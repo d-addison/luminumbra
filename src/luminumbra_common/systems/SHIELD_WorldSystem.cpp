@@ -1,6 +1,7 @@
 #include "SHIELD_WorldSystem.h"
 #include "entt/entt.hpp"
 #include "../world/MarchingCubes.h"
+#include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" // T-I6-A2
 #include <shared_mutex>
 #include <array>
@@ -690,6 +691,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 // FR-B1: publish the promoted structure material channel
                 // alongside the SDF (empty -> empty, lazy alloc preserved).
                 chunk->material_data = std::move(chunk->pending_material_data);
+                chunk->mark_sdf_generated_current_params();
                 chunk->clear_voxel_data_dirty();
                 shadow_note_promotion_published(chunk->get_id());  // SHIELD-03 shadow
                 m_streaming_state.pending_promotion_mesh.push_back(job_chunk);
@@ -3965,6 +3967,7 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos, float radius_m, 
         }
         if (changed) {
             chunk->mark_voxel_data_dirty();
+            m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel);
             chunk->current_lod.store(-1, std::memory_order_release);
             ++edited;
         }
@@ -4444,6 +4447,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
            // path is ~13x faster than the old per-column GenSingle2D loop.
            ComputeShapedHeightGrid(base_pos.x, base_pos.z, size_x, size_z,
                                    chunk.heightmap_data.data());
+           chunk.mark_sdf_generated_current_params();
            chunk.clear_voxel_data_dirty();
            return;
        }
@@ -4464,6 +4468,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
            chunk.heightmap_data[index] = terrain_h;
        }
 
+       chunk.mark_sdf_generated_current_params();
        chunk.clear_voxel_data_dirty();
        return;
    }
@@ -4498,6 +4503,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
 
        // Generation produces the canonical voxel data; only post-generation
        // edits count as unsaved dirty state.
+       chunk.mark_sdf_generated_current_params();
        chunk.clear_voxel_data_dirty();
        chunk.set_state(ChunkState::Idle);
        return;
@@ -4611,6 +4617,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
 
    // Generation produces the canonical voxel data; only post-generation edits
    // count as unsaved dirty state.
+   chunk.mark_sdf_generated_current_params();
    chunk.clear_voxel_data_dirty();
 }
 
@@ -5103,6 +5110,80 @@ std::vector<std::shared_ptr<Luminumbra::Chunk>> SHIELD_WorldSystem::snapshot_str
     return chunks;
 }
 
+std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(
+    i32 rx, i32 rz) const {
+    constexpr int kRegionChunkSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    constexpr std::size_t kFullSdfLatticeSize =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+        static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
+        static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
+
+    const int min_chunk_x = rx * kRegionChunkSpan - 1;
+    const int max_chunk_x = (rx + 1) * kRegionChunkSpan;
+    const int min_chunk_z = rz * kRegionChunkSpan - 1;
+    const int max_chunk_z = (rz + 1) * kRegionChunkSpan;
+
+    auto snapshot = std::make_shared<FarLodSdfSnapshot>();
+    snapshot->capture_epoch =
+        m_far_lod_capture_epoch.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);
+    snapshot->authority_revision =
+        m_far_lod_authority_revision.load(std::memory_order_acquire);
+    snapshot->entries.reserve(m_streaming_state.chunks.size());
+
+    // This capture runs after the owner thread's normal streaming publication
+    // point. Copying here is the ownership boundary: workers receive only the
+    // owned value vectors below, never a Chunk or a borrowed vector span.
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize) {
+            continue;
+        }
+        const IVec3& coords = chunk->get_coords();
+        if (coords.x < min_chunk_x || coords.x > max_chunk_x ||
+            coords.z < min_chunk_z || coords.z > max_chunk_z) {
+            continue;
+        }
+
+        FarLodSdfSnapshotEntry entry;
+        entry.coords = coords;
+        entry.provenance = chunk->sdf_provenance();
+        entry.voxel_revision = chunk->voxel_revision();
+        entry.sdf_data = chunk->sdf_data;
+        entry.material_data = chunk->material_data;
+        snapshot->entries.push_back(std::move(entry));
+    }
+
+    std::sort(snapshot->entries.begin(), snapshot->entries.end(),
+        [](const FarLodSdfSnapshotEntry& lhs, const FarLodSdfSnapshotEntry& rhs) {
+            if (lhs.coords.z != rhs.coords.z) return lhs.coords.z < rhs.coords.z;
+            if (lhs.coords.x != rhs.coords.x) return lhs.coords.x < rhs.coords.x;
+            return lhs.coords.y < rhs.coords.y;
+        });
+    return snapshot;
+}
+
+bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(
+    const FarLodSdfSnapshot& snapshot) const {
+    if (snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||
+        snapshot.authority_revision !=
+            m_far_lod_authority_revision.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    // Eviction is safe because snapshot owns its bytes. A still-resident
+    // chunk with a changed local revision/provenance, however, supersedes it.
+    for (const FarLodSdfSnapshotEntry& entry : snapshot.entries) {
+        const auto current = find_streamed_chunk(entry.coords);
+        if (current &&
+            (current->voxel_revision() != entry.voxel_revision ||
+             current->sdf_provenance() != entry.provenance)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::shared_ptr<Luminumbra::Chunk> SHIELD_WorldSystem::find_streamed_chunk(const IVec3& coords) const {
     const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
     return it != m_streaming_state.chunks.end() ? it->second : nullptr;
@@ -5122,7 +5203,11 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
         chunk->set_state(Luminumbra::ChunkState::Idle);
     }
-    return m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
+    const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
+    if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
+        m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel);
+    }
+    return adopted;
 }
 
 } // namespace Luminumbra::Systems

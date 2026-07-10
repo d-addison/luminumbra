@@ -13,6 +13,13 @@ enum class ChunkState : u8 {
     Unloaded, Loading, Idle, Meshing, Ready, Unloading
 };
 
+// Persisted or edited SDFs remain authoritative after a save clears the
+// transient dirty bit.  Far-LOD capture uses this explicit provenance.
+enum class ChunkSdfProvenance : u8 {
+    GeneratedCurrentParams,
+    LoadedOrEdited,
+};
+
 struct VoxelVertex {
     Vec3 position;
     Vec3 normal;
@@ -41,9 +48,26 @@ public:
     // not been persisted yet. Generation, loading, and meshing leave the flag
     // clear; runtime voxel edits must call mark_voxel_data_dirty(), and a
     // successful save clears it again.
-    void mark_voxel_data_dirty() { m_voxel_data_dirty.store(true, std::memory_order_release); }
+    void mark_voxel_data_dirty() {
+        m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
+                               std::memory_order_release);
+        m_voxel_revision.fetch_add(1u, std::memory_order_acq_rel);
+        m_voxel_data_dirty.store(true, std::memory_order_release);
+    }
     void clear_voxel_data_dirty() { m_voxel_data_dirty.store(false, std::memory_order_release); }
     bool is_voxel_data_dirty() const { return m_voxel_data_dirty.load(std::memory_order_acquire); }
+    void mark_sdf_generated_current_params() {
+        m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
+                               std::memory_order_release);
+    }
+    void mark_sdf_loaded_or_edited() {
+        m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
+                               std::memory_order_release);
+    }
+    ChunkSdfProvenance sdf_provenance() const {
+        return static_cast<ChunkSdfProvenance>(m_sdf_provenance.load(std::memory_order_acquire));
+    }
+    u32 voxel_revision() const { return m_voxel_revision.load(std::memory_order_acquire); }
 
     // --- Voxel & SDF Data ---
     std::vector<f32> sdf_data;
@@ -158,6 +182,8 @@ private:
     ChunkState m_state;
     mutable std::mutex m_state_mutex;  // mutable for use in const getter
     std::atomic<bool> m_voxel_data_dirty{false};
+    std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
+    std::atomic<u32> m_voxel_revision{0};
 };
 
 } // namespace Luminumbra

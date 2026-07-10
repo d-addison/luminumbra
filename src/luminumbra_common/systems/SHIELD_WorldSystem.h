@@ -2,8 +2,10 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "../world/Chunk.h"
+#include "../world/FarLodStore.h"
 #include "../core/JobSystem.h"
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -207,6 +209,35 @@ struct TerrainGenParams {
     float hydro_evaporation = 0.20f;
     float hydro_sediment_capacity = 0.40f;
     float hydro_max_offset = 24.0f;  // clamp |offset| (m)
+};
+
+// Immutable value data handed to far-LOD workers.  The capture owns these
+// vectors and never exposes a mutable streamed Chunk beyond the owner thread.
+struct FarLodSdfSnapshotEntry {
+    IVec3 coords{};
+    ChunkSdfProvenance provenance = ChunkSdfProvenance::GeneratedCurrentParams;
+    u32 voxel_revision = 0;
+    std::vector<f32> sdf_data;
+    std::vector<u8> material_data;
+
+    World::FarLodSdfSnapshot as_reduction_snapshot() const {
+        World::FarLodSdfSnapshot snapshot;
+        snapshot.coords = coords;
+        snapshot.revision = voxel_revision;
+        snapshot.source_kind = provenance == ChunkSdfProvenance::LoadedOrEdited
+            ? World::FarLodBrickSourceKind::Authoritative
+            : World::FarLodBrickSourceKind::RegenerableCache;
+        snapshot.sdf_data = sdf_data;
+        snapshot.material_data = material_data;
+        return snapshot;
+    }
+};
+
+struct FarLodSdfSnapshot {
+    u64 capture_epoch = 0;
+    u64 params_hash = 0;
+    u64 authority_revision = 0;
+    std::vector<FarLodSdfSnapshotEntry> entries;
 };
 
 struct WorldGenLayerSample {
@@ -746,6 +777,12 @@ public:
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
     std::vector<std::shared_ptr<::Luminumbra::Chunk>> snapshot_streamed_chunks() const;
+    // Owner-thread capture for a 32x32 chunk far region plus a one-chunk X/Z
+    // halo. Only exact full SDF lattices are copied into the immutable result.
+    std::shared_ptr<const FarLodSdfSnapshot> capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const;
+    // Eviction does not stale a copied snapshot; changed SDF authority or
+    // worldgen parameters do.
+    bool is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const;
     std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
     // Adopts an externally loaded chunk when its slot is empty. Returns false
     // (without clobbering the streamed chunk) when a chunk with the same id
@@ -811,6 +848,8 @@ private:
     StreamingState m_streaming_state;
     // SHIELD-09: the worldgen-epoch gate (see acquire_worldgen_sample_scope).
     mutable std::shared_mutex m_worldgen_epoch_mutex;
+    mutable std::atomic<u64> m_far_lod_capture_epoch{0};
+    std::atomic<u64> m_far_lod_authority_revision{0};
     // SHIELD-02 telemetry (main-thread, never hashed).
     std::uint64_t m_promotion_batches_dispatched = 0;
     std::uint64_t m_promotion_chunks_dispatched = 0;

@@ -288,6 +288,9 @@ std::shared_ptr<Chunk> DecodeChunkRecord(
         AddError(errors, "chunk record id does not match its payload: " + path.string());
         return nullptr;
     }
+    // Save-dirty is transient; all restored SDFs are authoritative inputs to
+    // far-LOD reduction even when an earlier save cleared that bit.
+    chunks.front()->mark_sdf_loaded_or_edited();
     return chunks.front();
 }
 
@@ -296,7 +299,8 @@ std::uint8_t ChunkRecordFlags(const Chunk& chunk, std::uint8_t previous_flags) {
     // Edited/authoritative is sticky: once a chunk record was persisted with
     // post-generation edits it stays authoritative even after the in-memory
     // dirty flag is cleared by the save.
-    if (chunk.is_voxel_data_dirty() || (previous_flags & kRecordFlagEdited) != 0) {
+    if (chunk.sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited ||
+        (previous_flags & kRecordFlagEdited) != 0) {
         flags |= kRecordFlagEdited;
     }
     if (chunk.has_water_sim.load(std::memory_order_acquire) || !chunk.water_mesh_vertices.empty()) {
@@ -612,7 +616,15 @@ bool WorldSaveService::load_world(
         return false;
     }
 
-    return LoadWorldStreamingStateSnapshotJson(buffer.str(), state, errors);
+    const bool loaded = LoadWorldStreamingStateSnapshotJson(buffer.str(), state, errors);
+    if (loaded) {
+        for (const auto& chunk : state.snapshot_chunks()) {
+            if (chunk) {
+                chunk->mark_sdf_loaded_or_edited();
+            }
+        }
+    }
+    return loaded;
 }
 
 std::string WorldSaveService::world_hash(const WorldStreamingState& state) const {

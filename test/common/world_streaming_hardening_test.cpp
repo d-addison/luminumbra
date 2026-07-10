@@ -38,6 +38,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -628,6 +629,36 @@ TEST(StreamingHardening, HeightQuantizationRoundTripsAtBoundaries) {
         EXPECT_NEAR(DequantizeFarLodHeight(QuantizeFarLodHeight(h)), h,
                     0.5f / kFarLodHeightQuantScale);
     }
+}
+
+TEST(StreamingHardening, FarLodSnapshotOwnsBytesAndRejectsStaleLiveData) {
+    const TerrainGenParams params = FixtureParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    const std::size_t full_lattice =
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y + 1) *
+        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1);
+    chunk->sdf_data.assign(full_lattice, -1.0f);
+    chunk->material_data.assign(full_lattice, 7u);
+    ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+
+    const auto captured = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(captured);
+    ASSERT_EQ(captured->entries.size(), 1u);
+    const auto& entry = captured->entries.front();
+    EXPECT_EQ(entry.sdf_data.front(), -1.0f);
+    EXPECT_EQ(entry.material_data.front(), 7u);
+    EXPECT_TRUE(world.is_far_lod_sdf_snapshot_current(*captured));
+
+    // The worker's copy is independent from the mutable live lattice. The
+    // revision/provenance check rejects a subsequently changed live chunk.
+    chunk->sdf_data.front() = 3.0f;
+    chunk->material_data.front() = 2u;
+    chunk->mark_voxel_data_dirty();
+    EXPECT_EQ(entry.sdf_data.front(), -1.0f);
+    EXPECT_EQ(entry.material_data.front(), 7u);
+    EXPECT_FALSE(world.is_far_lod_sdf_snapshot_current(*captured));
 }
 
 TEST(StreamingHardening, PristineTileBuildIsDeterministic) {
