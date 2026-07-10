@@ -13,6 +13,7 @@
 #include "world/MarchingCubes.h"
 #include "world/WorldStreamingState.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -88,7 +89,120 @@ u64 HashMeshBytes(const FarLodRegionMesh& mesh) {
     return hash;
 }
 
+u64 HashTerrainMeshBytes(const Chunk& chunk) {
+    u64 hash = 14695981039346656037ull;
+    const auto mix = [&hash](const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i) {
+            hash ^= static_cast<u64>(bytes[i]);
+            hash *= 1099511628211ull;
+        }
+    };
+    for (const Luminumbra::VoxelVertex& vertex : chunk.mesh_vertices) {
+        mix(&vertex.position, sizeof(vertex.position));
+        mix(&vertex.normal, sizeof(vertex.normal));
+        mix(&vertex.material_id, sizeof(vertex.material_id));
+    }
+    if (!chunk.mesh_indices.empty()) {
+        mix(chunk.mesh_indices.data(), chunk.mesh_indices.size() * sizeof(u32));
+    }
+    return hash;
+}
+
+TerrainGenParams FlatSdfFixtureParams() {
+    TerrainGenParams params = FixtureParams();
+    params.base_amplitude = 0.0f;
+    params.height_offset = 12.0f;
+    return params;
+}
+
+void CarveAlignedResidentSdfCavity(Chunk& chunk, int step) {
+    const int size_x = Luminumbra::CHUNK_SIZE_X + 1;
+    const int size_y = Luminumbra::CHUNK_SIZE_Y + 1;
+    const int size_z = Luminumbra::CHUNK_SIZE_Z + 1;
+    ASSERT_EQ(chunk.sdf_data.size(), static_cast<std::size_t>(size_x * size_y * size_z));
+    for (int z = 4; z <= 12; z += step) {
+        for (int y = 4; y <= 8; y += step) {
+            for (int x = 4; x <= 12; x += step) {
+                const std::size_t index = static_cast<std::size_t>(x) +
+                    static_cast<std::size_t>(y) * size_x +
+                    static_cast<std::size_t>(z) * size_x * size_y;
+                chunk.sdf_data[index] = 1.0f;
+            }
+        }
+    }
+}
+
 } // namespace
+
+TEST(MarchingCubesAuthoritativeSdf, CoarseStep2UsesResidentLattice) {
+    const TerrainGenParams params = FlatSdfFixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    Chunk pristine(IVec3(0, 0, 0));
+    Chunk edited(IVec3(0, 0, 0));
+    world.GenerateChunkData(pristine);
+    world.GenerateChunkData(edited);
+    ASSERT_EQ(pristine.heightmap_data, edited.heightmap_data);
+    CarveAlignedResidentSdfCavity(edited, 2);
+
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, pristine, 0.0f, 2);
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, edited, 0.0f, 2);
+
+    ASSERT_FALSE(pristine.mesh_indices.empty());
+    ASSERT_FALSE(edited.mesh_indices.empty());
+    EXPECT_NE(HashTerrainMeshBytes(pristine), HashTerrainMeshBytes(edited));
+    EXPECT_TRUE(std::any_of(edited.mesh_vertices.begin(), edited.mesh_vertices.end(),
+        [](const Luminumbra::VoxelVertex& vertex) { return vertex.position.y < 10.0f; }));
+}
+
+TEST(MarchingCubesAuthoritativeSdf, CoarseStep4UsesResidentLattice) {
+    const TerrainGenParams params = FlatSdfFixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    Chunk pristine(IVec3(0, 0, 0));
+    Chunk edited(IVec3(0, 0, 0));
+    world.GenerateChunkData(pristine);
+    world.GenerateChunkData(edited);
+    ASSERT_EQ(pristine.heightmap_data, edited.heightmap_data);
+    CarveAlignedResidentSdfCavity(edited, 4);
+
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, pristine, 0.0f, 4);
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, edited, 0.0f, 4);
+
+    ASSERT_FALSE(pristine.mesh_indices.empty());
+    ASSERT_FALSE(edited.mesh_indices.empty());
+    EXPECT_NE(HashTerrainMeshBytes(pristine), HashTerrainMeshBytes(edited));
+    EXPECT_TRUE(std::any_of(edited.mesh_vertices.begin(), edited.mesh_vertices.end(),
+        [](const Luminumbra::VoxelVertex& vertex) { return vertex.position.y < 10.0f; }));
+}
+
+TEST(MarchingCubesAuthoritativeSdf, EmptySdfKeepsPristineHeightFallback) {
+    const TerrainGenParams params = FlatSdfFixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    Chunk generated_coarse(IVec3(0, 0, 0));
+    Chunk emptied_full(IVec3(0, 0, 0));
+    world.GenerateChunkData(generated_coarse, 2);
+    world.GenerateChunkData(emptied_full);
+    emptied_full.sdf_data.clear();
+
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, generated_coarse, 0.0f, 2);
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, emptied_full, 0.0f, 2);
+
+    ASSERT_FALSE(generated_coarse.mesh_indices.empty());
+    EXPECT_EQ(HashTerrainMeshBytes(generated_coarse), HashTerrainMeshBytes(emptied_full));
+}
+
+TEST(MarchingCubesAuthoritativeSdf, MalformedNeverFallsBackToHeight) {
+    const TerrainGenParams params = FlatSdfFixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    Chunk malformed(IVec3(0, 0, 0));
+    world.GenerateChunkData(malformed);
+    malformed.sdf_data.resize(3u);
+
+    Luminumbra::World::MarchingCubes::PolygoniseTerrain(world, malformed, 0.0f, 2);
+
+    EXPECT_TRUE(malformed.mesh_vertices.empty());
+    EXPECT_TRUE(malformed.mesh_indices.empty());
+}
 
 TEST(FarLodStoreTest, HeightQuantizationRoundTripsWithinHalfStep) {
     for (float height : {-300.0f, -1.25f, 0.0f, 0.03f, 17.5f, 120.0625f, 950.0f}) {

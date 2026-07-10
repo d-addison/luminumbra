@@ -3441,18 +3441,23 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
             // a well-formed full SDF is always exactly kFullSdfLattice, so this never fires.
             constexpr std::size_t kFullSdfLattice =
                 static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-            if (needs_full_sdf && !chunk->sdf_data.empty() &&
-                chunk->sdf_data.size() != kFullSdfLattice) {
+            const bool has_malformed_sdf = !chunk->sdf_data.empty() &&
+                chunk->sdf_data.size() != kFullSdfLattice;
+            if (has_malformed_sdf) {
                 const IVec3 cc = chunk->get_coords();
                 LUMINUMBRA_CORE_WARN("EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
-                    "SDF (size {} != {}); regenerating to avoid out-of-bounds polygonise",
+                    "SDF (size {} != {}); regenerating a full lattice before meshing",
                     cc.x, cc.y, cc.z, chunk->sdf_data.size(), kFullSdfLattice);
                 chunk->sdf_data.clear();
             }
             const bool missing_required_data = needs_full_sdf
                 ? chunk->sdf_data.empty()
                 : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
-            if (missing_required_data) {
+            if (has_malformed_sdf) {
+                // A malformed non-empty lattice must not fall back to the
+                // coarse heightfield: rebuild exact SDF authority first.
+                GenerateChunkData(*chunk);
+            } else if (missing_required_data) {
                 // Chunks restored from a world save arrive with voxel data
                 // already populated (possibly carrying player edits);
                 // regeneration would clobber those edits. Generation is a
@@ -4699,9 +4704,12 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     mesh_items.reserve(chunks_to_mesh.size());
     for (const MeshingWorkItem& work_item : chunks_to_mesh) {
         const int step = get_lod_step_for_level(work_item.lod_level);
+        const bool has_malformed_sdf = work_item.terrain_mesh_required &&
+            !work_item.chunk->sdf_data.empty() &&
+            work_item.chunk->sdf_data.size() != kFullSdfLattice;
         const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
                                      work_item.chunk->sdf_data.size() != kFullSdfLattice;
-        if (needs_sim_truth && !work_item.chunk->sdf_data.empty()) {
+        if (has_malformed_sdf) {
             LUMINUMBRA_CORE_WARN(
                 "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
                 "(size {} != full lattice {}) — regenerating instead of meshing it",
@@ -4709,7 +4717,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 work_item.chunk->get_coords().z,
                 work_item.chunk->sdf_data.size(), kFullSdfLattice);
         }
-        (needs_sim_truth ? promotion_items : mesh_items).push_back(work_item);
+        ((needs_sim_truth || has_malformed_sdf) ? promotion_items : mesh_items).push_back(work_item);
     }
     // Guard: only hand items to the promotion lane when its whole pipeline is
     // idle. This makes the stage-B re-entry into dispatch_meshing_jobs

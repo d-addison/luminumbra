@@ -372,10 +372,11 @@ public:
     // Generates voxel data for a chunk. target_step is the meshing step this
     // generation must support: step <= 1 (default) generates the full 17^3
     // SDF + heightmap (LOD0 marching cubes, collision, edits, persistence);
-    // step > 1 generates ONLY the 17x17 heightmap (the coarse heightfield
-    // mesher and its boundary seam fallback never read interior SDF), leaving
-    // sdf_data empty and skipping the 3D cave-noise grid entirely. All
-    // existing callers default to full generation.
+    // step > 1 generates ONLY the 17x17 heightmap, leaving sdf_data empty and
+    // skipping the 3D cave-noise grid. Such newly generated coarse chunks use
+    // the heightfield fallback; a resident exact full SDF is instead meshed at
+    // its requested coarse stride. All existing callers default to full
+    // generation.
     void GenerateChunkData(::Luminumbra::Chunk& chunk, int target_step = 1) const;
     // FR-B1: stamp authored structure voxels into a freshly generated FULL-RES
     // chunk (sdf_data populated, step <= 1). Enumerates every structure site

@@ -38,7 +38,9 @@ namespace Luminumbra::World::MarchingCubes {
      * @param world_system A const reference to the world system for querying terrain parameters.
      * @param chunk The chunk to generate the mesh for. Its mesh_vertices and mesh_indices will be populated.
      * @param isolevel The density value that represents the surface (typically 0.0).
-     * @param step The step size for the algorithm, used for LOD (1 = full detail).
+     * @param step The cell stride used for LOD (1 = full detail). An exact
+     * full SDF lattice is polygonised at this stride; only an empty SDF at a
+     * coarse stride uses the heightfield fallback.
      */
     void PolygoniseTerrain(
         const Systems::SHIELD_WorldSystem& world_system, 

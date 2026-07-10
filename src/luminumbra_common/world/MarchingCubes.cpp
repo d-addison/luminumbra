@@ -365,17 +365,9 @@ namespace { // Anonymous namespace for internal implementation details
         return Vec3(0.0f);
     }
 
-    // Terrain density (y - terrain_height) at a lattice point on a horizontal
-    // chunk face, derived from the stored 17x17 heightmap instead of the 17^3
-    // SDF. Evidence for the swap (T-I3-1): cave carving is surface-capped -
-    // cave_surface_blend() is exactly 0 within kCaveSurfaceCapDepth (18 m) of
-    // the surface, so every stored face SDF value inside this fallback's
-    // near-surface emission band (|density| <= 0.75) equals the pure terrain
-    // density bit-for-bit. The only divergence is >= 18 m below the surface,
-    // where stored SDF could cross zero on deep cave walls; those patches
-    // were buried inside solid terrain under the coarse heightfield surface
-    // (the only mesh coarse chunks have) and covered nothing. This keeps the
-    // seam fallback working on chunks generated surface-band-only (no SDF).
+    // Terrain density at a lattice point on a horizontal chunk face. A resident
+    // full SDF is authoritative, including its cave/edit crossings, so use it
+    // first. Empty-SDF coarse chunks retain the heightmap-derived fallback.
     bool ReadTransitionFaceTerrainDensity(const Chunk& chunk, TerrainTransitionFace face, int major, int y, float& value) {
         if (major < 0 || major > CHUNK_SIZE_X || y < 0 || y > CHUNK_SIZE_Y) {
             return false;
@@ -400,13 +392,24 @@ namespace { // Anonymous namespace for internal implementation details
             z = CHUNK_SIZE_Z;
             break;
         }
-        const std::size_t index = static_cast<std::size_t>(x)
-            + static_cast<std::size_t>(z) * static_cast<std::size_t>(CHUNK_SIZE_X + 1);
-        if (index >= chunk.heightmap_data.size()) {
+        constexpr std::size_t kSdfSizeX = CHUNK_SIZE_X + 1;
+        constexpr std::size_t kFullLatticeCount =
+            kSdfSizeX * static_cast<std::size_t>(CHUNK_SIZE_Y + 1) * static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
+        const std::size_t sdf_index = static_cast<std::size_t>(x)
+            + static_cast<std::size_t>(y) * kSdfSizeX
+            + static_cast<std::size_t>(z) * kSdfSizeX * static_cast<std::size_t>(CHUNK_SIZE_Y + 1);
+        if (chunk.sdf_data.size() == kFullLatticeCount) {
+            value = chunk.sdf_data[sdf_index];
+            return true;
+        }
+
+        const std::size_t heightmap_index = static_cast<std::size_t>(x)
+            + static_cast<std::size_t>(z) * kSdfSizeX;
+        if (heightmap_index >= chunk.heightmap_data.size()) {
             return false;
         }
         const float world_y = static_cast<float>(chunk.get_coords().y * CHUNK_SIZE_Y + y);
-        value = world_y - chunk.heightmap_data[index];
+        value = world_y - chunk.heightmap_data[heightmap_index];
         return true;
     }
 
@@ -454,7 +457,9 @@ namespace { // Anonymous namespace for internal implementation details
     }
 
     void AppendFallbackFacePatches(Chunk& chunk, int step, TerrainTransitionFace face, TerrainTransitionSkirtStats& stats) {
-        if (chunk.heightmap_data.empty()) {
+        constexpr std::size_t kFullLatticeCount =
+            static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+        if (chunk.heightmap_data.empty() && chunk.sdf_data.size() != kFullLatticeCount) {
             return;
         }
 
@@ -845,31 +850,30 @@ void PolygoniseTerrain(
     MeshArenaScope mesh_arena_scope;
     const int sample_step = std::max(1, step);
 
-    if (sample_step > 1) {
-        GenerateCoarseHeightfieldTerrain(world_system, chunk, sample_step, build_start);
+    constexpr std::size_t kFullLatticeCount =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    const bool has_full_sdf = chunk.sdf_data.size() == kFullLatticeCount;
+    if (!chunk.sdf_data.empty() && !has_full_sdf) {
+        // A non-empty partial/oversized field must never silently degrade to
+        // the coarse heightfield. The world-system routes this state through
+        // full-lattice regeneration; this last-line guard keeps direct callers
+        // safe until that happens.
+        LUMINUMBRA_CORE_WARN(
+            "PolygoniseTerrain: chunk ({},{},{}) sdf_data size {} != full lattice {} — "
+            "rejecting (no mesh) instead of falling back to heightfield data",
+            chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z,
+            chunk.sdf_data.size(), kFullLatticeCount);
+        chunk.mesh_vertices.clear();
+        chunk.mesh_indices.clear();
         return;
     }
 
-    // SHIELD-04 (spec 021): the unit-step path below indexes the SDF as a full
-    // (CHUNK_SIZE+1)^3 lattice with unchecked corner offsets — a wrong-sized
-    // (non-empty, truncated/oversized) lattice from a corrupt save or a stale
-    // coarse producer would read out of bounds. Last-line belt: reject it here
-    // (empty mesh + warn); the build/promotion paths regenerate malformed
-    // chunks upstream, so a rejected chunk self-heals on its next build. An
-    // EMPTY SDF falls through to the surface scan's normal early-out.
-    {
-        constexpr std::size_t kFullLatticeCount =
-            static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-        if (!chunk.sdf_data.empty() && chunk.sdf_data.size() != kFullLatticeCount) {
-            LUMINUMBRA_CORE_WARN(
-                "PolygoniseTerrain: chunk ({},{},{}) sdf_data size {} != full lattice {} — "
-                "rejecting (no mesh) instead of reading out of bounds",
-                chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z,
-                chunk.sdf_data.size(), kFullLatticeCount);
-            chunk.mesh_vertices.clear();
-            chunk.mesh_indices.clear();
-            return;
-        }
+    // Coarse chunks with no resident lattice preserve the established analytic
+    // heightfield path. Every exact full lattice, including coarse LODs, is
+    // polygonised from its authoritative 3D densities below.
+    if (!has_full_sdf && sample_step > 1) {
+        GenerateCoarseHeightfieldTerrain(world_system, chunk, sample_step, build_start);
+        return;
     }
 
     // Debug: Check if chunk has a surface
@@ -899,10 +903,10 @@ void PolygoniseTerrain(
         return;
     }
 
-    // NOW continue with the actual mesh generation...
-    // This path only runs at sample_step == 1 (coarser LODs take the
-    // heightfield path above), so all cell/corner indexing below assumes a
-    // unit step over the full (CHUNK_SIZE+1)^3 SDF lattice.
+    // Exact full lattices share this one Marching Cubes path at every supported
+    // stride. Coarse cells start at 0,step,...,16-step and interpolate from
+    // the original float densities, retaining caves and edits representable at
+    // that stride.
     std::vector<VoxelVertex> vertices;
     std::vector<u32> indices;
     vertices.reserve(CHUNK_VOLUME / 4);
@@ -918,19 +922,6 @@ void PolygoniseTerrain(
         {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
     };
 
-    // SDF-lattice index offsets of the 8 cell corners relative to the cell's
-    // (x, y, z) lattice index. Mirrors corner_offsets above.
-    constexpr u32 kCornerIndexOffsets[8] = {
-        0u,
-        1u,
-        1u + kZStride,
-        kZStride,
-        kYStride,
-        1u + kYStride,
-        1u + kYStride + kZStride,
-        kYStride + kZStride,
-    };
-
     const int edge_connections[12][2] = {
         {0,1}, {1,2}, {2,3}, {3,0}, {4,5}, {5,6},
         {6,7}, {7,4}, {0,4}, {1,5}, {2,6}, {3,7}
@@ -942,22 +933,12 @@ void PolygoniseTerrain(
     // is lattice_point * 3 + axis: O(1) lookups, no hashing, no node
     // allocations. First-writer-wins semantics are identical to the map
     // because the cell scan order and the per-cell edge order are unchanged.
-    // Slot offsets relative to (cell lattice index * 3), one per cell edge:
-    // anchor corner's lattice offset * 3 + axis (0 = X, 1 = Y, 2 = Z).
     constexpr u32 kNoCachedVertex = 0xFFFFFFFFu;
-    constexpr u32 kEdgeCacheSlotOffsets[12] = {
-        0u * 3u + 0u,                          // edge 0: +X edge at corner 0
-        1u * 3u + 2u,                          // edge 1: +Z edge at corner 1
-        kZStride * 3u + 0u,                    // edge 2: +X edge at corner 3
-        0u * 3u + 2u,                          // edge 3: +Z edge at corner 0
-        kYStride * 3u + 0u,                    // edge 4: +X edge at corner 4
-        (1u + kYStride) * 3u + 2u,             // edge 5: +Z edge at corner 5
-        (kYStride + kZStride) * 3u + 0u,       // edge 6: +X edge at corner 7
-        kYStride * 3u + 2u,                    // edge 7: +Z edge at corner 4
-        0u * 3u + 1u,                          // edge 8: +Y edge at corner 0
-        1u * 3u + 1u,                          // edge 9: +Y edge at corner 1
-        (1u + kZStride) * 3u + 1u,             // edge 10: +Y edge at corner 2
-        kZStride * 3u + 1u,                    // edge 11: +Y edge at corner 3
+    constexpr u8 kEdgeAnchorCorner[12] = {
+        0u, 1u, 3u, 0u, 4u, 5u, 7u, 4u, 0u, 1u, 2u, 3u
+    };
+    constexpr u8 kEdgeAxis[12] = {
+        0u, 2u, 0u, 2u, 0u, 2u, 0u, 2u, 1u, 1u, 1u, 1u
     };
     // T-I4-18: the per-edge vertex cache is the dominant per-job scratch alloc
     // (kLatticeCount*3 u32 ~= 59 KB at 17^3). It is pure scratch (index-addressed,
@@ -986,19 +967,21 @@ void PolygoniseTerrain(
     // --- PASS 1: Generate unique vertices and triangle indices ---
     std::size_t cells_visited = 0;
     std::size_t active_cells = 0;
-    for (int z = 0; z < CHUNK_SIZE_Z; ++z) {
-        for (int y = 0; y < CHUNK_SIZE_Y; ++y) {
-            const u32 row_base = static_cast<u32>(y) * kYStride + static_cast<u32>(z) * kZStride;
-            for (int x = 0; x < CHUNK_SIZE_X; ++x) {
+    for (int z = 0; z < CHUNK_SIZE_Z; z += sample_step) {
+        for (int y = 0; y < CHUNK_SIZE_Y; y += sample_step) {
+            for (int x = 0; x < CHUNK_SIZE_X; x += sample_step) {
                 GridCell gridcell;
                 int cube_index = 0;
-                const u32 cell_base = row_base + static_cast<u32>(x);
+                u32 corner_lattice_indices[8];
                 ++cells_visited;
 
-                // At unit step every corner lies inside the SDF lattice, so
-                // values are read directly with hoisted stride offsets.
                 for (int i = 0; i < 8; ++i) {
-                    gridcell.val[i] = sdf[cell_base + kCornerIndexOffsets[i]];
+                    const IVec3 lattice_corner = IVec3(x, y, z) + corner_offsets[i] * sample_step;
+                    const u32 lattice_index = static_cast<u32>(lattice_corner.x)
+                        + static_cast<u32>(lattice_corner.y) * kYStride
+                        + static_cast<u32>(lattice_corner.z) * kZStride;
+                    corner_lattice_indices[i] = lattice_index;
+                    gridcell.val[i] = sdf[lattice_index];
                     if (gridcell.val[i] < isolevel) {
                         cube_index |= (1 << i);
                     }
@@ -1009,14 +992,15 @@ void PolygoniseTerrain(
                 ++active_cells;
 
                 for (int i = 0; i < 8; ++i) {
-                    gridcell.p[i] = Vec3(IVec3(x, y, z) + corner_offsets[i]);
+                    gridcell.p[i] = Vec3(IVec3(x, y, z) + corner_offsets[i] * sample_step);
                 }
 
-                const u32 cell_slot_base = cell_base * 3u;
                 u32 vert_indices[12];
                 for (int i = 0; i < 12; ++i) {
                     if (edge_mask & (1u << i)) {
-                        u32& cached_index = edge_vertex_cache[cell_slot_base + kEdgeCacheSlotOffsets[i]];
+                        const u32 cache_slot =
+                            corner_lattice_indices[kEdgeAnchorCorner[i]] * 3u + kEdgeAxis[i];
+                        u32& cached_index = edge_vertex_cache[cache_slot];
                         if (cached_index != kNoCachedVertex) {
                             vert_indices[i] = cached_index;
                         } else {
@@ -1049,7 +1033,7 @@ void PolygoniseTerrain(
                                 const int solid_corner =
                                     (v1 < isolevel) ? corner_a : corner_b;
                                 vertex_material_override.push_back(
-                                    material[cell_base + kCornerIndexOffsets[solid_corner]]);
+                                    material[corner_lattice_indices[solid_corner]]);
                             }
                         }
                     }
