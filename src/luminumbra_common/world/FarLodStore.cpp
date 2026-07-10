@@ -496,21 +496,29 @@ FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
         tile.sdf_bricks.begin(), tile.sdf_bricks.end(), descriptor, BrickLess);
     const std::size_t insert_index = static_cast<std::size_t>(found - tile.sdf_bricks.begin());
     if (found != tile.sdf_bricks.end() && SameBrickKey(*found, descriptor)) {
-        if (found->revision > descriptor.revision) {
-            return FarLodSdfReduceResult::Unchanged;
-        }
         const std::size_t payload_offset = insert_index * samples_per_brick;
-        const bool same_payload = found->revision == descriptor.revision &&
-            found->source_kind == descriptor.source_kind &&
-            found->payload_crc32 == descriptor.payload_crc32 &&
+        const bool same_payload = found->payload_crc32 == descriptor.payload_crc32 &&
             std::equal(density_q.begin(), density_q.end(), tile.sdf_density_q.begin() + payload_offset) &&
             std::equal(material.begin(), material.end(), tile.sdf_material.begin() + payload_offset);
-        if (same_payload) {
+        if (same_payload &&
+            (found->source_kind == descriptor.source_kind ||
+             found->source_kind == FarLodBrickSourceKind::Authoritative)) {
             return FarLodSdfReduceResult::Unchanged;
         }
-        if (found->revision == descriptor.revision) {
-            if (error) *error = "far-LOD SDF replacement reuses a revision with different payload bytes";
-            return FarLodSdfReduceResult::Error;
+
+        // Persisted far revisions outlive the process-local Chunk revision.
+        // A current owner-thread authoritative snapshot is therefore the source
+        // of truth even when its post-reload counter is numerically lower. Keep
+        // the far descriptor monotonic by advancing from the persisted value.
+        if (descriptor.source_kind == FarLodBrickSourceKind::Authoritative) {
+            const u32 next_revision = found->revision == std::numeric_limits<u32>::max()
+                ? found->revision : found->revision + 1u;
+            descriptor.revision = std::max(descriptor.revision, next_revision);
+        } else {
+            if (found->source_kind == FarLodBrickSourceKind::Authoritative ||
+                found->revision >= descriptor.revision) {
+                return FarLodSdfReduceResult::Unchanged;
+            }
         }
         *found = descriptor;
         std::copy(density_q.begin(), density_q.end(), tile.sdf_density_q.begin() + payload_offset);

@@ -3056,7 +3056,11 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     EXPECT_NE(source.find("BuildFarLodWorkerTile"), std::string::npos);
     EXPECT_NE(source.find("rebase_authoritative_tile"), std::string::npos);
     EXPECT_NE(source.find("GenerateChunkData(scratch, 1)"), std::string::npos);
-    EXPECT_NE(source.find("save_tile(tile"), std::string::npos);
+    const std::size_t stale_check = source.find("const bool snapshot_stale");
+    const std::size_t owner_save = source.find("save_tile(result.tile");
+    ASSERT_NE(stale_check, std::string::npos);
+    ASSERT_NE(owner_save, std::string::npos);
+    EXPECT_LT(stale_check, owner_save);
 }
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {

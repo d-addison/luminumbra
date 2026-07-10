@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -377,6 +378,81 @@ bool synchronize_regenerable_boundaries(
     return true;
 }
 
+bool derive_authoritative_surface_water(
+    Luminumbra::World::FarLodTile& tile,
+    std::string& error,
+    bool& changed) {
+    const u32 side = Luminumbra::World::FarLodSdfBrickSamplesPerSide(tile.tier);
+    const int step = Luminumbra::World::FarLodSampleStepMeters(tile.tier);
+    const std::size_t count = Luminumbra::World::FarLodSdfBrickSampleCount(tile.tier);
+    std::set<std::pair<int, int>> authoritative_columns;
+    for (const auto& brick : tile.sdf_bricks) {
+        if (brick.source_kind == Luminumbra::World::FarLodBrickSourceKind::Authoritative) {
+            authoritative_columns.emplace(brick.local_chunk_x, brick.local_chunk_z);
+        }
+    }
+    for (const auto& [column_x, column_z] : authoritative_columns) {
+        for (u32 local_z = 0; local_z < side; ++local_z) {
+            for (u32 local_x = 0; local_x < side; ++local_x) {
+                std::map<int, i16> vertical;
+                for (std::size_t brick_index = 0; brick_index < tile.sdf_bricks.size(); ++brick_index) {
+                    const auto& brick = tile.sdf_bricks[brick_index];
+                    if (brick.local_chunk_x != column_x || brick.local_chunk_z != column_z) {
+                        continue;
+                    }
+                    const std::size_t payload = brick_index * count;
+                    for (u32 local_y = 0; local_y < side; ++local_y) {
+                        const std::size_t sample = payload + static_cast<std::size_t>(local_x) +
+                            static_cast<std::size_t>(local_y) * side +
+                            static_cast<std::size_t>(local_z) * side * side;
+                        const int world_y = brick.chunk_y * Luminumbra::CHUNK_SIZE_Y +
+                            static_cast<int>(local_y) * step;
+                        const auto [found, inserted] = vertical.emplace(world_y, tile.sdf_density_q[sample]);
+                        if (!inserted && found->second != tile.sdf_density_q[sample]) {
+                            error = "far-SDF water derivation found a mismatched vertical boundary sample";
+                            return false;
+                        }
+                    }
+                }
+                bool found_surface = false;
+                float top_surface_y = 0.0f;
+                for (auto lower = vertical.begin(); lower != vertical.end(); ++lower) {
+                    auto upper = std::next(lower);
+                    if (upper == vertical.end()) {
+                        break;
+                    }
+                    const float d0 = Luminumbra::World::DequantizeFarLodSdf(lower->second);
+                    const float d1 = Luminumbra::World::DequantizeFarLodSdf(upper->second);
+                    if (d0 <= 0.0f && d1 > 0.0f) {
+                        const float denominator = d1 - d0;
+                        const float t = denominator > 0.0f ? -d0 / denominator : 0.0f;
+                        top_surface_y = static_cast<float>(lower->first) +
+                            t * static_cast<float>(upper->first - lower->first);
+                        found_surface = true;
+                    }
+                }
+                if (!found_surface) {
+                    error = "far-SDF water derivation found no top solid crossing";
+                    return false;
+                }
+                const std::size_t sample_x = static_cast<std::size_t>(
+                    (column_x * Luminumbra::CHUNK_SIZE_X + static_cast<int>(local_x) * step) / step);
+                const std::size_t sample_z = static_cast<std::size_t>(
+                    (column_z * Luminumbra::CHUNK_SIZE_Z + static_cast<int>(local_z) * step) / step);
+                u8& flags = tile.flags[sample_x + sample_z * tile.samples_per_side];
+                const u8 next = top_surface_y < Luminumbra::SEA_LEVEL
+                    ? static_cast<u8>(flags | Luminumbra::World::kFarLodSampleFlagWater)
+                    : static_cast<u8>(flags & ~Luminumbra::World::kFarLodSampleFlagWater);
+                if (next != flags) {
+                    flags = next;
+                    changed = true;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
@@ -436,14 +512,9 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
     if (!synchronize_regenerable_boundaries(tile, outcome.error, outcome.changed)) {
         return outcome;
     }
-    if (outcome.changed && !save_dir.empty()) {
-        std::vector<std::string> errors;
-        if (!World::FarLodStore(save_dir).save_tile(tile, &errors)) {
-            outcome.error = errors.empty() ? "failed to save far-SDF tile" : errors.front();
-            return outcome;
-        }
+    if (!derive_authoritative_surface_water(tile, outcome.error, outcome.changed)) {
+        return outcome;
     }
-
     World::MarchingCubes::GenerateFarLodRegionMesh(tile, outcome.mesh);
     if (outcome.mesh.vertices.empty() || outcome.mesh.indices.empty()) {
         outcome.error = "far-SDF worker produced an empty mesh";
@@ -578,6 +649,21 @@ void FarLodSystem::integrate_completed_builds() {
             ++m_stats.builds_failed_total;
             continue;
         }
+        bool persistence_pending = false;
+        if (result.tile_changed && !result.save_dir.empty() && result.persistence_allowed) {
+            std::vector<std::string> errors;
+            if (!World::FarLodStore(result.save_dir).save_tile(result.tile, &errors)) {
+                ++m_stats.authority_build_failures;
+                ++m_stats.builds_integrated_failed;
+                ++m_stats.builds_failed_total;
+                continue;
+            }
+        } else if (result.tile_changed && !result.save_dir.empty()) {
+            // Dirty authoritative chunks are persisted by WorldSaveService
+            // first. Keep the resident visual result, but schedule another CPU
+            // build after the dirty bit clears so derived FSD2 can follow.
+            persistence_pending = true;
+        }
 
         ResidentRegion region;
         region.tier = result.tier;
@@ -660,6 +746,8 @@ void FarLodSystem::integrate_completed_builds() {
             result.water_mesh.vertices.size() * sizeof(VoxelVertex) +
             result.water_mesh.indices.size() * sizeof(u32);
         region.last_wanted_frame = m_frame;
+        region.authority_revision = result.authority_revision;
+        region.persistence_pending = persistence_pending;
 
         auto existing = m_residents.find(key);
         if (existing != m_residents.end()) {
@@ -747,7 +835,10 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
     for (const Wanted& want : wanted) {
         const u64 key = region_key(want.rx, want.rz);
         const auto resident = m_residents.find(key);
-        const bool resident_matches = resident != m_residents.end() && resident->second.tier == want.tier;
+        const bool resident_matches = resident != m_residents.end() &&
+            resident->second.tier == want.tier &&
+            resident->second.authority_revision == world_system.far_lod_authority_revision() &&
+            !resident->second.persistence_pending;
         if (resident != m_residents.end()) {
             resident->second.last_wanted_frame = m_frame;
         }
@@ -786,6 +877,17 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
         if (!sdf_snapshot) {
             continue;
         }
+        const bool persistence_allowed = std::none_of(
+            sdf_snapshot->entries.begin(), sdf_snapshot->entries.end(),
+            [&](const Systems::FarLodSdfSnapshotEntry& entry) {
+                return belongs_to_region(entry, want.rx, want.rz) &&
+                    entry.provenance == ChunkSdfProvenance::LoadedOrEdited &&
+                    !entry.authority_durable;
+            });
+        if (resident != m_residents.end() && resident->second.persistence_pending &&
+            !persistence_allowed) {
+            continue;
+        }
         m_pending[key] = want.tier;
         ++dispatched;
 
@@ -796,7 +898,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
         const int rx = want.rx;
         const int rz = want.rz;
         const std::filesystem::path save_dir = m_save_dir;
-        const JobHandle handle = m_job_system->dispatch_batch({[shared, world, sdf_snapshot, epoch, tier, rx, rz, save_dir]() {
+        const JobHandle handle = m_job_system->dispatch_batch({[shared, world, sdf_snapshot, epoch, tier, rx, rz, save_dir, persistence_allowed]() {
             FarLodWorkerBuildOutcome outcome = BuildFarLodWorkerTile(
                 *world, *sdf_snapshot, tier, rx, rz, save_dir);
 
@@ -806,6 +908,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
             result.capture_epoch = sdf_snapshot->capture_epoch;
             result.params_hash = sdf_snapshot->params_hash;
             result.authority_revision = sdf_snapshot->authority_revision;
+            result.persistence_allowed = persistence_allowed;
             result.tier = tier;
             result.rx = rx;
             result.rz = rz;
@@ -816,6 +919,8 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
                 return;
             }
             World::FarLodTile& tile = outcome.tile;
+            result.tile_changed = outcome.changed;
+            result.save_dir = save_dir;
             result.tile_bytes = far_lod_tile_bytes(tile);
             u16 min_q = std::numeric_limits<u16>::max();
             u16 max_q = 0;
@@ -830,6 +935,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
             // T-I4-DR-far-water-sheet: build the flat water sheet from the same
             // tile's water flags (river channels + seabeds beyond the live ring).
             BuildFarLodWaterSheet(tile, result.water_mesh);
+            result.tile = std::move(tile);
 
             std::lock_guard<std::mutex> lock(shared->mutex);
             shared->completed.push_back(std::move(result));

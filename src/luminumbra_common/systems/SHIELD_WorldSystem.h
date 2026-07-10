@@ -217,6 +217,7 @@ struct FarLodSdfSnapshotEntry {
     IVec3 coords{};
     ChunkSdfProvenance provenance = ChunkSdfProvenance::GeneratedCurrentParams;
     u32 voxel_revision = 0;
+    bool authority_durable = true;
     std::vector<f32> sdf_data;
     std::vector<u8> material_data;
 
@@ -783,6 +784,9 @@ public:
     // Eviction does not stale a copied snapshot; changed SDF authority or
     // worldgen parameters do.
     bool is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const;
+    u64 far_lod_authority_revision() const {
+        return m_far_lod_authority_revision.load(std::memory_order_acquire);
+    }
     std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
     // Adopts an externally loaded chunk when its slot is empty. Returns false
     // (without clobbering the streamed chunk) when a chunk with the same id

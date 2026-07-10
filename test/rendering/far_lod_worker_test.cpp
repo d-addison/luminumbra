@@ -107,6 +107,10 @@ TEST(FarLodWorker, AuthoritativeCaptureBuildsPersistsAndStales) {
     ASSERT_EQ(snapshot->entries.size(), 1u);
 
     TempSaveDir save;
+    const FarLodTile previous = BuildPristineFarLodTile(
+        world, FarLodTier::F1, 0, 0, snapshot->params_hash);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(FarLodStore(save.path).save_tile(previous, &errors));
     const auto outcome = BuildFarLodWorkerTile(
         world, *snapshot, FarLodTier::F1, 0, 0, save.path);
     ASSERT_TRUE(outcome.ok) << outcome.error;
@@ -120,7 +124,12 @@ TEST(FarLodWorker, AuthoritativeCaptureBuildsPersistsAndStales) {
     EXPECT_FALSE(outcome.mesh.indices.empty());
 
     FarLodTile loaded;
-    std::vector<std::string> errors;
+    ASSERT_TRUE(FarLodStore(save.path).load_tile(
+        FarLodTier::F1, 0, 0, snapshot->params_hash, loaded, &errors));
+    EXPECT_EQ(ComputeFarLodTileHash(loaded), ComputeFarLodTileHash(previous))
+        << "the worker helper must not write before owner-thread stale validation";
+    errors.clear();
+    ASSERT_TRUE(FarLodStore(save.path).save_tile(outcome.tile, &errors));
     ASSERT_TRUE(FarLodStore(save.path).load_tile(
         FarLodTier::F1, 0, 0, snapshot->params_hash, loaded, &errors));
     EXPECT_EQ(ComputeFarLodTileHash(loaded), ComputeFarLodTileHash(outcome.tile));
@@ -145,6 +154,8 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
     const auto old_outcome = BuildFarLodWorkerTile(
         old_world, *old_snapshot, FarLodTier::F1, 0, 0, save.path);
     ASSERT_TRUE(old_outcome.ok) << old_outcome.error;
+    std::vector<std::string> save_errors;
+    ASSERT_TRUE(FarLodStore(save.path).save_tile(old_outcome.tile, &save_errors));
     const auto old_authority = std::find_if(
         old_outcome.tile.sdf_bricks.begin(), old_outcome.tile.sdf_bricks.end(),
         [](const FarLodSdfBrickDescriptor& brick) {
@@ -187,4 +198,55 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
         rebased.tile.sdf_density_q.begin() + new_authority_index * samples,
         rebased.tile.sdf_density_q.begin() + (new_authority_index + 1u) * samples);
     EXPECT_EQ(new_density, old_density);
+}
+
+TEST(FarLodWorker, SurfaceWaterComesFromHighestAuthoritativeSdfCrossing) {
+    const auto build = [](float background_surface, float authoritative_surface, bool cave) {
+        TerrainGenParams params = FlatParams();
+        params.height_offset = background_surface;
+        SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+        auto chunk = std::make_shared<Chunk>(IVec3(3, 0, 5));
+        world.GenerateChunkData(*chunk, 1);
+        const int side = CHUNK_SIZE_X + 1;
+        for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+            for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
+                for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                    const std::size_t index = static_cast<std::size_t>(x) +
+                        static_cast<std::size_t>(y) * side +
+                        static_cast<std::size_t>(z) * side * side;
+                    chunk->sdf_data[index] = static_cast<float>(y) - authoritative_surface;
+                }
+            }
+        }
+        if (cave) {
+            for (int z = 4; z <= 12; z += 4) {
+                for (int y = 4; y <= 8; y += 4) {
+                    for (int x = 4; x <= 12; x += 4) {
+                        const std::size_t index = static_cast<std::size_t>(x) +
+                            static_cast<std::size_t>(y) * side +
+                            static_cast<std::size_t>(z) * side * side;
+                        chunk->sdf_data[index] = 2.0f;
+                    }
+                }
+            }
+        }
+        chunk->mark_voxel_data_dirty();
+        EXPECT_TRUE(world.adopt_streamed_chunk(chunk));
+        const auto snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
+        EXPECT_TRUE(snapshot);
+        return BuildFarLodWorkerTile(world, *snapshot, FarLodTier::F1, 0, 0, {});
+    };
+
+    const auto lowered = build(12.0f, -4.0f, false);
+    ASSERT_TRUE(lowered.ok) << lowered.error;
+    const std::size_t center = 14u + 22u * lowered.tile.samples_per_side;
+    EXPECT_NE(lowered.tile.flags[center] & kFarLodSampleFlagWater, 0u);
+
+    const auto raised = build(-4.0f, 12.0f, false);
+    ASSERT_TRUE(raised.ok) << raised.error;
+    EXPECT_EQ(raised.tile.flags[center] & kFarLodSampleFlagWater, 0u);
+
+    const auto underground_cave = build(12.0f, 12.0f, true);
+    ASSERT_TRUE(underground_cave.ok) << underground_cave.error;
+    EXPECT_EQ(underground_cave.tile.flags[center] & kFarLodSampleFlagWater, 0u);
 }

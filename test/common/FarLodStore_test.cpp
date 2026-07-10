@@ -552,17 +552,18 @@ TEST(FarLodStoreTest, BrickUpsertsUseCanonicalOrderAndRejectDuplicateStreams) {
     EXPECT_EQ(tile.sdf_density_q[samples], QuantizeFarLodSdf(-2.0f));
     EXPECT_EQ(tile.sdf_density_q[2u * samples], QuantizeFarLodSdf(-3.0f));
 
-    const u64 ordered_hash = ComputeFarLodTileHash(tile);
-    FarLodSdfSnapshot stale = earlier;
-    stale.revision = 0u;
-    stale.sdf_data[0] = 4.0f;
-    EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, stale, &error), FarLodSdfReduceResult::Unchanged);
-    EXPECT_EQ(ComputeFarLodTileHash(tile), ordered_hash);
-    FarLodSdfSnapshot conflicting = earlier;
-    conflicting.sdf_data[0] = 4.0f;
-    EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, conflicting, &error), FarLodSdfReduceResult::Error);
-    EXPECT_FALSE(error.empty());
-    EXPECT_EQ(ComputeFarLodTileHash(tile), ordered_hash);
+    const u32 persisted_revision = tile.sdf_bricks[0].revision;
+    FarLodSdfSnapshot post_reload_edit = earlier;
+    post_reload_edit.revision = 0u;
+    post_reload_edit.sdf_data[0] = 4.0f;
+    EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, post_reload_edit, &error),
+        FarLodSdfReduceResult::Replaced);
+    EXPECT_GT(tile.sdf_bricks[0].revision, persisted_revision);
+    const u32 advanced_revision = tile.sdf_bricks[0].revision;
+    post_reload_edit.sdf_data[0] = 5.0f;
+    EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, post_reload_edit, &error),
+        FarLodSdfReduceResult::Replaced);
+    EXPECT_GT(tile.sdf_bricks[0].revision, advanced_revision);
 
     // A second descriptor with the same (z, x, y) key is not a valid
     // persisted stream, even when its payload is otherwise well formed.
@@ -956,6 +957,38 @@ TEST(FarLodStoreTest, AuthoritativeSdfBrickSurvivesPersistenceAndParamsMismatch)
     EXPECT_EQ(loaded.sdf_density_q, tile.sdf_density_q);
     EXPECT_EQ(loaded.sdf_material, tile.sdf_material);
     EXPECT_EQ(ComputeFarLodTileHash(loaded), ComputeFarLodTileHash(tile));
+}
+
+TEST(FarLodStoreTest, PostReloadLowerChunkRevisionStillReplacesPersistedAuthority) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    FarLodTile tile = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    FarLodSdfSnapshot before_restart = AuthoritativeSdfSnapshot(IVec3(4, 0, 7), 3u);
+    std::string reduction_error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, before_restart, &reduction_error),
+        FarLodSdfReduceResult::Inserted);
+
+    TempSaveDir save_dir("revision_restart");
+    FarLodStore store(save_dir.path);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(store.save_tile(tile, &errors));
+    FarLodTile loaded;
+    ASSERT_TRUE(store.load_tile(FarLodTier::F1, 0, 0, params_hash, loaded, &errors));
+    ASSERT_EQ(loaded.sdf_bricks.front().revision, 3u);
+
+    FarLodSdfSnapshot after_restart_edit = before_restart;
+    after_restart_edit.revision = 2u;
+    after_restart_edit.sdf_data[0] = 4.0f;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(loaded, after_restart_edit, &reduction_error),
+        FarLodSdfReduceResult::Replaced) << reduction_error;
+    EXPECT_GT(loaded.sdf_bricks.front().revision, 3u);
+    EXPECT_EQ(loaded.sdf_density_q.front(), QuantizeFarLodSdf(4.0f));
+    ASSERT_TRUE(store.save_tile(loaded, &errors));
+    FarLodTile reloaded;
+    ASSERT_TRUE(store.load_tile(FarLodTier::F1, 0, 0, params_hash, reloaded, &errors));
+    EXPECT_EQ(reloaded.sdf_density_q.front(), QuantizeFarLodSdf(4.0f));
+    EXPECT_EQ(reloaded.sdf_bricks.front().revision, loaded.sdf_bricks.front().revision);
 }
 
 TEST(FarLodStoreTest, PristineCacheMissesOnParamsHashMismatchEditedLoadsAnyway) {

@@ -5151,6 +5151,7 @@ std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf
         entry.coords = coords;
         entry.provenance = chunk->sdf_provenance();
         entry.voxel_revision = chunk->voxel_revision();
+        entry.authority_durable = !chunk->is_voxel_data_dirty();
         entry.sdf_data = chunk->sdf_data;
         entry.material_data = chunk->material_data;
         snapshot->entries.push_back(std::move(entry));
