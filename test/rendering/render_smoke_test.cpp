@@ -3053,11 +3053,10 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     EXPECT_NE(source.find("authority_revision"), std::string::npos);
     EXPECT_NE(source.find("is_far_lod_sdf_snapshot_current"), std::string::npos);
 
-    // Far tile loading includes the 3x3 record halo, which supplies shared
-    // border authority without cross-thread access to live streamed chunks.
-    EXPECT_NE(source.find("std::array<World::FarLodTile, 9> authority_halo"), std::string::npos);
-    EXPECT_NE(source.find("for (int dz = -1; dz <= 1; ++dz)"), std::string::npos);
-    EXPECT_NE(source.find("for (int dx = -1; dx <= 1; ++dx)"), std::string::npos);
+    EXPECT_NE(source.find("BuildFarLodWorkerTile"), std::string::npos);
+    EXPECT_NE(source.find("rebase_authoritative_tile"), std::string::npos);
+    EXPECT_NE(source.find("GenerateChunkData(scratch, 1)"), std::string::npos);
+    EXPECT_NE(source.find("save_tile(tile"), std::string::npos);
 }
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {

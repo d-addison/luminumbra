@@ -9,9 +9,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <limits>
+#include <map>
+#include <set>
+#include <tuple>
 
 namespace Luminumbra::Rendering {
 namespace {
@@ -134,7 +136,323 @@ void BuildFarLodWaterSheet(const Luminumbra::World::FarLodTile& tile,
     }
 }
 
+bool tile_has_authoritative_bricks(const Luminumbra::World::FarLodTile& tile) {
+    return std::any_of(tile.sdf_bricks.begin(), tile.sdf_bricks.end(),
+        [](const Luminumbra::World::FarLodSdfBrickDescriptor& brick) {
+            return brick.source_kind == Luminumbra::World::FarLodBrickSourceKind::Authoritative;
+        });
+}
+
+Luminumbra::World::FarLodTile rebase_authoritative_tile(
+    const Luminumbra::Systems::SHIELD_WorldSystem& world,
+    Luminumbra::World::FarLodTile&& stale,
+    Luminumbra::World::FarLodTier tier,
+    int rx,
+    int rz,
+    u64 params_hash) {
+    auto fresh = Luminumbra::World::BuildPristineFarLodTile(world, tier, rx, rz, params_hash);
+    if (stale.legacy_surface_authority) {
+        for (std::size_t i = 0; i < stale.sample_count(); ++i) {
+            if ((stale.flags[i] & Luminumbra::World::kFarLodSampleFlagEdited) == 0u) {
+                continue;
+            }
+            fresh.height_q[i] = stale.height_q[i];
+            fresh.material[i] = stale.material[i];
+            fresh.flags[i] = stale.flags[i];
+        }
+        fresh.legacy_surface_authority = true;
+        fresh.edited = true;
+    }
+
+    const std::size_t samples = Luminumbra::World::FarLodSdfBrickSampleCount(tier);
+    for (std::size_t brick_index = 0; brick_index < stale.sdf_bricks.size(); ++brick_index) {
+        const auto& descriptor = stale.sdf_bricks[brick_index];
+        if (descriptor.source_kind != Luminumbra::World::FarLodBrickSourceKind::Authoritative) {
+            continue;
+        }
+        fresh.sdf_bricks.push_back(descriptor);
+        const std::size_t begin = brick_index * samples;
+        fresh.sdf_density_q.insert(fresh.sdf_density_q.end(),
+            stale.sdf_density_q.begin() + static_cast<std::ptrdiff_t>(begin),
+            stale.sdf_density_q.begin() + static_cast<std::ptrdiff_t>(begin + samples));
+        fresh.sdf_material.insert(fresh.sdf_material.end(),
+            stale.sdf_material.begin() + static_cast<std::ptrdiff_t>(begin),
+            stale.sdf_material.begin() + static_cast<std::ptrdiff_t>(begin + samples));
+        fresh.edited = true;
+    }
+    return fresh;
+}
+
+bool complete_authoritative_stacks(
+    const Luminumbra::Systems::SHIELD_WorldSystem& world,
+    Luminumbra::World::FarLodTile& tile,
+    std::string& error,
+    bool& changed) {
+    struct AuthorityColumn {
+        int x = 0;
+        int z = 0;
+        int min_y = 0;
+        int max_y = 0;
+    };
+    std::vector<AuthorityColumn> columns;
+    for (const auto& brick : tile.sdf_bricks) {
+        if (brick.source_kind != Luminumbra::World::FarLodBrickSourceKind::Authoritative) {
+            continue;
+        }
+        auto found = std::find_if(columns.begin(), columns.end(), [&](const AuthorityColumn& column) {
+            return column.x == brick.local_chunk_x && column.z == brick.local_chunk_z;
+        });
+        if (found == columns.end()) {
+            columns.push_back({brick.local_chunk_x, brick.local_chunk_z, brick.chunk_y, brick.chunk_y});
+        } else {
+            found->min_y = std::min(found->min_y, brick.chunk_y);
+            found->max_y = std::max(found->max_y, brick.chunk_y);
+        }
+    }
+    if (columns.empty()) {
+        return true;
+    }
+
+    const int sample_step = Luminumbra::World::FarLodSampleStepMeters(tile.tier);
+    std::set<std::tuple<int, int, int>> required; // (z, x, y), canonical
+    for (const AuthorityColumn& column : columns) {
+        if (column.x <= 0 || column.x >= 31 || column.z <= 0 || column.z >= 31) {
+            error = "authoritative far-SDF column needs a cross-region halo";
+            return false;
+        }
+        int min_y = column.min_y - 1;
+        int max_y = column.max_y + 1;
+        for (int halo_z = column.z - 1; halo_z <= column.z + 1; ++halo_z) {
+            for (int halo_x = column.x - 1; halo_x <= column.x + 1; ++halo_x) {
+                const int base_x = halo_x * Luminumbra::CHUNK_SIZE_X;
+                const int base_z = halo_z * Luminumbra::CHUNK_SIZE_Z;
+                for (int local_z = 0; local_z <= Luminumbra::CHUNK_SIZE_Z; local_z += sample_step) {
+                    for (int local_x = 0; local_x <= Luminumbra::CHUNK_SIZE_X; local_x += sample_step) {
+                        const std::size_t sx = static_cast<std::size_t>((base_x + local_x) / sample_step);
+                        const std::size_t sz = static_cast<std::size_t>((base_z + local_z) / sample_step);
+                        const float height = Luminumbra::World::DequantizeFarLodHeight(
+                            tile.height_q[sx + sz * tile.samples_per_side]);
+                        const int surface_y = static_cast<int>(std::floor(
+                            height / static_cast<float>(Luminumbra::CHUNK_SIZE_Y)));
+                        min_y = std::min(min_y, surface_y - 1);
+                        max_y = std::max(max_y, surface_y + 1);
+                    }
+                }
+            }
+        }
+        for (int halo_z = column.z - 1; halo_z <= column.z + 1; ++halo_z) {
+            for (int halo_x = column.x - 1; halo_x <= column.x + 1; ++halo_x) {
+                for (int chunk_y = min_y; chunk_y <= max_y; ++chunk_y) {
+                    required.emplace(halo_z, halo_x, chunk_y);
+                }
+            }
+        }
+    }
+
+    const auto exists = [&](int x, int y, int z) {
+        return std::any_of(tile.sdf_bricks.begin(), tile.sdf_bricks.end(), [&](const auto& brick) {
+            return brick.local_chunk_x == x && brick.local_chunk_z == z && brick.chunk_y == y;
+        });
+    };
+    const auto worldgen_scope = world.acquire_worldgen_sample_scope();
+    for (const auto& [local_z, local_x, chunk_y] : required) {
+        if (exists(local_x, chunk_y, local_z)) {
+            continue;
+        }
+        const IVec3 coords(
+            tile.rx * kChunksPerFarLodRegion + local_x,
+            chunk_y,
+            tile.rz * kChunksPerFarLodRegion + local_z);
+        Luminumbra::Chunk scratch(coords);
+        world.GenerateChunkData(scratch, 1);
+        Luminumbra::World::FarLodSdfSnapshot generated;
+        generated.coords = coords;
+        generated.source_kind = Luminumbra::World::FarLodBrickSourceKind::RegenerableCache;
+        generated.sdf_data = std::move(scratch.sdf_data);
+        generated.material_data = std::move(scratch.material_data);
+        std::string reduction_error;
+        const auto reduced = Luminumbra::World::ReduceChunkSdfIntoFarTile(
+            tile, generated, &reduction_error);
+        if (reduced == Luminumbra::World::FarLodSdfReduceResult::Error) {
+            error = "failed to generate far-SDF halo brick: " + reduction_error;
+            return false;
+        }
+        changed = changed || reduced != Luminumbra::World::FarLodSdfReduceResult::Unchanged;
+    }
+    return true;
+}
+
+u32 far_brick_crc(const i16* density, const u8* material, std::size_t count) {
+    u32 crc = 0xffffffffu;
+    const auto update = [&crc](const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i) {
+            crc ^= bytes[i];
+            for (int bit = 0; bit < 8; ++bit) {
+                crc = (crc >> 1u) ^ (0xedb88320u & static_cast<u32>(-(crc & 1u)));
+            }
+        }
+    };
+    update(density, count * sizeof(i16));
+    update(material, count);
+    return ~crc;
+}
+
+bool synchronize_regenerable_boundaries(
+    Luminumbra::World::FarLodTile& tile,
+    std::string& error,
+    bool& changed) {
+    using Sample = std::pair<i16, u8>;
+    std::map<std::tuple<int, int, int>, Sample> authority_samples;
+    const u32 side = Luminumbra::World::FarLodSdfBrickSamplesPerSide(tile.tier);
+    const int step = Luminumbra::World::FarLodSampleStepMeters(tile.tier);
+    const std::size_t count = Luminumbra::World::FarLodSdfBrickSampleCount(tile.tier);
+    for (std::size_t brick_index = 0; brick_index < tile.sdf_bricks.size(); ++brick_index) {
+        const auto& brick = tile.sdf_bricks[brick_index];
+        if (brick.source_kind != Luminumbra::World::FarLodBrickSourceKind::Authoritative) {
+            continue;
+        }
+        const std::size_t payload = brick_index * count;
+        for (u32 z = 0; z < side; ++z) {
+            for (u32 y = 0; y < side; ++y) {
+                for (u32 x = 0; x < side; ++x) {
+                    const std::size_t sample = payload + static_cast<std::size_t>(x) +
+                        static_cast<std::size_t>(y) * side + static_cast<std::size_t>(z) * side * side;
+                    const auto key = std::make_tuple(
+                        static_cast<int>(brick.local_chunk_x) * Luminumbra::CHUNK_SIZE_X +
+                            static_cast<int>(x) * step,
+                        brick.chunk_y * Luminumbra::CHUNK_SIZE_Y + static_cast<int>(y) * step,
+                        static_cast<int>(brick.local_chunk_z) * Luminumbra::CHUNK_SIZE_Z +
+                            static_cast<int>(z) * step);
+                    const Sample value(tile.sdf_density_q[sample], tile.sdf_material[sample]);
+                    const auto [found, inserted] = authority_samples.emplace(key, value);
+                    if (!inserted && found->second != value) {
+                        error = "adjacent authoritative far-SDF bricks disagree on a shared sample";
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    for (std::size_t brick_index = 0; brick_index < tile.sdf_bricks.size(); ++brick_index) {
+        auto& brick = tile.sdf_bricks[brick_index];
+        if (brick.source_kind != Luminumbra::World::FarLodBrickSourceKind::RegenerableCache) {
+            continue;
+        }
+        const std::size_t payload = brick_index * count;
+        bool brick_changed = false;
+        for (u32 z = 0; z < side; ++z) {
+            for (u32 y = 0; y < side; ++y) {
+                for (u32 x = 0; x < side; ++x) {
+                    const auto key = std::make_tuple(
+                        static_cast<int>(brick.local_chunk_x) * Luminumbra::CHUNK_SIZE_X +
+                            static_cast<int>(x) * step,
+                        brick.chunk_y * Luminumbra::CHUNK_SIZE_Y + static_cast<int>(y) * step,
+                        static_cast<int>(brick.local_chunk_z) * Luminumbra::CHUNK_SIZE_Z +
+                            static_cast<int>(z) * step);
+                    const auto authoritative = authority_samples.find(key);
+                    if (authoritative == authority_samples.end()) {
+                        continue;
+                    }
+                    const std::size_t sample = payload + static_cast<std::size_t>(x) +
+                        static_cast<std::size_t>(y) * side + static_cast<std::size_t>(z) * side * side;
+                    if (tile.sdf_density_q[sample] != authoritative->second.first ||
+                        tile.sdf_material[sample] != authoritative->second.second) {
+                        tile.sdf_density_q[sample] = authoritative->second.first;
+                        tile.sdf_material[sample] = authoritative->second.second;
+                        brick_changed = true;
+                    }
+                }
+            }
+        }
+        if (brick_changed) {
+            brick.payload_crc32 = far_brick_crc(
+                tile.sdf_density_q.data() + payload,
+                tile.sdf_material.data() + payload,
+                count);
+            changed = true;
+        }
+    }
+    return true;
+}
+
 } // namespace
+
+FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
+    const Systems::SHIELD_WorldSystem& world,
+    const Systems::FarLodSdfSnapshot& snapshot,
+    World::FarLodTier tier,
+    int rx,
+    int rz,
+    const std::filesystem::path& save_dir) {
+    FarLodWorkerBuildOutcome outcome;
+    World::FarLodTile tile;
+    bool loaded = false;
+    if (!save_dir.empty()) {
+        std::vector<std::string> errors;
+        const World::FarLodStore store(save_dir);
+        loaded = store.load_tile(tier, rx, rz, snapshot.params_hash, tile, &errors);
+        if (!loaded && !errors.empty()) {
+            outcome.error = errors.front();
+            return outcome;
+        }
+    }
+    if (!loaded) {
+        const auto scope = world.acquire_worldgen_sample_scope();
+        tile = World::BuildPristineFarLodTile(world, tier, rx, rz, snapshot.params_hash);
+        outcome.changed = true;
+    } else if (tile.params_hash != snapshot.params_hash) {
+        const auto scope = world.acquire_worldgen_sample_scope();
+        tile = rebase_authoritative_tile(
+            world, std::move(tile), tier, rx, rz, snapshot.params_hash);
+        outcome.changed = true;
+    }
+
+    for (const Systems::FarLodSdfSnapshotEntry& entry : snapshot.entries) {
+        if (!belongs_to_region(entry, rx, rz) ||
+            entry.provenance != ChunkSdfProvenance::LoadedOrEdited) {
+            continue;
+        }
+        std::string reduction_error;
+        const auto reduced = World::ReduceChunkSdfIntoFarTile(
+            tile, entry.as_reduction_snapshot(), &reduction_error);
+        if (reduced == World::FarLodSdfReduceResult::Error) {
+            outcome.error = "failed to reduce authoritative far SDF: " + reduction_error;
+            return outcome;
+        }
+        outcome.changed = outcome.changed || reduced != World::FarLodSdfReduceResult::Unchanged;
+    }
+
+    if (!tile_has_authoritative_bricks(tile) && !tile.sdf_bricks.empty()) {
+        tile.sdf_bricks.clear();
+        tile.sdf_density_q.clear();
+        tile.sdf_material.clear();
+        outcome.changed = true;
+    }
+    if (!complete_authoritative_stacks(world, tile, outcome.error, outcome.changed)) {
+        return outcome;
+    }
+    if (!synchronize_regenerable_boundaries(tile, outcome.error, outcome.changed)) {
+        return outcome;
+    }
+    if (outcome.changed && !save_dir.empty()) {
+        std::vector<std::string> errors;
+        if (!World::FarLodStore(save_dir).save_tile(tile, &errors)) {
+            outcome.error = errors.empty() ? "failed to save far-SDF tile" : errors.front();
+            return outcome;
+        }
+    }
+
+    World::MarchingCubes::GenerateFarLodRegionMesh(tile, outcome.mesh);
+    if (outcome.mesh.vertices.empty() || outcome.mesh.indices.empty()) {
+        outcome.error = "far-SDF worker produced an empty mesh";
+        return outcome;
+    }
+    outcome.ok = true;
+    outcome.tile = std::move(tile);
+    return outcome;
+}
 
 FarLodSystem::FarLodSystem() = default;
 
@@ -245,6 +563,12 @@ void FarLodSystem::integrate_completed_builds() {
             result.params_hash != m_params_hash ||
             result.authority_revision != result.sdf_snapshot->authority_revision ||
             !m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);
+        if (snapshot_stale) {
+            ++m_stats.stale_results_rejected;
+        }
+        if (result.authority_build_failed) {
+            ++m_stats.authority_build_failures;
+        }
         if (result.epoch != m_epoch || snapshot_stale ||
             result.mesh.vertices.empty() || result.mesh.indices.empty()) {
             // spec 008 WS-2: a build that returned an empty mesh (or raced an epoch swap)
@@ -473,55 +797,8 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
         const int rz = want.rz;
         const std::filesystem::path save_dir = m_save_dir;
         const JobHandle handle = m_job_system->dispatch_batch({[shared, world, sdf_snapshot, epoch, tier, rx, rz, save_dir]() {
-            World::FarLodTile tile;
-            bool loaded = false;
-            if (!save_dir.empty()) {
-                // Load the target plus its 3x3 authority-record halo.  The
-                // target tile owns its brick stream; the halo records make
-                // boundary authority available to the far mesh assembly path
-                // without passing mutable streamed chunks to this worker.
-                const World::FarLodStore store(save_dir);
-                std::array<World::FarLodTile, 9> authority_halo;
-                for (int dz = -1; dz <= 1; ++dz) {
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        World::FarLodTile& halo_tile =
-                            authority_halo[static_cast<std::size_t>(dz + 1) * 3u +
-                                           static_cast<std::size_t>(dx + 1)];
-                        const bool halo_loaded = store.load_tile(
-                            tier, rx + dx, rz + dz, sdf_snapshot->params_hash, halo_tile);
-                        if (dx == 0 && dz == 0) {
-                            loaded = halo_loaded;
-                            if (loaded) {
-                                tile = std::move(halo_tile);
-                            }
-                        }
-                    }
-                }
-            }
-            if (!loaded) {
-                // SHIELD-09: hold the worldgen-epoch gate while sampling — a
-                // create-world preview knob change (reinitialize_noise) now
-                // QUIESCES this job instead of racing its generator reads
-                // (the worldgen-pan crash class, root-fixed).
-                const auto worldgen_scope = world->acquire_worldgen_sample_scope();
-                tile = World::BuildPristineFarLodTile(*world, tier, rx, rz, sdf_snapshot->params_hash);
-            }
-
-            bool reduction_failed = false;
-            for (const Systems::FarLodSdfSnapshotEntry& entry : sdf_snapshot->entries) {
-                // The capture includes a one-chunk halo.  Brick ownership is
-                // half-open at the region boundary, so only the target region
-                // writes its flat stream; the halo is consumed by assembly.
-                if (!belongs_to_region(entry, rx, rz)) {
-                    continue;
-                }
-                const World::FarLodSdfReduceResult reduction =
-                    World::ReduceChunkSdfIntoFarTile(tile, entry.as_reduction_snapshot());
-                if (reduction == World::FarLodSdfReduceResult::Error) {
-                    reduction_failed = true;
-                    break;
-                }
-            }
+            FarLodWorkerBuildOutcome outcome = BuildFarLodWorkerTile(
+                *world, *sdf_snapshot, tier, rx, rz, save_dir);
 
             BuildResult result;
             result.epoch = epoch;
@@ -532,12 +809,14 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
             result.tier = tier;
             result.rx = rx;
             result.rz = rz;
-            result.tile_bytes = far_lod_tile_bytes(tile);
-            if (reduction_failed) {
+            result.authority_build_failed = !outcome.ok;
+            if (!outcome.ok) {
                 std::lock_guard<std::mutex> lock(shared->mutex);
                 shared->completed.push_back(std::move(result));
                 return;
             }
+            World::FarLodTile& tile = outcome.tile;
+            result.tile_bytes = far_lod_tile_bytes(tile);
             u16 min_q = std::numeric_limits<u16>::max();
             u16 max_q = 0;
             for (const u16 q : tile.height_q) {
@@ -547,7 +826,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
             result.min_height = World::DequantizeFarLodHeight(min_q) -
                 static_cast<float>(World::FarLodSampleStepMeters(tier));
             result.max_height = World::DequantizeFarLodHeight(max_q);
-            World::MarchingCubes::GenerateFarLodRegionMesh(tile, result.mesh);
+            result.mesh = std::move(outcome.mesh);
             // T-I4-DR-far-water-sheet: build the flat water sheet from the same
             // tile's water flags (river channels + seabeds beyond the live ring).
             BuildFarLodWaterSheet(tile, result.water_mesh);

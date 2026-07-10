@@ -752,6 +752,32 @@ add_executable(particle_determinism_test
     rendering/particle_determinism_test.cpp
 )
 
+add_executable(far_lod_worker_test
+    rendering/far_lod_worker_test.cpp
+)
+
+target_include_directories(far_lod_worker_test PRIVATE
+    ../src
+    ../src/luminumbra_client
+)
+
+target_link_libraries(far_lod_worker_test PRIVATE
+    gtest_main
+    luminumbra_client
+    glfw
+    glad
+)
+
+if(WIN32)
+    target_link_libraries(far_lod_worker_test PRIVATE opengl32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(far_lod_worker_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(far_lod_worker_test PRIVATE OpenGL::GL)
+endif()
+
 target_compile_definitions(particle_determinism_test PRIVATE
     LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
     LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
@@ -1415,6 +1441,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     rhi_backend_test
     waterfall_visual_test
     particle_determinism_test
+    far_lod_worker_test
     ui_smoke_test
     ui_page_load_test
     worldgen_preview_test

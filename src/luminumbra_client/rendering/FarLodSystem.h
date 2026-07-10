@@ -43,6 +43,24 @@ namespace Luminumbra::Rendering {
 
 class Shader;
 
+struct FarLodWorkerBuildOutcome {
+    bool ok = false;
+    bool changed = false;
+    std::string error;
+    World::FarLodTile tile;
+    World::FarLodRegionMesh mesh;
+};
+
+// Pure CPU worker seam used by the asynchronous scheduler and focused tests.
+// All streamed voxel bytes arrive through the immutable owner-thread snapshot.
+FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
+    const Systems::SHIELD_WorldSystem& world,
+    const Systems::FarLodSdfSnapshot& snapshot,
+    World::FarLodTier tier,
+    int rx,
+    int rz,
+    const std::filesystem::path& save_dir);
+
 class FarLodSystem {
 public:
     // Pinned numbers (design-decisions.md section 4).
@@ -114,6 +132,8 @@ public:
         std::size_t builds_dispatched = 0;       // build jobs dispatched this frame (<= kMaxBuildDispatchesPerFrame)
         std::size_t builds_integrated_ok = 0;    // completed builds integrated to resident this frame
         std::size_t builds_integrated_failed = 0;// completed builds rejected this frame (empty mesh / epoch mismatch)
+        std::size_t stale_results_rejected = 0;
+        std::size_t authority_build_failures = 0;
         std::size_t builds_failed_total = 0;     // cumulative rejected builds (nonzero => empty-mesh failures, hypothesis b)
         std::size_t evictions_this_frame = 0;    // regions evicted this frame (wanted-set + budget)
         std::size_t pending_depth = 0;           // build jobs in flight at end of update()
@@ -207,6 +227,7 @@ private:
         u64 capture_epoch = 0;
         u64 params_hash = 0;
         u64 authority_revision = 0;
+        bool authority_build_failed = false;
         World::FarLodTier tier = World::FarLodTier::F1;
         int rx = 0;
         int rz = 0;
