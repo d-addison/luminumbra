@@ -103,15 +103,14 @@ namespace Luminumbra::World::MarchingCubes {
     };
 
     /**
-     * @brief Far-LOD region mesher (T-I3-8): the coarse heightfield approach
-     * generalized to a whole far-LOD region tile. One mesh per (tier, region);
-     * the whole-tile heightfield owns its full vertical extent, so the
-     * per-cell chunk-Y ownership test of the chunk mesher (and its hole class)
-     * does not exist here. Vertex positions are region-local in X/Z and
-     * absolute in Y; VoxelVertex layout is untouched (28 bytes). Tile border
-     * samples are shared with adjacent regions, so neighboring region meshes
-     * share edge vertex positions; the tile perimeter additionally drops a
-     * skirt one sample-step deep to mask tier-boundary cracks.
+     * @brief Hybrid far-LOD region mesher. Tiles without SDF bricks retain the
+     * original byte-stable whole-region heightfield path. A tile with aligned
+     * SDF bricks promotes their horizontal chunk columns plus a one-column
+     * halo to three-dimensional Marching Cubes; remaining cells stay on the
+     * heightfield path, so the two representations never own the same cell.
+     * Vertex positions are region-local in X/Z and absolute in Y; VoxelVertex
+     * layout is untouched (28 bytes). Tile border samples are shared with
+     * adjacent regions, and the perimeter skirt masks tier-boundary cracks.
      */
     FarLodRegionMeshStats GenerateFarLodRegionMesh(
         const World::FarLodTile& tile,

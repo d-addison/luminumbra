@@ -11,11 +11,13 @@
 #include <glm/glm.hpp>
 #include "systems/SHIELD_WorldSystem.h"
 #include "systems/WaterSystem.h"
+#include <unordered_map>
 #include <unordered_set>
 #include "../core/Log.h"
 #include <memory>
 #include <new>
 #include <cstring>
+#include <limits>
 #include <type_traits>
 
 namespace Luminumbra {
@@ -708,6 +710,123 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     vertices.reserve(surface_vertex_count + static_cast<std::size_t>(4u * (n - 1u)) * 4u);
     indices.reserve(static_cast<std::size_t>(n - 1u) * (n - 1u) * 6u + static_cast<std::size_t>(4u * (n - 1u)) * 6u);
 
+    // The no-brick path below deliberately remains byte-for-byte the original
+    // heightfield mesher. Once a tile carries an SDF brick, the brick's chunk
+    // column and a one-column halo are owned by the 3D path so the two meshers
+    // never emit the same horizontal cells.
+    const bool has_sdf_bricks = !tile.sdf_bricks.empty();
+    std::vector<bool> sdf_owned_columns(32u * 32u, false);
+    struct SdfSampleKey {
+        int x;
+        int y;
+        int z;
+
+        bool operator==(const SdfSampleKey& other) const {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+    struct SdfSampleKeyHash {
+        std::size_t operator()(const SdfSampleKey& key) const {
+            std::size_t hash = std::hash<int>{}(key.x);
+            hash ^= std::hash<int>{}(key.y) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
+            hash ^= std::hash<int>{}(key.z) + 0x9e3779b9u + (hash << 6u) + (hash >> 2u);
+            return hash;
+        }
+    };
+    struct SdfSample {
+        float density;
+        u8 material;
+    };
+    std::unordered_map<SdfSampleKey, SdfSample, SdfSampleKeyHash> sdf_samples;
+    int sdf_min_y = 0;
+    int sdf_max_y = 0;
+
+    if (has_sdf_bricks) {
+        const std::size_t brick_samples = World::FarLodSdfBrickSampleCount(tile.tier);
+        if (tile.sdf_density_q.size() != tile.sdf_bricks.size() * brick_samples ||
+            tile.sdf_material.size() != tile.sdf_bricks.size() * brick_samples) {
+            // A malformed authoritative stream must not fall back to a surface
+            // reconstruction. Persistence validates this too; this guard keeps
+            // direct mesher callers from producing a misleading mesh.
+            return stats;
+        }
+
+        sdf_samples.reserve(tile.sdf_bricks.size() * brick_samples);
+        const int sdf_step = World::FarLodSampleStepMeters(tile.tier);
+        bool first_brick = true;
+        for (std::size_t brick_index = 0; brick_index < tile.sdf_bricks.size(); ++brick_index) {
+            const World::FarLodSdfBrickDescriptor& brick = tile.sdf_bricks[brick_index];
+            if (brick.local_chunk_x >= 32u || brick.local_chunk_z >= 32u || brick.reserved != 0u) {
+                return stats;
+            }
+
+            const int base_x = static_cast<int>(brick.local_chunk_x) * CHUNK_SIZE_X;
+            const int base_y = brick.chunk_y * CHUNK_SIZE_Y;
+            const int base_z = static_cast<int>(brick.local_chunk_z) * CHUNK_SIZE_Z;
+            const int brick_min_y = base_y;
+            const int brick_max_y = base_y + CHUNK_SIZE_Y;
+            if (first_brick) {
+                sdf_min_y = brick_min_y;
+                sdf_max_y = brick_max_y;
+                first_brick = false;
+            } else {
+                sdf_min_y = std::min(sdf_min_y, brick_min_y);
+                sdf_max_y = std::max(sdf_max_y, brick_max_y);
+            }
+
+            const int min_column_x = std::max(0, static_cast<int>(brick.local_chunk_x) - 1);
+            const int max_column_x = std::min(31, static_cast<int>(brick.local_chunk_x) + 1);
+            const int min_column_z = std::max(0, static_cast<int>(brick.local_chunk_z) - 1);
+            const int max_column_z = std::min(31, static_cast<int>(brick.local_chunk_z) + 1);
+            for (int column_z = min_column_z; column_z <= max_column_z; ++column_z) {
+                for (int column_x = min_column_x; column_x <= max_column_x; ++column_x) {
+                    sdf_owned_columns[static_cast<std::size_t>(column_x) +
+                        static_cast<std::size_t>(column_z) * 32u] = true;
+                }
+            }
+
+            const std::size_t payload_base = brick_index * brick_samples;
+            const u32 side = World::FarLodSdfBrickSamplesPerSide(tile.tier);
+            for (u32 local_z = 0; local_z < side; ++local_z) {
+                for (u32 local_y = 0; local_y < side; ++local_y) {
+                    for (u32 local_x = 0; local_x < side; ++local_x) {
+                        const std::size_t sample_index = payload_base + static_cast<std::size_t>(local_x) +
+                            static_cast<std::size_t>(local_y) * side +
+                            static_cast<std::size_t>(local_z) * side * side;
+                        const i16 density_q = tile.sdf_density_q[sample_index];
+                        if (density_q == World::kFarLodSdfInvalid) {
+                            return stats;
+                        }
+                        const SdfSampleKey key{
+                            base_x + static_cast<int>(local_x) * sdf_step,
+                            base_y + static_cast<int>(local_y) * sdf_step,
+                            base_z + static_cast<int>(local_z) * sdf_step
+                        };
+                        const SdfSample sample{World::DequantizeFarLodSdf(density_q), tile.sdf_material[sample_index]};
+                        const auto [it, inserted] = sdf_samples.emplace(key, sample);
+                        if (!inserted &&
+                            (it->second.density != sample.density || it->second.material != sample.material)) {
+                            // Shared brick faces are a single world-aligned
+                            // lattice. Unequal duplicates are corrupt authority,
+                            // never an invitation to choose one side.
+                            return stats;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    const int sample_step_i = World::FarLodSampleStepMeters(tile.tier);
+    const auto sdf_owned_cell = [&](u32 sample_x, u32 sample_z) {
+        if (!has_sdf_bricks) {
+            return false;
+        }
+        const std::size_t column_x = (static_cast<std::size_t>(sample_x) * sample_step_i) / CHUNK_SIZE_X;
+        const std::size_t column_z = (static_cast<std::size_t>(sample_z) * sample_step_i) / CHUNK_SIZE_Z;
+        return column_x < 32u && column_z < 32u && sdf_owned_columns[column_x + column_z * 32u];
+    };
+
     // Surface lattice: region-local X/Z, absolute (dequantized) world Y.
     std::size_t sample_index = 0;
     for (u32 z = 0; z < n; ++z) {
@@ -730,6 +849,9 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     // full vertical extent - no chunk-Y ownership test, no ownership holes).
     for (u32 z = 0; z + 1u < n; ++z) {
         for (u32 x = 0; x + 1u < n; ++x) {
+            if (sdf_owned_cell(x, z)) {
+                continue;
+            }
             const u32 i00 = vertex_index(x, z);
             const u32 i10 = vertex_index(x + 1u, z);
             const u32 i01 = vertex_index(x, z + 1u);
@@ -740,6 +862,132 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             indices.push_back(i00);
             indices.push_back(i01);
             indices.push_back(i11);
+        }
+    }
+
+    if (has_sdf_bricks) {
+        const IVec3 far_corner_offsets[8] = {
+            {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
+            {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
+        };
+        const int far_edge_connections[12][2] = {
+            {0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+            {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}
+        };
+        // Missing samples inside the promoted columns are the analytic surface
+        // field derived from the tile background. This supplies the vertical
+        // padding around sparse bricks while every resident brick sample wins
+        // at its exact aligned world coordinate.
+        const auto background_sample = [&](int x, int y, int z) {
+            const std::size_t sample_x = static_cast<std::size_t>(x / sample_step_i);
+            const std::size_t sample_z = static_cast<std::size_t>(z / sample_step_i);
+            const std::size_t index = sample_x + sample_z * n;
+            return SdfSample{
+                static_cast<float>(y) - World::DequantizeFarLodHeight(tile.height_q[index]),
+                tile.material[index]
+            };
+        };
+        const auto read_sdf_sample = [&](int x, int y, int z) {
+            const auto it = sdf_samples.find(SdfSampleKey{x, y, z});
+            return it != sdf_samples.end() ? it->second : background_sample(x, y, z);
+        };
+
+        // One vertical coarse cell of padding covers crossings immediately
+        // above/below an authoritative brick. Surface heights may be outside
+        // that range (deep edits or tall terrain), so extend it to include the
+        // analytic background of each promoted column as well.
+        for (u32 column_z = 0; column_z < 32u; ++column_z) {
+            for (u32 column_x = 0; column_x < 32u; ++column_x) {
+                if (!sdf_owned_columns[column_x + column_z * 32u]) {
+                    continue;
+                }
+
+                const int base_x = static_cast<int>(column_x) * CHUNK_SIZE_X;
+                const int base_z = static_cast<int>(column_z) * CHUNK_SIZE_Z;
+                float min_height = std::numeric_limits<float>::max();
+                float max_height = std::numeric_limits<float>::lowest();
+                for (int local_z = 0; local_z <= CHUNK_SIZE_Z; local_z += sample_step_i) {
+                    for (int local_x = 0; local_x <= CHUNK_SIZE_X; local_x += sample_step_i) {
+                        const std::size_t sample_x = static_cast<std::size_t>((base_x + local_x) / sample_step_i);
+                        const std::size_t sample_z = static_cast<std::size_t>((base_z + local_z) / sample_step_i);
+                        const float height = World::DequantizeFarLodHeight(tile.height_q[sample_x + sample_z * n]);
+                        min_height = std::min(min_height, height);
+                        max_height = std::max(max_height, height);
+                    }
+                }
+                const int surface_min_y = static_cast<int>(std::floor(min_height / sample_step_i)) * sample_step_i;
+                const int surface_max_y = static_cast<int>(std::ceil(max_height / sample_step_i)) * sample_step_i;
+                const int min_y = std::min(sdf_min_y - sample_step_i, surface_min_y - sample_step_i);
+                const int max_y = std::max(sdf_max_y + sample_step_i, surface_max_y + sample_step_i);
+
+                for (int z = base_z; z < base_z + CHUNK_SIZE_Z; z += sample_step_i) {
+                    for (int y = min_y; y < max_y; y += sample_step_i) {
+                        for (int x = base_x; x < base_x + CHUNK_SIZE_X; x += sample_step_i) {
+                            GridCell cell;
+                            SdfSample corner_samples[8];
+                            int cube_index = 0;
+                            for (int corner = 0; corner < 8; ++corner) {
+                                const IVec3 position = IVec3(x, y, z) + far_corner_offsets[corner] * sample_step_i;
+                                corner_samples[corner] = read_sdf_sample(position.x, position.y, position.z);
+                                cell.p[corner] = Vec3(static_cast<float>(position.x),
+                                                      static_cast<float>(position.y),
+                                                      static_cast<float>(position.z));
+                                cell.val[corner] = corner_samples[corner].density;
+                                if (cell.val[corner] < 0.0f) {
+                                    cube_index |= 1 << corner;
+                                }
+                            }
+
+                            const unsigned int edge_mask = edgeTable[cube_index];
+                            if (edge_mask == 0u) {
+                                continue;
+                            }
+                            u32 edge_vertices[12]{};
+                            for (int edge = 0; edge < 12; ++edge) {
+                                if ((edge_mask & (1u << edge)) == 0u) {
+                                    continue;
+                                }
+                                const int corner_a = far_edge_connections[edge][0];
+                                const int corner_b = far_edge_connections[edge][1];
+                                const int solid_corner = cell.val[corner_a] < 0.0f ? corner_a : corner_b;
+                                const u8 authored_material = corner_samples[solid_corner].material;
+                                const u8 material = authored_material == 0xffu
+                                    ? background_sample(static_cast<int>(cell.p[solid_corner].x),
+                                                        static_cast<int>(cell.p[solid_corner].y),
+                                                        static_cast<int>(cell.p[solid_corner].z)).material
+                                    : authored_material;
+                                edge_vertices[edge] = static_cast<u32>(vertices.size());
+                                vertices.push_back({
+                                    VertexInterp(0.0f, cell.p[corner_a], cell.p[corner_b],
+                                                 cell.val[corner_a], cell.val[corner_b]),
+                                    Vec3(0.0f),
+                                    static_cast<u32>(material)
+                                });
+                            }
+
+                            const Vec3 gradient = EstimateDensityGradient(cell);
+                            const auto& triangle_row = triTable[cube_index];
+                            for (int triangle = 0; triangle_row[triangle] != -1; triangle += 3) {
+                                u32 i0 = edge_vertices[triangle_row[triangle]];
+                                u32 i1 = edge_vertices[triangle_row[triangle + 1]];
+                                u32 i2 = edge_vertices[triangle_row[triangle + 2]];
+                                const Vec3 face_normal = glm::cross(
+                                    vertices[i1].position - vertices[i0].position,
+                                    vertices[i2].position - vertices[i0].position);
+                                if (glm::dot(face_normal, face_normal) <= 1.0e-10f) {
+                                    continue;
+                                }
+                                if (glm::dot(face_normal, gradient) < 0.0f) {
+                                    std::swap(i1, i2);
+                                }
+                                indices.push_back(i0);
+                                indices.push_back(i1);
+                                indices.push_back(i2);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

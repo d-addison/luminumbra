@@ -330,6 +330,47 @@ TEST(FarLodStoreTest, ReducesAuthoritativeLatticeByAlignedDecimation) {
     EXPECT_EQ(f2.sdf_material[f2_index], 44u);
 }
 
+TEST(FarLodSdfMesher, AuthoritativeBricksChangeF1AndF2Geometry) {
+    const TerrainGenParams params = FlatSdfFixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+
+    for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
+        FarLodTile pristine = BuildPristineFarLodTile(world, tier, 0, 0, params_hash);
+        FarLodTile edited = pristine;
+        FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(IVec3(3, 0, 5), 1u);
+        for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z) {
+            for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y) {
+                for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x) {
+                    snapshot.sdf_data[FullSdfIndex(x, y, z)] = static_cast<float>(y - 12);
+                }
+            }
+        }
+        // This cavity reaches aligned F1/F2 lattice points while leaving the
+        // height-only background unchanged.
+        for (int z = 4; z <= 12; z += 4) {
+            for (int y = 4; y <= 8; y += 4) {
+                for (int x = 4; x <= 12; x += 4) {
+                    snapshot.sdf_data[FullSdfIndex(x, y, z)] = 1.0f;
+                }
+            }
+        }
+
+        std::string error;
+        ASSERT_EQ(ReduceChunkSdfIntoFarTile(edited, snapshot, &error), FarLodSdfReduceResult::Inserted)
+            << error;
+
+        FarLodRegionMesh pristine_mesh;
+        FarLodRegionMesh edited_mesh;
+        Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(pristine, pristine_mesh);
+        Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(edited, edited_mesh);
+
+        EXPECT_NE(HashMeshBytes(pristine_mesh), HashMeshBytes(edited_mesh));
+        EXPECT_TRUE(std::any_of(edited_mesh.vertices.begin(), edited_mesh.vertices.end(),
+            [](const Luminumbra::VoxelVertex& vertex) { return vertex.position.y < 10.0f; }));
+    }
+}
+
 TEST(FarLodStoreTest, RejectsMalformedSdfAndKeepsExistingBrick) {
     const TerrainGenParams params = FixtureParams();
     const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
