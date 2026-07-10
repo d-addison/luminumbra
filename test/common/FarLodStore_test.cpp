@@ -29,6 +29,7 @@ namespace {
 using Luminumbra::Chunk;
 using Luminumbra::IVec3;
 using Luminumbra::MaterialType;
+using Luminumbra::u8;
 using Luminumbra::u16;
 using Luminumbra::i16;
 using Luminumbra::u32;
@@ -162,6 +163,24 @@ std::size_t ReducedSdfIndex(FarLodTier tier, int x, int y, int z) {
         static_cast<std::size_t>(z / step) * side * side;
 }
 
+template <typename T>
+void AppendTestValue(std::string& buffer, const T& value) {
+    buffer.append(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+
+void AppendLegacyTilePayload(std::string& payload, const FarLodTile& tile) {
+    AppendTestValue(payload, static_cast<u8>(tile.tier));
+    AppendTestValue(payload, tile.rx);
+    AppendTestValue(payload, tile.rz);
+    AppendTestValue(payload, tile.samples_per_side);
+    AppendTestValue(payload, tile.params_hash);
+    AppendTestValue(payload, static_cast<u8>(tile.edited ? 1 : 0));
+    payload.append(reinterpret_cast<const char*>(tile.height_q.data()),
+        tile.height_q.size() * sizeof(u16));
+    payload.append(reinterpret_cast<const char*>(tile.material.data()), tile.material.size());
+    payload.append(reinterpret_cast<const char*>(tile.flags.data()), tile.flags.size());
+}
+
 } // namespace
 
 TEST(MarchingCubesAuthoritativeSdf, CoarseStep2UsesResidentLattice) {
@@ -250,6 +269,8 @@ TEST(FarLodStoreTest, SdfQuantizationPreservesSignsAndReservesInvalidSentinel) {
     EXPECT_EQ(QuantizeFarLodSdf(-1.0e6f), -32767);
     EXPECT_EQ(QuantizeFarLodSdf(1.0e6f), 32767);
     EXPECT_NE(QuantizeFarLodSdf(-1.0e6f), kFarLodSdfInvalid);
+    EXPECT_EQ(QuantizeFarLodSdf(std::numeric_limits<float>::quiet_NaN()), kFarLodSdfInvalid);
+    EXPECT_EQ(QuantizeFarLodSdf(std::numeric_limits<float>::infinity()), kFarLodSdfInvalid);
     EXPECT_NEAR(DequantizeFarLodSdf(static_cast<i16>(-384)), -1.5f, 0.0f);
 }
 
@@ -297,6 +318,139 @@ TEST(FarLodStoreTest, RejectsMalformedSdfAndKeepsExistingBrick) {
     EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &error), FarLodSdfReduceResult::Error);
     EXPECT_FALSE(error.empty());
     EXPECT_EQ(ComputeFarLodTileHash(tile), before);
+}
+
+TEST(FarLodStoreTest, BrickUpsertsUseCanonicalOrderAndRejectDuplicateStreams) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    FarLodTile tile = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    FarLodSdfSnapshot later = AuthoritativeSdfSnapshot(IVec3(9, 1, 7), 1u);
+    FarLodSdfSnapshot earlier = AuthoritativeSdfSnapshot(IVec3(2, -3, 4), 1u);
+    std::string error;
+
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, later, &error), FarLodSdfReduceResult::Inserted);
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, earlier, &error), FarLodSdfReduceResult::Inserted);
+    ASSERT_EQ(tile.sdf_bricks.size(), 2u);
+    EXPECT_EQ(tile.sdf_bricks[0].local_chunk_z, 4u);
+    EXPECT_EQ(tile.sdf_bricks[0].local_chunk_x, 2u);
+    EXPECT_EQ(tile.sdf_bricks[1].local_chunk_z, 7u);
+    EXPECT_EQ(tile.sdf_bricks[1].local_chunk_x, 9u);
+
+    // A second descriptor with the same (z, x, y) key is not a valid
+    // persisted stream, even when its payload is otherwise well formed.
+    FarLodTile duplicate = tile;
+    const std::size_t samples = FarLodSdfBrickSampleCount(duplicate.tier);
+    duplicate.sdf_bricks.push_back(duplicate.sdf_bricks.back());
+    const std::vector<i16> duplicate_density(
+        duplicate.sdf_density_q.end() - samples, duplicate.sdf_density_q.end());
+    const std::vector<u8> duplicate_material(
+        duplicate.sdf_material.end() - samples, duplicate.sdf_material.end());
+    duplicate.sdf_density_q.insert(duplicate.sdf_density_q.end(),
+        duplicate_density.begin(), duplicate_density.end());
+    duplicate.sdf_material.insert(duplicate.sdf_material.end(),
+        duplicate_material.begin(), duplicate_material.end());
+
+    TempSaveDir save_dir("duplicate_brick");
+    const FarLodStore store(save_dir.path);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(store.save_tile(duplicate, &errors));
+    EXPECT_FALSE(errors.empty());
+}
+
+TEST(FarLodStoreTest, LegacyEditedHeightRecordMigratesWithoutLosingSamples) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    FarLodTile legacy = BuildPristineFarLodTile(world, FarLodTier::F2, -1, 2, params_hash);
+    legacy.edited = true;
+    legacy.height_q[0] = QuantizeFarLodHeight(123.25f);
+    legacy.material[0] = 83u;
+    // Simulate old records whose edited bit was record-level only.
+    std::fill(legacy.flags.begin(), legacy.flags.end(), kFarLodSampleFlagWater);
+
+    TempSaveDir save_dir("legacy_migration");
+    const FarLodStore store(save_dir.path);
+    WorldSaveService::ContainerRecord record;
+    record.id = FarLodStore::tile_record_id(legacy.tier, legacy.rx, legacy.rz);
+    record.lod_level = static_cast<u8>(legacy.tier);
+    record.flags = 1u;
+    AppendLegacyTilePayload(record.payload, legacy);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(WorldSaveService::upsert_container_records(
+        WorldSaveService::region_file_path(save_dir.path, legacy.rx, legacy.rz), {record}, &errors));
+    ASSERT_TRUE(errors.empty());
+
+    FarLodTile loaded;
+    ASSERT_TRUE(store.load_tile(legacy.tier, legacy.rx, legacy.rz, params_hash + 1u, loaded, &errors));
+    EXPECT_TRUE(errors.empty());
+    EXPECT_TRUE(loaded.edited);
+    EXPECT_TRUE(loaded.legacy_surface_authority);
+    EXPECT_EQ(loaded.height_q, legacy.height_q);
+    EXPECT_EQ(loaded.material, legacy.material);
+    for (u8 flags : loaded.flags) {
+        EXPECT_NE(flags & kFarLodSampleFlagEdited, 0u);
+        EXPECT_NE(flags & kFarLodSampleFlagWater, 0u);
+    }
+}
+
+TEST(FarLodStoreTest, MalformedPristineIsCacheMissButMalformedAuthorityIsHardError) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+
+    const auto corrupt_payload = [](const std::filesystem::path& save_dir,
+                                    FarLodTier tier, i32 rx, i32 rz) {
+        std::vector<WorldSaveService::ContainerRecord> records;
+        std::vector<std::string> io_errors;
+        EXPECT_TRUE(WorldSaveService::read_container_records(
+            WorldSaveService::region_file_path(save_dir, rx, rz), records, &io_errors));
+        EXPECT_TRUE(io_errors.empty());
+        ASSERT_EQ(records.size(), 1u);
+        EXPECT_EQ(records.front().id, FarLodStore::tile_record_id(tier, rx, rz));
+        records.front().payload.resize(4u); // FSD2 magic without its required header.
+        EXPECT_TRUE(WorldSaveService::upsert_container_records(
+            WorldSaveService::region_file_path(save_dir, rx, rz), records, &io_errors));
+        EXPECT_TRUE(io_errors.empty());
+    };
+
+    TempSaveDir pristine_dir("malformed_pristine");
+    const FarLodStore pristine_store(pristine_dir.path);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(pristine_store.save_tile(
+        BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash), &errors));
+    corrupt_payload(pristine_dir.path, FarLodTier::F1, 0, 0);
+    FarLodTile pristine_loaded;
+    errors.clear();
+    EXPECT_FALSE(pristine_store.load_tile(FarLodTier::F1, 0, 0, params_hash, pristine_loaded, &errors));
+    EXPECT_TRUE(errors.empty());
+
+    TempSaveDir authoritative_dir("malformed_authority");
+    const FarLodStore authoritative_store(authoritative_dir.path);
+    FarLodTile authoritative = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    std::string reduction_error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(
+        authoritative, AuthoritativeSdfSnapshot(IVec3(0, 1, 0), 1u), &reduction_error),
+        FarLodSdfReduceResult::Inserted);
+    ASSERT_TRUE(authoritative_store.save_tile(authoritative, &errors));
+    corrupt_payload(authoritative_dir.path, FarLodTier::F1, 0, 0);
+    FarLodTile authoritative_loaded;
+    errors.clear();
+    EXPECT_FALSE(authoritative_store.load_tile(
+        FarLodTier::F1, 0, 0, params_hash, authoritative_loaded, &errors));
+    EXPECT_FALSE(errors.empty());
+}
+
+TEST(FarLodStoreTest, SaveRejectsInvalidTier) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    FarLodTile tile = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0,
+        ComputeTerrainParamsHash(params, kFixtureSeed));
+    tile.tier = static_cast<FarLodTier>(99);
+    TempSaveDir save_dir("invalid_tier");
+    std::vector<std::string> errors;
+    EXPECT_FALSE(FarLodStore(save_dir.path).save_tile(tile, &errors));
+    EXPECT_FALSE(errors.empty());
 }
 
 TEST(FarLodStoreTest, TierGeometryMatchesPinnedNumbers) {

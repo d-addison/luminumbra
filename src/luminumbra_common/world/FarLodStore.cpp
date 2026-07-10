@@ -75,6 +75,10 @@ bool IsValidSourceKind(FarLodBrickSourceKind source_kind) {
         source_kind == FarLodBrickSourceKind::Authoritative;
 }
 
+bool IsValidFarLodTier(FarLodTier tier) {
+    return tier == FarLodTier::F1 || tier == FarLodTier::F2;
+}
+
 bool BrickLess(const FarLodSdfBrickDescriptor& left, const FarLodSdfBrickDescriptor& right) {
     if (left.local_chunk_z != right.local_chunk_z) {
         return left.local_chunk_z < right.local_chunk_z;
@@ -107,6 +111,10 @@ u32 Crc32(const i16* density_q, const u8* material, std::size_t count) {
 }
 
 bool ValidateTileStreams(const FarLodTile& tile, std::string* error) {
+    if (!IsValidFarLodTier(tile.tier)) {
+        if (error) *error = "far-LOD tile has an invalid tier";
+        return false;
+    }
     const std::size_t background_count = tile.sample_count();
     if (tile.samples_per_side != FarLodSamplesPerSide(tile.tier) ||
         tile.height_q.size() != background_count || tile.material.size() != background_count ||
@@ -167,6 +175,9 @@ float DequantizeFarLodHeight(u16 height_q) {
 }
 
 i16 QuantizeFarLodSdf(float density) {
+    if (!std::isfinite(density)) {
+        return kFarLodSdfInvalid;
+    }
     const float scaled = std::clamp(
         density * kFarLodSdfQuantScale,
         -32767.0f,
@@ -589,6 +600,10 @@ bool FarLodStore::save_tile(const FarLodTile& tile, std::vector<std::string>* er
     }
     const std::size_t count = tile.sample_count();
     const std::size_t samples_per_brick = FarLodSdfBrickSampleCount(tile.tier);
+    if (tile.sdf_bricks.size() > std::numeric_limits<u32>::max()) {
+        PushError(errors, "far-LOD tile has too many SDF brick descriptors to serialize");
+        return false;
+    }
 
     Persistence::WorldSaveService::ContainerRecord record;
     record.id = tile_record_id(tile.tier, tile.rx, tile.rz);
@@ -666,6 +681,15 @@ bool FarLodStore::load_tile(
         u8 edited_byte = 0;
 
         if (!is_v2) {
+            const auto fail_legacy = [&](const std::string& message) {
+                // Legacy records have no payload magic/version. The container
+                // edited flag is therefore the only authority signal available
+                // when their header itself is truncated.
+                if (tile.edited || (record.flags & kTileRecordFlagEdited) != 0u) {
+                    PushError(errors, message + ": " + region_file.string());
+                }
+                return false;
+            };
             // Named migration: the old unversioned payload carried only the
             // height surface. Its exact fixed-length shape prevents an
             // arbitrary malformed v2 record from becoming synthetic authority.
@@ -675,20 +699,17 @@ bool FarLodStore::load_tile(
                 !ReadValue(record.payload, offset, tile.samples_per_side) ||
                 !ReadValue(record.payload, offset, tile.params_hash) ||
                 !ReadValue(record.payload, offset, edited_byte)) {
-                PushError(errors, "far-LOD legacy payload header is truncated: " + region_file.string());
-                return false;
+                return fail_legacy("far-LOD legacy payload header is truncated");
             }
             tile.tier = static_cast<FarLodTier>(tier_byte);
             tile.edited = edited_byte != 0;
             if (tile.tier != tier || tile.rx != rx || tile.rz != rz ||
                 tile.samples_per_side != FarLodSamplesPerSide(tier)) {
-                PushError(errors, "far-LOD legacy payload header mismatch: " + region_file.string());
-                return false;
+                return fail_legacy("far-LOD legacy payload header mismatch");
             }
             const std::size_t count = tile.sample_count();
             if (offset > record.payload.size() || record.payload.size() - offset != count * 4u) {
-                PushError(errors, "far-LOD legacy payload sample stream is truncated: " + region_file.string());
-                return false;
+                return fail_legacy("far-LOD legacy payload sample stream is truncated");
             }
             tile.height_q.resize(count);
             tile.material.resize(count);
