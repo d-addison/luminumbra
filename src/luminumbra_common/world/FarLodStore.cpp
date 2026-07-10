@@ -317,21 +317,29 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
 
 u64 ComputeFarLodTileHash(const FarLodTile& tile) {
     u64 hash = kFnvOffsetBasis;
-    FnvMix(hash, kFarLodPayloadMagic, sizeof(kFarLodPayloadMagic));
-    FnvMixValue(hash, kFarLodPayloadVersion);
     FnvMixValue(hash, static_cast<u8>(tile.tier));
     FnvMixValue(hash, tile.rx);
     FnvMixValue(hash, tile.rz);
     FnvMixValue(hash, tile.samples_per_side);
-    FnvMixValue(hash, tile.params_hash);
-    FnvMixValue(hash, static_cast<u8>(tile.edited));
-    FnvMixValue(hash, static_cast<u8>(tile.legacy_surface_authority));
     const std::size_t count = tile.sample_count();
     for (std::size_t i = 0; i < count; ++i) {
         FnvMixValue(hash, tile.height_q[i]);
         FnvMixValue(hash, tile.material[i]);
         FnvMixValue(hash, tile.flags[i]);
     }
+
+    // Preserve the original tile hash byte-for-byte for the zero-brick path.
+    // Existing pristine baselines and legacy height-only authority already
+    // encode their complete visible content in the streams above. FSD2 fields
+    // become part of the hash only once three-dimensional brick data exists.
+    if (tile.sdf_bricks.empty()) {
+        return hash;
+    }
+    FnvMix(hash, kFarLodPayloadMagic, sizeof(kFarLodPayloadMagic));
+    FnvMixValue(hash, kFarLodPayloadVersion);
+    FnvMixValue(hash, tile.params_hash);
+    FnvMixValue(hash, static_cast<u8>(tile.edited));
+    FnvMixValue(hash, static_cast<u8>(tile.legacy_surface_authority));
     FnvMixValue(hash, static_cast<u64>(tile.sdf_bricks.size()));
     const std::size_t samples_per_brick = FarLodSdfBrickSampleCount(tile.tier);
     for (std::size_t brick = 0; brick < tile.sdf_bricks.size(); ++brick) {
@@ -659,6 +667,10 @@ bool FarLodStore::load_tile(
     u64 expected_params_hash,
     FarLodTile& out_tile,
     std::vector<std::string>* errors) const {
+    if (!IsValidFarLodTier(tier)) {
+        PushError(errors, "far-LOD load requested an invalid tier");
+        return false;
+    }
     const std::filesystem::path region_file =
         Persistence::WorldSaveService::region_file_path(m_save_dir, rx, rz);
 

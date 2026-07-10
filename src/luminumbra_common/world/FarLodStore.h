@@ -170,8 +170,9 @@ struct FarLodRegionMesh {
 // component shared with worldgen.
 u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed);
 
-// Deterministic fnv1a64 over the tile header (tier, rx, rz, samples) and the
-// packed sample stream {height_q, material, flags} in row-major order.
+// Deterministic fnv1a64 over the legacy tile header and packed background
+// streams. Zero-brick tiles retain the pre-FSD2 hash exactly; tiles carrying
+// SDF bricks append the versioned authority metadata and payload streams.
 u64 ComputeFarLodTileHash(const FarLodTile& tile);
 
 // Builds a pristine tile analytically (batch-friendly row-major loops over
