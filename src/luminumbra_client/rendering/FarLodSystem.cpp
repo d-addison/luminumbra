@@ -9,6 +9,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -16,6 +17,30 @@ namespace Luminumbra::Rendering {
 namespace {
 
 constexpr float kRegionSize = static_cast<float>(Luminumbra::World::kFarLodRegionSizeMeters);
+constexpr int kChunksPerFarLodRegion =
+    Luminumbra::World::kFarLodRegionSizeMeters / Luminumbra::CHUNK_SIZE_X;
+
+int floor_divide(int value, int divisor) {
+    const int quotient = value / divisor;
+    const int remainder = value % divisor;
+    return remainder < 0 ? quotient - 1 : quotient;
+}
+
+bool belongs_to_region(const Luminumbra::Systems::FarLodSdfSnapshotEntry& entry,
+                       int rx,
+                       int rz) {
+    return floor_divide(entry.coords.x, kChunksPerFarLodRegion) == rx &&
+           floor_divide(entry.coords.z, kChunksPerFarLodRegion) == rz;
+}
+
+std::size_t far_lod_tile_bytes(const Luminumbra::World::FarLodTile& tile) {
+    return tile.height_q.size() * sizeof(u16) +
+           tile.material.size() * sizeof(u8) +
+           tile.flags.size() * sizeof(u8) +
+           tile.sdf_bricks.size() * sizeof(Luminumbra::World::FarLodSdfBrickDescriptor) +
+           tile.sdf_density_q.size() * sizeof(i16) +
+           tile.sdf_material.size() * sizeof(u8);
+}
 
 // Point-to-rect horizontal distances of a region footprint from a position.
 float region_nearest_distance(int rx, int rz, const glm::vec3& position) {
@@ -212,7 +237,16 @@ void FarLodSystem::integrate_completed_builds() {
     for (BuildResult& result : completed) {
         const u64 key = region_key(result.rx, result.rz);
         m_pending.erase(key);
-        if (result.epoch != m_epoch || result.mesh.vertices.empty() || result.mesh.indices.empty()) {
+        const bool snapshot_stale =
+            !m_world ||
+            !result.sdf_snapshot ||
+            result.capture_epoch != result.sdf_snapshot->capture_epoch ||
+            result.params_hash != result.sdf_snapshot->params_hash ||
+            result.params_hash != m_params_hash ||
+            result.authority_revision != result.sdf_snapshot->authority_revision ||
+            !m_world->is_far_lod_sdf_snapshot_current(*result.sdf_snapshot);
+        if (result.epoch != m_epoch || snapshot_stale ||
+            result.mesh.vertices.empty() || result.mesh.indices.empty()) {
             // spec 008 WS-2: a build that returned an empty mesh (or raced an epoch swap)
             // never becomes resident — counted so the gate can tell empty-mesh failures
             // apart from build-throttle starvation on the mountains preset.
@@ -420,24 +454,49 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
             m_world->PrefetchHydroRegions(region_cx, region_cz, kRegionSize);
         }
 
+        // Capture on the owner thread after streaming publication.  The worker
+        // receives only this immutable value; it must never retain a streamed
+        // Chunk or borrow one of its mutable voxel vectors.
+        const std::shared_ptr<const Systems::FarLodSdfSnapshot> sdf_snapshot =
+            world_system.capture_far_lod_sdf_snapshot(want.rx, want.rz);
+        if (!sdf_snapshot) {
+            continue;
+        }
         m_pending[key] = want.tier;
         ++dispatched;
+
         auto shared = m_shared;
         const Systems::SHIELD_WorldSystem* world = m_world;
-        const u64 params_hash = m_params_hash;
         const u64 epoch = m_epoch;
         const World::FarLodTier tier = want.tier;
         const int rx = want.rx;
         const int rz = want.rz;
         const std::filesystem::path save_dir = m_save_dir;
-        const JobHandle handle = m_job_system->dispatch_batch({[shared, world, params_hash, epoch, tier, rx, rz, save_dir]() {
+        const JobHandle handle = m_job_system->dispatch_batch({[shared, world, sdf_snapshot, epoch, tier, rx, rz, save_dir]() {
             World::FarLodTile tile;
             bool loaded = false;
             if (!save_dir.empty()) {
-                // Edited (authoritative) tiles - and valid pristine cache
-                // entries - come from the LMR1 store.
+                // Load the target plus its 3x3 authority-record halo.  The
+                // target tile owns its brick stream; the halo records make
+                // boundary authority available to the far mesh assembly path
+                // without passing mutable streamed chunks to this worker.
                 const World::FarLodStore store(save_dir);
-                loaded = store.load_tile(tier, rx, rz, params_hash, tile);
+                std::array<World::FarLodTile, 9> authority_halo;
+                for (int dz = -1; dz <= 1; ++dz) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        World::FarLodTile& halo_tile =
+                            authority_halo[static_cast<std::size_t>(dz + 1) * 3u +
+                                           static_cast<std::size_t>(dx + 1)];
+                        const bool halo_loaded = store.load_tile(
+                            tier, rx + dx, rz + dz, sdf_snapshot->params_hash, halo_tile);
+                        if (dx == 0 && dz == 0) {
+                            loaded = halo_loaded;
+                            if (loaded) {
+                                tile = std::move(halo_tile);
+                            }
+                        }
+                    }
+                }
             }
             if (!loaded) {
                 // SHIELD-09: hold the worldgen-epoch gate while sampling — a
@@ -445,15 +504,40 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system, const
                 // QUIESCES this job instead of racing its generator reads
                 // (the worldgen-pan crash class, root-fixed).
                 const auto worldgen_scope = world->acquire_worldgen_sample_scope();
-                tile = World::BuildPristineFarLodTile(*world, tier, rx, rz, params_hash);
+                tile = World::BuildPristineFarLodTile(*world, tier, rx, rz, sdf_snapshot->params_hash);
+            }
+
+            bool reduction_failed = false;
+            for (const Systems::FarLodSdfSnapshotEntry& entry : sdf_snapshot->entries) {
+                // The capture includes a one-chunk halo.  Brick ownership is
+                // half-open at the region boundary, so only the target region
+                // writes its flat stream; the halo is consumed by assembly.
+                if (!belongs_to_region(entry, rx, rz)) {
+                    continue;
+                }
+                const World::FarLodSdfReduceResult reduction =
+                    World::ReduceChunkSdfIntoFarTile(tile, entry.as_reduction_snapshot());
+                if (reduction == World::FarLodSdfReduceResult::Error) {
+                    reduction_failed = true;
+                    break;
+                }
             }
 
             BuildResult result;
             result.epoch = epoch;
+            result.sdf_snapshot = sdf_snapshot;
+            result.capture_epoch = sdf_snapshot->capture_epoch;
+            result.params_hash = sdf_snapshot->params_hash;
+            result.authority_revision = sdf_snapshot->authority_revision;
             result.tier = tier;
             result.rx = rx;
             result.rz = rz;
-            result.tile_bytes = tile.sample_count() * 4u;
+            result.tile_bytes = far_lod_tile_bytes(tile);
+            if (reduction_failed) {
+                std::lock_guard<std::mutex> lock(shared->mutex);
+                shared->completed.push_back(std::move(result));
+                return;
+            }
             u16 min_q = std::numeric_limits<u16>::max();
             u16 max_q = 0;
             for (const u16 q : tile.height_q) {

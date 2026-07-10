@@ -34,7 +34,10 @@
 #include <unordered_map>
 #include <vector>
 
-namespace Luminumbra::Systems { class SHIELD_WorldSystem; }
+namespace Luminumbra::Systems {
+class SHIELD_WorldSystem;
+struct FarLodSdfSnapshot;
+}
 
 namespace Luminumbra::Rendering {
 
@@ -196,6 +199,14 @@ private:
 
     struct BuildResult {
         u64 epoch = 0;
+        // Immutable owner-thread capture used by this build.  Keeping the
+        // shared value through completion lets integration reject results from
+        // a changed SDF authority without ever exposing mutable Chunk data to a
+        // worker.
+        std::shared_ptr<const Systems::FarLodSdfSnapshot> sdf_snapshot;
+        u64 capture_epoch = 0;
+        u64 params_hash = 0;
+        u64 authority_revision = 0;
         World::FarLodTier tier = World::FarLodTier::F1;
         int rx = 0;
         int rz = 0;

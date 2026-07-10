@@ -3028,6 +3028,38 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
     }
 }
 
+TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
+    const std::string header = ReadTextFile(
+        SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
+    const std::string source = ReadTextFile(
+        SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
+    ASSERT_FALSE(header.empty());
+    ASSERT_FALSE(source.empty());
+
+    // Snapshot capture must happen on the render-owner thread before the
+    // asynchronous dispatch.  The job owns copied SDF/material bytes rather
+    // than a streamed Chunk whose mutable vectors can be edited or evicted.
+    const std::size_t capture = source.find("capture_far_lod_sdf_snapshot");
+    const std::size_t dispatch = source.find("dispatch_batch");
+    ASSERT_NE(capture, std::string::npos);
+    ASSERT_NE(dispatch, std::string::npos);
+    EXPECT_LT(capture, dispatch);
+    EXPECT_NE(header.find("shared_ptr<const Systems::FarLodSdfSnapshot>"), std::string::npos);
+    EXPECT_NE(source.find("ReduceChunkSdfIntoFarTile"), std::string::npos);
+
+    // A completed mesh must be discarded when the capture's epoch, params, or
+    // authoritative voxel revision is no longer current.
+    EXPECT_NE(source.find("capture_epoch"), std::string::npos);
+    EXPECT_NE(source.find("authority_revision"), std::string::npos);
+    EXPECT_NE(source.find("is_far_lod_sdf_snapshot_current"), std::string::npos);
+
+    // Far tile loading includes the 3x3 record halo, which supplies shared
+    // border authority without cross-thread access to live streamed chunks.
+    EXPECT_NE(source.find("std::array<World::FarLodTile, 9> authority_halo"), std::string::npos);
+    EXPECT_NE(source.find("for (int dz = -1; dz <= 1; ++dz)"), std::string::npos);
+    EXPECT_NE(source.find("for (int dx = -1; dx <= 1; ++dx)"), std::string::npos);
+}
+
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
