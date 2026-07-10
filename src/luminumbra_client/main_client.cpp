@@ -10394,6 +10394,9 @@ int main(int argc, char* argv[]) {
                 j["warmup_frames"] = g_render_benchmark_warmup;
                 j["width"] = renderPipeline.screen_width();
                 j["height"] = renderPipeline.screen_height();
+                j["render_scale"] = renderPipeline.render_scale();
+                j["internal_width"] = renderPipeline.internal_width();
+                j["internal_height"] = renderPipeline.internal_height();
                 j["pose"] = "forest_dense";
                 j["cloud_quality"] = renderPipeline.get_cloud_quality();
                 j["ssao_quality"] = renderPipeline.get_ssao_quality();

@@ -53,7 +53,7 @@ $checks = @(
     Assert-Contains `
         -Name "chunk unload removes collision before erasing chunk" `
         -Text $worldText `
-        -Pattern "void SHIELD_WorldSystem::update_chunk_activation[\s\S]*?for \(ChunkID id : to_unload\)[\s\S]*?physics_system->remove_chunk_collision\(id\);[\s\S]*?m_streaming_state\.chunks\.erase\(id\);" `
+        -Pattern "(?:void|bool) SHIELD_WorldSystem::update_chunk_activation[\s\S]*?for \(ChunkID id : to_unload\)[\s\S]*?physics_system->remove_chunk_collision\(id\);[\s\S]*?m_streaming_state\.chunks\.erase\(id\);" `
         -Evidence "update_chunk_activation unregisters physics collision before erasing unloaded chunks"
 
     Assert-Contains `

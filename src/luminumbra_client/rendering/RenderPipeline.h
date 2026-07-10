@@ -491,6 +491,9 @@ public:
 
     u32 screen_width() const { return m_screen_width; }
     u32 screen_height() const { return m_screen_height; }
+    float render_scale() const { return m_render_scale; }
+    u32 internal_width() const { return m_internal_width; }
+    u32 internal_height() const { return m_internal_height; }
     const glm::mat4& prev_view_proj() const { return m_prev_view_proj; }  // FR-R5 TAAU motion vectors
     float prev_time() const { return m_prev_time; }                       // §13 TAAU: prev-frame wind wall-clock
     void set_taau_enabled(bool e) { m_taau_enabled = e; }                 // render.taau (client wires from SystemConfig)
