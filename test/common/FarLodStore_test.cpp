@@ -161,7 +161,8 @@ void FillFlatSdf(FarLodSdfSnapshot& snapshot, int surface_y = 12) {
     for (int z = 0; z <= Luminumbra::CHUNK_SIZE_Z; ++z) {
         for (int y = 0; y <= Luminumbra::CHUNK_SIZE_Y; ++y) {
             for (int x = 0; x <= Luminumbra::CHUNK_SIZE_X; ++x) {
-                snapshot.sdf_data[FullSdfIndex(x, y, z)] = static_cast<float>(y - surface_y);
+                const int world_y = snapshot.coords.y * Luminumbra::CHUNK_SIZE_Y + y;
+                snapshot.sdf_data[FullSdfIndex(x, y, z)] = static_cast<float>(world_y - surface_y);
             }
         }
     }
@@ -171,12 +172,14 @@ void AddCompleteFlatSdfHalo(FarLodTile& tile, const IVec3& center) {
     std::string error;
     for (int z_offset = -1; z_offset <= 1; ++z_offset) {
         for (int x_offset = -1; x_offset <= 1; ++x_offset) {
-            FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(
-                IVec3(center.x + x_offset, center.y, center.z + z_offset), 1u);
-            FillFlatSdf(snapshot);
-            snapshot.source_kind = FarLodBrickSourceKind::RegenerableCache;
-            ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &error), FarLodSdfReduceResult::Inserted)
-                << error;
+            for (int chunk_y = center.y - 1; chunk_y <= center.y + 1; ++chunk_y) {
+                FarLodSdfSnapshot snapshot = AuthoritativeSdfSnapshot(
+                    IVec3(center.x + x_offset, chunk_y, center.z + z_offset), 1u);
+                FillFlatSdf(snapshot);
+                snapshot.source_kind = FarLodBrickSourceKind::RegenerableCache;
+                ASSERT_EQ(ReduceChunkSdfIntoFarTile(tile, snapshot, &error), FarLodSdfReduceResult::Inserted)
+                    << error;
+            }
         }
     }
 }
@@ -438,6 +441,68 @@ TEST(FarLodSdfMesher, IncompleteHaloAndMismatchedSharedFacesFailClosed) {
     EXPECT_TRUE(mismatched_mesh.vertices.empty());
     EXPECT_TRUE(mismatched_mesh.indices.empty());
     EXPECT_EQ(mismatched_stats.triangles, 0u);
+}
+
+TEST(FarLodSdfMesher, MalformedCompleteStacksFailClosedBeforeVertexEmission) {
+    const TerrainGenParams params = FlatSdfFixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+    const IVec3 center(3, 0, 5);
+    const auto complete_tile = [&]() {
+        FarLodTile tile = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+        AddCompleteFlatSdfHalo(tile, center);
+        FarLodSdfSnapshot authoritative = AuthoritativeSdfSnapshot(center, 2u);
+        FillFlatSdf(authoritative);
+        std::string error;
+        EXPECT_EQ(ReduceChunkSdfIntoFarTile(tile, authoritative, &error),
+            FarLodSdfReduceResult::Replaced) << error;
+        return tile;
+    };
+    const auto expect_empty = [](const FarLodTile& tile) {
+        FarLodRegionMesh mesh;
+        const auto stats = Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(tile, mesh);
+        EXPECT_TRUE(mesh.vertices.empty());
+        EXPECT_TRUE(mesh.indices.empty());
+        EXPECT_EQ(stats.triangles, 0u);
+    };
+
+    FarLodTile bad_crc = complete_tile();
+    bad_crc.sdf_bricks.front().payload_crc32 ^= 1u;
+    expect_empty(bad_crc);
+
+    FarLodTile missing_vertical = complete_tile();
+    const auto missing = std::find_if(missing_vertical.sdf_bricks.begin(), missing_vertical.sdf_bricks.end(),
+        [center](const FarLodSdfBrickDescriptor& brick) {
+            return brick.local_chunk_x == center.x && brick.local_chunk_z == center.z && brick.chunk_y == -1;
+        });
+    ASSERT_NE(missing, missing_vertical.sdf_bricks.end());
+    const std::size_t missing_index = static_cast<std::size_t>(missing - missing_vertical.sdf_bricks.begin());
+    const std::size_t samples = FarLodSdfBrickSampleCount(missing_vertical.tier);
+    missing_vertical.sdf_bricks.erase(missing);
+    missing_vertical.sdf_density_q.erase(
+        missing_vertical.sdf_density_q.begin() + missing_index * samples,
+        missing_vertical.sdf_density_q.begin() + (missing_index + 1u) * samples);
+    missing_vertical.sdf_material.erase(
+        missing_vertical.sdf_material.begin() + missing_index * samples,
+        missing_vertical.sdf_material.begin() + (missing_index + 1u) * samples);
+    expect_empty(missing_vertical);
+
+    FarLodTile unsorted = complete_tile();
+    ASSERT_GE(unsorted.sdf_bricks.size(), 2u);
+    std::swap(unsorted.sdf_bricks[0], unsorted.sdf_bricks[1]);
+    std::swap_ranges(unsorted.sdf_density_q.begin(), unsorted.sdf_density_q.begin() + samples,
+        unsorted.sdf_density_q.begin() + samples);
+    std::swap_ranges(unsorted.sdf_material.begin(), unsorted.sdf_material.begin() + samples,
+        unsorted.sdf_material.begin() + samples);
+    expect_empty(unsorted);
+
+    FarLodTile wrong_size = complete_tile();
+    wrong_size.sdf_density_q.pop_back();
+    expect_empty(wrong_size);
+
+    FarLodTile invalid_tier = complete_tile();
+    invalid_tier.tier = static_cast<FarLodTier>(99);
+    expect_empty(invalid_tier);
 }
 
 TEST(FarLodStoreTest, RejectsMalformedSdfAndKeepsExistingBrick) {
@@ -982,6 +1047,8 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
     static_assert(sizeof(Luminumbra::VoxelVertex) == 28, "VoxelVertex layout must stay 28 bytes");
 
     EXPECT_EQ(HashMeshBytes(first), HashMeshBytes(second));
+    EXPECT_EQ(HashMeshBytes(first), 0x84fa7aa8cc3a3d15ull)
+        << "zero-brick F1 mesh hash must remain pre-SHIELD-08 byte-identical";
     std::printf("farlod fixture region mesh hash (seed %d, F1, r0.0): %016llx\n",
         kFixtureSeed, static_cast<unsigned long long>(HashMeshBytes(first)));
     // Surface lattice 129x129 + 4 edges x 128 skirt quads x 4 vertices.
@@ -1004,10 +1071,14 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
     const auto stats_f2 = Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(tile_f2, mesh_f2);
     FarLodRegionMesh mesh_f2_repeat;
     Luminumbra::World::MarchingCubes::GenerateFarLodRegionMesh(tile_f2, mesh_f2_repeat);
+    std::printf("farlod fixture region mesh hash (seed %d, F2, r0.0): %016llx\n",
+        kFixtureSeed, static_cast<unsigned long long>(HashMeshBytes(mesh_f2)));
     EXPECT_EQ(stats_f2.skirt_quads, 256u);
     EXPECT_EQ(mesh_f2.vertices.size(), 65u * 65u + 256u * 4u);
     EXPECT_EQ(HashMeshBytes(mesh_f2), HashMeshBytes(mesh_f2_repeat))
         << "zero-brick F2 mesh bytes must remain deterministic";
+    EXPECT_EQ(HashMeshBytes(mesh_f2), 0xe0c514794eaa306eull)
+        << "zero-brick F2 mesh hash must remain pre-SHIELD-08 byte-identical";
 }
 
 TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {

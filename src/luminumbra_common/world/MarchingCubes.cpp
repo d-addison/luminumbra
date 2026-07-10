@@ -699,8 +699,11 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     out_mesh.indices.clear();
 
     const u32 n = tile.samples_per_side;
-    if (n < 2u || tile.height_q.size() < tile.sample_count() ||
-        tile.material.size() < tile.sample_count()) {
+    if ((tile.tier != World::FarLodTier::F1 && tile.tier != World::FarLodTier::F2) ||
+        n != World::FarLodSamplesPerSide(tile.tier) ||
+        tile.height_q.size() != tile.sample_count() ||
+        tile.material.size() != tile.sample_count() ||
+        tile.flags.size() != tile.sample_count()) {
         return stats;
     }
 
@@ -744,6 +747,8 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         bool authoritative = false;
         int min_y = 0;
         int max_y = 0;
+        int authority_min_y = 0;
+        int authority_max_y = 0;
     };
     std::array<SdfColumnStack, 32u * 32u> sdf_column_stacks{};
 
@@ -795,6 +800,10 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                 stack.authoritative = brick.source_kind == World::FarLodBrickSourceKind::Authoritative;
                 stack.min_y = base_y;
                 stack.max_y = base_y;
+                if (stack.authoritative) {
+                    stack.authority_min_y = base_y;
+                    stack.authority_max_y = base_y;
+                }
             } else {
                 // A stack is only complete when every chunk-Y slab is present.
                 // The descriptor stream is sorted by (z, x, y), so a gap is
@@ -804,11 +813,36 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                     return stats;
                 }
                 stack.max_y = base_y;
-                stack.authoritative = stack.authoritative ||
-                    brick.source_kind == World::FarLodBrickSourceKind::Authoritative;
+                if (brick.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+                    if (!stack.authoritative) {
+                        stack.authority_min_y = base_y;
+                        stack.authority_max_y = base_y;
+                    } else {
+                        stack.authority_min_y = std::min(stack.authority_min_y, base_y);
+                        stack.authority_max_y = std::max(stack.authority_max_y, base_y);
+                    }
+                    stack.authoritative = true;
+                }
             }
 
             const std::size_t payload_base = brick_index * brick_samples;
+            u32 payload_crc = 0xffffffffu;
+            const auto crc_bytes = [&payload_crc](const void* data, std::size_t size) {
+                const auto* bytes = static_cast<const unsigned char*>(data);
+                for (std::size_t byte = 0; byte < size; ++byte) {
+                    payload_crc ^= bytes[byte];
+                    for (int bit = 0; bit < 8; ++bit) {
+                        payload_crc = (payload_crc >> 1u) ^
+                            (0xedb88320u & static_cast<u32>(-(payload_crc & 1u)));
+                    }
+                }
+            };
+            crc_bytes(tile.sdf_density_q.data() + payload_base, brick_samples * sizeof(i16));
+            crc_bytes(tile.sdf_material.data() + payload_base, brick_samples);
+            payload_crc = ~payload_crc;
+            if (brick.payload_crc32 != payload_crc) {
+                return stats;
+            }
             const u32 side = World::FarLodSdfBrickSamplesPerSide(tile.tier);
             for (u32 local_z = 0; local_z < side; ++local_z) {
                 for (u32 local_y = 0; local_y < side; ++local_y) {
@@ -856,11 +890,35 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                 if (column_x == 0 || column_x == 31 || column_z == 0 || column_z == 31) {
                     return stats;
                 }
+                int required_min_chunk_y = source.authority_min_y / CHUNK_SIZE_Y - 1;
+                int required_max_chunk_y = source.authority_max_y / CHUNK_SIZE_Y + 1;
+                for (int halo_z = column_z - 1; halo_z <= column_z + 1; ++halo_z) {
+                    for (int halo_x = column_x - 1; halo_x <= column_x + 1; ++halo_x) {
+                        const int base_x = halo_x * CHUNK_SIZE_X;
+                        const int base_z = halo_z * CHUNK_SIZE_Z;
+                        for (int local_z = 0; local_z <= CHUNK_SIZE_Z; local_z += sdf_step) {
+                            for (int local_x = 0; local_x <= CHUNK_SIZE_X; local_x += sdf_step) {
+                                const std::size_t sample_x =
+                                    static_cast<std::size_t>((base_x + local_x) / sdf_step);
+                                const std::size_t sample_z =
+                                    static_cast<std::size_t>((base_z + local_z) / sdf_step);
+                                const float height = World::DequantizeFarLodHeight(
+                                    tile.height_q[sample_x + sample_z * n]);
+                                const int surface_chunk_y = static_cast<int>(
+                                    std::floor(height / static_cast<float>(CHUNK_SIZE_Y)));
+                                required_min_chunk_y = std::min(required_min_chunk_y, surface_chunk_y - 1);
+                                required_max_chunk_y = std::max(required_max_chunk_y, surface_chunk_y + 1);
+                            }
+                        }
+                    }
+                }
+                const int required_min_y = required_min_chunk_y * CHUNK_SIZE_Y;
+                const int required_max_y = required_max_chunk_y * CHUNK_SIZE_Y;
                 for (int halo_z = column_z - 1; halo_z <= column_z + 1; ++halo_z) {
                     for (int halo_x = column_x - 1; halo_x <= column_x + 1; ++halo_x) {
                         const SdfColumnStack& halo = sdf_column_stacks[static_cast<std::size_t>(halo_x) +
                             static_cast<std::size_t>(halo_z) * 32u];
-                        if (!halo.present || halo.min_y != source.min_y || halo.max_y != source.max_y) {
+                        if (!halo.present || halo.min_y > required_min_y || halo.max_y < required_max_y) {
                             return stats;
                         }
                         sdf_owned_columns[static_cast<std::size_t>(halo_x) +
