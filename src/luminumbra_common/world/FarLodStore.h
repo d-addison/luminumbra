@@ -110,6 +110,9 @@ struct FarLodWorldLegacySurfaceSample {
     i32 world_z = 0;
     u16 height_q = 0;
     u8 material = 0;
+    // Retain migrated water authority while this sample is synthesized into an
+    // SDF-owned halo. A real SDF footprint is the only supersession path.
+    u8 flags = 0;
 };
 
 // An owned, transient world-coordinate SDF view passed from a far worker to
@@ -130,8 +133,9 @@ struct FarLodRegionSdfAssembly {
     std::vector<i16> density_q;
     std::vector<u8> material;
     // Canonically sorted by (world_z, world_x). These height-only migration
-    // samples never enter the 3D density map; their material is the canonical
-    // analytic fallback when an SDF transition touches legacy authority.
+    // samples are synthesized as d = world_y - saved_height only while an SDF
+    // transition promotes their surviving legacy footprint. They never enter
+    // the persisted 3D density stream.
     std::vector<FarLodWorldLegacySurfaceSample> legacy_surface_samples;
 };
 

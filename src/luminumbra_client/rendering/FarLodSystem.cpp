@@ -568,6 +568,7 @@ struct PendingWorldBrick {
 struct LegacySurfaceSample {
     u16 height_q = 0;
     u8 material = 0;
+    u8 flags = 0;
 };
 
 using LegacySurfaceMap =
@@ -605,12 +606,14 @@ bool collect_legacy_surface_samples(
                 error = "legacy far surface sample coordinate overflows";
                 return false;
             }
-            const LegacySurfaceSample value{source.height_q[index], source.material[index]};
+            const LegacySurfaceSample value{
+                source.height_q[index], source.material[index], source.flags[index]};
             const auto inserted = samples.emplace(
                 std::make_pair(static_cast<int>(world_z), static_cast<int>(world_x)), value);
             if (!inserted.second &&
                 (inserted.first->second.height_q != value.height_q ||
-                 inserted.first->second.material != value.material)) {
+                 inserted.first->second.material != value.material ||
+                 inserted.first->second.flags != value.flags)) {
                 error = "legacy far surfaces disagree on a shared world sample";
                 return false;
             }
@@ -811,6 +814,10 @@ bool derive_assembly_water(World::FarLodTile& tile, const Assembly& assembly, bo
     const u32 side = World::FarLodSdfBrickSamplesPerSide(assembly.tier);
     const std::size_t count = World::FarLodSdfBrickSampleCount(assembly.tier);
     std::map<std::pair<int, int>, std::map<int, i16>> vertical_columns; // (z,x) -> (y,density)
+    std::set<std::pair<int, int>> legacy_surface_coordinates;
+    for (const auto& legacy : assembly.legacy_surface_samples) {
+        legacy_surface_coordinates.emplace(legacy.world_z, legacy.world_x);
+    }
     for (std::size_t i = 0; i < assembly.bricks.size(); ++i) {
         const auto& brick = assembly.bricks[i];
         if (!valid_world_brick(brick)) {
@@ -835,6 +842,9 @@ bool derive_assembly_water(World::FarLodTile& tile, const Assembly& assembly, bo
         for (u32 z = 0; z < side; ++z) for (u32 x = 0; x < side; ++x) {
             const int wx = static_cast<int>(static_cast<std::int64_t>(x_chunk) * CHUNK_SIZE_X + static_cast<int>(x) * step);
             const int wz = static_cast<int>(static_cast<std::int64_t>(z_chunk) * CHUNK_SIZE_Z + static_cast<int>(z) * step);
+            // A surviving legacy height sample owns both its geometry and water
+            // state until a real SDF footprint removes it from the assembly.
+            if (legacy_surface_coordinates.count({wz, wx}) != 0u) continue;
             const auto column = vertical_columns.find({wz, wx});
             if (column == vertical_columns.end()) {
                 error = "far-SDF water derivation is missing a vertical column";
@@ -1215,7 +1225,8 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
                 continue;
             }
             assembly.legacy_surface_samples.push_back({
-                world_key.second, world_key.first, sample.height_q, sample.material});
+                world_key.second, world_key.first, sample.height_q, sample.material,
+                sample.flags});
         }
     }
     if (!derive_assembly_water(tile, assembly, outcome.changed, outcome.error)) return outcome;

@@ -898,6 +898,116 @@ TEST(FarLodWorker, FullSdfBoundaryAuthoritySupersedesLegacyNeighborMaterial) {
     }
 }
 
+TEST(FarLodWorker, LegacyHaloAuthoritySurvivesUntilItsOwnFullSdfFootprint) {
+    constexpr u8 kLegacyMaterial = 83u;
+    constexpr u8 kSdfMaterial = 231u;
+    constexpr float kLegacyHeight = 20.0f;
+    const TerrainGenParams params = FlatParams();
+
+    for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
+        SCOPED_TRACE(::testing::Message() << "tier=" << static_cast<int>(tier));
+        TempSaveDir save;
+        SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+        const int step = FarLodSampleStepMeters(tier);
+        const u64 params_hash = ComputeTerrainParamsHash(params, 1337);
+
+        // Migrate a height-only edit in local column 30. A real brick in
+        // adjacent local column 31 promotes it into the SDF halo, but may not
+        // replace the saved height, material, or water authority.
+        FarLodTile legacy = BuildPristineFarLodTile(world, tier, 0, 0, params_hash);
+        legacy.edited = true;
+        legacy.legacy_surface_authority = true;
+        for (u32 z = 0; z < legacy.samples_per_side; ++z) {
+            for (u32 x = 0; x < legacy.samples_per_side; ++x) {
+                const int world_x = static_cast<int>(x) * step;
+                const int world_z = static_cast<int>(z) * step;
+                if (world_x < 30 * CHUNK_SIZE_X || world_x > 31 * CHUNK_SIZE_X ||
+                    world_z < 5 * CHUNK_SIZE_Z || world_z > 6 * CHUNK_SIZE_Z) {
+                    continue;
+                }
+                const std::size_t index = static_cast<std::size_t>(x) +
+                    static_cast<std::size_t>(z) * legacy.samples_per_side;
+                legacy.height_q[index] = QuantizeFarLodHeight(kLegacyHeight);
+                legacy.material[index] = kLegacyMaterial;
+                legacy.flags[index] |=
+                    kFarLodSampleFlagEdited | kFarLodSampleFlagWater;
+            }
+        }
+        std::vector<std::string> errors;
+        ASSERT_TRUE(FarLodStore(save.path).save_tile(legacy, &errors));
+
+        auto adjacent = std::make_shared<Chunk>(IVec3(31, 0, 5));
+        world.GenerateChunkData(*adjacent, 1);
+        ASSERT_TRUE(SetPlanarAuthority(*adjacent, 7.0f, kSdfMaterial));
+        ASSERT_TRUE(world.adopt_streamed_chunk(adjacent));
+        const auto home_snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
+        const auto target_snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
+        ASSERT_TRUE(home_snapshot);
+        ASSERT_TRUE(target_snapshot);
+
+        const auto home = BuildFarLodWorkerTile(
+            world, *home_snapshot, tier, 0, 0, save.path);
+        ASSERT_TRUE(home.ok) << home.error;
+        ASSERT_TRUE(FarLodStore(save.path).save_tile(home.tile, &errors));
+        const auto target = BuildFarLodWorkerTile(
+            world, *target_snapshot, tier, 1, 0, save.path);
+        ASSERT_TRUE(target.ok) << target.error;
+        EXPECT_TRUE(target.tile.sdf_bricks.empty());
+
+        const std::size_t legacy_x = static_cast<std::size_t>(30 * CHUNK_SIZE_X / step);
+        const std::size_t legacy_z = static_cast<std::size_t>(5 * CHUNK_SIZE_Z / step);
+        const std::size_t legacy_index = legacy_x + legacy_z * home.tile.samples_per_side;
+        EXPECT_TRUE(home.tile.legacy_surface_authority);
+        EXPECT_EQ(home.tile.height_q[legacy_index], QuantizeFarLodHeight(kLegacyHeight));
+        EXPECT_EQ(home.tile.material[legacy_index], kLegacyMaterial);
+        EXPECT_EQ(home.tile.flags[legacy_index] & kFarLodSampleFlagEdited,
+                  kFarLodSampleFlagEdited);
+        EXPECT_EQ(home.tile.flags[legacy_index] & kFarLodSampleFlagWater,
+                  kFarLodSampleFlagWater);
+        EXPECT_GT(std::count_if(
+            home.mesh.vertices.begin(), home.mesh.vertices.end(),
+            [](const VoxelVertex& vertex) {
+                return vertex.material_id == kLegacyMaterial &&
+                    vertex.position.x < 31.0f * CHUNK_SIZE_X &&
+                    vertex.position.y == kLegacyHeight;
+            }), 0);
+
+        const auto home_segments = SharedPlaneSegments(
+            home.mesh, 0, 0, SharedPlaneAxis::X,
+            static_cast<float>(kFarLodRegionSizeMeters));
+        const auto target_segments = SharedPlaneSegments(
+            target.mesh, 1, 0, SharedPlaneAxis::X,
+            static_cast<float>(kFarLodRegionSizeMeters));
+        EXPECT_FALSE(home_segments.empty());
+        EXPECT_EQ(home_segments, target_segments);
+
+        FarLodTile persisted;
+        errors.clear();
+        ASSERT_TRUE(FarLodStore(save.path).load_tile(tier, 0, 0, params_hash, persisted, &errors));
+        EXPECT_EQ(persisted.height_q[legacy_index], QuantizeFarLodHeight(kLegacyHeight));
+        EXPECT_EQ(persisted.flags[legacy_index] & kFarLodSampleFlagEdited,
+                  kFarLodSampleFlagEdited);
+
+        // Moving real full-SDF authority onto column 30 is the named
+        // supersession path. The legacy samples must then disappear.
+        auto replacement = std::make_shared<Chunk>(IVec3(30, 0, 5));
+        world.GenerateChunkData(*replacement, 1);
+        ASSERT_TRUE(SetPlanarAuthority(*replacement, 11.0f, kSdfMaterial));
+        ASSERT_TRUE(world.adopt_streamed_chunk(replacement));
+        const auto replacement_snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
+        ASSERT_TRUE(replacement_snapshot);
+        const auto superseded = BuildFarLodWorkerTile(
+            world, *replacement_snapshot, tier, 0, 0, save.path);
+        ASSERT_TRUE(superseded.ok) << superseded.error;
+        EXPECT_EQ(superseded.tile.flags[legacy_index] & kFarLodSampleFlagEdited, 0u);
+        EXPECT_EQ(std::count_if(
+            superseded.mesh.vertices.begin(), superseded.mesh.vertices.end(),
+            [](const VoxelVertex& vertex) {
+                return vertex.material_id == kLegacyMaterial;
+            }), 0);
+    }
+}
+
 TEST(FarLodWorker, DurableChunkTruthRepairsOldFarWithoutAStreamedSnapshot) {
     constexpr u8 kOldMaterial = 231u;
     constexpr u8 kNewMaterial = 229u;
