@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -3049,15 +3050,22 @@ TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
 }
 
 TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
+    const fs::path behavior_test_path =
+        SourceRoot() / ".forge/scripts/test-nightly-provenance.ps1";
     const std::string runner = ReadTextFile(
         SourceRoot() / ".forge/scripts/run-nightly-gate.ps1");
     const std::string frontier = ReadTextFile(
         SourceRoot() / ".forge/scripts/validate-engine-frontier.ps1");
     const std::string registrar = ReadTextFile(
         SourceRoot() / ".forge/scripts/register-nightly-gate-task.ps1");
+    const std::string helper = ReadTextFile(
+        SourceRoot() / ".forge/scripts/nightly-provenance.ps1");
+    const std::string behavior_test = ReadTextFile(behavior_test_path);
     ASSERT_FALSE(runner.empty());
     ASSERT_FALSE(frontier.empty());
     ASSERT_FALSE(registrar.empty());
+    ASSERT_FALSE(helper.empty());
+    ASSERT_FALSE(behavior_test.empty());
 
     // The timestamp in the filename and report comes from one run identity;
     // copying an older report cannot win by changing its filesystem mtime.
@@ -3072,6 +3080,60 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
               std::string::npos);
     EXPECT_NE(frontier.find("does not match generated_at"), std::string::npos);
     EXPECT_EQ(frontier.find("Sort-Object LastWriteTimeUtc -Descending"),
+              std::string::npos);
+
+    // The runner proves it is the unique live scheduler instance before any
+    // gate, using the explicit 1-based COM collection contract. Its report is
+    // tied to one Git revision from entry through completion.
+    for (const char* seam : {
+             "New-Object -ComObject Schedule.Service",
+             "Assert-NightlyRegisteredTaskDefinition",
+             "$runningTasks.Item($index)",
+             "Assert-NightlyRunningTaskProvenance",
+             "-ExpectedProcessId ([uint32]$PID)",
+             "$gitHeadAtStart = Get-NightlyGitHead",
+             "$gitHeadAtCompletion = Get-NightlyGitHead",
+             "Assert-NightlyTrackedTreeClean -RepoRoot $RepoRoot",
+             "git_head_at_start = $gitHeadAtStart",
+             "git_head_at_completion = $gitHeadAtCompletion",
+             "scheduler_instance = $schedulerInstance",
+             "scheduler_definition_at_start = $schedulerDefinitionAtStart",
+         }) {
+        EXPECT_NE(runner.find(seam), std::string::npos) << seam;
+    }
+    EXPECT_LT(runner.find("Assert-NightlyRunningTaskProvenance"),
+              runner.find("Invoke-NightlyStep"));
+    EXPECT_LT(runner.find("Assert-NightlyRegisteredTaskDefinition"),
+              runner.find("Invoke-NightlyStep"));
+    const auto first_tree_check =
+        runner.find("Assert-NightlyTrackedTreeClean -RepoRoot $RepoRoot");
+    ASSERT_NE(first_tree_check, std::string::npos);
+    EXPECT_NE(runner.find("Assert-NightlyTrackedTreeClean -RepoRoot $RepoRoot",
+                          first_tree_check + 1),
+              std::string::npos);
+
+    // Validation rejects stale, future-dated, mixed-revision, malformed
+    // interval, and scheduler-field evidence before consulting LastRunTime.
+    for (const char* seam : {
+             "Assert-NightlyReportProvenance",
+             "Assert-NightlyTaskDefinitionSnapshot",
+             "Assert-NightlyRegisteredTaskDefinition",
+             "Get-NightlyGitHead -RepoRoot $repoRoot",
+             "Assert-NightlyTrackedTreeClean -RepoRoot $repoRoot",
+             "[timespan]::FromHours(26)",
+             "[timespan]::FromMinutes(5)",
+         }) {
+        EXPECT_NE(frontier.find(seam), std::string::npos) << seam;
+    }
+    for (const char* seam : {
+             "git_head_at_start",
+             "git_head_at_completion",
+             "scheduler_instance",
+         }) {
+        EXPECT_NE(helper.find(seam), std::string::npos) << seam;
+    }
+    EXPECT_NE(helper.find(
+                  "require run_started_at < completed_at == generated_at"),
               std::string::npos);
 
     // Closure requires the exact registered root task, canonical action and
@@ -3097,9 +3159,15 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
               std::string::npos);
     EXPECT_NE(registrar.find("-LogonType Interactive"), std::string::npos);
     EXPECT_NE(registrar.find("-RunLevel Limited"), std::string::npos);
-    EXPECT_NE(registrar.find("Resolve-PrincipalSidValue"), std::string::npos);
-    EXPECT_NE(registrar.find("$identity.User.Value"), std::string::npos);
-    EXPECT_NE(registrar.find("$currentPrincipalSid"), std::string::npos);
+    EXPECT_NE(registrar.find("Assert-NightlyRegisteredTaskDefinition"),
+              std::string::npos);
+    EXPECT_NE(registrar.find("Assert-NightlyTaskRepairAllowed"),
+              std::string::npos);
+    EXPECT_NE(registrar.find("$identitySid"), std::string::npos);
+    EXPECT_NE(registrar.find("Definition mismatch:"), std::string::npos);
+    EXPECT_NE(helper.find("Resolve-NightlyPrincipalSidValue"),
+              std::string::npos);
+    EXPECT_NE(helper.find("$AccountSidResolver"), std::string::npos);
     EXPECT_EQ(registrar.find("RunLevel Highest"), std::string::npos);
     EXPECT_EQ(registrar.find("BuiltInRole]::Administrator"), std::string::npos);
     const auto first_principal = registrar.find("-Principal $taskPrincipal");
@@ -3107,42 +3175,60 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     EXPECT_NE(registrar.find("-Principal $taskPrincipal", first_principal + 1),
               std::string::npos);
     for (const char* seam : {
-             "$currentPrincipal.UserId",
-             "$currentPrincipal.LogonType",
-             "$currentPrincipal.RunLevel",
-             "$currentTriggers[0].Enabled",
-             "$currentTriggers[0].DaysInterval",
-             "$currentTriggers[0].StartBoundary",
-             "$currentTriggers[0].EndBoundary",
-             "$current.Settings.Enabled",
-             "$current.Settings.ExecutionTimeLimit",
-             "$current.Settings.MultipleInstances",
-             "$current.Settings.StartWhenAvailable",
+             "principal.sid",
+             "principal.logon_type",
+             "principal.run_level",
+             "actions.Count -ne 1",
+             "actions[0].execute",
+             "actions[0].arguments",
+             "actions[0].working_directory",
+             "triggers.Count -ne 1",
+             "triggers[0].enabled",
+             "triggers[0].days_interval",
+             "triggers[0].daily_at",
+             "triggers[0].end_boundary",
+             "settings.enabled",
+             "settings.multiple_instances",
+             "settings.start_when_available",
+             "settings.execution_time_limit",
          }) {
-        EXPECT_NE(registrar.find(seam), std::string::npos) << seam;
-    }
-    for (const char* seam : {
-             "$taskPrincipal.UserId",
-             "$taskPrincipalSid",
-             "$identity.User.Value",
-             "Translate(",
-             "[Security.Principal.SecurityIdentifier]",
-             "$taskPrincipal.LogonType",
-             "$taskPrincipal.RunLevel",
-             "$trigger.Enabled",
-             "$trigger.DaysInterval",
-             "$trigger.StartBoundary",
-             "$trigger.EndBoundary",
-             "$task.Settings.Enabled",
-             "$task.Settings.ExecutionTimeLimit",
-             "$task.Settings.MultipleInstances",
-             "$task.Settings.StartWhenAvailable",
-             "daily at $dailyAt local time",
-         }) {
-        EXPECT_NE(frontier.find(seam), std::string::npos) << seam;
+        EXPECT_NE(helper.find(seam), std::string::npos) << seam;
     }
     EXPECT_EQ(runner.find("Register-ScheduledTask"), std::string::npos);
     EXPECT_EQ(runner.find("Set-ScheduledTask"), std::string::npos);
+
+    // This is a behavior test, not another token contract: injected short,
+    // qualified and SID identities; 0/1/2 COM-like instances; malformed
+    // path/PID/action/GUID; stale/future/HEAD/interval reports all execute.
+    for (const char* fixture : {
+             "BUILDHOST\\David",
+             "zero nightly instances",
+             "two nightly instances",
+             "wrong task path",
+             "wrong engine PID",
+             "wrong CurrentAction",
+             "malformed instance GUID",
+             "wrong registered arguments",
+             "wrong registered working directory",
+             "wrong trigger time",
+             "wrong multiple-instance policy",
+             "wrong execution limit",
+             "a forged reported start definition",
+             "repairing a noncanonical running task",
+             "a report older than 26 hours",
+             "a report more than five minutes in the future",
+             "a report from another Git HEAD",
+             "a tracked source change outside the two-file user-local allowlist",
+         }) {
+        EXPECT_NE(behavior_test.find(fixture), std::string::npos) << fixture;
+    }
+#if defined(_WIN32)
+    const std::string behavior_command =
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" +
+        behavior_test_path.string() + "\"";
+    EXPECT_EQ(std::system(behavior_command.c_str()), 0)
+        << "nightly provenance behavior test failed";
+#endif
 }
 
 TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
