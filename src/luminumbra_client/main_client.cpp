@@ -3036,7 +3036,11 @@ int main(int argc, char* argv[]) {
     // Outside scenarios, --window-mode / --resolution select the arrangement.
     using Luminumbra::Client::ScenarioHarness::kCapturePinnedWidth;
     using Luminumbra::Client::ScenarioHarness::kCapturePinnedHeight;
-    const bool capture_pinned = scenario_config.requires_pinned_capture();
+    // RenderBudget is a native-resolution capture contract too. Pin it even
+    // though it does not use a RuntimeScenarioHarness scenario, otherwise a
+    // decorated 3840x1600 window yields a 3840x1581 framebuffer on this host.
+    const bool capture_pinned =
+        scenario_config.requires_pinned_capture() || !g_render_benchmark_path.empty();
     g_windowState.capture_pinned = capture_pinned;
     g_windowState.mode = scenario_config.window_mode;
 
@@ -3237,11 +3241,13 @@ int main(int argc, char* argv[]) {
     // quality knob, matching the existing LUMIN_* render-tuning idiom. Unset -> 0
     // (full, byte-identical legacy path). 1 = half (1/2 per axis), 2 = quarter.
     // Applied after startup() below once the GL targets exist. Render-only.
-    // Render-optimization defaults are now ON (owner-blessed 2026-06-20): half-res
-    // clouds + GTAO High. The half-res cloud composite is validated visually faithful
-    // (skybox 4.14->0.88 ms); GTAO is the ground-truth AO. Set LUMIN_CLOUD_QUALITY=0 /
+    // Render-optimization defaults are now ON. Quarter-res clouds retain the
+    // depth-aware native-resolution composite and passed SkyboxVisual plus the
+    // 48-cell WorldVisualSweep; half-vs-quarter FLIP stayed below 0.03 against
+    // the unchanged 0.05 ceiling while restoring release RenderBudget margin.
+    // GTAO remains the ground-truth AO. Set LUMIN_CLOUD_QUALITY=0 /
     // LUMIN_SSAO_QUALITY=0 to fall back to the legacy full-res paths for A/B.
-    int cloud_quality = 1; // 0 full, 1 half, 2 quarter
+    int cloud_quality = 2; // 0 full, 1 half, 2 quarter (shipped default)
     if (const char* cq = std::getenv("LUMIN_CLOUD_QUALITY")) {
         cloud_quality = std::atoi(cq);
     }

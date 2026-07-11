@@ -3028,6 +3028,22 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
     }
 }
 
+TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
+    const std::string main_source = ReadTextFile(
+        SourceRoot() / "src/luminumbra_client/main_client.cpp");
+    const std::string frontier = ReadTextFile(
+        SourceRoot() / ".forge/scripts/validate-engine-frontier.ps1");
+    ASSERT_FALSE(main_source.empty());
+    ASSERT_FALSE(frontier.empty());
+
+    EXPECT_NE(main_source.find("int cloud_quality = 2;"), std::string::npos);
+    EXPECT_NE(main_source.find(
+        "scenario_config.requires_pinned_capture() || !g_render_benchmark_path.empty()"),
+        std::string::npos);
+    EXPECT_NE(frontier.find("$env:LUMIN_CLOUD_QUALITY = \"2\""), std::string::npos);
+    EXPECT_NE(frontier.find("budget = 3.33"), std::string::npos);
+}
+
 TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     const std::string header = ReadTextFile(
         SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
