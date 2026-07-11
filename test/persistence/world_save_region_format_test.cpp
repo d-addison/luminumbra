@@ -8,6 +8,7 @@
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -87,6 +88,17 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
     return buffer.str();
 }
 
+bool HasRegionTemporaryFile(const std::filesystem::path& region_path) {
+    const std::string prefix = region_path.filename().string() + ".tmp.";
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(region_path.parent_path(), error)) {
+        if (!error && entry.path().filename().string().rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void WriteV1SnapshotFile(const WorldStreamingState& state, const std::filesystem::path& save_dir) {
     const std::filesystem::path snapshot_path = WorldSaveService::world_state_path(save_dir);
     std::filesystem::create_directories(snapshot_path.parent_path());
@@ -162,6 +174,21 @@ TEST(WorldSaveRegionFormat, RegionAddressingUsesFloorDivision) {
     WorldSaveService::region_coords_for_chunk(IVec3(-33, 0, -64), rx, rz);
     EXPECT_EQ(rx, -2);
     EXPECT_EQ(rz, -2);
+}
+
+TEST(WorldSaveRegionFormat, ChunkIdDecodeRoundTripsSignedPackedCoordinates) {
+    const std::array<IVec3, 8> coordinates{{
+        IVec3(0, 0, 0), IVec3(31, 7, -32), IVec3(-1, -1, -1),
+        IVec3(1048575, 2097151, 1048575),
+        IVec3(-1048576, -2097152, -1048576),
+        IVec3(-32, 0, -27), IVec3(32, -9, 5), IVec3(-999, 12345, 777),
+    }};
+    for (const IVec3& coords : coordinates) {
+        const IVec3 decoded = Chunk::decode_id(Chunk::calculate_id(coords));
+        EXPECT_EQ(decoded.x, coords.x);
+        EXPECT_EQ(decoded.y, coords.y);
+        EXPECT_EQ(decoded.z, coords.z);
+    }
 }
 
 TEST(WorldSaveRegionFormat, SaveWritesLmr1RegionFilesAndManifest) {
@@ -360,6 +387,90 @@ TEST(WorldSaveRegionFormat, IncrementalSavePreservesOnDiskChunksAbsentFromMemory
     const auto edited = restored.find_chunk(IVec3(0, 0, 0));
     ASSERT_NE(edited, nullptr);
     EXPECT_EQ(edited->sdf_data[1], 17.5f);
+}
+
+TEST(WorldSaveRegionFormat, InterruptedChunkRewriteLeavesPriorRegionCompleteAndRetryPreservesOtherRecords) {
+    TempSaveDir save_dir("atomic_chunk_rewrite");
+    WorldSaveService service;
+
+    // Persist two records in one region, then rewrite from a state containing
+    // only one of them. The absent record exercises the raw-record merge path.
+    WorldStreamingState full;
+    auto original_target = AddFixtureChunk(full, IVec3(0, 0, 0), 1u);
+    auto untargeted = AddFixtureChunk(full, IVec3(5, 1, 7), 2u);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(service.save_world(full, save_dir.path, &errors));
+    ASSERT_TRUE(errors.empty());
+
+    const std::filesystem::path region = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    const std::string prior_region_bytes = ReadFileBytes(region);
+    ASSERT_FALSE(prior_region_bytes.empty());
+
+    std::vector<WorldSaveService::ContainerRecord> records_before;
+    ASSERT_TRUE(WorldSaveService::read_container_records(region, records_before, &errors));
+    const auto untargeted_before = std::find_if(records_before.begin(), records_before.end(),
+        [id = untargeted->get_id()](const WorldSaveService::ContainerRecord& record) {
+            return record.lod_level == 0u && record.id == id;
+        });
+    ASSERT_NE(untargeted_before, records_before.end());
+    const std::string untargeted_payload_before = untargeted_before->payload;
+    const Luminumbra::u8 untargeted_flags_before = untargeted_before->flags;
+
+    WorldStreamingState partial;
+    auto updated_target = AddFixtureChunk(partial, IVec3(0, 0, 0), 1u);
+    updated_target->sdf_data[0] = -64.0f;
+    updated_target->mark_voxel_data_dirty();
+
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const auto interrupted = service.save_dirty_chunks(partial, save_dir.path, &errors);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(interrupted.saved);
+    EXPECT_EQ(interrupted.regions_written, 0u);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_TRUE(updated_target->is_voxel_data_dirty());
+    EXPECT_EQ(ReadFileBytes(region), prior_region_bytes);
+    EXPECT_FALSE(HasRegionTemporaryFile(region));
+
+    // The live path is still a complete, loadable image of the prior region.
+    WorldStreamingState after_interruption;
+    std::vector<std::string> load_errors;
+    ASSERT_TRUE(service.load_world(after_interruption, save_dir.path, load_errors));
+    ASSERT_TRUE(load_errors.empty());
+    ASSERT_EQ(after_interruption.size(), 2u);
+    const auto old_target = after_interruption.find_chunk(original_target->get_id());
+    ASSERT_NE(old_target, nullptr);
+    ASSERT_FALSE(old_target->sdf_data.empty());
+    EXPECT_EQ(old_target->sdf_data[0], -2.0f);
+    EXPECT_NE(after_interruption.find_chunk(untargeted->get_id()), nullptr);
+
+    // A normal retry commits the target edit while retaining the absent
+    // chunk's record byte-for-byte at the uncompressed container boundary.
+    errors.clear();
+    const auto retried = service.save_dirty_chunks(partial, save_dir.path, &errors);
+    ASSERT_TRUE(retried.saved);
+    ASSERT_TRUE(errors.empty());
+    EXPECT_FALSE(updated_target->is_voxel_data_dirty());
+    EXPECT_NE(ReadFileBytes(region), prior_region_bytes);
+
+    std::vector<WorldSaveService::ContainerRecord> records_after;
+    ASSERT_TRUE(WorldSaveService::read_container_records(region, records_after, &errors));
+    const auto untargeted_after = std::find_if(records_after.begin(), records_after.end(),
+        [id = untargeted->get_id()](const WorldSaveService::ContainerRecord& record) {
+            return record.lod_level == 0u && record.id == id;
+        });
+    ASSERT_NE(untargeted_after, records_after.end());
+    EXPECT_EQ(untargeted_after->payload, untargeted_payload_before);
+    EXPECT_EQ(untargeted_after->flags, untargeted_flags_before);
+
+    WorldStreamingState after_retry;
+    load_errors.clear();
+    ASSERT_TRUE(service.load_world(after_retry, save_dir.path, load_errors));
+    ASSERT_EQ(after_retry.size(), 2u);
+    const auto committed_target = after_retry.find_chunk(updated_target->get_id());
+    ASSERT_NE(committed_target, nullptr);
+    ASSERT_FALSE(committed_target->sdf_data.empty());
+    EXPECT_EQ(committed_target->sdf_data[0], -64.0f);
+    EXPECT_NE(after_retry.find_chunk(untargeted->get_id()), nullptr);
 }
 
 TEST(WorldSaveRegionFormat, EmptySdfBandChunksRoundTrip) {

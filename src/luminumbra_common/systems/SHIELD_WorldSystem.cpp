@@ -3967,7 +3967,7 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos, float radius_m, 
         }
         if (changed) {
             chunk->mark_voxel_data_dirty();
-            m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel);
+            bump_far_lod_authority_revision(chunk->get_coords());
             chunk->current_lod.store(-1, std::memory_order_release);
             ++edited;
         }
@@ -5110,6 +5110,53 @@ std::vector<std::shared_ptr<Luminumbra::Chunk>> SHIELD_WorldSystem::snapshot_str
     return chunks;
 }
 
+void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coords) {
+    const auto floor_div = [](int value, int divisor) {
+        const int quotient = value / divisor;
+        const int remainder = value % divisor;
+        return remainder < 0 ? quotient - 1 : quotient;
+    };
+    constexpr int kChunksPerRegion =
+        World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    const int home_rx = floor_div(chunk_coords.x, kChunksPerRegion);
+    const int home_rz = floor_div(chunk_coords.z, kChunksPerRegion);
+    const int local_x = static_cast<int>(
+        static_cast<std::int64_t>(chunk_coords.x) -
+        static_cast<std::int64_t>(home_rx) * kChunksPerRegion);
+    const int local_z = static_cast<int>(
+        static_cast<std::int64_t>(chunk_coords.z) -
+        static_cast<std::int64_t>(home_rz) * kChunksPerRegion);
+
+    std::array<int, 2> affected_x{home_rx, home_rx};
+    std::array<int, 2> affected_z{home_rz, home_rz};
+    std::size_t x_count = 1;
+    std::size_t z_count = 1;
+    if (local_x == 0) affected_x[x_count++] = home_rx - 1;
+    else if (local_x == kChunksPerRegion - 1) affected_x[x_count++] = home_rx + 1;
+    if (local_z == 0) affected_z[z_count++] = home_rz - 1;
+    else if (local_z == kChunksPerRegion - 1) affected_z[z_count++] = home_rz + 1;
+
+    const u64 revision =
+        m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    for (std::size_t z = 0; z < z_count; ++z) {
+        for (std::size_t x = 0; x < x_count; ++x) {
+            m_far_lod_region_revisions[{affected_x[x], affected_z[z]}] = revision;
+        }
+    }
+}
+
+u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const {
+    std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
+    const auto found = m_far_lod_region_revisions.find({rx, rz});
+    return found == m_far_lod_region_revisions.end() ? 0u : found->second;
+}
+
+void SHIELD_WorldSystem::notify_far_lod_authority_durable(
+    const IVec3& chunk_coords) {
+    bump_far_lod_authority_revision(chunk_coords);
+}
+
 std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(
     i32 rx, i32 rz) const {
     constexpr int kRegionChunkSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
@@ -5118,10 +5165,24 @@ std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf
         static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
         static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
 
-    const int min_chunk_x = rx * kRegionChunkSpan - 1;
-    const int max_chunk_x = (rx + 1) * kRegionChunkSpan;
-    const int min_chunk_z = rz * kRegionChunkSpan - 1;
-    const int max_chunk_z = (rz + 1) * kRegionChunkSpan;
+    const std::int64_t min_chunk_x64 =
+        static_cast<std::int64_t>(rx) * kRegionChunkSpan - 1;
+    const std::int64_t max_chunk_x64 =
+        static_cast<std::int64_t>(rx) * kRegionChunkSpan + kRegionChunkSpan;
+    const std::int64_t min_chunk_z64 =
+        static_cast<std::int64_t>(rz) * kRegionChunkSpan - 1;
+    const std::int64_t max_chunk_z64 =
+        static_cast<std::int64_t>(rz) * kRegionChunkSpan + kRegionChunkSpan;
+    if (min_chunk_x64 < Chunk::kPackedMinXz ||
+        max_chunk_x64 > Chunk::kPackedMaxXz ||
+        min_chunk_z64 < Chunk::kPackedMinXz ||
+        max_chunk_z64 > Chunk::kPackedMaxXz) {
+        return nullptr;
+    }
+    const int min_chunk_x = static_cast<int>(min_chunk_x64);
+    const int max_chunk_x = static_cast<int>(max_chunk_x64);
+    const int min_chunk_z = static_cast<int>(min_chunk_z64);
+    const int max_chunk_z = static_cast<int>(max_chunk_z64);
 
     auto snapshot = std::make_shared<FarLodSdfSnapshot>();
     snapshot->capture_epoch =
@@ -5129,6 +5190,8 @@ std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf
     snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);
     snapshot->authority_revision =
         m_far_lod_authority_revision.load(std::memory_order_acquire);
+    snapshot->region_authority_revision =
+        far_lod_region_authority_revision(rx, rz);
     snapshot->entries.reserve(m_streaming_state.chunks.size());
 
     // This capture runs after the owner thread's normal streaming publication
@@ -5208,7 +5271,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
-        m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel);
+        bump_far_lod_authority_revision(chunk->get_coords());
     }
     return adopted;
 }

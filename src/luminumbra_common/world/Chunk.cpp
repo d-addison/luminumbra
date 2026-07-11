@@ -73,4 +73,21 @@ ChunkID Chunk::calculate_id(const IVec3& coords) {
     return (y_packed << (X_BITS + Z_BITS)) | (z_packed << X_BITS) | x_packed;
 }
 
+IVec3 Chunk::decode_id(ChunkID id) {
+    constexpr u64 X_BITS = 21;
+    constexpr u64 Z_BITS = 21;
+    constexpr u64 Y_BITS = 22;
+    constexpr u64 X_MASK = (1ULL << X_BITS) - 1;
+    constexpr u64 Z_MASK = (1ULL << Z_BITS) - 1;
+    constexpr u64 Y_MASK = (1ULL << Y_BITS) - 1;
+    const auto sign_extend = [](u64 value, u64 bits) -> i32 {
+        const u64 sign = 1ULL << (bits - 1u);
+        return static_cast<i32>(static_cast<i64>((value ^ sign) - sign));
+    };
+    return IVec3(
+        sign_extend(id & X_MASK, X_BITS),
+        sign_extend((id >> (X_BITS + Z_BITS)) & Y_MASK, Y_BITS),
+        sign_extend((id >> X_BITS) & Z_MASK, Z_BITS));
+}
+
 } // namespace Luminumbra

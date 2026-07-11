@@ -8,14 +8,31 @@
 #include <lz4.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <system_error>
 #include <utility>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace Luminumbra::Persistence {
 namespace {
@@ -39,6 +56,9 @@ constexpr std::size_t kRecordHeaderSize = 18;
 
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
+
+std::atomic<std::uint64_t> g_region_temp_sequence{0};
+std::atomic<bool> g_interrupt_before_region_replace_for_testing{false};
 
 // One record of an LMR1 region file kept in its on-disk (compressed) form so
 // untouched records survive a merge byte-for-byte without a decode pass.
@@ -97,6 +117,250 @@ void AddError(std::vector<std::string>* errors, std::string message) {
         errors->push_back(std::move(message));
     }
 }
+
+std::uint64_t CurrentProcessIdValue() {
+#if defined(_WIN32)
+    return static_cast<std::uint64_t>(::GetCurrentProcessId());
+#else
+    return static_cast<std::uint64_t>(::getpid());
+#endif
+}
+
+std::filesystem::path NextRegionTempPath(const std::filesystem::path& destination) {
+    const std::uint64_t sequence =
+        g_region_temp_sequence.fetch_add(1u, std::memory_order_relaxed) + 1u;
+    std::filesystem::path temp = destination;
+    temp += ".tmp." + std::to_string(CurrentProcessIdValue()) + "." + std::to_string(sequence);
+    return temp;
+}
+
+void RemoveTemporaryFile(const std::filesystem::path& path) {
+    std::error_code remove_error;
+    std::filesystem::remove(path, remove_error);
+}
+
+#if defined(_WIN32)
+
+std::string WindowsErrorMessage(DWORD error) {
+    return std::error_code(static_cast<int>(error), std::system_category()).message();
+}
+
+bool WriteDurableRegionTemp(
+    const std::filesystem::path& destination,
+    const std::string& bytes,
+    std::filesystem::path& out_temp,
+    std::vector<std::string>* errors) {
+    HANDLE file = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 128; ++attempt) {
+        out_temp = NextRegionTempPath(destination);
+        file = ::CreateFileW(
+            out_temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            break;
+        }
+        const DWORD error = ::GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+            AddError(errors, "failed to create temporary region file: " + out_temp.string() +
+                ": " + WindowsErrorMessage(error));
+            return false;
+        }
+    }
+    if (file == INVALID_HANDLE_VALUE) {
+        AddError(errors, "failed to allocate a unique temporary region file for: " +
+            destination.string());
+        return false;
+    }
+
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const std::size_t remaining = bytes.size() - offset;
+        const DWORD requested = static_cast<DWORD>(
+            std::min<std::size_t>(remaining, static_cast<std::size_t>(0xffffffffu)));
+        DWORD written = 0;
+        if (!::WriteFile(file, bytes.data() + offset, requested, &written, nullptr) || written == 0) {
+            DWORD error = ::GetLastError();
+            if (error == ERROR_SUCCESS) {
+                error = ERROR_WRITE_FAULT;
+            }
+            ::CloseHandle(file);
+            RemoveTemporaryFile(out_temp);
+            AddError(errors, "failed to write temporary region file: " + out_temp.string() +
+                ": " + WindowsErrorMessage(error));
+            return false;
+        }
+        offset += written;
+    }
+
+    if (!::FlushFileBuffers(file)) {
+        const DWORD error = ::GetLastError();
+        ::CloseHandle(file);
+        RemoveTemporaryFile(out_temp);
+        AddError(errors, "failed to durably flush temporary region file: " + out_temp.string() +
+            ": " + WindowsErrorMessage(error));
+        return false;
+    }
+    if (!::CloseHandle(file)) {
+        const DWORD error = ::GetLastError();
+        RemoveTemporaryFile(out_temp);
+        AddError(errors, "failed to close temporary region file: " + out_temp.string() +
+            ": " + WindowsErrorMessage(error));
+        return false;
+    }
+    return true;
+}
+
+bool ReplaceRegionFileAtomically(
+    const std::filesystem::path& temp,
+    const std::filesystem::path& destination,
+    std::vector<std::string>* errors) {
+    const DWORD attributes = ::GetFileAttributesW(destination.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) {
+        if (::ReplaceFileW(destination.c_str(), temp.c_str(), nullptr,
+                REPLACEFILE_WRITE_THROUGH | REPLACEFILE_IGNORE_MERGE_ERRORS,
+                nullptr, nullptr)) {
+            return true;
+        }
+        const DWORD error = ::GetLastError();
+        AddError(errors, "failed to atomically replace region file: " + destination.string() +
+            ": " + WindowsErrorMessage(error));
+        return false;
+    }
+
+    const DWORD attributes_error = ::GetLastError();
+    if (attributes_error != ERROR_FILE_NOT_FOUND && attributes_error != ERROR_PATH_NOT_FOUND) {
+        AddError(errors, "failed to inspect region file before replacement: " + destination.string() +
+            ": " + WindowsErrorMessage(attributes_error));
+        return false;
+    }
+    if (::MoveFileExW(temp.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+    const DWORD error = ::GetLastError();
+    AddError(errors, "failed to atomically install region file: " + destination.string() +
+        ": " + WindowsErrorMessage(error));
+    return false;
+}
+
+#else
+
+std::string PosixErrorMessage(int error) {
+    return std::error_code(error, std::generic_category()).message();
+}
+
+bool WriteDurableRegionTemp(
+    const std::filesystem::path& destination,
+    const std::string& bytes,
+    std::filesystem::path& out_temp,
+    std::vector<std::string>* errors) {
+    int file = -1;
+    for (int attempt = 0; attempt < 128; ++attempt) {
+        out_temp = NextRegionTempPath(destination);
+        file = ::open(out_temp.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
+        if (file >= 0) {
+            break;
+        }
+        if (errno != EEXIST) {
+            const int error = errno;
+            AddError(errors, "failed to create temporary region file: " + out_temp.string() +
+                ": " + PosixErrorMessage(error));
+            return false;
+        }
+    }
+    if (file < 0) {
+        AddError(errors, "failed to allocate a unique temporary region file for: " +
+            destination.string());
+        return false;
+    }
+
+    std::size_t offset = 0;
+    while (offset < bytes.size()) {
+        const std::size_t remaining = bytes.size() - offset;
+        const std::size_t requested = std::min<std::size_t>(
+            remaining, static_cast<std::size_t>((std::numeric_limits<ssize_t>::max)()));
+        const ssize_t written = ::write(file, bytes.data() + offset, requested);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            const int error = written < 0 ? errno : EIO;
+            ::close(file);
+            RemoveTemporaryFile(out_temp);
+            AddError(errors, "failed to write temporary region file: " + out_temp.string() +
+                ": " + PosixErrorMessage(error));
+            return false;
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+
+    while (::fsync(file) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        const int error = errno;
+        ::close(file);
+        RemoveTemporaryFile(out_temp);
+        AddError(errors, "failed to durably flush temporary region file: " + out_temp.string() +
+            ": " + PosixErrorMessage(error));
+        return false;
+    }
+    if (::close(file) != 0) {
+        const int error = errno;
+        RemoveTemporaryFile(out_temp);
+        AddError(errors, "failed to close temporary region file: " + out_temp.string() +
+            ": " + PosixErrorMessage(error));
+        return false;
+    }
+    return true;
+}
+
+bool ReplaceRegionFileAtomically(
+    const std::filesystem::path& temp,
+    const std::filesystem::path& destination,
+    std::vector<std::string>* errors) {
+    // POSIX rename replaces an existing same-filesystem destination atomically.
+    // The temporary file is always created beside the live LMR1 file.
+    if (std::rename(temp.c_str(), destination.c_str()) != 0) {
+        const int error = errno;
+        AddError(errors, "failed to atomically replace region file: " + destination.string() +
+            ": " + PosixErrorMessage(error));
+        return false;
+    }
+
+    // Persist the directory entry update as well as the replacement bytes.
+    // Without this fsync, rename is atomically visible to live processes but a
+    // power loss may resurrect the prior directory entry on some filesystems.
+    const std::filesystem::path parent = destination.has_parent_path()
+        ? destination.parent_path() : std::filesystem::path(".");
+    int directory_flags = O_RDONLY;
+#if defined(O_DIRECTORY)
+    directory_flags |= O_DIRECTORY;
+#endif
+    const int directory = ::open(parent.c_str(), directory_flags);
+    if (directory < 0) {
+        const int error = errno;
+        AddError(errors, "region file was replaced but its directory could not be opened for durable flush: " +
+            parent.string() + ": " + PosixErrorMessage(error));
+        return false;
+    }
+    while (::fsync(directory) != 0) {
+        if (errno == EINTR) continue;
+        const int error = errno;
+        ::close(directory);
+        AddError(errors, "region file was replaced but its directory flush failed: " +
+            parent.string() + ": " + PosixErrorMessage(error));
+        return false;
+    }
+    if (::close(directory) != 0) {
+        const int error = errno;
+        AddError(errors, "region directory close failed after durable replacement: " +
+            parent.string() + ": " + PosixErrorMessage(error));
+        return false;
+    }
+    return true;
+}
+
+#endif
 
 bool CompressPayload(const std::string& payload, RegionRecord& record, std::vector<std::string>* errors) {
     if (payload.size() > static_cast<std::size_t>(LZ4_MAX_INPUT_SIZE)) {
@@ -236,15 +500,21 @@ bool WriteRegionFile(
         bytes.append(record.compressed_payload);
     }
 
-    std::ofstream output(path, std::ios::binary | std::ios::trunc);
-    if (!output.is_open()) {
-        AddError(errors, "failed to open region file for writing: " + path.string());
+    std::filesystem::path temp_path;
+    if (!WriteDurableRegionTemp(path, bytes, temp_path, errors)) {
         return false;
     }
-    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    output.flush();
-    if (!output.good()) {
-        AddError(errors, "failed to write region file: " + path.string());
+
+    // Test-only crash seam: at this point the replacement bytes are complete
+    // and durable, while the prior live LMR1 file has not been touched.
+    if (g_interrupt_before_region_replace_for_testing.exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp_path);
+        AddError(errors, "region replacement interrupted by test seam before replacing: " + path.string());
+        return false;
+    }
+
+    if (!ReplaceRegionFileAtomically(temp_path, path, errors)) {
+        RemoveTemporaryFile(temp_path);
         return false;
     }
     return true;
@@ -489,6 +759,80 @@ bool WorldSaveService::read_container_records(
     return true;
 }
 
+bool WorldSaveService::read_region_chunks(
+    const std::filesystem::path& region_file,
+    std::vector<std::shared_ptr<Chunk>>& out_chunks,
+    std::vector<std::string>* errors) {
+    out_chunks.clear();
+    std::error_code exists_error;
+    if (!std::filesystem::exists(region_file, exists_error) || exists_error) {
+        return true; // clean miss
+    }
+
+    std::vector<RegionRecord> raw_records;
+    if (!ReadRegionFile(region_file, raw_records, errors)) {
+        return false;
+    }
+    for (const RegionRecord& record : raw_records) {
+        if (record.lod_level != 0u) continue;
+        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
+        if (!chunk) {
+            out_chunks.clear();
+            return false;
+        }
+        out_chunks.push_back(std::move(chunk));
+    }
+    std::sort(out_chunks.begin(), out_chunks.end(),
+        [](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs) {
+            return lhs->get_id() < rhs->get_id();
+        });
+    return true;
+}
+
+bool WorldSaveService::read_authoritative_region_chunks(
+    const std::filesystem::path& region_file,
+    int min_chunk_x,
+    int max_chunk_x,
+    int min_chunk_z,
+    int max_chunk_z,
+    std::vector<std::shared_ptr<Chunk>>& out_chunks,
+    std::vector<std::string>* errors) {
+    out_chunks.clear();
+    if (min_chunk_x > max_chunk_x || min_chunk_z > max_chunk_z) {
+        AddError(errors, "authoritative chunk read bounds are invalid");
+        return false;
+    }
+    std::error_code exists_error;
+    if (!std::filesystem::exists(region_file, exists_error) || exists_error) {
+        return true; // clean miss
+    }
+
+    std::vector<RegionRecord> raw_records;
+    if (!ReadRegionFile(region_file, raw_records, errors)) {
+        return false;
+    }
+    for (const RegionRecord& record : raw_records) {
+        if (record.lod_level != 0u ||
+            (record.flags & kRecordFlagEdited) == 0u) continue;
+        const IVec3 indexed_coords = Chunk::decode_id(record.id);
+        if (indexed_coords.x < min_chunk_x || indexed_coords.x > max_chunk_x ||
+            indexed_coords.z < min_chunk_z || indexed_coords.z > max_chunk_z) {
+            continue;
+        }
+        std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, region_file, errors);
+        if (!chunk) {
+            out_chunks.clear();
+            return false;
+        }
+        out_chunks.push_back(std::move(chunk));
+    }
+    std::sort(out_chunks.begin(), out_chunks.end(),
+        [](const std::shared_ptr<Chunk>& lhs, const std::shared_ptr<Chunk>& rhs) {
+            return lhs->get_id() < rhs->get_id();
+        });
+    return true;
+}
+
 bool WorldSaveService::upsert_container_records(
     const std::filesystem::path& region_file,
     const std::vector<ContainerRecord>& records,
@@ -534,6 +878,10 @@ bool WorldSaveService::upsert_container_records(
         AddError(errors, std::string("failed to upsert region records: ") + e.what());
         return false;
     }
+}
+
+void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enabled) {
+    g_interrupt_before_region_replace_for_testing.store(enabled, std::memory_order_release);
 }
 
 bool WorldSaveService::save_world(

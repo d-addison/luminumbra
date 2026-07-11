@@ -19,8 +19,10 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -72,6 +74,24 @@ struct TempSaveDir {
 
     std::filesystem::path path;
 };
+
+std::string ReadTestFileBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+bool HasRegionTemporaryFile(const std::filesystem::path& region_path) {
+    const std::string prefix = region_path.filename().string() + ".tmp.";
+    std::error_code error;
+    for (const auto& entry : std::filesystem::directory_iterator(region_path.parent_path(), error)) {
+        if (!error && entry.path().filename().string().rfind(prefix, 0) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
 
 u64 HashMeshBytes(const FarLodRegionMesh& mesh) {
     u64 hash = 14695981039346656037ull;
@@ -928,6 +948,86 @@ TEST(FarLodStoreTest, TilePersistenceRoundTripsThroughLmr1Container) {
     FarLodTile miss;
     EXPECT_FALSE(store.load_tile(FarLodTier::F2, -1, 2, params_hash, miss, &errors));
     EXPECT_TRUE(errors.empty());
+}
+
+TEST(FarLodStoreTest, InterruptedFarRewriteLeavesPriorRegionCompleteAndRetryPreservesOtherRecords) {
+    const TerrainGenParams params = FixtureParams();
+    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
+    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
+
+    TempSaveDir save_dir("atomic_far_rewrite");
+    const FarLodStore store(save_dir.path);
+    const FarLodTile original =
+        BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
+    const FarLodTile untargeted =
+        BuildPristineFarLodTile(world, FarLodTier::F2, 0, 0, params_hash);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(store.save_tile(original, &errors));
+    ASSERT_TRUE(store.save_tile(untargeted, &errors));
+    ASSERT_TRUE(errors.empty());
+
+    const std::filesystem::path region = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    const std::string prior_region_bytes = ReadTestFileBytes(region);
+    ASSERT_FALSE(prior_region_bytes.empty());
+
+    std::vector<WorldSaveService::ContainerRecord> records_before;
+    ASSERT_TRUE(WorldSaveService::read_container_records(region, records_before, &errors));
+    const auto untargeted_before = std::find_if(records_before.begin(), records_before.end(),
+        [id = FarLodStore::tile_record_id(FarLodTier::F2, 0, 0)](
+            const WorldSaveService::ContainerRecord& record) {
+            return record.lod_level == static_cast<u8>(FarLodTier::F2) && record.id == id;
+        });
+    ASSERT_NE(untargeted_before, records_before.end());
+    const std::string untargeted_payload_before = untargeted_before->payload;
+    const u8 untargeted_flags_before = untargeted_before->flags;
+
+    FarLodTile updated = original;
+    ASSERT_FALSE(updated.height_q.empty());
+    ++updated.height_q[0];
+    ASSERT_NE(ComputeFarLodTileHash(updated), ComputeFarLodTileHash(original));
+
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool interrupted = store.save_tile(updated, &errors);
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(interrupted);
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(ReadTestFileBytes(region), prior_region_bytes);
+    EXPECT_FALSE(HasRegionTemporaryFile(region));
+
+    // Both old far records remain complete and readable after the simulated
+    // interruption; no partially-written FSD2 payload can become visible.
+    errors.clear();
+    FarLodTile loaded_original;
+    FarLodTile loaded_untargeted;
+    ASSERT_TRUE(store.load_tile(FarLodTier::F1, 0, 0, params_hash, loaded_original, &errors));
+    ASSERT_TRUE(store.load_tile(FarLodTier::F2, 0, 0, params_hash, loaded_untargeted, &errors));
+    ASSERT_TRUE(errors.empty());
+    EXPECT_EQ(ComputeFarLodTileHash(loaded_original), ComputeFarLodTileHash(original));
+    EXPECT_EQ(ComputeFarLodTileHash(loaded_untargeted), ComputeFarLodTileHash(untargeted));
+
+    // The successful retry changes only F1 and keeps the co-resident F2
+    // record exactly unchanged at the uncompressed container boundary.
+    ASSERT_TRUE(store.save_tile(updated, &errors));
+    ASSERT_TRUE(errors.empty());
+    EXPECT_NE(ReadTestFileBytes(region), prior_region_bytes);
+
+    std::vector<WorldSaveService::ContainerRecord> records_after;
+    ASSERT_TRUE(WorldSaveService::read_container_records(region, records_after, &errors));
+    const auto untargeted_after = std::find_if(records_after.begin(), records_after.end(),
+        [id = FarLodStore::tile_record_id(FarLodTier::F2, 0, 0)](
+            const WorldSaveService::ContainerRecord& record) {
+            return record.lod_level == static_cast<u8>(FarLodTier::F2) && record.id == id;
+        });
+    ASSERT_NE(untargeted_after, records_after.end());
+    EXPECT_EQ(untargeted_after->payload, untargeted_payload_before);
+    EXPECT_EQ(untargeted_after->flags, untargeted_flags_before);
+
+    FarLodTile committed;
+    loaded_untargeted = FarLodTile{};
+    ASSERT_TRUE(store.load_tile(FarLodTier::F1, 0, 0, params_hash, committed, &errors));
+    ASSERT_TRUE(store.load_tile(FarLodTier::F2, 0, 0, params_hash, loaded_untargeted, &errors));
+    EXPECT_EQ(ComputeFarLodTileHash(committed), ComputeFarLodTileHash(updated));
+    EXPECT_EQ(ComputeFarLodTileHash(loaded_untargeted), ComputeFarLodTileHash(untargeted));
 }
 
 TEST(FarLodStoreTest, AuthoritativeSdfBrickSurvivesPersistenceAndParamsMismatch) {

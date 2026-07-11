@@ -29,6 +29,11 @@ struct VoxelVertex {
 
 class Chunk {
 public:
+    static constexpr i32 kPackedMinXz = -(1 << 20);
+    static constexpr i32 kPackedMaxXz = (1 << 20) - 1;
+    static constexpr i32 kPackedMinY = -(1 << 21);
+    static constexpr i32 kPackedMaxY = (1 << 21) - 1;
+
     Chunk(const IVec3& coords);
     const IVec3& get_coords() const { return m_coords; }
     ChunkID get_id() const { return m_id; }
@@ -183,6 +188,7 @@ public:
     int water_mesh_dirty_ticks{0};
 
     static ChunkID calculate_id(const IVec3& coords);
+    static IVec3 decode_id(ChunkID id);
     static bool is_valid_state_transition(ChunkState from, ChunkState to);
     bool try_set_state(ChunkState expected_state, ChunkState new_state);
 

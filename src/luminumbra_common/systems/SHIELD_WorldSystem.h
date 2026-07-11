@@ -238,6 +238,7 @@ struct FarLodSdfSnapshot {
     u64 capture_epoch = 0;
     u64 params_hash = 0;
     u64 authority_revision = 0;
+    u64 region_authority_revision = 0;
     std::vector<FarLodSdfSnapshotEntry> entries;
 };
 
@@ -787,6 +788,12 @@ public:
     u64 far_lod_authority_revision() const {
         return m_far_lod_authority_revision.load(std::memory_order_acquire);
     }
+    u64 far_lod_region_authority_revision(i32 rx, i32 rz) const;
+    // Phase-A persistence transition: a successful authoritative chunk rewrite
+    // changes the durable source observed by far workers even when voxel bytes
+    // themselves were edited earlier. Bump the generation so any worker that
+    // read the pre-commit LMR1 image is rejected at owner-thread integration.
+    void notify_far_lod_authority_durable(const IVec3& chunk_coords);
     std::shared_ptr<::Luminumbra::Chunk> find_streamed_chunk(const IVec3& coords) const;
     // Adopts an externally loaded chunk when its slot is empty. Returns false
     // (without clobbering the streamed chunk) when a chunk with the same id
@@ -854,6 +861,9 @@ private:
     mutable std::shared_mutex m_worldgen_epoch_mutex;
     mutable std::atomic<u64> m_far_lod_capture_epoch{0};
     std::atomic<u64> m_far_lod_authority_revision{0};
+    mutable std::mutex m_far_lod_region_revision_mutex;
+    std::map<std::pair<i32, i32>, u64> m_far_lod_region_revisions;
+    void bump_far_lod_authority_revision(const IVec3& chunk_coords);
     // SHIELD-02 telemetry (main-thread, never hashed).
     std::uint64_t m_promotion_batches_dispatched = 0;
     std::uint64_t m_promotion_chunks_dispatched = 0;

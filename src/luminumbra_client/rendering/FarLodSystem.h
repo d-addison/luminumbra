@@ -215,7 +215,7 @@ private:
         glm::vec3 aabb_max{0.0f};
         std::size_t resident_bytes = 0;
         u64 last_wanted_frame = 0;
-        u64 authority_revision = 0;
+        u64 region_authority_revision = 0;
         bool persistence_pending = false;
     };
 
@@ -229,6 +229,7 @@ private:
         u64 capture_epoch = 0;
         u64 params_hash = 0;
         u64 authority_revision = 0;
+        u64 region_authority_revision = 0;
         bool authority_build_failed = false;
         bool tile_changed = false;
         bool persistence_allowed = true;

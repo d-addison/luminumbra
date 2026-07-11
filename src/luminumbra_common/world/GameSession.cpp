@@ -1108,6 +1108,18 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir, WorldS
         ok = dirty_report.saved;
     }
 
+    // A multi-region save can commit an early atomic LMR1 replacement and then
+    // report failure on a later region. Conservatively invalidate every dirty
+    // chunk's affected far regions after any Phase-A attempt: this rejects a
+    // worker that read an older container even across a partial-save result.
+    // An extra rebuild when nothing committed is safe; missing a partial commit
+    // would allow old derived bytes to integrate as current.
+    for (const ChunkID id : dirty_ids) {
+        if (const auto chunk = state.find_chunk(id)) {
+            m_worldSystem->notify_far_lod_authority_durable(chunk->get_coords());
+        }
+    }
+
     // Phase 3B: persist plants alongside the chunk write (empty roster -> no file -> byte-identical).
     if (!Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, &errors)) {
         ok = false;

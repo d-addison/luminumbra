@@ -92,12 +92,41 @@ public:
         const std::filesystem::path& region_file,
         std::vector<ContainerRecord>& out_records,
         std::vector<std::string>* errors = nullptr);
+
+    // Decodes the durable lod-0 chunk records from one LMR1 file. A missing
+    // file is a clean empty result. Callers such as far-LOD cache recovery use
+    // this to overlay simulation truth over older derived records without
+    // loading every region in the world.
+    static bool read_region_chunks(
+        const std::filesystem::path& region_file,
+        std::vector<std::shared_ptr<Chunk>>& out_chunks,
+        std::vector<std::string>* errors = nullptr);
+
+    // Bounded far-cache recovery variant: decodes only lod-0 records carrying
+    // the sticky edited/authoritative flag, avoiding decompression of pristine
+    // streamed chunks that cannot supersede FSD2 authority.
+    static bool read_authoritative_region_chunks(
+        const std::filesystem::path& region_file,
+        int min_chunk_x,
+        int max_chunk_x,
+        int min_chunk_z,
+        int max_chunk_z,
+        std::vector<std::shared_ptr<Chunk>>& out_chunks,
+        std::vector<std::string>* errors = nullptr);
     // Inserts/replaces the given records keyed (lod_level, id), preserving
     // all other records of the file verbatim.
     static bool upsert_container_records(
         const std::filesystem::path& region_file,
         const std::vector<ContainerRecord>& records,
         std::vector<std::string>* errors = nullptr);
+
+    // Deterministic test seam for failure-atomic LMR1 rewrites. When armed,
+    // the next region write stops after its unique temporary file has been
+    // durably flushed, immediately before the atomic replacement of the live
+    // path. The write reports failure and removes the temporary file. This is
+    // process-global and must only be used by single-threaded persistence
+    // tests.
+    static void set_interrupt_before_region_replace_for_testing(bool enabled);
 
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in

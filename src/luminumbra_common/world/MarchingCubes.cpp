@@ -1162,28 +1162,144 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     const World::FarLodTile& tile,
     const World::FarLodRegionSdfAssembly& assembly,
     World::FarLodRegionMesh& out_mesh) {
-    // Preserve the original zero-authority path (including its mesh-byte pin).
-    if (assembly.bricks.empty()) return GenerateFarLodRegionMesh(tile, out_mesh);
+    // Preserve the original zero-authority path (including its mesh-byte pin),
+    // but only for a genuinely empty assembly bound to this tile. Metadata
+    // that claims authority without payload is malformed and must fail closed.
+    if (assembly.bricks.empty()) {
+        if (assembly.tier != tile.tier || assembly.rx != tile.rx ||
+            assembly.rz != tile.rz || assembly.params_hash != tile.params_hash ||
+            !assembly.authority_columns.empty() || !assembly.owned_columns.empty() ||
+            !assembly.density_q.empty() || !assembly.material.empty() ||
+            !assembly.legacy_surface_samples.empty()) {
+            out_mesh.vertices.clear();
+            out_mesh.indices.clear();
+            return {};
+        }
+        return GenerateFarLodRegionMesh(tile, out_mesh);
+    }
 
     FarLodRegionMeshStats stats;
     out_mesh.vertices.clear(); out_mesh.indices.clear();
+    const auto valid_region_coordinate = [](int region) {
+        const std::int64_t minimum =
+            static_cast<std::int64_t>(region) * World::kFarLodRegionSizeMeters;
+        const std::int64_t maximum = minimum + World::kFarLodRegionSizeMeters;
+        const std::int64_t min_chunk = static_cast<std::int64_t>(region) * 32 - 1;
+        const std::int64_t max_chunk = min_chunk + 33;
+        return minimum >= std::numeric_limits<int>::min() &&
+               maximum <= std::numeric_limits<int>::max() &&
+               min_chunk >= Chunk::kPackedMinXz &&
+               max_chunk <= Chunk::kPackedMaxXz;
+    };
+    const auto valid_chunk_coordinate = [](int chunk, int extent) {
+        const std::int64_t minimum = static_cast<std::int64_t>(chunk) * extent;
+        const std::int64_t maximum = minimum + extent;
+        return minimum >= std::numeric_limits<int>::min() &&
+               maximum <= std::numeric_limits<int>::max();
+    };
     const u32 n = tile.samples_per_side;
     if (assembly.tier != tile.tier || assembly.rx != tile.rx || assembly.rz != tile.rz ||
+        assembly.params_hash != tile.params_hash ||
+        !valid_region_coordinate(tile.rx) || !valid_region_coordinate(tile.rz) ||
         n != World::FarLodSamplesPerSide(tile.tier) || tile.height_q.size() != tile.sample_count() ||
         tile.material.size() != tile.sample_count() || tile.flags.size() != tile.sample_count()) return stats;
     const std::size_t count = World::FarLodSdfBrickSampleCount(tile.tier);
     if (assembly.density_q.size() != assembly.bricks.size() * count ||
         assembly.material.size() != assembly.density_q.size()) return stats;
 
+    const auto fail = [&]() -> FarLodRegionMeshStats {
+        out_mesh.vertices.clear();
+        out_mesh.indices.clear();
+        return {};
+    };
+    if (!std::is_sorted(assembly.authority_columns.begin(), assembly.authority_columns.end()) ||
+        std::adjacent_find(assembly.authority_columns.begin(), assembly.authority_columns.end()) !=
+            assembly.authority_columns.end() ||
+        !std::is_sorted(assembly.owned_columns.begin(), assembly.owned_columns.end()) ||
+        std::adjacent_find(assembly.owned_columns.begin(), assembly.owned_columns.end()) !=
+            assembly.owned_columns.end()) {
+        return fail();
+    }
+    const auto legacy_less = [](const World::FarLodWorldLegacySurfaceSample& lhs,
+                                const World::FarLodWorldLegacySurfaceSample& rhs) {
+        return std::tie(lhs.world_z, lhs.world_x) <
+               std::tie(rhs.world_z, rhs.world_x);
+    };
+    if (!std::is_sorted(
+            assembly.legacy_surface_samples.begin(),
+            assembly.legacy_surface_samples.end(), legacy_less) ||
+        std::adjacent_find(
+            assembly.legacy_surface_samples.begin(),
+            assembly.legacy_surface_samples.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.world_x == rhs.world_x && lhs.world_z == rhs.world_z;
+            }) != assembly.legacy_surface_samples.end()) return fail();
+    std::map<std::pair<int, int>, u8> legacy_materials;
+    for (const auto& sample : assembly.legacy_surface_samples) {
+        legacy_materials.emplace(
+            std::make_pair(sample.world_z, sample.world_x), sample.material);
+    }
+    const std::set<std::pair<i32, i32>> authority_columns(
+        assembly.authority_columns.begin(), assembly.authority_columns.end());
+    if (authority_columns.empty()) return fail();
+    std::set<std::pair<i32, i32>> expected_owned;
+    for (const auto& [chunk_z, chunk_x] : authority_columns) {
+        if (chunk_x < Chunk::kPackedMinXz || chunk_x > Chunk::kPackedMaxXz ||
+            chunk_z < Chunk::kPackedMinXz || chunk_z > Chunk::kPackedMaxXz ||
+            !valid_chunk_coordinate(chunk_x, CHUNK_SIZE_X) ||
+            !valid_chunk_coordinate(chunk_z, CHUNK_SIZE_Z)) return fail();
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const std::int64_t owned_z = static_cast<std::int64_t>(chunk_z) + dz;
+                const std::int64_t owned_x = static_cast<std::int64_t>(chunk_x) + dx;
+                if (owned_z < std::numeric_limits<int>::min() ||
+                    owned_z > std::numeric_limits<int>::max() ||
+                    owned_x < std::numeric_limits<int>::min() ||
+                    owned_x > std::numeric_limits<int>::max() ||
+                    owned_z < Chunk::kPackedMinXz || owned_z > Chunk::kPackedMaxXz ||
+                    owned_x < Chunk::kPackedMinXz || owned_x > Chunk::kPackedMaxXz ||
+                    !valid_chunk_coordinate(static_cast<int>(owned_z), CHUNK_SIZE_Z) ||
+                    !valid_chunk_coordinate(static_cast<int>(owned_x), CHUNK_SIZE_X)) return fail();
+                expected_owned.emplace(
+                    static_cast<int>(owned_z), static_cast<int>(owned_x));
+            }
+        }
+    }
+    const std::set<std::pair<i32, i32>> owned(
+        assembly.owned_columns.begin(), assembly.owned_columns.end());
+    if (owned != expected_owned) return fail();
+
     struct Sample { i16 density; u8 material; };
     std::map<std::tuple<int, int, int>, Sample> samples;
     const int step_i = World::FarLodSampleStepMeters(tile.tier);
     const u32 brick_side = World::FarLodSdfBrickSamplesPerSide(tile.tier);
-    const auto fail = [&]() -> FarLodRegionMeshStats { out_mesh.vertices.clear(); out_mesh.indices.clear(); return {}; };
+    std::set<std::pair<i32, i32>> seen_authority_columns;
+    std::map<std::pair<i32, i32>, std::vector<i32>> stack_levels;
+    std::vector<World::FarLodWorldSdfBrickDescriptor> authority_bricks;
+    bool have_previous_brick = false;
+    std::tuple<i32, i32, i32> previous_brick{};
     for (std::size_t brick_index = 0; brick_index < assembly.bricks.size(); ++brick_index) {
         const auto& brick = assembly.bricks[brick_index];
         if (brick.source_kind != World::FarLodBrickSourceKind::Authoritative &&
             brick.source_kind != World::FarLodBrickSourceKind::RegenerableCache) return fail();
+        if (brick.chunk_x < Chunk::kPackedMinXz ||
+            brick.chunk_x > Chunk::kPackedMaxXz ||
+            brick.chunk_y < Chunk::kPackedMinY ||
+            brick.chunk_y > Chunk::kPackedMaxY ||
+            brick.chunk_z < Chunk::kPackedMinXz ||
+            brick.chunk_z > Chunk::kPackedMaxXz ||
+            !valid_chunk_coordinate(brick.chunk_x, CHUNK_SIZE_X) ||
+            !valid_chunk_coordinate(brick.chunk_y, CHUNK_SIZE_Y) ||
+            !valid_chunk_coordinate(brick.chunk_z, CHUNK_SIZE_Z)) return fail();
+        const auto brick_key = std::make_tuple(brick.chunk_z, brick.chunk_x, brick.chunk_y);
+        if (have_previous_brick && !(previous_brick < brick_key)) return fail();
+        previous_brick = brick_key;
+        have_previous_brick = true;
+        stack_levels[{brick.chunk_z, brick.chunk_x}].push_back(brick.chunk_y);
+        if (brick.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+            seen_authority_columns.emplace(brick.chunk_z, brick.chunk_x);
+            authority_bricks.push_back(brick);
+        }
         const std::size_t base = brick_index * count;
         u32 crc = 0xffffffffu;
         const auto crc_bytes = [&crc](const void* data, std::size_t bytes) {
@@ -1203,8 +1319,37 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             if (!inserted.second && (inserted.first->second.density != value.density || inserted.first->second.material != value.material)) return fail();
         }
     }
-
-    const std::set<std::pair<i32, i32>> owned(assembly.owned_columns.begin(), assembly.owned_columns.end());
+    if (seen_authority_columns != authority_columns) return fail();
+    for (const auto& column : owned) {
+        const auto stack = stack_levels.find(column);
+        if (stack == stack_levels.end() || stack->second.empty()) return fail();
+        for (std::size_t i = 1; i < stack->second.size(); ++i) {
+            if (static_cast<std::int64_t>(stack->second[i - 1]) + 1 !=
+                stack->second[i]) return fail();
+        }
+    }
+    // Every authoritative brick requires one vertical support brick above and
+    // below in its complete 3x3 horizontal influence. Without this invariant
+    // an assembly can suppress background cells while providing no canonical
+    // corners for the replacement SDF cells.
+    for (const auto& authority : authority_bricks) {
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const auto stack = stack_levels.find({
+                    static_cast<int>(static_cast<std::int64_t>(authority.chunk_z) + dz),
+                    static_cast<int>(static_cast<std::int64_t>(authority.chunk_x) + dx)});
+                if (stack == stack_levels.end()) return fail();
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const std::int64_t required_y =
+                        static_cast<std::int64_t>(authority.chunk_y) + dy;
+                    if (required_y < std::numeric_limits<int>::min() ||
+                        required_y > std::numeric_limits<int>::max() ||
+                        !std::binary_search(stack->second.begin(), stack->second.end(),
+                                            static_cast<int>(required_y))) return fail();
+                }
+            }
+        }
+    }
     const int min_x = tile.rx * World::kFarLodRegionSizeMeters;
     const int min_z = tile.rz * World::kFarLodRegionSizeMeters;
     const auto floor_div = [](int value, int divisor) { const int q = value / divisor, r = value % divisor; return r < 0 ? q - 1 : q; };
@@ -1247,7 +1392,20 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             for (int edge = 0; edge < 12; ++edge) if ((mask & (1u << edge)) != 0u) {
                 const int a = edges[edge][0], b = edges[edge][1], solid = cell.val[a] < 0.0f ? a : b;
                 const int local_x = static_cast<int>(cell.p[solid].x) / step_i, local_z = static_cast<int>(cell.p[solid].z) / step_i;
-                const u8 material = values[solid].material == 0xffu ? tile.material[static_cast<std::size_t>(local_x) + static_cast<std::size_t>(local_z) * n] : values[solid].material;
+                if (local_x < 0 || local_z < 0 ||
+                    local_x >= static_cast<int>(n) || local_z >= static_cast<int>(n)) return fail();
+                u8 fallback_material = tile.material[
+                    static_cast<std::size_t>(local_x) +
+                    static_cast<std::size_t>(local_z) * n];
+                const int material_world_x = min_x + static_cast<int>(cell.p[solid].x);
+                const int material_world_z = min_z + static_cast<int>(cell.p[solid].z);
+                const auto legacy_material = legacy_materials.find(
+                    {material_world_z, material_world_x});
+                if (legacy_material != legacy_materials.end()) {
+                    fallback_material = legacy_material->second;
+                }
+                const u8 material = values[solid].material == 0xffu
+                    ? fallback_material : values[solid].material;
                 edge_vertices[edge] = static_cast<u32>(vertices.size()); vertices.push_back({VertexInterp(0.0f, cell.p[a], cell.p[b], cell.val[a], cell.val[b]), Vec3(0.0f), static_cast<u32>(material)});
             }
             const Vec3 gradient = EstimateDensityGradient(cell);

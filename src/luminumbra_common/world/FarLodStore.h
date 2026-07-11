@@ -105,6 +105,13 @@ struct FarLodWorldSdfBrickDescriptor {
     u32 payload_crc32 = 0;
 };
 
+struct FarLodWorldLegacySurfaceSample {
+    i32 world_x = 0;
+    i32 world_z = 0;
+    u16 height_q = 0;
+    u8 material = 0;
+};
+
 // An owned, transient world-coordinate SDF view passed from a far worker to
 // the mesher.  It is deliberately separate from FarLodTile: neighbours and
 // generated halo support are mesh inputs only and can never be persisted in
@@ -122,6 +129,10 @@ struct FarLodRegionSdfAssembly {
     std::vector<FarLodWorldSdfBrickDescriptor> bricks;
     std::vector<i16> density_q;
     std::vector<u8> material;
+    // Canonically sorted by (world_z, world_x). These height-only migration
+    // samples never enter the 3D density map; their material is the canonical
+    // analytic fallback when an SDF transition touches legacy authority.
+    std::vector<FarLodWorldLegacySurfaceSample> legacy_surface_samples;
 };
 
 // An owned full-lattice snapshot. Far workers consume this value instead of a
