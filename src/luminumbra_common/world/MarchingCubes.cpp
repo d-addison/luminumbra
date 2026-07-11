@@ -1198,6 +1198,7 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                maximum <= std::numeric_limits<int>::max();
     };
     const u32 n = tile.samples_per_side;
+    const int step_i = World::FarLodSampleStepMeters(tile.tier);
     if (assembly.tier != tile.tier || assembly.rx != tile.rx || assembly.rz != tile.rz ||
         assembly.params_hash != tile.params_hash ||
         !valid_region_coordinate(tile.rx) || !valid_region_coordinate(tile.rz) ||
@@ -1234,9 +1235,18 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             [](const auto& lhs, const auto& rhs) {
                 return lhs.world_x == rhs.world_x && lhs.world_z == rhs.world_z;
             }) != assembly.legacy_surface_samples.end()) return fail();
-    std::map<std::pair<int, int>, World::FarLodWorldLegacySurfaceSample> legacy_samples;
+    std::map<std::pair<int, int>, World::FarLodWorldLegacySurfaceSample>
+        legacy_metadata;
     for (const auto& sample : assembly.legacy_surface_samples) {
-        legacy_samples.emplace(std::make_pair(sample.world_z, sample.world_x), sample);
+        constexpr u8 kKnownLegacyFlags =
+            World::kFarLodSampleFlagWater | World::kFarLodSampleFlagEdited;
+        if ((sample.flags & World::kFarLodSampleFlagEdited) == 0u ||
+            (sample.flags & static_cast<u8>(~kKnownLegacyFlags)) != 0u ||
+            sample.world_x % step_i != 0 || sample.world_z % step_i != 0) {
+            return fail();
+        }
+        legacy_metadata.emplace(
+            std::make_pair(sample.world_z, sample.world_x), sample);
     }
     const std::set<std::pair<i32, i32>> authority_columns(
         assembly.authority_columns.begin(), assembly.authority_columns.end());
@@ -1267,19 +1277,37 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     const std::set<std::pair<i32, i32>> owned(
         assembly.owned_columns.begin(), assembly.owned_columns.end());
     if (owned != expected_owned) return fail();
+    const auto floor_div = [](int value, int divisor) {
+        const int quotient = value / divisor;
+        const int remainder = value % divisor;
+        return remainder < 0 ? quotient - 1 : quotient;
+    };
+    const auto sample_touches_owned_cell = [&](int world_x, int world_z) {
+        const int chunk_x = floor_div(world_x, CHUNK_SIZE_X);
+        const int chunk_z = floor_div(world_z, CHUNK_SIZE_Z);
+        const int first_x = world_x % CHUNK_SIZE_X == 0 ? chunk_x - 1 : chunk_x;
+        const int first_z = world_z % CHUNK_SIZE_Z == 0 ? chunk_z - 1 : chunk_z;
+        for (int z = first_z; z <= chunk_z; ++z) {
+            for (int x = first_x; x <= chunk_x; ++x) {
+                if (owned.count({z, x}) != 0u) return true;
+            }
+        }
+        return false;
+    };
+    if (std::any_of(
+            assembly.legacy_surface_samples.begin(),
+            assembly.legacy_surface_samples.end(),
+            [&](const auto& sample) {
+                return !sample_touches_owned_cell(sample.world_x, sample.world_z);
+            })) return fail();
 
     struct Sample { i16 density; u8 material; };
     std::map<std::tuple<int, int, int>, Sample> samples;
-    const int step_i = World::FarLodSampleStepMeters(tile.tier);
     const u32 brick_side = World::FarLodSdfBrickSamplesPerSide(tile.tier);
-    const auto legacy_density = [](int world_y,
-                                   const World::FarLodWorldLegacySurfaceSample& legacy) {
-        return World::QuantizeFarLodSdf(
-            static_cast<float>(world_y) - World::DequantizeFarLodHeight(legacy.height_q));
-    };
     std::set<std::pair<i32, i32>> seen_authority_columns;
     std::map<std::pair<i32, i32>, std::vector<i32>> stack_levels;
     std::vector<World::FarLodWorldSdfBrickDescriptor> authority_bricks;
+    std::set<std::pair<int, int>> seen_legacy_metadata;
     bool have_previous_brick = false;
     std::tuple<i32, i32, i32> previous_brick{};
     for (std::size_t brick_index = 0; brick_index < assembly.bricks.size(); ++brick_index) {
@@ -1315,14 +1343,34 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         for (u32 z = 0; z < brick_side; ++z) for (u32 y = 0; y < brick_side; ++y) for (u32 x = 0; x < brick_side; ++x) {
             const std::size_t offset = base + static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * brick_side + static_cast<std::size_t>(z) * brick_side * brick_side;
             if (assembly.density_q[offset] == World::kFarLodSdfInvalid) return fail();
-            const auto key = std::make_tuple(brick.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step_i,
-                                             brick.chunk_y * CHUNK_SIZE_Y + static_cast<int>(y) * step_i,
-                                             brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i);
+            const int world_x = brick.chunk_x * CHUNK_SIZE_X +
+                static_cast<int>(x) * step_i;
+            const int world_y = brick.chunk_y * CHUNK_SIZE_Y +
+                static_cast<int>(y) * step_i;
+            const int world_z = brick.chunk_z * CHUNK_SIZE_Z +
+                static_cast<int>(z) * step_i;
             const Sample value{assembly.density_q[offset], assembly.material[offset]};
+            const auto legacy = legacy_metadata.find({world_z, world_x});
+            if (legacy != legacy_metadata.end()) {
+                // Legacy columns must already have been promoted into scratch
+                // regenerable streams. Metadata may never overlay or coexist
+                // with a real authoritative footprint in the mesher.
+                if (brick.source_kind !=
+                        World::FarLodBrickSourceKind::RegenerableCache ||
+                    value.density != World::QuantizeFarLodSdf(
+                        static_cast<float>(world_y) -
+                        World::DequantizeFarLodHeight(legacy->second.height_q)) ||
+                    value.material != legacy->second.material) {
+                    return fail();
+                }
+                seen_legacy_metadata.emplace(world_z, world_x);
+            }
+            const auto key = std::make_tuple(world_x, world_y, world_z);
             const auto inserted = samples.emplace(key, value);
             if (!inserted.second && (inserted.first->second.density != value.density || inserted.first->second.material != value.material)) return fail();
         }
     }
+    if (seen_legacy_metadata.size() != legacy_metadata.size()) return fail();
     if (seen_authority_columns != authority_columns) return fail();
     for (const auto& column : owned) {
         const auto stack = stack_levels.find(column);
@@ -1356,7 +1404,6 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     }
     const int min_x = tile.rx * World::kFarLodRegionSizeMeters;
     const int min_z = tile.rz * World::kFarLodRegionSizeMeters;
-    const auto floor_div = [](int value, int divisor) { const int q = value / divisor, r = value % divisor; return r < 0 ? q - 1 : q; };
     const auto owned_cell = [&](u32 x, u32 z) {
         const int wx = min_x + static_cast<int>(x) * step_i, wz = min_z + static_cast<int>(z) * step_i;
         return owned.count({floor_div(wz, CHUNK_SIZE_Z), floor_div(wx, CHUNK_SIZE_X)}) != 0u;
@@ -1385,20 +1432,11 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             const int wz0 = brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i;
             if (wx0 < min_x || wx0 >= min_x + World::kFarLodRegionSizeMeters || wz0 < min_z || wz0 >= min_z + World::kFarLodRegionSizeMeters) continue;
             GridCell cell; Sample values[8];
-            const World::FarLodWorldLegacySurfaceSample* legacy_corners[8]{};
             int cube = 0;
             for (int c = 0; c < 8; ++c) {
                 const int wx = wx0 + corners[c].x * step_i, wy = brick.chunk_y * CHUNK_SIZE_Y + (static_cast<int>(y) + corners[c].y) * step_i, wz = wz0 + corners[c].z * step_i;
                 const auto found = samples.find(std::make_tuple(wx, wy, wz)); if (found == samples.end()) return fail();
                 values[c] = found->second; cell.p[c] = Vec3(static_cast<float>(wx - min_x), static_cast<float>(wy), static_cast<float>(wz - min_z));
-                const auto legacy = legacy_samples.find({wz, wx});
-                if (legacy != legacy_samples.end()) {
-                    // Scratch halo support must never replace migrated height
-                    // authority. Real full-SDF footprints were removed from
-                    // this map during assembly, so they retain precedence.
-                    legacy_corners[c] = &legacy->second;
-                    values[c].density = legacy_density(wy, legacy->second);
-                }
                 cell.val[c] = World::DequantizeFarLodSdf(values[c].density); if (cell.val[c] < 0.0f) cube |= 1 << c;
             }
             const unsigned int mask = edgeTable[cube]; if (mask == 0u) continue;
@@ -1411,17 +1449,8 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                 u8 fallback_material = tile.material[
                     static_cast<std::size_t>(local_x) +
                     static_cast<std::size_t>(local_z) * n];
-                const int material_world_x = min_x + static_cast<int>(cell.p[solid].x);
-                const int material_world_z = min_z + static_cast<int>(cell.p[solid].z);
-                const auto legacy_material = legacy_samples.find(
-                    {material_world_z, material_world_x});
-                if (legacy_material != legacy_samples.end()) {
-                    fallback_material = legacy_material->second.material;
-                }
-                const u8 material = legacy_corners[solid] != nullptr
-                    ? legacy_corners[solid]->material
-                    : values[solid].material == 0xffu
-                        ? fallback_material : values[solid].material;
+                const u8 material = values[solid].material == 0xffu
+                    ? fallback_material : values[solid].material;
                 edge_vertices[edge] = static_cast<u32>(vertices.size()); vertices.push_back({VertexInterp(0.0f, cell.p[a], cell.p[b], cell.val[a], cell.val[b]), Vec3(0.0f), static_cast<u32>(material)});
             }
             const Vec3 gradient = EstimateDensityGradient(cell);

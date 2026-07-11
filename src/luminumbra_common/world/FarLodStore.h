@@ -132,10 +132,11 @@ struct FarLodRegionSdfAssembly {
     std::vector<FarLodWorldSdfBrickDescriptor> bricks;
     std::vector<i16> density_q;
     std::vector<u8> material;
-    // Canonically sorted by (world_z, world_x). These height-only migration
-    // samples are synthesized as d = world_y - saved_height only while an SDF
-    // transition promotes their surviving legacy footprint. They never enter
-    // the persisted 3D density stream.
+    // Canonically sorted by (world_z, world_x). Before finalization these
+    // height-only migration samples are synthesized as d = world_y -
+    // saved_height into regenerable scratch bricks. The metadata retained here
+    // validates that promotion and carries only saved surface-water authority;
+    // it never enters the persisted 3D density stream.
     std::vector<FarLodWorldLegacySurfaceSample> legacy_surface_samples;
 };
 
