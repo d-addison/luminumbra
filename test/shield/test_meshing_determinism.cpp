@@ -169,6 +169,40 @@ TEST(MeshingDeterminism, FlatSurfaceChunkHashesAreStable) {
     VerifyCombo("flat seed=1337 chunk=(0,0,0)", MakeFlatSurfaceParams(), 1337, IVec3(0, 0, 0), expected);
 }
 
+TEST(MeshingDeterminism, CoarseStepUsesAuthoritativeSdfLattice) {
+    TerrainGenParams params = MakeFlatSurfaceParams();
+    params.height_offset = 0.0f;
+
+    SHIELD_WorldSystem world_system(nullptr, nullptr, params, 9001);
+    Chunk chunk(IVec3(0, 0, 0));
+
+    constexpr std::size_t lattice_width = static_cast<std::size_t>(CHUNK_SIZE_X + 1);
+    constexpr std::size_t lattice_height = static_cast<std::size_t>(CHUNK_SIZE_Y + 1);
+    chunk.sdf_data.resize(lattice_width * lattice_height * static_cast<std::size_t>(CHUNK_SIZE_Z + 1));
+
+    // This authoritative lattice describes a horizontal surface at y=12. It
+    // deliberately disagrees with the flat analytic terrain (y=0), so using
+    // GetTerrainHeightAtCoarse instead of the resident SDF cannot pass.
+    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+        for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
+            for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                const std::size_t index = static_cast<std::size_t>(x)
+                    + static_cast<std::size_t>(y) * lattice_width
+                    + static_cast<std::size_t>(z) * lattice_width * lattice_height;
+                chunk.sdf_data[index] = static_cast<float>(y) - 12.0f;
+            }
+        }
+    }
+
+    World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 4);
+
+    ASSERT_FALSE(chunk.mesh_vertices.empty());
+    ASSERT_FALSE(chunk.mesh_indices.empty());
+    for (const VoxelVertex& vertex : chunk.mesh_vertices) {
+        EXPECT_FLOAT_EQ(vertex.position.y, 12.0f);
+    }
+}
+
 // =====================================================================================
 // HOT-PATH BENCHMARK (informational; prints before/after optimization timings)
 // =====================================================================================
