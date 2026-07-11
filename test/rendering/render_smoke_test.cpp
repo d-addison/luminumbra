@@ -3048,6 +3048,96 @@ TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
     EXPECT_NE(frontier.find("budget = 3.33"), std::string::npos);
 }
 
+TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
+    const std::string runner = ReadTextFile(
+        SourceRoot() / ".forge/scripts/run-nightly-gate.ps1");
+    const std::string frontier = ReadTextFile(
+        SourceRoot() / ".forge/scripts/validate-engine-frontier.ps1");
+    const std::string registrar = ReadTextFile(
+        SourceRoot() / ".forge/scripts/register-nightly-gate-task.ps1");
+    ASSERT_FALSE(runner.empty());
+    ASSERT_FALSE(frontier.empty());
+    ASSERT_FALSE(registrar.empty());
+
+    // The timestamp in the filename and report comes from one run identity;
+    // copying an older report cannot win by changing its filesystem mtime.
+    EXPECT_NE(runner.find("$stamp = $generatedAt.ToString"), std::string::npos);
+    EXPECT_NE(runner.find("generated_at = $generatedAt.ToString(\"o\")"),
+              std::string::npos);
+    EXPECT_NE(runner.find("run_started_at = $runStartedAt.ToString(\"o\")"),
+              std::string::npos);
+    EXPECT_NE(runner.find("completed_at = $completedAt.ToString(\"o\")"),
+              std::string::npos);
+    EXPECT_NE(frontier.find("Sort-Object canonical_timestamp -Descending"),
+              std::string::npos);
+    EXPECT_NE(frontier.find("does not match generated_at"), std::string::npos);
+    EXPECT_EQ(frontier.find("Sort-Object LastWriteTimeUtc -Descending"),
+              std::string::npos);
+
+    // Closure requires the exact registered root task, canonical action and
+    // presets, a matching scheduler run, and a successful task result.
+    for (const char* seam : {
+             "Luminumbra Nightly Gate",
+             "Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath",
+             "Get-ScheduledTaskInfo -TaskName $taskName -TaskPath $taskPath",
+             "LastTaskResult",
+             "lastRunDeltaSeconds",
+             "-BuildPreset debug -RenderBudgetPreset release",
+         }) {
+        EXPECT_NE(frontier.find(seam), std::string::npos) << seam;
+    }
+
+    // Registration is explicit, idempotent and inspectable with -WhatIf; the
+    // nightly runner itself never mutates Task Scheduler state.
+    EXPECT_NE(registrar.find("SupportsShouldProcess = $true"), std::string::npos);
+    EXPECT_NE(registrar.find("if ($alreadyCanonical)"), std::string::npos);
+    EXPECT_NE(registrar.find("$PSCmdlet.ShouldProcess"), std::string::npos);
+    EXPECT_NE(registrar.find("[ValidateSet(\"02:00\")]"), std::string::npos);
+    EXPECT_NE(registrar.find("-BuildPreset debug -RenderBudgetPreset release"),
+              std::string::npos);
+    EXPECT_NE(registrar.find("-LogonType Interactive"), std::string::npos);
+    EXPECT_NE(registrar.find("-RunLevel Limited"), std::string::npos);
+    EXPECT_EQ(registrar.find("RunLevel Highest"), std::string::npos);
+    EXPECT_EQ(registrar.find("BuiltInRole]::Administrator"), std::string::npos);
+    const auto first_principal = registrar.find("-Principal $taskPrincipal");
+    ASSERT_NE(first_principal, std::string::npos);
+    EXPECT_NE(registrar.find("-Principal $taskPrincipal", first_principal + 1),
+              std::string::npos);
+    for (const char* seam : {
+             "$currentPrincipal.UserId",
+             "$currentPrincipal.LogonType",
+             "$currentPrincipal.RunLevel",
+             "$currentTriggers[0].Enabled",
+             "$currentTriggers[0].DaysInterval",
+             "$currentTriggers[0].StartBoundary",
+             "$currentTriggers[0].EndBoundary",
+             "$current.Settings.Enabled",
+             "$current.Settings.ExecutionTimeLimit",
+             "$current.Settings.MultipleInstances",
+             "$current.Settings.StartWhenAvailable",
+         }) {
+        EXPECT_NE(registrar.find(seam), std::string::npos) << seam;
+    }
+    for (const char* seam : {
+             "$taskPrincipal.UserId",
+             "$taskPrincipal.LogonType",
+             "$taskPrincipal.RunLevel",
+             "$trigger.Enabled",
+             "$trigger.DaysInterval",
+             "$trigger.StartBoundary",
+             "$trigger.EndBoundary",
+             "$task.Settings.Enabled",
+             "$task.Settings.ExecutionTimeLimit",
+             "$task.Settings.MultipleInstances",
+             "$task.Settings.StartWhenAvailable",
+             "daily at $dailyAt local time",
+         }) {
+        EXPECT_NE(frontier.find(seam), std::string::npos) << seam;
+    }
+    EXPECT_EQ(runner.find("Register-ScheduledTask"), std::string::npos);
+    EXPECT_EQ(runner.find("Set-ScheduledTask"), std::string::npos);
+}
+
 TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
     const std::string header = ReadTextFile(
         SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
