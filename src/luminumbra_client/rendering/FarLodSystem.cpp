@@ -453,6 +453,264 @@ bool derive_authoritative_surface_water(
     return true;
 }
 
+using WorldBrick = Luminumbra::World::FarLodWorldSdfBrickDescriptor;
+using Assembly = Luminumbra::World::FarLodRegionSdfAssembly;
+
+int region_for_chunk(int chunk) {
+    return floor_divide(chunk, kChunksPerFarLodRegion);
+}
+
+bool is_home_chunk(int chunk_x, int chunk_z, int rx, int rz) {
+    return region_for_chunk(chunk_x) == rx && region_for_chunk(chunk_z) == rz;
+}
+
+bool is_halo_chunk(int chunk_x, int chunk_z, int rx, int rz) {
+    const int min_x = rx * kChunksPerFarLodRegion - 1;
+    const int min_z = rz * kChunksPerFarLodRegion - 1;
+    return chunk_x >= min_x && chunk_x <= min_x + kChunksPerFarLodRegion + 1 &&
+           chunk_z >= min_z && chunk_z <= min_z + kChunksPerFarLodRegion + 1;
+}
+
+bool world_brick_less(const WorldBrick& a, const WorldBrick& b) {
+    return std::tie(a.chunk_z, a.chunk_x, a.chunk_y) < std::tie(b.chunk_z, b.chunk_x, b.chunk_y);
+}
+
+u32 world_brick_crc(const std::vector<i16>& density, const std::vector<u8>& material) {
+    return far_brick_crc(density.data(), material.data(), density.size());
+}
+
+// Use the persisted reduction operator as the single source of aligned
+// quantization truth.  The short-lived home tile is only a conversion vehicle;
+// no descriptor from it escapes as a persisted tile descriptor.
+bool reduce_world_brick(
+    World::FarLodTier tier,
+    const World::FarLodSdfSnapshot& snapshot,
+    WorldBrick& out_descriptor,
+    std::vector<i16>& out_density,
+    std::vector<u8>& out_material,
+    std::string& error) {
+    World::FarLodTile scratch;
+    scratch.tier = tier;
+    scratch.rx = region_for_chunk(snapshot.coords.x);
+    scratch.rz = region_for_chunk(snapshot.coords.z);
+    scratch.samples_per_side = World::FarLodSamplesPerSide(tier);
+    scratch.height_q.resize(scratch.sample_count());
+    scratch.material.resize(scratch.sample_count());
+    scratch.flags.resize(scratch.sample_count());
+    if (World::ReduceChunkSdfIntoFarTile(scratch, snapshot, &error) ==
+        World::FarLodSdfReduceResult::Error) {
+        return false;
+    }
+    if (scratch.sdf_bricks.size() != 1u) {
+        error = "far-SDF reduction did not produce exactly one world brick";
+        return false;
+    }
+    const auto& descriptor = scratch.sdf_bricks.front();
+    out_descriptor = {snapshot.coords.x, snapshot.coords.z, descriptor.chunk_y,
+                      descriptor.source_kind, descriptor.revision, descriptor.payload_crc32};
+    out_density = std::move(scratch.sdf_density_q);
+    out_material = std::move(scratch.sdf_material);
+    return true;
+}
+
+struct PendingWorldBrick {
+    WorldBrick descriptor;
+    std::vector<i16> density;
+    std::vector<u8> material;
+    bool persisted = false;
+};
+
+bool add_or_overlay_world_brick(
+    std::vector<PendingWorldBrick>& bricks,
+    PendingWorldBrick incoming,
+    bool snapshot_overlay,
+    std::string& error) {
+    const auto key = std::tie(incoming.descriptor.chunk_z, incoming.descriptor.chunk_x,
+                              incoming.descriptor.chunk_y);
+    const auto found = std::find_if(bricks.begin(), bricks.end(), [&](const PendingWorldBrick& existing) {
+        return std::tie(existing.descriptor.chunk_z, existing.descriptor.chunk_x,
+                        existing.descriptor.chunk_y) == key;
+    });
+    if (found == bricks.end()) {
+        bricks.push_back(std::move(incoming));
+        return true;
+    }
+    if (snapshot_overlay) {
+        // Current owner-thread authority always supersedes a persisted copy.
+        if (found->descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative &&
+            incoming.descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+            const u32 next = found->descriptor.revision == std::numeric_limits<u32>::max()
+                ? found->descriptor.revision : found->descriptor.revision + 1u;
+            incoming.descriptor.revision = std::max(incoming.descriptor.revision, next);
+        }
+        *found = std::move(incoming);
+        return true;
+    }
+    if (found->persisted && incoming.persisted) {
+        error = "two persisted far records claim the same world SDF brick";
+        return false;
+    }
+    // A regenerable cache can never replace authority.  Identical cache input
+    // is harmless and is kept deterministically.
+    if (found->descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+        return true;
+    }
+    if (incoming.descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+        *found = std::move(incoming);
+    }
+    return true;
+}
+
+bool finalize_assembly(
+    Assembly& assembly,
+    std::vector<PendingWorldBrick>& pending,
+    std::string& error) {
+    std::sort(pending.begin(), pending.end(), [](const PendingWorldBrick& a, const PendingWorldBrick& b) {
+        return world_brick_less(a.descriptor, b.descriptor);
+    });
+    const int step = World::FarLodSampleStepMeters(assembly.tier);
+    const u32 side = World::FarLodSdfBrickSamplesPerSide(assembly.tier);
+    std::map<std::tuple<int, int, int>, std::pair<i16, u8>> canonical;
+    std::map<std::tuple<int, int, int>, World::FarLodBrickSourceKind> source;
+    // Establish authoritative values before inspecting regenerable payloads so
+    // canonicalization is independent of chunk-coordinate sort order.
+    for (const PendingWorldBrick& brick : pending) {
+        if (brick.density.size() != World::FarLodSdfBrickSampleCount(assembly.tier) ||
+            brick.material.size() != brick.density.size() ||
+            brick.descriptor.payload_crc32 != world_brick_crc(brick.density, brick.material)) {
+            error = "assembled far-SDF brick has an invalid payload";
+            return false;
+        }
+        if (brick.descriptor.source_kind != World::FarLodBrickSourceKind::Authoritative) continue;
+        for (u32 z = 0; z < side; ++z) for (u32 y = 0; y < side; ++y) for (u32 x = 0; x < side; ++x) {
+            const std::size_t index = static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * side +
+                static_cast<std::size_t>(z) * side * side;
+            const auto key = std::make_tuple(brick.descriptor.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step,
+                                             brick.descriptor.chunk_y * CHUNK_SIZE_Y + static_cast<int>(y) * step,
+                                             brick.descriptor.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step);
+            const std::pair<i16, u8> value(brick.density[index], brick.material[index]);
+            const auto inserted = canonical.emplace(key, value);
+            if (!inserted.second && inserted.first->second != value) {
+                error = "authoritative far-SDF bricks disagree on a shared world sample";
+                return false;
+            }
+            source[key] = World::FarLodBrickSourceKind::Authoritative;
+        }
+    }
+    for (PendingWorldBrick& brick : pending) {
+        if (brick.density.size() != World::FarLodSdfBrickSampleCount(assembly.tier) ||
+            brick.material.size() != brick.density.size() ||
+            brick.descriptor.payload_crc32 != world_brick_crc(brick.density, brick.material)) {
+            error = "assembled far-SDF brick has an invalid payload";
+            return false;
+        }
+        bool patched = false;
+        for (u32 z = 0; z < side; ++z) for (u32 y = 0; y < side; ++y) for (u32 x = 0; x < side; ++x) {
+            const std::size_t index = static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * side +
+                static_cast<std::size_t>(z) * side * side;
+            if (brick.density[index] == World::kFarLodSdfInvalid) {
+                error = "assembled far-SDF brick contains an invalid density";
+                return false;
+            }
+            const auto key = std::make_tuple(brick.descriptor.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step,
+                                             brick.descriptor.chunk_y * CHUNK_SIZE_Y + static_cast<int>(y) * step,
+                                             brick.descriptor.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step);
+            const std::pair<i16, u8> value(brick.density[index], brick.material[index]);
+            const auto inserted = canonical.emplace(key, value);
+            if (inserted.second) {
+                source.emplace(key, brick.descriptor.source_kind);
+                continue;
+            }
+            const auto prior_source = source.find(key)->second;
+            if (prior_source == World::FarLodBrickSourceKind::Authoritative &&
+                brick.descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative &&
+                inserted.first->second != value) {
+                error = "authoritative far-SDF bricks disagree on a shared world sample";
+                return false;
+            }
+            if (prior_source == World::FarLodBrickSourceKind::RegenerableCache &&
+                brick.descriptor.source_kind == World::FarLodBrickSourceKind::RegenerableCache &&
+                inserted.first->second != value) {
+                error = "regenerable far-SDF bricks disagree on a shared world sample";
+                return false;
+            }
+            if (prior_source == World::FarLodBrickSourceKind::Authoritative &&
+                brick.descriptor.source_kind == World::FarLodBrickSourceKind::RegenerableCache) {
+                brick.density[index] = inserted.first->second.first;
+                brick.material[index] = inserted.first->second.second;
+                patched = true;
+            } else if (prior_source == World::FarLodBrickSourceKind::RegenerableCache &&
+                       brick.descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+                inserted.first->second = value;
+                source.find(key)->second = brick.descriptor.source_kind;
+            }
+        }
+        if (patched) brick.descriptor.payload_crc32 = world_brick_crc(brick.density, brick.material);
+    }
+    for (PendingWorldBrick& brick : pending) {
+        assembly.bricks.push_back(brick.descriptor);
+        assembly.density_q.insert(assembly.density_q.end(), brick.density.begin(), brick.density.end());
+        assembly.material.insert(assembly.material.end(), brick.material.begin(), brick.material.end());
+        if (brick.descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+            assembly.authority_columns.emplace_back(brick.descriptor.chunk_z, brick.descriptor.chunk_x);
+        }
+    }
+    std::sort(assembly.authority_columns.begin(), assembly.authority_columns.end());
+    assembly.authority_columns.erase(std::unique(assembly.authority_columns.begin(), assembly.authority_columns.end()),
+                                     assembly.authority_columns.end());
+    for (const auto& [z, x] : assembly.authority_columns) {
+        for (int dz = -1; dz <= 1; ++dz) for (int dx = -1; dx <= 1; ++dx) {
+            assembly.owned_columns.emplace_back(z + dz, x + dx);
+        }
+    }
+    std::sort(assembly.owned_columns.begin(), assembly.owned_columns.end());
+    assembly.owned_columns.erase(std::unique(assembly.owned_columns.begin(), assembly.owned_columns.end()),
+                                 assembly.owned_columns.end());
+    return true;
+}
+
+bool derive_assembly_water(World::FarLodTile& tile, const Assembly& assembly, bool& changed, std::string& error) {
+    const int step = World::FarLodSampleStepMeters(assembly.tier);
+    const u32 side = World::FarLodSdfBrickSamplesPerSide(assembly.tier);
+    const std::size_t count = World::FarLodSdfBrickSampleCount(assembly.tier);
+    std::map<std::tuple<int, int, int>, i16> samples;
+    for (std::size_t i = 0; i < assembly.bricks.size(); ++i) {
+        const auto& brick = assembly.bricks[i];
+        for (u32 z = 0; z < side; ++z) for (u32 y = 0; y < side; ++y) for (u32 x = 0; x < side; ++x) {
+            const std::size_t index = i * count + static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * side +
+                static_cast<std::size_t>(z) * side * side;
+            samples.emplace(std::make_tuple(brick.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step,
+                                            brick.chunk_y * CHUNK_SIZE_Y + static_cast<int>(y) * step,
+                                            brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step), assembly.density_q[index]);
+        }
+    }
+    for (const auto& [z_chunk, x_chunk] : assembly.authority_columns) {
+        if (!is_home_chunk(x_chunk, z_chunk, tile.rx, tile.rz)) continue;
+        for (u32 z = 0; z < side; ++z) for (u32 x = 0; x < side; ++x) {
+            const int wx = x_chunk * CHUNK_SIZE_X + static_cast<int>(x) * step;
+            const int wz = z_chunk * CHUNK_SIZE_Z + static_cast<int>(z) * step;
+            std::map<int, i16> vertical;
+            for (const auto& [key, density] : samples) {
+                if (std::get<0>(key) == wx && std::get<2>(key) == wz) vertical.emplace(std::get<1>(key), density);
+            }
+            bool crossing = false; float top = 0.0f;
+            for (auto it = vertical.begin(); std::next(it) != vertical.end(); ++it) {
+                const auto next = std::next(it);
+                const float a = World::DequantizeFarLodSdf(it->second), b = World::DequantizeFarLodSdf(next->second);
+                if (a <= 0.0f && b > 0.0f) { top = static_cast<float>(it->first) + (-a / (b - a)) * (next->first - it->first); crossing = true; }
+            }
+            if (!crossing) { error = "far-SDF water derivation found no top solid crossing"; return false; }
+            const std::size_t sx = static_cast<std::size_t>((wx - tile.rx * World::kFarLodRegionSizeMeters) / step);
+            const std::size_t sz = static_cast<std::size_t>((wz - tile.rz * World::kFarLodRegionSizeMeters) / step);
+            u8& flags = tile.flags[sx + sz * tile.samples_per_side];
+            const u8 next = top < SEA_LEVEL ? static_cast<u8>(flags | World::kFarLodSampleFlagWater) :
+                                              static_cast<u8>(flags & ~World::kFarLodSampleFlagWater);
+            changed = changed || flags != next; flags = next;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
@@ -464,6 +722,12 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
     const std::filesystem::path& save_dir) {
     FarLodWorkerBuildOutcome outcome;
     World::FarLodTile tile;
+    Assembly assembly;
+    assembly.tier = tier;
+    assembly.rx = rx;
+    assembly.rz = rz;
+    assembly.params_hash = snapshot.params_hash;
+    std::vector<PendingWorldBrick> pending;
     bool loaded = false;
     if (!save_dir.empty()) {
         std::vector<std::string> errors;
@@ -485,37 +749,121 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(
         outcome.changed = true;
     }
 
-    for (const Systems::FarLodSdfSnapshotEntry& entry : snapshot.entries) {
-        if (!belongs_to_region(entry, rx, rz) ||
-            entry.provenance != ChunkSdfProvenance::LoadedOrEdited) {
-            continue;
+    const auto copy_persisted = [&](const World::FarLodTile& source) -> bool {
+        const std::size_t count = World::FarLodSdfBrickSampleCount(tier);
+        for (std::size_t i = 0; i < source.sdf_bricks.size(); ++i) {
+            const auto& brick = source.sdf_bricks[i];
+            const int chunk_x = source.rx * kChunksPerFarLodRegion + brick.local_chunk_x;
+            const int chunk_z = source.rz * kChunksPerFarLodRegion + brick.local_chunk_z;
+            if (!is_home_chunk(chunk_x, chunk_z, source.rx, source.rz)) {
+                outcome.error = "persisted far-SDF brick is outside its home region";
+                return false;
+            }
+            if (brick.source_kind != World::FarLodBrickSourceKind::Authoritative ||
+                !is_halo_chunk(chunk_x, chunk_z, rx, rz)) continue;
+            PendingWorldBrick incoming;
+            incoming.descriptor = {chunk_x, chunk_z, brick.chunk_y, brick.source_kind,
+                                   brick.revision, brick.payload_crc32};
+            const std::size_t begin = i * count;
+            incoming.density.assign(source.sdf_density_q.begin() + static_cast<std::ptrdiff_t>(begin),
+                                    source.sdf_density_q.begin() + static_cast<std::ptrdiff_t>(begin + count));
+            incoming.material.assign(source.sdf_material.begin() + static_cast<std::ptrdiff_t>(begin),
+                                     source.sdf_material.begin() + static_cast<std::ptrdiff_t>(begin + count));
+            incoming.persisted = true;
+            if (!add_or_overlay_world_brick(pending, std::move(incoming), false, outcome.error)) return false;
         }
-        std::string reduction_error;
-        const auto reduced = World::ReduceChunkSdfIntoFarTile(
-            tile, entry.as_reduction_snapshot(), &reduction_error);
-        if (reduced == World::FarLodSdfReduceResult::Error) {
-            outcome.error = "failed to reduce authoritative far SDF: " + reduction_error;
-            return outcome;
+        return true;
+    };
+
+    if (!copy_persisted(tile)) return outcome;
+    if (!save_dir.empty()) {
+        // Neighbour records are read-only mesh inputs.  Canonical region order
+        // makes the result independent of filesystem enumeration.
+        const World::FarLodStore store(save_dir);
+        for (int neighbor_z = rz - 1; neighbor_z <= rz + 1; ++neighbor_z) {
+            for (int neighbor_x = rx - 1; neighbor_x <= rx + 1; ++neighbor_x) {
+                if (neighbor_x == rx && neighbor_z == rz) continue;
+                World::FarLodTile neighbor;
+                std::vector<std::string> errors;
+                if (!store.load_tile(tier, neighbor_x, neighbor_z, snapshot.params_hash, neighbor, &errors)) {
+                    if (!errors.empty()) { outcome.error = errors.front(); return outcome; }
+                    continue;
+                }
+                if (!copy_persisted(neighbor)) return outcome;
+            }
         }
-        outcome.changed = outcome.changed || reduced != World::FarLodSdfReduceResult::Unchanged;
     }
 
-    if (!tile_has_authoritative_bricks(tile) && !tile.sdf_bricks.empty()) {
-        tile.sdf_bricks.clear();
-        tile.sdf_density_q.clear();
-        tile.sdf_material.clear();
-        outcome.changed = true;
+    for (const Systems::FarLodSdfSnapshotEntry& entry : snapshot.entries) {
+        if (entry.provenance != ChunkSdfProvenance::LoadedOrEdited ||
+            !is_halo_chunk(entry.coords.x, entry.coords.z, rx, rz)) {
+            continue;
+        }
+        const World::FarLodSdfSnapshot reduction = entry.as_reduction_snapshot();
+        PendingWorldBrick incoming;
+        if (!reduce_world_brick(tier, reduction, incoming.descriptor, incoming.density,
+                                incoming.material, outcome.error)) {
+            outcome.error = "failed to reduce authoritative far SDF: " + outcome.error;
+            return outcome;
+        }
+        if (!add_or_overlay_world_brick(pending, std::move(incoming), true, outcome.error)) return outcome;
+        if (belongs_to_region(entry, rx, rz)) {
+            std::string reduction_error;
+            const auto reduced = World::ReduceChunkSdfIntoFarTile(tile, reduction, &reduction_error);
+            if (reduced == World::FarLodSdfReduceResult::Error) {
+                outcome.error = "failed to update home far SDF: " + reduction_error;
+                return outcome;
+            }
+            outcome.changed = outcome.changed || reduced != World::FarLodSdfReduceResult::Unchanged;
+        }
     }
-    if (!complete_authoritative_stacks(world, tile, outcome.error, outcome.changed)) {
-        return outcome;
+
+    // Complete every authority stack plus its horizontal halo in absolute
+    // chunk coordinates.  Support is transient; only the home tile above is
+    // ever modified or returned for persistence.
+    std::map<std::pair<int, int>, std::pair<int, int>> authority_spans;
+    for (const PendingWorldBrick& brick : pending) if (brick.descriptor.source_kind == World::FarLodBrickSourceKind::Authoritative) {
+        const auto key = std::make_pair(brick.descriptor.chunk_z, brick.descriptor.chunk_x);
+        const auto inserted = authority_spans.emplace(key, std::make_pair(brick.descriptor.chunk_y, brick.descriptor.chunk_y));
+        if (!inserted.second) { inserted.first->second.first = std::min(inserted.first->second.first, brick.descriptor.chunk_y); inserted.first->second.second = std::max(inserted.first->second.second, brick.descriptor.chunk_y); }
     }
-    if (!synchronize_regenerable_boundaries(tile, outcome.error, outcome.changed)) {
-        return outcome;
+    if (!authority_spans.empty()) {
+        std::set<std::tuple<int, int, int>> required;
+        for (const auto& [column, span] : authority_spans) {
+            int min_y = span.first - 1, max_y = span.second + 1;
+            for (int dz = -1; dz <= 1; ++dz) for (int dx = -1; dx <= 1; ++dx) {
+                const float height = world.GetTerrainHeightAt(static_cast<float>((column.second + dx) * CHUNK_SIZE_X),
+                                                              static_cast<float>((column.first + dz) * CHUNK_SIZE_Z));
+                const int surface = static_cast<int>(std::floor(height / static_cast<float>(CHUNK_SIZE_Y)));
+                min_y = std::min(min_y, surface - 1); max_y = std::max(max_y, surface + 1);
+            }
+            for (int dz = -1; dz <= 1; ++dz) for (int dx = -1; dx <= 1; ++dx) for (int y = min_y; y <= max_y; ++y)
+                required.emplace(column.first + dz, column.second + dx, y);
+        }
+        const auto scope = world.acquire_worldgen_sample_scope();
+        for (const auto& [chunk_z, chunk_x, chunk_y] : required) {
+            const auto exists = std::find_if(pending.begin(), pending.end(), [&](const PendingWorldBrick& brick) {
+                return brick.descriptor.chunk_x == chunk_x && brick.descriptor.chunk_z == chunk_z && brick.descriptor.chunk_y == chunk_y;
+            });
+            if (exists != pending.end()) continue;
+            Chunk generated_chunk(IVec3(chunk_x, chunk_y, chunk_z));
+            world.GenerateChunkData(generated_chunk, 1);
+            World::FarLodSdfSnapshot generated;
+            generated.coords = generated_chunk.get_coords();
+            generated.source_kind = World::FarLodBrickSourceKind::RegenerableCache;
+            generated.sdf_data = std::move(generated_chunk.sdf_data);
+            generated.material_data = std::move(generated_chunk.material_data);
+            PendingWorldBrick incoming;
+            if (!reduce_world_brick(tier, generated, incoming.descriptor, incoming.density, incoming.material, outcome.error)) {
+                outcome.error = "failed to generate far-SDF halo brick: " + outcome.error;
+                return outcome;
+            }
+            if (!add_or_overlay_world_brick(pending, std::move(incoming), false, outcome.error)) return outcome;
+        }
     }
-    if (!derive_authoritative_surface_water(tile, outcome.error, outcome.changed)) {
-        return outcome;
-    }
-    World::MarchingCubes::GenerateFarLodRegionMesh(tile, outcome.mesh);
+    if (!finalize_assembly(assembly, pending, outcome.error)) return outcome;
+    if (!derive_assembly_water(tile, assembly, outcome.changed, outcome.error)) return outcome;
+    World::MarchingCubes::GenerateFarLodRegionMesh(tile, assembly, outcome.mesh);
     if (outcome.mesh.vertices.empty() || outcome.mesh.indices.empty()) {
         outcome.error = "far-SDF worker produced an empty mesh";
         return outcome;

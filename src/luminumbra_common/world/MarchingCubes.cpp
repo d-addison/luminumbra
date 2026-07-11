@@ -19,6 +19,9 @@
 #include <new>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <set>
+#include <tuple>
 #include <type_traits>
 
 namespace Luminumbra {
@@ -1153,6 +1156,116 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     stats.indices = indices.size();
     stats.triangles = indices.size() / 3u;
     return stats;
+}
+
+FarLodRegionMeshStats GenerateFarLodRegionMesh(
+    const World::FarLodTile& tile,
+    const World::FarLodRegionSdfAssembly& assembly,
+    World::FarLodRegionMesh& out_mesh) {
+    // Preserve the original zero-authority path (including its mesh-byte pin).
+    if (assembly.bricks.empty()) return GenerateFarLodRegionMesh(tile, out_mesh);
+
+    FarLodRegionMeshStats stats;
+    out_mesh.vertices.clear(); out_mesh.indices.clear();
+    const u32 n = tile.samples_per_side;
+    if (assembly.tier != tile.tier || assembly.rx != tile.rx || assembly.rz != tile.rz ||
+        n != World::FarLodSamplesPerSide(tile.tier) || tile.height_q.size() != tile.sample_count() ||
+        tile.material.size() != tile.sample_count() || tile.flags.size() != tile.sample_count()) return stats;
+    const std::size_t count = World::FarLodSdfBrickSampleCount(tile.tier);
+    if (assembly.density_q.size() != assembly.bricks.size() * count ||
+        assembly.material.size() != assembly.density_q.size()) return stats;
+
+    struct Sample { i16 density; u8 material; };
+    std::map<std::tuple<int, int, int>, Sample> samples;
+    const int step_i = World::FarLodSampleStepMeters(tile.tier);
+    const u32 brick_side = World::FarLodSdfBrickSamplesPerSide(tile.tier);
+    const auto fail = [&]() -> FarLodRegionMeshStats { out_mesh.vertices.clear(); out_mesh.indices.clear(); return {}; };
+    for (std::size_t brick_index = 0; brick_index < assembly.bricks.size(); ++brick_index) {
+        const auto& brick = assembly.bricks[brick_index];
+        if (brick.source_kind != World::FarLodBrickSourceKind::Authoritative &&
+            brick.source_kind != World::FarLodBrickSourceKind::RegenerableCache) return fail();
+        const std::size_t base = brick_index * count;
+        u32 crc = 0xffffffffu;
+        const auto crc_bytes = [&crc](const void* data, std::size_t bytes) {
+            const auto* p = static_cast<const unsigned char*>(data);
+            for (std::size_t i = 0; i < bytes; ++i) { crc ^= p[i]; for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1u) ^ (0xedb88320u & static_cast<u32>(-(crc & 1u))); }
+        };
+        crc_bytes(assembly.density_q.data() + base, count * sizeof(i16)); crc_bytes(assembly.material.data() + base, count);
+        if (brick.payload_crc32 != ~crc) return fail();
+        for (u32 z = 0; z < brick_side; ++z) for (u32 y = 0; y < brick_side; ++y) for (u32 x = 0; x < brick_side; ++x) {
+            const std::size_t offset = base + static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * brick_side + static_cast<std::size_t>(z) * brick_side * brick_side;
+            if (assembly.density_q[offset] == World::kFarLodSdfInvalid) return fail();
+            const auto key = std::make_tuple(brick.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step_i,
+                                             brick.chunk_y * CHUNK_SIZE_Y + static_cast<int>(y) * step_i,
+                                             brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i);
+            const Sample value{assembly.density_q[offset], assembly.material[offset]};
+            const auto inserted = samples.emplace(key, value);
+            if (!inserted.second && (inserted.first->second.density != value.density || inserted.first->second.material != value.material)) return fail();
+        }
+    }
+
+    const std::set<std::pair<i32, i32>> owned(assembly.owned_columns.begin(), assembly.owned_columns.end());
+    const int min_x = tile.rx * World::kFarLodRegionSizeMeters;
+    const int min_z = tile.rz * World::kFarLodRegionSizeMeters;
+    const auto floor_div = [](int value, int divisor) { const int q = value / divisor, r = value % divisor; return r < 0 ? q - 1 : q; };
+    const auto owned_cell = [&](u32 x, u32 z) {
+        const int wx = min_x + static_cast<int>(x) * step_i, wz = min_z + static_cast<int>(z) * step_i;
+        return owned.count({floor_div(wz, CHUNK_SIZE_Z), floor_div(wx, CHUNK_SIZE_X)}) != 0u;
+    };
+
+    std::vector<VoxelVertex>& vertices = out_mesh.vertices;
+    std::vector<u32>& indices = out_mesh.indices;
+    vertices.reserve(tile.sample_count());
+    for (u32 z = 0; z < n; ++z) for (u32 x = 0; x < n; ++x) {
+        const std::size_t index = static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * n;
+        vertices.push_back({Vec3(static_cast<float>(x * step_i), World::DequantizeFarLodHeight(tile.height_q[index]), static_cast<float>(z * step_i)), Vec3(0.0f), static_cast<u32>(tile.material[index])});
+    }
+    const auto vertex_index = [n](u32 x, u32 z) { return z * n + x; };
+    for (u32 z = 0; z + 1 < n; ++z) for (u32 x = 0; x + 1 < n; ++x) {
+        if (owned_cell(x, z)) continue;
+        const u32 a = vertex_index(x, z), b = vertex_index(x + 1, z), c = vertex_index(x, z + 1), d = vertex_index(x + 1, z + 1);
+        indices.insert(indices.end(), {a, d, b, a, c, d});
+    }
+
+    const IVec3 corners[8] = {{0,0,0},{1,0,0},{1,0,1},{0,0,1},{0,1,0},{1,1,0},{1,1,1},{0,1,1}};
+    const int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
+    for (const auto& brick : assembly.bricks) {
+        if (owned.count({brick.chunk_z, brick.chunk_x}) == 0u) continue;
+        for (u32 z = 0; z + 1 < brick_side; ++z) for (u32 y = 0; y + 1 < brick_side; ++y) for (u32 x = 0; x + 1 < brick_side; ++x) {
+            const int wx0 = brick.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step_i;
+            const int wz0 = brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i;
+            if (wx0 < min_x || wx0 >= min_x + World::kFarLodRegionSizeMeters || wz0 < min_z || wz0 >= min_z + World::kFarLodRegionSizeMeters) continue;
+            GridCell cell; Sample values[8]; int cube = 0;
+            for (int c = 0; c < 8; ++c) {
+                const int wx = wx0 + corners[c].x * step_i, wy = brick.chunk_y * CHUNK_SIZE_Y + (static_cast<int>(y) + corners[c].y) * step_i, wz = wz0 + corners[c].z * step_i;
+                const auto found = samples.find(std::make_tuple(wx, wy, wz)); if (found == samples.end()) return fail();
+                values[c] = found->second; cell.p[c] = Vec3(static_cast<float>(wx - min_x), static_cast<float>(wy), static_cast<float>(wz - min_z));
+                cell.val[c] = World::DequantizeFarLodSdf(values[c].density); if (cell.val[c] < 0.0f) cube |= 1 << c;
+            }
+            const unsigned int mask = edgeTable[cube]; if (mask == 0u) continue;
+            u32 edge_vertices[12]{};
+            for (int edge = 0; edge < 12; ++edge) if ((mask & (1u << edge)) != 0u) {
+                const int a = edges[edge][0], b = edges[edge][1], solid = cell.val[a] < 0.0f ? a : b;
+                const int local_x = static_cast<int>(cell.p[solid].x) / step_i, local_z = static_cast<int>(cell.p[solid].z) / step_i;
+                const u8 material = values[solid].material == 0xffu ? tile.material[static_cast<std::size_t>(local_x) + static_cast<std::size_t>(local_z) * n] : values[solid].material;
+                edge_vertices[edge] = static_cast<u32>(vertices.size()); vertices.push_back({VertexInterp(0.0f, cell.p[a], cell.p[b], cell.val[a], cell.val[b]), Vec3(0.0f), static_cast<u32>(material)});
+            }
+            const Vec3 gradient = EstimateDensityGradient(cell);
+            for (int t = 0; triTable[cube][t] != -1; t += 3) { u32 a = edge_vertices[triTable[cube][t]], b = edge_vertices[triTable[cube][t+1]], c = edge_vertices[triTable[cube][t+2]]; const Vec3 normal = glm::cross(vertices[b].position - vertices[a].position, vertices[c].position - vertices[a].position); if (glm::dot(normal, normal) <= 1.0e-10f) continue; if (glm::dot(normal, gradient) < 0.0f) std::swap(b,c); indices.insert(indices.end(), {a,b,c}); }
+        }
+    }
+
+    const float drop = static_cast<float>(step_i);
+    const auto skirt = [&](u32 a_index, u32 b_index, const Vec3& out) {
+        const VoxelVertex a = vertices[a_index], b = vertices[b_index]; const u32 base = static_cast<u32>(vertices.size());
+        vertices.push_back({a.position,out,a.material_id}); vertices.push_back({b.position,out,b.material_id}); vertices.push_back({b.position-Vec3(0.0f,drop,0.0f),out,b.material_id}); vertices.push_back({a.position-Vec3(0.0f,drop,0.0f),out,a.material_id});
+        AppendOrientedTriangle(indices, vertices, base, base+1u, base+2u, out); AppendOrientedTriangle(indices, vertices, base, base+2u, base+3u, out); ++stats.skirt_quads;
+    };
+    for (u32 x = 0; x + 1 < n; ++x) { if (!owned_cell(x,0)) skirt(vertex_index(x,0),vertex_index(x+1,0),Vec3(0,0,-1)); if (!owned_cell(x,n-2)) skirt(vertex_index(x,n-1),vertex_index(x+1,n-1),Vec3(0,0,1)); }
+    for (u32 z = 0; z + 1 < n; ++z) { if (!owned_cell(0,z)) skirt(vertex_index(0,z),vertex_index(0,z+1),Vec3(-1,0,0)); if (!owned_cell(n-2,z)) skirt(vertex_index(n-1,z),vertex_index(n-1,z+1),Vec3(1,0,0)); }
+    for (std::size_t i = 0; i + 2 < indices.size(); i += 3) { VoxelVertex& a = vertices[indices[i]], &b = vertices[indices[i+1]], &c = vertices[indices[i+2]]; const Vec3 normal = glm::cross(b.position-a.position,c.position-a.position); a.normal += normal; b.normal += normal; c.normal += normal; }
+    for (VoxelVertex& vertex : vertices) vertex.normal = glm::dot(vertex.normal, vertex.normal) > 0.0f ? glm::normalize(vertex.normal) : Vec3(0,1,0);
+    stats.vertices = vertices.size(); stats.indices = indices.size(); stats.triangles = indices.size()/3u; return stats;
 }
 
 void ResetTerrainMeshBuildStats() {

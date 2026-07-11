@@ -115,7 +115,9 @@ TEST(FarLodWorker, AuthoritativeCaptureBuildsPersistsAndStales) {
         world, *snapshot, FarLodTier::F1, 0, 0, save.path);
     ASSERT_TRUE(outcome.ok) << outcome.error;
     EXPECT_TRUE(outcome.changed);
-    ASSERT_EQ(outcome.tile.sdf_bricks.size(), 27u);
+    // Generated stack support is transient mesh input.  The persisted home
+    // tile retains only its home-region authoritative brick.
+    ASSERT_EQ(outcome.tile.sdf_bricks.size(), 1u);
     EXPECT_EQ(std::count_if(outcome.tile.sdf_bricks.begin(), outcome.tile.sdf_bricks.end(),
         [](const FarLodSdfBrickDescriptor& brick) {
             return brick.source_kind == FarLodBrickSourceKind::Authoritative;
@@ -249,4 +251,47 @@ TEST(FarLodWorker, SurfaceWaterComesFromHighestAuthoritativeSdfCrossing) {
     const auto underground_cave = build(12.0f, 12.0f, true);
     ASSERT_TRUE(underground_cave.ok) << underground_cave.error;
     EXPECT_EQ(underground_cave.tile.flags[center] & kFarLodSampleFlagWater, 0u);
+}
+
+TEST(FarLodWorker, CrossRegionEdgeAndCornerAuthorityRemainTransientForBothTiers) {
+    for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
+        const TerrainGenParams params = FlatParams();
+        SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+        // This chunk is the max-X/max-Z corner of region (0,0), and must
+        // therefore promote the touching boundary columns of region (1,1).
+        auto chunk = std::make_shared<Chunk>(IVec3(31, 0, 31));
+        world.GenerateChunkData(*chunk, 1);
+        const int side = CHUNK_SIZE_X + 1;
+        for (int z = 0; z <= CHUNK_SIZE_Z; z += FarLodSampleStepMeters(tier)) {
+            for (int y = 0; y <= CHUNK_SIZE_Y; y += FarLodSampleStepMeters(tier)) {
+                for (int x = 0; x <= CHUNK_SIZE_X; x += FarLodSampleStepMeters(tier)) {
+                    const std::size_t index = static_cast<std::size_t>(x) +
+                        static_cast<std::size_t>(y) * side + static_cast<std::size_t>(z) * side * side;
+                    chunk->sdf_data[index] = static_cast<float>(y) - 7.0f;
+                }
+            }
+        }
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
+
+        TempSaveDir save;
+        const auto source_snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
+        ASSERT_TRUE(source_snapshot);
+        const auto source = BuildFarLodWorkerTile(world, *source_snapshot, tier, 0, 0, save.path);
+        ASSERT_TRUE(source.ok) << source.error;
+        std::vector<std::string> errors;
+        ASSERT_TRUE(FarLodStore(save.path).save_tile(source.tile, &errors));
+
+        const auto target_snapshot = world.capture_far_lod_sdf_snapshot(1, 1);
+        ASSERT_TRUE(target_snapshot);
+        const auto target = BuildFarLodWorkerTile(world, *target_snapshot, tier, 1, 1, save.path);
+        ASSERT_TRUE(target.ok) << target.error;
+        EXPECT_FALSE(target.mesh.indices.empty());
+        for (const FarLodSdfBrickDescriptor& descriptor : target.tile.sdf_bricks) {
+            EXPECT_GE(descriptor.local_chunk_x, 0u);
+            EXPECT_LT(descriptor.local_chunk_x, 32u);
+            EXPECT_GE(descriptor.local_chunk_z, 0u);
+            EXPECT_LT(descriptor.local_chunk_z, 32u);
+        }
+    }
 }

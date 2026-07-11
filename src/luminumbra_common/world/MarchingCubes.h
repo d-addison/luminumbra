@@ -14,6 +14,7 @@ namespace Luminumbra::Systems {
 namespace Luminumbra::World {
     struct FarLodTile;
     struct FarLodRegionMesh;
+    struct FarLodRegionSdfAssembly;
 }
 
 namespace Luminumbra::World::MarchingCubes {
@@ -116,6 +117,14 @@ namespace Luminumbra::World::MarchingCubes {
      */
     FarLodRegionMeshStats GenerateFarLodRegionMesh(
         const World::FarLodTile& tile,
+        World::FarLodRegionMesh& out_mesh
+    );
+
+    // Cross-region SDF variant.  The background remains the requested home
+    // tile, while all SDF reads use the owned world-coordinate assembly.
+    FarLodRegionMeshStats GenerateFarLodRegionMesh(
+        const World::FarLodTile& tile,
+        const World::FarLodRegionSdfAssembly& assembly,
         World::FarLodRegionMesh& out_mesh
     );
 

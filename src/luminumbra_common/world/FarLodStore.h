@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Luminumbra::Systems {
@@ -90,6 +91,37 @@ struct FarLodSdfBrickDescriptor {
     i32 chunk_y = 0;
     u32 revision = 0;
     u32 payload_crc32 = 0;
+};
+
+// Worker-only descriptor for an assembled mesh input.  Unlike the persisted
+// FSD2 descriptor it is expressed in absolute chunk coordinates and therefore
+// can describe the one-chunk halo that crosses a home-region boundary.
+struct FarLodWorldSdfBrickDescriptor {
+    i32 chunk_x = 0;
+    i32 chunk_z = 0;
+    i32 chunk_y = 0;
+    FarLodBrickSourceKind source_kind = FarLodBrickSourceKind::Authoritative;
+    u32 revision = 0;
+    u32 payload_crc32 = 0;
+};
+
+// An owned, transient world-coordinate SDF view passed from a far worker to
+// the mesher.  It is deliberately separate from FarLodTile: neighbours and
+// generated halo support are mesh inputs only and can never be persisted in
+// the requested region record.
+struct FarLodRegionSdfAssembly {
+    FarLodTier tier = FarLodTier::F1;
+    i32 rx = 0;
+    i32 rz = 0;
+    u64 params_hash = 0;
+    // Canonically sorted (chunk_z, chunk_x) absolute columns.
+    std::vector<std::pair<i32, i32>> authority_columns;
+    std::vector<std::pair<i32, i32>> owned_columns;
+    // Canonically sorted by (chunk_z, chunk_x, chunk_y).  Each descriptor owns
+    // FarLodSdfBrickSampleCount(tier) consecutive density/material samples.
+    std::vector<FarLodWorldSdfBrickDescriptor> bricks;
+    std::vector<i16> density_q;
+    std::vector<u8> material;
 };
 
 // An owned full-lattice snapshot. Far workers consume this value instead of a
