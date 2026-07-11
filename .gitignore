@@ -43,6 +43,9 @@ imgui.ini
 # Transient build/run capture logs dumped during dev iteration (not source of truth)
 .forge/artifacts/
 
+# Forge-generated Codex native-agent profiles (per-task, never source)
+.codex/agents/
+
 # Local-only project data
 /worlds/saves/
 /docs/internal/
