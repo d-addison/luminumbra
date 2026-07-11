@@ -3041,6 +3041,10 @@ TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
         "scenario_config.requires_pinned_capture() || !g_render_benchmark_path.empty()"),
         std::string::npos);
     EXPECT_NE(frontier.find("$env:LUMIN_CLOUD_QUALITY = \"2\""), std::string::npos);
+    EXPECT_NE(frontier.find("foreach ($run in 1..3)"), std::string::npos);
+    EXPECT_NE(frontier.find("--render-benchmark-warmup 600"), std::string::npos);
+    EXPECT_NE(frontier.find("--render-benchmark-frames 300"), std::string::npos);
+    EXPECT_NE(frontier.find("selection = \"median_total_of_three\""), std::string::npos);
     EXPECT_NE(frontier.find("budget = 3.33"), std::string::npos);
 }
 
