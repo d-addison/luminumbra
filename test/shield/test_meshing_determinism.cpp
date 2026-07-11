@@ -133,29 +133,36 @@ TerrainGenParams MakeFlatSurfaceParams() {
 // SHIELD-17 re-pin (spec 021, 2026-07-03): the step-1 VERTEX hashes below were
 // re-pinned for commit d53c99c5 (2026-06-26, "analytic MC normals") — a
 // deliberate render-only change to unit-step vertex NORMALS. Evidence chain:
-// index hashes + vertex counts UNCHANGED (same topology), coarse steps 2/4
-// UNCHANGED (heightfield path untouched), all pins pass byte-exact at
-// d53c99c5~1, and mesh bytes are world_hash-EXCLUDED so --smoke was unaffected
+// index hashes + vertex counts UNCHANGED (same topology), all pins pass
+// byte-exact at d53c99c5~1, and mesh bytes are world_hash-EXCLUDED so --smoke
+// was unaffected
 // throughout (which is exactly why this drift sat invisible until the full
 // ctest lane ran — the OPS-09 lesson).
+//
+// SHIELD-08 re-pin (2026-07-10 nightly 200301): steps 2/4 deliberately moved
+// from the analytic heightfield path to aligned samples of the resident
+// authoritative SDF lattice. All three step-1 vertex/index pairs below stayed
+// byte-identical. The six coarse pairs changed deterministically, were printed
+// identically by repeated focused runs, and remain render-only/world-hash
+// excluded. This records the intended representation change without changing
+// a simulation hash or relaxing the byte-exact gate.
 TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
     const ExpectedMeshHashes expected[3] = {
         {1, 0xc9f19ad96ac304caull, 0x3810ee7a8afe33d3ull},
-        {2, 0xdc1a13f81cb0558full, 0x394253726e701f4dull},
-        {4, 0x7e98cc1435877992ull, 0x8a8b92607bf5a5e1ull},
+        {2, 0xc97ec36ec178039dull, 0xdb4674d1012830e6ull},
+        {4, 0xe844d2832557de7dull, 0xcfa16e271f9baec9ull},
     };
     VerifyCombo("archipelago seed=42 chunk=(0,0,0)", MakeArchipelagoParams(), 42, IVec3(0, 0, 0), expected);
 }
 
 TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
-    // Steps 2 and 4 use the coarse heightfield path; the 40m-high terrain
-    // surface is above this chunk, so the coarse mesh is legitimately empty
-    // (FNV-1a-64 offset basis == hash of zero bytes).
-    // Step-1 vertex hash re-pinned for d53c99c5 analytic normals (see above).
+    // Step 1 keeps the d53c99c5 analytic-normal pin. Steps 2 and 4 now sample
+    // the resident cave-bearing SDF and therefore intentionally produce
+    // non-empty topology instead of the old empty heightfield approximation.
     const ExpectedMeshHashes expected[3] = {
         {1, 0x3c13cffb2df9002bull, 0x5c5461c111230d31ull},
-        {2, 0xcbf29ce484222325ull, 0xcbf29ce484222325ull},
-        {4, 0xcbf29ce484222325ull, 0xcbf29ce484222325ull},
+        {2, 0x4ccea9a8928dcb11ull, 0x31e388b242ffade9ull},
+        {4, 0x93681086fb859095ull, 0x8a80deef5ebdaf50ull},
     };
     VerifyCombo("caves seed=12345 chunk=(0,0,0)", MakeCaveParams(), 12345, IVec3(0, 0, 0), expected);
 }
@@ -163,8 +170,8 @@ TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
 TEST(MeshingDeterminism, FlatSurfaceChunkHashesAreStable) {
     const ExpectedMeshHashes expected[3] = {
         {1, 0x8108751b0ed03207ull, 0xcbacacb06ef692e3ull},
-        {2, 0xba1b3e29a667172full, 0x394253726e701f4dull},
-        {4, 0xfa87d667e9478c47ull, 0x8a8b92607bf5a5e1ull},
+        {2, 0x440ca86c8e7feb2full, 0x84202cee8631b65full},
+        {4, 0xbc6a9e9e583d2347ull, 0x08953fb8355470d3ull},
     };
     VerifyCombo("flat seed=1337 chunk=(0,0,0)", MakeFlatSurfaceParams(), 1337, IVec3(0, 0, 0), expected);
 }
