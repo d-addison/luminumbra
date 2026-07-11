@@ -3097,6 +3097,9 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
               std::string::npos);
     EXPECT_NE(registrar.find("-LogonType Interactive"), std::string::npos);
     EXPECT_NE(registrar.find("-RunLevel Limited"), std::string::npos);
+    EXPECT_NE(registrar.find("Resolve-PrincipalSidValue"), std::string::npos);
+    EXPECT_NE(registrar.find("$identity.User.Value"), std::string::npos);
+    EXPECT_NE(registrar.find("$currentPrincipalSid"), std::string::npos);
     EXPECT_EQ(registrar.find("RunLevel Highest"), std::string::npos);
     EXPECT_EQ(registrar.find("BuiltInRole]::Administrator"), std::string::npos);
     const auto first_principal = registrar.find("-Principal $taskPrincipal");
@@ -3120,6 +3123,10 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     }
     for (const char* seam : {
              "$taskPrincipal.UserId",
+             "$taskPrincipalSid",
+             "$identity.User.Value",
+             "Translate(",
+             "[Security.Principal.SecurityIdentifier]",
              "$taskPrincipal.LogonType",
              "$taskPrincipal.RunLevel",
              "$trigger.Enabled",
