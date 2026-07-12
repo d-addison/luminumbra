@@ -1,0 +1,18 @@
+# Luminumbra total-audit: byte-hash-gated campaign artifacts.
+#
+# The campaign is self-attesting: the Codex route-witness shim SHA-256s the routing
+# witness into an append-only root receipt, and each task record declares a SHA-256
+# for every generated evidence artifact. Those hashes are re-verified post-merge,
+# AFTER git has checked the files back out.
+#
+# This box runs core.autocrlf=true. Without an attribute pin, git rewrites EOLs on
+# checkout (LF -> CRLF), so the verified bytes are NOT the hashed bytes and every
+# SHA-256 gate fails closed -- no agent can ever pass. It is strictly worse for the
+# routing witness, which PowerShell writes with MIXED EOLs (ConvertTo-Json emits a
+# CRLF body, the shim appends a bare LF terminator): autocrlf collapses all CRLF to
+# LF on commit, then re-expands EVERY LF to CRLF on checkout -- including the
+# terminator -- so those bytes can never round-trip at all.
+#
+# Disable EOL conversion for the campaign tree so committed bytes == hashed bytes.
+# This does not weaken any gate; it makes the existing gates verifiable.
+.forge/campaigns/luminumbra-total-audit/** -text
