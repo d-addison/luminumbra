@@ -18,6 +18,14 @@ name = "lockstep-loopback"
 entrypoint = "steps/lockstep.ts"
 export = "runLockstep"
 
+[[gates]]
+name = "simulation"
+description = "Run the deterministic smoke simulation and require a successful process, retained output, and a world hash"
+entrypoint = "gates/simulation-gate.ts"
+export = "runSimulationGate"
+from_phase = "implement"
+to_phase = "verify"
+
 [result]
 schema = "banso.sim.result.v1"
 description = "Each step returns exact process arguments, a verbatim world_hash or null, the raw exit state and its mechanical exit class, and paths to captured evidence."

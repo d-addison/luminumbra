@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --experimental-strip-types test/parsers.test.ts"
+    "gate": "node --experimental-strip-types gates/simulation-gate.ts",
+    "test": "node --test --experimental-strip-types test/parsers.test.ts test/gate.test.ts"
   },
   "engines": {
     "node": ">=22.6"
