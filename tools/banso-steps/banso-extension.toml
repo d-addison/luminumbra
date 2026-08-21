@@ -1,0 +1,5 @@
+[extension]
+name = "luminumbra-steps"
+version = "0.1.0"
+description = "Shared process supervision and run manifest support for Luminumbra steps"
+
