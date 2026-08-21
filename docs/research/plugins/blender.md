@@ -130,6 +130,50 @@ An MCP server can eventually expose “inspect scene,” “run engine validatio
 
 A REST asset farm is unjustified until there is a real need for centralized licenses, expensive bakes, or many artists; it adds upload security, storage, queueing, and exact Blender-image reproducibility. An LSP models text documents and does not naturally map diagnostics back into a binary `.blend`; use the Blender add-on panel and JSON/CLI diagnostics instead.
 
+## Geometry nodes
+
+Geometry nodes are a useful **offline procedural authoring adapter**, not a new runtime asset format. A checked-in `.blend` can hold versioned node groups for trunks, branches, leaves, rocks, or other repeated forms; automation evaluates a declared graph and parameter set, bakes its result to an ordinary mesh, and then enters the same restricted-GLB pipeline described above. The authoritative sequence remains `evaluate -> realize/convert -> export temporary GLB -> engine-compatibility validator -> asset_processor -> atomic publish`. Geometry nodes therefore extend the headless exporter, validator, and DCC-neutral contract rather than bypassing any of them.
+
+### Candidate integrations
+
+| Candidate | Delivery form | Effort | Risk | Verdict |
+|---|---|---:|---:|---|
+| Evaluated-mesh bake adapter | Shared **`bpy` Python module** used by the headless exporter and Blender add-on | Medium | Medium | **P1 adopt after the validator and batch exporter** |
+| Deterministic asset-family regeneration | Versioned variant **JSON sidecar** plus **Banso YAML/TypeScript step** | Medium | Medium | **P1 adopt for graph-authored families** |
+| Vegetation node-group library | Checked-in **`.blend` node-group library** plus reviewed variant presets | Medium-high | Medium | **P2 pilot with one static species family** |
+| Geometry-nodes contract preflight | **`bpy` inspection script** plus rules in the existing validator's JSON report | Medium | Low-medium | **P1 adopt with the bake adapter** |
+
+#### Evaluated-mesh bake adapter — shared `bpy` module
+
+Run Blender in background mode through the existing batch command. On a disposable copy of the declared export collection, set geometry-node modifier interface inputs from the sidecar, set an explicit frame, update the dependency graph, and obtain each evaluated object with `evaluated_get`. `bpy.data.meshes.new_from_object(evaluated_object)` materializes the post-modifier mesh without depending on UI operator context; applying the modifier with `bpy.ops.object.modifier_apply` is an acceptable pinned alternative when the exporter requires an applied object, but it must operate only on the disposable copy. The supported graph contract ends in **Realize Instances**, and the bake rejects any remaining instances or non-mesh components before export. Blender documents that evaluated objects include modifiers and that `new_from_object` copies evaluated geometry, while Realize Instances converts instances to real geometry and propagates their attributes.
+
+The baked collection then uses the existing engine-correct GLB profile. It must still produce indexed triangles with `POSITION`, `NORMAL`, and the material-selected UV set required by `asset_processor`; it must still pass the DCC-neutral sidecar checks, the engine-compatibility validator, and the processor smoke check ([`tools/asset_processor.cpp:554-688`](../../../tools/asset_processor.cpp)). Baking is not evidence of compatibility on its own. This candidate is **medium effort / medium risk** because dependency-graph evaluation is bounded, but Blender-version drift, operator context, instance expansion, and unexpectedly large realized meshes need golden fixtures and triangle-budget checks.
+
+#### Deterministic asset-family regeneration — sidecar plus Banso step
+
+Extend `<asset>.luminumbra-asset.json` with a geometry-nodes source block containing the pinned Blender version, `.blend` path and digest, node-group name/revision, source collection, explicit frame, and a lexically sorted variant matrix. Every variant has a stable ID and output path plus all exposed inputs, including an explicit integer `seed` and any dimensions, densities, switches, material choices, or named-attribute inputs. Do not read wall-clock time, an implicit current frame, UI selection, or an unrecorded scene property. A fixed graph revision and identical complete input map must describe the same intended result.
+
+A typed Banso step such as `assets.geometry_nodes_family` expands that matrix in stable order, launches a fresh pinned background Blender process per variant (or resets to a known factory copy), invokes the bake adapter, and delegates to the existing exporter, validator, and configure/build bridge. Its result JSON records source and graph digests, canonical inputs, Blender/profile versions, triangle and vertex counts, GLB and compiled-output hashes, texture dependencies, and the complete declared output set. The gate should bake the same variant twice in a clean temporary directory and fail on a hash mismatch before atomically publishing the family. This matches the report's canonical Banso form—YAML composition over typed TypeScript process supervision—and keeps Blender an external host tool ([`docs/research/plugins/automation.md:29-39`](automation.md)). This candidate is **medium effort / medium risk**: the orchestration is conventional, while graph behavior, floating-point/tool-version changes, and stale-family cleanup require pinning and repeatability fixtures.
+
+#### Vegetation node-group library — `.blend` library plus presets
+
+Pilot reusable node groups for static trunks, branch/leaf clusters, grass clumps, and rocks, with low/medium/high authored variants driven by explicit seed and shape inputs. Their role is to generate **render archetype source assets**, not to replace simulation or runtime scattering. `SpeciesRegistry` already maps data-defined species to a `render_archetype` and deterministically samples heritable genomes from a caller-supplied seeded RNG ([`src/luminumbra_common/foliage/SpeciesRegistry.h:31-36`](../../../src/luminumbra_common/foliage/SpeciesRegistry.h), [`src/luminumbra_common/foliage/SpeciesRegistry.h:149-157`](../../../src/luminumbra_common/foliage/SpeciesRegistry.h)); a cooked geometry-nodes family can supply meshes selected by that archetype, but its authoring seed is not the gameplay genome or world RNG.
+
+Likewise, `FoliagePass` owns deterministic terrain placement, density weighting, size/color jitter, sway, and crossed-card rendering ([`src/luminumbra_client/rendering/passes/FoliagePass.cpp:490-521`](../../../src/luminumbra_client/rendering/passes/FoliagePass.cpp), [`src/luminumbra_client/rendering/passes/FoliagePass.cpp:594-628`](../../../src/luminumbra_client/rendering/passes/FoliagePass.cpp), [`src/luminumbra_client/rendering/passes/FoliagePass.cpp:964-967`](../../../src/luminumbra_client/rendering/passes/FoliagePass.cpp)). Geometry nodes may author the source card/clump meshes and textures, but must not pre-bake world placement that competes with that pass. `PlantProcgenPass` currently draws only gameplay marker octahedra, so it is not a second botanical generator to mirror ([`src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp:124-127`](../../../src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp)). High-detail tree outputs can instead feed the client's existing `--bake-tree-impostor` automation path to produce the engine's octahedral impostors ([`docs/research/plugins/automation.md:9`](automation.md)); geometry nodes author the source mesh, while the existing bake remains authoritative for the impostor representation.
+
+This candidate is **medium-high effort / medium risk** because a useful library needs art-direction, UV and texture policy, budgets, and regression fixtures in addition to node graphs. Start with one static, unskinned species family and compare its realized triangle count, UVs, bounds, LODs, and impostor bake before generalizing.
+
+#### Geometry-nodes contract preflight — inspection script plus validator rules
+
+Inspect the declared modifier and node group before baking and include findings in the existing validator's JSON report. Require a resolvable group and input identifiers, an explicit Realize Instances boundary, mesh-only output, stable variant IDs, complete input values, bounded evaluated vertex/triangle counts, finite positions, normals, and the required UV map. Reject undeclared external object/collection dependencies, simulation or time-dependent state without an explicit baked frame/cache contract, and outputs that change across the repeat bake. This preflight improves diagnostics, but only the exported GLB validator and `asset_processor` smoke output decide acceptance. Delivery is a **`bpy` inspection script plus validator rules**, at **medium effort / low-medium risk**, because false confidence is contained by preserving the existing post-export gates.
+
+### Attribute and content limits
+
+- **Non-mesh outputs:** curves must be converted to mesh; point clouds and instances must be realized; volumes, grease-pencil data, simulation zones without a pinned cache/frame contract, and any other residual geometry component are rejected. Realizing a dense canopy can multiply memory and triangle count, so budgets are checked after evaluation, not inferred from source objects.
+- **Attributes:** anonymous fields are graph-internal. Any export-relevant value must be stored as a deliberately named attribute on the correct domain and then transferred to a conventional UV map or color attribute before the evaluated mesh is copied. Blender supports named attributes and exposes UV maps and color attributes through that system, but luminumbra's current static compiler reads positions, normals, and one UV set only. UV data can therefore survive when exported as the selected `TEXCOORD_n`; vertex colors and arbitrary custom attributes are currently authoring/bake inputs only and must not be treated as runtime data unless the restricted GLB contract and `asset_processor` are deliberately extended.
+- **Skinned content:** keep the first geometry-nodes delivery static. Topology generation and modifier application can invalidate armature bindings or fail to produce the exact `JOINTS_0`/`WEIGHTS_0` lanes required by LMS2. A future skinned graph is acceptable only if the baked mesh retains one supported skin, at most four normalized influences, stable joint names, and all existing skinned-validator checks; geometry nodes do not relax that contract.
+- **Pipeline ownership:** the node-group library owns authoring recipes, the sidecar owns inputs and expected outputs, Blender owns graph evaluation, the DCC-neutral validator owns interchange acceptance, and `asset_processor` owns `.lmesh`/`.lanim` cooking. Runtime procedural systems continue to own simulation, species genomes, world placement, sway, and impostor selection.
+
 ## Ranking
 
 | Rank | Integration | Why this order |
@@ -158,6 +202,10 @@ Repository files inspected (no architecture claims were taken from `README.md`):
 - [`CMakeLists.txt`](../../../CMakeLists.txt) — configure-time `assets/**/*.glb` discovery and custom processing commands.
 - [`cmake/runtime_data_manifest.cmake`](../../../cmake/runtime_data_manifest.cmake) — authored runtime-data inventory.
 - [`tools/generate_grovestrider_gltf.py`](../../../tools/generate_grovestrider_gltf.py) — current skinned glTF fixture shape.
+- [`src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp`](../../../src/luminumbra_client/rendering/passes/PlantProcgenPass.cpp) — current marker-only responsibility of the nominal plant procedural rendering pass.
+- [`src/luminumbra_client/rendering/passes/FoliagePass.cpp`](../../../src/luminumbra_client/rendering/passes/FoliagePass.cpp) — deterministic terrain scatter, render archetypes, sway, and crossed-card foliage rendering.
+- [`src/luminumbra_common/foliage/SpeciesRegistry.h`](../../../src/luminumbra_common/foliage/SpeciesRegistry.h) — species-to-render-archetype mapping and deterministic genome sampling.
+- [`docs/research/plugins/automation.md`](automation.md) — canonical Banso delivery conventions and the existing tree-impostor bake automation surface.
 - [`docs/research/engine-library-landscape-2026.md`](../engine-library-landscape-2026.md) — prior repository research that places DCC interoperability at an offline asset boundary rather than in the runtime.
 
 Web sources consulted:
@@ -165,5 +213,8 @@ Web sources consulted:
 - [Blender 5.0 manual: glTF 2.0 importer/exporter](https://docs.blender.org/manual/en/5.0/addons/import_export/scene_gltf2.html) — supported mesh, material, skinning, and animation export behavior.
 - [Blender Python API: `bpy.ops.export_scene.gltf`](https://docs.blender.org/api/main/bpy.ops.export_scene.html) — callable exporter parameters used by the proposed profile.
 - [Blender manual: command-line arguments](https://docs.blender.org/manual/en/latest/advanced/command_line/arguments.html) — background execution, Python scripts, argument ordering, and Python exception exit codes.
+- [Blender 5.0 manual: Realize Instances](https://docs.blender.org/manual/en/5.0/modeling/geometry_nodes/instances/realize_instances.html) — conversion of instances to real geometry and attribute propagation.
+- [Blender 5.0 Python API: dependency graph](https://docs.blender.org/api/5.0/bpy.types.Depsgraph.html) — evaluated objects, modifier-aware meshes, and `bpy.data.meshes.new_from_object`.
+- [Blender 5.0 manual: geometry-nodes attributes](https://docs.blender.org/manual/en/5.0/modeling/geometry_nodes/attributes_reference.html) — named/anonymous attributes, domains, UV maps, and color attributes.
 - [Khronos glTF 2.0 specification](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html) — normative geometry, skins, `JOINTS_n`/`WEIGHTS_n`, animations, accessors, and GLB rules.
 - [Khronos glTF Validator](https://github.com/KhronosGroup/glTF-Validator/blob/main/README.md) — standards validation coverage, JSON reports, recursive CLI mode, and nonzero-on-error behavior.
