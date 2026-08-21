@@ -1,0 +1,16 @@
+schema_version = 1
+
+[extension]
+id = "banso-audio"
+name = "Banso Audio"
+version = "0.1.0"
+description = "Audio asset workflow steps for Banso pipelines."
+
+[[steps]]
+id = "audio-bank-validate"
+name = "Validate audio banks"
+description = "Validate audio bank manifests and their referenced assets."
+runtime = "node"
+entrypoint = "steps/bank-validate.ts"
+output = "json"
+
