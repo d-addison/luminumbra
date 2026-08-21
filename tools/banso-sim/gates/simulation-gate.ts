@@ -98,9 +98,18 @@ function evidenceCandidate(result: SimulationStepResult, stream: "stdout" | "std
   }
   const keys = [stream, `${stream}_path`, `${stream}Path`];
   for (const key of keys) {
-    if (result.evidence[key] !== undefined) {
-      return result.evidence[key];
+    const value = result.evidence[key];
+    if (value === undefined) {
+      continue;
     }
+    if (Array.isArray(value)) {
+      const last = value.at(-1);
+      if (typeof last === "string") {
+        return last;
+      }
+      continue;
+    }
+    return value;
   }
   return undefined;
 }
@@ -281,15 +290,17 @@ function spawnErrorResult(options: SimulationGateOptions, error: unknown): Simul
 export async function runSimulationGate(options: SimulationGateOptions): Promise<SimulationGateReport> {
   const cwd = options.cwd ?? process.cwd();
   const evidenceRoot = path.resolve(cwd, options.evidenceRoot ?? ".banso/evidence/simulation");
+  const smokeArgs = options.smokeArgs ?? [];
+  const readFlag = (name: string, fallback: string): string => {
+    const index = smokeArgs.lastIndexOf(name);
+    const value = index >= 0 ? smokeArgs.at(index + 1) : undefined;
+    return value ?? fallback;
+  };
   const parameters: UnknownRecord = {
-    serverBinary: options.serverBinary,
-    server: options.serverBinary,
-    binary: options.serverBinary,
-    args: options.smokeArgs ?? [],
-    smokeArgs: options.smokeArgs ?? [],
-    cwd,
-    evidenceDirectory: evidenceRoot,
-    evidenceDir: evidenceRoot,
+    executable: path.resolve(cwd, options.serverBinary),
+    seed: readFlag("--seed", "1"),
+    ticks: readFlag("--ticks", "300"),
+    evidence_directory: evidenceRoot,
   };
 
   let result: SimulationStepResult;

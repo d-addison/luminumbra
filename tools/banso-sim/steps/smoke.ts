@@ -50,7 +50,7 @@ export interface SmokeParameters {
 }
 
 const WORLD_HASH_PATTERN =
-  /(?:^|[\s,{])(?:"world_hash"|world_hash)\s*(?:=|:)\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s,}\]]+))/gm;
+  /(?:^|[\s,{])(?:"world_hash"|world_hash)\s*(?:=|:)\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|([^\s,=}\]]+))/gm;
 
 /** Returns the last world_hash token exactly as it appeared in the transcript. */
 export function extractWorldHash(output: string): string | null {
