@@ -1,0 +1,13 @@
+{
+  "name": "@luminumbra/banso-blender",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "regenerate-assets": "node --experimental-strip-types steps/regenerate-assets.ts",
+    "test": "node --experimental-strip-types --test test/regenerate.test.ts"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}
