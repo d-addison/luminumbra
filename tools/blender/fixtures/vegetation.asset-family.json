@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "sourceBlend": "vegetation.blend",
+  "targetObject": "Vegetation",
+  "expectedBlenderVersion": "5.1",
+  "parameterMatrix": {
+    "seeds": [1, 7],
+    "parameters": {
+      "Density": [1.5, 3.0]
+    }
+  },
+  "output": {
+    "directory": "staging/vegetation",
+    "glbNamingPattern": "vegetation-{seed}-{index}.glb",
+    "manifest": "family-manifest.json"
+  }
+}

@@ -56,3 +56,5 @@ Thumbs.db
 
 # Steamworks SDK (NOT redistributable -- owner-provided, never commit)
 vendor/steamworks/
+tools/blender/fixtures/*.blend
+tools/blender/fixtures/staging/

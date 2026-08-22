@@ -69,14 +69,22 @@ export interface FamilyManifestOutput {
     argv: string[];
     exitCode: number;
     verdict: "green" | "red";
+    stderrTail: string;
   };
   validator: {
     argv: string[];
     exitCode: number;
     verdict: "green" | "red";
     report: unknown;
+    stderrTail: string;
   };
   verdict: "green" | "red";
+}
+
+// A red verdict without its process output is not actionable evidence; keep
+// the tail of stderr beside every exit code.
+function stderrTail(text: string, limit = 2000): string {
+  return text.length > limit ? text.slice(text.length - limit) : text;
 }
 
 export interface FamilyManifest {
@@ -462,7 +470,10 @@ export async function regenerateAssets(
   sidecarPath: string,
   dependencies: RegenerationDependencies = {},
 ): Promise<FamilyManifest> {
-  const absoluteSidecar = resolve(sidecarPath);
+  // npm --prefix runs the step with the package directory as cwd; INIT_CWD is
+  // where the operator actually invoked it, so relative sidecar paths resolve
+  // against that when present.
+  const absoluteSidecar = resolve(process.env.INIT_CWD ?? process.cwd(), sidecarPath);
   const sidecarDirectory = dirname(absoluteSidecar);
   const sidecar = parseSidecarText(await readFile(absoluteSidecar, "utf8"));
   const sourceBlend = resolve(sidecarDirectory, sidecar.sourceBlend);
@@ -549,12 +560,18 @@ export async function regenerateAssets(
       parameters: member.parameters,
       path: outputPath,
       sha256: outputHash,
-      bake: { argv: bakeArgv, exitCode: bakeResult.exitCode, verdict: bakeVerdict },
+      bake: {
+        argv: bakeArgv,
+        exitCode: bakeResult.exitCode,
+        verdict: bakeVerdict,
+        stderrTail: stderrTail(bakeResult.stderr),
+      },
       validator: {
         argv: validatorArgv,
         exitCode: validatorResult.exitCode,
         verdict: validatorVerdict,
         report: validatorReport,
+        stderrTail: stderrTail(validatorResult.stderr),
       },
       verdict,
     });

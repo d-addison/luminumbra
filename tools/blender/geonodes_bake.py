@@ -399,6 +399,23 @@ def _atomic_write(path: Path, text: str) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
+
+def _supported_export_settings(settings: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
+    """Drop exporter keywords this Blender's glTF operator does not declare.
+
+    The pinned profile names every setting the restricted export relies on;
+    exporter releases add and retire keywords, and an unknown keyword makes the
+    operator raise before exporting anything. Filtering against the operator's
+    own property table keeps the pinned intent and records what was ignored.
+    """
+
+    try:
+        supported = set(bpy.ops.export_scene.gltf.get_rna_type().properties.keys())
+    except Exception:  # noqa: BLE001 - any introspection failure keeps the full set
+        return dict(settings), set()
+    kept = {key: value for key, value in settings.items() if key in supported}
+    return kept, set(settings) - set(kept)
+
 def run_bake(request: BakeRequest) -> dict[str, Any]:
     """Evaluate, export, validate, and publish one geometry-nodes bake."""
 
@@ -422,7 +439,15 @@ def run_bake(request: BakeRequest) -> dict[str, Any]:
         baked = resources["baked"]
         mesh = resources["mesh"]
         _select_only(baked)
-        result = bpy.ops.export_scene.gltf(**build_export_settings(temporary_path))
+        export_settings, dropped_settings = _supported_export_settings(
+            build_export_settings(temporary_path)
+        )
+        if dropped_settings:
+            print(
+                "geonodes_bake: exporter on this Blender ignores settings: "
+                + ", ".join(sorted(dropped_settings))
+            )
+        result = bpy.ops.export_scene.gltf(**export_settings)
         if "FINISHED" not in result or not temporary_path.is_file():
             raise BakeRuntimeError(f"Blender GLB exporter did not finish successfully: {result}")
 
