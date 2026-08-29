@@ -97,3 +97,9 @@ __pycache__/
 # Windows and WSL gits that share this working tree and would reintroduce
 # whole-file EOL churn across the vendored sources. Kept out of the index.
 /vendor/imgui/.gitattributes
+
+# Audio is kept on disk but never in git. The sample library and the generated
+# voice/SFX set together outweighed the entire rest of the repository by an
+# order of magnitude, and neither is something a clone needs to build or run.
+res/audio
+assets/audio
