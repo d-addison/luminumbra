@@ -1,7 +1,7 @@
 {
     "schema":  "luminumbra.perf_baseline.v1",
     "captured_at":  "2026-06-11T03:12:37Z",
-    "machine_id":  "BUILDHOST",
+    "machine_id":  "UNCAPTURED",
     "runs_aggregated":  3,
     "status":  "blessed",
     "scenarios":  {
@@ -71,7 +71,7 @@
                   },
     "previous":  {
                      "captured_at":  "2026-06-10T22:06:02Z",
-                     "machine_id":  "BUILDHOST",
+                     "machine_id":  "UNCAPTURED",
                      "runs_aggregated":  7,
                      "scenarios":  {
                                        "boot":  {

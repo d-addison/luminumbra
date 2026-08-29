@@ -3201,7 +3201,7 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     // qualified and SID identities; 0/1/2 COM-like instances; malformed
     // path/PID/action/GUID; stale/future/HEAD/interval reports all execute.
     for (const char* fixture : {
-             "BUILDHOST\\David",
+             "BUILDHOST\\gateuser",
              "zero nightly instances",
              "two nightly instances",
              "wrong task path",
