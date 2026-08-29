@@ -1,3 +1,14 @@
+# Normalise text to LF in the object store. This working tree is reached from
+# both the Windows git (core.autocrlf=true, which writes CRLF on checkout) and
+# the WSL git (core.autocrlf=false, which expects LF), so without this every
+# checked-out text file reads as wholly modified to whichever git did not write
+# it -- 610 files at once, byte-identical once CR is stripped. text=auto makes
+# the comparison and the commit happen on normalised bytes, so the churn can
+# neither be seen nor be committed. Binary files are detected and left alone,
+# and the .forge pins below still override this for the byte-hashed campaign
+# tree.
+* text=auto
+
 # Luminumbra total-audit: byte-hash-gated campaign artifacts.
 #
 # The campaign is self-attesting: the Codex route-witness shim SHA-256s the routing
