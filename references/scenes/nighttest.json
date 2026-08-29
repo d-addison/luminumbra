@@ -1,0 +1,6 @@
+{ "_comment": "night horizon w/ clouds — verify stars not through ground/clouds",
+  "camera": { "pos": [8, 54, 8], "yaw": 40, "pitch": -4, "fov": 62 },
+  "time_of_day": 0.30,
+  "clouds": { "coverage": 0.65, "plane_height": 900, "shadow": false },
+  "weather": { "type": "none", "intensity": 0.0 },
+  "screenshot": "references/compare/nighttest.ppm" }

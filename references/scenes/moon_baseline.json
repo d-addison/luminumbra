@@ -1,0 +1,7 @@
+{ "_comment": "Pillar A Codex C5 moon radiance channel baseline — midnight full moon over the lit valley",
+  "camera": { "pos": [8, 54, 8], "yaw": 40, "pitch": -4, "fov": 62 },
+  "time_of_day": 0.5,
+  "moon": 1.0,
+  "clouds": { "coverage": 0.25, "plane_height": 900, "shadow": false },
+  "weather": { "type": "none", "intensity": 0.0 },
+  "screenshot": "references/compare/moon_baseline.ppm" }
