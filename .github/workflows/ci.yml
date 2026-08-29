@@ -50,9 +50,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-vendor-
 
-      # One canonical tree (spec 020 OQ-1): build through the CMakePresets.json `release`
-      # preset -> build/release. Never `cmake -S . -B build` (the retired root tree); the
-      # BuildTreeStrict preflight refuses a concurrent root build/ tree.
+      # One canonical tree: build through the CMakePresets.json `release` preset
+      # into build/release. Never `cmake -S . -B build` (the retired root tree);
+      # the build-tree preflight refuses a concurrent root build/ tree.
       - name: Configure
         run: cmake --preset release
 
@@ -62,10 +62,9 @@ jobs:
       - name: Test
         run: ctest --preset release --output-on-failure
 
-  forge-verify:
-    name: Forge verify
+  lint:
+    name: Format and static analysis
     runs-on: ubuntu-latest
-    needs: build-test
 
     steps:
       - name: Check out repository
@@ -73,5 +72,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Verify Forge gates
-        run: forge verify --validation-policy fail --testing-policy fail
+      - name: Install lint tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: scripts/lint.sh --format-only

@@ -4,36 +4,5 @@
 # checked-out text file reads as wholly modified to whichever git did not write
 # it -- 610 files at once, byte-identical once CR is stripped. text=auto makes
 # the comparison and the commit happen on normalised bytes, so the churn can
-# neither be seen nor be committed. Binary files are detected and left alone,
-# and the .forge pins below still override this for the byte-hashed campaign
-# tree.
+# neither be seen nor be committed. Binary files are detected and left alone.
 * text=auto
-
-# Luminumbra total-audit: byte-hash-gated campaign artifacts.
-#
-# The campaign is self-attesting: the Codex route-witness shim SHA-256s the routing
-# witness into an append-only root receipt, and each task record declares a SHA-256
-# for every generated evidence artifact. Those hashes are re-verified post-merge,
-# AFTER git has checked the files back out.
-#
-# This box runs core.autocrlf=true. Without an attribute pin, git rewrites EOLs on
-# checkout (LF -> CRLF), so the verified bytes are NOT the hashed bytes and every
-# SHA-256 gate fails closed -- no agent can ever pass. It is strictly worse for the
-# routing witness, which PowerShell writes with MIXED EOLs (ConvertTo-Json emits a
-# CRLF body, the shim appends a bare LF terminator): autocrlf collapses all CRLF to
-# LF on commit, then re-expands EVERY LF to CRLF on checkout -- including the
-# terminator -- so those bytes can never round-trip at all.
-#
-# Disable EOL conversion for the campaign tree so committed bytes == hashed bytes.
-# This does not weaken any gate; it makes the existing gates verifiable.
-.forge/campaigns/luminumbra-total-audit/** -text
-
-# The SAME hazard, one directory over, with a different symptom. Any .forge file that
-# git is allowed to smudge (LF -> CRLF on checkout) shows up DIRTY in a freshly created
-# agent worktree, and forge attributes that dirt to the AGENT: it failed
-# T-LTA-002-census for "modified files outside declared scope:
-# .forge/scripts/run-luminumbra-total-audit-wave.ps1" -- a file the agent never opened.
-# The diff is empty once CR is stripped: a pure line-ending artifact of the machinery
-# commits (which are authored LF into CRLF files). Pin the whole .forge tree so an agent
-# worktree checks out byte-identical to HEAD and only the AGENT's real writes show up.
-.forge/** -text

@@ -1,7 +1,7 @@
 #pragma once
 
 // Pillar A (foliage polish): deterministic PROCEDURAL plant-geometry generator.
-// Spec: .forge/specs/foliage-polish/spec.md. PURE function of (genome, growth stage,
+// PURE function of (genome, growth stage,
 // atmosphere) -> branch-skeleton line list. This REPLACES the baked static tree models:
 // plants are grown PROGRAMMATICALLY (recursion), GENETICALLY (genome drives structure),
 // and ATMOSPHERICALLY (branches bend toward the sun — phototropism — and could respond

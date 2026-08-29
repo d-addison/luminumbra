@@ -1,5 +1,5 @@
 // Pillar A — deterministic procedural plant geometry. RED-first tests from spec
-// .forge/specs/foliage-polish/spec.md (AC-A-001..005). Headlessly verifiable: the
+// AC-A-001..005. Headlessly verifiable: the
 // generator is a pure, libm-free, deterministic function of (genome, stage).
 #include <gtest/gtest.h>
 

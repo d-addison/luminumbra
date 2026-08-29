@@ -22,7 +22,7 @@
 #   pwsh -File tools/oracle_vs_replay_count.ps1 [-OutFile <path>]
 
 param(
-    [string]$OutFile = ".forge/artifacts/test-rigor-hardening/oracle-vs-replay-report.md"
+    [string]$OutFile = "build/gate-artifacts/test-rigor-hardening/oracle-vs-replay-report.md"
 )
 
 $ErrorActionPreference = "Stop"

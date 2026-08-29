@@ -1,5 +1,5 @@
 ﻿{
-  "_comment": "SystemConfig registry (Â§1a). DEFAULT / all-off baseline: every system OFF so the canonical world_hash (d950a6afc12a5cdc) and visual baselines stay byte-identical. Spec: .forge/specs/system-config/spec.md. sim.* may change sim state (hashed when enabled); render.* is render-only (never hashed). systems.game.json is the intended-ON profile.",
+  "_comment": "SystemConfig registry (Â§1a). DEFAULT / all-off baseline: every system OFF so the canonical world_hash (d950a6afc12a5cdc) and visual baselines stay byte-identical. sim.* may change sim state (hashed when enabled); render.* is render-only (never hashed). systems.game.json is the intended-ON profile.",
   "sim": {
     "plant_growth": { "enabled": false, "params": { "mutation_rate": 0.05 } },
     "erosion": { "enabled": false },

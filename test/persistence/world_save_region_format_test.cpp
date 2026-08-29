@@ -1,7 +1,7 @@
 // T-I3-7 persistence v2: LMR1 region container round-trip, v1->v2 migration
 // (world-hash equality is the migration gate), .bak retention, and
 // O(edited regions) incremental saves. Container spec:
-// .forge/artifacts/engine-iteration-3/design-decisions.md section 3.
+// design decisions, section 3.
 #include "gtest/gtest.h"
 
 #include "persistence/WorldPersistenceRoundtrip.h"

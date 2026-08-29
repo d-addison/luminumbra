@@ -1,5 +1,5 @@
 // §1a SystemConfig substrate — RED-first tests derived from spec
-// `.forge/specs/system-config/spec.md` Acceptance Criteria AC-SC-001..005.
+// Acceptance Criteria AC-SC-001..005.
 // These reference luminumbra::core::SystemConfig, which does not exist yet:
 // the test is expected to FAIL TO COMPILE until SystemConfig.{h,cpp} land (RED).
 #include <gtest/gtest.h>

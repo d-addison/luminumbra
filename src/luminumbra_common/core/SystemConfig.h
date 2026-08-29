@@ -1,7 +1,7 @@
 #pragma once
 
 // §1a SystemConfig — data-driven feature-flag + per-system tuning registry.
-// Spec: .forge/specs/system-config/spec.md. One registry (data/common/systems.json)
+// One registry (data/common/systems.json)
 // queried by every system so each can be turned on/off + tuned from data, no recompile.
 //
 // Determinism contract (verified against persistence/WorldPersistenceRoundtrip.h):

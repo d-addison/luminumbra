@@ -26,13 +26,17 @@ change:
 Keep manifest paths anchored with `CMAKE_CURRENT_LIST_DIR` so the files can be
 included from either the module directory or the parent `src` directory.
 
-## Forge dispatch
+## Agent dispatch
 
-Luminumbra is a C++ project, so Forge's default post-cherry-pick `cargo check`
-integration step must be disabled before running `forge contracts execute`.
-Source `.forge/env.local.example` (or copy it to `.forge/env.local` and source
-that) into your shell first. Without it, every successful task gets reverted
-with `could not find Cargo.toml`.
+Planned work is dispatched with `banso contracts execute`. The project
+configuration lives in `.banso/`: `workflows/luminumbra-change.yaml` drives the
+phases, `contracts.yaml` gates entry to `verify` and `deploy` on a real preset
+build and CTest run, and `architecture.toml` holds the pillar checks that
+`banso audit architecture` reports on.
+
+Orchestrators that assume a Rust workspace will try to run `cargo` against this
+tree on integration. If a task is reverted with `could not find Cargo.toml`,
+that is the cause; there is no Cargo manifest here by design.
 
 After pulling a CMake change, `rm -rf build/` once before rebuilding — the
 manual source lists and presets can otherwise mismatch the cached state.

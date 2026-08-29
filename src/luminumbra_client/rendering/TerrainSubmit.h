@@ -1,7 +1,7 @@
 #pragma once
 
 // Spec 016 terrain-submit seam (Codex-signed-off:
-// .forge/artifacts/engine-infra-hardening/codex-signoff-shadow-submitter.md).
+// shadow submitter sign-off).
 //
 // GBuffer and Shadow share live-terrain submission. Today each does, via the
 // RenderPipeline `friend`:

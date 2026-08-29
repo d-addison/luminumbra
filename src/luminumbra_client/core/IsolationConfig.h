@@ -3,7 +3,7 @@
 // Isolation / layer render mode config (T-I6, owner-requested). Blender-like
 // "isolate a subsystem/layer against a neutral backdrop" for review/critique/debug.
 //
-// Post-critique v1 (.forge/critique-isolation-layer-spec-20260616.md): isolation is
+// Post-critique v1: isolation is
 // driven by NOT spawning the non-selected content in the scenario world (orthogonal
 // to the render pipeline, near-zero risk), plus a SkyboxPass flat-colour backdrop
 // override. Render-side per-pass masking + transparent RGBA + studio rig + sim

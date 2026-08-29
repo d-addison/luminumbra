@@ -122,7 +122,7 @@ option(LUMINUMBRA_ENABLE_STEAM "Build the Steamworks ISteamNetworkingSockets tra
 set(LUMINUMBRA_STEAM_SDK_DIR "${CMAKE_SOURCE_DIR}/vendor/steamworks/sdk" CACHE PATH "Steamworks SDK root")
 if(LUMINUMBRA_ENABLE_STEAM)
     if(NOT EXISTS "${LUMINUMBRA_STEAM_SDK_DIR}/public/steam/steam_api.h")
-        message(FATAL_ERROR "LUMINUMBRA_ENABLE_STEAM=ON but Steamworks SDK not found at ${LUMINUMBRA_STEAM_SDK_DIR} (see .forge/artifacts/engine-iteration-6/STEAMWORKS-SETUP.md)")
+        message(FATAL_ERROR "LUMINUMBRA_ENABLE_STEAM=ON but Steamworks SDK not found at ${LUMINUMBRA_STEAM_SDK_DIR} (see docs/steamworks-setup.md)")
     endif()
     target_include_directories(luminumbra_common PUBLIC "${LUMINUMBRA_STEAM_SDK_DIR}/public")
     target_compile_definitions(luminumbra_common PUBLIC LUMINUMBRA_ENABLE_STEAM)

@@ -8,9 +8,9 @@ scattered; where a topic has a deeper dedicated doc, this file states the rule a
 
 When guidance conflicts, the higher item wins:
 
-1. A formal spec under `.forge/specs/<feature>/spec.md` (the SDD source of truth for that feature).
+1. A formal spec under `docs/specs/<feature>/spec.md` (the SDD source of truth for that feature).
 2. The locked invariants in `test/features/TDD-LOCK.md` and per-iteration
-   `.forge/artifacts/engine-iteration-*/design-decisions.md`.
+   the per-iteration design-decision records under `docs/`.
 3. **This document.**
 4. Dedicated docs: `docs/TDD.md`, `docs/build/dependency-policy.md`, `CONTRIBUTING.md`, `README.md`.
 5. De-facto code patterns.
@@ -112,7 +112,7 @@ On any code that runs on the sim tick path:
 
 All configuration — engine feature-flags, per-system tuning, **and** player-facing settings — lives
 in **one** registry: `luminumbra::core::SystemConfig` (`core/SystemConfig.{h,cpp}`, spec
-`.forge/specs/system-config/spec.md`). There is no second config system.
+`docs/specs/system-config/spec.md`). There is no second config system.
 
 **Three sections, one determinism boundary:**
 

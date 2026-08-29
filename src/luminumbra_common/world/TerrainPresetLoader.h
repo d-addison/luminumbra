@@ -26,7 +26,7 @@
 namespace Luminumbra::world {
 
 // generation_params.terrain.shaping — reserved keys pinned by
-// .forge/artifacts/engine-iteration-3/panel-1-world-scale.md (spline points
+// (spline points
 // are monotone piecewise-linear control points, [input, output] pairs).
 struct TerrainShapingPreset {
     bool present = false; // block existed in the preset file
