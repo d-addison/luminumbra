@@ -1,0 +1,26 @@
+# Data Classification Policy
+# Maps classification levels to approved provider IDs and the .banso/ log files
+# that belong to each level. Missing or corrupt: banso fails closed.
+levels:
+public:
+providers:
+- cursor
+- codex
+- claude
+log_files: []
+internal:
+providers:
+- cursor
+- codex
+log_files:
+- cost-log.jsonl
+- routing-log.jsonl
+- friction-log.jsonl
+confidential:
+providers:
+- cursor
+log_files:
+- trace-log.jsonl
+- state.json
+- budgets.json
+- tag-budgets.json

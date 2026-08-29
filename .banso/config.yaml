@@ -1,0 +1,81 @@
+# Banso v2 configuration — luminumbra
+# Dispatch authority: execution profiles (single codex profile, gpt-5.6-sol all tiers).
+
+schema_version: 1
+project_name: "luminumbra"
+profile: default
+
+routing:
+  default_tier: standard
+  deescalation_window: 3
+
+budget:
+  on_exceed: warn
+
+tdd:
+  enabled: false
+  scope: per_task
+
+specs:
+  roots:
+    - .banso/specs
+
+execution:
+  active_profile: dispatch.codex
+  profiles:
+    dispatch.codex:
+      backends:
+        codex:
+          provider: openai
+          auth: { kind: cli_sso }
+      models:
+        quick: { backend: codex, model: gpt-5.6-sol }
+        standard: { backend: codex, model: gpt-5.6-sol }
+        deep: { backend: codex, model: gpt-5.6-sol }
+      repositories:
+        primary:
+          path: .
+          mount: primary
+          role: primary
+          authority: read_write
+          source: { kind: snapshot, digest: unpinned }
+          target_branch: unpinned
+          expected_target_head: unpinned
+      workspace_authority:
+        execute_processes: true
+        use_tools: true
+        use_vault_references: false
+        provider_push: false
+      sandbox: { mode: workspace_write, required: true }
+      egress: { mode: unrestricted, risk_acknowledged: true }
+      actions: { default: allow, destructive: confirm, sensitive: confirm }
+      retention:
+        download_outputs_before_cleanup: true
+        archive_on_completion: false
+        delete_on_completion: false
+      data_policy:
+        require_zdr: false
+        require_hipaa_baa: false
+        allow_sensitive_data: false
+        sensitive_data_risk_acknowledged: false
+      max_concurrency: 6
+      budget: {}
+
+dispatch:
+  preflight:
+    symbol_index_refresh_policy: warn
+  sandbox: workspace-write
+  max_parallel_default: 6
+  max_parallel_per_spawner:
+    codex: 6
+
+enrichment:
+  enabled: true
+  steps:
+    web-context:
+      enabled: true
+      skip_on_error: true
+
+websearch:
+  web_default: [duckduckgo]
+  fetch_pages: true

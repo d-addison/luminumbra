@@ -1,0 +1,27 @@
+# banso-generated-gitignore v3
+# Everything under .banso/ is local runtime state unless named below.
+# Banso refreshes this block; add your own rules AFTER the end marker.
+*
+!.gitignore
+# Project configuration and policy -- authored, reviewed, shared with the team.
+!config.yaml
+!workflows/
+!workflows/**
+!gates.yaml
+!architecture.toml
+!labels.yaml
+!teams/
+!teams/**
+# Connector trust. `plugin-trusted-keys.toml` holds PUBLIC signing keys --
+# it is the file that makes a signature checkable, not a secret.
+!mcp-servers.yaml
+!plugin-trusted-keys.toml
+# Ratchet baselines: generated, but gates fail closed without them, so they
+# are configuration in every sense that matters here.
+!*-baseline.json
+!*-baseline.toml
+# Installed plugin artifacts are regenerable; the lockfile that pins them
+# is not.
+!plugins/
+!plugins/banso-plugins.lock
+# banso-generated-gitignore end
