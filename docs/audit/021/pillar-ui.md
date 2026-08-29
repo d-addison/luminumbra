@@ -13,7 +13,7 @@ a v1 creature-codex browse overlay already exists (`data/ui/codex.rml:8`,
 (`src/luminumbra_client/ui/Rml_UIManager.h:141` — only tests wire it), and spec-001 FR-040 per-world
 save thumbnails were never implemented. Secondary debt: `--ui-fixtures` is a parse-only no-op
 (`main_client.cpp:2817`), the fidelity baseline covers only 3 of 8+ screens at 800x600
-(`.forge/scripts/validate-engine-frontier.ps1:1647`), and a handful of settings are persisted-only.
+(`tools/gates/validate-engine-frontier.ps1:1647`), and a handful of settings are persisted-only.
 
 ## Current state + evidence
 
@@ -89,7 +89,7 @@ save thumbnails were never implemented. Secondary debt: `--ui-fixtures` is a par
 - **Item 4, constrained layer graph**: `src/luminumbra_common/world/LayerGraph.h:1-15` (fixed
   topology over the existing `generation_params`), enabled by `--worldgen-graph`
   (`main_client.cpp:3603-3609`).
-- **Gate**: `-Mode UiTestBaseline` (`.forge/scripts/validate-engine-frontier.ps1:1559`) asserts the
+- **Gate**: `-Mode UiTestBaseline` (`tools/gates/validate-engine-frontier.ps1:1559`) asserts the
   ctest manifest, coverage subsystems, and a 3-view `ui_screenshots.json` baseline.
 
 ### Shipped since the 2026-06-28 roadmap
@@ -135,7 +135,7 @@ Verified via `git log` (the roadmap's "Wave-0.3 punch-list remaining" assumption
    `Rml_UIManager.cpp:897`), documented as pre-existing/environmental in `adbff49d`'s message.
 3. **Fidelity baseline covers 3 of 8+ screens at the wrong resolution**: the `ui_screenshots.json`
    contract pins exactly `main_menu` / `world_creation` / `world_selection` at the 800x600 hidden
-   window (`.forge/scripts/validate-engine-frontier.ps1:1647`, `:1656`), vs spec 001 FR-012's
+   window (`tools/gates/validate-engine-frontier.ps1:1647`, `:1656`), vs spec 001 FR-012's
    3840x1600 reference aspect (`spec.md:54`) and the 8-screen AC-002 critic loop (`spec.md:83`).
    settings/hud/photo/pause/gallery/codex have no pixel-level regression coverage.
 4. **Settings persist-only rows**: resolution, window-mode and sfx-volume setters only write config
@@ -148,7 +148,7 @@ Verified via `git log` (the roadmap's "Wave-0.3 punch-list remaining" assumption
 6. **Tutorial is one static hint block** (`data/ui/hud.rml:20-23`, gated only on "codex empty" at
    `main_client.cpp:7175`); there is no sequenced onboarding (find → photograph → codex → objective).
 7. **Gate-honesty tail**: the validator asserts only 3 of the 20 manifest-pinned UI tests
-   (`.forge/scripts/validate-engine-frontier.ps1:1591-1597`), and the configure-time manifest
+   (`tools/gates/validate-engine-frontier.ps1:1591-1597`), and the configure-time manifest
    hardcodes `"passed": true` (`test/CMakeLists.txt:1139`) — honesty rests on the
    `FAIL_REGULAR_EXPRESSION` promotion (`test/CMakeLists.txt:949-957`), which is real but the
    validator-side pin list has drifted below the manifest.
@@ -199,7 +199,7 @@ Verified via `git log` (the roadmap's "Wave-0.3 punch-list remaining" assumption
 | UI-05 | Creature-codex browse overlay v1 (C toggle, live completion + discovery-stars rows from PhotoCodex) | new | M | low | — | done | NEW: extend `UiPageLoadTest.EveryShippedDocumentLoadsWithAPopulatedBody` (test/ui/ui_page_load_test.cpp:129) with `{codex.rml, codex}` — asserts the codex document parses with a populated body |
 | UI-06 | Wire world-selection to real saves: runtime list population from `worlds/saves/`, client `SetLoadWorldCallback` wiring, per-world `thumbnail.png` emit on save (FR-040) | 001 | M | medium | — | todo | NEW: `UiSmokeTest.WorldSelectPopulatesFromSavesFixtureAndFiresLoad` — a fixture saves dir yields matching list-items with per-world thumbnails, and clicking load fires the callback with the real world id |
 | UI-07 | Implement `--ui-fixtures` (FR-011) + hermetic gallery e2e (kill the environmental 0-photos RED) | 001 | S | low | — | todo | `UiSmokeTest.GalleryBackNavigationAndContentArePresent` (test/ui/ui_smoke_test.cpp:799) green on a clean checkout, still pinned skip-as-fail |
-| UI-08 | Extend the UI fidelity baseline to all shipped screens at native reference aspect (currently 3 views @ 800x600 vs FR-012's 3840x1600) | 001 | M | low | UI-07 | todo | `validate-engine-frontier.ps1 -Mode UiTestBaseline` (.forge/scripts/validate-engine-frontier.ps1:1559) with the view list extended to all shipped documents + capture-resolution assertion |
+| UI-08 | Extend the UI fidelity baseline to all shipped screens at native reference aspect (currently 3 views @ 800x600 vs FR-012's 3840x1600) | 001 | M | low | UI-07 | todo | `validate-engine-frontier.ps1 -Mode UiTestBaseline` (tools/gates/validate-engine-frontier.ps1:1559) with the view list extended to all shipped documents + capture-resolution assertion |
 | UI-09 | Settings completeness: expose resolution/sfx/music rows, live-apply (or restart-note) for resolution/window-mode/sfx (setters currently persist-only) | new | S | low | — | todo | `UiSmokeTest.SettingsScreenRoundTripsThroughTheBridge` (test/ui/ui_smoke_test.cpp:425) extended to round-trip resolution/window-mode/sfx through visible controls |
 | UI-10 | Codex browse v2: per-species best-capture photo thumbnails + detail pane (photography-loop payoff; polish-roadmap follow-on) | new | M | low | — | todo | NEW: `UiSmokeTest.CodexPopulatesRowsFromPhotoCodexFixture` — an injected PhotoCodex fixture yields the expected discovered rows, stars, completion string, and photo `<img>` sources |
 | UI-11 | Sequenced first-session tutorial/onboarding (beyond the single HUD hint block): find → photograph → codex → first objective | new | M | low | — | todo | NEW: `UiSmokeTest.TutorialStepsAdvanceThroughFirstCaptureFlow` — the hint sequence advances as fixture codex/objective state changes, and disappears when complete |

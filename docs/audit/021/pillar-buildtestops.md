@@ -18,8 +18,8 @@ tree and never execute (local-only branch).
 
 ### The engine-frontier gate suite (the proving-signal substrate for every other pillar)
 
-- `.forge/scripts/validate-engine-frontier.ps1` exposes **80 named gates** via
-  `-Mode` (`.forge/scripts/validate-engine-frontier.ps1:2` — the `ValidateSet` list, from
+- `tools/gates/validate-engine-frontier.ps1` exposes **80 named gates** via
+  `-Mode` (`tools/gates/validate-engine-frontier.ps1:2` — the `ValidateSet` list, from
   `Build`/`UnitTests` through `WorldVisualSweep`, `HeadlessServerTick`, `ReplicationSmoke`,
   `LockstepLoopback`, `RenderBudget`, up to the newest `ArtifactManifest`, `ConfigSchemaCheck`,
   `MovingResidency`, `ReadbackDiscipline`, `RenderReadbackAllowlist`, `DeterminismAudit`).
@@ -45,7 +45,7 @@ tree and never execute (local-only branch).
 
 ### Spec 020 Group A — operability (LANDED, with unwired edges)
 
-- **FR-A-001/002/004/005 preflight + manifest**: `.forge/scripts/validate-build-tree.ps1`
+- **FR-A-001/002/004/005 preflight + manifest**: `tools/gates/validate-build-tree.ps1`
   (11 KB, committed 2026-06-28) implements the canonical-preset-tree preflight: wrong-tree
   `CMAKE_CACHEFILE_DIR` refusal (`validate-build-tree.ps1:101-109`), two-tree detection
   (`:117-125`), opt-in stale-binary refusal via `-ExpectExeHash` (`:56`, `:138-140`), and a
@@ -117,7 +117,7 @@ tree and never execute (local-only branch).
 
 ### Spec 018 gate infrastructure (determinism matrix + the E/F gates)
 
-- **Determinism matrix** (`.forge/scripts/validate-determinism-matrix.ps1`): axes = worker
+- **Determinism matrix** (`tools/gates/validate-determinism-matrix.ps1`): axes = worker
   count {1,2,4}, multiprocess one-box, record/replay, build-mode debug+release with
   **per-build baselines** (`:10-19`, `:39-40`), plus the `--smoke-moving` convergent oracle as
   a default axis (`:43-47`, `:127-136`). FR-D-002 (fast/slow-job throttle) is explicitly
@@ -171,7 +171,7 @@ tree and never execute (local-only branch).
 - Persistent per-session log: `logs/luminumbra.log` truncated on boot so it always holds the
   crashed session (`src/luminumbra_common/core/Log.cpp:31-36`); symbolized crash report
   `crash-<ts>.txt` (`src/luminumbra_client/main_client.cpp:2028`), breadcrumbs flushed before
-  symbolization (`:2136`); offline symbolizer `.forge/scripts/symbolize-crash.ps1` (committed
+  symbolization (`:2136`); offline symbolizer `tools/gates/symbolize-crash.ps1` (committed
   2026-06-28).
 - **DISCREPANCY vs KNOWN CONTEXT**: the brief listed `LUMINUMBRA_JOB_WATCHDOG` as *missing*.
   The tree contradicts this — it **exists** as an opt-in, hash-neutral wedge watchdog at

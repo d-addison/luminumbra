@@ -2008,7 +2008,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         // Dump the full-frame textured albedo as a PPM capture per material
-        // (convertible to PNG via .forge/scripts/convert-ppm-to-png.ps1).
+        // (convertible to PNG via tools/gates/convert-ppm-to-png.ps1).
         {
             std::vector<unsigned char> frame(static_cast<size_t>(kRes) * kRes * 4);
             glReadBuffer(GL_COLOR_ATTACHMENT2);
@@ -3033,7 +3033,7 @@ TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
     const std::string main_source = ReadTextFile(
         SourceRoot() / "src/luminumbra_client/main_client.cpp");
     const std::string frontier = ReadTextFile(
-        SourceRoot() / ".forge/scripts/validate-engine-frontier.ps1");
+        SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
     ASSERT_FALSE(main_source.empty());
     ASSERT_FALSE(frontier.empty());
 
@@ -3051,15 +3051,15 @@ TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
 
 TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     const fs::path behavior_test_path =
-        SourceRoot() / ".forge/scripts/test-nightly-provenance.ps1";
+        SourceRoot() / "tools/gates/test-nightly-provenance.ps1";
     const std::string runner = ReadTextFile(
-        SourceRoot() / ".forge/scripts/run-nightly-gate.ps1");
+        SourceRoot() / "tools/gates/run-nightly-gate.ps1");
     const std::string frontier = ReadTextFile(
-        SourceRoot() / ".forge/scripts/validate-engine-frontier.ps1");
+        SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
     const std::string registrar = ReadTextFile(
-        SourceRoot() / ".forge/scripts/register-nightly-gate-task.ps1");
+        SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
     const std::string helper = ReadTextFile(
-        SourceRoot() / ".forge/scripts/nightly-provenance.ps1");
+        SourceRoot() / "tools/gates/nightly-provenance.ps1");
     const std::string behavior_test = ReadTextFile(behavior_test_path);
     ASSERT_FALSE(runner.empty());
     ASSERT_FALSE(frontier.empty());

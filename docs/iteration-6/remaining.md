@@ -1,6 +1,6 @@
 # Iteration 6 Remaining Work
 
-Scope: `include_waves=true`, `include_multiplayer=true`. Generated 2026-06-17 from `.forge/artifacts/engine-frontier/handoff.md`, `.forge/artifacts/engine-frontier/ultimate-plan.md`, `.forge/artifacts/engine-iteration-6/*`, `.forge/specs/iter6/*`, `plan.md`, `.forge/workflows/engine-frontier.yaml`, `.forge/scripts/validate-engine-frontier.ps1`, live source, and live build/CTest/gate runs.
+Scope: `include_waves=true`, `include_multiplayer=true`. Generated 2026-06-17 from `.forge/artifacts/engine-frontier/handoff.md`, `.forge/artifacts/engine-frontier/ultimate-plan.md`, `.forge/artifacts/engine-iteration-6/*`, `.forge/specs/iter6/*`, `plan.md`, `.forge/workflows/engine-frontier.yaml`, `tools/gates/validate-engine-frontier.ps1`, live source, and live build/CTest/gate runs.
 
 ## Hard Constraints
 

@@ -21,7 +21,7 @@ scalar/batched/coarse height paths, `GenerateChunkData`); `World::SitesInArea`/`
 `GenerateFarLodRegionMesh`, `GenerateWaterMesh`, vertex material PASS 1/1b); `FarLodStore`/`FarLodSystem`;
 `WaterfallDetect.{h,cpp}` (already wires `waterfall.frag` to river-outlet drops);
 `BuildProcgenRockPalette` + `FoliagePass`; `PhysicsSystem` (Jolt `CharacterVirtual`, 50° max slope);
-`WorldPersistenceRoundtrip` (chunk JSON + sub-hashes); `.forge/scripts/validate-engine-frontier.ps1`
+`WorldPersistenceRoundtrip` (chunk JSON + sub-hashes); `tools/gates/validate-engine-frontier.ps1`
 (gates + pinned hashes).
 
 ## Goals

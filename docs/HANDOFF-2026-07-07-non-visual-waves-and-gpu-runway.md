@@ -28,7 +28,7 @@ agents never touch shared build files, main_client, GameSession, or hashed sim o
 - **`-Mode NetworkedSession` is RED** on a stale terrain-hash pin (`end_hash 354be8d… != 46f89d27449011a0`).
   It asserts host==client (passes) → internally deterministic; only the PIN differs. PROVEN not from this
   session: no commit touches worldgen; that scenario runs creatures/ecology OFF so INSTINCT-09 is a no-op.
-  FIX: re-run + re-pin `46f89d…` at line ~5752 of `.forge/scripts/validate-engine-frontier.ps1` if the new
+  FIX: re-run + re-pin `46f89d…` at line ~5752 of `tools/gates/validate-engine-frontier.ps1` if the new
   value is stable across runs, OR chase flaky worldgen determinism if it varies run-to-run.
 - **GPU-P09 is PARTIAL.** `c6493044` fixed the scale<1.0 pass-internal viewport SEAM (byte-identical at 1.0,
   0.67 renders correctly). The rest of the item is unstarted — see Wave 1.

@@ -142,10 +142,10 @@ cmake --build --preset debug
 build\debug\bin\luminumbra_server_app.exe --smoke            # 6f008a9f637c40b7 run==replay
 build\debug\bin\luminumbra_server_app.exe --smoke --avail-trace  # per-tick availability trace
 ctest --test-dir build/debug                                  # full lane (green except ForestPerfBudget)
-powershell -File .forge\scripts\validate-engine-frontier.ps1 -Mode <gate>
+powershell -File tools\gates\validate-engine-frontier.ps1 -Mode <gate>
 #   gates this session added/uses: HeadlessInGameCapture, FoliageInstancing,
 #   EngineGameSplitLint, UiTestBaseline, Build, RenderReadbackAllowlist, MovingResidency
-powershell -File .forge\scripts\validate-determinism-matrix.ps1 -Quick
+powershell -File tools\gates\validate-determinism-matrix.ps1 -Quick
 python docs\audit\021\validate_backlog.py                     # backlog schema + signals
 ```
 

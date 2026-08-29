@@ -88,7 +88,7 @@ pillar shipped since the 2026-06-28 roadmap (last pillar commit `ba7bac3a`, 2026
 - **Sleep made visible/audible (Phase G partial)** — rest/sleep poses (`main_client.cpp:699-705`),
   sleeping-breath 3D audio (`:4211-4224`), colony chitter bed near an active nest (`:4262-4272`).
 - **Determinism gates** — `PopulatedWorldReplay` (populated run==replay + pinned golden + non-vacuity:
-  `.forge/scripts/validate-engine-frontier.ps1:4624-4712`) over the kinematic gate roster
+  `tools/gates/validate-engine-frontier.ps1:4624-4712`) over the kinematic gate roster
   (`src/luminumbra_server/ServerWorldRunner.cpp:128-163`, which stamps the FULL deep-ecology component
   set: genome/alarm/mortal/decay/migratory/territory/pack); `EcologyTickPerf` measures median+p99 ms/tick
   at N ∈ {256, 1k, 4k} (`validate-engine-frontier.ps1:3012-3035`); the ecology sub-hash is the 6th

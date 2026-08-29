@@ -65,7 +65,7 @@ GPU-P10 (IUpscaler) and GPU-P11 (DLSS). Deps GPU-04 + GPU-12 both `done`.
 - SSAO march metric (`u_screenSize`) + half/blur viewports, water/particle/cave `u_screenSize`
   → internal.
 
-**Verify byte-identity:** `& powershell -File .forge/scripts/validate-engine-frontier.ps1
+**Verify byte-identity:** `& powershell -File tools/gates/validate-engine-frontier.ps1
 -Mode RenderParityFrame -BuildPreset debug` → "PASS ... EXACT (score 0.0, 3840x1581)".
 
 ---
@@ -80,7 +80,7 @@ is unlit black** except a blown-out white horizon strip. The frame is ~4–15× 
 **Repro (each cycle ~7 min on the RTX 5070 Ti):**
 ```
 $env:LUMIN_RENDER_SCALE = "0.67"
-& powershell -File .forge/scripts/validate-engine-frontier.ps1 -Mode RenderParityFrame -BuildPreset debug
+& powershell -File tools/gates/validate-engine-frontier.ps1 -Mode RenderParityFrame -BuildPreset debug
 Remove-Item Env:\LUMIN_RENDER_SCALE
 python tools/ppm_to_png.py build/debug/test-artifacts/render/frame-parity/frame_parity_a.ppm out.png
 ```

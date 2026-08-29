@@ -92,7 +92,7 @@ elision, stale-safe and never re-emptied once primed (FoliagePass.cpp:317-326,85
 FoliagePass.h:271-278). The ring's GL slots are freed under a live context in `destroy_compute`
 (FoliagePass.cpp:255-267, commit 3bba2a52). FoliagePass has LEFT the FR-G-001 render-readback-ban
 allowlist — only the RenderPipeline GPU-SDF site remains, gated on 017-B
-(.forge/scripts/validate-engine-frontier.ps1:7026-7033); the gate dispatches as
+(tools/gates/validate-engine-frontier.ps1:7026-7033); the gate dispatches as
 `-Mode RenderReadbackAllowlist` (validate-engine-frontier.ps1:7306). The ring contract itself is
 ctest-covered against a real headless GL context (test/rendering/async_readback_ring_test.cpp:1-9).
 
@@ -123,7 +123,7 @@ ctest-covered against a real headless GL context (test/rendering/async_readback_
 
 - **FoliageInstancing** is an engine-frontier gate (NOT a plain ctest, correcting the brief's
   phrasing): `validate-engine-frontier.ps1 -Mode FoliageInstancing`
-  (.forge/scripts/validate-engine-frontier.ps1:3551,7271) runs
+  (tools/gates/validate-engine-frontier.ps1:3551,7271) runs
   `--scenario foliage_visual_smoke --world-preset flat_lands` (validate-engine-frontier.ps1:3571-3580)
   and asserts determinism (run==run instance hash), biome-band coverage density, distance fade, wind
   sway, and the GPU-timer budget (validate-engine-frontier.ps1:3600-3639).

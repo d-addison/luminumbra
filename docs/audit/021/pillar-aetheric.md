@@ -53,7 +53,7 @@ run against the current tree.
   (`d950a6afc12a5cdc -> f17726d44054d133`), append-only after chunk|wind|weather
   (`src/luminumbra_server/ServerWorldRunner.cpp:61-70`, fold-order contract at
   `ServerWorldRunner.cpp:88-99`; bump chain also recorded at
-  `.forge/scripts/validate-engine-frontier.ps1:5177`). The current `--smoke` baseline
+  `tools/gates/validate-engine-frontier.ps1:5177`). The current `--smoke` baseline
   `6f008a9f637c40b7` therefore already contains the aether field.
 - The client capture context deliberately does NOT fold aether (client owns no independent field
   state) — guarded by the harness authority checks
@@ -61,7 +61,7 @@ run against the current tree.
 
 ### 3. Determinism gates and tests — BUILT
 
-- Engine-frontier gate `AetherFieldDeterminism` (`.forge/scripts/validate-engine-frontier.ps1:4956-5011`,
+- Engine-frontier gate `AetherFieldDeterminism` (`tools/gates/validate-engine-frontier.ps1:4956-5011`,
   mode dispatch at `:7285`): drives `luminumbra_server_app --aether-bench --ticks 90 --seed 424242`,
   asserts sub-hash equality across two runs, evolution over ticks, and the pinned 24 m / 64-extent /
   8-sweep shape.
@@ -77,7 +77,7 @@ run against the current tree.
   out-of-region edge zero, flattened exact run==replay with wind coupling (`:345`), anchor
   quantization (no raw sub-cell anchor leak, `:375-383`), degenerate/inf sample safety (`:387-392`).
 - The `aether` slot is a required artifact section in the world-hash gate
-  (`.forge/scripts/validate-engine-frontier.ps1:4671`).
+  (`tools/gates/validate-engine-frontier.ps1:4671`).
 
 ### 4. Render emissive tap — PLUMBED end-to-end, but INERT (T-I6-A1d, commit `bce99a5b`)
 
@@ -129,7 +129,7 @@ run against the current tree.
 
 - The engine deliberately knows only an "emissive scalar field"; game content assigns meaning
   (`AetherFieldSystem.h:5-8`). The `EngineGameSplitLint` gate bans game nouns (including `aetheric`)
-  under `src/` (`.forge/scripts/validate-engine-frontier.ps1:5623-5645`, noun list `:5630-5640`).
+  under `src/` (`tools/gates/validate-engine-frontier.ps1:5623-5645`, noun list `:5630-5640`).
 - The game-content layer exists only as data/scripts and references engine API that does not exist:
   `system_aetheric_feedback.lua` expects an `AethericFieldComponent` and a
   `get_world_api():get_aetheric_value(pos)` returning `{lumin, umbra}`

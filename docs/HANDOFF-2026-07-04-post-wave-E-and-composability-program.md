@@ -66,8 +66,8 @@ NOT built yet. Standing law and toolchain gotchas are in §8. Read §8 before to
   ctest --test-dir build/debug --output-on-failure             # SERIAL only; green exc ForestPerfBudget
   python docs\audit\021\validate_backlog.py
   # render gates (need the 5070 Ti):
-  powershell -File .forge\scripts\validate-engine-frontier.ps1 -Mode RenderHealth -BuildPreset debug
-  powershell -File .forge\scripts\validate-engine-frontier.ps1 -Mode RenderBudget -BuildPreset release
+  powershell -File tools\gates\validate-engine-frontier.ps1 -Mode RenderHealth -BuildPreset debug
+  powershell -File tools\gates\validate-engine-frontier.ps1 -Mode RenderBudget -BuildPreset release
   ```
 
 ---
@@ -362,7 +362,7 @@ RenderGraph to plug into).
 - `res/shaders/` — runtime-loaded shaders (no rebuild for a `.frag` edit).
 - `test/rendering/render_capture_test.cpp` — the render gtests (RenderGraph + TimeOfDayModel +
   ExposureModel + SunLightModel + the capture/SDK tests). Model tests need no GL context.
-- `.forge/scripts/validate-engine-frontier.ps1` — the mode gate runner (`-Mode RenderHealth`,
+- `tools/gates/validate-engine-frontier.ps1` — the mode gate runner (`-Mode RenderHealth`,
   `-Mode RenderBudget`, `-Mode MovingResidency`, etc.).
 
 ---

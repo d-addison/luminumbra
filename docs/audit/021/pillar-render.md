@@ -86,7 +86,7 @@ extension filter).
   `passes/FoliagePass.h:278`), freed under a live GL context (`FoliagePass.cpp:264`, commit
   `3bba2a52`).
 - **FR-G-001 render-side readback ban gate** exists and is enforced:
-  `Test-RenderReadbackAllowlist` (`.forge/scripts/validate-engine-frontier.ps1:7026-7076`, mode
+  `Test-RenderReadbackAllowlist` (`tools/gates/validate-engine-frontier.ps1:7026-7076`, mode
   `RenderReadbackAllowlist` at `:7306`) scans `src/luminumbra_client/rendering` with narrow
   blocking-form matchers (`:7036-7038`: `glClientWaitSync(...GL_TIMEOUT_IGNORED`,
   `glMapBuffer(...GL_READ_ONLY`, `glGet[Named]BufferSubData`), deliberately NOT the broad sim-path
@@ -163,7 +163,7 @@ extension filter).
   auto-world (`:2754-2763`) with a 4000-render-loop-frame watchdog (`:277-282`, checked `:6819-6825`).
 - FrameHealth anomaly verdict with `"nominal"` rollup (`rendering/FrameHealth.cpp:190`,
   `FrameHealth.h:50-53`).
-- Gates in `.forge/scripts/validate-engine-frontier.ps1`: `WorldVisualSweep` (`:4017`, TOD × angle ×
+- Gates in `tools/gates/validate-engine-frontier.ps1`: `WorldVisualSweep` (`:4017`, TOD × angle ×
   weather × season presence/production matrix over `--scenario world_visual_sweep`), `RenderBudget`
   (`:6442`, runs `--render-benchmark` fixed-scenario per-pass GPU timings), `ReadbackDiscipline`
   (`:6983`), `RenderReadbackAllowlist` (`:7026`), `DeterminismAudit` (`:7078`).

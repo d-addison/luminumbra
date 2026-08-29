@@ -211,7 +211,7 @@ see the **Anchor corrections** note under Key files).
   boot-settle + `--smoke-moving` (Group C); if a halting oracle, sub-hash folded only after C-passes
   (FR-C-003).
 - **FR-F-002 — Gate enforcement.** The checklist shall be enforced as a gate (extending the
-  engine-frontier validator, `.forge/scripts/validate-engine-frontier.ps1`) so a feature that
+  engine-frontier validator, `tools/gates/validate-engine-frontier.ps1`) so a feature that
   touches a hash-feeding path without a completed checklist fails verification.
 - **FR-F-003 — Guard specs 015 and 016.** The gate shall be the determinism guard that specs 015
   (atmospheric lighting — exposure/froxel must stay render-only) and 016 (render framework — frame
@@ -313,7 +313,7 @@ Each names a measurable signal / test command. Server flags grounded in
 
 ### Group F — audit gate + localization
 - [ ] **AC-F-001** — The determinism audit checklist exists and is enumerated (FR-F-001).
-- [ ] **AC-F-002** — The engine-frontier validator (`.forge/scripts/validate-engine-frontier.ps1`)
+- [ ] **AC-F-002** — The engine-frontier validator (`tools/gates/validate-engine-frontier.ps1`)
   fails a feature that touches a hash-feeding path without a completed checklist (FR-F-002).
 - [ ] **AC-F-003** — Specs 015 and 016 reference this gate as their determinism guard (FR-F-003).
 - [ ] **AC-F-004** — Every new streamed sim system carries a localization sub-hash present in the
@@ -417,7 +417,7 @@ Anchored files:
 - `docs/water-sim-lockstep-determinism.md` — the streaming-arrival desync root cause (`:31`, `:50`),
   the halting-oracle/lockstep-halt mechanics (`:38-46`), and the bed/sampler purity fix
   (`:50-61`). Source of the FR-B-004 / FR-C-001 / FR-C-003 patterns.
-- `.forge/scripts/validate-engine-frontier.ps1` — the engine-frontier gate the audit checklist
+- `tools/gates/validate-engine-frontier.ps1` — the engine-frontier gate the audit checklist
   (FR-F-002) extends; also the preset/build-tree assumptions relevant to NFR-003.
 - `src/luminumbra_client/rendering/RenderPipeline.cpp` (~`:4308`/`:4323`) and
   `.../passes/FoliagePass.cpp` (~`:784`) — the synchronous GPU readback paths classified

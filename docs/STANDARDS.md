@@ -159,7 +159,7 @@ Per `test/features/TDD-LOCK.md` and `docs/TDD.md`:
 - **Test-first (TDD).** Every acceptance criterion gets a failing test/gate **before** production
   code. Watch it fail (it must bite), then implement the minimum to green.
 - **SDD trace.** Each AC links to exactly one proving signal: a `ctest`, an engine-frontier gate
-  (`.forge/scripts/validate-engine-frontier.ps1 -Mode <X>`), or a BDD scenario.
+  (`tools/gates/validate-engine-frontier.ps1 -Mode <X>`), or a BDD scenario.
 - **Determinism test is mandatory for every sim system** (`run==replay` + a `Compute<X>SubHash`).
 - **Visual debt closes only on a passing `WorldVisualSweep`** (`tools/visual_critique.py … --strict`,
   0/48). Detector false-positives get a **fixture-backed** fix in `tools/test_visual_critique.py`,

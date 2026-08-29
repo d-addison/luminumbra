@@ -182,4 +182,4 @@ Coverage status distinguishes existing executable gates from BDD-only coverage. 
 
 - Feature syntax validation: PASS on 2026-06-17. The official `@cucumber/gherkin` parser parsed 11 authored `.feature` files with 94 scenarios.
 - CTest inventory source: `ctest --preset debug -N`.
-- Engine-frontier mode inventory source: `.forge/scripts/validate-engine-frontier.ps1` `ValidateSet`.
+- Engine-frontier mode inventory source: `tools/gates/validate-engine-frontier.ps1` `ValidateSet`.

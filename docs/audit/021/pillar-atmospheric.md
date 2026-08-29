@@ -34,7 +34,7 @@ the OPS-owned 018-E/F gates.
 - Tests/gates: `test/common/WeatherSystem_test.cpp:1-10` (two-instance sub-hash identity, bounded
   storms, 300-tick endurance horizon), `test/CMakeLists.txt:136-137` registers it in `common_tests`
   (gtest-discovered per `test/CMakeLists.txt:952`); engine-frontier modes `WeatherVisual`
-  (`.forge/scripts/validate-engine-frontier.ps1:3271`), `Precipitation` (`:3727`), `CloudShadow`
+  (`tools/gates/validate-engine-frontier.ps1:3271`), `Precipitation` (`:3727`), `CloudShadow`
   (`:3474`), `WindFieldDeterminism` (`:5014`), `SkyboxVisual` (`:3168`), `TimeOfDaySweep` (`:3841`),
   `AtmosphereAudio` (`:7250`).
 
@@ -93,7 +93,7 @@ the OPS-owned 018-E/F gates.
   seasonal sun declination (`RenderPipeline.cpp:4903-4915`) and a luminance-preserving seasonal
   palette tint on sun + ambient (`RenderPipeline.cpp:4984-4999`, `:5092-5111`).
 - The `TimeOfDaySweep` gate asserts noon/dusk/night under BOTH seasons (6 phases,
-  `.forge/scripts/validate-engine-frontier.ps1:3872-3881`).
+  `tools/gates/validate-engine-frontier.ps1:3872-3881`).
 - **But live play never feeds it:** `set_season_tick` is called only from the sweep scenario and the
   scenario harness (`main_client.cpp:6550`, `:6567`;
   `src/luminumbra_client/core/RuntimeScenarioHarness.cpp:8823`) — a live session stays frozen at

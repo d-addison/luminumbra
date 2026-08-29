@@ -2117,7 +2117,7 @@ bool WriteMiniDump(EXCEPTION_POINTERS* exception_info, const std::filesystem::pa
 // producing EMPTY .dmp files, and logs were stdout-only, so a normal-launch crash
 // left nothing to diagnose. DbgHelp resolves public/export names; the per-frame
 // `module+0xRVA` lets addr2line recover exact file:line from the binary's DWARF
-// (run .forge/scripts/symbolize-crash.ps1 on the crash file). A crash handler must
+// (run tools/gates/symbolize-crash.ps1 on the crash file). A crash handler must
 // not itself throw â€” everything here is guarded and bounded.
 void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& crash_dir) {
     std::error_code ec;
@@ -2208,7 +2208,7 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
             static_cast<unsigned long long>(rva), fn);
         emit(b);
     }
-    emit("=== end stack ===  (resolve file:line with .forge/scripts/symbolize-crash.ps1 <crash.txt>)");
+    emit("=== end stack ===  (resolve file:line with tools/gates/symbolize-crash.ps1 <crash.txt>)");
     SymCleanup(proc);
 }
 

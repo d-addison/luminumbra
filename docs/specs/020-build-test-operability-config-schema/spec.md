@@ -43,7 +43,7 @@ hardening**'s render-vs-sim residency rule, which `SystemConfig.cpp:223` (`rende
 currently implements by hand.
 
 **Environment realities (project memory).** The parent harness builds and tests `build/debug` via
-`cmake --build --preset debug`; the engine-frontier gate (`.forge/scripts/validate-engine-frontier.ps1`)
+`cmake --build --preset debug`; the engine-frontier gate (`tools/gates/validate-engine-frontier.ps1`)
 builds and reads `build/$BuildPreset`. The Bash tool is sandboxed and cannot run the GPU client or the
 compiler — all builds, the client, and the gates run through the PowerShell tool, prepending
 `C:\msys64\ucrt64\bin` to PATH. Any preflight or manifest tooling this spec adds must run in that
@@ -99,7 +99,7 @@ wrong artifact.
 - **FR-A-002 — Two-tree preflight refusal.** A preflight check shall **FAIL** when both a root
   `build/CMakeCache.txt` and a preset `build/${presetName}/CMakeCache.txt` exist concurrently,
   emitting which trees were found and which preset the caller intended. The engine-frontier gate
-  (`.forge/scripts/validate-engine-frontier.ps1`, build at `:255`, client-exe resolution at `:309`)
+  (`tools/gates/validate-engine-frontier.ps1`, build at `:255`, client-exe resolution at `:309`)
   shall invoke this preflight before any build/test step, so the gate can never silently build one
   tree and read another.
 - **FR-A-003 — Gate resolves the exact tree it builds.** Every gate step shall resolve its executable,
@@ -225,7 +225,7 @@ Each names a measurable signal or command. Gate/build/test commands run via the 
 ### Cross-cutting
 - [ ] **AC-001** — `luminumbra_server_app --smoke` stays `6f008a9f637c40b7` (run==replay) after
   **every** FR in both groups.
-- [ ] **AC-002** — The engine-frontier gate (`.forge/scripts/validate-engine-frontier.ps1 -Mode
+- [ ] **AC-002** — The engine-frontier gate (`tools/gates/validate-engine-frontier.ps1 -Mode
   Build` then the test/gate modes) passes end-to-end against `build/debug` with the new preflight in
   place.
 
@@ -323,7 +323,7 @@ should land first because every B verification run depends on knowing which bina
 ## Key files
 - `CMakePresets.json:13` — `"binaryDir": "${sourceDir}/build/${presetName}"`. The canonical preset
   tree (FR-A-001). The root `build/` tree is the deprecation target.
-- `.forge/scripts/validate-engine-frontier.ps1` — `Test-Build` runs `cmake --build --preset
+- `tools/gates/validate-engine-frontier.ps1` — `Test-Build` runs `cmake --build --preset
   $BuildPreset` (`:255`); `Test-UnitTests` runs `ctest --preset $BuildPreset -E "_NOT_BUILT$"`
   (`:264`); `Get-ClientExe` resolves `build/$BuildPreset/bin/luminumbra_client_app.exe` (`:308-314`).
   Wire the two-tree preflight (FR-A-002) here; extend single-root resolution (FR-A-003) beyond the

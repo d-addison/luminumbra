@@ -20,7 +20,7 @@ Branch: `feat/polyglot-audit-roadmap`. Determinism law held all session:
 - Remaining: **019-C1** 32-client multiprocess GNS soak harness.
 
 ### Spec 018 — determinism: A1 + D1 done
-- A1 residency contract; D1 the determinism matrix (`.forge/scripts/validate-determinism-matrix.ps1`,
+- A1 residency contract; D1 the determinism matrix (`tools/gates/validate-determinism-matrix.ps1`,
   proves determinism across worker counts {1,2} + multiprocess).
 - Remaining: 018-B/C/E/F (boot-settle, moving-residency, readback discipline, audit gate).
 
@@ -99,7 +99,7 @@ nm -C --numeric-sort --defined-only build/release/bin/luminumbra_client_app.exe 
 # address is the largest <= VMA. (See the inline python used in this session's transcript.)
 ```
 This turned `client_app.exe+0x48E11A` into `SHIELD_WorldSystem::RiverInfluenceFromNoise` in
-seconds. `.forge/scripts/symbolize-crash.ps1` exists but prefer the nm-range method for release.
+seconds. `tools/gates/symbolize-crash.ps1` exists but prefer the nm-range method for release.
 
 ### 3.3 Catch races BEFORE they ship — the missing tool
 This crash was a **data race** (worker-thread sampling vs main-thread reinit). A symptom-level

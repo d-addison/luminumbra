@@ -48,7 +48,7 @@ far-field voids/arches) is isolated to a final re-pin tier.
   fields), pacer, TAAU resolve, history/MV attachments, render-scale.
 - `res/shaders/` — `prop_cull.comp` (new), `instanced_mesh.vert` (baseInstance + MV/wind),
   `g_buffer.frag` (cheap paths), depth-prepass + TAAU resolve shaders, impostor bake/sample.
-- `.forge/scripts/validate-engine-frontier.ps1` — `RenderBudget` gate (`:6429-6481`) updated for v2
+- `tools/gates/validate-engine-frontier.ps1` — `RenderBudget` gate (`:6429-6481`) updated for v2
   schema + dense pose; FR-W re-pin literals.
 - New NVML wrapper (optional/guarded) under `src/luminumbra_client/core/` or `rendering/`.
 

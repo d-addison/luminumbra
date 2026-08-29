@@ -106,7 +106,7 @@ the tree.
   window (`WaterSystem.cpp:32-38`, `WaterSystem.cpp:518-536`), init seeding is inline (no
   dispatch+wait; `WaterSystem.cpp:439-448`) and reuses the mesher heightmap byte-identically at LOD0
   (`WaterSystem.cpp:352-393`), and the river-source mask is cached (`WaterSystem.cpp:146-157`).
-- The win is **locked in by a regression gate**: `.forge/scripts/validate-moving-hitch.ps1:3-7`
+- The win is **locked in by a regression gate**: `tools/gates/validate-moving-hitch.ps1:3-7`
   ("water-sim head-of-line block (was ~1500ms)") with a steady-state water ceiling of 220 ms
   (`validate-moving-hitch.ps1:33`) — the pillar's moving-lag item is DONE, not open.
 - `docs/specs/water-perf-200fps.md` records the honest ground truth: Steps 1–3 landed (commit
@@ -130,7 +130,7 @@ the tree.
   009 AC-6's "WaterfallDetect triggering off the live water surface",
   `docs/specs/009-flowing-water-terraforming/spec.md:102`, is unmet).
 - Gate: `waterfall_visual_test` (`test/rendering/waterfall_visual_test.cpp:1-18`), run as
-  `WaterfallVisualTest` (`.forge/scripts/verify-waveb-ocean.ps1:15`).
+  `WaterfallVisualTest` (`tools/gates/verify-waveb-ocean.ps1:15`).
 - **Stranded uncommitted work:** the night-lighting fix is split across a commit boundary. The C++
   half is at HEAD (committed in `7a780279`): the pipeline sets `u_scene_light` from sun intensity
   (`src/luminumbra_client/rendering/RenderPipeline.cpp:2424-2429`). The shader half — the
@@ -194,7 +194,7 @@ but not the water paths. The only post-roadmap water artifact in the tree is the
    (`docs/water-sim-lockstep-determinism.md:38-46`).
 4. **Spec 009 AC-4 (host==peer cross-build) has no gate.** The integer path makes it structurally
    safe, but no two-build/two-config water-hash compare exists (grep of `test/` finds only comments;
-   `.forge/scripts/validate-determinism-matrix.ps1` has no water mode). Debug vs Release canonical
+   `tools/gates/validate-determinism-matrix.ps1` has no water mode). Debug vs Release canonical
    world hashes already differ (`6f008a9f…` vs `ea9a0121…` — float state elsewhere), which makes a
    *water-scoped* cross-build gate the only practical way to prove the water claim.
 5. **Spec 009 AC-5's dam half is untested** — the terraform gate digs (`delta_mm=-4000`,
@@ -256,8 +256,8 @@ but not the water paths. The only post-roadmap water artifact in the tree is the
 | WATER-01 | Spec 009 Phases 1–3 landed: fixed-point virtual-pipes solver + cross-chunk owner-edge continuity + terraform coupling (bed edit + player voxel dig) on a camera-independent uniform grid | 009 | XL | low | — | done | ctest `WaterDeterminism.*` (4 tests, test/common/WaterDeterminism_test.cpp) |
 | WATER-02 | Spec 010 finite hydrology landed: SetHydrology(finite,rain,evap), rain fills land (land-water probe, not max-depth), evaporation recedes, default-OFF keeps baselines | 010 | L | low | — | done | ctest `WaterDeterminism.FiniteHydrologyRainFillsLandDeterministically` |
 | WATER-03 | Water lockstep desync resolved: bed current_lod==0 gate + boot water-settle (0 flakes/24) + --smoke-moving proof that B′ is unnecessary | 018 | M | low | — | done | `--smoke` run==replay `6f008a9f637c40b7` + ctest `WaterDeterminism.LiveWaterSimIsRunReplayDeterministic` |
-| WATER-04 | Water main-thread block (~450–1500 ms) killed: rotating 64-chunk sim window + inline init seeding + heightmap reuse + cached river-source mask; locked by the moving-hitch gate (220 ms water ceiling) | water-perf-200fps | M | low | — | done | engine gate `.forge/scripts/validate-moving-hitch.ps1` (WaterCeil=220) |
-| WATER-05 | Waterfalls-from-connections landed: lake/tarn rim-outlet detection + crest/foot pinned to upstream/downstream water surfaces (KNOWN CONTEXT was stale) | 003 | M | low | — | done | ctest `WaterfallVisualTest` (.forge/scripts/verify-waveb-ocean.ps1:15) |
+| WATER-04 | Water main-thread block (~450–1500 ms) killed: rotating 64-chunk sim window + inline init seeding + heightmap reuse + cached river-source mask; locked by the moving-hitch gate (220 ms water ceiling) | water-perf-200fps | M | low | — | done | engine gate `tools/gates/validate-moving-hitch.ps1` (WaterCeil=220) |
+| WATER-05 | Waterfalls-from-connections landed: lake/tarn rim-outlet detection + crest/foot pinned to upstream/downstream water surfaces (KNOWN CONTEXT was stale) | 003 | M | low | — | done | ctest `WaterfallVisualTest` (tools/gates/verify-waveb-ocean.ps1:15) |
 | WATER-06 | Commit the stranded waterfall night-lighting shader fix: HEAD's RenderPipeline sets `u_scene_light` (silent GL no-op) while the uniform exists only in the uncommitted res/shaders/waterfall.frag diff; then visually verify | 009 | S | low | RENDER: headless IN_GAME capture-hang fix (visual verify only) | in-progress | ctest `WaterfallVisualTest` stays green (shader default 1.0 = byte-identical) + WorldVisualSweep rerun on a night waterfall cell |
 | WATER-07 | Drive spec-010 rain/evap from WeatherSystem::PrecipitationAt behind a SystemConfig flag (default-OFF), persist the hydrology config with the world, and quantize precip→rain_mm deterministically | 010 | M | medium | — | todo | NEW: ctest `WaterDeterminism.WeatherDrivenRainIsDeterministic` — weather-coupled rain run==replay + land-water volume rises during a storm epoch and recedes after; `--smoke` unchanged with the flag off |
 | WATER-08 | Sever the float→sim feedback edges (route WaterSourceComponent + apply_displacement through water_depth_mm; make ResizeSimulationGrid interpolate the mm arrays, not the float mirror), then exclude the three float water arrays from world_hash (one deliberate re-pin) | water-perf-200fps | M | medium | — | todo | `--smoke` run==replay with ONE re-blessed `world_hash` bump + ctest `WaterDeterminism.*` + persistence gate `test/persistence/world-persistence-roundtrip.ps1` |

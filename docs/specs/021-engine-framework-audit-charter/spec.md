@@ -231,8 +231,8 @@ routing table, and determinism gates rather than inventing new ones.
 - Render-seam keystone: `docs/specs/016-render-framework-frame-graph/spec.md`.
 - Reconciliation baseline: `~/.claude/plans/handoff-2026-06-28-agile-puppy.md`.
 - TDD discipline: `docs/TDD.md`, `test/features/TDD-LOCK.md`, `docs/STANDARDS.md` §8–10.
-- Gate scripts: `.forge/scripts/validate-engine-frontier.ps1`,
-  `.forge/scripts/validate-determinism-matrix.ps1`.
+- Gate scripts: `tools/gates/validate-engine-frontier.ps1`,
+  `tools/gates/validate-determinism-matrix.ps1`.
 - Render code: `src/luminumbra_client/rendering/{RenderContext.h, RenderResourceHandles.h,
   RenderResourceRegistry.h, GBuffer.h, AsyncReadbackRing.h, CaptureHooks.h,
   passes/ShieldRtFarFieldPass.h}`; `res/shaders/taau_resolve.frag`.

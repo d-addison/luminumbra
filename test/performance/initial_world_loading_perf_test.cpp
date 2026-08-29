@@ -718,8 +718,8 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
             {"name", name},
             {"frame_time_ms", FrameStatsToJson(samples_ms)},
             // Flat per-scenario metric block consumed by the perf-regression gate
-            // (.forge/scripts/validate-engine-frontier.ps1 -Mode PerfRegression) and
-            // the baseline capture helper (.forge/scripts/capture-perf-baseline.ps1).
+            // (tools/gates/validate-engine-frontier.ps1 -Mode PerfRegression) and
+            // the baseline capture helper (tools/gates/capture-perf-baseline.ps1).
             // Keep keys stable: p50_ms, p95_ms, p99_ms, max_ms, mem_high_water_mb.
             {"regression_metrics", {
                 {"p50_ms", Percentile(samples_ms, 50.0)},

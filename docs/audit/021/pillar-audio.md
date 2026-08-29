@@ -106,7 +106,7 @@ scenario-guarded, determinism-neutral):
 ### Gates and tests (what is actually enforced)
 
 - `validate-engine-frontier.ps1` registers three audio modes
-  (`.forge/scripts/validate-engine-frontier.ps1:7248-7250`):
+  (`tools/gates/validate-engine-frontier.ps1:7248-7250`):
   - **AudioNullTelemetry** (`:1255`; script `test/audio/audio-null-telemetry.ps1:34-55`) — static
     regex checks that `--no-audio` selects the null manager, playback routes through
     `IAudioManager`, and the telemetry schema exists.

@@ -90,7 +90,7 @@ read-only observer of sim state and none of the remaining work touches `world_ha
   (`test/common/replication_scale_test.cpp:106`, `:168`, `:248`; registered
   `test/CMakeLists.txt:141`) plus the 64-player AOI-bound test
   (`ReplicationEndpoint_test.cpp:269`).
-- **`ReplicationSmoke`** — engine-frontier gate (`.forge/scripts/validate-engine-frontier.ps1:4845`,
+- **`ReplicationSmoke`** — engine-frontier gate (`tools/gates/validate-engine-frontier.ps1:4845`,
   dispatch `:7281`): drives `--replicate --avatars 4 --npcs 3 --arrow` (`:4867`) and asserts
   mirroring, acks, input-moved-avatar, GOAP NPC replication, and arrow lifecycle.
 - **`NetworkedReplication`** — engine-frontier gate (`:4904`, dispatch `:7282`): two real

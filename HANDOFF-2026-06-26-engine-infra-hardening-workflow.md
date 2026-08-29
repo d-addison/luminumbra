@@ -134,7 +134,7 @@ Workflow requirements:
 - **Visual gate:** `python tools/flip_diff.py --selftest`; bless with `tools/golden_update.py`
   (refuses overwrite w/o `--force`); goldens under `build/debug/showcase/`.
 - **Perf:** `--render-benchmark` (p50 frame/gpu). Spec 017 adds p95/p99 main-thread-wait fields.
-- **Engine-frontier gate:** `.forge/scripts/validate-engine-frontier.ps1 -Mode Build` then test/gate
+- **Engine-frontier gate:** `tools/gates/validate-engine-frontier.ps1 -Mode Build` then test/gate
   modes (needs `-Mode Build` first; doesn't auto-build).
 
 ## 5. Git state (important — so the specs aren't lost)
