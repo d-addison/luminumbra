@@ -5,6 +5,13 @@ schema_version: 1
 project_name: "luminumbra"
 profile: default
 
+# The verify pipeline runs the CMake presets directly. Banso's language
+# detection has no CMake branch: `builtin: verify-basic` finds no runner and
+# reports zero checks passed, and `builtin: lint` detects C++ and then returns
+# an empty clang-tidy result. Both are green without running anything, so
+# neither is used here.
+workflow: project/luminumbra-change
+
 routing:
   default_tier: standard
   deescalation_window: 3
@@ -13,8 +20,25 @@ budget:
   on_exceed: warn
 
 tdd:
-  enabled: false
-  scope: per_task
+  enabled: true
+  scope: both
+  prefer_properties: true
+
+tags:
+  - '#team:engine'
+  - '#lang:cpp'
+  - '#domain:game-engine'
+
+budgets:
+  daily_per_developer: $30.00
+
+# Read by the verify hygiene domain. Vendored upstream sources and build trees
+# are not first-party code and must not be scanned as such.
+hygiene:
+  exclude_paths:
+    - vendor/
+    - build/
+    - out/
 
 specs:
   roots:

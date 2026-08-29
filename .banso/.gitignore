@@ -25,3 +25,7 @@
 !plugins/
 !plugins/banso-plugins.lock
 # banso-generated-gitignore end
+
+# Phase-transition contracts are policy, and banso does not negate them in the
+# generated block above.
+!contracts.yaml

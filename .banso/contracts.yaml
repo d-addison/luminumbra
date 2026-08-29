@@ -1,0 +1,42 @@
+# Phase-transition contracts. A contract applies to the phase its id starts
+# with, and a failing `required` clause blocks `banso phase enter <phase>`
+# with exit 2.
+#
+# Clauses run one command each: the runner is `sh -c` on Unix and
+# `powershell.exe -Command` on Windows, and `&&` does not chain on both.
+contracts:
+  - id: verify/build-and-test
+    preconditions:
+      - kind:
+          type: script
+          script: "shell:cmake --preset debug"
+        description: "The debug preset configures"
+        required: true
+      - kind:
+          type: script
+          script: "shell:cmake --build --preset debug"
+        description: "The debug preset builds"
+        required: true
+      - kind:
+          type: script
+          script: "shell:ctest --preset debug --output-on-failure"
+        description: "The debug CTest suite passes"
+        required: true
+
+  - id: deploy/release-build-and-test
+    preconditions:
+      - kind:
+          type: script
+          script: "shell:cmake --preset release"
+        description: "The release preset configures"
+        required: true
+      - kind:
+          type: script
+          script: "shell:cmake --build --preset release"
+        description: "The release preset builds"
+        required: true
+      - kind:
+          type: script
+          script: "shell:ctest --preset release --output-on-failure"
+        description: "The release CTest suite passes"
+        required: true

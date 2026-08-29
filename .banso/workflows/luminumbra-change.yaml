@@ -1,0 +1,67 @@
+kind: workflow
+format: banso.workflow/2026-07-31
+name: project/luminumbra-change
+description: Luminumbra engine change. Verification runs the real CMake presets and CTest rather than a language-detected builtin, which is a no-op on C++.
+config:
+  automation: gated
+pipelines:
+  - name: specify
+    phase: spec
+    steps:
+      - { name: context, type: builtin, handler: spec-context-pack }
+      - { name: synthesize, type: builtin, handler: spec-synthesize }
+      - { name: validate, type: builtin, handler: validate-spec }
+  - name: plan
+    phase: plan
+    steps:
+      - { name: synthesize, type: builtin, handler: plan-synthesize }
+      - name: red-team
+        type: builtin
+        handler: red-team
+        config:
+          context: "the implementation plan for the active feature"
+      - { name: validate, type: builtin, handler: validate-plan }
+  - name: decompose
+    phase: tasks
+    steps:
+      - { name: decompose, type: builtin, handler: task-decompose }
+      - { name: validate-tasks, type: builtin, handler: validate-tasks }
+  - name: deliver
+    phase: execute
+    steps:
+      - { name: execute, type: builtin, handler: execute-tasks }
+  - name: prove
+    phase: verify
+    on_phase_fail: stop
+    steps:
+      - name: configure
+        type: deterministic
+        run: "cmake --preset debug"
+        config: { timeout_secs: 1800 }
+      - name: build
+        type: deterministic
+        run: "cmake --build --preset debug"
+        config: { timeout_secs: 7200 }
+      - name: test
+        type: deterministic
+        run: "ctest --preset debug --output-on-failure"
+        config: { timeout_secs: 5400 }
+      - { name: review, type: builtin, handler: review }
+  - name: ship
+    phase: deploy
+    on_phase_fail: stop
+    steps:
+      - name: configure-release
+        type: deterministic
+        run: "cmake --preset release"
+        config: { timeout_secs: 1800 }
+      - name: build-release
+        type: deterministic
+        run: "cmake --build --preset release"
+        config: { timeout_secs: 7200 }
+      - name: test-release
+        type: deterministic
+        run: "ctest --preset release --output-on-failure"
+        config: { timeout_secs: 5400 }
+        after_gates:
+          - use: release-sign-off

@@ -1,0 +1,210 @@
+[meta]
+version = "1"
+description = "Architecture pillar health for the Luminumbra C++ engine"
+core_pillars = [
+    "build_and_tests",
+    "world_generation",
+    "simulation_core",
+    "rendering_pipeline",
+]
+core_threshold = 90
+overall_threshold = 85
+
+[pillars.build_and_tests]
+description = "CMake targets, GoogleTest coverage, and repeatable local validation"
+
+[[pillars.build_and_tests.checks]]
+name = "root CMake project exists"
+type = "exists"
+path = "CMakeLists.txt"
+
+[[pillars.build_and_tests.checks]]
+name = "tests are enabled"
+type = "grep"
+pattern = "enable_testing"
+files = "CMakeLists.txt"
+
+[[pillars.build_and_tests.checks]]
+name = "world generation test suite exists"
+type = "exists"
+path = "test/shield/test_world_generation.cpp"
+
+[[pillars.build_and_tests.checks]]
+name = "test target is registered"
+type = "grep"
+pattern = "gtest_discover_tests"
+files = "test/CMakeLists.txt"
+
+[[pillars.build_and_tests.checks]]
+name = "CMake presets define the canonical build trees"
+type = "exists"
+path = "CMakePresets.json"
+
+[[pillars.build_and_tests.checks]]
+name = "C++ formatting rules are declared"
+type = "exists"
+path = ".clang-format"
+
+[[pillars.build_and_tests.checks]]
+name = "C++ static analysis rules are declared"
+type = "exists"
+path = ".clang-tidy"
+
+[[pillars.build_and_tests.checks]]
+name = "continuous integration builds and tests the presets"
+type = "exists"
+path = ".github/workflows/ci.yml"
+
+[pillars.world_generation]
+description = "SHIELD world generation, chunk data, meshing, and deterministic terrain behavior"
+
+[[pillars.world_generation.checks]]
+name = "SHIELD world system exists"
+type = "exists"
+path = "src/luminumbra_common/systems/SHIELD_WorldSystem.cpp"
+
+[[pillars.world_generation.checks]]
+name = "chunk storage exists"
+type = "exists"
+path = "src/luminumbra_common/world/Chunk.cpp"
+
+[[pillars.world_generation.checks]]
+name = "marching cubes implementation exists"
+type = "exists"
+path = "src/luminumbra_common/world/MarchingCubes.cpp"
+
+[[pillars.world_generation.checks]]
+name = "generator has deterministic seed configuration"
+type = "grep"
+pattern = "seed"
+files = "src/luminumbra_common/systems/SHIELD_WorldSystem.h"
+
+[[pillars.world_generation.checks]]
+name = "world generation tests cover determinism"
+type = "grep"
+pattern = "Deterministic"
+files = "test/shield/test_world_generation.cpp"
+
+[pillars.simulation_core]
+description = "Shared simulation primitives, ECS components, jobs, events, physics, and water"
+
+[[pillars.simulation_core.checks]]
+name = "shared component definitions exist"
+type = "exists"
+path = "src/luminumbra_common/components/CoreComponents.h"
+
+[[pillars.simulation_core.checks]]
+name = "job system exists"
+type = "exists"
+path = "src/luminumbra_common/core/JobSystem.cpp"
+
+[[pillars.simulation_core.checks]]
+name = "event bus exists"
+type = "exists"
+path = "src/luminumbra_common/core/EventBus.cpp"
+
+[[pillars.simulation_core.checks]]
+name = "physics system exists"
+type = "exists"
+path = "src/luminumbra_common/systems/PhysicsSystem.cpp"
+
+[[pillars.simulation_core.checks]]
+name = "water system exists"
+type = "exists"
+path = "src/luminumbra_common/systems/WaterSystem.cpp"
+
+[pillars.rendering_pipeline]
+description = "Client renderer, shader pipeline, camera, mesh upload, and visual systems"
+
+[[pillars.rendering_pipeline.checks]]
+name = "render pipeline exists"
+type = "exists"
+path = "src/luminumbra_client/rendering/RenderPipeline.cpp"
+
+[[pillars.rendering_pipeline.checks]]
+name = "render system exists"
+type = "exists"
+path = "src/luminumbra_client/rendering/RenderSystem.cpp"
+
+[[pillars.rendering_pipeline.checks]]
+name = "deferred lighting shader exists"
+type = "exists"
+path = "res/shaders/lighting_pass.frag"
+
+[[pillars.rendering_pipeline.checks]]
+name = "G-buffer shader exists"
+type = "exists"
+path = "res/shaders/g_buffer.frag"
+
+[[pillars.rendering_pipeline.checks]]
+name = "camera abstraction exists"
+type = "exists"
+path = "src/luminumbra_client/rendering/Camera.h"
+
+[pillars.audio_ui_scripting]
+description = "Presentation support systems: audio, UI, scripts, and data-driven behavior"
+
+[[pillars.audio_ui_scripting.checks]]
+name = "miniaudio manager exists"
+type = "exists"
+path = "src/luminumbra_client/audio/MiniaudioManager.cpp"
+
+[[pillars.audio_ui_scripting.checks]]
+name = "Rml UI manager exists"
+type = "exists"
+path = "src/luminumbra_client/ui/Rml_UIManager.cpp"
+
+[[pillars.audio_ui_scripting.checks]]
+name = "Lua state bridge exists"
+type = "exists"
+path = "src/luminumbra_common/scripting/LuaState.cpp"
+
+[[pillars.audio_ui_scripting.checks]]
+name = "AI action scripts exist"
+type = "exists"
+path = "scripts/common/ai/actions/action_wander.lua"
+
+[pillars.tooling_and_assets]
+description = "Asset processing, data files, world presets, and developer tooling"
+
+[[pillars.tooling_and_assets.checks]]
+name = "asset processor exists"
+type = "exists"
+path = "tools/asset_processor.cpp"
+
+[[pillars.tooling_and_assets.checks]]
+name = "material database exists"
+type = "exists"
+path = "data/common/materials.json"
+
+[[pillars.tooling_and_assets.checks]]
+name = "world preset data exists"
+type = "exists"
+path = "worlds/atlas/presets/default.json"
+
+[[pillars.tooling_and_assets.checks]]
+name = "runtime data is copied from the declared manifest"
+type = "grep"
+pattern = "runtime_data_manifest"
+files = "CMakeLists.txt"
+
+[pillars.debt_regression_guards]
+description = "Previously tracked prototype debt, now fixed. Each check asserts the fix is still in place; a failure means the debt came back."
+
+[[pillars.debt_regression_guards.checks]]
+name = "water system carries no unresolved markers"
+type = "grep_absent"
+pattern = "TODO"
+files = "src/luminumbra_common/systems/WaterSystem.cpp"
+
+[[pillars.debt_regression_guards.checks]]
+name = "shadow cascade splits are validated rather than thrown on"
+type = "grep"
+pattern = "has_valid_shadow_cascade_splits"
+files = "src/luminumbra_client/rendering/RenderPipeline.cpp"
+
+[[pillars.debt_regression_guards.checks]]
+name = "world load reports through the logger, not the console"
+type = "grep"
+pattern = "LUMINUMBRA_CORE_INFO(\"World loaded successfully"
+files = "src/luminumbra_common/world/GameSession.cpp"
