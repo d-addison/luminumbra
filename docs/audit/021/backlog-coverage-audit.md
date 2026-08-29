@@ -3,7 +3,7 @@
 | Field | Snapshot |
 | --- | --- |
 | Date | 2026-07-11 |
-| Repository | <code>D:\Coding\luminumbra</code> |
+| Repository | <code>luminumbra</code> |
 | Branch | <code>feat/polyglot-audit-roadmap</code> |
 | HEAD | <code>cdfd0a816d939c2c835c02b960d36986d380904d</code> |
 | Primary backlog | <code>docs/audit/021/backlog.json</code> |

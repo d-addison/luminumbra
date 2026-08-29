@@ -149,8 +149,8 @@ Workflow requirements:
   `vendor/`, `crop_*.png`, etc.) — NOT this work. Don't `git add -A`; stage precisely.
 
 ## 6. Forge gotchas (memory-backed)
-- `forge spec` state-sync is blocked by a forward-only phase guard once past `spec` phase (filed:
-  internal-org/forge#1978). The specs stand as docs regardless; don't fight the guard.
+- `forge spec` state-sync is blocked by a forward-only phase guard once past `spec` phase. The
+  specs stand as docs regardless; don't fight the guard.
 - Codex spawners under-deliver on intricate shaders (do those inline); they're fine for spec/plan
   drafting and mechanical work — which is what this workflow's planning phases are.
 - Single-PC: no two-box LAN; Steam SDR transport can't be locally validated (spec 019 NG-3 / OQ-3) —
