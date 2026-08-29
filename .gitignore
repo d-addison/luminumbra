@@ -122,3 +122,8 @@ __pycache__/
 /data/textures/models/
 /photos/
 /scratch_six/
+
+# Upstream imgui ships `* text=auto`, which resolves differently under the
+# Windows and WSL gits that share this working tree and would reintroduce
+# whole-file EOL churn across the vendored sources. Kept out of the index.
+/vendor/imgui/.gitattributes
