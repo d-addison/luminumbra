@@ -4,10 +4,9 @@ Luminumbra is distributed under the MIT License (see `LICENSE`). It builds on th
 third-party projects below, each under its own license. All are permissive and
 compatible with MIT redistribution.
 
-Dependencies are obtained one of three ways, noted per entry:
+Dependencies are obtained in one of two ways, noted per entry:
 
 - **vendored** — source is committed in this repository under `vendor/`
-- **submodule** — referenced as a git submodule
 - **fetched** — downloaded at configure time by CMake `FetchContent`
 
 ---
@@ -18,15 +17,6 @@ Dependencies are obtained one of three ways, noted per entry:
 | --- | --- | --- |
 | [FastNoiseLite](https://github.com/Auburn/FastNoiseLite) | Coherent noise for terrain generation | MIT |
 | [RenderDoc](https://github.com/baldurk/renderdoc) (`renderdoc_app.h` only) | In-application graphics capture API | MIT |
-| [Dear ImGui](https://github.com/ocornut/imgui) | Immediate-mode debug UI | MIT |
-| [sol2](https://github.com/ThePhD/sol2) | C++ binding layer for Lua | MIT |
-| [spdlog](https://github.com/gabime/spdlog) | Logging | MIT |
-
-## Submodule
-
-| Project | Use | License |
-| --- | --- | --- |
-| [GoogleTest](https://github.com/google/googletest) | Unit and integration test framework | BSD-3-Clause |
 
 ## Fetched at configure time
 
@@ -38,6 +28,18 @@ Dependencies are obtained one of three ways, noted per entry:
 | [glad](https://github.com/Dav1dde/glad) | OpenGL loader (generated) | MIT |
 | [nlohmann/json](https://github.com/nlohmann/json) | JSON parsing and serialization | MIT |
 | [Jolt Physics](https://github.com/jrouwe/JoltPhysics) | Rigid-body physics and collision | MIT |
+| [FreeType](https://github.com/freetype/freetype) | Font rasterization for RmlUi | FreeType License or GPL-2.0-or-later |
+| [RmlUi](https://github.com/mikke89/RmlUi) | Runtime user interface | MIT |
+| [SOIL2](https://github.com/SpartanJ/SOIL2) | Image loading and OpenGL textures | Public domain |
+| [miniaudio](https://github.com/mackron/miniaudio) | Audio playback and mixing | MIT or public domain |
+| [meshoptimizer](https://github.com/zeux/meshoptimizer) | Mesh optimization | MIT |
+| [Lua](https://github.com/lua/lua) | Runtime scripting language | MIT |
+| [sol2](https://github.com/ThePhD/sol2) | C++ binding layer for Lua | MIT |
+| [spdlog](https://github.com/gabime/spdlog) | Logging | MIT |
+| [Dear ImGui](https://github.com/ocornut/imgui) | Immediate-mode debug UI | MIT |
+| [stb](https://github.com/nothings/stb) | Image loading and utility headers | MIT or public domain |
+| [GoogleTest](https://github.com/google/googletest) | Unit and integration test framework | BSD-3-Clause |
+| [LZ4](https://github.com/lz4/lz4) | Fast compression | BSD-2-Clause |
 
 ---
 

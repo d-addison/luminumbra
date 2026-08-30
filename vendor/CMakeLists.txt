@@ -40,6 +40,11 @@ set(MESHOPT_BUILD_DEMO OFF)
 set(MESHOPT_BUILD_BENCHMARKS OFF)
 set(LZ4_BUILD_CLI OFF)
 set(LZ4_BUILD_LEGACY_LZ4C OFF)
+set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
+set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
 
 # ---------------------------------------------------------------------------
 # Third-party libraries restored via FetchContent (pinned tags), 2026-06-14.
@@ -88,6 +93,7 @@ FetchContent_Declare(glfw          GIT_REPOSITORY https://github.com/glfw/glfw.g
 FetchContent_Declare(glad          GIT_REPOSITORY https://github.com/Dav1dde/glad.git       GIT_TAG v0.1.36       GIT_SHALLOW TRUE)
 FetchContent_Declare(nlohmann_json GIT_REPOSITORY https://github.com/nlohmann/json.git      GIT_TAG v3.12.0       GIT_SHALLOW TRUE)
 FetchContent_Declare(JoltPhysics   GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git GIT_TAG v5.3.0        GIT_SHALLOW TRUE SOURCE_SUBDIR Build)
+FetchContent_Declare(freetype      GIT_REPOSITORY https://github.com/freetype/freetype.git  GIT_TAG 0a0221a1347e2f1e07c395263540026e9a0aa7c7)
 FetchContent_Declare(RmlUi         GIT_REPOSITORY https://github.com/mikke89/RmlUi.git      GIT_TAG 6.1           GIT_SHALLOW TRUE)
 FetchContent_Declare(soil2         GIT_REPOSITORY https://github.com/SpartanJ/SOIL2.git     GIT_TAG 1.3.0         GIT_SHALLOW TRUE)
 FetchContent_Declare(miniaudio     GIT_REPOSITORY https://github.com/mackron/miniaudio.git  GIT_TAG 0.11.22       GIT_SHALLOW TRUE)
@@ -106,6 +112,11 @@ FetchContent_Declare(imgui_src     GIT_REPOSITORY https://github.com/ocornut/img
 FetchContent_Declare(stb           GIT_REPOSITORY https://github.com/nothings/stb.git       GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4)
 FetchContent_Declare(googletest    GIT_REPOSITORY https://github.com/google/googletest.git GIT_TAG 373af2e3df71599b87a40ce0e37164523849166b)
 FetchContent_Declare(lz4_upstream  GIT_REPOSITORY https://github.com/lz4/lz4.git GIT_TAG ebb370ca83af193212df4dcbadcc5d87bc0de2f0 SOURCE_SUBDIR build/cmake)
+
+FetchContent_MakeAvailable(freetype)
+if(TARGET freetype AND NOT TARGET Freetype::Freetype)
+  add_library(Freetype::Freetype ALIAS freetype)
+endif()
 
 FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics RmlUi soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
 
