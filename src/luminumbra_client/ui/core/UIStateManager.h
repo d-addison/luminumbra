@@ -1,16 +1,39 @@
 #pragma once
 
 #include "UIProperty.h"
+#include <cstddef>
 #include <string>
 #include <vector>
-#include <unordered_map>
-#include <memory>
 
 namespace Luminumbra::Client::UI {
 
-// Forward declarations
-struct WorldInfo;
-enum class GameState;
+// Data structures for UI state
+struct WorldInfo {
+    std::string id;
+    std::string name;
+    std::string type;
+    std::string seed;
+    std::string lastPlayed;
+    std::size_t fileSize;
+
+    bool operator==(const WorldInfo& other) const {
+        return id == other.id;
+    }
+
+    bool operator!=(const WorldInfo& other) const {
+        return !(*this == other);
+    }
+};
+
+enum class GameState {
+    MainMenu,
+    InGame,
+    Loading,
+    Settings,
+    WorldSelection,
+    WorldCreation,
+    Paused
+};
 
 /**
  * Centralized state management for the UI system.
@@ -81,33 +104,5 @@ private:
 inline UIStateManager& UIState() {
     return UIStateManager::Instance();
 }
-
-// Data structures for UI state
-struct WorldInfo {
-    std::string id;
-    std::string name;
-    std::string type;
-    std::string seed;
-    std::string lastPlayed;
-    size_t fileSize;
-    
-    bool operator==(const WorldInfo& other) const {
-        return id == other.id;
-    }
-    
-    bool operator!=(const WorldInfo& other) const {
-        return !(*this == other);
-    }
-};
-
-enum class GameState {
-    MainMenu,
-    InGame,
-    Loading,
-    Settings,
-    WorldSelection,
-    WorldCreation,
-    Paused
-};
 
 } // namespace Luminumbra::Client::UI
