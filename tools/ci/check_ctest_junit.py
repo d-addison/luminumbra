@@ -15,6 +15,7 @@ ALLOWED_SKIPS = {"JobSystemPoolTest.DispatchThroughputBenchmark"}
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("report", type=Path)
+    parser.add_argument("--minimum-tests", type=int, default=1)
     args = parser.parse_args()
 
     if not args.report.is_file():
@@ -22,8 +23,17 @@ def main() -> int:
         return 2
 
     root = ET.parse(args.report).getroot()
+    cases = list(root.iter("testcase"))
+    if len(cases) < args.minimum_tests:
+        print(
+            f"CTest inventory is incomplete: evaluated {len(cases)} tests, "
+            f"requires at least {args.minimum_tests}",
+            file=sys.stderr,
+        )
+        return 1
+
     unexpected: list[str] = []
-    for case in root.iter("testcase"):
+    for case in cases:
         if case.find("skipped") is None:
             continue
         name = case.get("name", "<unnamed>")
@@ -36,7 +46,7 @@ def main() -> int:
             print(f"  - {name}", file=sys.stderr)
         return 1
 
-    print("CTest skip audit passed")
+    print(f"CTest inventory and skip audit passed ({len(cases)} tests)")
     return 0
 
 

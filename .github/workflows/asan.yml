@@ -42,7 +42,7 @@ jobs:
             xvfb-run -a ctest --preset debug-asan --no-tests=error -LE manual \
               -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
               --parallel 2 --timeout 300 --output-junit ctest.junit.xml
-          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml
+          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 1700
       - name: Upload sanitizer evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
