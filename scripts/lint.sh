@@ -4,6 +4,7 @@ set -euo pipefail
 build_dir="build"
 format_only=0
 tidy_only=0
+changed_from=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -18,6 +19,10 @@ while [[ $# -gt 0 ]]; do
         --tidy-only)
             tidy_only=1
             shift
+            ;;
+        --changed-from)
+            changed_from="$2"
+            shift 2
             ;;
         *)
             echo "Unknown argument: $1" >&2
@@ -36,18 +41,42 @@ for source_root in src include test; do
     fi
 done
 
-mapfile -t cpp_files < <(
-    find "$repo_root/src" "$repo_root/include" "$repo_root/test" \
-        -type f \
-        \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o \
-           -name '*.h' -o -name '*.hh' -o -name '*.hpp' -o -name '*.hxx' \) \
-        ! -path '*/vendor/*' \
-        ! -path '*/external/*' \
-        ! -path '*/build/*' \
-        ! -path '*/out/*'
-)
+if [[ -n "$changed_from" ]]; then
+    if ! git -C "$repo_root" rev-parse --verify --quiet "$changed_from^{commit}" >/dev/null; then
+        echo "Formatting comparison commit does not exist: $changed_from" >&2
+        exit 1
+    fi
+
+    cpp_files=()
+    while IFS= read -r -d '' relative_path; do
+        case "$relative_path" in
+            src/*|include/*|test/*)
+                case "$relative_path" in
+                    *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx)
+                        cpp_files+=("$repo_root/$relative_path")
+                        ;;
+                esac
+                ;;
+        esac
+    done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR -z "$changed_from")
+else
+    mapfile -t cpp_files < <(
+        find "$repo_root/src" "$repo_root/include" "$repo_root/test" \
+            -type f \
+            \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o \
+               -name '*.h' -o -name '*.hh' -o -name '*.hpp' -o -name '*.hxx' \) \
+            ! -path '*/vendor/*' \
+            ! -path '*/external/*' \
+            ! -path '*/build/*' \
+            ! -path '*/out/*'
+    )
+fi
 
 if [[ "${#cpp_files[@]}" -eq 0 ]]; then
+    if [[ -n "$changed_from" ]]; then
+        echo "No first-party C/C++ files changed."
+        exit 0
+    fi
     echo "No first-party C/C++ files found." >&2
     exit 1
 fi

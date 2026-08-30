@@ -1,4 +1,4 @@
-// Spec 002 Item 1 — the create-world LIVE WORLD-PREVIEW DIORAMA.
+// Create-world live preview diorama tests.
 //
 // These tests drive the REAL engine pipeline headlessly (hidden 4.5-core GL
 // window) through the WorldgenPreview controller: build a bounded candidate
@@ -11,18 +11,22 @@
 // worldgen agent), so they never go RED on a preset change.
 //
 // GL-required: the cases GTEST_SKIP without a GL context, and the UI gate
-// promotes any "SKIPPED" line on this target to a ctest FAILURE (spec 002 3a),
+// promotes any "SKIPPED" line on this target to a CTest failure,
 // so a real gate run must genuinely render these.
 
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <numeric>
 #include <thread>
 #include <vector>
@@ -37,6 +41,10 @@ namespace {
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
 #define LUMINUMBRA_SOURCE_ROOT "."
+#endif
+
+#ifndef LUMINUMBRA_TEST_ARTIFACT_DIR
+#define LUMINUMBRA_TEST_ARTIFACT_DIR "."
 #endif
 
 fs::path SourceRoot() {
@@ -68,11 +76,17 @@ public:
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -111,8 +125,7 @@ std::vector<unsigned char> ReadTarget(const Luminumbra::Client::WorldgenPreview&
 }
 
 // Sum of absolute per-byte differences between two equal-size buffers.
-std::uint64_t PixelDelta(const std::vector<unsigned char>& a,
-                         const std::vector<unsigned char>& b) {
+std::uint64_t PixelDelta(const std::vector<unsigned char>& a, const std::vector<unsigned char>& b) {
     const std::size_t n = std::min(a.size(), b.size());
     std::uint64_t acc = 0;
     for (std::size_t i = 0; i < n; ++i) {
@@ -125,7 +138,8 @@ std::uint64_t PixelDelta(const std::vector<unsigned char>& a,
 std::size_t Foreground(const std::vector<unsigned char>& px) {
     std::size_t fg = 0;
     for (std::size_t i = 0; i + 3 < px.size(); i += 4) {
-        if (px[i] > 4 || px[i + 1] > 4 || px[i + 2] > 4) ++fg;
+        if (px[i] > 4 || px[i + 1] > 4 || px[i + 2] > 4)
+            ++fg;
     }
     return fg;
 }
@@ -160,7 +174,8 @@ struct PreviewFixture {
 
     PreviewFixture() {
         ok = pipeline.startup(kPreviewW, kPreviewH, SourceRoot());
-        if (!ok) return;
+        if (!ok)
+            return;
         preview.set_active(true);
         preview.ensure_target(kPreviewW, kPreviewH);
         preview.set_params(FixedCandidate(), /*seed*/ 4242);
@@ -176,7 +191,8 @@ struct PreviewFixture {
 
 TEST(WorldgenPreviewTest, RendersCandidateDioramaToTargetWithoutCrashing) {
     HiddenGlContext ctx;
-    if (!ctx.ready()) GTEST_SKIP() << ctx.error();
+    if (!ctx.ready())
+        GTEST_SKIP() << ctx.error();
 
     PreviewFixture fx;
     ASSERT_TRUE(fx.ok) << "RenderPipeline startup failed";
@@ -185,15 +201,15 @@ TEST(WorldgenPreviewTest, RendersCandidateDioramaToTargetWithoutCrashing) {
     ASSERT_TRUE(fx.preview.render(fx.pipeline, 1.0f / 60.0f));
     const std::vector<unsigned char> px = ReadTarget(fx.preview);
     // A real lit diorama fills a meaningful fraction of the frame (terrain + sky).
-    EXPECT_GT(Foreground(px),
-              static_cast<std::size_t>(kPreviewW * kPreviewH / 20));
+    EXPECT_GT(Foreground(px), static_cast<std::size_t>(kPreviewW * kPreviewH / 20));
     // The offscreen redirect must be cleared after render (default-0 path).
     EXPECT_FALSE(fx.pipeline.has_offscreen_target());
 }
 
 TEST(WorldgenPreviewTest, ChangingParamsChangesTargetPixels) {
     HiddenGlContext ctx;
-    if (!ctx.ready()) GTEST_SKIP() << ctx.error();
+    if (!ctx.ready())
+        GTEST_SKIP() << ctx.error();
 
     PreviewFixture fx;
     ASSERT_TRUE(fx.ok);
@@ -219,7 +235,8 @@ TEST(WorldgenPreviewTest, ChangingParamsChangesTargetPixels) {
 
 TEST(WorldgenPreviewTest, ChangingWeatherAndTimeOfDayChangesTargetPixels) {
     HiddenGlContext ctx;
-    if (!ctx.ready()) GTEST_SKIP() << ctx.error();
+    if (!ctx.ready())
+        GTEST_SKIP() << ctx.error();
 
     PreviewFixture fx;
     ASSERT_TRUE(fx.ok);
@@ -239,7 +256,8 @@ TEST(WorldgenPreviewTest, ChangingWeatherAndTimeOfDayChangesTargetPixels) {
 
 TEST(WorldgenPreviewTest, OrbitChangesTheView) {
     HiddenGlContext ctx;
-    if (!ctx.ready()) GTEST_SKIP() << ctx.error();
+    if (!ctx.ready())
+        GTEST_SKIP() << ctx.error();
 
     PreviewFixture fx;
     ASSERT_TRUE(fx.ok);
@@ -259,7 +277,8 @@ TEST(WorldgenPreviewTest, OrbitChangesTheView) {
 
 TEST(WorldgenPreviewTest, RebuildIsDebouncedAndLatestWins) {
     HiddenGlContext ctx;
-    if (!ctx.ready()) GTEST_SKIP() << ctx.error();
+    if (!ctx.ready())
+        GTEST_SKIP() << ctx.error();
 
     PreviewFixture fx;
     ASSERT_TRUE(fx.ok);
@@ -289,7 +308,8 @@ TEST(WorldgenPreviewTest, RebuildIsDebouncedAndLatestWins) {
 
 TEST(WorldgenPreviewTest, PerFrameRenderHoldsPreviewBudget) {
     HiddenGlContext ctx;
-    if (!ctx.ready()) GTEST_SKIP() << ctx.error();
+    if (!ctx.ready())
+        GTEST_SKIP() << ctx.error();
 
     PreviewFixture fx;
     ASSERT_TRUE(fx.ok);
@@ -304,6 +324,8 @@ TEST(WorldgenPreviewTest, PerFrameRenderHoldsPreviewBudget) {
 
     constexpr int kFrames = 8;
     double worst_ms = 0.0;
+    std::vector<double> samples_ms;
+    samples_ms.reserve(kFrames);
     for (int i = 0; i < kFrames; ++i) {
         // Nudge the camera each frame so the render path actually re-runs.
         fx.preview.orbit(3.0f, 0.0f);
@@ -312,10 +334,58 @@ TEST(WorldgenPreviewTest, PerFrameRenderHoldsPreviewBudget) {
         glFinish();
         const auto t1 = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        samples_ms.push_back(ms);
         worst_ms = std::max(worst_ms, ms);
     }
+
+    auto sorted_ms = samples_ms;
+    std::sort(sorted_ms.begin(), sorted_ms.end());
+    const auto percentile = [&sorted_ms](double quantile) {
+        const auto rank =
+            static_cast<std::size_t>(std::ceil(quantile * static_cast<double>(sorted_ms.size())));
+        return sorted_ms[std::min(sorted_ms.size() - 1, std::max<std::size_t>(1, rank) - 1)];
+    };
+    const double p50_ms = percentile(0.50);
+    const double p95_ms = percentile(0.95);
+    const double p99_ms = percentile(0.99);
+    std::vector<double> deviations;
+    deviations.reserve(samples_ms.size());
+    for (const double sample_ms : samples_ms) {
+        deviations.push_back(std::abs(sample_ms - p50_ms));
+    }
+    std::sort(deviations.begin(), deviations.end());
+    const double mad_ms = deviations[(deviations.size() - 1) / 2];
+    constexpr double kBudgetMs = 250.0;
+
+    const fs::path artifact =
+        fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "performance" / "worldgen_preview_frame.json";
+    fs::create_directories(artifact.parent_path());
+    std::ofstream report(artifact, std::ios::trunc);
+    ASSERT_TRUE(report) << "could not write performance evidence: " << artifact;
+    report << std::setprecision(17) << "{\n"
+           << "  \"schema\": \"luminumbra.performance_measurement.v2\",\n"
+           << "  \"status\": \"evaluated\",\n"
+           << "  \"test\": \"WorldgenPreviewTest.PerFrameRenderHoldsPreviewBudget\",\n"
+           << "  \"metric\": \"preview_frame_wall_ms\",\n"
+           << "  \"unit\": \"ms\",\n"
+           << "  \"samples\": [";
+    for (std::size_t i = 0; i < samples_ms.size(); ++i) {
+        if (i > 0)
+            report << ", ";
+        report << samples_ms[i];
+    }
+    report << "],\n"
+           << "  \"p50\": " << p50_ms << ",\n"
+           << "  \"p95\": " << p95_ms << ",\n"
+           << "  \"p99\": " << p99_ms << ",\n"
+           << "  \"mad\": " << mad_ms << ",\n"
+           << "  \"worst\": " << worst_ms << ",\n"
+           << "  \"threshold\": " << kBudgetMs << ",\n"
+           << "  \"passed\": " << (worst_ms < kBudgetMs ? "true" : "false") << "\n"
+           << "}\n";
+    report.close();
     // Budget: the preview is small (640x480) + bounded radius. Debug + software
     // GL on a CI box is slow, so this is a generous ceiling that still catches a
     // gross regression (e.g. accidentally streaming the full world).
-    EXPECT_LT(worst_ms, 250.0) << "preview frame too expensive: " << worst_ms << " ms";
+    EXPECT_LT(worst_ms, kBudgetMs) << "preview frame too expensive: " << worst_ms << " ms";
 }

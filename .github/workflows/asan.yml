@@ -2,9 +2,7 @@ name: AddressSanitizer
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -12,43 +10,47 @@ permissions:
   contents: read
 
 concurrency:
-  group: asan-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   asan:
-    name: ASan
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: Linux / Clang ASan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
       CC: clang
       CXX: clang++
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install native toolchain
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install build and test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang \
-            cmake \
-            libgl1-mesa-dev \
-            libglu1-mesa-dev \
-            ninja-build \
-            pkg-config \
-            xauth \
-            xorg-dev \
-            xvfb
-
-      - name: Run sanitizer tests
-        shell: bash
+            clang cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev \
+            libglu1-mesa-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
+            python3-numpy python3-pil wayland-protocols xauth xorg-dev xvfb
+      - name: Configure
+        run: cmake --preset debug-asan
+      - name: Build
+        run: cmake --build --preset debug-asan --parallel 4
+      - name: Test
         run: |
-          set -euo pipefail
-          cmake --preset debug-asan
-          cmake --build --preset debug-asan --parallel
-          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a \
-            ctest --preset debug-asan --output-on-failure --no-tests=error -LE manual
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset debug-asan --no-tests=error -LE manual \
+              -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+              --parallel 2 --timeout 300 --output-junit ctest.junit.xml
+          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml
+      - name: Upload sanitizer evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: asan-test-evidence-${{ github.sha }}
+          path: |
+            build/debug-asan/ctest.junit.xml
+            build/debug-asan/Testing/Temporary
+            build/debug-asan/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14

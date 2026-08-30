@@ -7,7 +7,6 @@ PROJECT_BRIEF          = "A C++20 voxel and entity-component-system engine"
 OUTPUT_DIRECTORY       = build/docs
 CREATE_SUBDIRS         = NO
 OUTPUT_LANGUAGE        = English
-OUTPUT_TEXT_DIRECTION  = None
 ALLOW_UNICODE_NAMES    = NO
 
 BRIEF_MEMBER_DESC      = YES
@@ -33,9 +32,8 @@ BUILTIN_STL_SUPPORT    = YES
 CPP_CLI_SUPPORT        = NO
 SIP_SUPPORT            = NO
 
-# EXTRACT_ALL must remain disabled: enabling it suppresses Doxygen's
-# undocumented-API warnings. Public and protected declarations without docs
-# remain visible in warnings and in the context of documented compounds.
+# Keep the reference centered on documented API while source browsing still
+# exposes surrounding declarations.
 EXTRACT_ALL            = NO
 EXTRACT_PRIVATE        = NO
 EXTRACT_PRIV_VIRTUAL   = NO
@@ -67,17 +65,17 @@ MAX_INITIALIZER_LINES  = 30
 SHOW_USED_FILES        = YES
 SHOW_FILES             = YES
 SHOW_NAMESPACES        = YES
-QUIET                   = NO
+QUIET                   = YES
 
-# Keep warnings in the job log so documentation debt is visible. They are not
-# errors yet; this lets the initial public API reference be generated while the
-# existing undocumented surface is paid down incrementally.
+# Syntax, link, and structural documentation errors fail the build. API
+# coverage is a separate metric; treating every undocumented implementation
+# detail as a parser failure would make the reference permanently unusable.
 WARNINGS               = YES
-WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_UNDOCUMENTED   = NO
 WARN_IF_DOC_ERROR      = YES
-WARN_NO_PARAMDOC       = YES
+WARN_NO_PARAMDOC       = NO
 WARN_IF_INCOMPLETE_DOC = YES
-WARN_AS_ERROR          = NO
+WARN_AS_ERROR          = YES
 WARN_FORMAT            = "$file:$line: $text"
 
 INPUT                  = include \
@@ -120,7 +118,6 @@ CLANG_OPTIONS          = -std=c++20
 CASE_SENSE_NAMES       = YES
 MARKDOWN_SUPPORT       = YES
 AUTOLINK_SUPPORT       = YES
-AUTOLINK_IGNORE_WORDS  =
 
 GENERATE_HTML          = YES
 HTML_OUTPUT            = html
@@ -164,7 +161,6 @@ ALLEXTERNALS           = NO
 EXTERNAL_GROUPS        = YES
 EXTERNAL_PAGES         = YES
 
-CLASS_DIAGRAMS         = YES
 DIA_PATH               =
 HIDE_UNDOC_RELATIONS   = YES
 HAVE_DOT               = YES
@@ -188,4 +184,3 @@ DOT_IMAGE_FORMAT       = svg
 INTERACTIVE_SVG        = YES
 DOT_GRAPH_MAX_NODES    = 50
 MAX_DOT_GRAPH_DEPTH    = 0
-DOT_TRANSPARENT        = YES

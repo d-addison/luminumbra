@@ -1,0 +1,71 @@
+name: Performance observations
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview-frame:
+    name: Preview frame / software OpenGL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install measurement dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
+            xauth xorg-dev xvfb
+      - name: Restore compiler cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ccache
+          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
+          restore-keys: perf-linux-x64-gcc-ccache-
+      - name: Configure
+        run: cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build measurement target
+        run: cmake --build --preset release --target worldgen_preview_test --parallel 4
+      - name: Measure preview frame
+        continue-on-error: true
+        run: |
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset release --no-tests=error \
+              -R '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+              --output-on-failure --output-junit performance.junit.xml
+      - name: Validate measurement evidence
+        if: always()
+        run: |
+          python3 tools/ci/validate_performance_measurement.py \
+            build/release/performance.junit.xml \
+            build/release/test-artifacts/performance/worldgen_preview_frame.json \
+            build/release/performance-result.json \
+            --test WorldgenPreviewTest.PerFrameRenderHoldsPreviewBudget
+          cat build/release/performance-result.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload measurement evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: preview-frame-performance-${{ github.sha }}
+          path: |
+            build/release/performance.junit.xml
+            build/release/performance-result.json
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 30

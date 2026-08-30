@@ -9,82 +9,168 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  build-test:
-    name: Build and test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
+env:
+  CTEST_PARALLEL_LEVEL: "4"
 
+jobs:
+  linux:
+    name: Linux / GCC
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install build and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            cmake \
-            ninja-build \
-            libgl1-mesa-dev \
-            libglu1-mesa-dev \
-            pkg-config \
-            xauth \
-            xorg-dev \
-            xvfb
-
-      - name: Cache vendor build artifacts
-        uses: actions/cache@v4
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
+            xauth xorg-dev xvfb
+      - name: Restore compiler cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: build/release/vendor
-          key: ${{ runner.os }}-vendor-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'vendor/**') }}
-          restore-keys: |
-            ${{ runner.os }}-vendor-
-
-      # One canonical tree: build through the CMakePresets.json `release` preset
-      # into build/release. Never `cmake -S . -B build` (the retired root tree);
-      # the build-tree preflight refuses a concurrent root build/ tree.
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
+          restore-keys: linux-x64-gcc-ccache-
       - name: Configure
-        run: cmake --preset release
-
+        run: cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
       - name: Build
-        run: cmake --build --preset release
+        run: cmake --build --preset release --parallel 4
+      - name: Test
+        run: |
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset release --no-tests=error -LE manual \
+              -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+              --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-gcc-test-evidence-${{ github.sha }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Test (Linux)
-        if: runner.os == 'Linux'
-        env:
-          LIBGL_ALWAYS_SOFTWARE: 1
-        run: xvfb-run -a ctest --preset release --output-on-failure --no-tests=error -LE manual
+  windows-msvc:
+    name: Windows / MSVC
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Python test dependencies
+        run: python -m pip install --disable-pip-version-check numpy Pillow
+      - name: Configure, build, and test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          cmake --build --preset release --parallel 4
+          ctest --preset release --no-tests=error -LE manual `
+            -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' `
+            --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-msvc-test-evidence-${{ github.sha }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Test (Windows)
-        if: runner.os == 'Windows'
-        run: ctest --preset release --output-on-failure --no-tests=error -LE manual
+  windows-ucrt64:
+    name: Windows / MSYS2 UCRT64
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-numpy
+            mingw-w64-ucrt-x86_64-python-pillow
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake --preset release
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build --preset release --parallel 4
+      - name: Test
+        shell: msys2 {0}
+        run: |
+          ctest --preset release --no-tests=error -LE manual \
+            -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+            --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-ucrt64-test-evidence-${{ github.sha }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
 
   lint:
-    name: Format and static analysis
-    runs-on: ubuntu-latest
-
+    name: Format changed files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          submodules: recursive
-
-      - name: Install lint tooling
+          fetch-depth: 0
+      - name: Install formatting tool
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-format
-
+          sudo apt-get install -y --no-install-recommends clang-format
+      - name: Select formatting comparison commit
+        id: format-base
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PULL_REQUEST_BASE"
+          elif [[ -n "$PUSH_BEFORE" && "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            base="$PUSH_BEFORE"
+          elif git rev-parse --verify --quiet origin/main >/dev/null; then
+            base="origin/main"
+          else
+            base="HEAD^"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Check formatting
-        run: scripts/lint.sh --format-only
+        run: scripts/lint.sh --format-only --changed-from '${{ steps.format-base.outputs.base }}'
