@@ -32,6 +32,13 @@ uniform float u_water_depth_scaler;
 uniform float u_reflection_power;
 uniform vec3 u_sky_color; // approximate sky reflection color (time-of-day driven)
 
+const float FAR_DEPTH_THRESHOLD = 0.9999;
+
+bool has_opaque_depth(float depth)
+{
+    return depth < FAR_DEPTH_THRESHOLD;
+}
+
 // --- Procedural ripple normal -------------------------------------------
 // The bound u_normal_map is the engine's FLAT fallback (tangent +Z), so the
 // texture bump below contributes no XY tilt and the surface normal collapses
@@ -176,23 +183,26 @@ void main()
 
     // --- 3. Depth & Scene Reconstruction ---
     float background_depth_sample = texture(u_opaque_depth, screen_uv).r;
-    vec3 background_world_pos = world_pos_from_depth(background_depth_sample, screen_uv);
-    float water_depth = max(0.0, fs_in.world_pos.y - background_world_pos.y);
+    bool background_has_opaque_depth = has_opaque_depth(background_depth_sample);
+
+    // Sky and clouds have resolved color but retain far-plane depth. Treat that
+    // case as open water instead of reconstructing a far-plane world position.
+    float water_depth = max(6.0, 1.0 / max(u_water_depth_scaler, 0.001));
+    if (background_has_opaque_depth) {
+        vec3 background_world_pos = world_pos_from_depth(background_depth_sample, screen_uv);
+        water_depth = max(0.0, fs_in.world_pos.y - background_world_pos.y);
+    }
 
     // --- 4. Refraction ---
     vec2 refraction_offset = surface_normal.xz * (0.05 + flow_data.a * 0.02);
-    vec2 refraction_uv = screen_uv + refraction_offset;
-    // Fall back to the deep water tint when nothing opaque is rendered behind
-    // the surface (unstreamed chunks / sky at the far plane); sampling the
-    // unrendered opaque buffer there produces grey-white blotches.
-    float refraction_depth = texture(u_opaque_depth, refraction_uv).r;
+    vec2 refraction_uv = clamp(screen_uv + refraction_offset, vec2(0.001), vec2(0.999));
     // Light-scaled deep tint used wherever the surface falls back to a constant
     // water colour (refraction/reflection misses). Like the body colour, this
     // must dim at night or the constant blue becomes self-lit in dark frames.
     vec3 deep_fill = u_deep_color * light_scale;
-    vec3 refracted_color = refraction_depth < 1.0
-        ? texture(u_opaque_scene_color, refraction_uv).rgb
-        : deep_fill;
+    // The color input is the resolved pre-water scene, including sky. It is
+    // valid even when the corresponding depth sample is at the far plane.
+    vec3 refracted_color = texture(u_opaque_scene_color, refraction_uv).rgb;
     
     // --- 5. Reflection (inline SSR: 8-step raymarch + binary refinement + edge fade) ---
     // T-I2-16b decision: the whole water pass (caustics + SSR + shading)
@@ -201,7 +211,9 @@ void main()
     vec3 reflection_vector = reflect(view_dir, surface_normal);
     // Rays that leave the screen without hitting geometry reflect the sky for
     // upward directions and the deep water tint for grazing/downward ones.
-    vec3 miss_color = mix(deep_fill, u_sky_color, clamp(reflection_vector.y * 2.0 + 0.2, 0.0, 1.0));
+    vec3 resolved_background_color = texture(u_opaque_scene_color, screen_uv).rgb;
+    vec3 sky_miss_color = background_has_opaque_depth ? u_sky_color : resolved_background_color;
+    vec3 miss_color = mix(deep_fill, sky_miss_color, clamp(reflection_vector.y * 2.0 + 0.2, 0.0, 1.0));
     vec3 reflected_color = miss_color;
 
     // Reduced steps and adaptive quality based on fresnel
@@ -234,7 +246,7 @@ void main()
             // this, far-plane reconstructions register as fake hits and the
             // reflection samples the unrendered region of the opaque buffer
             // (grey-white blotches instead of sky).
-            if (scene_depth >= 1.0) {
+            if (!has_opaque_depth(scene_depth)) {
                 continue;
             }
             vec3 scene_pos = world_pos_from_depth(scene_depth, ray_uv);
@@ -249,7 +261,12 @@ void main()
                     vec3 mid = 0.5 * (lo + hi);
                     vec4 mid_clip = u_view_projection * vec4(mid, 1.0);
                     vec2 mid_uv = mid_clip.xy / mid_clip.w * 0.5 + 0.5;
-                    vec3 mid_scene = world_pos_from_depth(texture(u_opaque_depth, mid_uv).r, mid_uv);
+                    float mid_depth = texture(u_opaque_depth, mid_uv).r;
+                    if (!has_opaque_depth(mid_depth)) {
+                        lo = mid;
+                        continue;
+                    }
+                    vec3 mid_scene = world_pos_from_depth(mid_depth, mid_uv);
                     if (mid.y < mid_scene.y) {
                         hi = mid;
                     } else {

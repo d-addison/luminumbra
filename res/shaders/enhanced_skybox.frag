@@ -237,10 +237,12 @@ vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
     float tEnter = cloudSlabBottom() / max(viewDir.y, 1e-3);
     float tExit  = cloudSlabTop()    / max(viewDir.y, 1e-3);
 
-    // CHEAP CLEAR-SKY REJECT (gate safety + perf): probe coverage at the slab
-    // mid-point; if the column is essentially clear, return the base gradient
-    // untouched so SkyboxVisual sees a pristine fair-weather dome.
+    // Probe the bounded slab at bottom, middle, and top. A midpoint-only reject
+    // can miss tilted columns that clip cloud near a slab edge.
+    float lowCov = cloudCoverageAt(viewDir.xz * tEnter);
     float midCov = cloudCoverageAt(viewDir.xz * (0.5 * (tEnter + tExit)));
+    float highCov = cloudCoverageAt(viewDir.xz * tExit);
+    midCov = max(midCov, max(lowCov, highCov));
     midCov = mix(midCov, max(midCov, mix(0.55, 0.95, structureWeight)), structureWeight);
     if (midCov <= 0.01) return baseColor;
 
@@ -379,7 +381,10 @@ vec3 renderAurora(vec3 viewDir, float dayFactor) {
     // NONE. Keyed on the same u_cloudCoverageAmount the cloud deck uses, so the gate
     // tracks the actual overcast level (clear ~0.45 -> 1.0, storm ~0.85 -> 0.0).
     float overcastGate = 1.0 - smoothstep(0.55, 0.72, u_cloudCoverageAmount);
-    float nightEnvelope = clamp(u_auroraStrength, 0.0, 1.0) * overcastGate;
+    // The explicit storm floor closes the gate even if coverage state lags a
+    // frame behind the active storm lighting.
+    float stormGate = 1.0 - smoothstep(0.05, 0.35, u_stormSkyFloor);
+    float nightEnvelope = clamp(u_auroraStrength, 0.0, 1.0) * overcastGate * stormGate;
     // Curtains hang above the horizon band; start the fade a little above y=0 so
     // nothing snaps on at the frame edge, but allow them well up the dome.
     if (nightEnvelope <= 0.0 || viewDir.y < 0.12) return vec3(0.0);
