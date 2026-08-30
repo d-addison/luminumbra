@@ -48,6 +48,7 @@ if [[ -n "$changed_from" ]]; then
     fi
 
     cpp_files=()
+    untracked_cpp_files=()
     while IFS= read -r -d '' relative_path; do
         case "$relative_path" in
             src/*|include/*|test/*)
@@ -59,6 +60,19 @@ if [[ -n "$changed_from" ]]; then
                 ;;
         esac
     done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR -z "$changed_from")
+
+    while IFS= read -r -d '' relative_path; do
+        case "$relative_path" in
+            src/*|include/*|test/*)
+                case "$relative_path" in
+                    *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx)
+                        untracked_cpp_files+=("$repo_root/$relative_path")
+                        cpp_files+=("$repo_root/$relative_path")
+                        ;;
+                esac
+                ;;
+        esac
+    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- src include test)
 else
     mapfile -t cpp_files < <(
         find "$repo_root/src" "$repo_root/include" "$repo_root/test" \
@@ -113,6 +127,9 @@ if [[ "$tidy_only" -eq 0 ]]; then
         if [[ -n "$format_diff" ]]; then
             echo "$format_diff"
             exit 1
+        fi
+        if [[ "${#untracked_cpp_files[@]}" -gt 0 ]]; then
+            clang-format --dry-run --Werror -style=file "${untracked_cpp_files[@]}"
         fi
     else
         clang-format --dry-run --Werror "${cpp_files[@]}"
