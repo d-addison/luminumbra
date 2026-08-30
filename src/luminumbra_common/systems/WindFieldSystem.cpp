@@ -71,9 +71,8 @@ void MixU64(std::uint64_t& hash, std::uint64_t value) {
 } // namespace
 
 WindFieldSystem::WindFieldSystem(int world_seed)
-    : m_world_seed(world_seed),
-      m_wind_seed(world_seed + 11), // seed-offset registry: +11 wind (FIRST)
-      m_grid(kWindExtentCells, kWindCellSizeM) {
+    : m_wind_seed(world_seed + 11)
+    , m_grid(kWindExtentCells, kWindCellSizeM) {
     // Low-frequency FBm simplex, the same family the worldgen climate noises use,
     // so the FastNoise batch path (GenPositionArray2D / GenUniformGrid2D) and the
     // single-sample path (GenSingle2D) produce identical float bits.

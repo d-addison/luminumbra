@@ -87,7 +87,36 @@ if [[ "$tidy_only" -eq 0 ]]; then
         exit 1
     fi
 
-    clang-format --dry-run --Werror "${cpp_files[@]}"
+    if [[ -n "$changed_from" ]]; then
+        clang_format_diff=""
+        for candidate in clang-format-diff clang-format-diff-18 clang-format-diff-17; do
+            if command -v "$candidate" >/dev/null 2>&1; then
+                clang_format_diff="$candidate"
+                break
+            fi
+        done
+        if [[ -z "$clang_format_diff" ]]; then
+            echo "clang-format-diff was not found on PATH." >&2
+            exit 1
+        fi
+        set +e
+        format_diff=$(
+            git -C "$repo_root" diff --no-ext-diff -U0 "$changed_from" -- src include test |
+                "$clang_format_diff" -p1 -style=file
+        )
+        format_status=$?
+        set -e
+        if [[ "$format_status" -gt 1 ]]; then
+            echo "clang-format-diff failed with status $format_status." >&2
+            exit "$format_status"
+        fi
+        if [[ -n "$format_diff" ]]; then
+            echo "$format_diff"
+            exit 1
+        fi
+    else
+        clang-format --dry-run --Werror "${cpp_files[@]}"
+    fi
 fi
 
 if [[ "$format_only" -eq 0 ]]; then

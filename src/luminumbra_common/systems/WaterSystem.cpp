@@ -15,13 +15,10 @@
 
 namespace Luminumbra::Systems {
 
-// --- Constants for Simulation ---
-constexpr float FLOW_CONSTANT = 0.1f;
-constexpr float MIN_FLOW_DIFF = 0.001f;
-constexpr float MAX_WATER_COMPRESSION = 0.2f;
-constexpr int WATER_MESH_DIRTY_TICK_INTERVAL = 15; // spec 009: responsive water mesh (render-only, not
-                                                   // hashed) so a filling river updates its surface ~0.5s
-                                                   // instead of 2s — visible flowing water, not stale mesh.
+constexpr int WATER_MESH_DIRTY_TICK_INTERVAL =
+    15; // responsive water mesh (render-only, not
+        // hashed) so a filling river updates its surface ~0.5s
+        // instead of 2s — visible flowing water, not stale mesh.
 // spec 008 follow-up (streaming-burst amortization): cap how many chunks first-time-initialize
 // their water sim grid per tick. Each init samples WaterLevelAt + GetTerrainHeightAt for every
 // cell (resolution^2), so a moving camera that streams in many water chunks at once initialized

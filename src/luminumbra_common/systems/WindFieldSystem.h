@@ -114,8 +114,7 @@ private:
     // reported via in_region).
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;
 
-    int m_world_seed = 0;
-    int m_wind_seed = 0; // m_world_seed + 11
+    int m_wind_seed = 0; // world seed + 11
     luminumbra::fields::FieldGrid<WindCell> m_grid;
     Vec2 m_base_direction = Vec2(1.0f, 0.0f);
     std::uint64_t m_last_tick = 0;

@@ -4345,16 +4345,9 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
     std::vector<Luminumbra::Chunk*> renderable;
     renderable.reserve(m_streaming_state.chunks.size());
 
-    int total_chunks = 0;
-    int ready_chunks = 0;
-    int chunks_with_mesh = 0;
-
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-        total_chunks++;
         if (chunk_ptr->get_state() == Luminumbra::ChunkState::Ready) {
-            ready_chunks++;
             if (!chunk_ptr->mesh_vertices.empty()) {
-                chunks_with_mesh++;
                 renderable.push_back(chunk_ptr.get());
 
                 // Debug logging disabled to prevent segfault from static atomics
