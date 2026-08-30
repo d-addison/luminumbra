@@ -26,6 +26,8 @@
  *
  */
 
+#include <cstdint>
+
 #include "RmlUi_Renderer_GL3.h"
 #include <RmlUi/Core/Core.h>
 #include <RmlUi/Core/DecorationTypes.h>

@@ -10,7 +10,14 @@
 #include <unordered_map>
 
 #define CGLTF_IMPLEMENTATION
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
 #include "cgltf.h"
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 #include "meshoptimizer.h" // This will now be found via the include path in CMake
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -620,7 +627,14 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
             // Read indices for this primitive
             for (size_t i = 0; i < index_accessor->count; ++i) {
                 // Add the current vertex offset to each index before adding it to the master list
-                master_indices.push_back(cgltf_accessor_read_index(index_accessor, i) + (uint32_t)vertex_offset);
+                const size_t local_index = cgltf_accessor_read_index(index_accessor, i);
+                if (vertex_offset > UINT32_MAX || local_index > UINT32_MAX - vertex_offset) {
+                    std::cerr << "Error: Mesh index exceeds the 32-bit output format in "
+                              << input_path << '\n';
+                    cgltf_free(data);
+                    return;
+                }
+                master_indices.push_back(static_cast<uint32_t>(local_index + vertex_offset));
             }
 
             // Read vertices for this primitive

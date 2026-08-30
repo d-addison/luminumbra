@@ -34,7 +34,7 @@ done
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 
-for source_root in src include test; do
+for source_root in src include test tools; do
     if [[ ! -d "$repo_root/$source_root" ]]; then
         echo "Required source directory is missing: $source_root" >&2
         exit 1
@@ -51,7 +51,7 @@ if [[ -n "$changed_from" ]]; then
     untracked_cpp_files=()
     while IFS= read -r -d '' relative_path; do
         case "$relative_path" in
-            src/*|include/*|test/*)
+            src/*|include/*|test/*|tools/*)
                 case "$relative_path" in
                     *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx)
                         cpp_files+=("$repo_root/$relative_path")
@@ -63,7 +63,7 @@ if [[ -n "$changed_from" ]]; then
 
     while IFS= read -r -d '' relative_path; do
         case "$relative_path" in
-            src/*|include/*|test/*)
+            src/*|include/*|test/*|tools/*)
                 case "$relative_path" in
                     *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx)
                         untracked_cpp_files+=("$repo_root/$relative_path")
@@ -72,10 +72,10 @@ if [[ -n "$changed_from" ]]; then
                 esac
                 ;;
         esac
-    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- src include test)
+    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- src include test tools)
 else
     mapfile -t cpp_files < <(
-        find "$repo_root/src" "$repo_root/include" "$repo_root/test" \
+        find "$repo_root/src" "$repo_root/include" "$repo_root/test" "$repo_root/tools" \
             -type f \
             \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o \
                -name '*.h' -o -name '*.hh' -o -name '*.hpp' -o -name '*.hxx' \) \
@@ -115,7 +115,7 @@ if [[ "$tidy_only" -eq 0 ]]; then
         fi
         set +e
         format_diff=$(
-            git -C "$repo_root" diff --no-ext-diff -U0 "$changed_from" -- src include test |
+            git -C "$repo_root" diff --no-ext-diff -U0 "$changed_from" -- src include test tools |
                 "$clang_format_diff" -p1 -style=file
         )
         format_status=$?
