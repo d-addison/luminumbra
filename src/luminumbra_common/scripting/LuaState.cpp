@@ -2,18 +2,14 @@
 
 #include "LuaApiManifest.h"
 
-// Spec 024 (AETHER-07): this is the ONE translation unit that includes sol2
-// (v3.3.0) — the pimpl in LuaState.h keeps every other TU sol-free. GCC 15's
-// stricter template-body checking rejects an upstream sol2 3.3.0 bug
-// (optional<T&>::emplace calls a nonexistent this->construct); the per-file
-// -Wno-template-body in src/luminumbra_common/CMakeLists.txt downgrades that
-// diagnostic for this TU only (the member is never instantiated here).
+// The pimpl in LuaState.h keeps the sol2 dependency confined to this
+// translation unit.
 #include <sol/sol.hpp>
 
 #include <cmath>
 
 #include "../fields/EnergyFieldState.h"
-#include "../systems/AetherFieldSystem.h"  // kAetherCellSizeM — the shared 24 m grid identity
+#include "../systems/AetherFieldSystem.h" // kAetherCellSizeM — the shared 24 m grid identity
 
 namespace Luminumbra::scripting {
 
@@ -25,7 +21,8 @@ struct LuaState::Impl {
     sol::state lua;
 };
 
-LuaState::LuaState() : m_impl(std::make_unique<Impl>()) {
+LuaState::LuaState()
+    : m_impl(std::make_unique<Impl>()) {
     // FR-024-5: the read-only energy-field sampler. Registered under its
     // manifest home (`world.sample_energy_field`) and as the bare global the
     // spec names (`sample_energy_field`) — one implementation, one manifest
@@ -50,9 +47,9 @@ void LuaState::set_energy_field(const luminumbra::fields::EnergyFieldState* fiel
 }
 
 double LuaState::sample_energy_field(double x, double y, double z) const {
-    (void)y;  // columnar (2.5D) field: cells are keyed by (cx, cz) only
+    (void)y; // columnar (2.5D) field: cells are keyed by (cx, cz) only
     if (m_energy_field == nullptr) {
-        return 0.0;  // no session / sim.aether_state OFF: the field reads 0
+        return 0.0; // no session / sim.aether_state OFF: the field reads 0
     }
     // World -> cell quantization matches GameSession's anchor quantization
     // byte-for-byte (std::floor over the shared 24 m cell size). This is a

@@ -76,14 +76,12 @@ else()
     set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
 endif()
 
-# Spec 024 (AETHER-07): scripting/LuaState.cpp is the ONE TU that includes sol2
-# (v3.3.0; the pimpl keeps <sol/sol.hpp> out of every other TU). GCC 15's
-# stricter template-body checking rejects an upstream sol2 3.3.0 bug —
-# optional<T&>::emplace calls a nonexistent this->construct — even though that
-# member is never instantiated. Downgrade the diagnostic for just this file
-# (older GCC silently ignores unknown -Wno-* flags; the MSVC arm never sees it —
-# the build is GCC/MinGW today, mirroring the GameSession.cpp per-file pin above).
-if(NOT MSVC)
+# LuaState.cpp is the one translation unit that includes sol2. GCC 15 diagnoses
+# an unused, ill-formed optional-reference member in sol2 3.3.0 while parsing
+# the template body. Confine that compiler-specific suppression to this file;
+# Clang treats the option itself as an error under -Werror.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+   CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
     set_source_files_properties(scripting/LuaState.cpp PROPERTIES
         COMPILE_OPTIONS "-Wno-template-body")
 endif()

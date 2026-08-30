@@ -54,9 +54,7 @@ public:
     [[nodiscard]] bool EvalNumber(const std::string& chunk, double& out_value) const;
 
 private:
-    struct Impl;  // holds the sol2 VM; kept out of the header (pimpl) so only
-                  // LuaState.cpp pays the sol2 include (and its GCC-15
-                  // -Wno-template-body accommodation)
+    struct Impl; // holds the sol2 VM and keeps its headers out of the public surface
     std::unique_ptr<Impl> m_impl;
     const luminumbra::fields::EnergyFieldState* m_energy_field = nullptr;
 };
