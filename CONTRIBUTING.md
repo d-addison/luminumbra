@@ -2,12 +2,14 @@
 
 ## Build
 
-Use the repository root as the CMake source directory:
+Use the repository root and one of the presets declared in
+`CMakePresets.json`. A normal development build is:
 
-```powershell
-cmake -S . -B build
-cmake --build build
-ctest --test-dir build --output-on-failure
+```sh
+git submodule update --init --recursive
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug --output-on-failure
 ```
 
 ## Source Lists
@@ -26,17 +28,5 @@ change:
 Keep manifest paths anchored with `CMAKE_CURRENT_LIST_DIR` so the files can be
 included from either the module directory or the parent `src` directory.
 
-## Agent dispatch
-
-Planned work is dispatched with `banso contracts execute`. The project
-configuration lives in `.banso/`: `workflows/luminumbra-change.yaml` drives the
-phases, `contracts.yaml` gates entry to `verify` and `deploy` on a real preset
-build and CTest run, and `architecture.toml` holds the pillar checks that
-`banso audit architecture` reports on.
-
-Orchestrators that assume a Rust workspace will try to run `cargo` against this
-tree on integration. If a task is reverted with `could not find Cargo.toml`,
-that is the cause; there is no Cargo manifest here by design.
-
-After pulling a CMake change, `rm -rf build/` once before rebuilding — the
-manual source lists and presets can otherwise mismatch the cached state.
+After pulling a CMake change, re-run `cmake --preset debug` before rebuilding
+so the preset tree is reconfigured against the updated source lists.
