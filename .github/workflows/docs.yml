@@ -2,6 +2,7 @@ name: API Documentation
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -30,6 +31,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p build/docs
           doxygen Doxyfile
           test -f build/docs/html/index.html
 
