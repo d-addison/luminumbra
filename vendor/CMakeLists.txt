@@ -187,11 +187,20 @@ if (NOT TARGET rmlui)
   if (TARGET RmlUi::Debugger)
     target_link_libraries(rmlui INTERFACE RmlUi::Debugger)
   endif()
+  if(MINGW)
+    target_compile_options(rmlui INTERFACE -include cstdint)
+  endif()
 endif()
 
 # Jolt: ensure <Jolt/...> resolves from the fetched source root.
 if (TARGET Jolt)
   target_include_directories(Jolt PUBLIC $<BUILD_INTERFACE:${joltphysics_SOURCE_DIR}>)
+  if(MSVC)
+    # Visual Studio 18 emits C4865 from Windows SDK display enums included by
+    # Jolt. Jolt enables /Wall /WX for its own target, so suppress this SDK-only
+    # migration warning without changing first-party warning policy.
+    target_compile_options(Jolt PRIVATE /wd4865)
+  endif()
 endif()
 
 # lua: upstream ships no CMake — build a static `lua` target from its core .c

@@ -124,7 +124,7 @@ public:
                      BusId bus = BusId::Sfx) override;
     bool PlayOneShot2D(const AudioEventID& eventID, BusId bus = BusId::Sfx) override;
     void PlayMusic(const AudioEventID& musicEventID) override;
-    void StopMusic();
+    void StopMusic() override;
 
     void SetMasterVolume(float volume) override;
     void SetMusicVolume(float volume) override;

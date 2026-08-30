@@ -679,7 +679,7 @@ TEST(DecompHardening, RunEqualsReplay) {
 // --- GATING: no CircadianComponent => no-op. ---
 TEST(CircadianHardening, GatingNoComponentIsNoOp) {
     entt::registry r;
-    r.create();  // bare entity
+    (void)r.create(); // bare entity
     auto s = luminumbra::ai::RunCircadianOnTick(r, 0.5f);
     EXPECT_EQ(s.participants, 0);
 }

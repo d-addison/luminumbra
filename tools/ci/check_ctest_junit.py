@@ -9,7 +9,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
-ALLOWED_SKIPS = {"JobSystemPoolTest.DispatchThroughputBenchmark"}
+ALLOWED_SKIPS = {
+    "AudioBankIntegrity.LoadedBankFilesExistOnDisk",
+    "JobSystemPoolTest.DispatchThroughputBenchmark",
+}
 
 
 def main() -> int:

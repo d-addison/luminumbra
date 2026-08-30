@@ -12,9 +12,7 @@
 #include "core/JobSystem.h"
 #include "world/Chunk.h"
 
-#define private public
 #include "systems/SHIELD_WorldSystem.h"
-#undef private
 
 #include "world/MarchingCubes.h"
 #include "systems/WaterSystem.h"
@@ -109,17 +107,16 @@ TEST_F(WorldGenerationTest, UpdateSkipsMeshingChunksStillLoading) {
 
     world_system.dispatch_generation_jobs({coords});
 
-    const ChunkID chunk_id = Chunk::calculate_id(coords);
-    auto chunk_it = world_system.m_streaming_state.chunks.find(chunk_id);
-    ASSERT_NE(chunk_it, world_system.m_streaming_state.chunks.end());
-    ASSERT_EQ(chunk_it->second->get_state(), ChunkState::Loading);
+    auto chunk = world_system.find_streamed_chunk(coords);
+    ASSERT_NE(chunk, nullptr);
+    ASSERT_EQ(chunk->get_state(), ChunkState::Loading);
 
     entt::registry registry;
     world_system.update(registry, Vec3{0.0f, 0.0f, 0.0f}, nullptr);
 
-    EXPECT_EQ(chunk_it->second->get_state(), ChunkState::Loading);
-    EXPECT_TRUE(chunk_it->second->mesh_vertices.empty());
-    EXPECT_TRUE(chunk_it->second->mesh_indices.empty());
+    EXPECT_EQ(chunk->get_state(), ChunkState::Loading);
+    EXPECT_TRUE(chunk->mesh_vertices.empty());
+    EXPECT_TRUE(chunk->mesh_indices.empty());
 }
 
 TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {
