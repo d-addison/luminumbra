@@ -120,13 +120,12 @@ const char* WeatherCategoryName(WeatherCategory category) noexcept {
 }
 
 WeatherSystem::WeatherSystem(int world_seed)
-    : m_world_seed(world_seed),
-      m_weather_seed(world_seed + 12),   // seed-offset registry: +12 weather (FIRST)
-      m_lightning_seed(world_seed + 13), // seed-offset registry: +13 lightning strikes (FIRST)
-      m_precip(kWeatherExtentCells, kWeatherCellSizeM),
-      m_category(kWeatherExtentCells, kWeatherCellSizeM),
-      m_grid_extent(kWeatherExtentCells),
-      m_grid_cell_size(kWeatherCellSizeM) {
+    : m_weather_seed(world_seed + 12)
+    , m_lightning_seed(world_seed + 13)
+    , m_precip(kWeatherExtentCells, kWeatherCellSizeM)
+    , m_category(kWeatherExtentCells, kWeatherCellSizeM)
+    , m_grid_extent(kWeatherExtentCells)
+    , m_grid_cell_size(kWeatherCellSizeM) {
     // Low-frequency FBm Simplex (same family the wind base + worldgen climate
     // noises use) so the FastNoise batch path matches the single-sample path.
     auto pressure = FastNoise::New<FastNoise::FractalFBm>();

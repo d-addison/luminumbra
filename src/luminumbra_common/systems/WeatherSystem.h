@@ -203,9 +203,8 @@ private:
     // Nearest-storm intensity at a world position [0, 1] (for the render sample).
     [[nodiscard]] float StormIntensityAt(const Vec3& world_pos) const;
 
-    int m_world_seed = 0;
-    int m_weather_seed = 0;   // m_world_seed + 12 (weather noise/storm schedule)
-    int m_lightning_seed = 0; // m_world_seed + 13 (lightning strike schedule, FIRST)
+    int m_weather_seed = 0;   // world seed + 12 (weather noise/storm schedule)
+    int m_lightning_seed = 0; // world seed + 13 (lightning strike schedule)
 
     luminumbra::fields::FieldGrid<float> m_precip;          // precipitation intensity
     luminumbra::fields::FieldGrid<std::uint8_t> m_category; // per-cell WeatherCategory

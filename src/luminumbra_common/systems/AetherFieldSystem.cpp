@@ -49,9 +49,8 @@ void MixU64(std::uint64_t& hash, std::uint64_t value) {
 } // namespace
 
 AetherFieldSystem::AetherFieldSystem(int world_seed)
-    : m_world_seed(world_seed),
-      m_aether_seed(world_seed + 14), // seed-offset registry: +14 aether
-      m_grid(kAetherExtentCells, kAetherCellSizeM) {
+    : m_aether_seed(world_seed + 14)
+    , m_grid(kAetherExtentCells, kAetherCellSizeM) {
     // Low-frequency FBm simplex (same family as the worldgen/wind noises) so the
     // FastNoise batch path produces bit-stable floats.
     auto fractal = FastNoise::New<FastNoise::FractalFBm>();

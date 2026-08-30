@@ -95,8 +95,7 @@ private:
     // reported via in_region). Mirrors WindFieldSystem::LocalCell.
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;
 
-    int m_world_seed = 0;
-    int m_aether_seed = 0; // m_world_seed + 14
+    int m_aether_seed = 0; // world seed + 14
     luminumbra::fields::FieldGrid<float> m_grid;
     std::uint64_t m_last_tick = 0;
 

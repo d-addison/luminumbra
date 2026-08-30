@@ -12,7 +12,6 @@ Checks: >
   portability-*
 WarningsAsErrors: ''
 HeaderFilterRegex: '^(src|include|test)/'
-AnalyzeTemporaryDtors: false
 FormatStyle: file
 CheckOptions:
   - key: bugprone-argument-comment.StrictMode

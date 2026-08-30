@@ -35,7 +35,6 @@ const int MAX_COLLISION_MESHES_PER_FRAME = 16;
 // lane that generation batches ride on, delaying neighbor arrival and
 // inflating late-neighbor transition remesh churn.
 constexpr std::size_t MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH = 32;
-constexpr size_t MAX_ACTIVE_CHUNKS = 20000;
 constexpr size_t STREAMING_MAX_ACTIVE_CHUNKS_BUDGET = 8192;
 constexpr int STREAMING_ACTIVATION_INTERVAL_FRAMES = 4;
 constexpr int STREAMING_NEAR_VERTICAL_STACK_RADIUS = 4;
@@ -90,10 +89,6 @@ constexpr std::size_t PadToNoiseSimd(std::size_t count) {
 }
 
 namespace Luminumbra::Systems {
-
-constexpr float FLOW_CONSTANT = 0.1f;
-constexpr float MIN_FLOW_DIFF = 0.001f;
-constexpr float MAX_WATER_COMPRESSION = 0.2f;
 
 namespace {
 

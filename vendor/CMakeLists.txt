@@ -120,6 +120,17 @@ endif()
 
 FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics RmlUi soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
 
+# RmlUi 6.1's bundled robin_hood header uses SIZE_MAX and fixed-width integer
+# types without including <cstdint>. Other standard-library implementations
+# expose them transitively, but UCRT64 does not.
+if(MINGW)
+  foreach(_rmlui_target rmlui_core rmlui_debugger)
+    if(TARGET ${_rmlui_target})
+      target_compile_options(${_rmlui_target} PRIVATE -include cstdint)
+    endif()
+  endforeach()
+endif()
+
 if(TARGET lz4_static AND NOT TARGET lz4)
   add_library(lz4 ALIAS lz4_static)
 endif()

@@ -107,9 +107,8 @@ endfunction()
 # from the unfused debug result. Pinning -ffp-contract=off forbids that fusion
 # everywhere. No -ffast-math reaches these targets (it is confined to vendor
 # FastNoise); this function asserts that invariant rather than assuming it.
-# Generalizes the per-file AnimationRuntime.cpp pin (T-I3-15) to whole targets.
-# MSVC's analogue is /fp:precise (default) + /fp:contract- but the build is
-# GCC/MinGW today; the MSVC arm is added defensively for a future client lane.
+# Apply the same floating-point contract to every engine target. MSVC uses
+# /fp:precise plus /fp:contract- where the latter option is supported.
 function(luminumbra_pin_fp_determinism TARGET_NAME)
   if(NOT TARGET ${TARGET_NAME})
     return()
@@ -129,11 +128,11 @@ function(luminumbra_pin_fp_determinism TARGET_NAME)
   endif()
   if(MSVC)
     target_compile_options(${TARGET_NAME} ${_lpfd_scope} /fp:precise)
-    # /fp:contract- requires MSVC >= 19.30 (VS2022 17.0); the cmake generator
-    # expression keeps older toolchains compiling (they default to no
-    # contraction anyway).
-    target_compile_options(${TARGET_NAME} ${_lpfd_scope}
-      $<$<CXX_COMPILER_VERSION:GREATER_EQUAL:19.30>:/fp:contract->)
+    # Older toolchains default to no contraction and do not recognize the
+    # explicit option.
+    if(MSVC_VERSION GREATER_EQUAL 1930)
+      target_compile_options(${TARGET_NAME} ${_lpfd_scope} /fp:contract-)
+    endif()
   else()
     target_compile_options(${TARGET_NAME} ${_lpfd_scope} -ffp-contract=off)
   endif()
