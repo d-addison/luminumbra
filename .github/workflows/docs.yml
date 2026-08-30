@@ -1,0 +1,42 @@
+name: API Documentation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  doxygen:
+    name: Build Doxygen reference
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install documentation tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends doxygen graphviz
+
+      - name: Build API documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          doxygen Doxyfile
+          test -f build/docs/html/index.html
+
+      - name: Upload API documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: luminumbra-api-docs-${{ github.sha }}
+          path: build/docs/html
+          if-no-files-found: error
+          retention-days: 14

@@ -40,7 +40,9 @@ jobs:
             libgl1-mesa-dev \
             libglu1-mesa-dev \
             pkg-config \
-            xorg-dev
+            xauth \
+            xorg-dev \
+            xvfb
 
       - name: Cache vendor build artifacts
         uses: actions/cache@v4
@@ -59,8 +61,15 @@ jobs:
       - name: Build
         run: cmake --build --preset release
 
-      - name: Test
-        run: ctest --preset release --output-on-failure
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: 1
+        run: xvfb-run -a ctest --preset release --output-on-failure --no-tests=error -LE manual
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: ctest --preset release --output-on-failure --no-tests=error -LE manual
 
   lint:
     name: Format and static analysis

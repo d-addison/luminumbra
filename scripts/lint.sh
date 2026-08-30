@@ -29,6 +29,13 @@ done
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 
+for source_root in src include test; do
+    if [[ ! -d "$repo_root/$source_root" ]]; then
+        echo "Required source directory is missing: $source_root" >&2
+        exit 1
+    fi
+done
+
 mapfile -t cpp_files < <(
     find "$repo_root/src" "$repo_root/include" "$repo_root/test" \
         -type f \
@@ -37,12 +44,12 @@ mapfile -t cpp_files < <(
         ! -path '*/vendor/*' \
         ! -path '*/external/*' \
         ! -path '*/build/*' \
-        ! -path '*/out/*' 2>/dev/null || true
+        ! -path '*/out/*'
 )
 
 if [[ "${#cpp_files[@]}" -eq 0 ]]; then
-    echo "No first-party C/C++ files found."
-    exit 0
+    echo "No first-party C/C++ files found." >&2
+    exit 1
 fi
 
 if [[ "$tidy_only" -eq 0 ]]; then
@@ -75,7 +82,10 @@ if [[ "$format_only" -eq 0 ]]; then
         esac
     done
 
-    if [[ "${#tidy_files[@]}" -gt 0 ]]; then
-        clang-tidy -p "$repo_root/$build_dir" "${tidy_files[@]}"
+    if [[ "${#tidy_files[@]}" -eq 0 ]]; then
+        echo "No first-party C/C++ translation units found for clang-tidy." >&2
+        exit 1
     fi
+
+    clang-tidy -p "$repo_root/$build_dir" "${tidy_files[@]}"
 fi

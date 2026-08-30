@@ -22,37 +22,33 @@ jobs:
     timeout-minutes: 30
     env:
       ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
-      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      CC: clang
+      CXX: clang++
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install native toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang cmake ninja-build
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            cmake \
+            libgl1-mesa-dev \
+            libglu1-mesa-dev \
+            ninja-build \
+            pkg-config \
+            xauth \
+            xorg-dev \
+            xvfb
 
       - name: Run sanitizer tests
         shell: bash
         run: |
           set -euo pipefail
-
-          if [[ -f Cargo.toml ]]; then
-            rustup toolchain install nightly --profile minimal --component rust-src
-            export RUSTFLAGS="-Zsanitizer=address"
-            cargo +nightly test --workspace --all-targets -Zbuild-std --target x86_64-unknown-linux-gnu
-          elif [[ -f CMakeLists.txt ]]; then
-            cmake -S . -B build/asan -G Ninja \
-              -DCMAKE_BUILD_TYPE=Debug \
-              -DCMAKE_C_COMPILER=clang \
-              -DCMAKE_CXX_COMPILER=clang++ \
-              -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-              -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-              -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
-              -DCMAKE_SHARED_LINKER_FLAGS="-fsanitize=address,undefined"
-            cmake --build build/asan --parallel
-            ctest --test-dir build/asan --output-on-failure
-          else
-            echo "No supported ASan test entry point found. Expected Cargo.toml or CMakeLists.txt." >&2
-            exit 1
-          fi
+          cmake --preset debug-asan
+          cmake --build --preset debug-asan --parallel
+          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a \
+            ctest --preset debug-asan --output-on-failure --no-tests=error -LE manual

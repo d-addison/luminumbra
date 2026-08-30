@@ -13,6 +13,13 @@ $sourceRoots = @(
     "test"
 )
 
+foreach ($root in $sourceRoots) {
+    $path = Join-Path $repoRoot $root
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        Write-Error "Required source directory is missing: $root"
+    }
+}
+
 function Get-FirstPartyCppFiles {
     $extensions = @("*.c", "*.cc", "*.cpp", "*.cxx", "*.h", "*.hh", "*.hpp", "*.hxx")
     foreach ($root in $sourceRoots) {
@@ -33,8 +40,7 @@ function Test-CommandAvailable {
 
 $cppFiles = @(Get-FirstPartyCppFiles)
 if ($cppFiles.Count -eq 0) {
-    Write-Host "No first-party C/C++ files found."
-    exit 0
+    Write-Error "No first-party C/C++ files found."
 }
 
 if (-not $TidyOnly) {
@@ -57,7 +63,9 @@ if (-not $FormatOnly) {
     }
 
     $tidyFiles = $cppFiles | Where-Object { $_.Extension -in @(".c", ".cc", ".cpp", ".cxx") }
-    if ($tidyFiles.Count -gt 0) {
-        & clang-tidy -p (Join-Path $repoRoot $BuildDir) @($tidyFiles | ForEach-Object { $_.FullName })
+    if ($tidyFiles.Count -eq 0) {
+        Write-Error "No first-party C/C++ translation units found for clang-tidy."
     }
+
+    & clang-tidy -p (Join-Path $repoRoot $BuildDir) @($tidyFiles | ForEach-Object { $_.FullName })
 }
