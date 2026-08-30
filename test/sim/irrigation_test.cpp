@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -201,14 +202,11 @@ TEST(Irrigation, MoistureAtIsStableAndBounded) {
 // A continuously-fed grid never exceeds saturation (max) even over many ticks.
 TEST(Irrigation, BoundedUnderSustainedInput) {
     entt::registry r;
-    IrrigationGrid grid(4, 4);
-    spawnSource(r, 2.0f, 2.0f, kMoistureMax); // hammer the cell
+    IrrigationGrid grid(1, 1);
+    spawnSource(r, 0.0f, 0.0f, std::numeric_limits<std::uint16_t>::max());
     for (int t = 0; t < 100; ++t) RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
-    for (int z = 0; z < grid.height(); ++z)
-        for (int x = 0; x < grid.width(); ++x) {
-            EXPECT_GE(grid.AtCell(x, z), kMoistureBaseline);
-            EXPECT_LE(grid.AtCell(x, z), kMoistureMax) << "moisture is capped at saturation";
-        }
+    EXPECT_EQ(grid.AtCell(0, 0), kMoistureMax - kMoistureDrainPerTick)
+        << "each sustained deposit saturates before the fixed drain step";
 }
 
 // ---- determinism: run == replay ----

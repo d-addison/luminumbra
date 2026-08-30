@@ -224,3 +224,16 @@ if (NOT TARGET FastNoise)
     add_subdirectory(fastnoise)
   endif()
 endif()
+
+# Terrain is persisted and network-authoritative, so the noise library must
+# produce the same samples in debug and optimized builds. Keep its debug
+# code-generation mode aligned with release while first-party code remains
+# fully debuggable and sanitizer-instrumented.
+if(TARGET FastNoise)
+  target_compile_definitions(FastNoise PRIVATE $<$<CONFIG:Debug>:NDEBUG>)
+  if(MSVC)
+    target_compile_options(FastNoise PRIVATE $<$<CONFIG:Debug>:/O2>)
+  else()
+    target_compile_options(FastNoise PRIVATE $<$<CONFIG:Debug>:-O3>)
+  endif()
+endif()
