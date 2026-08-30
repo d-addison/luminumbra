@@ -1339,3 +1339,23 @@ TEST(FarLodStore, TerrainParamsHashShapingFold) {
     EXPECT_NE(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on_count, seed))
         << "spline count not hashed";
 }
+
+TEST(FarLodStore, TerrainParamsHashTracksHydraulicKernel) {
+    TerrainGenParams disabled = FixtureParams();
+    TerrainGenParams disabled_changed = disabled;
+    disabled_changed.hydro_iterations += 1;
+    disabled_changed.hydro_max_offset += 1.0f;
+
+    constexpr int seed = 424242;
+    EXPECT_EQ(ComputeTerrainParamsHash(disabled, seed),
+              ComputeTerrainParamsHash(disabled_changed, seed));
+
+    TerrainGenParams enabled = disabled;
+    enabled.hydro_enabled = true;
+    TerrainGenParams enabled_changed = enabled;
+    enabled_changed.hydro_iterations += 1;
+    EXPECT_NE(ComputeTerrainParamsHash(enabled, seed),
+              ComputeTerrainParamsHash(enabled_changed, seed));
+
+    EXPECT_EQ(ComputeTerrainParamsHash(enabled, seed), 0x95d932de973229b9ull);
+}

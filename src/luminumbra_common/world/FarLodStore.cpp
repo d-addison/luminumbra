@@ -1,5 +1,6 @@
 #include "FarLodStore.h"
 
+#include "HydraulicErosion.h"
 #include "MarchingCubes.h"
 #include "core/Crc32.h"
 #include "persistence/WorldSaveService.h"
@@ -282,6 +283,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
     // Disabled worlds skip the block (byte-stable cache key). marker 0x06.
     if (params.hydro_enabled) {
         FnvMixValue(hash, static_cast<u8>(5)); // marker 0x06 (5th conditional block)
+        FnvMixValue(hash, kHydraulicErosionWorldgenVersion);
         FnvMixValue(hash, params.hydro_iterations);
         FnvMixValue(hash, params.hydro_cell_size_m);
         FnvMixValue(hash, params.hydro_talus_height);

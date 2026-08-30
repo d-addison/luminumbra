@@ -32,6 +32,11 @@
 
 namespace Luminumbra::World {
 
+// Cache salt for shape-affecting kernel changes that are not represented by
+// TerrainGenParams. Incrementing this value deliberately invalidates generated
+// terrain caches while leaving worlds with erosion disabled byte-stable.
+inline constexpr u32 kHydraulicErosionWorldgenVersion = 2u;
+
 // PINNED erosion parameters. Changing ANY value changes the baked offset bits
 // and is therefore a deliberate world_hash bump -- frozen for iteration 6.
 struct HydroErosionParams {
