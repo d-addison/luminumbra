@@ -1,29 +1,30 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
+#include "../core/JobSystem.h"
+#include "../world/BiomeTable.h"
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
-#include "../core/JobSystem.h"
+#include "../world/StructurePlacement.h"
+#include "FastNoise/FastNoise.h"
+#include "entt/entt.hpp"
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <shared_mutex>
-#include <unordered_map>
-#include <memory>
 #include <string>
-#include <optional>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
-#include <functional>
-#include "entt/entt.hpp"
-#include "FastNoise/FastNoise.h"
-#include "../world/BiomeTable.h"
-#include "../world/StructurePlacement.h"
 
 namespace Luminumbra::Systems {
 
@@ -47,11 +48,12 @@ struct TerrainGenParams {
     // the legacy cheese rooms PLUS spaghetti winding tunnels carved at the zero-crossing
     // EDGE of a second Perlin (abs(noise) < thickness => air) so caves become connected
     // networks, not isolated bubbles. Opt-in per preset; legacy stays byte-identical.
-    int   cave_style = 0;
-    float spaghetti_frequency = 0.04f;  // tunnel noise scale (higher = tighter winding)
-    float spaghetti_thickness = 0.08f;  // |noise| < this carves a tunnel (wider = fatter)
-    float worley_frequency = 0.016f;    // CHEESE cavern cell scale (lower = bigger rooms)
-    float worley_threshold = 0.62f;     // F1/F3 < this => open room (cell interior); higher = more/bigger caverns
+    int cave_style = 0;
+    float spaghetti_frequency = 0.04f; // tunnel noise scale (higher = tighter winding)
+    float spaghetti_thickness = 0.08f; // |noise| < this carves a tunnel (wider = fatter)
+    float worley_frequency = 0.016f;   // CHEESE cavern cell scale (lower = bigger rooms)
+    float worley_threshold =
+        0.62f; // F1/F3 < this => open room (cell interior); higher = more/bigger caverns
 
     // --- FR-A3 surface-breaking caves / sinkholes / cave-mouths (default-off) ---
     // Makes the 18 m surface cap (kCaveSurfaceCapDepth) a PER-COLUMN field so the
@@ -73,11 +75,11 @@ struct TerrainGenParams {
     //   entrance_min_cap   -- floor the per-column cap drops to inside a feature
     //                         (0 => cave noise fully exposed; small positive keeps a thin lip).
     bool surface_breaks_enabled = false;
-    float surface_break_density = 0.0f;   // Bernoulli accept prob per doline cell
-    float feature_cell_size = 128.0f;     // doline cell pitch (m)
-    float max_feature_radius = 60.0f;     // MUST be < feature_cell_size (asserted)
-    float carve_smoothness = 0.0f;        // exp-smin k (0 => hard max)
-    float entrance_min_cap = 0.0f;        // metres the cap floors to inside a feature
+    float surface_break_density = 0.0f; // Bernoulli accept prob per doline cell
+    float feature_cell_size = 128.0f;   // doline cell pitch (m)
+    float max_feature_radius = 60.0f;   // MUST be < feature_cell_size (asserted)
+    float carve_smoothness = 0.0f;      // exp-smin k (0 => hard max)
+    float entrance_min_cap = 0.0f;      // metres the cap floors to inside a feature
 
     bool island_mask_enabled = false;
     float island_mask_frequency = 0.004f;
@@ -136,8 +138,8 @@ struct TerrainGenParams {
     // cliff zones sit naturally amid normal foothills. Disabled -> byte-zero drift.
     bool cliffs_enabled = false;
     float cliff_frequency = 0.0011f; // cliff-zone mask feature scale
-    float cliff_threshold = 0.4f;    // mask value above which terracing engages (matches default.json)
-    float cliff_step = 11.0f;        // metres per bench (cliff face height)
+    float cliff_threshold = 0.4f; // mask value above which terracing engages (matches default.json)
+    float cliff_step = 11.0f;     // metres per bench (cliff face height)
 
     // --- T-I4-3 PV-band rivers (default-off) ---
     // Chunk-local river carve on the +10 ridged noise (seed registry). The
@@ -152,9 +154,9 @@ struct TerrainGenParams {
     // pre-river generation (byte-zero drift).
     bool rivers_enabled = false;
     float river_frequency = 0.0016f;
-    float river_pv_min = -1.0f;   // valleys band lower edge (folded PV)
-    float river_pv_max = -0.85f;  // valleys band upper edge (folded PV)
-    float river_depth = 8.0f;     // metres the channel floor sits below SEA_LEVEL
+    float river_pv_min = -1.0f;    // valleys band lower edge (folded PV)
+    float river_pv_max = -0.85f;   // valleys band upper edge (folded PV)
+    float river_depth = 8.0f;      // metres the channel floor sits below SEA_LEVEL
     float river_max_carve = 60.0f; // clamp on terrain lowered into the channel
     // Lakes (elevation lakes): where the lake field (smooth FBM, seed +11) exceeds
     // lake_threshold, the terrain is carved into a basin BELOW the LOCAL surface
@@ -165,11 +167,11 @@ struct TerrainGenParams {
     // so the flow sim can't drain it). Sea-level oceans still form wherever the
     // continental base dips below SEA_LEVEL. Disabled -> byte-zero drift.
     bool lakes_enabled = false;
-    float lake_frequency = 0.0009f;  // ~1100 m feature scale
-    float lake_threshold = 0.52f;    // lake field value above which a lake forms (moderate)
-    float lake_depth = 5.0f;         // metres the basin floor sits below the lake surface
-    float lake_max_carve = 22.0f;    // clamp on terrain lowered into the basin
-    float lake_bank_offset = 2.0f;   // lake surface sits this far below the local land level (banks)
+    float lake_frequency = 0.0009f; // ~1100 m feature scale
+    float lake_threshold = 0.52f;   // lake field value above which a lake forms (moderate)
+    float lake_depth = 5.0f;        // metres the basin floor sits below the lake surface
+    float lake_max_carve = 22.0f;   // clamp on terrain lowered into the basin
+    float lake_bank_offset = 2.0f;  // lake surface sits this far below the local land level (banks)
     // fnv1a64 of the canonicalized biome table content, stamped by the world
     // system when it loads the table (0 when biomes are disabled or the table
     // failed to load). ComputeTerrainParamsHash mixes this in so pristine
@@ -208,7 +210,7 @@ struct TerrainGenParams {
     float hydro_deposition = 0.10f;
     float hydro_evaporation = 0.20f;
     float hydro_sediment_capacity = 0.40f;
-    float hydro_max_offset = 24.0f;  // clamp |offset| (m)
+    float hydro_max_offset = 24.0f; // clamp |offset| (m)
 };
 
 // Immutable value data handed to far-LOD workers.  The capture owns these
@@ -226,8 +228,8 @@ struct FarLodSdfSnapshotEntry {
         snapshot.coords = coords;
         snapshot.revision = voxel_revision;
         snapshot.source_kind = provenance == ChunkSdfProvenance::LoadedOrEdited
-            ? World::FarLodBrickSourceKind::Authoritative
-            : World::FarLodBrickSourceKind::RegenerableCache;
+                                   ? World::FarLodBrickSourceKind::Authoritative
+                                   : World::FarLodBrickSourceKind::RegenerableCache;
         snapshot.sdf_data = sdf_data;
         snapshot.material_data = material_data;
         return snapshot;
@@ -394,12 +396,15 @@ public:
         std::size_t renderable_chunks = 0;
         double renderable_ratio = 1.0;
     };
-    FrustumSurfaceCoverageStats get_frustum_surface_coverage_stats(
-        const Vec3& camera_position,
-        const std::array<Vec4, 6>& frustum_planes,
-        float max_distance) const;
+    FrustumSurfaceCoverageStats
+    get_frustum_surface_coverage_stats(const Vec3& camera_position,
+                                       const std::array<Vec4, 6>& frustum_planes,
+                                       float max_distance) const;
 
-    SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed);
+    SHIELD_WorldSystem(JobSystem* job_system,
+                       WaterSystem* water_system,
+                       const TerrainGenParams& params,
+                       int seed);
     ~SHIELD_WorldSystem();
 
     // Generates voxel data for a chunk. target_step is the meshing step this
@@ -428,8 +433,11 @@ public:
     // to this, so existing callers + single-anchor behaviour are byte-identical (one
     // anchor -> one disc, identical eviction). Streaming sets RESIDENCY only, not chunk
     // content, so world_hash is unaffected for a given anchor set.
-    void update(entt::registry& registry, const std::vector<Vec3>& anchor_positions, PhysicsSystem* physics_system);
-    void update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
+    void update(entt::registry& registry,
+                const std::vector<Vec3>& anchor_positions,
+                PhysicsSystem* physics_system);
+    void
+    update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system);
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
@@ -437,19 +445,21 @@ public:
     // (byte-identical to the legacy path) and, in noise-router style (cave_style==1), adds
     // spaghetti EDGE tunnels, composed via the existing order-free smax. Called identically
     // by every density site (mesh / collision / query) so they cannot disagree.
-    float EvaluateCaveDensity(const Vec3& world_pos, float terrain_density,
-                              float effective_cap, float feature_carve,
+    float EvaluateCaveDensity(const Vec3& world_pos,
+                              float terrain_density,
+                              float effective_cap,
+                              float feature_carve,
                               const float* precomputed_cheese = nullptr) const;
     // Spec 013 P1: locate the LARGEST doline / surface-break (cave mouth) within
     // `scan_radius_m` of a point. Pure read of the deterministic placement; used to aim a
     // camera at a dramatic cave opening (dolines follow a power-law, so most are small).
     // found=false when surface breaks are disabled or none in range.
     struct SurfaceBreakInfo {
-        bool  found = false;
-        float x = 0.0f, z = 0.0f;   // world centre of the doline
-        float radius = 0.0f;        // surface footprint radius (m)
-        float depth = 0.0f;         // funnel depth (m)
-        bool  shaft = false;        // true => vertical cenote shaft
+        bool found = false;
+        float x = 0.0f, z = 0.0f; // world centre of the doline
+        float radius = 0.0f;      // surface footprint radius (m)
+        float depth = 0.0f;       // funnel depth (m)
+        bool shaft = false;       // true => vertical cenote shaft
     };
     SurfaceBreakInfo FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const;
     // Elevation-aware water surface level at a column: the local lake surface
@@ -473,19 +483,27 @@ public:
 
     // --- T-I4-1 biome selection ---
     // Whether biomes are active (preset opted in AND the table loaded).
-    bool biomes_enabled() const { return m_biomes_enabled; }
-    const World::BiomeTable& biome_table() const { return m_biome_table; }
+    bool biomes_enabled() const {
+        return m_biomes_enabled;
+    }
+    const World::BiomeTable& biome_table() const {
+        return m_biome_table;
+    }
 
     // --- T-I4-4 structures ---
-    bool structures_enabled() const { return m_structures_enabled; }
+    bool structures_enabled() const {
+        return m_structures_enabled;
+    }
     const std::vector<World::StructureTemplatePool>& structure_pools() const {
         return m_structure_pools;
     }
     // Nearest structure site of the given type to (world_x, world_z) within the
     // search radius (cells), or nullopt. Deterministic; pure function of the
     // world seed + the type's grid. Used by gates and locate(type, near).
-    std::optional<World::StructureSite> LocateStructure(
-        const std::string& type, int world_x, int world_z, int search_radius_cells = 2) const;
+    std::optional<World::StructureSite> LocateStructure(const std::string& type,
+                                                        int world_x,
+                                                        int world_z,
+                                                        int search_radius_cells = 2) const;
     // Per-column biome id at the surface (u8, 255 = none). Pure function of
     // (seed, params): samples the five climate dimensions (continentalness,
     // erosion, peaks/valleys reuse the +3/+4/+5 shaping noises; temperature
@@ -528,8 +546,7 @@ public:
     // Air/Water reclassification at depth 0.1 m) using the supplied height.
     // Valid for the live coarse mesher's surface samples, where caves never
     // carve (the 18 m surface cap makes the 0.35 m-deep sample always solid).
-    MaterialType SurfaceVertexMaterial(float world_x, float world_z,
-                                       float terrain_height) const;
+    MaterialType SurfaceVertexMaterial(float world_x, float world_z, float terrain_height) const;
 
     // T-I4-DR-shaping-perf: SIMD-batched material classification for a list of
     // isosurface vertex world positions (the LOD0 marching-cubes mesher emits
@@ -543,8 +560,8 @@ public:
     // final band selection stay per-vertex (cheap). positions are in WORLD
     // space. With shaping disabled this falls back to per-vertex classification
     // so legacy worlds are byte-unchanged.
-    void ClassifyVertexMaterials(const Vec3* positions, std::size_t count,
-                                 u32* out_materials) const;
+    void
+    ClassifyVertexMaterials(const Vec3* positions, std::size_t count, u32* out_materials) const;
 
     // T-I4-DR-shaping-perf: SIMD-batched shaped final heights at an arbitrary
     // list of world (x,z) positions. out[i] == ComputeShapedHeight(xs[i], zs[i])
@@ -556,8 +573,10 @@ public:
     // (keeps the surface-span corners consistent with collision/SDF). The erosion
     // bake passes false to sample the NO-hydro base height (and to avoid recursion)
     // -- this is also the fast SIMD path the bake uses to build its base grid.
-    void ComputeShapedHeightsAtPositions(const float* xs, const float* zs,
-                                         std::size_t count, float* out,
+    void ComputeShapedHeightsAtPositions(const float* xs,
+                                         const float* zs,
+                                         std::size_t count,
+                                         float* out,
                                          bool apply_hydro = true) const;
 
     // T-I4-3: river influence [0, 1] at a column - how strongly the +10 PV-band
@@ -568,16 +587,23 @@ public:
     static IVec3 world_to_chunk_coords(const Vec3& position);
 
     // --- API for WorldGenViewer ---
-    const TerrainGenParams& get_params() const { return m_params; }
+    const TerrainGenParams& get_params() const {
+        return m_params;
+    }
     // True when a GPU-SDF generation callback is registered (experimental, opt-in via
-    // enable_gpu_sdf_runtime). When set, a chunk's heightmap_data is the MARCHED SDF surface (:3695),
-    // which is NOT byte-identical to GetTerrainHeightAt — so heightmap-reuse consumers (water init) must
-    // fall back to the analytic sampler. Unset in the headless server + default client (CPU shaping path).
-    bool has_gpu_sdf_callback() const { return static_cast<bool>(m_gpu_sdf_callback); }
+    // enable_gpu_sdf_runtime). When set, a chunk's heightmap_data is the MARCHED SDF surface
+    // (:3695), which is NOT byte-identical to GetTerrainHeightAt — so heightmap-reuse consumers
+    // (water init) must fall back to the analytic sampler. Unset in the headless server + default
+    // client (CPU shaping path).
+    bool has_gpu_sdf_callback() const {
+        return static_cast<bool>(m_gpu_sdf_callback);
+    }
     // T-I3-9 (far-LOD): read-only seed accessor so the far-LOD scheduler can
     // key its pristine tile cache (seed, params_hash) without re-deriving the
     // seed. Minimal insertion - no height/noise path is touched.
-    int get_seed() const { return m_seed; }
+    int get_seed() const {
+        return m_seed;
+    }
     void set_params(const TerrainGenParams& params);
     void set_seed(int seed);
     void regenerate_all_chunks(PhysicsSystem* physics_system);
@@ -592,16 +618,25 @@ public:
         IVec3 coords{0};
         int target_step = 1;
     };
-    JobHandle dispatch_generation_jobs(const std::vector<ChunkGenerationRequest>& chunks_to_generate);
-    bool EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius = 1);
+    JobHandle
+    dispatch_generation_jobs(const std::vector<ChunkGenerationRequest>& chunks_to_generate);
+    bool EnsureCollisionReadyNear(const Vec3& world_pos,
+                                  PhysicsSystem* physics_system,
+                                  int horizontal_radius = 1);
     // render_lod0_radius (default -1): the ring distance that renders at full-SDF
     // LOD0, decoupled from collision_radius. -1 keeps the historical behaviour
     // (LOD0 boundary == collision_radius) so the GAME path and world_hash are
     // unchanged. A caller may pass a larger value than collision_radius to render
     // a wider full-detail near slice (caves/overhangs) without building collision
     // for it — used by the create-world preview.
-    bool EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius, int render_lod0_radius = -1);
-    const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const { return m_last_streaming_budget_stats; }
+    bool EnsureSurfaceReadyNear(const Vec3& world_pos,
+                                PhysicsSystem* physics_system,
+                                int surface_radius,
+                                int collision_radius,
+                                int render_lod0_radius = -1);
+    const StreamingBudgetFrameStats& get_last_streaming_budget_stats() const {
+        return m_last_streaming_budget_stats;
+    }
 
     // TEMP diag (spec 008 follow-up): per-sub-phase ms of the last update() to localize the
     // 300ms+ streaming spike when moving. Removed once the amortization lands.
@@ -613,41 +648,62 @@ public:
         double meshing_pass = 0.0;
         double collision = 0.0;
     };
-    const DbgStreamTimings& dbg_stream_timings() const { return m_dbg_stream; }
-    const StreamingTelemetryStats& get_streaming_telemetry_stats() const { return m_streaming_telemetry_stats; }
-    const std::vector<ChunkLOD>& get_lod_levels() const { return m_lod_levels; }
+    const DbgStreamTimings& dbg_stream_timings() const {
+        return m_dbg_stream;
+    }
+    const StreamingTelemetryStats& get_streaming_telemetry_stats() const {
+        return m_streaming_telemetry_stats;
+    }
+    const std::vector<ChunkLOD>& get_lod_levels() const {
+        return m_lod_levels;
+    }
     RuntimeChunkStats get_runtime_chunk_stats() const;
-    CameraLocalCoverageStats get_camera_local_coverage_stats(const Vec3& camera_position, int horizontal_radius) const;
+    CameraLocalCoverageStats get_camera_local_coverage_stats(const Vec3& camera_position,
+                                                             int horizontal_radius) const;
     float get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const;
 
     // spec 008 follow-up: a deterministic, order-independent hash of the LIVE water-sim state
     // (water_level_data + water_flow_data folded across resident chunks, sorted by chunk id) plus
     // the count of chunks carrying a water sim. Test/telemetry hook for the live-water determinism
     // gate — the existing fixture gates never tick live water, so they cannot catch a non-determ-
-    // inistic water-sim change (e.g. an async integration). Two independent sessions ticked with the
-    // same seed+anchors must produce identical hash sequences.
-    struct WaterStateHash { std::uint64_t hash = 0; std::size_t water_chunks = 0; };
+    // inistic water-sim change (e.g. an async integration). Two independent sessions ticked with
+    // the same seed+anchors must produce identical hash sequences.
+    struct WaterStateHash {
+        std::uint64_t hash = 0;
+        std::size_t water_chunks = 0;
+    };
     WaterStateHash debug_water_state_hash() const;
     // Spec 009 gate hooks: AC-2 mass invariant held last tick; AC-1 the max live water depth (mm)
     // across resident chunks (> 0 once a river has filled). Debug/test only.
     [[nodiscard]] bool debug_water_mass_ok() const;
     [[nodiscard]] std::int64_t debug_max_water_depth_mm() const;
-    [[nodiscard]] Vec3 debug_deepest_water_pos(std::int64_t* depth_mm_out = nullptr) const; // anchor capture on real water
-    void debug_force_water_remesh(); // render-only: refresh all water surfaces next frame (capture tooling)
-    [[nodiscard]] std::int64_t debug_water_volume_near(const Vec3& center, float radius_m) const; // drain ground-truth
-    [[nodiscard]] std::int64_t debug_land_water_volume_mm() const; // rain-fed water on land (excludes the sea)
-    [[nodiscard]] bool debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) const; // valley floor where rain collects
-    [[nodiscard]] bool debug_find_shoreline(Vec3& water_pos_out, float& to_land_x, float& to_land_z,
-                                            float& water_surf_out, float& bank_height_out) const; // filmable shoreline
+    [[nodiscard]] Vec3 debug_deepest_water_pos(
+        std::int64_t* depth_mm_out = nullptr) const; // anchor capture on real water
+    void debug_force_water_remesh(); // render-only: refresh all water surfaces next frame (capture
+                                     // tooling)
+    [[nodiscard]] std::int64_t debug_water_volume_near(const Vec3& center,
+                                                       float radius_m) const; // drain ground-truth
+    [[nodiscard]] std::int64_t
+    debug_land_water_volume_mm() const; // rain-fed water on land (excludes the sea)
+    [[nodiscard]] bool
+    debug_lowest_land_pos(Vec3& pos_out,
+                          float& bed_m_out) const; // valley floor where rain collects
+    [[nodiscard]] bool debug_find_shoreline(Vec3& water_pos_out,
+                                            float& to_land_x,
+                                            float& to_land_z,
+                                            float& water_surf_out,
+                                            float& bank_height_out) const; // filmable shoreline
     [[nodiscard]] int debug_water_seam_wet_pairs() const; // spec 009 Phase 3 cross-chunk continuity
 
     // Spec 009 Phase 2 — terraform the water bed (dig delta<0 / dam delta>0) within radius_m of
     // world_pos; the fixed-point solver then drains/pools. Returns cells edited.
     int EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m);
 
-    // Spec 010 — configure finite hydrology: finite removes the perpetual river source (drainable water),
-    // rain_mm_per_tick adds rainfall (caller scales by weather precip), evap_mm_per_tick recedes ponds.
-    void SetWaterHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick);
+    // Finite hydrology removes the perpetual river source (drainable
+    // water), rain_mm_per_tick adds rainfall (caller scales by weather precip), evap_mm_per_tick
+    // recedes ponds.
+    void
+    SetWaterHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick);
 
     // S1.1 (ATMO-11/WATER-07) — wire weather-driven per-cell rain into the water solver
     // (precipitation integer-quantized at the boundary). null = OFF, byte-identical.
@@ -694,10 +750,15 @@ public:
     // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
     // Returns the number of chunks modified.
-    int EditTerrainVoxel(const Vec3& world_pos, float radius_m, bool fill, PhysicsSystem* physics_system);
+    int EditTerrainVoxel(const Vec3& world_pos,
+                         float radius_m,
+                         bool fill,
+                         PhysicsSystem* physics_system);
 
     // GPU SDF generation integration
-    void SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback);
+    void SetGPUSDFCallback(
+        std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)>
+            callback);
 
     // --- Persistence integration (runtime save/load, T-I2-12) ---
     // Blocks until in-flight generation and meshing jobs complete so chunk
@@ -731,7 +792,15 @@ public:
     // negligible. Sampling jobs never take the exclusive side, so there is no
     // ordering inversion.
     [[nodiscard]] std::shared_lock<std::shared_mutex> acquire_worldgen_sample_scope() const {
-        return std::shared_lock<std::shared_mutex>(m_worldgen_epoch_mutex);
+        for (;;) {
+            while (m_worldgen_writer_pending.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            std::shared_lock<std::shared_mutex> scope(m_worldgen_epoch_mutex);
+            if (!m_worldgen_writer_pending.load(std::memory_order_acquire)) {
+                return scope;
+            }
+        }
     }
     // SHIELD-02 telemetry: lifetime totals of promotion-lane dispatches
     // (batches, chunks). Static smoke runs are expected to record ZERO (the
@@ -755,8 +824,12 @@ public:
     // (due = dispatch + kActivationPipelineLatencyTicks) and drives
     // activate_due after the swap. The client never calls it (tick stays -1:
     // batches carry due_tick -1 = publish-when-drained, today's semantics).
-    void begin_tick(std::int64_t sim_tick) { m_current_sim_tick = sim_tick; }
-    std::int64_t current_sim_tick() const { return m_current_sim_tick; }
+    void begin_tick(std::int64_t sim_tick) {
+        m_current_sim_tick = sim_tick;
+    }
+    std::int64_t current_sim_tick() const {
+        return m_current_sim_tick;
+    }
     // SHIELD-03 (017-B FR-B-005): tick-keyed activation. Publishes, in FIFO
     // order, exactly the batches whose due_tick is at or before `tick` —
     // BLOCKING on a due-but-unfinished batch's jobs (K under-covering is a
@@ -766,15 +839,17 @@ public:
     // wait_for_streaming_jobs barrier at the 5b swap; until then it is
     // exercised by the ActivationQueueSemantics gtest only.
     void activate_due(std::int64_t tick);
-    void begin_tick_shadow(std::int64_t sim_tick) { m_shadow_current_tick = sim_tick; }
+    void begin_tick_shadow(std::int64_t sim_tick) {
+        m_shadow_current_tick = sim_tick;
+    }
     struct ActivationShadowReport {
         // gen-dispatch tick -> first Ready tick, one sample per activated chunk
         std::vector<std::int64_t> generation_to_ready_ticks;
         // promotion-dispatch tick -> sim-truth publish tick
         std::vector<std::int64_t> promotion_to_publish_ticks;
-        std::uint64_t generation_dispatches = 0;   // chunks entered the shadow
+        std::uint64_t generation_dispatches = 0; // chunks entered the shadow
         std::uint64_t promotion_dispatches = 0;
-        std::uint64_t still_pending = 0;           // dispatched, never activated by report time
+        std::uint64_t still_pending = 0; // dispatched, never activated by report time
     };
     ActivationShadowReport activation_shadow_report() const;
     // Shared-ownership snapshot of every streamed chunk (save path).
@@ -801,7 +876,8 @@ public:
     bool adopt_streamed_chunk(const std::shared_ptr<::Luminumbra::Chunk>& chunk);
 
 private:
-    std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> m_gpu_sdf_callback;
+    std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)>
+        m_gpu_sdf_callback;
 
 private:
     struct StreamingState {
@@ -828,8 +904,8 @@ private:
             u8 transition_faces = 0;
         };
         struct MeshingBatch {
-            JobHandle handle;       // Normal lane
-            JobHandle handle_high;  // High lane
+            JobHandle handle;      // Normal lane
+            JobHandle handle_high; // High lane
             std::vector<MeshingJobChunk> chunks;
             std::int64_t due_tick = -1;
         };
@@ -848,8 +924,9 @@ private:
             int lod_level = 0;
             bool high_priority = false;
         };
-        std::vector<PromotionJobChunk> promotion_job_chunks;   // stage A in flight
-        std::vector<PromotionJobChunk> pending_promotion_mesh; // sim truth live, stage B not yet dispatched
+        std::vector<PromotionJobChunk> promotion_job_chunks; // stage A in flight
+        std::vector<PromotionJobChunk>
+            pending_promotion_mesh; // sim truth live, stage B not yet dispatched
         // SHIELD-03: promotion stays a depth-1 lane (its dispatch cadence is
         // low; stage B rides the meshing FIFO); due_tick joins it for the
         // activate_due scheduling shell.
@@ -859,6 +936,7 @@ private:
     StreamingState m_streaming_state;
     // SHIELD-09: the worldgen-epoch gate (see acquire_worldgen_sample_scope).
     mutable std::shared_mutex m_worldgen_epoch_mutex;
+    mutable std::atomic<bool> m_worldgen_writer_pending{false};
     mutable std::atomic<u64> m_far_lod_capture_epoch{0};
     std::atomic<u64> m_far_lod_authority_revision{0};
     mutable std::mutex m_far_lod_region_revision_mutex;
@@ -884,7 +962,7 @@ private:
     void shadow_note_promotion_published(ChunkID id);
     void shadow_note_evicted(ChunkID id);
     StreamingBudgetFrameStats m_last_streaming_budget_stats;
-    DbgStreamTimings m_dbg_stream;  // TEMP diag
+    DbgStreamTimings m_dbg_stream; // TEMP diag
     StreamingTelemetryStats m_streaming_telemetry_stats;
     uint64_t m_deferred_backlog_age_frames = 0;
     // T-I5b-DR-streaming-drain: trailing per-frame queue-depth ring used to
@@ -900,42 +978,44 @@ private:
     // (a dirty-generation delta, EXACT anchor-vector inequality, chunk-count delta, an activation
     // tick, or a not-yet-drained previous pass) — NEVER on job-completion timing (the attempt-#1
     // determinism trap). Job-active state is consulted ONLY to decide whether the world has reached
-    // quiescence (so a future tick MAY elide), which on the per-tick-quiesced hashed paths is itself
-    // deterministic. `m_dirty_generation` is bumped at the
-    // chunk insert/erase + synchronous-rebuild sites that mutate a settled world.
+    // quiescence (so a future tick MAY elide), which on the per-tick-quiesced hashed paths is
+    // itself deterministic. `m_dirty_generation` is bumped at the chunk insert/erase +
+    // synchronous-rebuild sites that mutate a settled world.
     std::uint64_t m_dirty_generation = 0;
     std::uint64_t m_last_serviced_generation = 0;
     std::vector<Vec3> m_last_anchor_positions;
 
-    // spec 008 follow-up (streaming residual): elide update_chunk_activation's O(radius^2) wanted-set
-    // enumeration + O(N) eviction scan when the residency set is PROVABLY unchanged — the anchor
-    // chunk coords are identical, no world mutation since (dirty_generation), and the last activation
-    // created NOTHING (scheduled+deferred == 0, i.e. every wanted chunk was already resident). All
-    // signals are deterministic main-thread state (NOT job-activity timing — the attempt-#1 trap),
-    // so the skip is residency-equivalent and run==replay / host==peer stay byte-identical. This is
-    // the dominant per-tick cost while stationary at high render distance.
+    // Elide update_chunk_activation's O(radius^2)
+    // wanted-set enumeration + O(N) eviction scan when the residency set is PROVABLY unchanged —
+    // the anchor chunk coords are identical, no world mutation since (dirty_generation), and the
+    // last activation created NOTHING (scheduled+deferred == 0, i.e. every wanted chunk was already
+    // resident). All signals are deterministic main-thread state (NOT job-activity timing — the
+    // attempt-#1 trap), so the skip is residency-equivalent and run==replay / host==peer stay
+    // byte-identical. This is the dominant per-tick cost while stationary at high render distance.
     bool m_activation_has_run = false;
     std::vector<IVec3> m_last_activation_camera_chunks;
     std::uint64_t m_last_activation_dirty_generation = 0;
-    std::size_t m_last_activation_pending = 0;  // scheduled_generation + deferred_generation last pass
+    std::size_t m_last_activation_pending =
+        0; // scheduled_generation + deferred_generation last pass
     std::size_t m_last_chunk_count = 0;
-    bool m_last_pass_drained = false;  // sticky: false forces the next tick's candidate pass to run
+    bool m_last_pass_drained = false; // sticky: false forces the next tick's candidate pass to run
 
-    // spec 008 WS-1 streaming-residual: gate the O(N) per-tick collision-creation scan (Step 4) so a
-    // SETTLED world (every Ready/LOD0 chunk already has its collider) skips the scan entirely instead
-    // of walking all chunks every tick. The flag is a PRECISE, main-thread, deterministic work signal:
-    // set true at exactly the two sites that reset has_collision=false (remesh / LOD0 promotion in
-    // process_completed_meshing_jobs, and the synchronous surface-horizon rebuild) — NOT job-activity
-    // state (cf. the attempt-#1 trap above). Cleared only when a scan visits every chunk without
-    // hitting the per-frame cap (i.e. it drained all eligible work). Starts true so the first tick
-    // scans. The scan body itself is byte-identical to before, so collision eligibility/order — and
-    // thus has_collision, which feeds world_hash — is unchanged; only redundant settled-tick scans go.
+    // Gate the O(N) per-tick collision-creation scan so
+    // a SETTLED world (every Ready/LOD0 chunk already has its collider) skips the scan entirely
+    // instead of walking all chunks every tick. The flag is a PRECISE, main-thread, deterministic
+    // work signal: set true at exactly the two sites that reset has_collision=false (remesh / LOD0
+    // promotion in process_completed_meshing_jobs, and the synchronous surface-horizon rebuild) —
+    // NOT job-activity state (cf. the attempt-#1 trap above). Cleared only when a scan visits every
+    // chunk without hitting the per-frame cap (i.e. it drained all eligible work). Starts true so
+    // the first tick scans. The scan body itself is byte-identical to before, so collision
+    // eligibility/order — and thus has_collision, which feeds world_hash — is unchanged; only
+    // redundant settled-tick scans go.
     bool m_collision_pass_dirty = true;
 
     const std::vector<ChunkLOD> m_lod_levels = {
-        {0, 1, 192.0f},  // LOD 0: Full detail up to 192 meters (~12 chunks)
-        {1, 2, 384.0f},  // LOD 1: Half resolution up to 384 meters (~24 chunks)
-        {2, 4, 640.0f}   // LOD 2: Quarter resolution beyond the near visual range
+        {0, 1, 192.0f}, // LOD 0: Full detail up to 192 meters (~12 chunks)
+        {1, 2, 384.0f}, // LOD 1: Half resolution up to 384 meters (~24 chunks)
+        {2, 4, 640.0f}  // LOD 2: Quarter resolution beyond the near visual range
     };
     int get_lod_level_for_distance(float dist) const;
     int get_lod_step_for_level(int lod_level) const;
@@ -948,11 +1028,10 @@ private:
     // apply an asymmetric hysteresis margin so chunks dwelling on a band
     // edge do not oscillate; promotions and first-time assignment are
     // unaffected (see implementation comment).
-    int get_required_lod_for_chunk(
-        const IVec3& coords,
-        const Vec3& chunk_center,
-        const Vec3& camera_position,
-        int current_lod = -1);
+    int get_required_lod_for_chunk(const IVec3& coords,
+                                   const Vec3& chunk_center,
+                                   const Vec3& camera_position,
+                                   int current_lod = -1);
 
     // Chunk-Y span of the terrain surface for a horizontal column (T-I3-2).
     // Sampled at 5 points - the column center plus its 4 footprint corners -
@@ -1057,7 +1136,7 @@ private:
         float pre_island_height = 0.0f; // combined height before the island mask
         float island_noise = 0.0f;
         float island_mask = 1.0f;
-        float final_height = 0.0f;  // after the river carve
+        float final_height = 0.0f;     // after the river carve
         float pre_carve_height = 0.0f; // final surface before the river carve
         bool island_applied = false;
     };
@@ -1076,9 +1155,7 @@ private:
     // parity gtest, which now also exercises the SIMD path). The slow per-column
     // GenSingle2D loop cost ~26 us/column; the batched path is ~2 us/column.
     // Only valid when m_params.shaping_enabled; callers gate on that.
-    void ComputeShapedHeightGrid(int base_x, int base_z,
-                                 int size_x, int size_z,
-                                 float* out) const;
+    void ComputeShapedHeightGrid(int base_x, int base_z, int size_x, int size_z, float* out) const;
 
     // T-I6-A2: hydraulic/thermal relief (decision a). The analytic height is
     // computed by ...Impl(apply_hydro=false); ComputeShapedHeightSample adds the
@@ -1087,8 +1164,8 @@ private:
     // (deterministic, cached, recompute-on-load); the bake samples the NO-hydro
     // height (apply_hydro=false) to avoid recursion. World_hash-affecting when
     // enabled. Halo == hydro_iterations (halo-independent interior, A2a).
-    ShapedHeightSample ComputeShapedHeightSampleImpl(float world_x, float world_z,
-                                                     bool apply_hydro) const;
+    ShapedHeightSample
+    ComputeShapedHeightSampleImpl(float world_x, float world_z, bool apply_hydro) const;
     float SampleHydroOffsetMeters(float world_x, float world_z) const;
 
     // T-I4-1: the five normalized climate dimensions consumed by the biome
@@ -1149,7 +1226,10 @@ private:
     // byte-identical across paths and chunk seams (absolute world coords only).
     // Returns {kCaveSurfaceCapDepth, 0} when surface_breaks_enabled is false (the
     // disabled path stays byte-identical to the pre-A3 implementation).
-    struct SurfaceBreakSample { float effective_cap; float carve; };
+    struct SurfaceBreakSample {
+        float effective_cap;
+        float carve;
+    };
     SurfaceBreakSample sample_surface_breaks(const Vec3& world_pos, float surface_h) const;
     // Monotone piecewise-linear spline over sorted [input, output] control
     // points: endpoint-clamped, plain lerp between neighbors, `fallback` when
@@ -1168,8 +1248,10 @@ private:
     // Noise states for procedural generation
     FastNoise::SmartNode<FastNoise::Generator> m_terrain_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_cave_generator;
-    FastNoise::SmartNode<FastNoise::Generator> m_spaghetti_generator; // spec 013 noise-router tunnels (built iff cave_style==1)
-    FastNoise::SmartNode<FastNoise::Generator> m_worley_generator;    // spec 013 Worley CHEESE caverns (built iff cave_style==1)
+    FastNoise::SmartNode<FastNoise::Generator>
+        m_spaghetti_generator; // noise-router tunnels, built when cave_style == 1
+    FastNoise::SmartNode<FastNoise::Generator>
+        m_worley_generator; // Worley cheese caverns, built when cave_style == 1
     FastNoise::SmartNode<FastNoise::Generator> m_island_mask_generator;
     // T-I3-10 shaping control noises (only built when shaping_enabled; seed
     // offsets +3/+4/+5 for continentalness/erosion/peaks, the single warp

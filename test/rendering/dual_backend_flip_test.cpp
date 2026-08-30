@@ -34,8 +34,9 @@
 
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <array>
@@ -86,7 +87,10 @@ struct RenderParams {
 
 // The seam rank 66 fills in: today only RawGl is realisable; RhiDiligent is wired
 // so the proving-signal test can name it and skip loudly until GPU-P02.
-enum class FlipBackend { RawGl, RhiDiligent };
+enum class FlipBackend {
+    RawGl,
+    RhiDiligent
+};
 
 class HiddenGlContext {
 public:
@@ -113,11 +117,17 @@ public:
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -126,7 +136,9 @@ private:
     std::string m_error;
 };
 
-fs::path SourceRoot() { return fs::weakly_canonical(fs::path(LUMINUMBRA_SOURCE_ROOT)); }
+fs::path SourceRoot() {
+    return fs::weakly_canonical(fs::path(LUMINUMBRA_SOURCE_ROOT));
+}
 
 fs::path ArtifactRoot() {
     return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "dual_backend_flip";
@@ -134,7 +146,8 @@ fs::path ArtifactRoot() {
 
 std::string ReadTextFile(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
-    if (!file) return {};
+    if (!file)
+        return {};
     std::stringstream stream;
     stream << file.rdbuf();
     return stream.str();
@@ -169,8 +182,10 @@ GLuint LinkBasicProgram() {
     GLuint vs = CompileShader(shader_root / "basic.vert", GL_VERTEX_SHADER);
     GLuint fsh = CompileShader(shader_root / "basic.frag", GL_FRAGMENT_SHADER);
     if (vs == 0 || fsh == 0) {
-        if (vs) glDeleteShader(vs);
-        if (fsh) glDeleteShader(fsh);
+        if (vs)
+            glDeleteShader(vs);
+        if (fsh)
+            glDeleteShader(fsh);
         return 0;
     }
     GLuint program = glCreateProgram();
@@ -199,12 +214,12 @@ std::vector<MeshVertex> BuildCubeMesh() {
         std::array<glm::vec3, 4> corners;
     };
     const std::array<Face, 6> faces = {{
-        {{ 1, 0, 0}, {{{ h,-h,-h}, { h, h,-h}, { h, h, h}, { h,-h, h}}}},
-        {{-1, 0, 0}, {{{-h,-h, h}, {-h, h, h}, {-h, h,-h}, {-h,-h,-h}}}},
-        {{ 0, 1, 0}, {{{-h, h,-h}, {-h, h, h}, { h, h, h}, { h, h,-h}}}},
-        {{ 0,-1, 0}, {{{-h,-h, h}, {-h,-h,-h}, { h,-h,-h}, { h,-h, h}}}},
-        {{ 0, 0, 1}, {{{-h,-h, h}, { h,-h, h}, { h, h, h}, {-h, h, h}}}},
-        {{ 0, 0,-1}, {{{ h,-h,-h}, {-h,-h,-h}, {-h, h,-h}, { h, h,-h}}}},
+        {{1, 0, 0}, {{{h, -h, -h}, {h, h, -h}, {h, h, h}, {h, -h, h}}}},
+        {{-1, 0, 0}, {{{-h, -h, h}, {-h, h, h}, {-h, h, -h}, {-h, -h, -h}}}},
+        {{0, 1, 0}, {{{-h, h, -h}, {-h, h, h}, {h, h, h}, {h, h, -h}}}},
+        {{0, -1, 0}, {{{-h, -h, h}, {-h, -h, -h}, {h, -h, -h}, {h, -h, h}}}},
+        {{0, 0, 1}, {{{-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}}}},
+        {{0, 0, -1}, {{{h, -h, -h}, {-h, -h, -h}, {-h, h, -h}, {h, h, -h}}}},
     }};
     std::vector<MeshVertex> verts;
     verts.reserve(faces.size() * 6);
@@ -222,12 +237,13 @@ std::vector<MeshVertex> BuildCubeMesh() {
 // back. glReadPixels from the bound FBO is synchronous (it blocks until the draw
 // completes); glFinish() is added as belt-and-suspenders. No fence/glClientWaitSync
 // is used, so GL_SYNC_FLUSH_COMMANDS_BIT does not apply here.
-std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<MeshVertex>& mesh,
-                                          const RenderParams& params) {
+std::vector<std::uint8_t>
+RenderCubeRawGl(GLuint program, const std::vector<MeshVertex>& mesh, const RenderParams& params) {
     GLuint color_tex = 0, depth_rb = 0, fbo = 0, vao = 0, vbo = 0;
     glGenTextures(1, &color_tex);
     glBindTexture(GL_TEXTURE_2D, color_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kWidth, kHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(
+        GL_TEXTURE_2D, 0, GL_RGBA8, kWidth, kHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -245,13 +261,23 @@ std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<Mesh
     glGenBuffers(1, &vbo);
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.size() * sizeof(MeshVertex)),
-                 mesh.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(mesh.size() * sizeof(MeshVertex)),
+                 mesh.data(),
+                 GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex),
+    glVertexAttribPointer(0,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(MeshVertex),
                           reinterpret_cast<void*>(offsetof(MeshVertex, px)));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex),
+    glVertexAttribPointer(1,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(MeshVertex),
                           reinterpret_cast<void*>(offsetof(MeshVertex, nx)));
 
     glViewport(0, 0, kWidth, kHeight);
@@ -261,21 +287,32 @@ std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<Mesh
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const glm::mat4 model(1.0f);
-    const glm::mat4 view = glm::lookAt(params.camera_position, params.camera_target,
-                                       glm::vec3{0.0f, 1.0f, 0.0f});
-    const glm::mat4 projection = glm::perspective(
-        glm::radians(45.0f), static_cast<float>(kWidth) / kHeight, 0.1f, 128.0f);
+    const glm::mat4 view =
+        glm::lookAt(params.camera_position, params.camera_target, glm::vec3{0.0f, 1.0f, 0.0f});
+    const glm::mat4 projection =
+        glm::perspective(glm::radians(45.0f), static_cast<float>(kWidth) / kHeight, 0.1f, 128.0f);
     const glm::mat3 normal_matrix(1.0f);
 
     glUseProgram(program);
     glUniformMatrix4fv(glGetUniformLocation(program, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniformMatrix4fv(glGetUniformLocation(program, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-    glUniformMatrix3fv(glGetUniformLocation(program, "normalMatrix"), 1, GL_FALSE, glm::value_ptr(normal_matrix));
-    glUniform3f(glGetUniformLocation(program, "lightPos"), params.light_pos.x, params.light_pos.y, params.light_pos.z);
-    glUniform3f(glGetUniformLocation(program, "viewPos"), params.camera_position.x, params.camera_position.y, params.camera_position.z);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    glUniformMatrix3fv(
+        glGetUniformLocation(program, "normalMatrix"), 1, GL_FALSE, glm::value_ptr(normal_matrix));
+    glUniform3f(glGetUniformLocation(program, "lightPos"),
+                params.light_pos.x,
+                params.light_pos.y,
+                params.light_pos.z);
+    glUniform3f(glGetUniformLocation(program, "viewPos"),
+                params.camera_position.x,
+                params.camera_position.y,
+                params.camera_position.z);
     glUniform3f(glGetUniformLocation(program, "lightColor"), 1.0f, 1.0f, 1.0f);
-    glUniform3f(glGetUniformLocation(program, "objectColor"), params.object_color.x, params.object_color.y, params.object_color.z);
+    glUniform3f(glGetUniformLocation(program, "objectColor"),
+                params.object_color.x,
+                params.object_color.y,
+                params.object_color.z);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh.size()));
     glFinish();
 
@@ -292,16 +329,20 @@ std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<Mesh
 
 // backend dispatch. RawGl renders; RhiDiligent reports unavailable (the backend
 // is not built until GPU-P02 / rank 63). available is set to false in that case.
-std::vector<std::uint8_t> RenderVia(FlipBackend backend, GLuint program,
+std::vector<std::uint8_t> RenderVia(FlipBackend backend,
+                                    GLuint program,
                                     const std::vector<MeshVertex>& mesh,
-                                    const RenderParams& params, bool* available) {
+                                    const RenderParams& params,
+                                    bool* available) {
     switch (backend) {
         case FlipBackend::RawGl:
-            if (available) *available = true;
+            if (available)
+                *available = true;
             return RenderCubeRawGl(program, mesh, params);
         case FlipBackend::RhiDiligent:
         default:
-            if (available) *available = false;
+            if (available)
+                *available = false;
             return {};
     }
 }
@@ -332,7 +373,8 @@ protected:
         }
     }
     static void TearDownTestSuite() {
-        if (s_program) glDeleteProgram(s_program);
+        if (s_program)
+            glDeleteProgram(s_program);
         s_program = 0;
         delete s_context;
         s_context = nullptr;
@@ -381,8 +423,10 @@ TEST_F(DualBackendFlipInProcessGpu, ZeroNoiseFloorIsBitIdentical) {
     EXPECT_TRUE(any_foreground) << "cube pass produced a blank frame -- metric would be vacuous";
 
     for (int i = 1; i < kRepeats; ++i) {
-        EXPECT_EQ(std::memcmp(frames[0].data(), frames[static_cast<std::size_t>(i)].data(),
-                              frames[0].size()), 0)
+        EXPECT_EQ(std::memcmp(frames[0].data(),
+                              frames[static_cast<std::size_t>(i)].data(),
+                              frames[0].size()),
+                  0)
             << "raw-GL render " << i << " was not bit-identical to render 0";
         const auto flip = Luminumbra::Rendering::InProcessFlip::ComputeLumaFlip(
             frames[0].data(), frames[static_cast<std::size_t>(i)].data(), kWidth, kHeight);
@@ -426,13 +470,15 @@ TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
     recolored.object_color = glm::vec3{0.85f, 0.30f, 0.25f};
     const std::vector<std::uint8_t> recolored_frame =
         RenderVia(FlipBackend::RawGl, s_program, mesh, recolored, &available);
-    const auto color_flip = ComputeLumaFlip(baseline.data(), recolored_frame.data(), kWidth, kHeight);
+    const auto color_flip =
+        ComputeLumaFlip(baseline.data(), recolored_frame.data(), kWidth, kHeight);
     EXPECT_GT(color_flip.score, 0.001)
         << "render-level colour change was not detected above the zero floor";
 
     // Self-diff of the recolored frame is still exactly 0 (determinism holds for
     // any pass, not just the baseline colour).
-    const auto self_flip = ComputeLumaFlip(recolored_frame.data(), recolored_frame.data(), kWidth, kHeight);
+    const auto self_flip =
+        ComputeLumaFlip(recolored_frame.data(), recolored_frame.data(), kWidth, kHeight);
     EXPECT_EQ(self_flip.score, 0.0);
 
     // Record the calibration so rank 66 reads its per-pass threshold basis rather
@@ -442,7 +488,8 @@ TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
     ASSERT_TRUE(out);
     out << "{\n";
     out << "  \"schema\": \"luminumbra.dual_backend_flip.v1\",\n";
-    out << "  \"metric_backend\": \"" << Luminumbra::Rendering::InProcessFlip::BackendName() << "\",\n";
+    out << "  \"metric_backend\": \"" << Luminumbra::Rendering::InProcessFlip::BackendName()
+        << "\",\n";
     out << "  \"metric_source\": \"C++ port of tools/flip_diff.py backend_luma\",\n";
     out << "  \"pass\": \"basic\",\n";
     out << "  \"resolution\": [" << kWidth << ", " << kHeight << "],\n";
@@ -456,7 +503,8 @@ TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
     }
     out << "  ],\n";
     out << "  \"render_level_color_diff_score\": " << color_flip.score << ",\n";
-    out << "  \"second_backend\": \"pending GPU-P02 (rank 63); parity run is rank 66 (GPU-03+GPU-P05)\"\n";
+    out << "  \"second_backend\": \"pending GPU-P02 (rank 63); parity run is rank 66 "
+           "(GPU-03+GPU-P05)\"\n";
     out << "}\n";
 }
 
@@ -480,8 +528,6 @@ TEST_F(DualBackendFlipInProcessGpu, SecondBackendParityLandedInRhiPilotFlip) {
                                "not link Diligent; the parity RUN is RhiPilotParityGpu";
     EXPECT_TRUE(diligent_frame.empty());
 
-    GTEST_SKIP() << "raw-GL vs GL-via-Diligent parity RUN landed in RhiPilotParityGpu "
-                    "(test/rendering/rhi_pilot_flip_test.cpp, Diligent-linked): leg B "
-                    "verdict GO, bit-identical (FLIP 0.0). This GL-only harness keeps "
-                    "the inline seam a documented stub.";
+    // The assertions above fully evaluate this target's contract: this GL-only
+    // harness must not silently acquire a second backend.
 }

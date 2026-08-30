@@ -90,8 +90,7 @@ endif()
 
 target_include_directories(luminumbra_common PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_SOURCE_DIR}/vendor/spdlog/include"
-    "${CMAKE_SOURCE_DIR}/vendor/soil2/src"
+    "${CMAKE_SOURCE_DIR}/include"
     "${CMAKE_SOURCE_DIR}/vendor"
 )
 

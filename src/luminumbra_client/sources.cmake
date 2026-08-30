@@ -78,15 +78,8 @@ set(CLIENT_INTERNAL_SOURCES
 set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.cpp
     PROPERTIES COMPILE_DEFINITIONS "RMLUI_GL3_CUSTOM_LOADER=<glad/glad.h>")
 
-# List of vendor source files that need to be compiled with the client.
-set(CLIENT_VENDOR_SOURCES
-    ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui.cpp
-    ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui_draw.cpp
-    ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui_tables.cpp
-    ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui_widgets.cpp
-    ${CMAKE_SOURCE_DIR}/vendor/imgui/backends/imgui_impl_glfw.cpp
-    ${CMAKE_SOURCE_DIR}/vendor/imgui/backends/imgui_impl_opengl3.cpp
-)
+# Third-party implementation sources are owned by their dependency targets.
+set(CLIENT_VENDOR_SOURCES)
 
 # Main client executable sources.
 set(CLIENT_APP_SOURCES

@@ -2,9 +2,17 @@
 cmake_minimum_required(VERSION 3.20)
 project(Luminumbra VERSION 0.1.0 LANGUAGES C CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Dependency revisions are immutable in the FetchContent declarations. Once a
+# source has been populated, configuring must be reproducible and work offline
+# instead of contacting every upstream repository for an update probe.
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL
+    "Do not update already-populated FetchContent dependencies" FORCE)
 
 # Set build output directories
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -110,15 +118,24 @@ function(luminumbra_pin_fp_determinism TARGET_NAME)
   if(_lpfd_type STREQUAL "INTERFACE_LIBRARY")
     return()
   endif()
+  # Static/shared libraries expose simulation headers with inline arithmetic.
+  # Consumers must compile those helpers under the same floating-point contract;
+  # a PRIVATE flag would leave tests and applications free to fuse operations.
+  if(_lpfd_type STREQUAL "STATIC_LIBRARY" OR
+     _lpfd_type STREQUAL "SHARED_LIBRARY")
+    set(_lpfd_scope PUBLIC)
+  else()
+    set(_lpfd_scope PRIVATE)
+  endif()
   if(MSVC)
-    target_compile_options(${TARGET_NAME} PRIVATE /fp:precise)
+    target_compile_options(${TARGET_NAME} ${_lpfd_scope} /fp:precise)
     # /fp:contract- requires MSVC >= 19.30 (VS2022 17.0); the cmake generator
     # expression keeps older toolchains compiling (they default to no
     # contraction anyway).
-    target_compile_options(${TARGET_NAME} PRIVATE
+    target_compile_options(${TARGET_NAME} ${_lpfd_scope}
       $<$<CXX_COMPILER_VERSION:GREATER_EQUAL:19.30>:/fp:contract->)
   else()
-    target_compile_options(${TARGET_NAME} PRIVATE -ffp-contract=off)
+    target_compile_options(${TARGET_NAME} ${_lpfd_scope} -ffp-contract=off)
   endif()
 endfunction()
 
@@ -129,9 +146,7 @@ include(cmake/engine_version.cmake)
 include(cmake/dependencies.cmake)
 add_subdirectory(vendor)
 
-# spec 021 GPU-P02: Diligent Engine (RHI pilot backend) via FetchContent. Only
-# registers the GL/Vk targets -- they are compiled solely by the RhiDeviceBringupGpu
-# ctest, never by a shipping binary, so this does not touch the server/sim build.
+# The experimental Diligent backend is opt-in and excluded from normal builds.
 include(cmake/diligent.cmake)
 
 # spec 021 (2026-07 research P1): Tracy Profiler seam. Defines the luminumbra_profiler
@@ -244,9 +259,11 @@ luminumbra_pin_fp_determinism(luminumbra_server_app)
 # This ensures all assets are processed *before* the game is linked.
 add_dependencies(luminumbra_client_app process_assets)
 
-# Enable testing framework
-enable_testing()
-add_subdirectory(test)
+# Tests are enabled by default for development presets and can be omitted from
+# packaging-only builds with -DBUILD_TESTING=OFF.
+if(BUILD_TESTING)
+  add_subdirectory(test)
+endif()
 
 foreach(FIRST_PARTY_TARGET IN ITEMS
   asset_processor

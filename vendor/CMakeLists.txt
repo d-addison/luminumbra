@@ -38,6 +38,8 @@ set(gmock_build_tests OFF)
 set(MESHOPT_BUILD_TESTS OFF)
 set(MESHOPT_BUILD_DEMO OFF)
 set(MESHOPT_BUILD_BENCHMARKS OFF)
+set(LZ4_BUILD_CLI OFF)
+set(LZ4_BUILD_LEGACY_LZ4C OFF)
 
 # ---------------------------------------------------------------------------
 # Third-party libraries restored via FetchContent (pinned tags), 2026-06-14.
@@ -50,7 +52,8 @@ set(MESHOPT_BUILD_BENCHMARKS OFF)
 # glfw 3.4 / lua 5.4.8 confirmed from surviving artifacts; glm 1.0.1 confirmed
 # from the prior external/glm-1.0.1 reference). DETERMINISM ACCEPTANCE TEST: a
 # clean rebuild must reproduce HeadlessServerTick world_hash 0eac465289e7c88b.
-# Still vendored on-disk (unchanged): fastnoise, imgui, sol2, spdlog, googletest.
+# FastNoise and the RenderDoc header remain embedded in the repository. Other
+# dependencies are consumed directly from their pinned FetchContent trees.
 # ---------------------------------------------------------------------------
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
@@ -101,28 +104,16 @@ FetchContent_Declare(imgui_src     GIT_REPOSITORY https://github.com/ocornut/img
 # stb: header-only, single-header collection (no releases/tags upstream) — pin a
 # commit. tools/asset_processor hardcodes vendor/stb; restored below.
 FetchContent_Declare(stb           GIT_REPOSITORY https://github.com/nothings/stb.git       GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4)
+FetchContent_Declare(googletest    GIT_REPOSITORY https://github.com/google/googletest.git GIT_TAG 373af2e3df71599b87a40ce0e37164523849166b)
+FetchContent_Declare(lz4_upstream  GIT_REPOSITORY https://github.com/lz4/lz4.git GIT_TAG ebb370ca83af193212df4dcbadcc5d87bc0de2f0 SOURCE_SUBDIR build/cmake)
 
-FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics RmlUi soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb)
+FetchContent_MakeAvailable(EnTT glm glfw glad nlohmann_json JoltPhysics RmlUi soil2 miniaudio meshoptimizer lua_upstream sol2 spdlog imgui_src stb googletest lz4_upstream)
 
-# Restore the clipped imgui backend sources from the pinned FetchContent copy
-# into the on-disk vendor/imgui/backends that src/CMakeLists.txt references.
-# Idempotent; re-copies if the working-tree copy is ever lost again.
-file(COPY "${imgui_src_SOURCE_DIR}/backends/"
-     DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends"
-     FILES_MATCHING PATTERN "imgui_impl_glfw.*" PATTERN "imgui_impl_opengl3*")
+if(TARGET lz4_static AND NOT TARGET lz4)
+  add_library(lz4 ALIAS lz4_static)
+endif()
 
-# tools/asset_processor compiles vendor/meshoptimizer/src/*.cpp and includes
-# vendor/stb directly; restore those on-disk paths from the pinned fetches.
-file(COPY "${meshoptimizer_SOURCE_DIR}/src/"
-     DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/meshoptimizer/src")
-file(COPY "${stb_SOURCE_DIR}/stb_image.h" "${stb_SOURCE_DIR}/stb_image_write.h"
-          "${stb_SOURCE_DIR}/stb_image_resize2.h"
-     DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/stb")
-# SOIL2 ships no CMake (premake upstream), so build the `soil2` static target
-# ourselves from its sources, and restore its headers into the on-disk
-# vendor/soil2/src path that src/luminumbra_client hardcodes (-Ivendor/soil2/src,
-# <SOIL2/SOIL2.h>).
-file(COPY "${soil2_SOURCE_DIR}/src/" DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/soil2/src")
+# SOIL2 ships no CMake project, so build it directly from the fetched tree.
 if (NOT TARGET soil2)
   file(GLOB SOIL2_SRC "${soil2_SOURCE_DIR}/src/SOIL2/*.c")
   add_library(soil2 STATIC ${SOIL2_SRC})
@@ -130,6 +121,33 @@ if (NOT TARGET soil2)
   if (WIN32)
     target_link_libraries(soil2 PUBLIC opengl32)
   endif()
+endif()
+
+# stb is header-only. Export its fetched include directory without copying
+# generated dependency state back into the source checkout.
+if(NOT TARGET stb_headers)
+  add_library(stb_headers INTERFACE)
+  target_include_directories(stb_headers SYSTEM INTERFACE "${stb_SOURCE_DIR}")
+endif()
+
+# Dear ImGui does not provide a CMake project. Build the pinned sources and GL
+# backends in place so every consumer uses the same target and include paths.
+if(NOT TARGET imgui)
+  find_package(OpenGL REQUIRED)
+  add_library(imgui STATIC
+    "${imgui_src_SOURCE_DIR}/imgui.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_demo.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_draw.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_tables.cpp"
+    "${imgui_src_SOURCE_DIR}/imgui_widgets.cpp"
+    "${imgui_src_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
+    "${imgui_src_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp")
+  target_include_directories(imgui SYSTEM PUBLIC
+    "${imgui_src_SOURCE_DIR}"
+    "${imgui_src_SOURCE_DIR}/backends")
+  target_link_libraries(imgui PUBLIC glfw glad OpenGL::GL)
+  target_compile_features(imgui PUBLIC cxx_std_20)
+  add_library(imgui::imgui ALIAS imgui)
 endif()
 
 # Compatibility shims so the engine's existing link names resolve to the targets
@@ -175,7 +193,3 @@ if (NOT TARGET FastNoise)
     add_subdirectory(fastnoise)
   endif()
 endif()
-
-# Still vendored on-disk (present) — unchanged.
-add_subdirectory(imgui)  # Now ENABLED for Quantum UI!
-add_subdirectory(googletest)

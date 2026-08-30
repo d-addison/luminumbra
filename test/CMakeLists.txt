@@ -70,8 +70,6 @@ target_include_directories(asset_processor_round_trip_test PRIVATE
     ../src
     ../tools
     ../vendor/cgltf
-    ../vendor/meshoptimizer/src
-    ../vendor/stb
     ../third_party/cgltf
     ../third_party/meshoptimizer/src
     ../external/cgltf
@@ -96,6 +94,7 @@ endif()
 
 target_link_libraries(asset_processor_round_trip_test PRIVATE
     gtest_main
+    stb_headers
 )
 
 if(TARGET meshoptimizer)
@@ -542,6 +541,7 @@ target_link_libraries(dual_backend_flip_test PRIVATE
     gtest_main
     glfw
     glad
+    glm
 )
 
 if(WIN32)
@@ -1475,11 +1475,19 @@ endif()
 # on a gate runner that lacks GL. These tests assert real behaviour and MUST run, not skip. Promote
 # any "[ SKIPPED ]" line from the UI targets to a ctest FAILURE via FAIL_REGULAR_EXPRESSION. The
 # GL-free cases in these binaries never print SKIPPED, so a fully-GL run stays green.
-set(LUMINUMBRA_GL_REQUIRED_UI_TARGETS ui_smoke_test ui_page_load_test worldgen_preview_test)
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
-    if(_lum_gtest_target IN_LIST LUMINUMBRA_GL_REQUIRED_UI_TARGETS)
+    if(_lum_gtest_target STREQUAL common_tests)
+        # Individual tests in this aggregate use shared runtime roots and may
+        # create loopback listeners. CTest launches every discovered case as a
+        # separate process, so serialize the aggregate to prevent cross-test
+        # corruption and port contention.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
-            PROPERTIES FAIL_REGULAR_EXPRESSION "SKIPPED")
+            PROPERTIES RESOURCE_LOCK luminumbra_common_runtime)
+    elseif(_lum_gtest_target STREQUAL world_load_bounded_test)
+        # The contract is sixty seconds per cold load, repeated twenty times.
+        # The process-level timeout must cover the complete measurement.
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES TIMEOUT 1500 RUN_SERIAL TRUE)
     else()
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120)
     endif()
@@ -1598,7 +1606,7 @@ if(_vc_python)
     set_tests_properties(VisualCritiqueFlags PROPERTIES LABELS "visual;critique" TIMEOUT 120)
     message(STATUS "VisualCritiqueFlags gate registered using python: ${_vc_python}")
 else()
-    message(WARNING "No python with numpy found: VisualCritiqueFlags gate (visual_critique fixtures) will NOT be registered. Set VISUAL_SWEEP_PYTHON to a python with numpy+Pillow.")
+    message(FATAL_ERROR "No python with numpy found: VisualCritiqueFlags cannot be registered. Install numpy or configure with -DBUILD_TESTING=OFF.")
 endif()
 
 # Timelapse assembler self-check (tools/timelapse.py): needs Pillow. Probe the same
@@ -1618,7 +1626,7 @@ if(_tl_python)
     set_tests_properties(TimelapseSelftest PROPERTIES LABELS "visual;tools" TIMEOUT 120)
     message(STATUS "TimelapseSelftest registered using python: ${_tl_python}")
 else()
-    message(WARNING "No python with Pillow found: TimelapseSelftest will NOT be registered.")
+    message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")
 endif()
 
 # SHIELD-10 (spec 021): SDF-contract doc-lint. Assert docs/shield/sdf-contract.md

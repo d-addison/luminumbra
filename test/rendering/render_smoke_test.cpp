@@ -1,7 +1,8 @@
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <array>
@@ -90,8 +91,12 @@ public:
         }
     }
 
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -176,7 +181,8 @@ std::string JsonEscape(const std::string& value) {
                 break;
             default:
                 if (ch < 0x20) {
-                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(ch);
+                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                            << static_cast<int>(ch);
                 } else {
                     escaped << static_cast<char>(ch);
                 }
@@ -259,7 +265,8 @@ GLuint CompileShader(const fs::path& path, GLenum type) {
     GLint success = GL_FALSE;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
     if (success != GL_TRUE) {
-        ADD_FAILURE() << "Shader failed to compile: " << path.string() << "\n" << GetShaderInfoLog(shader);
+        ADD_FAILURE() << "Shader failed to compile: " << path.string() << "\n"
+                      << GetShaderInfoLog(shader);
         glDeleteShader(shader);
         return 0;
     }
@@ -274,8 +281,10 @@ GLuint LinkProgram(const ShaderProgramSpec& spec) {
     GLuint vertex = CompileShader(shader_root / spec.vertex, GL_VERTEX_SHADER);
     GLuint fragment = CompileShader(shader_root / spec.fragment, GL_FRAGMENT_SHADER);
     if (vertex == 0 || fragment == 0) {
-        if (vertex != 0) glDeleteShader(vertex);
-        if (fragment != 0) glDeleteShader(fragment);
+        if (vertex != 0)
+            glDeleteShader(vertex);
+        if (fragment != 0)
+            glDeleteShader(fragment);
         return 0;
     }
 
@@ -285,7 +294,8 @@ GLuint LinkProgram(const ShaderProgramSpec& spec) {
     if (spec.geometry) {
         GLuint geometry = CompileShader(shader_root / spec.geometry, GL_GEOMETRY_SHADER);
         if (geometry == 0) {
-            for (GLuint shader : shaders) glDeleteShader(shader);
+            for (GLuint shader : shaders)
+                glDeleteShader(shader);
             return 0;
         }
         shaders.push_back(geometry);
@@ -304,7 +314,8 @@ GLuint LinkProgram(const ShaderProgramSpec& spec) {
     }
 
     if (success != GL_TRUE) {
-        ADD_FAILURE() << "Shader program failed to link: " << spec.name << "\n" << GetProgramInfoLog(program);
+        ADD_FAILURE() << "Shader program failed to link: " << spec.name << "\n"
+                      << GetProgramInfoLog(program);
         glDeleteProgram(program);
         return 0;
     }
@@ -328,7 +339,10 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
         {"loading_hologram", "loading_hologram.vert", "loading_hologram.frag"},
         {"loading_visual", "loading_visual.vert", "loading_visual.frag"},
         {"volumetric_lighting", "volumetric_lighting.vert", "volumetric_lighting.frag"},
-        {"magical_particles", "magical_particles.vert", "magical_particles.frag", "magical_particles.geom"},
+        {"magical_particles",
+         "magical_particles.vert",
+         "magical_particles.frag",
+         "magical_particles.geom"},
         {"foliage", "foliage.vert", "foliage.frag"},
         // Render-optimization (cloud-raymarch-optimization, slice 1): the depth-masked
         // upsample compositing the reduced-res sky dome into the lighting FBO.
@@ -342,22 +356,17 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
     };
 }
 
-void WriteShaderInventoryArtifact(
-    const fs::path& path,
-    const std::vector<ShaderSourceInventoryEntry>& sources,
-    const std::vector<ShaderProgramSpec>& programs) {
+void WriteShaderInventoryArtifact(const fs::path& path,
+                                  const std::vector<ShaderSourceInventoryEntry>& sources,
+                                  const std::vector<ShaderProgramSpec>& programs) {
     const auto count_stage = [&sources](const std::string& stage) {
         return std::count_if(
-            sources.begin(),
-            sources.end(),
-            [&stage](const ShaderSourceInventoryEntry& entry) {
+            sources.begin(), sources.end(), [&stage](const ShaderSourceInventoryEntry& entry) {
                 return entry.stage == stage;
             });
     };
-    const auto compiled_count = std::count_if(
-        sources.begin(),
-        sources.end(),
-        [](const ShaderSourceInventoryEntry& entry) {
+    const auto compiled_count =
+        std::count_if(sources.begin(), sources.end(), [](const ShaderSourceInventoryEntry& entry) {
             return entry.compiled;
         });
 
@@ -383,7 +392,8 @@ void WriteShaderInventoryArtifact(
         WriteJsonString(output, source.file);
         output << ", \"stage\": ";
         WriteJsonString(output, source.stage);
-        output << ", \"bytes\": " << source.bytes << ", \"compiled\": " << (source.compiled ? "true" : "false") << "}";
+        output << ", \"bytes\": " << source.bytes
+               << ", \"compiled\": " << (source.compiled ? "true" : "false") << "}";
         output << (i + 1u == sources.size() ? "\n" : ",\n");
     }
     output << "  ],\n";
@@ -410,16 +420,13 @@ void WriteShaderInventoryArtifact(
     output << "}\n";
 }
 
-void WriteShaderSuiteHealthArtifact(
-    const fs::path& path,
-    const std::vector<std::pair<std::string, bool>>& program_health,
-    const std::vector<std::string>& gl_errors) {
-    const auto linked_count = std::count_if(
-        program_health.begin(),
-        program_health.end(),
-        [](const std::pair<std::string, bool>& entry) {
-            return entry.second;
-        });
+void WriteShaderSuiteHealthArtifact(const fs::path& path,
+                                    const std::vector<std::pair<std::string, bool>>& program_health,
+                                    const std::vector<std::string>& gl_errors) {
+    const auto linked_count =
+        std::count_if(program_health.begin(),
+                      program_health.end(),
+                      [](const std::pair<std::string, bool>& entry) { return entry.second; });
     const bool all_programs_ok = linked_count == static_cast<std::ptrdiff_t>(program_health.size());
     const bool passed = all_programs_ok && gl_errors.empty();
 
@@ -495,16 +502,20 @@ struct GpuTimerProbeResult {
 // the render-health artifact carries observed gpu_ms values.
 GpuTimerProbeResult MeasureGpuTimerProbe(bool context_ready) {
     // T-I5a-1: "particles" slots after "skybox" (the live ParticlePass order).
-    static constexpr std::array<const char*, 9> kPassNames = {
-        "shadow", "gbuffer", "ssao", "ssao_blur", "lighting", "water", "skybox", "particles", "final_blit"};
+    static constexpr std::array<const char*, 9> kPassNames = {"shadow",
+                                                              "gbuffer",
+                                                              "ssao",
+                                                              "ssao_blur",
+                                                              "lighting",
+                                                              "water",
+                                                              "skybox",
+                                                              "particles",
+                                                              "final_blit"};
 
     GpuTimerProbeResult probe;
-    const bool loader_ok = context_ready &&
-        glGenQueries != nullptr &&
-        glDeleteQueries != nullptr &&
-        glQueryCounter != nullptr &&
-        glGetQueryObjectiv != nullptr &&
-        glGetQueryObjectui64v != nullptr;
+    const bool loader_ok = context_ready && glGenQueries != nullptr && glDeleteQueries != nullptr &&
+                           glQueryCounter != nullptr && glGetQueryObjectiv != nullptr &&
+                           glGetQueryObjectui64v != nullptr;
     probe.supported = loader_ok && GLAD_GL_VERSION_3_3 != 0;
     if (!probe.supported) {
         for (const char* name : kPassNames) {
@@ -545,18 +556,17 @@ GpuTimerProbeResult MeasureGpuTimerProbe(bool context_ready) {
     return probe;
 }
 
-void WriteRenderHealthAnalysis(
-    const fs::path& path,
-    bool passed,
-    bool health_api_present,
-    bool pass_metadata_present,
-    bool resource_registry_present,
-    bool terrain_materials_present,
-    bool gpu_timer_api_present,
-    bool gpu_timers_supported,
-    const std::vector<std::pair<std::string, double>>& gpu_timer_passes,
-    const std::vector<std::pair<std::string, bool>>& program_health,
-    const std::vector<std::string>& gl_errors) {
+void WriteRenderHealthAnalysis(const fs::path& path,
+                               bool passed,
+                               bool health_api_present,
+                               bool pass_metadata_present,
+                               bool resource_registry_present,
+                               bool terrain_materials_present,
+                               bool gpu_timer_api_present,
+                               bool gpu_timers_supported,
+                               const std::vector<std::pair<std::string, double>>& gpu_timer_passes,
+                               const std::vector<std::pair<std::string, bool>>& program_health,
+                               const std::vector<std::string>& gl_errors) {
     std::ofstream output(path);
     ASSERT_TRUE(output) << path.string();
     output << "{\n";
@@ -580,19 +590,22 @@ void WriteRenderHealthAnalysis(
     output << "    \"runtime_validity_requires_compile_and_link_success\": true,\n";
     output << "    \"programs\": [\n";
     for (std::size_t i = 0; i < program_health.size(); ++i) {
-        output << "      {\"name\": \"" << program_health[i].first << "\", \"ok\": " << (program_health[i].second ? "true" : "false") << "}";
+        output << "      {\"name\": \"" << program_health[i].first
+               << "\", \"ok\": " << (program_health[i].second ? "true" : "false") << "}";
         output << (i + 1u == program_health.size() ? "\n" : ",\n");
     }
     output << "    ]\n";
     output << "  },\n";
     output << "  \"render_pass_metadata\": {\n";
     output << "    \"present\": " << (pass_metadata_present ? "true" : "false") << ",\n";
-    output << "    \"required_passes\": [\"shadow\", \"gbuffer\", \"ssao\", \"ssao_blur\", \"lighting\", \"water\", \"skybox\", \"particles\", \"final_blit\"]\n";
+    output << "    \"required_passes\": [\"shadow\", \"gbuffer\", \"ssao\", \"ssao_blur\", "
+              "\"lighting\", \"water\", \"skybox\", \"particles\", \"final_blit\"]\n";
     output << "  },\n";
     output << "  \"resource_registry\": {\n";
     output << "    \"present\": " << (resource_registry_present ? "true" : "false") << ",\n";
     output << "    \"debug_labels\": true,\n";
-    output << "    \"resource_types\": [\"framebuffer\", \"texture\", \"renderbuffer\", \"buffer\", \"vertex_array\", \"shader_program\"],\n";
+    output << "    \"resource_types\": [\"framebuffer\", \"texture\", \"renderbuffer\", "
+              "\"buffer\", \"vertex_array\", \"shader_program\"],\n";
     output << "    \"shutdown_requires_empty_registry\": true,\n";
     output << "    \"empty_after_shutdown\": true\n";
     output << "  },\n";
@@ -606,11 +619,13 @@ void WriteRenderHealthAnalysis(
     output << "    \"supported\": " << (gpu_timers_supported ? "true" : "false") << ",\n";
     output << "    \"api_present\": " << (gpu_timer_api_present ? "true" : "false") << ",\n";
     output << "    \"stats_api\": \"RenderPassFrameStats.gpu_timers_supported\",\n";
-    output << "    \"query_mechanism\": \"glQueryCounter(GL_TIMESTAMP) ring, non-blocking GL_QUERY_RESULT_AVAILABLE polls\",\n";
+    output << "    \"query_mechanism\": \"glQueryCounter(GL_TIMESTAMP) ring, non-blocking "
+              "GL_QUERY_RESULT_AVAILABLE polls\",\n";
     output << "    \"passes\": [\n";
     output << std::fixed << std::setprecision(6);
     for (std::size_t i = 0; i < gpu_timer_passes.size(); ++i) {
-        output << "      {\"name\": \"" << gpu_timer_passes[i].first << "\", \"gpu_ms\": " << gpu_timer_passes[i].second << "}";
+        output << "      {\"name\": \"" << gpu_timer_passes[i].first
+               << "\", \"gpu_ms\": " << gpu_timer_passes[i].second << "}";
         output << (i + 1u == gpu_timer_passes.size() ? "\n" : ",\n");
     }
     output << "    ]\n";
@@ -618,21 +633,21 @@ void WriteRenderHealthAnalysis(
     output << "}\n";
 }
 
-void WriteGpuSdfCallbackSafetyArtifact(
-    const fs::path& path,
-    bool passed,
-    bool callback_api_present,
-    bool integration_disabled_by_default,
-    bool setup_clears_callback_when_disabled,
-    bool raw_this_capture_present,
-    bool raw_this_callback_gated,
-    bool gpu_readback_is_synchronous,
-    bool gl_context_required) {
+void WriteGpuSdfCallbackSafetyArtifact(const fs::path& path,
+                                       bool passed,
+                                       bool callback_api_present,
+                                       bool integration_disabled_by_default,
+                                       bool setup_clears_callback_when_disabled,
+                                       bool raw_this_capture_present,
+                                       bool raw_this_callback_gated,
+                                       bool gpu_readback_is_synchronous,
+                                       bool gl_context_required) {
     std::ofstream output(path);
     ASSERT_TRUE(output) << path.string();
     output << "{\n";
     output << "  \"schema\": \"luminumbra.render.gpu_sdf_callback_safety.v1\",\n";
-    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfCallbackSafetyGateEmitsAnalysisArtifact\",\n";
+    output << "  \"generated_by\": "
+              "\"RenderSmokeTest.GpuSdfCallbackSafetyGateEmitsAnalysisArtifact\",\n";
     output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
     output << "  \"callback\": {\n";
     output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
@@ -641,46 +656,60 @@ void WriteGpuSdfCallbackSafetyArtifact(
     output << "    \"generation_api\": \"generate_chunk_sdf_gpu\",\n";
     output << "    \"world_callback\": \"SetGPUSDFCallback\",\n";
     output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
-    output << "    \"callback_api_present\": " << (callback_api_present ? "true" : "false") << ",\n";
-    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true") << ",\n";
-    output << "    \"clears_callback_when_disabled\": " << (setup_clears_callback_when_disabled ? "true" : "false") << ",\n";
-    output << "    \"raw_this_capture_present\": " << (raw_this_capture_present ? "true" : "false") << ",\n";
-    output << "    \"raw_this_capture_gated\": " << (raw_this_callback_gated ? "true" : "false") << ",\n";
-    output << "    \"gpu_readback_is_synchronous\": " << (gpu_readback_is_synchronous ? "true" : "false") << ",\n";
+    output << "    \"callback_api_present\": " << (callback_api_present ? "true" : "false")
+           << ",\n";
+    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true")
+           << ",\n";
+    output << "    \"clears_callback_when_disabled\": "
+           << (setup_clears_callback_when_disabled ? "true" : "false") << ",\n";
+    output << "    \"raw_this_capture_present\": " << (raw_this_capture_present ? "true" : "false")
+           << ",\n";
+    output << "    \"raw_this_capture_gated\": " << (raw_this_callback_gated ? "true" : "false")
+           << ",\n";
+    output << "    \"gpu_readback_is_synchronous\": "
+           << (gpu_readback_is_synchronous ? "true" : "false") << ",\n";
     output << "    \"gl_context_required\": " << (gl_context_required ? "true" : "false") << ",\n";
     output << "    \"safe_until_explicit_opt_in\": " << (passed ? "true" : "false") << "\n";
     output << "  },\n";
     output << "  \"checks\": [\n";
-    output << "    {\"name\": \"gpu sdf callback API is present\", \"passed\": " << (callback_api_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf integration is disabled by default\", \"passed\": " << (integration_disabled_by_default ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"disabled setup clears any world callback\", \"passed\": " << (setup_clears_callback_when_disabled ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"raw pipeline capture is gated behind explicit opt-in\", \"passed\": " << (raw_this_callback_gated ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu readback stays synchronous while callback path is disabled\", \"passed\": " << (gpu_readback_is_synchronous ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"callback path requires render GL context ownership\", \"passed\": " << (gl_context_required ? "true" : "false") << "}\n";
+    output << "    {\"name\": \"gpu sdf callback API is present\", \"passed\": "
+           << (callback_api_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf integration is disabled by default\", \"passed\": "
+           << (integration_disabled_by_default ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"disabled setup clears any world callback\", \"passed\": "
+           << (setup_clears_callback_when_disabled ? "true" : "false") << "},\n";
+    output
+        << "    {\"name\": \"raw pipeline capture is gated behind explicit opt-in\", \"passed\": "
+        << (raw_this_callback_gated ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu readback stays synchronous while callback path is disabled\", "
+              "\"passed\": "
+           << (gpu_readback_is_synchronous ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"callback path requires render GL context ownership\", \"passed\": "
+           << (gl_context_required ? "true" : "false") << "}\n";
     output << "  ]\n";
     output << "}\n";
 }
 
-void WriteGpuSdfComputeParityArtifact(
-    const fs::path& path,
-    bool passed,
-    bool compute_api_present,
-    bool output_grid_contract_present,
-    bool dispatch_covers_grid,
-    bool deterministic_readback,
-    bool cpu_worldgen_authoritative_until_parity,
-    bool integration_disabled_by_default,
-    bool thresholds_explicit,
-    bool fixtures_cover_required_space,
-    double max_abs_error_threshold,
-    double mean_abs_error_threshold,
-    const std::vector<GpuSdfParityFixture>& fixtures) {
+void WriteGpuSdfComputeParityArtifact(const fs::path& path,
+                                      bool passed,
+                                      bool compute_api_present,
+                                      bool output_grid_contract_present,
+                                      bool dispatch_covers_grid,
+                                      bool deterministic_readback,
+                                      bool cpu_worldgen_authoritative_until_parity,
+                                      bool integration_disabled_by_default,
+                                      bool thresholds_explicit,
+                                      bool fixtures_cover_required_space,
+                                      double max_abs_error_threshold,
+                                      double mean_abs_error_threshold,
+                                      const std::vector<GpuSdfParityFixture>& fixtures) {
     std::ofstream output(path);
     ASSERT_TRUE(output) << path.string();
     output << std::fixed << std::setprecision(6);
     output << "{\n";
     output << "  \"schema\": \"luminumbra.render.gpu_sdf_compute_parity.v1\",\n";
-    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfComputeParityGateEmitsAnalysisArtifact\",\n";
+    output << "  \"generated_by\": "
+              "\"RenderSmokeTest.GpuSdfComputeParityGateEmitsAnalysisArtifact\",\n";
     output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
     output << "  \"parity\": {\n";
     output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
@@ -690,7 +719,8 @@ void WriteGpuSdfComputeParityArtifact(
     output << "    \"cpu_reference\": \"authoritative CPU worldgen path\",\n";
     output << "    \"compute_shader\": \"res/shaders/sdf_generation.compute\",\n";
     output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
-    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true") << ",\n";
+    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true")
+           << ",\n";
     output << "    \"sample_grid\": \"17x17x17\",\n";
     output << "    \"sample_count\": 4913,\n";
     output << "    \"dispatch_groups\": \"3x3x3\",\n";
@@ -700,14 +730,17 @@ void WriteGpuSdfComputeParityArtifact(
     output << "    \"mean_abs_error_threshold\": " << mean_abs_error_threshold << ",\n";
     output << "    \"fixture_count\": " << fixtures.size() << ",\n";
     output << "    \"gpu_callback_requires_passing_parity\": true,\n";
-    output << "    \"gpu_path_blocked_until_parity_passes\": " << (integration_disabled_by_default ? "true" : "false") << ",\n";
-    output << "    \"authoritative_cpu_path_retained\": " << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << ",\n";
+    output << "    \"gpu_path_blocked_until_parity_passes\": "
+           << (integration_disabled_by_default ? "true" : "false") << ",\n";
+    output << "    \"authoritative_cpu_path_retained\": "
+           << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << ",\n";
     output << "    \"fixtures\": [\n";
     for (std::size_t i = 0; i < fixtures.size(); ++i) {
         const GpuSdfParityFixture& fixture = fixtures[i];
         output << "      {\"name\": ";
         WriteJsonString(output, fixture.name);
-        output << ", \"chunk_coords\": [" << fixture.chunk_coords[0] << ", " << fixture.chunk_coords[1] << ", " << fixture.chunk_coords[2] << "]";
+        output << ", \"chunk_coords\": [" << fixture.chunk_coords[0] << ", "
+               << fixture.chunk_coords[1] << ", " << fixture.chunk_coords[2] << "]";
         output << ", \"seed\": " << fixture.seed << ", \"terrain_profile\": ";
         WriteJsonString(output, fixture.terrain_profile);
         output << "}";
@@ -716,14 +749,26 @@ void WriteGpuSdfComputeParityArtifact(
     output << "    ]\n";
     output << "  },\n";
     output << "  \"checks\": [\n";
-    output << "    {\"name\": \"gpu sdf compute API is present\", \"passed\": " << (compute_api_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf output grid matches chunk-plus-padding contract\", \"passed\": " << (output_grid_contract_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf dispatch covers every output sample\", \"passed\": " << (dispatch_covers_grid ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf readback produces deterministic sample buffer\", \"passed\": " << (deterministic_readback ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"cpu worldgen remains authoritative until parity passes\", \"passed\": " << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf integration remains disabled by default\", \"passed\": " << (integration_disabled_by_default ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"parity thresholds are explicit\", \"passed\": " << (thresholds_explicit ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"parity fixtures cover origin positive and negative chunks\", \"passed\": " << (fixtures_cover_required_space ? "true" : "false") << "}\n";
+    output << "    {\"name\": \"gpu sdf compute API is present\", \"passed\": "
+           << (compute_api_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf output grid matches chunk-plus-padding contract\", "
+              "\"passed\": "
+           << (output_grid_contract_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf dispatch covers every output sample\", \"passed\": "
+           << (dispatch_covers_grid ? "true" : "false") << "},\n";
+    output
+        << "    {\"name\": \"gpu sdf readback produces deterministic sample buffer\", \"passed\": "
+        << (deterministic_readback ? "true" : "false") << "},\n";
+    output
+        << "    {\"name\": \"cpu worldgen remains authoritative until parity passes\", \"passed\": "
+        << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf integration remains disabled by default\", \"passed\": "
+           << (integration_disabled_by_default ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"parity thresholds are explicit\", \"passed\": "
+           << (thresholds_explicit ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"parity fixtures cover origin positive and negative chunks\", "
+              "\"passed\": "
+           << (fixtures_cover_required_space ? "true" : "false") << "}\n";
     output << "  ]\n";
     output << "}\n";
 }
@@ -744,13 +789,18 @@ std::string Hex64(std::uint64_t value) {
 }
 
 std::vector<unsigned char> BuildGpuSdfRuntimeParityPixels(int width, int height) {
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) *
+                                      static_cast<std::size_t>(height) * 3u);
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            const std::size_t offset = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 3u;
+            const std::size_t offset =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                 static_cast<std::size_t>(x)) *
+                3u;
             const unsigned char terrain = static_cast<unsigned char>((x * 13 + y * 7) & 0xff);
             const unsigned char cave = static_cast<unsigned char>((x * x + y * 11) & 0xff);
-            const unsigned char mask = static_cast<unsigned char>((255 - ((x * 5 + y * 17) & 0xff)) & 0xff);
+            const unsigned char mask =
+                static_cast<unsigned char>((255 - ((x * 5 + y * 17) & 0xff)) & 0xff);
             pixels[offset + 0u] = terrain;
             pixels[offset + 1u] = cave;
             pixels[offset + 2u] = mask;
@@ -759,34 +809,38 @@ std::vector<unsigned char> BuildGpuSdfRuntimeParityPixels(int width, int height)
     return pixels;
 }
 
-void WriteBinaryPpm(const fs::path& path, int width, int height, const std::vector<unsigned char>& pixels) {
+void WriteBinaryPpm(const fs::path& path,
+                    int width,
+                    int height,
+                    const std::vector<unsigned char>& pixels) {
     std::ofstream output(path, std::ios::binary);
     ASSERT_TRUE(output) << path.string();
     output << "P6\n" << width << ' ' << height << "\n255\n";
-    output.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+    output.write(reinterpret_cast<const char*>(pixels.data()),
+                 static_cast<std::streamsize>(pixels.size()));
 }
 
-void WriteGpuSdfRuntimeToggleArtifact(
-    const fs::path& path,
-    bool passed,
-    bool runtime_setter_present,
-    bool runtime_state_present,
-    bool runtime_flag_present,
-    bool main_wires_runtime_flag,
-    bool setup_invoked_for_world,
-    bool compile_time_gate_disabled,
-    bool runtime_gate_blocks_callback,
-    bool callback_state_tracked,
-    const std::string& cpu_checksum,
-    const std::string& gpu_checksum,
-    std::uint64_t max_pixel_delta,
-    double mean_pixel_delta) {
+void WriteGpuSdfRuntimeToggleArtifact(const fs::path& path,
+                                      bool passed,
+                                      bool runtime_setter_present,
+                                      bool runtime_state_present,
+                                      bool runtime_flag_present,
+                                      bool main_wires_runtime_flag,
+                                      bool setup_invoked_for_world,
+                                      bool compile_time_gate_disabled,
+                                      bool runtime_gate_blocks_callback,
+                                      bool callback_state_tracked,
+                                      const std::string& cpu_checksum,
+                                      const std::string& gpu_checksum,
+                                      std::uint64_t max_pixel_delta,
+                                      double mean_pixel_delta) {
     std::ofstream output(path);
     ASSERT_TRUE(output) << path.string();
     output << std::fixed << std::setprecision(6);
     output << "{\n";
     output << "  \"schema\": \"luminumbra.render.gpu_sdf_runtime_toggle.v1\",\n";
-    output << "  \"generated_by\": \"RenderSmokeTest.GpuSdfRuntimeToggleGateEmitsAnalysisArtifact\",\n";
+    output << "  \"generated_by\": "
+              "\"RenderSmokeTest.GpuSdfRuntimeToggleGateEmitsAnalysisArtifact\",\n";
     output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
     output << "  \"runtime_toggle\": {\n";
     output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
@@ -805,13 +859,20 @@ void WriteGpuSdfRuntimeToggleArtifact(
     output << "    \"runtime_allowed_requires_explicit_flag\": true,\n";
     output << "    \"callback_registered_by_default\": false,\n";
     output << "    \"cpu_fallback_active_by_default\": true,\n";
-    output << "    \"runtime_setter_present\": " << (runtime_setter_present ? "true" : "false") << ",\n";
-    output << "    \"runtime_state_present\": " << (runtime_state_present ? "true" : "false") << ",\n";
-    output << "    \"runtime_flag_present\": " << (runtime_flag_present ? "true" : "false") << ",\n";
-    output << "    \"main_wires_runtime_flag\": " << (main_wires_runtime_flag ? "true" : "false") << ",\n";
-    output << "    \"setup_invoked_for_world\": " << (setup_invoked_for_world ? "true" : "false") << ",\n";
-    output << "    \"runtime_gate_blocks_callback\": " << (runtime_gate_blocks_callback ? "true" : "false") << ",\n";
-    output << "    \"callback_state_tracked\": " << (callback_state_tracked ? "true" : "false") << "\n";
+    output << "    \"runtime_setter_present\": " << (runtime_setter_present ? "true" : "false")
+           << ",\n";
+    output << "    \"runtime_state_present\": " << (runtime_state_present ? "true" : "false")
+           << ",\n";
+    output << "    \"runtime_flag_present\": " << (runtime_flag_present ? "true" : "false")
+           << ",\n";
+    output << "    \"main_wires_runtime_flag\": " << (main_wires_runtime_flag ? "true" : "false")
+           << ",\n";
+    output << "    \"setup_invoked_for_world\": " << (setup_invoked_for_world ? "true" : "false")
+           << ",\n";
+    output << "    \"runtime_gate_blocks_callback\": "
+           << (runtime_gate_blocks_callback ? "true" : "false") << ",\n";
+    output << "    \"callback_state_tracked\": " << (callback_state_tracked ? "true" : "false")
+           << "\n";
     output << "  },\n";
     output << "  \"parity\": {\n";
     output << "    \"cpu_reference\": \"gpu-sdf-cpu.ppm\",\n";
@@ -828,37 +889,72 @@ void WriteGpuSdfRuntimeToggleArtifact(
     output << "    \"mean_pixel_delta\": " << mean_pixel_delta << ",\n";
     output << "    \"max_pixel_delta_threshold\": 0,\n";
     output << "    \"mean_pixel_delta_threshold\": 0.000000,\n";
-    output << "    \"images_match\": " << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0 ? "true" : "false") << "\n";
+    output << "    \"images_match\": "
+           << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0
+                   ? "true"
+                   : "false")
+           << "\n";
     output << "  },\n";
     output << "  \"checks\": [\n";
-    output << "    {\"name\": \"gpu sdf runtime setter API is present\", \"passed\": " << (runtime_setter_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf runtime state API is present\", \"passed\": " << (runtime_state_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf runtime opt-in flag is parsed\", \"passed\": " << (runtime_flag_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"client wires opt-in flag into render pipeline\", \"passed\": " << (main_wires_runtime_flag ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"world creation invokes gpu sdf callback setup\", \"passed\": " << (setup_invoked_for_world ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"compile-time parity gate remains closed by default\", \"passed\": " << (compile_time_gate_disabled ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"runtime gate blocks callback unless explicitly allowed\", \"passed\": " << (runtime_gate_blocks_callback ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"runtime callback state is tracked\", \"passed\": " << (callback_state_tracked ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"cpu and gpu runtime parity artifacts match\", \"passed\": " << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0 ? "true" : "false") << "}\n";
+    output << "    {\"name\": \"gpu sdf runtime setter API is present\", \"passed\": "
+           << (runtime_setter_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf runtime state API is present\", \"passed\": "
+           << (runtime_state_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"gpu sdf runtime opt-in flag is parsed\", \"passed\": "
+           << (runtime_flag_present ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"client wires opt-in flag into render pipeline\", \"passed\": "
+           << (main_wires_runtime_flag ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"world creation invokes gpu sdf callback setup\", \"passed\": "
+           << (setup_invoked_for_world ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"compile-time parity gate remains closed by default\", \"passed\": "
+           << (compile_time_gate_disabled ? "true" : "false") << "},\n";
+    output
+        << "    {\"name\": \"runtime gate blocks callback unless explicitly allowed\", \"passed\": "
+        << (runtime_gate_blocks_callback ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"runtime callback state is tracked\", \"passed\": "
+           << (callback_state_tracked ? "true" : "false") << "},\n";
+    output << "    {\"name\": \"cpu and gpu runtime parity artifacts match\", \"passed\": "
+           << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0
+                   ? "true"
+                   : "false")
+           << "}\n";
     output << "  ]\n";
     output << "}\n";
 }
 
 void SetMat4Identity(GLuint program, const char* name) {
     const GLfloat identity[16] = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f,
-        0.0f, 0.0f, 0.0f, 1.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     };
     glUniformMatrix4fv(glGetUniformLocation(program, name), 1, GL_FALSE, identity);
 }
 
 void SetMat3Identity(GLuint program, const char* name) {
     const GLfloat identity[9] = {
-        1.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f,
-        0.0f, 0.0f, 1.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     };
     glUniformMatrix3fv(glGetUniformLocation(program, name), 1, GL_FALSE, identity);
 }
@@ -878,18 +974,37 @@ struct GateLtexImage {
 
 bool LoadGateLtex(const fs::path& path, GateLtexImage& out) {
     std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    auto read_pod = [&](auto& v) { in.read(reinterpret_cast<char*>(&v), sizeof(v)); return static_cast<bool>(in); };
-    uint32_t magic = 0; uint16_t version = 0; uint16_t mip_count = 0;
-    uint32_t width = 0; uint32_t height = 0; uint8_t channels = 0;
-    if (!read_pod(magic) || !read_pod(version) || !read_pod(mip_count) ||
-        !read_pod(width) || !read_pod(height) || !read_pod(channels)) return false;
-    if (magic != 0x5845544Cu || version != 1u || width == 0 || height == 0 ||
-        channels == 0 || channels > 4 || mip_count == 0) return false;
+    if (!in)
+        return false;
+    auto read_pod = [&](auto& v) {
+        in.read(reinterpret_cast<char*>(&v), sizeof(v));
+        return static_cast<bool>(in);
+    };
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    uint16_t mip_count = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint8_t channels = 0;
+    if (!read_pod(magic) || !read_pod(version) || !read_pod(mip_count) || !read_pod(width) ||
+        !read_pod(height) || !read_pod(channels))
+        return false;
+    if (magic != 0x5845544Cu || version != 1u || width == 0 || height == 0 || channels == 0 ||
+        channels > 4 || mip_count == 0)
+        return false;
     size_t total = 0;
-    { uint32_t w = width, h = height;
-      for (uint16_t l = 0; l < mip_count; ++l) { total += static_cast<size_t>(w) * h * channels; w = std::max(1u, w/2u); h = std::max(1u, h/2u); } }
-    out.width = width; out.height = height; out.channels = channels; out.mip_count = mip_count;
+    {
+        uint32_t w = width, h = height;
+        for (uint16_t l = 0; l < mip_count; ++l) {
+            total += static_cast<size_t>(w) * h * channels;
+            w = std::max(1u, w / 2u);
+            h = std::max(1u, h / 2u);
+        }
+    }
+    out.width = width;
+    out.height = height;
+    out.channels = channels;
+    out.mip_count = mip_count;
     out.bytes.resize(total);
     in.read(reinterpret_cast<char*>(out.bytes.data()), static_cast<std::streamsize>(total));
     return static_cast<bool>(in);
@@ -907,22 +1022,36 @@ GLuint UploadGateTextureArray(const std::vector<fs::path>& plates, bool internal
     // Immutable storage allocates EVERY mip level up front (glTexImage3D only
     // allocates level 0, so uploading the pre-built mip chain to it leaves
     // levels 1+ undefined -> black under mipmap filtering).
-    glTexStorage3D(GL_TEXTURE_2D_ARRAY, kMipLevels,
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY,
+                   kMipLevels,
                    internal_srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8,
-                   kRes, kRes, static_cast<GLsizei>(plates.size()));
+                   kRes,
+                   kRes,
+                   static_cast<GLsizei>(plates.size()));
     for (size_t i = 0; i < plates.size(); ++i) {
         GateLtexImage img;
-        if (!LoadGateLtex(plates[i], img) || img.width != kRes || img.height != kRes || img.channels != 4u) {
+        if (!LoadGateLtex(plates[i], img) || img.width != kRes || img.height != kRes ||
+            img.channels != 4u) {
             glDeleteTextures(1, &tex);
             return 0;
         }
-        size_t offset = 0; uint32_t w = img.width, h = img.height;
+        size_t offset = 0;
+        uint32_t w = img.width, h = img.height;
         for (uint16_t l = 0; l < img.mip_count && l < kMipLevels; ++l) {
-            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, l, 0, 0, static_cast<GLint>(i),
-                            static_cast<GLsizei>(w), static_cast<GLsizei>(h), 1,
-                            GL_RGBA, GL_UNSIGNED_BYTE, img.bytes.data() + offset);
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
+                            l,
+                            0,
+                            0,
+                            static_cast<GLint>(i),
+                            static_cast<GLsizei>(w),
+                            static_cast<GLsizei>(h),
+                            1,
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            img.bytes.data() + offset);
             offset += static_cast<size_t>(w) * h * img.channels;
-            w = std::max(1u, w/2u); h = std::max(1u, h/2u);
+            w = std::max(1u, w / 2u);
+            h = std::max(1u, h / 2u);
         }
     }
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
@@ -942,10 +1071,12 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
     if (z < 0.0f) {
         float ox = (1.0f - std::fabs(y)) * (x >= 0.0f ? 1.0f : -1.0f);
         float oy = (1.0f - std::fabs(x)) * (y >= 0.0f ? 1.0f : -1.0f);
-        x = ox; y = oy;
+        x = ox;
+        y = oy;
     }
     float len = std::sqrt(x * x + y * y + z * z);
-    if (len < 1e-6f) len = 1.0f;
+    if (len < 1e-6f)
+        len = 1.0f;
     return {x / len, y / len, z / len};
 }
 
@@ -963,7 +1094,9 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
 //   sun.color = (1.0, 0.95, 0.85), sky ambient = (0.1, 0.15, 0.2), ao = 1.
 // The sun is placed overhead-ish toward the +Z plate (NdotL ~ 0.85) so the
 // representative diffuse term dominates without a specular singularity.
-struct LitNoonResult { float r = 0, g = 0, b = 0; };
+struct LitNoonResult {
+    float r = 0, g = 0, b = 0;
+};
 // AETHER-11 (spec 024 FR-024-6) additions, both defaulted so every existing
 // caller renders byte-identically: emissive_intensity_norm > 0 authors that
 // normalized emissive value into the LUT's row 2 for the plate's material
@@ -993,7 +1126,9 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glDrawBuffer(GL_COLOR_ATTACHMENT0);
 
     auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
-        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
         glTexImage2D(GL_TEXTURE_2D, 0, ifmt, 1, 1, 0, fmt, type, data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -1011,8 +1146,10 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
         int q = static_cast<int>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
         return static_cast<unsigned char>(std::clamp(q, 0, 255));
     };
-    const unsigned char albedo_px[4] = {to_u8(albedo_linear[0]), to_u8(albedo_linear[1]),
-                                        to_u8(albedo_linear[2]), to_u8(roughness)};
+    const unsigned char albedo_px[4] = {to_u8(albedo_linear[0]),
+                                        to_u8(albedo_linear[1]),
+                                        to_u8(albedo_linear[2]),
+                                        to_u8(roughness)};
     GLuint g_albedo = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, albedo_px);
     const float metallic_px[2] = {0.0f, 1.0f};
     GLuint g_metallic = make_tex(GL_RG16F, GL_RG, GL_FLOAT, metallic_px);
@@ -1022,20 +1159,23 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
 
     auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
-        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, t);
         glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, ifmt, 1, 1, 1, 0, fmt, type, data);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         return t;
     };
     const float shadow_px[1] = {1.0f};
-    GLuint shadow_arr = make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
+    GLuint shadow_arr =
+        make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
     const unsigned char terrain_px[4] = {0, 0, 0, 255};
     GLuint terrain_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, terrain_px);
 
     const float quad[] = {
-        -1, -1, 0, 0, 0,   1, -1, 0, 1, 0,   1, 1, 0, 1, 1,
-        -1, -1, 0, 0, 0,   1,  1, 0, 1, 1,  -1, 1, 0, 0, 1,
+        -1, -1, 0, 0, 0, 1, -1, 0, 1, 0, 1,  1, 0, 1, 1,
+        -1, -1, 0, 0, 0, 1, 1,  0, 1, 1, -1, 1, 0, 0, 1,
     };
     GLuint vao = 0, vbo = 0;
     glGenVertexArrays(1, &vao);
@@ -1046,30 +1186,51 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(0));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
 
     glViewport(0, 0, kRes, kRes);
     glDisable(GL_DEPTH_TEST);
     glUseProgram(lighting_program);
 
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, g_pos);      glUniform1i(glGetUniformLocation(lighting_program, "gPosition"), 0);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, g_norm);     glUniform1i(glGetUniformLocation(lighting_program, "gNormalMaterial"), 1);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, g_albedo);   glUniform1i(glGetUniformLocation(lighting_program, "gAlbedoRoughness"), 2);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, g_metallic); glUniform1i(glGetUniformLocation(lighting_program, "gMetallicAO"), 3);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ssao_tex);   glUniform1i(glGetUniformLocation(lighting_program, "u_ssao"), 4);
-    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_shadowCascades"), 5);
-    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_terrainTextures"), 6);
-    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(lighting_program, "u_causticsTexture"), 7);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_pos);
+    glUniform1i(glGetUniformLocation(lighting_program, "gPosition"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, g_norm);
+    glUniform1i(glGetUniformLocation(lighting_program, "gNormalMaterial"), 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_albedo);
+    glUniform1i(glGetUniformLocation(lighting_program, "gAlbedoRoughness"), 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, g_metallic);
+    glUniform1i(glGetUniformLocation(lighting_program, "gMetallicAO"), 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, ssao_tex);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_ssao"), 4);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_shadowCascades"), 5);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_terrainTextures"), 6);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, caustics_tex);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_causticsTexture"), 7);
     // Spec 015 C-1 (RENDER-15): the tint cascade sampler needs its OWN unit even
     // when disabled — a sampler2DArray left on unit 0 (a 2D texture) is a sampler
     // type collision that invalidates the whole draw. White 1x1x1 + enabled=0.
     const unsigned char tint_white_px[4] = {255, 255, 255, 255};
     GLuint tint_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, tint_white_px);
-    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D_ARRAY, tint_arr); glUniform1i(glGetUniformLocation(lighting_program, "u_shadowTintCascades"), 9);
+    glActiveTexture(GL_TEXTURE9);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tint_arr);
+    glUniform1i(glGetUniformLocation(lighting_program, "u_shadowTintCascades"), 9);
     glUniform1i(glGetUniformLocation(lighting_program, "u_shadowTintEnabled"), 0);
 
     SetMat4Identity(lighting_program, "u_inverseView");
-    for (int i = 0; i < 4; ++i) SetMat4Identity(lighting_program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    for (int i = 0; i < 4; ++i)
+        SetMat4Identity(lighting_program,
+                        ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
     glUniform4f(glGetUniformLocation(lighting_program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
     glUniform1f(glGetUniformLocation(lighting_program, "u_time"), 0.0f);
     glUniform1f(glGetUniformLocation(lighting_program, "u_sea_level"), -1000.0f);
@@ -1130,14 +1291,20 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     const GLfloat clear0[4] = {0, 0, 0, 1};
     glClearBufferfv(GL_COLOR, 0, clear0);
     glDrawArrays(GL_TRIANGLES, 0, 6);
-    if (aether_tex != 0) { glDeleteTextures(1, &aether_tex); }
+    if (aether_tex != 0) {
+        glDeleteTextures(1, &aether_tex);
+    }
 
     std::vector<unsigned char> px(static_cast<size_t>(kRes) * kRes * 4);
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, kRes, kRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     double sr = 0, sg = 0, sb = 0;
     const size_t n = static_cast<size_t>(kRes) * kRes;
-    for (size_t p = 0; p < n; ++p) { sr += px[p*4+0]; sg += px[p*4+1]; sb += px[p*4+2]; }
+    for (size_t p = 0; p < n; ++p) {
+        sr += px[p * 4 + 0];
+        sg += px[p * 4 + 1];
+        sb += px[p * 4 + 2];
+    }
     LitNoonResult res;
     res.r = static_cast<float>(sr / n / 255.0);
     res.g = static_cast<float>(sg / n / 255.0);
@@ -1219,10 +1386,9 @@ TEST(RenderSmokeTest, AllShaderSourcesCompile) {
     }
 
     fs::create_directories(RenderHealthArtifactRoot());
-    WriteShaderInventoryArtifact(
-        RenderHealthArtifactRoot() / "shader-inventory.json",
-        source_inventory,
-        PipelineProgramSpecs());
+    WriteShaderInventoryArtifact(RenderHealthArtifactRoot() / "shader-inventory.json",
+                                 source_inventory,
+                                 PipelineProgramSpecs());
 
     EXPECT_GT(compiled_count, 0);
 }
@@ -1244,18 +1410,14 @@ TEST(RenderSmokeTest, PipelineShaderProgramsLink) {
     }
 
     const std::vector<std::string> gl_errors = DrainGlErrors();
-    const bool all_programs_ok = std::all_of(
-        program_health.begin(),
-        program_health.end(),
-        [](const std::pair<std::string, bool>& entry) {
-            return entry.second;
-        });
+    const bool all_programs_ok =
+        std::all_of(program_health.begin(),
+                    program_health.end(),
+                    [](const std::pair<std::string, bool>& entry) { return entry.second; });
 
     fs::create_directories(RenderHealthArtifactRoot());
     WriteShaderSuiteHealthArtifact(
-        RenderHealthArtifactRoot() / "shader-suite-health.json",
-        program_health,
-        gl_errors);
+        RenderHealthArtifactRoot() / "shader-suite-health.json", program_health, gl_errors);
 
     EXPECT_TRUE(all_programs_ok);
     EXPECT_TRUE(gl_errors.empty());
@@ -1267,8 +1429,10 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
         GTEST_SKIP() << context.error();
     }
 
-    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -1309,33 +1473,26 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     const GpuTimerProbeResult gpu_timer_probe = MeasureGpuTimerProbe(context.ready());
 
     const std::vector<std::string> gl_errors = DrainGlErrors();
-    const bool all_programs_ok = std::all_of(
-        program_health.begin(),
-        program_health.end(),
-        [](const std::pair<std::string, bool>& entry) {
-            return entry.second;
-        });
-    const bool passed = health_api_present &&
-        pass_metadata_present &&
-        resource_registry_present &&
-        terrain_materials_present &&
-        gpu_timer_api_present &&
-        all_programs_ok &&
-        gl_errors.empty();
+    const bool all_programs_ok =
+        std::all_of(program_health.begin(),
+                    program_health.end(),
+                    [](const std::pair<std::string, bool>& entry) { return entry.second; });
+    const bool passed = health_api_present && pass_metadata_present && resource_registry_present &&
+                        terrain_materials_present && gpu_timer_api_present && all_programs_ok &&
+                        gl_errors.empty();
 
     fs::create_directories(RenderHealthArtifactRoot());
-    WriteRenderHealthAnalysis(
-        RenderHealthArtifactRoot() / "render-health-analysis.json",
-        passed,
-        health_api_present,
-        pass_metadata_present,
-        resource_registry_present,
-        terrain_materials_present,
-        gpu_timer_api_present,
-        gpu_timer_probe.supported,
-        gpu_timer_probe.passes,
-        program_health,
-        gl_errors);
+    WriteRenderHealthAnalysis(RenderHealthArtifactRoot() / "render-health-analysis.json",
+                              passed,
+                              health_api_present,
+                              pass_metadata_present,
+                              resource_registry_present,
+                              terrain_materials_present,
+                              gpu_timer_api_present,
+                              gpu_timer_probe.supported,
+                              gpu_timer_probe.passes,
+                              program_health,
+                              gl_errors);
 
     EXPECT_TRUE(health_api_present);
     EXPECT_TRUE(pass_metadata_present);
@@ -1355,8 +1512,10 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
 }
 
 TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
-    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -1370,7 +1529,8 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
     // The disabled branch must be guarded by the compile-time flag first; the
     // runtime toggle gate strengthens it with additional conditions, so match
     // the guard prefix rather than the exact original literal.
-    const std::size_t disabled_branch = setup_body.find("if (!kEnableExperimentalGpuSdfIntegration");
+    const std::size_t disabled_branch =
+        setup_body.find("if (!kEnableExperimentalGpuSdfIntegration");
     const std::size_t clear_callback = setup_body.find("world_system.SetGPUSDFCallback({})");
     const std::size_t disabled_return = setup_body.find("return;", clear_callback);
     const std::size_t raw_capture = setup_body.find("[this]");
@@ -1380,18 +1540,16 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
         header.find("generate_chunk_sdf_gpu") != std::string::npos &&
         source.find("world_system.SetGPUSDFCallback") != std::string::npos;
     const bool integration_disabled_by_default =
-        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") !=
+        std::string::npos;
     const bool setup_clears_callback_when_disabled =
-        disabled_branch != std::string::npos &&
-        clear_callback != std::string::npos &&
-        disabled_return != std::string::npos &&
-        disabled_branch < clear_callback &&
+        disabled_branch != std::string::npos && clear_callback != std::string::npos &&
+        disabled_return != std::string::npos && disabled_branch < clear_callback &&
         clear_callback < disabled_return;
     const bool raw_this_capture_present = raw_capture != std::string::npos;
-    const bool raw_this_callback_gated =
-        raw_this_capture_present &&
-        disabled_return != std::string::npos &&
-        disabled_return < raw_capture;
+    const bool raw_this_callback_gated = raw_this_capture_present &&
+                                         disabled_return != std::string::npos &&
+                                         disabled_return < raw_capture;
     // RENDER-06 (016 FR-E): the contract FLIPPED — the readback is the 017-A
     // ring + a BOUNDED zero-timeout poll with a CPU-worldgen fallback, and the
     // infinite blocking primitives are BANNED from this TU outright (the
@@ -1400,7 +1558,8 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
     // now asserts the bounded-ring shape.
     const bool gpu_readback_is_synchronous =
         source.find("m_gpu_sdf.readback_ring.submit()") != std::string::npos &&
-        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") != std::string::npos &&
+        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") !=
+            std::string::npos &&
         source.find("falling back to CPU worldgen") != std::string::npos &&
         source.find("GL_TIMEOUT_IGNORED") == std::string::npos &&
         source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") == std::string::npos;
@@ -1408,25 +1567,20 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
         source.find("glUseProgram(m_gpu_sdf.compute_program)") != std::string::npos &&
         source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
         source.find("glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)") != std::string::npos;
-    const bool passed =
-        callback_api_present &&
-        integration_disabled_by_default &&
-        setup_clears_callback_when_disabled &&
-        raw_this_callback_gated &&
-        gpu_readback_is_synchronous &&
-        gl_context_required;
+    const bool passed = callback_api_present && integration_disabled_by_default &&
+                        setup_clears_callback_when_disabled && raw_this_callback_gated &&
+                        gpu_readback_is_synchronous && gl_context_required;
 
     fs::create_directories(RenderHealthArtifactRoot());
-    WriteGpuSdfCallbackSafetyArtifact(
-        RenderHealthArtifactRoot() / "gpu-sdf-callback-safety.json",
-        passed,
-        callback_api_present,
-        integration_disabled_by_default,
-        setup_clears_callback_when_disabled,
-        raw_this_capture_present,
-        raw_this_callback_gated,
-        gpu_readback_is_synchronous,
-        gl_context_required);
+    WriteGpuSdfCallbackSafetyArtifact(RenderHealthArtifactRoot() / "gpu-sdf-callback-safety.json",
+                                      passed,
+                                      callback_api_present,
+                                      integration_disabled_by_default,
+                                      setup_clears_callback_when_disabled,
+                                      raw_this_capture_present,
+                                      raw_this_callback_gated,
+                                      gpu_readback_is_synchronous,
+                                      gl_context_required);
 
     EXPECT_TRUE(callback_api_present);
     EXPECT_TRUE(integration_disabled_by_default);
@@ -1439,9 +1593,12 @@ TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
 }
 
 TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
-    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
-    const std::string chunk_header = ReadTextFile(SourceRoot() / "src/luminumbra_common/world/Chunk.h");
+    const std::string header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string chunk_header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_common/world/Chunk.h");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
     ASSERT_FALSE(chunk_header.empty());
@@ -1463,58 +1620,49 @@ TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
     // gate's now-empty allowlist).
     const bool deterministic_readback =
         source.find("m_gpu_sdf.readback_ring.submit()") != std::string::npos &&
-        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") != std::string::npos &&
+        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") !=
+            std::string::npos &&
         source.find("std::memcpy(out_sdf.data(), mapped_data, sdf_bytes)") != std::string::npos &&
         source.find("GL_TIMEOUT_IGNORED") == std::string::npos;
     const bool cpu_worldgen_authoritative_until_parity =
         source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
-        source.find("authoritative CPU worldgen path until GPU/CPU parity is implemented") != std::string::npos;
+        source.find("authoritative CPU worldgen path until GPU/CPU parity is implemented") !=
+            std::string::npos;
     const bool integration_disabled_by_default =
-        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") !=
+        std::string::npos;
     constexpr double kMaxAbsErrorThreshold = 0.001;
     constexpr double kMeanAbsErrorThreshold = 0.0001;
     const bool thresholds_explicit =
-        kMaxAbsErrorThreshold > 0.0 &&
-        kMaxAbsErrorThreshold <= 0.001 &&
-        kMeanAbsErrorThreshold > 0.0 &&
-        kMeanAbsErrorThreshold <= 0.0001;
+        kMaxAbsErrorThreshold > 0.0 && kMaxAbsErrorThreshold <= 0.001 &&
+        kMeanAbsErrorThreshold > 0.0 && kMeanAbsErrorThreshold <= 0.0001;
     const std::vector<GpuSdfParityFixture> fixtures = {
         {"origin", {0, 0, 0}, 1337, "baseline"},
         {"positive_offset", {2, 1, 3}, 4242, "caves_enabled"},
-        {"negative_offset", {-2, 0, -3}, 9001, "island_mask"}
-    };
+        {"negative_offset", {-2, 0, -3}, 9001, "island_mask"}};
     const bool fixtures_cover_required_space =
-        fixtures.size() >= 3 &&
-        fixtures[0].chunk_coords == std::array<int, 3>{0, 0, 0} &&
-        fixtures[1].chunk_coords[0] > 0 &&
-        fixtures[1].chunk_coords[2] > 0 &&
-        fixtures[2].chunk_coords[0] < 0 &&
-        fixtures[2].chunk_coords[2] < 0;
+        fixtures.size() >= 3 && fixtures[0].chunk_coords == std::array<int, 3>{0, 0, 0} &&
+        fixtures[1].chunk_coords[0] > 0 && fixtures[1].chunk_coords[2] > 0 &&
+        fixtures[2].chunk_coords[0] < 0 && fixtures[2].chunk_coords[2] < 0;
     const bool passed =
-        compute_api_present &&
-        output_grid_contract_present &&
-        dispatch_covers_grid &&
-        deterministic_readback &&
-        cpu_worldgen_authoritative_until_parity &&
-        integration_disabled_by_default &&
-        thresholds_explicit &&
-        fixtures_cover_required_space;
+        compute_api_present && output_grid_contract_present && dispatch_covers_grid &&
+        deterministic_readback && cpu_worldgen_authoritative_until_parity &&
+        integration_disabled_by_default && thresholds_explicit && fixtures_cover_required_space;
 
     fs::create_directories(RenderHealthArtifactRoot());
-    WriteGpuSdfComputeParityArtifact(
-        RenderHealthArtifactRoot() / "gpu-sdf-compute-parity.json",
-        passed,
-        compute_api_present,
-        output_grid_contract_present,
-        dispatch_covers_grid,
-        deterministic_readback,
-        cpu_worldgen_authoritative_until_parity,
-        integration_disabled_by_default,
-        thresholds_explicit,
-        fixtures_cover_required_space,
-        kMaxAbsErrorThreshold,
-        kMeanAbsErrorThreshold,
-        fixtures);
+    WriteGpuSdfComputeParityArtifact(RenderHealthArtifactRoot() / "gpu-sdf-compute-parity.json",
+                                     passed,
+                                     compute_api_present,
+                                     output_grid_contract_present,
+                                     dispatch_covers_grid,
+                                     deterministic_readback,
+                                     cpu_worldgen_authoritative_until_parity,
+                                     integration_disabled_by_default,
+                                     thresholds_explicit,
+                                     fixtures_cover_required_space,
+                                     kMaxAbsErrorThreshold,
+                                     kMeanAbsErrorThreshold,
+                                     fixtures);
 
     EXPECT_TRUE(compute_api_present);
     EXPECT_TRUE(output_grid_contract_present);
@@ -1528,8 +1676,10 @@ TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
 }
 
 TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
-    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
+    const std::string header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
     const std::string main_client =
         ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp") +
         ReadTextFile(SourceRoot() / "src/luminumbra_client/core/RuntimeScenarioHarness.cpp");
@@ -1548,17 +1698,24 @@ TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
     const bool runtime_flag_present =
         main_client.find("--enable-gpu-sdf-runtime") != std::string::npos &&
         main_client.find("enable_gpu_sdf_runtime") != std::string::npos &&
-        main_client.find("HasCommandLineFlag(argc, argv, \"--enable-gpu-sdf-runtime\")") != std::string::npos;
+        main_client.find("HasCommandLineFlag(argc, argv, \"--enable-gpu-sdf-runtime\")") !=
+            std::string::npos;
     const bool main_wires_runtime_flag =
-        main_client.find("renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime)") != std::string::npos;
+        main_client.find(
+            "renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime)") !=
+        std::string::npos;
     const bool setup_invoked_for_world =
-        main_client.find("renderPipeline.SetupGPUSDFIntegration(*world_system)") != std::string::npos;
+        main_client.find("renderPipeline.SetupGPUSDFIntegration(*world_system)") !=
+        std::string::npos;
     const bool compile_time_gate_disabled =
-        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") != std::string::npos;
+        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") !=
+        std::string::npos;
     const bool runtime_gate_blocks_callback =
-        source.find("if (!kEnableExperimentalGpuSdfIntegration || !m_gpu_sdf.runtime_requested)") != std::string::npos &&
+        source.find("if (!kEnableExperimentalGpuSdfIntegration || !m_gpu_sdf.runtime_requested)") !=
+            std::string::npos &&
         source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
-        source.find("pass --enable-gpu-sdf-runtime only after parity gate approval") != std::string::npos;
+        source.find("pass --enable-gpu-sdf-runtime only after parity gate approval") !=
+            std::string::npos;
     const bool callback_state_tracked =
         header.find("gpu_sdf_callback_registered") != std::string::npos &&
         header.find("callback_registered") != std::string::npos &&
@@ -1567,8 +1724,10 @@ TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
 
     constexpr int kImageWidth = 17;
     constexpr int kImageHeight = 17;
-    const std::vector<unsigned char> cpu_pixels = BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
-    const std::vector<unsigned char> gpu_pixels = BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
+    const std::vector<unsigned char> cpu_pixels =
+        BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
+    const std::vector<unsigned char> gpu_pixels =
+        BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
 
     std::uint64_t max_pixel_delta = 0;
     std::uint64_t total_pixel_delta = 0;
@@ -1579,44 +1738,38 @@ TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
         max_pixel_delta = std::max(max_pixel_delta, delta);
         total_pixel_delta += delta;
     }
-    const double mean_pixel_delta =
-        cpu_pixels.empty() ? 0.0 : static_cast<double>(total_pixel_delta) / static_cast<double>(cpu_pixels.size());
+    const double mean_pixel_delta = cpu_pixels.empty() ? 0.0
+                                                       : static_cast<double>(total_pixel_delta) /
+                                                             static_cast<double>(cpu_pixels.size());
     const std::string cpu_checksum = Hex64(StableFnv1a64(cpu_pixels));
     const std::string gpu_checksum = Hex64(StableFnv1a64(gpu_pixels));
     const bool parity_artifacts_match =
-        cpu_checksum == gpu_checksum &&
-        max_pixel_delta == 0u &&
-        mean_pixel_delta == 0.0;
+        cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0;
 
-    const bool passed =
-        runtime_setter_present &&
-        runtime_state_present &&
-        runtime_flag_present &&
-        main_wires_runtime_flag &&
-        setup_invoked_for_world &&
-        compile_time_gate_disabled &&
-        runtime_gate_blocks_callback &&
-        callback_state_tracked &&
-        parity_artifacts_match;
+    const bool passed = runtime_setter_present && runtime_state_present && runtime_flag_present &&
+                        main_wires_runtime_flag && setup_invoked_for_world &&
+                        compile_time_gate_disabled && runtime_gate_blocks_callback &&
+                        callback_state_tracked && parity_artifacts_match;
 
     fs::create_directories(RenderHealthArtifactRoot());
-    WriteBinaryPpm(RenderHealthArtifactRoot() / "gpu-sdf-cpu.ppm", kImageWidth, kImageHeight, cpu_pixels);
-    WriteBinaryPpm(RenderHealthArtifactRoot() / "gpu-sdf-gpu.ppm", kImageWidth, kImageHeight, gpu_pixels);
-    WriteGpuSdfRuntimeToggleArtifact(
-        RenderHealthArtifactRoot() / "gpu-sdf-runtime-parity.json",
-        passed,
-        runtime_setter_present,
-        runtime_state_present,
-        runtime_flag_present,
-        main_wires_runtime_flag,
-        setup_invoked_for_world,
-        compile_time_gate_disabled,
-        runtime_gate_blocks_callback,
-        callback_state_tracked,
-        cpu_checksum,
-        gpu_checksum,
-        max_pixel_delta,
-        mean_pixel_delta);
+    WriteBinaryPpm(
+        RenderHealthArtifactRoot() / "gpu-sdf-cpu.ppm", kImageWidth, kImageHeight, cpu_pixels);
+    WriteBinaryPpm(
+        RenderHealthArtifactRoot() / "gpu-sdf-gpu.ppm", kImageWidth, kImageHeight, gpu_pixels);
+    WriteGpuSdfRuntimeToggleArtifact(RenderHealthArtifactRoot() / "gpu-sdf-runtime-parity.json",
+                                     passed,
+                                     runtime_setter_present,
+                                     runtime_state_present,
+                                     runtime_flag_present,
+                                     main_wires_runtime_flag,
+                                     setup_invoked_for_world,
+                                     compile_time_gate_disabled,
+                                     runtime_gate_blocks_callback,
+                                     callback_state_tracked,
+                                     cpu_checksum,
+                                     gpu_checksum,
+                                     max_pixel_delta,
+                                     mean_pixel_delta);
 
     EXPECT_TRUE(runtime_setter_present);
     EXPECT_TRUE(runtime_state_present);
@@ -1656,7 +1809,8 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, 64, 64, 0, GL_RGB, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, position_texture, 0);
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, position_texture, 0);
 
     glGenTextures(1, &normal_texture);
     glBindTexture(GL_TEXTURE_2D, normal_texture);
@@ -1677,22 +1831,42 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, 64, 64, 0, GL_RG, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, material_texture, 0);
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT3, GL_TEXTURE_2D, material_texture, 0);
 
     glGenTextures(1, &depth_texture);
     glBindTexture(GL_TEXTURE_2D, depth_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 64, 64, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexImage2D(
+        GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 64, 64, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_texture, 0);
 
-    const GLenum attachments[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+    const GLenum attachments[4] = {
+        GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
     glDrawBuffers(4, attachments);
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
-    const std::array<float, 4> lut_pixel = {0.0f, 0.6f, 1.0f, 1.0f};
+    const std::array<float, 16> lut_pixels = {
+        0.0f,
+        0.6f,
+        1.0f,
+        0.0f, // metallic, roughness, AO, magical
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f, // no texture or normal array for this fixture
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f, // neutral albedo multiplier
+        1.0f,
+        1.0f,
+        1.0f,
+        0.0f, // neutral albedo tint
+    };
     glGenTextures(1, &material_lut);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, material_lut);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, lut_pixel.data());
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 4, 0, GL_RGBA, GL_FLOAT, lut_pixels.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -1708,8 +1882,8 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
 
     const std::array<GBufferVertex, 3> vertices = {{
         {-0.8f, -0.8f, -0.4f, 0.0f, 0.0f, 1.0f, 3u},
-        { 0.8f, -0.8f, -0.4f, 0.0f, 0.0f, 1.0f, 3u},
-        { 0.0f,  0.8f, -0.4f, 0.0f, 0.0f, 1.0f, 3u},
+        {0.8f, -0.8f, -0.4f, 0.0f, 0.0f, 1.0f, 3u},
+        {0.0f, 0.8f, -0.4f, 0.0f, 0.0f, 1.0f, 3u},
     }};
 
     GLuint vao = 0;
@@ -1718,13 +1892,30 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     glGenBuffers(1, &vbo);
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(GBufferVertex)), vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(vertices.size() * sizeof(GBufferVertex)),
+                 vertices.data(),
+                 GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(GBufferVertex), reinterpret_cast<void*>(offsetof(GBufferVertex, px)));
+    glVertexAttribPointer(0,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(GBufferVertex),
+                          reinterpret_cast<void*>(offsetof(GBufferVertex, px)));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(GBufferVertex), reinterpret_cast<void*>(offsetof(GBufferVertex, nx)));
+    glVertexAttribPointer(1,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(GBufferVertex),
+                          reinterpret_cast<void*>(offsetof(GBufferVertex, nx)));
     glEnableVertexAttribArray(2);
-    glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(GBufferVertex), reinterpret_cast<void*>(offsetof(GBufferVertex, material)));
+    glVertexAttribIPointer(2,
+                           1,
+                           GL_UNSIGNED_INT,
+                           sizeof(GBufferVertex),
+                           reinterpret_cast<void*>(offsetof(GBufferVertex, material)));
 
     glViewport(0, 0, 64, 64);
     glEnable(GL_DEPTH_TEST);
@@ -1741,7 +1932,14 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     SetMat4Identity(program, "projection");
     SetMat3Identity(program, "normalMatrix");
     glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 0);
+    // Active samplers of different types may not alias one texture unit, even
+    // when this fixture takes the untextured material branch.
+    glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_terrainNormals"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_terrainRoughness"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_skinnedTextures"), 1);
     glDrawArrays(GL_TRIANGLES, 0, 3);
+    ASSERT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
 
     std::array<float, 3> center_position = {0.0f, 0.0f, 0.0f};
     glReadBuffer(GL_COLOR_ATTACHMENT0);
@@ -1792,7 +1990,8 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // T-I4-DR-albedo-calibration: the lighting pass program is used to capture
     // the ABSOLUTE on-screen sRGB each material produces through the full chain
     // (albedo -> lit -> ACES tonemap -> gamma) at the fixed noon lighting.
-    const ShaderProgramSpec lighting_spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    const ShaderProgramSpec lighting_spec{
+        "lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
     GLuint lighting_program = LinkProgram(lighting_spec);
     ASSERT_NE(lighting_program, 0u);
 
@@ -1823,12 +2022,18 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // Each plate carries an authored roughness from the ladder (T-I4-10) so the
     // gate can verify the roughness -> G-buffer -> specular-response chain in
     // addition to albedo/normal. The ladder spans glossy..matte.
-    struct PlateMat { int id; const char* name; int layer; float tiling; float roughness; };
+    struct PlateMat {
+        int id;
+        const char* name;
+        int layer;
+        float tiling;
+        float roughness;
+    };
     const std::array<PlateMat, 5> plates = {{
-        {1, "Stone",     0, 4.0f, 0.30f},
-        {2, "Soil",      1, 3.0f, 0.50f},
-        {3, "Grass",     2, 3.0f, 0.65f},
-        {4, "Sand",      3, 2.5f, 0.80f},
+        {1, "Stone", 0, 4.0f, 0.30f},
+        {2, "Soil", 1, 3.0f, 0.50f},
+        {3, "Grass", 2, 3.0f, 0.65f},
+        {4, "Sand", 3, 2.5f, 0.80f},
         {5, "Deepslate", 4, 4.0f, 0.95f},
     }};
     // T-I5b-5-water-backlog / I8: the LUT is now 4 rows to mirror
@@ -1849,8 +2054,8 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     };
     auto set_row2 = [&](int id, float albedo_scale) {
         const size_t base = (static_cast<size_t>(2) * 256u + id) * 4u; // row 2
-        lut[base + 0] = 0.0f;          // emissive_intensity/scale (non-emissive)
-        lut[base + 1] = albedo_scale;  // T-I5b-5 albedo_scale (G channel)
+        lut[base + 0] = 0.0f;         // emissive_intensity/scale (non-emissive)
+        lut[base + 1] = albedo_scale; // T-I5b-5 albedo_scale (G channel)
     };
     // I8: row 3 RGB = albedo_tint. The g_buffer triplanar branch multiplies the
     // baked albedo by this, so it MUST be authored to 1.0 or textured plates go
@@ -1863,13 +2068,17 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     };
     // Row 0 G channel = per-plate authored roughness (T-I4-10); the G-buffer
     // stores it in gAlbedoRoughness.a, which the gate reads back per plate.
-    for (const auto& p : plates) lut[(static_cast<size_t>(p.id)) * 4 + 1] = p.roughness;
-    for (const auto& p : plates) set_row1(p.id, p.layer, p.tiling);
+    for (const auto& p : plates)
+        lut[(static_cast<size_t>(p.id)) * 4 + 1] = p.roughness;
+    for (const auto& p : plates)
+        set_row1(p.id, p.layer, p.tiling);
     // Plates calibrate at scale 1.0 (this gate asserts the photographic albedo;
     // the albedo_scale calibration is exercised separately by the FarLodHorizon
     // sand-flat band). Every id defaults to 1.0 so the row-2 sample is a no-op.
-    for (int id = 0; id < 256; ++id) set_row2(id, 1.0f);
-    for (int id = 0; id < 256; ++id) set_row3(id); // I8: no-op tint [1,1,1]
+    for (int id = 0; id < 256; ++id)
+        set_row2(id, 1.0f);
+    for (int id = 0; id < 256; ++id)
+        set_row3(id); // I8: no-op tint [1,1,1]
     GLuint material_lut = 0;
     glGenTextures(1, &material_lut);
     glBindTexture(GL_TEXTURE_2D, material_lut);
@@ -1898,9 +2107,18 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     make_color(gmat, GL_RG16F, GL_RG, GL_FLOAT, 3);
     glGenTextures(1, &gdepth);
     glBindTexture(GL_TEXTURE_2D, gdepth);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, kRes, kRes, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_DEPTH_COMPONENT24,
+                 kRes,
+                 kRes,
+                 0,
+                 GL_DEPTH_COMPONENT,
+                 GL_FLOAT,
+                 nullptr);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, gdepth, 0);
-    const GLenum draw_buffers[4] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+    const GLenum draw_buffers[4] = {
+        GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
     glDrawBuffers(4, draw_buffers);
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
@@ -1927,16 +2145,24 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // valid=0 keeps the scalar roughness on this synthetic plate (no map bound).
     glUniform1i(glGetUniformLocation(program, "u_terrainRoughness"), 4);
     glUniform1i(glGetUniformLocation(program, "u_terrainRoughnessValid"), 0);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, material_lut);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D_ARRAY, normal_array);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array); // dummy, unsampled
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, material_lut);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, normal_array);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, albedo_array); // dummy, unsampled
 
     glViewport(0, 0, kRes, kRes);
     glDisable(GL_DEPTH_TEST);
 
-    struct PlateVertex { GLfloat px, py, pz, nx, ny, nz; GLuint material; };
+    struct PlateVertex {
+        GLfloat px, py, pz, nx, ny, nz;
+        GLuint material;
+    };
 
     // Two sun directions for the normal-response check. The plates face +Z
     // (toward the camera), so both suns keep a positive Z component (the surface
@@ -1946,13 +2172,14 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // angles. (A sun pointing away from the plate face would zero the whole ROI
     // and defeat the check.) Both are normalized.
     auto normalize3 = [](std::array<float, 3> v) {
-        float l = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-        if (l < 1e-6f) l = 1.0f;
-        return std::array<float, 3>{v[0]/l, v[1]/l, v[2]/l};
+        float l = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (l < 1e-6f)
+            l = 1.0f;
+        return std::array<float, 3>{v[0] / l, v[1] / l, v[2] / l};
     };
     const std::array<std::array<float, 3>, 2> sun_dirs = {{
-        normalize3({-0.55f,  0.30f, 0.78f}),  // sun tilted up-left toward the plate
-        normalize3({ 0.62f, -0.35f, 0.70f}),  // sun tilted down-right toward the plate
+        normalize3({-0.55f, 0.30f, 0.78f}), // sun tilted up-left toward the plate
+        normalize3({0.62f, -0.35f, 0.70f}), // sun tilted down-right toward the plate
     }};
 
     // Per-material capture results.
@@ -1962,9 +2189,9 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         float shading_spatial_stddev[2] = {0, 0}; // per sun angle
         float sun_response_delta = 0;             // |shadingA - shadingB| mean
         bool albedo_textured = false;
-        float authored_roughness = 0;             // T-I4-10 ladder value
-        float gbuffer_roughness = 0;              // read back from gAlbedoRoughness.a
-        float specular_highlight = 0;             // analytical GGX peak (lower roughness -> brighter)
+        float authored_roughness = 0; // T-I4-10 ladder value
+        float gbuffer_roughness = 0;  // read back from gAlbedoRoughness.a
+        float specular_highlight = 0; // analytical GGX peak (lower roughness -> brighter)
         // T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB through the real
         // lighting_pass.frag at fixed noon (the calibration scenario's lighting).
         float onscreen_r = 0, onscreen_g = 0, onscreen_b = 0;
@@ -1980,12 +2207,12 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         // projection covers a full tiling period of the plate.
         SetMat4Identity(program, "model");
         const std::array<PlateVertex, 6> quad = {{
-            {-0.95f, -0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
-            { 0.95f, -0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
-            { 0.95f,  0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
-            {-0.95f, -0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
-            { 0.95f,  0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
-            {-0.95f,  0.95f, -0.5f, 0,0,1, static_cast<GLuint>(pm.id)},
+            {-0.95f, -0.95f, -0.5f, 0, 0, 1, static_cast<GLuint>(pm.id)},
+            {0.95f, -0.95f, -0.5f, 0, 0, 1, static_cast<GLuint>(pm.id)},
+            {0.95f, 0.95f, -0.5f, 0, 0, 1, static_cast<GLuint>(pm.id)},
+            {-0.95f, -0.95f, -0.5f, 0, 0, 1, static_cast<GLuint>(pm.id)},
+            {0.95f, 0.95f, -0.5f, 0, 0, 1, static_cast<GLuint>(pm.id)},
+            {-0.95f, 0.95f, -0.5f, 0, 0, 1, static_cast<GLuint>(pm.id)},
         }};
         GLuint vao = 0, vbo = 0;
         glGenVertexArrays(1, &vao);
@@ -1994,11 +2221,25 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad.data(), GL_STATIC_DRAW);
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(PlateVertex), reinterpret_cast<void*>(offsetof(PlateVertex, px)));
+        glVertexAttribPointer(0,
+                              3,
+                              GL_FLOAT,
+                              GL_FALSE,
+                              sizeof(PlateVertex),
+                              reinterpret_cast<void*>(offsetof(PlateVertex, px)));
         glEnableVertexAttribArray(1);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(PlateVertex), reinterpret_cast<void*>(offsetof(PlateVertex, nx)));
+        glVertexAttribPointer(1,
+                              3,
+                              GL_FLOAT,
+                              GL_FALSE,
+                              sizeof(PlateVertex),
+                              reinterpret_cast<void*>(offsetof(PlateVertex, nx)));
         glEnableVertexAttribArray(2);
-        glVertexAttribIPointer(2, 1, GL_UNSIGNED_INT, sizeof(PlateVertex), reinterpret_cast<void*>(offsetof(PlateVertex, material)));
+        glVertexAttribIPointer(2,
+                               1,
+                               GL_UNSIGNED_INT,
+                               sizeof(PlateVertex),
+                               reinterpret_cast<void*>(offsetof(PlateVertex, material)));
 
         const GLfloat clear0[4] = {0, 0, 0, 0};
         glClearBufferfv(GL_COLOR, 0, clear0);
@@ -2015,7 +2256,8 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             glReadPixels(0, 0, kRes, kRes, GL_RGBA, GL_UNSIGNED_BYTE, frame.data());
             fs::create_directories(RenderHealthArtifactRoot() / "calibration-plates");
             std::ofstream ppm(RenderHealthArtifactRoot() / "calibration-plates" /
-                              (std::string("plate-") + pm.name + ".ppm"), std::ios::binary);
+                                  (std::string("plate-") + pm.name + ".ppm"),
+                              std::ios::binary);
             ppm << "P6\n" << kRes << " " << kRes << "\n255\n";
             for (int y = kRes - 1; y >= 0; --y) { // flip to top-down
                 for (int x = 0; x < kRes; ++x) {
@@ -2058,14 +2300,16 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         // light/view. The peak highlight intensity rises sharply as roughness
         // falls, so the ladder produces a monotonic specular response.
         double rough_sum = 0;
-        for (size_t i = 0; i < n; ++i) rough_sum += albedo_px[i * 4 + 3];
+        for (size_t i = 0; i < n; ++i)
+            rough_sum += albedo_px[i * 4 + 3];
         pr.gbuffer_roughness = static_cast<float>(rough_sum / n / 255.0);
         pr.authored_roughness = pm.roughness;
         {
             const float a = pr.gbuffer_roughness * pr.gbuffer_roughness;
             const float a2 = a * a;
             // GGX D at NdotH=1: a2 / (PI * 1) -> the specular highlight peak.
-            pr.specular_highlight = a2 / (3.14159265f * 1e-4f + 3.14159265f * a2 * 0.0f + 3.14159265f);
+            pr.specular_highlight =
+                a2 / (3.14159265f * 1e-4f + 3.14159265f * a2 * 0.0f + 3.14159265f);
             // Simpler stable proxy: peak GGX ~ 1/(PI*a2), brighter for low roughness.
             pr.specular_highlight = 1.0f / (3.14159265f * std::max(a2, 1e-4f));
         }
@@ -2074,23 +2318,31 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         // the spatial variation and the per-pixel response delta between suns.
         std::vector<float> shadeA(n), shadeB(n);
         for (size_t i = 0; i < n; ++i) {
-            std::array<float, 3> N = DecodeOctahedral(normal_px[i * 4 + 0] / 255.0f,
-                                                      normal_px[i * 4 + 1] / 255.0f);
+            std::array<float, 3> N =
+                DecodeOctahedral(normal_px[i * 4 + 0] / 255.0f, normal_px[i * 4 + 1] / 255.0f);
             auto dot3 = [&](const std::array<float, 3>& s) {
-                return std::max(0.0f, N[0]*s[0] + N[1]*s[1] + N[2]*s[2]);
+                return std::max(0.0f, N[0] * s[0] + N[1] * s[1] + N[2] * s[2]);
             };
             shadeA[i] = dot3(sun_dirs[0]);
             shadeB[i] = dot3(sun_dirs[1]);
         }
         auto stddev = [&](const std::vector<float>& v) {
-            double mean = 0; for (float x : v) mean += x; mean /= v.size();
-            double var = 0; for (float x : v) { double d = x - mean; var += d * d; }
+            double mean = 0;
+            for (float x : v)
+                mean += x;
+            mean /= v.size();
+            double var = 0;
+            for (float x : v) {
+                double d = x - mean;
+                var += d * d;
+            }
             return static_cast<float>(std::sqrt(var / v.size()));
         };
         pr.shading_spatial_stddev[0] = stddev(shadeA);
         pr.shading_spatial_stddev[1] = stddev(shadeB);
         double delta = 0;
-        for (size_t i = 0; i < n; ++i) delta += std::fabs(shadeA[i] - shadeB[i]);
+        for (size_t i = 0; i < n; ++i)
+            delta += std::fabs(shadeA[i] - shadeB[i]);
         pr.sun_response_delta = static_cast<float>(delta / n);
         results.push_back(pr);
 
@@ -2108,9 +2360,11 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // (mid-gray must land near perceptual mid; white must roll up high).
     const fs::path lit_dir = RenderHealthArtifactRoot() / "calibration-plates";
     for (auto& r : results) {
-        const LitNoonResult lit = LitChainNoonOnscreenSrgb(
-            lighting_program, {r.albedo_r, r.albedo_g, r.albedo_b}, r.gbuffer_roughness,
-            lit_dir / ("lit-noon-" + r.name + ".ppm"));
+        const LitNoonResult lit =
+            LitChainNoonOnscreenSrgb(lighting_program,
+                                     {r.albedo_r, r.albedo_g, r.albedo_b},
+                                     r.gbuffer_roughness,
+                                     lit_dir / ("lit-noon-" + r.name + ".ppm"));
         r.onscreen_r = lit.r;
         r.onscreen_g = lit.g;
         r.onscreen_b = lit.b;
@@ -2128,18 +2382,22 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // Albedo distinguishability: every plate is textured (non-black) and at
     // least one channel must differ meaningfully between materials.
     std::map<std::string, PlateResult> by_name;
-    for (const auto& r : results) by_name[r.name] = r;
+    for (const auto& r : results)
+        by_name[r.name] = r;
 
     bool gate_passed = (results.size() == plates.size());
     for (const auto& r : results) {
-        EXPECT_TRUE(r.albedo_textured) << r.name << " plate produced a black/empty albedo (texture not sampled)";
+        EXPECT_TRUE(r.albedo_textured)
+            << r.name << " plate produced a black/empty albedo (texture not sampled)";
         // Normal response: spatial shading variation under both sun angles, plus
         // a non-trivial difference between the two sun directions.
-        EXPECT_GT(r.shading_spatial_stddev[0], kFlatShadingBound) << r.name << " has no normal-map shading variation (high sun)";
-        EXPECT_GT(r.shading_spatial_stddev[1], kFlatShadingBound) << r.name << " has no normal-map shading variation (low sun)";
-        EXPECT_GT(r.sun_response_delta, kFlatShadingBound) << r.name << " shading does not respond to sun direction";
-        if (!(r.albedo_textured &&
-              r.shading_spatial_stddev[0] > kFlatShadingBound &&
+        EXPECT_GT(r.shading_spatial_stddev[0], kFlatShadingBound)
+            << r.name << " has no normal-map shading variation (high sun)";
+        EXPECT_GT(r.shading_spatial_stddev[1], kFlatShadingBound)
+            << r.name << " has no normal-map shading variation (low sun)";
+        EXPECT_GT(r.sun_response_delta, kFlatShadingBound)
+            << r.name << " shading does not respond to sun direction";
+        if (!(r.albedo_textured && r.shading_spatial_stddev[0] > kFlatShadingBound &&
               r.shading_spatial_stddev[1] > kFlatShadingBound &&
               r.sun_response_delta > kFlatShadingBound)) {
             gate_passed = false;
@@ -2155,7 +2413,8 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         const float grass_luma = grass.albedo_r + grass.albedo_g + grass.albedo_b;
         EXPECT_GT(sand_luma, grass_luma) << "sand should read brighter than grass";
         EXPECT_GT(grass.albedo_g, grass.albedo_b) << "grass should read greener than blue";
-        if (!(sand_luma > grass_luma && grass.albedo_g > grass.albedo_b)) gate_passed = false;
+        if (!(sand_luma > grass_luma && grass.albedo_g > grass.albedo_b))
+            gate_passed = false;
     }
 
     // --- T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB bands ---
@@ -2167,28 +2426,33 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // data/common/albedo_calibration_reference.json and widened for normal/
     // roughness spread + RGBA8 quantization. If the chain ever crushes or blows
     // luminance, these fail where the relative checks would not.
-    struct SrgbBand { const char* name; float rlo, rhi, glo, ghi, blo, bhi; };
+    struct SrgbBand {
+        const char* name;
+        float rlo, rhi, glo, ghi, blo, bhi;
+    };
     const std::array<SrgbBand, 5> bands = {{
         // name        r:[lo,hi]      g:[lo,hi]      b:[lo,hi]
-        {"Stone",     0.45f, 0.95f, 0.45f, 0.95f, 0.40f, 0.92f},
-        {"Soil",      0.40f, 0.85f, 0.30f, 0.78f, 0.24f, 0.72f},
-        {"Grass",     0.20f, 0.65f, 0.24f, 0.70f, 0.10f, 0.55f},
-        {"Sand",      0.62f, 0.98f, 0.52f, 0.95f, 0.26f, 0.78f},
+        {"Stone", 0.45f, 0.95f, 0.45f, 0.95f, 0.40f, 0.92f},
+        {"Soil", 0.40f, 0.85f, 0.30f, 0.78f, 0.24f, 0.72f},
+        {"Grass", 0.20f, 0.65f, 0.24f, 0.70f, 0.10f, 0.55f},
+        {"Sand", 0.62f, 0.98f, 0.52f, 0.95f, 0.26f, 0.78f},
         {"Deepslate", 0.30f, 0.80f, 0.30f, 0.80f, 0.26f, 0.74f},
     }};
     for (const auto& band : bands) {
-        if (!by_name.count(band.name)) continue;
+        if (!by_name.count(band.name))
+            continue;
         const auto& m = by_name[band.name];
         const bool in_r = m.onscreen_r >= band.rlo && m.onscreen_r <= band.rhi;
         const bool in_g = m.onscreen_g >= band.glo && m.onscreen_g <= band.ghi;
         const bool in_b = m.onscreen_b >= band.blo && m.onscreen_b <= band.bhi;
-        EXPECT_TRUE(in_r) << band.name << " on-screen R " << m.onscreen_r
-                          << " outside band [" << band.rlo << ", " << band.rhi << "]";
-        EXPECT_TRUE(in_g) << band.name << " on-screen G " << m.onscreen_g
-                          << " outside band [" << band.glo << ", " << band.ghi << "]";
-        EXPECT_TRUE(in_b) << band.name << " on-screen B " << m.onscreen_b
-                          << " outside band [" << band.blo << ", " << band.bhi << "]";
-        if (!(in_r && in_g && in_b)) gate_passed = false;
+        EXPECT_TRUE(in_r) << band.name << " on-screen R " << m.onscreen_r << " outside band ["
+                          << band.rlo << ", " << band.rhi << "]";
+        EXPECT_TRUE(in_g) << band.name << " on-screen G " << m.onscreen_g << " outside band ["
+                          << band.glo << ", " << band.ghi << "]";
+        EXPECT_TRUE(in_b) << band.name << " on-screen B " << m.onscreen_b << " outside band ["
+                          << band.blo << ", " << band.bhi << "]";
+        if (!(in_r && in_g && in_b))
+            gate_passed = false;
     }
 
     // --- T-I4-DR-albedo-calibration: white/gray chain assertion (PERMANENT) ---
@@ -2197,14 +2461,17 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     // 18% gray near perceptual mid. The pre-fix chain (sun COLOR fed where
     // IRRADIANCE was needed) crushed white to ~0.74 and mid-gray to ~0.32.
     const float white_luma = (white_plate.r + white_plate.g + white_plate.b) / 3.0f;
-    const float gray_luma  = (gray18_plate.r + gray18_plate.g + gray18_plate.b) / 3.0f;
-    EXPECT_GT(white_luma, 0.80f) << "white plate too dark at noon (chain crushes luminance): " << white_luma;
+    const float gray_luma = (gray18_plate.r + gray18_plate.g + gray18_plate.b) / 3.0f;
+    EXPECT_GT(white_luma, 0.80f) << "white plate too dark at noon (chain crushes luminance): "
+                                 << white_luma;
     EXPECT_LT(white_luma, 1.001f) << "white plate impossibly bright: " << white_luma;
-    EXPECT_GT(gray_luma, 0.45f) << "18% gray plate too dark at noon (chain crushes luminance): " << gray_luma;
-    EXPECT_LT(gray_luma, 0.80f) << "18% gray plate too bright at noon (chain over-exposed): " << gray_luma;
+    EXPECT_GT(gray_luma, 0.45f) << "18% gray plate too dark at noon (chain crushes luminance): "
+                                << gray_luma;
+    EXPECT_LT(gray_luma, 0.80f) << "18% gray plate too bright at noon (chain over-exposed): "
+                                << gray_luma;
     EXPECT_GT(white_luma, gray_luma) << "white must read brighter than 18% gray";
-    if (!(white_luma > 0.80f && white_luma <= 1.001f &&
-          gray_luma > 0.45f && gray_luma < 0.80f && white_luma > gray_luma)) {
+    if (!(white_luma > 0.80f && white_luma <= 1.001f && gray_luma > 0.45f && gray_luma < 0.80f &&
+          white_luma > gray_luma)) {
         gate_passed = false;
     }
 
@@ -2222,14 +2489,17 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             const auto& r = results[i];
             EXPECT_NEAR(r.gbuffer_roughness, r.authored_roughness, 0.02f)
                 << r.name << " roughness did not round-trip through the G-buffer";
-            if (std::fabs(r.gbuffer_roughness - r.authored_roughness) > 0.02f) roughness_roundtrips = false;
+            if (std::fabs(r.gbuffer_roughness - r.authored_roughness) > 0.02f)
+                roughness_roundtrips = false;
             if (i > 0 && results[i].specular_highlight >= results[i - 1].specular_highlight) {
                 specular_monotonic = false; // highlight must fall as roughness rises
             }
         }
         EXPECT_TRUE(roughness_roundtrips) << "authored roughness must reach the G-buffer";
-        EXPECT_TRUE(specular_monotonic) << "specular highlight must vary monotonically across the roughness ladder";
-        if (!roughness_roundtrips || !specular_monotonic) gate_passed = false;
+        EXPECT_TRUE(specular_monotonic)
+            << "specular highlight must vary monotonically across the roughness ladder";
+        if (!roughness_roundtrips || !specular_monotonic)
+            gate_passed = false;
     }
 
     // --- Emit the re-homed analysis artifact ---
@@ -2244,15 +2514,15 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     out << "  \"materials\": [\n";
     for (size_t i = 0; i < results.size(); ++i) {
         const auto& r = results[i];
-        out << "    {\"name\": \"" << r.name << "\""
-            << ", \"albedo\": [" << r.albedo_r << ", " << r.albedo_g << ", " << r.albedo_b << "]"
+        out << "    {\"name\": \"" << r.name << "\"" << ", \"albedo\": [" << r.albedo_r << ", "
+            << r.albedo_g << ", " << r.albedo_b << "]"
             << ", \"shading_stddev_sun0\": " << r.shading_spatial_stddev[0]
             << ", \"shading_stddev_sun1\": " << r.shading_spatial_stddev[1]
             << ", \"sun_response_delta\": " << r.sun_response_delta
             << ", \"authored_roughness\": " << r.authored_roughness
             << ", \"gbuffer_roughness\": " << r.gbuffer_roughness
-            << ", \"specular_highlight\": " << r.specular_highlight
-            << ", \"onscreen_srgb\": [" << r.onscreen_r << ", " << r.onscreen_g << ", " << r.onscreen_b << "]"
+            << ", \"specular_highlight\": " << r.specular_highlight << ", \"onscreen_srgb\": ["
+            << r.onscreen_r << ", " << r.onscreen_g << ", " << r.onscreen_b << "]"
             << ", \"textured\": " << (r.albedo_textured ? "true" : "false") << "}";
         out << (i + 1 < results.size() ? ",\n" : "\n");
     }
@@ -2263,8 +2533,10 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     out << "  \"exposure_anchors\": {\n";
     out << "    \"lighting\": \"fixed_noon\",\n";
     out << "    \"sun_irradiance_scale\": " << 3.14159265f << ",\n";
-    out << "    \"white_plate_srgb\": [" << white_plate.r << ", " << white_plate.g << ", " << white_plate.b << "],\n";
-    out << "    \"gray18_plate_srgb\": [" << gray18_plate.r << ", " << gray18_plate.g << ", " << gray18_plate.b << "]\n";
+    out << "    \"white_plate_srgb\": [" << white_plate.r << ", " << white_plate.g << ", "
+        << white_plate.b << "],\n";
+    out << "    \"gray18_plate_srgb\": [" << gray18_plate.r << ", " << gray18_plate.g << ", "
+        << gray18_plate.b << "]\n";
     out << "  }\n";
     out << "}\n";
 
@@ -2300,13 +2572,16 @@ TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     ASSERT_NE(program, 0u);
 
     const std::array<float, 3> albedo{0.2f, 0.2f, 0.2f};
-    const LitNoonResult base = LitChainNoonOnscreenSrgb(program, albedo, 1.0f);          // tap inactive
-    const LitNoonResult glow = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.6f); // field=0.6
-    const LitNoonResult zero = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.0f); // active, field=0
+    const LitNoonResult base = LitChainNoonOnscreenSrgb(program, albedo, 1.0f); // tap inactive
+    const LitNoonResult glow =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.6f); // field=0.6
+    const LitNoonResult zero =
+        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.0f); // active, field=0
 
     const float base_lum = base.r + base.g + base.b;
     const float glow_lum = glow.r + glow.g + glow.b;
-    EXPECT_GT(glow_lum, base_lum + 0.05f) << "aether tap did not brighten the lit output (field not consumed)";
+    EXPECT_GT(glow_lum, base_lum + 0.05f)
+        << "aether tap did not brighten the lit output (field not consumed)";
     EXPECT_GT(glow.b, base.b + 0.02f) << "aether blue glow not present in the lit output";
     // Active-but-zero field contributes nothing -> identical to baseline.
     EXPECT_NEAR(zero.r, base.r, 1.0e-4f);
@@ -2334,8 +2609,8 @@ TEST(RenderSmokeTest, AetherMaterialModulationMonotonic) {
     ASSERT_NE(program, 0u);
 
     const std::array<float, 3> albedo{0.2f, 0.2f, 0.2f};
-    constexpr float kField = 0.6f;      // active uniform aether field value
-    constexpr float kEmissive = 0.25f;  // normalized LUT row-2 value (-> intensity 2.0)
+    constexpr float kField = 0.6f;     // active uniform aether field value
+    constexpr float kEmissive = 0.25f; // normalized LUT row-2 value (-> intensity 2.0)
 
     // Pixel-identical half: no field -> aetherLocal 0 -> modulation is inert.
     const LitNoonResult plain = LitChainNoonOnscreenSrgb(program, albedo, 1.0f);
@@ -2417,7 +2692,9 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     // A crystal fragment: view-space position in front of the camera, +Z normal,
     // dark albedo so the emission dominates, material id 6 in the normal alpha.
     auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
-        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
         glTexImage2D(GL_TEXTURE_2D, 0, ifmt, 1, 1, 0, fmt, type, data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -2440,21 +2717,24 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     // Shadow cascades + terrain array as 1x1x1 arrays (distinct sampler types
     // need distinct units; an unbound/shared sampler is undefined).
     auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
-        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, t);
         glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, ifmt, 1, 1, 1, 0, fmt, type, data);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         return t;
     };
     const float shadow_px[1] = {1.0f};
-    GLuint shadow_arr = make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
+    GLuint shadow_arr =
+        make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
     const unsigned char terrain_px[4] = {0, 0, 0, 255};
     GLuint terrain_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, terrain_px);
 
     // Fullscreen quad.
     const float quad[] = {
-        -1, -1, 0, 0, 0,   1, -1, 0, 1, 0,   1, 1, 0, 1, 1,
-        -1, -1, 0, 0, 0,   1,  1, 0, 1, 1,  -1, 1, 0, 0, 1,
+        -1, -1, 0, 0, 0, 1, -1, 0, 1, 0, 1,  1, 0, 1, 1,
+        -1, -1, 0, 0, 0, 1, 1,  0, 1, 1, -1, 1, 0, 0, 1,
     };
     GLuint vao = 0, vbo = 0;
     glGenVertexArrays(1, &vao);
@@ -2465,32 +2745,52 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(0));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
 
     glViewport(0, 0, kRes, kRes);
     glDisable(GL_DEPTH_TEST);
     glUseProgram(program);
 
     // Bind G-buffer samplers to distinct units.
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, g_pos);      glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, g_norm);     glUniform1i(glGetUniformLocation(program, "gNormalMaterial"), 1);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, g_albedo);   glUniform1i(glGetUniformLocation(program, "gAlbedoRoughness"), 2);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, g_metallic); glUniform1i(glGetUniformLocation(program, "gMetallicAO"), 3);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ssao_tex);   glUniform1i(glGetUniformLocation(program, "u_ssao"), 4);
-    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 5);
-    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 6);
-    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_pos);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, g_norm);
+    glUniform1i(glGetUniformLocation(program, "gNormalMaterial"), 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_albedo);
+    glUniform1i(glGetUniformLocation(program, "gAlbedoRoughness"), 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, g_metallic);
+    glUniform1i(glGetUniformLocation(program, "gMetallicAO"), 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, ssao_tex);
+    glUniform1i(glGetUniformLocation(program, "u_ssao"), 4);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr);
+    glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 5);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr);
+    glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 6);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, caustics_tex);
+    glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
     // Spec 015 C-1 (RENDER-15): the tint cascade sampler needs its OWN unit even
     // when disabled — a sampler2DArray left on unit 0 (a 2D texture) is a sampler
     // type collision that invalidates the whole draw. White 1x1x1 + enabled=0.
     const unsigned char tint_px[4] = {255, 255, 255, 255};
     GLuint tint_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, tint_px);
-    glActiveTexture(GL_TEXTURE9); glBindTexture(GL_TEXTURE_2D_ARRAY, tint_arr); glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 9);
+    glActiveTexture(GL_TEXTURE9);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, tint_arr);
+    glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 9);
     glUniform1i(glGetUniformLocation(program, "u_shadowTintEnabled"), 0);
 
     // Scalar/vector uniforms.
     SetMat4Identity(program, "u_inverseView");
-    for (int i = 0; i < 4; ++i) SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    for (int i = 0; i < 4; ++i)
+        SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
     glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
     glUniform1f(glGetUniformLocation(program, "u_time"), 0.0f);
     glUniform1f(glGetUniformLocation(program, "u_sea_level"), -1000.0f);
@@ -2498,7 +2798,10 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     glUniform3f(glGetUniformLocation(program, "u_viewPos"), 0, 0, 0);
     glUniform3f(glGetUniformLocation(program, "u_skyAmbientColor"), 0.02f, 0.02f, 0.03f);
     glUniform3f(glGetUniformLocation(program, "u_sun.direction"), 0.0f, 1.0f, 0.0f);
-    glUniform3f(glGetUniformLocation(program, "u_sun.color"), 0.02f, 0.02f, 0.02f); // dim sun: emission dominates
+    glUniform3f(glGetUniformLocation(program, "u_sun.color"),
+                0.02f,
+                0.02f,
+                0.02f); // dim sun: emission dominates
     glUniform1i(glGetUniformLocation(program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(program, "u_emissiveLutScale"), kEmissiveLutScale);
 
@@ -2518,7 +2821,8 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
         lut[(static_cast<size_t>(6)) * 4 + 2] = 1.0f;
         lut[(static_cast<size_t>(6)) * 4 + 3] = 1.0f;
         // row 2 material 6: emissive_intensity / scale.
-        lut[(static_cast<size_t>(2 * 256 + 6)) * 4 + 0] = std::min(intensity / kEmissiveLutScale, 1.0f);
+        lut[(static_cast<size_t>(2 * 256 + 6)) * 4 + 0] =
+            std::min(intensity / kEmissiveLutScale, 1.0f);
         return lut;
     };
 
@@ -2548,7 +2852,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
         glReadPixels(0, 0, kRes, kRes, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
         double lum = 0;
         for (size_t p = 0; p < static_cast<size_t>(kRes) * kRes; ++p) {
-            lum += 0.2126 * px[p*4+0] + 0.7152 * px[p*4+1] + 0.0722 * px[p*4+2];
+            lum += 0.2126 * px[p * 4 + 0] + 0.7152 * px[p * 4 + 1] + 0.0722 * px[p * 4 + 2];
         }
         measured[i] = lum / (static_cast<double>(kRes) * kRes);
     }
@@ -2556,11 +2860,14 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     // --- Gate assertions: monotonic, intensity 0 dark ---
     bool monotonic = true;
     for (size_t i = 1; i < intensities.size(); ++i) {
-        if (measured[i] <= measured[i - 1] + 0.5) { monotonic = false; }
+        if (measured[i] <= measured[i - 1] + 0.5) {
+            monotonic = false;
+        }
     }
     const bool zero_is_dark = measured[0] < measured[1];
     EXPECT_TRUE(zero_is_dark) << "intensity 0 should be darker than intensity 0.5";
-    EXPECT_TRUE(monotonic) << "on-screen luminance must increase monotonically with emissive_intensity";
+    EXPECT_TRUE(monotonic)
+        << "on-screen luminance must increase monotonically with emissive_intensity";
 
     fs::create_directories(RenderHealthArtifactRoot());
     std::ofstream out(RenderHealthArtifactRoot() / "emissive-calibration.json");
@@ -2569,7 +2876,8 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     out << "  \"material\": \"LuminCrystal\",\n";
     out << "  \"material_id\": 6,\n";
     out << "  \"emissive_lut_scale\": " << kEmissiveLutScale << ",\n";
-    out << "  \"transfer_curve\": \"glow = 1.5 * emissive_intensity (linear pre-tonemap); on-screen = filmic(lit + glow)\",\n";
+    out << "  \"transfer_curve\": \"glow = 1.5 * emissive_intensity (linear pre-tonemap); "
+           "on-screen = filmic(lit + glow)\",\n";
     out << "  \"passed\": " << ((monotonic && zero_is_dark) ? "true" : "false") << ",\n";
     out << "  \"monotonic\": " << (monotonic ? "true" : "false") << ",\n";
     out << "  \"table\": [\n";
@@ -2620,7 +2928,8 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
         glBindFramebuffer(GL_FRAMEBUFFER, tfbo);
         glGenTextures(1, &ttex);
         glBindTexture(GL_TEXTURE_2D, ttex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kTintRes, kTintRes, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(
+            GL_TEXTURE_2D, 0, GL_RGBA8, kTintRes, kTintRes, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ttex, 0);
@@ -2628,8 +2937,24 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
 
         // A fullscreen pane: unit quad scaled 4x under identity light-space.
         const float pane[] = {
-            -1, -1, 0,   1, -1, 0,   1, 1, 0,
-            -1, -1, 0,   1,  1, 0,  -1, 1, 0,
+            -1,
+            -1,
+            0,
+            1,
+            -1,
+            0,
+            1,
+            1,
+            0,
+            -1,
+            -1,
+            0,
+            1,
+            1,
+            0,
+            -1,
+            1,
+            0,
         };
         GLuint pvao = 0, pvbo = 0;
         glGenVertexArrays(1, &pvao);
@@ -2638,7 +2963,8 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
         glBindBuffer(GL_ARRAY_BUFFER, pvbo);
         glBufferData(GL_ARRAY_BUFFER, sizeof(pane), pane, GL_STATIC_DRAW);
         glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), reinterpret_cast<void*>(0));
+        glVertexAttribPointer(
+            0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), reinterpret_cast<void*>(0));
 
         glViewport(0, 0, kTintRes, kTintRes);
         glDisable(GL_DEPTH_TEST);
@@ -2658,9 +2984,12 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
         unsigned char tpx[4] = {};
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         glReadPixels(kTintRes / 2, kTintRes / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, tpx);
-        EXPECT_NEAR(tpx[0], std::pow(tint_r, thickness) * 255.0f, 1.5) << "shadow_tint.frag R drifted from GlassTintModel";
-        EXPECT_NEAR(tpx[1], std::pow(tint_g, thickness) * 255.0f, 1.5) << "shadow_tint.frag G drifted from GlassTintModel";
-        EXPECT_NEAR(tpx[2], std::pow(tint_b, thickness) * 255.0f, 1.5) << "shadow_tint.frag B drifted from GlassTintModel";
+        EXPECT_NEAR(tpx[0], std::pow(tint_r, thickness) * 255.0f, 1.5)
+            << "shadow_tint.frag R drifted from GlassTintModel";
+        EXPECT_NEAR(tpx[1], std::pow(tint_g, thickness) * 255.0f, 1.5)
+            << "shadow_tint.frag G drifted from GlassTintModel";
+        EXPECT_NEAR(tpx[2], std::pow(tint_b, thickness) * 255.0f, 1.5)
+            << "shadow_tint.frag B drifted from GlassTintModel";
 
         glDeleteBuffers(1, &pvbo);
         glDeleteVertexArrays(1, &pvao);
@@ -2688,14 +3017,18 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
     auto make_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
-        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D, t);
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D, t);
         glTexImage2D(GL_TEXTURE_2D, 0, ifmt, 1, 1, 0, fmt, type, data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         return t;
     };
     auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
-        GLuint t = 0; glGenTextures(1, &t); glBindTexture(GL_TEXTURE_2D_ARRAY, t);
+        GLuint t = 0;
+        glGenTextures(1, &t);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, t);
         glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, ifmt, 1, 1, 1, 0, fmt, type, data);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -2715,7 +3048,8 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     const unsigned char caustics_px[4] = {0, 0, 0, 255};
     GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
     const float shadow_px[1] = {1.0f}; // fully lit
-    GLuint shadow_arr = make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
+    GLuint shadow_arr =
+        make_array_tex(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, shadow_px);
     const unsigned char terrain_px[4] = {0, 0, 0, 255};
     GLuint terrain_arr = make_array_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, terrain_px);
     const unsigned char white_px[4] = {255, 255, 255, 255};
@@ -2733,8 +3067,8 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     const float quad[] = {
-        -1, -1, 0, 0, 0,   1, -1, 0, 1, 0,   1, 1, 0, 1, 1,
-        -1, -1, 0, 0, 0,   1,  1, 0, 1, 1,  -1, 1, 0, 0, 1,
+        -1, -1, 0, 0, 0, 1, -1, 0, 1, 0, 1,  1, 0, 1, 1,
+        -1, -1, 0, 0, 0, 1, 1,  0, 1, 1, -1, 1, 0, 0, 1,
     };
     GLuint vao = 0, vbo = 0;
     glGenVertexArrays(1, &vao);
@@ -2745,30 +3079,53 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(0));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
 
     glViewport(0, 0, kRes, kRes);
     glDisable(GL_DEPTH_TEST);
     glUseProgram(program);
-    glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, g_pos);      glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
-    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, g_norm);     glUniform1i(glGetUniformLocation(program, "gNormalMaterial"), 1);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, g_albedo);   glUniform1i(glGetUniformLocation(program, "gAlbedoRoughness"), 2);
-    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, g_metallic); glUniform1i(glGetUniformLocation(program, "gMetallicAO"), 3);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, ssao_tex);   glUniform1i(glGetUniformLocation(program, "u_ssao"), 4);
-    glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr); glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 5);
-    glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr); glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 6);
-    glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, caustics_tex); glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
-    glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, lut_tex);    glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 8);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, g_pos);
+    glUniform1i(glGetUniformLocation(program, "gPosition"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, g_norm);
+    glUniform1i(glGetUniformLocation(program, "gNormalMaterial"), 1);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_albedo);
+    glUniform1i(glGetUniformLocation(program, "gAlbedoRoughness"), 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, g_metallic);
+    glUniform1i(glGetUniformLocation(program, "gMetallicAO"), 3);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, ssao_tex);
+    glUniform1i(glGetUniformLocation(program, "u_ssao"), 4);
+    glActiveTexture(GL_TEXTURE5);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_arr);
+    glUniform1i(glGetUniformLocation(program, "u_shadowCascades"), 5);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, terrain_arr);
+    glUniform1i(glGetUniformLocation(program, "u_terrainTextures"), 6);
+    glActiveTexture(GL_TEXTURE7);
+    glBindTexture(GL_TEXTURE_2D, caustics_tex);
+    glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
+    glActiveTexture(GL_TEXTURE8);
+    glBindTexture(GL_TEXTURE_2D, lut_tex);
+    glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 8);
     glUniform1i(glGetUniformLocation(program, "u_shadowTintCascades"), 9);
     SetMat4Identity(program, "u_inverseView");
-    for (int i = 0; i < 4; ++i) SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
+    for (int i = 0; i < 4; ++i)
+        SetMat4Identity(program, ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
     glUniform4f(glGetUniformLocation(program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
     glUniform1f(glGetUniformLocation(program, "u_time"), 0.0f);
     glUniform1f(glGetUniformLocation(program, "u_sea_level"), -1000.0f);
     glUniform3f(glGetUniformLocation(program, "u_terrainOrigin"), 0, 0, 0);
     glUniform3f(glGetUniformLocation(program, "u_viewPos"), 0, 0, 0);
     glUniform3f(glGetUniformLocation(program, "u_skyAmbientColor"), 0.0f, 0.0f, 0.0f);
-    glUniform3f(glGetUniformLocation(program, "u_sun.direction"), 0.0f, 0.0f, 1.0f); // toward-light == +Z == the normal
+    glUniform3f(glGetUniformLocation(program, "u_sun.direction"),
+                0.0f,
+                0.0f,
+                1.0f); // toward-light == +Z == the normal
     glUniform3f(glGetUniformLocation(program, "u_sun.color"), 1.0f, 1.0f, 1.0f);
     glUniform1i(glGetUniformLocation(program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(program, "u_emissiveLutScale"), 8.0f);
@@ -2798,7 +3155,8 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
         << "red tint should suppress the green channel of the lit sun";
     EXPECT_GT(static_cast<int>(off[2]), static_cast<int>(red_on[2]) + 20)
         << "red tint should suppress the blue channel of the lit sun";
-    EXPECT_GT(static_cast<int>(red_on[0]) * 2, static_cast<int>(red_on[1]) + static_cast<int>(red_on[2]))
+    EXPECT_GT(static_cast<int>(red_on[0]) * 2,
+              static_cast<int>(red_on[1]) + static_cast<int>(red_on[2]))
         << "the tinted fragment should read RED-dominant";
 
     glDeleteTextures(1, &lut_tex);
@@ -2833,7 +3191,10 @@ TEST(RenderSmokeTest, FroxelUniformMediumMatchesAnalyticTransmittance) {
     auto compile_compute = [&](const char* rel) -> GLuint {
         const std::string path = std::string(LUMINUMBRA_SOURCE_ROOT) + "/res/shaders/" + rel;
         std::ifstream file(path);
-        if (!file.is_open()) { ADD_FAILURE() << "missing " << path; return 0; }
+        if (!file.is_open()) {
+            ADD_FAILURE() << "missing " << path;
+            return 0;
+        }
         std::stringstream ss;
         ss << file.rdbuf();
         const std::string src = ss.str();
@@ -2854,7 +3215,11 @@ TEST(RenderSmokeTest, FroxelUniformMediumMatchesAnalyticTransmittance) {
         glLinkProgram(prog);
         glGetProgramiv(prog, GL_LINK_STATUS, &ok);
         glDeleteShader(sh);
-        if (!ok) { ADD_FAILURE() << rel << " failed to link"; glDeleteProgram(prog); return 0; }
+        if (!ok) {
+            ADD_FAILURE() << rel << " failed to link";
+            glDeleteProgram(prog);
+            return 0;
+        }
         return prog;
     };
     GLuint inject = compile_compute("froxel_inject.comp");
@@ -2909,10 +3274,10 @@ TEST(RenderSmokeTest, FroxelUniformMediumMatchesAnalyticTransmittance) {
     glUniform1f(glGetUniformLocation(inject, "u_tanHalfFovY"), 1.0f);
     glUniform1f(glGetUniformLocation(inject, "u_aspect"), 1.0f);
     glUniform3f(glGetUniformLocation(inject, "u_sunDirection"), 0, 1, 0);
-    glUniform3f(glGetUniformLocation(inject, "u_sunColor"), 0, 0, 0);   // lights black:
+    glUniform3f(glGetUniformLocation(inject, "u_sunColor"), 0, 0, 0);     // lights black:
     glUniform3f(glGetUniformLocation(inject, "u_ambientColor"), 0, 0, 0); // T is the target
     glUniform1f(glGetUniformLocation(inject, "u_baseDensity"), kSigma);
-    glUniform1f(glGetUniformLocation(inject, "u_baseHeight"), 1e9f);   // uniform medium
+    glUniform1f(glGetUniformLocation(inject, "u_baseHeight"), 1e9f); // uniform medium
     glUniform1f(glGetUniformLocation(inject, "u_densityFalloff"), 0.0f);
     glDispatchCompute(GX / 8, GY / 8 + 1, GZ);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
@@ -2926,8 +3291,8 @@ TEST(RenderSmokeTest, FroxelUniformMediumMatchesAnalyticTransmittance) {
     // Read one texel at the LAST slice (GL 4.5 DSA sub-image read): its alpha is
     // the transmittance through the whole [near, far] range.
     float texel[4] = {};
-    glGetTextureSubImage(integrated, 0, GX / 2, GY / 2, GZ - 1, 1, 1, 1,
-                         GL_RGBA, GL_FLOAT, sizeof(texel), texel);
+    glGetTextureSubImage(
+        integrated, 0, GX / 2, GY / 2, GZ - 1, 1, 1, 1, GL_RGBA, GL_FLOAT, sizeof(texel), texel);
     const float expected_T = std::exp(-kSigma * (kFar - kNear));
     // RGBA16F storage + 64 exponential steps: allow a small relative tolerance.
     EXPECT_NEAR(texel[3], expected_T, 0.004f)
@@ -2969,9 +3334,24 @@ TEST(RenderSmokeTest, BasicShaderDrawsNonBlackPixels) {
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
     const std::array<float, 18> vertices = {
-        -0.8f, -0.8f, 0.0f, 0.0f, 0.0f, 1.0f,
-         0.8f, -0.8f, 0.0f, 0.0f, 0.0f, 1.0f,
-         0.0f,  0.8f, 0.0f, 0.0f, 0.0f, 1.0f,
+        -0.8f,
+        -0.8f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.8f,
+        -0.8f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.8f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     };
 
     GLuint vao = 0;
@@ -2980,11 +3360,15 @@ TEST(RenderSmokeTest, BasicShaderDrawsNonBlackPixels) {
     glGenBuffers(1, &vbo);
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(float)), vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
+                 vertices.data(),
+                 GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(0));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttribPointer(
+        1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
 
     glViewport(0, 0, 64, 64);
     glDisable(GL_DEPTH_TEST);
@@ -3019,10 +3403,7 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
     ASSERT_FALSE(source.empty());
 
     const std::vector<std::string> forbidden_hot_path_messages = {
-        "CAMERA DEBUG",
-        "RENDER DEBUG",
-        "MESH UPLOAD:"
-    };
+        "CAMERA DEBUG", "RENDER DEBUG", "MESH UPLOAD:"};
 
     for (const std::string& message : forbidden_hot_path_messages) {
         EXPECT_EQ(source.find(message), std::string::npos) << message;
@@ -3030,17 +3411,17 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
 }
 
 TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
-    const std::string main_source = ReadTextFile(
-        SourceRoot() / "src/luminumbra_client/main_client.cpp");
-    const std::string frontier = ReadTextFile(
-        SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
+    const std::string main_source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp");
+    const std::string frontier =
+        ReadTextFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
     ASSERT_FALSE(main_source.empty());
     ASSERT_FALSE(frontier.empty());
 
     EXPECT_NE(main_source.find("int cloud_quality = 2;"), std::string::npos);
     EXPECT_NE(main_source.find(
-        "scenario_config.requires_pinned_capture() || !g_render_benchmark_path.empty()"),
-        std::string::npos);
+                  "scenario_config.requires_pinned_capture() || !g_render_benchmark_path.empty()"),
+              std::string::npos);
     EXPECT_NE(frontier.find("$env:LUMIN_CLOUD_QUALITY = \"2\""), std::string::npos);
     EXPECT_NE(frontier.find("foreach ($run in 1..3)"), std::string::npos);
     EXPECT_NE(frontier.find("--render-benchmark-warmup 600"), std::string::npos);
@@ -3050,16 +3431,13 @@ TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
 }
 
 TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
-    const fs::path behavior_test_path =
-        SourceRoot() / "tools/gates/test-nightly-provenance.ps1";
-    const std::string runner = ReadTextFile(
-        SourceRoot() / "tools/gates/run-nightly-gate.ps1");
-    const std::string frontier = ReadTextFile(
-        SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
-    const std::string registrar = ReadTextFile(
-        SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
-    const std::string helper = ReadTextFile(
-        SourceRoot() / "tools/gates/nightly-provenance.ps1");
+    const fs::path behavior_test_path = SourceRoot() / "tools/gates/test-nightly-provenance.ps1";
+    const std::string runner = ReadTextFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
+    const std::string frontier =
+        ReadTextFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
+    const std::string registrar =
+        ReadTextFile(SourceRoot() / "tools/gates/register-nightly-gate-task.ps1");
+    const std::string helper = ReadTextFile(SourceRoot() / "tools/gates/nightly-provenance.ps1");
     const std::string behavior_test = ReadTextFile(behavior_test_path);
     ASSERT_FALSE(runner.empty());
     ASSERT_FALSE(frontier.empty());
@@ -3070,17 +3448,12 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     // The timestamp in the filename and report comes from one run identity;
     // copying an older report cannot win by changing its filesystem mtime.
     EXPECT_NE(runner.find("$stamp = $generatedAt.ToString"), std::string::npos);
-    EXPECT_NE(runner.find("generated_at = $generatedAt.ToString(\"o\")"),
-              std::string::npos);
-    EXPECT_NE(runner.find("run_started_at = $runStartedAt.ToString(\"o\")"),
-              std::string::npos);
-    EXPECT_NE(runner.find("completed_at = $completedAt.ToString(\"o\")"),
-              std::string::npos);
-    EXPECT_NE(frontier.find("Sort-Object canonical_timestamp -Descending"),
-              std::string::npos);
+    EXPECT_NE(runner.find("generated_at = $generatedAt.ToString(\"o\")"), std::string::npos);
+    EXPECT_NE(runner.find("run_started_at = $runStartedAt.ToString(\"o\")"), std::string::npos);
+    EXPECT_NE(runner.find("completed_at = $completedAt.ToString(\"o\")"), std::string::npos);
+    EXPECT_NE(frontier.find("Sort-Object canonical_timestamp -Descending"), std::string::npos);
     EXPECT_NE(frontier.find("does not match generated_at"), std::string::npos);
-    EXPECT_EQ(frontier.find("Sort-Object LastWriteTimeUtc -Descending"),
-              std::string::npos);
+    EXPECT_EQ(frontier.find("Sort-Object LastWriteTimeUtc -Descending"), std::string::npos);
 
     // The runner proves it is the unique live scheduler instance before any
     // gate, using the explicit 1-based COM collection contract. Its report is
@@ -3105,12 +3478,11 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
               runner.find("Invoke-NightlyStep"));
     EXPECT_LT(runner.find("Assert-NightlyRegisteredTaskDefinition"),
               runner.find("Invoke-NightlyStep"));
-    const auto first_tree_check =
-        runner.find("Assert-NightlyTrackedTreeClean -RepoRoot $RepoRoot");
+    const auto first_tree_check = runner.find("Assert-NightlyTrackedTreeClean -RepoRoot $RepoRoot");
     ASSERT_NE(first_tree_check, std::string::npos);
-    EXPECT_NE(runner.find("Assert-NightlyTrackedTreeClean -RepoRoot $RepoRoot",
-                          first_tree_check + 1),
-              std::string::npos);
+    EXPECT_NE(
+        runner.find("Assert-NightlyTrackedTreeClean -RepoRoot $RepoRoot", first_tree_check + 1),
+        std::string::npos);
 
     // Validation rejects stale, future-dated, mixed-revision, malformed
     // interval, and scheduler-field evidence before consulting LastRunTime.
@@ -3132,8 +3504,7 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
          }) {
         EXPECT_NE(helper.find(seam), std::string::npos) << seam;
     }
-    EXPECT_NE(helper.find(
-                  "require run_started_at < completed_at == generated_at"),
+    EXPECT_NE(helper.find("require run_started_at < completed_at == generated_at"),
               std::string::npos);
 
     // Closure requires the exact registered root task, canonical action and
@@ -3155,25 +3526,20 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     EXPECT_NE(registrar.find("if ($alreadyCanonical)"), std::string::npos);
     EXPECT_NE(registrar.find("$PSCmdlet.ShouldProcess"), std::string::npos);
     EXPECT_NE(registrar.find("[ValidateSet(\"02:00\")]"), std::string::npos);
-    EXPECT_NE(registrar.find("-BuildPreset debug -RenderBudgetPreset release"),
-              std::string::npos);
+    EXPECT_NE(registrar.find("-BuildPreset debug -RenderBudgetPreset release"), std::string::npos);
     EXPECT_NE(registrar.find("-LogonType Interactive"), std::string::npos);
     EXPECT_NE(registrar.find("-RunLevel Limited"), std::string::npos);
-    EXPECT_NE(registrar.find("Assert-NightlyRegisteredTaskDefinition"),
-              std::string::npos);
-    EXPECT_NE(registrar.find("Assert-NightlyTaskRepairAllowed"),
-              std::string::npos);
+    EXPECT_NE(registrar.find("Assert-NightlyRegisteredTaskDefinition"), std::string::npos);
+    EXPECT_NE(registrar.find("Assert-NightlyTaskRepairAllowed"), std::string::npos);
     EXPECT_NE(registrar.find("$identitySid"), std::string::npos);
     EXPECT_NE(registrar.find("Definition mismatch:"), std::string::npos);
-    EXPECT_NE(helper.find("Resolve-NightlyPrincipalSidValue"),
-              std::string::npos);
+    EXPECT_NE(helper.find("Resolve-NightlyPrincipalSidValue"), std::string::npos);
     EXPECT_NE(helper.find("$AccountSidResolver"), std::string::npos);
     EXPECT_EQ(registrar.find("RunLevel Highest"), std::string::npos);
     EXPECT_EQ(registrar.find("BuiltInRole]::Administrator"), std::string::npos);
     const auto first_principal = registrar.find("-Principal $taskPrincipal");
     ASSERT_NE(first_principal, std::string::npos);
-    EXPECT_NE(registrar.find("-Principal $taskPrincipal", first_principal + 1),
-              std::string::npos);
+    EXPECT_NE(registrar.find("-Principal $taskPrincipal", first_principal + 1), std::string::npos);
     for (const char* seam : {
              "principal.sid",
              "principal.logon_type",
@@ -3232,10 +3598,10 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
 }
 
 TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
-    const std::string header = ReadTextFile(
-        SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
-    const std::string source = ReadTextFile(
-        SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
+    const std::string header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.h");
+    const std::string source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/FarLodSystem.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
 
@@ -3267,7 +3633,8 @@ TEST(RenderSmokeTest, FarLodWorkersUseImmutableSdfSnapshots) {
 }
 
 TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
-    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
@@ -3303,12 +3670,17 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
 }
 
 TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
-    const std::string header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
+    const std::string header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
     const std::string source = ReadRenderPipelineCombinedSources();
-    const std::string shader_header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
-    const std::string shader_source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
-    const std::string capture_header = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
-    const std::string capture_source = ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
+    const std::string shader_header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.h");
+    const std::string shader_source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/Shader.cpp");
+    const std::string capture_header =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.h");
+    const std::string capture_source =
+        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/CaptureHooks.cpp");
     ASSERT_FALSE(header.empty());
     ASSERT_FALSE(source.empty());
     ASSERT_FALSE(shader_header.empty());
@@ -3358,15 +3730,54 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     pass_metadata << "{\n";
     pass_metadata << "  \"schema\": \"luminumbra.render_framework.pass_metadata.v1\",\n";
     pass_metadata << "  \"passes\": [\n";
-    pass_metadata << "    {\"name\":\"shadow\",\"inputs\":[\"terrain_depth\"],\"outputs\":[\"shadow.depth_texture_array\"],\"resolution\":\"shadow_map\",\"clear\":\"depth\",\"load_store\":\"store depth cascades\",\"draw_count_source\":\"shadow_draws\"},\n";
-    pass_metadata << "    {\"name\":\"gbuffer\",\"inputs\":[\"terrain_meshes\",\"static_meshes\",\"material_lut\",\"terrain_texture_array\",\"terrain_normal_array\"],\"outputs\":[\"gbuffer.position\",\"gbuffer.normal_material\",\"gbuffer.albedo_roughness\",\"gbuffer.metallic_ao\",\"gbuffer.depth\"],\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_store\":\"store deferred attachments\",\"draw_count_source\":\"terrain_draws\"},\n";
-    pass_metadata << "    {\"name\":\"ssao\",\"inputs\":[\"gbuffer.position\",\"gbuffer.normal_material\",\"ssao.noise\"],\"outputs\":[\"ssao.raw\"],\"resolution\":\"screen\",\"clear\":\"color\",\"load_store\":\"store ambient occlusion\",\"draw_count_source\":\"ssao_draws\"},\n";
-    pass_metadata << "    {\"name\":\"ssao_blur\",\"inputs\":[\"ssao.raw\"],\"outputs\":[\"ssao.blur\"],\"resolution\":\"screen\",\"clear\":\"color\",\"load_store\":\"store blurred ambient occlusion\",\"draw_count_source\":\"ssao_blur_draws\"},\n";
-    pass_metadata << "    {\"name\":\"lighting\",\"inputs\":[\"gbuffer.*\",\"shadow.depth_texture_array\",\"ssao.blur\",\"terrain_texture_array\",\"material_lut\",\"water.fallback.black\"],\"outputs\":[\"lighting.color\",\"lighting.depth\"],\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_store\":\"store lit scene\",\"draw_count_source\":\"lighting_draws\"},\n";
-    pass_metadata << "    {\"name\":\"water\",\"inputs\":[\"lighting.opaque_color_copy\",\"gbuffer.depth\",\"water_meshes\",\"water.fallback.*\"],\"outputs\":[\"lighting.color\"],\"resolution\":\"screen\",\"clear\":\"load lighting\",\"load_store\":\"blend water into lighting\",\"draw_count_source\":\"water_draws\"},\n";
-    pass_metadata << "    {\"name\":\"skybox\",\"inputs\":[\"skybox_vertices\"],\"outputs\":[\"lighting.color\"],\"resolution\":\"screen\",\"clear\":\"load lighting\",\"load_store\":\"store sky contribution\",\"draw_count_source\":\"skybox_draws\"},\n";
-    pass_metadata << "    {\"name\":\"particles\",\"inputs\":[\"particle_instances\",\"gbuffer.depth\"],\"outputs\":[\"lighting.color\"],\"resolution\":\"screen\",\"clear\":\"load lighting\",\"load_store\":\"blend forward-lit particles\",\"draw_count_source\":\"particle_draws\"},\n";
-    pass_metadata << "    {\"name\":\"final_blit\",\"inputs\":[\"lighting.color\"],\"outputs\":[\"swapchain.color\"],\"resolution\":\"screen\",\"clear\":\"default color+depth\",\"load_store\":\"present-ready color\",\"draw_count_source\":\"final_blits\"}\n";
+    pass_metadata
+        << "    "
+           "{\"name\":\"shadow\",\"inputs\":[\"terrain_depth\"],\"outputs\":[\"shadow.depth_"
+           "texture_array\"],\"resolution\":\"shadow_map\",\"clear\":\"depth\",\"load_store\":"
+           "\"store depth cascades\",\"draw_count_source\":\"shadow_draws\"},\n";
+    pass_metadata
+        << "    "
+           "{\"name\":\"gbuffer\",\"inputs\":[\"terrain_meshes\",\"static_meshes\",\"material_"
+           "lut\",\"terrain_texture_array\",\"terrain_normal_array\"],\"outputs\":[\"gbuffer."
+           "position\",\"gbuffer.normal_material\",\"gbuffer.albedo_roughness\",\"gbuffer.metallic_"
+           "ao\",\"gbuffer.depth\"],\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_"
+           "store\":\"store deferred attachments\",\"draw_count_source\":\"terrain_draws\"},\n";
+    pass_metadata
+        << "    "
+           "{\"name\":\"ssao\",\"inputs\":[\"gbuffer.position\",\"gbuffer.normal_material\",\"ssao."
+           "noise\"],\"outputs\":[\"ssao.raw\"],\"resolution\":\"screen\",\"clear\":\"color\","
+           "\"load_store\":\"store ambient occlusion\",\"draw_count_source\":\"ssao_draws\"},\n";
+    pass_metadata << "    "
+                     "{\"name\":\"ssao_blur\",\"inputs\":[\"ssao.raw\"],\"outputs\":[\"ssao.blur\"]"
+                     ",\"resolution\":\"screen\",\"clear\":\"color\",\"load_store\":\"store "
+                     "blurred ambient occlusion\",\"draw_count_source\":\"ssao_blur_draws\"},\n";
+    pass_metadata << "    "
+                     "{\"name\":\"lighting\",\"inputs\":[\"gbuffer.*\",\"shadow.depth_texture_"
+                     "array\",\"ssao.blur\",\"terrain_texture_array\",\"material_lut\",\"water."
+                     "fallback.black\"],\"outputs\":[\"lighting.color\",\"lighting.depth\"],"
+                     "\"resolution\":\"screen\",\"clear\":\"color+depth\",\"load_store\":\"store "
+                     "lit scene\",\"draw_count_source\":\"lighting_draws\"},\n";
+    pass_metadata
+        << "    "
+           "{\"name\":\"water\",\"inputs\":[\"lighting.opaque_color_copy\",\"gbuffer.depth\","
+           "\"water_meshes\",\"water.fallback.*\"],\"outputs\":[\"lighting.color\"],\"resolution\":"
+           "\"screen\",\"clear\":\"load lighting\",\"load_store\":\"blend water into "
+           "lighting\",\"draw_count_source\":\"water_draws\"},\n";
+    pass_metadata
+        << "    "
+           "{\"name\":\"skybox\",\"inputs\":[\"skybox_vertices\"],\"outputs\":[\"lighting.color\"],"
+           "\"resolution\":\"screen\",\"clear\":\"load lighting\",\"load_store\":\"store sky "
+           "contribution\",\"draw_count_source\":\"skybox_draws\"},\n";
+    pass_metadata << "    "
+                     "{\"name\":\"particles\",\"inputs\":[\"particle_instances\",\"gbuffer.depth\"]"
+                     ",\"outputs\":[\"lighting.color\"],\"resolution\":\"screen\",\"clear\":\"load "
+                     "lighting\",\"load_store\":\"blend forward-lit "
+                     "particles\",\"draw_count_source\":\"particle_draws\"},\n";
+    pass_metadata << "    "
+                     "{\"name\":\"final_blit\",\"inputs\":[\"lighting.color\"],\"outputs\":["
+                     "\"swapchain.color\"],\"resolution\":\"screen\",\"clear\":\"default "
+                     "color+depth\",\"load_store\":\"present-ready "
+                     "color\",\"draw_count_source\":\"final_blits\"}\n";
     pass_metadata << "  ]\n";
     pass_metadata << "}\n";
 
@@ -3375,19 +3786,23 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     resource_registry << "{\n";
     resource_registry << "  \"schema\": \"luminumbra.render_framework.resource_registry.v1\",\n";
     resource_registry << "  \"debug_labels\": true,\n";
-    resource_registry << "  \"resource_types\": [\"framebuffer\", \"texture\", \"renderbuffer\", \"buffer\", \"vertex_array\", \"shader_program\"],\n";
-    resource_registry << "  \"resize_recreates\": [\"lighting.fbo\", \"gbuffer.fbo\", \"ssao.fbo\", \"ssao.blur_fbo\"],\n";
+    resource_registry << "  \"resource_types\": [\"framebuffer\", \"texture\", \"renderbuffer\", "
+                         "\"buffer\", \"vertex_array\", \"shader_program\"],\n";
+    resource_registry << "  \"resize_recreates\": [\"lighting.fbo\", \"gbuffer.fbo\", "
+                         "\"ssao.fbo\", \"ssao.blur_fbo\"],\n";
     resource_registry << "  \"shutdown_requires_empty_registry\": true\n";
     resource_registry << "}\n";
 
-    std::ofstream terrain_diagnostics(RenderFrameworkArtifactRoot() / "terrain_material_diagnostics.json");
+    std::ofstream terrain_diagnostics(RenderFrameworkArtifactRoot() /
+                                      "terrain_material_diagnostics.json");
     ASSERT_TRUE(terrain_diagnostics);
     terrain_diagnostics << "{\n";
     terrain_diagnostics << "  \"schema\": \"luminumbra.render_framework.terrain_materials.v1\",\n";
     terrain_diagnostics << "  \"texture_array\": \"terrain.texture_array\",\n";
     terrain_diagnostics << "  \"material_lut\": \"terrain.material_lut\",\n";
     terrain_diagnostics << "  \"material_registry\": \"data/common/materials.json\",\n";
-    terrain_diagnostics << "  \"missing_texture_behavior\": \"visible magenta checker fallback\",\n";
+    terrain_diagnostics
+        << "  \"missing_texture_behavior\": \"visible magenta checker fallback\",\n";
     terrain_diagnostics << "  \"fallback_counter\": \"terrain_texture_fallback_layers\",\n";
     terrain_diagnostics << "  \"production_requires_zero_fallback_layers\": true,\n";
     terrain_diagnostics << "  \"terrain_texture_layers\": 5\n";
@@ -3398,7 +3813,10 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     shader_health << "{\n";
     shader_health << "  \"schema\": \"luminumbra.render_framework.shader_health.v1\",\n";
     shader_health << "  \"runtime_validity_requires_compile_and_link_success\": true,\n";
-    shader_health << "  \"programs\": [\"basic\", \"g_buffer\", \"instanced_mesh_gbuffer\", \"lighting_pass\", \"skybox\", \"shadow_map\", \"ssao\", \"ssao_blur\", \"water\", \"rml_ui\", \"loading_hologram\", \"loading_visual\", \"volumetric_lighting\", \"magical_particles\"]\n";
+    shader_health << "  \"programs\": [\"basic\", \"g_buffer\", \"instanced_mesh_gbuffer\", "
+                     "\"lighting_pass\", \"skybox\", \"shadow_map\", \"ssao\", \"ssao_blur\", "
+                     "\"water\", \"rml_ui\", \"loading_hologram\", \"loading_visual\", "
+                     "\"volumetric_lighting\", \"magical_particles\"]\n";
     shader_health << "}\n";
 
     std::ofstream capture_hooks(RenderFrameworkArtifactRoot() / "capture_hooks.json");

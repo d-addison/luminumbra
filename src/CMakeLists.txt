@@ -23,9 +23,6 @@ target_include_directories(luminumbra_client PUBLIC
     # The 'src' directory, which is the root for includes like "luminumbra_common/..."
     ${CMAKE_CURRENT_SOURCE_DIR} 
     
-    # Vendor includes specific to the client
-    ${CMAKE_SOURCE_DIR}/vendor/imgui
-    ${CMAKE_SOURCE_DIR}/vendor/stb
     # vendor root, for single-header vendor libs included as "<lib>/<header>.h"
     # (e.g. renderdoc/renderdoc_app.h -- the GPU-06 in-app capture API).
     ${CMAKE_SOURCE_DIR}/vendor
@@ -44,6 +41,8 @@ target_link_libraries(luminumbra_client PUBLIC
     nlohmann_json
     sol2
     lua
+    imgui
+    stb_headers
 )
 
 # --- Headless Server Executable (T-I3-12) ---

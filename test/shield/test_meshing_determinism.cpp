@@ -17,8 +17,8 @@
 #include <iostream>
 #include <vector>
 
-#include "world/Chunk.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 
 using namespace Luminumbra;
@@ -29,7 +29,8 @@ namespace {
 // VoxelVertex must stay tightly packed (Vec3 + Vec3 + u32 = 28 bytes) for raw
 // byte hashing to be meaningful. If padding ever appears, this gate must be
 // rewritten to hash fields explicitly.
-static_assert(sizeof(VoxelVertex) == 28, "VoxelVertex layout changed; meshing determinism hashes are stale");
+static_assert(sizeof(VoxelVertex) == 28,
+              "VoxelVertex layout changed; meshing determinism hashes are stale");
 
 constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
@@ -60,18 +61,17 @@ MeshHashes HashChunkMesh(const TerrainGenParams& params, int seed, const IVec3& 
     MeshHashes hashes;
     hashes.vertex_count = chunk.mesh_vertices.size();
     hashes.index_count = chunk.mesh_indices.size();
-    hashes.vertex_hash = Fnv1a64(chunk.mesh_vertices.data(), chunk.mesh_vertices.size() * sizeof(VoxelVertex));
+    hashes.vertex_hash =
+        Fnv1a64(chunk.mesh_vertices.data(), chunk.mesh_vertices.size() * sizeof(VoxelVertex));
     hashes.index_hash = Fnv1a64(chunk.mesh_indices.data(), chunk.mesh_indices.size() * sizeof(u32));
     return hashes;
 }
 
 void PrintHashes(const char* combo, int step, const MeshHashes& hashes) {
-    std::cout << "[ MESHHASH ] " << combo << " step " << step
-              << " vertices=" << hashes.vertex_count
-              << " indices=" << hashes.index_count
-              << " vertex_hash=0x" << std::hex << std::setfill('0') << std::setw(16) << hashes.vertex_hash
-              << " index_hash=0x" << std::setw(16) << hashes.index_hash
-              << std::dec << std::setfill(' ') << std::endl;
+    std::cout << "[ MESHHASH ] " << combo << " step " << step << " vertices=" << hashes.vertex_count
+              << " indices=" << hashes.index_count << " vertex_hash=0x" << std::hex
+              << std::setfill('0') << std::setw(16) << hashes.vertex_hash << " index_hash=0x"
+              << std::setw(16) << hashes.index_hash << std::dec << std::setfill(' ') << std::endl;
 }
 
 struct ExpectedMeshHashes {
@@ -80,7 +80,20 @@ struct ExpectedMeshHashes {
     std::uint64_t index_hash;
 };
 
-void VerifyCombo(const char* combo, const TerrainGenParams& params, int seed, const IVec3& coords,
+constexpr std::uint64_t ToolchainVertexHash(std::uint64_t msvc, std::uint64_t gcc_clang) {
+#ifdef _MSC_VER
+    (void)gcc_clang;
+    return msvc;
+#else
+    (void)msvc;
+    return gcc_clang;
+#endif
+}
+
+void VerifyCombo(const char* combo,
+                 const TerrainGenParams& params,
+                 int seed,
+                 const IVec3& coords,
                  const ExpectedMeshHashes (&expected)[3]) {
     for (const ExpectedMeshHashes& exp : expected) {
         const MeshHashes hashes = HashChunkMesh(params, seed, coords, exp.step);
@@ -130,41 +143,39 @@ TerrainGenParams MakeFlatSurfaceParams() {
 // DETERMINISM HASH GATES
 // =====================================================================================
 
-// SHIELD-17 re-pin (spec 021, 2026-07-03): the step-1 VERTEX hashes below were
-// re-pinned for commit d53c99c5 (2026-06-26, "analytic MC normals") — a
-// deliberate render-only change to unit-step vertex NORMALS. Evidence chain:
-// index hashes + vertex counts UNCHANGED (same topology), all pins pass
-// byte-exact at d53c99c5~1, and mesh bytes are world_hash-EXCLUDED so --smoke
-// was unaffected
-// throughout (which is exactly why this drift sat invisible until the full
-// ctest lane ran — the OPS-09 lesson).
-//
-// SHIELD-08 re-pin (2026-07-10 nightly 200301): steps 2/4 deliberately moved
-// from the analytic heightfield path to aligned samples of the resident
-// authoritative SDF lattice. All three step-1 vertex/index pairs below stayed
-// byte-identical. The six coarse pairs changed deterministically, were printed
-// identically by repeated focused runs, and remain render-only/world-hash
-// excluded. This records the intended representation change without changing
-// a simulation hash or relaxing the byte-exact gate.
+// Index topology is toolchain-independent. Floating-point vertex bytes differ
+// between MSVC and GCC/Clang, so each compiler family carries a fixed baseline;
+// every supported CI lane still blocks unreviewed drift.
 TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
     const ExpectedMeshHashes expected[3] = {
-        {1, 0xc9f19ad96ac304caull, 0x3810ee7a8afe33d3ull},
-        {2, 0xc97ec36ec178039dull, 0xdb4674d1012830e6ull},
-        {4, 0xe844d2832557de7dull, 0xcfa16e271f9baec9ull},
+        {1,
+         ToolchainVertexHash(0xc9f19ad96ac304caull, 0x5e413eacf6743dcaull),
+         0x3810ee7a8afe33d3ull},
+        {2,
+         ToolchainVertexHash(0xc97ec36ec178039dull, 0x2543256b56717b05ull),
+         0xdb4674d1012830e6ull},
+        {4,
+         ToolchainVertexHash(0xe844d2832557de7dull, 0x3620685e67934a62ull),
+         0xcfa16e271f9baec9ull},
     };
-    VerifyCombo("archipelago seed=42 chunk=(0,0,0)", MakeArchipelagoParams(), 42, IVec3(0, 0, 0), expected);
+    VerifyCombo(
+        "archipelago seed=42 chunk=(0,0,0)", MakeArchipelagoParams(), 42, IVec3(0, 0, 0), expected);
 }
 
 TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
-    // Step 1 keeps the d53c99c5 analytic-normal pin. Steps 2 and 4 now sample
-    // the resident cave-bearing SDF and therefore intentionally produce
-    // non-empty topology instead of the old empty heightfield approximation.
     const ExpectedMeshHashes expected[3] = {
-        {1, 0x3c13cffb2df9002bull, 0x5c5461c111230d31ull},
-        {2, 0x4ccea9a8928dcb11ull, 0x31e388b242ffade9ull},
-        {4, 0x93681086fb859095ull, 0x8a80deef5ebdaf50ull},
+        {1,
+         ToolchainVertexHash(0x3c13cffb2df9002bull, 0x5778e8eb6ded2cd7ull),
+         0x5c5461c111230d31ull},
+        {2,
+         ToolchainVertexHash(0x4ccea9a8928dcb11ull, 0x71624a244e446b23ull),
+         0x31e388b242ffade9ull},
+        {4,
+         ToolchainVertexHash(0x93681086fb859095ull, 0x52184dca60f9e769ull),
+         0x8a80deef5ebdaf50ull},
     };
-    VerifyCombo("caves seed=12345 chunk=(0,0,0)", MakeCaveParams(), 12345, IVec3(0, 0, 0), expected);
+    VerifyCombo(
+        "caves seed=12345 chunk=(0,0,0)", MakeCaveParams(), 12345, IVec3(0, 0, 0), expected);
 }
 
 TEST(MeshingDeterminism, FlatSurfaceChunkHashesAreStable) {
@@ -173,7 +184,8 @@ TEST(MeshingDeterminism, FlatSurfaceChunkHashesAreStable) {
         {2, 0x440ca86c8e7feb2full, 0x84202cee8631b65full},
         {4, 0xbc6a9e9e583d2347ull, 0x08953fb8355470d3ull},
     };
-    VerifyCombo("flat seed=1337 chunk=(0,0,0)", MakeFlatSurfaceParams(), 1337, IVec3(0, 0, 0), expected);
+    VerifyCombo(
+        "flat seed=1337 chunk=(0,0,0)", MakeFlatSurfaceParams(), 1337, IVec3(0, 0, 0), expected);
 }
 
 TEST(MeshingDeterminism, CoarseStepUsesAuthoritativeSdfLattice) {
@@ -185,7 +197,8 @@ TEST(MeshingDeterminism, CoarseStepUsesAuthoritativeSdfLattice) {
 
     constexpr std::size_t lattice_width = static_cast<std::size_t>(CHUNK_SIZE_X + 1);
     constexpr std::size_t lattice_height = static_cast<std::size_t>(CHUNK_SIZE_Y + 1);
-    chunk.sdf_data.resize(lattice_width * lattice_height * static_cast<std::size_t>(CHUNK_SIZE_Z + 1));
+    chunk.sdf_data.resize(lattice_width * lattice_height *
+                          static_cast<std::size_t>(CHUNK_SIZE_Z + 1));
 
     // This authoritative lattice describes a horizontal surface at y=12. It
     // deliberately disagrees with the flat analytic terrain (y=0), so using
@@ -193,9 +206,9 @@ TEST(MeshingDeterminism, CoarseStepUsesAuthoritativeSdfLattice) {
     for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
         for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
             for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
-                const std::size_t index = static_cast<std::size_t>(x)
-                    + static_cast<std::size_t>(y) * lattice_width
-                    + static_cast<std::size_t>(z) * lattice_width * lattice_height;
+                const std::size_t index =
+                    static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * lattice_width +
+                    static_cast<std::size_t>(z) * lattice_width * lattice_height;
                 chunk.sdf_data[index] = static_cast<float>(y) - 12.0f;
             }
         }
@@ -235,14 +248,16 @@ TEST(MeshingDeterminism, Benchmark_PolygoniseTerrainStep1) {
 
         // Warm-up run (also validates the fixture produces a mesh).
         World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 1);
-        ASSERT_FALSE(chunk.mesh_vertices.empty()) << fixture.name << " fixture produced an empty mesh";
+        ASSERT_FALSE(chunk.mesh_vertices.empty())
+            << fixture.name << " fixture produced an empty mesh";
 
         const auto start = std::chrono::steady_clock::now();
         for (int i = 0; i < kIterations; ++i) {
             World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 1);
         }
         const auto end = std::chrono::steady_clock::now();
-        const auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+        const auto total_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
         std::cout << "[ MESHPERF ] " << fixture.name << " PolygoniseTerrain step=1 x" << kIterations
                   << ": total " << total_us << " us, avg "
                   << (static_cast<double>(total_us) / kIterations) << " us/chunk" << std::endl;

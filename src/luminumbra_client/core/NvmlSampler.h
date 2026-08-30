@@ -28,13 +28,14 @@ public:
     // once; cheap no-op + false on non-NVIDIA / headless / non-Windows.
     bool init() {
 #if defined(_WIN32)
-        if (m_ok) return true;
+        if (m_ok)
+            return true;
         m_lib = ::LoadLibraryA("nvml.dll");
         if (!m_lib) {
-            m_lib = ::LoadLibraryA(
-                "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
+            m_lib = ::LoadLibraryA("C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
         }
-        if (!m_lib) return false;
+        if (!m_lib)
+            return false;
         // Route through void* to satisfy -Werror=cast-function-type (GCC rejects a
         // direct FARPROC -> typed-fn-ptr reinterpret_cast). Function<->object
         // pointer conversion is conditionally-supported and valid on Win64.
@@ -42,16 +43,19 @@ public:
             return reinterpret_cast<void*>(::GetProcAddress(m_lib, name));
         };
         auto p_init = reinterpret_cast<int (*)()>(load("nvmlInit_v2"));
-        m_getHandle = reinterpret_cast<int (*)(unsigned int, void**)>(
-            load("nvmlDeviceGetHandleByIndex_v2"));
-        m_getPower = reinterpret_cast<int (*)(void*, unsigned int*)>(
-            load("nvmlDeviceGetPowerUsage"));
-        m_getClock = reinterpret_cast<int (*)(void*, int, unsigned int*)>(
-            load("nvmlDeviceGetClockInfo"));
+        m_getHandle =
+            reinterpret_cast<int (*)(unsigned int, void**)>(load("nvmlDeviceGetHandleByIndex_v2"));
+        m_getPower =
+            reinterpret_cast<int (*)(void*, unsigned int*)>(load("nvmlDeviceGetPowerUsage"));
+        m_getClock =
+            reinterpret_cast<int (*)(void*, int, unsigned int*)>(load("nvmlDeviceGetClockInfo"));
         m_shutdown = reinterpret_cast<int (*)()>(load("nvmlShutdown"));
-        if (!p_init || !m_getHandle || !m_getPower || !m_getClock) return false;
-        if (p_init() != 0) return false;             // NVML_SUCCESS == 0
-        if (m_getHandle(0u, &m_dev) != 0) return false;
+        if (!p_init || !m_getHandle || !m_getPower || !m_getClock)
+            return false;
+        if (p_init() != 0)
+            return false; // NVML_SUCCESS == 0
+        if (m_getHandle(0u, &m_dev) != 0)
+            return false;
         m_ok = true;
         return true;
 #else
@@ -59,13 +63,16 @@ public:
 #endif
     }
 
-    bool supported() const { return m_ok; }
+    bool supported() const {
+        return m_ok;
+    }
 
     // Sample GPU board power (watts) + GRAPHICS clock (MHz). Returns true if at
     // least one value was read; leaves outputs untouched on failure.
     bool sample(double& power_w, double& clock_mhz) {
 #if defined(_WIN32)
-        if (!m_ok) return false;
+        if (!m_ok)
+            return false;
         unsigned int mw = 0u, mhz = 0u;
         bool got = false;
         if (m_getPower && m_getPower(m_dev, &mw) == 0) {
@@ -86,14 +93,17 @@ public:
 
     void shutdown() {
 #if defined(_WIN32)
-        if (m_ok && m_shutdown) m_shutdown();
-        if (m_lib) ::FreeLibrary(m_lib);
+        if (m_ok && m_shutdown)
+            m_shutdown();
+        if (m_lib)
+            ::FreeLibrary(m_lib);
         m_lib = nullptr;
         m_ok = false;
 #endif
     }
 
 private:
+    bool m_ok = false;
 #if defined(_WIN32)
     HMODULE m_lib = nullptr;
     void* m_dev = nullptr;
@@ -101,9 +111,8 @@ private:
     int (*m_getPower)(void*, unsigned int*) = nullptr;
     int (*m_getClock)(void*, int, unsigned int*) = nullptr;
     int (*m_shutdown)() = nullptr;
-    bool m_ok = false;
 #endif
 };
 
-}  // namespace Client
-}  // namespace Luminumbra
+} // namespace Client
+} // namespace Luminumbra

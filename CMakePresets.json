@@ -13,6 +13,7 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "LUMINUMBRA_ENABLE_DILIGENT": "OFF",
         "LUMINUMBRA_WARNINGS_AS_ERRORS": "ON"
       }
     },

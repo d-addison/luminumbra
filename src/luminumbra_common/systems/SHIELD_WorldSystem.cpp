@@ -1,31 +1,32 @@
 #include "SHIELD_WorldSystem.h"
-#include "entt/entt.hpp"
-#include "../world/MarchingCubes.h"
+#include "../core/JobWatchdog.h" // OPS-11: opt-in named-phase wedge reporter for unbounded waits
+#include "../core/Log.h"
 #include "../world/FarLodStore.h"
 #include "../world/HydraulicErosion.h" // T-I6-A2
-#include <shared_mutex>
+#include "../world/MarchingCubes.h"
+#include "WaterSystem.h"
+#include "entt/entt.hpp"
+#include "systems/PhysicsSystem.h"
+#include <algorithm> // Required for std::max and std::min
 #include <array>
 #include <atomic>
 #include <chrono> // TEMP diag (spec 008 follow-up): per-sub-phase streaming timing
 #include <cmath>
 #include <cstdlib> // std::getenv for the opt-in job watchdog (LUMINUMBRA_JOB_WATCHDOG)
 #include <cstring> // std::memcpy for the deterministic water-state hash
-#include <thread>  // opt-in job-wedge watchdog monitor thread
-#include <algorithm> // Required for std::max and std::min
 #include <filesystem>
 #include <limits>
 #include <optional>
+#include <shared_mutex>
+#include <thread> // opt-in job-wedge watchdog monitor thread
 #include <unordered_map>
 #include <unordered_set>
-#include "systems/PhysicsSystem.h"
-#include "../core/JobWatchdog.h" // OPS-11: opt-in named-phase wedge reporter for unbounded waits
-#include "../core/Log.h"
-#include "WaterSystem.h"
 
 constexpr int BASE_WORK_BUDGET_EQUIVALENT = 320;
-const int MAX_CHUNKS_TO_PROCESS_PER_FRAME = std::max(1, 
-    static_cast<int>(BASE_WORK_BUDGET_EQUIVALENT / (static_cast<float>(Luminumbra::CHUNK_VOLUME) / 4096.0f))
-);
+const int MAX_CHUNKS_TO_PROCESS_PER_FRAME =
+    std::max(1,
+             static_cast<int>(BASE_WORK_BUDGET_EQUIVALENT /
+                              (static_cast<float>(Luminumbra::CHUNK_VOLUME) / 4096.0f)));
 const int MAX_COLLISION_MESHES_PER_FRAME = 16;
 // Per dispatch, at most this many sorted-prefix hole-fill candidates ride the
 // High job lane. The cap keeps "High" meaning near-field holes the player can
@@ -46,9 +47,9 @@ constexpr std::size_t STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN = 3;
 // full-resolution sim truth; anything else (empty = surface-band/coarse
 // generated, wrong-sized = malformed, SHIELD-04) needs the promotion lane to
 // (re)generate the full field before a unit-step polygonise may read it.
-constexpr std::size_t kFullSdfLattice =
-    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Z + 1);
 
 // SHIELD-03 (017-B FR-B-005): the FIXED activation pipeline latency K, in sim
 // ticks. A batch dispatched at tick D becomes sim-visible at D+K — a pure
@@ -96,6 +97,14 @@ constexpr float MAX_WATER_COMPRESSION = 0.2f;
 
 namespace {
 
+template<typename T>
+FastNoise::SmartNode<T> NewWorldNoise() {
+    // Keep world generation on one x86 SIMD implementation. Auto-selection
+    // otherwise changes persisted terrain when the same build moves between
+    // AVX2 and AVX-512 hosts.
+    return FastNoise::New<T>(FastSIMD::Level_AVX2);
+}
+
 constexpr float kCaveSurfaceCapDepth = 18.0f;
 constexpr float kCaveSurfaceFullDepth = 24.0f;
 // FR-A3: surface-break feature width above the cap. The blend ramps from a
@@ -120,8 +129,10 @@ float cave_surface_blend(float terrain_density, float effective_cap) {
     return smoothstep01((depth_below_surface - effective_cap) / kCaveSurfaceCapBand);
 }
 
-float surface_capped_cave_density(float terrain_density, float raw_cave_noise,
-                                  const TerrainGenParams& params, float effective_cap) {
+float surface_capped_cave_density(float terrain_density,
+                                  float raw_cave_noise,
+                                  const TerrainGenParams& params,
+                                  float effective_cap) {
     const float cave_val = std::clamp((raw_cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
     const float cave_density = (cave_val - params.cave_threshold) * params.cave_carve_value;
     const float cap_blend = cave_surface_blend(terrain_density, effective_cap);
@@ -147,10 +158,13 @@ float exp_smax(float a, float b, float k) {
 // where terrain is solid/negative this can flip it positive == air). Order-free.
 // When effective_cap==18 and feature_carve==0 and carve_smoothness<=0 this is
 // byte-identical to the original apply_cave_field.
-float apply_cave_field(float terrain_density, float raw_cave_noise,
-                       const TerrainGenParams& params, float effective_cap,
+float apply_cave_field(float terrain_density,
+                       float raw_cave_noise,
+                       const TerrainGenParams& params,
+                       float effective_cap,
                        float feature_carve) {
-    const float caves = std::max(terrain_density,
+    const float caves = std::max(
+        terrain_density,
         surface_capped_cave_density(terrain_density, raw_cave_noise, params, effective_cap));
     if (feature_carve <= 0.0f) {
         return caves;
@@ -184,7 +198,8 @@ u64 SbCellSeed(int world_seed, u32 salt, int cell_x, int cell_z) {
 
 struct SbSplitMix64 {
     u64 state;
-    explicit SbSplitMix64(u64 seed) : state(seed) {}
+    explicit SbSplitMix64(u64 seed)
+        : state(seed) {}
     u64 next() {
         state += 0x9E3779B97F4A7C15ull;
         u64 z = state;
@@ -215,7 +230,8 @@ float sdCappedCone(float px, float py, float pz, float h, float r1, float r2) {
     const float cax = qx - std::min(qx, (py < 0.0f) ? r1 : r2);
     const float cay = std::abs(py) - h;
     const float k2dot = k2x * k2x + k2y * k2y;
-    const float t = std::clamp(((k1x - qx) * k2x + (k1y - py) * k2y) / std::max(1e-6f, k2dot), 0.0f, 1.0f);
+    const float t =
+        std::clamp(((k1x - qx) * k2x + (k1y - py) * k2y) / std::max(1e-6f, k2dot), 0.0f, 1.0f);
     const float cbx = qx - k1x + k2x * t;
     const float cby = py - k1y + k2y * t;
     const float s = (cbx < 0.0f && cay < 0.0f) ? -1.0f : 1.0f;
@@ -227,15 +243,15 @@ struct SurfaceBreakFeature {
     bool valid = false;
     float center_x = 0.0f;
     float center_z = 0.0f;
-    float radius = 0.0f;   // surface footprint radius (m), < max_feature_radius
-    float depth = 0.0f;    // funnel depth (m)
-    bool shaft = false;    // true => vertical capsule (cenote), false => cone funnel
+    float radius = 0.0f; // surface footprint radius (m), < max_feature_radius
+    float depth = 0.0f;  // funnel depth (m)
+    bool shaft = false;  // true => vertical capsule (cenote), false => cone funnel
 };
 
 // Decode the feature (if any) authored in doline cell (cx, cz). Pure fn of seed +
 // cell coords. The same decode runs on CPU and GPU.
-SurfaceBreakFeature DecodeSurfaceBreakCell(int seed, int cx, int cz,
-                                           const TerrainGenParams& params) {
+SurfaceBreakFeature
+DecodeSurfaceBreakCell(int seed, int cx, int cz, const TerrainGenParams& params) {
     SurfaceBreakFeature f;
     SbSplitMix64 rng(SbCellSeed(seed, kSurfaceBreakSalt, cx, cz));
     const float accept = rng.next_unit();
@@ -253,7 +269,7 @@ SurfaceBreakFeature DecodeSurfaceBreakCell(int seed, int cx, int cz,
     // Power-law diameter (truncated Pareto, beta ~ 2.5): D = Dmin * (1-u)^(-1/(b-1)).
     const float u = rng.next_unit();
     constexpr float kBeta = 2.5f;
-    constexpr float kDmin = 6.0f;   // metres
+    constexpr float kDmin = 6.0f; // metres
     const float kDmax = std::min(120.0f, 2.0f * params.max_feature_radius);
     float diameter = kDmin * std::pow(std::max(1e-4f, 1.0f - u), -1.0f / (kBeta - 1.0f));
     diameter = std::clamp(diameter, kDmin, kDmax);
@@ -318,12 +334,18 @@ u64 horizontal_chunk_key(int x, int z) {
     return (static_cast<u64>(static_cast<u32>(x)) << 32u) | static_cast<u32>(z);
 }
 
-int streaming_radius_for_pressure(std::size_t active_chunks, std::size_t loading_chunks, std::size_t idle_chunks, bool generation_active, bool meshing_active, std::size_t anchor_count) {
+int streaming_radius_for_pressure(std::size_t active_chunks,
+                                  std::size_t loading_chunks,
+                                  std::size_t idle_chunks,
+                                  bool generation_active,
+                                  bool meshing_active,
+                                  std::size_t anchor_count) {
     const std::size_t pending_chunks = loading_chunks + idle_chunks;
     int radius = RENDER_DISTANCE;
     if (active_chunks < 800u && !generation_active) {
         radius = std::min(radius, 24);
-    } else if (generation_active || meshing_active || pending_chunks > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME * 8)) {
+    } else if (generation_active || meshing_active ||
+               pending_chunks > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME * 8)) {
         radius = std::min(radius, 20);
     } else if (active_chunks > STREAMING_MAX_ACTIVE_CHUNKS_BUDGET * 3u / 4u) {
         radius = std::min(radius, 24);
@@ -338,8 +360,10 @@ int streaming_radius_for_pressure(std::size_t active_chunks, std::size_t loading
         const double columns_per_anchor =
             static_cast<double>(STREAMING_MAX_ACTIVE_CHUNKS_BUDGET) /
             static_cast<double>(anchor_count * STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN);
-        const int budget_radius = static_cast<int>(std::floor(std::sqrt(std::max(1.0, columns_per_anchor / kPi))));
-        radius = std::min(radius, std::clamp(budget_radius, STREAMING_MULTI_ANCHOR_MIN_RADIUS, RENDER_DISTANCE));
+        const int budget_radius =
+            static_cast<int>(std::floor(std::sqrt(std::max(1.0, columns_per_anchor / kPi))));
+        radius = std::min(
+            radius, std::clamp(budget_radius, STREAMING_MULTI_ANCHOR_MIN_RADIUS, RENDER_DISTANCE));
     }
 
     return radius;
@@ -360,10 +384,16 @@ void replace_chunk_collision(PhysicsSystem& physics_system, Luminumbra::Chunk& c
     chunk.has_collision.store(true, std::memory_order_release);
 }
 
-}
+} // namespace
 
-SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system, WaterSystem* water_system, const TerrainGenParams& params, int seed)
-    : m_job_system(job_system), m_params(params), m_seed(seed), m_water_system(water_system) {
+SHIELD_WorldSystem::SHIELD_WorldSystem(JobSystem* job_system,
+                                       WaterSystem* water_system,
+                                       const TerrainGenParams& params,
+                                       int seed)
+    : m_job_system(job_system)
+    , m_params(params)
+    , m_seed(seed)
+    , m_water_system(water_system) {
     reinitialize_noise();
 }
 
@@ -417,7 +447,7 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
         return false;
     }
     if (has_active_job(front.handle)) {
-        return false;  // FIFO head still running — later batches wait their turn
+        return false; // FIFO head still running — later batches wait their turn
     }
     for (auto& chunk : front.chunks) {
         if (!chunk) {
@@ -437,8 +467,7 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
 void SHIELD_WorldSystem::publish_completed_generation_jobs(bool force) {
     // Drain every publishable front batch, in FIFO order (publication order
     // == dispatch order — deterministic).
-    while (publish_front_generation_batch(force)) {
-    }
+    while (publish_front_generation_batch(force)) {}
 }
 
 void SHIELD_WorldSystem::wait_for_meshing_jobs() {
@@ -486,8 +515,8 @@ bool SHIELD_WorldSystem::sim_available_lod0(const ::Luminumbra::Chunk& chunk) {
     // Barrier-era definition: the LOD0 render mesh has published. The
     // activation queue redefines this to tick-keyed availability at the
     // barrier-swap increment (017-B FR-B-005) — one function, all consumers.
-    return chunk.current_lod.load(std::memory_order_acquire) == 0 &&
-           !chunk.mesh_vertices.empty() && !chunk.mesh_indices.empty();
+    return chunk.current_lod.load(std::memory_order_acquire) == 0 && !chunk.mesh_vertices.empty() &&
+           !chunk.mesh_indices.empty();
 }
 
 bool SHIELD_WorldSystem::promotion_jobs_active() const {
@@ -496,8 +525,7 @@ bool SHIELD_WorldSystem::promotion_jobs_active() const {
 }
 
 bool SHIELD_WorldSystem::promotion_pipeline_pending() const {
-    return promotion_jobs_active() ||
-           !m_streaming_state.promotion_job_chunks.empty() ||
+    return promotion_jobs_active() || !m_streaming_state.promotion_job_chunks.empty() ||
            !m_streaming_state.pending_promotion_mesh.empty();
 }
 
@@ -530,7 +558,7 @@ void SHIELD_WorldSystem::shadow_note_ready(ChunkID id) {
     }
     const auto it = m_shadow_generation_dispatch_tick.find(id);
     if (it == m_shadow_generation_dispatch_tick.end()) {
-        return;  // boot-path / save-adopted chunk, or a re-mesh — not a first activation
+        return; // boot-path / save-adopted chunk, or a re-mesh — not a first activation
     }
     m_shadow_gen_latency_samples.push_back(m_shadow_current_tick - it->second);
     m_shadow_generation_dispatch_tick.erase(it);
@@ -559,8 +587,8 @@ SHIELD_WorldSystem::ActivationShadowReport SHIELD_WorldSystem::activation_shadow
     report.promotion_to_publish_ticks = m_shadow_promo_latency_samples;
     report.generation_dispatches = m_shadow_gen_dispatches;
     report.promotion_dispatches = m_shadow_promo_dispatches;
-    report.still_pending = m_shadow_generation_dispatch_tick.size() +
-                           m_shadow_promotion_dispatch_tick.size();
+    report.still_pending =
+        m_shadow_generation_dispatch_tick.size() + m_shadow_promotion_dispatch_tick.size();
     return report;
 }
 
@@ -601,8 +629,8 @@ void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
     // Generation lane.
     while (!m_streaming_state.generation_batches.empty()) {
         auto& front = m_streaming_state.generation_batches.front();
-        const bool due = front.due_tick < 0 ? !has_active_job(front.handle)
-                                            : front.due_tick <= tick;
+        const bool due =
+            front.due_tick < 0 ? !has_active_job(front.handle) : front.due_tick <= tick;
         if (!due) {
             break;
         }
@@ -636,8 +664,8 @@ void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
     while (!m_streaming_state.meshing_batches.empty()) {
         auto& front = m_streaming_state.meshing_batches.front();
         const bool due = front.due_tick < 0
-            ? !(has_active_job(front.handle) || has_active_job(front.handle_high))
-            : front.due_tick <= tick;
+                             ? !(has_active_job(front.handle) || has_active_job(front.handle_high))
+                             : front.due_tick <= tick;
         if (!due) {
             break;
         }
@@ -672,8 +700,8 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     // 017-B: a tick-stamped promotion pipeline publishes exclusively via
     // activate_due / force drains (see publish_front_generation_batch).
     const bool promotion_due = force || m_streaming_state.promotion_due_tick < 0;
-    if (promotion_due &&
-        !m_streaming_state.promotion_job_chunks.empty() && !promotion_jobs_active()) {
+    if (promotion_due && !m_streaming_state.promotion_job_chunks.empty() &&
+        !promotion_jobs_active()) {
         for (auto& job_chunk : m_streaming_state.promotion_job_chunks) {
             auto& chunk = job_chunk.chunk;
             if (!chunk) {
@@ -693,7 +721,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->mark_sdf_generated_current_params();
                 chunk->clear_voxel_data_dirty();
-                shadow_note_promotion_published(chunk->get_id());  // SHIELD-03 shadow
+                shadow_note_promotion_published(chunk->get_id()); // SHIELD-03 shadow
                 m_streaming_state.pending_promotion_mesh.push_back(job_chunk);
             } else {
                 // Stage-A failure: revert the transient Meshing state (the
@@ -736,8 +764,8 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
             if (it == m_streaming_state.chunks.end() || it->second.get() != item.chunk.get()) {
                 continue;
             }
-            stage_b.push_back({item.chunk, item.lod_level, /*terrain_mesh_required=*/true,
-                               item.high_priority});
+            stage_b.push_back(
+                {item.chunk, item.lod_level, /*terrain_mesh_required=*/true, item.high_priority});
         }
         m_streaming_state.pending_promotion_mesh.clear();
         if (!stage_b.empty()) {
@@ -746,7 +774,8 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     }
 }
 
-void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkItem>& chunks_to_promote) {
+void SHIELD_WorldSystem::dispatch_promotion_jobs(
+    const std::vector<MeshingWorkItem>& chunks_to_promote) {
     process_completed_promotion_jobs(/*force=*/false);
     if (promotion_jobs_active()) {
         // One promotion batch in flight at a time (the meshing lane's
@@ -765,7 +794,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
         // (coarse) mesh stays Ready so it keeps rendering while the promotion
         // is pending; a meshless chunk flips to Meshing.
         const bool has_active_mesh = chunk->get_state() == Luminumbra::ChunkState::Ready &&
-            !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
+                                     !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
         if (!has_active_mesh) {
             chunk->set_state(Luminumbra::ChunkState::Meshing);
         }
@@ -777,12 +806,12 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
         chunk->pending_lod.store(work_item.lod_level, std::memory_order_release);
         m_streaming_state.promotion_job_chunks.push_back(
             {chunk, work_item.lod_level, work_item.high_priority});
-        shadow_note_promotion_dispatch(chunk->get_id());  // SHIELD-03 shadow
+        shadow_note_promotion_dispatch(chunk->get_id()); // SHIELD-03 shadow
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk]() {
             try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
+                const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
                 // Build the full LOD0 voxel field into a scratch chunk and
                 // stage it — the live chunk's sdf_data is never touched off
                 // the main thread (a concurrent far-LOD sampler must never
@@ -795,11 +824,17 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
                 chunk->pending_promotion_ready.store(true, std::memory_order_release);
             } catch (const std::exception& e) {
                 LUMINUMBRA_CORE_ERROR("PROMOTION JOB CRASH: Chunk ({},{},{}) failed: {}",
-                    chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z, e.what());
+                                      chunk->get_coords().x,
+                                      chunk->get_coords().y,
+                                      chunk->get_coords().z,
+                                      e.what());
                 chunk->pending_promotion_failed.store(true, std::memory_order_release);
             } catch (...) {
-                LUMINUMBRA_CORE_ERROR("PROMOTION JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
-                    chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z);
+                LUMINUMBRA_CORE_ERROR(
+                    "PROMOTION JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
+                    chunk->get_coords().x,
+                    chunk->get_coords().y,
+                    chunk->get_coords().z);
                 chunk->pending_promotion_failed.store(true, std::memory_order_release);
             }
         });
@@ -807,8 +842,8 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
     m_promotion_batches_dispatched++;
     m_promotion_chunks_dispatched += m_streaming_state.promotion_job_chunks.size();
     // SHIELD-03 inc 5a-3: tick-keyed activation stamp (inert until the swap).
-    m_streaming_state.promotion_due_tick = m_current_sim_tick >= 0
-        ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+    m_streaming_state.promotion_due_tick =
+        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
 
     if (m_job_system && (!high_priority_jobs.empty() || !normal_priority_jobs.empty())) {
         if (!high_priority_jobs.empty()) {
@@ -816,7 +851,8 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(const std::vector<MeshingWorkIt
                 m_job_system->dispatch_batch(high_priority_jobs, JobPriority::High);
         }
         if (!normal_priority_jobs.empty()) {
-            m_streaming_state.promotion_job_handle = m_job_system->dispatch_batch(normal_priority_jobs);
+            m_streaming_state.promotion_job_handle =
+                m_job_system->dispatch_batch(normal_priority_jobs);
         }
     } else {
         for (auto& job : high_priority_jobs) {
@@ -836,6 +872,13 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // and blocks new ones until the generator set is consistent again — the
     // proper fix for the worldgen-preview pan crash (the assign-last ordering
     // below stays as belt-and-braces, no longer the correctness mechanism).
+    m_worldgen_writer_pending.store(true, std::memory_order_release);
+    struct WriterIntentReset {
+        std::atomic<bool>& pending;
+        ~WriterIntentReset() {
+            pending.store(false, std::memory_order_release);
+        }
+    } writer_intent_reset{m_worldgen_writer_pending};
     std::unique_lock<std::shared_mutex> worldgen_epoch(m_worldgen_epoch_mutex);
 
     // Terrain height is a pure function of seed/params; drop the cached
@@ -845,8 +888,8 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // FastNoise2 uses a node-based system to build complex generators.
 
     // 1. Terrain Height Generator (Fractal Simplex Noise)
-    auto terrain_noise = FastNoise::New<FastNoise::Simplex>();
-    auto terrain_fractal = FastNoise::New<FastNoise::FractalFBm>();
+    auto terrain_noise = NewWorldNoise<FastNoise::Simplex>();
+    auto terrain_fractal = NewWorldNoise<FastNoise::FractalFBm>();
     terrain_fractal->SetSource(terrain_noise);
     terrain_fractal->SetOctaveCount(m_params.octaves);
     terrain_fractal->SetLacunarity(m_params.lacunarity);
@@ -854,17 +897,17 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     m_terrain_generator = terrain_fractal;
 
     // 2. Cave Generator (3D Perlin Noise) — the cheese BODY field.
-    auto cave_noise = FastNoise::New<FastNoise::Perlin>();
+    auto cave_noise = NewWorldNoise<FastNoise::Perlin>();
     m_cave_generator = cave_noise;
     // 2b. Spec 013 noise-router SPAGHETTI tunnel field (a second, decorrelated Perlin).
     // Built ONLY when the preset opts into the noise-router style, so legacy worlds never
     // construct this node and stay byte-identical.
     if (m_params.cave_style != 0) {
-        m_spaghetti_generator = FastNoise::New<FastNoise::Perlin>();
+        m_spaghetti_generator = NewWorldNoise<FastNoise::Perlin>();
         // 2c. Worley CHEESE caverns: cellular F1/F3 edge field -> big ROUNDED rooms (vs the
         // Perlin body's blobs). Index0Div1 returns F1/F3 in [0,1]: small at cell centres
         // (carve = open room), ->1 at cell walls (stone). Built only in noise-router style.
-        auto worley = FastNoise::New<FastNoise::CellularDistance>();
+        auto worley = NewWorldNoise<FastNoise::CellularDistance>();
         worley->SetDistanceIndex0(0);
         worley->SetDistanceIndex1(2); // F1 and F3
         worley->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0Div1);
@@ -872,7 +915,7 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     }
 
     // 3. Island Mask Generator (Low-frequency Simplex)
-    auto island_noise = FastNoise::New<FastNoise::Simplex>();
+    auto island_noise = NewWorldNoise<FastNoise::Simplex>();
     m_island_mask_generator = island_noise;
 
     // 4. T-I3-10 shaping control noises (seed registry: +3 continentalness,
@@ -888,22 +931,22 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // SmartNode is still technically a data race; the proper fix is to quiesce far-LOD
     // sampling during the preview's world rebuild (see the session handoff).
     if (m_params.shaping_enabled) {
-        auto continental_fractal = FastNoise::New<FastNoise::FractalFBm>();
-        continental_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        auto continental_fractal = NewWorldNoise<FastNoise::FractalFBm>();
+        continental_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
         continental_fractal->SetOctaveCount(3);
         m_continentalness_generator = continental_fractal;
 
-        auto erosion_fractal = FastNoise::New<FastNoise::FractalFBm>();
-        erosion_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        auto erosion_fractal = NewWorldNoise<FastNoise::FractalFBm>();
+        erosion_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
         erosion_fractal->SetOctaveCount(3);
         m_erosion_generator = erosion_fractal;
 
-        auto peaks_fractal = FastNoise::New<FastNoise::FractalRidged>();
-        peaks_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        auto peaks_fractal = NewWorldNoise<FastNoise::FractalRidged>();
+        peaks_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
         peaks_fractal->SetOctaveCount(2);
         m_peaks_generator = peaks_fractal;
 
-        m_warp_generator = FastNoise::New<FastNoise::Simplex>();
+        m_warp_generator = NewWorldNoise<FastNoise::Simplex>();
     } else {
         m_continentalness_generator = {};
         m_erosion_generator = {};
@@ -916,8 +959,8 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     //     preset opts in; legacy worlds never construct it. (Same never-null race fix:
     //     assign in the enabled branch, null only in the else.)
     if (m_params.rivers_enabled) {
-        auto river_fractal = FastNoise::New<FastNoise::FractalRidged>();
-        river_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        auto river_fractal = NewWorldNoise<FastNoise::FractalRidged>();
+        river_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
         river_fractal->SetOctaveCount(2);
         m_river_generator = river_fractal;
     } else {
@@ -936,13 +979,13 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // loads) so ComputeTerrainParamsHash mixes it into the far-LOD cache key.
     m_params.biome_table_content_hash = 0;
     if (m_params.biomes_enabled) {
-        auto temperature_fractal = FastNoise::New<FastNoise::FractalFBm>();
-        temperature_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        auto temperature_fractal = NewWorldNoise<FastNoise::FractalFBm>();
+        temperature_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
         temperature_fractal->SetOctaveCount(2);
         m_temperature_generator = temperature_fractal;
 
-        auto humidity_fractal = FastNoise::New<FastNoise::FractalFBm>();
-        humidity_fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+        auto humidity_fractal = NewWorldNoise<FastNoise::FractalFBm>();
+        humidity_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
         humidity_fractal->SetOctaveCount(2);
         m_humidity_generator = humidity_fractal;
 
@@ -951,9 +994,9 @@ void SHIELD_WorldSystem::reinitialize_noise() {
             for (const std::string& error : m_biome_table.errors()) {
                 LUMINUMBRA_CORE_WARN("biome table load error: {}", error);
             }
-            LUMINUMBRA_CORE_WARN(
-                "biomes requested but table '{}' failed to load; falling back to legacy single-material classification",
-                m_params.biome_table_path);
+            LUMINUMBRA_CORE_WARN("biomes requested but table '{}' failed to load; falling back to "
+                                 "legacy single-material classification",
+                                 m_params.biome_table_path);
             // Table failed: disable biomes so the world is still byte-zero
             // (legacy) rather than half-applied.
             m_biomes_enabled = false;
@@ -986,8 +1029,7 @@ void SHIELD_WorldSystem::reinitialize_noise() {
         u64 combined = 14695981039346656037ull; // fnv offset basis
         for (const auto& type_dir : type_dirs) {
             const std::string type = type_dir.filename().string();
-            World::StructureTemplatePool pool =
-                World::LoadStructureTemplatePool(type_dir, type);
+            World::StructureTemplatePool pool = World::LoadStructureTemplatePool(type_dir, type);
             for (const std::string& warn : pool.warnings) {
                 LUMINUMBRA_CORE_WARN("structure pool '{}': {}", type, warn);
             }
@@ -1022,8 +1064,9 @@ std::optional<World::StructureSite> SHIELD_WorldSystem::LocateStructure(
     return std::nullopt;
 }
 
-float SHIELD_WorldSystem::EvaluateShapingSpline(
-    const std::vector<std::array<float, 2>>& points, float input, float fallback) {
+float SHIELD_WorldSystem::EvaluateShapingSpline(const std::vector<std::array<float, 2>>& points,
+                                                float input,
+                                                float fallback) {
     if (points.empty()) {
         return fallback;
     }
@@ -1043,8 +1086,8 @@ float SHIELD_WorldSystem::EvaluateShapingSpline(
     return points.back()[1];
 }
 
-SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSample(
-    float world_x, float world_z) const {
+SHIELD_WorldSystem::ShapedHeightSample
+SHIELD_WorldSystem::ComputeShapedHeightSample(float world_x, float world_z) const {
     return ComputeShapedHeightSampleImpl(world_x, world_z, /*apply_hydro=*/true);
 }
 
@@ -1076,62 +1119,57 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         // Domain warp (seed +6 / +7) displaces the BASE detail (and pv)
         // sample coordinates; the control channels read the unwarped point so
         // the macro structure stays stable under the warp.
-        const float warp_x = m_params.domain_warp_amplitude * warp_gen->GenSingle2D(
-            world_x * m_params.domain_warp_frequency,
-            world_z * m_params.domain_warp_frequency,
-            m_seed + 6);
-        const float warp_z = m_params.domain_warp_amplitude * warp_gen->GenSingle2D(
-            world_x * m_params.domain_warp_frequency,
-            world_z * m_params.domain_warp_frequency,
-            m_seed + 7);
+        const float warp_x = m_params.domain_warp_amplitude *
+                             warp_gen->GenSingle2D(world_x * m_params.domain_warp_frequency,
+                                                   world_z * m_params.domain_warp_frequency,
+                                                   m_seed + 6);
+        const float warp_z = m_params.domain_warp_amplitude *
+                             warp_gen->GenSingle2D(world_x * m_params.domain_warp_frequency,
+                                                   world_z * m_params.domain_warp_frequency,
+                                                   m_seed + 7);
         sample_x = world_x + warp_x;
         sample_z = world_z + warp_z;
 
-        const float continentalness = continental_gen->GenSingle2D(
-            world_x * m_params.continentalness_frequency,
-            world_z * m_params.continentalness_frequency,
-            m_seed + 3);
+        const float continentalness =
+            continental_gen->GenSingle2D(world_x * m_params.continentalness_frequency,
+                                         world_z * m_params.continentalness_frequency,
+                                         m_seed + 3);
         const float erosion = erosion_gen->GenSingle2D(
-            world_x * m_params.erosion_frequency,
-            world_z * m_params.erosion_frequency,
-            m_seed + 4);
+            world_x * m_params.erosion_frequency, world_z * m_params.erosion_frequency, m_seed + 4);
         const float peaks_valleys = peaks_gen->GenSingle2D(
-            sample_x * m_params.peaks_frequency,
-            sample_z * m_params.peaks_frequency,
-            m_seed + 5);
+            sample_x * m_params.peaks_frequency, sample_z * m_params.peaks_frequency, m_seed + 5);
 
         base_level = EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
         amplitude_multiplier = EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
         // Ridge term: peaks only where erosion is low (eroded land is flat).
         const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-        ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f)
-            * m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
+        ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
+                m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
 
         // Slice 3 per-biome morphology: scale the ridge by the (continuous)
         // temperature field — cold ground (alpine) gets taller/rugged peaks, warm
         // lowlands gentler. Only the ridge term; smooth so no seams. Byte-identical
         // to the batched path in ComputeShapedHeightGrid.
         if (m_params.biome_relief_enabled && m_temperature_generator) {
-            const float temp = m_temperature_generator->GenSingle2D(
-                world_x * m_params.temperature_frequency,
-                world_z * m_params.temperature_frequency, m_seed + 8);
+            const float temp =
+                m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
+                                                     world_z * m_params.temperature_frequency,
+                                                     m_seed + 8);
             const float cold01 = std::clamp(0.5f - 0.5f * temp, 0.0f, 1.0f);
             ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
         }
     }
 
     sample.base_noise = m_terrain_generator->GenSingle2D(
-        sample_x * m_params.base_frequency,
-        sample_z * m_params.base_frequency,
-        m_seed);
+        sample_x * m_params.base_frequency, sample_z * m_params.base_frequency, m_seed);
     // With shaping disabled this is exactly the legacy float-op sequence:
     // height_offset + noise * amplitude (base_level == 0, multiplier == 1,
     // ridge == 0 are not applied at all on the legacy branch).
     float terrain_height;
     if (m_params.shaping_enabled) {
-        terrain_height = m_params.height_offset + base_level
-            + amplitude_multiplier * (sample.base_noise * m_params.base_amplitude)
-            + ridge;
+        terrain_height = m_params.height_offset + base_level +
+                         amplitude_multiplier * (sample.base_noise * m_params.base_amplitude) +
+                         ridge;
     } else {
         terrain_height = m_params.height_offset + sample.base_noise * m_params.base_amplitude;
     }
@@ -1143,10 +1181,10 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
 
     if (m_params.island_mask_enabled) {
         sample.island_applied = true;
-        sample.island_noise = m_island_mask_generator->GenSingle2D(
-            world_x * m_params.island_mask_frequency,
-            world_z * m_params.island_mask_frequency,
-            m_seed + 2);
+        sample.island_noise =
+            m_island_mask_generator->GenSingle2D(world_x * m_params.island_mask_frequency,
+                                                 world_z * m_params.island_mask_frequency,
+                                                 m_seed + 2);
         sample.island_mask = glm::smoothstep(0.1f, 0.25f, sample.island_noise);
         sample.final_height = glm::mix(m_params.height_offset, terrain_height, sample.island_mask);
     }
@@ -1247,7 +1285,10 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
             }
         }
         std::vector<float> heights(cells, 0.0f);
-        ComputeShapedHeightsAtPositions(xs.data(), zs.data(), cells, heights.data(),
+        ComputeShapedHeightsAtPositions(xs.data(),
+                                        zs.data(),
+                                        cells,
+                                        heights.data(),
                                         /*apply_hydro=*/false);
         World::HydroErosionParams p;
         p.iterations = m_params.hydro_iterations;
@@ -1274,8 +1315,9 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
         const int lx = static_cast<int>(gx - rx * kHydroRegionCells);
         const int lz = static_cast<int>(gz - rz * kHydroRegionCells);
         const std::pair<std::int64_t, std::int64_t> key(rx, rz);
-        const std::size_t local = static_cast<std::size_t>(lz) *
-            static_cast<std::size_t>(kHydroRegionCells) + static_cast<std::size_t>(lx);
+        const std::size_t local =
+            static_cast<std::size_t>(lz) * static_cast<std::size_t>(kHydroRegionCells) +
+            static_cast<std::size_t>(lx);
         {
             std::shared_lock<std::shared_mutex> rlock(m_hydro_mutex);
             auto it = m_hydro_cache.find(key);
@@ -1330,8 +1372,10 @@ void SHIELD_WorldSystem::PrefetchHydroRegions(float cx, float cz, float radius_m
                     continue; // already queued
                 }
             }
-            const float sample_x = static_cast<float>(rkey.first * kHydroRegionCells) * cs + region_m * 0.5f;
-            const float sample_z = static_cast<float>(rkey.second * kHydroRegionCells) * cs + region_m * 0.5f;
+            const float sample_x =
+                static_cast<float>(rkey.first * kHydroRegionCells) * cs + region_m * 0.5f;
+            const float sample_z =
+                static_cast<float>(rkey.second * kHydroRegionCells) * cs + region_m * 0.5f;
             jobs.emplace_back([this, rkey, sample_x, sample_z]() {
                 SampleHydroOffsetMeters(sample_x, sample_z); // triggers + caches the region bake
                 std::lock_guard<std::mutex> g(m_hydro_prefetch_mutex);
@@ -1367,9 +1411,7 @@ float SHIELD_WorldSystem::LakeInfluenceFromNoise(float world_x, float world_z) c
         return 0.0f;
     }
     const float v = m_continentalness_generator->GenSingle2D(
-        world_x * m_params.lake_frequency,
-        world_z * m_params.lake_frequency,
-        m_seed + 11);
+        world_x * m_params.lake_frequency, world_z * m_params.lake_frequency, m_seed + 11);
     if (v < m_params.lake_threshold) {
         return 0.0f;
     }
@@ -1385,10 +1427,10 @@ float SHIELD_WorldSystem::ContinentalBaseHeight(float world_x, float world_z) co
     if (!m_params.shaping_enabled || !m_continentalness_generator) {
         return m_params.height_offset;
     }
-    const float continentalness = m_continentalness_generator->GenSingle2D(
-        world_x * m_params.continentalness_frequency,
-        world_z * m_params.continentalness_frequency,
-        m_seed + 3);
+    const float continentalness =
+        m_continentalness_generator->GenSingle2D(world_x * m_params.continentalness_frequency,
+                                                 world_z * m_params.continentalness_frequency,
+                                                 m_seed + 3);
     return m_params.height_offset +
            EvaluateShapingSpline(m_params.continental_spline, continentalness, 0.0f);
 }
@@ -1438,7 +1480,9 @@ float SHIELD_WorldSystem::WaterLevelAt(float world_x, float world_z) const {
     return level;
 }
 
-float SHIELD_WorldSystem::LakeCarveAmount(float final_height, float influence, float lake_surface) const {
+float SHIELD_WorldSystem::LakeCarveAmount(float final_height,
+                                          float influence,
+                                          float lake_surface) const {
     // Carve a basin whose floor sits lake_depth below the LOCAL lake surface (which
     // is at the basin's elevation, not SEA_LEVEL — that is what lets a lake form on
     // a mountain/valley). lake_max_carve * influence clamps the drop so the rim
@@ -1458,9 +1502,7 @@ float SHIELD_WorldSystem::CliffTerracedHeight(float world_x, float world_z, floa
         return height;
     }
     const float mask_noise = m_continentalness_generator->GenSingle2D(
-        world_x * m_params.cliff_frequency,
-        world_z * m_params.cliff_frequency,
-        m_seed + 12);
+        world_x * m_params.cliff_frequency, world_z * m_params.cliff_frequency, m_seed + 12);
     const float mask = std::clamp((mask_noise - m_params.cliff_threshold) / 0.15f, 0.0f, 1.0f);
     if (mask <= 0.0f) {
         return height;
@@ -1487,17 +1529,21 @@ float SHIELD_WorldSystem::CliffTerracedHeight(float world_x, float world_z, floa
 // carve -> byte-identical. Noise-router (cave_style==1): ALSO carve SPAGHETTI tunnels at
 // the zero-crossing EDGE of a second Perlin (abs(noise) < thickness => air), composed via
 // the surface cap + a hard max so isolated cheese bubbles become a connected network.
-float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp, float terrain_density,
-                                              float effective_cap, float feature_carve,
+float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp,
+                                              float terrain_density,
+                                              float effective_cap,
+                                              float feature_carve,
                                               const float* precomputed_cheese) const {
     // Cheese BODY field — identical args to the legacy site, so the legacy result is bit-exact.
     // The hot batched-chunk path passes its precomputed batch value to skip a re-sample.
     const float cheese = precomputed_cheese
-        ? *precomputed_cheese
-        : m_cave_generator->GenSingle3D(wp.x * m_params.cave_frequency,
-                                        wp.y * m_params.cave_frequency,
-                                        wp.z * m_params.cave_frequency, m_seed + 1);
-    float density = apply_cave_field(terrain_density, cheese, m_params, effective_cap, feature_carve);
+                             ? *precomputed_cheese
+                             : m_cave_generator->GenSingle3D(wp.x * m_params.cave_frequency,
+                                                             wp.y * m_params.cave_frequency,
+                                                             wp.z * m_params.cave_frequency,
+                                                             m_seed + 1);
+    float density =
+        apply_cave_field(terrain_density, cheese, m_params, effective_cap, feature_carve);
 
     if (m_params.cave_style == 0 || !m_spaghetti_generator) {
         return density; // legacy path: byte-identical to before this feature existed
@@ -1505,11 +1551,12 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp, float terrain_dens
 
     // SPAGHETTI tunnels: |noise| small => near a tunnel centerline => air. Seed +20 keeps
     // the tunnel field decorrelated from the cheese field (m_seed + 1).
-    const float sp = m_spaghetti_generator->GenSingle3D(
-        wp.x * m_params.spaghetti_frequency, wp.y * m_params.spaghetti_frequency,
-        wp.z * m_params.spaghetti_frequency, m_seed + 20);
+    const float sp = m_spaghetti_generator->GenSingle3D(wp.x * m_params.spaghetti_frequency,
+                                                        wp.y * m_params.spaghetti_frequency,
+                                                        wp.z * m_params.spaghetti_frequency,
+                                                        m_seed + 20);
     const float thickness = std::max(1e-4f, m_params.spaghetti_thickness);
-    const float edge = thickness - std::abs(sp);  // >0 inside the tunnel, peak at the centerline
+    const float edge = thickness - std::abs(sp); // >0 inside the tunnel, peak at the centerline
     if (edge > 0.0f) {
         const float tunnel_density = (edge / thickness) * m_params.cave_carve_value;
         // Respect the per-column surface cap exactly like the cheese field (no surface breaches).
@@ -1522,12 +1569,14 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp, float terrain_dens
     // at a cell centre -> carve an open room; ->1 at the cell wall -> stone. Low frequency =>
     // dramatic chambers. Composed via the same surface cap + max as the cheese/spaghetti terms.
     if (m_worley_generator) {
-        const float w = m_worley_generator->GenSingle3D(
-            wp.x * m_params.worley_frequency, wp.y * m_params.worley_frequency,
-            wp.z * m_params.worley_frequency, m_seed + 21);
-        const float room = m_params.worley_threshold - w;  // >0 inside a room (w below threshold)
+        const float w = m_worley_generator->GenSingle3D(wp.x * m_params.worley_frequency,
+                                                        wp.y * m_params.worley_frequency,
+                                                        wp.z * m_params.worley_frequency,
+                                                        m_seed + 21);
+        const float room = m_params.worley_threshold - w; // >0 inside a room (w below threshold)
         if (room > 0.0f) {
-            const float room_density = (room / std::max(1e-4f, m_params.worley_threshold)) * m_params.cave_carve_value;
+            const float room_density =
+                (room / std::max(1e-4f, m_params.worley_threshold)) * m_params.cave_carve_value;
             const float cap_blend = cave_surface_blend(terrain_density, effective_cap);
             const float capped = terrain_density + (room_density - terrain_density) * cap_blend;
             density = std::max(density, capped);
@@ -1539,22 +1588,31 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp, float terrain_dens
 SHIELD_WorldSystem::SurfaceBreakInfo
 SHIELD_WorldSystem::FindLargestSurfaceBreak(float near_x, float near_z, float scan_radius_m) const {
     SurfaceBreakInfo best;
-    if (!m_params.surface_breaks_enabled) return best;
+    if (!m_params.surface_breaks_enabled)
+        return best;
     const float cs = m_params.feature_cell_size;
-    if (cs <= 0.0f) return best;
+    if (cs <= 0.0f)
+        return best;
     const int cells = static_cast<int>(std::ceil(scan_radius_m / cs)) + 1;
     const int bcx = static_cast<int>(std::floor(near_x / cs));
     const int bcz = static_cast<int>(std::floor(near_z / cs));
     const float r2 = scan_radius_m * scan_radius_m;
     for (int dz = -cells; dz <= cells; ++dz) {
         for (int dx = -cells; dx <= cells; ++dx) {
-            const SurfaceBreakFeature f = DecodeSurfaceBreakCell(m_seed, bcx + dx, bcz + dz, m_params);
-            if (!f.valid) continue;
+            const SurfaceBreakFeature f =
+                DecodeSurfaceBreakCell(m_seed, bcx + dx, bcz + dz, m_params);
+            if (!f.valid)
+                continue;
             const float ddx = f.center_x - near_x, ddz = f.center_z - near_z;
-            if (ddx * ddx + ddz * ddz > r2) continue;
-            if (f.radius > best.radius) {  // prefer the biggest (most dramatic) opening
-                best.found = true; best.x = f.center_x; best.z = f.center_z;
-                best.radius = f.radius; best.depth = f.depth; best.shaft = f.shaft;
+            if (ddx * ddx + ddz * ddz > r2)
+                continue;
+            if (f.radius > best.radius) { // prefer the biggest (most dramatic) opening
+                best.found = true;
+                best.x = f.center_x;
+                best.z = f.center_z;
+                best.radius = f.radius;
+                best.depth = f.depth;
+                best.shaft = f.shaft;
             }
         }
     }
@@ -1598,10 +1656,11 @@ SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h
             // single extra GenSingle3D at y = surface - capDepth, classified with the
             // same threshold the cave field uses.
             const float probe_y = surface_h - kCaveSurfaceCapDepth;
-            const float cave_noise = m_cave_generator->GenSingle3D(
-                world_pos.x * m_params.cave_frequency,
-                probe_y * m_params.cave_frequency,
-                world_pos.z * m_params.cave_frequency, m_seed + 1);
+            const float cave_noise =
+                m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency,
+                                              probe_y * m_params.cave_frequency,
+                                              world_pos.z * m_params.cave_frequency,
+                                              m_seed + 1);
             const float cave_val = std::clamp((cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
             const bool interior_carved = cave_val > m_params.cave_threshold;
             if (interior_carved) {
@@ -1680,8 +1739,9 @@ float SHIELD_WorldSystem::SurfaceBreakRimDepression(float world_x, float world_z
     return dip;
 }
 
-float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(
-    float world_x, float world_z, int sample_step) const {
+float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(float world_x,
+                                                   float world_z,
+                                                   int sample_step) const {
     // Full-res path is byte-identical to GetTerrainHeightAt (the carve is a
     // single point sample), so near chunks and the worldgen gates are
     // unaffected. The coarse anti-alias only runs for step > 1 river worlds.
@@ -1762,9 +1822,13 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
         std::vector<float> island_noise;
         if (m_params.island_mask_enabled) {
             island_noise.resize(count);
-            m_island_mask_generator->GenUniformGrid2D(
-                island_noise.data(), base_x, base_z, size_x, size_z,
-                m_params.island_mask_frequency, m_seed + 2);
+            m_island_mask_generator->GenUniformGrid2D(island_noise.data(),
+                                                      base_x,
+                                                      base_z,
+                                                      size_x,
+                                                      size_z,
+                                                      m_params.island_mask_frequency,
+                                                      m_seed + 2);
         }
         for (std::size_t i = 0; i < count; ++i) {
             float h = m_params.height_offset + base_noise[i] * m_params.base_amplitude;
@@ -1782,18 +1846,34 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     std::vector<float> warp_z_grid(count);
     std::vector<float> continentalness_grid(count);
     std::vector<float> erosion_grid(count);
-    m_warp_generator->GenUniformGrid2D(
-        warp_x_grid.data(), base_x, base_z, size_x, size_z,
-        m_params.domain_warp_frequency, m_seed + 6);
-    m_warp_generator->GenUniformGrid2D(
-        warp_z_grid.data(), base_x, base_z, size_x, size_z,
-        m_params.domain_warp_frequency, m_seed + 7);
-    m_continentalness_generator->GenUniformGrid2D(
-        continentalness_grid.data(), base_x, base_z, size_x, size_z,
-        m_params.continentalness_frequency, m_seed + 3);
-    m_erosion_generator->GenUniformGrid2D(
-        erosion_grid.data(), base_x, base_z, size_x, size_z,
-        m_params.erosion_frequency, m_seed + 4);
+    m_warp_generator->GenUniformGrid2D(warp_x_grid.data(),
+                                       base_x,
+                                       base_z,
+                                       size_x,
+                                       size_z,
+                                       m_params.domain_warp_frequency,
+                                       m_seed + 6);
+    m_warp_generator->GenUniformGrid2D(warp_z_grid.data(),
+                                       base_x,
+                                       base_z,
+                                       size_x,
+                                       size_z,
+                                       m_params.domain_warp_frequency,
+                                       m_seed + 7);
+    m_continentalness_generator->GenUniformGrid2D(continentalness_grid.data(),
+                                                  base_x,
+                                                  base_z,
+                                                  size_x,
+                                                  size_z,
+                                                  m_params.continentalness_frequency,
+                                                  m_seed + 3);
+    m_erosion_generator->GenUniformGrid2D(erosion_grid.data(),
+                                          base_x,
+                                          base_z,
+                                          size_x,
+                                          size_z,
+                                          m_params.erosion_frequency,
+                                          m_seed + 4);
 
     // --- 2. Warp-displaced sample coordinates for the base + peaks channels. ---
     // The warped coordinate is (world + amp*warp) * freq, matching the scalar
@@ -1829,20 +1909,32 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
 
     std::vector<float> base_noise(noise_pad);
     std::vector<float> peaks_noise(noise_pad);
-    m_terrain_generator->GenPositionArray2D(
-        base_noise.data(), static_cast<int>(count), base_px.data(), base_py.data(),
-        0.0f, 0.0f, m_seed);
-    m_peaks_generator->GenPositionArray2D(
-        peaks_noise.data(), static_cast<int>(count), peaks_px.data(), peaks_py.data(),
-        0.0f, 0.0f, m_seed + 5);
+    m_terrain_generator->GenPositionArray2D(base_noise.data(),
+                                            static_cast<int>(count),
+                                            base_px.data(),
+                                            base_py.data(),
+                                            0.0f,
+                                            0.0f,
+                                            m_seed);
+    m_peaks_generator->GenPositionArray2D(peaks_noise.data(),
+                                          static_cast<int>(count),
+                                          peaks_px.data(),
+                                          peaks_py.data(),
+                                          0.0f,
+                                          0.0f,
+                                          m_seed + 5);
 
     // --- 3. Optional island mask + river channels (cheap per-column scalar). ---
     std::vector<float> island_noise;
     if (m_params.island_mask_enabled) {
         island_noise.resize(count);
-        m_island_mask_generator->GenUniformGrid2D(
-            island_noise.data(), base_x, base_z, size_x, size_z,
-            m_params.island_mask_frequency, m_seed + 2);
+        m_island_mask_generator->GenUniformGrid2D(island_noise.data(),
+                                                  base_x,
+                                                  base_z,
+                                                  size_x,
+                                                  size_z,
+                                                  m_params.island_mask_frequency,
+                                                  m_seed + 2);
     }
 
     // --- 4. Combine per column, mirroring ComputeShapedHeightSample exactly. ---
@@ -1859,28 +1951,28 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
             const float amplitude_multiplier =
                 EvaluateShapingSpline(m_params.erosion_spline, erosion, 1.0f);
             const float erosion_01 = std::clamp((erosion + 1.0f) * 0.5f, 0.0f, 1.0f);
-            float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f)
-                * m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
+            float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
+                          m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
 
             // Slice 3 per-biome morphology — byte-identical to ComputeShapedHeightSampleImpl.
             if (m_params.biome_relief_enabled && m_temperature_generator) {
                 const float world_x = static_cast<float>(base_x + x);
                 const float world_z = static_cast<float>(base_z + z);
-                const float temp = m_temperature_generator->GenSingle2D(
-                    world_x * m_params.temperature_frequency,
-                    world_z * m_params.temperature_frequency, m_seed + 8);
+                const float temp =
+                    m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
+                                                         world_z * m_params.temperature_frequency,
+                                                         m_seed + 8);
                 const float cold01 = std::clamp(0.5f - 0.5f * temp, 0.0f, 1.0f);
                 ridge *= 1.0f + m_params.biome_relief_strength * (2.0f * cold01 - 1.0f);
             }
 
-            float terrain_height = m_params.height_offset + base_level
-                + amplitude_multiplier * (base_noise[i] * m_params.base_amplitude)
-                + ridge;
+            float terrain_height =
+                m_params.height_offset + base_level +
+                amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
 
             // Slice 4 cliffs — byte-identical to ComputeShapedHeightSampleImpl.
-            terrain_height = CliffTerracedHeight(static_cast<float>(base_x + x),
-                                                 static_cast<float>(base_z + z),
-                                                 terrain_height);
+            terrain_height = CliffTerracedHeight(
+                static_cast<float>(base_x + x), static_cast<float>(base_z + z), terrain_height);
 
             if (m_params.island_mask_enabled) {
                 const float mask = glm::smoothstep(0.1f, 0.25f, island_noise[i]);
@@ -1918,8 +2010,9 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     if (m_params.hydro_enabled) {
         for (int z = 0; z < size_z; ++z) {
             for (int x = 0; x < size_x; ++x) {
-                const std::size_t i = static_cast<std::size_t>(x) +
-                                      static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
+                const std::size_t i =
+                    static_cast<std::size_t>(x) +
+                    static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x);
                 out[i] += SampleHydroOffsetMeters(static_cast<float>(base_x + x),
                                                   static_cast<float>(base_z + z));
             }
@@ -1927,8 +2020,8 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     }
 }
 
-SHIELD_WorldSystem::ClimateSample SHIELD_WorldSystem::ComputeClimateSample(
-    float world_x, float world_z) const {
+SHIELD_WorldSystem::ClimateSample SHIELD_WorldSystem::ComputeClimateSample(float world_x,
+                                                                           float world_z) const {
     ClimateSample climate;
 
     // continentalness/erosion REUSE the +3/+4 shaping noises sampled at the
@@ -1938,41 +2031,35 @@ SHIELD_WorldSystem::ClimateSample SHIELD_WorldSystem::ComputeClimateSample(
     // When shaping is off the three control noises are not built; biomes then
     // see a flat (0) control field, which still selects deterministically.
     if (m_params.shaping_enabled) {
-        const float warp_x = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
-            world_x * m_params.domain_warp_frequency,
-            world_z * m_params.domain_warp_frequency,
-            m_seed + 6);
-        const float warp_z = m_params.domain_warp_amplitude * m_warp_generator->GenSingle2D(
-            world_x * m_params.domain_warp_frequency,
-            world_z * m_params.domain_warp_frequency,
-            m_seed + 7);
+        const float warp_x = m_params.domain_warp_amplitude *
+                             m_warp_generator->GenSingle2D(world_x * m_params.domain_warp_frequency,
+                                                           world_z * m_params.domain_warp_frequency,
+                                                           m_seed + 6);
+        const float warp_z = m_params.domain_warp_amplitude *
+                             m_warp_generator->GenSingle2D(world_x * m_params.domain_warp_frequency,
+                                                           world_z * m_params.domain_warp_frequency,
+                                                           m_seed + 7);
         const float sample_x = world_x + warp_x;
         const float sample_z = world_z + warp_z;
 
-        climate.continentalness = m_continentalness_generator->GenSingle2D(
-            world_x * m_params.continentalness_frequency,
-            world_z * m_params.continentalness_frequency,
-            m_seed + 3);
+        climate.continentalness =
+            m_continentalness_generator->GenSingle2D(world_x * m_params.continentalness_frequency,
+                                                     world_z * m_params.continentalness_frequency,
+                                                     m_seed + 3);
         climate.erosion = m_erosion_generator->GenSingle2D(
-            world_x * m_params.erosion_frequency,
-            world_z * m_params.erosion_frequency,
-            m_seed + 4);
+            world_x * m_params.erosion_frequency, world_z * m_params.erosion_frequency, m_seed + 4);
         climate.peaks_valleys = m_peaks_generator->GenSingle2D(
-            sample_x * m_params.peaks_frequency,
-            sample_z * m_params.peaks_frequency,
-            m_seed + 5);
+            sample_x * m_params.peaks_frequency, sample_z * m_params.peaks_frequency, m_seed + 5);
     }
 
     // Temperature (+8) and humidity (+9) are new 2D climate noises, sampled at
     // the unwarped column so the climate macro-structure is stable.
-    climate.temperature = m_temperature_generator->GenSingle2D(
-        world_x * m_params.temperature_frequency,
-        world_z * m_params.temperature_frequency,
-        m_seed + 8);
+    climate.temperature =
+        m_temperature_generator->GenSingle2D(world_x * m_params.temperature_frequency,
+                                             world_z * m_params.temperature_frequency,
+                                             m_seed + 8);
     climate.humidity = m_humidity_generator->GenSingle2D(
-        world_x * m_params.humidity_frequency,
-        world_z * m_params.humidity_frequency,
-        m_seed + 9);
+        world_x * m_params.humidity_frequency, world_z * m_params.humidity_frequency, m_seed + 9);
     return climate;
 }
 
@@ -2005,9 +2092,7 @@ float SHIELD_WorldSystem::RiverInfluenceFromNoise(float world_x, float world_z) 
     // the influence ramps from 0 at the band edge to 1 at the band center, so
     // the channel has a soft width/wobble driven by the same noise.
     const float r = m_river_generator->GenSingle2D(
-        world_x * m_params.river_frequency,
-        world_z * m_params.river_frequency,
-        m_seed + 10);
+        world_x * m_params.river_frequency, world_z * m_params.river_frequency, m_seed + 10);
     const float pv = 1.0f - std::abs(3.0f * std::abs(r) - 2.0f);
     if (pv < m_params.river_pv_min || pv > m_params.river_pv_max) {
         return 0.0f;
@@ -2026,8 +2111,10 @@ float SHIELD_WorldSystem::RiverInfluenceAt(float world_x, float world_z) const {
     return RiverInfluenceFromNoise(world_x, world_z);
 }
 
-MaterialType SHIELD_WorldSystem::SurfaceMaterialForColumn(
-    float world_y, float final_height, u8 biome_id, bool river_bank) const {
+MaterialType SHIELD_WorldSystem::SurfaceMaterialForColumn(float world_y,
+                                                          float final_height,
+                                                          u8 biome_id,
+                                                          bool river_bank) const {
     // No biome (disabled / unmatched): the exact legacy classifier. River banks
     // need a palette, so with no biome they keep the legacy classification
     // (rivers only ship on biome-enabled presets; the bank distinction is a
@@ -2056,8 +2143,9 @@ MaterialType SHIELD_WorldSystem::SurfaceMaterialForColumn(
     return static_cast<MaterialType>(palette.depth);
 }
 
-MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(
-    float world_x, float world_z, float terrain_height) const {
+MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
+                                                       float world_z,
+                                                       float terrain_height) const {
     // Byte-exact twin of MarchingCubes::GetTerrainMaterialAt for a surface
     // vertex, given the already-known terrain height. GetTerrainMaterialAt:
     //   1. sample = SampleWorldGenLayers(x, terrain_height - 0.35, z);
@@ -2073,13 +2161,12 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(
     // redundant shaped-height recompute inside SampleWorldGenLayers.
     const u8 biome_id = BiomeIdAt(world_x, world_z);
     const bool river_bank = RiverInfluenceFromNoise(world_x, world_z) > 0.25f;
-    const MaterialType solid_material = SurfaceMaterialForColumn(
-        terrain_height - 0.35f, terrain_height, biome_id, river_bank);
+    const MaterialType solid_material =
+        SurfaceMaterialForColumn(terrain_height - 0.35f, terrain_height, biome_id, river_bank);
     if (solid_material != MaterialType::Air && solid_material != MaterialType::Water) {
         return solid_material;
     }
-    return SurfaceMaterialForColumn(
-        terrain_height - 0.1f, terrain_height, biome_id, river_bank);
+    return SurfaceMaterialForColumn(terrain_height - 0.1f, terrain_height, biome_id, river_bank);
 }
 
 void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
@@ -2106,10 +2193,10 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
         wz_in[i] = zs[i] * m_params.domain_warp_frequency;
     }
     std::vector<float> warp_x(pad), warp_z(pad);
-    m_warp_generator->GenPositionArray2D(warp_x.data(), static_cast<int>(count),
-        wx_in.data(), wz_in.data(), 0.0f, 0.0f, m_seed + 6);
-    m_warp_generator->GenPositionArray2D(warp_z.data(), static_cast<int>(count),
-        wx_in.data(), wz_in.data(), 0.0f, 0.0f, m_seed + 7);
+    m_warp_generator->GenPositionArray2D(
+        warp_x.data(), static_cast<int>(count), wx_in.data(), wz_in.data(), 0.0f, 0.0f, m_seed + 6);
+    m_warp_generator->GenPositionArray2D(
+        warp_z.data(), static_cast<int>(count), wx_in.data(), wz_in.data(), 0.0f, 0.0f, m_seed + 7);
 
     std::vector<float> cont_x(pad), cont_y(pad), eros_x(pad), eros_y(pad);
     std::vector<float> base_x(pad), base_y(pad), peaks_x(pad), peaks_y(pad);
@@ -2126,14 +2213,34 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
         peaks_y[i] = sz * m_params.peaks_frequency;
     }
     std::vector<float> continentalness(pad), erosion(pad), base_noise(pad), peaks_noise(pad);
-    m_continentalness_generator->GenPositionArray2D(continentalness.data(), static_cast<int>(count),
-        cont_x.data(), cont_y.data(), 0.0f, 0.0f, m_seed + 3);
-    m_erosion_generator->GenPositionArray2D(erosion.data(), static_cast<int>(count),
-        eros_x.data(), eros_y.data(), 0.0f, 0.0f, m_seed + 4);
-    m_terrain_generator->GenPositionArray2D(base_noise.data(), static_cast<int>(count),
-        base_x.data(), base_y.data(), 0.0f, 0.0f, m_seed);
-    m_peaks_generator->GenPositionArray2D(peaks_noise.data(), static_cast<int>(count),
-        peaks_x.data(), peaks_y.data(), 0.0f, 0.0f, m_seed + 5);
+    m_continentalness_generator->GenPositionArray2D(continentalness.data(),
+                                                    static_cast<int>(count),
+                                                    cont_x.data(),
+                                                    cont_y.data(),
+                                                    0.0f,
+                                                    0.0f,
+                                                    m_seed + 3);
+    m_erosion_generator->GenPositionArray2D(erosion.data(),
+                                            static_cast<int>(count),
+                                            eros_x.data(),
+                                            eros_y.data(),
+                                            0.0f,
+                                            0.0f,
+                                            m_seed + 4);
+    m_terrain_generator->GenPositionArray2D(base_noise.data(),
+                                            static_cast<int>(count),
+                                            base_x.data(),
+                                            base_y.data(),
+                                            0.0f,
+                                            0.0f,
+                                            m_seed);
+    m_peaks_generator->GenPositionArray2D(peaks_noise.data(),
+                                          static_cast<int>(count),
+                                          peaks_x.data(),
+                                          peaks_y.data(),
+                                          0.0f,
+                                          0.0f,
+                                          m_seed + 5);
 
     std::vector<float> island_noise;
     for (std::size_t i = 0; i < count; ++i) {
@@ -2142,13 +2249,15 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
         const float amplitude_multiplier =
             EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
         const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f)
-            * m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float h = m_params.height_offset + base_level
-            + amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
+        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
+                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
+        float h = m_params.height_offset + base_level +
+                  amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
         if (m_params.island_mask_enabled) {
-            const float in = m_island_mask_generator->GenSingle2D(
-                xs[i] * m_params.island_mask_frequency, zs[i] * m_params.island_mask_frequency, m_seed + 2);
+            const float in =
+                m_island_mask_generator->GenSingle2D(xs[i] * m_params.island_mask_frequency,
+                                                     zs[i] * m_params.island_mask_frequency,
+                                                     m_seed + 2);
             const float mask = glm::smoothstep(0.1f, 0.25f, in);
             h = glm::mix(m_params.height_offset, h, mask);
         }
@@ -2165,8 +2274,9 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     }
 }
 
-void SHIELD_WorldSystem::ClassifyVertexMaterials(
-    const Vec3* positions, std::size_t count, u32* out_materials) const {
+void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
+                                                 std::size_t count,
+                                                 u32* out_materials) const {
     if (count == 0) {
         return;
     }
@@ -2176,8 +2286,7 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
     if (!m_params.shaping_enabled) {
         for (std::size_t i = 0; i < count; ++i) {
             const Vec3& p = positions[i];
-            const WorldGenLayerSample sample =
-                SampleWorldGenLayers(p - Vec3(0.0f, 0.25f, 0.0f));
+            const WorldGenLayerSample sample = SampleWorldGenLayers(p - Vec3(0.0f, 0.25f, 0.0f));
             MaterialType material = sample.material;
             if (material == MaterialType::Air || material == MaterialType::Water) {
                 const float th = sample.final_height;
@@ -2198,16 +2307,26 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
     // PadToNoiseSimd) so the full-width tail load/store cannot over-read past the
     // count-sized vectors. Hash-neutral: only indices [0,count) are consumed.
     const std::size_t pad = PadToNoiseSimd(count);
-    std::vector<float> warp_xf(pad), warp_zf(pad);   // warp coords (unwarped * warp_freq)
+    std::vector<float> warp_xf(pad), warp_zf(pad); // warp coords (unwarped * warp_freq)
     for (std::size_t i = 0; i < count; ++i) {
         warp_xf[i] = positions[i].x * m_params.domain_warp_frequency;
         warp_zf[i] = positions[i].z * m_params.domain_warp_frequency;
     }
     std::vector<float> warp_x(pad), warp_z(pad);
-    m_warp_generator->GenPositionArray2D(warp_x.data(), static_cast<int>(count),
-        warp_xf.data(), warp_zf.data(), 0.0f, 0.0f, m_seed + 6);
-    m_warp_generator->GenPositionArray2D(warp_z.data(), static_cast<int>(count),
-        warp_xf.data(), warp_zf.data(), 0.0f, 0.0f, m_seed + 7);
+    m_warp_generator->GenPositionArray2D(warp_x.data(),
+                                         static_cast<int>(count),
+                                         warp_xf.data(),
+                                         warp_zf.data(),
+                                         0.0f,
+                                         0.0f,
+                                         m_seed + 6);
+    m_warp_generator->GenPositionArray2D(warp_z.data(),
+                                         static_cast<int>(count),
+                                         warp_xf.data(),
+                                         warp_zf.data(),
+                                         0.0f,
+                                         0.0f,
+                                         m_seed + 7);
 
     // continentalness/erosion read the UNWARPED column; base/peaks read the
     // warp-displaced column (matching ComputeShapedHeightSample).
@@ -2228,14 +2347,34 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
         peaks_y[i] = sz * m_params.peaks_frequency;
     }
     std::vector<float> continentalness(pad), erosion(pad), base_noise(pad), peaks_noise(pad);
-    m_continentalness_generator->GenPositionArray2D(continentalness.data(), static_cast<int>(count),
-        cont_x.data(), cont_y.data(), 0.0f, 0.0f, m_seed + 3);
-    m_erosion_generator->GenPositionArray2D(erosion.data(), static_cast<int>(count),
-        eros_x.data(), eros_y.data(), 0.0f, 0.0f, m_seed + 4);
-    m_terrain_generator->GenPositionArray2D(base_noise.data(), static_cast<int>(count),
-        base_x.data(), base_y.data(), 0.0f, 0.0f, m_seed);
-    m_peaks_generator->GenPositionArray2D(peaks_noise.data(), static_cast<int>(count),
-        peaks_x.data(), peaks_y.data(), 0.0f, 0.0f, m_seed + 5);
+    m_continentalness_generator->GenPositionArray2D(continentalness.data(),
+                                                    static_cast<int>(count),
+                                                    cont_x.data(),
+                                                    cont_y.data(),
+                                                    0.0f,
+                                                    0.0f,
+                                                    m_seed + 3);
+    m_erosion_generator->GenPositionArray2D(erosion.data(),
+                                            static_cast<int>(count),
+                                            eros_x.data(),
+                                            eros_y.data(),
+                                            0.0f,
+                                            0.0f,
+                                            m_seed + 4);
+    m_terrain_generator->GenPositionArray2D(base_noise.data(),
+                                            static_cast<int>(count),
+                                            base_x.data(),
+                                            base_y.data(),
+                                            0.0f,
+                                            0.0f,
+                                            m_seed);
+    m_peaks_generator->GenPositionArray2D(peaks_noise.data(),
+                                          static_cast<int>(count),
+                                          peaks_x.data(),
+                                          peaks_y.data(),
+                                          0.0f,
+                                          0.0f,
+                                          m_seed + 5);
 
     // Climate (temperature +8, humidity +9) for the biome lookup, when biomes
     // are enabled. Sampled at the unwarped column.
@@ -2250,10 +2389,20 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
             hum_x[i] = positions[i].x * m_params.humidity_frequency;
             hum_y[i] = positions[i].z * m_params.humidity_frequency;
         }
-        m_temperature_generator->GenPositionArray2D(temperature.data(), static_cast<int>(count),
-            temp_x.data(), temp_y.data(), 0.0f, 0.0f, m_seed + 8);
-        m_humidity_generator->GenPositionArray2D(humidity.data(), static_cast<int>(count),
-            hum_x.data(), hum_y.data(), 0.0f, 0.0f, m_seed + 9);
+        m_temperature_generator->GenPositionArray2D(temperature.data(),
+                                                    static_cast<int>(count),
+                                                    temp_x.data(),
+                                                    temp_y.data(),
+                                                    0.0f,
+                                                    0.0f,
+                                                    m_seed + 8);
+        m_humidity_generator->GenPositionArray2D(humidity.data(),
+                                                 static_cast<int>(count),
+                                                 hum_x.data(),
+                                                 hum_y.data(),
+                                                 0.0f,
+                                                 0.0f,
+                                                 m_seed + 9);
     }
 
     // --- Per-vertex combine + classification (mirrors the scalar path). ---
@@ -2268,13 +2417,16 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
         const float amplitude_multiplier =
             EvaluateShapingSpline(m_params.erosion_spline, erosion[i], 1.0f);
         const float erosion_01 = std::clamp((erosion[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f)
-            * m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
-        float final_height = m_params.height_offset + base_level
-            + amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
+        const float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_noise[i], 0.0f) *
+                            m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
+        float final_height = m_params.height_offset + base_level +
+                             amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) +
+                             ridge;
         if (m_params.island_mask_enabled) {
-            const float island_noise = m_island_mask_generator->GenSingle2D(
-                p.x * m_params.island_mask_frequency, p.z * m_params.island_mask_frequency, m_seed + 2);
+            const float island_noise =
+                m_island_mask_generator->GenSingle2D(p.x * m_params.island_mask_frequency,
+                                                     p.z * m_params.island_mask_frequency,
+                                                     m_seed + 2);
             const float mask = glm::smoothstep(0.1f, 0.25f, island_noise);
             final_height = glm::mix(m_params.height_offset, final_height, mask);
         }
@@ -2286,8 +2438,8 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
         // Biome id (batched climate + the reused +3/+4/+5 shaping noises).
         u8 biome_id = World::kNoBiome;
         if (m_biomes_enabled && !m_biome_table.empty()) {
-            biome_id = m_biome_table.lookup(continentalness[i], erosion[i], peaks_noise[i],
-                                            temperature[i], humidity[i]);
+            biome_id = m_biome_table.lookup(
+                continentalness[i], erosion[i], peaks_noise[i], temperature[i], humidity[i]);
         }
         const bool river_bank = RiverInfluenceFromNoise(p.x, p.z) > 0.25f;
 
@@ -2320,7 +2472,8 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(
     }
 }
 
-SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const {
+SHIELD_WorldSystem::ColumnSurfaceSpan
+SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const {
     const float base_x = static_cast<float>(chunk_x * CHUNK_SIZE_X);
     const float base_z = static_cast<float>(chunk_z * CHUNK_SIZE_Z);
     const float max_x = base_x + static_cast<float>(CHUNK_SIZE_X);
@@ -2355,7 +2508,8 @@ SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::compute_column_surface
     return span;
 }
 
-SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span(int chunk_x, int chunk_z) {
+SHIELD_WorldSystem::ColumnSurfaceSpan SHIELD_WorldSystem::column_surface_span(int chunk_x,
+                                                                              int chunk_z) {
     const u64 key = horizontal_chunk_key(chunk_x, chunk_z);
     const auto it = m_column_surface_span_cache.find(key);
     if (it != m_column_surface_span_cache.end()) {
@@ -2377,12 +2531,10 @@ int SHIELD_WorldSystem::get_lod_level_for_distance(float dist) const {
     return m_lod_levels.back().level;
 }
 
-int SHIELD_WorldSystem::get_required_lod_for_chunk(
-    const IVec3& coords,
-    const Vec3& chunk_center,
-    const Vec3& camera_position,
-    int current_lod)
-{
+int SHIELD_WorldSystem::get_required_lod_for_chunk(const IVec3& coords,
+                                                   const Vec3& chunk_center,
+                                                   const Vec3& camera_position,
+                                                   int current_lod) {
     // Chunks in the surface band of their column (the chunks that actually
     // contain the terrain isosurface) select LOD from HORIZONTAL distance
     // only, so the surface never crosses a vertical LOD boundary. With 3D
@@ -2402,9 +2554,8 @@ int SHIELD_WorldSystem::get_required_lod_for_chunk(
     float dist;
     if (coords.y >= span.min_y - kSurfaceLodBandChunks &&
         coords.y <= span.max_y + kSurfaceLodBandChunks) {
-        dist = glm::distance(
-            Vec3(camera_position.x, 0.0f, camera_position.z),
-            Vec3(chunk_center.x, 0.0f, chunk_center.z));
+        dist = glm::distance(Vec3(camera_position.x, 0.0f, camera_position.z),
+                             Vec3(chunk_center.x, 0.0f, chunk_center.z));
     } else {
         dist = glm::distance(camera_position, chunk_center);
     }
@@ -2427,8 +2578,8 @@ int SHIELD_WorldSystem::get_required_lod_for_chunk(
     // determinism - is byte-identical to the pre-hysteresis behavior.
     if (current_lod >= 0 && band_lod > current_lod) {
         constexpr float kDemoteHysteresisMeters = static_cast<float>(CHUNK_SIZE_X);
-        const float hold_distance = m_lod_levels[static_cast<std::size_t>(current_lod)].distance
-                                    + kDemoteHysteresisMeters;
+        const float hold_distance =
+            m_lod_levels[static_cast<std::size_t>(current_lod)].distance + kDemoteHysteresisMeters;
         if (dist <= hold_distance) {
             return current_lod;
         }
@@ -2473,36 +2624,36 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
             const ColumnSurfaceSpan span = compute_column_surface_span(chunk_x, chunk_z);
 
             for (int y = span.min_y - 1; y <= span.max_y + 1; ++y) {
-                candidates.push_back({
-                    IVec3(chunk_x, y, chunk_z),
-                    std::abs(y - span.center_y),
-                    horizontal_ring_distance(dx, dz),
-                    horizontal_distance_sq(dx, dz)
-                });
+                candidates.push_back({IVec3(chunk_x, y, chunk_z),
+                                      std::abs(y - span.center_y),
+                                      horizontal_ring_distance(dx, dz),
+                                      horizontal_distance_sq(dx, dz)});
                 min_y = std::min(min_y, y);
                 max_y = std::max(max_y, y);
             }
         }
     }
 
-    std::sort(candidates.begin(), candidates.end(), [](const InitialChunkCandidate& a, const InitialChunkCandidate& b) {
-        if (a.vertical_rank != b.vertical_rank) {
-            return a.vertical_rank < b.vertical_rank;
-        }
-        if (a.ring_distance != b.ring_distance) {
-            return a.ring_distance < b.ring_distance;
-        }
-        if (a.horizontal_distance_sq != b.horizontal_distance_sq) {
-            return a.horizontal_distance_sq < b.horizontal_distance_sq;
-        }
-        if (a.coords.y != b.coords.y) {
-            return a.coords.y < b.coords.y;
-        }
-        if (a.coords.x != b.coords.x) {
-            return a.coords.x < b.coords.x;
-        }
-        return a.coords.z < b.coords.z;
-    });
+    std::sort(candidates.begin(),
+              candidates.end(),
+              [](const InitialChunkCandidate& a, const InitialChunkCandidate& b) {
+                  if (a.vertical_rank != b.vertical_rank) {
+                      return a.vertical_rank < b.vertical_rank;
+                  }
+                  if (a.ring_distance != b.ring_distance) {
+                      return a.ring_distance < b.ring_distance;
+                  }
+                  if (a.horizontal_distance_sq != b.horizontal_distance_sq) {
+                      return a.horizontal_distance_sq < b.horizontal_distance_sq;
+                  }
+                  if (a.coords.y != b.coords.y) {
+                      return a.coords.y < b.coords.y;
+                  }
+                  if (a.coords.x != b.coords.x) {
+                      return a.coords.x < b.coords.x;
+                  }
+                  return a.coords.z < b.coords.z;
+              });
 
     std::vector<IVec3> initial_chunks;
     initial_chunks.reserve(candidates.size());
@@ -2512,19 +2663,27 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
 
     // Debug: Log initial chunk loading
     const float spawn_terrain_height = GetTerrainHeightAt(center_pos.x, center_pos.z);
-    LUMINUMBRA_CORE_WARN("Loading {} chunks - Spawn Y={}, Terrain Y={}, Chunk range Y={}..{}", 
-        initial_chunks.size(), center_pos.y, spawn_terrain_height, min_y * CHUNK_SIZE_Y, max_y * CHUNK_SIZE_Y);
-    
+    LUMINUMBRA_CORE_WARN("Loading {} chunks - Spawn Y={}, Terrain Y={}, Chunk range Y={}..{}",
+                         initial_chunks.size(),
+                         center_pos.y,
+                         spawn_terrain_height,
+                         min_y * CHUNK_SIZE_Y,
+                         max_y * CHUNK_SIZE_Y);
+
     return initial_chunks;
 }
 
-void SHIELD_WorldSystem::update(entt::registry& registry, const Vec3& camera_position, PhysicsSystem* physics_system) {
+void SHIELD_WorldSystem::update(entt::registry& registry,
+                                const Vec3& camera_position,
+                                PhysicsSystem* physics_system) {
     // Single-anchor convenience overload — forwards to the multi-anchor path with one
     // anchor (byte-identical streaming/world_hash to the historical single-anchor code).
     update(registry, std::vector<Vec3>{camera_position}, physics_system);
 }
 
-void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3>& anchor_positions, PhysicsSystem* physics_system) {
+void SHIELD_WorldSystem::update(entt::registry& registry,
+                                const std::vector<Vec3>& anchor_positions,
+                                PhysicsSystem* physics_system) {
     // TEMP diag (spec 008 follow-up): split the 300ms+ streaming spike by sub-phase.
     m_dbg_stream = {};
     auto _dbg_prev = std::chrono::steady_clock::now();
@@ -2631,13 +2790,13 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
 
     // spec 004 streaming elision GATE. Run the Step-2/3 meshing-candidate pass only when something
     // the pass cares about changed since it last fully drained. RUN signals are deterministic +
-    // main-thread-observed (NO job-completion timing — the attempt-#1 trap): a dirty-generation delta
-    // (a chunk insert/erase / synchronous rebuild bumped it), an EXACT anchor-vector change (LOD keys
-    // on continuous distance, so any sub-chunk anchor motion can flip a band — no threshold, no
-    // quantization), a chunk-count delta, an activation tick, or a previous pass that did not reach
-    // quiescence. On a settled static pose all are false, so the O(N) meshed_columns build + candidate
-    // scan + sort + dispatch are skipped entirely. Step 4 (collision) and the telemetry scans run
-    // unchanged every tick.
+    // main-thread-observed (NO job-completion timing — the attempt-#1 trap): a dirty-generation
+    // delta (a chunk insert/erase / synchronous rebuild bumped it), an EXACT anchor-vector change
+    // (LOD keys on continuous distance, so any sub-chunk anchor motion can flip a band — no
+    // threshold, no quantization), a chunk-count delta, an activation tick, or a previous pass that
+    // did not reach quiescence. On a settled static pose all are false, so the O(N) meshed_columns
+    // build + candidate scan + sort + dispatch are skipped entirely. Step 4 (collision) and the
+    // telemetry scans run unchanged every tick.
     const bool anchor_changed = (anchor_positions != m_last_anchor_positions);
     const bool count_changed = (m_streaming_state.chunks.size() != m_last_chunk_count);
     const bool generation_dirty = (m_dirty_generation != m_last_serviced_generation);
@@ -2649,259 +2808,277 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     // Recomputed FRESH inside every non-elided pass (never a stale cross-frame dispatch input).
     std::size_t terrain_meshing_backlog = 0;
     if (streaming_dirty) {
-    // Snapshot meshed-chunk LODs per horizontal column so the candidate loop
-    // below can cheaply detect coarse chunks whose transition skirts went
-    // stale because a finer neighbor arrived AFTER this chunk was meshed.
-    // Without this, a seam crack opened by a late-arriving finer neighbor
-    // persists until the coarse chunk happens to remesh for another reason.
-    struct MeshedColumnEntry {
-        int y = 0;
-        int lod = 0;
-    };
-    std::unordered_map<u64, std::vector<MeshedColumnEntry>> meshed_columns;
-    meshed_columns.reserve(m_streaming_state.chunks.size());
-    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-        (void)id;
-        if (!chunk_ptr || chunk_ptr->mesh_vertices.empty() || chunk_ptr->mesh_indices.empty()) {
-            continue;
-        }
-        const int lod = chunk_ptr->current_lod.load(std::memory_order_acquire);
-        if (lod < 0) {
-            continue;
-        }
-        const IVec3 coords = chunk_ptr->get_coords();
-        meshed_columns[horizontal_chunk_key(coords.x, coords.z)].push_back({coords.y, lod});
-    }
-
-    // Returns the transition faces this chunk needs against current neighbor
-    // LODs that are NOT yet baked into its mesh. Mirrors the neighbor criteria
-    // used by dispatch_meshing_jobs so a triggered remesh always converges.
-    auto missing_transition_faces = [&](const Luminumbra::Chunk& chunk, int lod_level) -> u8 {
-        const IVec3 coords = chunk.get_coords();
-        u8 required = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
-        auto require_face_if_neighbor_is_finer = [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
-            const auto column_it = meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
-            if (column_it == meshed_columns.end()) {
-                return;
+        // Snapshot meshed-chunk LODs per horizontal column so the candidate loop
+        // below can cheaply detect coarse chunks whose transition skirts went
+        // stale because a finer neighbor arrived AFTER this chunk was meshed.
+        // Without this, a seam crack opened by a late-arriving finer neighbor
+        // persists until the coarse chunk happens to remesh for another reason.
+        struct MeshedColumnEntry {
+            int y = 0;
+            int lod = 0;
+        };
+        std::unordered_map<u64, std::vector<MeshedColumnEntry>> meshed_columns;
+        meshed_columns.reserve(m_streaming_state.chunks.size());
+        for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
+            (void)id;
+            if (!chunk_ptr || chunk_ptr->mesh_vertices.empty() || chunk_ptr->mesh_indices.empty()) {
+                continue;
             }
-            for (const MeshedColumnEntry& entry : column_it->second) {
-                if (entry.lod < lod_level || (entry.lod != lod_level && entry.y != coords.y)) {
-                    required |= static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
-                    return;
+            const int lod = chunk_ptr->current_lod.load(std::memory_order_acquire);
+            if (lod < 0) {
+                continue;
+            }
+            const IVec3 coords = chunk_ptr->get_coords();
+            meshed_columns[horizontal_chunk_key(coords.x, coords.z)].push_back({coords.y, lod});
+        }
+
+        // Returns the transition faces this chunk needs against current neighbor
+        // LODs that are NOT yet baked into its mesh. Mirrors the neighbor criteria
+        // used by dispatch_meshing_jobs so a triggered remesh always converges.
+        auto missing_transition_faces = [&](const Luminumbra::Chunk& chunk, int lod_level) -> u8 {
+            const IVec3 coords = chunk.get_coords();
+            u8 required = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
+            auto require_face_if_neighbor_is_finer =
+                [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
+                    const auto column_it =
+                        meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
+                    if (column_it == meshed_columns.end()) {
+                        return;
+                    }
+                    for (const MeshedColumnEntry& entry : column_it->second) {
+                        if (entry.lod < lod_level ||
+                            (entry.lod != lod_level && entry.y != coords.y)) {
+                            required |= static_cast<
+                                Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
+                            return;
+                        }
+                    }
+                };
+            require_face_if_neighbor_is_finer(
+                -1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
+            require_face_if_neighbor_is_finer(
+                1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
+            require_face_if_neighbor_is_finer(
+                0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
+            require_face_if_neighbor_is_finer(
+                0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
+            return static_cast<u8>(required & static_cast<u8>(~chunk.applied_transition_faces.load(
+                                                  std::memory_order_acquire)));
+        };
+
+        // Chunk state logging removed from hot path - too expensive
+
+        for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
+            (void)id;
+            bool needs_meshing = false;
+            bool terrain_mesh_required = true;
+            int required_lod = -1;
+
+            ChunkState state = chunk_ptr->get_state();
+            const int pending_lod = chunk_ptr->pending_lod.load(std::memory_order_acquire);
+            if (pending_lod >= 0) {
+                continue;
+            }
+
+            // Closest anchor to this chunk (multi-anchor LOD: the finest detail any anchor
+            // demands wins). One anchor -> that anchor, identical to the historical
+            // camera_position.
+            Vec3 closest_anchor = anchor_positions.empty() ? Vec3(0.0f) : anchor_positions[0];
+            if (anchor_positions.size() > 1) {
+                const IVec3 lod_chunk = chunk_ptr->get_coords();
+                float best = 1e30f;
+                for (const Vec3& a : anchor_positions) {
+                    const IVec3 d = lod_chunk - world_to_chunk_coords(a);
+                    const float ds =
+                        static_cast<float>(horizontal_distance_sq(d.x, d.z) + d.y * d.y);
+                    if (ds < best) {
+                        best = ds;
+                        closest_anchor = a;
+                    }
                 }
             }
-        };
-        require_face_if_neighbor_is_finer(-1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
-        require_face_if_neighbor_is_finer(1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
-        require_face_if_neighbor_is_finer(0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
-        require_face_if_neighbor_is_finer(0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
-        return static_cast<u8>(required & static_cast<u8>(~chunk.applied_transition_faces.load(std::memory_order_acquire)));
-    };
 
-    // Chunk state logging removed from hot path - too expensive
-
-    for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
-        (void)id;
-        bool needs_meshing = false;
-        bool terrain_mesh_required = true;
-        int required_lod = -1;
-
-        ChunkState state = chunk_ptr->get_state();
-        const int pending_lod = chunk_ptr->pending_lod.load(std::memory_order_acquire);
-        if (pending_lod >= 0) {
-            continue;
-        }
-
-        // Closest anchor to this chunk (multi-anchor LOD: the finest detail any anchor
-        // demands wins). One anchor -> that anchor, identical to the historical
-        // camera_position.
-        Vec3 closest_anchor = anchor_positions.empty() ? Vec3(0.0f) : anchor_positions[0];
-        if (anchor_positions.size() > 1) {
-            const IVec3 lod_chunk = chunk_ptr->get_coords();
-            float best = 1e30f;
-            for (const Vec3& a : anchor_positions) {
-                const IVec3 d = lod_chunk - world_to_chunk_coords(a);
-                const float ds = static_cast<float>(horizontal_distance_sq(d.x, d.z) + d.y * d.y);
-                if (ds < best) { best = ds; closest_anchor = a; }
-            }
-        }
-
-        if (state == Luminumbra::ChunkState::Idle) {
-            needs_meshing = true;
-        } else if (state == Luminumbra::ChunkState::Ready) {
-            Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-            // T-I3-19: pass the meshed LOD so demotions go through the
-            // asymmetric hysteresis band (promote at D, demote at D + margin).
-            required_lod = get_required_lod_for_chunk(
-                chunk_ptr->get_coords(), chunk_center, closest_anchor,
-                chunk_ptr->current_lod.load());
-
-            if (required_lod != chunk_ptr->current_lod.load()) {
+            if (state == Luminumbra::ChunkState::Idle) {
                 needs_meshing = true;
-                terrain_mesh_required = true;
-            } else if (required_lod == 0 &&
-                       chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
-                       !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire))
-            {
-                needs_meshing = true;
-                terrain_mesh_required = false;
-            } else if (get_lod_step_for_level(required_lod) > 1 &&
-                       !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty() &&
-                       missing_transition_faces(*chunk_ptr, required_lod) != Luminumbra::World::MarchingCubes::kNoTransitionFaces)
-            {
-                // A finer neighbor arrived after this coarse chunk was meshed:
-                // remesh so the now-required boundary transition skirts are
-                // baked in, closing the persistent LOD seam crack.
-                needs_meshing = true;
-                terrain_mesh_required = true;
+            } else if (state == Luminumbra::ChunkState::Ready) {
+                Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
+                                    Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                // T-I3-19: pass the meshed LOD so demotions go through the
+                // asymmetric hysteresis band (promote at D, demote at D + margin).
+                required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
+                                                          chunk_center,
+                                                          closest_anchor,
+                                                          chunk_ptr->current_lod.load());
+
+                if (required_lod != chunk_ptr->current_lod.load()) {
+                    needs_meshing = true;
+                    terrain_mesh_required = true;
+                } else if (required_lod == 0 &&
+                           chunk_ptr->has_water_sim.load(std::memory_order_acquire) &&
+                           !chunk_ptr->water_mesh_generated.load(std::memory_order_acquire)) {
+                    needs_meshing = true;
+                    terrain_mesh_required = false;
+                } else if (get_lod_step_for_level(required_lod) > 1 &&
+                           !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty() &&
+                           missing_transition_faces(*chunk_ptr, required_lod) !=
+                               Luminumbra::World::MarchingCubes::kNoTransitionFaces) {
+                    // A finer neighbor arrived after this coarse chunk was meshed:
+                    // remesh so the now-required boundary transition skirts are
+                    // baked in, closing the persistent LOD seam crack.
+                    needs_meshing = true;
+                    terrain_mesh_required = true;
+                }
+            }
+
+            if (needs_meshing) {
+                const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
+                                          Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                if (required_lod == -1) {
+                    // Never-meshed chunks carry current_lod == -1, so this stays
+                    // the raw band assignment; a previously meshed chunk that
+                    // re-enters here keeps the same hysteresis as the Ready path.
+                    required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
+                                                              chunk_center,
+                                                              closest_anchor,
+                                                              chunk_ptr->current_lod.load());
+                }
+                // The column-surface cache samples the same chunk positions, so
+                // this replaces per-candidate fractal noise evaluations with a
+                // hash lookup (terrain height is a pure function of seed/params).
+                // Vertical rank is the distance OUTSIDE the column surface span
+                // (0 for every chunk the isosurface passes through), so cliff
+                // wall chunks drain with the same hole-fill priority as the
+                // center surface chunk.
+                const ColumnSurfaceSpan span =
+                    column_surface_span(chunk_ptr->get_coords().x, chunk_ptr->get_coords().z);
+                const int chunk_y = chunk_ptr->get_coords().y;
+                const int vertical_surface_distance =
+                    chunk_y > span.max_y ? chunk_y - span.max_y
+                                         : (chunk_y < span.min_y ? span.min_y - chunk_y : 0);
+                // Meshing priority by distance to the CLOSEST anchor (multi-anchor). One
+                // anchor -> identical to the historical camera-relative distance.
+                const IVec3 mc_coords = chunk_ptr->get_coords();
+                float distance_sq = 1e30f;
+                for (const Vec3& a : anchor_positions) {
+                    const IVec3 delta = mc_coords - world_to_chunk_coords(a);
+                    distance_sq =
+                        std::min(distance_sq,
+                                 static_cast<float>(horizontal_distance_sq(delta.x, delta.z) +
+                                                    delta.y * delta.y));
+                }
+                meshing_candidates.push_back({chunk_ptr,
+                                              required_lod,
+                                              state == Luminumbra::ChunkState::Ready &&
+                                                  !chunk_ptr->mesh_vertices.empty() &&
+                                                  !chunk_ptr->mesh_indices.empty(),
+                                              terrain_mesh_required,
+                                              vertical_surface_distance,
+                                              distance_sq});
             }
         }
-        
-        if (needs_meshing) {
-            const Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-            if (required_lod == -1) {
-                // Never-meshed chunks carry current_lod == -1, so this stays
-                // the raw band assignment; a previously meshed chunk that
-                // re-enters here keeps the same hysteresis as the Ready path.
-                required_lod = get_required_lod_for_chunk(
-                    chunk_ptr->get_coords(), chunk_center, closest_anchor,
-                    chunk_ptr->current_lod.load());
+
+        m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
+        terrain_meshing_backlog = 0;
+        for (const MeshingCandidate& candidate : meshing_candidates) {
+            if (candidate.terrain_mesh_required) {
+                ++terrain_meshing_backlog;
             }
-            // The column-surface cache samples the same chunk positions, so
-            // this replaces per-candidate fractal noise evaluations with a
-            // hash lookup (terrain height is a pure function of seed/params).
-            // Vertical rank is the distance OUTSIDE the column surface span
-            // (0 for every chunk the isosurface passes through), so cliff
-            // wall chunks drain with the same hole-fill priority as the
-            // center surface chunk.
-            const ColumnSurfaceSpan span = column_surface_span(chunk_ptr->get_coords().x, chunk_ptr->get_coords().z);
-            const int chunk_y = chunk_ptr->get_coords().y;
-            const int vertical_surface_distance = chunk_y > span.max_y
-                ? chunk_y - span.max_y
-                : (chunk_y < span.min_y ? span.min_y - chunk_y : 0);
-            // Meshing priority by distance to the CLOSEST anchor (multi-anchor). One
-            // anchor -> identical to the historical camera-relative distance.
-            const IVec3 mc_coords = chunk_ptr->get_coords();
-            float distance_sq = 1e30f;
-            for (const Vec3& a : anchor_positions) {
-                const IVec3 delta = mc_coords - world_to_chunk_coords(a);
-                distance_sq = std::min(distance_sq,
-                    static_cast<float>(horizontal_distance_sq(delta.x, delta.z) + delta.y * delta.y));
-            }
-            meshing_candidates.push_back({
-                chunk_ptr,
-                required_lod,
-                state == Luminumbra::ChunkState::Ready && !chunk_ptr->mesh_vertices.empty() && !chunk_ptr->mesh_indices.empty(),
-                terrain_mesh_required,
-                vertical_surface_distance,
-                distance_sq
-            });
         }
-    }
-
-    m_last_streaming_budget_stats.meshing_candidates = meshing_candidates.size();
-    terrain_meshing_backlog = 0;
-    for (const MeshingCandidate& candidate : meshing_candidates) {
-        if (candidate.terrain_mesh_required) {
-            ++terrain_meshing_backlog;
+        // SHIELD-03 5b: the meshing dispatch gate is the FIFO DEPTH BUDGET —
+        // deterministic main-thread state, never job timing. Promotion
+        // backpressure decoupled from meshing (its own pipeline-pending guard in
+        // dispatch_meshing_jobs routes promotions; a promotion pipeline in flight
+        // must not stall meshing for its whole due window).
+        const bool meshing_job_active =
+            m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight;
+        m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
+        // Scale the per-dispatch meshing batch with the standing terrain backlog:
+        // deep backlogs (initial load, fast travel) dispatch larger batches so
+        // more of the backlog is in flight per dispatch, while shallow
+        // steady-state backlogs keep the small batches that preserve LOD/hole-fill
+        // responsiveness. The batch is still the sorted-candidate prefix, so the
+        // hole-fill-first ordering and per-chunk LOD selection are unchanged -
+        // only how quickly the same work drains. Measured on the 20s
+        // EnduranceStreamDrain scenario: max_deferred_age_frames 28 -> 12 and
+        // cumulative_deferred_meshing ~15k -> ~5k versus a fixed budget. T-I7
+        // residency push (owner: "parts not loaded" must resolve fast + "up the caps"
+        // for the RTX 5070 Ti target): the deep-backlog cap is raised from 2x to 4x
+        // and the base budget bumped, so initial-load / fast-travel backlogs drain in
+        // far fewer frames (meshing runs on JobSystem workers; the main thread is
+        // still bounded by the per-frame upload cap, so worst-case main-thread cost is
+        // governed by uploads, not this dispatch batch size). Steady-state shallow
+        // backlogs keep the base budget for LOD/hole-fill responsiveness.
+        int meshing_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
+        if (terrain_meshing_backlog > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)) {
+            meshing_budget = static_cast<int>(std::min<std::size_t>(
+                static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 4u,
+                terrain_meshing_backlog / 2u));
+            meshing_budget = std::max(meshing_budget, MAX_CHUNKS_TO_PROCESS_PER_FRAME);
         }
-    }
-    // SHIELD-03 5b: the meshing dispatch gate is the FIFO DEPTH BUDGET —
-    // deterministic main-thread state, never job timing. Promotion
-    // backpressure decoupled from meshing (its own pipeline-pending guard in
-    // dispatch_meshing_jobs routes promotions; a promotion pipeline in flight
-    // must not stall meshing for its whole due window).
-    const bool meshing_job_active =
-        m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight;
-    m_last_streaming_budget_stats.meshing_job_active = meshing_job_active;
-    // Scale the per-dispatch meshing batch with the standing terrain backlog:
-    // deep backlogs (initial load, fast travel) dispatch larger batches so
-    // more of the backlog is in flight per dispatch, while shallow
-    // steady-state backlogs keep the small batches that preserve LOD/hole-fill
-    // responsiveness. The batch is still the sorted-candidate prefix, so the
-    // hole-fill-first ordering and per-chunk LOD selection are unchanged -
-    // only how quickly the same work drains. Measured on the 20s
-    // EnduranceStreamDrain scenario: max_deferred_age_frames 28 -> 12 and
-    // cumulative_deferred_meshing ~15k -> ~5k versus a fixed budget. T-I7
-    // residency push (owner: "parts not loaded" must resolve fast + "up the caps"
-    // for the RTX 5070 Ti target): the deep-backlog cap is raised from 2x to 4x
-    // and the base budget bumped, so initial-load / fast-travel backlogs drain in
-    // far fewer frames (meshing runs on JobSystem workers; the main thread is
-    // still bounded by the per-frame upload cap, so worst-case main-thread cost is
-    // governed by uploads, not this dispatch batch size). Steady-state shallow
-    // backlogs keep the base budget for LOD/hole-fill responsiveness.
-    int meshing_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
-    if (terrain_meshing_backlog > static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME)) {
-        meshing_budget = static_cast<int>(std::min<std::size_t>(
-            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 4u,
-            terrain_meshing_backlog / 2u
-        ));
-        meshing_budget = std::max(meshing_budget, MAX_CHUNKS_TO_PROCESS_PER_FRAME);
-    }
-    m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : meshing_budget;
+        m_last_streaming_budget_stats.meshing_budget = meshing_job_active ? 0 : meshing_budget;
 
-    if (!meshing_candidates.empty() && !meshing_job_active) {
-        std::sort(meshing_candidates.begin(), meshing_candidates.end(), [](const MeshingCandidate& a, const MeshingCandidate& b) {
-            if (a.has_active_mesh != b.has_active_mesh) {
-                return !a.has_active_mesh;
-            }
-            if (a.vertical_surface_distance != b.vertical_surface_distance) {
-                return a.vertical_surface_distance < b.vertical_surface_distance;
-            }
-            if (a.distance_sq != b.distance_sq) {
-                return a.distance_sq < b.distance_sq;
-            }
-            if (a.required_lod != b.required_lod) {
-                return a.required_lod < b.required_lod;
-            }
-            return a.chunk->get_id() < b.chunk->get_id();
-        });
+        if (!meshing_candidates.empty() && !meshing_job_active) {
+            std::sort(meshing_candidates.begin(),
+                      meshing_candidates.end(),
+                      [](const MeshingCandidate& a, const MeshingCandidate& b) {
+                          if (a.has_active_mesh != b.has_active_mesh) {
+                              return !a.has_active_mesh;
+                          }
+                          if (a.vertical_surface_distance != b.vertical_surface_distance) {
+                              return a.vertical_surface_distance < b.vertical_surface_distance;
+                          }
+                          if (a.distance_sq != b.distance_sq) {
+                              return a.distance_sq < b.distance_sq;
+                          }
+                          if (a.required_lod != b.required_lod) {
+                              return a.required_lod < b.required_lod;
+                          }
+                          return a.chunk->get_id() < b.chunk->get_id();
+                      });
 
-        const std::size_t budget = std::min(
-            meshing_candidates.size(),
-            static_cast<std::size_t>(m_last_streaming_budget_stats.meshing_budget)
-        );
-        for (std::size_t i = 0; i < budget; ++i) {
-            // The sort places hole-fill candidates (no active mesh) first,
-            // nearest surface band first, so the capped High prefix is
-            // exactly the near-field holes.
-            const bool high_priority = !meshing_candidates[i].has_active_mesh &&
-                i < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
-            chunks_to_mesh_jobs.push_back({
-                meshing_candidates[i].chunk,
-                meshing_candidates[i].required_lod,
-                meshing_candidates[i].terrain_mesh_required,
-                high_priority
-            });
+            const std::size_t budget =
+                std::min(meshing_candidates.size(),
+                         static_cast<std::size_t>(m_last_streaming_budget_stats.meshing_budget));
+            for (std::size_t i = 0; i < budget; ++i) {
+                // The sort places hole-fill candidates (no active mesh) first,
+                // nearest surface band first, so the capped High prefix is
+                // exactly the near-field holes.
+                const bool high_priority = !meshing_candidates[i].has_active_mesh &&
+                                           i < MAX_HIGH_PRIORITY_MESHING_JOBS_PER_DISPATCH;
+                chunks_to_mesh_jobs.push_back({meshing_candidates[i].chunk,
+                                               meshing_candidates[i].required_lod,
+                                               meshing_candidates[i].terrain_mesh_required,
+                                               high_priority});
+            }
+
+            m_last_streaming_budget_stats.scheduled_meshing = chunks_to_mesh_jobs.size();
+            m_last_streaming_budget_stats.deferred_meshing =
+                meshing_candidates.size() - chunks_to_mesh_jobs.size();
         }
 
-        m_last_streaming_budget_stats.scheduled_meshing = chunks_to_mesh_jobs.size();
-        m_last_streaming_budget_stats.deferred_meshing = meshing_candidates.size() - chunks_to_mesh_jobs.size();
-    }
+        if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
+            dispatch_meshing_jobs(chunks_to_mesh_jobs);
+        }
 
-    if (!chunks_to_mesh_jobs.empty() && !meshing_job_active) {
-        dispatch_meshing_jobs(chunks_to_mesh_jobs);
-    }
-
-        // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS pass
-        // ran). The world is settled iff this pass produced no candidates, left nothing deferred, and
-        // no gen/mesh jobs are in flight. Job-active state is read ONLY here; on the per-tick-quiesced
-        // hashed paths it is deterministic. Advancing m_last_serviced_generation only at quiescence
-        // means a budget-deferred remesh (deferred_meshing>0) or any produced candidate keeps the gate
-        // sticky-open next tick, so chained seam/transition propagation always converges.
-        const bool produced_work = !meshing_candidates.empty() ||
-                                   m_last_streaming_budget_stats.deferred_meshing > 0;
+        // Post-pass QUIESCENCE test (decides whether a FUTURE tick may elide — NOT whether THIS
+        // pass ran). The world is settled iff this pass produced no candidates, left nothing
+        // deferred, and no gen/mesh jobs are in flight. Job-active state is read ONLY here; on the
+        // per-tick-quiesced hashed paths it is deterministic. Advancing m_last_serviced_generation
+        // only at quiescence means a budget-deferred remesh (deferred_meshing>0) or any produced
+        // candidate keeps the gate sticky-open next tick, so chained seam/transition propagation
+        // always converges.
+        const bool produced_work =
+            !meshing_candidates.empty() || m_last_streaming_budget_stats.deferred_meshing > 0;
         // SHIELD-03 inc 2: quiescence keys on the publication-keyed outstanding
         // signals (main-thread events), not wall-clock job counters — the last
         // scheduler read to be de-timed ahead of the barrier removal.
         const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
-                               !promotion_pipeline_pending() &&
-                               !generation_batch_outstanding();
+                               !promotion_pipeline_pending() && !generation_batch_outstanding();
         m_last_pass_drained = quiescent;
         if (quiescent) {
             m_last_serviced_generation = m_dirty_generation;
         }
-    }  // streaming_dirty gate
+    } // streaming_dirty gate
     _dbg_split(m_dbg_stream.meshing_pass); // TEMP diag: Step 3 meshing-candidate pass + dispatch
 
     // Step 4. Time-slice the creation of expensive physics colliders on the main thread.
@@ -2961,10 +3138,12 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         }
     }
 
-    const std::size_t queue_depth = m_last_streaming_budget_stats.loading_chunks + terrain_meshing_backlog;
+    const std::size_t queue_depth =
+        m_last_streaming_budget_stats.loading_chunks + terrain_meshing_backlog;
     ++m_streaming_telemetry_stats.frames_observed;
     m_streaming_telemetry_stats.last_queue_depth = queue_depth;
-    m_streaming_telemetry_stats.peak_queue_depth = std::max(m_streaming_telemetry_stats.peak_queue_depth, queue_depth);
+    m_streaming_telemetry_stats.peak_queue_depth =
+        std::max(m_streaming_telemetry_stats.peak_queue_depth, queue_depth);
     // T-I5b-DR-streaming-drain: record this frame's depth into the trailing ring
     // and derive the SETTLED floor (min over the last activation window). Chunk
     // activation runs only every STREAMING_ACTIVATION_INTERVAL_FRAMES frames, so
@@ -2974,8 +3153,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
     // (bounded + fully draining) and stays nonzero only for a standing backlog
     // that never empties (genuinely unbounded). Telemetry only; not hashed.
     m_recent_queue_depths[m_recent_queue_depth_cursor] = queue_depth;
-    m_recent_queue_depth_cursor =
-        (m_recent_queue_depth_cursor + 1u) % m_recent_queue_depths.size();
+    m_recent_queue_depth_cursor = (m_recent_queue_depth_cursor + 1u) % m_recent_queue_depths.size();
     if (m_recent_queue_depth_count < m_recent_queue_depths.size()) {
         ++m_recent_queue_depth_count;
     }
@@ -2984,26 +3162,27 @@ void SHIELD_WorldSystem::update(entt::registry& registry, const std::vector<Vec3
         settled_queue_depth = std::min(settled_queue_depth, m_recent_queue_depths[i]);
     }
     m_streaming_telemetry_stats.settled_queue_depth = settled_queue_depth;
-    m_streaming_telemetry_stats.peak_meshing_candidates = std::max(
-        m_streaming_telemetry_stats.peak_meshing_candidates,
-        m_last_streaming_budget_stats.meshing_candidates
-    );
-    m_streaming_telemetry_stats.cumulative_scheduled_meshing += m_last_streaming_budget_stats.scheduled_meshing;
-    m_streaming_telemetry_stats.cumulative_deferred_meshing += m_last_streaming_budget_stats.deferred_meshing;
-    if (m_last_streaming_budget_stats.meshing_candidates > m_last_streaming_budget_stats.scheduled_meshing) {
+    m_streaming_telemetry_stats.peak_meshing_candidates =
+        std::max(m_streaming_telemetry_stats.peak_meshing_candidates,
+                 m_last_streaming_budget_stats.meshing_candidates);
+    m_streaming_telemetry_stats.cumulative_scheduled_meshing +=
+        m_last_streaming_budget_stats.scheduled_meshing;
+    m_streaming_telemetry_stats.cumulative_deferred_meshing +=
+        m_last_streaming_budget_stats.deferred_meshing;
+    if (m_last_streaming_budget_stats.meshing_candidates >
+        m_last_streaming_budget_stats.scheduled_meshing) {
         ++m_deferred_backlog_age_frames;
     } else {
         m_deferred_backlog_age_frames = 0;
     }
     m_streaming_telemetry_stats.max_deferred_age_frames = std::max(
-        m_streaming_telemetry_stats.max_deferred_age_frames,
-        m_deferred_backlog_age_frames
-    );
+        m_streaming_telemetry_stats.max_deferred_age_frames, m_deferred_backlog_age_frames);
 }
 
-bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors, PhysicsSystem* physics_system) {
+bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchors,
+                                                 PhysicsSystem* physics_system) {
     if (anchors.empty()) {
-        return false;  // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
+        return false; // no anchors -> nothing to stream around (caller guarantees >= 1 in practice)
     }
     // Per-anchor chunk coordinates (the wanted-set is the UNION of each anchor's disc;
     // eviction below keeps a chunk if it is in range of ANY anchor). One anchor ->
@@ -3024,10 +3203,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     // eviction scan. Signals are deterministic main-thread state (NEVER job-activity timing), so
     // residency — and world_hash — are byte-identical to running it. This is the dominant per-tick
     // CPU cost while stationary at high render distance.
-    if (m_activation_has_run &&
-        m_dirty_generation == m_last_activation_dirty_generation &&
-        m_last_activation_pending == 0 &&
-        camera_chunks == m_last_activation_camera_chunks) {
+    if (m_activation_has_run && m_dirty_generation == m_last_activation_dirty_generation &&
+        m_last_activation_pending == 0 && camera_chunks == m_last_activation_camera_chunks) {
         return false;
     }
     struct GenerationCandidate {
@@ -3050,18 +3227,17 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         // meshing-lane work before the decoupling). Byte-neutral on the
         // per-tick-quiesced server paths — both terms read false there.
         meshing_batch_outstanding() || promotion_pipeline_pending(),
-        anchors.size()
-    );
+        anchors.size());
 
     m_last_streaming_budget_stats.target_render_radius = target_radius;
     m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
     int generation_budget = MAX_CHUNKS_TO_PROCESS_PER_FRAME;
     if (anchors.size() > 1u) {
-        generation_budget = static_cast<int>(std::min<std::size_t>(
-            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 2u,
-            static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) +
-                static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * (anchors.size() - 1u) / 8u
-        ));
+        generation_budget = static_cast<int>(
+            std::min<std::size_t>(static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) * 2u,
+                                  static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) +
+                                      static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) *
+                                          (anchors.size() - 1u) / 8u));
     }
     // SHIELD-03 5b: generation dispatch backpressure = FIFO depth budget
     // (deterministic; the telemetry field above keeps outstanding semantics).
@@ -3078,7 +3254,12 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     std::unordered_map<ChunkID, std::size_t> candidate_index;
     candidate_index.reserve(to_create.capacity() * 2u);
 
-    auto add_candidate = [&](const IVec3& coords, bool surface, int ring_distance, int horizontal_dist2, int vertical_rank, const Vec3& anchor_pos) {
+    auto add_candidate = [&](const IVec3& coords,
+                             bool surface,
+                             int ring_distance,
+                             int horizontal_dist2,
+                             int vertical_rank,
+                             const Vec3& anchor_pos) {
         // NOTE (T-I3-2): the active-chunk budget is no longer applied here.
         // Enforcing it during enumeration capped candidates in row-major scan
         // order, so when the wanted set exceeded the budget (mountains preset
@@ -3095,7 +3276,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         // coarse (> 1) generate surface-band data only - no interior SDF, no
         // 3D cave grid. Promotion to LOD0 backfills the full SDF via the
         // meshing dispatch, so a conservative step here is only a perf cost.
-        const Vec3 chunk_center = (Vec3(coords) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+        const Vec3 chunk_center =
+            (Vec3(coords) + 0.5f) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
         const int required_lod = get_required_lod_for_chunk(coords, chunk_center, anchor_pos);
         const int target_step = get_lod_step_for_level(required_lod);
 
@@ -3114,13 +3296,15 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         if (it != candidate_index.end()) {
             GenerationCandidate& existing = to_create[it->second];
             existing.ring_distance = std::min(existing.ring_distance, ring_distance);
-            existing.horizontal_distance_sq = std::min(existing.horizontal_distance_sq, horizontal_dist2);
+            existing.horizontal_distance_sq =
+                std::min(existing.horizontal_distance_sq, horizontal_dist2);
             existing.vertical_rank = std::min(existing.vertical_rank, vertical_rank);
             existing.target_step = std::min(existing.target_step, target_step);
             return;
         }
         candidate_index.emplace(id, to_create.size());
-        to_create.push_back({coords, surface, ring_distance, horizontal_dist2, vertical_rank, target_step});
+        to_create.push_back(
+            {coords, surface, ring_distance, horizontal_dist2, vertical_rank, target_step});
     };
 
     // UNION the wanted-set across every anchor. candidate_index (in add_candidate)
@@ -3128,78 +3312,98 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     // anchor's priority metrics (T-I6 P0); a chunk wanted by ANY anchor is enumerated.
     // One anchor -> the historical single-disc scan, unchanged.
     for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
-      const IVec3 camera_chunk = camera_chunks[ai];
-      const Vec3& anchor_pos = anchors[ai];
-      for (int dz = -target_radius; dz <= target_radius; ++dz) {
-        for (int dx = -target_radius; dx <= target_radius; ++dx) {
-            const int horizontal_dist2 = horizontal_distance_sq(dx, dz);
-            if (horizontal_dist2 > target_radius * target_radius) {
-                continue;
-            }
+        const IVec3 camera_chunk = camera_chunks[ai];
+        const Vec3& anchor_pos = anchors[ai];
+        for (int dz = -target_radius; dz <= target_radius; ++dz) {
+            for (int dx = -target_radius; dx <= target_radius; ++dx) {
+                const int horizontal_dist2 = horizontal_distance_sq(dx, dz);
+                if (horizontal_dist2 > target_radius * target_radius) {
+                    continue;
+                }
 
-            const int chunk_x = camera_chunk.x + dx;
-            const int chunk_z = camera_chunk.z + dz;
-            // 5-point span sample (T-I3-2); the cache persists for the
-            // lifetime of seed/params.
-            const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
-            const int ring_distance = horizontal_ring_distance(dx, dz);
+                const int chunk_x = camera_chunk.x + dx;
+                const int chunk_z = camera_chunk.z + dz;
+                // 5-point span sample (T-I3-2); the cache persists for the
+                // lifetime of seed/params.
+                const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
+                const int ring_distance = horizontal_ring_distance(dx, dz);
 
-            ++m_last_streaming_budget_stats.target_surface_columns;
-            // Activate EVERY chunk-Y the column's isosurface passes through,
-            // at every ring. Beyond ring 12 the old code streamed exactly one
-            // chunk per column; any coarse cell whose surface lay in another
-            // chunk-Y had no owner (the coarse mesher's per-cell ownership
-            // test drops it) - a permanent horizon hole. Cliff walls between
-            // columns (>16 m steps) live in the span interior and were never
-            // streamed at any ring. Flat terrain has span size 1, so this
-            // costs nothing where the old behavior was already correct.
-            // When the full wanted set exceeds the active-chunk budget (the
-            // mountains preset at large radii), the post-sort budget
-            // truncation below trims the farthest-ring candidates - never
-            // the near field.
-            for (int y = span.min_y; y <= span.max_y; ++y) {
-                add_candidate(
-                    IVec3(chunk_x, y, chunk_z),
-                    true,
-                    ring_distance,
-                    horizontal_dist2,
-                    std::abs(y - span.center_y),
-                    anchor_pos
-                );
-            }
+                ++m_last_streaming_budget_stats.target_surface_columns;
+                // Activate EVERY chunk-Y the column's isosurface passes through,
+                // at every ring. Beyond ring 12 the old code streamed exactly one
+                // chunk per column; any coarse cell whose surface lay in another
+                // chunk-Y had no owner (the coarse mesher's per-cell ownership
+                // test drops it) - a permanent horizon hole. Cliff walls between
+                // columns (>16 m steps) live in the span interior and were never
+                // streamed at any ring. Flat terrain has span size 1, so this
+                // costs nothing where the old behavior was already correct.
+                // When the full wanted set exceeds the active-chunk budget (the
+                // mountains preset at large radii), the post-sort budget
+                // truncation below trims the farthest-ring candidates - never
+                // the near field.
+                for (int y = span.min_y; y <= span.max_y; ++y) {
+                    add_candidate(IVec3(chunk_x, y, chunk_z),
+                                  true,
+                                  ring_distance,
+                                  horizontal_dist2,
+                                  std::abs(y - span.center_y),
+                                  anchor_pos);
+                }
 
-            if (ring_distance <= STREAMING_NEAR_VERTICAL_STACK_RADIUS) {
-                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 1, anchor_pos);
-                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 1, anchor_pos);
-            } else if (ring_distance <= STREAMING_MID_VERTICAL_STACK_RADIUS) {
-                add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z), false, ring_distance, horizontal_dist2, 2, anchor_pos);
-                add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z), false, ring_distance, horizontal_dist2, 2, anchor_pos);
+                if (ring_distance <= STREAMING_NEAR_VERTICAL_STACK_RADIUS) {
+                    add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z),
+                                  false,
+                                  ring_distance,
+                                  horizontal_dist2,
+                                  1,
+                                  anchor_pos);
+                    add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z),
+                                  false,
+                                  ring_distance,
+                                  horizontal_dist2,
+                                  1,
+                                  anchor_pos);
+                } else if (ring_distance <= STREAMING_MID_VERTICAL_STACK_RADIUS) {
+                    add_candidate(IVec3(chunk_x, span.min_y - 1, chunk_z),
+                                  false,
+                                  ring_distance,
+                                  horizontal_dist2,
+                                  2,
+                                  anchor_pos);
+                    add_candidate(IVec3(chunk_x, span.max_y + 1, chunk_z),
+                                  false,
+                                  ring_distance,
+                                  horizontal_dist2,
+                                  2,
+                                  anchor_pos);
+                }
             }
         }
-      }
     }
 
-    std::sort(to_create.begin(), to_create.end(), [](const GenerationCandidate& a, const GenerationCandidate& b) {
-        if (a.surface != b.surface) {
-            return a.surface;
-        }
-        if (a.ring_distance != b.ring_distance) {
-            return a.ring_distance < b.ring_distance;
-        }
-        if (a.horizontal_distance_sq != b.horizontal_distance_sq) {
-            return a.horizontal_distance_sq < b.horizontal_distance_sq;
-        }
-        if (a.vertical_rank != b.vertical_rank) {
-            return a.vertical_rank < b.vertical_rank;
-        }
-        if (a.coords.y != b.coords.y) {
-            return a.coords.y < b.coords.y;
-        }
-        if (a.coords.x != b.coords.x) {
-            return a.coords.x < b.coords.x;
-        }
-        return a.coords.z < b.coords.z;
-    });
+    std::sort(to_create.begin(),
+              to_create.end(),
+              [](const GenerationCandidate& a, const GenerationCandidate& b) {
+                  if (a.surface != b.surface) {
+                      return a.surface;
+                  }
+                  if (a.ring_distance != b.ring_distance) {
+                      return a.ring_distance < b.ring_distance;
+                  }
+                  if (a.horizontal_distance_sq != b.horizontal_distance_sq) {
+                      return a.horizontal_distance_sq < b.horizontal_distance_sq;
+                  }
+                  if (a.vertical_rank != b.vertical_rank) {
+                      return a.vertical_rank < b.vertical_rank;
+                  }
+                  if (a.coords.y != b.coords.y) {
+                      return a.coords.y < b.coords.y;
+                  }
+                  if (a.coords.x != b.coords.x) {
+                      return a.coords.x < b.coords.x;
+                  }
+                  return a.coords.z < b.coords.z;
+              });
 
     m_last_streaming_budget_stats.generation_candidates = to_create.size();
     for (const GenerationCandidate& candidate : to_create) {
@@ -3220,10 +3424,9 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             m_streaming_state.chunks.size() < STREAMING_MAX_ACTIVE_CHUNKS_BUDGET
                 ? STREAMING_MAX_ACTIVE_CHUNKS_BUDGET - m_streaming_state.chunks.size()
                 : 0u;
-        const std::size_t budget = std::min(
-            std::min(to_create.size(), budget_headroom),
-            static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget)
-        );
+        const std::size_t budget =
+            std::min(std::min(to_create.size(), budget_headroom),
+                     static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
         for (std::size_t i = 0; i < budget; ++i) {
             generate_now.push_back({to_create[i].coords, to_create[i].target_step});
             if (to_create[i].surface) {
@@ -3262,7 +3465,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         for (const IVec3& cc : camera_chunks) {
             const IVec3 d = coords - cc;
             if (std::abs(d.x) > UNLOAD_DISTANCE_XZ || std::abs(d.z) > UNLOAD_DISTANCE_XZ) {
-                continue;  // outside this anchor's XZ disc
+                continue; // outside this anchor's XZ disc
             }
             xz_in_range_any = true;
             if (d.y <= UNLOAD_DISTANCE_UP && d.y >= -UNLOAD_DISTANCE_DOWN) {
@@ -3271,10 +3474,10 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             }
         }
         if (vert_in_band_any) {
-            continue;  // in full range of some anchor
+            continue; // in full range of some anchor
         }
         if (!xz_in_range_any) {
-            to_unload.push_back(id);  // XZ-far from every anchor
+            to_unload.push_back(id); // XZ-far from every anchor
             continue;
         }
         // XZ in range of some anchor but vertically outside all bands -> surface-band test.
@@ -3315,11 +3518,17 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     return true;
 }
 
-bool SHIELD_WorldSystem::EnsureCollisionReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int horizontal_radius) {
+bool SHIELD_WorldSystem::EnsureCollisionReadyNear(const Vec3& world_pos,
+                                                  PhysicsSystem* physics_system,
+                                                  int horizontal_radius) {
     return EnsureSurfaceReadyNear(world_pos, physics_system, horizontal_radius, horizontal_radius);
 }
 
-bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSystem* physics_system, int surface_radius, int collision_radius, int render_lod0_radius) {
+bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
+                                                PhysicsSystem* physics_system,
+                                                int surface_radius,
+                                                int collision_radius,
+                                                int render_lod0_radius) {
     if (!physics_system) {
         return false;
     }
@@ -3335,20 +3544,21 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     // collision-build batch below was wrapped, so a generation/meshing wedge still
     // hung silently). Observability only — hash-neutral, OFF in determinism gates.
     const bool job_watchdog = Luminumbra::Core::JobWatchdogEnabled();
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...", world_pos.x, world_pos.z);
+    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining generation jobs (near {:.0f},{:.0f})...",
+                         world_pos.x,
+                         world_pos.z);
     Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-        "EnsureSurfaceReadyNear/generation-drain",
-        [this]() { wait_for_generation_jobs(); });
+                                          "EnsureSurfaceReadyNear/generation-drain",
+                                          [this]() { wait_for_generation_jobs(); });
     LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: draining meshing jobs...");
     Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-        "EnsureSurfaceReadyNear/meshing-drain",
-        [this]() { wait_for_meshing_jobs(); });
+                                          "EnsureSurfaceReadyNear/meshing-drain",
+                                          [this]() { wait_for_meshing_jobs(); });
     // SHIELD-02: settle the two-stage promotion pipeline too (publish staged
     // sim truth, dispatch + drain the stage-B render meshes) so the surface
     // band below observes fully settled chunks, exactly as before the split.
-    Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
-        "EnsureSurfaceReadyNear/promotion-drain",
-        [this]() {
+    Luminumbra::Core::WaitWithJobWatchdog(
+        job_watchdog, "EnsureSurfaceReadyNear/promotion-drain", [this]() {
             wait_for_promotion_jobs();
             wait_for_meshing_jobs();
         });
@@ -3365,9 +3575,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     // render caves/overhangs instead of coarse heightmap LODs, WITHOUT building
     // any extra gameplay collision (collision still gates on collision_range
     // below). Clamped to [0, radius] so it never exceeds the built surface disc.
-    const int lod0_range = (render_lod0_radius < 0)
-        ? collision_range
-        : std::clamp(render_lod0_radius, 0, radius);
+    const int lod0_range =
+        (render_lod0_radius < 0) ? collision_range : std::clamp(render_lod0_radius, 0, radius);
     struct SurfaceHorizonChunk {
         std::shared_ptr<Luminumbra::Chunk> chunk;
         IVec2 offset{0};
@@ -3379,7 +3588,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     std::vector<SurfaceHorizonChunk> chunks_to_build;
     std::vector<SurfaceHorizonChunk> chunks_to_consider_for_collision;
     std::array<std::size_t, 3> lod_counts{0u, 0u, 0u};
-    const std::size_t surface_capacity = static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 5);
+    const std::size_t surface_capacity =
+        static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1) * 5);
     chunks_to_build.reserve(surface_capacity);
     chunks_to_consider_for_collision.reserve(surface_capacity);
 
@@ -3409,16 +3619,10 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
 
                 auto& chunk = it->second;
                 SurfaceHorizonChunk surface_chunk{
-                    chunk,
-                    IVec2(dx, dz),
-                    std::abs(chunk_y - span.center_y),
-                    lod,
-                    step
-                };
+                    chunk, IVec2(dx, dz), std::abs(chunk_y - span.center_y), lod, step};
                 chunks_to_consider_for_collision.push_back(surface_chunk);
                 if (chunk->get_state() != ChunkState::Ready || chunk->current_lod.load() != lod ||
-                    chunk->mesh_vertices.empty() || chunk->mesh_indices.empty())
-                {
+                    chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) {
                     chunk->set_state(ChunkState::Loading);
                     chunks_to_build.push_back(surface_chunk);
                 }
@@ -3430,7 +3634,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     build_jobs.reserve(chunks_to_build.size());
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
         build_jobs.emplace_back([this, build_chunk]() {
-            const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
+            const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
             // Stopgap guard (spec 017/018; Codex audit #2 — the most plausible load-hang
@@ -3441,20 +3645,25 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
             // Detect it and clear the buffer so it REGENERATES a correct lattice below
             // (generation is a pure function of seed/params). Hash-neutral for valid worlds:
             // a well-formed full SDF is always exactly kFullSdfLattice, so this never fires.
-            constexpr std::size_t kFullSdfLattice =
-                static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-            const bool has_malformed_sdf = !chunk->sdf_data.empty() &&
-                chunk->sdf_data.size() != kFullSdfLattice;
+            constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                                    (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+            const bool has_malformed_sdf =
+                !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
             if (has_malformed_sdf) {
                 const IVec3 cc = chunk->get_coords();
-                LUMINUMBRA_CORE_WARN("EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
+                LUMINUMBRA_CORE_WARN(
+                    "EnsureSurfaceReadyNear: chunk ({},{},{}) has malformed "
                     "SDF (size {} != {}); regenerating a full lattice before meshing",
-                    cc.x, cc.y, cc.z, chunk->sdf_data.size(), kFullSdfLattice);
+                    cc.x,
+                    cc.y,
+                    cc.z,
+                    chunk->sdf_data.size(),
+                    kFullSdfLattice);
                 chunk->sdf_data.clear();
             }
-            const bool missing_required_data = needs_full_sdf
-                ? chunk->sdf_data.empty()
-                : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
+            const bool missing_required_data =
+                needs_full_sdf ? chunk->sdf_data.empty()
+                               : (chunk->sdf_data.empty() && chunk->heightmap_data.empty());
             if (has_malformed_sdf) {
                 // A malformed non-empty lattice must not fall back to the
                 // coarse heightfield: rebuild exact SDF authority first.
@@ -3472,7 +3681,8 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
                 GenerateChunkData(*chunk, build_chunk.step);
             }
             chunk->set_state(ChunkState::Meshing);
-            Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, *chunk, 0.0f, build_chunk.step);
+            Luminumbra::World::MarchingCubes::PolygoniseTerrain(
+                *this, *chunk, 0.0f, build_chunk.step);
             chunk->applied_transition_faces.store(0, std::memory_order_release);
             chunk->water_mesh_vertices.clear();
             chunk->water_mesh_indices.clear();
@@ -3497,24 +3707,27 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
         constexpr std::size_t kBootBuildSubBatch = 64u;
         const std::size_t total_jobs = build_jobs.size();
         const std::size_t batch_count = (total_jobs + kBootBuildSubBatch - 1) / kBootBuildSubBatch;
-        LUMINUMBRA_CORE_INFO(
-            "EnsureSurfaceReadyNear: dispatching {} surface-build jobs in {} bounded sub-batches...",
-            total_jobs, batch_count);
+        LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: dispatching {} surface-build jobs in {} "
+                             "bounded sub-batches...",
+                             total_jobs,
+                             batch_count);
         std::vector<Luminumbra::Job> sub_batch;
         sub_batch.reserve(kBootBuildSubBatch);
         std::size_t completed = 0;
         for (std::size_t begin = 0; begin < total_jobs; begin += kBootBuildSubBatch) {
             const std::size_t end = std::min(begin + kBootBuildSubBatch, total_jobs);
-            sub_batch.assign(std::make_move_iterator(build_jobs.begin() + static_cast<std::ptrdiff_t>(begin)),
-                             std::make_move_iterator(build_jobs.begin() + static_cast<std::ptrdiff_t>(end)));
+            sub_batch.assign(
+                std::make_move_iterator(build_jobs.begin() + static_cast<std::ptrdiff_t>(begin)),
+                std::make_move_iterator(build_jobs.begin() + static_cast<std::ptrdiff_t>(end)));
             const Luminumbra::JobHandle handle = m_job_system->dispatch_batch(sub_batch);
-            std::string phase = "EnsureSurfaceReadyNear/surface-build batch " +
+            std::string phase =
+                "EnsureSurfaceReadyNear/surface-build batch " +
                 std::to_string(begin / kBootBuildSubBatch + 1) + "/" + std::to_string(batch_count) +
                 " (" + std::to_string(completed) + "/" + std::to_string(total_jobs) +
                 " built, near chunk " + std::to_string(center_chunk.x) + "," +
                 std::to_string(center_chunk.y) + "," + std::to_string(center_chunk.z) + ")";
-            Luminumbra::Core::WaitWithJobWatchdog(job_watchdog, std::move(phase),
-                [this, &handle]() { m_job_system->wait(handle); });
+            Luminumbra::Core::WaitWithJobWatchdog(
+                job_watchdog, std::move(phase), [this, &handle]() { m_job_system->wait(handle); });
             completed = end;
         }
     } else {
@@ -3522,8 +3735,10 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
             job();
         }
     }
-    LUMINUMBRA_CORE_INFO("EnsureSurfaceReadyNear: surface ready (took {:.0f}ms)",
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _esrn_t0).count());
+    LUMINUMBRA_CORE_INFO(
+        "EnsureSurfaceReadyNear: surface ready (took {:.0f}ms)",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _esrn_t0)
+            .count());
 
     std::unordered_map<u64, const SurfaceHorizonChunk*> surface_by_xz;
     surface_by_xz.reserve(chunks_to_consider_for_collision.size());
@@ -3545,21 +3760,24 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
 
         const IVec3 coords = surface_chunk.chunk->get_coords();
         auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
-        auto add_face_if_neighbor_is_finer = [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
-            const auto neighbor_it = surface_by_xz.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
-            if (neighbor_it == surface_by_xz.end()) {
-                return;
-            }
+        auto add_face_if_neighbor_is_finer =
+            [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
+                const auto neighbor_it =
+                    surface_by_xz.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
+                if (neighbor_it == surface_by_xz.end()) {
+                    return;
+                }
 
-            const SurfaceHorizonChunk& neighbor = *neighbor_it->second;
-            const bool neighbor_is_finer = neighbor.lod < surface_chunk.lod;
-            const bool vertical_mixed_lod_pair =
-                neighbor.lod != surface_chunk.lod &&
-                neighbor.chunk->get_coords().y != coords.y;
-            if (neighbor_is_finer || vertical_mixed_lod_pair) {
-                transition_faces |= static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
-            }
-        };
+                const SurfaceHorizonChunk& neighbor = *neighbor_it->second;
+                const bool neighbor_is_finer = neighbor.lod < surface_chunk.lod;
+                const bool vertical_mixed_lod_pair =
+                    neighbor.lod != surface_chunk.lod && neighbor.chunk->get_coords().y != coords.y;
+                if (neighbor_is_finer || vertical_mixed_lod_pair) {
+                    transition_faces |=
+                        static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(
+                            face);
+                }
+            };
 
         add_face_if_neighbor_is_finer(-1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
         add_face_if_neighbor_is_finer(1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
@@ -3568,11 +3786,9 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
 
         if (transition_faces != Luminumbra::World::MarchingCubes::kNoTransitionFaces) {
             Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
-                *surface_chunk.chunk,
-                surface_chunk.step,
-                transition_faces
-            );
-            surface_chunk.chunk->applied_transition_faces.fetch_or(transition_faces, std::memory_order_acq_rel);
+                *surface_chunk.chunk, surface_chunk.step, transition_faces);
+            surface_chunk.chunk->applied_transition_faces.fetch_or(transition_faces,
+                                                                   std::memory_order_acq_rel);
         }
     }
 
@@ -3580,25 +3796,32 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos, PhysicsSy
     for (const SurfaceHorizonChunk& surface_chunk : chunks_to_consider_for_collision) {
         const auto& chunk = surface_chunk.chunk;
         const IVec2& offset = surface_chunk.offset;
-        if (surface_chunk.lod == 0 &&
-            surface_chunk.vertical_rank == 0 &&
+        if (surface_chunk.lod == 0 && surface_chunk.vertical_rank == 0 &&
             std::abs(offset.x) <= collision_range && std::abs(offset.y) <= collision_range &&
-            !chunk->has_collision.load())
-        {
+            !chunk->has_collision.load()) {
             replace_chunk_collision(*physics_system, *chunk);
             ++collision_count;
         }
     }
 
-    LUMINUMBRA_CORE_INFO("Initial surface horizon ready: radius={}, surface_chunks={}, rebuilt={}, lod0={}, lod1={}, lod2={}, collision_radius={}, collisions={}",
-        radius, chunks_to_consider_for_collision.size(), chunks_to_build.size(),
-        lod_counts[0], lod_counts[1], lod_counts[2], collision_range, collision_count);
-    // spec 004 streaming elision: this synchronous rebuild can mutate a SETTLED world (carve / teleport
-    // / boot) WITHOUT a chunk-count or anchor delta, so re-open the candidate-pass gate explicitly.
+    LUMINUMBRA_CORE_INFO("Initial surface horizon ready: radius={}, surface_chunks={}, rebuilt={}, "
+                         "lod0={}, lod1={}, lod2={}, collision_radius={}, collisions={}",
+                         radius,
+                         chunks_to_consider_for_collision.size(),
+                         chunks_to_build.size(),
+                         lod_counts[0],
+                         lod_counts[1],
+                         lod_counts[2],
+                         collision_range,
+                         collision_count);
+    // This synchronous rebuild can mutate a settled world (carve /
+    // teleport / boot) WITHOUT a chunk-count or anchor delta, so re-open the candidate-pass gate
+    // explicitly.
     ++m_dirty_generation;
     // spec 008 WS-1: the rebuild reset has_collision=false on its remeshed chunks (some on worker
-    // threads, now joined) and synchronously collided only the in-range subset, so re-open the gated
-    // collision scan to backfill colliders for any out-of-range LOD0 chunks. Main-thread store.
+    // threads, now joined) and synchronously collided only the in-range subset, so re-open the
+    // gated collision scan to backfill colliders for any out-of-range LOD0 chunks. Main-thread
+    // store.
     m_collision_pass_dirty = true;
     return true;
 }
@@ -3616,18 +3839,24 @@ SHIELD_WorldSystem::WaterStateHash SHIELD_WorldSystem::debug_water_state_hash() 
     std::vector<ChunkID> ids;
     ids.reserve(m_streaming_state.chunks.size());
     for (const auto& [id, c] : m_streaming_state.chunks) {
-        if (c && c->has_water_sim.load(std::memory_order_acquire)) ids.push_back(id);
+        if (c && c->has_water_sim.load(std::memory_order_acquire))
+            ids.push_back(id);
     }
     std::sort(ids.begin(), ids.end());
     WaterStateHash out;
     out.water_chunks = ids.size();
     std::uint64_t h = 1469598103934665603ull;
-    auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ull; };
+    auto mix = [&h](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
     for (ChunkID id : ids) {
         const auto& c = m_streaming_state.chunks.at(id);
         mix(static_cast<std::uint64_t>(id));
-        for (const std::int32_t d : c->water_depth_mm) mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(d)));
-        for (const std::int32_t b : c->water_bed_mm)   mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(b)));
+        for (const std::int32_t d : c->water_depth_mm)
+            mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(d)));
+        for (const std::int32_t b : c->water_bed_mm)
+            mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(b)));
     }
     out.hash = h;
     return out;
@@ -3645,7 +3874,9 @@ std::int64_t SHIELD_WorldSystem::debug_max_water_depth_mm() const {
     std::int64_t mx = 0;
     for (const auto& [id, c] : m_streaming_state.chunks) {
         if (c && c->has_water_sim.load(std::memory_order_acquire)) {
-            for (const std::int32_t d : c->water_depth_mm) if (d > mx) mx = d;
+            for (const std::int32_t d : c->water_depth_mm)
+                if (d > mx)
+                    mx = d;
         }
     }
     return mx;
@@ -3657,9 +3888,11 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
     const float r2 = radius_m * radius_m;
     std::int64_t sum = 0;
     for (const auto& [id, c] : m_streaming_state.chunks) {
-        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire))
+            continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res) continue;
+        if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res)
+            continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
@@ -3668,7 +3901,8 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
                 const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
                 const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
                 const float dx = wx - center.x, dz = wz - center.z;
-                if (dx * dx + dz * dz <= r2) sum += c->water_depth_mm[z * res + x];
+                if (dx * dx + dz * dz <= r2)
+                    sum += c->water_depth_mm[z * res + x];
             }
         }
     }
@@ -3680,11 +3914,14 @@ std::int64_t SHIELD_WorldSystem::debug_water_volume_near(const Vec3& center, flo
 std::int64_t SHIELD_WorldSystem::debug_land_water_volume_mm() const {
     std::int64_t sum = 0;
     for (const auto& [id, c] : m_streaming_state.chunks) {
-        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire))
+            continue;
         const std::size_t nb = c->water_bed_mm.size();
-        if (c->water_depth_mm.size() != nb) continue;
+        if (c->water_depth_mm.size() != nb)
+            continue;
         for (std::size_t i = 0; i < nb; ++i) {
-            if (c->water_bed_mm[i] > 500) sum += c->water_depth_mm[i]; // bed > 0.5 m above sea => land
+            if (c->water_bed_mm[i] > 500)
+                sum += c->water_depth_mm[i]; // bed > 0.5 m above sea => land
         }
     }
     return sum;
@@ -3698,24 +3935,29 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
     std::int32_t lowest = 0x7fffffff;
     bool found = false;
     for (const auto& [id, c] : m_streaming_state.chunks) {
-        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
-        if (c->sdf_data.size() != kFullSdf) continue;
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire))
+            continue;
+        if (c->sdf_data.size() != kFullSdf)
+            continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
-        if (res <= 1 || static_cast<int>(c->water_bed_mm.size()) != res * res) continue;
+        if (res <= 1 || static_cast<int>(c->water_bed_mm.size()) != res * res)
+            continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
-        for (int z = 0; z < res; ++z) for (int x = 0; x < res; ++x) {
-            const std::int32_t b = c->water_bed_mm[z * res + x];
-            if (b > 2000 && b < lowest) {  // above sea (valley floor, not coast) and the lowest so far
-                lowest = b;
-                const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
-                const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                pos_out = Vec3(wx, static_cast<float>(b) / 1000.0f, wz);
-                bed_m_out = static_cast<float>(b) / 1000.0f;
-                found = true;
+        for (int z = 0; z < res; ++z)
+            for (int x = 0; x < res; ++x) {
+                const std::int32_t b = c->water_bed_mm[z * res + x];
+                if (b > 2000 &&
+                    b < lowest) { // above sea (valley floor, not coast) and the lowest so far
+                    lowest = b;
+                    const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
+                    const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
+                    pos_out = Vec3(wx, static_cast<float>(b) / 1000.0f, wz);
+                    bed_m_out = static_cast<float>(b) / 1000.0f;
+                    found = true;
+                }
             }
-        }
     }
     return found;
 }
@@ -3726,38 +3968,48 @@ bool SHIELD_WorldSystem::debug_lowest_land_pos(Vec3& pos_out, float& bed_m_out) 
 // the bank height. Picks the tallest dry bank found (most dramatic dry->flooded contrast). False if
 // no such shoreline is streamed (e.g. open sea surrounded by sea). This is what makes a convincing
 // "carve the bank, water floods the dry side" shot — the naive deepest-water cell is mid-ocean.
-bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out, float& to_land_x, float& to_land_z,
-                                              float& water_surf_out, float& bank_height_out) const {
+bool SHIELD_WorldSystem::debug_find_shoreline(Vec3& water_pos_out,
+                                              float& to_land_x,
+                                              float& to_land_z,
+                                              float& water_surf_out,
+                                              float& bank_height_out) const {
     constexpr std::size_t kFullSdf =
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     float best_bank = -1e9f;
     bool found = false;
     for (const auto& [id, c] : m_streaming_state.chunks) {
-        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
-        if (c->sdf_data.size() != kFullSdf) continue;
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire))
+            continue;
+        if (c->sdf_data.size() != kFullSdf)
+            continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
         if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
-            static_cast<int>(c->water_bed_mm.size()) != res * res) continue;
+            static_cast<int>(c->water_bed_mm.size()) != res * res)
+            continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
-                if (c->water_depth_mm[z * res + x] < 2500) continue;  // need real depth (>=2.5 m)
+                if (c->water_depth_mm[z * res + x] < 2500)
+                    continue; // need real depth (>=2.5 m)
                 const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
                 const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
                 const float surf = static_cast<float>(c->water_bed_mm[z * res + x] +
-                                                      c->water_depth_mm[z * res + x]) / 1000.0f;
+                                                      c->water_depth_mm[z * res + x]) /
+                                   1000.0f;
                 for (int a = 0; a < 8; ++a) {
                     const float ang = static_cast<float>(a) * 0.7853981634f;
                     const float ox = std::cos(ang), oz = std::sin(ang);
                     const float th = GetTerrainHeightAt(wx + ox * 8.0f, wz + oz * 8.0f);
-                    const float bank = th - surf;  // dry bank height above the water
+                    const float bank = th - surf; // dry bank height above the water
                     if (bank > best_bank && bank > 2.5f) {
                         best_bank = bank;
                         water_pos_out = Vec3(wx, surf, wz);
-                        to_land_x = ox; to_land_z = oz;
-                        water_surf_out = surf; bank_height_out = bank;
+                        to_land_x = ox;
+                        to_land_z = oz;
+                        water_surf_out = surf;
+                        bank_height_out = bank;
                         found = true;
                     }
                 }
@@ -3790,44 +4042,55 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
     constexpr std::size_t kFullSdf =
         static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     for (const auto& [id, c] : m_streaming_state.chunks) {
-        if (!c || !c->has_water_sim.load(std::memory_order_acquire)) continue;
-        if (c->sdf_data.size() != kFullSdf) continue;
+        if (!c || !c->has_water_sim.load(std::memory_order_acquire))
+            continue;
+        if (c->sdf_data.size() != kFullSdf)
+            continue;
         const int res = static_cast<int>(c->current_water_resolution.load());
         if (res <= 1 || static_cast<int>(c->water_depth_mm.size()) != res * res ||
-            static_cast<int>(c->water_bed_mm.size()) != res * res) continue;
+            static_cast<int>(c->water_bed_mm.size()) != res * res)
+            continue;
         const IVec3 cc = c->get_coords();
         const float cw_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(res);
         const float cw_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(res);
         for (int z = 0; z < res; ++z) {
             for (int x = 0; x < res; ++x) {
                 const std::int32_t d = c->water_depth_mm[z * res + x];
-                if (d <= best) continue;
+                if (d <= best)
+                    continue;
                 best = d;
                 const float wx = cc.x * CHUNK_SIZE_X + (x + 0.5f) * cw_x;
                 const float wz = cc.z * CHUNK_SIZE_Z + (z + 0.5f) * cw_z;
-                const float surf_y =
-                    static_cast<float>(c->water_bed_mm[z * res + x] + d) / 1000.0f;
+                const float surf_y = static_cast<float>(c->water_bed_mm[z * res + x] + d) / 1000.0f;
                 best_pos = Vec3(wx, surf_y, wz);
             }
         }
     }
-    if (depth_mm_out) *depth_mm_out = best;
+    if (depth_mm_out)
+        *depth_mm_out = best;
     return best_pos;
 }
 
 // Spec 009 Phase 2: terraform the water bed (dig/dam) — delegates to the WaterSystem.
-int SHIELD_WorldSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, float radius_m) {
+int SHIELD_WorldSystem::EditTerrainBed(const Vec3& world_pos,
+                                       std::int32_t delta_mm,
+                                       float radius_m) {
     return m_water_system ? m_water_system->EditTerrainBed(world_pos, delta_mm, radius_m) : 0;
 }
 
 // Spec 010: configure the finite-hydrology cycle (no perpetual source + rain + evaporation).
-void SHIELD_WorldSystem::SetWaterHydrology(bool finite, std::int32_t rain_mm_per_tick, std::int32_t evap_mm_per_tick) {
-    if (m_water_system) m_water_system->SetHydrology(finite, rain_mm_per_tick, evap_mm_per_tick);
+void SHIELD_WorldSystem::SetWaterHydrology(bool finite,
+                                           std::int32_t rain_mm_per_tick,
+                                           std::int32_t evap_mm_per_tick) {
+    if (m_water_system)
+        m_water_system->SetHydrology(finite, rain_mm_per_tick, evap_mm_per_tick);
 }
 
 // S1.1 (ATMO-11/WATER-07): weather-driven per-cell rain passthrough (null = OFF).
-void SHIELD_WorldSystem::SetWaterWeatherRain(const Systems::WeatherSystem* weather, std::int32_t scale_mm) {
-    if (m_water_system) m_water_system->SetWeatherRain(weather, scale_mm);
+void SHIELD_WorldSystem::SetWaterWeatherRain(const Systems::WeatherSystem* weather,
+                                             std::int32_t scale_mm) {
+    if (m_water_system)
+        m_water_system->SetWeatherRain(weather, scale_mm);
 }
 
 // W2.1 diagnostics passthrough.
@@ -3844,10 +4107,11 @@ std::vector<IVec3> SHIELD_WorldSystem::debug_water_grid_chunk_coords(std::size_t
             found.emplace_back(id, c->get_coords());
         }
     }
-    std::sort(found.begin(), found.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::sort(
+        found.begin(), found.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<IVec3> out;
-    for (std::size_t i = 0; i < found.size() && i < max_count; ++i) out.push_back(found[i].second);
+    for (std::size_t i = 0; i < found.size() && i < max_count; ++i)
+        out.push_back(found[i].second);
     return out;
 }
 
@@ -3861,9 +4125,11 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
     const float terrain = GetTerrainHeightAt(world_x, world_z);
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
     const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
-    if (!c || !c->has_water_sim.load(std::memory_order_relaxed)) return terrain;
+    if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
+        return terrain;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    if (res <= 1 || static_cast<int>(c->water_level_data.size()) != res * res) return terrain;
+    if (res <= 1 || static_cast<int>(c->water_level_data.size()) != res * res)
+        return terrain;
     const float lx = world_x - static_cast<float>(cc.x * CHUNK_SIZE_X);
     const float lz = world_z - static_cast<float>(cc.z * CHUNK_SIZE_Z);
     const int sx = std::clamp(static_cast<int>((lx / CHUNK_SIZE_X) * res), 0, res - 1);
@@ -3877,20 +4143,22 @@ bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const
     // the 2.5D COLUMN's y=0 chunk regardless of the terrain sign — probe there.
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
     const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
-    if (!c || !c->has_water_sim.load(std::memory_order_relaxed)) return false;
+    if (!c || !c->has_water_sim.load(std::memory_order_relaxed))
+        return false;
     const int res = c->current_water_resolution.load(std::memory_order_relaxed);
-    return res > 1 &&
-           static_cast<int>(c->water_level_data.size()) == res * res;
+    return res > 1 && static_cast<int>(c->water_level_data.size()) == res * res;
 }
 
 // WATER-17: boot-settle mode passthrough (lifts the live-play water caps during Boot only).
 void SHIELD_WorldSystem::SetWaterBootSettleMode(bool on) {
-    if (m_water_system) m_water_system->SetBootSettleMode(on);
+    if (m_water_system)
+        m_water_system->SetBootSettleMode(on);
 }
 
 // WATER-17: loaded-boot water pause passthrough (see WaterSystem::SetBootPaused).
 void SHIELD_WorldSystem::SetWaterBootPaused(bool on) {
-    if (m_water_system) m_water_system->SetBootPaused(on);
+    if (m_water_system)
+        m_water_system->SetBootPaused(on);
 }
 
 // WATER-17: rotating sim-window cursor persistence seam (see WaterSystem accessors).
@@ -3898,7 +4166,8 @@ std::size_t SHIELD_WorldSystem::GetWaterSimWindowCursor() const {
     return m_water_system ? m_water_system->GetSimWindowCursor() : 0u;
 }
 void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
-    if (m_water_system) m_water_system->SetSimWindowCursor(cursor);
+    if (m_water_system)
+        m_water_system->SetSimWindowCursor(cursor);
 }
 
 // Spec 009 Phase 2 — PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
@@ -3916,62 +4185,71 @@ void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
 // hashed + persisted directly (WorldPersistenceRoundtrip), and sqrt is IEEE-754
 // correctly-rounded — the same determinism contract the green persistence carve relies on.
 // Returns the number of chunks actually modified.
-int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos, float radius_m, bool fill,
+int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
+                                         float radius_m,
+                                         bool fill,
                                          PhysicsSystem* physics_system) {
-    if (radius_m <= 0.0f) return 0;
+    if (radius_m <= 0.0f)
+        return 0;
     constexpr int size_x = CHUNK_SIZE_X + 1;
     constexpr int size_y = CHUNK_SIZE_Y + 1;
     constexpr int size_z = CHUNK_SIZE_Z + 1;
-    constexpr std::size_t expected =
-        static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y) * static_cast<std::size_t>(size_z);
+    constexpr std::size_t expected = static_cast<std::size_t>(size_x) *
+                                     static_cast<std::size_t>(size_y) *
+                                     static_cast<std::size_t>(size_z);
 
     // Chunk-coord AABB the sphere can touch (carve may span several chunks).
     const IVec3 lo = world_to_chunk_coords(world_pos - Vec3(radius_m, radius_m, radius_m));
     const IVec3 hi = world_to_chunk_coords(world_pos + Vec3(radius_m, radius_m, radius_m));
     int edited = 0;
     for (int cz = lo.z; cz <= hi.z; ++cz)
-    for (int cy = lo.y; cy <= hi.y; ++cy)
-    for (int cx = lo.x; cx <= hi.x; ++cx) {
-        const auto chunk = find_streamed_chunk(IVec3(cx, cy, cz));
-        if (!chunk || chunk->sdf_data.size() != expected) continue;
-        const IVec3 base = chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-        bool changed = false;
-        for (int z = 0; z < size_z; ++z)
-        for (int y = 0; y < size_y; ++y)
-        for (int x = 0; x < size_x; ++x) {
-            const float dx = static_cast<float>(base.x + x) - world_pos.x;
-            const float dy = static_cast<float>(base.y + y) - world_pos.y;
-            const float dz = static_cast<float>(base.z + z) - world_pos.z;
-            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (dist > radius_m) continue;
-            const std::size_t idx =
-                static_cast<std::size_t>(x) +
-                static_cast<std::size_t>(y) * static_cast<std::size_t>(size_x) +
-                static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x) * static_cast<std::size_t>(size_y);
-            const float mag = radius_m - dist;
-            if (!fill) {
-                // DIG → carve to air (raise toward +mag).
-                if (mag > chunk->sdf_data[idx]) {
-                    chunk->sdf_data[idx] = mag;
-                    if (!chunk->material_data.empty() && idx < chunk->material_data.size())
-                        chunk->material_data[idx] = 0u;
-                    changed = true;
-                }
-            } else {
-                // FILL → pack solid (lower toward -mag).
-                if (-mag < chunk->sdf_data[idx]) {
-                    chunk->sdf_data[idx] = -mag;
-                    changed = true;
+        for (int cy = lo.y; cy <= hi.y; ++cy)
+            for (int cx = lo.x; cx <= hi.x; ++cx) {
+                const auto chunk = find_streamed_chunk(IVec3(cx, cy, cz));
+                if (!chunk || chunk->sdf_data.size() != expected)
+                    continue;
+                const IVec3 base =
+                    chunk->get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+                bool changed = false;
+                for (int z = 0; z < size_z; ++z)
+                    for (int y = 0; y < size_y; ++y)
+                        for (int x = 0; x < size_x; ++x) {
+                            const float dx = static_cast<float>(base.x + x) - world_pos.x;
+                            const float dy = static_cast<float>(base.y + y) - world_pos.y;
+                            const float dz = static_cast<float>(base.z + z) - world_pos.z;
+                            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                            if (dist > radius_m)
+                                continue;
+                            const std::size_t idx =
+                                static_cast<std::size_t>(x) +
+                                static_cast<std::size_t>(y) * static_cast<std::size_t>(size_x) +
+                                static_cast<std::size_t>(z) * static_cast<std::size_t>(size_x) *
+                                    static_cast<std::size_t>(size_y);
+                            const float mag = radius_m - dist;
+                            if (!fill) {
+                                // DIG → carve to air (raise toward +mag).
+                                if (mag > chunk->sdf_data[idx]) {
+                                    chunk->sdf_data[idx] = mag;
+                                    if (!chunk->material_data.empty() &&
+                                        idx < chunk->material_data.size())
+                                        chunk->material_data[idx] = 0u;
+                                    changed = true;
+                                }
+                            } else {
+                                // FILL → pack solid (lower toward -mag).
+                                if (-mag < chunk->sdf_data[idx]) {
+                                    chunk->sdf_data[idx] = -mag;
+                                    changed = true;
+                                }
+                            }
+                        }
+                if (changed) {
+                    chunk->mark_voxel_data_dirty();
+                    bump_far_lod_authority_revision(chunk->get_coords());
+                    chunk->current_lod.store(-1, std::memory_order_release);
+                    ++edited;
                 }
             }
-        }
-        if (changed) {
-            chunk->mark_voxel_data_dirty();
-            bump_far_lod_authority_revision(chunk->get_coords());
-            chunk->current_lod.store(-1, std::memory_order_release);
-            ++edited;
-        }
-    }
     if (edited > 0) {
         // Remesh + rebuild colliders for the edited band (rings in chunk units).
         const int rings = static_cast<int>(radius_m / static_cast<float>(CHUNK_SIZE_X)) + 2;
@@ -4006,20 +4284,21 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
 
     if (m_params.caves_enabled) {
         sample.caves_applied = true;
-        sample.cave_noise = m_cave_generator->GenSingle3D(
-            world_pos.x * m_params.cave_frequency,
-            world_pos.y * m_params.cave_frequency,
-            world_pos.z * m_params.cave_frequency,
-            m_seed + 1
-        );
+        sample.cave_noise = m_cave_generator->GenSingle3D(world_pos.x * m_params.cave_frequency,
+                                                          world_pos.y * m_params.cave_frequency,
+                                                          world_pos.z * m_params.cave_frequency,
+                                                          m_seed + 1);
         sample.cave_value = std::clamp((sample.cave_noise + 1.0f) * 0.5f, 0.0f, 1.0f);
         const SurfaceBreakSample sb = sample_surface_breaks(world_pos, sample.final_height);
-        sample.cave_density = surface_capped_cave_density(sample.terrain_density,
-            sample.cave_noise, m_params, sb.effective_cap);  // cheese component (diagnostic)
+        sample.cave_density =
+            surface_capped_cave_density(sample.terrain_density,
+                                        sample.cave_noise,
+                                        m_params,
+                                        sb.effective_cap); // cheese component (diagnostic)
         // Spec 013: final density routes through the single composition point so it includes
         // the noise-router spaghetti tunnels (legacy result stays bit-exact: same cheese noise).
-        sample.final_density = EvaluateCaveDensity(world_pos, sample.terrain_density,
-                                                   sb.effective_cap, sb.carve);
+        sample.final_density =
+            EvaluateCaveDensity(world_pos, sample.terrain_density, sb.effective_cap, sb.carve);
     }
 
     sample.solid = sample.final_density < 0.0f;
@@ -4035,17 +4314,20 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
         // its above-water skin as the biome filler. The threshold keeps the
         // bank a thin rim around the channel rather than the whole valley.
         const bool river_bank = RiverInfluenceFromNoise(world_pos.x, world_pos.z) > 0.25f;
-        sample.material = SurfaceMaterialForColumn(world_pos.y, sample.final_height, biome_id, river_bank);
+        sample.material =
+            SurfaceMaterialForColumn(world_pos.y, sample.final_height, biome_id, river_bank);
     }
     return sample;
 }
 
-float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_pos, float terrain_height) const {
+float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_pos,
+                                                            float terrain_height) const {
     float terrain_density = world_pos.y - terrain_height;
     if (m_params.caves_enabled) {
         // Spec 013: single composition point (cheese + noise-router spaghetti).
         const SurfaceBreakSample sb = sample_surface_breaks(world_pos, terrain_height);
-        terrain_density = EvaluateCaveDensity(world_pos, terrain_density, sb.effective_cap, sb.carve);
+        terrain_density =
+            EvaluateCaveDensity(world_pos, terrain_density, sb.effective_cap, sb.carve);
     }
     return terrain_density;
 }
@@ -4062,11 +4344,11 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
 
     std::vector<Luminumbra::Chunk*> renderable;
     renderable.reserve(m_streaming_state.chunks.size());
-    
+
     int total_chunks = 0;
     int ready_chunks = 0;
     int chunks_with_mesh = 0;
-    
+
     for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
         total_chunks++;
         if (chunk_ptr->get_state() == Luminumbra::ChunkState::Ready) {
@@ -4074,14 +4356,14 @@ std::vector<Luminumbra::Chunk*> SHIELD_WorldSystem::get_renderable_chunks() {
             if (!chunk_ptr->mesh_vertices.empty()) {
                 chunks_with_mesh++;
                 renderable.push_back(chunk_ptr.get());
-                
+
                 // Debug logging disabled to prevent segfault from static atomics
             }
         }
     }
-    
+
     // Performance logging removed from hot path - use profiler instead
-    
+
     return renderable;
 }
 
@@ -4130,7 +4412,8 @@ SHIELD_WorldSystem::RuntimeChunkStats SHIELD_WorldSystem::get_runtime_chunk_stat
         stats.water_vertex_count += chunk_ptr->water_mesh_vertices.size();
         stats.water_index_count += chunk_ptr->water_mesh_indices.size();
         stats.terrain_payload_bytes +=
-            (chunk_ptr->mesh_vertices.size() + chunk_ptr->water_mesh_vertices.size()) * sizeof(VoxelVertex) +
+            (chunk_ptr->mesh_vertices.size() + chunk_ptr->water_mesh_vertices.size()) *
+                sizeof(VoxelVertex) +
             (chunk_ptr->mesh_indices.size() + chunk_ptr->water_mesh_indices.size()) * sizeof(u32);
         stats.sdf_payload_bytes += chunk_ptr->sdf_data.size() * sizeof(f32);
         stats.heightmap_payload_bytes += chunk_ptr->heightmap_data.size() * sizeof(f32);
@@ -4142,21 +4425,17 @@ SHIELD_WorldSystem::RuntimeChunkStats SHIELD_WorldSystem::get_runtime_chunk_stat
     return stats;
 }
 
-SHIELD_WorldSystem::CameraLocalCoverageStats SHIELD_WorldSystem::get_camera_local_coverage_stats(
-    const Vec3& camera_position,
-    int horizontal_radius) const
-{
+SHIELD_WorldSystem::CameraLocalCoverageStats
+SHIELD_WorldSystem::get_camera_local_coverage_stats(const Vec3& camera_position,
+                                                    int horizontal_radius) const {
     CameraLocalCoverageStats stats;
     stats.camera_position = camera_position;
     stats.camera_chunk = world_to_chunk_coords(camera_position);
     stats.horizontal_radius = std::max(0, horizontal_radius);
     stats.terrain_height_under_camera = GetTerrainHeightAt(camera_position.x, camera_position.z);
     stats.camera_height_above_terrain = camera_position.y - stats.terrain_height_under_camera;
-    stats.surface_chunk_under_camera = world_to_chunk_coords(Vec3(
-        camera_position.x,
-        stats.terrain_height_under_camera,
-        camera_position.z
-    ));
+    stats.surface_chunk_under_camera = world_to_chunk_coords(
+        Vec3(camera_position.x, stats.terrain_height_under_camera, camera_position.z));
 
     const IVec3 center_chunk = stats.camera_chunk;
     for (int dz = -stats.horizontal_radius; dz <= stats.horizontal_radius; ++dz) {
@@ -4168,10 +4447,9 @@ SHIELD_WorldSystem::CameraLocalCoverageStats SHIELD_WorldSystem::get_camera_loca
             const float terrain_height = GetTerrainHeightAt(sample_x, sample_z);
             const int chunk_y = world_to_chunk_coords(Vec3(sample_x, terrain_height, sample_z)).y;
             const IVec3 coords(chunk_x, chunk_y, chunk_z);
-            const bool is_center_surface_chunk =
-                coords.x == stats.surface_chunk_under_camera.x &&
-                coords.y == stats.surface_chunk_under_camera.y &&
-                coords.z == stats.surface_chunk_under_camera.z;
+            const bool is_center_surface_chunk = coords.x == stats.surface_chunk_under_camera.x &&
+                                                 coords.y == stats.surface_chunk_under_camera.y &&
+                                                 coords.z == stats.surface_chunk_under_camera.z;
 
             ++stats.expected_surface_chunks;
             const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
@@ -4228,30 +4506,29 @@ SHIELD_WorldSystem::CameraLocalCoverageStats SHIELD_WorldSystem::get_camera_loca
         }
     }
 
-    stats.near_field_renderable =
-        stats.expected_surface_chunks > 0 &&
-        stats.missing_surface_chunks == 0 &&
-        stats.renderable_surface_chunks == stats.expected_surface_chunks;
+    stats.near_field_renderable = stats.expected_surface_chunks > 0 &&
+                                  stats.missing_surface_chunks == 0 &&
+                                  stats.renderable_surface_chunks == stats.expected_surface_chunks;
     return stats;
 }
 
-SHIELD_WorldSystem::FrustumSurfaceCoverageStats SHIELD_WorldSystem::get_frustum_surface_coverage_stats(
-    const Vec3& camera_position,
-    const std::array<Vec4, 6>& frustum_planes,
-    float max_distance) const
-{
+SHIELD_WorldSystem::FrustumSurfaceCoverageStats
+SHIELD_WorldSystem::get_frustum_surface_coverage_stats(const Vec3& camera_position,
+                                                       const std::array<Vec4, 6>& frustum_planes,
+                                                       float max_distance) const {
     FrustumSurfaceCoverageStats stats;
 
     // Positive-vertex AABB/frustum intersection: the box is outside when its
     // most-positive corner against a plane normal is still behind the plane.
-    const auto aabb_intersects_frustum = [&frustum_planes](const Vec3& min_corner, const Vec3& max_corner) {
+    const auto aabb_intersects_frustum = [&frustum_planes](const Vec3& min_corner,
+                                                           const Vec3& max_corner) {
         for (const Vec4& plane : frustum_planes) {
-            const Vec3 positive_corner(
-                plane.x >= 0.0f ? max_corner.x : min_corner.x,
-                plane.y >= 0.0f ? max_corner.y : min_corner.y,
-                plane.z >= 0.0f ? max_corner.z : min_corner.z);
+            const Vec3 positive_corner(plane.x >= 0.0f ? max_corner.x : min_corner.x,
+                                       plane.y >= 0.0f ? max_corner.y : min_corner.y,
+                                       plane.z >= 0.0f ? max_corner.z : min_corner.z);
             if (plane.x * positive_corner.x + plane.y * positive_corner.y +
-                plane.z * positive_corner.z + plane.w < 0.0f) {
+                    plane.z * positive_corner.z + plane.w <
+                0.0f) {
                 return false;
             }
         }
@@ -4259,7 +4536,8 @@ SHIELD_WorldSystem::FrustumSurfaceCoverageStats SHIELD_WorldSystem::get_frustum_
     };
 
     const IVec3 camera_chunk = world_to_chunk_coords(camera_position);
-    const int radius = std::max(0, static_cast<int>(std::ceil(max_distance / static_cast<float>(CHUNK_SIZE_X))));
+    const int radius =
+        std::max(0, static_cast<int>(std::ceil(max_distance / static_cast<float>(CHUNK_SIZE_X))));
     const float max_distance_sq = max_distance * max_distance;
 
     for (int dz = -radius; dz <= radius; ++dz) {
@@ -4307,7 +4585,8 @@ SHIELD_WorldSystem::FrustumSurfaceCoverageStats SHIELD_WorldSystem::get_frustum_
 
                 column_considered = true;
                 ++stats.expected_chunks;
-                const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(IVec3(chunk_x, chunk_y, chunk_z)));
+                const auto it = m_streaming_state.chunks.find(
+                    Chunk::calculate_id(IVec3(chunk_x, chunk_y, chunk_z)));
                 if (it == m_streaming_state.chunks.end() || !it->second) {
                     ++stats.missing_chunks;
                     continue;
@@ -4324,13 +4603,14 @@ SHIELD_WorldSystem::FrustumSurfaceCoverageStats SHIELD_WorldSystem::get_frustum_
     }
 
     stats.renderable_ratio = stats.expected_chunks > 0
-        ? static_cast<double>(stats.renderable_chunks) / static_cast<double>(stats.expected_chunks)
-        : 1.0;
+                                 ? static_cast<double>(stats.renderable_chunks) /
+                                       static_cast<double>(stats.expected_chunks)
+                                 : 1.0;
     return stats;
 }
 
-void SHIELD_WorldSystem::StampStructuresIntoChunk(
-    Luminumbra::Chunk& chunk, const IVec3& base_pos) const {
+void SHIELD_WorldSystem::StampStructuresIntoChunk(Luminumbra::Chunk& chunk,
+                                                  const IVec3& base_pos) const {
     // Guard: only the full-res path (sdf_data populated). The step>1 coarse path
     // leaves sdf_data empty and carries no structure material (documented gap).
     if (!m_structures_enabled || m_structure_pools.empty() || chunk.sdf_data.empty()) {
@@ -4359,19 +4639,20 @@ void SHIELD_WorldSystem::StampStructuresIntoChunk(
         // Enumerate sites over the chunk X/Z AABB padded by the pool footprint,
         // so a structure whose voxels straddle the chunk border is seen here.
         const int pad = std::max(0, pool.footprint_radius);
-        const std::vector<World::StructureSite> sites = World::SitesInArea(
-            pool, m_seed,
-            min_x - pad, min_z - pad,
-            base_pos.x + CHUNK_SIZE_X + pad + 1,
-            base_pos.z + CHUNK_SIZE_Z + pad + 1);
+        const std::vector<World::StructureSite> sites =
+            World::SitesInArea(pool,
+                               m_seed,
+                               min_x - pad,
+                               min_z - pad,
+                               base_pos.x + CHUNK_SIZE_X + pad + 1,
+                               base_pos.z + CHUNK_SIZE_Z + pad + 1);
 
         for (const World::StructureSite& enumerated : sites) {
             // Drop the site to a SINGLE integer floor of the surface height,
             // computed once per site so every chunk/path that touches this
             // structure agrees on its Y (determinism: identical across paths).
-            const float surface = GetTerrainHeightAt(
-                static_cast<float>(enumerated.origin.x),
-                static_cast<float>(enumerated.origin.z));
+            const float surface = GetTerrainHeightAt(static_cast<float>(enumerated.origin.x),
+                                                     static_cast<float>(enumerated.origin.z));
             if (surface < SEA_LEVEL) {
                 continue; // no half-submerged structures (deterministic skip)
             }
@@ -4379,8 +4660,7 @@ void SHIELD_WorldSystem::StampStructuresIntoChunk(
 
             World::StructureSite site = enumerated;
             site.origin.y = floor_y;
-            const std::vector<World::StructureVoxel> voxels =
-                World::AssembleStructure(pool, site);
+            const std::vector<World::StructureVoxel> voxels = World::AssembleStructure(pool, site);
 
             for (const World::StructureVoxel& voxel : voxels) {
                 // Only write voxels that fall inside this chunk's lattice. The
@@ -4390,22 +4670,18 @@ void SHIELD_WorldSystem::StampStructuresIntoChunk(
                 const int lx = voxel.position.x - min_x;
                 const int ly = voxel.position.y - min_y;
                 const int lz = voxel.position.z - min_z;
-                if (lx < 0 || lx >= size_x ||
-                    ly < 0 || ly >= size_y ||
-                    lz < 0 || lz >= size_z) {
+                if (lx < 0 || lx >= size_x || ly < 0 || ly >= size_y || lz < 0 || lz >= size_z) {
                     continue;
                 }
-                const size_t index =
-                    static_cast<size_t>(lx) +
-                    static_cast<size_t>(ly) * size_x +
-                    static_cast<size_t>(lz) * size_x * size_y;
+                const size_t index = static_cast<size_t>(lx) + static_cast<size_t>(ly) * size_x +
+                                     static_cast<size_t>(lz) * size_x * size_y;
 
                 // Lazily allocate the material channel on first stamp (0 = Air
                 // sentinel). Empty for non-structure chunks => byte-identical.
                 if (chunk.material_data.empty()) {
                     chunk.material_data.assign(padded_volume, 0u);
                 }
-                chunk.sdf_data[index] = -1.0f;          // solid
+                chunk.sdf_data[index] = -1.0f; // solid
                 chunk.material_data[index] = voxel.material;
             }
         }
@@ -4413,215 +4689,258 @@ void SHIELD_WorldSystem::StampStructuresIntoChunk(
 }
 
 void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_step) const {
-   const IVec3 coords = chunk.get_coords();
-   const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-   const int size_x = CHUNK_SIZE_X + 1;
-   const int size_y = CHUNK_SIZE_Y + 1;
-   const int size_z = CHUNK_SIZE_Z + 1;
-   const size_t padded_volume = static_cast<size_t>(size_x) * size_y * size_z;
+    const IVec3 coords = chunk.get_coords();
+    const IVec3 base_pos = coords * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    const int size_x = CHUNK_SIZE_X + 1;
+    const int size_y = CHUNK_SIZE_Y + 1;
+    const int size_z = CHUNK_SIZE_Z + 1;
+    const size_t padded_volume = static_cast<size_t>(size_x) * size_y * size_z;
 
-   // T-I3-1 SDF skip: chunks generated for a coarse meshing step (> 1) are
-   // only ever meshed by GenerateCoarseHeightfieldTerrain (which samples
-   // GetTerrainHeightAt analytically) and by the seam-fallback face patches
-   // (which read terrain density derived from heightmap_data). Neither reads
-   // the interior 17^3 SDF, so generate only the 17x17 heightmap: no SDF
-   // allocation (19.65 KB/chunk) and no 3D cave-noise grid. Cave carving is
-   // surface-capped at 18 m depth (kCaveSurfaceCapDepth), so every face SDF
-   // value within the seam fallback's +-0.75 near-surface band equals the
-   // pure terrain density (y - heightmap) exactly - the heightmap IS the
-   // boundary-face band for seam purposes.
-   if (target_step > 1) {
-       chunk.sdf_data.clear();
-       chunk.sdf_data.shrink_to_fit();
+    // T-I3-1 SDF skip: chunks generated for a coarse meshing step (> 1) are
+    // only ever meshed by GenerateCoarseHeightfieldTerrain (which samples
+    // GetTerrainHeightAt analytically) and by the seam-fallback face patches
+    // (which read terrain density derived from heightmap_data). Neither reads
+    // the interior 17^3 SDF, so generate only the 17x17 heightmap: no SDF
+    // allocation (19.65 KB/chunk) and no 3D cave-noise grid. Cave carving is
+    // surface-capped at 18 m depth (kCaveSurfaceCapDepth), so every face SDF
+    // value within the seam fallback's +-0.75 near-surface band equals the
+    // pure terrain density (y - heightmap) exactly - the heightmap IS the
+    // boundary-face band for seam purposes.
+    if (target_step > 1) {
+        chunk.sdf_data.clear();
+        chunk.sdf_data.shrink_to_fit();
 
-       const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
-       chunk.heightmap_data.resize(heightmap_size);
+        const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
+        chunk.heightmap_data.resize(heightmap_size);
 
-       if (m_params.shaping_enabled) {
-           // T-I3-10 / T-I4-DR-shaping-perf: shaped heights come from the one
-           // shared height definition, but via the SIMD-batched grid helper
-           // (GenUniformGrid2D / GenPositionArray2D) which produces bytes
-           // EXACTLY equal to the per-column GenSingle2D scalar helper
-           // GetTerrainHeightAt on this build - the batch and scalar paths
-           // cannot diverge (batch-vs-scalar parity gtest pins ==). The batched
-           // path is ~13x faster than the old per-column GenSingle2D loop.
-           ComputeShapedHeightGrid(base_pos.x, base_pos.z, size_x, size_z,
-                                   chunk.heightmap_data.data());
-           chunk.mark_sdf_generated_current_params();
-           chunk.clear_voxel_data_dirty();
-           return;
-       }
+        if (m_params.shaping_enabled) {
+            // T-I3-10 / T-I4-DR-shaping-perf: shaped heights come from the one
+            // shared height definition, but via the SIMD-batched grid helper
+            // (GenUniformGrid2D / GenPositionArray2D) which produces bytes
+            // EXACTLY equal to the per-column GenSingle2D scalar helper
+            // GetTerrainHeightAt on this build - the batch and scalar paths
+            // cannot diverge (batch-vs-scalar parity gtest pins ==). The batched
+            // path is ~13x faster than the old per-column GenSingle2D loop.
+            ComputeShapedHeightGrid(
+                base_pos.x, base_pos.z, size_x, size_z, chunk.heightmap_data.data());
+            chunk.mark_sdf_generated_current_params();
+            chunk.clear_voxel_data_dirty();
+            return;
+        }
 
-       std::vector<float> heightmap_noise(heightmap_size);
-       std::vector<float> island_mask_noise(heightmap_size);
-       m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.base_frequency, m_seed);
-       m_island_mask_generator->GenUniformGrid2D(island_mask_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.island_mask_frequency, m_seed + 2);
+        std::vector<float> heightmap_noise(heightmap_size);
+        std::vector<float> island_mask_noise(heightmap_size);
+        m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(),
+                                              base_pos.x,
+                                              base_pos.z,
+                                              size_x,
+                                              size_z,
+                                              m_params.base_frequency,
+                                              m_seed);
+        m_island_mask_generator->GenUniformGrid2D(island_mask_noise.data(),
+                                                  base_pos.x,
+                                                  base_pos.z,
+                                                  size_x,
+                                                  size_z,
+                                                  m_params.island_mask_frequency,
+                                                  m_seed + 2);
 
-       for (size_t index = 0; index < heightmap_size; ++index) {
-           // Identical combine math to the full path below so heightmap bytes
-           // are bit-equal regardless of which generation mode ran.
-           float terrain_h = m_params.height_offset + heightmap_noise[index] * m_params.base_amplitude;
-           if (m_params.island_mask_enabled) {
-               const float island_mask = glm::smoothstep(0.1f, 0.25f, island_mask_noise[index]);
-               terrain_h = glm::mix(m_params.height_offset, terrain_h, island_mask);
-           }
-           chunk.heightmap_data[index] = terrain_h;
-       }
+        for (size_t index = 0; index < heightmap_size; ++index) {
+            // Identical combine math to the full path below so heightmap bytes
+            // are bit-equal regardless of which generation mode ran.
+            float terrain_h =
+                m_params.height_offset + heightmap_noise[index] * m_params.base_amplitude;
+            if (m_params.island_mask_enabled) {
+                const float island_mask = glm::smoothstep(0.1f, 0.25f, island_mask_noise[index]);
+                terrain_h = glm::mix(m_params.height_offset, terrain_h, island_mask);
+            }
+            chunk.heightmap_data[index] = terrain_h;
+        }
 
-       chunk.mark_sdf_generated_current_params();
-       chunk.clear_voxel_data_dirty();
-       return;
-   }
+        chunk.mark_sdf_generated_current_params();
+        chunk.clear_voxel_data_dirty();
+        return;
+    }
 
-   // Try GPU generation first
-   if (m_gpu_sdf_callback && m_gpu_sdf_callback(coords, m_params, m_seed, chunk.sdf_data)) {
-       // GPU generation successful - still need to generate heightmap for physics
-       const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
-       chunk.heightmap_data.resize(heightmap_size);
-       
-       // Generate heightmap from SDF data
-       for (int z = 0; z < size_z; ++z) {
-           for (int x = 0; x < size_x; ++x) {
-               int heightmap_idx = z * size_x + x;
-               
-               // Find surface by marching down through SDF
-               float surface_height = base_pos.y + size_y; // Start from top
-               for (int y = size_y - 1; y >= 0; --y) {
-                   int sdf_idx = z * (size_x * size_y) + y * size_x + x;
-                   if (chunk.sdf_data[sdf_idx] <= 0.0f) {
-                       surface_height = base_pos.y + y;
-                       break;
-                   }
-               }
-               chunk.heightmap_data[heightmap_idx] = surface_height;
-           }
-       }
-       
-       // FR-B1: stamp authored structure voxels into the now-complete SDF
-       // (solid density + per-voxel material). No-op when structures disabled.
-       StampStructuresIntoChunk(chunk, base_pos);
+    // Try GPU generation first
+    if (m_gpu_sdf_callback && m_gpu_sdf_callback(coords, m_params, m_seed, chunk.sdf_data)) {
+        // GPU generation successful - still need to generate heightmap for physics
+        const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
+        chunk.heightmap_data.resize(heightmap_size);
 
-       // Generation produces the canonical voxel data; only post-generation
-       // edits count as unsaved dirty state.
-       chunk.mark_sdf_generated_current_params();
-       chunk.clear_voxel_data_dirty();
-       chunk.set_state(ChunkState::Idle);
-       return;
-   }
+        // Generate heightmap from SDF data
+        for (int z = 0; z < size_z; ++z) {
+            for (int x = 0; x < size_x; ++x) {
+                int heightmap_idx = z * size_x + x;
 
-   // Fallback to CPU generation
-   chunk.sdf_data.resize(padded_volume);
+                // Find surface by marching down through SDF
+                float surface_height = base_pos.y + size_y; // Start from top
+                for (int y = size_y - 1; y >= 0; --y) {
+                    int sdf_idx = z * (size_x * size_y) + y * size_x + x;
+                    if (chunk.sdf_data[sdf_idx] <= 0.0f) {
+                        surface_height = base_pos.y + y;
+                        break;
+                    }
+                }
+                chunk.heightmap_data[heightmap_idx] = surface_height;
+            }
+        }
 
-   const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
-   chunk.heightmap_data.resize(heightmap_size);
+        // FR-B1: stamp authored structure voxels into the now-complete SDF
+        // (solid density + per-voxel material). No-op when structures disabled.
+        StampStructuresIntoChunk(chunk, base_pos);
 
-   // --- Step 1: Generate all noise data for the chunk in large, SIMD-accelerated batches ---
-   std::vector<float> heightmap_noise(heightmap_size);
-   std::vector<float> island_mask_noise(heightmap_size);
-   std::vector<float> cave_noise;
-   if (m_params.caves_enabled) {
-       cave_noise.resize(padded_volume);
-   }
-   
-   // T-I3-10: with shaping enabled the per-column heights are computed by the
-   // one shared scalar helper (GenSingle* only) so they are EXACTLY equal to
-   // GetTerrainHeightAt/SampleWorldGenLayers at the same coordinates. The
-   // legacy path keeps its SIMD GenUniformGrid2D batches (bit-identical
-   // pre-shaping bytes; the 1e-4 snapshot gate covers grid-vs-single drift).
-   std::vector<float> shaped_heights;
-   if (m_params.shaping_enabled) {
-       // T-I4-DR-shaping-perf: SIMD-batched shaped heights, byte-identical to
-       // the per-column GenSingle2D scalar helper (parity gtest pins ==).
-       shaped_heights.resize(heightmap_size);
-       ComputeShapedHeightGrid(base_pos.x, base_pos.z, size_x, size_z,
-                               shaped_heights.data());
-   } else {
-       // FastNoise GenUniformGrid2D populates its buffer in [x][z] layout where x varies fastest
-       m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.base_frequency, m_seed);
-       m_island_mask_generator->GenUniformGrid2D(island_mask_noise.data(), base_pos.x, base_pos.z, size_x, size_z, m_params.island_mask_frequency, m_seed + 2);
-   }
+        // Generation produces the canonical voxel data; only post-generation
+        // edits count as unsaved dirty state.
+        chunk.mark_sdf_generated_current_params();
+        chunk.clear_voxel_data_dirty();
+        chunk.set_state(ChunkState::Idle);
+        return;
+    }
 
-   // FastNoise GenUniformGrid3D populates its buffer in [x][y][z] layout where x varies fastest
-   if (m_params.caves_enabled) {
-       m_cave_generator->GenUniformGrid3D(cave_noise.data(), base_pos.x, base_pos.y, base_pos.z, size_x, size_y, size_z, m_params.cave_frequency, m_seed + 1);
-   }
-   
-   // --- Step 2: Combine the pre-generated noise to calculate the final SDF values ---
-   for (int z = 0; z < size_z; ++z) {
-       for (int y = 0; y < size_y; ++y) {
-           for (int x = 0; x < size_x; ++x) {
-               // For 2D noise buffers in [x][z] layout (x varies fastest):
-               size_t index_2d_read = static_cast<size_t>(x) + static_cast<size_t>(z) * size_x;
+    // Fallback to CPU generation
+    chunk.sdf_data.resize(padded_volume);
 
-               // Index for WRITING to our sdf_data and heightmap_data with bounds checking
-               size_t sdf_write_idx = static_cast<size_t>(x) + static_cast<size_t>(y) * size_x + static_cast<size_t>(z) * size_x * size_y;
-               size_t heightmap_write_idx = static_cast<size_t>(x) + static_cast<size_t>(z) * size_x;
-               
-               // Bounds checking
-               if (sdf_write_idx >= chunk.sdf_data.size()) {
-                   LUMINUMBRA_CORE_ERROR("SDF index out of bounds: {} >= {}", sdf_write_idx, chunk.sdf_data.size());
-                   continue;
-               }
-               if (y == 0 && heightmap_write_idx >= chunk.heightmap_data.size()) {
-                   LUMINUMBRA_CORE_ERROR("Heightmap index out of bounds: {} >= {}", heightmap_write_idx, chunk.heightmap_data.size());
-                   continue;
-               }
-               
-               // A. Calculate final terrain height for this (x,z) column
-               float terrain_h;
-               if (m_params.shaping_enabled) {
-                   terrain_h = shaped_heights[index_2d_read];
-               } else {
-                   terrain_h = m_params.height_offset + heightmap_noise[index_2d_read] * m_params.base_amplitude;
-                   if (m_params.island_mask_enabled) {
-                       float island_mask = glm::smoothstep(0.1f, 0.25f, island_mask_noise[index_2d_read]);
-                       terrain_h = glm::mix(m_params.height_offset, terrain_h, island_mask);
-                   }
-               }
+    const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
+    chunk.heightmap_data.resize(heightmap_size);
 
-               // B. Calculate base terrain density
-               float current_world_y = base_pos.y + y;
-               float terrain_density = current_world_y - terrain_h;
+    // --- Step 1: Generate all noise data for the chunk in large, SIMD-accelerated batches ---
+    std::vector<float> heightmap_noise(heightmap_size);
+    std::vector<float> island_mask_noise(heightmap_size);
+    std::vector<float> cave_noise;
+    if (m_params.caves_enabled) {
+        cave_noise.resize(padded_volume);
+    }
 
-               // C. Carve caves using the 3D noise buffer
-               if (m_params.caves_enabled) {
-                   // For 3D noise buffer in [x][y][z] layout (x varies fastest):
-                   size_t cave_read_idx = static_cast<size_t>(x) + static_cast<size_t>(y) * size_x + static_cast<size_t>(z) * size_x * size_y;
-                   const Vec3 cave_world_pos(static_cast<float>(base_pos.x + x),
-                                             current_world_y,
-                                             static_cast<float>(base_pos.z + z));
-                   const SurfaceBreakSample sb = sample_surface_breaks(cave_world_pos, terrain_h);
-                   // Spec 013: single composition point. Pass the precomputed batch cheese
-                   // noise so the hot path skips a re-sample (legacy bit-exact); noise-router
-                   // adds spaghetti tunnels per-voxel.
-                   terrain_density = EvaluateCaveDensity(cave_world_pos, terrain_density,
-                                                         sb.effective_cap, sb.carve,
-                                                         &cave_noise[cave_read_idx]);
-               }
-               
-               if (y == 0) {
-                   chunk.heightmap_data[heightmap_write_idx] = terrain_h;
-               }
+    // T-I3-10: with shaping enabled the per-column heights are computed by the
+    // one shared scalar helper (GenSingle* only) so they are EXACTLY equal to
+    // GetTerrainHeightAt/SampleWorldGenLayers at the same coordinates. The
+    // legacy path keeps its SIMD GenUniformGrid2D batches (bit-identical
+    // pre-shaping bytes; the 1e-4 snapshot gate covers grid-vs-single drift).
+    std::vector<float> shaped_heights;
+    if (m_params.shaping_enabled) {
+        // T-I4-DR-shaping-perf: SIMD-batched shaped heights, byte-identical to
+        // the per-column GenSingle2D scalar helper (parity gtest pins ==).
+        shaped_heights.resize(heightmap_size);
+        ComputeShapedHeightGrid(base_pos.x, base_pos.z, size_x, size_z, shaped_heights.data());
+    } else {
+        // FastNoise GenUniformGrid2D populates its buffer in [x][z] layout where x varies fastest
+        m_terrain_generator->GenUniformGrid2D(heightmap_noise.data(),
+                                              base_pos.x,
+                                              base_pos.z,
+                                              size_x,
+                                              size_z,
+                                              m_params.base_frequency,
+                                              m_seed);
+        m_island_mask_generator->GenUniformGrid2D(island_mask_noise.data(),
+                                                  base_pos.x,
+                                                  base_pos.z,
+                                                  size_x,
+                                                  size_z,
+                                                  m_params.island_mask_frequency,
+                                                  m_seed + 2);
+    }
 
-               // D. Write final density to chunk data using our consistent internal layout.
-               // SDF debug logging removed to prevent segfault
-               chunk.sdf_data[sdf_write_idx] = terrain_density;
-           }
-       }
-   }
+    // FastNoise GenUniformGrid3D populates its buffer in [x][y][z] layout where x varies fastest
+    if (m_params.caves_enabled) {
+        m_cave_generator->GenUniformGrid3D(cave_noise.data(),
+                                           base_pos.x,
+                                           base_pos.y,
+                                           base_pos.z,
+                                           size_x,
+                                           size_y,
+                                           size_z,
+                                           m_params.cave_frequency,
+                                           m_seed + 1);
+    }
 
-   // FR-B1: stamp authored structure voxels into the populated SDF (solid
-   // density + per-voxel material) before the dirty flag is cleared. No-op when
-   // structures are disabled or sdf_data is empty (coarse step>1 path).
-   StampStructuresIntoChunk(chunk, base_pos);
+    // --- Step 2: Combine the pre-generated noise to calculate the final SDF values ---
+    for (int z = 0; z < size_z; ++z) {
+        for (int y = 0; y < size_y; ++y) {
+            for (int x = 0; x < size_x; ++x) {
+                // For 2D noise buffers in [x][z] layout (x varies fastest):
+                size_t index_2d_read = static_cast<size_t>(x) + static_cast<size_t>(z) * size_x;
 
-   // Generation produces the canonical voxel data; only post-generation edits
-   // count as unsaved dirty state.
-   chunk.mark_sdf_generated_current_params();
-   chunk.clear_voxel_data_dirty();
+                // Index for WRITING to our sdf_data and heightmap_data with bounds checking
+                size_t sdf_write_idx = static_cast<size_t>(x) + static_cast<size_t>(y) * size_x +
+                                       static_cast<size_t>(z) * size_x * size_y;
+                size_t heightmap_write_idx =
+                    static_cast<size_t>(x) + static_cast<size_t>(z) * size_x;
+
+                // Bounds checking
+                if (sdf_write_idx >= chunk.sdf_data.size()) {
+                    LUMINUMBRA_CORE_ERROR(
+                        "SDF index out of bounds: {} >= {}", sdf_write_idx, chunk.sdf_data.size());
+                    continue;
+                }
+                if (y == 0 && heightmap_write_idx >= chunk.heightmap_data.size()) {
+                    LUMINUMBRA_CORE_ERROR("Heightmap index out of bounds: {} >= {}",
+                                          heightmap_write_idx,
+                                          chunk.heightmap_data.size());
+                    continue;
+                }
+
+                // A. Calculate final terrain height for this (x,z) column
+                float terrain_h;
+                if (m_params.shaping_enabled) {
+                    terrain_h = shaped_heights[index_2d_read];
+                } else {
+                    terrain_h = m_params.height_offset +
+                                heightmap_noise[index_2d_read] * m_params.base_amplitude;
+                    if (m_params.island_mask_enabled) {
+                        float island_mask =
+                            glm::smoothstep(0.1f, 0.25f, island_mask_noise[index_2d_read]);
+                        terrain_h = glm::mix(m_params.height_offset, terrain_h, island_mask);
+                    }
+                }
+
+                // B. Calculate base terrain density
+                float current_world_y = base_pos.y + y;
+                float terrain_density = current_world_y - terrain_h;
+
+                // C. Carve caves using the 3D noise buffer
+                if (m_params.caves_enabled) {
+                    // For 3D noise buffer in [x][y][z] layout (x varies fastest):
+                    size_t cave_read_idx = static_cast<size_t>(x) +
+                                           static_cast<size_t>(y) * size_x +
+                                           static_cast<size_t>(z) * size_x * size_y;
+                    const Vec3 cave_world_pos(static_cast<float>(base_pos.x + x),
+                                              current_world_y,
+                                              static_cast<float>(base_pos.z + z));
+                    const SurfaceBreakSample sb = sample_surface_breaks(cave_world_pos, terrain_h);
+                    // Pass the precomputed batch cheese noise through the single composition point;
+                    // the hot path skips a re-sample while the noise router adds tunnels per voxel.
+                    terrain_density = EvaluateCaveDensity(cave_world_pos,
+                                                          terrain_density,
+                                                          sb.effective_cap,
+                                                          sb.carve,
+                                                          &cave_noise[cave_read_idx]);
+                }
+
+                if (y == 0) {
+                    chunk.heightmap_data[heightmap_write_idx] = terrain_h;
+                }
+
+                // D. Write final density to chunk data using our consistent internal layout.
+                // SDF debug logging removed to prevent segfault
+                chunk.sdf_data[sdf_write_idx] = terrain_density;
+            }
+        }
+    }
+
+    // FR-B1: stamp authored structure voxels into the populated SDF (solid
+    // density + per-voxel material) before the dirty flag is cleared. No-op when
+    // structures are disabled or sdf_data is empty (coarse step>1 path).
+    StampStructuresIntoChunk(chunk, base_pos);
+
+    // Generation produces the canonical voxel data; only post-generation edits
+    // count as unsaved dirty state.
+    chunk.mark_sdf_generated_current_params();
+    chunk.clear_voxel_data_dirty();
 }
 
-JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
+JobHandle
+SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to_generate) {
     // Coordinate-only callers (initial world load, regeneration, tests,
     // persistence) always want full voxel generation.
     std::vector<ChunkGenerationRequest> requests;
@@ -4632,7 +4951,8 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>&
     return dispatch_generation_jobs(requests);
 }
 
-JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGenerationRequest>& chunks_to_generate) {
+JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
+    const std::vector<ChunkGenerationRequest>& chunks_to_generate) {
     // SHIELD-03 inc 5a-2: dispatch APPENDS a batch to the lane FIFO (the old
     // refuse-while-active head guard is gone — the scheduler's budget gate
     // already prevents scheduling-path double-dispatch, boot-path callers
@@ -4662,7 +4982,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
         chunk->pending_generation_ready.store(false, std::memory_order_release);
         batch.chunks.push_back(chunk);
         jobs.emplace_back([this, chunk, target_step]() {
-            const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
+            const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
             GenerateChunkData(*chunk, target_step);
             // SHIELD-03 inc 5a: stage completion only — the MAIN thread flips
             // Loading→Idle in publish_completed_generation_jobs, so chunk
@@ -4675,8 +4995,8 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<ChunkGe
         batch.handle = m_job_system->dispatch_batch(jobs);
         // SHIELD-03 inc 5a-3: tick-keyed activation stamp (inert until the
         // barrier swap; -1 with no tick source = publish-when-drained).
-        batch.due_tick = m_current_sim_tick >= 0
-            ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+        batch.due_tick =
+            m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
         const JobHandle handle = batch.handle;
         m_streaming_state.generation_batches.push_back(std::move(batch));
         return handle;
@@ -4712,19 +5032,22 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     for (const MeshingWorkItem& work_item : chunks_to_mesh) {
         const int step = get_lod_step_for_level(work_item.lod_level);
         const bool has_malformed_sdf = work_item.terrain_mesh_required &&
-            !work_item.chunk->sdf_data.empty() &&
-            work_item.chunk->sdf_data.size() != kFullSdfLattice;
+                                       !work_item.chunk->sdf_data.empty() &&
+                                       work_item.chunk->sdf_data.size() != kFullSdfLattice;
         const bool needs_sim_truth = work_item.terrain_mesh_required && step <= 1 &&
                                      work_item.chunk->sdf_data.size() != kFullSdfLattice;
         if (has_malformed_sdf) {
             LUMINUMBRA_CORE_WARN(
                 "Meshing promotion: chunk ({},{},{}) has malformed sdf_data "
                 "(size {} != full lattice {}) — regenerating instead of meshing it",
-                work_item.chunk->get_coords().x, work_item.chunk->get_coords().y,
+                work_item.chunk->get_coords().x,
+                work_item.chunk->get_coords().y,
                 work_item.chunk->get_coords().z,
-                work_item.chunk->sdf_data.size(), kFullSdfLattice);
+                work_item.chunk->sdf_data.size(),
+                kFullSdfLattice);
         }
-        ((needs_sim_truth || has_malformed_sdf) ? promotion_items : mesh_items).push_back(work_item);
+        ((needs_sim_truth || has_malformed_sdf) ? promotion_items : mesh_items)
+            .push_back(work_item);
     }
     // Guard: only hand items to the promotion lane when its whole pipeline is
     // idle. This makes the stage-B re-entry into dispatch_meshing_jobs
@@ -4761,9 +5084,8 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
             continue;
         }
         const IVec3 neighbor_coords = neighbor->get_coords();
-        meshed_columns[horizontal_chunk_key(neighbor_coords.x, neighbor_coords.z)].push_back({
-            neighbor.get(), neighbor_coords.y, neighbor_lod
-        });
+        meshed_columns[horizontal_chunk_key(neighbor_coords.x, neighbor_coords.z)].push_back(
+            {neighbor.get(), neighbor_coords.y, neighbor_lod});
     }
 
     // Near-field hole-fill candidates (no active mesh yet, capped prefix of
@@ -4777,8 +5099,8 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     // appended to the lane FIFO at the dispatch below. The due stamp (5a-3)
     // is inert until the barrier swap; -1 = publish-when-drained (client).
     StreamingState::MeshingBatch mesh_batch;
-    mesh_batch.due_tick = m_current_sim_tick >= 0
-        ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
+    mesh_batch.due_tick =
+        m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
     mesh_batch.chunks.reserve(mesh_items.size());
     for (const MeshingWorkItem& work_item : mesh_items) {
         auto& chunk = work_item.chunk;
@@ -4786,7 +5108,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         const bool terrain_mesh_required = work_item.terrain_mesh_required;
         const int step = get_lod_step_for_level(lod_level);
         const bool has_active_mesh = chunk->get_state() == Luminumbra::ChunkState::Ready &&
-            !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
+                                     !chunk->mesh_vertices.empty() && !chunk->mesh_indices.empty();
 
         if (!has_active_mesh) {
             chunk->set_state(Luminumbra::ChunkState::Meshing);
@@ -4802,40 +5124,51 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         auto transition_faces = Luminumbra::World::MarchingCubes::kNoTransitionFaces;
         if (terrain_mesh_required && step > 1) {
             const IVec3 coords = chunk->get_coords();
-            auto add_face_if_neighbor_is_finer = [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
-                const auto column_it = meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
-                if (column_it == meshed_columns.end()) {
-                    return;
-                }
-                for (const DispatchMeshedColumnEntry& entry : column_it->second) {
-                    if (entry.chunk == chunk.get()) {
-                        continue;
-                    }
-                    if (entry.lod < lod_level || (entry.lod != lod_level && entry.y != coords.y)) {
-                        transition_faces |= static_cast<Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
+            auto add_face_if_neighbor_is_finer =
+                [&](int dx, int dz, Luminumbra::World::MarchingCubes::TerrainTransitionFace face) {
+                    const auto column_it =
+                        meshed_columns.find(horizontal_chunk_key(coords.x + dx, coords.z + dz));
+                    if (column_it == meshed_columns.end()) {
                         return;
                     }
-                }
-            };
+                    for (const DispatchMeshedColumnEntry& entry : column_it->second) {
+                        if (entry.chunk == chunk.get()) {
+                            continue;
+                        }
+                        if (entry.lod < lod_level ||
+                            (entry.lod != lod_level && entry.y != coords.y)) {
+                            transition_faces |= static_cast<
+                                Luminumbra::World::MarchingCubes::TerrainTransitionFaceMask>(face);
+                            return;
+                        }
+                    }
+                };
 
-            add_face_if_neighbor_is_finer(-1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
-            add_face_if_neighbor_is_finer(1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
-            add_face_if_neighbor_is_finer(0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
-            add_face_if_neighbor_is_finer(0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
+            add_face_if_neighbor_is_finer(
+                -1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMinX);
+            add_face_if_neighbor_is_finer(
+                1, 0, Luminumbra::World::MarchingCubes::TransitionFaceMaxX);
+            add_face_if_neighbor_is_finer(
+                0, -1, Luminumbra::World::MarchingCubes::TransitionFaceMinZ);
+            add_face_if_neighbor_is_finer(
+                0, 1, Luminumbra::World::MarchingCubes::TransitionFaceMaxZ);
         }
         mesh_batch.chunks.push_back({chunk, terrain_mesh_required, transition_faces});
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
             try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope();  // SHIELD-09
+                const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
                 Luminumbra::Chunk scratch(chunk->get_coords());
                 scratch.water_level_data = chunk->water_level_data;
                 scratch.water_flow_data = chunk->water_flow_data;
                 scratch.water_sim_terrain_height = chunk->water_sim_terrain_height;
-                scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire), std::memory_order_release);
+                scratch.has_water_sim.store(chunk->has_water_sim.load(std::memory_order_acquire),
+                                            std::memory_order_release);
                 scratch.water_mesh_generated.store(false, std::memory_order_release);
-                scratch.current_water_resolution.store(chunk->current_water_resolution.load(std::memory_order_acquire), std::memory_order_release);
+                scratch.current_water_resolution.store(
+                    chunk->current_water_resolution.load(std::memory_order_acquire),
+                    std::memory_order_release);
 
                 if (terrain_mesh_required) {
                     if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
@@ -4848,8 +5181,11 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                             "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
                             "lane without full sim truth (sdf size {} != {}) — the SHIELD-02 "
                             "promotion routing is broken; failing the mesh",
-                            chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z,
-                            chunk->sdf_data.size(), kFullSdfLattice);
+                            chunk->get_coords().x,
+                            chunk->get_coords().y,
+                            chunk->get_coords().z,
+                            chunk->sdf_data.size(),
+                            kFullSdfLattice);
                         chunk->pending_mesh_failed.store(true, std::memory_order_release);
                         return;
                     }
@@ -4867,16 +5203,18 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
 
                     // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
                     Luminumbra::World::MarchingCubes::PolygoniseTerrain(*this, scratch, 0.0f, step);
-                    Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(scratch, step, transition_faces);
+                    Luminumbra::World::MarchingCubes::AddBoundaryTransitionSkirts(
+                        scratch, step, transition_faces);
                 }
-                
+
                 // Terrain mesh generation debug logging removed to prevent segfault
-                
+
                 // 2. Generate the water surface mesh if the water system exists
                 if (m_water_system) {
                     // Only generate high-detail water mesh for highest LOD terrain
                     if (step <= 1) {
-                        Luminumbra::World::MarchingCubes::GenerateWaterMesh(*m_water_system, *this, scratch);
+                        Luminumbra::World::MarchingCubes::GenerateWaterMesh(
+                            *m_water_system, *this, scratch);
                     } else {
                         scratch.water_mesh_vertices.clear();
                         scratch.water_mesh_indices.clear();
@@ -4890,17 +5228,25 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                 }
                 chunk->pending_water_mesh_vertices = std::move(scratch.water_mesh_vertices);
                 chunk->pending_water_mesh_indices = std::move(scratch.water_mesh_indices);
-                chunk->water_mesh_generated.store(scratch.water_mesh_generated.load(std::memory_order_acquire), std::memory_order_release);
+                chunk->water_mesh_generated.store(
+                    scratch.water_mesh_generated.load(std::memory_order_acquire),
+                    std::memory_order_release);
                 chunk->pending_mesh_ready.store(true, std::memory_order_release);
-                
+
                 // Job completion debug logging removed to prevent segfault
             } catch (const std::exception& e) {
-                LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}", 
-                    chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z, e.what());
+                LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed: {}",
+                                      chunk->get_coords().x,
+                                      chunk->get_coords().y,
+                                      chunk->get_coords().z,
+                                      e.what());
                 chunk->pending_mesh_failed.store(true, std::memory_order_release);
             } catch (...) {
-                LUMINUMBRA_CORE_ERROR("MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception", 
-                    chunk->get_coords().x, chunk->get_coords().y, chunk->get_coords().z);
+                LUMINUMBRA_CORE_ERROR(
+                    "MESHING JOB CRASH: Chunk ({},{},{}) failed with unknown exception",
+                    chunk->get_coords().x,
+                    chunk->get_coords().y,
+                    chunk->get_coords().z);
                 chunk->pending_mesh_failed.store(true, std::memory_order_release);
             }
         });
@@ -4964,7 +5310,8 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                 chunk->mesh_vertices = std::move(chunk->pending_mesh_vertices);
                 chunk->mesh_indices = std::move(chunk->pending_mesh_indices);
                 chunk->current_lod.store(completed_lod, std::memory_order_release);
-                chunk->applied_transition_faces.store(job_chunk.transition_faces, std::memory_order_release);
+                chunk->applied_transition_faces.store(job_chunk.transition_faces,
+                                                      std::memory_order_release);
                 chunk->mesh_version++;
                 chunk->has_collision.store(false, std::memory_order_release);
                 // spec 008 WS-1: a remesh / LOD0 promotion just cleared this chunk's collider, so
@@ -4982,7 +5329,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->set_state(Luminumbra::ChunkState::Ready);
         }
         if (chunk->get_state() == Luminumbra::ChunkState::Ready) {
-            shadow_note_ready(chunk->get_id());  // SHIELD-03 shadow: first-activation latency
+            shadow_note_ready(chunk->get_id()); // SHIELD-03 shadow: first-activation latency
         }
 
         chunk->pending_mesh_vertices.clear();
@@ -5004,8 +5351,7 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs(bool force) {
     // Drain every publishable front batch, in FIFO order (publication order
     // == dispatch order — deterministic; stops at the first still-running or
     // not-yet-due batch so later batches never publish ahead of an earlier one).
-    while (publish_front_meshing_batch(force)) {
-    }
+    while (publish_front_meshing_batch(force)) {}
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
@@ -5045,7 +5391,7 @@ void SHIELD_WorldSystem::regenerate_all_chunks(PhysicsSystem* physics_system) {
     LUMINUMBRA_CORE_INFO("Regenerating all active chunks...");
     std::vector<IVec3> coords_to_regenerate;
     coords_to_regenerate.reserve(m_streaming_state.chunks.size());
-    for(const auto& [id, chunk] : m_streaming_state.chunks) {
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
         coords_to_regenerate.push_back(chunk->get_coords());
     }
     clear_world(physics_system);
@@ -5059,14 +5405,13 @@ void SHIELD_WorldSystem::SetWaterSystem(WaterSystem* water_system) {
 }
 
 IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
-    return IVec3(
-        static_cast<int>(std::floor(position.x / CHUNK_SIZE_X)),
-        static_cast<int>(std::floor(position.y / CHUNK_SIZE_Y)),
-        static_cast<int>(std::floor(position.z / CHUNK_SIZE_Z))
-    );
+    return IVec3(static_cast<int>(std::floor(position.x / CHUNK_SIZE_X)),
+                 static_cast<int>(std::floor(position.y / CHUNK_SIZE_Y)),
+                 static_cast<int>(std::floor(position.z / CHUNK_SIZE_Z)));
 }
 
-void SHIELD_WorldSystem::SetGPUSDFCallback(std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback) {
+void SHIELD_WorldSystem::SetGPUSDFCallback(
+    std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback) {
     wait_for_generation_jobs();
     // SHIELD-02: promotion stage-A jobs run GenerateChunkData too (which may
     // consult the callback) — raw waits; publication is not this call's job.
@@ -5088,9 +5433,9 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
     // (availability digest, collision pass, water init, world_hash) sees
     // exactly the same settled state per tick as the old fused pipeline.
     wait_for_generation_jobs();
-    wait_for_meshing_jobs();      // publish any in-flight render meshes; frees the lanes
-    wait_for_promotion_jobs();    // publish staged sim truth + dispatch stage B
-    wait_for_meshing_jobs();      // publish stage-B render meshes — same call, same tick
+    wait_for_meshing_jobs();   // publish any in-flight render meshes; frees the lanes
+    wait_for_promotion_jobs(); // publish staged sim truth + dispatch stage B
+    wait_for_meshing_jobs();   // publish stage-B render meshes — same call, same tick
     if (promotion_pipeline_pending()) {
         LUMINUMBRA_CORE_ERROR(
             "wait_for_streaming_jobs: promotion pipeline still pending after the "
@@ -5098,7 +5443,8 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
     }
 }
 
-std::vector<std::shared_ptr<Luminumbra::Chunk>> SHIELD_WorldSystem::snapshot_streamed_chunks() const {
+std::vector<std::shared_ptr<Luminumbra::Chunk>>
+SHIELD_WorldSystem::snapshot_streamed_chunks() const {
     std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks;
     chunks.reserve(m_streaming_state.chunks.size());
     for (const auto& [id, chunk_ptr] : m_streaming_state.chunks) {
@@ -5116,28 +5462,28 @@ void SHIELD_WorldSystem::bump_far_lod_authority_revision(const IVec3& chunk_coor
         const int remainder = value % divisor;
         return remainder < 0 ? quotient - 1 : quotient;
     };
-    constexpr int kChunksPerRegion =
-        World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
+    constexpr int kChunksPerRegion = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
     const int home_rx = floor_div(chunk_coords.x, kChunksPerRegion);
     const int home_rz = floor_div(chunk_coords.z, kChunksPerRegion);
-    const int local_x = static_cast<int>(
-        static_cast<std::int64_t>(chunk_coords.x) -
-        static_cast<std::int64_t>(home_rx) * kChunksPerRegion);
-    const int local_z = static_cast<int>(
-        static_cast<std::int64_t>(chunk_coords.z) -
-        static_cast<std::int64_t>(home_rz) * kChunksPerRegion);
+    const int local_x = static_cast<int>(static_cast<std::int64_t>(chunk_coords.x) -
+                                         static_cast<std::int64_t>(home_rx) * kChunksPerRegion);
+    const int local_z = static_cast<int>(static_cast<std::int64_t>(chunk_coords.z) -
+                                         static_cast<std::int64_t>(home_rz) * kChunksPerRegion);
 
     std::array<int, 2> affected_x{home_rx, home_rx};
     std::array<int, 2> affected_z{home_rz, home_rz};
     std::size_t x_count = 1;
     std::size_t z_count = 1;
-    if (local_x == 0) affected_x[x_count++] = home_rx - 1;
-    else if (local_x == kChunksPerRegion - 1) affected_x[x_count++] = home_rx + 1;
-    if (local_z == 0) affected_z[z_count++] = home_rz - 1;
-    else if (local_z == kChunksPerRegion - 1) affected_z[z_count++] = home_rz + 1;
+    if (local_x == 0)
+        affected_x[x_count++] = home_rx - 1;
+    else if (local_x == kChunksPerRegion - 1)
+        affected_x[x_count++] = home_rx + 1;
+    if (local_z == 0)
+        affected_z[z_count++] = home_rz - 1;
+    else if (local_z == kChunksPerRegion - 1)
+        affected_z[z_count++] = home_rz + 1;
 
-    const u64 revision =
-        m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    const u64 revision = m_far_lod_authority_revision.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     std::lock_guard<std::mutex> lock(m_far_lod_region_revision_mutex);
     for (std::size_t z = 0; z < z_count; ++z) {
         for (std::size_t x = 0; x < x_count; ++x) {
@@ -5152,31 +5498,25 @@ u64 SHIELD_WorldSystem::far_lod_region_authority_revision(i32 rx, i32 rz) const 
     return found == m_far_lod_region_revisions.end() ? 0u : found->second;
 }
 
-void SHIELD_WorldSystem::notify_far_lod_authority_durable(
-    const IVec3& chunk_coords) {
+void SHIELD_WorldSystem::notify_far_lod_authority_durable(const IVec3& chunk_coords) {
     bump_far_lod_authority_revision(chunk_coords);
 }
 
-std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(
-    i32 rx, i32 rz) const {
+std::shared_ptr<const FarLodSdfSnapshot>
+SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     constexpr int kRegionChunkSpan = World::kFarLodRegionSizeMeters / CHUNK_SIZE_X;
-    constexpr std::size_t kFullSdfLatticeSize =
-        static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-        static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
-        static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
+    constexpr std::size_t kFullSdfLatticeSize = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
+                                                static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
+                                                static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
 
-    const std::int64_t min_chunk_x64 =
-        static_cast<std::int64_t>(rx) * kRegionChunkSpan - 1;
+    const std::int64_t min_chunk_x64 = static_cast<std::int64_t>(rx) * kRegionChunkSpan - 1;
     const std::int64_t max_chunk_x64 =
         static_cast<std::int64_t>(rx) * kRegionChunkSpan + kRegionChunkSpan;
-    const std::int64_t min_chunk_z64 =
-        static_cast<std::int64_t>(rz) * kRegionChunkSpan - 1;
+    const std::int64_t min_chunk_z64 = static_cast<std::int64_t>(rz) * kRegionChunkSpan - 1;
     const std::int64_t max_chunk_z64 =
         static_cast<std::int64_t>(rz) * kRegionChunkSpan + kRegionChunkSpan;
-    if (min_chunk_x64 < Chunk::kPackedMinXz ||
-        max_chunk_x64 > Chunk::kPackedMaxXz ||
-        min_chunk_z64 < Chunk::kPackedMinXz ||
-        max_chunk_z64 > Chunk::kPackedMaxXz) {
+    if (min_chunk_x64 < Chunk::kPackedMinXz || max_chunk_x64 > Chunk::kPackedMaxXz ||
+        min_chunk_z64 < Chunk::kPackedMinXz || max_chunk_z64 > Chunk::kPackedMaxXz) {
         return nullptr;
     }
     const int min_chunk_x = static_cast<int>(min_chunk_x64);
@@ -5185,13 +5525,10 @@ std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf
     const int max_chunk_z = static_cast<int>(max_chunk_z64);
 
     auto snapshot = std::make_shared<FarLodSdfSnapshot>();
-    snapshot->capture_epoch =
-        m_far_lod_capture_epoch.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+    snapshot->capture_epoch = m_far_lod_capture_epoch.fetch_add(1u, std::memory_order_acq_rel) + 1u;
     snapshot->params_hash = World::ComputeTerrainParamsHash(m_params, m_seed);
-    snapshot->authority_revision =
-        m_far_lod_authority_revision.load(std::memory_order_acquire);
-    snapshot->region_authority_revision =
-        far_lod_region_authority_revision(rx, rz);
+    snapshot->authority_revision = m_far_lod_authority_revision.load(std::memory_order_acquire);
+    snapshot->region_authority_revision = far_lod_region_authority_revision(rx, rz);
     snapshot->entries.reserve(m_streaming_state.chunks.size());
 
     // This capture runs after the owner thread's normal streaming publication
@@ -5200,13 +5537,12 @@ std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf
     for (const auto& [id, chunk] : m_streaming_state.chunks) {
         (void)id;
         if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize ||
-            (!chunk->material_data.empty() &&
-             chunk->material_data.size() != kFullSdfLatticeSize)) {
+            (!chunk->material_data.empty() && chunk->material_data.size() != kFullSdfLatticeSize)) {
             continue;
         }
         const IVec3& coords = chunk->get_coords();
-        if (coords.x < min_chunk_x || coords.x > max_chunk_x ||
-            coords.z < min_chunk_z || coords.z > max_chunk_z) {
+        if (coords.x < min_chunk_x || coords.x > max_chunk_x || coords.z < min_chunk_z ||
+            coords.z > max_chunk_z) {
             continue;
         }
 
@@ -5220,17 +5556,19 @@ std::shared_ptr<const FarLodSdfSnapshot> SHIELD_WorldSystem::capture_far_lod_sdf
         snapshot->entries.push_back(std::move(entry));
     }
 
-    std::sort(snapshot->entries.begin(), snapshot->entries.end(),
-        [](const FarLodSdfSnapshotEntry& lhs, const FarLodSdfSnapshotEntry& rhs) {
-            if (lhs.coords.z != rhs.coords.z) return lhs.coords.z < rhs.coords.z;
-            if (lhs.coords.x != rhs.coords.x) return lhs.coords.x < rhs.coords.x;
-            return lhs.coords.y < rhs.coords.y;
-        });
+    std::sort(snapshot->entries.begin(),
+              snapshot->entries.end(),
+              [](const FarLodSdfSnapshotEntry& lhs, const FarLodSdfSnapshotEntry& rhs) {
+                  if (lhs.coords.z != rhs.coords.z)
+                      return lhs.coords.z < rhs.coords.z;
+                  if (lhs.coords.x != rhs.coords.x)
+                      return lhs.coords.x < rhs.coords.x;
+                  return lhs.coords.y < rhs.coords.y;
+              });
     return snapshot;
 }
 
-bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(
-    const FarLodSdfSnapshot& snapshot) const {
+bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot& snapshot) const {
     if (snapshot.params_hash != World::ComputeTerrainParamsHash(m_params, m_seed) ||
         snapshot.authority_revision !=
             m_far_lod_authority_revision.load(std::memory_order_acquire)) {
@@ -5241,16 +5579,16 @@ bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(
     // chunk with a changed local revision/provenance, however, supersedes it.
     for (const FarLodSdfSnapshotEntry& entry : snapshot.entries) {
         const auto current = find_streamed_chunk(entry.coords);
-        if (current &&
-            (current->voxel_revision() != entry.voxel_revision ||
-             current->sdf_provenance() != entry.provenance)) {
+        if (current && (current->voxel_revision() != entry.voxel_revision ||
+                        current->sdf_provenance() != entry.provenance)) {
             return false;
         }
     }
     return true;
 }
 
-std::shared_ptr<Luminumbra::Chunk> SHIELD_WorldSystem::find_streamed_chunk(const IVec3& coords) const {
+std::shared_ptr<Luminumbra::Chunk>
+SHIELD_WorldSystem::find_streamed_chunk(const IVec3& coords) const {
     const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
     return it != m_streaming_state.chunks.end() ? it->second : nullptr;
 }

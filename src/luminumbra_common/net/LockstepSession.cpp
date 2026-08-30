@@ -14,6 +14,14 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #include "net/LockstepSession.h"
@@ -35,7 +43,9 @@ namespace fs = std::filesystem;
 // --- Little-endian fixed-width append helpers (the only on-wire encoders). Identical
 // discipline to ReplayStream.cpp's encoders; kept local so net has no dependency on the
 // replay internals beyond the public ReplayWriter used for the dump. ----------------
-void PutU8(std::vector<std::uint8_t>& out, std::uint8_t v) { out.push_back(v); }
+void PutU8(std::vector<std::uint8_t>& out, std::uint8_t v) {
+    out.push_back(v);
+}
 
 void PutU16(std::vector<std::uint8_t>& out, std::uint16_t v) {
     out.push_back(static_cast<std::uint8_t>(v & 0xFF));
@@ -72,45 +82,69 @@ struct Cursor {
     std::size_t pos = 0;
     bool ok = true;
 
-    bool Remaining(std::size_t n) const { return ok && pos + n <= size; }
+    bool Remaining(std::size_t n) const {
+        return ok && pos + n <= size;
+    }
     bool GetU8(std::uint8_t& v) {
-        if (!Remaining(1)) { ok = false; return false; }
+        if (!Remaining(1)) {
+            ok = false;
+            return false;
+        }
         v = data[pos++];
         return true;
     }
     bool GetU16(std::uint16_t& v) {
-        if (!Remaining(2)) { ok = false; return false; }
+        if (!Remaining(2)) {
+            ok = false;
+            return false;
+        }
         v = static_cast<std::uint16_t>(data[pos]) |
             (static_cast<std::uint16_t>(data[pos + 1]) << 8);
         pos += 2;
         return true;
     }
     bool GetU32(std::uint32_t& v) {
-        if (!Remaining(4)) { ok = false; return false; }
+        if (!Remaining(4)) {
+            ok = false;
+            return false;
+        }
         v = 0;
-        for (int i = 0; i < 4; ++i) v |= static_cast<std::uint32_t>(data[pos + i]) << (8 * i);
+        for (int i = 0; i < 4; ++i)
+            v |= static_cast<std::uint32_t>(data[pos + i]) << (8 * i);
         pos += 4;
         return true;
     }
     bool GetU64(std::uint64_t& v) {
-        if (!Remaining(8)) { ok = false; return false; }
+        if (!Remaining(8)) {
+            ok = false;
+            return false;
+        }
         v = 0;
-        for (int i = 0; i < 8; ++i) v |= static_cast<std::uint64_t>(data[pos + i]) << (8 * i);
+        for (int i = 0; i < 8; ++i)
+            v |= static_cast<std::uint64_t>(data[pos + i]) << (8 * i);
         pos += 8;
         return true;
     }
     bool GetString(std::string& s) {
         std::uint32_t len = 0;
-        if (!GetU32(len)) return false;
-        if (!Remaining(len)) { ok = false; return false; }
+        if (!GetU32(len))
+            return false;
+        if (!Remaining(len)) {
+            ok = false;
+            return false;
+        }
         s.assign(reinterpret_cast<const char*>(data + pos), len);
         pos += len;
         return true;
     }
     bool GetBlob(std::vector<std::uint8_t>& b) {
         std::uint32_t len = 0;
-        if (!GetU32(len)) return false;
-        if (!Remaining(len)) { ok = false; return false; }
+        if (!GetU32(len))
+            return false;
+        if (!Remaining(len)) {
+            ok = false;
+            return false;
+        }
         b.assign(data + pos, data + pos + len);
         pos += len;
         return true;
@@ -133,9 +167,12 @@ bool OpenFrame(const std::vector<std::uint8_t>& frame, MessageType expected, Cur
     Cursor c{frame.data(), frame.size(), 0, true};
     std::uint8_t type = 0;
     std::uint32_t len = 0;
-    if (!c.GetU8(type) || !c.GetU32(len)) return false;
-    if (static_cast<MessageType>(type) != expected) return false;
-    if (!c.Remaining(len)) return false;
+    if (!c.GetU8(type) || !c.GetU32(len))
+        return false;
+    if (static_cast<MessageType>(type) != expected)
+        return false;
+    if (!c.Remaining(len))
+        return false;
     payload = Cursor{frame.data() + c.pos, len, 0, true};
     return true;
 }
@@ -182,69 +219,94 @@ std::vector<std::uint8_t> EncodeBye(const ByeMsg& m) {
 }
 
 bool PeekMessageType(const std::vector<std::uint8_t>& frame, MessageType& out_type) {
-    if (frame.empty()) return false;
+    if (frame.empty())
+        return false;
     out_type = static_cast<MessageType>(frame[0]);
     return true;
 }
 
 bool DecodeHello(const std::vector<std::uint8_t>& frame, HelloMsg& out) {
     Cursor c;
-    if (!OpenFrame(frame, MessageType::Hello, c)) return false;
+    if (!OpenFrame(frame, MessageType::Hello, c))
+        return false;
     char magic[sizeof(kLockstepMagic)] = {0};
     for (char& ch : magic) {
         std::uint8_t b = 0;
-        if (!c.GetU8(b)) return false;
+        if (!c.GetU8(b))
+            return false;
         ch = static_cast<char>(b);
     }
-    if (std::memcmp(magic, kLockstepMagic, sizeof(kLockstepMagic)) != 0) return false;
-    if (!c.GetU16(out.protocol_version)) return false;
-    if (!c.GetU64(out.seed)) return false;
-    if (!c.GetU16(out.tick_rate_hz)) return false;
-    if (!c.GetU32(out.client_id)) return false;
-    if (!c.GetString(out.preset)) return false;
+    if (std::memcmp(magic, kLockstepMagic, sizeof(kLockstepMagic)) != 0)
+        return false;
+    if (!c.GetU16(out.protocol_version))
+        return false;
+    if (!c.GetU64(out.seed))
+        return false;
+    if (!c.GetU16(out.tick_rate_hz))
+        return false;
+    if (!c.GetU32(out.client_id))
+        return false;
+    if (!c.GetString(out.preset))
+        return false;
     return c.ok;
 }
 
 bool DecodeInput(const std::vector<std::uint8_t>& frame, InputMsg& out) {
     Cursor c;
-    if (!OpenFrame(frame, MessageType::Input, c)) return false;
-    if (!c.GetU64(out.tick)) return false;
-    if (!c.GetU32(out.client_id)) return false;
-    if (!c.GetBlob(out.inputs)) return false;
+    if (!OpenFrame(frame, MessageType::Input, c))
+        return false;
+    if (!c.GetU64(out.tick))
+        return false;
+    if (!c.GetU32(out.client_id))
+        return false;
+    if (!c.GetBlob(out.inputs))
+        return false;
     return c.ok;
 }
 
 bool DecodeHash(const std::vector<std::uint8_t>& frame, HashMsg& out) {
     Cursor c;
-    if (!OpenFrame(frame, MessageType::Hash, c)) return false;
-    if (!c.GetU64(out.tick)) return false;
-    if (!c.GetString(out.world_hash)) return false;
-    if (!c.GetString(out.terrain)) return false;
-    if (!c.GetString(out.water)) return false;
-    if (!c.GetString(out.entities)) return false;
+    if (!OpenFrame(frame, MessageType::Hash, c))
+        return false;
+    if (!c.GetU64(out.tick))
+        return false;
+    if (!c.GetString(out.world_hash))
+        return false;
+    if (!c.GetString(out.terrain))
+        return false;
+    if (!c.GetString(out.water))
+        return false;
+    if (!c.GetString(out.entities))
+        return false;
     return c.ok;
 }
 
 bool DecodeBye(const std::vector<std::uint8_t>& frame, ByeMsg& out) {
     Cursor c;
-    if (!OpenFrame(frame, MessageType::Bye, c)) return false;
-    if (!c.GetU64(out.tick)) return false;
+    if (!OpenFrame(frame, MessageType::Bye, c))
+        return false;
+    if (!c.GetU64(out.tick))
+        return false;
     return c.ok;
 }
 
 // --- LoopbackTransport -------------------------------------------------------------
 
 LoopbackTransport::LoopbackTransport(std::shared_ptr<Channel> tx, std::shared_ptr<Channel> rx)
-    : m_tx(std::move(tx)), m_rx(std::move(rx)) {}
+    : m_tx(std::move(tx))
+    , m_rx(std::move(rx)) {}
 
-bool LoopbackTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
-    if (!m_tx || !m_tx->open) return false;
+bool LoopbackTransport::SendFrame(const std::vector<std::uint8_t>& frame,
+                                  FrameDelivery /*delivery*/) {
+    if (!m_tx || !m_tx->open)
+        return false;
     m_tx->queue.push_back(frame);
     return true;
 }
 
 bool LoopbackTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
-    if (!m_rx || m_rx->queue.empty()) return false;
+    if (!m_rx || m_rx->queue.empty())
+        return false;
     out = std::move(m_rx->queue.front());
     m_rx->queue.pop_front();
     return true;
@@ -254,12 +316,14 @@ bool LoopbackTransport::IsPeerConnected() const {
     // The peer is connected while its SEND channel (our rx) is open OR still has buffered
     // messages we have not drained (a clean Bye/close should be observed AFTER its queued
     // frames, never before them).
-    if (!m_rx) return false;
+    if (!m_rx)
+        return false;
     return m_rx->open || !m_rx->queue.empty();
 }
 
 void LoopbackTransport::Close() {
-    if (m_tx) m_tx->open = false; // our send channel closes -> the peer's rx sees it closed
+    if (m_tx)
+        m_tx->open = false; // our send channel closes -> the peer's rx sees it closed
 }
 
 std::pair<std::unique_ptr<LoopbackTransport>, std::unique_ptr<LoopbackTransport>>
@@ -272,7 +336,7 @@ MakeLoopbackPair() {
     return {std::move(a), std::move(b)};
 }
 
-// --- TcpTransport (winsock2 under _WIN32; stub otherwise) ---------------------------
+// --- TcpTransport (Winsock on Windows, POSIX sockets elsewhere) --------------------
 // Wire framing: every frame is preceded by its u32 LE length, so the receiver can
 // reassemble exactly one complete frame from a partially-arrived byte stream (TCP is a
 // stream, not message-oriented). TryReceiveFrame is non-blocking: it pumps whatever bytes
@@ -288,10 +352,13 @@ namespace {
 } // namespace
 
 bool TcpTransport::PumpRecv() {
-    if (m_socket < 0) return false;
+    if (m_socket < 0)
+        return false;
     // Opportunistically push any queued outbound bytes (non-blocking; no spin) whenever
     // we pump -- an earlier would-block may have left a remainder that can now go out.
-    if (!m_send_q.Empty() && FlushSendNonBlocking() < 0) { m_peer_closed = true; }
+    if (!m_send_q.Empty() && FlushSendNonBlocking() < 0) {
+        m_peer_closed = true;
+    }
     char buf[4096];
     for (;;) {
         const int n = ::recv(static_cast<SOCKET>(m_socket), buf, sizeof(buf), 0);
@@ -299,9 +366,13 @@ bool TcpTransport::PumpRecv() {
             m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
             continue;
         }
-        if (n == 0) { m_peer_closed = true; return true; } // graceful close
+        if (n == 0) {
+            m_peer_closed = true;
+            return true;
+        } // graceful close
         const int err = ::WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return true; // no more data right now
+        if (err == WSAEWOULDBLOCK)
+            return true;      // no more data right now
         m_peer_closed = true; // real error -> treat as disconnect (clean end)
         return true;
     }
@@ -319,30 +390,44 @@ TcpTransport::~TcpTransport() {
 
 bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
     m_listen_socket = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
-    if (m_listen_socket < 0) return false;
+    if (m_listen_socket < 0)
+        return false;
     BOOL reuse = TRUE;
-    ::setsockopt(static_cast<SOCKET>(m_listen_socket), SOL_SOCKET, SO_REUSEADDR,
-                 reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    ::setsockopt(static_cast<SOCKET>(m_listen_socket),
+                 SOL_SOCKET,
+                 SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&reuse),
+                 sizeof(reuse));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = ::htons(port);
-    if (::bind(static_cast<SOCKET>(m_listen_socket), reinterpret_cast<sockaddr*>(&addr),
+    if (::bind(static_cast<SOCKET>(m_listen_socket),
+               reinterpret_cast<sockaddr*>(&addr),
                sizeof(addr)) != 0) {
         Close();
         return false;
     }
-    if (::listen(static_cast<SOCKET>(m_listen_socket), 1) != 0) { Close(); return false; }
+    if (::listen(static_cast<SOCKET>(m_listen_socket), 1) != 0) {
+        Close();
+        return false;
+    }
 
     // Accept ONE client, bounded by timeout_ms via select (no hang -- critique F3 hygiene).
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(static_cast<SOCKET>(m_listen_socket), &rfds);
     timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
-    if (::select(0, &rfds, nullptr, nullptr, &tv) <= 0) { Close(); return false; }
+    if (::select(0, &rfds, nullptr, nullptr, &tv) <= 0) {
+        Close();
+        return false;
+    }
     m_socket = static_cast<std::intptr_t>(
         ::accept(static_cast<SOCKET>(m_listen_socket), nullptr, nullptr));
-    if (m_socket < 0) { Close(); return false; }
+    if (m_socket < 0) {
+        Close();
+        return false;
+    }
     u_long nonblock = 1;
     ::ioctlsocket(static_cast<SOCKET>(m_socket), FIONBIO, &nonblock);
     return true;
@@ -350,14 +435,18 @@ bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
 
 bool TcpTransport::Connect(const std::string& host, std::uint16_t port, int timeout_ms) {
     m_socket = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
-    if (m_socket < 0) return false;
+    if (m_socket < 0)
+        return false;
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = ::htons(port);
-    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) { Close(); return false; }
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        Close();
+        return false;
+    }
     (void)timeout_ms; // blocking connect for v1 (loopback/LAN); timeout via OS default
-    if (::connect(static_cast<SOCKET>(m_socket), reinterpret_cast<sockaddr*>(&addr),
-                  sizeof(addr)) != 0) {
+    if (::connect(
+            static_cast<SOCKET>(m_socket), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
         Close();
         return false;
     }
@@ -367,34 +456,40 @@ bool TcpTransport::Connect(const std::string& host, std::uint16_t port, int time
 }
 
 int TcpTransport::FlushSendNonBlocking() {
-    if (m_socket < 0) return -1;
+    if (m_socket < 0)
+        return -1;
     // Push as much of the queued outbound bytes as the kernel send buffer will take right
     // now. DrainOnce advances while ::send makes progress and STOPS the instant it
-    // would-blocks (returns 0) -- it never spins on a zero-progress send (Spec 019 FR-D,
-    // replacing the old `if (err == WSAEWOULDBLOCK) continue;`). The unsent remainder
+    // would-blocks (returns 0) -- it never spins on a zero-progress send. The unsent remainder
     // stays queued for the next flush; nothing is dropped.
     return m_send_q.DrainOnce([this](const std::uint8_t* p, std::size_t len) -> int {
         const int want = static_cast<int>(std::min<std::size_t>(len, 1u << 20));
-        const int n = ::send(static_cast<SOCKET>(m_socket),
-                             reinterpret_cast<const char*>(p), want, 0);
-        if (n > 0) return n;
+        const int n =
+            ::send(static_cast<SOCKET>(m_socket), reinterpret_cast<const char*>(p), want, 0);
+        if (n > 0)
+            return n;
         const int err = ::WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return 0; // would-block -> stop draining (no busy-spin)
-        return -1;                            // real error -> fatal/disconnect
+        if (err == WSAEWOULDBLOCK)
+            return 0; // would-block -> stop draining (no busy-spin)
+        return -1;    // real error -> fatal/disconnect
     });
 }
 
 bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
-    if (m_socket < 0 || m_peer_closed) return false;
+    if (m_socket < 0 || m_peer_closed)
+        return false;
     // Frame = [u32 LE len][payload]; APPEND it whole to the bounded outbound queue. The
-    // queue NEVER drops a message (Spec 019 FR-D high-water backpressure policy).
+    // queue never drops a message.
     std::vector<std::uint8_t> out;
     PutU32(out, static_cast<std::uint32_t>(frame.size()));
     out.insert(out.end(), frame.begin(), frame.end());
     m_send_q.Append(out.data(), out.size());
 
     // Opportunistic non-blocking flush; a would-block leaves the remainder queued.
-    if (FlushSendNonBlocking() < 0) { m_peer_closed = true; return false; }
+    if (FlushSendNonBlocking() < 0) {
+        m_peer_closed = true;
+        return false;
+    }
 
     // High-water backpressure: if the kernel send buffer is saturated and the queue has
     // grown past the high-water mark, BLOCK on socket writability via select and keep
@@ -409,8 +504,14 @@ bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelive
         FD_SET(static_cast<SOCKET>(m_socket), &wfds);
         timeval tv{5, 0}; // 5s ceiling per writability wait
         const int sel = ::select(0, nullptr, &wfds, nullptr, &tv);
-        if (sel <= 0) { m_peer_closed = true; return false; } // peer not draining
-        if (FlushSendNonBlocking() < 0) { m_peer_closed = true; return false; }
+        if (sel <= 0) {
+            m_peer_closed = true;
+            return false;
+        } // peer not draining
+        if (FlushSendNonBlocking() < 0) {
+            m_peer_closed = true;
+            return false;
+        }
     }
     return true;
 }
@@ -418,10 +519,13 @@ bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelive
 bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     PumpRecv();
     // Need at least the u32 length prefix.
-    if (m_recv_buffer.size() < 4) return false;
+    if (m_recv_buffer.size() < 4)
+        return false;
     std::uint32_t frame_len = 0;
-    for (int i = 0; i < 4; ++i) frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
-    if (m_recv_buffer.size() < 4u + frame_len) return false; // frame not fully arrived
+    for (int i = 0; i < 4; ++i)
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
+    if (m_recv_buffer.size() < 4u + frame_len)
+        return false; // frame not fully arrived
     out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
     m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
     return true;
@@ -434,13 +538,21 @@ bool TcpTransport::IsPeerConnected() const {
 }
 
 void TcpTransport::Close() {
-    if (m_socket >= 0) { ::shutdown(static_cast<SOCKET>(m_socket), SD_BOTH); ::closesocket(static_cast<SOCKET>(m_socket)); m_socket = -1; }
-    if (m_listen_socket >= 0) { ::closesocket(static_cast<SOCKET>(m_listen_socket)); m_listen_socket = -1; }
+    if (m_socket >= 0) {
+        ::shutdown(static_cast<SOCKET>(m_socket), SD_BOTH);
+        ::closesocket(static_cast<SOCKET>(m_socket));
+        m_socket = -1;
+    }
+    if (m_listen_socket >= 0) {
+        ::closesocket(static_cast<SOCKET>(m_listen_socket));
+        m_listen_socket = -1;
+    }
 }
 
 // --- NET-11: single-listen-socket fan-out (TcpTransport::FromAcceptedSocket + TcpListener)
 std::unique_ptr<TcpTransport> TcpTransport::FromAcceptedSocket(std::intptr_t sock) {
-    if (sock < 0) return nullptr;
+    if (sock < 0)
+        return nullptr;
     auto t = std::make_unique<TcpTransport>();
     t->m_socket = sock;
     // Windows does not reliably inherit non-blocking from the listen socket; set it here
@@ -462,22 +574,34 @@ TcpListener::~TcpListener() {
 
 bool TcpListener::Listen(std::uint16_t port, int backlog) {
     m_listen_socket = static_cast<std::intptr_t>(::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
-    if (m_listen_socket < 0) return false;
+    if (m_listen_socket < 0)
+        return false;
     BOOL reuse = TRUE;
-    ::setsockopt(static_cast<SOCKET>(m_listen_socket), SOL_SOCKET, SO_REUSEADDR,
-                 reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    ::setsockopt(static_cast<SOCKET>(m_listen_socket),
+                 SOL_SOCKET,
+                 SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&reuse),
+                 sizeof(reuse));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = ::htons(port);
-    if (::bind(static_cast<SOCKET>(m_listen_socket), reinterpret_cast<sockaddr*>(&addr),
-               sizeof(addr)) != 0) { Close(); return false; }
-    if (::listen(static_cast<SOCKET>(m_listen_socket), backlog) != 0) { Close(); return false; }
+    if (::bind(static_cast<SOCKET>(m_listen_socket),
+               reinterpret_cast<sockaddr*>(&addr),
+               sizeof(addr)) != 0) {
+        Close();
+        return false;
+    }
+    if (::listen(static_cast<SOCKET>(m_listen_socket), backlog) != 0) {
+        Close();
+        return false;
+    }
     // Read back the actual bound port (Listen(0) => OS-assigned ephemeral) in HOST order.
     sockaddr_in bound{};
     int bound_len = static_cast<int>(sizeof(bound));
     if (::getsockname(static_cast<SOCKET>(m_listen_socket),
-                      reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0) {
+                      reinterpret_cast<sockaddr*>(&bound),
+                      &bound_len) == 0) {
         m_port = ::ntohs(bound.sin_port);
     } else {
         m_port = port;
@@ -489,58 +613,320 @@ bool TcpListener::Listen(std::uint16_t port, int backlog) {
 }
 
 std::unique_ptr<ILockstepTransport> TcpListener::AcceptOne() {
-    if (m_listen_socket < 0) return nullptr;
+    if (m_listen_socket < 0)
+        return nullptr;
     const std::intptr_t sock = static_cast<std::intptr_t>(
         ::accept(static_cast<SOCKET>(m_listen_socket), nullptr, nullptr));
-    if (sock < 0) return nullptr; // WSAEWOULDBLOCK (nothing pending) or error -> none now
+    if (sock < 0)
+        return nullptr; // WSAEWOULDBLOCK (nothing pending) or error -> none now
     return TcpTransport::FromAcceptedSocket(sock);
 }
 
 std::unique_ptr<TcpTransport> TcpListener::AcceptOneBlocking(int timeout_ms) {
-    if (m_listen_socket < 0) return nullptr;
+    if (m_listen_socket < 0)
+        return nullptr;
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(static_cast<SOCKET>(m_listen_socket), &rfds);
     timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
-    if (::select(0, &rfds, nullptr, nullptr, &tv) <= 0) return nullptr; // timeout/error
+    if (::select(0, &rfds, nullptr, nullptr, &tv) <= 0)
+        return nullptr; // timeout/error
     const std::intptr_t sock = static_cast<std::intptr_t>(
         ::accept(static_cast<SOCKET>(m_listen_socket), nullptr, nullptr));
-    if (sock < 0) return nullptr;
+    if (sock < 0)
+        return nullptr;
     return TcpTransport::FromAcceptedSocket(sock);
 }
 
 void TcpListener::Close() {
-    if (m_listen_socket >= 0) { ::closesocket(static_cast<SOCKET>(m_listen_socket)); m_listen_socket = -1; }
+    if (m_listen_socket >= 0) {
+        ::closesocket(static_cast<SOCKET>(m_listen_socket));
+        m_listen_socket = -1;
+    }
 }
 
-#else // !_WIN32 -- portable stub (the seam compiles; POSIX impl is a later additive change)
+#else // !_WIN32 -- POSIX sockets
+
+namespace {
+
+bool SetNonBlocking(std::intptr_t socket) {
+    const int fd = static_cast<int>(socket);
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+void CloseSocket(std::intptr_t& socket) {
+    if (socket < 0)
+        return;
+    ::close(static_cast<int>(socket));
+    socket = -1;
+}
+
+} // namespace
 
 TcpTransport::TcpTransport() = default;
-TcpTransport::~TcpTransport() { Close(); }
-bool TcpTransport::Listen(std::uint16_t, int) { return false; }
-bool TcpTransport::Connect(const std::string&, std::uint16_t, int) { return false; }
-bool TcpTransport::SendFrame(const std::vector<std::uint8_t>&, FrameDelivery) { return false; }
-bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>&) { return false; }
-bool TcpTransport::IsPeerConnected() const { return false; }
-void TcpTransport::Close() {}
-bool TcpTransport::PumpRecv() { return false; }
-int TcpTransport::FlushSendNonBlocking() { return 0; }
-std::unique_ptr<TcpTransport> TcpTransport::FromAcceptedSocket(std::intptr_t) { return nullptr; }
+TcpTransport::~TcpTransport() {
+    Close();
+}
+
+bool TcpTransport::PumpRecv() {
+    if (m_socket < 0)
+        return false;
+    if (!m_send_q.Empty() && FlushSendNonBlocking() < 0)
+        m_peer_closed = true;
+    char buf[4096];
+    for (;;) {
+        const ssize_t n = ::recv(static_cast<int>(m_socket), buf, sizeof(buf), 0);
+        if (n > 0) {
+            m_recv_buffer.insert(m_recv_buffer.end(), buf, buf + n);
+            continue;
+        }
+        if (n == 0) {
+            m_peer_closed = true;
+            return true;
+        }
+        if (errno == EINTR)
+            continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return true;
+        m_peer_closed = true;
+        return true;
+    }
+}
+
+bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
+    m_listen_socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (m_listen_socket < 0)
+        return false;
+    int reuse = 1;
+    ::setsockopt(
+        static_cast<int>(m_listen_socket), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+    if (::bind(static_cast<int>(m_listen_socket),
+               reinterpret_cast<sockaddr*>(&addr),
+               sizeof(addr)) != 0 ||
+        ::listen(static_cast<int>(m_listen_socket), 1) != 0) {
+        Close();
+        return false;
+    }
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(static_cast<int>(m_listen_socket), &rfds);
+    timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    if (::select(static_cast<int>(m_listen_socket) + 1, &rfds, nullptr, nullptr, &tv) <= 0) {
+        Close();
+        return false;
+    }
+    m_socket = ::accept(static_cast<int>(m_listen_socket), nullptr, nullptr);
+    if (m_socket < 0 || !SetNonBlocking(m_socket)) {
+        Close();
+        return false;
+    }
+    return true;
+}
+
+bool TcpTransport::Connect(const std::string& host, std::uint16_t port, int timeout_ms) {
+    m_socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (m_socket < 0 || !SetNonBlocking(m_socket)) {
+        Close();
+        return false;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        Close();
+        return false;
+    }
+    const int rc =
+        ::connect(static_cast<int>(m_socket), reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (rc != 0 && errno != EINPROGRESS) {
+        Close();
+        return false;
+    }
+    if (rc != 0) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(static_cast<int>(m_socket), &wfds);
+        timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+        if (::select(static_cast<int>(m_socket) + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
+            Close();
+            return false;
+        }
+        int socket_error = 0;
+        socklen_t error_len = sizeof(socket_error);
+        if (::getsockopt(
+                static_cast<int>(m_socket), SOL_SOCKET, SO_ERROR, &socket_error, &error_len) != 0 ||
+            socket_error != 0) {
+            Close();
+            return false;
+        }
+    }
+    return true;
+}
+
+int TcpTransport::FlushSendNonBlocking() {
+    if (m_socket < 0)
+        return -1;
+    return m_send_q.DrainOnce([this](const std::uint8_t* p, std::size_t len) -> int {
+        const std::size_t want = std::min<std::size_t>(len, 1u << 20);
+#ifdef MSG_NOSIGNAL
+        const ssize_t n = ::send(static_cast<int>(m_socket), p, want, MSG_NOSIGNAL);
+#else
+        const ssize_t n = ::send(static_cast<int>(m_socket), p, want, 0);
+#endif
+        if (n > 0)
+            return static_cast<int>(n);
+        if (n < 0 && errno == EINTR)
+            return 0;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return 0;
+        return -1;
+    });
+}
+
+bool TcpTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery /*delivery*/) {
+    if (m_socket < 0 || m_peer_closed)
+        return false;
+    std::vector<std::uint8_t> out;
+    PutU32(out, static_cast<std::uint32_t>(frame.size()));
+    out.insert(out.end(), frame.begin(), frame.end());
+    m_send_q.Append(out.data(), out.size());
+    if (FlushSendNonBlocking() < 0) {
+        m_peer_closed = true;
+        return false;
+    }
+    while (m_send_q.OverHighWater()) {
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(static_cast<int>(m_socket), &wfds);
+        timeval tv{5, 0};
+        if (::select(static_cast<int>(m_socket) + 1, nullptr, &wfds, nullptr, &tv) <= 0 ||
+            FlushSendNonBlocking() < 0) {
+            m_peer_closed = true;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TcpTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
+    PumpRecv();
+    if (m_recv_buffer.size() < 4)
+        return false;
+    std::uint32_t frame_len = 0;
+    for (int i = 0; i < 4; ++i)
+        frame_len |= static_cast<std::uint32_t>(m_recv_buffer[i]) << (8 * i);
+    if (m_recv_buffer.size() < 4u + frame_len)
+        return false;
+    out.assign(m_recv_buffer.begin() + 4, m_recv_buffer.begin() + 4 + frame_len);
+    m_recv_buffer.erase(m_recv_buffer.begin(), m_recv_buffer.begin() + 4 + frame_len);
+    return true;
+}
+
+bool TcpTransport::IsPeerConnected() const {
+    return m_socket >= 0 && (!m_peer_closed || !m_recv_buffer.empty());
+}
+
+void TcpTransport::Close() {
+    if (m_socket >= 0)
+        ::shutdown(static_cast<int>(m_socket), SHUT_RDWR);
+    CloseSocket(m_socket);
+    CloseSocket(m_listen_socket);
+}
+
+std::unique_ptr<TcpTransport> TcpTransport::FromAcceptedSocket(std::intptr_t socket) {
+    if (socket < 0 || !SetNonBlocking(socket)) {
+        if (socket >= 0)
+            ::close(static_cast<int>(socket));
+        return nullptr;
+    }
+    auto transport = std::make_unique<TcpTransport>();
+    transport->m_socket = socket;
+    return transport;
+}
 
 TcpListener::TcpListener() = default;
-TcpListener::~TcpListener() { Close(); }
-bool TcpListener::Listen(std::uint16_t, int) { return false; }
-std::unique_ptr<ILockstepTransport> TcpListener::AcceptOne() { return nullptr; }
-std::unique_ptr<TcpTransport> TcpListener::AcceptOneBlocking(int) { return nullptr; }
-void TcpListener::Close() {}
+TcpListener::~TcpListener() {
+    Close();
+}
+
+bool TcpListener::Listen(std::uint16_t port, int backlog) {
+    m_listen_socket = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (m_listen_socket < 0)
+        return false;
+    int reuse = 1;
+    ::setsockopt(
+        static_cast<int>(m_listen_socket), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+    if (::bind(static_cast<int>(m_listen_socket),
+               reinterpret_cast<sockaddr*>(&addr),
+               sizeof(addr)) != 0 ||
+        ::listen(static_cast<int>(m_listen_socket), backlog) != 0) {
+        Close();
+        return false;
+    }
+    sockaddr_in bound{};
+    socklen_t bound_len = sizeof(bound);
+    if (::getsockname(static_cast<int>(m_listen_socket),
+                      reinterpret_cast<sockaddr*>(&bound),
+                      &bound_len) == 0) {
+        m_port = ntohs(bound.sin_port);
+    } else {
+        m_port = port;
+    }
+    if (!SetNonBlocking(m_listen_socket)) {
+        Close();
+        return false;
+    }
+    return true;
+}
+
+std::unique_ptr<ILockstepTransport> TcpListener::AcceptOne() {
+    if (m_listen_socket < 0)
+        return nullptr;
+    const std::intptr_t socket = ::accept(static_cast<int>(m_listen_socket), nullptr, nullptr);
+    if (socket < 0)
+        return nullptr;
+    return TcpTransport::FromAcceptedSocket(socket);
+}
+
+std::unique_ptr<TcpTransport> TcpListener::AcceptOneBlocking(int timeout_ms) {
+    if (m_listen_socket < 0)
+        return nullptr;
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(static_cast<int>(m_listen_socket), &rfds);
+    timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    if (::select(static_cast<int>(m_listen_socket) + 1, &rfds, nullptr, nullptr, &tv) <= 0)
+        return nullptr;
+    const std::intptr_t socket = ::accept(static_cast<int>(m_listen_socket), nullptr, nullptr);
+    if (socket < 0)
+        return nullptr;
+    return TcpTransport::FromAcceptedSocket(socket);
+}
+
+void TcpListener::Close() {
+    CloseSocket(m_listen_socket);
+    m_port = 0;
+}
 
 #endif // _WIN32
 
 // --- LockstepSession ---------------------------------------------------------------
 
-LockstepSession::LockstepSession(LockstepConfig config, ILockstepTransport* transport,
+LockstepSession::LockstepSession(LockstepConfig config,
+                                 ILockstepTransport* transport,
                                  LockstepHooks hooks)
-    : m_config(config), m_transport(transport), m_hooks(hooks) {
+    : m_config(config)
+    , m_transport(transport)
+    , m_hooks(hooks) {
     m_horizon = std::max(m_config.horizon_min, m_config.horizon_start);
     m_status.horizon = m_horizon;
     m_status.max_horizon_reached = m_horizon;
@@ -596,22 +982,30 @@ bool LockstepSession::Handshake() {
 
     if (peer.protocol_version != mine.protocol_version) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: protocol version mismatch (local {} != peer {})",
-                              m_config.local_client_id, mine.protocol_version, peer.protocol_version);
+                              m_config.local_client_id,
+                              mine.protocol_version,
+                              peer.protocol_version);
         return false;
     }
     if (peer.seed != mine.seed) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: seed mismatch (local {} != peer {})",
-                              m_config.local_client_id, mine.seed, peer.seed);
+                              m_config.local_client_id,
+                              mine.seed,
+                              peer.seed);
         return false;
     }
     if (peer.preset != mine.preset) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: preset mismatch (local '{}' != peer '{}')",
-                              m_config.local_client_id, mine.preset, peer.preset);
+                              m_config.local_client_id,
+                              mine.preset,
+                              peer.preset);
         return false;
     }
     if (peer.tick_rate_hz != mine.tick_rate_hz) {
         LUMINUMBRA_CORE_ERROR("lockstep[{}]: tick-rate mismatch (local {} != peer {})",
-                              m_config.local_client_id, mine.tick_rate_hz, peer.tick_rate_hz);
+                              m_config.local_client_id,
+                              mine.tick_rate_hz,
+                              peer.tick_rate_hz);
         return false;
     }
 
@@ -629,7 +1023,8 @@ bool LockstepSession::Handshake() {
 }
 
 void LockstepSession::ScheduleLocalInput(std::uint64_t tick) {
-    if (tick <= m_local_input_scheduled_through) return;
+    if (tick <= m_local_input_scheduled_through)
+        return;
     std::vector<std::uint8_t> blob;
     if (m_hooks.collect_local_input) {
         blob = m_hooks.collect_local_input(tick, m_hooks.user);
@@ -648,51 +1043,55 @@ bool LockstepSession::DrainPeerMessages() {
     std::vector<std::uint8_t> frame;
     while (m_transport->TryReceiveFrame(frame)) {
         MessageType type;
-        if (!PeekMessageType(frame, type)) continue;
+        if (!PeekMessageType(frame, type))
+            continue;
         switch (type) {
-        case MessageType::Input: {
-            InputMsg in;
-            if (DecodeInput(frame, in)) {
-                m_inputs[in.tick][in.client_id] = in.inputs;
+            case MessageType::Input: {
+                InputMsg in;
+                if (DecodeInput(frame, in)) {
+                    m_inputs[in.tick][in.client_id] = in.inputs;
+                }
+                break;
             }
-            break;
-        }
-        case MessageType::Hash: {
-            HashMsg h;
-            if (DecodeHash(frame, h)) {
-                m_peer_hashes[h.tick] = h;
-                // Compare immediately if we already hold the local hash for that tick.
-                auto local = m_local_hashes.find(h.tick);
-                if (local != m_local_hashes.end()) {
-                    if (local->second.world_hash != h.world_hash) {
-                        // Localize via authoritative sub-hashes (terrain/water/entities),
-                        // then fall back to world_hash (mesh / non-authoritative).
-                        std::string section = "world_hash";
-                        if (local->second.terrain != h.terrain) section = "terrain";
-                        else if (local->second.water != h.water) section = "water";
-                        else if (local->second.entities != h.entities) section = "entities";
-                        EmitDesyncDump(h.tick, section);
-                        return false;
+            case MessageType::Hash: {
+                HashMsg h;
+                if (DecodeHash(frame, h)) {
+                    m_peer_hashes[h.tick] = h;
+                    // Compare immediately if we already hold the local hash for that tick.
+                    auto local = m_local_hashes.find(h.tick);
+                    if (local != m_local_hashes.end()) {
+                        if (local->second.world_hash != h.world_hash) {
+                            // Localize via authoritative sub-hashes (terrain/water/entities),
+                            // then fall back to world_hash (mesh / non-authoritative).
+                            std::string section = "world_hash";
+                            if (local->second.terrain != h.terrain)
+                                section = "terrain";
+                            else if (local->second.water != h.water)
+                                section = "water";
+                            else if (local->second.entities != h.entities)
+                                section = "entities";
+                            EmitDesyncDump(h.tick, section);
+                            return false;
+                        }
                     }
                 }
+                break;
             }
-            break;
-        }
-        case MessageType::Bye: {
-            ByeMsg bye;
-            DecodeBye(frame, bye);
-            // A clean disconnect ENDS the session cleanly (critique F3): it is NOT a
-            // desync. Record the disconnect tick and stop.
-            m_disconnected = true;
-            m_status.peer_disconnected = true;
-            m_status.disconnect_tick = bye.tick;
-            return false;
-        }
-        case MessageType::Hello:
-        default:
-            // A stray Hello / unknown after handshake is ignored (forward-compat: an
-            // unknown future message must not crash an older peer).
-            break;
+            case MessageType::Bye: {
+                ByeMsg bye;
+                DecodeBye(frame, bye);
+                // A clean disconnect ENDS the session cleanly (critique F3): it is NOT a
+                // desync. Record the disconnect tick and stop.
+                m_disconnected = true;
+                m_status.peer_disconnected = true;
+                m_status.disconnect_tick = bye.tick;
+                return false;
+            }
+            case MessageType::Hello:
+            default:
+                // A stray Hello / unknown after handshake is ignored (forward-compat: an
+                // unknown future message must not crash an older peer).
+                break;
         }
     }
     return true;
@@ -700,14 +1099,31 @@ bool LockstepSession::DrainPeerMessages() {
 
 TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
     TickResult result;
-    if (m_status.desynced) { result.outcome = TickOutcome::Desync; result.tick = m_status.desync_tick; return result; }
-    if (m_status.peer_disconnected) { result.outcome = TickOutcome::PeerDisconnected; result.tick = m_status.disconnect_tick; return result; }
-    if (m_agreed_tick >= budget_ticks) { result.outcome = TickOutcome::Finished; result.tick = m_agreed_tick; return result; }
+    if (m_status.desynced) {
+        result.outcome = TickOutcome::Desync;
+        result.tick = m_status.desync_tick;
+        return result;
+    }
+    if (m_status.peer_disconnected) {
+        result.outcome = TickOutcome::PeerDisconnected;
+        result.tick = m_status.disconnect_tick;
+        return result;
+    }
+    if (m_agreed_tick >= budget_ticks) {
+        result.outcome = TickOutcome::Finished;
+        result.tick = m_agreed_tick;
+        return result;
+    }
 
     // 1) Drain peer messages (inputs, hash compares, disconnect). A fatal state stops here.
     if (!DrainPeerMessages()) {
-        if (m_status.desynced) { result.outcome = TickOutcome::Desync; result.tick = m_status.desync_tick; }
-        else { result.outcome = TickOutcome::PeerDisconnected; result.tick = m_status.disconnect_tick; }
+        if (m_status.desynced) {
+            result.outcome = TickOutcome::Desync;
+            result.tick = m_status.desync_tick;
+        } else {
+            result.outcome = TickOutcome::PeerDisconnected;
+            result.tick = m_status.disconnect_tick;
+        }
         return result;
     }
 
@@ -716,10 +1132,10 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
 
     // 2) Do we have ALL peers' inputs for the wanted tick? (local + the one remote).
     auto it = m_inputs.find(want);
-    const bool have_local = it != m_inputs.end() &&
-        it->second.find(m_config.local_client_id) != it->second.end();
-    const bool have_peer = it != m_inputs.end() &&
-        it->second.find(m_config.peer_client_id) != it->second.end();
+    const bool have_local =
+        it != m_inputs.end() && it->second.find(m_config.local_client_id) != it->second.end();
+    const bool have_peer =
+        it != m_inputs.end() && it->second.find(m_config.peer_client_id) != it->second.end();
 
     if (!have_local) {
         // Should not happen (we pre-scheduled), but be defensive: schedule it now.
@@ -811,9 +1227,12 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
         if (peer != m_peer_hashes.end()) {
             if (peer->second.world_hash != local.world_hash) {
                 std::string section = "world_hash";
-                if (local.terrain != peer->second.terrain) section = "terrain";
-                else if (local.water != peer->second.water) section = "water";
-                else if (local.entities != peer->second.entities) section = "entities";
+                if (local.terrain != peer->second.terrain)
+                    section = "terrain";
+                else if (local.water != peer->second.water)
+                    section = "water";
+                else if (local.entities != peer->second.entities)
+                    section = "entities";
                 EmitDesyncDump(want, section);
                 result.outcome = TickOutcome::Desync;
                 result.tick = want;
@@ -822,7 +1241,8 @@ TickResult LockstepSession::PumpTick(std::uint64_t budget_ticks) {
         }
     }
 
-    result.outcome = (m_agreed_tick >= budget_ticks) ? TickOutcome::Finished : TickOutcome::Advanced;
+    result.outcome =
+        (m_agreed_tick >= budget_ticks) ? TickOutcome::Finished : TickOutcome::Advanced;
     return result;
 }
 
@@ -840,8 +1260,8 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
     header.seed = m_config.seed;
     header.seed_string = std::to_string(m_config.seed);
     header.preset = m_config.preset;
-    header.preset_hash = std::strtoull(
-        Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
+    header.preset_hash =
+        std::strtoull(Luminumbra::Replay::Fnv1a64Hex(m_config.preset).c_str(), nullptr, 16);
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     // start_world_hash: the first cadence hash if we captured one, else empty.
     if (!m_local_hashes.empty()) {
@@ -850,8 +1270,8 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
 
     Luminumbra::Replay::ReplayWriter writer;
     if (!writer.Open(m_dump_path, header)) {
-        LUMINUMBRA_CORE_ERROR("lockstep[{}]: failed to open desync dump '{}'",
-                              m_config.local_client_id, m_dump_path);
+        LUMINUMBRA_CORE_ERROR(
+            "lockstep[{}]: failed to open desync dump '{}'", m_config.local_client_id, m_dump_path);
         return;
     }
     // Input records: every applied tick's merged opaque input set.
@@ -861,7 +1281,8 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
     // Checkpoint records: every LOCAL cadence hash captured up to (and including) the
     // divergence tick.
     for (const auto& [tick, h] : m_local_hashes) {
-        if (tick > divergence_tick) continue;
+        if (tick > divergence_tick)
+            continue;
         Luminumbra::Replay::CheckpointRecord cp;
         cp.tick = tick;
         cp.world_hash = h.world_hash;
@@ -873,13 +1294,16 @@ void LockstepSession::EmitDesyncDump(std::uint64_t divergence_tick, const std::s
     writer.Finalize(m_agreed_tick);
     m_status.dump_path = m_dump_path;
 
-    LUMINUMBRA_CORE_ERROR(
-        "lockstep[{}]: DESYNC at tick {} (section={}); LREC1 dump -> {}",
-        m_config.local_client_id, divergence_tick, section, m_dump_path);
+    LUMINUMBRA_CORE_ERROR("lockstep[{}]: DESYNC at tick {} (section={}); LREC1 dump -> {}",
+                          m_config.local_client_id,
+                          divergence_tick,
+                          section,
+                          m_dump_path);
 }
 
 void LockstepSession::Disconnect() {
-    if (m_disconnected) return;
+    if (m_disconnected)
+        return;
     ByeMsg bye;
     bye.tick = m_agreed_tick;
     m_transport->SendFrame(EncodeBye(bye));

@@ -42,8 +42,8 @@
 // blobs, and hash checkpoints. It knows NOTHING about voxels, biomes, cameras, or any
 // game concept. The opaque input blob is exactly the InputRecord payload of LREC1.
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <memory>
@@ -62,10 +62,10 @@ inline constexpr std::uint16_t kLockstepProtocolVersion = 1;
 
 // Message type tags (u8 on the wire).
 enum class MessageType : std::uint8_t {
-    Hello = 0x01,      // handshake: protocol/version/seed/preset/tick-rate + client id
-    Input = 0x02,      // per-tick input: tick, client id, opaque input blob (empty ok)
-    Hash = 0x03,       // periodic desync oracle: tick + world_hash + sub-hashes
-    Bye = 0x04,        // clean disconnect: the disconnect tick
+    Hello = 0x01, // handshake: protocol/version/seed/preset/tick-rate + client id
+    Input = 0x02, // per-tick input: tick, client id, opaque input blob (empty ok)
+    Hash = 0x03,  // periodic desync oracle: tick + world_hash + sub-hashes
+    Bye = 0x04,   // clean disconnect: the disconnect tick
 };
 
 // Handshake. Both peers send a Hello first; mismatched protocol/version/seed/preset/
@@ -130,7 +130,10 @@ bool DecodeBye(const std::vector<std::uint8_t>& frame, ByeMsg& out);
 // (k_nSteamNetworkingSend_Unreliable / _Reliable). The Loopback/Tcp transports are
 // always-reliable (a safe superset), so they ignore the flag; only a future
 // SteamNetworkingTransport / GameNetworkingSockets impl honours it.
-enum class FrameDelivery { Unreliable, Reliable };
+enum class FrameDelivery {
+    Unreliable,
+    Reliable
+};
 
 class ILockstepTransport {
 public:
@@ -201,7 +204,7 @@ private:
 std::pair<std::unique_ptr<LoopbackTransport>, std::unique_ptr<LoopbackTransport>>
 MakeLoopbackPair();
 
-// --- Outbound backpressure queue (Spec 019 FR-D) -----------------------------------
+// --- Outbound backpressure queue ---------------------------------------------------
 // A bounded outbound byte buffer that REPLACES the old WSAEWOULDBLOCK busy-spin in
 // TcpTransport::SendFrame. Framed bytes are appended whole and NEVER dropped. DrainOnce
 // pushes the queued bytes through a non-blocking `send_some` sink, advancing only while
@@ -212,13 +215,19 @@ MakeLoopbackPair();
 struct OutboundByteQueue {
     static constexpr std::size_t kDefaultHighWaterBytes = 4u * 1024u * 1024u; // 4 MiB
 
-    std::vector<std::uint8_t> buf;  // pending bytes; the live window is [off, buf.size())
-    std::size_t off = 0;            // consumed-prefix offset (compacted away on Append)
+    std::vector<std::uint8_t> buf; // pending bytes; the live window is [off, buf.size())
+    std::size_t off = 0;           // consumed-prefix offset (compacted away on Append)
     std::size_t high_water = kDefaultHighWaterBytes;
 
-    [[nodiscard]] bool Empty() const { return off >= buf.size(); }
-    [[nodiscard]] std::size_t PendingBytes() const { return buf.size() - off; }
-    [[nodiscard]] bool OverHighWater() const { return PendingBytes() >= high_water; }
+    [[nodiscard]] bool Empty() const {
+        return off >= buf.size();
+    }
+    [[nodiscard]] std::size_t PendingBytes() const {
+        return buf.size() - off;
+    }
+    [[nodiscard]] bool OverHighWater() const {
+        return PendingBytes() >= high_water;
+    }
 
     // Appends one complete frame's bytes (caller has already length-prefixed). Compacts
     // the consumed prefix first so the buffer never accumulates already-sent bytes.
@@ -233,12 +242,14 @@ struct OutboundByteQueue {
     // Drains via `send_some(data, len) -> int`:  >0 bytes accepted (progress; keep
     // going), 0 would-block (STOP -- no busy-spin -- remainder retained), <0 fatal.
     // Returns 1 fully drained, 0 would-block (bytes remain), -1 fatal. NEVER drops.
-    template <typename SendSome>
+    template<typename SendSome>
     int DrainOnce(SendSome&& send_some) {
         while (off < buf.size()) {
             const int n = send_some(buf.data() + off, buf.size() - off);
-            if (n < 0) return -1;
-            if (n == 0) return 0;
+            if (n < 0)
+                return -1;
+            if (n == 0)
+                return 0;
             off += static_cast<std::size_t>(n);
         }
         buf.clear();
@@ -250,11 +261,8 @@ struct OutboundByteQueue {
 // Real TCP transport (loopback + LAN scope, ONE remote). Length-prefixed frames over a
 // blocking-but-polled stream socket: SendFrame writes [u32 LE frame-len][frame] and
 // TryReceiveFrame non-blockingly reassembles one complete frame from a receive buffer.
-// The winsock2 plumbing is guarded under _WIN32 and links ws2_32 (the gates/tests use
-// LoopbackTransport ONLY, so no real ports/firewall are needed there -- this path is for
-// the actual loopback/LAN session wiring). On a non-_WIN32 build the methods are stubs
-// that report no connection, so the engine still compiles cross-platform; a POSIX-socket
-// impl is a later additive change (the seam is identical).
+// Uses Winsock on Windows and POSIX sockets elsewhere. The public framing and polling
+// contract is identical on every supported platform.
 class TcpTransport final : public ILockstepTransport {
 public:
     TcpTransport();
@@ -288,7 +296,7 @@ private:
     std::intptr_t m_listen_socket = -1;
     bool m_peer_closed = false;
     std::vector<std::uint8_t> m_recv_buffer; // accumulates partial frames
-    OutboundByteQueue m_send_q; // bounded outbound queue (Spec 019 FR-D; no busy-spin)
+    OutboundByteQueue m_send_q;              // bounded outbound queue; no busy-spin
 };
 
 // Real TCP acceptor (NET-11): ONE listen socket, N accepted connections -- the actual
@@ -298,8 +306,7 @@ private:
 // one-port-per-client scheme where every client needed its own TcpTransport::Listen on a
 // separate base_port+K port. The listen socket is non-blocking so AcceptOne never stalls
 // the server tick; AcceptOneBlocking waits (select-bounded) for the next connection for a
-// startup/test accept loop. winsock2 under _WIN32; a portable stub otherwise (the seam
-// compiles cross-platform, POSIX impl is a later additive change -- identical seam).
+// startup/test accept loop. Uses Winsock on Windows and POSIX sockets elsewhere.
 class TcpListener final : public IConnectionAcceptor {
 public:
     TcpListener();
@@ -320,10 +327,14 @@ public:
     // accepts it. Returns nullptr on timeout / error. Convenience for accept loops/tests.
     std::unique_ptr<TcpTransport> AcceptOneBlocking(int timeout_ms);
 
-    [[nodiscard]] bool IsListening() const { return m_listen_socket >= 0; }
+    [[nodiscard]] bool IsListening() const {
+        return m_listen_socket >= 0;
+    }
     // The actual bound port (host byte order). Meaningful after a successful Listen(),
     // including when Listen(0) picked an ephemeral port.
-    [[nodiscard]] std::uint16_t port() const { return m_port; }
+    [[nodiscard]] std::uint16_t port() const {
+        return m_port;
+    }
     void Close();
 
 private:
@@ -359,32 +370,33 @@ struct LockstepConfig {
 
 // Outcome of a tick-advance attempt.
 enum class TickOutcome {
-    Advanced,        // a tick ran (all peer inputs present); world advanced by one tick
-    WaitingForPeer,  // peer input for the wanted tick not yet present -- caller pumps again
-    Desync,          // a hash mismatch was detected -- session HALTED, dump emitted
-    PeerDisconnected,// a clean Bye/close -- session ENDED cleanly (not a desync)
-    Finished,        // the configured tick budget was reached
+    Advanced,         // a tick ran (all peer inputs present); world advanced by one tick
+    WaitingForPeer,   // peer input for the wanted tick not yet present -- caller pumps again
+    Desync,           // a hash mismatch was detected -- session HALTED, dump emitted
+    PeerDisconnected, // a clean Bye/close -- session ENDED cleanly (not a desync)
+    Finished,         // the configured tick budget was reached
 };
 
 // The result the host/driver acts on each pump.
 struct TickResult {
     TickOutcome outcome = TickOutcome::WaitingForPeer;
-    std::uint64_t tick = 0;            // the tick this result concerns
-    std::vector<std::uint8_t> local_inputs;  // inputs to APPLY for this tick (local + peer merged opaque set)
-    bool ran_hash_exchange = false;   // a HashMsg was sent/compared at this tick
+    std::uint64_t tick = 0; // the tick this result concerns
+    std::vector<std::uint8_t>
+        local_inputs; // inputs to APPLY for this tick (local + peer merged opaque set)
+    bool ran_hash_exchange = false; // a HashMsg was sent/compared at this tick
 };
 
 // Snapshot of session status (telemetry only -- none of this feeds the hash).
 struct LockstepStatus {
-    std::uint64_t agreed_tick = 0;     // last tick the session has run
-    std::uint32_t horizon = 3;         // current adaptive horizon (ticks)
+    std::uint64_t agreed_tick = 0; // last tick the session has run
+    std::uint32_t horizon = 3;     // current adaptive horizon (ticks)
     bool handshaken = false;
     bool desynced = false;
     bool peer_disconnected = false;
-    std::uint64_t disconnect_tick = 0; // tick at which the peer disconnected (if any)
-    std::uint64_t desync_tick = 0;     // divergence tick (if desynced)
-    std::string desync_section;        // terrain/water/entities/world_hash
-    std::string dump_path;             // LREC1 dump path on desync
+    std::uint64_t disconnect_tick = 0;     // tick at which the peer disconnected (if any)
+    std::uint64_t desync_tick = 0;         // divergence tick (if desynced)
+    std::string desync_section;            // terrain/water/entities/world_hash
+    std::string dump_path;                 // LREC1 dump path on desync
     std::uint64_t late_input_events = 0;   // how many times the peer input arrived late
     std::uint32_t max_horizon_reached = 3; // peak horizon over the session
 };
@@ -400,7 +412,8 @@ struct LockstepHooks {
     // Applies the agreed merged input set and advances the simulation by exactly one
     // tick. Returns true on success. `merged` is the concatenation of all peers' opaque
     // blobs for this tick in ascending client-id order (deterministic ordering).
-    bool (*apply_and_step)(std::uint64_t tick, const std::vector<std::uint8_t>& merged,
+    bool (*apply_and_step)(std::uint64_t tick,
+                           const std::vector<std::uint8_t>& merged,
                            void* user) = nullptr;
 
     // Captures the LOCAL authoritative hashes at `tick` for the oracle exchange + dump.
@@ -424,8 +437,7 @@ struct LockstepHooks {
 // determinism oracle). See docs/networking-scale-architecture.md for the demotion.
 class LockstepSession {
 public:
-    LockstepSession(LockstepConfig config, ILockstepTransport* transport,
-                    LockstepHooks hooks);
+    LockstepSession(LockstepConfig config, ILockstepTransport* transport, LockstepHooks hooks);
 
     // Exchanges Hello with the peer and validates protocol/version/seed/preset/tick-rate.
     // Returns false on a mismatch (rejected loudly) or a peer that never said Hello.
@@ -445,13 +457,21 @@ public:
     // Sends a clean Bye at the current tick and closes the local transport end. Idempotent.
     void Disconnect();
 
-    [[nodiscard]] LockstepStatus Status() const { return m_status; }
-    [[nodiscard]] std::uint64_t AgreedTick() const { return m_agreed_tick; }
-    [[nodiscard]] std::uint32_t Horizon() const { return m_horizon; }
+    [[nodiscard]] LockstepStatus Status() const {
+        return m_status;
+    }
+    [[nodiscard]] std::uint64_t AgreedTick() const {
+        return m_agreed_tick;
+    }
+    [[nodiscard]] std::uint32_t Horizon() const {
+        return m_horizon;
+    }
 
     // Where a desync dump is written. Defaults to a temp path; set before PumpTick to
     // direct the gate's dump to a known artifact location.
-    void SetDumpPath(const std::string& path) { m_dump_path = path; }
+    void SetDumpPath(const std::string& path) {
+        m_dump_path = path;
+    }
 
 private:
     // Drains all currently-available peer messages into the input/hash buffers, flips
@@ -470,7 +490,7 @@ private:
     LockstepHooks m_hooks;
 
     std::uint32_t m_horizon = 3;
-    std::uint64_t m_agreed_tick = 0;     // last tick run (0 = none yet)
+    std::uint64_t m_agreed_tick = 0;                   // last tick run (0 = none yet)
     std::uint64_t m_local_input_scheduled_through = 0; // highest tick we've sent local input for
     std::uint32_t m_consecutive_slack_ticks = 0;
 

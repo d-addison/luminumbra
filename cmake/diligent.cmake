@@ -29,7 +29,7 @@
 # targets on pristine flags so nothing about the sim build (or its hash) changes.
 
 option(LUMINUMBRA_ENABLE_DILIGENT
-    "Vendor Diligent Engine (RHI pilot backend) via FetchContent -- OFF skips the clone/build for contributors who do not need the GPU RHI ctest" ON)
+    "Build the opt-in Diligent RHI pilot and its GPU tests" OFF)
 
 if(LUMINUMBRA_ENABLE_DILIGENT)
     include(FetchContent)
