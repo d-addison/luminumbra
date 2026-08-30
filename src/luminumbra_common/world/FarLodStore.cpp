@@ -101,7 +101,8 @@ u32 Crc32(const i16* density_q, const u8* material, std::size_t count) {
         for (std::size_t i = 0; i < size; ++i) {
             crc ^= bytes[i];
             for (int bit = 0; bit < 8; ++bit) {
-                crc = (crc >> 1u) ^ (0xedb88320u & static_cast<u32>(-(crc & 1u)));
+                const u32 low_bit_mask = (crc & 1u) != 0u ? 0xffffffffu : 0u;
+                crc = (crc >> 1u) ^ (0xedb88320u & low_bit_mask);
             }
         }
     };

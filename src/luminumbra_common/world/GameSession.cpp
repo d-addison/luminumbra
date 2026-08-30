@@ -278,7 +278,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // canonical headless roster carries none, so this is a no-op there and
         // world_hash is UNCHANGED (byte-identical) -- same discipline as the
         // stimulus-channel opt-in above. No RNG/wall-clock; id-ordered.
-        luminumbra::ai::RunPerceptionSystemOnTick(m_registry, m_simulationClock.fixed_dt());
+        luminumbra::ai::RunPerceptionSystemOnTick(m_registry,
+                                                  static_cast<float>(m_simulationClock.fixed_dt()));
 
         // 2c. T-I7-ECO-RENDER: scent stigmergy write/update. Game-data opt-in:
         // no scent emitter/sensor components means no field mutation, while active

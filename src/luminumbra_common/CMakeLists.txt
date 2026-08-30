@@ -65,15 +65,17 @@ endif()
 # reintroduces the vague-linkage link error above) and asserts the headless
 # world_hash is identical, proving opt-level invariance.
 option(LUMINUMBRA_SIM_O0_PARITY
-       "Build GameSession.cpp at a sim-parity opt level for the O0/O1 world_hash invariance gate" OFF)
-if(LUMINUMBRA_SIM_O0_PARITY)
-    # -O2 (not -O0): -O0 reintroduces the entt vague-linkage undefined-reference link
-    # error this override exists to dodge. -O2 is link-safe and a STRONGER opt level
-    # than the normal -O1, so world_hash parity across -O1 vs -O2 is a stricter proof
-    # of opt-level invariance than -O0 vs -O1 would have been.
-    set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O2")
-else()
-    set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
+       "Build GameSession.cpp at a GCC sim-parity opt level for world-hash invariance" OFF)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    if(LUMINUMBRA_SIM_O0_PARITY)
+        # -O2 (not -O0): -O0 reintroduces the entt vague-linkage undefined-reference link
+        # error this override exists to dodge. -O2 is link-safe and a STRONGER opt level
+        # than the normal -O1, so world_hash parity across -O1 vs -O2 is a stricter proof
+        # of opt-level invariance than -O0 vs -O1 would have been.
+        set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+    else()
+        set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
+    endif()
 endif()
 
 # LuaState.cpp is the one translation unit that includes sol2. GCC 15 diagnoses
