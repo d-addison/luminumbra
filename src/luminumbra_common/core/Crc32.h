@@ -12,8 +12,7 @@ public:
         for (std::size_t i = 0; i < size; ++i) {
             state_ ^= bytes[i];
             for (int bit = 0; bit < 8; ++bit) {
-                const std::uint32_t low_bit_mask =
-                    (state_ & 1u) != 0u ? 0xffffffffu : 0u;
+                const std::uint32_t low_bit_mask = (state_ & 1u) != 0u ? 0xffffffffu : 0u;
                 state_ = (state_ >> 1u) ^ (0xedb88320u & low_bit_mask);
             }
         }
