@@ -12,7 +12,6 @@
 #include <atomic>
 #include <chrono> // TEMP diag (spec 008 follow-up): per-sub-phase streaming timing
 #include <cmath>
-#include <cstdlib> // std::getenv for the opt-in job watchdog (LUMINUMBRA_JOB_WATCHDOG)
 #include <cstring> // std::memcpy for the deterministic water-state hash
 #include <filesystem>
 #include <limits>

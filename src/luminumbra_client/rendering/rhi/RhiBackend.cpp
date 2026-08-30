@@ -1,7 +1,6 @@
 #include "rendering/rhi/RhiBackend.h"
+#include "luminumbra_common/core/Environment.h"
 
-#include <cstdlib>
-#include <cstring>
 #include <string>
 
 namespace Luminumbra::Rendering::Rhi {
@@ -50,7 +49,8 @@ const char* BackendName(Backend backend) {
 }
 
 Backend SelectedBackendFromEnv() {
-    return ParseRhiBackend(std::getenv("LUMIN_RHI"));
+    const auto value = Core::ReadEnvironment("LUMIN_RHI");
+    return ParseRhiBackend(value ? value->c_str() : nullptr);
 }
 
 }  // namespace Luminumbra::Rendering::Rhi

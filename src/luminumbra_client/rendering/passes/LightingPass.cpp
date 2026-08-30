@@ -1,14 +1,15 @@
 #include "LightingPass.h"
 
-#include "PassGlHelpers.h"
 #include "../PassShaderLayouts.h"
 #include "../RenderContext.h"
 #include "../RenderResourceRegistry.h"
 #include "../ShadowMap.h"
+#include "PassGlHelpers.h"
 #include "core/Log.h"
+#include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
-#include "luminumbra_common/world/Chunk.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -201,8 +202,10 @@ void LightingPass::execute(const RenderContext& ctx) {
     // wrap floor (parsed once; default 0.25 = today's bytes) so ONE build stages
     // both ratification candidates - brighter navigable vs moodier floorless.
     static const float s_moon_wrap_floor = [] {
-        if (const char* e = std::getenv("LUMIN_MOON_WRAP_FLOOR")) {
-            try { return std::stof(e); } catch (...) {}
+        if (const auto value = Core::ReadEnvironment("LUMIN_MOON_WRAP_FLOOR")) {
+            try {
+                return std::stof(*value);
+            } catch (...) {}
         }
         return 0.25f;
     }();
@@ -218,9 +221,15 @@ void LightingPass::execute(const RenderContext& ctx) {
     };
     static const Grade s_grade = [] {
         Grade g{1.12f, 1.30f, 1.42f, 1.06f, 1.0f, 0.92f}; // richer sat + punchier contrast (de-wash noon; owner "white filter" pass 2026-07-07)
-        if (const char* env = std::getenv("LUMIN_GRADE")) {
-            std::sscanf(env, "%f,%f,%f,%f,%f,%f", &g.exposure, &g.saturation,
-                        &g.contrast, &g.wr, &g.wg, &g.wb);
+        if (const auto env = Core::ReadEnvironment("LUMIN_GRADE")) {
+            std::sscanf(env->c_str(),
+                        "%f,%f,%f,%f,%f,%f",
+                        &g.exposure,
+                        &g.saturation,
+                        &g.contrast,
+                        &g.wr,
+                        &g.wg,
+                        &g.wb);
         }
         return g;
     }();
@@ -258,10 +267,10 @@ void LightingPass::execute(const RenderContext& ctx) {
         struct CaveAO { float enabled, maxDist, floor, thickness; int steps; };
         static const CaveAO s_caveAO = [] {
             CaveAO c{0.0f, 24.0f, 0.06f, 1.5f, 8}; // DEFAULT OFF (enabled=0)
-            if (const char* env = std::getenv("LUMIN_CAVE_AO")) {
+            if (const auto env = Core::ReadEnvironment("LUMIN_CAVE_AO")) {
                 // "enabled,maxDist,floor,steps,thickness"
                 float en = 0, md = 24, fl = 0.06f, th = 1.5f; int st = 8;
-                std::sscanf(env, "%f,%f,%f,%d,%f", &en, &md, &fl, &st, &th);
+                std::sscanf(env->c_str(), "%f,%f,%f,%d,%f", &en, &md, &fl, &st, &th);
                 c = CaveAO{en, md, fl, th, st};
             }
             return c;

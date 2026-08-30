@@ -11,26 +11,27 @@
 #include <vector>
 
 #include "luminumbra_common/ai/EcologyHash.h"
+#include "luminumbra_common/components/AlarmComponents.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CreatureComponents.h"
-#include "luminumbra_common/components/AlarmComponents.h"
 #include "luminumbra_common/components/DecayComponents.h"
+#include "luminumbra_common/components/InstinctComponents.h" // INSTINCT-08: SensableComponent (prey scent)
 #include "luminumbra_common/components/MigratoryComponents.h"
 #include "luminumbra_common/components/MortalComponents.h"
 #include "luminumbra_common/components/PackHunterComponents.h"
 #include "luminumbra_common/components/TerritoryComponents.h"
-#include "luminumbra_common/components/InstinctComponents.h" // INSTINCT-08: SensableComponent (prey scent)
+#include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/Profiler.h"
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -239,8 +240,8 @@ bool ServerWorldRunner::Boot() {
     // replay gates set it to 1 to minimize the headless server's known
     // intermittent shutdown/streaming race (documented in T-I4-11) without
     // touching the hash. Unset => one worker per hardware thread (production).
-    if (const char* wc = std::getenv("LUMINUMBRA_JOB_WORKERS")) {
-        m_jobSystem.startup(static_cast<std::size_t>(std::strtoul(wc, nullptr, 10)));
+    if (const auto workers = Core::ReadEnvironment("LUMINUMBRA_JOB_WORKERS")) {
+        m_jobSystem.startup(static_cast<std::size_t>(std::strtoul(workers->c_str(), nullptr, 10)));
     } else {
         m_jobSystem.startup();
     }

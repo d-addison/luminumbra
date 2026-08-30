@@ -1,12 +1,14 @@
 #include "JobSystem.h"
+#include "../../../include/luminumbra/core/Types.h"
+#include "core/Environment.h"
+#include "core/Log.h"
 #include <algorithm>
+#include <cstddef>
 #include <cstdlib>
 #include <exception>
 #include <new>
 #include <string>
 #include <utility>
-#include "../../../include/luminumbra/core/Types.h"
-#include "core/Log.h"
 
 namespace Luminumbra {
 
@@ -29,6 +31,12 @@ constexpr std::size_t kCacheLine = 64;
 // does not false-share with `mutex`/`condition` (the line the single waiter
 // loads under the lock). `counter` keeps its acquire/release semantics; only
 // its placement changes, so the lost-wakeup discipline below is untouched.
+#if defined(_MSC_VER)
+#pragma warning(push)
+// Cache-line isolation intentionally adds layout padding. The assertions below
+// keep the diagnostic suppression local to the one type requiring that layout.
+#pragma warning(disable : 4324)
+#endif
 struct JobCompletionState {
     explicit JobCompletionState(int job_count)
         : counter(job_count) {}
@@ -38,6 +46,12 @@ struct JobCompletionState {
     alignas(kCacheLine) std::mutex mutex;
     std::condition_variable condition;
 };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+static_assert(alignof(JobCompletionState) >= kCacheLine);
+static_assert(offsetof(JobCompletionState, mutex) >= kCacheLine);
 
 namespace {
 
@@ -183,8 +197,8 @@ void JobSystem::startup(std::size_t worker_count) {
         m_throttle_enabled = false;
         m_throttle_seed = 0;
         m_throttle_pop_counter = 0;
-        if (const char* throttle = std::getenv("LUMINUMBRA_JOB_THROTTLE")) {
-            const std::uint64_t seed = std::strtoull(throttle, nullptr, 10);
+        if (const auto throttle = Core::ReadEnvironment("LUMINUMBRA_JOB_THROTTLE")) {
+            const std::uint64_t seed = std::strtoull(throttle->c_str(), nullptr, 10);
             if (seed != 0) {
                 m_throttle_enabled = true;
                 m_throttle_seed = seed;

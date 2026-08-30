@@ -7,11 +7,11 @@
 // phase every interval instead of hanging silently (the "CONSTRUCTING WORLD
 // GEOMETRY" freeze diagnosis surface).
 
+#include "Environment.h"
 #include "Log.h"
 
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <string>
 #include <thread>
 #include <utility>
@@ -20,8 +20,8 @@ namespace Luminumbra::Core {
 
 inline bool JobWatchdogEnabled() {
     static const bool enabled = []() {
-        const char* e = std::getenv("LUMINUMBRA_JOB_WATCHDOG");
-        return e && e[0] == '1';
+        const auto value = ReadEnvironment("LUMINUMBRA_JOB_WATCHDOG");
+        return value && !value->empty() && value->front() == '1';
     }();
     return enabled;
 }

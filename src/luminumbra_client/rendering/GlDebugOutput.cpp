@@ -1,10 +1,9 @@
 #include "GlDebugOutput.h"
 
 #include "core/Log.h"
+#include "luminumbra_common/core/Environment.h"
 
 #include <atomic>
-#include <cstdlib>
-#include <cstring>
 
 namespace Luminumbra::Rendering::GlDebug {
 
@@ -101,11 +100,11 @@ bool InstallGlDebugCallback() {
     }
 
     // Opt-in gate: default-OFF because SYNCHRONOUS debug output is slow.
-    const char* flag = std::getenv("LUMIN_GL_DEBUG");
-    if (flag == nullptr || flag[0] == '\0' || std::strcmp(flag, "0") == 0) {
+    const auto flag = Core::ReadEnvironment("LUMIN_GL_DEBUG");
+    if (!flag || flag->empty() || *flag == "0") {
         return false;
     }
-    const bool verbose = (std::strcmp(flag, "verbose") == 0);
+    const bool verbose = (*flag == "verbose");
 
     // KHR_debug entry points are core in 4.3+. Guard on non-null anyway: a context
     // created without the debug bit (or an exotic loader) may leave them null, and

@@ -5,104 +5,105 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
-#include "core/Log.h"
+#include "WorldDressing.h" // RENDER-20: background world-dressing placement computation
+#include "audio/AudioManagerFactory.h"
+#include "audio/AudioPropagationSystem.h"   // AUDIO-06: ComputeWaterfallRoar (static)
+#include "audio/EnvironmentalAudioSystem.h" // AUDIO-07/09: day/night beds + biome/weather reverb
+#include "audio/IAudioManager.h"
+#include "audio/NullAudioManager.h"
 #include "core/Debug.h"
 #include "core/GameState.h"
-#include "core/RuntimeScenarioHarness.h"
+#include "core/Log.h"
 #include "core/NvmlSampler.h" // spec 004 Phase 0: optional GPU power/clock sampling
+#include "core/RuntimeScenarioHarness.h"
+#include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
+#include "debug/WorldGenViewer.h"
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h" // species id -> display name for the codex/discovery HUD
+#include "luminumbra_common/ai/EcologyTuningConfig.h" // critique #3: resolve sim.ecology brain tuning
+#include "luminumbra_common/ai/SimTuningConfig.h" // full-control: resolve per-system creature tuning
+#include "luminumbra_common/animation/AnimationRuntime.h" // skinned skeleton/clip loaders for ambient wildlife
+#include "luminumbra_common/components/AlarmComponents.h"     // herd-alarm collective flee
+#include "luminumbra_common/components/CircadianComponents.h" // spec 011: diurnal/nocturnal sleep clock
+#include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
+#include "luminumbra_common/components/DecayComponents.h"    // decomposition (carcass fades)
+#include "luminumbra_common/components/ForagingComponents.h" // spec 011: ant-trail forager colonies
+#include "luminumbra_common/components/LightingComponents.h" // spec 013: lumin-crystal cave point lights
+#include "luminumbra_common/components/MigratoryComponents.h"  // INSTINCT-07: seasonal drive
+#include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
+#include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
+#include "luminumbra_common/components/PlantComponents.h"      // I9-FOLIAGE
+#include "luminumbra_common/components/ScavengerComponent.h" // ambient-wildlife predator scavenging
+#include "luminumbra_common/components/TerritoryComponents.h" // INSTINCT-07: home-range homing
+#include "luminumbra_common/components/ThirstComponents.h" // ambient-wildlife thirst + water holes
+#include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h" // user.* video/audio/controls settings
+#include "luminumbra_common/game/CodexView.h" // pure presentation model for the codex browse screen
+#include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
+#include "luminumbra_common/game/PhotoMode.h" // g-vertical-slice: photo-mode capture loop (read-only observer)
+#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h" // AETHER-04 (R1.6): the aether tap
+#include "luminumbra_common/systems/CreatureProcgen.h" // genome -> body-proportion build (procedural silhouette)
+#include "luminumbra_common/systems/FarmingSystem.h" // I9-FOLIAGE MakePlantFromSpecies (Phase 5A) + SpeciesRegistry
+#include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/PlantGrowthSystem.h" // I9-FOLIAGE phenotype/genome
+#include "luminumbra_common/systems/PlantProcgen.h" // I9-FOLIAGE procedural plant geometry (render-only)
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_common/world/KnobLayer.h" // Spec 002 Item 2: semantic-knob layer + startup invariant
+#include "nlohmann/json.hpp"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
-#include "rendering/FarLodSystem.h"
-#include "rendering/ScentFieldRenderMirror.h" // spec 011 FR-C: one-way scent snapshot for the ground decal
-#include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
-#include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
-#include "rendering/GlDebugOutput.h" // KHR_debug callback + debug groups/labels (env-gated LUMIN_GL_DEBUG)
-#include "debug/DebugCamera.h"       // deterministic feature locator (--debug-goto cave|doline)
-#include "rendering/ImpostorBake.h" // Wave-3 far-field tree impostor atlas bake (render-only)
-#include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
-#include "rendering/RenderPipeline.h"
 #include "rendering/ExposureModel.h" // Spec 015 Pillar A (A-T07): lens EV -> render exposure multiplier
-#include "rendering/passes/WaterPass.h"
+#include "rendering/FarLodSystem.h"
+#include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
+#include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
+#include "rendering/GlDebugOutput.h" // KHR_debug callback + debug groups/labels (env-gated LUMIN_GL_DEBUG)
+#include "rendering/ImpostorBake.h"  // Wave-3 far-field tree impostor atlas bake (render-only)
+#include "rendering/LightningBolt.h" // T-I5a-5 (B3): deterministic bolt geometry
+#include "rendering/RenderPipeline.h"
+#include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
+#include "rendering/ScentFieldRenderMirror.h" // spec 011 FR-C: one-way scent snapshot for the ground decal
+#include "rendering/SnowCoverModel.h"         // ATMO-14 (S1.3): render-only snow cover
+#include "rendering/WeatherRenderBridge.h" // ATMO-07 (R1.4): the live weather bridge
+#include "rendering/WorldLoadingVisualizer.h"
 #include "rendering/passes/ParticlePass.h" // T-I5a-1: EmitterDescriptor + accessor type
 #include "rendering/passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plant bake (flag-gated)
-#include "rendering/LightningBolt.h" // T-I5a-5 (B3): deterministic bolt geometry
-#include "rendering/WorldLoadingVisualizer.h"
+#include "rendering/passes/WaterPass.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/core/UIHotReload.h"
 #include "world/WorldgenOverride.h"
-#include "luminumbra_common/world/KnobLayer.h" // Spec 002 Item 2: semantic-knob layer + startup invariant
 #include "world/WorldgenPreview.h"
-#include "audio/AudioManagerFactory.h"
-#include "audio/IAudioManager.h"
-#include "audio/NullAudioManager.h"
-#include "audio/EnvironmentalAudioSystem.h"  // AUDIO-07/09: day/night beds + biome/weather reverb
-#include "rendering/WeatherRenderBridge.h"   // ATMO-07 (R1.4): the live weather bridge
-#include "rendering/SnowCoverModel.h"        // ATMO-14 (S1.3): render-only snow cover
-#include "audio/AudioPropagationSystem.h"    // AUDIO-06: ComputeWaterfallRoar (static)
-#include "luminumbra_common/systems/AetherFieldSystem.h" // AETHER-04 (R1.6): the aether tap
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
-#include "luminumbra_common/components/PlantComponents.h"   // I9-FOLIAGE
-#include "luminumbra_common/components/CreatureComponents.h" // I9-ECO creature markers
-#include "luminumbra_common/components/ThirstComponents.h"   // ambient-wildlife thirst + water holes
-#include "luminumbra_common/components/CircadianComponents.h" // spec 011: diurnal/nocturnal sleep clock
-#include "luminumbra_common/components/ForagingComponents.h" // spec 011: ant-trail forager colonies
-#include "luminumbra_common/components/ScavengerComponent.h" // ambient-wildlife predator scavenging
-#include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
-#include "luminumbra_common/components/LightingComponents.h"   // spec 013: lumin-crystal cave point lights
-#include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
-#include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
-#include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
-#include "luminumbra_common/components/DecayComponents.h"      // decomposition (carcass fades)
-#include "luminumbra_common/components/TerritoryComponents.h"  // INSTINCT-07: home-range homing
-#include "luminumbra_common/components/MigratoryComponents.h"  // INSTINCT-07: seasonal drive
-#include "luminumbra_common/systems/PlantGrowthSystem.h"    // I9-FOLIAGE phenotype/genome
-#include "luminumbra_common/systems/FarmingSystem.h"        // I9-FOLIAGE MakePlantFromSpecies (Phase 5A) + SpeciesRegistry
-#include "luminumbra_common/systems/PlantProcgen.h"         // I9-FOLIAGE procedural plant geometry (render-only)
-#include "luminumbra_common/systems/WaterSystem.h"
-#include "luminumbra_common/systems/WindFieldSystem.h"
-#include "luminumbra_common/systems/PhysicsSystem.h"
-#include "luminumbra_common/systems/WeatherSystem.h"
-#include "luminumbra_common/game/PhotoMode.h"  // g-vertical-slice: photo-mode capture loop (read-only observer)
-#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // species id -> display name for the codex/discovery HUD
-#include "luminumbra_common/ai/EcologyTuningConfig.h"       // critique #3: resolve sim.ecology brain tuning
-#include "luminumbra_common/ai/SimTuningConfig.h"           // full-control: resolve per-system creature tuning
-#include "luminumbra_common/game/Objectives.h"  // progression goals surfaced on the HUD
-#include "luminumbra_common/game/CodexView.h"  // pure presentation model for the codex browse screen
-#include "luminumbra_common/animation/AnimationRuntime.h"  // skinned skeleton/clip loaders for ambient wildlife
-#include "luminumbra_common/systems/CreatureProcgen.h"  // genome -> body-proportion build (procedural silhouette)
-#include "WorldDressing.h"  // RENDER-20: background world-dressing placement computation
-#include "luminumbra_common/world/GameSession.h"
-#include "luminumbra_common/core/JobSystem.h"
-#include "luminumbra_common/core/SystemConfig.h"  // user.* video/audio/controls settings
-#include "luminumbra_common/network/NetworkLoopbackAuthority.h"
-#include "debug/WorldGenViewer.h"
-#include "nlohmann/json.hpp"
-#include <imgui.h>
-#include <backends/imgui_impl_glfw.h>
-#include <backends/imgui_impl_opengl3.h>
-#include <memory>
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_opengl3.h>
+#include <cctype>
 #include <chrono>
 #include <cmath>
-#include <unordered_map>
-#include <unordered_set>
-#include <cstdio>
-#include <cstring>
-#include <cstdlib>
 #include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
-#include <cctype>
 #include <fstream>
+#include <imgui.h>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
-#include "luminumbra_common/components/CoreComponents.h"
 
 #if defined(_WIN32)
 #include <Windows.h>
@@ -2909,8 +2910,8 @@ int main(int argc, char* argv[]) {
     }
     // DIAGNOSTIC-only settle override (see g_frame_scan_settle_target): let a fully-loaded
     // capture wait past the gate's 90-frame default. Gates never set this env.
-    if (const char* settle_env = std::getenv("LUMIN_FRAME_SCAN_SETTLE")) {
-        const int v = std::atoi(settle_env);
+    if (const auto settle_env = Luminumbra::Core::ReadEnvironment("LUMIN_FRAME_SCAN_SETTLE")) {
+        const int v = std::atoi(settle_env->c_str());
         if (v > 0) g_frame_scan_settle_target = v;
     }
     // Spec 016-P2-T02: --render-parity-ssao <dir>. Same boot/settle, captures the
@@ -3248,12 +3249,12 @@ int main(int argc, char* argv[]) {
     // GTAO remains the ground-truth AO. Set LUMIN_CLOUD_QUALITY=0 /
     // LUMIN_SSAO_QUALITY=0 to fall back to the legacy full-res paths for A/B.
     int cloud_quality = 2; // 0 full, 1 half, 2 quarter (shipped default)
-    if (const char* cq = std::getenv("LUMIN_CLOUD_QUALITY")) {
-        cloud_quality = std::atoi(cq);
+    if (const auto cq = Luminumbra::Core::ReadEnvironment("LUMIN_CLOUD_QUALITY")) {
+        cloud_quality = std::atoi(cq->c_str());
     }
     int ssao_quality = 3;  // 0 legacy, 1 GTAO Low, 2 GTAO High, 3 GTAO half-res (default)
-    if (const char* sq = std::getenv("LUMIN_SSAO_QUALITY")) {
-        ssao_quality = std::atoi(sq);
+    if (const auto sq = Luminumbra::Core::ReadEnvironment("LUMIN_SSAO_QUALITY")) {
+        ssao_quality = std::atoi(sq->c_str());
     }
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
@@ -4021,8 +4022,8 @@ int main(int argc, char* argv[]) {
     // moving clip (GIF/MP4) can be judged IN MOTION (a single still is not enough).
     // Render-only: never touches sim/world_hash.
     const bool atmos_motion_capture = [] {
-        const char* v = std::getenv("LUMINUMBRA_ATMOS_MOTION_CAPTURE");
-        return v != nullptr && v[0] != '\0' && v[0] != '0';
+        const auto value = Luminumbra::Core::ReadEnvironment("LUMINUMBRA_ATMOS_MOTION_CAPTURE");
+        return value && !value->empty() && value->front() != '0';
     }();
     int atmos_motion_frame_index = 0;
     // T-I5a-DR-storm-motion-v3: capture 240 frames. At the honest 1/60 s stride
@@ -4815,7 +4816,8 @@ int main(int argc, char* argv[]) {
             // read of the just-completed tick on this same (single) thread -> race-free;
             // the sim never reads the mirror back, so it is determinism-neutral. Gated by
             // LUMIN_SCENT_DECAL so the default render stays byte-identical until opted in.
-            static const bool s_scentDecal = (std::getenv("LUMIN_SCENT_DECAL") != nullptr);
+            static const bool s_scentDecal =
+                Luminumbra::Core::ReadEnvironment("LUMIN_SCENT_DECAL").has_value();
             if (s_scentDecal) {
                 static Luminumbra::Rendering::ScentFieldRenderMirror s_scentMirror;
                 const auto* sf = gameSession->GetScentField();
@@ -6743,8 +6745,9 @@ int main(int argc, char* argv[]) {
                     // so the standing gate (summer-only, 48 cells) stays fast while a
                     // manual LUMINUMBRA_VISUAL_SWEEP_WINTER=1 run captures both seasons.
                     {
-                        const char* w = std::getenv("LUMINUMBRA_VISUAL_SWEEP_WINTER");
-                        deps.include_winter = (w != nullptr && w[0] != '\0' && w[0] != '0');
+                        const auto winter =
+                            Luminumbra::Core::ReadEnvironment("LUMINUMBRA_VISUAL_SWEEP_WINTER");
+                        deps.include_winter = winter && !winter->empty() && winter->front() != '0';
                     }
                     // The anchor position is FIXED across the whole matrix (only the
                     // camera orientation changes per cell), so the world only needs to

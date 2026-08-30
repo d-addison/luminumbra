@@ -107,8 +107,9 @@ endfunction()
 # from the unfused debug result. Pinning -ffp-contract=off forbids that fusion
 # everywhere. No -ffast-math reaches these targets (it is confined to vendor
 # FastNoise); this function asserts that invariant rather than assuming it.
-# Apply the same floating-point contract to every engine target. MSVC uses
-# /fp:precise plus /fp:contract- where the latter option is supported.
+# Apply the same floating-point contract to every engine target. MSVC's
+# /fp:precise contract keeps expression evaluation reproducible without using
+# non-portable clang-cl switches.
 function(luminumbra_pin_fp_determinism TARGET_NAME)
   if(NOT TARGET ${TARGET_NAME})
     return()
@@ -128,11 +129,6 @@ function(luminumbra_pin_fp_determinism TARGET_NAME)
   endif()
   if(MSVC)
     target_compile_options(${TARGET_NAME} ${_lpfd_scope} /fp:precise)
-    # Older toolchains default to no contraction and do not recognize the
-    # explicit option.
-    if(MSVC_VERSION GREATER_EQUAL 1930)
-      target_compile_options(${TARGET_NAME} ${_lpfd_scope} /fp:contract-)
-    endif()
   else()
     target_compile_options(${TARGET_NAME} ${_lpfd_scope} -ffp-contract=off)
   endif()

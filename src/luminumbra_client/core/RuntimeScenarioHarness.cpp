@@ -4,27 +4,28 @@
 
 #include <glad/glad.h>
 
-#include "core/RuntimeScenarioHarness.h"
 #include "core/Log.h"
-#include "rendering/Camera.h"
+#include "core/RuntimeScenarioHarness.h"
+#include "luminumbra_common/ai/CreatureSpeciesRegistry.h" // Phase 2: species base_color -> creature tint
 #include "luminumbra_common/animation/AnimationRuntime.h"
-#include "luminumbra_common/ai/CreatureSpeciesRegistry.h"  // Phase 2: species base_color -> creature tint
-#include "luminumbra_common/systems/CreatureProcgen.h"      // Phase 2: genome -> body-proportion build
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/ecs/EntitySnapshot.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/CreatureProcgen.h" // Phase 2: genome -> body-proportion build
 #include "luminumbra_common/systems/PhysicsSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
-#include "rendering/passes/ParticlePass.h"
-#include "rendering/passes/FoliagePass.h"
-#include "rendering/LightningBolt.h"
-#include "luminumbra_common/persistence/WorldSaveService.h"
-#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
-#include "luminumbra_common/ecs/EntitySnapshot.h"
-#include "luminumbra_common/core/JobSystem.h"
+#include "rendering/Camera.h"
+#include "rendering/LightningBolt.h"
+#include "rendering/passes/FoliagePass.h"
+#include "rendering/passes/ParticlePass.h"
 // T-I4-14: lockstep transport seam (engine-generic; ILockstepTransport +
 // LoopbackTransport + LockstepSession). Named SendFrame/TryReceiveFrame to dodge
 // the <windows.h> SendMessage macro (see LockstepSession.h note).
@@ -160,8 +161,8 @@ RuntimeScenarioConfig ParseRuntimeScenarioConfig(int argc, char* argv[], const s
     // auto/server launch wrappers can opt in without a CLI change. An explicit
     // --scenario always wins.
     if (config.scenario.empty()) {
-        const char* sweep_env = std::getenv("LUMINUMBRA_VISUAL_SWEEP");
-        if (sweep_env != nullptr && sweep_env[0] != '\0' && sweep_env[0] != '0') {
+        const auto sweep_env = Core::ReadEnvironment("LUMINUMBRA_VISUAL_SWEEP");
+        if (sweep_env && !sweep_env->empty() && sweep_env->front() != '0') {
             config.scenario = "world_visual_sweep";
         }
     }

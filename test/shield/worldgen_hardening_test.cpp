@@ -36,9 +36,7 @@
 #include "core/JobSystem.h"
 #include "world/Chunk.h"
 
-#define private public
 #include "systems/SHIELD_WorldSystem.h"
-#undef private
 
 #include "world/MarchingCubes.h"
 #include "systems/WaterSystem.h"
@@ -474,6 +472,7 @@ TEST_F(WorldgenHardeningTest, River_CarveChangesTerrainSomewhere) {
         }
     }
     ASSERT_TRUE(any_carve) << "no river influence found anywhere -- carve path is dead";
+    EXPECT_GT(carve_checks, 0) << "no strong river samples exercised the carve-height assertion";
 }
 
 // Boundary stability: river influence sampled AT an exact band edge must not flicker

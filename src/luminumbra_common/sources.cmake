@@ -91,9 +91,6 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldStreamingState.cpp
 )
 
-# G1 pose-determinism gate (T-I3-15): forbid FP contraction in the animation
-# runtime so debug and release sample bit-identical poses. GCC enables
-# -ffp-contract=fast at -O2 by default; pinning it off here keeps the
-# committed pose checksum preset-independent.
-set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/animation/AnimationRuntime.cpp
-    PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+# Animation pose determinism is covered by the target-wide floating-point
+# contract in the root build. Keeping the policy at target scope also prevents
+# compiler-specific switches from leaking onto MSVC source invocations.

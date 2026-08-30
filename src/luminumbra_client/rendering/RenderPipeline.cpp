@@ -1,56 +1,56 @@
 #include "RenderPipeline.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
-#include "luminumbra_common/core/DeterministicMath.h"
-#include "luminumbra_common/world/Chunk.h"
-#include "core/Log.h"
-#include "rendering/Shader.h"
-#include "rendering/Camera.h"
+#include "../../include/luminumbra/core/Types.h"
+#include "CelestialBodyModel.h" // Spec 022 Tier 1 (Wave F F9): the celestial-body seam
 #include "ExposureModel.h" // Spec 015 Pillar A (A-T07): SelectRenderExposure (manual EV precedence)
+#include "FarLodSystem.h"
+#include "FroxelGrid.h"    // Spec 015 Pillar B (RENDER-17): the froxel grid model
+#include "ImpostorBake.h"  // Wave-3 far-field tree impostor atlas (opt-in)
+#include "InProcessFlip.h" // WAVE-F F1: the deterministic in-process FLIP (capture_frame_parity)
+#include "Mesh.h"
+#include "RenderContext.h" // Spec 016: per-frame pass contract
+#include "RenderGraph.h" // Spec 016 FR-C (RENDER-11): the declarative frame graph gated against the trace
+#include "RenderSystem.h"
 #include "SunLightModel.h" // Spec 015 Pillar A (FR-A-001): SunIrradiance (transmittance-coupled sun magnitude)
 #include "TimeOfDayModel.h" // Spec 016 FR-F-001 (RENDER-14): pure time-of-day policy facets (ComputeSeason, ...)
-#include "RenderGraph.h"    // Spec 016 FR-C (RENDER-11): the declarative frame graph gated against the trace
-#include "InProcessFlip.h"  // WAVE-F F1: the deterministic in-process FLIP (capture_frame_parity)
-#include "FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
-#include "CelestialBodyModel.h" // Spec 022 Tier 1 (Wave F F9): the celestial-body seam
+#include "core/Log.h"
+#include "luminumbra_common/components/CoreComponents.h"
+#include "luminumbra_common/components/LightingComponents.h"
+#include "luminumbra_common/core/DeterministicMath.h"
+#include "luminumbra_common/core/Environment.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/world/Chunk.h"
+#include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
+#include "passes/FinalBlitPass.h" // Spec 016-P1-T01: FinalBlit on the RenderContext seam
+#include "passes/FoliagePass.h"
+#include "passes/GBufferPass.h"
+#include "passes/GroundDecalPass.h" // spec 011 FR-C: render-only pheromone ground decal (flag-gated)
+#include "passes/LightingPass.h"
+#include "passes/ParticlePass.h"
+#include "passes/PassGlHelpers.h"    // iter-6 A0: push/pop debug-group markers
+#include "passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plants (flag-gated)
+#include "passes/ShadowPass.h"
+#include "passes/SkyboxPass.h"
+#include "passes/SsaoPass.h"
+#include "passes/WaterPass.h"
+#include "rendering/Camera.h"
+#include "rendering/Shader.h"
 #include "rendering/passes/ShieldRtFarFieldPass.h"
+#include <GLFW/glfw3.h>
 #include <algorithm>
+#include <cassert>
 #include <chrono> // spec 004: CPU per-phase submit cost
-#include <unordered_set>
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/constants.hpp>
-#include <random>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <glm/gtc/constants.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <limits>
-#include <utility>
-#include <GLFW/glfw3.h>
-#include "Mesh.h"
-#include "ImpostorBake.h" // Wave-3 far-field tree impostor atlas (opt-in)
-#include "../../include/luminumbra/core/Types.h"
-#include "luminumbra_common/components/CoreComponents.h"
-#include <cmath>
-#include <cassert>
-#include "luminumbra_common/components/LightingComponents.h"
-#include "RenderSystem.h"
-#include "FarLodSystem.h"
-#include "passes/GBufferPass.h"
-#include "passes/PassGlHelpers.h"  // iter-6 A0: push/pop debug-group markers
-#include "passes/LightingPass.h"
-#include "passes/ShadowPass.h"
-#include "passes/SkyboxPass.h"
-#include "passes/ParticlePass.h"
-#include "passes/FoliagePass.h"
-#include "passes/PlantProcgenPass.h" // I9-FOLIAGE: render-only procedural plants (flag-gated)
-#include "passes/GroundDecalPass.h"  // spec 011 FR-C: render-only pheromone ground decal (flag-gated)
-#include "passes/DebugViewPass.h"    // render-only G-buffer debug visualizer (default-OFF)
-#include "passes/SsaoPass.h"
-#include "passes/WaterPass.h"
-#include "passes/FinalBlitPass.h" // Spec 016-P1-T01: FinalBlit on the RenderContext seam
-#include "RenderContext.h"        // Spec 016: per-frame pass contract
-#include <stb_image.h>
 #include <nlohmann/json.hpp>
-#include <fstream>
+#include <random>
+#include <stb_image.h>
+#include <unordered_set>
+#include <utility>
 
 // T-I5a-6: the Hillaire scattering-LUT implementation is compiled into this TU
 // rather than added as a separate source file (the vendored meshoptimizer
@@ -643,8 +643,8 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
     // set_render_scale before startup); LUMIN_RENDER_SCALE overrides for an A/B. Clamped to
     // [0.5, 1.0] -- 1.0 is byte-identical (internal==output); < 1.0 renders the scene at the
     // internal extent and the taau/final-blit sampler upscales to output.
-    if (const char* e = std::getenv("LUMIN_RENDER_SCALE"); e && e[0]) {
-        const float s = std::strtof(e, nullptr);
+    if (const auto value = Core::ReadEnvironment("LUMIN_RENDER_SCALE"); value && !value->empty()) {
+        const float s = std::strtof(value->c_str(), nullptr);
         // The env knob WINS over the config-seeded set_render_scale() for any PARSEABLE value:
         // clamp into [0.5,1.0] to match set_render_scale's clamp (so config=0.5 + env=2.0 -> 1.0,
         // not a leaked 0.5). strtof returns 0.0 on garbage -> `s > 0.0f` rejects unparseable input.
@@ -696,7 +696,8 @@ bool RenderPipeline::startup(u32 screen_width, u32 screen_height, const std::fil
         // Wave-3 far-field tree impostors: DEFAULT ON (set LUMIN_TREE_IMPOSTORS=0 to disable for
         // an A/B). Perf-validated win (render-benchmark forest_dense), scales with far tree count.
         // Bake the atlas now that the tree textures are loaded; the GBuffer LOD3 path samples it.
-        if (const char* e = std::getenv("LUMIN_TREE_IMPOSTORS"); !e || (e[0] && e[0] != '0')) {
+        const auto impostors = Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS");
+        if (!impostors || (!impostors->empty() && impostors->front() != '0')) {
             OctaImpostorGrid g; g.gridResolution = 12;
             const ImpostorAtlasTextures ia = BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
             if (ia.ok) {
@@ -3952,10 +3953,14 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
     AtmosphereParams atmo = m_atmosphere;
     static const auto s_atmos_override = [] {
         std::optional<AtmosphereParams> ov;
-        if (const char* env = std::getenv("LUMIN_ATMOS")) {
+        if (const auto env = Core::ReadEnvironment("LUMIN_ATMOS")) {
             AtmosphereParams p{};
-            if (std::sscanf(env, "%f,%f,%f,%f", &p.aerial_density, &p.aerial_max_distance,
-                            &p.inscatter_strength, &p.warmth) == 4) {
+            if (std::sscanf(env->c_str(),
+                            "%f,%f,%f,%f",
+                            &p.aerial_density,
+                            &p.aerial_max_distance,
+                            &p.inscatter_strength,
+                            &p.warmth) == 4) {
                 ov = p;
             }
         }
@@ -6185,7 +6190,11 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // primitive; the moon uses std::sin/std::cos — the asymmetry is intentional.
     // The LUMIN_MOON env read (parsed once) stays here as a client-config concern.
     static const float s_moon_env = [] {
-        if (const char* e = std::getenv("LUMIN_MOON")) { try { return std::stof(e); } catch (...) {} }
+        if (const auto value = Core::ReadEnvironment("LUMIN_MOON")) {
+            try {
+                return std::stof(*value);
+            } catch (...) {}
+        }
         return -1.0f;
     }();
     const float moon_forced = s_moon_env >= 0.0f ? s_moon_env : m_moonIllumOverride;

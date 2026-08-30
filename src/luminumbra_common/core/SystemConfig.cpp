@@ -6,8 +6,9 @@
 #include <iomanip>
 #include <sstream>
 
+#include "core/Environment.h"
 #include "nlohmann/json.hpp"
-#include "persistence/WorldPersistenceRoundtrip.h"  // Luminumbra::Persistence::StableChecksum
+#include "persistence/WorldPersistenceRoundtrip.h" // Luminumbra::Persistence::StableChecksum
 
 namespace luminumbra::core {
 namespace {
@@ -262,15 +263,15 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
 
 std::string SystemConfig::DefaultUserOverlayPath() {
 #if defined(_WIN32)
-    if (const char* appdata = std::getenv("APPDATA")) {
-        return (std::filesystem::path(appdata) / "Luminumbra" / "settings.json").string();
+    if (const auto appdata = Luminumbra::Core::ReadEnvironment("APPDATA")) {
+        return (std::filesystem::path(*appdata) / "Luminumbra" / "settings.json").string();
     }
 #else
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-        return (std::filesystem::path(xdg) / "luminumbra" / "settings.json").string();
+    if (const auto xdg = Luminumbra::Core::ReadEnvironment("XDG_CONFIG_HOME")) {
+        return (std::filesystem::path(*xdg) / "luminumbra" / "settings.json").string();
     }
-    if (const char* home = std::getenv("HOME")) {
-        return (std::filesystem::path(home) / ".config" / "luminumbra" / "settings.json").string();
+    if (const auto home = Luminumbra::Core::ReadEnvironment("HOME")) {
+        return (std::filesystem::path(*home) / ".config" / "luminumbra" / "settings.json").string();
     }
 #endif
     return "settings.json";  // last-resort: cwd
