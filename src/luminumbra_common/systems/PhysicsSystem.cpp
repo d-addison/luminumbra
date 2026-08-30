@@ -180,8 +180,8 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     }
     
     glm::ivec3 cc = chunk.get_coords();
-    float chunk_min_y = cc.y * CHUNK_SIZE_Y;
-    float chunk_max_y = (cc.y + 1) * CHUNK_SIZE_Y;
+    const float chunk_min_y = static_cast<float>(cc.y) * static_cast<float>(CHUNK_SIZE_Y);
+    const float chunk_max_y = static_cast<float>(cc.y + 1) * static_cast<float>(CHUNK_SIZE_Y);
     const int center_index = (CHUNK_SIZE_Z / 2) * resolution + (CHUNK_SIZE_X / 2);
     const float center_height = chunk.heightmap_data[center_index];
     if (center_height < chunk_min_y || center_height >= chunk_max_y) {
@@ -446,8 +446,7 @@ bool PhysicsSystem::player_has_space_to_stand() const {
         StandUpCollector() = default;
 
         // The virtual function we MUST implement. It's called for each hit.
-        virtual void AddHit(const CollideShapeResult& inResult) override
-        {
+        virtual void AddHit(const CollideShapeResult&) override {
             // A hit was found, so there is no space to stand.
             mHadHit = true;
             // Force the query to stop immediately. This is a critical optimization.
@@ -647,20 +646,21 @@ void PhysicsSystem::BatchedPhysicsQueries::ProcessBatch(const PhysicsSystem* phy
               });
     
     // Limit processing to avoid frame spikes
-    int queries_to_process = std::min(static_cast<int>(m_queued_queries.size()), m_max_queries_per_frame);
-    
+    const std::size_t queries_to_process =
+        std::min(m_queued_queries.size(), m_max_queries_per_frame);
+
     // Process highest priority queries first
     std::vector<BatchedRaycastQuery> high_priority_queries;
     std::vector<BatchedRaycastQuery> remaining_queries;
-    
-    for (int i = 0; i < queries_to_process; ++i) {
+
+    for (std::size_t i = 0; i < queries_to_process; ++i) {
         high_priority_queries.push_back(m_queued_queries[i]);
     }
-    
-    for (size_t i = queries_to_process; i < m_queued_queries.size(); ++i) {
+
+    for (std::size_t i = queries_to_process; i < m_queued_queries.size(); ++i) {
         remaining_queries.push_back(m_queued_queries[i]);
     }
-    
+
     // Sort the queries we're processing spatially for better cache performance
     SortQueriesSpatially(high_priority_queries);
     

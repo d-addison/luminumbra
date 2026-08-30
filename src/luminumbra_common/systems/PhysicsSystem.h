@@ -13,6 +13,7 @@
 
 #include <luminumbra/core/Types.h>
 
+#include <cstddef>
 #include <functional>
 #include <glm/glm.hpp>
 #include <memory>
@@ -142,15 +143,15 @@ public:
         void ClearCompleted();
 
         // Get statistics
-        int GetQueuedQueryCount() const {
+        std::size_t GetQueuedQueryCount() const {
             return m_queued_queries.size();
         }
-        int GetProcessedQueryCount() const {
+        std::size_t GetProcessedQueryCount() const {
             return m_processed_this_frame;
         }
 
         // Performance tuning
-        void SetMaxQueriesPerFrame(int max_queries) {
+        void SetMaxQueriesPerFrame(std::size_t max_queries) {
             m_max_queries_per_frame = max_queries;
         }
 
@@ -158,8 +159,8 @@ public:
         std::vector<BatchedRaycastQuery> m_queued_queries;
         std::vector<BatchedRaycastResult> m_results_buffer;
         int m_next_query_id = 1;
-        int m_processed_this_frame = 0;
-        int m_max_queries_per_frame = 64; // Limit to prevent frame spikes
+        std::size_t m_processed_this_frame = 0;
+        std::size_t m_max_queries_per_frame = 64; // Limit to prevent frame spikes
 
         // Spatial sorting for cache efficiency
         void SortQueriesSpatially(std::vector<BatchedRaycastQuery>& queries);

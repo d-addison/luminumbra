@@ -3639,8 +3639,6 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
             // Detect it and clear the buffer so it REGENERATES a correct lattice below
             // (generation is a pure function of seed/params). Hash-neutral for valid worlds:
             // a well-formed full SDF is always exactly kFullSdfLattice, so this never fires.
-            constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                    (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
             const bool has_malformed_sdf =
                 !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice;
             if (has_malformed_sdf) {
@@ -4761,11 +4759,11 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
                 int heightmap_idx = z * size_x + x;
 
                 // Find surface by marching down through SDF
-                float surface_height = base_pos.y + size_y; // Start from top
+                float surface_height = static_cast<float>(base_pos.y + size_y); // Start from top
                 for (int y = size_y - 1; y >= 0; --y) {
                     int sdf_idx = z * (size_x * size_y) + y * size_x + x;
                     if (chunk.sdf_data[sdf_idx] <= 0.0f) {
-                        surface_height = base_pos.y + y;
+                        surface_height = static_cast<float>(base_pos.y + y);
                         break;
                     }
                 }
@@ -4882,7 +4880,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
                 }
 
                 // B. Calculate base terrain density
-                float current_world_y = base_pos.y + y;
+                float current_world_y = static_cast<float>(base_pos.y + y);
                 float terrain_density = current_world_y - terrain_h;
 
                 // C. Carve caves using the 3D noise buffer
