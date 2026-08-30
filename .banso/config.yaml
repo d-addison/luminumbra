@@ -12,6 +12,13 @@ profile: default
 # neither is used here.
 workflow: project/luminumbra-change
 
+# Banso defaults the daemon to port 9615. This project runs alongside the
+# banso repository itself, and only the port is a shared resource: pid file,
+# socket, token and all other state already live under this .banso. Pinning a
+# distinct port here lets both roots run a daemon at once.
+daemon:
+  port: 9617
+
 routing:
   default_tier: standard
   deescalation_window: 3
