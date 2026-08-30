@@ -9,6 +9,9 @@
 // or its declarations conflict with winsock.h pulled by windows.h. Including it FIRST in
 // this TU, guarded by _WIN32, satisfies that ordering for the TcpTransport impl below.
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
