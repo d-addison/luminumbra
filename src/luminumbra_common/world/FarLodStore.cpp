@@ -1,6 +1,7 @@
 #include "FarLodStore.h"
 
 #include "MarchingCubes.h"
+#include "core/Crc32.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
 
@@ -95,20 +96,10 @@ bool SameBrickKey(const FarLodSdfBrickDescriptor& left, const FarLodSdfBrickDesc
 }
 
 u32 Crc32(const i16* density_q, const u8* material, std::size_t count) {
-    u32 crc = 0xffffffffu;
-    const auto update = [&crc](const void* data, std::size_t size) {
-        const auto* bytes = static_cast<const unsigned char*>(data);
-        for (std::size_t i = 0; i < size; ++i) {
-            crc ^= bytes[i];
-            for (int bit = 0; bit < 8; ++bit) {
-                const u32 low_bit_mask = (crc & 1u) != 0u ? 0xffffffffu : 0u;
-                crc = (crc >> 1u) ^ (0xedb88320u & low_bit_mask);
-            }
-        }
-    };
-    update(density_q, count * sizeof(i16));
-    update(material, count);
-    return ~crc;
+    Core::Crc32Accumulator crc;
+    crc.Update(density_q, count * sizeof(i16));
+    crc.Update(material, count);
+    return crc.Value();
 }
 
 bool ValidateTileStreams(const FarLodTile& tile, std::string* error) {

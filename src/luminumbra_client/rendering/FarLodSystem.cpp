@@ -1,11 +1,12 @@
 #include "FarLodSystem.h"
 
 #include "Shader.h"
-#include "passes/PassGlHelpers.h"
 #include "core/Log.h"
+#include "luminumbra_common/core/Crc32.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/MarchingCubes.h"
+#include "passes/PassGlHelpers.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -285,19 +286,10 @@ bool complete_authoritative_stacks(
 }
 
 u32 far_brick_crc(const i16* density, const u8* material, std::size_t count) {
-    u32 crc = 0xffffffffu;
-    const auto update = [&crc](const void* data, std::size_t size) {
-        const auto* bytes = static_cast<const unsigned char*>(data);
-        for (std::size_t i = 0; i < size; ++i) {
-            crc ^= bytes[i];
-            for (int bit = 0; bit < 8; ++bit) {
-                crc = (crc >> 1u) ^ (0xedb88320u & static_cast<u32>(-(crc & 1u)));
-            }
-        }
-    };
-    update(density, count * sizeof(i16));
-    update(material, count);
-    return ~crc;
+    Luminumbra::Core::Crc32Accumulator crc;
+    crc.Update(density, count * sizeof(i16));
+    crc.Update(material, count);
+    return crc.Value();
 }
 
 bool synchronize_regenerable_boundaries(

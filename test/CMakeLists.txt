@@ -104,6 +104,7 @@ elseif(TARGET meshoptimizer::meshoptimizer)
 endif()
 
 add_executable(common_tests
+    common/Crc32_test.cpp
     common/AnimationRuntime_test.cpp
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp

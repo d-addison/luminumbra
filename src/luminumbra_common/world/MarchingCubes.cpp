@@ -1,28 +1,29 @@
 ﻿#include "MarchingCubes.h"
+#include "../../../include/luminumbra/core/Types.h"
+#include "../core/Log.h"
 #include "FarLodStore.h"
+#include "core/Crc32.h"
+#include "systems/SHIELD_WorldSystem.h"
+#include "systems/WaterSystem.h"
+#include "world/Chunk.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <cstdint>
-#include <vector>
 #include <cmath>
-#include "world/Chunk.h"
-#include "../../../include/luminumbra/core/Types.h"
-#include <glm/glm.hpp>
-#include "systems/SHIELD_WorldSystem.h"
-#include "systems/WaterSystem.h"
-#include <unordered_map>
-#include <unordered_set>
-#include "../core/Log.h"
-#include <memory>
-#include <new>
+#include <cstdint>
 #include <cstring>
+#include <glm/glm.hpp>
 #include <limits>
 #include <map>
+#include <memory>
+#include <new>
 #include <set>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace Luminumbra {
 namespace World::MarchingCubes {
@@ -829,21 +830,11 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             }
 
             const std::size_t payload_base = brick_index * brick_samples;
-            u32 payload_crc = 0xffffffffu;
-            const auto crc_bytes = [&payload_crc](const void* data, std::size_t size) {
-                const auto* bytes = static_cast<const unsigned char*>(data);
-                for (std::size_t byte = 0; byte < size; ++byte) {
-                    payload_crc ^= bytes[byte];
-                    for (int bit = 0; bit < 8; ++bit) {
-                        payload_crc = (payload_crc >> 1u) ^
-                            (0xedb88320u & static_cast<u32>(-(payload_crc & 1u)));
-                    }
-                }
-            };
-            crc_bytes(tile.sdf_density_q.data() + payload_base, brick_samples * sizeof(i16));
-            crc_bytes(tile.sdf_material.data() + payload_base, brick_samples);
-            payload_crc = ~payload_crc;
-            if (brick.payload_crc32 != payload_crc) {
+            Core::Crc32Accumulator payload_crc;
+            payload_crc.Update(tile.sdf_density_q.data() + payload_base,
+                               brick_samples * sizeof(i16));
+            payload_crc.Update(tile.sdf_material.data() + payload_base, brick_samples);
+            if (brick.payload_crc32 != payload_crc.Value()) {
                 return stats;
             }
             const u32 side = World::FarLodSdfBrickSamplesPerSide(tile.tier);
@@ -1022,11 +1013,13 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                             const IVec3 local = IVec3(static_cast<int>(local_x),
                                                        static_cast<int>(local_y),
                                                        static_cast<int>(local_z)) + far_corner_offsets[corner];
-                            const std::size_t sample_index = payload_base + static_cast<std::size_t>(local.x) +
+                            const std::size_t brick_sample_index =
+                                payload_base + static_cast<std::size_t>(local.x) +
                                 static_cast<std::size_t>(local.y) * brick_side +
                                 static_cast<std::size_t>(local.z) * brick_side * brick_side;
-                            corner_samples[corner] = {World::DequantizeFarLodSdf(tile.sdf_density_q[sample_index]),
-                                                       tile.sdf_material[sample_index]};
+                            corner_samples[corner] = {
+                                World::DequantizeFarLodSdf(tile.sdf_density_q[brick_sample_index]),
+                                tile.sdf_material[brick_sample_index]};
                             const IVec3 position(base_x + local.x * sample_step_i,
                                                  base_y + local.y * sample_step_i,
                                                  base_z + local.z * sample_step_i);
@@ -1333,13 +1326,11 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             authority_bricks.push_back(brick);
         }
         const std::size_t base = brick_index * count;
-        u32 crc = 0xffffffffu;
-        const auto crc_bytes = [&crc](const void* data, std::size_t bytes) {
-            const auto* p = static_cast<const unsigned char*>(data);
-            for (std::size_t i = 0; i < bytes; ++i) { crc ^= p[i]; for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1u) ^ (0xedb88320u & static_cast<u32>(-(crc & 1u))); }
-        };
-        crc_bytes(assembly.density_q.data() + base, count * sizeof(i16)); crc_bytes(assembly.material.data() + base, count);
-        if (brick.payload_crc32 != ~crc) return fail();
+        Core::Crc32Accumulator crc;
+        crc.Update(assembly.density_q.data() + base, count * sizeof(i16));
+        crc.Update(assembly.material.data() + base, count);
+        if (brick.payload_crc32 != crc.Value())
+            return fail();
         for (u32 z = 0; z < brick_side; ++z) for (u32 y = 0; y < brick_side; ++y) for (u32 x = 0; x < brick_side; ++x) {
             const std::size_t offset = base + static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * brick_side + static_cast<std::size_t>(z) * brick_side * brick_side;
             if (assembly.density_q[offset] == World::kFarLodSdfInvalid) return fail();
