@@ -149,6 +149,10 @@ public:
     void ProcessEvent(Rml::Event& event) override {
         if (m_callback) m_callback(event);
     }
+    void OnDetach(Rml::Element*) override {
+        delete this;
+    }
+
 private:
     Callback m_callback;
 };
