@@ -1,0 +1,93 @@
+{
+  "schema": "luminumbra.material_registry.v1",
+  "_albedo_calibration": ": base_color values are the MEASURED LINEAR albedo means of each material's AmbientCG source texture (the photographic PBR albedo), so the metadata is truthful against what the triplanar terrain sampler bakes into the G-buffer. The exposure root fix lives in res/shaders/lighting_pass.frag (sun COLOR -> IRRADIANCE, x PI); textures were NOT brightened because they are already physically accurate. Reference bands + sources: data/common/albedo_calibration_reference.json.",
+  "materials": [
+    {
+      "id": 0,
+      "name": "Air",
+      "render_kind": "none"
+    },
+    {
+      "id": 1,
+      "name": "Stone",
+      "base_color": [0.087, 0.083, 0.065],
+      "roughness": 0.85,
+      "metallic": 0.05,
+      "albedo_map": "data/textures/terrain/rock/Rock028_2K-PNG_Color.png",
+      "texture_layer": 0,
+      "normal_layer": 0,
+      "tiling": 4.0
+    },
+    {
+      "id": 2,
+      "name": "Soil",
+      "base_color": [0.114, 0.061, 0.041],
+      "roughness": 0.9,
+      "metallic": 0.0,
+      "albedo_map": "data/textures/terrain/soil/Ground048_2K-PNG_Color.png",
+      "texture_layer": 1,
+      "normal_layer": 1,
+      "tiling": 3.0,
+      "_albedo_tint_note": " dusty- palette: render-only warm albedo tint toward ochre. Small + luminance-preserving, capped within ~10% (let lighting/atmosphere carry most of the warmth). LUT row 3; no world_hash impact.",
+      "albedo_tint": [1.00, 0.95, 0.90]
+    },
+    {
+      "id": 3,
+      "name": "Grass",
+      "base_color": [0.056, 0.071, 0.014],
+      "roughness": 0.8,
+      "metallic": 0.0,
+      "albedo_map": "data/textures/terrain/grass/Grass003_2K-PNG_Color.png",
+      "texture_layer": 2,
+      "normal_layer": 2,
+      "tiling": 3.0,
+      "_albedo_tint_note": " dusty- palette: render-only warm-desaturate albedo tint (khaki). Small + luminance-preserving. LUT row 3; no world_hash impact.",
+      "albedo_tint": [1.00, 0.96, 0.90]
+    },
+    {
+      "id": 4,
+      "name": "Sand",
+      "base_color": [0.517, 0.323, 0.106],
+      "roughness": 0.75,
+      "metallic": 0.0,
+      "albedo_map": "data/textures/terrain/sand/Ground087_2K-PNG_Color.png",
+      "texture_layer": 3,
+      "normal_layer": 3,
+      "tiling": 2.5,
+      "_albedo_scale_note": ": the Ground087 sand albedo (linear mean ~0.52,0.32,0.11) is a bright dune sand; an UP-FACING near-sea-level dry sand flat at the pinned noon sun took near-maximum irradiance and clipped through the ACES knee to ~234-244 sRGB (washed near-white, the sun-bright sand-flat defect the FarLodHorizon boundary band reads at every eye-level station). albedo_scale multiplies the textured albedo at G-buffer bake time toward a natural damp-coastal sand tone that survives tonemapping below the clip. Render-only LUT calibration; the photographic base_color metadata is left truthful. Other materials default to 1.0 (unscaled).",
+      "albedo_scale": 0.6
+    },
+    {
+      "id": 5,
+      "name": "Deepslate",
+      "base_color": [0.135, 0.134, 0.113],
+      "roughness": 0.95,
+      "metallic": 0.02,
+      "albedo_map": "data/textures/terrain/deepslate/Gravel040_2K-PNG_Color.png",
+      "texture_layer": 4,
+      "normal_layer": 4,
+      "tiling": 4.0
+    },
+    {
+      "id": 6,
+      "name": "LuminCrystal",
+      "base_color": [0.85, 0.95, 1.0],
+      "roughness": 0.05,
+      "metallic": 0.1,
+      "emission": [0.4, 0.6, 0.8],
+      "emissive_intensity": 3.0,
+      "texture_layer": -1,
+      "normal_layer": -1
+    },
+    {
+      "id": 7,
+      "name": "Water",
+      "base_color": [0.0, 0.1, 0.25],
+      "roughness": 0.1,
+      "metallic": 0.0,
+      "render_kind": "water",
+      "texture_layer": -1,
+      "normal_layer": -1
+    }
+  ]
+}

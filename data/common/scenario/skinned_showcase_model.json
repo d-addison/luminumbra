@@ -1,0 +1,6 @@
+{
+  "_comment": ": the manual skinned-mesh SHOWCASE (RuntimeScenarioHarness, row count >= 2) model, named by DATA so the engine source carries no game-content nouns. mesh/clip are root-relative asset paths; label is the human-readable row tag. The gated path (row count 1) uses the engine's generic test rig and does not read this file.",
+  "mesh": "data/models/creatures/grovestrider/grovestrider.lmesh",
+  "clip": "data/models/creatures/grovestrider/grovestrider.idle.lanim",
+  "label": "grovestrider"
+}

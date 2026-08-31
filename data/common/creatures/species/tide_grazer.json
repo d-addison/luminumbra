@@ -1,0 +1,9 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "tide_grazer",
+  "display_name": "Tide Grazer",
+  "predator": false,
+  "rarity": 0.5,
+  "base_color": [0.40, 0.52, 0.55],
+  "biomes": ["wetland", "desert"]
+}

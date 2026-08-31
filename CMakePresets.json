@@ -1,0 +1,164 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "LUMINUMBRA_ENABLE_DILIGENT": "OFF",
+        "LUMINUMBRA_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "description": "Debug build with first-party warnings enabled.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LUMINUMBRA_ENABLE_ASAN": "OFF"
+      }
+    },
+    {
+      "name": "debug-asan",
+      "displayName": "Debug ASan",
+      "description": "Debug build with AddressSanitizer enabled for first-party targets.",
+      "inherits": "debug",
+      "cacheVariables": {
+        "LUMINUMBRA_ENABLE_ASAN": "ON"
+      }
+    },
+    {
+      "name": "debug-simo0",
+      "displayName": "Debug Sim Opt-Parity",
+      "description": "Debug build with GameSession.cpp forced to the sim opt-parity level (-) for the Test-SimOptLevelParity world_hash invariance gate ().",
+      "inherits": "debug",
+      "cacheVariables": {
+        "LUMINUMBRA_SIM_O0_PARITY": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "description": "Optimized release build with first-party warnings enabled.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "LUMINUMBRA_ENABLE_ASAN": "OFF"
+      }
+    },
+    {
+      "name": "perf",
+      "displayName": "Performance measurement",
+      "description": "Optimized symbols and frame pointers without profiler instrumentation.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "LUMINUMBRA_ENABLE_ASAN": "OFF",
+        "LUMINUMBRA_ENABLE_FRAME_POINTERS": "ON",
+        "LUMINUMBRA_ENABLE_TRACY": "OFF"
+      }
+    },
+    {
+      "name": "profile",
+      "displayName": "Tracy profiling",
+      "description": "Optimized symbols and frame pointers with Tracy instrumentation enabled.",
+      "inherits": "perf",
+      "cacheVariables": {
+        "LUMINUMBRA_ENABLE_TRACY": "ON"
+      }
+    },
+    {
+      "name": "coverage",
+      "displayName": "Coverage",
+      "description": "Debug build instrumented with gcov (--coverage) for measured line/branch coverage. Isolated into build/coverage; NEVER used for determinism/world_hash gates.",
+      "inherits": "debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "LUMINUMBRA_ENABLE_COVERAGE": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "debug-simo0",
+      "configurePreset": "debug-simo0"
+    },
+    {
+      "name": "debug-asan",
+      "configurePreset": "debug-asan"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "perf",
+      "configurePreset": "perf"
+    },
+    {
+      "name": "profile",
+      "configurePreset": "profile"
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "debug-asan",
+      "configurePreset": "debug-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "perf",
+      "configurePreset": "perf",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "profile",
+      "configurePreset": "profile",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "coverage",
+      "configurePreset": "coverage",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

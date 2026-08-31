@@ -1,0 +1,9 @@
+<rml>
+    <head>
+        <title>Window</title>
+        <link type="text/css" href="game_theme.rcss" />
+    </head>
+    <body>
+        <div id="content" />
+    </body>
+</rml>

@@ -1,0 +1,98 @@
+<rml>
+    <head>
+        <title>Load World - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+    </head>
+    <body id="world_selection" class="fade-in">
+        <div class="container">
+            <h1>select world</h1>
+            <div class="title-ornament">&#9670;</div>
+
+            <!-- Search/filters hidden in card layout (preserved for wiring). -->
+            <div class="search-container">
+                <div class="form-group">
+                    <input type="text"
+                           id="world_search"
+                           placeholder="Search worlds..."
+                           class="form-control" />
+                </div>
+                <div class="filter-buttons gap-sm">
+                    <button id="filter_all" class="btn btn-sm">All</button>
+                    <button id="filter_recent" class="btn btn-sm">Recent</button>
+                    <button id="filter_favorites" class="btn btn-sm">Favorites</button>
+                </div>
+            </div>
+
+            <!-- World list container -->
+            <div id="world_list" class="list-container">
+                <!-- Loading state -->
+                <div id="loading_worlds" class="text-center p-lg hidden">
+                    <div class="loading-spinner"></div>
+                    <p class="mt-md">Loading worlds...</p>
+                </div>
+
+                <!-- Empty state -->
+                <div id="no_worlds" class="text-center p-lg hidden">
+                    <p class="text-lg mb-md">No worlds found</p>
+                    <p class="text-sm text-secondary">Create your first world to get started!</p>
+                </div>
+
+                <!-- World list items (dynamically populated) -->
+                <div id="world_list_items" class="cards-row">
+                    <div class="list-item selected" data-world-id="world_1661381313_1234">
+                        <img class="world-thumbnail" src="thumbs/thumb_0.tga"/>
+                        <h3 class="list-item-title">luminecoast</h3>
+                        <p class="list-item-description">42 days &#183; 318 captures &#183; default</p>
+                        <div class="select-dot"></div>
+                    </div>
+
+                    <div class="list-item" data-world-id="world_1661381599_5678">
+                        <img class="world-thumbnail" src="thumbs/thumb_2.tga"/>
+                        <h3 class="list-item-title">vellumvalley</h3>
+                        <p class="list-item-description">18 days &#183; 127 captures &#183; valley</p>
+                        <div class="select-dot"></div>
+                    </div>
+
+                    <div class="list-item" data-world-id="world_1661381742_9012">
+                        <img class="world-thumbnail" src="thumbs/thumb_5.tga"/>
+                        <h3 class="list-item-title">niveuspeak</h3>
+                        <p class="list-item-description">7 days &#183; 64 captures &#183; alpine</p>
+                        <div class="select-dot"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Back link; load/import kept hidden for C++ wiring. -->
+            <span id="back_btn" class="back-link">&#8249; back</span>
+            <button id="load_selected_btn" class="btn hidden" disabled>
+                Load World
+            </button>
+            <button id="import_world_btn" class="btn hidden">
+                Import
+            </button>
+        </div>
+        
+        <!-- Confirmation modal for world deletion -->
+        <div id="delete_confirmation_modal" class="modal-overlay hidden">
+            <div class="modal">
+                <div class="modal-header">
+                    <h2 class="modal-title">Delete World</h2>
+                </div>
+                <div class="modal-body">
+                    <p>Are you sure you want to delete "<span id="world_to_delete"></span>"?</p>
+                    <p class="text-sm text-secondary">This action cannot be undone.</p>
+                </div>
+                <div class="modal-footer">
+                    <button id="cancel_delete_btn" class="btn btn-secondary">Cancel</button>
+                    <button id="confirm_delete_btn" class="btn btn-danger">Delete</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Notification area -->
+        <div id="notification" class="notification hidden">
+            <span id="notification_text"></span>
+        </div>
+    </body>
+</rml>

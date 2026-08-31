@@ -1,0 +1,221 @@
+#version 450 core
+#extension GL_ARB_gpu_shader_int64: require
+
+// ===========================================================================
+//  #4: GPU grass scatter (compute)..
+//
+// Ports the CPU FoliagePass::rebuild_instances scatter loop to a compute pass:
+// one thread per candidate slot, deterministic splitmix64 placement (bit-exact
+// 64-bit integer math), sea-level + slope hard gates, density*slope*moisture
+// accept, weighted archetype pick. Surviving candidates are atomic-appended to
+// the GrassBlades SSBO as the SAME packed 36-byte InstanceRecord the CPU path
+// emits (9 uint words/record), so foliage.vert/.frag + the VAO format are
+// UNCHANGED -- only WHERE generation happens moves to the GPU, removing the
+// per-candidate CPU work + the per-rebuild ~9 MB memcpy into the ring VBO.
+//
+// Per-candidate surface (height/slope/moisture/valid) comes from a coarse
+// (kGrid+1)^2 per-chunk grid uploaded once per rebuild (CPU samples the world
+// ~81x/chunk instead of up to 4096x), bilinearly interpolated here; slope is the
+// grid height gradient. This shifts placement vs the exact CPU query slightly
+// (coverage stays in the FoliageInstancing biome band) but is fully
+// deterministic run-to-run (the gate's requirement).: nothing here
+// writes back to sim/world_hash.
+// ===========================================================================
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const int   kGrid = 8;                 // surface grid cells per chunk side
+const int   kGridVerts = kGrid + 1;    // 9 samples/side -> 81 samples/chunk
+const uint  kWordsPerBlade = 9u;       // 36-byte InstanceRecord = 9 uint words
+const float kSeaLevel = 0.0;
+const float kWaterMargin = 0.4;
+const float kMaxFoliageSlope = 0.70;
+
+struct GpuChunk {
+    vec4 origin_extent; // xyz = world origin of the chunk footprint, w = extent_m
+    vec4 id_density;    // x = chunk_x, y = chunk_z, z = biome_id, w = biome density
+};
+
+layout(std430, binding = 0) readonly buffer ChunkParams { GpuChunk chunks[]; };
+// Per-chunk surface grid: chunk c base = c * kGridVerts*kGridVerts; each sample
+// is vec4(height, moisture, slope, valid). slope is the SAME [0,1] estimate the
+// CPU SurfaceQuery returns (uploaded per vert, bilinearly interpolated here) so
+// the GPU accept uses the identical slope source as the CPU path. valid<0.5 ->
+// underwater/no-ground (the candidate is skipped).
+layout(std430, binding = 1) readonly buffer SurfaceGrid { vec4 surf[]; };
+layout(std430, binding = 2) writeonly buffer GrassBlades { uint blades[]; };
+// One append counter followed by DrawArraysIndirectCommand:
+//   [0] append_count, [1] vertex_count, [2] instance_count, [3] first_vertex,
+//   [4] base_instance. The CPU initializes this to {0,12,0,0,0}; each accepted
+// blade reserves a storage slot with append_count and increments instance_count
+// only if the slot fits inside the fixed pool.
+layout(std430, binding = 3) buffer BladeCount {
+    uint append_count;
+    uint draw_vertex_count;
+    uint draw_instance_count;
+    uint draw_first_vertex;
+    uint draw_base_instance;
+};
+// Archetype palette (parallel arrays packed as vec4 for std430 cleanliness):
+//   pal0 = (color.r, color.g, color.b, density_weight)
+//   pal1 = (half_width, height, sways?1:0, 0)
+layout(std430, binding = 4) readonly buffer Archetypes { vec4 pal[]; };
+
+uniform int   u_chunk_count;
+uniform int   u_archetype_count;
+uniform float u_total_weight;
+uniform int   u_max_candidates;   // kMaxCandidatesPerChunk (4096)
+uniform uint  u_max_instances;    // global pool cap
+uniform float u_density_scale;    // #1b-lush per-preset multiplier
+uniform vec2  u_camera_xz;
+uniform float u_fade_end_m;
+uniform vec2  u_wind_xz;
+
+// --- splitmix64 (bit-exact with the C++ FoliagePass mixer). ----------------
+uint64_t sm64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15UL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9UL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBUL;
+    return x ^ (x >> 31);
+}
+
+float hash_unit(uint64_t h) {
+    return float(uint(h >> 40)) / 16777216.0;
+}
+
+uint64_t placement_hash(int cx, int cz, uint biome, uint idx) {
+    uint64_t h = sm64(uint64_t(uint(cx)) ^ 0x51AF7C3D9E0B12A7UL);
+    h = sm64(h ^ (uint64_t(uint(cz)) * 0xD1B54A32D192ED03UL));
+    h = sm64(h ^ (uint64_t(biome) * 0x9E3779B97F4A7C15UL));
+    h = sm64(h ^ (uint64_t(idx) * 0xA24BAED4963EE407UL));
+    return h;
+}
+
+uint pack_unorm8(vec4 c) {
+    uvec4 u = uvec4(clamp(c, 0.0, 1.0) * 255.0 + 0.5);
+    return u.x | (u.y << 8) | (u.z << 16) | (u.w << 24);
+}
+
+// IEEE-754 half encode matching ParticlePass::encode_f16 (truncating).
+uint encode_f16(float value) {
+    uint bits = floatBitsToUint(value);
+    uint sign = (bits >> 16) & 0x8000u;
+    int exponent = int((bits >> 23) & 0xFFu) - 127 + 15;
+    uint mantissa = bits & 0x7FFFFFu;
+    if (exponent <= 0) return sign;
+    if (exponent >= 0x1F) return sign | 0x7C00u;
+    return sign | (uint(exponent) << 10) | (mantissa >> 13);
+}
+
+// Bilinear height/moisture/slope from a chunk's surface grid (slope is the
+// query's own [0,1] estimate, so the GPU accept matches the CPU path).
+void sample_surface(int c, vec2 local01, out float height, out float moisture, out float slope, out bool valid) {
+    int base = c * (kGridVerts * kGridVerts);
+    vec2 g = clamp(local01, 0.0, 1.0) * float(kGrid);
+    ivec2 gi = ivec2(floor(g));
+    gi = clamp(gi, ivec2(0), ivec2(kGrid - 1));
+    vec2 f = fract(g);
+
+    vec4 s00 = surf[base + (gi.y) * kGridVerts + (gi.x)];
+    vec4 s10 = surf[base + (gi.y) * kGridVerts + (gi.x + 1)];
+    vec4 s01 = surf[base + (gi.y + 1) * kGridVerts + (gi.x)];
+    vec4 s11 = surf[base + (gi.y + 1) * kGridVerts + (gi.x + 1)];
+
+    // Conservative validity: every corner of the cell must be on valid ground.
+    valid = (s00.w > 0.5) && (s10.w > 0.5) && (s01.w > 0.5) && (s11.w > 0.5);
+
+    vec4 a = mix(s00, s10, f.x);
+    vec4 b = mix(s01, s11, f.x);
+    vec4 s = mix(a, b, f.y);
+    height = s.x;
+    moisture = s.y;
+    slope = clamp(s.z, 0.0, 1.0);
+}
+
+void main() {
+    uint cand = gl_GlobalInvocationID.x;
+    uint c = gl_GlobalInvocationID.y;
+    if (int(c) >= u_chunk_count) return;
+
+    GpuChunk ch = chunks[c];
+    vec3 origin = ch.origin_extent.xyz;
+    float extent = ch.origin_extent.w;
+    int cx = int(ch.id_density.x);
+    int cz = int(ch.id_density.y);
+    uint biome = uint(ch.id_density.z);
+    float density = ch.id_density.w;
+    if (density <= 0.0) return;
+
+    uint candidates = uint(round(density * float(u_max_candidates) * u_density_scale));
+    candidates = min(candidates, uint(u_max_candidates));
+    if (cand >= candidates) return;
+
+    uint64_t h0 = placement_hash(cx, cz, biome, cand);
+    uint64_t h1 = sm64(h0 ^ 0x2545F4914F6CDD1DUL);
+    uint64_t h2 = sm64(h1 ^ 0x9E3779B97F4A7C15UL);
+    uint64_t h3 = sm64(h2 ^ 0xBF58476D1CE4E5B9UL);
+
+    float fx = hash_unit(h0);
+    float fz = hash_unit(h1);
+    float wx = origin.x + fx * extent;
+    float wz = origin.z + fz * extent;
+
+    // Ring cull (gate: no foliage past the fade end).
+    float inst_dist = length(vec2(wx - u_camera_xz.x, wz - u_camera_xz.y));
+    if (inst_dist > u_fade_end_m) return;
+
+    float height, moisture, slope;
+    bool valid;
+    sample_surface(int(c), vec2(fx, fz), height, moisture, slope, valid);
+    if (!valid) return;
+    if (height <= kSeaLevel + kWaterMargin) return;
+    if (slope >= kMaxFoliageSlope) return;
+
+    float slope_head = clamp(1.0 - slope / kMaxFoliageSlope, 0.0, 1.0);
+    float slope_factor = slope_head * slope_head;
+    float moisture_factor = clamp(0.78 + 0.22 * moisture, 0.0, 1.0);
+    float accept = clamp(density * 2.4 * u_density_scale * slope_factor * moisture_factor, 0.0, 1.0);
+    if (hash_unit(h2) > accept) return;
+
+    // Weighted archetype pick (matches the CPU linear scan).
+    float pick = hash_unit(h3) * u_total_weight;
+    int arch = 0;
+    for (int a = 0; a < u_archetype_count; ++a) {
+        if (pick < pal[a * 2].w) { arch = a; break; }
+        pick -= pal[a * 2].w;
+        arch = a;
+    }
+    vec3 acolor = pal[arch * 2].xyz;
+    float ahw = pal[arch * 2 + 1].x;
+    float aht = pal[arch * 2 + 1].y;
+    float sway_scale = pal[arch * 2 + 1].z;
+
+    float size_jit = 0.8 + 0.4 * hash_unit(sm64(h3 ^ 0x123456789ABCDEFUL));
+    float val_jit = 0.72 + 0.42 * hash_unit(sm64(h2 ^ 0xC2B2AE3D27D4EB4FUL));
+    float hue_jit = (hash_unit(sm64(h1 ^ 0x165667B19E3779F9UL)) - 0.5) * 0.10;
+    float cr = acolor.r * val_jit + hue_jit;
+    float cg = acolor.g * val_jit;
+    float cb = acolor.b * val_jit - 0.4 * hue_jit;
+
+    vec2 sway = u_wind_xz * sway_scale;
+
+    // Reserve a slot. Atomic append; respect the global pool cap. The draw
+    // command counts only valid in-pool blades, so overflow candidates never
+    // overdraw stale SSBO records.
+    uint slot = atomicAdd(append_count, 1u);
+    if (slot >= u_max_instances) return;
+    atomicAdd(draw_instance_count, 1u);
+    uint o = slot * kWordsPerBlade;
+
+    blades[o + 0u] = floatBitsToUint(wx);
+    blades[o + 1u] = floatBitsToUint(height);
+    blades[o + 2u] = floatBitsToUint(wz);
+    blades[o + 3u] = floatBitsToUint(ahw * size_jit);
+    blades[o + 4u] = floatBitsToUint(aht * size_jit);
+    blades[o + 5u] = pack_unorm8(vec4(cr, cg, cb, sway_scale));
+    blades[o + 6u] = floatBitsToUint(sway.x);
+    blades[o + 7u] = floatBitsToUint(sway.y);
+    uint phase  = encode_f16(hash_unit(h1) * 6.2831853);
+    uint facing = encode_f16(hash_unit(h0) * 6.2831853);
+    blades[o + 8u] = phase | (facing << 16);
+}

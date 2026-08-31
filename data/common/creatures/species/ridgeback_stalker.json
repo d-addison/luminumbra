@@ -1,0 +1,17 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "ridgeback_stalker",
+  "display_name": "Ridgeback Stalker",
+  "predator": true,
+  "rarity": 0.7,
+  "base_color": [
+    0.3,
+    0.26,
+    0.24
+  ],
+  "biomes": [
+    "alpine",
+    "tundra"
+  ],
+  "nocturnal": true
+}

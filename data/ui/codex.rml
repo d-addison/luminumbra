@@ -1,0 +1,24 @@
+<rml>
+    <head>
+        <title>Codex - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="pages.rcss" />
+    </head>
+    <body id="codex">
+        <div class="codex-panel">
+            <div class="codex-header">
+                <h1 class="codex-title">Creature Codex</h1>
+                <span class="codex-completion" id="codex_completion">0 / 0 discovered · 0%</span>
+            </div>
+            <!-- Rows are populated from the live PhotoCodex + species registry while open. -->
+            <div class="codex-list" id="codex_list">
+                <div class="codex-row codex-locked">
+                    <span class="codex-name">? ? ?</span>
+                    <span class="codex-stars">☆☆☆☆☆</span>
+                </div>
+            </div>
+            <div class="codex-footer">press C to close</div>
+        </div>
+    </body>
+</rml>

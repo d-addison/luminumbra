@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    name: Signed source release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out signed tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Verify release identity and public tree
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^project(Luminumbra VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          tag_object=$(git rev-parse "${GITHUB_REF_NAME}^{tag}")
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" --jq .verification.verified)" = true
+          python3 tools/ci/validate_public_tree.py
+          python3 tools/ci/validate_assets.py --check config/public-asset-inventory.json
+      - name: Build source archive, SBOM, and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git archive --format=tar --prefix="luminumbra-${GITHUB_REF_NAME#v}/" HEAD | gzip -n > "dist/luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz"
+          python3 tools/release/validate_package.py "dist/luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz"
+          python3 tools/release/generate_sbom.py --root . --tracked \
+            --name luminumbra-source --version "${GITHUB_REF_NAME#v}" \
+            --output "dist/luminumbra-${GITHUB_REF_NAME#v}-source.spdx.json"
+          cd dist
+          sha256sum "luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz" \
+            "luminumbra-${GITHUB_REF_NAME#v}-source.spdx.json" > SHA256SUMS
+      - name: Attest source artifacts
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/luminumbra-*-source.tar.gz
+            dist/luminumbra-*-source.spdx.json
+            dist/SHA256SUMS
+      - name: Attest source SBOM
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+        with:
+          subject-path: dist/luminumbra-*-source.tar.gz
+          sbom-path: dist/luminumbra-*-source.spdx.json
+      - name: Create source-only GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "Luminumbra ${GITHUB_REF_NAME}"
+
+  binary-linux:
+    name: Dormant binary package / Linux
+    if: vars.ENABLE_BINARY_RELEASES == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config wayland-protocols xorg-dev
+      - name: Build and validate package
+        run: |
+          cmake -S . -B build/package -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package --target package --parallel 4
+          cmake --install build/package --prefix build/stage
+          python3 tools/release/validate_package.py build/package/luminumbra-*.tar.gz
+          python3 tools/release/generate_sbom.py --root build/stage --name luminumbra-linux --version "${GITHUB_REF_NAME#v}" --output build/package/luminumbra-linux.spdx.json
+          cd build/package
+          sha256sum luminumbra-*.tar.gz luminumbra-linux.spdx.json > SHA256SUMS-linux
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: build/package/luminumbra-*.tar.gz
+      - uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+        with:
+          subject-path: build/package/luminumbra-*.tar.gz
+          sbom-path: build/package/luminumbra-linux.spdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-linux
+          path: |
+            build/package/luminumbra-*.tar.gz
+            build/package/luminumbra-linux.spdx.json
+            build/package/SHA256SUMS-linux
+          if-no-files-found: error
+          retention-days: 7
+
+  binary-windows:
+    name: Dormant binary package / Windows
+    if: vars.ENABLE_BINARY_RELEASES == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 90
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and validate package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          cmake -S . -B build/package -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package --target package --parallel 4
+          cmake --install build/package --prefix build/stage
+          $archive = Get-ChildItem build/package/luminumbra-*.zip | Select-Object -First 1
+          python tools/release/validate_package.py $archive.FullName
+          python tools/release/generate_sbom.py --root build/stage --name luminumbra-windows --version $env:GITHUB_REF_NAME.TrimStart('v') --output build/package/luminumbra-windows.spdx.json
+          Get-FileHash $archive.FullName -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($archive.Name)" } | Set-Content build/package/SHA256SUMS-windows
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: build/package/luminumbra-*.zip
+      - uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+        with:
+          subject-path: build/package/luminumbra-*.zip
+          sbom-path: build/package/luminumbra-windows.spdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-windows
+          path: |
+            build/package/luminumbra-*.zip
+            build/package/luminumbra-windows.spdx.json
+            build/package/SHA256SUMS-windows
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-binaries:
+    name: Publish enabled binary packages
+    if: vars.ENABLE_BINARY_RELEASES == 'true'
+    needs: [source, binary-linux, binary-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Attach binary packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

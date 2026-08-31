@@ -1,0 +1,7 @@
+{
+  "_comment": "Stone cairn placement grid (). Sparse markers on a 96 m grid.",
+  "spacing": 96,
+  "separation": 24,
+  "salt": 101,
+  "density": 0.5
+}

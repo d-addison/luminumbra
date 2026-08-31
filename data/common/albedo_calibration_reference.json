@@ -1,0 +1,85 @@
+{
+  "schema": "luminumbra.albedo_calibration_reference.v1",
+  "summary": "Per-material reference surface reflectance (physical albedo) and the on-screen sRGB bands those albedos must land in at the fixed noon calibration capture, AFTER the exposure-chain root fix (sun COLOR -> IRRADIANCE, x PI). The bands are derived by running the measured texture linear-albedo through the real lighting_pass.frag chain at noon and allowing a tolerance for normal/roughness variation and RGBA8 quantization. These are ABSOLUTE bands: a render that is globally too dark (the pre-fix defect) fails them even though relative ordering passes.",
+
+  "exposure_audit": {
+    "noon_lighting": {
+      "sun_color": [1.0, 0.95, 0.85],
+      "sun_color_source": "RenderPipeline::update_time_of_day noonColor at sun_up_factor->1",
+      "sky_ambient": [0.1, 0.15, 0.2],
+      "ao": 1.0
+    },
+    "chain": "ambient(sky*albedo*ao) + sunDiffuse(kD*albedo/PI * sunRadiance * NdotL) + spec -> ACES filmic -> gamma 1/2.2",
+    "root_cause": "Diffuse divides albedo by PI but sun radiance was the raw unit-ish sun COLOR (~1.0), not surface IRRADIANCE (~PI). The unmatched 1/PI division darkened every lit surface by ~PI (3.14x). An 18% gray plate landed at on-screen sRGB ~0.32 instead of perceptual mid (~0.50); a white plate could not exceed ~0.74; sand read rust-brown and grass near-black.",
+    "fix": "lighting_pass.frag: sunRadiance = u_sun.color * SUN_IRRADIANCE_SCALE, SUN_IRRADIANCE_SCALE = PI. Applied to the SUN only (point lights carry explicit intensity; ambient is already an irradiance term). Documented in-shader.",
+    "transfer_white_plate": { "before_srgb": 0.744, "after_srgb": 0.903 },
+    "transfer_gray18_plate": { "before_srgb": 0.320, "after_srgb": 0.581 },
+    "geometry_note": "Representative on-flat-ground noon geometry used for band derivation: N=+Z, V=+Z (NdotV=1), L tilted (NdotL=0.85), no specular singularity. The headless gate uses two tilted suns; bands are widened to cover both and the normal-mapped shading spread."
+  },
+
+  "reference_sources": [
+    "Dry/light sand quartz albedo ~0.30-0.45 (Tetzlaff 1983; Oke, Boundary Layer Climates, surface albedo tables).",
+    "Green grass / short vegetation broadband albedo ~0.16-0.26 visible-band; physical leaf albedo low (chlorophyll absorbs R+B), perceptually rendered brighter than its photometric luminance. (Oke 1987; Monteith & Unsworth, Principles of Environmental Physics).",
+    "Bare soil albedo ~0.10-0.20, darker when moist (Oke 1987 surface albedo tables).",
+    "Granite / light stone albedo ~0.20-0.35; dark igneous rock (basalt/dark gravel) ~0.05-0.15 (USGS spectral library; engineering surface reflectance references).",
+    "Deepslate / dark gravel: dark stone end, linear luminance ~0.08-0.15."
+  ],
+
+  "materials": [
+    {
+      "name": "Stone",
+      "source_texture": "Rock028 (AmbientCG, real PBR albedo)",
+      "measured_albedo_srgb": [0.317, 0.311, 0.274],
+      "measured_albedo_linear": [0.087, 0.083, 0.065],
+      "reference_band_linear_lum": [0.05, 0.35],
+      "note": "AmbientCG Rock028 is a darker grey rock (lin lum 0.083) at the dark-granite/basalt end; kept as measured (photographic albedo) rather than brightened.",
+      "onscreen_srgb_noon_after_fix": [0.366, 0.356, 0.296],
+      "onscreen_srgb_band": { "r": [0.20, 0.55], "g": [0.20, 0.55], "b": [0.15, 0.50] }
+    },
+    {
+      "name": "Soil",
+      "source_texture": "Ground048 (AmbientCG)",
+      "measured_albedo_srgb": [0.367, 0.271, 0.222],
+      "measured_albedo_linear": [0.114, 0.061, 0.041],
+      "reference_band_linear_lum": [0.06, 0.20],
+      "onscreen_srgb_noon_after_fix": [0.478, 0.359, 0.287],
+      "onscreen_srgb_band": { "r": [0.30, 0.65], "g": [0.22, 0.52], "b": [0.16, 0.46] }
+    },
+    {
+      "name": "Grass",
+      "source_texture": "Grass003 (AmbientCG)",
+      "measured_albedo_srgb": [0.262, 0.294, 0.122],
+      "measured_albedo_linear": [0.056, 0.071, 0.014],
+      "reference_band_linear_lum": [0.04, 0.15],
+      "note": "Physically dark (chlorophyll); green channel must dominate. Rendered green and readable after fix, not near-black.",
+      "onscreen_srgb_noon_after_fix": [0.335, 0.372, 0.183],
+      "onscreen_srgb_band": { "r": [0.18, 0.52], "g": [0.22, 0.56], "b": [0.08, 0.40] },
+      "green_must_exceed_blue": true
+    },
+    {
+      "name": "Sand",
+      "source_texture": "Ground087 (AmbientCG)",
+      "measured_albedo_srgb": [0.746, 0.603, 0.359],
+      "measured_albedo_linear": [0.517, 0.323, 0.106],
+      "reference_band_linear_lum": [0.30, 0.45],
+      "note": "Dry sand, squarely in reference band. Brightest plate. Renders warm tan after fix, not rust-brown.",
+      "onscreen_srgb_noon_after_fix": [0.804, 0.707, 0.416],
+      "onscreen_srgb_band": { "r": [0.62, 0.92], "g": [0.52, 0.85], "b": [0.26, 0.62] }
+    },
+    {
+      "name": "Deepslate",
+      "source_texture": "Gravel040 (AmbientCG)",
+      "measured_albedo_srgb": [0.398, 0.398, 0.367],
+      "measured_albedo_linear": [0.135, 0.134, 0.113],
+      "reference_band_linear_lum": [0.08, 0.20],
+      "onscreen_srgb_noon_after_fix": [0.471, 0.470, 0.416],
+      "onscreen_srgb_band": { "r": [0.28, 0.62], "g": [0.28, 0.62], "b": [0.24, 0.58] }
+    }
+  ],
+
+  "relative_ordering_retained": [
+    "Sand is the brightest plate (sand_luma > grass_luma).",
+    "Grass green channel exceeds its blue channel.",
+    "Stone/Deepslate stay neutral (|r-g| small)."
+  ]
+}

@@ -1,0 +1,51 @@
+<rml>
+    <head>
+        <title>Luminumbra - Main Menu</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+    </head>
+    <body id="main_menu" class="fade-in">
+        <!-- Main title with quantum effect -->
+        <div class="container">
+            <h1>luminumbra</h1>
+            <p class="subtitle">a novel in photographs</p>
+            <div class="title-divider"></div>
+
+            <!-- Main navigation -->
+            <div id="nav">
+                <button id="new_world_btn" class="btn">
+                    New World
+                </button>
+                <button id="load_world_btn" class="btn">
+                    Continue
+                </button>
+                <button id="gallery_btn" class="btn">
+                    Gallery
+                </button>
+                <button id="settings_btn" class="btn">
+                    Settings
+                </button>
+                <button id="quit_btn" class="btn">
+                    Quit
+                </button>
+            </div>
+
+            <!-- Version info -->
+            <div class="version-info">
+                <p class="text-sm text-center">v0.1.0</p>
+            </div>
+        </div>
+
+        <!-- Background particles (CSS animation) -->
+        <div class="quantum-background">
+            <div class="particle"></div>
+            <div class="particle"></div>
+            <div class="particle"></div>
+        </div>
+
+        <!-- Notification area -->
+        <div id="notification" class="notification hidden">
+            <span id="notification_text"></span>
+        </div>
+    </body>
+</rml>

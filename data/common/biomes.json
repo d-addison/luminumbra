@@ -1,0 +1,136 @@
+{
+  "schema": "luminumbra.biome_table.v1",
+  "description": "Authored biome table. Biome selection is BiomeTable.lookup(continentalness, erosion, pv, temperature, humidity): the engine knows only the lookup, while climate ranges and surface palettes are game data. Ranges are inclusive-min / exclusive-max in the normalized noise domain [-1, 1]; an unspecified dimension matches the full [-1, 1] span. Overlapping ranges resolve first-match in array order, so order biomes specific-before-general. A column matching no biome row yields id 255 (none) and falls back to the legacy single-material classifier. Vegetation density drives client foliage scattering and reverb drives the environmental audio profile.",
+  "biomes": [
+    {
+      "id": 0,
+      "name": "alpine",
+      "description": "Cold high ground: bare stone shoulders with thin soil, exposed peaks.",
+      "climate": {
+        "continentalness": [0.2, 1.0],
+        "erosion": [-1.0, -0.1],
+        "peaks_valleys": [-1.0, 1.0],
+        "temperature": [-1.0, -0.2],
+        "humidity": [-1.0, 1.0]
+      },
+      "surface": {
+        "top": "Stone",
+        "filler": "Stone",
+        "depth": "Deepslate",
+        "underwater": "Stone"
+      },
+      "vegetation": {
+        "density": 0.05,
+        "scatter": ["lichen"]
+      },
+      "reverb": {
+        "preset": "open_mountain",
+        "wet": 0.35
+      }
+    },
+    {
+      "id": 1,
+      "name": "desert",
+      "description": "Hot and dry lowlands: sand over sandstone, scoured flats.",
+      "climate": {
+        "continentalness": [-0.2, 1.0],
+        "erosion": [-1.0, 1.0],
+        "peaks_valleys": [-1.0, 1.0],
+        "temperature": [0.35, 1.0],
+        "humidity": [-1.0, -0.2]
+      },
+      "surface": {
+        "top": "Sand",
+        "filler": "Sand",
+        "depth": "Stone",
+        "underwater": "Sand"
+      },
+      "vegetation": {
+        "density": 0.02,
+        "scatter": ["cactus", "dry_shrub"]
+      },
+      "reverb": {
+        "preset": "open_arid",
+        "wet": 0.15
+      }
+    },
+    {
+      "id": 2,
+      "name": "wetland",
+      "description": "Warm, wet, low-lying basins: soft soil, muddy shallows.",
+      "climate": {
+        "continentalness": [-1.0, 0.3],
+        "erosion": [0.0, 1.0],
+        "peaks_valleys": [-1.0, 1.0],
+        "temperature": [0.0, 1.0],
+        "humidity": [0.25, 1.0]
+      },
+      "surface": {
+        "top": "Grass",
+        "filler": "Soil",
+        "depth": "Soil",
+        "underwater": "Soil"
+      },
+      "vegetation": {
+        "density": 0.6,
+        "scatter": ["reed", "fern", "moss"]
+      },
+      "reverb": {
+        "preset": "muffled_basin",
+        "wet": 0.45
+      }
+    },
+    {
+      "id": 3,
+      "name": "tundra",
+      "description": "Cold flats: frozen soil under thin grass, low relief.",
+      "climate": {
+        "continentalness": [-0.4, 1.0],
+        "erosion": [-0.1, 1.0],
+        "peaks_valleys": [-1.0, 1.0],
+        "temperature": [-1.0, -0.2],
+        "humidity": [-1.0, 1.0]
+      },
+      "surface": {
+        "top": "Grass",
+        "filler": "Soil",
+        "depth": "Stone",
+        "underwater": "Soil"
+      },
+      "vegetation": {
+        "density": 0.1,
+        "scatter": ["lichen", "dwarf_shrub"]
+      },
+      "reverb": {
+        "preset": "open_cold",
+        "wet": 0.25
+      }
+    },
+    {
+      "id": 4,
+      "name": "plains",
+      "description": "Default temperate grassland: grass over soil over stone.",
+      "climate": {
+        "continentalness": [-1.0, 1.0],
+        "erosion": [-1.0, 1.0],
+        "peaks_valleys": [-1.0, 1.0],
+        "temperature": [-1.0, 1.0],
+        "humidity": [-1.0, 1.0]
+      },
+      "surface": {
+        "top": "Grass",
+        "filler": "Soil",
+        "depth": "Stone",
+        "underwater": "Sand"
+      },
+      "vegetation": {
+        "density": 0.3,
+        "scatter": ["grass_tuft", "flower"]
+      },
+      "reverb": {
+        "preset": "open_field",
+        "wet": 0.2
+      }
+    }
+  ]
+}

@@ -1,0 +1,654 @@
+/* ============================================================================
+   pages.rcss — in-game page styles in the "Zen / Photographic Calm" language.
+   Covers: HUD, photo mode, pause, gallery.
+   Palette (from game_theme.rcss): warm-dusk near-black #16130E / #14110B ·
+   ivory ink #F2EDE4 · sage #8FA68E · dusk-gold focus #C9A86A ·
+   warm surface #1F1B14 · hairline #3A3326 · muted ink #8A8270.
+   Linked AFTER base.rcss + game_theme.rcss in every page.
+   ============================================================================ */
+
+/* ============================================================================
+   1. HUD — minimal diegetic corner cluster. Mostly transparent, never boxed.
+   ============================================================================ */
+
+/* The HUD body itself is a transparent pass-through over the live world. */
+body#hud {
+    background-color: transparent;
+    decorator: none;
+}
+
+.hud-corner {
+    position: absolute;
+    bottom: 24px;
+    left: 28px;
+    width: auto;
+    text-align: left;
+    color: rgba(242, 237, 228, 90);
+    letter-spacing: 3px;
+    font-size: 11px;
+}
+
+.hud-time {
+    margin-bottom: 0px;
+}
+
+.hud-time-value {
+    font-size: 11px;
+    color: rgba(242, 237, 228, 90);
+    letter-spacing: 3px;
+}
+
+/* Fainter second watermark line. */
+.hud-watermark-sub {
+    color: rgba(242, 237, 228, 65);
+    font-size: 10px;
+    letter-spacing: 3px;
+    margin-top: 2px;
+}
+
+/* Purged diegetic accents — warm-white watermark only. */
+.hud-time-label { display: none; }
+.hud-lens { display: none; }
+.hud-capture-cue { display: none; }
+
+/* First-boot onboarding hint — centred low, faint, auto-hidden after first capture. */
+.hud-tutorial {
+    position: absolute;
+    bottom: 80px;
+    left: 50%;
+    margin-left: -300px;
+    width: 600px;
+    text-align: center;
+    color: rgba(242, 237, 228, 150);
+}
+.hud-tutorial-line {
+    font-size: 13px;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+}
+.hud-tutorial strong {
+    color: #C9A86A;
+}
+
+/* Objective tracker — top-left, quiet and diegetic like the watermark. */
+.hud-objective {
+    position: absolute;
+    top: 24px;
+    left: 28px;
+    width: 280px;
+    text-align: left;
+    color: rgba(242, 237, 228, 90);
+}
+.hud-objective-row {
+    display: block;
+}
+.hud-objective-label {
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: rgba(242, 237, 228, 65);
+    text-transform: uppercase;
+}
+.hud-objective-progress {
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #C9A86A;
+    float: right;
+}
+.hud-objective-title {
+    font-size: 14px;
+    color: rgba(242, 237, 228, 220);
+    letter-spacing: 1px;
+    margin-top: 2px;
+}
+.hud-objective-count {
+    font-size: 10px;
+    color: rgba(242, 237, 228, 65);
+    letter-spacing: 2px;
+    margin-top: 2px;
+}
+.hud-capture-dot { display: none; }
+
+/* Farming HUD — top-right, mirrors the objective tracker's quiet diegetic style. */
+.hud-farming {
+    position: absolute;
+    top: 24px;
+    right: 28px;
+    width: 280px;
+    text-align: right;
+    color: rgba(242, 237, 228, 90);
+}
+.hud-farming-row {
+    display: block;
+}
+.hud-farming-label {
+    font-size: 10px;
+    letter-spacing: 3px;
+    color: rgba(242, 237, 228, 65);
+    text-transform: uppercase;
+}
+.hud-farming-inv {
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #C9A86A;
+    float: left;
+}
+.hud-farming-crop {
+    font-size: 14px;
+    color: rgba(242, 237, 228, 220);
+    letter-spacing: 1px;
+    margin-top: 2px;
+}
+.hud-farming-hint {
+    font-size: 10px;
+    color: rgba(242, 237, 228, 65);
+    letter-spacing: 1px;
+    margin-top: 4px;
+}
+.hud-farming-hint strong { color: #C9A86A; }
+
+/* ============================================================================
+   2. Photo mode — viewfinder, rule-of-thirds, readout, shutter, verdict.
+   ============================================================================ */
+
+/* Photo mode looks through to the world, so the field stays transparent. */
+body#photo_mode {
+    background-color: transparent;
+    decorator: none;
+}
+
+/* The viewfinder window: a centred frame inset from the screen edges. */
+.viewfinder {
+    position: absolute;
+    top: 7%;
+    left: 6%;
+    width: 88%;
+    height: 76%;
+    border-width: 0px;
+}
+
+/* --- Rule-of-thirds hairlines --- */
+.thirds-line {
+    position: absolute;
+    background-color: #F2EDE4;
+    opacity: 0.12;
+}
+
+.thirds-v {
+    top: 0px;
+    width: 1px;
+    height: 100%;
+}
+.thirds-v1 { left: 33.33%; }
+.thirds-v2 { left: 66.66%; }
+
+.thirds-h {
+    left: 0px;
+    height: 1px;
+    width: 100%;
+}
+.thirds-h1 { top: 33.33%; }
+.thirds-h2 { top: 66.66%; }
+
+/* --- Corner brackets: warm-white hairline ticks at each viewfinder corner. --- */
+.vf-corner {
+    position: absolute;
+    width: 28px;
+    height: 28px;
+    border-color: rgba(242, 237, 228, 150);
+}
+.vf-corner-tl {
+    top: 0px; left: 0px;
+    border-top-width: 1px;
+    border-left-width: 1px;
+}
+.vf-corner-tr {
+    top: 0px; right: 0px;
+    border-top-width: 1px;
+    border-right-width: 1px;
+}
+.vf-corner-bl {
+    bottom: 0px; left: 0px;
+    border-bottom-width: 1px;
+    border-left-width: 1px;
+}
+.vf-corner-br {
+    bottom: 0px; right: 0px;
+    border-bottom-width: 1px;
+    border-right-width: 1px;
+}
+
+/* Centre focus reticle — a faint warm-white ring. */
+.vf-reticle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 34px;
+    height: 34px;
+    margin-top: -17px;
+    margin-left: -17px;
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 130);
+    border-radius: 18px;
+    opacity: 0.45;
+}
+
+/* --- Bottom readout row --- */
+.photo-readout {
+    position: absolute;
+    bottom: 3%;
+    left: 6%;
+    width: 88%;
+    height: auto;
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-end;
+}
+
+.readout-group {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    width: 100%;
+    justify-content: space-between;
+}
+
+.readout-cell {
+    display: block;
+    width: auto;
+    min-width: 78px;
+    text-align: center;
+    margin-right: 0px;
+}
+
+.readout-label {
+    display: block;
+    font-size: 11px;
+    color: rgba(180, 170, 150, 160);
+    letter-spacing: 3px;
+    margin-bottom: 5px;
+}
+
+.readout-value {
+    display: block;
+    font-size: 24px;
+    color: #F7F2E9;
+    letter-spacing: 0px;
+}
+
+/* --- Shutter minimized — reference has no prominent shutter button. --- */
+.shutter {
+    display: block;
+    text-align: center;
+    width: 96px;
+}
+
+.shutter-ring {
+    width: 0px;
+    height: 0px;
+    border-width: 0px;
+    background-color: transparent;
+}
+
+.shutter-core {
+    display: none;
+}
+
+.shutter-hint {
+    display: block;
+    font-size: 11px;
+    color: rgba(180, 170, 150, 140);
+    letter-spacing: 3px;
+}
+
+/* --- Post-capture star verdict panel (hidden by default). --- */
+.verdict-panel {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 360px;
+    margin-left: -180px;
+    margin-top: -130px;
+    padding: 28px;
+    background-color: #1F1B14;
+    border-width: 1px;
+    border-color: #3A3326;
+    text-align: center;
+}
+
+.verdict-heading {
+    font-size: 26px;
+    color: #8FA68E;
+    font-weight: normal;
+    letter-spacing: 4px;
+    margin-bottom: 14px;
+}
+
+.verdict-stars {
+    margin-bottom: 12px;
+}
+
+.verdict-star {
+    font-size: 30px;
+    color: #3A3326;
+    letter-spacing: 4px;
+}
+
+.verdict-star-on {
+    color: #C9A86A;
+}
+
+.verdict-note {
+    font-size: 14px;
+    font-style: italic;
+    color: #B3A892;
+    letter-spacing: 1px;
+    margin-bottom: 20px;
+}
+
+/* First-time species discovery — the codex-fill payoff, emphasised in warm gold. */
+.verdict-note.verdict-discovery {
+    color: #E8C572;
+    font-style: normal;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+
+/* Creature codex browse screen — a quiet full-screen overlay. */
+.codex-panel {
+    position: absolute;
+    top: 6%;
+    left: 50%;
+    margin-left: -320px;
+    width: 640px;
+    height: 88%;
+    background-color: rgba(18, 20, 22, 235);
+    padding: 28px 32px;
+    border: 1px rgba(201, 168, 106, 60);
+}
+.codex-header {
+    margin-bottom: 18px;
+}
+.codex-title {
+    font-size: 28px;
+    color: #E8E0D0;
+    font-weight: normal;
+    letter-spacing: 2px;
+}
+.codex-completion {
+    font-size: 13px;
+    color: #C9A86A;
+    letter-spacing: 1px;
+}
+.codex-list {
+    height: 78%;
+    overflow-y: auto;
+}
+.codex-row {
+    display: block;
+    padding: 10px 8px;
+    border-bottom: 1px rgba(242, 237, 228, 20);
+}
+.codex-name {
+    font-size: 16px;
+    color: #E8E0D0;
+}
+.codex-stars {
+    font-size: 15px;
+    color: #C9A86A;
+    float: right;
+}
+.codex-row.codex-locked .codex-name {
+    color: rgba(242, 237, 228, 60);
+    font-style: italic;
+}
+.codex-row.codex-locked .codex-stars {
+    color: rgba(242, 237, 228, 40);
+}
+.codex-footer {
+    margin-top: 16px;
+    font-size: 11px;
+    color: rgba(242, 237, 228, 65);
+    letter-spacing: 3px;
+    text-align: center;
+}
+
+.verdict-actions {
+    text-align: center;
+}
+
+.verdict-actions button {
+    display: inline-block;
+    width: 130px;
+    margin-left: 8px;
+    margin-right: 8px;
+}
+
+/* ============================================================================
+   3. Pause — dim overlay + centred ghost-button nav.
+   ============================================================================ */
+
+body#pause {
+    background-color: transparent;
+    decorator: none;
+}
+
+/* Light frosted scrim lets the frozen sunset world show through softly. */
+.pause-overlay {
+    position: absolute;
+    top: 0px;
+    left: 0px;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(14, 11, 7, 70);
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
+.pause-panel {
+    width: 420px;
+    padding: 48px 52px 44px;
+    text-align: center;
+    background-color: rgba(26, 22, 16, 120);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 55);
+    border-radius: 4px;
+    box-shadow: 0px 24px 60px rgba(8, 6, 4, 150);
+    backdrop-filter: blur(10px);
+}
+
+.pause-heading {
+    font-size: 50px;
+    color: #F2EDE4;
+    font-weight: normal;
+    letter-spacing: 16px;
+    margin-bottom: 8px;
+    margin-left: 7px;
+}
+
+/* Small ornament where the subtitle used to sit. */
+.pause-ornament {
+    font-size: 11px;
+    color: #C9A86A;
+    letter-spacing: 2px;
+    margin-bottom: 34px;
+    opacity: 0.85;
+}
+
+/* Pause nav overrides the menu base ghost buttons (higher specificity). */
+#pause #nav button {
+    width: 316px;
+    height: 52px;
+    line-height: 50px;
+    margin-bottom: 14px;
+    background-color: rgba(34, 29, 21, 135);
+    border-color: rgba(242, 237, 228, 55);
+    border-radius: 3px;
+    color: #E8E0D2;
+    font-size: 19px;
+    letter-spacing: 2px;
+}
+
+#pause #nav button:hover {
+    background-color: rgba(143, 166, 142, 70);
+    border-color: rgba(169, 192, 160, 150);
+    color: #F2EDE4;
+}
+
+#pause #nav button.btn-selected {
+    background-color: rgba(143, 166, 142, 165);
+    border-color: #A9C0A0;
+    color: #16130E;
+    box-shadow: 0px 0px 0px 1px rgba(169, 192, 160, 90);
+}
+
+#pause #nav button.btn-selected:hover {
+    background-color: rgba(143, 166, 142, 165);
+    border-color: #BFD6B6;
+    color: #16130E;
+}
+
+/* ============================================================================
+   4. Gallery — heading + flexbox grid of photo cards + back button.
+   ============================================================================ */
+
+body#gallery {
+    display: block;
+}
+
+.gallery-container {
+    width: 80%;
+    max-width: 1200px;
+    margin-left: auto;
+    margin-right: auto;
+    padding-top: 40px;
+    text-align: center;
+}
+
+.gallery-heading {
+    font-size: 46px;
+    letter-spacing: 14px;
+    color: #F2EDE4;
+    font-weight: normal;
+    margin-bottom: 4px;
+    margin-left: 14px;
+}
+
+/* Hairline ornament beneath the heading. */
+.gallery-ornament {
+    width: 40px;
+    height: 1px;
+    margin: 6px auto 8px;
+    background-color: #6B6450;
+}
+
+.gallery-subtitle {
+    font-size: 13px;
+    letter-spacing: 6px;
+    color: #8A8270;
+    font-style: normal;
+    margin-bottom: 22px;
+}
+
+/* Top-left back arrow. */
+.gallery-back {
+    position: absolute;
+    top: 22px;
+    left: 26px;
+    width: 40px;
+    height: 40px;
+    line-height: 38px;
+    text-align: center;
+    font-size: 26px;
+    color: #D8CFBC;
+    background-color: transparent;
+    border-width: 0px;
+}
+
+.gallery-back:hover {
+    color: #C9A86A;
+}
+
+/* Tight 4-up photo wall — wraps cards with small gaps. */
+.gallery-grid {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: stretch;
+    margin-top: 28px;
+    margin-bottom: 20px;
+}
+
+.photo-card {
+    width: 22.5%;
+    margin: 9px;
+    padding: 0px;
+    background-color: transparent;
+    border-width: 0px;
+    border-radius: 10px;
+    box-shadow: 0px 6px 18px rgba(8, 6, 4, 150);
+    position: relative;
+}
+
+.photo-card:hover {
+    box-shadow: 0px 10px 26px rgba(8, 6, 4, 190);
+    border-color: transparent;
+}
+
+/* Default thumbnail tile: a soft warm field with a vignette. */
+.photo-thumb {
+    width: 100%;
+    height: 132px;
+    background-color: #14110C;
+    decorator: linear-gradient(135deg, #2A2114 0%, #17130C 60%, #0B0906 100%);
+    border-width: 0px;
+    border-radius: 10px;
+}
+
+/* Favorite star — a chip over the image (chip bg, not text-shadow). */
+.photo-fav {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    font-size: 15px;
+    color: #F2EDE4;
+    background-color: rgba(11, 9, 6, 90);
+    border-radius: 10px;
+    padding: 1px 4px;
+}
+
+/* Bottom-center pager. */
+.gallery-pager {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    margin-top: 14px;
+}
+
+.pager-arrow {
+    font-size: 18px;
+    color: #8A8270;
+    margin: 0 10px;
+}
+
+.pager-arrow:hover {
+    color: #C9A86A;
+}
+
+.pager-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 3px;
+    background-color: #6B6450;
+    margin: 0 5px;
+}
+
+.pager-dot-active {
+    background-color: #C9A86A;
+}

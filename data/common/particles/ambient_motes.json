@@ -1,0 +1,18 @@
+{
+  "schema": "luminumbra.particle_emitter.v1",
+  "name": "ambient_motes",
+  "type": 0,
+  "spawn_rate": 38.0,
+  "lifetime": 9.0,
+  "origin": [0.0, 5.0, 0.0],
+  "origin_extent": [30.0, 11.0, 30.0],
+  "base_velocity": [0.14, 0.08, 0.05],
+  "velocity_jitter": 0.22,
+  "size_curve": [0.0, 0.05, 0.07, 0.05, 0.0],
+  "color_r_curve": [0.95, 0.97, 1.0, 0.97, 0.9],
+  "color_g_curve": [0.92, 0.95, 0.98, 0.93, 0.85],
+  "color_b_curve": [0.74, 0.82, 0.88, 0.8, 0.7],
+  "color_a_curve": [0.0, 0.3, 0.42, 0.28, 0.0],
+  "atlas_layer": 0,
+  "blend": "additive"
+}

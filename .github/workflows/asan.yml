@@ -1,0 +1,57 @@
+name: AddressSanitizer
+
+on:
+  push:
+    branches: [main, devel]
+  pull_request:
+    branches: [main, devel]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  asan:
+    name: Linux / GCC ASan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:symbolize=1
+      CC: gcc
+      CXX: g++
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake extra-cmake-modules libfreetype6-dev libgl1-mesa-dev \
+            libglu1-mesa-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
+            python3-numpy python3-pil wayland-protocols xauth xorg-dev xvfb
+      - name: Configure
+        run: cmake --preset debug-asan
+      - name: Build
+        run: cmake --build --preset debug-asan --parallel 4
+      - name: Test
+        run: |
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset debug-asan --no-tests=error -LE manual \
+              -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+              --parallel 2 --timeout 300 --output-junit ctest.junit.xml
+          python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 1700
+      - name: Upload sanitizer evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: asan-test-evidence-${{ github.sha }}
+          path: |
+            build/debug-asan/ctest.junit.xml
+            build/debug-asan/Testing/Temporary
+            build/debug-asan/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,68 @@
+{
+  "name": "Amplified",
+  "description": "Minecraft-Amplified style: towering peaks, deep valleys, perched alpine lakes and cliffs. Deliberately exaggerated (not DEM-realistic).",
+  "schema_rev": 5,
+  "realism_exempt": true,
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.0095,
+      "base_amplitude": 78.0,
+      "octaves": 6,
+      "persistence": 0.5,
+      "lacunarity": 2.0,
+      "height_offset": 28.0,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0011,
+        "erosion_frequency": 0.0016,
+        "peaks_frequency": 0.0032,
+        "peaks_amplitude": 70.0,
+        "domain_warp_amplitude": 26.0,
+        "domain_warp_frequency": 0.0035,
+        "continental_spline": [[-1.0, -55.0], [-0.5, -28.0], [-0.1, 2.0], [0.3, 34.0], [0.7, 80.0], [1.0, 130.0]],
+        "erosion_spline": [[-1.0, 0.85], [-0.5, 0.55], [0.0, 0.35], [0.5, 0.2], [1.0, 0.1]],
+        "peaks_spline": [[-1.0, 0.0], [0.2, 0.06], [0.6, 0.45], [1.0, 1.0]]
+      },
+      "island_mask_enabled": false,
+      "hydro": {
+        "enabled": true,
+        "iterations": 8,
+        "cell_size_m": 8.0,
+        "talus_height": 2.6,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 10.0
+      }
+    },
+    "biomes": {
+      "table": "common/biomes.json",
+      "temperature_frequency": 0.005,
+      "humidity_frequency": 0.005,
+      "relief_enabled": true,
+      "relief_strength": 0.55
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.03,
+      "rivers_enabled": true,
+      "river_frequency": 0.0016,
+      "river_depth": 5.0,
+      "river_pv_min": -1.0,
+      "river_pv_max": -0.84,
+      "river_max_carve": 12.0,
+      "lakes_enabled": true,
+      "lake_frequency": 0.001,
+      "lake_threshold": 0.48,
+      "lake_depth": 6.0,
+      "lake_max_carve": 30.0,
+      "lake_bank_offset": 2.5,
+      "cliffs_enabled": true,
+      "cliff_frequency": 0.0013,
+      "cliff_threshold": 0.38,
+      "cliff_step": 14.0,
+      "structures_enabled": true
+    }
+  }
+}

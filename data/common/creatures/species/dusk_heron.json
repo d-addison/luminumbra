@@ -1,0 +1,9 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "dusk_heron",
+  "display_name": "Dusk Heron",
+  "predator": false,
+  "rarity": 0.5,
+  "base_color": [0.42, 0.48, 0.55],
+  "biomes": ["wetland", "plains"]
+}

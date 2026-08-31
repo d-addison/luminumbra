@@ -1,0 +1,16 @@
+{
+  "id": "sungourd",
+  "render_archetype": "vine_gourd",
+  "perennial": false,
+  "lifespan_ticks": 1400,
+  "genes": {
+    "GrowthRate": [0.45, 0.75],
+    "MaxScale": [0.65, 0.95],
+    "DroughtTolerance": [0.70, 0.95],
+    "ColdTolerance": [0.10, 0.25],
+    "HeatTolerance": [0.80, 1.00],
+    "LeafDensity": [0.60, 0.90],
+    "Yield": [0.70, 1.00],
+    "Hardiness": [0.40, 0.65]
+  }
+}

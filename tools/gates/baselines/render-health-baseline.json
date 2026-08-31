@@ -1,0 +1,93 @@
+{
+  "schema": "luminumbra.render_health_analysis.v1",
+  "passed": true,
+  "startup": {
+    "health_snapshot_api": "get_render_health_snapshot",
+    "runtime_stats_api": "get_runtime_render_stats",
+    "health_api_present": true
+  },
+  "gl_debug": {
+    "errors": 0,
+    "error_names": []
+  },
+  "shader_health": {
+    "runtime_validity_requires_compile_and_link_success": true,
+    "programs": [
+      {"name": "basic", "ok": true},
+      {"name": "g_buffer", "ok": true},
+      {"name": "instanced_mesh_gbuffer", "ok": true},
+      {"name": "skinned_mesh_gbuffer", "ok": true},
+      {"name": "lighting_pass", "ok": true},
+      {"name": "skybox", "ok": true},
+      {"name": "shadow_map", "ok": true},
+      {"name": "ssao", "ok": true},
+      {"name": "ssao_blur", "ok": true},
+      {"name": "water", "ok": true},
+      {"name": "rml_ui", "ok": true},
+      {"name": "loading_hologram", "ok": true},
+      {"name": "loading_visual", "ok": true},
+      {"name": "volumetric_lighting", "ok": true},
+      {"name": "magical_particles", "ok": true},
+      {"name": "aerial_perspective", "ok": true}
+    ]
+  },
+  "render_pass_metadata": {
+    "present": true,
+    "required_passes": ["shadow", "gbuffer", "ssao", "ssao_blur", "lighting", "water", "skybox", "final_blit"]
+  },
+  "resource_registry": {
+    "present": true,
+    "debug_labels": true,
+    "resource_types": ["framebuffer", "texture", "renderbuffer", "buffer", "vertex_array", "shader_program"],
+    "shutdown_requires_empty_registry": true,
+    "empty_after_shutdown": true
+  },
+  "terrain_materials": {
+    "present": true,
+    "texture_array_required": true,
+    "material_lut_required": true,
+    "max_fallback_layers": 0
+  },
+  "sky_scattering": {
+    "_rebless_note": " DELIBERATE update the baseline: Hillaire 2020 scattering replaces the authored skybox gradient. Adds three RGB16F LUT textures to the resource registry (released on shutdown -> empty-after-shutdown invariant holds) + a sky-precompute startup-cost entry in render telemetry. The scattering sky changes sky pixels in ALL scenarios, so RenderHealth + SkyboxVisual + TimeOfDaySweep baselines move; PlayerView + FarLodHorizon stay green (terrain coverage + horizon sky-ratio unaffected: the aerial term skips far-depth sky pixels). world_hash unchanged (render-only).",
+    "luts": [
+      {"name": "sky.lut.transmittance", "dimensions": "256x64", "format": "RGB16F", "sun_dependent": false},
+      {"name": "sky.lut.multiscatter", "dimensions": "32x32", "format": "RGB16F", "sun_dependent": false},
+      {"name": "sky.lut.skyview", "dimensions": "192x108", "format": "RGB16F", "sun_dependent": true, "refresh": "on sun motion past threshold"}
+    ],
+    "atmosphere_params": {
+      "rayleigh_scattering_per_m": [5.802e-06, 1.3558e-05, 3.31e-05],
+      "rayleigh_scale_height_m": 8000,
+      "mie_scattering_per_m": 3.996e-06,
+      "mie_scale_height_m": 1200,
+      "mie_phase_g": 0.76,
+      "ground_albedo": 0.1,
+      "planet_radius_km": 6360,
+      "atmosphere_top_km": 6460
+    },
+    "coherence": "sun disc color = transmittance toward the sun; ambient = sky-view hemisphere integral; aerial fog = sky-view in-scatter. All read the SAME transmittance, so low-sun palettes (pinks/purples/oranges) stay coherent.",
+    "scope_stop": "three LUTs + analytic aerial term only; NO froxel volume (regression contract)."
+  },
+  "gpu_timers": {
+    "supported": true,
+    "api_present": true,
+    "stats_api": "RenderPassFrameStats.gpu_timers_supported",
+    "query_mechanism": "glQueryCounter(GL_TIMESTAMP) ring, non-blocking GL_QUERY_RESULT_AVAILABLE polls",
+    "passes": [
+      {"name": "shadow", "gpu_ms": 0.001600},
+      {"name": "gbuffer", "gpu_ms": 0.000192},
+      {"name": "ssao", "gpu_ms": 0.000160},
+      {"name": "ssao_blur", "gpu_ms": 0.000192},
+      {"name": "lighting", "gpu_ms": 0.000160},
+      {"name": "water", "gpu_ms": 0.000160},
+      {"name": "skybox", "gpu_ms": 0.000192},
+      {"name": "aerial", "gpu_ms": 0.000192, "budget_ms": 0.3},
+      {"name": "final_blit", "gpu_ms": 0.000160}
+    ],
+    "sky_precompute": {
+      "_note": " startup one-shot (CPU LUT build + GL upload), not per-frame.",
+      "sky_full_precompute_budget_ms": 8.0,
+      "sky_view_refresh_budget_ms": 0.2
+    }
+  }
+}

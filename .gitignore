@@ -1,0 +1,100 @@
+# Build outputs
+build/
+out/
+cmake-build-*/
+# Transient build/run log dumps written to the repo root during dev iteration
+/build_*.txt
+/tl_run.log
+/wl_run.log
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# Generated assets
+data/**/*.lmesh
+
+# Runtime and local state
+imgui.ini
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# IDE and editor state
+.vs/
+.vscode/
+*.user
+*.suo
+*.VC.db
+
+# Tool caches
+.cache/
+.clangd/
+.ninja_deps
+.ninja_log
+
+# Agent-generated Codex native-agent profiles (per-task, never source)
+.codex/agents/
+
+# Local-only project data
+/worlds/saves/
+/docs/internal/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Steamworks SDK (NOT redistributable -- owner-provided, never commit)
+vendor/steamworks/
+tools/blender/fixtures/*.blend
+tools/blender/fixtures/staging/
+
+# --- Dev capture dumps ---------------------------------------------------
+# Loose run/gate/diagnostic captures written to the repo root during dev
+# iteration, relocated out of the root. Reproduced by re-running the gate.
+/scratch/
+
+# --- Python bytecode -----------------------------------------------------
+__pycache__/
+*.py[cod]
+
+# --- Local agent/editor state -------------------------------------------
+.claude/settings.local.json
+**/.banso/evidence/
+/.banso/
+/.worktrees/
+
+# --- Obsolete local dependency remnants ----------------------------------
+# CMake consumes these dependencies directly from pinned FetchContent trees.
+# Ignore stale on-disk copies from older checkouts.
+/vendor/imgui/backends/
+/vendor/meshoptimizer/
+/vendor/soil2/
+/vendor/stb/
+/vendor/sol2/
+/vendor/spdlog/
+
+# --- Raw DCC source material ---------------------------------------------
+# Hundreds of MB of unbaked GLTF/JPG working files. The asset bake globs
+# assets/**/*.glb only, so nothing here is a build input.
+/assets/models/
+
+# --- Capture output ------------------------------------------------------
+/references/compare/
+/references/
+/data/ui/captures/
+/data/textures/models/
+/photos/
+/scratch_six/
+
+# Upstream imgui ships `* text=auto`, which resolves differently under the
+# Windows and WSL gits that share this working tree and would reintroduce
+# whole-file EOL churn across the vendored sources. Kept out of the index.
+/vendor/imgui/.gitattributes
+
+# Audio is kept on disk but never in git. The sample library and the generated
+# voice/SFX set together outweighed the entire rest of the repository by an
+# order of magnitude, and neither is something a clone needs to build or run.
+res/audio
+assets/audio

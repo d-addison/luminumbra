@@ -1,0 +1,38 @@
+{
+  "name": "Temperate Forest",
+  "schema_rev": 5,
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.008,
+      "base_amplitude": 30.0,
+      "octaves": 6,
+      "persistence": 0.5,
+      "lacunarity": 2.0,
+      "height_offset": 32.0,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0011,
+        "erosion_frequency": 0.0017,
+        "peaks_frequency": 0.0038,
+        "peaks_amplitude": 24.0,
+        "domain_warp_amplitude": 15.0,
+        "domain_warp_frequency": 0.0038,
+        "continental_spline": [[-1.0, -4.0], [-0.3, 3.0], [0.1, 8.0], [0.5, 13.2], [1.0, 22.0]],
+        "erosion_spline": [[-1.0, 0.7], [-0.4, 0.45], [0.0, 0.3], [0.5, 0.18], [1.0, 0.12]],
+        "peaks_spline": [[-1.0, 0.0], [0.3, 0.05], [0.7, 0.4], [1.0, 1.0]]
+      },
+      "island_mask_enabled": false,
+      "hydro": {
+        "enabled": false
+      }
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.025,
+      "rivers_enabled": false,
+      "lakes_enabled": false,
+      "cliffs_enabled": false,
+      "structures_enabled": false
+    }
+  }
+}

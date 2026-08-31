@@ -1,0 +1,221 @@
+name: CI
+
+on:
+  push:
+    branches: [main, devel]
+  pull_request:
+    branches: [main, devel]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CTEST_PARALLEL_LEVEL: "4"
+
+jobs:
+  linux:
+    name: Linux / GCC
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
+            xauth xorg-dev xvfb
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
+          restore-keys: linux-x64-gcc-ccache-
+      - name: Configure
+        run: cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build
+        run: cmake --build --preset release --parallel 4
+      - name: Test
+        run: |
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset release --no-tests=error -LE manual \
+              -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+              --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-gcc-test-evidence-${{ github.sha }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Validate dormant and enabled Linux packaging
+        if: github.ref_name == 'main' || github.base_ref == 'main'
+        run: |
+          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          test ! -e build/package-off/CPackConfig.cmake
+          cmake -S . -B build/package-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package-linux --target package --parallel 4
+
+  windows-msvc:
+    name: Windows / MSVC
+    runs-on: windows-2025
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Python test dependencies
+        run: python -m pip install --disable-pip-version-check numpy Pillow
+      - name: Configure, build, and test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          cmake --build --preset release --parallel 4
+          ctest --preset release --no-tests=error -LE manual `
+            -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' `
+            --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-msvc-test-evidence-${{ github.sha }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Validate dormant and enabled Windows packaging
+        if: github.ref_name == 'main' || github.base_ref == 'main'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
+          cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package-windows --target package --parallel 4
+
+  windows-ucrt64:
+    name: Windows / MSYS2 UCRT64
+    if: github.ref_name == 'main' || github.base_ref == 'main'
+    runs-on: windows-2025
+    timeout-minutes: 105
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-numpy
+            mingw-w64-ucrt-x86_64-python-pillow
+      - name: Configure
+        shell: msys2 {0}
+        run: cmake --preset release
+      - name: Build
+        shell: msys2 {0}
+        run: cmake --build --preset release --parallel 4
+      - name: Test
+        shell: msys2 {0}
+        run: |
+          ctest --preset release --no-tests=error -LE manual \
+            -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+            --parallel 4 --timeout 360 --output-junit ctest.junit.xml
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-ucrt64-test-evidence-${{ github.sha }}
+          path: |
+            build/release/ctest.junit.xml
+            build/release/Testing/Temporary
+            build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+
+  lint:
+    name: Format changed files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install formatting tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format
+      - name: Select formatting comparison commit
+        id: format-base
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PULL_REQUEST_BASE"
+          elif [[ -n "$PUSH_BEFORE" && "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            base="$PUSH_BEFORE"
+          elif git rev-parse --verify --quiet origin/main >/dev/null; then
+            base="origin/main"
+          else
+            base="HEAD^"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+      - name: Check formatting
+        run: scripts/lint.sh --format-only --changed-from '${{ steps.format-base.outputs.base }}'
+
+  public-tree:
+    name: Public tree / inventory honesty
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate publishable tree
+        run: |
+          python3 tools/ci/test_validate_public_tree.py
+          python3 tools/ci/test_check_docs.py
+          python3 tools/ci/validate_public_tree.py
+          python3 tools/ci/validate_assets.py --check config/public-asset-inventory.json
+          python3 tools/check_runtime_data_manifest.py
+          python3 tools/config_codegen.py --check
+          python3 tools/config_codegen.py --check-constants

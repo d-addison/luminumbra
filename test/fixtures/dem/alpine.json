@@ -1,0 +1,131 @@
+{
+  "schema": "luminumbra.dem_reference.v1",
+  "class": "alpine",
+  "landform": "alpine",
+  "source": {
+    "dataset": "AWS Terrain Tiles (Terrarium PNG), open data, public domain",
+    "dataset_url": "https://registry.opendata.aws/terrain-tiles/",
+    "tile_url": "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/11/417/781.png",
+    "tile_zxy": [
+      11,
+      417,
+      781
+    ],
+    "center_latlon": [
+      39.1,
+      -106.6
+    ],
+    "region": "Sawatch Range, Colorado Rocky Mountains, USA",
+    "license": "Public domain / CC0 (Terrarium tiles; underlying SRTM/USGS/ASTER public-domain sources)",
+    "decode": "elevation_m = R*256 + G + B/256 - 32768"
+  },
+  "grid": {
+    "samples": [
+      256,
+      256
+    ],
+    "meters_per_pixel": 59.319
+  },
+  "elevation_m": {
+    "min": 2921.7,
+    "median": 3575.9,
+    "max": 4172.6,
+    "relief": 1251.0
+  },
+  "slope": {
+    "spacing_m": 59.32,
+    "p10": 8.396,
+    "p50": 21.528,
+    "p90": 35.365,
+    "p95": 38.363,
+    "mean": 21.838,
+    "frac_lt5": 0.03517,
+    "frac_lt15": 0.283,
+    "frac_lt25": 0.60959,
+    "frac_gt35": 0.10764,
+    "frac_gt60": 0.0,
+    "bins_5deg": [
+      0.03517,
+      0.10565,
+      0.14218,
+      0.16769,
+      0.15889,
+      0.15211,
+      0.13066,
+      0.07564,
+      0.02504,
+      0.00575,
+      0.00107,
+      0.00014,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "hypsometry": {
+    "integral": 0.5097,
+    "curve": [
+      [
+        0.0,
+        1.0
+      ],
+      [
+        0.1,
+        0.98909
+      ],
+      [
+        0.2,
+        0.95119
+      ],
+      [
+        0.3,
+        0.86833
+      ],
+      [
+        0.4,
+        0.73958
+      ],
+      [
+        0.5,
+        0.54973
+      ],
+      [
+        0.6,
+        0.33498
+      ],
+      [
+        0.7,
+        0.13307
+      ],
+      [
+        0.8,
+        0.03175
+      ],
+      [
+        0.9,
+        0.00336
+      ],
+      [
+        1.0,
+        2e-05
+      ]
+    ]
+  },
+  "spectral": {
+    "measured_beta": 3.956,
+    "fit_band_k": [
+      2,
+      64
+    ],
+    "samples": 63,
+    "reference_beta_band": [
+      1.8,
+      2.2
+    ],
+    "reference_beta_note": "self-affine topography beta = 2H+1 ~ 1.8-2.2 (published); the measured_beta above is biased high by terrarium-tile upsampling. "
+  },
+  "scale_note": "Slope magnitudes are at ~60 m/px DEM resolution; the engine TerrainRealism gate samples at 4 m. Gate on scale-robust descriptors (hypsometric integral, spectral beta, slope distribution SHAPE) rather than absolute slope degrees."
+}

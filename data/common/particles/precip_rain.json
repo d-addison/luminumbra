@@ -1,0 +1,23 @@
+{
+  "schema": "luminumbra.particle_emitter.v1",
+  "name": "precip_rain",
+  "_comment": ": the ONE real gameplay rain emitter (used both in-game AND by the motion-capture clip -- there is no demo-only variant). The emitter GEOMETRY (spawn_rate/lifetime/origin/extent/fall/jitter/aspect/wind_response/size) is kept BYTE-IDENTICAL to the gate-blessed  values so the WeatherVisual/Precipitation wind-slant relationship (windy streaks lean measurably more than calm) is unperturbed. The CLEAN-RAIN look is produced entirely in the particle frag shader, which now draws each streak as a CONSTANT light blue-white translucent filament (no per-particle hue, no scene-light tint), eliminating the coloured-static speckle. The colour_*_curve values below are a neutral fallback only; the shader overrides the streak colour.",
+  "type": 1,
+  "spawn_rate": 4200.0,
+  "lifetime": 1.4,
+  "origin": [0.0, 22.0, 0.0],
+  "origin_extent": [26.0, 4.0, 26.0],
+  "base_velocity": [0.0, -28.0, 0.0],
+  "velocity_jitter": 1.2,
+  "size_curve": [0.08, 0.085, 0.085, 0.085, 0.075],
+  "color_r_curve": [0.82, 0.82, 0.82, 0.82, 0.82],
+  "color_g_curve": [0.90, 0.90, 0.90, 0.90, 0.90],
+  "color_b_curve": [1.0, 1.0, 1.0, 1.0, 1.0],
+  "color_a_curve": [0.0, 0.5, 0.58, 0.46, 0.0],
+  "atlas_layer": 0,
+  "blend": "alpha",
+  "wind_response": 1.0,
+  "streak_aspect": 7.0,
+  "impact_splash": true,
+  "impact_plane_y": 0.0
+}

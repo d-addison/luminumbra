@@ -1,0 +1,98 @@
+#version 450 core
+//  froxel volumetrics (,  ): froxel INJECT — per froxel, evaluate
+// the participating-media density and its in-scattered radiance, writing
+// (rgb = in-scatter, a = extinction sigma) into the scatter volume. The grid
+// geometry (160x90x64, exponential slices 0.5..160 m) mirrors FroxelGrid.h —
+// the FroxelModel gtest anchors the C++ side; FroxelGpu pins this GLSL side.
+//
+// The  COMPOSE: sun visibility samples BOTH the depth cascade AND
+// the tinted-transmission cascade, so light through stained glass scatters as a
+// COLORED shaft — the signature froxel volumetrics x  interaction.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(rgba16f, binding = 0) uniform writeonly image3D u_scatter;
+
+uniform sampler2DArray u_shadowCascades;
+uniform sampler2DArray u_shadowTintCascades;
+uniform int u_shadowTintEnabled;
+uniform mat4 u_lightSpaceMatrices[4];
+uniform vec4 u_cascadeSplits;
+
+uniform mat4 u_inverseView;   // view -> world
+uniform vec3 u_cameraPos;
+uniform float u_tanHalfFovY;
+uniform float u_aspect;
+
+uniform vec3 u_sunDirection;  // TOWARD-sun unit vector
+uniform vec3 u_sunColor;
+uniform vec3 u_ambientColor;
+
+// Media model: exponential height fog (uniform when u_densityFalloff == 0).
+uniform float u_baseDensity;   // sigma at/below u_baseHeight (1/m)
+uniform float u_baseHeight;    // world Y where density starts falling off
+uniform float u_densityFalloff; // 1/m vertical falloff rate
+
+// Grid constants — MUST mirror FroxelGrid.h (pinned by the gtests).
+const int GX = 160; const int GY = 90; const int GZ = 64;
+const float NEAR_D = 0.5; const float FAR_D = 160.0;
+
+float sliceCenterDepth(int z) {
+    float t = (float(z) + 0.5) / float(GZ);
+    return NEAR_D * pow(FAR_D / NEAR_D, t);
+}
+
+// Henyey-Greenstein phase, g = 0.3 (mild forward scattering for air/haze).
+float phaseHG(float cosTheta) {
+    const float g = 0.3;
+    float denom = 1.0 + g * g - 2.0 * g * cosTheta;
+    return (1.0 - g * g) / (4.0 * 3.14159265 * pow(max(denom, 1e-4), 1.5));
+}
+
+void main() {
+    ivec3 gid = ivec3(gl_GlobalInvocationID);
+    if (gid.x >= GX || gid.y >= GY) return;
+
+    // Froxel centre -> view space -> world space. The grid is keyed on RADIAL
+    // view distance d along the froxel's ray (matching DepthToTextureW at
+    // composite time), with the ray direction from the screen position.
+    float d = sliceCenterDepth(gid.z);
+    vec2 ndc = (vec2(gid.xy) + 0.5) / vec2(GX, GY) * 2.0 - 1.0;
+    vec3 rayView = normalize(vec3(ndc.x * u_tanHalfFovY * u_aspect,
+                                  ndc.y * u_tanHalfFovY, -1.0));
+    vec3 viewPos = rayView * d;
+    vec3 worldPos = (u_inverseView * vec4(viewPos, 1.0)).xyz;
+
+    // Density: exponential height falloff above u_baseHeight.
+    float h = max(worldPos.y - u_baseHeight, 0.0);
+    float sigma = u_baseDensity * exp(-h * u_densityFalloff);
+
+    // Sun visibility through the cascade (single tap; media is soft) + the
+    // tinted transmission. Cascade selection keys on the view-space |z| like the
+    // lighting pass.
+    float viewZ = abs(viewPos.z);
+    int ci = 0;
+    ci += (viewZ > u_cascadeSplits.x) ? 1: 0;
+    ci += (viewZ > u_cascadeSplits.y) ? 1: 0;
+    ci += (viewZ > u_cascadeSplits.z) ? 1: 0;
+    vec4 ls = u_lightSpaceMatrices[ci] * vec4(worldPos, 1.0);
+    vec3 proj = ls.xyz / ls.w * 0.5 + 0.5;
+    float sunVis = 1.0;
+    vec3 sunTint = vec3(1.0);
+    if (proj.z <= 1.0 && all(greaterThanEqual(proj.xy, vec2(0.0))) &&
+        all(lessThanEqual(proj.xy, vec2(1.0)))) {
+        float occDepth = texture(u_shadowCascades, vec3(proj.xy, ci)).r;
+        sunVis = (proj.z - 0.002 > occDepth) ? 0.0: 1.0;
+        if (u_shadowTintEnabled != 0) {
+            sunTint = texture(u_shadowTintCascades, vec3(proj.xy, ci)).rgb;
+        }
+    }
+
+    // Phase angle in WORLD space: cos between the camera->froxel ray and the
+    // toward-sun vector — +1 when looking sunward (forward scattering peaks).
+    vec3 worldRay = normalize(worldPos - u_cameraPos);
+    float cosTheta = dot(worldRay, normalize(u_sunDirection));
+    vec3 inscatter = sigma * (u_sunColor * sunVis * sunTint * phaseHG(cosTheta) +
+                              u_ambientColor * (1.0 / (4.0 * 3.14159265)));
+
+    imageStore(u_scatter, gid, vec4(inscatter, sigma));
+}

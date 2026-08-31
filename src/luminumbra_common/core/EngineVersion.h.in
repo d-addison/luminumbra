@@ -1,0 +1,15 @@
+#pragma once
+
+#include <string_view>
+
+namespace luminumbra::core {
+
+inline constexpr std::string_view kEngineVersion = "@LUMINUMBRA_ENGINE_VERSION@";
+inline constexpr std::string_view kEngineGitSha = "@LUMINUMBRA_ENGINE_GIT_SHA@";
+inline constexpr std::string_view kEngineVersionString = "@LUMINUMBRA_ENGINE_VERSION_STRING@";
+
+std::string_view GetEngineVersion() noexcept;
+std::string_view GetEngineGitSha() noexcept;
+std::string_view GetEngineVersionString() noexcept;
+
+} // namespace luminumbra::core

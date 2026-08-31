@@ -1,0 +1,247 @@
+name: Performance observations
+
+on:
+  pull_request:
+    branches: [main, devel]
+  push:
+    branches: [main, devel]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runner-contract:
+    name: Runner contract / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Test performance result contract
+        run: |
+          python tools/perf/test_perf.py
+          python tools/ci/test_validate_performance_measurement.py
+
+  preview-frame:
+    name: Preview frame / software OpenGL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install measurement dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
+            xauth xorg-dev xvfb
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: perf-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
+          restore-keys: perf-linux-x64-gcc-ccache-
+      - name: Configure
+        run: cmake --preset perf -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - name: Build measurement target
+        run: cmake --build --preset perf --target worldgen_preview_test --parallel 4
+      - name: Measure preview frame
+        continue-on-error: true
+        run: |
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset perf --no-tests=error \
+              -R '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
+              --output-on-failure --output-junit performance.junit.xml
+      - name: Validate measurement evidence
+        if: always()
+        run: |
+          python3 tools/ci/validate_performance_measurement.py \
+            build/perf/performance.junit.xml \
+            build/perf/test-artifacts/performance/worldgen_preview_frame.json \
+            build/perf/performance-result.json \
+            --test WorldgenPreviewTest.PerFrameRenderHoldsPreviewBudget --preset perf
+          cat build/perf/performance-result.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload measurement evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: preview-frame-performance-${{ github.sha }}
+          path: |
+            build/perf/performance.junit.xml
+            build/perf/performance-result.json
+            build/perf/Testing/Temporary
+            build/perf/test-artifacts
+          if-no-files-found: warn
+          retention-days: 30
+
+  server-smoke-comparison:
+    name: Server smoke observation / base versus head
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.event.before != '0000000000000000000000000000000000000000')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: head
+      - name: Check out base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          path: base
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config wayland-protocols xorg-dev
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha || github.event.before }}-${{ github.event.pull_request.head.sha || github.sha }}
+          restore-keys: perf-paired-linux-x64-gcc-
+      - name: Configure identical builds
+        run: |
+          cmake -S base -B build/base -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLUMINUMBRA_ENABLE_ASAN=OFF \
+            -DLUMINUMBRA_ENABLE_COVERAGE=OFF \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
+            -DLUMINUMBRA_ENABLE_FRAME_POINTERS=ON \
+            -DLUMINUMBRA_ENABLE_TRACY=OFF \
+            -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON \
+            -DCMAKE_PROJECT_INCLUDE="$GITHUB_WORKSPACE/head/cmake/performance_manifest.cmake"
+          cmake -S head -B build/head -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLUMINUMBRA_ENABLE_ASAN=OFF \
+            -DLUMINUMBRA_ENABLE_COVERAGE=OFF \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
+            -DLUMINUMBRA_ENABLE_FRAME_POINTERS=ON \
+            -DLUMINUMBRA_ENABLE_TRACY=OFF \
+            -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+      - name: Build identical targets
+        run: |
+          cmake --build build/base --target luminumbra_server_app --parallel 4
+          cmake --build build/head --target luminumbra_server_app --parallel 4
+      - name: Measure base / first batch
+        run: |
+          BASE_FIXTURE=$(git -C base rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload server-smoke --workload-version 1 --layer end-to-end \
+            --preset perf --build-manifest build/base/performance-build.json \
+            --commit "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
+            --parameter ticks=30 --parameter surface_radius=1 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/base/server-smoke-evidence-1.json \
+            --output build/base/server-smoke-run-1.json -- \
+            build/base/bin/luminumbra_server_app --smoke --preset default \
+              --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
+              --artifact build/base/server-smoke-evidence-1.json
+      - name: Measure candidate / first batch
+        run: |
+          HEAD_FIXTURE=$(git -C head rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload server-smoke --workload-version 1 --layer end-to-end \
+            --preset perf --build-manifest build/head/performance-build.json \
+            --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
+            --parameter ticks=30 --parameter surface_radius=1 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/head/server-smoke-evidence-1.json \
+            --output build/head/server-smoke-run-1.json -- \
+            build/head/bin/luminumbra_server_app --smoke --preset default \
+              --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
+              --artifact build/head/server-smoke-evidence-1.json
+      - name: Measure candidate / second batch
+        run: |
+          HEAD_FIXTURE=$(git -C head rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload server-smoke --workload-version 1 --layer end-to-end \
+            --preset perf --build-manifest build/head/performance-build.json \
+            --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
+            --parameter ticks=30 --parameter surface_radius=1 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/head/server-smoke-evidence-2.json \
+            --output build/head/server-smoke-run-2.json -- \
+            build/head/bin/luminumbra_server_app --smoke --preset default \
+              --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
+              --artifact build/head/server-smoke-evidence-2.json
+      - name: Measure base / second batch
+        run: |
+          BASE_FIXTURE=$(git -C base rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload server-smoke --workload-version 1 --layer end-to-end \
+            --preset perf --build-manifest build/base/performance-build.json \
+            --commit "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
+            --parameter ticks=30 --parameter surface_radius=1 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/base/server-smoke-evidence-2.json \
+            --output build/base/server-smoke-run-2.json -- \
+            build/base/bin/luminumbra_server_app --smoke --preset default \
+              --seed 1337 --ticks 30 --radius 1 --collision-radius 1 \
+              --artifact build/base/server-smoke-evidence-2.json
+      - name: Combine interleaved batches
+        run: |
+          python3 head/tools/perf/perf.py combine \
+            --runs build/base/server-smoke-run-1.json build/base/server-smoke-run-2.json \
+            --output build/base/server-smoke-run.json
+          python3 head/tools/perf/perf.py combine \
+            --runs build/head/server-smoke-run-1.json build/head/server-smoke-run-2.json \
+            --output build/head/server-smoke-run.json
+      - name: Compare base and candidate observation
+        run: |
+          python3 head/tools/perf/perf.py compare \
+            --base build/base/server-smoke-run.json \
+            --candidate build/head/server-smoke-run.json \
+            --limit 5 --min-samples 20 \
+            --output build/server-smoke-comparison.json
+      - name: Publish comparison summary
+        if: always()
+        run: |
+          test -f build/server-smoke-comparison.json
+          cat build/server-smoke-comparison.json >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload paired evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: server-smoke-comparison-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            build/base/server-smoke-run.json
+            build/base/server-smoke-run-*.json
+            build/base/server-smoke-evidence-*.json
+            build/head/server-smoke-run.json
+            build/head/server-smoke-run-*.json
+            build/head/server-smoke-evidence-*.json
+            build/server-smoke-comparison.json
+          if-no-files-found: error
+          retention-days: 30

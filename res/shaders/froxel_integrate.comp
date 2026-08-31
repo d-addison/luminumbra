@@ -1,0 +1,38 @@
+#version 450 core
+//  froxel volumetrics (,  ): froxel INTEGRATE — per screen column,
+// march the scatter volume front to back accumulating in-scattered radiance and
+// transmittance:
+//   T *= exp(-sigma * dz);  L += T * inscatter * dz
+// writing (rgb = accumulated L up to this slice, a = transmittance T) so the
+// composite samples the volume at the scene depth's slice and gets exactly the
+// media integral in front of that surface.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(rgba16f, binding = 0) uniform readonly image3D u_scatter;
+layout(rgba16f, binding = 1) uniform writeonly image3D u_integrated;
+
+const int GX = 160; const int GY = 90; const int GZ = 64;
+const float NEAR_D = 0.5; const float FAR_D = 160.0;
+
+float sliceBoundaryDepth(int b) {
+    float t = float(b) / float(GZ);
+    return NEAR_D * pow(FAR_D / NEAR_D, t);
+}
+
+void main() {
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= GX || gid.y >= GY) return;
+
+    vec3 L = vec3(0.0);
+    float T = 1.0;
+    for (int z = 0; z < GZ; ++z) {
+        vec4 s = imageLoad(u_scatter, ivec3(gid, z));
+        float dz = sliceBoundaryDepth(z + 1) - sliceBoundaryDepth(z);
+        // Energy-conserving slice integration (Frostbite): the slice's own
+        // scattering attenuates through the slice, then T steps across it.
+        float stepT = exp(-s.a * dz);
+        L += T * s.rgb * dz;
+        T *= stepT;
+        imageStore(u_integrated, ivec3(gid, z), vec4(L, T));
+    }
+}
