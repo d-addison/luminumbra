@@ -2,27 +2,28 @@
 #include "../world/Chunk.h"
 #include "../../../include/luminumbra/core/Types.h"
 
+#include <Jolt/Core/Factory.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/Body/Body.h>
-#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
-#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
-#include <Jolt/Physics/Collision/Shape/SphereShape.h>
-#include <Jolt/Physics/Collision/Shape/MeshShape.h>
-#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
-#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
-#include <Jolt/Physics/Collision/CollideShape.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
-#include <Jolt/Core/Factory.h>
-#include <Jolt/RegisterTypes.h>
-#include <Jolt/Core/JobSystemThreadPool.h>
-#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
 #include <Jolt/Physics/Collision/RayCast.h>
-#include <Jolt/Physics/Collision/CastResult.h> 
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/RegisterTypes.h>
 
+#include "../core/Log.h"
+#include <algorithm>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <algorithm>
-#include "../core/Log.h"
+#include <mutex>
 
 using namespace JPH;
 
@@ -89,6 +90,33 @@ public:
     bool ShouldCollide(ObjectLayer) const override { return true; }
 };
 
+namespace {
+std::mutex g_jolt_runtime_mutex;
+std::size_t g_jolt_runtime_users = 0;
+bool g_owns_jolt_factory = false;
+
+void AcquireJoltRuntime() {
+    std::lock_guard lock(g_jolt_runtime_mutex);
+    if (g_jolt_runtime_users == 0 && Factory::sInstance == nullptr) {
+        RegisterDefaultAllocator();
+        Factory::sInstance = new Factory();
+        RegisterTypes();
+        g_owns_jolt_factory = true;
+    }
+    ++g_jolt_runtime_users;
+}
+
+void ReleaseJoltRuntime() {
+    std::lock_guard lock(g_jolt_runtime_mutex);
+    if (--g_jolt_runtime_users == 0 && g_owns_jolt_factory) {
+        UnregisterTypes();
+        delete Factory::sInstance;
+        Factory::sInstance = nullptr;
+        g_owns_jolt_factory = false;
+    }
+}
+} // namespace
+
 // --- PhysicsSystem Implementation (Unchanged parts omitted for brevity) ---
 PhysicsSystem::PhysicsSystem() = default;
 PhysicsSystem::~PhysicsSystem() { shutdown(); }
@@ -99,11 +127,10 @@ void PhysicsSystem::startup() {
         return;
     }
 
-    RegisterDefaultAllocator();
-    Factory::sInstance = new Factory();
-    RegisterTypes();
+    AcquireJoltRuntime();
     m_temp_allocator = std::make_unique<TempAllocatorImpl>(10 * 1024 * 1024);
-    const uint num_worker_threads = std::max(1u, std::thread::hardware_concurrency() - 1);
+    const uint hardware_threads = std::thread::hardware_concurrency();
+    const uint num_worker_threads = hardware_threads > 1 ? hardware_threads - 1 : 1;
     m_jolt_job_system = std::make_unique<JobSystemThreadPool>(cMaxPhysicsJobs, cMaxPhysicsBarriers, num_worker_threads);
     m_jolt_system = std::make_unique<JPH::PhysicsSystem>();
     static BPLayerInterfaceImpl broad_phase_layer_interface;
@@ -138,9 +165,7 @@ void PhysicsSystem::shutdown() {
     m_jolt_system.reset();
     m_jolt_job_system.reset();
     m_temp_allocator.reset();
-    UnregisterTypes();
-    delete Factory::sInstance;
-    Factory::sInstance = nullptr;
+    ReleaseJoltRuntime();
     m_started = false;
 }
 
