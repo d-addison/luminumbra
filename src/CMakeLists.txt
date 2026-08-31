@@ -4,12 +4,10 @@
 add_subdirectory(luminumbra_common)
 
 # --- Client Library (Rendering, UI, Input) ---
-# src/luminumbra_client/CMakeLists.txt is not the active entry point; keep the
-# shared source manifest below as the single source of truth for the client.
+# The shared source manifest is the single source of truth for the client.
 include("${CMAKE_CURRENT_LIST_DIR}/luminumbra_client/sources.cmake")
 
-# Create the library with both first-party client sources and vendored ImGui
-# backend sources.
+# Create the library from the first-party client source manifest.
 add_library(luminumbra_client STATIC
     ${CLIENT_INTERNAL_SOURCES}
     ${CLIENT_VENDOR_SOURCES}

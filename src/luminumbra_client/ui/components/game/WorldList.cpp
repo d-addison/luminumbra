@@ -1,11 +1,50 @@
 #include "WorldList.h"
 #include "core/Log.h"
+#include <RmlUi/Core/StringUtilities.h>
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <chrono>
 #include <iomanip>
+#include <optional>
 #include <sstream>
+#include <unordered_map>
 
 namespace Luminumbra::Client::UI {
+
+namespace {
+
+std::optional<std::chrono::sys_days> ParseIsoDate(const std::string& timestamp) {
+    if (timestamp.size() < 10 || timestamp[4] != '-' || timestamp[7] != '-') {
+        return std::nullopt;
+    }
+
+    int yearValue = 0;
+    unsigned monthValue = 0;
+    unsigned dayValue = 0;
+    const auto parsePart = [&](std::size_t offset, std::size_t count, auto& value) {
+        const char* begin = timestamp.data() + offset;
+        const char* end = begin + count;
+        const auto result = std::from_chars(begin, end, value);
+        return result.ec == std::errc{} && result.ptr == end;
+    };
+    if (!parsePart(0, 4, yearValue) || !parsePart(5, 2, monthValue) || !parsePart(8, 2, dayValue)) {
+        return std::nullopt;
+    }
+
+    const std::chrono::year_month_day date{
+        std::chrono::year{yearValue}, std::chrono::month{monthValue}, std::chrono::day{dayValue}};
+    if (!date.ok()) {
+        return std::nullopt;
+    }
+    return std::chrono::sys_days{date};
+}
+
+std::string EscapeRml(const std::string& value) {
+    return Rml::StringUtilities::EncodeRml(value);
+}
+
+} // namespace
 
 WorldList::WorldList(const std::string& elementId) : UIComponent(elementId) {
 }
@@ -22,9 +61,10 @@ void WorldList::OnElementSet() {
     m_listContainer = m_element->GetElementById("world_list_items");
     if (!m_listContainer) {
         // Create list container if it doesn't exist
-        m_listContainer = m_document->CreateElement("div");
+        auto listContainer = m_document->CreateElement("div");
+        m_listContainer = listContainer.get();
         m_listContainer->SetId("world_list_items");
-        m_element->AppendChild(m_listContainer);
+        m_element->AppendChild(std::move(listContainer));
     }
     
     UpdateLoadingState();
@@ -32,7 +72,8 @@ void WorldList::OnElementSet() {
 }
 
 void WorldList::Update(float deltaTime) {
-    // Handle any pending UI updates
+    (void)deltaTime;
+    UpdateLoadingState();
 }
 
 void WorldList::SetWorlds(const std::vector<WorldInfo>& worlds) {
@@ -61,8 +102,16 @@ void WorldList::RemoveWorld(const std::string& worldId) {
     }
     
     ApplyFilters();
-    RemoveWorldElement(worldId);
+    RebuildList();
     UpdateEmptyState();
+}
+
+void WorldList::SetLoading(bool loading) {
+    if (m_loading != loading) {
+        m_loading = loading;
+        UpdateLoadingState();
+        UpdateEmptyState();
+    }
 }
 
 void WorldList::UpdateWorld(const WorldInfo& world) {
@@ -83,6 +132,7 @@ void WorldList::ClearWorlds() {
     
     if (m_listContainer) {
         m_listContainer->SetInnerRML("");
+        PruneDetachedEventListeners();
     }
     
     UpdateEmptyState();
@@ -98,7 +148,7 @@ void WorldList::SelectWorld(const std::string& worldId) {
             m_listContainer->GetElementsByClassName(items, "list-item");
             
             for (auto* item : items) {
-                std::string itemWorldId = item->GetAttribute("data-world-id", "");
+                std::string itemWorldId = item->GetAttribute<Rml::String>("data-world-id", "");
                 if (itemWorldId == worldId) {
                     item->SetClass("selected", true);
                 } else {
@@ -221,12 +271,19 @@ void WorldList::BindSearchFilter(Property<std::string>& searchProperty) {
     });
 }
 
+void WorldList::BindLoading(Property<bool>& loadingProperty) {
+    SetLoading(loadingProperty.Get());
+    TrackSubscription(loadingProperty,
+                      [this](const bool&, const bool& loading) { SetLoading(loading); });
+}
+
 void WorldList::RebuildList() {
     if (!m_listContainer) return;
     
     // Clear existing items
     m_listContainer->SetInnerRML("");
-    
+    PruneDetachedEventListeners();
+
     // Hide loading state
     UpdateLoadingState();
     
@@ -282,24 +339,28 @@ void WorldList::CreateWorldElement(const WorldInfo& world) {
     if (!m_listContainer || !m_document) return;
     
     // Create main list item
-    Rml::Element* item = m_document->CreateElement("div");
+    auto itemHandle = m_document->CreateElement("div");
+    Rml::Element* item = itemHandle.get();
     item->SetClass("list-item", true);
     item->SetAttribute("data-world-id", world.id);
     
     // Create world entry content
     std::stringstream content;
     content << "<div class=\"world-entry-header\">";
-    content << "<h3 class=\"list-item-title\">" << world.name << "</h3>";
+    content << "<h3 class=\"list-item-title\">" << EscapeRml(world.name) << "</h3>";
     content << "<div class=\"world-actions\">";
-    content << "<button class=\"btn btn-sm btn-secondary world-favorite\" data-favorite=\"false\" data-world-id=\"" << world.id << "\">☆</button>";
-    content << "<button class=\"btn btn-sm btn-danger world-delete\" data-world-id=\"" << world.id << "\">Delete</button>";
+    content << "<button class=\"btn btn-sm btn-secondary world-favorite\" data-favorite=\""
+            << (world.favorite ? "true" : "false") << "\" data-world-id=\"" << EscapeRml(world.id)
+            << "\">" << (world.favorite ? "★" : "☆") << "</button>";
+    content << "<button class=\"btn btn-sm btn-danger world-delete\" data-world-id=\""
+            << EscapeRml(world.id) << "\">Delete</button>";
     content << "</div>";
     content << "</div>";
     
     content << "<p class=\"list-item-description\">";
-    content << "Type: " << GetWorldTypeDisplayName(world.type);
+    content << "Type: " << EscapeRml(GetWorldTypeDisplayName(world.type));
     if (!world.seed.empty()) {
-        content << " | Seed: " << world.seed;
+        content << " | Seed: " << EscapeRml(world.seed);
     }
     content << "<br/>";
     content << "Last played: " << FormatLastPlayed(world.lastPlayed);
@@ -313,67 +374,46 @@ void WorldList::CreateWorldElement(const WorldInfo& world) {
     item->SetInnerRML(content.str());
     
     // Add event handlers
-    auto clickListener = std::make_unique<LambdaEventListener>([this, worldId = world.id](Rml::Event&) {
-        HandleWorldClick(worldId);
-    });
-    
-    item->AddEventListener("click", clickListener.get());
-    m_eventListeners.emplace_back(std::move(clickListener));
-    
+    AddTrackedEventListener(
+        item, "click", [this, worldId = world.id](Rml::Event&) { HandleWorldClick(worldId); });
+
     // Add favorite button handler
-    if (auto* favoriteBtn = item->GetElementById("world-favorite")) {
-        auto favoriteListener = std::make_unique<LambdaEventListener>([this, worldId = world.id](Rml::Event& event) {
-            event.StopPropagation();
-            HandleFavoriteToggle(worldId);
-        });
-        
-        favoriteBtn->AddEventListener("click", favoriteListener.get());
-        m_eventListeners.emplace_back(std::move(favoriteListener));
+    if (auto* favoriteBtn = item->QuerySelector(".world-favorite")) {
+        AddTrackedEventListener(
+            favoriteBtn, "click", [this, worldId = world.id](Rml::Event& event) {
+                event.StopPropagation();
+                HandleFavoriteToggle(worldId);
+            });
     }
-    
+
     // Add delete button handler
-    if (auto* deleteBtn = item->GetElementById("world-delete")) {
-        auto deleteListener = std::make_unique<LambdaEventListener>([this, worldId = world.id](Rml::Event& event) {
+    if (auto* deleteBtn = item->QuerySelector(".world-delete")) {
+        AddTrackedEventListener(deleteBtn, "click", [this, worldId = world.id](Rml::Event& event) {
             event.StopPropagation();
             HandleWorldDelete(worldId);
         });
-        
-        deleteBtn->AddEventListener("click", deleteListener.get());
-        m_eventListeners.emplace_back(std::move(deleteListener));
     }
-    
+
     // Check if this world is selected
     if (world.id == m_selectedWorldId) {
         item->SetClass("selected", true);
     }
-    
-    m_listContainer->AppendChild(item);
-}
 
-void WorldList::RemoveWorldElement(const std::string& worldId) {
-    if (!m_listContainer) return;
-    
-    Rml::ElementList items;
-    m_listContainer->GetElementsByClassName(items, "list-item");
-    
-    for (auto* item : items) {
-        if (item->GetAttribute("data-world-id", "") == worldId) {
-            m_listContainer->RemoveChild(item);
-            break;
-        }
-    }
+    m_listContainer->AppendChild(std::move(itemHandle));
 }
 
 void WorldList::UpdateLoadingState() {
     if (m_loadingElement) {
-        bool isLoading = false; // TODO: Add loading state management
-        m_loadingElement->SetProperty("display", isLoading ? "block" : "none");
+        m_loadingElement->SetProperty("display", m_loading ? "block" : "none");
+    }
+    if (m_listContainer) {
+        m_listContainer->SetProperty("display", m_loading ? "none" : "block");
     }
 }
 
 void WorldList::UpdateEmptyState() {
     if (m_emptyElement) {
-        bool isEmpty = m_filteredWorlds.empty() && !m_worlds.empty(); // No filtered results
+        const bool isEmpty = !m_loading && m_filteredWorlds.empty();
         m_emptyElement->SetProperty("display", isEmpty ? "block" : "none");
     }
 }
@@ -389,17 +429,31 @@ void WorldList::HandleWorldDelete(const std::string& worldId) {
 }
 
 void WorldList::HandleFavoriteToggle(const std::string& worldId) {
-    // TODO: Implement favorite toggle functionality
-    LUMINUMBRA_CORE_INFO("[UI] Toggle favorite for world: {}", worldId);
+    const auto world =
+        std::find_if(m_worlds.begin(), m_worlds.end(), [&worldId](const WorldInfo& candidate) {
+            return candidate.id == worldId;
+        });
+    if (world == m_worlds.end()) {
+        return;
+    }
+    world->favorite = !world->favorite;
+    ApplyFilters();
+    RebuildList();
+    UpdateEmptyState();
 }
 
 bool WorldList::MatchesSearchFilter(const WorldInfo& world) const {
     std::string lowerFilter = m_searchFilter;
-    std::transform(lowerFilter.begin(), lowerFilter.end(), lowerFilter.begin(), ::tolower);
-    
+    std::transform(lowerFilter.begin(),
+                   lowerFilter.end(),
+                   lowerFilter.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+
     std::string lowerName = world.name;
-    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-    
+    std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+
     return lowerName.find(lowerFilter) != std::string::npos;
 }
 
@@ -408,13 +462,17 @@ bool WorldList::MatchesTypeFilter(const WorldInfo& world) const {
 }
 
 bool WorldList::MatchesFavoriteFilter(const WorldInfo& world) const {
-    // TODO: Implement favorite status tracking
-    return true; // Placeholder
+    return world.favorite;
 }
 
 bool WorldList::MatchesRecentFilter(const WorldInfo& world) const {
-    // TODO: Implement recent filter logic (e.g., played within last week)
-    return true; // Placeholder
+    const auto played = ParseIsoDate(world.lastPlayed);
+    if (!played) {
+        return false;
+    }
+    const auto today = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+    const auto age = today - *played;
+    return age >= std::chrono::days{0} && age <= std::chrono::days{7};
 }
 
 std::string WorldList::FormatFileSize(size_t bytes) const {
@@ -433,8 +491,19 @@ std::string WorldList::FormatFileSize(size_t bytes) const {
 }
 
 std::string WorldList::FormatLastPlayed(const std::string& timestamp) const {
-    // TODO: Implement proper timestamp parsing and formatting
-    return timestamp.empty() ? "Never" : timestamp;
+    const auto played = ParseIsoDate(timestamp);
+    if (!played) {
+        return timestamp.empty() ? "Never" : timestamp;
+    }
+    const auto today = std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now());
+    const auto age = today - *played;
+    if (age == std::chrono::days{0}) {
+        return "Today";
+    }
+    if (age == std::chrono::days{1}) {
+        return "Yesterday";
+    }
+    return timestamp.substr(0, 10);
 }
 
 std::string WorldList::GetWorldTypeDisplayName(const std::string& type) const {
@@ -453,25 +522,30 @@ std::string WorldList::GetWorldTypeDisplayName(const std::string& type) const {
 }
 
 bool WorldList::CompareWorlds(const WorldInfo& a, const WorldInfo& b) const {
-    bool result = false;
-    
+    bool less = false;
+    bool greater = false;
     switch (m_sortBy) {
         case SortBy::Name:
-            result = a.name < b.name;
+            less = a.name < b.name;
+            greater = b.name < a.name;
             break;
         case SortBy::LastPlayed:
-            result = a.lastPlayed < b.lastPlayed;
+            less = a.lastPlayed < b.lastPlayed;
+            greater = b.lastPlayed < a.lastPlayed;
             break;
         case SortBy::Size:
-            result = a.fileSize < b.fileSize;
+            less = a.fileSize < b.fileSize;
+            greater = b.fileSize < a.fileSize;
             break;
         case SortBy::CreationDate:
-            // TODO: Add creation date to WorldInfo
-            result = a.id < b.id; // Fallback to ID
+            less = a.createdAt < b.createdAt;
+            greater = b.createdAt < a.createdAt;
             break;
     }
-    
-    return m_sortAscending ? result : !result;
+    if (!less && !greater) {
+        return m_sortAscending ? a.id < b.id : b.id < a.id;
+    }
+    return m_sortAscending ? less : greater;
 }
 
 } // namespace Luminumbra::Client::UI

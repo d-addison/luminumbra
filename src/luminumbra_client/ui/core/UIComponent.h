@@ -10,6 +10,32 @@
 
 namespace Luminumbra::Client::UI {
 
+class LambdaEventListener : public Rml::EventListener {
+public:
+    using Callback = std::function<void(Rml::Event&)>;
+    using DetachCallback = std::function<void()>;
+
+    LambdaEventListener(Callback callback, DetachCallback detachCallback = {})
+        : m_callback(std::move(callback))
+        , m_detachCallback(std::move(detachCallback)) {}
+
+    void ProcessEvent(Rml::Event& event) override {
+        if (m_callback) {
+            m_callback(event);
+        }
+    }
+
+    void OnDetach(Rml::Element*) override {
+        if (m_detachCallback) {
+            m_detachCallback();
+        }
+    }
+
+private:
+    Callback m_callback;
+    DetachCallback m_detachCallback;
+};
+
 /**
  * Base class for all UI components.
  * Provides data binding capabilities and common functionality.
@@ -40,10 +66,10 @@ public:
     
     template<typename T>
     void BindValue(Property<T>& property);
-    
-    template<typename T>
-    void BindVisibility(Property<T>& property, std::function<bool(const T&)> visibilityFunc);
-    
+
+    template<typename T, typename Predicate>
+    void BindVisibility(Property<T>& property, Predicate&& visibilityFunc);
+
     // Event handling
     using ClickCallback = std::function<void(Rml::Event&)>;
     using ChangeCallback = std::function<void(Rml::Event&)>;
@@ -68,6 +94,16 @@ public:
     void FadeOut(float duration = 0.3f);
 
 protected:
+    struct ListenerAttachment {
+        Rml::Element* element = nullptr;
+    };
+
+    struct EventListenerBinding {
+        std::shared_ptr<ListenerAttachment> attachment;
+        Rml::String event;
+        std::unique_ptr<LambdaEventListener> listener;
+    };
+
     std::string m_elementId;
     Rml::Element* m_element = nullptr;
     Rml::ElementDocument* m_document = nullptr;
@@ -78,10 +114,15 @@ protected:
     std::vector<ScopedSubscription> m_bindings;
 
     // Event listeners for cleanup
-    std::vector<std::unique_ptr<Rml::EventListener>> m_eventListeners;
+    std::vector<EventListenerBinding> m_eventListeners;
 
     virtual void OnElementSet() {} // Called when element is first set
     void CleanupBindings();
+    void CleanupEventListeners();
+    void PruneDetachedEventListeners();
+    void AddTrackedEventListener(Rml::Element* element,
+                                 const Rml::String& event,
+                                 LambdaEventListener::Callback callback);
 
     // Subscribe to a property and track the subscription for automatic
     // unsubscription when this component is destroyed. The callable type is
@@ -92,24 +133,6 @@ protected:
         const SubscriptionToken token = property.Subscribe(std::forward<Callback>(callback));
         m_bindings.emplace_back(property, token);
     }
-};
-
-/**
- * Lambda-based event listener for RmlUi integration
- */
-class LambdaEventListener : public Rml::EventListener {
-public:
-    using Callback = std::function<void(Rml::Event&)>;
-    explicit LambdaEventListener(Callback callback) : m_callback(std::move(callback)) {}
-    
-    void ProcessEvent(Rml::Event& event) override {
-        if (m_callback) {
-            m_callback(event);
-        }
-    }
-    
-private:
-    Callback m_callback;
 };
 
 // Template implementations
@@ -199,22 +222,24 @@ void UIComponent::BindValue(Property<T>& property) {
     });
 }
 
-template<typename T>
-void UIComponent::BindVisibility(Property<T>& property, std::function<bool(const T&)> visibilityFunc) {
+template<typename T, typename Predicate>
+void UIComponent::BindVisibility(Property<T>& property, Predicate&& visibilityFunc) {
     if (!m_element) return;
-    
+
+    std::function<bool(const T&)> predicate(std::forward<Predicate>(visibilityFunc));
+
     // Set initial visibility
-    bool visible = visibilityFunc(property.Get());
+    bool visible = predicate(property.Get());
     m_element->SetProperty("display", visible ? "block" : "none");
     
     // Subscribe to changes
-    auto binding = [this, visibilityFunc](const T& oldValue, const T& newValue) {
+    auto binding = [this, predicate = std::move(predicate)](const T& oldValue, const T& newValue) {
         if (m_element) {
-            bool visible = visibilityFunc(newValue);
+            bool visible = predicate(newValue);
             m_element->SetProperty("display", visible ? "block" : "none");
         }
     };
-    
+
     TrackSubscription(property, std::move(binding));
 }
 

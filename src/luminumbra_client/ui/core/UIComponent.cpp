@@ -1,5 +1,8 @@
 #include "UIComponent.h"
 #include "core/Log.h"
+#include <RmlUi/Core/PropertyDictionary.h>
+#include <RmlUi/Core/StyleSheetSpecification.h>
+#include <algorithm>
 
 namespace Luminumbra::Client::UI {
 
@@ -11,6 +14,7 @@ UIComponent::~UIComponent() {
     // called, so a destroyed component cannot be invoked by a later
     // Property::Set() (use-after-free).
     CleanupBindings();
+    CleanupEventListeners();
 }
 
 void UIComponent::Initialize(Rml::ElementDocument* document) {
@@ -27,43 +31,28 @@ void UIComponent::Initialize(Rml::ElementDocument* document) {
 
 void UIComponent::Destroy() {
     CleanupBindings();
-    m_eventListeners.clear();
+    CleanupEventListeners();
     m_element = nullptr;
     m_document = nullptr;
 }
 
 void UIComponent::OnClick(ClickCallback callback) {
     if (!m_element || !callback) return;
-    
-    auto listener = std::make_unique<LambdaEventListener>(std::move(callback));
-    m_element->AddEventListener("click", listener.get());
-    m_eventListeners.emplace_back(std::move(listener));
+
+    AddTrackedEventListener(m_element, "click", std::move(callback));
 }
 
 void UIComponent::OnChange(ChangeCallback callback) {
     if (!m_element || !callback) return;
-    
-    auto listener = std::make_unique<LambdaEventListener>(std::move(callback));
-    m_element->AddEventListener("change", listener.get());
-    m_eventListeners.emplace_back(std::move(listener));
+
+    AddTrackedEventListener(m_element, "change", std::move(callback));
 }
 
 void UIComponent::OnHover(std::function<void(bool)> callback) {
     if (!m_element || !callback) return;
-    
-    auto enterListener = std::make_unique<LambdaEventListener>([callback](Rml::Event&) {
-        callback(true);
-    });
-    
-    auto leaveListener = std::make_unique<LambdaEventListener>([callback](Rml::Event&) {
-        callback(false);
-    });
-    
-    m_element->AddEventListener("mouseenter", enterListener.get());
-    m_element->AddEventListener("mouseleave", leaveListener.get());
-    
-    m_eventListeners.emplace_back(std::move(enterListener));
-    m_eventListeners.emplace_back(std::move(leaveListener));
+
+    AddTrackedEventListener(m_element, "mouseenter", [callback](Rml::Event&) { callback(true); });
+    AddTrackedEventListener(m_element, "mouseleave", [callback](Rml::Event&) { callback(false); });
 }
 
 void UIComponent::AddClass(const std::string& className) {
@@ -101,27 +90,73 @@ std::string UIComponent::GetAttribute(const std::string& name) const {
 
 void UIComponent::AnimateProperty(const std::string& property, const std::string& targetValue, float duration) {
     if (!m_element) return;
-    
-    // TODO: Implement smooth animations
-    // For now, just set the property directly
-    m_element->SetProperty(property, targetValue);
-    
-    LUMINUMBRA_CORE_TRACE("[UI] Animated property {} to {} on element {}", property, targetValue, m_elementId);
+
+    Rml::PropertyDictionary properties;
+    const Rml::PropertyId id = Rml::StyleSheetSpecification::GetPropertyId(property);
+    if (id == Rml::PropertyId::Invalid || !Rml::StyleSheetSpecification::ParsePropertyDeclaration(
+                                              properties, property, targetValue)) {
+        LUMINUMBRA_CORE_WARN("[UI] Could not animate invalid property {}={} on element {}",
+                             property,
+                             targetValue,
+                             m_elementId);
+        return;
+    }
+    const Rml::Property* target = properties.GetProperty(id);
+    if (!target || !m_element->Animate(property, *target, std::max(0.0f, duration))) {
+        LUMINUMBRA_CORE_WARN("[UI] Could not start animation {}={} on element {}",
+                             property,
+                             targetValue,
+                             m_elementId);
+    }
 }
 
 void UIComponent::FadeIn(float duration) {
-    AnimateProperty("opacity", "1", duration);
+    if (!m_element)
+        return;
     m_element->SetProperty("display", "block");
+    m_element->SetProperty("pointer-events", "auto");
+    AnimateProperty("opacity", "1", duration);
 }
 
 void UIComponent::FadeOut(float duration) {
+    if (!m_element)
+        return;
     AnimateProperty("opacity", "0", duration);
-    // TODO: Set display to none after animation completes
+    m_element->SetProperty("pointer-events", "none");
 }
 
 void UIComponent::CleanupBindings() {
     // ScopedSubscription destructors unsubscribe from the bound properties.
     m_bindings.clear();
+}
+
+void UIComponent::CleanupEventListeners() {
+    for (auto& binding : m_eventListeners) {
+        if (binding.attachment && binding.attachment->element && binding.listener) {
+            binding.attachment->element->RemoveEventListener(binding.event, binding.listener.get());
+        }
+    }
+    m_eventListeners.clear();
+}
+
+void UIComponent::PruneDetachedEventListeners() {
+    std::erase_if(m_eventListeners, [](const EventListenerBinding& binding) {
+        return !binding.attachment || !binding.attachment->element;
+    });
+}
+
+void UIComponent::AddTrackedEventListener(Rml::Element* element,
+                                          const Rml::String& event,
+                                          LambdaEventListener::Callback callback) {
+    if (!element || !callback) {
+        return;
+    }
+    auto attachment = std::make_shared<ListenerAttachment>();
+    attachment->element = element;
+    auto listener = std::make_unique<LambdaEventListener>(
+        std::move(callback), [attachment]() { attachment->element = nullptr; });
+    element->AddEventListener(event, listener.get());
+    m_eventListeners.push_back({std::move(attachment), event, std::move(listener)});
 }
 
 } // namespace Luminumbra::Client::UI

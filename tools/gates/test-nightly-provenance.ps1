@@ -74,17 +74,15 @@ Assert-False `
     "an unresolved identity is rejected"
 
 $null = Assert-NightlyTrackedChangePolicy -ChangedPaths @()
-$null = Assert-NightlyTrackedChangePolicy -ChangedPaths @(
-    ".banso/config.yaml", "imgui.ini")
-$null = Assert-NightlyTrackedChangePolicy -ChangedPaths @(
-    ".banso\config.yaml", "IMGUi.ini")
+$null = Assert-NightlyTrackedChangePolicy -ChangedPaths @(".banso/config.yaml")
+$null = Assert-NightlyTrackedChangePolicy -ChangedPaths @(".banso\config.yaml")
 Assert-Throws {
     Assert-NightlyTrackedChangePolicy -ChangedPaths @(
         ".banso/config.yaml", "src/luminumbra_client/main_client.cpp")
-} "a tracked source change outside the two-file user-local allowlist"
+} "a tracked source change outside the user-local allowlist"
 Assert-Throws {
     Assert-NightlyTrackedChangePolicy -ChangedPaths @(
-        "imgui.ini.backup")
+        ".banso/config.yaml.backup")
 } "a path which only prefixes the user-local allowlist"
 
 $expectedPath = "\Luminumbra Nightly Gate"

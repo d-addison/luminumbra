@@ -482,7 +482,7 @@ function Assert-NightlyTrackedChangePolicy {
     param(
         [AllowEmptyCollection()]
         [object[]]$ChangedPaths,
-        [string[]]$AllowedPaths = @(".banso/config.yaml", "imgui.ini")
+        [string[]]$AllowedPaths = @(".banso/config.yaml")
     )
 
     $unexpected = New-Object System.Collections.Generic.List[string]
@@ -505,7 +505,7 @@ function Assert-NightlyTrackedChangePolicy {
     }
 
     if ($unexpected.Count -gt 0) {
-        throw "Nightly tree provenance: tracked paths differ from HEAD: $($unexpected.ToArray() -join ', '). Only .banso/config.yaml and imgui.ini may be user-local."
+        throw "Nightly tree provenance: tracked paths differ from HEAD: $($unexpected.ToArray() -join ', '). Only .banso/config.yaml may be user-local."
     }
 }
 

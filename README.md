@@ -59,7 +59,7 @@ defined by the [SHIELD SDF contract](docs/shield/sdf-contract.md).
 | `data/` | Runtime data copied into each build tree |
 | `res/` | Runtime resources that remain source-form, including shaders |
 | `worlds/` | Authored world definitions |
-| `references/` | Visual regression references and capture fixtures |
+| `references/` | Environmental visual targets and capture scene fixtures |
 | `docs/` | Maintained architecture, development, and validation guides |
 
 ## Documentation

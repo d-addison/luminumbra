@@ -23,7 +23,8 @@ public:
     void RemoveWorld(const std::string& worldId);
     void UpdateWorld(const WorldInfo& world);
     void ClearWorlds();
-    
+    void SetLoading(bool loading);
+
     // Selection
     void SelectWorld(const std::string& worldId);
     void ClearSelection();
@@ -53,7 +54,8 @@ public:
     void BindWorlds(Property<std::vector<WorldInfo>>& worldsProperty);
     void BindSelectedWorldId(Property<std::string>& selectedIdProperty);
     void BindSearchFilter(Property<std::string>& searchProperty);
-    
+    void BindLoading(Property<bool>& loadingProperty);
+
     // State
     bool IsEmpty() const { return m_filteredWorlds.empty(); }
     size_t GetWorldCount() const { return m_worlds.size(); }
@@ -73,7 +75,8 @@ private:
     std::string m_typeFilter;
     bool m_showFavoritesOnly = false;
     bool m_showRecentOnly = false;
-    
+    bool m_loading = false;
+
     // Sort settings
     SortBy m_sortBy = SortBy::LastPlayed;
     bool m_sortAscending = false;
@@ -92,7 +95,6 @@ private:
     void ApplyFilters();
     void SortWorlds();
     void CreateWorldElement(const WorldInfo& world);
-    void RemoveWorldElement(const std::string& worldId);
     void UpdateLoadingState();
     void UpdateEmptyState();
     

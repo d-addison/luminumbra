@@ -14,7 +14,9 @@ struct WorldInfo {
     std::string type;
     std::string seed;
     std::string lastPlayed;
-    std::size_t fileSize;
+    std::string createdAt;
+    std::size_t fileSize = 0;
+    bool favorite = false;
 
     bool operator==(const WorldInfo& other) const {
         return id == other.id;

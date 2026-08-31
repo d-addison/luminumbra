@@ -6,8 +6,8 @@ $ErrorActionPreference = "Stop"
 
 $PlayerHeaderPath = "src/luminumbra_client/player/PlayerController.h"
 $PlayerSourcePath = "src/luminumbra_client/player/PlayerController.cpp"
-$PhysicsHeaderPath = "src/luminumbra_common/physics/PhysicsSystem.h"
-$PhysicsSourcePath = "src/luminumbra_common/physics/PhysicsSystem.cpp"
+$PhysicsHeaderPath = "src/luminumbra_common/systems/PhysicsSystem.h"
+$PhysicsSourcePath = "src/luminumbra_common/systems/PhysicsSystem.cpp"
 $ArtifactDir = "build/$BuildPreset/test-artifacts/runtime/physics-replay"
 $ArtifactPath = Join-Path $ArtifactDir "physics-replay-endstate.json"
 
@@ -128,10 +128,10 @@ $checks = @(
         -Evidence "Noclip replay is driven by frame booleans and records velocity"
 
     Assert-Contains `
-        -Name "physics include bridge remains intact" `
+        -Name "physics replay dependencies remain available" `
         -Text ($physicsHeader + "`n" + $physicsSource) `
-        -Pattern "#include\s+`"../systems/PhysicsSystem\.h`"[\s\S]*#include\s+`"PhysicsSystem\.h`"" `
-        -Evidence "The assigned physics include bridge remains available to replay and physics tests"
+        -Pattern "class\s+PhysicsSystem[\s\S]*void\s+update_player[\s\S]*void\s+PhysicsSystem::update_player" `
+        -Evidence "The active physics system exposes and implements the player update used by replay"
 )
 
 $walkSpeed = Get-FloatInitializer -Text $playerHeader -Name "m_walkSpeed"
@@ -216,7 +216,7 @@ $analysis = [ordered]@{
     physics = [ordered]@{
         header = $PhysicsHeaderPath
         source = $PhysicsSourcePath
-        include_bridge = "../systems/PhysicsSystem.h"
+        update_api = "update_player"
     }
     replay = [ordered]@{
         mode = "Walking"

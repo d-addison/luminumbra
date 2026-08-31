@@ -1,5 +1,8 @@
 #include "Button.h"
 #include "core/Log.h"
+#include <RmlUi/Core/PropertyDictionary.h>
+#include <RmlUi/Core/StringUtilities.h>
+#include <RmlUi/Core/StyleSheetSpecification.h>
 
 namespace Luminumbra::Client::UI {
 
@@ -26,11 +29,12 @@ void Button::OnElementSet() {
 void Button::SetText(const std::string& text) {
     m_text = text;
     if (m_element) {
+        const std::string safeText = Rml::StringUtilities::EncodeRml(text);
         if (m_iconPath.empty()) {
-            m_element->SetInnerRML(text);
+            m_element->SetInnerRML(safeText);
         } else {
-            // Combine icon and text
-            std::string content = "<img src=\"" + m_iconPath + "\" /> " + text;
+            const std::string safeIcon = Rml::StringUtilities::EncodeRml(m_iconPath);
+            std::string content = "<img src=\"" + safeIcon + "\" /> " + safeText;
             m_element->SetInnerRML(content);
         }
     }
@@ -96,12 +100,23 @@ void Button::BindText(Property<std::string>& property) {
 }
 
 void Button::PlayClickAnimation() {
-    if (m_element) {
-        // Add click animation class
-        AddClass("animate-click");
-        
-        // TODO: Remove class after animation completes
-        // For now, we'll rely on CSS animation duration
+    if (!m_element) {
+        return;
+    }
+
+    Rml::PropertyDictionary pressed;
+    Rml::PropertyDictionary released;
+    const Rml::PropertyId transformId = Rml::PropertyId::Transform;
+    if (Rml::StyleSheetSpecification::ParsePropertyDeclaration(
+            pressed, "transform", "scale(0.96)") &&
+        Rml::StyleSheetSpecification::ParsePropertyDeclaration(
+            released, "transform", "scale(1.0)")) {
+        const Rml::Property* pressedTransform = pressed.GetProperty(transformId);
+        const Rml::Property* releasedTransform = released.GetProperty(transformId);
+        if (pressedTransform && releasedTransform &&
+            m_element->Animate("transform", *pressedTransform, 0.06f)) {
+            m_element->AddAnimationKey("transform", *releasedTransform, 0.08f);
+        }
     }
 }
 
@@ -126,7 +141,6 @@ void Button::UpdateStyles() {
     
     // Apply component-specific styles
     m_element->SetProperty("cursor", "pointer");
-    m_element->SetProperty("user-select", "none");
 }
 
 void Button::UpdateClasses() {

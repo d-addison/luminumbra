@@ -3584,7 +3584,7 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
              "a report older than 26 hours",
              "a report more than five minutes in the future",
              "a report from another Git HEAD",
-             "a tracked source change outside the two-file user-local allowlist",
+             "a tracked source change outside the user-local allowlist",
          }) {
         EXPECT_NE(behavior_test.find(fixture), std::string::npos) << fixture;
     }

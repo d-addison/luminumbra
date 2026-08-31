@@ -69,11 +69,9 @@ __pycache__/
 # -- which must never be committed. Delete the directory and this rule with it.
 /.forge/
 
-# --- Vendored trees restored at configure time ---------------------------
-# vendor/CMakeLists.txt pins these upstream via FetchContent and file(COPY)s
-# them back onto the on-disk paths the build hardcodes. Editing them is a
-# no-op; the next configure overwrites. sol2 and spdlog no longer build from
-# their on-disk remnants at all.
+# --- Obsolete local dependency remnants ----------------------------------
+# CMake consumes these dependencies directly from pinned FetchContent trees.
+# Ignore stale on-disk copies from older checkouts.
 /vendor/imgui/backends/
 /vendor/meshoptimizer/
 /vendor/soil2/

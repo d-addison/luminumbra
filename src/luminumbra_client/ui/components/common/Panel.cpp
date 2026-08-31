@@ -1,5 +1,6 @@
 #include "Panel.h"
 #include "core/Log.h"
+#include <RmlUi/Core/StringUtilities.h>
 
 namespace Luminumbra::Client::UI {
 
@@ -8,11 +9,16 @@ Panel::Panel(const std::string& elementId) : UIComponent(elementId) {
 
 void Panel::OnElementSet() {
     if (!m_element) return;
-    
+
     UpdateStyles();
     CreateHeader();
     CreateBody();
-    
+
+    const bool collapsible = m_collapsible;
+    m_collapsible = false;
+    SetCollapsible(collapsible);
+    UpdateExpandedState();
+
     if (!m_title.empty()) {
         SetTitle(m_title);
     }
@@ -35,13 +41,14 @@ void Panel::SetTitle(const std::string& title) {
             Rml::Element* titleElement = m_headerElement->GetElementById(m_elementId + "_title");
             if (!titleElement) {
                 // Create title element
-                titleElement = m_document->CreateElement("div");
+                auto title = m_document->CreateElement("div");
+                titleElement = title.get();
                 titleElement->SetId(m_elementId + "_title");
                 titleElement->SetClass("panel-title", true);
-                m_headerElement->AppendChild(titleElement);
+                m_headerElement->AppendChild(std::move(title));
             }
-            
-            titleElement->SetInnerRML(title);
+
+            titleElement->SetInnerRML(Rml::StringUtilities::EncodeRml(title));
         }
     }
 }
@@ -64,16 +71,15 @@ void Panel::SetCollapsible(bool collapsible) {
             }
             
             if (m_headerElement) {
-                m_toggleButton = m_document->CreateElement("button");
+                auto toggle = m_document->CreateElement("button");
+                m_toggleButton = toggle.get();
                 m_toggleButton->SetId(m_elementId + "_toggle");
                 m_toggleButton->SetClass("panel-toggle", true);
                 m_toggleButton->SetInnerRML(m_expanded ? "−" : "+");
-                
-                auto toggleListener = std::make_unique<LambdaEventListener>([this](Rml::Event&) { HandleToggle(); });
-                m_toggleButton->AddEventListener("click", toggleListener.get());
-                m_eventListeners.emplace_back(std::move(toggleListener));
-                
-                m_headerElement->AppendChild(m_toggleButton);
+
+                AddTrackedEventListener(
+                    m_toggleButton, "click", [this](Rml::Event&) { HandleToggle(); });
+                m_headerElement->AppendChild(std::move(toggle));
             }
         } else if (!collapsible && m_toggleButton) {
             // Remove toggle button
@@ -81,6 +87,7 @@ void Panel::SetCollapsible(bool collapsible) {
                 m_headerElement->RemoveChild(m_toggleButton);
             }
             m_toggleButton = nullptr;
+            PruneDetachedEventListeners();
         }
     }
 }
@@ -100,7 +107,7 @@ void Panel::SetContent(const std::string& content) {
     if (!m_bodyElement) {
         CreateBody();
     }
-    
+
     if (m_bodyElement) {
         m_bodyElement->SetInnerRML(content);
     }
@@ -110,7 +117,7 @@ void Panel::AppendContent(const std::string& content) {
     if (!m_bodyElement) {
         CreateBody();
     }
-    
+
     if (m_bodyElement) {
         std::string currentContent = m_bodyElement->GetInnerRML();
         m_bodyElement->SetInnerRML(currentContent + content);
@@ -130,7 +137,7 @@ void Panel::SetToggleHandler(ToggleHandler handler) {
 void Panel::BindTitle(Property<std::string>& property) {
     // Set initial title
     SetTitle(property.Get());
-    
+
     // Subscribe to changes
     TrackSubscription(property, [this](const std::string& oldValue, const std::string& newValue) {
         SetTitle(newValue);
@@ -176,27 +183,29 @@ void Panel::UpdateStyles() {
 
 void Panel::CreateHeader() {
     if (m_headerElement || !m_element) return;
-    
-    m_headerElement = m_document->CreateElement("div");
+
+    auto header = m_document->CreateElement("div");
+    m_headerElement = header.get();
     m_headerElement->SetId(m_elementId + "_header");
     m_headerElement->SetClass("panel-header", true);
     
     // Insert header as first child
     if (m_element->GetFirstChild()) {
-        m_element->InsertBefore(m_headerElement, m_element->GetFirstChild());
+        m_element->InsertBefore(std::move(header), m_element->GetFirstChild());
     } else {
-        m_element->AppendChild(m_headerElement);
+        m_element->AppendChild(std::move(header));
     }
 }
 
 void Panel::CreateBody() {
     if (m_bodyElement || !m_element) return;
-    
-    m_bodyElement = m_document->CreateElement("div");
+
+    auto body = m_document->CreateElement("div");
+    m_bodyElement = body.get();
     m_bodyElement->SetId(m_elementId + "_body");
     m_bodyElement->SetClass("panel-body", true);
-    
-    m_element->AppendChild(m_bodyElement);
+
+    m_element->AppendChild(std::move(body));
 }
 
 void Panel::HandleToggle() {

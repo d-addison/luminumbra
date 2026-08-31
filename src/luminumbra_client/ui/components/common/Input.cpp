@@ -1,5 +1,7 @@
 #include "Input.h"
 #include "core/Log.h"
+#include <RmlUi/Core/Elements/ElementFormControl.h>
+#include <RmlUi/Core/StringUtilities.h>
 
 namespace Luminumbra::Client::UI {
 
@@ -13,18 +15,10 @@ void Input::OnElementSet() {
     OnChange([this](Rml::Event& event) { HandleChange(event); });
     
     // Set up focus/blur handlers
-    auto focusListener = std::make_unique<LambdaEventListener>([this](Rml::Event& event) { HandleFocus(event); });
-    auto blurListener = std::make_unique<LambdaEventListener>([this](Rml::Event& event) { HandleBlur(event); });
-    auto inputListener = std::make_unique<LambdaEventListener>([this](Rml::Event& event) { HandleInput(event); });
-    
-    m_element->AddEventListener("focus", focusListener.get());
-    m_element->AddEventListener("blur", blurListener.get());
-    m_element->AddEventListener("input", inputListener.get());
-    
-    m_eventListeners.emplace_back(std::move(focusListener));
-    m_eventListeners.emplace_back(std::move(blurListener));
-    m_eventListeners.emplace_back(std::move(inputListener));
-    
+    AddTrackedEventListener(m_element, "focus", [this](Rml::Event& event) { HandleFocus(event); });
+    AddTrackedEventListener(m_element, "blur", [this](Rml::Event& event) { HandleBlur(event); });
+    AddTrackedEventListener(m_element, "input", [this](Rml::Event& event) { HandleInput(event); });
+
     // Apply initial configuration
     SetType(m_type);
     if (!m_placeholder.empty()) {
@@ -57,7 +51,11 @@ void Input::SetPlaceholder(const std::string& placeholder) {
 void Input::SetValue(const std::string& value) {
     m_value = value;
     if (m_element) {
-        m_element->SetAttribute("value", value);
+        if (auto* control = dynamic_cast<Rml::ElementFormControl*>(m_element)) {
+            control->SetValue(value);
+        } else {
+            m_element->SetAttribute("value", value);
+        }
     }
     
     // Validate new value
@@ -94,8 +92,12 @@ void Input::SetRequired(bool required) {
 
 void Input::SetMaxLength(int maxLength) {
     m_maxLength = maxLength;
-    if (m_element && maxLength > 0) {
-        m_element->SetAttribute("maxlength", std::to_string(maxLength));
+    if (m_element) {
+        if (maxLength > 0) {
+            m_element->SetAttribute("maxlength", std::to_string(maxLength));
+        } else {
+            m_element->RemoveAttribute("maxlength");
+        }
     }
 }
 
@@ -138,7 +140,10 @@ void Input::ClearValidation() {
 }
 
 std::string Input::GetValue() const {
-    return m_element ? m_element->GetAttribute("value", "") : m_value;
+    if (auto* control = dynamic_cast<Rml::ElementFormControl*>(m_element)) {
+        return control->GetValue();
+    }
+    return m_element ? m_element->GetAttribute<Rml::String>("value", "") : m_value;
 }
 
 bool Input::IsValid() const {
@@ -226,11 +231,19 @@ void Input::ShowValidationMessage(const std::string& message) {
     if (!errorElement) {
         // Create error message element
         if (auto* parent = m_element->GetParentNode()) {
-            std::string errorHtml = "<div id=\"" + m_elementId + "_error\" class=\"field-error\">" + message + "</div>";
-            // TODO: Insert after input element
+            auto error = m_document->CreateElement("div");
+            errorElement = error.get();
+            errorElement->SetId(m_elementId + "_error");
+            errorElement->SetClass("field-error", true);
+            errorElement->SetInnerRML(Rml::StringUtilities::EncodeRml(message));
+            if (Rml::Element* next = m_element->GetNextSibling()) {
+                parent->InsertBefore(std::move(error), next);
+            } else {
+                parent->AppendChild(std::move(error));
+            }
         }
     } else {
-        errorElement->SetInnerRML(message);
+        errorElement->SetInnerRML(Rml::StringUtilities::EncodeRml(message));
         errorElement->SetProperty("display", "block");
     }
 }
@@ -246,7 +259,10 @@ void Input::HideValidationMessage() {
 }
 
 void Input::HandleChange(Rml::Event& event) {
-    std::string newValue = event.GetTargetElement()->GetAttribute("value", "");
+    auto* control = dynamic_cast<Rml::ElementFormControl*>(event.GetTargetElement());
+    std::string newValue = control
+                               ? control->GetValue()
+                               : event.GetTargetElement()->GetAttribute<Rml::String>("value", "");
     m_value = newValue;
     
     // Validate on change
@@ -270,7 +286,10 @@ void Input::HandleBlur(Rml::Event& event) {
 
 void Input::HandleInput(Rml::Event& event) {
     // Real-time input validation (less strict)
-    std::string newValue = event.GetTargetElement()->GetAttribute("value", "");
+    auto* control = dynamic_cast<Rml::ElementFormControl*>(event.GetTargetElement());
+    std::string newValue = control
+                               ? control->GetValue()
+                               : event.GetTargetElement()->GetAttribute<Rml::String>("value", "");
     m_value = newValue;
 }
 

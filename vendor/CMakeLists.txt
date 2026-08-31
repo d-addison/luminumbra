@@ -46,20 +46,9 @@ set(FT_DISABLE_PNG ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
 
-# ---------------------------------------------------------------------------
-# Third-party libraries restored via FetchContent (pinned tags), 2026-06-14.
-# These were previously vendored on-disk under vendor/<lib>; that working-tree
-# copy was lost (a worktree-cleanup deleted through junctions) and the sources
-# were never tracked in git, so they are now declared as FetchContent
-# dependencies — reproducible and impossible to lose again. Sources download to
-# build/_deps at configure time. The BUILD_*/*_TESTS OFF flags above still
-# apply. Pinned versions match the original vendoring vintage (imgui 1.92.1 /
-# glfw 3.4 / lua 5.4.8 confirmed from surviving artifacts; glm 1.0.1 confirmed
-# from the prior external/glm-1.0.1 reference). DETERMINISM ACCEPTANCE TEST: a
-# clean rebuild must reproduce HeadlessServerTick world_hash 0eac465289e7c88b.
-# FastNoise and the RenderDoc header remain embedded in the repository. Other
-# dependencies are consumed directly from their pinned FetchContent trees.
-# ---------------------------------------------------------------------------
+# FetchContent dependencies use immutable revisions and populate build/_deps.
+# FastNoise and the RenderDoc integration header remain committed under vendor/;
+# all other dependencies are consumed directly from their fetched source trees.
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
@@ -99,16 +88,11 @@ FetchContent_Declare(soil2         GIT_REPOSITORY https://github.com/SpartanJ/SO
 FetchContent_Declare(miniaudio     GIT_REPOSITORY https://github.com/mackron/miniaudio.git  GIT_TAG 0.11.22       GIT_SHALLOW TRUE)
 FetchContent_Declare(meshoptimizer GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git GIT_TAG v0.22         GIT_SHALLOW TRUE)
 FetchContent_Declare(lua_upstream  GIT_REPOSITORY https://github.com/lua/lua.git            GIT_TAG v5.4.8        GIT_SHALLOW TRUE)
-# sol2 + spdlog: the on-disk vendor copies were also partially clipped (sol2
-# missing cmake/*.in; spdlog include/ hollow), so restore them via FetchContent.
 FetchContent_Declare(sol2          GIT_REPOSITORY https://github.com/ThePhD/sol2.git        GIT_TAG v3.3.0        GIT_SHALLOW TRUE)
 FetchContent_Declare(spdlog        GIT_REPOSITORY https://github.com/gabime/spdlog.git      GIT_TAG v1.15.1       GIT_SHALLOW TRUE)
-# imgui: on-disk vendor/imgui core is intact (v1.92.1) but its backends/ was
-# clipped. Fetch the matching tag (populate only; imgui ships no CMake) so we
-# can restore the backend sources below.
+# Dear ImGui ships no CMake project, so its fetched source tree is built below.
 FetchContent_Declare(imgui_src     GIT_REPOSITORY https://github.com/ocornut/imgui.git      GIT_TAG v1.92.1       GIT_SHALLOW TRUE)
-# stb: header-only, single-header collection (no releases/tags upstream) — pin a
-# commit. tools/asset_processor hardcodes vendor/stb; restored below.
+# stb is a header-only collection without releases; pin an immutable commit.
 FetchContent_Declare(stb           GIT_REPOSITORY https://github.com/nothings/stb.git       GIT_TAG 31c1ad37456438565541f4919958214b6e762fb4)
 FetchContent_Declare(googletest    GIT_REPOSITORY https://github.com/google/googletest.git GIT_TAG 373af2e3df71599b87a40ce0e37164523849166b)
 FetchContent_Declare(lz4_upstream  GIT_REPOSITORY https://github.com/lz4/lz4.git GIT_TAG ebb370ca83af193212df4dcbadcc5d87bc0de2f0 SOURCE_SUBDIR build/cmake)

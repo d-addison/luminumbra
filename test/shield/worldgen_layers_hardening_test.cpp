@@ -104,7 +104,7 @@ std::size_t HeightIndex(int x, int z) {
 }
 
 // Generate full-resolution SDF + heightmap for one chunk with a fresh world.
-void GenerateFull(const TerrainGenParams& params, int seed, const IVec3& coords, Chunk& out) {
+void GenerateFull(const TerrainGenParams& params, int seed, const IVec3&, Chunk& out) {
     SHIELD_WorldSystem world(nullptr, nullptr, params, seed);
     world.GenerateChunkData(out);
 }

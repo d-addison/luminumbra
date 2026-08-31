@@ -63,8 +63,14 @@ set(CLIENT_INTERNAL_SOURCES
     # UI
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_Interfaces.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/Rml_UIManager.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Button.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Input.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/components/common/Panel.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/components/game/WorldList.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIComponent.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIDataStream.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIHotReload.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIStateManager.cpp
     # RmlUi reference GL3 backend (vendored copy of the 6.1 renderer). It implements the
     # layered/filter/clip-mask render API the hand-rolled RmlRenderer stubbed out, so
     # backdrop-filter / filter / box-shadow actually render. Compiled against the engine's

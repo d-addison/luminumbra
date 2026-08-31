@@ -18,6 +18,10 @@
 #include <vector>
 
 #include "ui/Rml_UIManager.h"
+#include "ui/components/common/Button.h"
+#include "ui/components/common/Input.h"
+#include "ui/components/common/Panel.h"
+#include "ui/components/game/WorldList.h"
 #include "ui/core/UIComponent.h"
 #include "ui/core/UIStateManager.h"
 #include "world/WorldgenOverride.h"
@@ -320,6 +324,111 @@ TEST(UiSmokeTest, UiStateNavigationMaintainsDocumentAndGameState) {
     state.ClearNotification();
     EXPECT_TRUE(state.notificationMessage.Get().empty());
     EXPECT_FLOAT_EQ(state.notificationTimeout.Get(), 0.0f);
+}
+
+TEST(UiSmokeTest, ComponentLayerOwnsListenersAndImplementsInteractiveState) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const fs::path source_root = SourceRoot();
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    Rml::ElementDocument* document = ui.GetContext()->LoadDocumentFromMemory(R"(
+        <rml><head><style>body { font-family: Lora; }</style></head><body>
+          <button id="component_button"></button>
+          <div><input id="component_input" type="text" /></div>
+          <div id="component_panel"><p>original</p></div>
+          <div>
+            <div id="loading_worlds"></div><div id="no_worlds"></div>
+            <div id="component_world_list"><div id="world_list_items"></div></div>
+          </div>
+        </body></rml>)");
+    ASSERT_NE(document, nullptr);
+    document->Show();
+    ui.GetContext()->Update();
+
+    using Luminumbra::Client::UI::Button;
+    using Luminumbra::Client::UI::Input;
+    using Luminumbra::Client::UI::Panel;
+    using Luminumbra::Client::UI::Property;
+    using Luminumbra::Client::UI::WorldInfo;
+    using Luminumbra::Client::UI::WorldList;
+
+    int clicks = 0;
+    Button button("component_button");
+    button.SetText("Create");
+    button.SetStyle(Button::Style::Accent);
+    button.SetSize(Button::Size::Large);
+    button.SetClickHandler([&clicks]() { ++clicks; });
+    button.Initialize(document);
+    ASSERT_TRUE(button.IsValid());
+    EXPECT_TRUE(button.HasClass("btn-accent"));
+    EXPECT_TRUE(button.HasClass("btn-lg"));
+    button.SetText("<em>not markup</em>");
+    EXPECT_EQ(button.GetElement()->QuerySelector("em"), nullptr);
+    button.GetElement()->Click();
+    EXPECT_EQ(clicks, 1);
+    button.SetEnabled(false);
+    button.GetElement()->Click();
+    EXPECT_EQ(clicks, 1);
+    button.Destroy();
+    document->GetElementById("component_button")->Click();
+    EXPECT_EQ(clicks, 1) << "destroyed component left a live event callback";
+
+    Input input("component_input");
+    input.SetType(Input::Type::Email);
+    input.SetRequired(true);
+    input.SetValidationMessage("Enter a valid email");
+    input.Initialize(document);
+    input.SetValue("invalid");
+    EXPECT_FALSE(input.Validate());
+    EXPECT_NE(document->GetElementById("component_input_error"), nullptr);
+    input.SetValue("player@example.com");
+    EXPECT_TRUE(input.Validate());
+
+    Property<bool> expanded{true};
+    Panel panel("component_panel");
+    panel.SetTitle("Details");
+    panel.SetCollapsible(true);
+    panel.BindExpanded(expanded);
+    panel.Initialize(document);
+    ASSERT_NE(document->GetElementById("component_panel_toggle"), nullptr);
+    panel.SetTitle("<em>Details</em>");
+    EXPECT_EQ(document->GetElementById("component_panel_title")->QuerySelector("em"), nullptr);
+    document->GetElementById("component_panel_toggle")->Click();
+    EXPECT_FALSE(panel.IsExpanded());
+    EXPECT_FALSE(expanded.Get());
+
+    const auto today = std::chrono::year_month_day{
+        std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
+    std::ostringstream todayText;
+    todayText << static_cast<int>(today.year()) << '-' << std::setfill('0') << std::setw(2)
+              << static_cast<unsigned>(today.month()) << '-' << std::setw(2)
+              << static_cast<unsigned>(today.day());
+
+    WorldList worlds("component_world_list");
+    worlds.Initialize(document);
+    worlds.SetWorlds({
+        WorldInfo{"a", "<em>Alpha</em>", "default", "1", todayText.str(), "2026-01-01", 1024, true},
+        WorldInfo{"b", "Beta", "mountains", "2", "2020-01-01", "2020-01-01", 2048, false},
+    });
+    EXPECT_EQ(worlds.GetWorldCount(), 2u);
+    EXPECT_EQ(document->GetElementById("world_list_items")->QuerySelector("em"), nullptr);
+    worlds.ShowFavoritesOnly(true);
+    EXPECT_EQ(worlds.GetFilteredWorldCount(), 1u);
+    worlds.ShowFavoritesOnly(false);
+    worlds.ShowRecentOnly(true);
+    EXPECT_EQ(worlds.GetFilteredWorldCount(), 1u);
+    worlds.SetLoading(true);
+    ui.GetContext()->Update();
+    EXPECT_EQ(document->GetElementById("loading_worlds")->GetDisplay(), Rml::Style::Display::Block);
+    worlds.SetLoading(false);
+
+    ui.Shutdown();
 }
 
 TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
