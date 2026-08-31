@@ -1,0 +1,404 @@
+<rml>
+    <head>
+        <title>Create New World - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+    </head>
+    <body id="world_creation" class="fade-in">
+        <div class="creation-panel">
+            <h1>create world</h1>
+            <div class="title-ornament">&#9670;</div>
+
+            <!--  : the LIVE WORLD-PREVIEW DIORAMA renders the candidate
+                 world FULL-SCREEN behind this (transparent) panel — a cinematic
+                 backdrop you orbit by dragging over the world (outside the panel) and
+                 zoom with the scroll wheel. This compact control strip drives the live
+                 atmosphere (weather + time-of-day) and re-centers the turntable. -->
+            <div class="preview-section">
+                <div class="preview-controls">
+                    <div class="preview-weather-row">
+                        <span class="preview-weather selected" id="pw_clear" data-weather="clear">clear</span>
+                        <span class="preview-weather" id="pw_rain" data-weather="rain">rain</span>
+                        <span class="preview-weather" id="pw_snow" data-weather="snow">snow</span>
+                        <span class="preview-weather" id="pw_fog" data-weather="fog">fog</span>
+                        <span class="preview-weather" id="pw_storm" data-weather="storm">storm</span>
+                        <span id="preview_reset_btn" class="preview-reset">reset view</span>
+                    </div>
+                    <div class="settings-row preview-tod-row">
+                        <label>time of day</label>
+                        <input type="range" id="preview_tod" class="settings-slider" min="0" max="1" step="0.01" value="0.24" />
+                    </div>
+                    <span id="preview_hint" class="preview-hint">drag the world to orbit &middot; scroll to zoom</span>
+                </div>
+            </div>
+
+            <!-- World creation form -->
+            <div class="form-container">
+                <form id="world_creation_form">
+                    <!-- World name input -->
+                    <div class="form-group">
+                        <label for="world_name">world name</label>
+                        <input type="text"
+                               id="world_name"
+                               name="world_name"
+                               placeholder="Enter world name..."
+                               value="New World"
+                               class="form-control"
+                               required />
+                    </div>
+
+                    <!-- World seed input -->
+                    <div class="form-group">
+                        <label for="world_seed">seed</label>
+                        <input type="text"
+                               id="world_seed"
+                               name="world_seed"
+                               placeholder="Leave empty for random generation..."
+                               class="form-control" />
+                    </div>
+
+                    <!-- World type: visual preset chips; hidden select keeps C++ read. -->
+                    <div class="form-group">
+                        <label>landscape preset</label>
+                        <div class="preset-row">
+                            <span class="preset-chip selected" data-preset="default">hills</span>
+                            <span class="preset-chip" data-preset="archipelago">lake</span>
+                            <span class="preset-chip" data-preset="mountains">mons</span>
+                            <span class="preset-chip" data-preset="temperate_forest">forest</span>
+                        </div>
+                        <!-- Saved user presets are injected here as additional chips (C++). -->
+                        <div class="preset-row user-preset-row" id="user_presets_row"></div>
+                        <!-- chips drive the hidden #world_type select via a C++ click handler. -->
+                        <select id="world_type" name="world_type" class="form-control hidden">
+                            <option value="default">Default Terrain</option>
+                            <option value="archipelago">Archipelago</option>
+                            <option value="mountains">Mountainous</option>
+                            <option value="flat_lands">Flat Plains</option>
+                            <option value="temperate_forest">Temperate Forest</option>
+                            <option value="desert">Desert Wasteland</option>
+                            <option value="frozen">Frozen Tundra</option>
+                        </select>
+                    </div>
+
+                    <!--  : SEMANTIC KNOBS — the DEFAULT create surface.
+                         6 outcome knobs (data-knob id, [0,1]); the host applies the
+                         engine-side KnobLayer response curves, then overlays any
+                         advanced-panel override diff. Curated presets carry no knob
+                         layer, so these seed NEUTRAL (0.5) — never inverse-lerped.
+: each row is a flex [label][slider][value] line so the
+                         live value reads BESIDE its slider, not floated above it. -->
+                    <div class="knob-section">
+                        <h3 class="param-group-heading">world feel</h3>
+                        <div class="settings-row knob-row">
+                            <label>mountainousness</label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="mountainousness" min="0" max="1" step="0.01" value="0.5" />
+                            <span class="knob-value">0.5</span>
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>ruggedness</label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="ruggedness" min="0" max="1" step="0.01" value="0.5" />
+                            <span class="knob-value">0.5</span>
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>wetness</label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="wetness" min="0" max="1" step="0.01" value="0.5" />
+                            <span class="knob-value">0.5</span>
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>erosion / age</label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="erosion" min="0" max="1" step="0.01" value="0.5" />
+                            <span class="knob-value">0.5</span>
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>climate</label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="climate" min="0" max="1" step="0.01" value="0.5" />
+                            <span class="knob-value">0.5</span>
+                        </div>
+                        <div class="settings-row knob-row">
+                            <label>feature density</label>
+                            <input type="range" class="worldgen-knob settings-slider" data-knob="feature_density" min="0" max="1" step="0.01" value="0.5" />
+                            <span class="knob-value">0.5</span>
+                        </div>
+                    </div>
+
+                    <!-- Collapsible ADVANCED raw worldgen parameters. Collapsed by default;
+                         a C++ click handler toggles.collapsed on #customize_body and the
+                         caret glyph, then seeds the controls per-preset. Edits here overlay
+                         the knob layer as a sparse raw-override diff (both persist).
+: the four advanced groups are now TAB PANES (a chip strip
+                         toggles.active on one pane at a time) so the panel no longer
+                         scrolls a long single column — only the active group shows. -->
+                    <div class="customize-section">
+                        <div class="customize-header" id="customize_toggle">
+                            <span class="customize-label">advanced parameters</span>
+                            <span class="customize-caret" id="customize_caret">+</span>
+                        </div>
+                        <div class="customize-body collapsed" id="customize_body">
+
+                            <!-- Tab strip: one.active pane at a time (C++ click handler). -->
+                            <div class="param-tabs">
+                                <span class="param-tab active" data-tab="terrain">terrain</span>
+                                <span class="param-tab" data-tab="water">water</span>
+                                <span class="param-tab" data-tab="biomes">biomes</span>
+                                <span class="param-tab" data-tab="features">features</span>
+                            </div>
+
+                            <!-- terrain -->
+                            <div class="param-pane active" data-pane="terrain">
+                            <div class="param-group">
+                                <div class="settings-row param-row">
+                                    <label>base scale</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.base_frequency" data-type="float" min="0.001" max="0.05" step="0.001" value="0.01" />
+                                    <span class="param-value">0.01</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>amplitude</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.base_amplitude" data-type="float" min="0" max="200" step="1" value="34" />
+                                    <span class="param-value">34</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>octaves</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.octaves" data-type="int" min="1" max="8" step="1" value="6" />
+                                    <span class="param-value">6</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>persistence</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.persistence" data-type="float" min="0" max="1" step="0.05" value="0.5" />
+                                    <span class="param-value">0.5</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lacunarity</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.lacunarity" data-type="float" min="1.5" max="3" step="0.1" value="2" />
+                                    <span class="param-value">2</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>height offset</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.height_offset" data-type="float" min="-50" max="100" step="1" value="5" />
+                                    <span class="param-value">5</span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>shaping</label>
+                                    <span class="toggle worldgen-param on" data-path="terrain.shaping.enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>peak height</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.peaks_amplitude" data-type="float" min="0" max="150" step="1" value="20" />
+                                    <span class="param-value">20</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>peak scale</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.peaks_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.004" />
+                                    <span class="param-value">0.004</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>domain warp</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.shaping.domain_warp_amplitude" data-type="float" min="0" max="60" step="1" value="14" />
+                                    <span class="param-value">14</span>
+                                </div>
+                            </div>
+                            </div>
+
+                            <!-- water -->
+                            <div class="param-pane" data-pane="water">
+                            <div class="param-group">
+                                <div class="settings-row-inline param-row">
+                                    <label>erosion</label>
+                                    <span class="toggle worldgen-param on" data-path="terrain.hydro.enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>erosion passes</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.hydro.iterations" data-type="int" min="0" max="20" step="1" value="4" />
+                                    <span class="param-value">4</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>thermal rate</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="terrain.hydro.thermal_rate" data-type="float" min="0" max="1" step="0.05" value="0.3" />
+                                    <span class="param-value">0.3</span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>rivers</label>
+                                    <span class="toggle worldgen-param on" data-path="features.rivers_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>river depth</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.river_depth" data-type="float" min="0" max="20" step="0.5" value="4" />
+                                    <span class="param-value">4</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>river density</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.river_frequency" data-type="float" min="0.0005" max="0.005" step="0.0001" value="0.0016" />
+                                    <span class="param-value">0.0016</span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>lakes</label>
+                                    <span class="toggle worldgen-param on" data-path="features.lakes_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake depth</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_depth" data-type="float" min="0" max="20" step="0.5" value="5" />
+                                    <span class="param-value">5</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake density</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_frequency" data-type="float" min="0.0003" max="0.003" step="0.0001" value="0.0009" />
+                                    <span class="param-value">0.0009</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake threshold</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_threshold" data-type="float" min="0.3" max="0.8" step="0.01" value="0.52" />
+                                    <span class="param-value">0.52</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake carve</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_max_carve" data-type="float" min="0" max="40" step="1" value="22" />
+                                    <span class="param-value">22</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>lake bank offset</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.lake_bank_offset" data-type="float" min="0" max="8" step="0.5" value="2" />
+                                    <span class="param-value">2</span>
+                                </div>
+                            </div>
+                            </div>
+
+                            <!-- biomes -->
+                            <div class="param-pane" data-pane="biomes">
+                            <div class="param-group">
+                                <div class="settings-row-inline param-row">
+                                    <label>biomes</label>
+                                    <span class="toggle worldgen-param on" data-path="biomes.enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>temperature scale</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="biomes.temperature_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.005" />
+                                    <span class="param-value">0.005</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>humidity scale</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="biomes.humidity_frequency" data-type="float" min="0.001" max="0.01" step="0.0005" value="0.005" />
+                                    <span class="param-value">0.005</span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>per-biome relief</label>
+                                    <span class="toggle worldgen-param on" data-path="biomes.relief_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>relief strength</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="biomes.relief_strength" data-type="float" min="0" max="1" step="0.05" value="0.45" />
+                                    <span class="param-value">0.45</span>
+                                </div>
+                            </div>
+                            </div>
+
+                            <!-- features -->
+                            <div class="param-pane" data-pane="features">
+                            <div class="param-group">
+                                <div class="settings-row-inline param-row">
+                                    <label>caves</label>
+                                    <span class="toggle worldgen-param on" data-path="features.caves_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>cave density</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.cave_frequency" data-type="float" min="0.005" max="0.05" step="0.001" value="0.02" />
+                                    <span class="param-value">0.02</span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>cliffs</label>
+                                    <span class="toggle worldgen-param on" data-path="features.cliffs_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>cliff height</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.cliff_step" data-type="float" min="2" max="30" step="1" value="11" />
+                                    <span class="param-value">11</span>
+                                </div>
+                                <div class="settings-row param-row">
+                                    <label>cliff density</label>
+                                    <input type="range" class="worldgen-param settings-slider" data-path="features.cliff_frequency" data-type="float" min="0.0005" max="0.005" step="0.0001" value="0.0011" />
+                                    <span class="param-value">0.0011</span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>structures</label>
+                                    <span class="toggle worldgen-param on" data-path="features.structures_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                                <div class="settings-row-inline param-row">
+                                    <label>island mask</label>
+                                    <span class="toggle worldgen-param" data-path="terrain.island_mask_enabled" data-type="bool"><span class="toggle-knob"></span></span>
+                                </div>
+                            </div>
+                            </div>
+
+                            <!-- Save the current config as a reusable named preset. The
+                                 rename button retargets the currently-selected USER preset
+                                 to the typed name (curated presets are immutable). Kept
+                                 OUTSIDE the tab panes so it is always visible/clickable
+                                 regardless of the active pane. -->
+                            <div class="save-preset-group">
+                                <input type="text" id="save_preset_name" class="form-control save-preset-name" placeholder="name this world type..." />
+                                <span id="save_preset_btn" class="btn save-preset-btn">save preset</span>
+                                <span id="rename_preset_btn" class="btn save-preset-btn rename-preset-btn">rename</span>
+                            </div>
+
+                        </div>
+                    </div>
+
+                    <button id="create_btn" class="btn">
+                        create
+                    </button>
+                </form>
+            </div>
+
+            <span id="back_btn" class="back-link">&#8249; back</span>
+
+            <!-- Progress indicator (hidden by default) -->
+            <div id="creation_progress" class="hidden mt-lg">
+                <div class="progress-container">
+                    <div id="progress_bar" class="progress-bar" style="width: 0%;"></div>
+                </div>
+                <p class="text-center text-sm mt-sm">
+                    <span id="progress_text">Generating world...</span>
+                </p>
+            </div>
+        </div>
+
+        <!-- Overwrite-collision confirm: shown when saving under a name whose slug
+             already has a user preset on disk. WorldPresetSaver silently overwrites,
+             so the UI guards it with an explicit confirm. -->
+        <div id="preset_overwrite_modal" class="modal-overlay hidden">
+            <div class="modal">
+                <div class="modal-header">
+                    <h2 class="modal-title">Overwrite Preset</h2>
+                </div>
+                <div class="modal-body">
+                    <p>A preset named "<span id="preset_overwrite_name"></span>" already exists. Overwrite it?</p>
+                    <p class="text-sm text-secondary">This replaces the saved preset.</p>
+                </div>
+                <div class="modal-footer">
+                    <button id="cancel_overwrite_btn" class="btn btn-secondary">Cancel</button>
+                    <button id="confirm_overwrite_btn" class="btn btn-danger">Overwrite</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete-confirm for a saved user preset. -->
+        <div id="preset_delete_modal" class="modal-overlay hidden">
+            <div class="modal">
+                <div class="modal-header">
+                    <h2 class="modal-title">Delete Preset</h2>
+                </div>
+                <div class="modal-body">
+                    <p>Delete the saved preset "<span id="preset_delete_name"></span>"?</p>
+                    <p class="text-sm text-secondary">This action cannot be undone.</p>
+                </div>
+                <div class="modal-footer">
+                    <button id="cancel_delete_preset_btn" class="btn btn-secondary">Cancel</button>
+                    <button id="confirm_delete_preset_btn" class="btn btn-danger">Delete</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Notification area -->
+        <div id="notification" class="notification hidden">
+            <span id="notification_text"></span>
+        </div>
+    </body>
+</rml>

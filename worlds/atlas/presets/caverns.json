@@ -1,0 +1,69 @@
+{
+  "name": "Caverns",
+  "description": "A pitted karst highland riddled with caves that open to the sky through sinkholes and cave-mouths — built to chase light shafts underground",
+  "schema_rev": 5,
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.009,
+      "base_amplitude": 58.0,
+      "octaves": 6,
+      "persistence": 0.5,
+      "lacunarity": 2.0,
+      "height_offset": 14.0,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0009,
+        "erosion_frequency": 0.0016,
+        "peaks_frequency": 0.0028,
+        "peaks_amplitude": 44.0,
+        "domain_warp_amplitude": 22.0,
+        "domain_warp_frequency": 0.0032,
+        "continental_spline": [[-1.0, -4.0], [-0.2, 5.0], [0.3, 10.0], [0.65, 24.0], [1.0, 42.0]],
+        "erosion_spline": [[-1.0, 0.5], [-0.6, 0.36], [-0.35, 0.26], [0.0, 0.2], [0.4, 0.14], [1.0, 0.1]],
+        "peaks_spline": [[-1.0, 0.0], [0.35, 0.1], [0.72, 0.5], [1.0, 1.0]]
+      },
+      "island_mask_enabled": false,
+      "hydro": {
+        "enabled": true,
+        "iterations": 8,
+        "cell_size_m": 8.0,
+        "talus_height": 2.6,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 12.0
+      }
+    },
+    "biomes": {
+      "table": "common/biomes.json",
+      "temperature_frequency": 0.003,
+      "humidity_frequency": 0.004,
+      "relief_enabled": false
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.035,
+      "cave_threshold": 0.62,
+      "cave_carve_value": 2.4,
+      "cave_style": 1,
+      "spaghetti_frequency": 0.045,
+      "spaghetti_thickness": 0.09,
+      "surface_breaks_enabled": true,
+      "surface_break_density": 0.28,
+      "feature_cell_size": 110.0,
+      "max_feature_radius": 46.0,
+      "carve_smoothness": 2.2,
+      "entrance_min_cap": 3.0,
+      "rivers_enabled": true,
+      "river_frequency": 0.0016,
+      "river_depth": 4.0,
+      "river_pv_min": -1.0,
+      "river_pv_max": -0.82,
+      "river_max_carve": 10.0,
+      "lakes_enabled": true,
+      "cliffs_enabled": false,
+      "structures_enabled": true
+    }
+  }
+}

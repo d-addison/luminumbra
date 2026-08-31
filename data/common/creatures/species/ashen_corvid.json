@@ -1,0 +1,9 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "ashen_corvid",
+  "display_name": "Ashen Corvid",
+  "predator": false,
+  "rarity": 0.6,
+  "base_color": [0.22, 0.22, 0.24],
+  "biomes": ["plains", "desert", "tundra"]
+}

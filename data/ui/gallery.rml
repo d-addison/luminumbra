@@ -1,0 +1,55 @@
+<rml>
+    <head>
+        <title>Gallery - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="pages.rcss" />
+    </head>
+    <body id="gallery">
+        <a id="back_btn" class="gallery-back">‹</a>
+
+        <div class="container gallery-container">
+            <h1 class="gallery-heading">gallery</h1>
+            <div class="gallery-ornament"></div>
+            <p class="subtitle gallery-subtitle">moments you kept</p>
+
+            <!-- Tight 4-up photo wall — populated at runtime from the player's real captures
+                 (PopulateGallery). The static cards below are a fallback for the fixture/preview. -->
+            <div id="gallery_grid" class="gallery-grid">
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_0.tga"/>
+                </div>
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_1.tga"/>
+                </div>
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_2.tga"/>
+                    <span class="photo-fav">★</span>
+                </div>
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_3.tga"/>
+                </div>
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_4.tga"/>
+                </div>
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_5.tga"/>
+                </div>
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_6.tga"/>
+                </div>
+                <div class="photo-card">
+                    <img class="photo-thumb" src="thumbs/thumb_7.tga"/>
+                </div>
+            </div>
+
+            <div class="gallery-pager">
+                <span class="pager-arrow">‹</span>
+                <span class="pager-dot pager-dot-active"></span>
+                <span class="pager-dot"></span>
+                <span class="pager-dot"></span>
+                <span class="pager-arrow">›</span>
+            </div>
+        </div>
+    </body>
+</rml>

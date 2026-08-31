@@ -1,0 +1,93 @@
+<rml>
+    <head>
+        <title>Photo Mode - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="pages.rcss" />
+    </head>
+    <body id="photo_mode">
+        <!-- Viewfinder frame with hairline rule-of-thirds grid. The frame is a
+             transparent window onto the live scene; only its edges + guides draw. -->
+        <div class="viewfinder">
+            <!-- Rule-of-thirds lines (thin hairline divs). -->
+            <div class="thirds-line thirds-v thirds-v1"></div>
+            <div class="thirds-line thirds-v thirds-v2"></div>
+            <div class="thirds-line thirds-h thirds-h1"></div>
+            <div class="thirds-line thirds-h thirds-h2"></div>
+
+            <!-- Corner ticks frame the composition without boxing it in. -->
+            <div class="vf-corner vf-corner-tl"></div>
+            <div class="vf-corner vf-corner-tr"></div>
+            <div class="vf-corner vf-corner-bl"></div>
+            <div class="vf-corner vf-corner-br"></div>
+
+            <!-- Focus reticle at centre. -->
+            <div class="vf-reticle"></div>
+        </div>
+
+        <!-- Bottom EXIF strip — spread evenly across the frame. -->
+        <div class="photo-readout">
+            <div class="readout-group">
+                <div class="readout-cell">
+                    <span class="readout-label">aperture</span>
+                    <span class="readout-value" id="ro_aperture">f/1.8</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">shutter</span>
+                    <span class="readout-value" id="ro_shutter">1/125</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">iso</span>
+                    <span class="readout-value" id="ro_iso">ISO 100</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">exposure</span>
+                    <span class="readout-value" id="ro_ev">+0.0 EV ok</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">light (k/l)</span>
+                    <span class="readout-value" id="ro_tod">day</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">weather (t)</span>
+                    <span class="readout-value" id="ro_weather">live</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">focal</span>
+                    <span class="readout-value">35mm</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">white bal</span>
+                    <span class="readout-value">5600k</span>
+                </div>
+                <div class="readout-cell">
+                    <span class="readout-label">format</span>
+                    <span class="readout-value">raw</span>
+                </div>
+            </div>
+
+            <!-- Shutter minimized — reference has no prominent shutter button. -->
+            <div class="shutter">
+                <div class="shutter-ring"></div>
+                <span class="shutter-hint">space</span>
+            </div>
+        </div>
+
+        <!-- Post-capture star verdict — hidden until a frame is taken. -->
+        <div id="verdict-panel" class="verdict-panel hidden">
+            <h2 class="verdict-heading" id="verdict_heading">captured</h2>
+            <div class="verdict-stars" id="verdict_stars">
+                <span class="verdict-star verdict-star-on">★</span>
+                <span class="verdict-star verdict-star-on">★</span>
+                <span class="verdict-star verdict-star-on">★</span>
+                <span class="verdict-star">★</span>
+                <span class="verdict-star">★</span>
+            </div>
+            <p class="verdict-note" id="verdict_note">balanced light · subject on the third</p>
+            <div class="verdict-actions">
+                <button id="verdict_keep_btn" class="btn">Keep</button>
+                <button id="verdict_retake_btn" class="btn">Retake</button>
+            </div>
+        </div>
+    </body>
+</rml>

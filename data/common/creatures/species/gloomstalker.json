@@ -1,0 +1,17 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "gloomstalker",
+  "display_name": "Gloomstalker",
+  "predator": true,
+  "rarity": 0.3,
+  "base_color": [
+    0.16,
+    0.14,
+    0.2
+  ],
+  "biomes": [
+    "tundra",
+    "alpine"
+  ],
+  "nocturnal": true
+}

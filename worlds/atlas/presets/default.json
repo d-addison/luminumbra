@@ -1,0 +1,132 @@
+{
+  "name": "Default",
+  "description": "Varied, DEM-grounded foothills with biomes, rivers, and hydraulic drainage relief",
+  "schema_rev": 5,
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.01,
+      "base_amplitude": 34.0,
+      "octaves": 6,
+      "persistence": 0.5,
+      "lacunarity": 2.0,
+      "height_offset": 5.0,
+      "island_mask_enabled": false,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0012,
+        "erosion_frequency": 0.0018,
+        "peaks_frequency": 0.004,
+        "peaks_amplitude": 20.0,
+        "domain_warp_amplitude": 14.0,
+        "domain_warp_frequency": 0.004,
+        "continental_spline": [
+          [
+            -1.0,
+            -9.0
+          ],
+          [
+            -0.3,
+            -2.0
+          ],
+          [
+            0.1,
+            3.0
+          ],
+          [
+            0.5,
+            9.0
+          ],
+          [
+            1.0,
+            18.0
+          ]
+        ],
+        "erosion_spline": [
+          [
+            -1.0,
+            0.7
+          ],
+          [
+            -0.4,
+            0.45
+          ],
+          [
+            0.0,
+            0.3
+          ],
+          [
+            0.5,
+            0.18
+          ],
+          [
+            1.0,
+            0.12
+          ]
+        ],
+        "peaks_spline": [
+          [
+            -1.0,
+            0.0
+          ],
+          [
+            0.3,
+            0.05
+          ],
+          [
+            0.7,
+            0.4
+          ],
+          [
+            1.0,
+            1.0
+          ]
+        ]
+      },
+      "hydro": {
+        "enabled": true,
+        "iterations": 4,
+        "cell_size_m": 8.0,
+        "talus_height": 2.6,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 8.0
+      }
+    },
+    "biomes": {
+      "table": "common/biomes.json",
+      "temperature_frequency": 0.005,
+      "humidity_frequency": 0.005,
+      "relief_enabled": true,
+      "relief_strength": 0.45
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.02,
+      "rivers_enabled": true,
+      "river_frequency": 0.0016,
+      "river_depth": 4.0,
+      "river_pv_min": -1.0,
+      "river_pv_max": -0.84,
+      "river_max_carve": 8.0,
+      "lakes_enabled": true,
+      "lake_frequency": 0.0009,
+      "lake_threshold": 0.52,
+      "lake_depth": 5.0,
+      "lake_max_carve": 22.0,
+      "lake_bank_offset": 2.0,
+      "cliffs_enabled": true,
+      "cliff_frequency": 0.0011,
+      "cliff_threshold": 0.4,
+      "cliff_step": 11.0,
+      "structures_enabled": true,
+      "surface_breaks_enabled": true,
+      "surface_break_density": 0.18,
+      "feature_cell_size": 128.0,
+      "max_feature_radius": 18.0,
+      "carve_smoothness": 3.0,
+      "entrance_min_cap": 2.0
+    }
+  }
+}

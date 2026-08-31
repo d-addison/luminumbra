@@ -1,0 +1,23 @@
+{
+  "_comment": " static-model UV texture lane: maps each tree-part mesh to its albedo+normal .ltex (sampled by the mesh's own UVs in g_buffer.frag). Render-only; never hashed. leaves carry alpha_test (luma-keyed cutout) since the source leaf JPGs have no alpha channel.",
+  "models": [
+    {
+      "mesh": "data/models/trees/tree_small_02_trunk.lmesh",
+      "albedo": "data/textures/models/tree_trunk_albedo_512.ltex",
+      "normal": "data/textures/models/tree_trunk_normal_512.ltex",
+      "alpha_test": false
+    },
+    {
+      "mesh": "data/models/trees/tree_small_02_branches.lmesh",
+      "albedo": "data/textures/models/tree_branch_albedo_512.ltex",
+      "normal": "data/textures/models/tree_branch_normal_512.ltex",
+      "alpha_test": false
+    },
+    {
+      "mesh": "data/models/trees/tree_small_02_leaves.lmesh",
+      "albedo": "data/textures/models/tree_leaves_albedo_512.ltex",
+      "normal": "data/textures/models/tree_leaves_normal_512.ltex",
+      "alpha_test": true
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+<rml>
+    <head>
+        <title>Settings - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+    </head>
+    <body id="settings" class="fade-in">
+        <div class="container">
+            <h1>settings</h1>
+            <div class="title-ornament">&#9670;</div>
+
+            <!-- Hidden controls preserved for C++ get/set wiring. -->
+            <div class="hidden">
+                <select id="setting_resolution" name="resolution" class="form-control">
+                    <option value="">Native / Default</option>
+                    <option value="1280x720">1280 x 720</option>
+                    <option value="1920x1080">1920 x 1080</option>
+                    <option value="2560x1440">2560 x 1440</option>
+                    <option value="3440x1440">3440 x 1440</option>
+                    <option value="3840x1600">3840 x 1600</option>
+                    <option value="3840x2160">3840 x 2160</option>
+                </select>
+                <select id="setting_window_mode" name="window_mode" class="form-control">
+                    <option value="windowed">Windowed</option>
+                    <option value="borderless">Borderless</option>
+                    <option value="fullscreen">Fullscreen</option>
+                </select>
+                <select id="setting_vsync" name="vsync" class="form-control">
+                    <option value="off">Off</option>
+                    <option value="on">On</option>
+                </select>
+                <input type="range" id="setting_audio_sfx" name="audio_sfx"
+                       min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />
+                <input type="range" id="setting_audio_music" name="audio_music"
+                       min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />
+            </div>
+
+            <div class="settings-panel">
+                <div class="settings-columns">
+                    <!-- ===================== GAMEPLAY ===================== -->
+                    <div class="settings-column settings-section">
+                        <h2 class="settings-heading">gameplay</h2>
+
+                        <div class="form-group settings-row">
+                            <label for="setting_mouse_sensitivity">sensitivity <span id="setting_mouse_sensitivity_value" class="settings-value">0.025</span></label>
+                            <input type="range" id="setting_mouse_sensitivity" name="mouse_sensitivity"
+                                   min="0.01" max="1.0" step="0.005" value="0.025" class="form-control settings-slider" />
+                        </div>
+
+                        <div class="form-group settings-row">
+                            <label for="setting_fov">field of view <span id="setting_fov_value" class="settings-value">45</span></label>
+                            <input type="range" id="setting_fov" name="fov"
+                                   min="30" max="110" step="1" value="45" class="form-control settings-slider" />
+                        </div>
+
+                        <div class="form-group settings-row">
+                            <label for="setting_ui_scale">ui / hud scale <span id="setting_ui_scale_value" class="settings-value">100%</span></label>
+                            <input type="range" id="setting_ui_scale" name="ui_scale"
+                                   min="0.5" max="2.5" step="0.05" value="1.0" class="form-control settings-slider" />
+                        </div>
+
+                        <div class="form-group settings-row">
+                            <label for="setting_audio_master">master volume <span id="setting_audio_master_value" class="settings-value">100%</span></label>
+                            <input type="range" id="setting_audio_master" name="audio_master"
+                                   min="0" max="1" step="0.01" value="1" class="form-control settings-slider" />
+                        </div>
+
+                        <!-- vsync toggle (drives hidden #setting_vsync via C++ handler) -->
+                        <div class="form-group settings-row-inline">
+                            <label>vsync</label>
+                            <span class="toggle on" id="vsync_toggle"><span class="toggle-knob"></span></span>
+                        </div>
+
+                        <!-- window mode stepper (drives hidden #setting_window_mode) -->
+                        <div class="form-group settings-row-inline">
+                            <label>window mode</label>
+                            <span class="stepper">
+                                <span class="stepper-arrow" id="window_mode_prev">&#8249;</span>
+                                <span class="stepper-value" id="window_mode_value">borderless</span>
+                                <span class="stepper-arrow" id="window_mode_next">&#8250;</span>
+                            </span>
+                        </div>
+                    </div>
+
+                    <!-- ===================== CONTROLS ===================== -->
+                    <div class="settings-column settings-section">
+                        <h2 class="settings-heading">controls</h2>
+
+                        <!-- Keybind rows bound to real input actions; click a row to rebind
+                             (the next key press is captured). Chips are filled from the current
+                             bindings on load. -->
+                        <div class="keybind-row keybind-rebind" data-action="TogglePhotoMode">
+                            <span class="keybind-label">photo mode</span>
+                            <span class="keybind-chip" id="kb_TogglePhotoMode">P</span>
+                        </div>
+                        <div class="keybind-row keybind-rebind" data-action="Shutter">
+                            <span class="keybind-label">shutter</span>
+                            <span class="keybind-chip" id="kb_Shutter">Enter</span>
+                        </div>
+                        <div class="keybind-row keybind-rebind" data-action="MoveForward">
+                            <span class="keybind-label">move forward</span>
+                            <span class="keybind-chip" id="kb_MoveForward">W</span>
+                        </div>
+                        <div class="keybind-row keybind-rebind" data-action="MoveBack">
+                            <span class="keybind-label">move back</span>
+                            <span class="keybind-chip" id="kb_MoveBack">S</span>
+                        </div>
+                        <div class="keybind-row keybind-rebind" data-action="Jump">
+                            <span class="keybind-label">jump</span>
+                            <span class="keybind-chip" id="kb_Jump">Space</span>
+                        </div>
+                        <div class="keybind-row keybind-rebind" data-action="Sprint">
+                            <span class="keybind-label">sprint</span>
+                            <span class="keybind-chip" id="kb_Sprint">Shift</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Back link (settings apply live; apply button kept hidden for C++). -->
+                <span id="back_btn" class="back-link">&#8249; back</span>
+                <button id="apply_settings_btn" class="btn hidden">
+                    Apply &amp; Save
+                </button>
+            </div>
+        </div>
+
+        <!-- Notification area -->
+        <div id="notification" class="notification hidden">
+            <span id="notification_text"></span>
+        </div>
+    </body>
+</rml>

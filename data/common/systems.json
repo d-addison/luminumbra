@@ -1,0 +1,58 @@
+﻿{
+  "_comment": "SystemConfig defaults. Every system is off so an unconfigured world keeps the canonical world hash and visual baseline. sim.* may change authoritative state and is hashed when enabled; render.* is render-only and excluded from hashes.",
+  "sim": {
+    "plant_growth": { "enabled": false, "params": { "mutation_rate": 0.05 } },
+    "erosion": { "enabled": false },
+    "_ecology_comment": "Creature-brain tuning. enabled:false -> the compiled defaults are used (byte-identical). Set enabled:true to apply these values; the shown values ARE the defaults, so flip enabled alone changes nothing until you tweak a number. Levers: energy/sleep cadence, hunger/stamina pacing, herd cohesion (herd_weight/alignment_weight), predator reach (catch_radius/satiation).",
+    "ecology": { "enabled": false, "params": {
+      "energy_drain_per_second": 0.006,
+      "energy_rest_recover": 0.080,
+      "energy_sleep_recover": 0.160,
+      "hunger_growth_per_second": 0.02,
+      "hunger_graze_sate": 0.5,
+      "stamina_rest_recover": 0.3,
+      "stamina_move_drain": 0.10,
+      "herd_weight": 0.8,
+      "alignment_weight": 0.5,
+      "catch_radius": 2.2,
+      "catch_satiation": 0.8,
+      "flock_neighbor_radius": 12.0,
+      "flock_separation_radius": 3.0,
+      "flock_cohesion_weight": 0.6,
+      "flock_separation_weight": 1.4
+    } },
+    "_fullcontrol_comment": "Per-system creature tuning. Each enabled:false -> compiled defaults (byte-identical); the shown values ARE the defaults. Flip enabled:true + edit a number to tune live. sim.* are hashed when enabled; the canonical baseline keeps them all OFF.",
+    "wildlife_foliage": { "enabled": false, "params": {
+      "graze_radius": 3.0, "graze_per_creature": 0.05, "regrow_per_tick": 0.01, "feed_per_graze": 0.02 } },
+    "thirst": { "enabled": false, "params": {
+      "rise_rate_per_second": 0.04, "drink_rate_per_second": 0.5, "seek_threshold": 0.3 } },
+    "scavenging": { "enabled": false, "params": {
+      "hunger_threshold": 0.3, "feed_radius": 1.5, "feed_rate_per_tick": 0.05 } },
+    "reproduction": { "enabled": false, "params": {
+      "maturity_ticks": 90, "cooldown_ticks": 300, "healthy_stamina": 0.5,
+      "mate_seek_radius": 45.0, "courtship_radius": 2.6, "courtship_ticks": 90, "spawn_radius": 1.2 } },
+    "foraging": { "enabled": false, "params": {
+      "deposit": 1.0, "trail_weight": 8.0, "goal_weight": 1.0 } },
+    "_hydrology_weather_comment": "Weather-driven rain enters finite hydrology through integer-quantized per-cell precipitation. Enabling it deliberately changes the world hash.",
+    "hydrology_weather": { "enabled": false },
+    "_weather_events_comment": "Deterministic Markov weather-event epochs are exposed through GameSession::CurrentWeatherEvent. OFF -> always Clear/0 (byte-identical); consumers must also be participants.",
+    "weather_events": { "enabled": false },
+    "_aether_state_comment": "The stateful energy-field layer uses world-anchored sparse pages and an integer kernel; its sub-hash is folded into the aether hash slot. OFF -> no allocation, no tick work, zero hash bytes, and byte-identical saves. Activation deliberately changes the world hash.",
+    "aether_state": { "enabled": false }
+  },
+  "render": {
+    "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },
+    "tree_wind": { "enabled": false },
+    "plant_procgen": { "enabled": true },
+    "sky_lut_gpu": { "enabled": true },
+    "circadian": { "enabled": false, "params": { "amplitude": 1.0 } },
+    "_spawn_comment": "Client-only ambient living-world spawn (never hashed). enabled:false -> compiled defaults. Tune how many creatures/ants populate the world + their speeds.",
+    "creature_spawn": { "enabled": false, "params": {
+      "herd_count": 12, "predator_speed": 4.0, "prey_speed": 2.6, "initial_hunger": 0.2 } },
+    "foraging_colony": { "enabled": false, "params": { "ant_count": 24, "food_amount": 1000000 } },
+    "_living_atmosphere_comment": "Live weather, aether response, and snow cover form the default living-atmosphere presentation.",
+    "live_weather": { "enabled": true },
+    "aether_tap": { "enabled": true },
+    "snow_cover": { "enabled": true }
+  }
+}

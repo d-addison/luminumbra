@@ -1,0 +1,17 @@
+{
+  "schema": "luminumbra.creature.species.v1",
+  "id": "lumen_moth",
+  "display_name": "Lumen Moth",
+  "predator": false,
+  "rarity": 0.85,
+  "base_color": [
+    0.72,
+    0.68,
+    0.95
+  ],
+  "biomes": [
+    "wetland",
+    "plains"
+  ],
+  "nocturnal": true
+}

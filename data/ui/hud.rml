@@ -1,0 +1,49 @@
+<rml>
+    <head>
+        <title>HUD - Luminumbra</title>
+        <link type="text/css" href="base.rcss" />
+        <link type="text/css" href="game_theme.rcss" />
+        <link type="text/css" href="pages.rcss" />
+    </head>
+    <body id="hud">
+        <!-- Faint corner watermark — warm-white only, no glow, never boxed.
+             Diegetic + mostly transparent so it never competes with the world. -->
+        <div class="hud-corner">
+            <div class="hud-time">
+                <span class="hud-time-value">lumin v0.1.0</span>
+            </div>
+            <div class="hud-watermark-sub">24 exposures</div>
+        </div>
+
+        <!-- First-boot onboarding hint. Auto-hidden by the client once the first
+             capture records a species. -->
+        <div class="hud-tutorial" id="tutorial_hint">
+            <div class="hud-tutorial-line">Find a creature, then <strong>P</strong> to raise your camera</div>
+            <div class="hud-tutorial-line">Frame it &middot; <strong>Enter</strong> to capture &middot; <strong>[ ]</strong> aperture &middot; <strong>- =</strong> focus</div>
+            <div class="hud-tutorial-line"><strong>C</strong> opens your codex</div>
+        </div>
+
+        <!-- Objective tracker — the current progression goal + its progress. Updated
+             from the live PhotoCodex while the HUD (not the viewfinder) is shown. -->
+        <div class="hud-objective">
+            <div class="hud-objective-row">
+                <span class="hud-objective-label">objective</span>
+                <span class="hud-objective-progress" id="obj_progress">0%</span>
+            </div>
+            <div class="hud-objective-title" id="obj_title">Photograph your first creature</div>
+            <div class="hud-objective-count" id="obj_count">0 / 5 goals</div>
+        </div>
+
+        <!-- Farming HUD — top-right. Seed/harvest inventory + the crop you're facing
+             (stage, quality, harvest hint). Shown by the client once the player is near a
+             crop or has farmed; hidden otherwise so it never clutters a non-farming run. -->
+        <div class="hud-farming hidden" id="farming_panel">
+            <div class="hud-farming-row">
+                <span class="hud-farming-label">farm</span>
+                <span class="hud-farming-inv" id="farm_inv">5 seeds - 0 harvested</span>
+            </div>
+            <div class="hud-farming-crop" id="farm_crop">no crop in reach</div>
+            <div class="hud-farming-hint"><strong>F</strong> plant &middot; <strong>V</strong> species &middot; <strong>G</strong> water &middot; <strong>H</strong> fertilize &middot; <strong>J</strong> harvest</div>
+        </div>
+    </body>
+</rml>

@@ -1,0 +1,68 @@
+{
+  "schema": "luminumbra.game.archetype.v1",
+  "archetype": "grovestrider",
+  "actor_id": "grovestrider-01",
+  "comment": "Project Capture game content (): the grovestrider hunger fixture relocated out of engine source. The `expected` block is the planner gate's baseline; the engine never reads this file.",
+  "needs": [
+    { "name": "hunger", "pressure": 0.92, "growth_per_tick": 0.0 },
+    { "name": "safety", "pressure": 0.28, "growth_per_tick": 0.0 },
+    { "name": "curiosity", "pressure": 0.18, "growth_per_tick": 0.0 },
+    { "name": "fatigue", "pressure": 0.22, "growth_per_tick": 0.0 }
+  ],
+  "opportunities": [
+    { "id": "mossberry-cache", "action": "forage", "target": "mossberry_grove", "need": "hunger", "satisfaction": 0.94, "urgency": 0.85, "distance": 2.0, "risk": 0.08, "stamina_cost": 0.18 },
+    { "id": "stream-reeds", "action": "graze", "target": "stream_reeds", "need": "hunger", "satisfaction": 0.42, "urgency": 0.6, "distance": 1.0, "risk": 0.03, "stamina_cost": 0.08 },
+    { "id": "thunder-hollow", "action": "shelter", "target": "thunder_hollow", "need": "safety", "satisfaction": 0.7, "urgency": 0.4, "distance": 0.8, "risk": 0.02, "stamina_cost": 0.1 },
+    { "id": "glowcap-ring", "action": "inspect", "target": "glowcap_ring", "need": "curiosity", "satisfaction": 0.55, "urgency": 0.35, "distance": 1.2, "risk": 0.15, "stamina_cost": 0.2 }
+  ],
+  "creature": {
+    "mesh": "data/models/creatures/grovestrider/grovestrider.lmesh",
+    "comment_texture": ": UV-mapped skinned-texture set (256x256.ltex). The engine RenderPipeline names no creature; the scenario harness reads these paths from this game archetype and hands them to the generic load_skinned_texture_set API.",
+    "albedo_texture": "data/textures/creatures/grovestrider/grovestrider_albedo_256.ltex",
+    "normal_texture": "data/textures/creatures/grovestrider/grovestrider_normal_256.ltex",
+    "comment_material": " slice polish: dark moss tone (material 3) for high contrast against the sandy archipelago shore. Material 4 (Sand) made the creature read invisibly against its own ground.",
+    "material_id": 3,
+    "replan_interval_ticks": 10,
+    "clips": {
+      "idle": "data/models/creatures/grovestrider/grovestrider.idle.lanim",
+      "walk": "data/models/creatures/grovestrider/grovestrider.walk.lanim"
+    },
+    "clip_by_action": { "graze": "idle", "approach": "walk" }
+  },
+  "slice": {
+    "comment": "creature_slice_smoke scenario data (): runtime needs, the ambient graze opportunity, and the light-stimulus reaction. expected_* feed the gate.",
+    "needs": [
+      { "name": "hunger", "pressure": 0.55, "growth_per_tick": 0.0002 },
+      { "name": "curiosity", "pressure": 0.65, "growth_per_tick": 0.0001 }
+    ],
+    "graze_opportunity": {
+      "id": "shore-grass", "action": "graze", "target": "shore_grass", "need": "hunger",
+      "satisfaction": 0.6, "urgency": 0.5, "risk": 0.02, "stamina_cost": 0.05,
+      "offset": { "x": 2.5, "z": 0.0 }
+    },
+    "light_stimulus": {
+      "id": "glow-bloom", "action": "approach", "target": "glow_bloom", "need": "curiosity",
+      "satisfaction": 0.95, "urgency": 0.95, "risk": 0.05, "stamina_cost": 0.1,
+      "offset": { "x": -1.0, "z": 4.0 },
+      "prop_mesh": "data/models/props/glow_bloom/glow_bloom.lmesh",
+      "emissive_material_id": 6
+    },
+    "expected_before_action": "graze",
+    "expected_after_action": "approach"
+  },
+  "expected": {
+    "decision_contract": "deterministic_priority_then_cost",
+    "dominant_need": "hunger",
+    "selected_action": "forage",
+    "selected_target": "mossberry_grove",
+    "selected_score": 2.1366,
+    "candidate_count": 4,
+    "checksum": "fnv1a32:5bfeaba9",
+    "candidates": [
+      { "rank": 1, "id": "mossberry-cache", "need": "hunger", "action": "forage", "target": "mossberry_grove", "score": 2.1366, "need_pressure": 0.92 },
+      { "rank": 2, "id": "stream-reeds", "need": "hunger", "action": "graze", "target": "stream_reeds", "score": 1.2548, "need_pressure": 0.92 },
+      { "rank": 3, "id": "thunder-hollow", "need": "safety", "action": "shelter", "target": "thunder_hollow", "score": 0.648, "need_pressure": 0.28 },
+      { "rank": 4, "id": "glowcap-ring", "need": "curiosity", "action": "inspect", "target": "glowcap_ring", "score": 0.043, "need_pressure": 0.18 }
+    ]
+  }
+}

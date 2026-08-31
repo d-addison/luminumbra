@@ -1,0 +1,37 @@
+#version 450 core
+//   (:  /,  ): mean log-luminance of
+// the lit scene -> a single float in an SSBO, copied out through the
+// AsyncReadbackRing (submit now, consume a later frame; the frame NEVER blocks).
+// One 16x16 workgroup; the 256 threads stride a fixed 64x64 sample lattice over
+// the frame (4096 samples - plenty for an exposure servo), reduce in shared
+// memory, and thread 0 writes exp(mean(log(lum))) - the geometric mean, the
+// standard eye-adaptation metering statistic (robust to small bright outliers).
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) uniform sampler2D u_scene;
+layout(std430, binding = 1) buffer LumOut { float mean_luminance; };
+
+shared float s_sum[256];
+
+void main() {
+    const uint idx = gl_LocalInvocationID.y * 16u + gl_LocalInvocationID.x;
+    const int N = 64; // the sample lattice dimension
+    float sum = 0.0;
+    for (int sy = int(gl_LocalInvocationID.y); sy < N; sy += 16) {
+        for (int sx = int(gl_LocalInvocationID.x); sx < N; sx += 16) {
+            vec2 uv = (vec2(sx, sy) + 0.5) / float(N);
+            vec3 c = textureLod(u_scene, uv, 0.0).rgb;
+            float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+            sum += log(max(lum, 1e-4));
+        }
+    }
+    s_sum[idx] = sum;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (idx < stride) { s_sum[idx] += s_sum[idx + stride]; }
+        barrier();
+    }
+    if (idx == 0u) {
+        mean_luminance = exp(s_sum[0] / float(N * N));
+    }
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "luminumbra.particle_emitter.v1",
+  "name": "precip_splash",
+  "_comment": ": rain-impact FOAM. atlas_layer 4 is a render-side SENTINEL the particle frag shader reads to draw this as a clean near-white foam burst (no scene-light tint, no additive glow) instead of a coloured emissive sprite. spawn_rate 0 (impact-spawned only) so it is excluded from the deterministic emitter-descriptor snapshot. Colours are a near-neutral pale white-blue so the burst reads as a small subtle whitish foam pop, never coloured speckle.",
+  "type": 3,
+  "spawn_rate": 0.0,
+  "lifetime": 0.28,
+  "origin": [0.0, 0.0, 0.0],
+  "origin_extent": [0.0, 0.0, 0.0],
+  "base_velocity": [0.0, 1.4, 0.0],
+  "velocity_jitter": 1.1,
+  "size_curve": [0.02, 0.05, 0.06, 0.04, 0.0],
+  "color_r_curve": [0.9, 0.93, 0.95, 0.93, 0.88],
+  "color_g_curve": [0.93, 0.95, 0.97, 0.95, 0.9],
+  "color_b_curve": [0.97, 0.99, 1.0, 0.99, 0.95],
+  "color_a_curve": [0.0, 0.4, 0.45, 0.28, 0.0],
+  "atlas_layer": 4,
+  "blend": "alpha",
+  "wind_response": 0.0,
+  "streak_aspect": 1.0,
+  "impact_splash": false,
+  "impact_plane_y": 0.0
+}

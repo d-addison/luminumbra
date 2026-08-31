@@ -1,0 +1,12 @@
+#version 450 core
+// glass occluders into the shadow TINT cascade.
+// Position-only: the pane's unit quad under its model matrix, projected by the
+// same light-space matrix the depth cascade used.
+layout (location = 0) in vec3 aPos;
+
+uniform mat4 u_lightSpaceMatrix;
+uniform mat4 u_model;
+
+void main() {
+    gl_Position = u_lightSpaceMatrix * u_model * vec4(aPos, 1.0);
+}

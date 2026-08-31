@@ -1,0 +1,24 @@
+{
+  "bank_id": "music",
+  "streaming": true,
+  "events": {
+    "music_main_menu": {
+      "files": ["assets/audio/music/themes/main_menu_theme.mp3"],
+      "volume": 0.30,
+      "is_2d": true,
+      "looping": true
+    },
+    "music_exploration": {
+      "files": ["assets/audio/music/themes/exploration_theme.mp3"],
+      "volume": 0.20,
+      "is_2d": true,
+      "looping": true
+    },
+    "music_dusk": {
+      "files": ["assets/audio/music/themes/dusk_theme.mp3"],
+      "volume": 0.20,
+      "is_2d": true,
+      "looping": true
+    }
+  }
+}

@@ -1,0 +1,973 @@
+/* ============================================================================
+   game_theme.rcss — "Zen / Photographic Calm" visual language.
+   Palette: warm-dusk near-black #16130E · ivory ink #F2EDE4 · sage #8FA68E ·
+   dusk-gold focus #C9A86A · warm surfaces #1F1B14 · hairlines #3A3326.
+   Type: Lora serif, light weight, generous letter-spacing, lots of space.
+   Linked AFTER base.rcss (which supplies block/inline structural defaults).
+   ============================================================================ */
+
+body {
+    width: 100%;
+    height: 100%;
+    color: #F2EDE4;
+    font-family: Lora;
+    /* The menus render over the live golden-hour world (main_client renders a scenic world
+       behind the menu branch). Keep the field transparent so the world shows through; a gentle
+       top-to-bottom darkening veil lifts text legibility without hiding the vista. When the
+       backdrop is disabled the cleared back buffer shows through as near-black. */
+    background-color: transparent;
+    decorator: linear-gradient(180deg, rgba(11,9,6,90) 0%, rgba(11,9,6,40) 35%, rgba(11,9,6,120) 100%);
+}
+
+/* Main menu: centre the hero + nav, raised toward the upper third. */
+body#main_menu {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: center;
+}
+
+body#main_menu.container {
+    padding-top: 18%;
+}
+
+/* ---- Title / hero ---- */
+h1 {
+    font-size: 96px;
+    text-align: center;
+    color: #F6F1E8;
+    font-weight: normal;
+    letter-spacing: 22px;
+    margin-top: 8px;
+    margin-bottom: 10px;
+}
+
+p.subtitle {
+    text-align: center;
+    font-style: italic;
+    color: #C9B89A;
+    font-size: 17px;
+    letter-spacing: 5px;
+    margin-bottom: 32px;
+}
+
+/* Shared title ornaments (used across settings / world pages). */
+.title-divider {
+    display: block;
+    width: 64px;
+    height: 1px;
+    margin: 0 auto 40px auto;
+    background-color: rgba(201, 168, 106, 110);
+}
+
+.title-ornament {
+    text-align: center;
+    color: rgba(201, 168, 106, 150);
+    font-size: 11px;
+    letter-spacing: 2px;
+    margin-bottom: 26px;
+}
+
+/* ---- Main-menu navigation ---- */
+div#nav {
+    text-align: center;
+    width: 360px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* Base button: a frosted pill — translucent warm fill, dusk-gold hairline, blur. */
+button {
+    height: 58px;
+    line-height: 56px;          /* vertically centre the single-line label */
+    padding-left: 28px;
+    padding-right: 28px;
+    background-color: rgba(34, 28, 20, 140);
+    border-width: 1px;
+    border-color: rgba(201, 168, 106, 110);
+    border-radius: 26px;
+    color: #EDE5D6;
+    font-size: 20px;
+    font-weight: normal;
+    font-family: Lora;
+    text-align: center;
+    backdrop-filter: blur(12px);
+    box-shadow: 0px 2px 18px rgba(8, 6, 4, 120);
+}
+
+button:hover {
+    background-color: rgba(201, 168, 106, 60);
+    border-color: rgba(201, 168, 106, 200);
+    color: #FFF9EE;
+    box-shadow: 0px 0px 22px rgba(201, 168, 106, 90);
+}
+
+button:active {
+    background-color: rgba(201, 168, 106, 110);
+    border-color: #C9A86A;
+    color: #16130E;
+}
+
+/* Main-menu navigation: the big stacked, centered frosted pills. */
+#nav button {
+    display: block;
+    width: 360px;
+    margin-bottom: 16px;
+    margin-left: auto;
+    margin-right: auto;
+    letter-spacing: 4px;
+}
+
+/* Small inline buttons — the filter row in Load World. */
+.btn-sm {
+    height: auto;
+    width: auto;
+    padding-top: 6px;
+    padding-bottom: 6px;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+.container {
+    text-align: center;
+    width: 100%;
+}
+
+.version-info {
+    position: absolute;
+    bottom: 18px;
+    right: 20px;
+    color: rgba(180, 168, 140, 90);
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+/* ============================================================================
+   Forms / settings — same Zen palette, left-aligned, spacious.
+   ============================================================================ */
+
+.form-container {
+    width: 660px;
+    margin-left: auto;
+    margin-right: auto;
+    text-align: left;
+}
+
+.settings-container {
+    max-height: none;
+    overflow: visible;
+}
+
+/* body#settings layout — flex-centre the panel. */
+body#settings {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
+/* body#settings header */
+body#settings h1 {
+    font-size: 42px;
+    letter-spacing: 16px;
+    color: #F2EDE4;
+    font-weight: normal;
+    margin: 0 0 6px 0;
+    text-align: center;
+}
+
+/* One frosted panel containing both columns. */
+.settings-panel {
+    width: 1080px;
+    max-width: 76%;
+    margin: 0 auto;
+    padding: 48px 64px 40px;
+    text-align: left;
+    background-color: rgba(24, 20, 15, 150);
+    backdrop-filter: blur(22px);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 28);
+    box-shadow: 0px 18px 60px rgba(0, 0, 0, 120);
+}
+
+.settings-columns {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+}
+
+.settings-column {
+    width: 47%;
+}
+
+/* The old cards are neutralized into plain blocks inside the panel. */
+.settings-section {
+    background-color: transparent;
+    border-width: 0;
+    padding: 0;
+    margin-bottom: 0;
+}
+
+h2 {
+    font-weight: normal;
+    letter-spacing: 2px;
+}
+
+h2.settings-heading {
+    font-size: 15px;
+    color: rgba(206, 189, 158, 210);
+    font-weight: normal;
+    letter-spacing: 4px;
+    margin-bottom: 22px;
+    border-bottom-width: 0;
+    padding-bottom: 0;
+}
+
+.settings-row {
+    display: block;
+    margin-bottom: 22px;
+}
+
+.settings-row label {
+    display: block;
+    color: rgba(224, 215, 198, 200);
+    font-size: 16px;
+    margin-bottom: 8px;
+    letter-spacing: 1px;
+}
+
+.settings-value {
+    color: #C9A86A;
+    font-size: 15px;
+    float: right;
+}
+
+/* Inline rows (vsync toggle / window-mode stepper). */
+.settings-row-inline {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 18px;
+}
+.settings-row-inline label {
+    display: block;
+    color: rgba(224, 215, 198, 200);
+    font-size: 16px;
+    letter-spacing: 1px;
+    margin-bottom: 0;
+}
+
+/* VSync toggle pill. */
+.toggle {
+    display: inline-block;
+    width: 46px;
+    height: 22px;
+    border-radius: 11px;
+    background-color: rgba(60, 54, 40, 160);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 30);
+}
+.toggle.on { background-color: rgba(143, 166, 142, 220); }
+.toggle-knob {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    margin-top: 2px;
+    margin-left: 3px;
+    background-color: #F2EDE4;
+}
+.toggle.on.toggle-knob { margin-left: 27px; }
+
+/* Window-mode stepper. */
+.stepper {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+}
+.stepper-arrow {
+    color: rgba(216, 207, 188, 130);
+    font-size: 15px;
+    padding: 0 10px;
+}
+.stepper-arrow:hover { color: #F2EDE4; }
+.stepper-value {
+    color: #D8CFBC;
+    font-size: 15px;
+    letter-spacing: 1px;
+}
+
+/* Keybind rows (right column). */
+.keybind-row {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 12px;
+    margin-bottom: 4px;
+}
+.keybind-row.selected {
+    background-color: rgba(143, 166, 142, 90);
+    border-width: 1px;
+    border-color: rgba(143, 166, 142, 130);
+}
+.keybind-row:hover { background-color: rgba(242, 237, 228, 18); }
+.keybind-label {
+    color: rgba(224, 215, 198, 200);
+    font-size: 15px;
+    letter-spacing: 1px;
+}
+.keybind-row.selected.keybind-label { color: #F2EDE4; }
+.keybind-chip {
+    color: #D8CFBC;
+    font-size: 14px;
+    letter-spacing: 1px;
+}
+
+/* Centered text-link back action. */
+.back-link {
+    display: block;
+    text-align: center;
+    margin-top: 30px;
+    color: rgba(216, 207, 188, 130);
+    font-size: 15px;
+    letter-spacing: 3px;
+    background-color: transparent;
+    border-width: 0;
+    box-shadow: none;
+    backdrop-filter: none;
+    border-radius: 0;
+}
+.back-link:hover {
+    color: #F2EDE4;
+    background-color: transparent;
+    border-width: 0;
+    box-shadow: none;
+}
+
+.form-control {
+    display: block;
+    width: 100%;
+    height: 38px;
+    background-color: #14110C;
+    border-width: 1px;
+    border-color: #3A3326;
+    color: #F2EDE4;
+    font-size: 16px;
+    font-family: Lora;
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+.form-control:focus {
+    border-color: #C9A86A;
+}
+
+select.form-control { height: 38px; }
+select.form-control option {
+    background-color: #14110C;
+    color: #F2EDE4;
+}
+
+.settings-slider {
+    height: 24px;
+    padding-left: 0px;
+    padding-right: 0px;
+}
+
+input.settings-slider slidertrack {
+    background-color: rgba(242, 237, 228, 70);
+    border-width: 0;
+    height: 4px;
+    margin-top: 10px;
+}
+
+input.settings-slider sliderbar {
+    width: 14px;
+    height: 14px;
+    /* Vertically centre the 14px knob on the 4px track (margin-top:10px): the knob
+       centre must sit at the track centre. track top=10, centre=12; knob top must be
+       12-7=5 -> margin-top relative to track top = 5-10 = -5px (was -6, 1px high). */
+    margin-top: -5px;
+    border-radius: 7px;
+    background-color: #D8CFBC;
+    border-width: 0px;
+}
+
+input.settings-slider sliderbar:hover { background-color: #F2EDE4; }
+
+.field-help {
+    color: #8A8270;
+    font-size: 13px;
+    font-style: italic;
+    margin-top: 5px;
+}
+
+.settings-keybinds { color: #B3A892; font-size: 14px; }
+
+.button-container {
+    text-align: center;
+    margin-top: 16px;
+}
+
+.button-container button {
+    display: inline-block;
+    width: 200px;
+    margin-left: 10px;
+    margin-right: 10px;
+}
+
+/* Primary action (Create World) — a soft sage-green affirmative. */
+.btn-success {
+    border-color: #6E8A6A;
+    color: #BFD6B6;
+}
+.btn-success:hover {
+    background-color: #6E8A6A;
+    border-color: #8FA68E;
+    color: #16130E;
+}
+
+.notification {
+    position: absolute;
+    top: 24px;
+    left: 50%;
+    margin-left: -170px;
+    width: 340px;
+    padding: 14px;
+    background-color: #1F1B14;
+    border-width: 1px;
+    border-color: #8FA68E;
+    color: #F2EDE4;
+    text-align: center;
+    font-size: 15px;
+}
+
+.notification.hidden { display: none; }
+.hidden { display: none; }
+
+/* ============================================================================
+   World selection (world_selection.rml) — cards, utilities, delete modal.
+   ============================================================================ */
+/* Search / filters hidden in the photo-card layout. */
+.search-container { display: none; }
+.filter-buttons { display: none; }
+
+/* World selection header. */
+body#world_selection h1 {
+    font-size: 40px;
+    letter-spacing: 8px;
+    color: #E8E0D2;
+    margin: 28px 0 8px;
+}
+
+.list-container {
+    text-align: center;
+    overflow: visible;
+    max-height: none;
+    margin-bottom: 28px;
+}
+
+/* Centered row of photo cards. */
+.cards-row {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: flex-start;
+}
+
+.list-item {
+    display: block;
+    width: 300px;
+    margin: 0 14px;
+    padding: 14px 14px 18px;
+    text-align: center;
+    background-color: rgba(28, 24, 17, 110);
+    backdrop-filter: blur(14px);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 28);
+    border-radius: 6px;
+    box-shadow: 0px 18px 40px rgba(8, 6, 4, 150);
+}
+.list-item:hover {
+    border-color: rgba(242, 237, 228, 60);
+    background-color: rgba(34, 29, 20, 130);
+}
+.list-item.selected {
+    border-color: #C9A86A;
+    box-shadow: 0px 18px 40px rgba(8, 6, 4, 170);
+}
+
+.list-item-title {
+    color: #E8E0D2;
+    font-size: 22px;
+    font-weight: normal;
+    letter-spacing: 2px;
+    text-align: center;
+    margin-top: 14px;
+    margin-bottom: 6px;
+}
+
+.list-item-description {
+    color: #8A8270;
+    font-size: 12px;
+    letter-spacing: 1px;
+    text-align: center;
+}
+
+/* Thumbnail styling used while a capture is loading or unavailable. */
+.world-thumbnail {
+    display: block;
+    width: 100%;
+    height: 150px;
+    background-color: #14110C;
+    decorator: linear-gradient(135deg, #2A2114 0%, #17130C 60%, #0B0906 100%);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 22);
+    border-radius: 4px;
+}
+
+/* Selection dot under each card. */
+.select-dot {
+    display: block;
+    width: 6px;
+    height: 6px;
+    margin: 12px auto 0;
+    border-radius: 4px;
+    background-color: #C9A86A;
+    opacity: 0;
+}
+.list-item.selected.select-dot { opacity: 1; }
+
+.btn-danger { border-color: #7A4A42; color: #D8A39A; }
+.btn-danger:hover { background-color: #7A4A42; border-color: #9A6A60; color: #16130E; }
+
+button:disabled { color: #6E6656; border-color: #2A2620; }
+
+/* Utility classes used across the form / list pages. */
+.text-center { text-align: center; }
+.text-sm { font-size: 14px; }
+.text-lg { font-size: 22px; }
+.text-secondary { color: #8A8270; }
+.mb-md { margin-bottom: 12px; }
+.mb-lg { margin-bottom: 24px; }
+.mt-md { margin-top: 12px; }
+.p-lg { padding: 24px; }
+
+/* Delete-confirmation modal. */
+.modal-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(8, 6, 4, 205);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+/*.modal-overlay's display:flex is defined after.hidden{display:none}, so a plain
+.hidden can't win on equal specificity — make the hidden state explicit for modals. */
+.modal-overlay.hidden { display: none; }
+.modal {
+    width: 440px;
+    padding: 26px;
+    background-color: #1F1B14;
+    border-width: 1px;
+    border-color: #3A3326;
+    text-align: center;
+}
+.modal-title { color: #C9A86A; font-size: 24px; font-weight: normal; letter-spacing: 2px; }
+.modal-body { margin-top: 12px; margin-bottom: 20px; color: #D8CFBC; }
+.modal-footer { display: flex; flex-direction: row; justify-content: center; margin-top: 8px; }
+.modal-footer button { margin-left: 8px; margin-right: 8px; }
+
+/* ============================================================================
+   World creation (world_creation.rml) — frosted panel, underline fields,
+   preset chips, single wide create.
+   ============================================================================ */
+body#world_creation {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+}
+
+.creation-panel {
+    width: 64%;
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 48px 72px 52px;
+    text-align: center;
+    background-color: rgba(22, 19, 14, 140);
+    backdrop-filter: blur(22px);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 28);
+    box-shadow: 0px 24px 70px rgba(8, 6, 4, 150);
+    border-radius: 2px;
+}
+
+#world_creation h1 {
+    font-size: 40px;
+    letter-spacing: 14px;
+    color: #EDE6D8;
+    margin: 4px 0 6px;
+}
+
+#world_creation.title-ornament { margin-bottom: 34px; }
+
+/*   — live world-preview diorama. The pane is a TRANSPARENT
+   framed hole: the host blits the rendered candidate world into this rect under
+   the panel, so the pane itself only draws the frosted frame + vignette. */
+.preview-section {
+    width: 100%;
+    margin-bottom: 30px;
+}
+.preview-pane {
+    width: 100%;
+    height: 320px;
+    position: relative;
+    background-color: transparent;
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 45);
+    box-shadow: 0px 18px 50px rgba(8, 6, 4, 150), inset 0px 0px 60px rgba(8, 6, 4, 90);
+    border-radius: 2px;
+}
+/* Soft edge-darkening so the slice reads as a model on a table, not infinite
+   terrain. A radial vignette via inset shadow over the framed render. */
+.preview-vignette {
+    width: 100%;
+    height: 100%;
+    box-shadow: inset 0px 0px 90px 20px rgba(8, 6, 4, 170);
+    border-radius: 2px;
+}
+.preview-reset {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    height: 26px;
+    line-height: 24px;
+    padding: 0 12px;
+    background-color: rgba(20, 17, 11, 150);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 55);
+    color: #D8CDB8;
+    font-size: 12px;
+    letter-spacing: 2px;
+}
+.preview-reset:hover { border-color: #C9A86A; color: #F4EFE6; }
+.preview-hint {
+    position: absolute;
+    bottom: 8px;
+    left: 0;
+    width: 100%;
+    text-align: center;
+    color: rgba(216, 205, 184, 150);
+    font-size: 11px;
+    letter-spacing: 3px;
+}
+.preview-controls { margin-top: 14px; }
+.preview-weather-row {
+    display: flex;
+    flex-direction: row;
+    margin-bottom: 12px;
+}
+.preview-weather {
+    flex: 1 1 0;
+    height: 34px;
+    line-height: 32px;
+    margin-right: 8px;
+    background-color: rgba(20, 17, 11, 110);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 38);
+    color: #C9C0AE;
+    font-size: 13px;
+    letter-spacing: 2px;
+    text-align: center;
+}
+.preview-weather:last-child { margin-right: 0; }
+.preview-weather:hover { border-color: #8FA68E; color: #F2EDE4; }
+.preview-weather.selected {
+    background-color: rgba(143, 166, 142, 70);
+    border-color: #B6CBAE;
+    color: #F4EFE6;
+}
+.preview-tod-row label {
+    color: #C3B9A2;
+    font-size: 13px;
+    letter-spacing: 3px;
+}
+
+#world_creation.form-container {
+    width: 100%;
+    text-align: left;
+}
+
+#world_creation.form-group {
+    margin-bottom: 28px;
+}
+
+#world_creation.form-group label {
+    display: block;
+    color: #C3B9A2;
+    font-size: 13px;
+    letter-spacing: 3px;
+    margin-bottom: 8px;
+}
+
+/* Underline-style inputs. */
+#world_creation.form-control {
+    background-color: transparent;
+    border-width: 0;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(242, 237, 228, 70);
+    height: 34px;
+    font-size: 18px;
+    padding: 0;
+}
+#world_creation.form-control:focus {
+    border-bottom-color: #C9A86A;
+}
+
+/* Landscape preset chips. */
+.preset-row {
+    display: flex;
+    flex-direction: row;
+    margin-top: 4px;
+}
+.preset-chip {
+    flex: 1 1 0;
+    height: 42px;
+    line-height: 40px;
+    margin-right: 10px;
+    background-color: rgba(20, 17, 11, 110);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 38);
+    color: #C9C0AE;
+    font-size: 15px;
+    letter-spacing: 2px;
+    text-align: center;
+}
+.preset-chip:last-child { margin-right: 0; }
+.preset-chip:hover {
+    border-color: #8FA68E;
+    color: #F2EDE4;
+}
+.preset-chip.selected {
+    background-color: rgba(143, 166, 142, 70);
+    border-color: #B6CBAE;
+    color: #F4EFE6;
+}
+
+/* Saved user presets: a second chip row (dusk-gold tint to set them apart from curated) +
+   the inline "save preset" control. */
+.user-preset-row { margin-top: 8px; }
+.user-preset-row:empty { margin-top: 0; }
+.user-preset-chip { border-color: rgba(201, 168, 106, 90); color: #D8C6A2; }
+.user-preset-chip.selected {
+    background-color: rgba(201, 168, 106, 70);
+    border-color: #C9A86A;
+    color: #F4EFE6;
+}
+
+.save-preset-group {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top-width: 1px;
+    border-top-color: rgba(242, 237, 228, 22);
+}
+.save-preset-name {
+    flex: 1 1 0;
+    height: 34px;
+    background-color: transparent;
+    border-width: 0;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(242, 237, 228, 45);
+    color: #F2EDE4;
+    font-size: 15px;
+    font-family: Lora;
+    margin-right: 14px;
+}
+.save-preset-name:focus { border-bottom-color: #C9A86A; }
+.save-preset-btn {
+    height: 36px;
+    line-height: 34px;
+    padding-left: 18px;
+    padding-right: 18px;
+    background-color: rgba(20, 17, 11, 110);
+    border-width: 1px;
+    border-color: rgba(201, 168, 106, 110);
+    color: #EDE6D8;
+    font-size: 13px;
+    letter-spacing: 2px;
+}
+.save-preset-btn:hover { background-color: rgba(201, 168, 106, 80); border-color: #C9A86A; color: #16130E; }
+.rename-preset-btn { margin-left: 8px; }
+
+/* Per-chip delete affordance on saved user presets (curated chips have none). */
+.user-preset-chip { position: relative; }
+.preset-delete {
+    margin-left: 8px;
+    color: rgba(242, 237, 228, 120);
+    font-size: 11px;
+}
+.preset-delete:hover { color: #E8765A; }
+
+#world_creation #create_btn {
+    display: block;
+    width: 64%;
+    max-width: 400px;
+    margin: 0 auto;
+    height: 48px;
+    line-height: 46px;
+    background-color: rgba(20, 17, 11, 110);
+    border-width: 1px;
+    border-color: rgba(242, 237, 228, 55);
+    border-radius: 0;
+    backdrop-filter: none;
+    box-shadow: none;
+    color: #EDE6D8;
+    font-size: 15px;
+    letter-spacing: 5px;
+}
+#world_creation #create_btn:hover {
+    background-color: rgba(143, 166, 142, 90);
+    border-color: #B6CBAE;
+    color: #16130E;
+    box-shadow: none;
+}
+
+/* ---- Collapsible "customize world" advanced worldgen params ---- */
+/* The semantic knobs are the default surface — a prominent
+   "world feel" block above the advanced fold. Same dusk palette as the params. */
+.knob-section {
+    margin-top: 20px;
+    margin-bottom: 8px;
+}
+
+/* Flex [label][slider][value] rows so the live value reads beside its
+   slider (align-items:center) instead of floated above a full-width slider. The
+   compound selectors (.settings-row.knob-row /.settings-row.param-row) target
+   ONLY the create-world slider rows; the inline toggle rows (.settings-row-inline
+.param-row) and the shared block.settings-row keep their own layout. */
+.settings-row.knob-row,
+.settings-row.param-row,
+.settings-row.preview-tod-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 12px;
+}
+.settings-row.knob-row label,
+.settings-row.param-row label,
+.settings-row.preview-tod-row label {
+    width: 42%;
+    margin-bottom: 0;
+    font-size: 14px;
+    color: rgba(224, 215, 198, 200);
+    letter-spacing: 1px;
+}
+.settings-row.knob-row.settings-slider,
+.settings-row.param-row.settings-slider,
+.settings-row.preview-tod-row.settings-slider {
+    flex: 1 1 auto;
+}
+.knob-row label {
+    color: rgba(232, 222, 204, 220);
+}
+.knob-value,
+.param-value {
+    width: 58px;
+    margin-left: 10px;
+    text-align: right;
+    color: #C9A86A;
+    font-size: 13px;
+}
+
+.customize-section {
+    margin-top: 24px;
+}
+
+/* Clickable header row — dusk-gold hairline above, spread label + caret. */
+.customize-header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding-top: 16px;
+    padding-bottom: 4px;
+    border-top-width: 1px;
+    border-top-color: rgba(201, 168, 106, 90);
+    letter-spacing: 3px;
+}
+.customize-header:hover.customize-label { color: #F2EDE4; }
+.customize-header:hover.customize-caret { color: #E0C488; }
+
+.customize-label {
+    color: #C9C0AE;
+    font-size: 13px;
+    letter-spacing: 3px;
+}
+.customize-caret {
+    color: #C9A86A;
+    font-size: 16px;
+    letter-spacing: 0;
+}
+
+/* The advanced groups are tab panes (one shown at a time), so the
+   body no longer needs to be a bounded scroll container. Dropping overflow-y:auto
+   removes the RmlUi scroll-container that intercepted slider drags inside the
+   panel — sliders are now directly draggable. */
+.customize-body {
+    margin-top: 14px;
+}
+.customize-body.collapsed { display: none; }
+
+/* Advanced-param TAB strip + panes (). A chip row toggles.active on one
+   pane; only the active pane renders, so the long advanced column no longer
+   scrolls and the inactive groups don't pile up vertically. */
+.param-tabs {
+    display: flex;
+    flex-direction: row;
+    margin-bottom: 14px;
+}
+.param-tab {
+    color: rgba(216, 207, 188, 150);
+    font-size: 13px;
+    letter-spacing: 2px;
+    padding: 5px 14px;
+    margin-right: 6px;
+    border-bottom-width: 2px;
+    border-bottom-color: rgba(201, 168, 106, 0);
+}
+.param-tab:hover { color: #F2EDE4; }
+.param-tab.active {
+    color: #E0C488;
+    border-bottom-color: rgba(201, 168, 106, 200);
+}
+.param-pane { display: none; }
+.param-pane.active { display: block; }
+
+.param-group {
+    margin-bottom: 18px;
+}
+.param-group-heading {
+    font-size: 13px;
+    letter-spacing: 4px;
+    color: rgba(201, 184, 154, 200);
+    font-weight: normal;
+    margin-top: 0;
+    margin-bottom: 12px;
+}
+
+/* Tighter than the stock.settings-row (applies to the inline toggle rows too;
+   the slider rows get their flex layout from the.settings-row.param-row block
+   above)..param-value styling lives with.knob-value above (flex sibling). */
+.param-row {
+    margin-bottom: 12px;
+}

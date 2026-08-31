@@ -1,0 +1,1328 @@
+{
+  "files": [
+    {
+      "bytes": 547,
+      "license": "MIT",
+      "path": "data/audio/music.bank.json",
+      "sha256": "641a086360059f2f6639b1f88e19c45a087ce0069192e0c82d71d46374f598cd",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 11729,
+      "license": "MIT",
+      "path": "data/audio/sfx_main.bank.json",
+      "sha256": "cbab1dc6eed7613c179cc85fb2da56ca6f9606796b7f17741ecef2f2d20191ca",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 5427,
+      "license": "MIT",
+      "path": "data/common/albedo_calibration_reference.json",
+      "sha256": "9bf03a8ee6198227d204620bb05efcf0bd50f08eaf0495e845ea1e2f2488d1b3",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 4307,
+      "license": "MIT",
+      "path": "data/common/archetypes/grovestrider.json",
+      "sha256": "955c2aa937a97be093cfdd72d803ce83065423014627c2188f55f07613c8ebf2",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 3983,
+      "license": "MIT",
+      "path": "data/common/biomes.json",
+      "sha256": "3e679f3c95fa2e164c8c74769099c8bf8908640c0861943ee1e83733501780a3",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 225,
+      "license": "MIT",
+      "path": "data/common/creatures/species/ashen_corvid.json",
+      "sha256": "e5325cff63b96a8f5f0cae1aee10737ef95d70bcfa3b5c4df78f6b007a890821",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 212,
+      "license": "MIT",
+      "path": "data/common/creatures/species/dusk_heron.json",
+      "sha256": "10b33b78e63b5f826112f23d6dca0b3e0821dbd7365da00b7ac793fd56806665",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 213,
+      "license": "MIT",
+      "path": "data/common/creatures/species/ember_skink.json",
+      "sha256": "6fe82083552b1537da8b7faa75bf42a2a9b912ded911a069152700c7e420a1d4",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 218,
+      "license": "MIT",
+      "path": "data/common/creatures/species/glimmer_finch.json",
+      "sha256": "10c633e94f582ae3a02e614f0a743ae49f0888a29954de74e3bc62d3b6f6a75a",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 261,
+      "license": "MIT",
+      "path": "data/common/creatures/species/gloomstalker.json",
+      "sha256": "a66048fd353ad048c98f59eeb7dba4a7c3479f7a27e0c9957da20a9978bb4615",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 217,
+      "license": "MIT",
+      "path": "data/common/creatures/species/grovestrider.json",
+      "sha256": "6cff465b33c4f88b3f61f380a7b55a3da4b7fb0300334a1703bcf85db8a83a6c",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 261,
+      "license": "MIT",
+      "path": "data/common/creatures/species/lumen_moth.json",
+      "sha256": "07023f664a34480e961b1e8a3a690f0b052a149a98ef1e7989383f3acc449bf0",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 247,
+      "license": "MIT",
+      "path": "data/common/creatures/species/mire_lurker.json",
+      "sha256": "53da60c8fe6442e1c2669e2bc88fdfb6000db12307c5b8cd0579a0f4ee8d0ace",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 271,
+      "license": "MIT",
+      "path": "data/common/creatures/species/ridgeback_stalker.json",
+      "sha256": "ece57d1605eea446a1754a2d5fae0d3f44f5d78ca0f082089b8255bb67170133",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 214,
+      "license": "MIT",
+      "path": "data/common/creatures/species/tide_grazer.json",
+      "sha256": "0a1f34630a74ed8dce3d7d067e3122968cc1ea20ddd71b54d0947488160ab3f3",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 2064,
+      "license": "MIT",
+      "path": "data/common/foliage/scatter_set.json",
+      "sha256": "2901c546499b55eddab721bc17f8cac3ae60468fb2b9bda124198bc2bdcf54c1",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 387,
+      "license": "MIT",
+      "path": "data/common/foliage/species/frostberry.json",
+      "sha256": "80095b612ee1b0f9d90b68839291ca98c6698b3624a0bfa1a500c56a591d50ac",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 382,
+      "license": "MIT",
+      "path": "data/common/foliage/species/maize.json",
+      "sha256": "b2e9dc25f06edef7518f79f062c89df8cdbc671210c302fb9f60e230ed08ade0",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 387,
+      "license": "MIT",
+      "path": "data/common/foliage/species/moonpetal.json",
+      "sha256": "eb1d873a2396b5f70619f1b89f273b699813f2c7d2ba724a6b169e1738bc196f",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 383,
+      "license": "MIT",
+      "path": "data/common/foliage/species/oak.json",
+      "sha256": "308bfb604bdfb653fcc57be8191ee1e4d2336a28dc87c023b20b5a0fda59125d",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 385,
+      "license": "MIT",
+      "path": "data/common/foliage/species/sungourd.json",
+      "sha256": "9f35db584231a12bf6e33b46cfef93476ee23e45fb75a1cb62b11c085a4b661b",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 381,
+      "license": "MIT",
+      "path": "data/common/foliage/species/wheat.json",
+      "sha256": "66ab38676f4e436daa37425354915a28a7928228630586dd95168eb7d5ad5e92",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 3729,
+      "license": "MIT",
+      "path": "data/common/materials.json",
+      "sha256": "c72cc83fb8c352e283b9bdfbcd8ce2d7367dc7edf418fe54b612f8a05eb51ec6",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 550,
+      "license": "MIT",
+      "path": "data/common/particles/ambient_motes.json",
+      "sha256": "7e65b7a1c7da665d2480d6de5d9f10a5d751648efeb1b2c71af8dbcb2c06cb42",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 541,
+      "license": "MIT",
+      "path": "data/common/particles/fixture_sparkle.json",
+      "sha256": "3f623856817231614c2da0ea6f24b0eed6d44dc789a7234533599c410ea1ca20",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1391,
+      "license": "MIT",
+      "path": "data/common/particles/precip_rain.json",
+      "sha256": "905c1bfd80bf083a68aa89bbb913d0da9bd3fab82509c4a6629551b185b4b31c",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 646,
+      "license": "MIT",
+      "path": "data/common/particles/precip_snow.json",
+      "sha256": "91d522911536c126b6ed153f8ab0e35455d7d22f23ff34506fbe4a26e5be598d",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1101,
+      "license": "MIT",
+      "path": "data/common/particles/precip_splash.json",
+      "sha256": "b3a14b07de18fe168e9359c41d514233ff8ff84cb1cf53d708a96cef897f5a09",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1159,
+      "license": "MIT",
+      "path": "data/common/particles/waterfall_spray.json",
+      "sha256": "08f6016d9719f0df013f52a92e6efdaddc5d9c1cb627631824cc3cbb6ec1b13c",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506,
+      "license": "MIT",
+      "path": "data/common/scenario/skinned_showcase_model.json",
+      "sha256": "f1c400ef7a1fed2c34aa4c517c62b2c8213ac8d776ab08626b0d394d5d6abb1a",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 428,
+      "license": "MIT",
+      "path": "data/common/structures/cairn/cairn.json",
+      "sha256": "a1c0c25595030e41a563f8ba50f746e0f68e083370bf55de692cb37f4176c518",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 152,
+      "license": "MIT",
+      "path": "data/common/structures/cairn/placement.json",
+      "sha256": "a9330be08887e46689116bc85845380978475740025d2b630500546eb9458ef1",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 315,
+      "license": "MIT",
+      "path": "data/common/structures/ruin/a_base.json",
+      "sha256": "178ccc1fa71813acf5cc351002da780e075494a9f64eac3d505df5fbe882c5ba",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 263,
+      "license": "MIT",
+      "path": "data/common/structures/ruin/b_pillar.json",
+      "sha256": "f0783b679bbd647b575b6abc1bdc0782e5472e2e189a7a4ffcb0d85e766f57eb",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 261,
+      "license": "MIT",
+      "path": "data/common/structures/ruin/c_wall.json",
+      "sha256": "3f0c396b0645f8dcb8331130f59000e96273939a85fe1511cc109689c3171ecb",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 153,
+      "license": "MIT",
+      "path": "data/common/structures/ruin/placement.json",
+      "sha256": "a9c37836017b816108e987ff797d47b10ed5f66f6e3e3cb42ab45754752335a6",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 4214,
+      "license": "MIT",
+      "path": "data/common/systems.json",
+      "sha256": "a9581e675d608a462ae1c2705c9e3f790a90119c3bce0e10d75009b2268ff968",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 219120,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/Lora-Italic-VariableFont_wght.ttf",
+      "sha256": "fe24ffb892efdf883f708bfc445ca76f00e1ee1c334479922b36109779792f39",
+      "source": "Lora"
+    },
+    {
+      "bytes": 210884,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/Lora-VariableFont_wght.ttf",
+      "sha256": "53c6817f76828af08d49cb77c9894cb698c929e17ff2c2d81aa34c86e2524c1f",
+      "source": "Lora"
+    },
+    {
+      "bytes": 4423,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/OFL.txt",
+      "sha256": "62e37a82d3f1ef2a70712885fa8b3144b65fd144d8e748d6196b690a354d792c",
+      "source": "Lora"
+    },
+    {
+      "bytes": 2249,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/README.txt",
+      "sha256": "fceff9e89f7d5dd3c9cc3c8a12f8b139a39acd88f7d760b9d01d3be062b06ea5",
+      "source": "Lora"
+    },
+    {
+      "bytes": 133828,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-Bold.ttf",
+      "sha256": "7d74015e950c2fb66519c7295b8155621d22200ae2ca2a4c6b43ce3c490cac87",
+      "source": "Lora"
+    },
+    {
+      "bytes": 140332,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-BoldItalic.ttf",
+      "sha256": "152f87e71f5ddb60d5c57ecd9132807c947e65c42977193c9164e7c5a6690081",
+      "source": "Lora"
+    },
+    {
+      "bytes": 139328,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-Italic.ttf",
+      "sha256": "be627e595184e8afe521f08da0607eee613f1997d423bc8dadc5798995581377",
+      "source": "Lora"
+    },
+    {
+      "bytes": 134004,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-Medium.ttf",
+      "sha256": "fd57ed9e3945de65de667f1919c2978b79937a13d246508fc4f64bb562e53196",
+      "source": "Lora"
+    },
+    {
+      "bytes": 140264,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-MediumItalic.ttf",
+      "sha256": "c3de4a2d67a382297ffb01524220a1d05eef08c4dcc4a596c9d8232ab13ccfbf",
+      "source": "Lora"
+    },
+    {
+      "bytes": 133888,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-Regular.ttf",
+      "sha256": "7ed00e7c9cdf16ab7e2fd2361fe45d4f0b61263cd60aae398b27b7ee08108827",
+      "source": "Lora"
+    },
+    {
+      "bytes": 134352,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-SemiBold.ttf",
+      "sha256": "be01a859620401d734e8ca062fb42fd5dbf533355c76f70c2a1d5435a9f3a7b7",
+      "source": "Lora"
+    },
+    {
+      "bytes": 140396,
+      "license": "OFL-1.1",
+      "path": "data/fonts/Lora/static/Lora-SemiBoldItalic.ttf",
+      "sha256": "23ba2f4dd56128dc43f0f051fabb95db1ea4ea56e841f55bb97715e2a26ac358",
+      "source": "Lora"
+    },
+    {
+      "bytes": 16617,
+      "license": "MIT",
+      "path": "data/models/creatures/grovestrider/grovestrider.gltf",
+      "sha256": "25817d82f5dad3700cf64504b712b3971b815091e2c84fd36d8442164737d054",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 228,
+      "license": "MIT",
+      "path": "data/models/creatures/grovestrider/grovestrider.idle.lanim",
+      "sha256": "b902c9063c1bc8defcab1b4f1f44d99fd65d7fba3a8408e022b07899d50da254",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 596,
+      "license": "MIT",
+      "path": "data/models/creatures/grovestrider/grovestrider.walk.lanim",
+      "sha256": "9844a51a9eba5e1f24abbc8af3407ea02cf6e566d3e9bb8b20f5af0185de39ef",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 4541,
+      "license": "MIT",
+      "path": "data/models/props/glow_bloom/glow_bloom.gltf",
+      "sha256": "1240bbe6c7ea15ef541d3ac6ae6795dbf27a599b869f3402d8e3392da047290a",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1001,
+      "license": "MIT",
+      "path": "data/models/trees/tree_textures.json",
+      "sha256": "ce09514547492748b420a61b7c807530f0c90351a0957418609a219112f6471e",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 148495,
+      "license": "MIT",
+      "path": "data/textures/creatures/grovestrider/grovestrider_albedo.png",
+      "sha256": "ed0cd0a1c2a19225f7f6e71e6ac07e04821e2fc0338a70f24784ae4f03368213",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 349541,
+      "license": "MIT",
+      "path": "data/textures/creatures/grovestrider/grovestrider_albedo_256.ltex",
+      "sha256": "1130b5997f121a40cbab49a18fe0278aea9437800b744c9c5bc753e14359e34c",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 124224,
+      "license": "MIT",
+      "path": "data/textures/creatures/grovestrider/grovestrider_normal.png",
+      "sha256": "ecae360369c2a2a461814fb7d7ccfe98549ef91065253d4f0afa3915a21dd8a6",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 349541,
+      "license": "MIT",
+      "path": "data/textures/creatures/grovestrider/grovestrider_normal_256.ltex",
+      "sha256": "2905897865277c93777ae6cba4176f74ed94df04a65ba4d2b1f3119d10f6cadf",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 2006696,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040.png",
+      "sha256": "5d982d0e91c40fda885c15293ab61e0ee528d32742a59b16d6320e42ada3d087",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 2634,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG.mtlx",
+      "sha256": "95d50c3b72b9c6f8fb7e2a4488463d766fa6cf7f01d62b2538c6cc9b8ed00380",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 2685,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG.usdc",
+      "sha256": "5b31da5ad2d529ef2ec4f510e4e9f4ab0f19a362eb2edf5ae24fcc3c40d9495f",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 2915291,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG_AmbientOcclusion.png",
+      "sha256": "5ccee10bc06c96e82df375df6ad71f738a673f6005f47128d584d9edf3a2c77c",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 7894954,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG_Color.png",
+      "sha256": "8681b9ed90b069443ea6305b9493e7a50e392914723d8e65e029484e4efa743b",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 7035795,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG_Displacement.png",
+      "sha256": "c8119bf75ffe3280cebfd4abb86152a756b78123328df96f4d5cbb818162c595",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 23356666,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG_NormalDX.png",
+      "sha256": "453fd94a0160479ccc9370dd55a8bc06e77bfc0c7f3e3a0a35a09ae00912d63b",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 23361551,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG_NormalGL.png",
+      "sha256": "ca2eafc49fabe018d4b2dd706384f894cb12043691926476825dbcda514f72eb",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 2662959,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/Gravel040_2K-PNG_Roughness.png",
+      "sha256": "3c868aea05b12db28d2136f6db09b8c4436006bc9f7e0d8594cf648c5884f4c3",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/deepslate_albedo_1024.ltex",
+      "sha256": "ebcec04eaece24ebbd2c4463d14fe95227f5f195108b8f95a2faaedef9b78840",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/deepslate_albedo_256.ltex",
+      "sha256": "3ed08fb607206a49db6618d1ed4ca98453b422289170d6dfebbb60bc9494c2d2",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 203865,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/deepslate_albedo_256.png",
+      "sha256": "7d6f8dcd68d188ec2343afd995310fb3658fe321615639f6797616ecd4d37992",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/deepslate_normal_1024.ltex",
+      "sha256": "a2953b233f1dac8e554cf996168467fd456d85a169694c451fa35c01cffed3d5",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/deepslate_normal_256.ltex",
+      "sha256": "7b609c373c209c9302b801f661d6a905887c95f77edaf47ed00980afde97ce51",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 229634,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/deepslate_normal_256.png",
+      "sha256": "8be0e10e8dd277c078ddc40356d0809eef7bda1f2f3a18b8a93cf119d70052f9",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/deepslate/deepslate_roughness_1024.ltex",
+      "sha256": "0f323d8a433febb42e2fb694e356f16fc578d332d6a904d40b1b1438b9ea28f6",
+      "source": "ambientCG Gravel040"
+    },
+    {
+      "bytes": 2035211,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003.png",
+      "sha256": "ead678b448ab5e582e7ea57feb9a36679e6958e212eea252d77280e71bad55ac",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 2618,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG.mtlx",
+      "sha256": "8cf33ef3a83bc2b70faee761cf8d78a56a48d1be5ee1f953d1a788f8b0fca506",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 2606,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG.usdc",
+      "sha256": "9c55f78174a1b2eae3fe207830b91dfe4539700b796678409fc5cafd76499163",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 3509782,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG_AmbientOcclusion.png",
+      "sha256": "da58f6d42d9f47ee0a45b39580c5e683de7969e0b463ac1e5ecd244a7278ab97",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 7357632,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG_Color.png",
+      "sha256": "7fb96658a3e7177a8a24e7443cc5f822c9f653feb0678b5692bd3104d5ad1408",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 7906742,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG_Displacement.png",
+      "sha256": "62d9a6da1bf957710976ca57c7718ccf355ebabe6b8190ddece67b994828d317",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 24277745,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG_NormalDX.png",
+      "sha256": "cec36b0ef919056a67736853429b8d99329857ca81981bbb73acf9c5d8dd5ed2",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 24276761,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG_NormalGL.png",
+      "sha256": "ca64538800cf9d494c3750d5827a118741032bcd46d054d92eed1d9ab81a4c40",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 3271269,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/Grass003_2K-PNG_Roughness.png",
+      "sha256": "3ff11e44033d7df201cd2e02f2711b9adc4e1c0d072e545c0eba7d6db39d129f",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/grass_albedo_1024.ltex",
+      "sha256": "fd2d0acf89c1aaf652eeee3b4eb5bd43e14be06fb26df8cf5ce2f5efc40131ec",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/grass_albedo_256.ltex",
+      "sha256": "da55d3d984996c7effc38f192107d53c2f5c423d728e3fd9de6603f3f43028d9",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 205987,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/grass_albedo_256.png",
+      "sha256": "fc9dcfcbbb5c29aef4cdfe4fc2766785dd52a82f7b15ca0b72e168bd1c04eafa",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/grass_normal_1024.ltex",
+      "sha256": "d8ac8ef58b1e891c7f2850b9421e8d37ef49cfa8e986b236e60b0f4bc7474c1a",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/grass_normal_256.ltex",
+      "sha256": "39ea6eed28d2713f8e1674a608da506c45c90d0b14be9ffd2c33f6ba73ffa4fb",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 234332,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/grass_normal_256.png",
+      "sha256": "c1efc37db5ec1189ab57772fded7a87226b879aadade5e5c75276c9ffdbba8fc",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/grass/grass_roughness_1024.ltex",
+      "sha256": "10a18314e1f34ebf510ce6c3cc84f5b311047c2f08db1db5d25eb37b55fc31d5",
+      "source": "ambientCG Grass003"
+    },
+    {
+      "bytes": 1446567,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028.png",
+      "sha256": "bedc26521ba3ba7a709a3ffa573ad67f22e574976492300c757780d90a733e9a",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 2602,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG.mtlx",
+      "sha256": "7b039be9d33de3cfdeb03496b8c097b71ae84ee12c8c739486bc536440f6255a",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 2629,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG.usdc",
+      "sha256": "2a8d363c15946f7c20d49bc1dac95f0be56bb7833dfea8a685d4aae8580de2d4",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 1732471,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG_AmbientOcclusion.png",
+      "sha256": "c82a90361c76871dbbba2fe1b032e9af498ffd1bb0d9f0a5ed3fa2eae4532c4b",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 8809577,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG_Color.png",
+      "sha256": "a1268cdfe9850ea1c254e1a65ad44e1da5258b7b40745772a691f99efa833fa2",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 5737314,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG_Displacement.png",
+      "sha256": "f9443e77158da58ec271a6f770ed63079e0a0abe55cdbd8baaaa8098607cffc2",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 24262024,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG_NormalDX.png",
+      "sha256": "ab4059ba7a0f0fd1982f6ed17eee905bf52cb1dd71ed59399854759e4cda0e92",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 24261334,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG_NormalGL.png",
+      "sha256": "363d15b320d6881a4101a16c7dec71012ca267fa1779f7ff79005db88b1e5ca6",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 2565338,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/Rock028_2K-PNG_Roughness.png",
+      "sha256": "fba94ab82d413015dda1ed55c29721e18cf4780ab884360e10d1c3106095f29e",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/rock_albedo_1024.ltex",
+      "sha256": "9507f219831c456ee7da25a084fb92979529485d2203271e66684ab5625cdfa1",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/rock_normal_1024.ltex",
+      "sha256": "0297ee6e9a79a239c0001a110c94a956e0f098c6ca5784d8309d45b3c9753b71",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/rock_roughness_1024.ltex",
+      "sha256": "0318c156d3c9fdacd745dda33261f3c6b611b965344edef52eed7fa085dd4626",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/stone_albedo_256.ltex",
+      "sha256": "cfcb4a21242ab9f08de12fae263c2cd2c7a2a314bc849ac6516d46e4c4015a75",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 179399,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/stone_albedo_256.png",
+      "sha256": "70ac08f7705d79886e476fdccc7eef2974329361681806c4f1d7c9cac28fe431",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/stone_normal_256.ltex",
+      "sha256": "e16e08c57719f687129b9c4772f67254dc62221f9839d8eaaa22dd73ad58b73b",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 245053,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/rock/stone_normal_256.png",
+      "sha256": "d6099c2918d87c8e407b2717b3388a60e35c2fc2b22975ac029a879998efe5b3",
+      "source": "ambientCG Rock028"
+    },
+    {
+      "bytes": 1732052,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087.png",
+      "sha256": "d5fe6eb544bbb286fb1afa9e498f56ceffba5bed667904e82d97f58fcc275fe4",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 2634,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG.mtlx",
+      "sha256": "13dcb58254b88542a5bd4b93b7e83495dc173eda0d0f3b9c9026fc2919cdf738",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 2689,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG.usdc",
+      "sha256": "d4adaaa4849441cf5076be13ab8e5437cb4c7bba1f8694bc4955b6b2ab210ec6",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 2745493,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG_AmbientOcclusion.png",
+      "sha256": "556ac3832fa77fa9471c0e89362e7df955465f6431519dd8f4f90361f09cda0b",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 7318444,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG_Color.png",
+      "sha256": "28c79bb41a48ef585e29adb7aed846beb1de7b4644e4658922919dc53167267a",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 6586885,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG_Displacement.png",
+      "sha256": "6151b5f6ca893676666df11920f2f6511de21122a1ee58e2114c55b1f8e0fcd7",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 23638292,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG_NormalDX.png",
+      "sha256": "7244c158ea6dc8ab94e6646ffc472508cb7301881459abbdbdbb4556dbadbc83",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 23638784,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG_NormalGL.png",
+      "sha256": "7329c9a1c1ea1c4a1f0d7121400f946d6ebe1737ec76b131fb1b0ffcad0c9cb6",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 2870352,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/Ground087_2K-PNG_Roughness.png",
+      "sha256": "2bb125e04be6ce07fb88fe9dee098c93821d19d9dbaf9ec3f0aa18c319f232bc",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/sand_albedo_1024.ltex",
+      "sha256": "bcd4bac32147a2e70e3bc0224ab2c5b826f06727642de46f950911a7e62a2dd9",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/sand_albedo_256.ltex",
+      "sha256": "d61906b7ac91533401e42e3f92bead77439e269c15d86fb7f3cc895344eb2a98",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 161952,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/sand_albedo_256.png",
+      "sha256": "f70c96713ed190d51c1ccb09f6028cda316b75b85477d32eb3482333449c7890",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/sand_normal_1024.ltex",
+      "sha256": "de0dd71206cd620a992defde212ccb6177f8cf9e41061b7989edd9e1e54d945b",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/sand_normal_256.ltex",
+      "sha256": "d318a3ad6f085ffac29cc53ef2f4450cf0d838dc8ee1e18aa5bce61d38f4aa67",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 218294,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/sand_normal_256.png",
+      "sha256": "f3bec1fff0dee8108878fe433b49d5c1744d54a5da828ee5254a13ec05168179",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/sand/sand_roughness_1024.ltex",
+      "sha256": "2753844d9ccce932ae48d8e6b16fe873e8b0c261d55fb61ced6cc5b789c209ab",
+      "source": "ambientCG Ground087"
+    },
+    {
+      "bytes": 2016634,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048.png",
+      "sha256": "de50881a7ff8d243cb4caf3f00008b8e273e450df968b556f61e14b243b99158",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 2634,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG.mtlx",
+      "sha256": "7f5dcf5f8bbfc93378aeb1c6febf11ef3d885c6ab82158ef58ddf2da3015e64f",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 2629,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG.usdc",
+      "sha256": "39a622d2171a127ccb9cc600d89d2863a091fe57948efb00d3398c425d99514e",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 3265712,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG_AmbientOcclusion.png",
+      "sha256": "b0fec26170b9e50f37c5d834dd50ad88e90d3fb56b3241b22561e5cf786195e2",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 10539462,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG_Color.png",
+      "sha256": "2cf5f06e9e7d80a1a54e2b2de12eeefee797bfdfb0cc88bfe7b2efe63be1e005",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 7072159,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG_Displacement.png",
+      "sha256": "a00a404f139b36f81792229057c4291f1bbd065c2e481d039c247717a3d6f2ac",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 24315550,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG_NormalDX.png",
+      "sha256": "7686aac3b8829d8ab516a333df7afa073fd30dc821b851f1d133fc8128cfd5f4",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 24316778,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG_NormalGL.png",
+      "sha256": "743af703a2168e077dbaf0f7c8d64ced52d3a63bb3f6cf751c1e67bc4ef84d91",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 2441410,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/Ground048_2K-PNG_Roughness.png",
+      "sha256": "04c439f257b16d8f3b18115783764cde5f4644af6d252701c3d2d44af20eb3ae",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/soil_albedo_1024.ltex",
+      "sha256": "f33df543ef7ee96ec1cd0f2dab7ccd7efd9fa20bcf05a81ccfdd1fff1ab882cf",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/soil_albedo_256.ltex",
+      "sha256": "63f2a7a572a2ee84802f07fd83b5dbfacceb86021af2af1f4357747e37bb284d",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 188917,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/soil_albedo_256.png",
+      "sha256": "703ee17151bb1e70181a3fd2398b3930878c7fcb062f1903221aa6438c865c11",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/soil_normal_1024.ltex",
+      "sha256": "62e4c8d653fb0e4c314f59c2aba5ee9bba0bc99c63cf2b699c60e0f34765d79d",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 349541,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/soil_normal_256.ltex",
+      "sha256": "9e3cf6b2caa4cd51e130f0a777495e783b51c05d7f76d6281b0b94426af48a09",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 227462,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/soil_normal_256.png",
+      "sha256": "1f08b32fdb185704092720b5b54fc700823620eb88154497aa7424ef34460bf0",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 5592421,
+      "license": "CC0-1.0",
+      "path": "data/textures/terrain/soil/soil_roughness_1024.ltex",
+      "sha256": "f6faf6f5588f0c4e0a5cb0761869643f66b58f548524db8cac54ee43c5a50d8c",
+      "source": "ambientCG Ground048"
+    },
+    {
+      "bytes": 1381,
+      "license": "MIT",
+      "path": "data/textures/test/checker_16.ltex",
+      "sha256": "a92a47c447e61b0cf15eaf81b8ec731fe14d06ce1ad0a96b7ece0eebdbc8d80a",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 109,
+      "license": "MIT",
+      "path": "data/textures/test/checker_16.png",
+      "sha256": "a200e2b40dc95cd258874629cb7cfc223c42580f7a84284a0813abad826b257c",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1389,
+      "license": "MIT",
+      "path": "data/textures/test/framed_32x8.ltex",
+      "sha256": "b3f51caa946a102661a68ad4ccee4e37f0b828474015b6251c88e0f602bf9a14",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 99,
+      "license": "MIT",
+      "path": "data/textures/test/framed_32x8.png",
+      "sha256": "b052d42d173f18d5e98b04750bdd26d41380f78ffbd97ceabc93c7e51fcc60d5",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1381,
+      "license": "MIT",
+      "path": "data/textures/test/gradient_16.ltex",
+      "sha256": "b0610fe4a34ab599799a34790441da1d45da90a4296b172af468fc75c3757e00",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 111,
+      "license": "MIT",
+      "path": "data/textures/test/gradient_16.png",
+      "sha256": "f0f1e1aa06f313864fe2b2f3481413540764fc7815391f5b09c2af043feaf8f1",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 262161,
+      "license": "MIT",
+      "path": "data/textures/test/skinned_test_albedo_256.ltex",
+      "sha256": "b5de80b562ae0b4377dbd49c64ed6ecb35bab99dfacf457e9a1f8b9beecacc82",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 262161,
+      "license": "MIT",
+      "path": "data/textures/test/skinned_test_normal_256.ltex",
+      "sha256": "c6c4203948698db786f15f796448df7fad5949b4f04648c5f69c475adb4c3e0d",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1547,
+      "license": "MIT",
+      "path": "data/ui/base.rcss",
+      "sha256": "6170b904975638801c36e08c915392e8ae9f4eb130c8008e993c507a8cf3aa4b",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 967,
+      "license": "MIT",
+      "path": "data/ui/codex.rml",
+      "sha256": "804c0c6f0e5623a9bf1183b397d8aa959b9b3e82ce100c005df4688c21fd8e01",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 12306,
+      "license": "MIT",
+      "path": "data/ui/fixtures/captures/cap_1.tga",
+      "sha256": "07acd53b9431fd6a1cf7da2aa25cd581bf42e8a241820737bed11898dc7f351a",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 12306,
+      "license": "MIT",
+      "path": "data/ui/fixtures/captures/cap_2.tga",
+      "sha256": "45e9be8e371b2be47ac33c0b42e1755355dd2c431516fe0e8aee745705d8e09f",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 12306,
+      "license": "MIT",
+      "path": "data/ui/fixtures/captures/cap_3.tga",
+      "sha256": "93cd5058a1b436697a103cb41a582c39fdbbca8d6cc4e149e081d29b6a5a4639",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 12306,
+      "license": "MIT",
+      "path": "data/ui/fixtures/captures/cap_4.tga",
+      "sha256": "9b7651b04afb581b6690eb6b891f8070860c8bffa4d3191e6e420bfa44ade144",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 2311,
+      "license": "MIT",
+      "path": "data/ui/gallery.rml",
+      "sha256": "04da371f8d6ce86ebae9598caa17ed5cb10a3942025236577e3f9277c1345ef8",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 24247,
+      "license": "MIT",
+      "path": "data/ui/game_theme.rcss",
+      "sha256": "3a19b9ac7c7b74b09018c0c190fcc5f9b46c4d14fe102874300edbe8b329d0f6",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 2694,
+      "license": "MIT",
+      "path": "data/ui/hud.rml",
+      "sha256": "acd756df4881a1f292b2a63324cf154125ca8edcc9d71283106f30dd4d8a7fd3",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 1647,
+      "license": "MIT",
+      "path": "data/ui/main_menu.rml",
+      "sha256": "0dd2fbfaf6da7cb8b5260a08c0e1030af1eb286b5cc1014b265559a83200c0fc",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 14026,
+      "license": "MIT",
+      "path": "data/ui/pages.rcss",
+      "sha256": "f9c5a946f9a0d083863d8751ed9fa8f8db44debe3dea869e1204913e2bf19ee1",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 940,
+      "license": "MIT",
+      "path": "data/ui/pause.rml",
+      "sha256": "d2689ce3710cefa28a2e76c621214d939e2421c3b01737a48cae16d69bc09a1f",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 4359,
+      "license": "MIT",
+      "path": "data/ui/photo_mode.rml",
+      "sha256": "a95a6b77336eec961b8dd29061341ad4a9f54027182e9906e5ca3325696c8e98",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 7716,
+      "license": "MIT",
+      "path": "data/ui/settings.rml",
+      "sha256": "ae8fee0ce5b89aefab94bafed2576266b00ed973f9ac6b90c315478a25efaf15",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_0.tga",
+      "sha256": "2758676f41a051661937bd17f93c4800d7173481bcb61e3f19832346d7ff3368",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_1.tga",
+      "sha256": "ff66f6189529d1921a2dc928498b9eb61e2bd266972a13b32b5afe94821058ee",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_2.tga",
+      "sha256": "c0ecfa90a4510d080556eba735b1084000ca28ae1c8f0b6e7eb0771eb2e926dc",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_3.tga",
+      "sha256": "00defade3b0ae066b041df764e76d8c7ea539535fd748c9799074f2d10ada71e",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_4.tga",
+      "sha256": "639742892cbd56b5eb65d89d755904c4afad861b86d0663279465aeffb5caffe",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_5.tga",
+      "sha256": "e8662c7e536fe1022d6e0e882fb6948492ca8e42acb3e3ff767ecd6f27f7491a",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_6.tga",
+      "sha256": "8c34c43636d22ffbad8e364c5b19b100f496351b77dc387f67ce69fbf23d7190",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 506898,
+      "license": "MIT",
+      "path": "data/ui/thumbs/thumb_7.tga",
+      "sha256": "9539d78ec8aaa16c12cc118a678253b70f5e633ca469744fb631f36590705001",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 174,
+      "license": "MIT",
+      "path": "data/ui/window.rml",
+      "sha256": "28e508c2094ef6f130f2814b4cb292062780faea02889dad4c1bf4f651eb64ff",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 27846,
+      "license": "MIT",
+      "path": "data/ui/world_creation.rml",
+      "sha256": "763d97fe81fd32632bdd82c09742d151bd3a2cd6b996cb6a1cb76fe940c34118",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 4549,
+      "license": "MIT",
+      "path": "data/ui/world_selection.rml",
+      "sha256": "777476afea52508c89ce6ed0bde4fe7ecaa33bbc2611d59b861d32aaa5b0c216",
+      "source": "Luminumbra first-party runtime data"
+    },
+    {
+      "bytes": 833,
+      "license": "MIT",
+      "path": "docs/assets/badges/language-cpp.svg",
+      "sha256": "38bb5fb377c1b3def12f4dad03b8c2e179c7d01e61e15319824266084d429f1d",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 822,
+      "license": "MIT",
+      "path": "docs/assets/badges/license-mit.svg",
+      "sha256": "d963201e969c6215323821398f67ce84a95168e110f93b91618e83d3320c1e87",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 887,
+      "license": "MIT",
+      "path": "docs/assets/badges/platforms.svg",
+      "sha256": "ed9c84ae935fe4f70737888396d395dc6ad5fd14a19f074b44ace1f8dd2c748c",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 841,
+      "license": "MIT",
+      "path": "docs/assets/badges/standard-cpp20.svg",
+      "sha256": "0649f3791e95bb2a56b48b007d5d25567c577a91b569a8194ad61bcaef921a39",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 44771,
+      "license": "MIT",
+      "path": "docs/assets/screenshots/main-menu.png",
+      "sha256": "b977315d51697f8b3e9069e20f586c61abf09f11974f9909a3147c4768da08f2",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 168,
+      "license": "LicenseRef-Public-Domain",
+      "path": "test/fixtures/dem/.gitignore",
+      "sha256": "097120074acd273ae4ac5a5413521e398149a6238142171b11d6705816227417",
+      "source": "documented DEM fixtures"
+    },
+    {
+      "bytes": 2647,
+      "license": "LicenseRef-Public-Domain",
+      "path": "test/fixtures/dem/PROVENANCE.md",
+      "sha256": "683899f6e257b05f9a5ebdb10c09ec48032cfd81fdbbb79c2071bb57d1575667",
+      "source": "documented DEM fixtures"
+    },
+    {
+      "bytes": 2550,
+      "license": "LicenseRef-Public-Domain",
+      "path": "test/fixtures/dem/alpine.json",
+      "sha256": "b4a714a957da630175a6c70f565eaa9c12bcdf521888890da9135c09f861fdc6",
+      "source": "documented DEM fixtures"
+    },
+    {
+      "bytes": 2637,
+      "license": "LicenseRef-Public-Domain",
+      "path": "test/fixtures/dem/coastal.json",
+      "sha256": "6e2c0b6ed1d5f34eed9d43f8043cc08700132545bb893fc539b714d972ca9a1b",
+      "source": "documented DEM fixtures"
+    },
+    {
+      "bytes": 2544,
+      "license": "LicenseRef-Public-Domain",
+      "path": "test/fixtures/dem/foothills.json",
+      "sha256": "66341821a21da85a892ca85039d397822baaaeed0f182d851c28a6f3e7f659d2",
+      "source": "documented DEM fixtures"
+    },
+    {
+      "bytes": 2488,
+      "license": "LicenseRef-Public-Domain",
+      "path": "test/fixtures/dem/plains.json",
+      "sha256": "0eef164bdd242f1a5f90902c2d96dc33fea44d97cb9724c8f0eb5ebc7352f81d",
+      "source": "documented DEM fixtures"
+    },
+    {
+      "bytes": 2107,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/amplified.json",
+      "sha256": "0a149c7c0cd83e39dc8e4fb5509dcf67e3c8dbca53c9576e6ddcebcad0dd025a",
+      "source": "Luminumbra authored worlds"
+    },
+    {
+      "bytes": 1601,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/archipelago.json",
+      "sha256": "5afc3fdd4ece5956257bfbd7ae89d775fccce4fb6a230103633588572f4a5ee3",
+      "source": "Luminumbra authored worlds"
+    },
+    {
+      "bytes": 2177,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/caverns.json",
+      "sha256": "352caa69d60266541058e8c1f1a107c675a4d784c36220565ac373dc143fec42",
+      "source": "Luminumbra authored worlds"
+    },
+    {
+      "bytes": 2877,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/default.json",
+      "sha256": "7f3e69fc545d0bcdb3104a44ac2ec161c3c62a0309d4073a459fb58ab2574a3f",
+      "source": "Luminumbra authored worlds"
+    },
+    {
+      "bytes": 1290,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/flat_lands.json",
+      "sha256": "0c234ec72df5a55167aef7ec2fe93def5121df1bed92421a411c3e0740e449d0",
+      "source": "Luminumbra authored worlds"
+    },
+    {
+      "bytes": 1753,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/mountains.json",
+      "sha256": "0d763e63aaab901048699511679cb06fb21c0add3e4fcff7a060f30ce0ed8ee4",
+      "source": "Luminumbra authored worlds"
+    },
+    {
+      "bytes": 1111,
+      "license": "MIT",
+      "path": "worlds/atlas/presets/temperate_forest.json",
+      "sha256": "69099af1e6a251f075c21647c61386fa3bb6e5a1cd89c4799f1d04f332de5f81",
+      "source": "Luminumbra authored worlds"
+    }
+  ],
+  "schema": "luminumbra.public_asset_inventory.v1"
+}

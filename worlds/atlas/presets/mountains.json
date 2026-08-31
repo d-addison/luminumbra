@@ -1,0 +1,58 @@
+{
+  "name": "Mountainous",
+  "description": "Dramatic shaped mountain ranges rising from walkable valleys and plateaus",
+  "schema_rev": 5,
+  "generation_params": {
+    "terrain": {
+      "base_frequency": 0.008,
+      "base_amplitude": 70.0,
+      "octaves": 6,
+      "persistence": 0.5,
+      "lacunarity": 2.0,
+      "height_offset": 10.0,
+      "shaping": {
+        "enabled": true,
+        "continentalness_frequency": 0.0008,
+        "erosion_frequency": 0.0015,
+        "peaks_frequency": 0.0025,
+        "peaks_amplitude": 52.0,
+        "domain_warp_amplitude": 20.0,
+        "domain_warp_frequency": 0.003,
+        "continental_spline": [[-1.0, -6.0], [-0.2, 4.0], [0.3, 8.0], [0.65, 27.5], [1.0, 50.0]],
+        "erosion_spline": [[-1.0, 0.5], [-0.6, 0.36], [-0.35, 0.25], [0.0, 0.18], [0.4, 0.13], [1.0, 0.1]],
+        "peaks_spline": [[-1.0, 0.0], [0.35, 0.08], [0.72, 0.5], [1.0, 1.0]]
+      },
+      "island_mask_enabled": false,
+      "hydro": {
+        "enabled": true,
+        "iterations": 9,
+        "cell_size_m": 8.0,
+        "talus_height": 2.8,
+        "thermal_rate": 0.3,
+        "solubility": 0.06,
+        "deposition": 0.15,
+        "sediment_capacity": 0.35,
+        "max_offset": 14.0
+      }
+    },
+    "biomes": {
+      "table": "common/biomes.json",
+      "temperature_frequency": 0.003,
+      "humidity_frequency": 0.004,
+      "relief_enabled": false
+    },
+    "features": {
+      "caves_enabled": true,
+      "cave_frequency": 0.03,
+      "rivers_enabled": true,
+      "river_frequency": 0.0016,
+      "river_depth": 4.0,
+      "river_pv_min": -1.0,
+      "river_pv_max": -0.82,
+      "river_max_carve": 10.0,
+      "lakes_enabled": false,
+      "cliffs_enabled": false,
+      "structures_enabled": true
+    }
+  }
+}

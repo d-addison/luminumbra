@@ -1,0 +1,16 @@
+{
+  "id": "oak",
+  "render_archetype": "broadleaf_tree",
+  "perennial": true,
+  "lifespan_ticks": 4800,
+  "genes": {
+    "GrowthRate": [0.10, 0.30],
+    "MaxScale": [0.75, 1.00],
+    "DroughtTolerance": [0.45, 0.75],
+    "ColdTolerance": [0.55, 0.85],
+    "HeatTolerance": [0.40, 0.70],
+    "LeafDensity": [0.65, 0.95],
+    "Yield": [0.25, 0.55],
+    "Hardiness": [0.60, 0.90]
+  }
+}
