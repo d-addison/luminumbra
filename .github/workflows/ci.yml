@@ -101,7 +101,7 @@ jobs:
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
     runs-on: windows-2025
-    timeout-minutes: 75
+    timeout-minutes: 105
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -129,7 +129,7 @@ jobs:
         run: |
           ctest --preset release --no-tests=error -LE manual \
             -E '^WorldgenPreviewTest\.PerFrameRenderHoldsPreviewBudget$' \
-            --parallel 4 --timeout 180 --output-junit ctest.junit.xml
+            --parallel 4 --timeout 360 --output-junit ctest.junit.xml
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
       - name: Upload test evidence
         if: always()

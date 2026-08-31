@@ -104,7 +104,7 @@ std::size_t HeightIndex(int x, int z) {
 }
 
 // Generate full-resolution SDF + heightmap for one chunk with a fresh world.
-void GenerateFull(const TerrainGenParams& params, int seed, const IVec3& coords, Chunk& out) {
+void GenerateFull(const TerrainGenParams& params, int seed, Chunk& out) {
     SHIELD_WorldSystem world(nullptr, nullptr, params, seed);
     world.GenerateChunkData(out);
 }
@@ -185,8 +185,8 @@ TEST(WorldgenHardening, RegenIsByteIdenticalSdfAndHeightmap) {
 
     Chunk a(coords);
     Chunk b(coords);
-    GenerateFull(params, kSeed, coords, a);
-    GenerateFull(params, kSeed, coords, b);
+    GenerateFull(params, kSeed, a);
+    GenerateFull(params, kSeed, b);
 
     ASSERT_EQ(a.sdf_data.size(), b.sdf_data.size());
     ASSERT_EQ(a.heightmap_data.size(), b.heightmap_data.size());
@@ -308,8 +308,8 @@ TEST(WorldgenHardening, DifferentSeedChangesField) {
     const TerrainGenParams params = ArchipelagoParams();
     Chunk a(IVec3(0, 0, 0));
     Chunk b(IVec3(0, 0, 0));
-    GenerateFull(params, kSeed, IVec3(0, 0, 0), a);
-    GenerateFull(params, kSeed + 7, IVec3(0, 0, 0), b);
+    GenerateFull(params, kSeed, a);
+    GenerateFull(params, kSeed + 7, b);
     ASSERT_EQ(a.sdf_data.size(), b.sdf_data.size());
     EXPECT_NE(a.sdf_data, b.sdf_data) << "seed has no effect on the field";
 }

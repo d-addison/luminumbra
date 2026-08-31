@@ -111,8 +111,11 @@ function ConvertTo-NightlyTaskDefinitionSnapshot {
         }
         $dailyAt = $null
         try {
-            $dailyAt = ([datetime]$trigger.StartBoundary).ToString(
-                "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
+            $dailyAt = ([DateTimeOffset]::Parse(
+                [string]$trigger.StartBoundary,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind)).ToString(
+                    "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
         } catch {
             $dailyAt = $null
         }
