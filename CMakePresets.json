@@ -56,6 +56,27 @@
       }
     },
     {
+      "name": "perf",
+      "displayName": "Performance measurement",
+      "description": "Optimized symbols and frame pointers without profiler instrumentation.",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "LUMINUMBRA_ENABLE_ASAN": "OFF",
+        "LUMINUMBRA_ENABLE_FRAME_POINTERS": "ON",
+        "LUMINUMBRA_ENABLE_TRACY": "OFF"
+      }
+    },
+    {
+      "name": "profile",
+      "displayName": "Tracy profiling",
+      "description": "Optimized symbols and frame pointers with Tracy instrumentation enabled.",
+      "inherits": "perf",
+      "cacheVariables": {
+        "LUMINUMBRA_ENABLE_TRACY": "ON"
+      }
+    },
+    {
       "name": "coverage",
       "displayName": "Coverage",
       "description": "Debug build instrumented with gcov (--coverage) for measured line/branch coverage. Isolated into build/coverage; NEVER used for determinism/world_hash gates.",
@@ -84,6 +105,14 @@
       "configurePreset": "release"
     },
     {
+      "name": "perf",
+      "configurePreset": "perf"
+    },
+    {
+      "name": "profile",
+      "configurePreset": "profile"
+    },
+    {
       "name": "coverage",
       "configurePreset": "coverage"
     }
@@ -106,6 +135,20 @@
     {
       "name": "release",
       "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "perf",
+      "configurePreset": "perf",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "profile",
+      "configurePreset": "profile",
       "output": {
         "outputOnFailure": true
       }

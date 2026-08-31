@@ -5,6 +5,43 @@ whole-frame profiling. Measurements compare a candidate revision with its base
 using the same scenario, preset, compiler, operating system, CPU/GPU class, driver,
 and runtime settings.
 
+## Local commands
+
+Use the `perf` preset for comparable measurements and `profile` when collecting a
+Tracy trace. Both retain debug symbols and frame pointers; only `profile` enables
+instrumentation.
+
+```sh
+cmake --preset perf
+cmake --build --preset perf --target luminumbra_server_app --parallel
+python tools/perf/perf.py run \
+  --workload server-smoke --layer end-to-end --preset perf \
+  --build-manifest build/perf/performance-build.json --mode gating \
+  --parameter ticks=30 --parameter surface_radius=1 \
+  --parameter collision_radius=1 --parameter seed=1337 \
+  --parameter world_preset=default --fixture-hash "$(git rev-parse HEAD:data)" \
+  --evidence-contract server-smoke --evidence build/perf/server-smoke-evidence.json \
+  --warmup 1 --samples 10 --output build/perf/server-smoke.json -- \
+  build/perf/bin/luminumbra_server_app --smoke --preset default --seed 1337 \
+    --ticks 30 --radius 1 --collision-radius 1 \
+    --artifact build/perf/server-smoke-evidence.json
+```
+
+Compare results only when their generated comparability keys match:
+
+```sh
+python tools/perf/perf.py compare \
+  --base build/perf/base.json --candidate build/perf/candidate.json \
+  --output build/perf/comparison.json
+```
+
+`bisect-eval` accepts the same arguments and returns `0` for good, `1` for a
+confirmed regression, and `125` when evidence is not comparable. The runner uses
+raw samples, median, p95, p99, maximum, and median absolute deviation. Its default
+relative verdict requires at least a 10% median change, a Mann-Whitney p-value no
+greater than 0.01, and an effect larger than three pooled median absolute
+deviations.
+
 ## Measurement layers
 
 | Layer | Representative evidence |
@@ -25,23 +62,26 @@ Warm-up samples are excluded explicitly and the retained sample count is recorde
 
 A measurement has one of three outcomes:
 
-- `evaluated`: the scenario ran, required evidence exists, and comparison keys
+- `evaluated`: the scenario ran and all evidence required by its workload
+  contract exists. A comparison is evaluated separately only when both run keys
   match.
 - `unevaluated`: the platform, hardware, tool, or required evidence was unavailable.
 - `failed`: the scenario attempted to run but produced invalid evidence or crossed
   an approved regression limit.
 
-An unavailable profiler or missing GPU is never reported as a pass. The existing
-software-OpenGL workflow is an observational render-path check; it is not a GPU
-performance gate.
+An unavailable profiler or missing GPU is never reported as a pass. The
+software-OpenGL workflow enforces a deliberately generous CPU/render-path ceiling
+that catches gross regressions; it is not evidence of GPU performance.
 
 ## Comparability
 
 Machine-readable results include a schema version and a comparability key derived
-from the benchmark name, scenario version, build preset, compiler and version,
-operating system and architecture, CPU model, GPU and driver when applicable,
-engine configuration, resolution, and sample policy. Base and candidate results
-with different keys are reported as unevaluated rather than compared.
+from the workload and version, allow-listed scenario parameters, fixture hash,
+build preset, compiler identity and version, operating system and architecture,
+CPU model, GPU and driver when applicable, renderer, metric schema, and sample
+policy. Base and candidate results with different keys are reported as
+unevaluated rather than compared. The key is recomputed during validation rather
+than trusted from the file.
 
 Thresholds are added only after at least 20 clean baseline runs on the intended
 runner class. Initial lanes publish observations. A maintainer reviews the
@@ -51,10 +91,14 @@ as success.
 
 ## Automation model
 
-Hosted pull-request lanes should cover deterministic CPU work on Windows, Linux,
-and macOS when supported. They build base and candidate in the same job, run the
-same scenario repeatedly, and upload raw JSON plus a Markdown comparison summary.
-Hosted-runner noise warrants conservative thresholds and repeated samples.
+The hosted Linux pull-request lane builds base and candidate in the same job,
+runs deterministic server batches in ABBA order, and uploads the engine evidence,
+raw samples, and comparison. Missing evidence, underpowered samples, or an
+incomparable result fails the measurement. Regression and improvement verdicts
+remain explicit observations until at least 20 clean paired runs calibrate the
+runner distribution; the workflow can then remove `--report-only` to enforce the
+reviewed policy. Windows and macOS currently exercise the portable runner contract
+only; engine measurement on those systems remains non-blocking expansion work.
 
 Hardware rendering requires a labeled, fixed Windows runner with a pinned driver,
 power profile, display mode, and background-service policy. That lane runs nightly

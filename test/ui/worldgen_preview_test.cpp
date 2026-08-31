@@ -368,6 +368,7 @@ TEST(WorldgenPreviewTest, PerFrameRenderHoldsPreviewBudget) {
            << "  \"test\": \"WorldgenPreviewTest.PerFrameRenderHoldsPreviewBudget\",\n"
            << "  \"metric\": \"preview_frame_wall_ms\",\n"
            << "  \"unit\": \"ms\",\n"
+           << "  \"sample_count\": " << samples_ms.size() << ",\n"
            << "  \"samples\": [";
     for (std::size_t i = 0; i < samples_ms.size(); ++i) {
         if (i > 0)

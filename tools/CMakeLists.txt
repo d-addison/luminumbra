@@ -12,3 +12,17 @@ target_include_directories(asset_processor PUBLIC
 # Vendor headers are SYSTEM includes: third-party code (stb, meshoptimizer)
 # is not held to the project's -Werror warning policy.
 target_link_libraries(asset_processor PRIVATE meshoptimizer stb_headers)
+
+if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(
+        NAME PerformanceToolContract
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_perf.py")
+    set_tests_properties(PerformanceToolContract PROPERTIES LABELS "perf;tools" TIMEOUT 30)
+    add_test(
+        NAME PerformanceMeasurementValidatorContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_performance_measurement.py")
+    set_tests_properties(PerformanceMeasurementValidatorContract
+        PROPERTIES LABELS "perf;tools" TIMEOUT 30)
+endif()

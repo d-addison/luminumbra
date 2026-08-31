@@ -22,6 +22,24 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 option(LUMINUMBRA_WARNINGS_AS_ERRORS "Treat first-party compiler warnings as errors" OFF)
 option(LUMINUMBRA_ENABLE_ASAN "Enable AddressSanitizer for first-party targets in Debug builds" OFF)
 option(LUMINUMBRA_ENABLE_COVERAGE "Instrument first-party targets with gcov coverage counters (--coverage)" OFF)
+option(LUMINUMBRA_ENABLE_FRAME_POINTERS "Preserve frame pointers in first-party targets" OFF)
+
+include(cmake/performance_manifest.cmake)
+
+function(luminumbra_enable_frame_pointers TARGET_NAME)
+  if(NOT LUMINUMBRA_ENABLE_FRAME_POINTERS OR NOT TARGET ${TARGET_NAME})
+    return()
+  endif()
+  get_target_property(_lefp_type ${TARGET_NAME} TYPE)
+  if(_lefp_type STREQUAL "INTERFACE_LIBRARY")
+    return()
+  endif()
+  if(MSVC)
+    target_compile_options(${TARGET_NAME} PRIVATE /Oy-)
+  else()
+    target_compile_options(${TARGET_NAME} PRIVATE -fno-omit-frame-pointer)
+  endif()
+endfunction()
 
 # Coverage instrumentation (coverage-instrumentation slice). Applied ONLY when
 # LUMINUMBRA_ENABLE_COVERAGE is set, which is owned exclusively by the dedicated
@@ -82,6 +100,8 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
       target_compile_options(${TARGET_NAME} PRIVATE -Werror -Wno-error=unused-parameter)
     endif()
   endif()
+
+  luminumbra_enable_frame_pointers(${TARGET_NAME})
 
   if(LUMINUMBRA_ENABLE_ASAN)
     get_target_property(_lea_type ${TARGET_NAME} TYPE)
@@ -288,3 +308,14 @@ endforeach()
 # coverage ONLY (no warning-as-error flags). This is a no-op unless the
 # `coverage` preset set LUMINUMBRA_ENABLE_COVERAGE.
 luminumbra_enable_coverage(luminumbra_client)
+luminumbra_enable_frame_pointers(luminumbra_client)
+luminumbra_enable_frame_pointers(worldgen_preview_test)
+foreach(PROFILING_TARGET IN ITEMS
+  forest_perf_budget_test
+  initial_world_loading_perf_test
+  world_load_bounded_test
+  ecology_tick_perf_test
+  shieldrt_spike_bench
+)
+  luminumbra_enable_frame_pointers(${PROFILING_TARGET})
+endforeach()
