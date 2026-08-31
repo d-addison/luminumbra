@@ -157,7 +157,8 @@ constexpr int kPreviewH = 480;
 inline bool PumpRebuild(Luminumbra::Client::WorldgenPreview& preview,
                         Luminumbra::Rendering::RenderPipeline& pipeline,
                         unsigned expect_generation) {
-    for (int i = 0; i < 2000; ++i) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline) {
         preview.render(pipeline, 1.0f / 60.0f); // adopts a finished build on the GL thread
         if (preview.rebuild_generation() >= expect_generation && preview.world_ready()) {
             return true;
