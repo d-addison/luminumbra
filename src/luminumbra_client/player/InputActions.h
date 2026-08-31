@@ -1,7 +1,7 @@
 #pragma once
 
 // Rebindable input action registry (task #11). Gameplay reads logical InputActions, not
-// raw GLFW keys (docs/STANDARDS.md §6). Bindings resolve from SystemConfig user.controls.*
+// raw GLFW keys. Bindings resolve from SystemConfig user.controls.*
 // (action name -> GLFW key code), so controls are rebindable + persisted with user settings.
 
 #include <array>

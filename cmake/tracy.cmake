@@ -1,7 +1,6 @@
 # cmake/tracy.cmake
 #
-# spec 021 (2026-07 research P1, docs/research/engine-library-landscape-2026.md,
-# emerging-2026): Tracy Profiler -- the one frame profiler whose GPU-zone abstraction
+# Tracy Profiler provides a GPU-zone abstraction that
 # spans OpenGL AND Vulkan/D3D12, so it survives the GL -> Diligent RHI migration that
 # the bespoke GL-only GpuTimerPass cannot. Vendored via FetchContent (same rationale
 # as cmake/diligent.cmake: sidesteps the vendor/ junction hazard on this box).

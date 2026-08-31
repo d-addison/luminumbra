@@ -43,9 +43,9 @@ constexpr std::size_t MAX_WATER_RESIZES_PER_TICK = 1;
 
 // --- Spec 009: fixed-point virtual-pipes (Mei) flowing-water solver ----------------------------
 // Integer-only so host==peer is BIT-exact (the water-state hash FNV-1a's the raw int32 bits). Depth
-// and flux are in MILLIMETRES (per unit cell area -> flux and depth share mm units). The whole hashed
-// path is integer: no float/libm/RNG/wall-clock. Mass is exact (one shared int32 flux subtracted from
-// one cell, added to its neighbour). See docs/specs/009-flowing-water-terraforming/spec.md.
+// and flux are in MILLIMETRES (per unit cell area -> flux and depth share mm units). The whole
+// hashed path is integer: no float/libm/RNG/wall-clock. Mass is exact (one shared int32 flux
+// subtracted from one cell, added to its neighbour).
 constexpr std::int64_t MM_PER_M    = 1000;
 constexpr std::int32_t MIN_FLOW_MM = 2;     // sub-2mm surface diffs produce no flux (kills limit-cycle jitter)
 constexpr std::int64_t K_ACCEL     = 256;   // gain: q += (K_ACCEL*dSurf_mm) >> FLOW_SHIFT  (dSurf 1m -> +62mm)

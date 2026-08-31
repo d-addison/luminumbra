@@ -146,7 +146,7 @@ bool g_codexOpen = false;
 std::string g_codexSig;
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
-// never hashed (docs/STANDARDS.md Â§5). Loaded once at startup (before window creation).
+// never hashed. Loaded once at startup, before window creation.
 luminumbra::core::SystemConfig g_systemConfig;
 // Settings menu (F8) â€” frees the cursor so the ImGui panel is clickable. While
 // g_rebindCaptureAction >= 0 the next key press is captured as that action's binding.
@@ -2980,7 +2980,7 @@ int main(int argc, char* argv[]) {
         LUMINUMBRA_CORE_INFO("UI thumbnail mode: {} thumbs -> {}/thumb_*.ppm", g_ui_thumbs, g_ui_thumbs_dir.string());
     }
 
-    // --timelapse capture mode (docs/timelapse.md). Single-player; pair with
+    // --timelapse capture mode. Single-player; pair with
     // --auto-create-world --auto-enter-world (and --no-ui for a clean frame).
     g_timelapse_frames = GetCommandLineIntOption(argc, argv, "--timelapse-frames", 0);
     g_timelapse_ticks = GetCommandLineIntOption(argc, argv, "--timelapse-ticks", 60);

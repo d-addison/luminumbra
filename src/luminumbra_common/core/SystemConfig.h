@@ -26,7 +26,7 @@
 namespace luminumbra::core {
 
 // Player-facing settings (client-only; NEVER hashed). Persisted to a writable per-user
-// overlay (%APPDATA%/Luminumbra/settings.json). Spec Addendum A; docs/STANDARDS.md §5/§6.
+// overlay (%APPDATA%/Luminumbra/settings.json).
 struct UserSettings {
     // video
     std::string resolution;                 // "" = native/default; else "WxH"

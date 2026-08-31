@@ -1,6 +1,5 @@
-// Spec 024 FR-024-5 (AETHER-07) — AetherScriptBinding: the proving signals for
-// the Lua energy-field sampler (docs/specs/024-aether-field-completion/spec.md,
-// SDD trace table). Three contracts pinned here:
+// AetherScriptBinding provides proving signals for the Lua energy-field sampler.
+// Three contracts are pinned here:
 //   1. the manifest gate stays green WITH the new entry (adding a binding
 //      REQUIRES a manifest entry — the surface is manifest-enumerated);
 //   2. the binding is absent-safe: no wired layer -> 0.0, never an error;

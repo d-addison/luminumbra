@@ -5,125 +5,76 @@
 ![Standard: C++20](docs/assets/badges/standard-cpp20.svg)
 ![Platforms: Windows and Linux](docs/assets/badges/platforms.svg)
 
-Luminumbra is a C++20 voxel engine for a living simulated world. It combines an
-EnTT-based ECS, GPU-driven rendering, and a deterministic fixed-tick simulation
-so world generation, ecology, weather, and field systems can evolve together.
+Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
+deterministic fixed-tick simulation, procedural terrain, entity-component systems,
+networking, and a GPU-driven client renderer.
 
-## Build
+The project is under active development. Interfaces, content formats, and the
+runtime experience are not yet release-stable.
 
-### Requirements
+## Build and test
 
-| Requirement | Repository source of truth |
-|---|---|
-| CMake 3.20 or newer | `CMakeLists.txt` and `CMakePresets.json` |
-| Ninja | The base configure preset selects the Ninja generator |
-| A C++20-capable compiler | The root CMake project requires C++20 without extensions |
-| Git and network access during configuration | The GoogleTest submodule and pinned `FetchContent` dependencies are populated from upstream repositories |
-
-On Ubuntu, the CI build installs the following system packages:
-
-```sh
-sudo apt-get update
-sudo apt-get install -y \
-  build-essential \
-  cmake \
-  ninja-build \
-  libgl1-mesa-dev \
-  libglu1-mesa-dev \
-  pkg-config \
-  xorg-dev
-```
-
-### Clean checkout
-
-Clone with submodules, or initialize them before configuring. From the
-repository root, the same release sequence used by CI is:
-
-```sh
-git submodule update --init --recursive
-cmake --preset release
-cmake --build --preset release
-ctest --preset release --output-on-failure
-```
-
-The presets keep each configuration in its own directory under `build/`.
-
-| Purpose | Configure preset | Build preset | Test preset |
-|---|---|---|---|
-| Debug | `debug` | `debug` | `debug` |
-| Debug with AddressSanitizer | `debug-asan` | `debug-asan` | `debug-asan` |
-| Release | `release` | `release` | `release` |
-| Coverage | `coverage` | `coverage` | `coverage` |
-| Simulation optimization-parity build | `debug-simo0` | `debug-simo0` | — |
-
-For example, a normal development build uses:
+Luminumbra uses CMake presets and Ninja. A first configure downloads dependencies
+at revisions pinned by the repository, so it requires Git and network access.
 
 ```sh
 cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug --output-on-failure
+cmake --build --preset debug --parallel
+ctest --preset debug --no-tests=error --output-on-failure
 ```
+
+Use `release` for optimized builds and `debug-asan` for AddressSanitizer builds.
+All generated files stay under `build/<preset>/`.
+
+The primary executables are written to `build/<preset>/bin/`:
+
+- `luminumbra_client_app` runs the graphical client.
+- `luminumbra_server_app` runs the headless simulation server.
+- `asset_processor` converts authored models into the runtime mesh format.
+
+See [Development and testing](docs/development.md) for platform dependencies,
+validation lanes, and source-list ownership.
 
 ## Architecture
 
-Luminumbra separates deterministic world state from presentation. The shared
-engine owns ECS data, simulation, world generation, networking, replay, and
-persistence; the client consumes that state through the rendering and UI
-layers; the server advances the authoritative fixed-tick world.
+The common engine owns deterministic simulation, world generation, persistence,
+replay, and networking. The client adds rendering, audio, input, and UI. The
+headless server links only the common engine and advances authoritative state.
 
-### Four world pillars
-
-| Pillar | Responsibility | Grounded implementation |
-|---|---|---|
-| **SHIELD** | Procedural voxel/SDF world generation, chunk streaming, meshing, and persistence | `SHIELD_WorldSystem`, Marching Cubes, far-LOD storage, and world persistence under `src/luminumbra_common/` |
-| **Instinct** | Creature perception, planning, locomotion, needs, and ecology | EnTT components plus the planners and tick systems under `src/luminumbra_common/ai/` |
-| **Atmospheric** | Deterministic weather and wind state that can feed simulation and rendering | `WeatherSystem`, `WeatherEventSystem`, and `WindFieldSystem` |
-| **Aetheric** | A persistent scalar energy field with emitters, diffusion, and deterministic hashing | `AetherFieldSystem`, `FieldEmitterSystem`, and the field-grid implementation under `src/luminumbra_common/fields/` |
-
-### Engine foundations
-
-| Area | Design |
-|---|---|
-| **ECS and simulation** | EnTT stores entity state; systems advance it on the canonical 30 Hz `SimulationClock`. Simulation paths use stable ordering and deterministic state hashes for replay and desynchronization checks. |
-| **Rendering** | A client-side render graph coordinates deferred passes. Terrain uses indirect multi-draw submission, while compute paths support SDF generation, foliage scattering, and other GPU work. |
-| **Concurrency** | A first-party job system handles asynchronous work while activation and residency contracts keep timing-dependent render work out of deterministic simulation state. |
-| **Persistence and replay** | Common-engine modules serialize world state, record replay streams, and expose sub-hashes for deterministic verification. |
-| **Testing** | CTest covers common, client, server, rendering, simulation, persistence, networking, and tooling behavior. AddressSanitizer and coverage have dedicated presets. |
-
-The testing philosophy and pillar-level test strategy are documented in
-[`docs/TDD.md`](docs/TDD.md). SHIELD's voxel density and sampling rules live in
-[`docs/shield/sdf-contract.md`](docs/shield/sdf-contract.md).
+The main engine layers and their dependency boundaries are described in
+[Architecture](docs/architecture.md). The terrain density and sampling rules are
+defined by the [SHIELD SDF contract](docs/shield/sdf-contract.md).
 
 ## Repository layout
 
-| Path | Contents |
+| Path | Purpose |
 |---|---|
-| `.github/` | Windows and Linux CI workflows |
-| `assets/` | Authored source assets consumed by the asset pipeline |
-| `cmake/` | Build helpers and dependency integration |
-| `config/` | Repository and runtime policy configuration |
-| `data/` | Authored runtime data copied into each build tree |
-| `docs/` | Architecture, contracts, specifications, and historical notes |
-| `include/` | Public engine headers |
-| `references/` | Visual reference material and UI concept frames |
-| `res/` | Runtime shader sources |
-| `scripts/` | Lint and developer workflow scripts |
-| `src/` | Common engine, client, and server source code |
+| `src/luminumbra_common/` | Shared simulation and engine services |
+| `src/luminumbra_client/` | Client rendering, audio, input, and UI |
+| `src/luminumbra_server/` | Headless server entry points |
 | `test/` | CTest and GoogleTest suites grouped by subsystem |
-| `tools/` | Asset, validation, capture, and analysis utilities |
-| `updates/` | Project update notes |
-| `vendor/` | Vendored sources and pinned dependency integration |
+| `tools/` | Asset processing, CI validation, captures, and developer tools |
+| `cmake/` | Build modules and dependency declarations |
+| `assets/` | Authored inputs to the asset pipeline |
+| `data/` | Runtime data copied into each build tree |
+| `res/` | Runtime resources that remain source-form, including shaders |
 | `worlds/` | Authored world definitions |
+| `references/` | Visual regression references and capture fixtures |
+| `docs/` | Maintained architecture, development, and validation guides |
 
-## Contributing
+## Documentation
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for source-list ownership, linting, and
-the expected development workflow. Changes should configure, build, and pass
-CTest through the preset that matches the work being performed.
+- [Architecture](docs/architecture.md)
+- [Development and testing](docs/development.md)
+- [Performance measurement](docs/performance.md)
+- [Visual regression](docs/visual-regression.md)
+- [Contributing](CONTRIBUTING.md)
+
+API documentation is built with Doxygen in CI and uploaded as a workflow
+artifact. It is not published as a website while the repository remains private.
 
 ## License
 
-Luminumbra is released under the [MIT License](LICENSE). Third-party components
+Luminumbra is licensed under the [MIT License](LICENSE). Third-party components
 and assets retain their own terms; see
-[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for attribution and license
-details.
+[Third-party licenses](THIRD_PARTY_LICENSES.md).

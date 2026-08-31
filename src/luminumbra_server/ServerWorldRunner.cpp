@@ -417,7 +417,7 @@ bool ServerWorldRunner::Boot() {
     // equilibrium. Bounded: settle residency (stable chunk count), then run water until every
     // chunk is calm (asleep) or a hard cap. If water does NOT reach a static fixed point this
     // will hit the cap and the smoke will still flake — that result decides option C vs B'
-    // (see docs/water-sim-lockstep-determinism.md). Server/lockstep boot only.
+    // Server/lockstep boot only; interactive streaming uses the normal residency path.
     {
         auto* ws = m_session->GetWorldSystem();
         auto* phys = m_session->GetPhysicsSystem();

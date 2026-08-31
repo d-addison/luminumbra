@@ -47,11 +47,10 @@ hygiene:
     - build/
     - out/
 
-# The repository's own SDD record is the authored spec set; .banso/specs is
-# where banso drafts new ones.
+# Banso drafts stay in its local task-state area rather than the maintained
+# project documentation tree.
 specs:
   roots:
-    - docs/specs
     - .banso/specs
 
 execution:

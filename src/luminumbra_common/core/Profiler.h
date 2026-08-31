@@ -2,8 +2,7 @@
 
 // Luminumbra profiling seam -- Tracy Profiler behind LUMINUMBRA_ENABLE_TRACY.
 //
-// spec 021 (2026-07 research P1, docs/research/engine-library-landscape-2026.md,
-// emerging-2026): Tracy is the one frame profiler whose GPU-zone abstraction spans
+// Tracy's GPU-zone abstraction spans
 // OpenGL AND Vulkan/D3D12, so it survives the GL -> Diligent RHI migration where the
 // bespoke GL-only GpuTimerPass (glBeginQuery) cannot. It is wired behind an
 // engine-owned shim (this header) exactly like the RHI seam sits above Diligent, so

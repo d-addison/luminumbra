@@ -428,13 +428,12 @@ struct LockstepHooks {
 // returns Finished / Desync / PeerDisconnected. The host is the sim authority; both
 // sides tick the same world and exchange hashes.
 //
-// SCOPE (spec 019 FR-B-002/FR-B-003, AC-B-001): lockstep is intentionally the
+// SCOPE: lockstep is intentionally the
 // determinism-ORACLE, REPLAY, and SMALL-CO-OP path only -- it is NOT a scale path.
 // Shared-fate input gating (one slow peer stalls all) and the all-or-nothing desync
-// HALT make lockstep-at-scale a non-goal (spec 019 NG-2); any headcount above the
+// HALT make lockstep-at-scale a non-goal; any headcount above the
 // documented small-co-op cap routes to server-authoritative delta replication instead.
-// The desync-oracle hash exchange is PRESERVED, not deleted (it stays the spec 018
-// determinism oracle). See docs/networking-scale-architecture.md for the demotion.
+// The desync-oracle hash exchange remains the determinism oracle.
 class LockstepSession {
 public:
     LockstepSession(LockstepConfig config, ILockstepTransport* transport, LockstepHooks hooks);

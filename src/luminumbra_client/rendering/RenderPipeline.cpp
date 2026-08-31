@@ -495,7 +495,7 @@ void RenderPipeline::HierarchicalCuller::BuildHierarchy(const std::vector<ChunkM
         glm::vec3 chunk_max = chunk_min + glm::vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
         chunk_refs.push_back(ChunkCullEntry{chunk.id, chunk.coords, AABB(chunk_min, chunk_max)});
     }
-    
+
     // Calculate root bounding box from all chunks
     glm::vec3 min(std::numeric_limits<float>::max());
     glm::vec3 max(std::numeric_limits<float>::lowest());
@@ -6079,7 +6079,7 @@ bool RenderPipeline::generate_chunk_sdf_gpu(const glm::ivec3& chunk_coords, cons
         glDeleteSync(m_gpu_sdf.compute_fence);
     }
     m_gpu_sdf.compute_fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    
+
     // RENDER-06 (016 FR-E, unblocked by 017-B): the INFINITE blocking readback
     // (the infinite client-wait + read-map pair the FR-G-001 gate bans) is
     // retired onto the 017-A ring. This experimental path's callback contract
@@ -6088,7 +6088,7 @@ bool RenderPipeline::generate_chunk_sdf_gpu(const glm::ivec3& chunk_coords, cons
     // longer hang the caller forever — past the deadline the caller returns
     // false and generation falls back to the authoritative CPU path. The
     // fully asynchronous, activation-queue-integrated GPU worldgen pipeline
-    // is chartered in the GPU track (docs/audit/021/gpu-modernization-plan.md);
+    // requires integration with the asynchronous world-activation pipeline;
     // this path stays behind the closed kEnableExperimentalGpuSdfIntegration
     // parity gate either way.
     const size_t sdf_size = 17 * 17 * 17;

@@ -151,7 +151,7 @@ add_subdirectory(vendor)
 # The experimental Diligent backend is opt-in and excluded from normal builds.
 include(cmake/diligent.cmake)
 
-# spec 021 (2026-07 research P1): Tracy Profiler seam. Defines the luminumbra_profiler
+# Tracy Profiler seam. Defines the luminumbra_profiler
 # INTERFACE target (empty + no fetch when LUMINUMBRA_ENABLE_TRACY=OFF, the default),
 # so gate/release builds are byte-identical. Must precede the target subdirectories.
 include(cmake/tracy.cmake)

@@ -597,7 +597,7 @@ endif()
 # SPIR-V (-target spirv) AND emits its reflection (-reflection-json); the ctest
 # asserts that reflection == the GL-introspected GLSL layout == the declared
 # ExpectedLayout. Slang replaces the former dxc + spirv-cross two-tool chain (one
-# tool that compiles for every backend and reflects; see docs/research/). slangc is
+# tool that compiles for every backend and emits reflection data. slangc is
 # a STANDALONE binary (no mingw linkage), bundled with the Vulkan SDK since 1.3.296,
 # so gate the target on finding it -- an SDK-less configure just skips this GPU ctest.
 find_program(LUMINUMBRA_SLANGC slangc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")

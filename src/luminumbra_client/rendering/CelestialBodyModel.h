@@ -17,7 +17,7 @@
 //
 // Render-only: celestial render state never feeds world_hash (018 FR-E-003).
 // A SIM-authoritative celestial quantity must route through the deterministic
-// tick path (ATMO-10) — see docs/specs/022-celestial-body-seam/spec.md Tier 2.
+// tick path.
 namespace Luminumbra::Rendering {
 
 struct CelestialBodyParams {

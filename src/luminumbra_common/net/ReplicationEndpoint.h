@@ -84,9 +84,9 @@ public:
     // against the last-ACKED baseline until a newer ack arrives, so a dropped delta is
     // recovered by the next one (no stranded client). Validate over NetworkSim
     // (injected loss/jitter) -- the single-PC unblocker for this slice.
-    // SCALE PATH (spec 019 FR-A-002): default-OFF keeps the canonical full-snapshot
+    // SCALE PATH: default-OFF keeps the canonical full-snapshot
     // baselines bit-exact, but the 20-32 player session ENABLES this -- delta-vs-acked
-    // is the bandwidth win that makes scale affordable (docs/networking-scale-architecture.md).
+    // is the bandwidth win that makes scale affordable.
     void SetDeltaCompression(bool on) { m_delta = on; }
     [[nodiscard]] bool delta_compression() const { return m_delta; }
 

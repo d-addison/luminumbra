@@ -1,32 +1,61 @@
 # Contributing
 
-## Build
+## Development flow
 
-Use the repository root and one of the presets declared in
-`CMakePresets.json`. A normal development build is:
+Create focused branches from the integration branch, keep generated artifacts out
+of Git, and open a pull request for review. A change is ready to merge when its
+applicable Windows and Linux build, test, sanitizer, formatting, documentation,
+and measurement lanes report evaluated results.
+
+Do not commit local audio, captures, build trees, editor state, credentials, or
+machine-specific paths. Design drafts, session handoffs, and task state belong in
+local tooling rather than the maintained documentation tree.
+
+## Build and test
+
+Use an isolated CMake preset from the repository root:
 
 ```sh
-git submodule update --init --recursive
 cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug --output-on-failure
+cmake --build --preset debug --parallel
+ctest --preset debug --no-tests=error --output-on-failure
 ```
 
-## Source Lists
+Run `scripts/lint.sh` before opening a pull request. The script checks formatting
+and first-party static analysis when the required tools are available. A skipped
+or unavailable analysis is not equivalent to a pass.
 
-The active build graph enters the client through `src/CMakeLists.txt`. The
-`src/luminumbra_client/CMakeLists.txt` file is legacy-only unless it is first
-updated to match the active client library plus executable layout.
+See [Development and testing](docs/development.md) for the supported presets and
+CI matrix.
 
-When adding or removing `.cpp` files, update the owning manifest in the same
-change:
+## Source ownership
 
-- `src/luminumbra_common/sources.cmake` for common engine sources.
-- `src/luminumbra_client/sources.cmake` for client library, client app, and
-  vendored ImGui sources compiled into the client.
+The active build graph enters engine applications through `src/CMakeLists.txt`.
+When adding or removing a translation unit, update its explicit source manifest in
+the same change:
 
-Keep manifest paths anchored with `CMAKE_CURRENT_LIST_DIR` so the files can be
-included from either the module directory or the parent `src` directory.
+- `src/luminumbra_common/sources.cmake` owns common engine sources.
+- `src/luminumbra_client/sources.cmake` owns client library and application
+  sources.
+- `src/luminumbra_server/sources.cmake` owns server application sources.
+- `test/CMakeLists.txt` owns tests.
+- `tools/CMakeLists.txt` owns compiled tools.
 
-After pulling a CMake change, re-run `cmake --preset debug` before rebuilding
-so the preset tree is reconfigured against the updated source lists.
+Do not introduce a second manifest or rely on recursive source globs. Reconfigure
+after changing a manifest.
+
+## Tests and evidence
+
+Add the smallest test that proves the behavior and include failure-path coverage.
+CTest invocations must use `--no-tests=error`; zero discovered tests are a failure.
+Deterministic-state changes require stable hash or replay evidence. Render-only
+changes require shader compilation and, where relevant, captured visual evidence.
+Performance claims require comparable raw measurements as described in
+[Performance measurement](docs/performance.md).
+
+## Documentation
+
+Keep documentation durable and code-grounded. Update a maintained guide when a
+public workflow, contract, or architectural boundary changes. Do not store feature
+backlogs, implementation plans, research dumps, or completed handoffs under
+`docs/`.

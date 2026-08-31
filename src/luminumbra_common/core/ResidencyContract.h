@@ -1,10 +1,6 @@
 #pragma once
 
-// ResidencyContract — the two-worlds determinism contract (Spec 018 FR-A + FR-B).
-//
-// Prose contract: docs/determinism-residency-contract.md
-// Spec:           docs/specs/018-determinism-hardening/spec.md
-//
+// ResidencyContract — the two-worlds determinism contract.
 // PURPOSE
 //   Formalize the SIMULATION-vs-RENDER residency split that today lives only as a
 //   hand-maintained exclusion list (the render-mesh sub-hash is computed but omitted
@@ -13,17 +9,17 @@
 //   that partition as an explicit, named, self-checking contract.
 //
 // SCOPE / NEUTRALITY
-//   This header is SELF-CONTAINED (only <cstdint>) and header-only. Since SHIELD-06 it
-//   is ENFORCED IN PRODUCTION: WorldPersistenceRoundtrip.cpp derives the world_hash
+//   This header is self-contained (only <cstdint>) and header-only. It is enforced in
+//   production: WorldPersistenceRoundtrip.cpp derives the world_hash
 //   exclusion scope from kChunkFieldResidency below (byte-neutral — the table encodes
-//   the status-quo scope), and Spec 017-B's activation queue implements the FR-B
+//   the status-quo scope), and the activation queue implements the deterministic
 //   availability contract.
 //
 //   OQ-1 (residency partition: compile-time type distinction vs runtime registry) is
-//   left OPEN by Spec 018. This header declares the VOCABULARY (named tag types + a
+//   left open. This header declares the vocabulary (named tag types + a
 //   runtime enum) so downstream code may key on either, but it deliberately does NOT
 //   force a `Tagged<T, Class>` wrapper onto every hash-feeding signature — that invasive
-//   choice is reserved for the consuming spec.
+//   choice is reserved for a consuming implementation.
 
 #include <cstdint>
 

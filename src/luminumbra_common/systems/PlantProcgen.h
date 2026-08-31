@@ -8,7 +8,7 @@
 // to light/wind), so two genomes grow structurally different plants, a plant elaborates
 // as it matures, and a plant leans toward its light.
 //
-// DETERMINISM (docs/STANDARDS.md §4/§9): VISUAL-ONLY — never feeds the sim, never
+// DETERMINISM: VISUAL-ONLY — never feeds the sim, never
 // touches world_hash. But it is a deterministic pure function so a baked cache is
 // reproducible and a future CPU/GPU split agrees. Cross-platform bit-stable: uses
 // ONLY Luminumbra::DeterministicMath (libm-free Sin/Cos/Sqrt) + IEEE basic ops, with

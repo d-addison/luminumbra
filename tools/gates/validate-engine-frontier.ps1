@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet("Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "SpecStatusAudit", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "PerfFloor", "EcologyTickPerf", "FarFieldForestBudget", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "RenderParityFrame", "UpscaleSeamParity", "PopulatedWorldReplay", "PopulatedAsan", "ReplicationSmoke", "NetworkedReplication", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "SimOptLevelParity", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "RenderBudget", "ArtifactManifest", "ConfigSchemaCheck", "MovingResidency", "WorldLoadBounded", "ReadbackDiscipline", "RenderReadbackAllowlist", "DeterminismAudit", "HeadlessInGameCapture", "PilotReadiness", "RhiNoReexport", "ProfilerDeterminismNeutral", "BuildTreeStrict", "ScheduledGateRun", "NetDemotionDocGrep", "All")]
+    [ValidateSet("Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "DocumentationHygiene", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "PerfFloor", "EcologyTickPerf", "FarFieldForestBudget", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "RenderParityFrame", "UpscaleSeamParity", "PopulatedWorldReplay", "PopulatedAsan", "ReplicationSmoke", "NetworkedReplication", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "SimOptLevelParity", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "RenderBudget", "ArtifactManifest", "ConfigSchemaCheck", "MovingResidency", "WorldLoadBounded", "ReadbackDiscipline", "RenderReadbackAllowlist", "DeterminismAudit", "HeadlessInGameCapture", "PilotReadiness", "RhiNoReexport", "ProfilerDeterminismNeutral", "BuildTreeStrict", "ScheduledGateRun", "NetDemotionDocGrep", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
@@ -124,45 +124,32 @@ function Test-BuildTreeStrict {
 }
 
 function Test-NetDemotionDocGrep {
-    # NET-10 (spec 019 AC-B-001): lockstep is intentionally the determinism-ORACLE /
-    # REPLAY / SMALL-CO-OP path only -- not a scale path. Two assertions:
-    #  (1) DURABLE content-grep -- LockstepSession.h states the oracle/replay/small-co-op
-    #      scope in-header (previously only the arch doc + ReplicationEndpoint.h did). This
-    #      half does NOT hinge on line numbers.
-    #  (2) ANCHOR tripwire -- docs/networking-scale-architecture.md cites the header line
-    #      anchors, AND those lines actually carry the content they claim, so a future edit
-    #      that shifts the header lines fails the gate instead of silently drifting.
+    # Lockstep is the determinism-oracle, replay, and small-co-op path, not the
+    # scale path. Verify both sides of that routing decision from durable headers.
     $hdr = "src/luminumbra_common/net/LockstepSession.h"
-    $arch = "docs/networking-scale-architecture.md"
+    $replication = "src/luminumbra_common/net/ReplicationEndpoint.h"
     Assert-FileExists $hdr
-    Assert-FileExists $arch
+    Assert-FileExists $replication
 
-    # (1) scope tokens present in the header (case-insensitive -match).
     $hdrText = Get-Content $hdr -Raw
     foreach ($tok in @("oracle", "replay", "small-co-op")) {
         if ($hdrText -notmatch [regex]::Escape($tok)) {
-            throw "NetDemotionDocGrep: LockstepSession.h does not state the '$tok' scope -- spec 019 AC-B-001 wants the oracle/replay/small-co-op demotion scope stated in-header, not only in the arch doc"
+            throw "NetDemotionDocGrep: LockstepSession.h does not state the '$tok' scope"
         }
     }
 
-    # (2) each arch-doc anchor must cite a header line that actually carries its content.
-    $hdrLines = Get-Content $hdr
-    $archText = Get-Content $arch -Raw
-    $anchors = @(
-        @{ cite = "LockstepSession.h:340-341"; line = 340; needle = "v1 scope: <= 2" },
-        @{ cite = ":413-416";                   line = 413; needle = "2-peer" }
-    )
-    foreach ($a in $anchors) {
-        if ($archText -notmatch [regex]::Escape($a.cite)) {
-            throw "NetDemotionDocGrep: $arch does not cite the current header anchor '$($a.cite)' -- the pre-019-D1 line numbers have drifted (spec 019 AC-B-001)"
-        }
-        $actual = $hdrLines[$a.line - 1]
-        if ($actual -notmatch [regex]::Escape($a.needle)) {
-            throw "NetDemotionDocGrep: $hdr line $($a.line) does not contain '$($a.needle)' -- the arch-doc anchor '$($a.cite)' has drifted (found: $actual). Re-point the arch-doc anchor AND update this gate's expected line."
+    if ($hdrText -notmatch "2-peer" -or $hdrText -notmatch "NOT a scale path") {
+        throw "NetDemotionDocGrep: LockstepSession.h does not retain its peer-count and scale boundaries"
+    }
+
+    $replicationText = Get-Content $replication -Raw
+    foreach ($tok in @("server-authoritative", "scale path", "delta")) {
+        if ($replicationText -notmatch [regex]::Escape($tok)) {
+            throw "NetDemotionDocGrep: ReplicationEndpoint.h does not state the '$tok' scale-path contract"
         }
     }
 
-    Write-Host "[NetDemotionDocGrep] OK -- header states the oracle/replay/small-co-op scope; arch-doc anchors match the tree."
+    Write-Host "[NetDemotionDocGrep] OK -- lockstep and replication state complementary session scopes."
 }
 
 function Invoke-Checked {
@@ -624,43 +611,37 @@ function Test-ShaderInventory {
     Write-Host ("shader dead-file check: {0} shader files, all referenced" -f @($shaderFiles).Count)
 }
 
-function Test-SpecStatusAudit {
-    # WATER-14 (Wave G W1.4): the spec-docs-debt tripwire. The 010 lesson: finite
-    # hydrology SHIPPED (524a5557) with no docs/specs directory at all, and spec 009
-    # said "Status: Draft" long after Phases 1-3 landed. Machine checks:
-    #   1. every docs/specs/NNN-*/ directory contains a spec.md;
-    #   2. spec numbering is gap-free from 001 to the max (a shipped-but-undocumented
-    #      spec shows up as a hole, exactly like 010 did);
-    #   3. no spec.md carries "Status: Draft" unless explicitly allowlisted as a
-    #      genuinely in-draft spec.
-    $draftAllowlist = @() # add "NNN-slug" entries ONLY for specs genuinely still in draft
-    $dirs = @(Get-ChildItem "docs/specs" -Directory | Where-Object { $_.Name -match '^\d{3}-' } | Sort-Object Name)
-    if ($dirs.Count -lt 20) {
-        throw "SpecStatusAudit: found only $($dirs.Count) spec directories; the scan is broken"
+function Test-DocumentationHygiene {
+    $allowed = @(
+        "architecture.md",
+        "assets/badges/language-cpp.svg",
+        "assets/badges/license-mit.svg",
+        "assets/badges/platforms.svg",
+        "assets/badges/standard-cpp20.svg",
+        "development.md",
+        "performance.md",
+        "shield/sdf-contract.md",
+        "visual-regression.md"
+    )
+
+    if (-not (Test-Path "docs" -PathType Container)) {
+        throw "documentation hygiene: docs directory is missing"
     }
-    $numbers = @($dirs | ForEach-Object { [int]($_.Name.Substring(0, 3)) })
-    for ($i = 0; $i -lt $numbers.Count; $i++) {
-        if ($numbers[$i] -ne $i + 1) {
-            throw ("SpecStatusAudit: spec numbering has a HOLE at {0:d3} (found {1:d3}) - a shipped spec without a docs/specs directory? (the 010 lesson)" -f ($i + 1), $numbers[$i])
-        }
+
+    $actual = @(Get-ChildItem "docs" -Recurse -File | ForEach-Object {
+        $_.FullName.Substring((Resolve-Path "docs").Path.Length + 1).Replace('\', '/')
+    })
+    $unexpected = @($actual | Where-Object { $allowed -notcontains $_ } | Sort-Object)
+    $missing = @($allowed | Where-Object { $actual -notcontains $_ } | Sort-Object)
+
+    if ($unexpected.Count -gt 0) {
+        throw ("documentation hygiene: unmaintained files under docs/: {0}" -f ($unexpected -join ", "))
     }
-    $violations = @()
-    foreach ($dir in $dirs) {
-        $specPath = Join-Path $dir.FullName "spec.md"
-        if (-not (Test-Path $specPath)) {
-            $violations += "$($dir.Name): missing spec.md"
-            continue
-        }
-        $statusLine = (Select-String -Path $specPath -Pattern '^Status:' | Select-Object -First 1)
-        if ($statusLine -and $statusLine.Line -match 'Draft' -and $draftAllowlist -notcontains $dir.Name) {
-            $violations += "$($dir.Name): says 'Status: Draft' but is not on the draft allowlist - if it shipped, update the status; if it is genuinely draft, allowlist it with a reason"
-        }
+    if ($missing.Count -gt 0) {
+        throw ("documentation hygiene: required maintained files are missing: {0}" -f ($missing -join ", "))
     }
-    if ($violations.Count -gt 0) {
-        foreach ($v in $violations) { Write-Host "  $v" }
-        throw "SpecStatusAudit (WATER-14): $($violations.Count) spec docs-debt violation(s)"
-    }
-    Write-Host ("spec status audit: {0} spec dirs, numbering gap-free, no un-allowlisted drafts" -f $dirs.Count)
+
+    Write-Host ("documentation hygiene: {0} maintained files" -f $actual.Count)
 }
 
 function Test-TextureResidency {
@@ -5720,7 +5701,7 @@ function Test-EngineGameSplitLint {
         # allowlisted here is CODE-LEVEL debt only, each entry awaiting the OPS-16
         # data-driven refactor (hardcoded species spawns/audio event ids/model paths/the
         # MaterialType::LuminCrystal enumerant/the built-in species table). Do not add
-        # entries without filing the debt in docs/audit/021/backlog.json.
+        # entries without an explicit, reviewed data-driven replacement plan.
         $ops16Debt = @(
             @{ Path = "src/luminumbra_server/ServerWorldRunner.cpp";           Nouns = @("grovestrider") },
             @{ Path = "src/luminumbra_client/main_client.cpp";                 Nouns = @("grovestrider", "glimmer", "lumincrystal") }
@@ -8009,7 +7990,7 @@ switch ($Mode) {
     "WorldLoadBounded" { Test-WorldLoadBounded }
     "ReadbackDiscipline" { Test-ReadbackDiscipline }
     "RenderReadbackAllowlist" { Test-RenderReadbackAllowlist }
-    "SpecStatusAudit" { Test-SpecStatusAudit }
+    "DocumentationHygiene" { Test-DocumentationHygiene }
     "DeterminismAudit" { Test-DeterminismAudit }
     "HeadlessInGameCapture" { Test-HeadlessInGameCapture }
     "PilotReadiness" { Test-PilotReadiness }
@@ -8044,6 +8025,7 @@ switch ($Mode) {
         Test-SimDeterminismLint
         Test-ReadbackDiscipline
         Test-RenderReadbackAllowlist
+        Test-DocumentationHygiene
         Test-DeterminismAudit
         Test-PilotReadiness
         Test-RhiNoReexport

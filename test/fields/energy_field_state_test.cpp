@@ -1,6 +1,5 @@
-// Spec 024 (AETHER-06) — AetherEmitterDeterminism: the proving signals for the
-// stateful energy-field layer (docs/specs/024-aether-field-completion/spec.md,
-// SDD trace table). The kernel constants are public and PINNED; the tests
+// AetherEmitterDeterminism provides proving signals for the stateful energy-field
+// layer. The kernel constants are public and pinned; the tests
 // replicate single ops (one decay step) from those constants where an expected
 // value is needed — never from a parallel implementation of the kernel.
 
