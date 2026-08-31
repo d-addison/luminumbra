@@ -51,14 +51,14 @@ jobs:
           sha256sum "luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz" \
             "luminumbra-${GITHUB_REF_NAME#v}-source.spdx.json" > SHA256SUMS
       - name: Attest source artifacts
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/luminumbra-*-source.tar.gz
             dist/luminumbra-*-source.spdx.json
             dist/SHA256SUMS
       - name: Attest source SBOM
-        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: dist/luminumbra-*-source.tar.gz
           sbom-path: dist/luminumbra-*-source.spdx.json
@@ -90,10 +90,10 @@ jobs:
           python3 tools/release/generate_sbom.py --root build/stage --name luminumbra-linux --version "${GITHUB_REF_NAME#v}" --output build/package/luminumbra-linux.spdx.json
           cd build/package
           sha256sum luminumbra-*.tar.gz luminumbra-linux.spdx.json > SHA256SUMS-linux
-      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: build/package/luminumbra-*.tar.gz
-      - uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: build/package/luminumbra-*.tar.gz
           sbom-path: build/package/luminumbra-linux.spdx.json
@@ -134,10 +134,10 @@ jobs:
           python tools/release/validate_package.py $archive.FullName
           python tools/release/generate_sbom.py --root build/stage --name luminumbra-windows --version $env:GITHUB_REF_NAME.TrimStart('v') --output build/package/luminumbra-windows.spdx.json
           Get-FileHash $archive.FullName -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $($archive.Name)" } | Set-Content build/package/SHA256SUMS-windows
-      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: build/package/luminumbra-*.zip
-      - uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: build/package/luminumbra-*.zip
           sbom-path: build/package/luminumbra-windows.spdx.json
