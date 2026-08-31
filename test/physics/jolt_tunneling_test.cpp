@@ -122,3 +122,19 @@ TEST(JoltTunneling, SlowSphereAlsoRestsOnTheFloor) {
     physics.destroy_body(ball);
     physics.shutdown();
 }
+
+TEST(JoltRuntimeLifetime, OverlappingWorldsShareTheProcessFactory) {
+    PhysicsSystem first;
+    PhysicsSystem second;
+
+    first.startup();
+    second.startup();
+    ASSERT_TRUE(first.is_started());
+    ASSERT_TRUE(second.is_started());
+
+    first.shutdown();
+    EXPECT_TRUE(second.is_started());
+    EXPECT_NO_THROW(second.update(1.0f / 60.0f));
+
+    second.shutdown();
+}
