@@ -518,7 +518,7 @@ function Assert-NightlyTrackedTreeClean {
 
     # `git diff HEAD` combines index and worktree differences for files already
     # tracked by HEAD. Deliberately omit --no-index/--others: untracked build and
-    # Forge artifacts are outside this provenance policy.
+    # Local orchestration artifacts are outside this provenance policy.
     $savedErrorActionPreference = $ErrorActionPreference
     try {
         # Windows PowerShell 5.1 promotes native stderr (including harmless

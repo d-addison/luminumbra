@@ -28,11 +28,8 @@ import numpy as np
 from PIL import Image
 
 # --- objective thresholds -----------------------------------------------------
-# PROVENANCE: every threshold below was tuned against a specific iteration-5
-# storm-visual defect the dual-bias pipeline caught (see the iteration-5b
-# closeout + engine-iteration-5b/visual-debt.md). The number is the boundary
-# that separated the broken captures from the fixed ones in that DR round; do
-# not retune without a fixture in tools/test_visual_critique.py pinning it.
+# Every threshold is pinned by a fixture in tools/test_visual_critique.py. Do
+# not retune one without updating its evidence-backed fixture.
 T = {
     "black_frac_dead": 0.92,        # >92% near-black => dead/black frame (night dome was once fully unlit)
     "near_black": 14,               # luma <= this counts as "near black"
@@ -44,17 +41,14 @@ T = {
     "aurora_dusk_chroma_frac": 0.010, # green/magenta chroma in a dusk sky => aurora leaking out of night
     "foliage_ground_green_min": 0.010, # daytime down-view: ground green-cover floor (foliage must be present)
     "rain_anis_min": 1.15,          # storm: vertical/horizontal gradient ratio floor (rain reads as streaks)
-    # --- VISUAL-FIDELITY FLOOR (owner principle 2026-06-16: BF4/BF1 realism) ---
-    # Terrain micro-contrast = BRIGHTNESS-NORMALIZED ground detail: mean |Laplacian| of
-    # the ground luma DIVIDED BY mean ground luma. The raw |Laplacian| (fidelity_detail_min
-    # below, kept for telemetry) scales with absolute luma, so the SAME terrain scored
-    # 2.5-3x lower at dusk than noon — a light-level artifact, not a texture deficit
-    # (forge-critique 2026-06-16, terrain-fidelity-plan pass-#2). The normalized metric is
-    # light-independent: flat/untextured terrain -> ~0 at any time of day; a textured
-    # BF4/BF1 surface carries visible relative contrast. PROVENANCE: the current sweep's
-    # daytime ground views score ~0.03-0.05 relative (flat-shaded, "pretty shit"); the
-    # floor sits above that. The flag is judged ONLY on DOWN-PITCHED daytime-clear cells
-    # (eye-level horizon vistas legitimately minify distant terrain). PROVISIONAL — pinned
+    # --- visual-fidelity floor ------------------------------------------------
+    # Terrain micro-contrast is brightness-normalized ground detail: mean |Laplacian| of
+    # the ground luma divided by mean ground luma. The raw |Laplacian| metric retained
+    # below for telemetry scales with absolute luma, making it unsuitable as a gate across
+    # lighting conditions. The normalized metric is light-independent: flat/untextured
+    # terrain -> ~0 at any time of day; a detailed surface carries visible relative
+    # contrast. The floor is judged only on down-pitched daytime-clear cells because
+    # eye-level horizon views legitimately minify distant terrain. Its fixture is pinned
     # by tools/test_visual_critique.py.
     "fidelity_relative_detail_min": 0.08,  # |Laplacian|/luma floor (light-independent)
     # Per-time-of-day raking scale on the fidelity floor: overhead noon light casts less

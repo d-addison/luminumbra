@@ -1,7 +1,5 @@
-# Enforced verify gate for T-I7-WAVEB-OCEAN (forge runs this via
-# agent_contract.verify_command). Build clean + render/water visual tests +
-# the world visual sweep gate. Any failure -> non-zero exit so forge's
-# post-merge verification marks the task Failed (PR #1728 enforcement).
+# Enforced ocean verification: build, run the render and water tests, then run
+# the world visual sweep gate. Any failure returns a non-zero exit code.
 $ErrorActionPreference = 'Stop'
 $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)

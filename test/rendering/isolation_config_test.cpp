@@ -1,8 +1,8 @@
-// T-I6 isolation/layer render mode: unit tests for the pure config parse
+// Isolation/layer render mode: unit tests for the pure config parse
 // (core/IsolationConfig.h is dependency-free, so this needs no GL/common libs).
 // Pins the CLI -> layer-mask/backdrop mapping, the default-is-noop byte-stability
-// guarantee, and unknown-token handling. (forge-critique T1/T3: test the gating
-// LOGIC purely; don't rely on a synthetic-quad GL test that fakes the real path.)
+// guarantee, and unknown-token handling. This tests the gating logic directly
+// without substituting a synthetic rendering path for the production path.
 
 #include "gtest/gtest.h"
 

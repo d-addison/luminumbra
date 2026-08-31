@@ -62,12 +62,7 @@ __pycache__/
 # --- Local agent/editor state -------------------------------------------
 .claude/settings.local.json
 **/.banso/evidence/
-
-# --- Retired orchestrator leftovers ----------------------------------------
-# .forge/ is no longer part of this repository; .banso/ replaces it. What is
-# left on disk is local run state -- build logs, caches, and HMAC key material
-# -- which must never be committed. Delete the directory and this rule with it.
-/.forge/
+/.worktrees/
 
 # --- Obsolete local dependency remnants ----------------------------------
 # CMake consumes these dependencies directly from pinned FetchContent trees.

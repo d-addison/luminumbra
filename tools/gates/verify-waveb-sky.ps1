@@ -1,7 +1,5 @@
-# Enforced verify gate for T-I7-WAVEB-SKY (forge runs this via
-# agent_contract.verify_command). Build clean + render/visual tests + the
-# skybox + world visual sweep gates. Any failure -> non-zero exit so forge's
-# post-merge verification marks the task Failed (PR #1728 enforcement).
+# Enforced sky verification: build, run the rendering tests, then run the
+# skybox and world visual sweep gates. Any failure returns a non-zero exit code.
 $ErrorActionPreference = 'Stop'
 $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
