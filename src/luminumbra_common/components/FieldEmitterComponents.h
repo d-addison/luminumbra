@@ -1,16 +1,16 @@
 #pragma once
 
-// Spec 024 FR-024-5 (AETHER-07) — FIELD EMITTERS: the gameplay WRITE side of the
+//  -5 — FIELD EMITTERS: the gameplay WRITE side of the
 // stateful energy layer (fields/EnergyFieldState). An entity carrying this plus a
 // TransformComponent deposits `rate_raw_per_tick` raw units into its 24 m world
 // cell every tick; the crystal archetypes and energy-flavored flora ride this on
 // the game-content track (the engine knows only a generic "energy field").
 //
 // CHANNEL AS DATA (the Factorio emissions_per_minute precedent): the channel is a
-// plain data key, not an API surface — AETHER-08's Lumin/Umbra polarity becomes
+// plain data key, not an API surface — 's Lumin/Umbra polarity becomes
 // channel 1 of the same component, no new component type, no new deposit path.
 //
-// TWO-PHASE SORTED DEPOSITS (FFF-52/WATER-17 ordering law): emitters never write
+// TWO-PHASE SORTED DEPOSITS (/ ordering law): emitters never write
 // the field directly. The gather helper (systems/FieldEmitterSystem.h) visits
 // carriers in entity-id order and QUEUES (emitter_id, cell, amount) into the
 // layer; EnergyFieldState re-sorts by (cell, channel, emitter_id) and applies
@@ -33,7 +33,7 @@ namespace Luminumbra::Components {
 // radius_cells > 0 the surrounding cells within that Chebyshev radius also
 // receive rate >> (Chebyshev distance) — an integer halving falloff per ring.
 struct FieldEmitterComponent {
-    // Data key into the layer's channel set (0 = energy; AETHER-08 polarity = 1).
+    // Data key into the layer's channel set (0 = energy;  polarity = 1).
     int channel = 0;
     // Raw units queued per tick at the centre cell (kEnergyRawPerUnit raw = 1
     // gameplay unit). 0 = inert: the gather helper skips the entity entirely.
@@ -42,4 +42,4 @@ struct FieldEmitterComponent {
     int radius_cells = 0;
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

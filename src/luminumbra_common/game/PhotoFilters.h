@@ -1,15 +1,15 @@
 #pragma once
 
-// Track game.photo_filters — PURE, DETERMINISTIC post-capture FILTER/grade scoring
-// (pillar G). After a shot is composed + scored (see systems/PhotoScoring.h), the
+// game.photo_filters: PURE, DETERMINISTIC post-capture FILTER/grade scoring
+// (photography). After a shot is composed + scored (see systems/PhotoScoring.h), the
 // player may apply a creative FILTER (a colour grade / look). This module answers a
 // single, render-free question: how WELL does a chosen filter SUIT a given scene? A
 // good filter amplifies the mood already latent in the scene; a wrong one fights it.
 //
 // SCOPE. NO render, NO camera, NO GL, NO entt, NO rng, NO wall-clock, NO global
 // state. It operates on a plain FilterContext value struct describing the scene's
-// colour/light character, so it can be unit-tested in isolation and later fed by
-// whatever capture pipeline produces those scalars. Mirrors systems/PhotoScoring.h
+// colour/light character, so it can be unit-tested in isolation and fed by the
+// runtime capture pipeline. Mirrors systems/PhotoScoring.h
 // in shape (pure library, value structs, [0,1] outputs).
 //
 // DETERMINISM CONTRACT. Uses ONLY Luminumbra::DeterministicMath (no libm
@@ -44,7 +44,7 @@ namespace luminumbra::game {
 
 namespace DM = ::Luminumbra::DeterministicMath;
 
-// Reserved seed-stream offset for the photo-filters track (registry: ... scavenging+34,
+// Reserved seed-stream offset for the photo-filters subsystem (registry: ... scavenging+34,
 // photo-filters+35 — the next free slot above scavenging). The module is PURE (no rng), so
 // this is recorded for collision-avoidance only and is intentionally never consumed.
 inline constexpr std::uint64_t kPhotoFilterSeedOffset = 35ull;
@@ -72,10 +72,10 @@ inline constexpr int kPhotoFilterCount = 6;
 //   low_light01          — darkness of the scene: 0 = bright, 1 = very dark.
 // ---------------------------------------------------------------------------
 struct FilterContext {
-    float scene_warmth01       = 0.5f;
-    float scene_contrast01     = 0.5f;
+    float scene_warmth01 = 0.5f;
+    float scene_contrast01 = 0.5f;
     float subject_saturation01 = 0.5f;
-    float low_light01          = 0.5f;
+    float low_light01 = 0.5f;
 };
 
 // The graded result for one filter against one scene. Each field is clamped [0,1].
@@ -84,8 +84,8 @@ struct FilterContext {
 //   total       — the weighted blend used for ranking (BestFilter maximizes this).
 struct FilterScore {
     float suitability = 0.0f;
-    float mood        = 0.0f;
-    float total       = 0.0f;
+    float mood = 0.0f;
+    float total = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -96,20 +96,22 @@ struct FilterScore {
 // must FIT before its mood lift counts); mood breaks ties between equally-fitting
 // looks. Weights sum to 1.0.
 inline constexpr float kwSuitability = 0.65f;
-inline constexpr float kwMood        = 0.35f;
+inline constexpr float kwMood = 0.35f;
 
 // None's flat baseline: a neutral, scene-independent score the stylized filters must
 // beat to be chosen. Set so a clearly-matched filter wins but a poorly-matched one
 // (a vivid grade in the dark, a warm grade on an ice-blue scene) loses to None.
 inline constexpr float kNoneSuitability = 0.55f;
-inline constexpr float kNoneMood        = 0.45f;
+inline constexpr float kNoneMood = 0.45f;
 
 // ---------------------------------------------------------------------------
 // Small pure helpers (float +-*/ only — no libm).
 // ---------------------------------------------------------------------------
 inline float FilterClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -128,7 +130,7 @@ inline float Lerp(float a, float b, float t) {
 // low_light scales the whole thing down. Mood = the punch a vivid grade adds, which
 // only lands when there's colour AND light to work with.
 inline FilterScore ScoreVivid(const FilterContext& c) {
-    const float sat  = FilterClamp01(c.subject_saturation01);
+    const float sat = FilterClamp01(c.subject_saturation01);
     const float dark = FilterClamp01(c.low_light01);
     const float light = 1.0f - dark;
 
@@ -145,7 +147,7 @@ inline FilterScore ScoreVivid(const FilterContext& c) {
 // rewards darkness + contrast and is INDIFFERENT to saturation (it would discard it
 // anyway). Mood is high wherever it fits — noir is an inherently moody look.
 inline FilterScore ScoreNoir(const FilterContext& c) {
-    const float dark     = FilterClamp01(c.low_light01);
+    const float dark = FilterClamp01(c.low_light01);
     const float contrast = FilterClamp01(c.scene_contrast01);
 
     FilterScore s;
@@ -160,7 +162,7 @@ inline FilterScore ScoreNoir(const FilterContext& c) {
 // hour. Suitability rises with scene_warmth01. Mood rewards the cosy lift, with a
 // touch of contrast for shape.
 inline FilterScore ScoreWarm(const FilterContext& c) {
-    const float warmth   = FilterClamp01(c.scene_warmth01);
+    const float warmth = FilterClamp01(c.scene_warmth01);
     const float contrast = FilterClamp01(c.scene_contrast01);
 
     FilterScore s;
@@ -172,7 +174,7 @@ inline FilterScore ScoreWarm(const FilterContext& c) {
 // COOL — COLD/blue scenes. The mirror of Warm: a cool grade on a cold scene reads
 // crisp + wintry. Suitability rises as warmth FALLS (1 - warmth). Mood likewise.
 inline FilterScore ScoreCool(const FilterContext& c) {
-    const float cold     = 1.0f - FilterClamp01(c.scene_warmth01);
+    const float cold = 1.0f - FilterClamp01(c.scene_warmth01);
     const float contrast = FilterClamp01(c.scene_contrast01);
 
     FilterScore s;
@@ -185,7 +187,7 @@ inline FilterScore ScoreCool(const FilterContext& c) {
 // moody frames). Suitability is contrast-led; mood adds the emotional punch.
 inline FilterScore ScoreDramatic(const FilterContext& c) {
     const float contrast = FilterClamp01(c.scene_contrast01);
-    const float dark     = FilterClamp01(c.low_light01);
+    const float dark = FilterClamp01(c.low_light01);
 
     FilterScore s;
     s.suitability = FilterClamp01(0.8f * contrast + 0.2f * dark);
@@ -198,7 +200,7 @@ inline FilterScore ScoreDramatic(const FilterContext& c) {
 inline FilterScore ScoreNone(const FilterContext&) {
     FilterScore s;
     s.suitability = kNoneSuitability;
-    s.mood        = kNoneMood;
+    s.mood = kNoneMood;
     return s;
 }
 
@@ -209,16 +211,28 @@ inline FilterScore ScoreNone(const FilterContext&) {
 inline FilterScore ScoreFilter(PhotoFilter filter, const FilterContext& ctx) {
     FilterScore s;
     switch (filter) {
-        case PhotoFilter::Vivid:    s = ScoreVivid(ctx);    break;
-        case PhotoFilter::Noir:     s = ScoreNoir(ctx);     break;
-        case PhotoFilter::Warm:     s = ScoreWarm(ctx);     break;
-        case PhotoFilter::Cool:     s = ScoreCool(ctx);     break;
-        case PhotoFilter::Dramatic: s = ScoreDramatic(ctx); break;
+        case PhotoFilter::Vivid:
+            s = ScoreVivid(ctx);
+            break;
+        case PhotoFilter::Noir:
+            s = ScoreNoir(ctx);
+            break;
+        case PhotoFilter::Warm:
+            s = ScoreWarm(ctx);
+            break;
+        case PhotoFilter::Cool:
+            s = ScoreCool(ctx);
+            break;
+        case PhotoFilter::Dramatic:
+            s = ScoreDramatic(ctx);
+            break;
         case PhotoFilter::None:
-        default:                    s = ScoreNone(ctx);     break;
+        default:
+            s = ScoreNone(ctx);
+            break;
     }
     s.suitability = FilterClamp01(s.suitability);
-    s.mood        = FilterClamp01(s.mood);
+    s.mood = FilterClamp01(s.mood);
     s.total = FilterClamp01(kwSuitability * s.suitability + kwMood * s.mood);
     return s;
 }

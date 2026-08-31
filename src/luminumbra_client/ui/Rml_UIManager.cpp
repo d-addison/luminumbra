@@ -1,20 +1,20 @@
 #include "ui/Rml_UIManager.h"
 #include "audio/IAudioManager.h"
+#include <GLFW/glfw3.h>
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
 #include <RmlUi/Core/Factory.h>
 #include <RmlUi/Debugger.h>
-#include <utility>
-#include <functional>
-#include <cstdio>
-#include <string>
-#include <chrono>
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <vector>
+#include <functional>
 #include <nlohmann/json.hpp>
-#include <GLFW/glfw3.h>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace Luminumbra::Client {
 
@@ -133,11 +133,16 @@ static Rml::Input::KeyIdentifier GlfwToRmlKey(int glfw_key) {
 
 static int GlfwToRmlMods(int glfw_mods) {
     int rml_mods = 0;
-    if (glfw_mods & GLFW_MOD_SHIFT) rml_mods |= Rml::Input::KM_SHIFT;
-    if (glfw_mods & GLFW_MOD_CONTROL) rml_mods |= Rml::Input::KM_CTRL;
-    if (glfw_mods & GLFW_MOD_ALT) rml_mods |= Rml::Input::KM_ALT;
-    if (glfw_mods & GLFW_MOD_CAPS_LOCK) rml_mods |= Rml::Input::KM_CAPSLOCK;
-    if (glfw_mods & GLFW_MOD_NUM_LOCK) rml_mods |= Rml::Input::KM_NUMLOCK;
+    if (glfw_mods & GLFW_MOD_SHIFT)
+        rml_mods |= Rml::Input::KM_SHIFT;
+    if (glfw_mods & GLFW_MOD_CONTROL)
+        rml_mods |= Rml::Input::KM_CTRL;
+    if (glfw_mods & GLFW_MOD_ALT)
+        rml_mods |= Rml::Input::KM_ALT;
+    if (glfw_mods & GLFW_MOD_CAPS_LOCK)
+        rml_mods |= Rml::Input::KM_CAPSLOCK;
+    if (glfw_mods & GLFW_MOD_NUM_LOCK)
+        rml_mods |= Rml::Input::KM_NUMLOCK;
     return rml_mods;
 }
 
@@ -145,9 +150,11 @@ static int GlfwToRmlMods(int glfw_mods) {
 class LambdaEventListener : public Rml::EventListener {
 public:
     using Callback = std::function<void(Rml::Event&)>;
-    explicit LambdaEventListener(Callback callback) : m_callback(std::move(callback)) {}
+    explicit LambdaEventListener(Callback callback)
+        : m_callback(std::move(callback)) {}
     void ProcessEvent(Rml::Event& event) override {
-        if (m_callback) m_callback(event);
+        if (m_callback)
+            m_callback(event);
     }
     void OnDetach(Rml::Element*) override {
         delete this;
@@ -164,22 +171,25 @@ static std::string ReadFormControlValue(Rml::Element* element, const std::string
     return element ? element->GetAttribute<Rml::String>("value", fallback) : fallback;
 }
 
-// Gather every .worldgen-param control in the create-world customize form into the override
-// list the host merges onto the base preset. Bool params read their toggle .on class; numeric
+// Gather every.worldgen-param control in the create-world customize form into the override
+// list the host merges onto the base preset. Bool params read their toggle.on class; numeric
 // params read their form-control value.
 static std::vector<WorldGenParam> CollectWorldGenParams(Rml::ElementDocument* document) {
     std::vector<WorldGenParam> out;
-    if (!document) return out;
-    // Spec 002 Item 2: the SEMANTIC KNOBS travel first, as WorldGenParam entries
+    if (!document)
+        return out;
+    //  the SEMANTIC KNOBS travel first, as WorldGenParam entries
     // with path "knob.<id>" + type "knob" (value in [0,1]). The host splits these
-    // off and feeds them to the engine-side KnobLayer; the raw .worldgen-param
+    // off and feeds them to the engine-side KnobLayer; the raw.worldgen-param
     // entries below are the sparse advanced-panel OVERRIDE diff overlaid on top.
     Rml::ElementList knobs;
     document->GetElementsByClassName(knobs, "worldgen-knob");
     for (Rml::Element* el : knobs) {
-        if (!el) continue;
+        if (!el)
+            continue;
         const std::string id = el->GetAttribute<Rml::String>("data-knob", "");
-        if (id.empty()) continue;
+        if (id.empty())
+            continue;
         WorldGenParam p;
         p.path = "knob." + id;
         p.type = "knob";
@@ -189,16 +199,19 @@ static std::vector<WorldGenParam> CollectWorldGenParams(Rml::ElementDocument* do
     Rml::ElementList controls;
     document->GetElementsByClassName(controls, "worldgen-param");
     for (Rml::Element* el : controls) {
-        if (!el) continue;
+        if (!el)
+            continue;
         WorldGenParam p;
         p.path = el->GetAttribute<Rml::String>("data-path", "");
         p.type = el->GetAttribute<Rml::String>("data-type", "float");
-        if (p.path.empty()) continue;
+        if (p.path.empty())
+            continue;
         if (p.type == "bool") {
             p.value = el->IsClassSet("on") ? "true" : "false";
         } else {
             p.value = ReadFormControlValue(el, "");
-            if (p.value.empty()) continue;
+            if (p.value.empty())
+                continue;
         }
         out.push_back(std::move(p));
     }
@@ -210,20 +223,23 @@ Rml_UIManager* Rml_UIManager::s_active_manager = nullptr;
 
 Rml_UIManager::PreviewState Rml_UIManager::GetWorldCreationPreviewState() const {
     PreviewState st;
-    if (!m_context) return st;
+    if (!m_context)
+        return st;
     // Find the loaded, VISIBLE create-world document. The live diorama renders
     // FULL-SCREEN behind the form (cinematic backdrop), so the form itself — not a
     // bounded preview box — is the active marker.
     Rml::ElementDocument* doc = nullptr;
     for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
         Rml::ElementDocument* d = m_context->GetDocument(i);
-        if (!d || !d->IsVisible()) continue;
+        if (!d || !d->IsVisible())
+            continue;
         if (d->GetElementById("world_creation_form")) {
             doc = d;
             break;
         }
     }
-    if (!doc) return st;
+    if (!doc)
+        return st;
 
     st.active = true;
     st.params = CollectWorldGenParams(doc);
@@ -241,7 +257,11 @@ Rml_UIManager::PreviewState Rml_UIManager::GetWorldCreationPreviewState() const 
     // Time-of-day slider.
     if (Rml::Element* tod = doc->GetElementById("preview_tod")) {
         const std::string v = ReadFormControlValue(tod, "0.24");
-        try { st.tod = std::stof(v); } catch (...) { st.tod = 0.24f; }
+        try {
+            st.tod = std::stof(v);
+        } catch (...) {
+            st.tod = 0.24f;
+        }
     }
 
     // The diorama is full-screen, so there is no bounded pane rect to report; the
@@ -251,10 +271,12 @@ Rml_UIManager::PreviewState Rml_UIManager::GetWorldCreationPreviewState() const 
 }
 
 bool Rml_UIManager::ConsumeWorldCreationResetView() {
-    if (!m_context) return false;
+    if (!m_context)
+        return false;
     for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
         Rml::ElementDocument* d = m_context->GetDocument(i);
-        if (!d || !d->IsVisible()) continue;
+        if (!d || !d->IsVisible())
+            continue;
         if (Rml::Element* btn = d->GetElementById("preview_reset_btn")) {
             if (btn->IsClassSet("reset-pending")) {
                 btn->SetClass("reset-pending", false);
@@ -267,8 +289,8 @@ bool Rml_UIManager::ConsumeWorldCreationResetView() {
 
 // --- Constructor / Destructor ---
 Rml_UIManager::Rml_UIManager(const std::string& asset_root_path)
-    : m_fileInterface(asset_root_path),
-      m_assetRoot(asset_root_path) {
+    : m_fileInterface(asset_root_path)
+    , m_assetRoot(asset_root_path) {
     s_active_manager = this;
 }
 
@@ -294,7 +316,7 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
         LUMINUMBRA_CORE_ERROR("Failed to initialize RmlUi!");
         return;
     }
-    
+
     // It's better to load fonts relative to the assets path specified in the file interface
     Rml::LoadFontFace("data/fonts/Lora/Lora-VariableFont_wght.ttf");
     Rml::LoadFontFace("data/fonts/Lora/Lora-Italic-VariableFont_wght.ttf");
@@ -302,7 +324,7 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
     int width, height;
     glfwGetWindowSize(m_window, &width, &height);
     m_context = Rml::CreateContext("main", Rml::Vector2i(width, height));
-    
+
     if (!m_context) {
         LUMINUMBRA_CORE_ERROR("Failed to create RmlUi context!");
         Rml::Shutdown();
@@ -310,7 +332,7 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
     }
 
     Rml::Debugger::Initialise(m_context);
-    
+
     glfwSetKeyCallback(m_window, Rml_UIManager::KeyCallback);
     glfwSetCharCallback(m_window, Rml_UIManager::CharCallback);
     glfwSetMouseButtonCallback(m_window, Rml_UIManager::MouseButtonCallback);
@@ -331,7 +353,7 @@ void Rml_UIManager::Shutdown() {
 void Rml_UIManager::Update() {
     if (m_context) {
         ProcessDocumentLoadRequest(); // Process async loads
-        // T006: only push dimensions on an actual size change — a per-frame SetDimensions can
+        //  only push dimensions on an actual size change — a per-frame SetDimensions can
         // needlessly dirty layout even when the size is unchanged.
         int width, height;
         glfwGetWindowSize(m_window, &width, &height);
@@ -345,12 +367,14 @@ void Rml_UIManager::Update() {
 }
 
 void Rml_UIManager::Render() {
-    if (!m_context) return;
+    if (!m_context)
+        return;
 
     int width, height;
     glfwGetFramebufferSize(m_window, &width, &height);
     // BeginFrame asserts a >=1 viewport; skip minimised frames.
-    if (width < 1 || height < 1) return;
+    if (width < 1 || height < 1)
+        return;
 
     m_renderInterface.SetViewport(width, height);
 
@@ -359,7 +383,7 @@ void Rml_UIManager::Render() {
     // world and ImGui passes around this call are unaffected. It composites the UI (with its
     // layer/filter stack) into its own MSAA framebuffer and blits the result onto the default
     // backbuffer with premultiplied-alpha blend, so the world shows through transparent UI.
-    // T007: time the UI draw submission (CPU side; the UI is off the deterministic sim path).
+    //  time the UI draw submission (CPU side; the UI is off the deterministic sim path).
     const auto ui_t0 = std::chrono::high_resolution_clock::now();
     m_renderInterface.BeginFrame();
     m_context->Render();
@@ -373,8 +397,9 @@ void Rml_UIManager::RequestLoadDocument(std::string path) {
 }
 
 void Rml_UIManager::ReloadActiveDocument() {
-    if (!m_context || m_activeDocument.empty()) return;
-    // Drop cached stylesheets/templates so edited .rcss/.rml is re-read from disk.
+    if (!m_context || m_activeDocument.empty())
+        return;
+    // Drop cached stylesheets/templates so edited.rcss/.rml is re-read from disk.
     Rml::Factory::ClearStyleSheetCache();
     Rml::Factory::ClearTemplateCache();
     // LoadDocument early-returns when the path equals the active document; clear it to force
@@ -385,7 +410,7 @@ void Rml_UIManager::ReloadActiveDocument() {
     LUMINUMBRA_CORE_INFO("UI hot-reloaded: {}", doc);
 }
 
-// REMOVED: GetContext() is now in the header.
+// REMOVED: GetContext is now in the header.
 
 // --- Private Implementation ---
 
@@ -397,7 +422,8 @@ void Rml_UIManager::ProcessDocumentLoadRequest() {
 }
 
 void Rml_UIManager::LoadDocument(const std::string& rml_path) {
-    if (!m_context || rml_path == m_activeDocument) return;
+    if (!m_context || rml_path == m_activeDocument)
+        return;
 
     // Close existing documents (except the debugger)
     for (int i = m_context->GetNumDocuments() - 1; i >= 0; --i) {
@@ -406,7 +432,7 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
             doc->Close();
         }
     }
-    
+
     Rml::ElementDocument* document = m_context->LoadDocument("data/ui/" + rml_path);
     if (!document) {
         LUMINUMBRA_CORE_ERROR("Failed to load RML document: {}", rml_path);
@@ -416,43 +442,71 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
     m_activeDocument = rml_path;
     m_selectedWorldId.clear();
     BindEventListeners(document);
-    if (document->GetId() == "gallery") PopulateGallery(document);
+    if (document->GetId() == "gallery")
+        PopulateGallery(document);
     document->Show();
 }
 
 void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
-    auto AddClickSoundListener = [this](Rml::Element* element, LambdaEventListener::Callback callback) {
+    auto AddClickSoundListener = [this](Rml::Element* element,
+                                        LambdaEventListener::Callback callback) {
         if (element) {
-            element->AddEventListener("click", new LambdaEventListener([this, cb = std::move(callback)](Rml::Event& event){
-                if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-                if (cb) cb(event);
-            }));
-            element->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&){
-                 if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover", BusId::Ui);
-            }));
+            element->AddEventListener(
+                "click",
+                new LambdaEventListener([this, cb = std::move(callback)](Rml::Event& event) {
+                    if (m_audioManager)
+                        m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                    if (cb)
+                        cb(event);
+                }));
+            element->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&) {
+                                          if (m_audioManager)
+                                              m_audioManager->PlayOneShot2D("ui_button_hover",
+                                                                            BusId::Ui);
+                                      }));
         }
     };
     // The rest of your BindEventListeners implementation is fine...
-    if (auto* e = document->GetElementById("new_world_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("world_creation.rml"); });
-    if (auto* e = document->GetElementById("load_world_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("world_selection.rml"); });
-    if (auto* e = document->GetElementById("settings_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("settings.rml"); });
-    if (auto* e = document->GetElementById("gallery_btn")) AddClickSoundListener(e, [this](Rml::Event&){ this->RequestLoadDocument("gallery.rml"); });
-    if (auto* e = document->GetElementById("quit_btn")) AddClickSoundListener(e, [this](Rml::Event&){ glfwSetWindowShouldClose(this->m_window, true); });
-    if (auto* e = document->GetElementById("back_btn")) AddClickSoundListener(e, [this, document](Rml::Event&){
-        // Leaving settings persists the live-applied changes (sliders apply on change; the
-        // overlay is saved here since there's no explicit apply button in the new design).
-        if (document->GetId() == "settings" && m_settingsBridge.Save) m_settingsBridge.Save();
-        this->RequestLoadDocument("main_menu.rml");
-    });
-    // Pause menu (pause.rml): route resume / quit-to-menu back to main_client (it owns cursor + state).
-    if (auto* e = document->GetElementById("resume_btn")) AddClickSoundListener(e, [this](Rml::Event&){ if (m_pauseActionCallback) m_pauseActionCallback("resume"); });
-    if (auto* e = document->GetElementById("quit_menu_btn")) AddClickSoundListener(e, [this](Rml::Event&){ if (m_pauseActionCallback) m_pauseActionCallback("quit"); });
+    if (auto* e = document->GetElementById("new_world_btn"))
+        AddClickSoundListener(
+            e, [this](Rml::Event&) { this->RequestLoadDocument("world_creation.rml"); });
+    if (auto* e = document->GetElementById("load_world_btn"))
+        AddClickSoundListener(
+            e, [this](Rml::Event&) { this->RequestLoadDocument("world_selection.rml"); });
+    if (auto* e = document->GetElementById("settings_btn"))
+        AddClickSoundListener(e,
+                              [this](Rml::Event&) { this->RequestLoadDocument("settings.rml"); });
+    if (auto* e = document->GetElementById("gallery_btn"))
+        AddClickSoundListener(e, [this](Rml::Event&) { this->RequestLoadDocument("gallery.rml"); });
+    if (auto* e = document->GetElementById("quit_btn"))
+        AddClickSoundListener(
+            e, [this](Rml::Event&) { glfwSetWindowShouldClose(this->m_window, true); });
+    if (auto* e = document->GetElementById("back_btn"))
+        AddClickSoundListener(e, [this, document](Rml::Event&) {
+            // Leaving settings persists the live-applied changes (sliders apply on change; the
+            // overlay is saved here since there's no explicit apply button in the new design).
+            if (document->GetId() == "settings" && m_settingsBridge.Save)
+                m_settingsBridge.Save();
+            this->RequestLoadDocument("main_menu.rml");
+        });
+    // Pause menu (pause.rml): route resume / quit-to-menu back to main_client (it owns cursor +
+    // state).
+    if (auto* e = document->GetElementById("resume_btn"))
+        AddClickSoundListener(e, [this](Rml::Event&) {
+            if (m_pauseActionCallback)
+                m_pauseActionCallback("resume");
+        });
+    if (auto* e = document->GetElementById("quit_menu_btn"))
+        AddClickSoundListener(e, [this](Rml::Event&) {
+            if (m_pauseActionCallback)
+                m_pauseActionCallback("quit");
+        });
 
     // settings.rml: populate widgets from current settings, then wire live change + Apply.
     BindSettingsListeners(document);
 
     if (auto* load_button = document->GetElementById("load_selected_btn")) {
-        AddClickSoundListener(load_button, [this](Rml::Event&){
+        AddClickSoundListener(load_button, [this](Rml::Event&) {
             if (m_loadWorldCallback && !m_selectedWorldId.empty()) {
                 m_loadWorldCallback(m_selectedWorldId);
             }
@@ -465,7 +519,7 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         if (!item) {
             continue;
         }
-        AddClickSoundListener(item, [this, document](Rml::Event& event){
+        AddClickSoundListener(item, [this, document](Rml::Event& event) {
             Rml::Element* selected = event.GetTargetElement();
             while (selected && selected->GetAttribute<Rml::String>("data-world-id", "").empty()) {
                 selected = selected->GetParentNode();
@@ -491,9 +545,9 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
             }
         });
     }
-    
+
     if (auto* e = document->GetElementById("create_btn")) {
-        AddClickSoundListener(e, [this](Rml::Event& event){
+        AddClickSoundListener(e, [this](Rml::Event& event) {
             if (m_worldCreationCallback) {
                 auto* doc = event.GetTargetElement()->GetOwnerDocument();
                 Rml::Element* name_input = doc->GetElementById("world_name");
@@ -516,15 +570,19 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         for (Rml::Element* chip : chips) {
             AddClickSoundListener(chip, [this, document](Rml::Event& event) {
                 Rml::Element* c = event.GetTargetElement();
-                while (c && c->GetAttribute<Rml::String>("data-preset", "").empty()) c = c->GetParentNode();
-                if (!c) return;
+                while (c && c->GetAttribute<Rml::String>("data-preset", "").empty())
+                    c = c->GetParentNode();
+                if (!c)
+                    return;
                 Rml::ElementList all;
                 document->GetElementsByClassName(all, "preset-chip");
-                for (Rml::Element* x : all) x->SetClass("selected", false);
+                for (Rml::Element* x : all)
+                    x->SetClass("selected", false);
                 c->SetClass("selected", true);
                 const std::string preset = c->GetAttribute<Rml::String>("data-preset", "default");
                 if (auto* sel = document->GetElementById("world_type")) {
-                    if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel)) fc->SetValue(preset);
+                    if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel))
+                        fc->SetValue(preset);
                 }
                 this->SeedWorldGenParams(document, preset);
             });
@@ -533,18 +591,22 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
 
     // Customize section: expand/collapse the advanced worldgen params.
     if (auto* toggle = document->GetElementById("customize_toggle")) {
-        toggle->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-            auto* body = document->GetElementById("customize_body");
-            const bool collapsed = body && body->IsClassSet("collapsed");
-            if (body) body->SetClass("collapsed", !collapsed);
-            if (auto* caret = document->GetElementById("customize_caret")) {
-                caret->SetInnerRML(collapsed ? "&#8211;" : "+");  // "–" when open, "+" when closed
-            }
-        }));
+        toggle->AddEventListener(
+            "click", new LambdaEventListener([this, document](Rml::Event&) {
+                if (m_audioManager)
+                    m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                auto* body = document->GetElementById("customize_body");
+                const bool collapsed = body && body->IsClassSet("collapsed");
+                if (body)
+                    body->SetClass("collapsed", !collapsed);
+                if (auto* caret = document->GetElementById("customize_caret")) {
+                    caret->SetInnerRML(collapsed ? "&#8211;"
+                                                 : "+"); // "–" when open, "+" when closed
+                }
+            }));
     }
 
-    // Wave 0.3: advanced-param TAB strip. Clicking a tab chip activates its pane
+    // advanced-param TAB strip. Clicking a tab chip activates its pane
     // (and only its pane), so the long advanced column is split into terrain /
     // water / biomes / features groups shown one at a time (cuts the scroll).
     {
@@ -553,8 +615,10 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         for (Rml::Element* tab : tabs) {
             AddClickSoundListener(tab, [this, document](Rml::Event& event) {
                 Rml::Element* t = event.GetTargetElement();
-                while (t && t->GetAttribute<Rml::String>("data-tab", "").empty()) t = t->GetParentNode();
-                if (!t) return;
+                while (t && t->GetAttribute<Rml::String>("data-tab", "").empty())
+                    t = t->GetParentNode();
+                if (!t)
+                    return;
                 const std::string which = t->GetAttribute<Rml::String>("data-tab", "");
                 Rml::ElementList all_tabs;
                 document->GetElementsByClassName(all_tabs, "param-tab");
@@ -568,36 +632,43 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         }
     }
 
-    // Worldgen sliders: live-update the adjacent .param-value label as they move.
+    // Worldgen sliders: live-update the adjacent.param-value label as they move.
     {
         Rml::ElementList sliders;
         document->GetElementsByClassName(sliders, "worldgen-param");
         for (Rml::Element* el : sliders) {
-            if (el->GetAttribute<Rml::String>("data-type", "") == "bool") continue;
+            if (el->GetAttribute<Rml::String>("data-type", "") == "bool")
+                continue;
             el->AddEventListener("change", new LambdaEventListener([](Rml::Event& ev) {
-                Rml::Element* slider = ev.GetTargetElement();
-                if (!slider || !slider->GetParentNode()) return;
-                Rml::ElementList vals;
-                slider->GetParentNode()->GetElementsByClassName(vals, "param-value");
-                if (!vals.empty()) vals[0]->SetInnerRML(ReadFormControlValue(slider, ""));
-            }));
+                                     Rml::Element* slider = ev.GetTargetElement();
+                                     if (!slider || !slider->GetParentNode())
+                                         return;
+                                     Rml::ElementList vals;
+                                     slider->GetParentNode()->GetElementsByClassName(vals,
+                                                                                     "param-value");
+                                     if (!vals.empty())
+                                         vals[0]->SetInnerRML(ReadFormControlValue(slider, ""));
+                                 }));
         }
     }
 
-    // Spec 002 Item 2: semantic-knob sliders — live-update the adjacent
-    // .knob-value label (the host reads the knob positions each frame to drive
+    //  semantic-knob sliders — live-update the adjacent
+    //.knob-value label (the host reads the knob positions each frame to drive
     // the engine KnobLayer + the live preview rebuild).
     {
         Rml::ElementList kslid;
         document->GetElementsByClassName(kslid, "worldgen-knob");
         for (Rml::Element* el : kslid) {
             el->AddEventListener("change", new LambdaEventListener([](Rml::Event& ev) {
-                Rml::Element* slider = ev.GetTargetElement();
-                if (!slider || !slider->GetParentNode()) return;
-                Rml::ElementList vals;
-                slider->GetParentNode()->GetElementsByClassName(vals, "knob-value");
-                if (!vals.empty()) vals[0]->SetInnerRML(ReadFormControlValue(slider, "0.5"));
-            }));
+                                     Rml::Element* slider = ev.GetTargetElement();
+                                     if (!slider || !slider->GetParentNode())
+                                         return;
+                                     Rml::ElementList vals;
+                                     slider->GetParentNode()->GetElementsByClassName(vals,
+                                                                                     "knob-value");
+                                     if (!vals.empty())
+                                         vals[0]->SetInnerRML(ReadFormControlValue(slider, "0.5"));
+                                 }));
         }
     }
 
@@ -606,8 +677,10 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     // overwrite-confirm modal instead of clobbering the existing preset without warning.
     if (auto* save_btn = document->GetElementById("save_preset_btn")) {
         AddClickSoundListener(save_btn, [this, document](Rml::Event&) {
-            if (!m_worldPresetSaver) return;
-            const std::string name = ReadFormControlValue(document->GetElementById("save_preset_name"), "");
+            if (!m_worldPresetSaver)
+                return;
+            const std::string name =
+                ReadFormControlValue(document->GetElementById("save_preset_name"), "");
             if (m_worldPresetExists && m_worldPresetExists(name)) {
                 // Show the overwrite-confirm modal; the confirm button commits the save.
                 if (auto* modal = document->GetElementById("preset_overwrite_modal"))
@@ -625,7 +698,8 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         AddClickSoundListener(confirm, [this, document](Rml::Event&) {
             if (auto* modal = document->GetElementById("preset_overwrite_modal"))
                 modal->SetClass("hidden", true);
-            const std::string name = ReadFormControlValue(document->GetElementById("save_preset_name"), "");
+            const std::string name =
+                ReadFormControlValue(document->GetElementById("save_preset_name"), "");
             this->CommitSavePreset(document, name);
         });
     }
@@ -640,23 +714,37 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     // user-type id, so the renamer no-ops on them. Confirm/cancel reuse the rename flow inline.
     if (auto* rename_btn = document->GetElementById("rename_preset_btn")) {
         AddClickSoundListener(rename_btn, [this, document](Rml::Event&) {
-            if (!m_worldPresetRenamer) return;
-            const std::string worldType = ReadFormControlValue(document->GetElementById("world_type"), "default");
-            const std::string newName = ReadFormControlValue(document->GetElementById("save_preset_name"), "");
+            if (!m_worldPresetRenamer)
+                return;
+            const std::string worldType =
+                ReadFormControlValue(document->GetElementById("world_type"), "default");
+            const std::string newName =
+                ReadFormControlValue(document->GetElementById("save_preset_name"), "");
             auto note = [&](const std::string& msg) {
                 if (auto* n = document->GetElementById("notification")) {
                     n->SetClass("hidden", false);
-                    if (auto* t = document->GetElementById("notification_text")) t->SetInnerRML(msg);
+                    if (auto* t = document->GetElementById("notification_text"))
+                        t->SetInnerRML(msg);
                 }
             };
-            if (worldType.rfind("user_", 0) != 0) { note("Select a saved preset to rename"); return; }
-            if (newName.empty()) { note("Enter a new name"); return; }
+            if (worldType.rfind("user_", 0) != 0) {
+                note("Select a saved preset to rename");
+                return;
+            }
+            if (newName.empty()) {
+                note("Enter a new name");
+                return;
+            }
             const std::string renamed = m_worldPresetRenamer(worldType, newName);
-            if (renamed.empty()) { note("Could not rename preset"); return; }
+            if (renamed.empty()) {
+                note("Could not rename preset");
+                return;
+            }
             note("Preset renamed");
             // Point #world_type at the (possibly new) id and refresh the chip row.
             if (auto* sel = document->GetElementById("world_type")) {
-                if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel)) fc->SetValue(renamed);
+                if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel))
+                    fc->SetValue(renamed);
             }
             this->PopulateUserPresets(document);
         });
@@ -666,16 +754,20 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
     if (auto* confirm = document->GetElementById("confirm_delete_preset_btn")) {
         AddClickSoundListener(confirm, [this, document](Rml::Event&) {
             Rml::Element* modal = document->GetElementById("preset_delete_modal");
-            const std::string worldType = modal ? modal->GetAttribute<Rml::String>("data-pending", "") : "";
-            if (modal) modal->SetClass("hidden", true);
-            if (!m_worldPresetDeleter || worldType.empty()) return;
+            const std::string worldType =
+                modal ? modal->GetAttribute<Rml::String>("data-pending", "") : "";
+            if (modal)
+                modal->SetClass("hidden", true);
+            if (!m_worldPresetDeleter || worldType.empty())
+                return;
             const bool ok = m_worldPresetDeleter(worldType);
             if (auto* n = document->GetElementById("notification")) {
                 n->SetClass("hidden", false);
                 if (auto* t = document->GetElementById("notification_text"))
                     t->SetInnerRML(ok ? "Preset deleted" : "Could not delete preset");
             }
-            if (ok) this->PopulateUserPresets(document);
+            if (ok)
+                this->PopulateUserPresets(document);
         });
     }
     if (auto* cancel = document->GetElementById("cancel_delete_preset_btn")) {
@@ -685,28 +777,32 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         });
     }
 
-    // Spec 002 Item 1: live-preview weather pills. Clicking one selects it (the
-    // host reads .preview-weather.selected each frame and drives set_weather).
+    //  live-preview weather pills. Clicking one selects it (the
+    // host reads.preview-weather.selected each frame and drives set_weather).
     {
         Rml::ElementList pills;
         document->GetElementsByClassName(pills, "preview-weather");
         for (Rml::Element* pill : pills) {
             AddClickSoundListener(pill, [document](Rml::Event& event) {
                 Rml::Element* p = event.GetTargetElement();
-                while (p && p->GetAttribute<Rml::String>("data-weather", "").empty()) p = p->GetParentNode();
-                if (!p) return;
+                while (p && p->GetAttribute<Rml::String>("data-weather", "").empty())
+                    p = p->GetParentNode();
+                if (!p)
+                    return;
                 Rml::ElementList all;
                 document->GetElementsByClassName(all, "preview-weather");
-                for (Rml::Element* x : all) x->SetClass("selected", false);
+                for (Rml::Element* x : all)
+                    x->SetClass("selected", false);
                 p->SetClass("selected", true);
             });
         }
     }
     // Live-preview reset-view: a marker class the host polls + clears (orbit reset
-    // lives host-side in WorldgenPreview). Toggling .reset-pending signals it.
+    // lives host-side in WorldgenPreview). Toggling.reset-pending signals it.
     if (auto* reset = document->GetElementById("preview_reset_btn")) {
         AddClickSoundListener(reset, [](Rml::Event& event) {
-            if (Rml::Element* e = event.GetTargetElement()) e->SetClass("reset-pending", true);
+            if (Rml::Element* e = event.GetTargetElement())
+                e->SetClass("reset-pending", true);
         });
     }
 
@@ -717,24 +813,30 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
         Rml::ElementList chips;
         document->GetElementsByClassName(chips, "preset-chip");
         for (Rml::Element* c : chips) {
-            if (c->IsClassSet("selected")) { preset = c->GetAttribute<Rml::String>("data-preset", "default"); break; }
+            if (c->IsClassSet("selected")) {
+                preset = c->GetAttribute<Rml::String>("data-preset", "default");
+                break;
+            }
         }
         SeedWorldGenParams(document, preset);
         PopulateUserPresets(document);
     }
 }
 
-void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document, const std::string& worldType) {
-    if (!document || !m_worldParamGetter) return;
+void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document,
+                                       const std::string& worldType) {
+    if (!document || !m_worldParamGetter)
+        return;
 
-    // Spec 002 Item 2: seed the semantic knobs from the preset's persisted knob
+    //  seed the semantic knobs from the preset's persisted knob
     // layer (path convention "knob.<id>"). A curated preset has none -> the
     // getter returns "" and the knob keeps its NEUTRAL 0.5 (never inverse-lerped).
     Rml::ElementList knobs;
     document->GetElementsByClassName(knobs, "worldgen-knob");
     for (Rml::Element* el : knobs) {
         const std::string id = el->GetAttribute<Rml::String>("data-knob", "");
-        if (id.empty()) continue;
+        if (id.empty())
+            continue;
         const std::string value = m_worldParamGetter(worldType, "knob." + id);
         const std::string v = value.empty() ? std::string("0.5") : value;
         if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(el)) {
@@ -742,7 +844,8 @@ void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document, const std
             if (el->GetParentNode()) {
                 Rml::ElementList vals;
                 el->GetParentNode()->GetElementsByClassName(vals, "knob-value");
-                if (!vals.empty()) vals[0]->SetInnerRML(v);
+                if (!vals.empty())
+                    vals[0]->SetInnerRML(v);
             }
         }
     }
@@ -752,9 +855,11 @@ void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document, const std
     for (Rml::Element* el : controls) {
         const std::string path = el->GetAttribute<Rml::String>("data-path", "");
         const std::string type = el->GetAttribute<Rml::String>("data-type", "float");
-        if (path.empty()) continue;
+        if (path.empty())
+            continue;
         const std::string value = m_worldParamGetter(worldType, path);
-        if (value.empty()) continue;  // preset doesn't set this key -> keep the control's default
+        if (value.empty())
+            continue; // preset doesn't set this key -> keep the control's default
         if (type == "bool") {
             el->SetClass("on", value == "true" || value == "1");
         } else if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(el)) {
@@ -763,22 +868,27 @@ void Rml_UIManager::SeedWorldGenParams(Rml::ElementDocument* document, const std
             if (el->GetParentNode()) {
                 Rml::ElementList vals;
                 el->GetParentNode()->GetElementsByClassName(vals, "param-value");
-                if (!vals.empty()) vals[0]->SetInnerRML(value);
+                if (!vals.empty())
+                    vals[0]->SetInnerRML(value);
             }
         }
     }
 }
 
 void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
-    if (!document || !m_worldPresetList) return;
+    if (!document || !m_worldPresetList)
+        return;
     Rml::Element* row = document->GetElementById("user_presets_row");
-    if (!row) return;
+    if (!row)
+        return;
     // Rebuild from scratch (avoids duplicates on re-entry).
-    while (row->GetNumChildren() > 0) row->RemoveChild(row->GetChild(0));
+    while (row->GetNumChildren() > 0)
+        row->RemoveChild(row->GetChild(0));
 
     for (const auto& [name, type] : m_worldPresetList()) {
         Rml::ElementPtr chip = document->CreateElement("span");
-        if (!chip) continue;
+        if (!chip)
+            continue;
         chip->SetClassNames("preset-chip user-preset-chip");
         chip->SetAttribute("data-preset", type);
         chip->SetInnerRML(name);
@@ -789,58 +899,74 @@ void Rml_UIManager::PopulateUserPresets(Rml::ElementDocument* document) {
             del->SetClassNames("preset-delete");
             del->SetId("del_" + type);
             del->SetAttribute("data-delete", type);
-            del->SetInnerRML("&#10005;");  // ✕
+            del->SetInnerRML("&#10005;"); // ✕
             chip->AppendChild(std::move(del));
         }
         Rml::Element* added = row->AppendChild(std::move(chip));
         // Same behaviour as the curated chips: select + drive #world_type + re-seed the form.
         // A click on the inner delete control opens the delete-confirm modal instead.
-        added->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event& event) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-            Rml::Element* target = event.GetTargetElement();
-            // Delete affordance: walk up looking for a data-delete before the chip's data-preset.
-            for (Rml::Element* t = target; t; t = t->GetParentNode()) {
-                const std::string del = t->GetAttribute<Rml::String>("data-delete", "");
-                if (!del.empty()) {
-                    std::string disp = del;
-                    if (m_worldPresetList) {
-                        for (const auto& [n, ty] : m_worldPresetList()) if (ty == del) { disp = n; break; }
+        added->AddEventListener(
+            "click", new LambdaEventListener([this, document](Rml::Event& event) {
+                if (m_audioManager)
+                    m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                Rml::Element* target = event.GetTargetElement();
+                // Delete affordance: walk up looking for a data-delete before the chip's
+                // data-preset.
+                for (Rml::Element* t = target; t; t = t->GetParentNode()) {
+                    const std::string del = t->GetAttribute<Rml::String>("data-delete", "");
+                    if (!del.empty()) {
+                        std::string disp = del;
+                        if (m_worldPresetList) {
+                            for (const auto& [n, ty] : m_worldPresetList())
+                                if (ty == del) {
+                                    disp = n;
+                                    break;
+                                }
+                        }
+                        if (auto* modal = document->GetElementById("preset_delete_modal")) {
+                            modal->SetClass("hidden", false);
+                            modal->SetAttribute("data-pending", del);
+                        }
+                        if (auto* lbl = document->GetElementById("preset_delete_name"))
+                            lbl->SetInnerRML(disp);
+                        return;
                     }
-                    if (auto* modal = document->GetElementById("preset_delete_modal")) {
-                        modal->SetClass("hidden", false);
-                        modal->SetAttribute("data-pending", del);
-                    }
-                    if (auto* lbl = document->GetElementById("preset_delete_name")) lbl->SetInnerRML(disp);
-                    return;
+                    if (!t->GetAttribute<Rml::String>("data-preset", "").empty())
+                        break;
                 }
-                if (!t->GetAttribute<Rml::String>("data-preset", "").empty()) break;
-            }
-            Rml::Element* c = target;
-            while (c && c->GetAttribute<Rml::String>("data-preset", "").empty()) c = c->GetParentNode();
-            if (!c) return;
-            Rml::ElementList all;
-            document->GetElementsByClassName(all, "preset-chip");
-            for (Rml::Element* x : all) x->SetClass("selected", false);
-            c->SetClass("selected", true);
-            const std::string preset = c->GetAttribute<Rml::String>("data-preset", "default");
-            if (auto* sel = document->GetElementById("world_type")) {
-                if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel)) fc->SetValue(preset);
-            }
-            this->SeedWorldGenParams(document, preset);
-        }));
+                Rml::Element* c = target;
+                while (c && c->GetAttribute<Rml::String>("data-preset", "").empty())
+                    c = c->GetParentNode();
+                if (!c)
+                    return;
+                Rml::ElementList all;
+                document->GetElementsByClassName(all, "preset-chip");
+                for (Rml::Element* x : all)
+                    x->SetClass("selected", false);
+                c->SetClass("selected", true);
+                const std::string preset = c->GetAttribute<Rml::String>("data-preset", "default");
+                if (auto* sel = document->GetElementById("world_type")) {
+                    if (auto* fc = dynamic_cast<Rml::ElementFormControl*>(sel))
+                        fc->SetValue(preset);
+                }
+                this->SeedWorldGenParams(document, preset);
+            }));
     }
 }
 
 void Rml_UIManager::CommitSavePreset(Rml::ElementDocument* document, const std::string& name) {
-    if (!document || !m_worldPresetSaver) return;
-    const std::string baseType = ReadFormControlValue(document->GetElementById("world_type"), "default");
+    if (!document || !m_worldPresetSaver)
+        return;
+    const std::string baseType =
+        ReadFormControlValue(document->GetElementById("world_type"), "default");
     const std::string saved = m_worldPresetSaver(name, baseType, CollectWorldGenParams(document));
     if (auto* note = document->GetElementById("notification")) {
         note->SetClass("hidden", false);
         if (auto* txt = document->GetElementById("notification_text"))
             txt->SetInnerRML(saved.empty() ? "Could not save preset" : "Preset saved");
     }
-    if (!saved.empty()) this->PopulateUserPresets(document);
+    if (!saved.empty())
+        this->PopulateUserPresets(document);
 }
 
 // --- settings.rml support ---
@@ -856,7 +982,9 @@ void SetControlValue(Rml::Element* element, const std::string& value) {
 }
 
 // Update the little "value" label next to a slider, if present.
-void SetValueLabel(Rml::ElementDocument* doc, const std::string& label_id, const std::string& text) {
+void SetValueLabel(Rml::ElementDocument* doc,
+                   const std::string& label_id,
+                   const std::string& text) {
     if (auto* label = doc->GetElementById(label_id)) {
         label->SetInnerRML(text);
     }
@@ -874,31 +1002,37 @@ std::string FormatPercent(float v01) {
     return buf;
 }
 
-}  // namespace
+} // namespace
 
 void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
-    if (!document) return;
+    if (!document)
+        return;
     Rml::Element* grid = document->GetElementById("gallery_grid");
-    if (!grid) return;
+    if (!grid)
+        return;
 
     namespace fs = std::filesystem;
     std::error_code ec;
 
     // Each shutter writes <root>/data/ui/captures/cap_<N>.tga; collect them
-    // newest-first. UI-07: enumerate against the ASSET ROOT (the same root the
+    // newest-first.: enumerate against the ASSET ROOT (the same root the
     // emitted <img src> resolves through — the old CWD-relative lookup silently
     // found nothing when CWD != root), unless a fixture source was injected
     // (SetGalleryCaptureSource / --ui-fixtures).
     std::vector<int> ids;
     const fs::path thumbs_dir = m_galleryCaptureDir.empty()
-        ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
-        : m_galleryCaptureDir;
+                                    ? fs::path(m_assetRoot) / "data" / "ui" / "captures"
+                                    : m_galleryCaptureDir;
     if (fs::exists(thumbs_dir, ec)) {
         for (const auto& entry : fs::directory_iterator(thumbs_dir, ec)) {
-            if (entry.path().extension() != ".tga") continue;
-            const std::string stem = entry.path().stem().string();  // "cap_<N>"
-            if (stem.rfind("cap_", 0) != 0) continue;
-            try { ids.push_back(std::stoi(stem.substr(4))); } catch (...) {}
+            if (entry.path().extension() != ".tga")
+                continue;
+            const std::string stem = entry.path().stem().string(); // "cap_<N>"
+            if (stem.rfind("cap_", 0) != 0)
+                continue;
+            try {
+                ids.push_back(std::stoi(stem.substr(4)));
+            } catch (...) {}
         }
     }
     std::sort(ids.begin(), ids.end(), std::greater<int>());
@@ -913,26 +1047,32 @@ void Rml_UIManager::PopulateGallery(Rml::ElementDocument* document) {
     std::string html;
     int shown = 0;
     for (int id : ids) {
-        if (shown++ >= 12) break;  // one page of the most recent captures
+        if (shown++ >= 12)
+            break; // one page of the most recent captures
         // Star rating from the sidecar (<root>/photos/photo-<N>.photo.json), if it's there.
         int stars = 0;
-        std::ifstream sf(fs::path(m_assetRoot) / "photos" / ("photo-" + std::to_string(id) + ".photo.json"));
+        std::ifstream sf(fs::path(m_assetRoot) / "photos" /
+                         ("photo-" + std::to_string(id) + ".photo.json"));
         if (sf) {
             try {
-                nlohmann::json j; sf >> j;
-                if (j.contains("stars") && j["stars"].is_number_integer()) stars = j["stars"].get<int>();
+                nlohmann::json j;
+                sf >> j;
+                if (j.contains("stars") && j["stars"].is_number_integer())
+                    stars = j["stars"].get<int>();
             } catch (...) {}
         }
-        html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"" +
-                m_galleryImgPrefix + "cap_" + std::to_string(id) + ".tga\"/>";
-        if (stars >= 4) html += "<span class=\"photo-fav\">\xE2\x98\x85</span>";
+        html += "<div class=\"photo-card\"><img class=\"photo-thumb\" src=\"" + m_galleryImgPrefix +
+                "cap_" + std::to_string(id) + ".tga\"/>";
+        if (stars >= 4)
+            html += "<span class=\"photo-fav\">\xE2\x98\x85</span>";
         html += "</div>";
     }
     grid->SetInnerRML(html);
 }
 
 void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
-    if (!document) return;
+    if (!document)
+        return;
     const SettingsBridge& b = m_settingsBridge;
 
     // Video
@@ -978,74 +1118,99 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
         SetValueLabel(document, "setting_audio_music_value", FormatPercent(v));
     }
 
-    // Custom widgets mirror the hidden controls: vsync toggle .on state, window-mode stepper
+    // Custom widgets mirror the hidden controls: vsync toggle.on state, window-mode stepper
     // label, and each keybind chip filled from the live bindings.
     if (b.GetVSync) {
-        if (auto* toggle = document->GetElementById("vsync_toggle")) toggle->SetClass("on", b.GetVSync());
+        if (auto* toggle = document->GetElementById("vsync_toggle"))
+            toggle->SetClass("on", b.GetVSync());
     }
     if (b.GetWindowMode) {
-        if (auto* val = document->GetElementById("window_mode_value")) val->SetInnerRML(b.GetWindowMode());
+        if (auto* val = document->GetElementById("window_mode_value"))
+            val->SetInnerRML(b.GetWindowMode());
     }
     if (b.GetKeybind) {
         Rml::ElementList rows;
         document->GetElementsByClassName(rows, "keybind-rebind");
         for (Rml::Element* row : rows) {
             const std::string action = row->GetAttribute<Rml::String>("data-action", "");
-            if (action.empty()) continue;
+            if (action.empty())
+                continue;
             if (auto* chip = document->GetElementById("kb_" + action)) {
                 const std::string label = b.GetKeybind(action);
-                if (!label.empty()) chip->SetInnerRML(label);
+                if (!label.empty())
+                    chip->SetInnerRML(label);
             }
         }
     }
 }
 
 void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
-    if (!element) return;
+    if (!element)
+        return;
     const std::string id = element->GetId();
     const std::string value = ReadFormControlValue(element, "");
     SettingsBridge& b = m_settingsBridge;
     Rml::ElementDocument* doc = element->GetOwnerDocument();
 
     auto as_float = [&value](float fallback) {
-        try { return std::stof(value); } catch (...) { return fallback; }
+        try {
+            return std::stof(value);
+        } catch (...) {
+            return fallback;
+        }
     };
 
     if (id == "setting_resolution") {
-        if (b.SetResolution) b.SetResolution(value);
+        if (b.SetResolution)
+            b.SetResolution(value);
     } else if (id == "setting_window_mode") {
-        if (b.SetWindowMode) b.SetWindowMode(value);
+        if (b.SetWindowMode)
+            b.SetWindowMode(value);
     } else if (id == "setting_vsync") {
-        if (b.SetVSync) b.SetVSync(value == "on" || value == "1" || value == "true");
+        if (b.SetVSync)
+            b.SetVSync(value == "on" || value == "1" || value == "true");
     } else if (id == "setting_fov") {
         const float f = as_float(45.0f);
-        if (b.SetFov) b.SetFov(f);
-        if (doc) SetValueLabel(doc, "setting_fov_value", FormatFloat(f, 0));
+        if (b.SetFov)
+            b.SetFov(f);
+        if (doc)
+            SetValueLabel(doc, "setting_fov_value", FormatFloat(f, 0));
     } else if (id == "setting_mouse_sensitivity") {
         const float f = as_float(0.025f);
-        if (b.SetMouseSensitivity) b.SetMouseSensitivity(f);
-        if (doc) SetValueLabel(doc, "setting_mouse_sensitivity_value", FormatFloat(f, 3));
+        if (b.SetMouseSensitivity)
+            b.SetMouseSensitivity(f);
+        if (doc)
+            SetValueLabel(doc, "setting_mouse_sensitivity_value", FormatFloat(f, 3));
     } else if (id == "setting_ui_scale") {
         const float f = as_float(1.0f);
-        if (b.SetUiScale) b.SetUiScale(f);
-        if (doc) SetValueLabel(doc, "setting_ui_scale_value", FormatPercent(f));
+        if (b.SetUiScale)
+            b.SetUiScale(f);
+        if (doc)
+            SetValueLabel(doc, "setting_ui_scale_value", FormatPercent(f));
     } else if (id == "setting_audio_master") {
         const float f = as_float(1.0f);
-        if (b.SetAudioMaster) b.SetAudioMaster(f);
-        if (doc) SetValueLabel(doc, "setting_audio_master_value", FormatPercent(f));
+        if (b.SetAudioMaster)
+            b.SetAudioMaster(f);
+        if (doc)
+            SetValueLabel(doc, "setting_audio_master_value", FormatPercent(f));
     } else if (id == "setting_audio_sfx") {
         const float f = as_float(1.0f);
-        if (b.SetAudioSfx) b.SetAudioSfx(f);
-        if (doc) SetValueLabel(doc, "setting_audio_sfx_value", FormatPercent(f));
+        if (b.SetAudioSfx)
+            b.SetAudioSfx(f);
+        if (doc)
+            SetValueLabel(doc, "setting_audio_sfx_value", FormatPercent(f));
     } else if (id == "setting_audio_music") {
         const float f = as_float(1.0f);
-        if (b.SetAudioMusic) b.SetAudioMusic(f);
-        if (doc) SetValueLabel(doc, "setting_audio_music_value", FormatPercent(f));
+        if (b.SetAudioMusic)
+            b.SetAudioMusic(f);
+        if (doc)
+            SetValueLabel(doc, "setting_audio_music_value", FormatPercent(f));
     }
 }
 
 void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
-    if (!document) return;
+    if (!document)
+        return;
     // Only wire the settings screen.
     if (!document->GetElementById("setting_resolution") &&
         !document->GetElementById("apply_settings_btn")) {
@@ -1057,55 +1222,71 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
 
     // Live-apply every control on "change" (sliders, selects).
     static const char* kControlIds[] = {
-        "setting_resolution", "setting_window_mode", "setting_vsync",
-        "setting_fov", "setting_mouse_sensitivity", "setting_ui_scale",
-        "setting_audio_master", "setting_audio_sfx", "setting_audio_music",
+        "setting_resolution",
+        "setting_window_mode",
+        "setting_vsync",
+        "setting_fov",
+        "setting_mouse_sensitivity",
+        "setting_ui_scale",
+        "setting_audio_master",
+        "setting_audio_sfx",
+        "setting_audio_music",
     };
     for (const char* control_id : kControlIds) {
         if (auto* el = document->GetElementById(control_id)) {
             el->AddEventListener("change", new LambdaEventListener([this](Rml::Event& event) {
-                this->ApplySettingFromElement(event.GetTargetElement());
-            }));
+                                     this->ApplySettingFromElement(event.GetTargetElement());
+                                 }));
         }
     }
 
     // Apply & Save button: flush every control then persist the overlay.
     if (auto* apply = document->GetElementById("apply_settings_btn")) {
-        apply->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-            for (const char* control_id : kControlIds) {
-                this->ApplySettingFromElement(document->GetElementById(control_id));
-            }
-            bool ok = true;
-            if (m_settingsBridge.Save) ok = m_settingsBridge.Save();
-            if (auto* note = document->GetElementById("notification")) {
-                note->SetClass("hidden", false);
-                if (auto* txt = document->GetElementById("notification_text")) {
-                    txt->SetInnerRML(ok ? "Settings saved" : "Save failed");
+        apply->AddEventListener(
+            "click", new LambdaEventListener([this, document](Rml::Event&) {
+                if (m_audioManager)
+                    m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                for (const char* control_id : kControlIds) {
+                    this->ApplySettingFromElement(document->GetElementById(control_id));
                 }
-            }
-        }));
+                bool ok = true;
+                if (m_settingsBridge.Save)
+                    ok = m_settingsBridge.Save();
+                if (auto* note = document->GetElementById("notification")) {
+                    note->SetClass("hidden", false);
+                    if (auto* txt = document->GetElementById("notification_text")) {
+                        txt->SetInnerRML(ok ? "Settings saved" : "Save failed");
+                    }
+                }
+            }));
         apply->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_hover", BusId::Ui);
-        }));
+                                    if (m_audioManager)
+                                        m_audioManager->PlayOneShot2D("ui_button_hover", BusId::Ui);
+                                }));
     }
 
     // --- Custom widgets that drive the hidden form controls (settings apply live + persist) ---
-    auto persist = [this]() { if (m_settingsBridge.Save) m_settingsBridge.Save(); };
+    auto persist = [this]() {
+        if (m_settingsBridge.Save)
+            m_settingsBridge.Save();
+    };
 
-    // vsync toggle: flip .on, mirror to hidden #setting_vsync, apply + save.
+    // vsync toggle: flip.on, mirror to hidden #setting_vsync, apply + save.
     if (auto* toggle = document->GetElementById("vsync_toggle")) {
-        toggle->AddEventListener("click", new LambdaEventListener([this, document, persist](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-            auto* t = document->GetElementById("vsync_toggle");
-            const bool now_on = !(t && t->IsClassSet("on"));
-            if (t) t->SetClass("on", now_on);
-            if (auto* sel = document->GetElementById("setting_vsync")) {
-                SetControlValue(sel, now_on ? "on" : "off");
-                this->ApplySettingFromElement(sel);
-            }
-            persist();
-        }));
+        toggle->AddEventListener(
+            "click", new LambdaEventListener([this, document, persist](Rml::Event&) {
+                if (m_audioManager)
+                    m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                auto* t = document->GetElementById("vsync_toggle");
+                const bool now_on = !(t && t->IsClassSet("on"));
+                if (t)
+                    t->SetClass("on", now_on);
+                if (auto* sel = document->GetElementById("setting_vsync")) {
+                    SetControlValue(sel, now_on ? "on" : "off");
+                    this->ApplySettingFromElement(sel);
+                }
+                persist();
+            }));
     }
 
     // window-mode stepper: cycle windowed/borderless/fullscreen, mirror to hidden select.
@@ -1114,10 +1295,13 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
         auto* val = document->GetElementById("window_mode_value");
         std::string cur = val ? val->GetInnerRML() : std::string("borderless");
         int idx = 1;
-        for (int i = 0; i < 3; ++i) if (cur == kModes[i]) idx = i;
+        for (int i = 0; i < 3; ++i)
+            if (cur == kModes[i])
+                idx = i;
         idx = (idx + dir + 3) % 3;
         const std::string next = kModes[idx];
-        if (val) val->SetInnerRML(next);
+        if (val)
+            val->SetInnerRML(next);
         if (auto* sel = document->GetElementById("setting_window_mode")) {
             SetControlValue(sel, next);
             this->ApplySettingFromElement(sel);
@@ -1126,15 +1310,17 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     };
     if (auto* prev = document->GetElementById("window_mode_prev")) {
         prev->AddEventListener("click", new LambdaEventListener([this, cycle_window](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-            cycle_window(-1);
-        }));
+                                   if (m_audioManager)
+                                       m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                                   cycle_window(-1);
+                               }));
     }
     if (auto* next = document->GetElementById("window_mode_next")) {
         next->AddEventListener("click", new LambdaEventListener([this, cycle_window](Rml::Event&) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-            cycle_window(+1);
-        }));
+                                   if (m_audioManager)
+                                       m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                                   cycle_window(+1);
+                               }));
     }
 
     // keybind rows: click to capture the next key as that action's binding (chip updates on the
@@ -1142,25 +1328,33 @@ void Rml_UIManager::BindSettingsListeners(Rml::ElementDocument* document) {
     Rml::ElementList kb_rows;
     document->GetElementsByClassName(kb_rows, "keybind-rebind");
     for (Rml::Element* row : kb_rows) {
-        row->AddEventListener("click", new LambdaEventListener([this, document](Rml::Event& ev) {
-            if (m_audioManager) m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
-            Rml::Element* r = ev.GetTargetElement();
-            while (r && r->GetAttribute<Rml::String>("data-action", "").empty()) r = r->GetParentNode();
-            if (!r) return;
-            const std::string action = r->GetAttribute<Rml::String>("data-action", "");
-            Rml::ElementList all;
-            document->GetElementsByClassName(all, "keybind-rebind");
-            for (Rml::Element* x : all) x->SetClass("selected", false);
-            r->SetClass("selected", true);
-            if (auto* chip = document->GetElementById("kb_" + action)) chip->SetInnerRML("press a key");
-            if (m_settingsBridge.BeginRebind) m_settingsBridge.BeginRebind(action);
-        }));
+        row->AddEventListener(
+            "click", new LambdaEventListener([this, document](Rml::Event& ev) {
+                if (m_audioManager)
+                    m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                Rml::Element* r = ev.GetTargetElement();
+                while (r && r->GetAttribute<Rml::String>("data-action", "").empty())
+                    r = r->GetParentNode();
+                if (!r)
+                    return;
+                const std::string action = r->GetAttribute<Rml::String>("data-action", "");
+                Rml::ElementList all;
+                document->GetElementsByClassName(all, "keybind-rebind");
+                for (Rml::Element* x : all)
+                    x->SetClass("selected", false);
+                r->SetClass("selected", true);
+                if (auto* chip = document->GetElementById("kb_" + action))
+                    chip->SetInnerRML("press a key");
+                if (m_settingsBridge.BeginRebind)
+                    m_settingsBridge.BeginRebind(action);
+            }));
     }
 }
 
 // --- Static GLFW Callbacks ---
 void Rml_UIManager::KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
-    if (!s_active_manager || !s_active_manager->m_context) return;
+    if (!s_active_manager || !s_active_manager->m_context)
+        return;
 
     if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
         Rml::Debugger::SetVisible(!Rml::Debugger::IsVisible());
@@ -1186,8 +1380,10 @@ void Rml_UIManager::CharCallback(GLFWwindow*, unsigned int codepoint) {
 void Rml_UIManager::MouseButtonCallback(GLFWwindow*, int button, int action, int mods) {
     if (s_active_manager && s_active_manager->m_context) {
         int rml_mods = GlfwToRmlMods(mods);
-        if (action == GLFW_PRESS) s_active_manager->m_context->ProcessMouseButtonDown(button, rml_mods);
-        else s_active_manager->m_context->ProcessMouseButtonUp(button, rml_mods);
+        if (action == GLFW_PRESS)
+            s_active_manager->m_context->ProcessMouseButtonDown(button, rml_mods);
+        else
+            s_active_manager->m_context->ProcessMouseButtonUp(button, rml_mods);
     }
 }
 void Rml_UIManager::CursorPosCallback(GLFWwindow*, double xpos, double ypos) {

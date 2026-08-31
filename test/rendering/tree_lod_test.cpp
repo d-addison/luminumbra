@@ -1,4 +1,4 @@
-// Track-B (roadmap pillar B): unit + budget gate for the render-only tree LOD
+// tree rendering (tree rendering): unit + budget gate for the render-only tree LOD
 // distance selection. These tests are OpenGL-free -- they exercise the pure
 // selection logic in src/luminumbra_client/rendering/TreeLod.h that the G-Buffer
 // pass uses to pick a per-instance LOD mesh by camera distance.
@@ -22,9 +22,9 @@
 #include <limits>
 #include <string>
 
-using Luminumbra::Rendering::TreeLodConfig;
-using Luminumbra::Rendering::SelectTreeLod;
 using Luminumbra::Rendering::LodMeshPath;
+using Luminumbra::Rendering::SelectTreeLod;
+using Luminumbra::Rendering::TreeLodConfig;
 
 namespace {
 
@@ -101,10 +101,8 @@ TEST(TreeLod, Lod0PathIsUnchanged) {
 
 TEST(TreeLod, LodPathInsertsSuffixBeforeExtension) {
     const std::string base = "data/models/trees/tree_small_02_leaves.lmesh";
-    EXPECT_EQ(LodMeshPath(base, 1),
-              "data/models/trees/tree_small_02_leaves.lod1.lmesh");
-    EXPECT_EQ(LodMeshPath(base, 2),
-              "data/models/trees/tree_small_02_leaves.lod2.lmesh");
+    EXPECT_EQ(LodMeshPath(base, 1), "data/models/trees/tree_small_02_leaves.lod1.lmesh");
+    EXPECT_EQ(LodMeshPath(base, 2), "data/models/trees/tree_small_02_leaves.lod2.lmesh");
 }
 
 TEST(TreeLod, LodPathAppendsWhenNoLmeshExtension) {

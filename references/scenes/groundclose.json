@@ -1,6 +1,0 @@
-{ "_comment": "spec 003 verification: low oblique over open ground to read bushes among grass (noon)",
-  "camera": { "pos": [120, 40, 120], "yaw": 225, "pitch": -22, "fov": 60 },
-  "time_of_day": 0.0,
-  "clouds": { "coverage": 0.3, "plane_height": 1400, "shadow": true },
-  "weather": { "type": "none", "intensity": 0.0 },
-  "screenshot": "references/compare/groundclose.ppm" }

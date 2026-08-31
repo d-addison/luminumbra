@@ -1,4 +1,4 @@
-// T-I3-6: asset-manifest split. The engine-side GameSession validates
+// asset-manifest split. The engine-side GameSession validates
 // SIMULATION requirements only (world preset readable/parseable); renderer/UI
 // asset requirements are caller-supplied by the client. Headless CreateWorld
 // must succeed in a root containing nothing but the world preset.
@@ -12,11 +12,13 @@
 #include <nlohmann/json.hpp>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/scripting/LuaState.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 namespace fs = std::filesystem;
 
@@ -49,7 +51,9 @@ public:
         fs::remove_all(root_, ec);
     }
 
-    [[nodiscard]] const fs::path& path() const { return root_; }
+    [[nodiscard]] const fs::path& path() const {
+        return root_;
+    }
     // GameSession::SetRootPath expects a trailing separator (paths are
     // concatenated, not joined).
     [[nodiscard]] std::string root_string() const {
@@ -113,7 +117,32 @@ TEST(GameSessionHeadlessWorldTest, HeadlessCreateWorldSucceedsWithPresetOnly) {
         EXPECT_NE(session.GetPhysicsSystem(), nullptr);
         EXPECT_FALSE(session.GetMetadata().worldId.empty());
         // World metadata landed inside the headless root.
-        EXPECT_TRUE(fs::exists(root.path() / "worlds" / "saves" / session.GetMetadata().worldId / "world_info.json"));
+        EXPECT_TRUE(fs::exists(root.path() / "worlds" / "saves" / session.GetMetadata().worldId /
+                               "world_info.json"));
+    }
+    jobs.shutdown();
+}
+
+TEST(GameSessionHeadlessWorldTest, ScriptHostTracksTheSessionEnergyField) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup();
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root.root_string());
+        session.SetAetherStateEnabled(true);
+        ASSERT_TRUE(session.CreateWorld("ScriptWorld", "12345", "default"));
+        ASSERT_NE(session.GetScriptState(), nullptr);
+        ASSERT_NE(session.GetEnergyFieldState(), nullptr);
+
+        session.GetEnergyFieldState()->SetAnchorCell(0, 0);
+        session.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 512);
+        session.GetEnergyFieldState()->Tick(1);
+        double value = 0.0;
+        ASSERT_TRUE(session.GetScriptState()->EvalNumber(
+            "return world.sample_energy_field(1, 0, 1)", value));
+        EXPECT_DOUBLE_EQ(value, 2.0);
     }
     jobs.shutdown();
 }
@@ -150,8 +179,10 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
         // The resolved preset is embedded in THIS world's save dir; worldType keeps the base name.
         const fs::path embedded =
             root.path() / "worlds" / "saves" / custom_world.GetMetadata().worldId / "preset.json";
-        EXPECT_TRUE(fs::exists(embedded)) << "custom preset must be embedded in the world's own save";
-        EXPECT_EQ(custom_world.GetMetadata().worldType, "default") << "worldType records the base name";
+        EXPECT_TRUE(fs::exists(embedded))
+            << "custom preset must be embedded in the world's own save";
+        EXPECT_EQ(custom_world.GetMetadata().worldType, "default")
+            << "worldType records the base name";
 
         // The cranked amplitude must change generated terrain at some sampled point.
         const std::vector<std::pair<float, float>> pts = {{8.f, 8.f}, {41.f, 17.f}, {-33.f, 52.f}};
@@ -168,7 +199,7 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
     jobs.shutdown();
 }
 
-// SHIELD-05 (spec 021): a save carrying a wrong-sized (non-empty, != (CHUNK+1)^3)
+// a save carrying a wrong-sized (non-empty, != (CHUNK+1)^3)
 // SDF lattice is QUARANTINED at adoption — the chunk loads with its sdf_data
 // cleared (marked for deterministic regeneration) and is never fed to the
 // unit-step polygonise. A valid full lattice in the same save survives verbatim.
@@ -178,9 +209,9 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsQuarantinedOnLoad) {
     using Luminumbra::ChunkState;
     using Luminumbra::IVec3;
     using Luminumbra::WorldStreamingState;
-    constexpr std::size_t kFullLattice =
-        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-        (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+    constexpr std::size_t kFullLattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                         (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                         (Luminumbra::CHUNK_SIZE_Z + 1);
 
     const HeadlessRoot root;
     // Author a save whose region holds one CORRUPT chunk (truncated lattice)
@@ -201,8 +232,8 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsQuarantinedOnLoad) {
             chunk->mesh_indices = {0u, 1u, 2u};
             return chunk;
         };
-        make(corrupt_coords)->sdf_data = {-2.0f, -0.5f, 0.25f, 1.0f};  // 4 != full lattice
-        make(control_coords)->sdf_data.assign(kFullLattice, 1.0f);     // valid (all air)
+        make(corrupt_coords)->sdf_data = {-2.0f, -0.5f, 0.25f, 1.0f}; // 4 != full lattice
+        make(control_coords)->sdf_data.assign(kFullLattice, 1.0f);    // valid (all air)
         P::WorldSaveService service;
         std::vector<std::string> errors;
         ASSERT_TRUE(service.save_world(state, save_dir, &errors));
@@ -223,14 +254,17 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsQuarantinedOnLoad) {
         const Chunk* corrupt = nullptr;
         const Chunk* control = nullptr;
         for (const Chunk* c : world->get_renderable_chunks()) {
-            if (c->get_coords() == corrupt_coords) corrupt = c;
-            if (c->get_coords() == control_coords) control = c;
+            if (c->get_coords() == corrupt_coords)
+                corrupt = c;
+            if (c->get_coords() == control_coords)
+                control = c;
         }
         ASSERT_NE(corrupt, nullptr) << "the quarantined chunk must still load (mesh intact)";
         ASSERT_NE(control, nullptr);
         EXPECT_TRUE(corrupt->sdf_data.empty())
             << "a wrong-sized SDF lattice must be quarantined (cleared for regeneration), "
-               "not adopted verbatim — got size " << corrupt->sdf_data.size();
+               "not adopted verbatim — got size "
+            << corrupt->sdf_data.size();
         EXPECT_EQ(control->sdf_data.size(), kFullLattice)
             << "a valid full lattice in the same save must survive adoption verbatim";
         EXPECT_FALSE(corrupt->mesh_vertices.empty())

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""T-I3-18: generates the Grovestrider rigged box-limb quadruped glTF.
+""": generates the Grovestrider rigged box-limb quadruped glTF.
 
 Game-content generator (Project Capture). The committed glTF under
 data/models/creatures/grovestrider/ is processed by tools/asset_processor

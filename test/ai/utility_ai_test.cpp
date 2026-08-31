@@ -1,4 +1,4 @@
-// I9-ECO: Utility-AI (IAUS) arbiter tests. The decision system is a pure, libm-free,
+//  Utility-AI (IAUS) arbiter tests. The decision system is a pure, libm-free,
 // deterministic function of the considerations -> safe on the sim path.
 #include <gtest/gtest.h>
 
@@ -25,8 +25,8 @@ Consideration con(float input, CurveType curve, float m = 1.0f, float b = 0.0f, 
 
 // Every curve stays in [0,1] across the input range and is deterministic (same in == same out).
 TEST(UtilityAI, CurvesBoundedAndDeterministic) {
-    const CurveType curves[] = {CurveType::Linear, CurveType::InvLinear,
-                                CurveType::Quadratic, CurveType::Logistic};
+    const CurveType curves[] = {
+        CurveType::Linear, CurveType::InvLinear, CurveType::Quadratic, CurveType::Logistic};
     for (CurveType cv : curves) {
         for (int i = 0; i <= 10; ++i) {
             const float x = static_cast<float>(i) / 10.0f;
@@ -45,13 +45,14 @@ TEST(UtilityAI, PicksHigherUtilityAction) {
         UtilityAction flee;
         flee.id = 1;
         flee.weight = 1.0f;
-        flee.considerations = {con(threat, CurveType::Linear)};  // flee when threatened
+        flee.considerations = {con(threat, CurveType::Linear)}; // flee when threatened
 
         UtilityAction graze;
         graze.id = 2;
         graze.weight = 1.0f;
-        graze.considerations = {con(hunger, CurveType::Linear),
-                                con(threat, CurveType::InvLinear, 1.0f, 0.0f, 1.0f)};  // safe = 1 - threat
+        graze.considerations = {
+            con(hunger, CurveType::Linear),
+            con(threat, CurveType::InvLinear, 1.0f, 0.0f, 1.0f)}; // safe = 1 - threat
         return std::vector<UtilityAction>{flee, graze};
     };
 
@@ -68,9 +69,9 @@ TEST(UtilityAI, TieResolvesToLowestId) {
     a.weight = 0.5f;
     UtilityAction b;
     b.id = 2;
-    b.weight = 0.5f;  // identical score
+    b.weight = 0.5f; // identical score
     EXPECT_EQ(SelectAction({a, b}), 2);
-    EXPECT_EQ(SelectAction({b, a}), 2);  // order-independent
+    EXPECT_EQ(SelectAction({b, a}), 2); // order-independent
 }
 
 // With equal considerations, the higher-weight action wins.
@@ -92,8 +93,10 @@ TEST(UtilityAI, CompensationKeepsMultiConsiderationViable) {
     UtilityAction many;
     many.id = 1;
     many.weight = 1.0f;
-    many.considerations = {con(0.8f, CurveType::Linear), con(0.8f, CurveType::Linear),
-                           con(0.8f, CurveType::Linear), con(0.8f, CurveType::Linear)};
+    many.considerations = {con(0.8f, CurveType::Linear),
+                           con(0.8f, CurveType::Linear),
+                           con(0.8f, CurveType::Linear),
+                           con(0.8f, CurveType::Linear)};
     EXPECT_GT(many.Score(), 0.5f) << "compensation factor failed; product collapsed";
     EXPECT_LE(many.Score(), 1.0f);
 }
@@ -102,4 +105,4 @@ TEST(UtilityAI, EmptyReturnsNegativeOne) {
     EXPECT_EQ(SelectAction({}), -1);
 }
 
-}  // namespace
+} // namespace

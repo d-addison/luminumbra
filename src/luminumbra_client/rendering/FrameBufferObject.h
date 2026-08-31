@@ -1,6 +1,6 @@
 #pragma once
 
-// Spec 016 (016-P1, struct extraction): FrameBufferObject moved out of
+//  (, struct extraction): FrameBufferObject moved out of
 // RenderPipeline.h so the LightingPass (which holds one by value) + the
 // RenderContext seam reference it without pulling the RenderPipeline god-object.
 // Definition unchanged; RenderPipeline.h includes this header in its place.

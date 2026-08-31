@@ -31,244 +31,260 @@ namespace World::MarchingCubes {
 // ===================== CORE MARCHING CUBES HELPERS (REFACTORED) =====================
 namespace { // Anonymous namespace for internal implementation details
 
-    // ===================== T-I4-18 RESET-PER-JOB MESHING ARENA =====================
-    // Reset-per-job linear (bump) allocator for the meshing hot path. This is a
-    // pure ALLOCATION-STRATEGY change: it replaces the repeated malloc/free of
-    // the per-job PURE-SCRATCH buffers (the index-addressed temporaries that are
-    // NEVER moved into the chunk - edge_vertex_cache, world_positions, materials,
-    // remap) with bump allocations from a thread_local arena that is RESET (not
-    // freed) at the start of each meshing job and reused across jobs, growing
-    // only to a per-worker high-water mark.
-    //
-    // Thread-safety: the arena is thread_local, so each JobSystem worker owns its
-    // own arena. Meshing runs inside Job lambdas on worker threads (see
-    // SHIELD_WorldSystem chunk-build / remesh job loops), so an arena is never
-    // shared across concurrently running jobs - no locks, no atomics, no sharing.
-    //
-    // Byte-identical guarantee: the arena only backs index-addressed, FIXED-SIZE
-    // scratch buffers. None of them GROW (no push_back / reallocation) and none
-    // ESCAPE the meshing function (the buffers that ARE moved into the chunk -
-    // mesh_vertices / mesh_indices / compact_vertices / water meshes - stay real
-    // owning std::vectors, because the Chunk takes ownership and outlives the
-    // job). Each arena buffer is value-initialized to the SAME init value the old
-    // std::vector ctor used (kNoCachedVertex, 0xFFFFFFFF remap sentinel, or
-    // default), so every byte the mesher reads/writes is identical. The arena
-    // therefore changes WHERE scratch memory comes from, never the geometry.
-    //
-    // Skirt by-value invariant (T-I4-DR-live-needle-streak): UNAFFECTED. The
-    // dangling-reference hazard lives in the skirt generators, which read/grow
-    // `vertices` / `out_mesh.vertices` - those remain real std::vectors that can
-    // still reallocate on push_back, so the existing by-value source-vertex
-    // copies are still required and are left exactly in place. The arena never
-    // backs any vertex buffer that a skirt generator pushes into.
-    class MeshArena {
-    public:
-        // Reset to empty without releasing the backing storage (reused next job).
-        void Reset() noexcept { m_offset = 0; }
+// =====================  RESET-PER-JOB MESHING ARENA =====================
+// Reset-per-job linear (bump) allocator for the meshing hot path. This is a
+// pure ALLOCATION-STRATEGY change: it replaces the repeated malloc/free of
+// the per-job PURE-SCRATCH buffers (the index-addressed temporaries that are
+// NEVER moved into the chunk - edge_vertex_cache, world_positions, materials,
+// remap) with bump allocations from a thread_local arena that is RESET (not
+// freed) at the start of each meshing job and reused across jobs, growing
+// only to a per-worker high-water mark.
+//
+// Thread-safety: the arena is thread_local, so each JobSystem worker owns its
+// own arena. Meshing runs inside Job lambdas on worker threads (see
+// SHIELD_WorldSystem chunk-build / remesh job loops), so an arena is never
+// shared across concurrently running jobs - no locks, no atomics, no sharing.
+//
+// Byte-identical guarantee: the arena only backs index-addressed, FIXED-SIZE
+// scratch buffers. None of them GROW (no push_back / reallocation) and none
+// ESCAPE the meshing function (the buffers that ARE moved into the chunk -
+// mesh_vertices / mesh_indices / compact_vertices / water meshes - stay real
+// owning std::vectors, because the Chunk takes ownership and outlives the
+// job). Each arena buffer is value-initialized to the SAME init value the old
+// std::vector ctor used (kNoCachedVertex, 0xFFFFFFFF remap sentinel, or
+// default), so every byte the mesher reads/writes is identical. The arena
+// therefore changes WHERE scratch memory comes from, never the geometry.
+//
+// Skirt by-value invariant: UNAFFECTED. The
+// dangling-reference hazard lives in the skirt generators, which read/grow
+// `vertices` / `out_mesh.vertices` - those remain real std::vectors that can
+// still reallocate on push_back, so the existing by-value source-vertex
+// copies are still required and are left exactly in place. The arena never
+// backs any vertex buffer that a skirt generator pushes into.
+class MeshArena {
+public:
+    // Reset to empty without releasing the backing storage (reused next job).
+    void Reset() noexcept {
+        m_offset = 0;
+    }
 
-        unsigned char* base() const noexcept { return m_storage.get(); }
+    unsigned char* base() const noexcept {
+        return m_storage.get();
+    }
 
-        // Bump-allocate `count` objects of trivially-copyable T, value-set to
-        // `init`. Returns the BYTE OFFSET of the allocation within the arena
-        // block (NOT a raw pointer). Callers resolve the pointer lazily against
-        // base() on every access (see ArenaSpan), which keeps outstanding
-        // allocations valid across a mid-job grow: a grow that needs more space
-        // while earlier allocations are still live copies the existing
-        // [0, m_offset) bytes into the larger block, so resolving the offset
-        // against the NEW base yields the same logical data. This is the
-        // determinism-critical property - an earlier raw-pointer design dangled
-        // world_positions when the subsequent materials allocation reallocated
-        // the block, leaking job-order-dependent garbage and breaking the
-        // canonical world_hash (T-I4-18).
-        template <typename T>
-        std::size_t Allocate(std::size_t count, const T& init) {
-            static_assert(std::is_trivially_copyable<T>::value,
-                          "T-I4-18 arena only backs trivially-copyable scratch");
-            static_assert(std::is_trivially_destructible<T>::value,
-                          "T-I4-18 arena never runs destructors");
-            if (count == 0) {
-                return 0;
-            }
-            constexpr std::size_t align = alignof(T);
-            const std::size_t aligned_offset = (m_offset + (align - 1)) & ~(align - 1);
-            const std::size_t bytes = count * sizeof(T);
-            EnsureCapacity(aligned_offset + bytes);
-            T* const ptr = reinterpret_cast<T*>(m_storage.get() + aligned_offset);
-            m_offset = aligned_offset + bytes;
-            for (std::size_t i = 0; i < count; ++i) {
-                // Placement-construct each element with the requested init value;
-                // matches the std::vector(count, init) the arena replaces.
-                ::new (static_cast<void*>(ptr + i)) T(init);
-            }
-            return aligned_offset;
+    // Bump-allocate `count` objects of trivially-copyable T, value-set to
+    // `init`. Returns the BYTE OFFSET of the allocation within the arena
+    // block (NOT a raw pointer). Callers resolve the pointer lazily against
+    // base on every access (see ArenaSpan), which keeps outstanding
+    // allocations valid across a mid-job grow: a grow that needs more space
+    // while earlier allocations are still live copies the existing
+    // [0, m_offset) bytes into the larger block, so resolving the offset
+    // against the NEW base yields the same logical data. This is the
+    // determinism-critical property - an earlier raw-pointer design dangled
+    // world_positions when the subsequent materials allocation reallocated
+    // the block, leaking job-order-dependent garbage and breaking the
+    // canonical world_hash.
+    template<typename T>
+    std::size_t Allocate(std::size_t count, const T& init) {
+        static_assert(std::is_trivially_copyable<T>::value,
+                      " arena only backs trivially-copyable scratch");
+        static_assert(std::is_trivially_destructible<T>::value, " arena never runs destructors");
+        if (count == 0) {
+            return 0;
         }
-
-    private:
-        void EnsureCapacity(std::size_t required_bytes) {
-            if (required_bytes <= m_capacity) {
-                return;
-            }
-            // Grow geometrically to amortize. A grow may fire mid-job while
-            // earlier allocations are still live, so preserve their bytes by
-            // copying [0, m_offset) into the new block. Offset-based ArenaSpans
-            // (which resolve against base() lazily) then keep pointing at the
-            // same logical scratch after the block moves.
-            std::size_t new_capacity = m_capacity == 0 ? 4096 : m_capacity;
-            while (new_capacity < required_bytes) {
-                new_capacity *= 2;
-            }
-            // Over-aligned to the strictest scratch type we hand out so every
-            // typed sub-allocation's alignment math stays in-bounds.
-            constexpr std::size_t kBlockAlign = alignof(std::max_align_t);
-            auto* raw = static_cast<unsigned char*>(
-                ::operator new(new_capacity, std::align_val_t{kBlockAlign}));
-            if (m_storage && m_offset > 0) {
-                std::memcpy(raw, m_storage.get(), m_offset);
-            }
-            m_storage = std::unique_ptr<unsigned char[], BlockDeleter>(raw);
-            m_capacity = new_capacity;
+        constexpr std::size_t align = alignof(T);
+        const std::size_t aligned_offset = (m_offset + (align - 1)) & ~(align - 1);
+        const std::size_t bytes = count * sizeof(T);
+        EnsureCapacity(aligned_offset + bytes);
+        T* const ptr = reinterpret_cast<T*>(m_storage.get() + aligned_offset);
+        m_offset = aligned_offset + bytes;
+        for (std::size_t i = 0; i < count; ++i) {
+            // Placement-construct each element with the requested init value;
+            // matches the std::vector(count, init) the arena replaces.
+            ::new (static_cast<void*>(ptr + i)) T(init);
         }
+        return aligned_offset;
+    }
 
-        struct BlockDeleter {
-            void operator()(unsigned char* p) const noexcept {
-                ::operator delete(p, std::align_val_t{alignof(std::max_align_t)});
-            }
-        };
+private:
+    void EnsureCapacity(std::size_t required_bytes) {
+        if (required_bytes <= m_capacity) {
+            return;
+        }
+        // Grow geometrically to amortize. A grow may fire mid-job while
+        // earlier allocations are still live, so preserve their bytes by
+        // copying [0, m_offset) into the new block. Offset-based ArenaSpans
+        // (which resolve against base lazily) then keep pointing at the
+        // same logical scratch after the block moves.
+        std::size_t new_capacity = m_capacity == 0 ? 4096 : m_capacity;
+        while (new_capacity < required_bytes) {
+            new_capacity *= 2;
+        }
+        // Over-aligned to the strictest scratch type we hand out so every
+        // typed sub-allocation's alignment math stays in-bounds.
+        constexpr std::size_t kBlockAlign = alignof(std::max_align_t);
+        auto* raw = static_cast<unsigned char*>(
+            ::operator new(new_capacity, std::align_val_t{kBlockAlign}));
+        if (m_storage && m_offset > 0) {
+            std::memcpy(raw, m_storage.get(), m_offset);
+        }
+        m_storage = std::unique_ptr<unsigned char[], BlockDeleter>(raw);
+        m_capacity = new_capacity;
+    }
 
-        std::unique_ptr<unsigned char[], BlockDeleter> m_storage;
-        std::size_t m_capacity = 0;  // high-water mark in bytes (never shrinks)
-        std::size_t m_offset = 0;    // bump cursor; Reset() rewinds to 0
+    struct BlockDeleter {
+        void operator()(unsigned char* p) const noexcept {
+            ::operator delete(p, std::align_val_t{alignof(std::max_align_t)});
+        }
     };
 
-    // Per-worker meshing arena. thread_local => one arena per JobSystem worker,
-    // never shared across concurrently running meshing jobs.
-    thread_local MeshArena t_mesh_arena;
+    std::unique_ptr<unsigned char[], BlockDeleter> m_storage;
+    std::size_t m_capacity = 0; // high-water mark in bytes (never shrinks)
+    std::size_t m_offset = 0;   // bump cursor; Reset() rewinds to 0
+};
 
-    // RAII guard: reset the worker arena at job entry so each meshing job starts
-    // from a clean bump cursor while reusing the high-water-mark storage.
-    struct MeshArenaScope {
-        MeshArenaScope() noexcept { t_mesh_arena.Reset(); }
-        ~MeshArenaScope() noexcept { t_mesh_arena.Reset(); }
-        MeshArenaScope(const MeshArenaScope&) = delete;
-        MeshArenaScope& operator=(const MeshArenaScope&) = delete;
-    };
+// Per-worker meshing arena. thread_local => one arena per JobSystem worker,
+// never shared across concurrently running meshing jobs.
+thread_local MeshArena t_mesh_arena;
 
-    // Lightweight typed view over an arena allocation. Index-addressed only (the
-    // arena never backs a growing buffer), so it deliberately exposes no
-    // push_back: that keeps the no-reallocation / stable-address guarantee that
-    // makes the scratch byte-identical to the std::vectors it replaces. The view
-    // holds a BYTE OFFSET, not a pointer, and resolves data() against the current
-    // arena base on every access, so it survives a mid-job arena grow (the grow
-    // copies existing bytes forward; see MeshArena::EnsureCapacity).
-    template <typename T>
-    struct ArenaSpan {
-        std::size_t offset = 0;
-        std::size_t count = 0;
-        T* data() const noexcept {
-            return count == 0 ? nullptr
-                              : reinterpret_cast<T*>(t_mesh_arena.base() + offset);
-        }
-        std::size_t size() const noexcept { return count; }
-        T& operator[](std::size_t i) const noexcept { return data()[i]; }
-    };
-
-    template <typename T>
-    ArenaSpan<T> ArenaAlloc(std::size_t count, const T& init) {
-        return ArenaSpan<T>{t_mesh_arena.Allocate<T>(count, init), count};
+// RAII guard: reset the worker arena at job entry so each meshing job starts
+// from a clean bump cursor while reusing the high-water-mark storage.
+struct MeshArenaScope {
+    MeshArenaScope() noexcept {
+        t_mesh_arena.Reset();
     }
-    // ===================== END T-I4-18 MESHING ARENA =====================
-
-    // These tables are the core of the Marching Cubes algorithm
-    #include "MarchingCubesTables.inl"
-
-    struct GridCell {
-        Vec3 p[8];  // Position of the 8 corners of the cube
-        f32 val[8]; // SDF value at each of the 8 corners
-    };
-
-    // Linearly interpolates to find the point on an edge where the surface crosses
-    Vec3 VertexInterp(f32 isolevel, Vec3 p1, Vec3 p2, f32 valp1, f32 valp2) {
-        if (std::abs(valp1 - valp2) < 0.00001f) return p1;
-        f32 mu = (isolevel - valp1) / (valp2 - valp1);
-        return p1 + mu * (p2 - p1);
+    ~MeshArenaScope() noexcept {
+        t_mesh_arena.Reset();
     }
+    MeshArenaScope(const MeshArenaScope&) = delete;
+    MeshArenaScope& operator=(const MeshArenaScope&) = delete;
+};
 
-    Vec3 EstimateDensityGradient(const GridCell& gridcell) {
-        const f32 dx = (gridcell.val[1] + gridcell.val[2] + gridcell.val[5] + gridcell.val[6])
-                     - (gridcell.val[0] + gridcell.val[3] + gridcell.val[4] + gridcell.val[7]);
-        const f32 dy = (gridcell.val[4] + gridcell.val[5] + gridcell.val[6] + gridcell.val[7])
-                     - (gridcell.val[0] + gridcell.val[1] + gridcell.val[2] + gridcell.val[3]);
-        const f32 dz = (gridcell.val[2] + gridcell.val[3] + gridcell.val[6] + gridcell.val[7])
-                     - (gridcell.val[0] + gridcell.val[1] + gridcell.val[4] + gridcell.val[5]);
-
-        return Vec3(dx, dy, dz);
+// Lightweight typed view over an arena allocation. Index-addressed only (the
+// arena never backs a growing buffer), so it deliberately exposes no
+// push_back: that keeps the no-reallocation / stable-address guarantee that
+// makes the scratch byte-identical to the std::vectors it replaces. The view
+// holds a BYTE OFFSET, not a pointer, and resolves data against the current
+// arena base on every access, so it survives a mid-job arena grow (the grow
+// copies existing bytes forward; see MeshArena::EnsureCapacity).
+template<typename T>
+struct ArenaSpan {
+    std::size_t offset = 0;
+    std::size_t count = 0;
+    T* data() const noexcept {
+        return count == 0 ? nullptr : reinterpret_cast<T*>(t_mesh_arena.base() + offset);
     }
-
-    // Determines terrain material based on world position and height.
-    // Meshable terrain must never carry the non-rendering Air material into the
-    // G-buffer; isosurface interpolation can land just outside the solid side.
-    MaterialType GetTerrainMaterialAt(const Systems::SHIELD_WorldSystem& world_system, const Vec3& world_pos) {
-        const auto sample = world_system.SampleWorldGenLayers(world_pos - Vec3(0.0f, 0.25f, 0.0f));
-        if (sample.material != MaterialType::Air && sample.material != MaterialType::Water) {
-            return sample.material;
-        }
-
-        // Fallback when isosurface interpolation landed just outside the solid
-        // side (sample classified Air/Water): reclassify from the column height
-        // through the SAME biome-aware band selector (T-I4-2). With biomes
-        // disabled this reproduces the legacy Sand/Grass/Soil/Stone bands
-        // bit-for-bit.
-        const float terrain_height = world_system.GetTerrainHeightAt(world_pos.x, world_pos.z);
-        const u8 biome_id = world_system.BiomeIdAt(world_pos.x, world_pos.z);
-        const bool river_bank = world_system.RiverInfluenceAt(world_pos.x, world_pos.z) > 0.25f;
-        return world_system.SurfaceMaterialForColumn(world_pos.y, terrain_height, biome_id, river_bank);
+    std::size_t size() const noexcept {
+        return count;
     }
+    T& operator[](std::size_t i) const noexcept {
+        return data()[i];
+    }
+};
 
-    struct AtomicTerrainMeshBuildStats {
-        std::atomic<std::size_t> jobs{0};
-        std::atomic<std::size_t> step1_jobs{0};
-        std::atomic<std::size_t> step2_jobs{0};
-        std::atomic<std::size_t> step4_jobs{0};
-        std::atomic<std::size_t> cells_visited{0};
-        std::atomic<std::size_t> active_cells{0};
-        std::atomic<std::size_t> vertices{0};
-        std::atomic<std::size_t> indices{0};
-        std::atomic<std::size_t> triangles{0};
-        std::atomic<std::uint64_t> elapsed_us{0};
-    };
+template<typename T>
+ArenaSpan<T> ArenaAlloc(std::size_t count, const T& init) {
+    return ArenaSpan<T>{t_mesh_arena.Allocate<T>(count, init), count};
+}
+// ===================== END  MESHING ARENA =====================
 
-    AtomicTerrainMeshBuildStats g_terrain_mesh_build_stats;
+// These tables are the core of the Marching Cubes algorithm
+#include "MarchingCubesTables.inl"
 
-    void RecordTerrainMeshBuildStats(int step, std::size_t cells_visited, std::size_t active_cells,
-                                     std::size_t vertices, std::size_t indices, std::uint64_t elapsed_us) {
-        g_terrain_mesh_build_stats.jobs.fetch_add(1, std::memory_order_relaxed);
-        if (step <= 1) {
-            g_terrain_mesh_build_stats.step1_jobs.fetch_add(1, std::memory_order_relaxed);
-        } else if (step == 2) {
-            g_terrain_mesh_build_stats.step2_jobs.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            g_terrain_mesh_build_stats.step4_jobs.fetch_add(1, std::memory_order_relaxed);
-        }
-        g_terrain_mesh_build_stats.cells_visited.fetch_add(cells_visited, std::memory_order_relaxed);
-        g_terrain_mesh_build_stats.active_cells.fetch_add(active_cells, std::memory_order_relaxed);
-        g_terrain_mesh_build_stats.vertices.fetch_add(vertices, std::memory_order_relaxed);
-        g_terrain_mesh_build_stats.indices.fetch_add(indices, std::memory_order_relaxed);
-        g_terrain_mesh_build_stats.triangles.fetch_add(indices / 3u, std::memory_order_relaxed);
-        g_terrain_mesh_build_stats.elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
+struct GridCell {
+    Vec3 p[8];  // Position of the 8 corners of the cube
+    f32 val[8]; // SDF value at each of the 8 corners
+};
+
+// Linearly interpolates to find the point on an edge where the surface crosses
+Vec3 VertexInterp(f32 isolevel, Vec3 p1, Vec3 p2, f32 valp1, f32 valp2) {
+    if (std::abs(valp1 - valp2) < 0.00001f)
+        return p1;
+    f32 mu = (isolevel - valp1) / (valp2 - valp1);
+    return p1 + mu * (p2 - p1);
+}
+
+Vec3 EstimateDensityGradient(const GridCell& gridcell) {
+    const f32 dx = (gridcell.val[1] + gridcell.val[2] + gridcell.val[5] + gridcell.val[6]) -
+                   (gridcell.val[0] + gridcell.val[3] + gridcell.val[4] + gridcell.val[7]);
+    const f32 dy = (gridcell.val[4] + gridcell.val[5] + gridcell.val[6] + gridcell.val[7]) -
+                   (gridcell.val[0] + gridcell.val[1] + gridcell.val[2] + gridcell.val[3]);
+    const f32 dz = (gridcell.val[2] + gridcell.val[3] + gridcell.val[6] + gridcell.val[7]) -
+                   (gridcell.val[0] + gridcell.val[1] + gridcell.val[4] + gridcell.val[5]);
+
+    return Vec3(dx, dy, dz);
+}
+
+// Determines terrain material based on world position and height.
+// Meshable terrain must never carry the non-rendering Air material into the
+// G-buffer; isosurface interpolation can land just outside the solid side.
+MaterialType GetTerrainMaterialAt(const Systems::SHIELD_WorldSystem& world_system,
+                                  const Vec3& world_pos) {
+    const auto sample = world_system.SampleWorldGenLayers(world_pos - Vec3(0.0f, 0.25f, 0.0f));
+    if (sample.material != MaterialType::Air && sample.material != MaterialType::Water) {
+        return sample.material;
     }
 
-    constexpr float kBoundaryEpsilon = 1.0e-4f;
+    // Fallback when isosurface interpolation landed just outside the solid
+    // side (sample classified Air/Water): reclassify from the column height
+    // through the SAME biome-aware band selector. With biomes
+    // disabled this reproduces the legacy Sand/Grass/Soil/Stone bands
+    // bit-for-bit.
+    const float terrain_height = world_system.GetTerrainHeightAt(world_pos.x, world_pos.z);
+    const u8 biome_id = world_system.BiomeIdAt(world_pos.x, world_pos.z);
+    const bool river_bank = world_system.RiverInfluenceAt(world_pos.x, world_pos.z) > 0.25f;
+    return world_system.SurfaceMaterialForColumn(world_pos.y, terrain_height, biome_id, river_bank);
+}
 
-    bool Near(float value, float target) {
-        return std::abs(value - target) <= kBoundaryEpsilon;
+struct AtomicTerrainMeshBuildStats {
+    std::atomic<std::size_t> jobs{0};
+    std::atomic<std::size_t> step1_jobs{0};
+    std::atomic<std::size_t> step2_jobs{0};
+    std::atomic<std::size_t> step4_jobs{0};
+    std::atomic<std::size_t> cells_visited{0};
+    std::atomic<std::size_t> active_cells{0};
+    std::atomic<std::size_t> vertices{0};
+    std::atomic<std::size_t> indices{0};
+    std::atomic<std::size_t> triangles{0};
+    std::atomic<std::uint64_t> elapsed_us{0};
+};
+
+AtomicTerrainMeshBuildStats g_terrain_mesh_build_stats;
+
+void RecordTerrainMeshBuildStats(int step,
+                                 std::size_t cells_visited,
+                                 std::size_t active_cells,
+                                 std::size_t vertices,
+                                 std::size_t indices,
+                                 std::uint64_t elapsed_us) {
+    g_terrain_mesh_build_stats.jobs.fetch_add(1, std::memory_order_relaxed);
+    if (step <= 1) {
+        g_terrain_mesh_build_stats.step1_jobs.fetch_add(1, std::memory_order_relaxed);
+    } else if (step == 2) {
+        g_terrain_mesh_build_stats.step2_jobs.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_terrain_mesh_build_stats.step4_jobs.fetch_add(1, std::memory_order_relaxed);
     }
+    g_terrain_mesh_build_stats.cells_visited.fetch_add(cells_visited, std::memory_order_relaxed);
+    g_terrain_mesh_build_stats.active_cells.fetch_add(active_cells, std::memory_order_relaxed);
+    g_terrain_mesh_build_stats.vertices.fetch_add(vertices, std::memory_order_relaxed);
+    g_terrain_mesh_build_stats.indices.fetch_add(indices, std::memory_order_relaxed);
+    g_terrain_mesh_build_stats.triangles.fetch_add(indices / 3u, std::memory_order_relaxed);
+    g_terrain_mesh_build_stats.elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
+}
 
-    bool HasFace(TerrainTransitionFaceMask mask, TerrainTransitionFace face) {
-        return (mask & static_cast<TerrainTransitionFaceMask>(face)) != 0u;
-    }
+constexpr float kBoundaryEpsilon = 1.0e-4f;
 
-    Vec3 TransitionFaceNormal(TerrainTransitionFace face) {
-        switch (face) {
+bool Near(float value, float target) {
+    return std::abs(value - target) <= kBoundaryEpsilon;
+}
+
+bool HasFace(TerrainTransitionFaceMask mask, TerrainTransitionFace face) {
+    return (mask & static_cast<TerrainTransitionFaceMask>(face)) != 0u;
+}
+
+Vec3 TransitionFaceNormal(TerrainTransitionFace face) {
+    switch (face) {
         case TransitionFaceMinX:
             return Vec3(-1.0f, 0.0f, 0.0f);
         case TransitionFaceMaxX:
@@ -277,12 +293,12 @@ namespace { // Anonymous namespace for internal implementation details
             return Vec3(0.0f, 0.0f, -1.0f);
         case TransitionFaceMaxZ:
             return Vec3(0.0f, 0.0f, 1.0f);
-        }
-        return Vec3(0.0f, 0.0f, 0.0f);
     }
+    return Vec3(0.0f, 0.0f, 0.0f);
+}
 
-    int TransitionFaceSlot(TerrainTransitionFace face) {
-        switch (face) {
+int TransitionFaceSlot(TerrainTransitionFace face) {
+    switch (face) {
         case TransitionFaceMinX:
             return 0;
         case TransitionFaceMaxX:
@@ -291,12 +307,12 @@ namespace { // Anonymous namespace for internal implementation details
             return 2;
         case TransitionFaceMaxZ:
             return 3;
-        }
-        return 0;
     }
+    return 0;
+}
 
-    bool VertexOnTransitionFace(const VoxelVertex& vertex, TerrainTransitionFace face) {
-        switch (face) {
+bool VertexOnTransitionFace(const VoxelVertex& vertex, TerrainTransitionFace face) {
+    switch (face) {
         case TransitionFaceMinX:
             return Near(vertex.position.x, 0.0f);
         case TransitionFaceMaxX:
@@ -305,83 +321,87 @@ namespace { // Anonymous namespace for internal implementation details
             return Near(vertex.position.z, 0.0f);
         case TransitionFaceMaxZ:
             return Near(vertex.position.z, static_cast<float>(CHUNK_SIZE_Z));
+    }
+    return false;
+}
+
+bool EdgeOnTransitionFace(const VoxelVertex& a, const VoxelVertex& b, TerrainTransitionFace face) {
+    return VertexOnTransitionFace(a, face) && VertexOnTransitionFace(b, face);
+}
+
+u64 TransitionEdgeKey(u32 a, u32 b, TerrainTransitionFace face) {
+    const u64 lo = static_cast<u64>(std::min(a, b));
+    const u64 hi = static_cast<u64>(std::max(a, b));
+    return (static_cast<u64>(face) << 56u) ^ (lo << 28u) ^ hi;
+}
+
+bool ExistingTransitionSkirtOnFace(const Chunk& chunk, TerrainTransitionFace face) {
+    const Vec3 face_normal = TransitionFaceNormal(face);
+    std::size_t stamped_vertices = 0;
+    for (const VoxelVertex& vertex : chunk.mesh_vertices) {
+        if (VertexOnTransitionFace(vertex, face) &&
+            std::abs(vertex.normal.x - face_normal.x) <= kBoundaryEpsilon &&
+            std::abs(vertex.normal.y - face_normal.y) <= kBoundaryEpsilon &&
+            std::abs(vertex.normal.z - face_normal.z) <= kBoundaryEpsilon) {
+            ++stamped_vertices;
         }
+    }
+    return stamped_vertices >= 2u;
+}
+
+bool AppendOrientedTriangle(std::vector<u32>& indices,
+                            const std::vector<VoxelVertex>& vertices,
+                            u32 a,
+                            u32 b,
+                            u32 c,
+                            const Vec3& desired_normal) {
+    if (a == b || b == c || c == a) {
         return false;
     }
 
-    bool EdgeOnTransitionFace(const VoxelVertex& a, const VoxelVertex& b, TerrainTransitionFace face) {
-        return VertexOnTransitionFace(a, face) && VertexOnTransitionFace(b, face);
+    Vec3 face_normal = glm::cross(vertices[b].position - vertices[a].position,
+                                  vertices[c].position - vertices[a].position);
+    if (glm::dot(face_normal, face_normal) <= 1.0e-10f) {
+        return false;
     }
 
-    u64 TransitionEdgeKey(u32 a, u32 b, TerrainTransitionFace face) {
-        const u64 lo = static_cast<u64>(std::min(a, b));
-        const u64 hi = static_cast<u64>(std::max(a, b));
-        return (static_cast<u64>(face) << 56u) ^ (lo << 28u) ^ hi;
+    if (glm::dot(face_normal, desired_normal) < 0.0f) {
+        std::swap(b, c);
     }
 
-    bool ExistingTransitionSkirtOnFace(const Chunk& chunk, TerrainTransitionFace face) {
-        const Vec3 face_normal = TransitionFaceNormal(face);
-        std::size_t stamped_vertices = 0;
-        for (const VoxelVertex& vertex : chunk.mesh_vertices) {
-            if (VertexOnTransitionFace(vertex, face) &&
-                std::abs(vertex.normal.x - face_normal.x) <= kBoundaryEpsilon &&
-                std::abs(vertex.normal.y - face_normal.y) <= kBoundaryEpsilon &&
-                std::abs(vertex.normal.z - face_normal.z) <= kBoundaryEpsilon)
-            {
-                ++stamped_vertices;
-            }
-        }
-        return stamped_vertices >= 2u;
-    }
+    indices.push_back(a);
+    indices.push_back(b);
+    indices.push_back(c);
+    return true;
+}
 
-    bool AppendOrientedTriangle(std::vector<u32>& indices, const std::vector<VoxelVertex>& vertices,
-                                u32 a, u32 b, u32 c, const Vec3& desired_normal) {
-        if (a == b || b == c || c == a) {
-            return false;
-        }
-
-        Vec3 face_normal = glm::cross(
-            vertices[b].position - vertices[a].position,
-            vertices[c].position - vertices[a].position
-        );
-        if (glm::dot(face_normal, face_normal) <= 1.0e-10f) {
-            return false;
-        }
-
-        if (glm::dot(face_normal, desired_normal) < 0.0f) {
-            std::swap(b, c);
-        }
-
-        indices.push_back(a);
-        indices.push_back(b);
-        indices.push_back(c);
-        return true;
-    }
-
-    Vec3 TransitionFacePosition(TerrainTransitionFace face, int major, int y) {
-        switch (face) {
+Vec3 TransitionFacePosition(TerrainTransitionFace face, int major, int y) {
+    switch (face) {
         case TransitionFaceMinX:
             return Vec3(0.0f, static_cast<float>(y), static_cast<float>(major));
         case TransitionFaceMaxX:
-            return Vec3(static_cast<float>(CHUNK_SIZE_X), static_cast<float>(y), static_cast<float>(major));
+            return Vec3(
+                static_cast<float>(CHUNK_SIZE_X), static_cast<float>(y), static_cast<float>(major));
         case TransitionFaceMinZ:
             return Vec3(static_cast<float>(major), static_cast<float>(y), 0.0f);
         case TransitionFaceMaxZ:
-            return Vec3(static_cast<float>(major), static_cast<float>(y), static_cast<float>(CHUNK_SIZE_Z));
-        }
-        return Vec3(0.0f);
+            return Vec3(
+                static_cast<float>(major), static_cast<float>(y), static_cast<float>(CHUNK_SIZE_Z));
     }
+    return Vec3(0.0f);
+}
 
-    // Terrain density at a lattice point on a horizontal chunk face. A resident
-    // full SDF is authoritative, including its cave/edit crossings, so use it
-    // first. Empty-SDF coarse chunks retain the heightmap-derived fallback.
-    bool ReadTransitionFaceTerrainDensity(const Chunk& chunk, TerrainTransitionFace face, int major, int y, float& value) {
-        if (major < 0 || major > CHUNK_SIZE_X || y < 0 || y > CHUNK_SIZE_Y) {
-            return false;
-        }
-        int x = 0;
-        int z = 0;
-        switch (face) {
+// Terrain density at a lattice point on a horizontal chunk face. A resident
+// full SDF is authoritative, including its cave/edit crossings, so use it
+// first. Empty-SDF coarse chunks retain the heightmap-derived fallback.
+bool ReadTransitionFaceTerrainDensity(
+    const Chunk& chunk, TerrainTransitionFace face, int major, int y, float& value) {
+    if (major < 0 || major > CHUNK_SIZE_X || y < 0 || y > CHUNK_SIZE_Y) {
+        return false;
+    }
+    int x = 0;
+    int z = 0;
+    switch (face) {
         case TransitionFaceMinX:
             x = 0;
             z = major;
@@ -398,306 +418,316 @@ namespace { // Anonymous namespace for internal implementation details
             x = major;
             z = CHUNK_SIZE_Z;
             break;
-        }
-        constexpr std::size_t kSdfSizeX = CHUNK_SIZE_X + 1;
-        constexpr std::size_t kFullLatticeCount =
-            kSdfSizeX * static_cast<std::size_t>(CHUNK_SIZE_Y + 1) * static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
-        const std::size_t sdf_index = static_cast<std::size_t>(x)
-            + static_cast<std::size_t>(y) * kSdfSizeX
-            + static_cast<std::size_t>(z) * kSdfSizeX * static_cast<std::size_t>(CHUNK_SIZE_Y + 1);
-        if (chunk.sdf_data.size() == kFullLatticeCount) {
-            value = chunk.sdf_data[sdf_index];
-            return true;
-        }
-
-        const std::size_t heightmap_index = static_cast<std::size_t>(x)
-            + static_cast<std::size_t>(z) * kSdfSizeX;
-        if (heightmap_index >= chunk.heightmap_data.size()) {
-            return false;
-        }
-        const float world_y = static_cast<float>(chunk.get_coords().y * CHUNK_SIZE_Y + y);
-        value = world_y - chunk.heightmap_data[heightmap_index];
+    }
+    constexpr std::size_t kSdfSizeX = CHUNK_SIZE_X + 1;
+    constexpr std::size_t kFullLatticeCount = kSdfSizeX *
+                                              static_cast<std::size_t>(CHUNK_SIZE_Y + 1) *
+                                              static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
+    const std::size_t sdf_index =
+        static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * kSdfSizeX +
+        static_cast<std::size_t>(z) * kSdfSizeX * static_cast<std::size_t>(CHUNK_SIZE_Y + 1);
+    if (chunk.sdf_data.size() == kFullLatticeCount) {
+        value = chunk.sdf_data[sdf_index];
         return true;
     }
 
-    bool HasCompleteWaterGrid(const Chunk& chunk, int resolution) {
-        if (!chunk.has_water_sim.load(std::memory_order_relaxed) || resolution <= 1) {
-            return false;
+    const std::size_t heightmap_index =
+        static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * kSdfSizeX;
+    if (heightmap_index >= chunk.heightmap_data.size()) {
+        return false;
+    }
+    const float world_y = static_cast<float>(chunk.get_coords().y * CHUNK_SIZE_Y + y);
+    value = world_y - chunk.heightmap_data[heightmap_index];
+    return true;
+}
+
+bool HasCompleteWaterGrid(const Chunk& chunk, int resolution) {
+    if (!chunk.has_water_sim.load(std::memory_order_relaxed) || resolution <= 1) {
+        return false;
+    }
+    const std::size_t cell_count =
+        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    return chunk.water_level_data.size() >= cell_count;
+}
+
+float SampleChunkWaterLevel(const Chunk& chunk, float world_x, float world_z, int resolution) {
+    const Vec3 base_pos = Vec3(chunk.get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z));
+    const float local_x = world_x - base_pos.x;
+    const float local_z = world_z - base_pos.z;
+
+    const float sim_xf =
+        (local_x / static_cast<float>(CHUNK_SIZE_X)) * static_cast<float>(resolution) - 0.5f;
+    const float sim_zf =
+        (local_z / static_cast<float>(CHUNK_SIZE_Z)) * static_cast<float>(resolution) - 0.5f;
+
+    int x0 = static_cast<int>(std::floor(sim_xf));
+    int z0 = static_cast<int>(std::floor(sim_zf));
+    x0 = std::clamp(x0, 0, resolution - 2);
+    z0 = std::clamp(z0, 0, resolution - 2);
+
+    const float tx = std::clamp(sim_xf - static_cast<float>(x0), 0.0f, 1.0f);
+    const float tz = std::clamp(sim_zf - static_cast<float>(z0), 0.0f, 1.0f);
+
+    const float h00 = chunk.water_level_data[static_cast<std::size_t>(z0 * resolution + x0)];
+    const float h10 = chunk.water_level_data[static_cast<std::size_t>(z0 * resolution + (x0 + 1))];
+    const float h01 = chunk.water_level_data[static_cast<std::size_t>((z0 + 1) * resolution + x0)];
+    const float h11 =
+        chunk.water_level_data[static_cast<std::size_t>((z0 + 1) * resolution + (x0 + 1))];
+
+    const float h_z0 = glm::mix(h00, h10, tx);
+    const float h_z1 = glm::mix(h01, h11, tx);
+    return glm::mix(h_z0, h_z1, tz);
+}
+
+u32 FallbackTransitionMaterial(const Chunk& chunk, TerrainTransitionFace face) {
+    for (const VoxelVertex& vertex : chunk.mesh_vertices) {
+        if (VertexOnTransitionFace(vertex, face)) {
+            return vertex.material_id;
         }
-        const std::size_t cell_count = static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
-        return chunk.water_level_data.size() >= cell_count;
+    }
+    return static_cast<u32>(MaterialType::Stone);
+}
+
+void AppendFallbackFacePatches(Chunk& chunk,
+                               int step,
+                               TerrainTransitionFace face,
+                               TerrainTransitionSkirtStats& stats) {
+    constexpr std::size_t kFullLatticeCount =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    if (chunk.heightmap_data.empty() && chunk.sdf_data.size() != kFullLatticeCount) {
+        return;
     }
 
-    float SampleChunkWaterLevel(const Chunk& chunk, float world_x, float world_z, int resolution) {
-        const Vec3 base_pos = Vec3(chunk.get_coords() * IVec3(CHUNK_SIZE_X, 0, CHUNK_SIZE_Z));
-        const float local_x = world_x - base_pos.x;
-        const float local_z = world_z - base_pos.z;
-
-        const float sim_xf = (local_x / static_cast<float>(CHUNK_SIZE_X)) * static_cast<float>(resolution) - 0.5f;
-        const float sim_zf = (local_z / static_cast<float>(CHUNK_SIZE_Z)) * static_cast<float>(resolution) - 0.5f;
-
-        int x0 = static_cast<int>(std::floor(sim_xf));
-        int z0 = static_cast<int>(std::floor(sim_zf));
-        x0 = std::clamp(x0, 0, resolution - 2);
-        z0 = std::clamp(z0, 0, resolution - 2);
-
-        const float tx = std::clamp(sim_xf - static_cast<float>(x0), 0.0f, 1.0f);
-        const float tz = std::clamp(sim_zf - static_cast<float>(z0), 0.0f, 1.0f);
-
-        const float h00 = chunk.water_level_data[static_cast<std::size_t>(z0 * resolution + x0)];
-        const float h10 = chunk.water_level_data[static_cast<std::size_t>(z0 * resolution + (x0 + 1))];
-        const float h01 = chunk.water_level_data[static_cast<std::size_t>((z0 + 1) * resolution + x0)];
-        const float h11 = chunk.water_level_data[static_cast<std::size_t>((z0 + 1) * resolution + (x0 + 1))];
-
-        const float h_z0 = glm::mix(h00, h10, tx);
-        const float h_z1 = glm::mix(h01, h11, tx);
-        return glm::mix(h_z0, h_z1, tz);
-    }
-
-    u32 FallbackTransitionMaterial(const Chunk& chunk, TerrainTransitionFace face) {
-        for (const VoxelVertex& vertex : chunk.mesh_vertices) {
-            if (VertexOnTransitionFace(vertex, face)) {
-                return vertex.material_id;
+    const int sample_step = std::max(1, step);
+    // Patch vertices carry the outward face normal for the same reason as
+    // edge skirts: idempotency detection and wall-correct lighting.
+    const Vec3 face_normal = TransitionFaceNormal(face);
+    const u32 material_id = FallbackTransitionMaterial(chunk, face);
+    for (int major = 0; major + sample_step <= CHUNK_SIZE_X; major += sample_step) {
+        for (int y = 0; y + sample_step <= CHUNK_SIZE_Y; y += sample_step) {
+            float v00 = 0.0f;
+            float v10 = 0.0f;
+            float v01 = 0.0f;
+            float v11 = 0.0f;
+            if (!ReadTransitionFaceTerrainDensity(chunk, face, major, y, v00) ||
+                !ReadTransitionFaceTerrainDensity(chunk, face, major + sample_step, y, v10) ||
+                !ReadTransitionFaceTerrainDensity(chunk, face, major, y + sample_step, v01) ||
+                !ReadTransitionFaceTerrainDensity(
+                    chunk, face, major + sample_step, y + sample_step, v11)) {
+                continue;
             }
-        }
-        return static_cast<u32>(MaterialType::Stone);
-    }
 
-    void AppendFallbackFacePatches(Chunk& chunk, int step, TerrainTransitionFace face, TerrainTransitionSkirtStats& stats) {
-        constexpr std::size_t kFullLatticeCount =
-            static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-        if (chunk.heightmap_data.empty() && chunk.sdf_data.size() != kFullLatticeCount) {
-            return;
-        }
-
-        const int sample_step = std::max(1, step);
-        // Patch vertices carry the outward face normal for the same reason as
-        // edge skirts: idempotency detection and wall-correct lighting.
-        const Vec3 face_normal = TransitionFaceNormal(face);
-        const u32 material_id = FallbackTransitionMaterial(chunk, face);
-        for (int major = 0; major + sample_step <= CHUNK_SIZE_X; major += sample_step) {
-            for (int y = 0; y + sample_step <= CHUNK_SIZE_Y; y += sample_step) {
-                float v00 = 0.0f;
-                float v10 = 0.0f;
-                float v01 = 0.0f;
-                float v11 = 0.0f;
-                if (!ReadTransitionFaceTerrainDensity(chunk, face, major, y, v00) ||
-                    !ReadTransitionFaceTerrainDensity(chunk, face, major + sample_step, y, v10) ||
-                    !ReadTransitionFaceTerrainDensity(chunk, face, major, y + sample_step, v01) ||
-                    !ReadTransitionFaceTerrainDensity(chunk, face, major + sample_step, y + sample_step, v11))
-                {
-                    continue;
-                }
-
-                const float min_density = std::min(std::min(v00, v10), std::min(v01, v11));
-                const float max_density = std::max(std::max(v00, v10), std::max(v01, v11));
-                const bool crosses_surface = min_density <= 0.0f && max_density >= 0.0f;
-                bool near_surface =
-                    std::abs(v00) <= 0.75f || std::abs(v10) <= 0.75f ||
-                    std::abs(v01) <= 0.75f || std::abs(v11) <= 0.75f;
-                for (int local_major = 0; local_major <= sample_step && !near_surface; ++local_major) {
-                    for (int local_y = 0; local_y <= sample_step; ++local_y) {
-                        float sample = 0.0f;
-                        if (ReadTransitionFaceTerrainDensity(chunk, face, major + local_major, y + local_y, sample) &&
-                            std::abs(sample) <= 0.75f)
-                        {
-                            near_surface = true;
-                            break;
-                        }
+            const float min_density = std::min(std::min(v00, v10), std::min(v01, v11));
+            const float max_density = std::max(std::max(v00, v10), std::max(v01, v11));
+            const bool crosses_surface = min_density <= 0.0f && max_density >= 0.0f;
+            bool near_surface = std::abs(v00) <= 0.75f || std::abs(v10) <= 0.75f ||
+                                std::abs(v01) <= 0.75f || std::abs(v11) <= 0.75f;
+            for (int local_major = 0; local_major <= sample_step && !near_surface; ++local_major) {
+                for (int local_y = 0; local_y <= sample_step; ++local_y) {
+                    float sample = 0.0f;
+                    if (ReadTransitionFaceTerrainDensity(
+                            chunk, face, major + local_major, y + local_y, sample) &&
+                        std::abs(sample) <= 0.75f) {
+                        near_surface = true;
+                        break;
                     }
                 }
-                if (!crosses_surface && !near_surface) {
-                    continue;
-                }
-
-                const u32 base = static_cast<u32>(chunk.mesh_vertices.size());
-                chunk.mesh_vertices.push_back({TransitionFacePosition(face, major, y), face_normal, material_id});
-                chunk.mesh_vertices.push_back({TransitionFacePosition(face, major + sample_step, y), face_normal, material_id});
-                chunk.mesh_vertices.push_back({TransitionFacePosition(face, major + sample_step, y + sample_step), face_normal, material_id});
-                chunk.mesh_vertices.push_back({TransitionFacePosition(face, major, y + sample_step), face_normal, material_id});
-
-                const std::size_t index_count_before = chunk.mesh_indices.size();
-                const bool first = AppendOrientedTriangle(chunk.mesh_indices, chunk.mesh_vertices, base, base + 1u, base + 2u, face_normal);
-                const bool second = AppendOrientedTriangle(chunk.mesh_indices, chunk.mesh_vertices, base, base + 2u, base + 3u, face_normal);
-                if (!first && !second) {
-                    chunk.mesh_vertices.pop_back();
-                    chunk.mesh_vertices.pop_back();
-                    chunk.mesh_vertices.pop_back();
-                    chunk.mesh_vertices.pop_back();
-                    continue;
-                }
-
-                ++stats.boundary_edges;
-                stats.vertices_added += 4u;
-                stats.indices_added += chunk.mesh_indices.size() - index_count_before;
-                stats.triangles_added += (first ? 1u : 0u) + (second ? 1u : 0u);
             }
+            if (!crosses_surface && !near_surface) {
+                continue;
+            }
+
+            const u32 base = static_cast<u32>(chunk.mesh_vertices.size());
+            chunk.mesh_vertices.push_back(
+                {TransitionFacePosition(face, major, y), face_normal, material_id});
+            chunk.mesh_vertices.push_back(
+                {TransitionFacePosition(face, major + sample_step, y), face_normal, material_id});
+            chunk.mesh_vertices.push_back(
+                {TransitionFacePosition(face, major + sample_step, y + sample_step),
+                 face_normal,
+                 material_id});
+            chunk.mesh_vertices.push_back(
+                {TransitionFacePosition(face, major, y + sample_step), face_normal, material_id});
+
+            const std::size_t index_count_before = chunk.mesh_indices.size();
+            const bool first = AppendOrientedTriangle(
+                chunk.mesh_indices, chunk.mesh_vertices, base, base + 1u, base + 2u, face_normal);
+            const bool second = AppendOrientedTriangle(
+                chunk.mesh_indices, chunk.mesh_vertices, base, base + 2u, base + 3u, face_normal);
+            if (!first && !second) {
+                chunk.mesh_vertices.pop_back();
+                chunk.mesh_vertices.pop_back();
+                chunk.mesh_vertices.pop_back();
+                chunk.mesh_vertices.pop_back();
+                continue;
+            }
+
+            ++stats.boundary_edges;
+            stats.vertices_added += 4u;
+            stats.indices_added += chunk.mesh_indices.size() - index_count_before;
+            stats.triangles_added += (first ? 1u : 0u) + (second ? 1u : 0u);
+        }
+    }
+}
+
+void GenerateCoarseHeightfieldTerrain(const Systems::SHIELD_WorldSystem& world_system,
+                                      Chunk& chunk,
+                                      int sample_step,
+                                      const std::chrono::steady_clock::time_point& build_start) {
+    const IVec3 chunk_base_pos =
+        chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    const int cells_x = CHUNK_SIZE_X / sample_step;
+    const int cells_z = CHUNK_SIZE_Z / sample_step;
+    const int vertices_x = cells_x + 1;
+    const int vertices_z = cells_z + 1;
+
+    std::vector<VoxelVertex> vertices;
+    std::vector<u32> indices;
+    vertices.reserve(static_cast<std::size_t>(vertices_x * vertices_z));
+    indices.reserve(static_cast<std::size_t>(cells_x * cells_z * 6));
+
+    // when the chunk already carries its surface-band
+    // heightmap (generated by GenerateChunkData for this same step) AND the
+    // world has no rivers, the per-vertex height is BYTE-IDENTICAL to
+    // GetTerrainHeightAtCoarse - the coarse grid points (local = g*step) are
+    // exactly the heightmap lattice, and for !rivers_enabled the coarse
+    // carve anti-alias is a no-op (GetTerrainHeightAtCoarse just forwards to
+    // GetTerrainHeightAt, whose bytes the heightmap already holds, proven by
+    // the batch-vs-scalar parity gtest). Reading the cached heightmap then
+    // skips one full per-column shaped-noise re-evaluation per vertex (the
+    // dominant meshing cost on shaped presets). River worlds and chunks with
+    // no heightmap keep the analytic coarse sampler unchanged.
+    const int hm_size_x = CHUNK_SIZE_X + 1;
+    const bool use_cached_heightmap =
+        !world_system.get_params().rivers_enabled &&
+        chunk.heightmap_data.size() ==
+            static_cast<std::size_t>(hm_size_x) * static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
+
+    for (int gz = 0; gz < vertices_z; ++gz) {
+        const int local_z = std::min(CHUNK_SIZE_Z, gz * sample_step);
+        const float world_z = static_cast<float>(chunk_base_pos.z + local_z);
+        for (int gx = 0; gx < vertices_x; ++gx) {
+            const int local_x = std::min(CHUNK_SIZE_X, gx * sample_step);
+            const float world_x = static_cast<float>(chunk_base_pos.x + local_x);
+            // coarse-LOD river-carve anti-alias
+            // (matches the far tile sampler) so the live coarse ring does
+            // not aliased-notch a narrow channel into a sliver triangle.
+            const float terrain_height =
+                use_cached_heightmap
+                    ? chunk.heightmap_data[static_cast<std::size_t>(local_x) +
+                                           static_cast<std::size_t>(local_z) *
+                                               static_cast<std::size_t>(hm_size_x)]
+                    : world_system.GetTerrainHeightAtCoarse(world_x, world_z, sample_step);
+            const float local_y = terrain_height - static_cast<float>(chunk_base_pos.y);
+            // on the cached-heightmap (non-river) path
+            // the surface height is already known, so classify the skin
+            // material WITHOUT a second shaped-height re-evaluation. Returns
+            // bytes identical to GetTerrainMaterialAt for a surface vertex
+            // (proven equivalent in SurfaceVertexMaterial). The analytic
+            // fallback keeps the exact prior call for river / no-heightmap
+            // chunks.
+            const MaterialType material =
+                use_cached_heightmap
+                    ? world_system.SurfaceVertexMaterial(world_x, world_z, terrain_height)
+                    : GetTerrainMaterialAt(world_system,
+                                           Vec3(world_x, terrain_height - 0.1f, world_z));
+            vertices.push_back(
+                {Vec3(static_cast<float>(local_x), local_y, static_cast<float>(local_z)),
+                 Vec3(0.0f),
+                 static_cast<u32>(material)});
         }
     }
 
-    void GenerateCoarseHeightfieldTerrain(
-        const Systems::SHIELD_WorldSystem& world_system,
-        Chunk& chunk,
-        int sample_step,
-        const std::chrono::steady_clock::time_point& build_start)
-    {
-        const IVec3 chunk_base_pos = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-        const int cells_x = CHUNK_SIZE_X / sample_step;
-        const int cells_z = CHUNK_SIZE_Z / sample_step;
-        const int vertices_x = cells_x + 1;
-        const int vertices_z = cells_z + 1;
+    auto vertex_index = [vertices_x](int gx, int gz) {
+        return static_cast<u32>(gz * vertices_x + gx);
+    };
 
-        std::vector<VoxelVertex> vertices;
-        std::vector<u32> indices;
-        vertices.reserve(static_cast<std::size_t>(vertices_x * vertices_z));
-        indices.reserve(static_cast<std::size_t>(cells_x * cells_z * 6));
+    std::size_t cells_visited = 0;
+    std::size_t active_cells = 0;
+    for (int gz = 0; gz < cells_z; ++gz) {
+        for (int gx = 0; gx < cells_x; ++gx) {
+            ++cells_visited;
+            const u32 i00 = vertex_index(gx, gz);
+            const u32 i10 = vertex_index(gx + 1, gz);
+            const u32 i01 = vertex_index(gx, gz + 1);
+            const u32 i11 = vertex_index(gx + 1, gz + 1);
+            const float cell_surface_y = (vertices[i00].position.y + vertices[i10].position.y +
+                                          vertices[i01].position.y + vertices[i11].position.y) *
+                                         0.25f;
 
-        // T-I4-DR-shaping-perf: when the chunk already carries its surface-band
-        // heightmap (generated by GenerateChunkData for this same step) AND the
-        // world has no rivers, the per-vertex height is BYTE-IDENTICAL to
-        // GetTerrainHeightAtCoarse - the coarse grid points (local = g*step) are
-        // exactly the heightmap lattice, and for !rivers_enabled the coarse
-        // carve anti-alias is a no-op (GetTerrainHeightAtCoarse just forwards to
-        // GetTerrainHeightAt, whose bytes the heightmap already holds, proven by
-        // the batch-vs-scalar parity gtest). Reading the cached heightmap then
-        // skips one full per-column shaped-noise re-evaluation per vertex (the
-        // dominant meshing cost on shaped presets). River worlds and chunks with
-        // no heightmap keep the analytic coarse sampler unchanged.
-        const int hm_size_x = CHUNK_SIZE_X + 1;
-        const bool use_cached_heightmap =
-            !world_system.get_params().rivers_enabled &&
-            chunk.heightmap_data.size() ==
-                static_cast<std::size_t>(hm_size_x) * static_cast<std::size_t>(CHUNK_SIZE_Z + 1);
-
-        for (int gz = 0; gz < vertices_z; ++gz) {
-            const int local_z = std::min(CHUNK_SIZE_Z, gz * sample_step);
-            const float world_z = static_cast<float>(chunk_base_pos.z + local_z);
-            for (int gx = 0; gx < vertices_x; ++gx) {
-                const int local_x = std::min(CHUNK_SIZE_X, gx * sample_step);
-                const float world_x = static_cast<float>(chunk_base_pos.x + local_x);
-                // T-I4-DR-river-seam-sliver: coarse-LOD river-carve anti-alias
-                // (matches the far tile sampler) so the live coarse ring does
-                // not aliased-notch a narrow channel into a sliver triangle.
-                const float terrain_height =
-                    use_cached_heightmap
-                        ? chunk.heightmap_data[static_cast<std::size_t>(local_x) +
-                              static_cast<std::size_t>(local_z) * static_cast<std::size_t>(hm_size_x)]
-                        : world_system.GetTerrainHeightAtCoarse(world_x, world_z, sample_step);
-                const float local_y = terrain_height - static_cast<float>(chunk_base_pos.y);
-                // T-I4-DR-shaping-perf: on the cached-heightmap (non-river) path
-                // the surface height is already known, so classify the skin
-                // material WITHOUT a second shaped-height re-evaluation. Returns
-                // bytes identical to GetTerrainMaterialAt for a surface vertex
-                // (proven equivalent in SurfaceVertexMaterial). The analytic
-                // fallback keeps the exact prior call for river / no-heightmap
-                // chunks.
-                const MaterialType material =
-                    use_cached_heightmap
-                        ? world_system.SurfaceVertexMaterial(world_x, world_z, terrain_height)
-                        : GetTerrainMaterialAt(
-                              world_system,
-                              Vec3(world_x, terrain_height - 0.1f, world_z));
-                vertices.push_back({
-                    Vec3(static_cast<float>(local_x), local_y, static_cast<float>(local_z)),
-                    Vec3(0.0f),
-                    static_cast<u32>(material)
-                });
+            if (cell_surface_y < 0.0f || cell_surface_y > static_cast<float>(CHUNK_SIZE_Y)) {
+                continue;
             }
+
+            indices.push_back(i00);
+            indices.push_back(i11);
+            indices.push_back(i10);
+            indices.push_back(i00);
+            indices.push_back(i01);
+            indices.push_back(i11);
+            ++active_cells;
         }
-
-        auto vertex_index = [vertices_x](int gx, int gz) {
-            return static_cast<u32>(gz * vertices_x + gx);
-        };
-
-        std::size_t cells_visited = 0;
-        std::size_t active_cells = 0;
-        for (int gz = 0; gz < cells_z; ++gz) {
-            for (int gx = 0; gx < cells_x; ++gx) {
-                ++cells_visited;
-                const u32 i00 = vertex_index(gx, gz);
-                const u32 i10 = vertex_index(gx + 1, gz);
-                const u32 i01 = vertex_index(gx, gz + 1);
-                const u32 i11 = vertex_index(gx + 1, gz + 1);
-                const float cell_surface_y =
-                    (vertices[i00].position.y + vertices[i10].position.y +
-                     vertices[i01].position.y + vertices[i11].position.y) * 0.25f;
-
-                if (cell_surface_y < 0.0f || cell_surface_y > static_cast<float>(CHUNK_SIZE_Y)) {
-                    continue;
-                }
-
-                indices.push_back(i00);
-                indices.push_back(i11);
-                indices.push_back(i10);
-                indices.push_back(i00);
-                indices.push_back(i01);
-                indices.push_back(i11);
-                ++active_cells;
-            }
-        }
-
-        for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
-            VoxelVertex& v0 = vertices[indices[i]];
-            VoxelVertex& v1 = vertices[indices[i + 1u]];
-            VoxelVertex& v2 = vertices[indices[i + 2u]];
-            const Vec3 face_normal = glm::cross(v1.position - v0.position, v2.position - v0.position);
-            v0.normal += face_normal;
-            v1.normal += face_normal;
-            v2.normal += face_normal;
-        }
-
-        for (VoxelVertex& vertex : vertices) {
-            if (glm::dot(vertex.normal, vertex.normal) > 0.0f) {
-                vertex.normal = glm::normalize(vertex.normal);
-            } else {
-                vertex.normal = Vec3(0.0f, 1.0f, 0.0f);
-            }
-        }
-
-        // T-I4-18: remap is pure index-addressed scratch (never escapes), so it
-        // comes from the reset-per-job arena. Value-set to 0xFFFFFFFF, the exact
-        // sentinel the prior std::vector(count, -1) used - byte-identical compaction.
-        ArenaSpan<u32> remap = ArenaAlloc<u32>(vertices.size(), static_cast<u32>(-1));
-        std::vector<VoxelVertex> compact_vertices;
-        compact_vertices.reserve(vertices.size());
-        for (u32& index : indices) {
-            if (remap[index] == static_cast<u32>(-1)) {
-                remap[index] = static_cast<u32>(compact_vertices.size());
-                compact_vertices.push_back(vertices[index]);
-            }
-            index = remap[index];
-        }
-
-        chunk.mesh_vertices = std::move(compact_vertices);
-        chunk.mesh_indices = std::move(indices);
-        const auto elapsed_us = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - build_start).count()
-        );
-        RecordTerrainMeshBuildStats(
-            sample_step,
-            cells_visited,
-            active_cells,
-            chunk.mesh_vertices.size(),
-            chunk.mesh_indices.size(),
-            elapsed_us
-        );
     }
+
+    for (std::size_t i = 0; i + 2u < indices.size(); i += 3u) {
+        VoxelVertex& v0 = vertices[indices[i]];
+        VoxelVertex& v1 = vertices[indices[i + 1u]];
+        VoxelVertex& v2 = vertices[indices[i + 2u]];
+        const Vec3 face_normal = glm::cross(v1.position - v0.position, v2.position - v0.position);
+        v0.normal += face_normal;
+        v1.normal += face_normal;
+        v2.normal += face_normal;
+    }
+
+    for (VoxelVertex& vertex : vertices) {
+        if (glm::dot(vertex.normal, vertex.normal) > 0.0f) {
+            vertex.normal = glm::normalize(vertex.normal);
+        } else {
+            vertex.normal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+    }
+
+    // remap is pure index-addressed scratch (never escapes), so it
+    // comes from the reset-per-job arena. Value-set to 0xFFFFFFFF, the exact
+    // sentinel the prior std::vector(count, -1) used - byte-identical compaction.
+    ArenaSpan<u32> remap = ArenaAlloc<u32>(vertices.size(), static_cast<u32>(-1));
+    std::vector<VoxelVertex> compact_vertices;
+    compact_vertices.reserve(vertices.size());
+    for (u32& index : indices) {
+        if (remap[index] == static_cast<u32>(-1)) {
+            remap[index] = static_cast<u32>(compact_vertices.size());
+            compact_vertices.push_back(vertices[index]);
+        }
+        index = remap[index];
+    }
+
+    chunk.mesh_vertices = std::move(compact_vertices);
+    chunk.mesh_indices = std::move(indices);
+    const auto elapsed_us =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - build_start)
+                                       .count());
+    RecordTerrainMeshBuildStats(sample_step,
+                                cells_visited,
+                                active_cells,
+                                chunk.mesh_vertices.size(),
+                                chunk.mesh_indices.size(),
+                                elapsed_us);
+}
 
 } // anonymous namespace
 
-MaterialType TerrainSurfaceMaterialAt(
-    const Systems::SHIELD_WorldSystem& world_system,
-    float world_x,
-    float world_z,
-    float terrain_height) {
+MaterialType TerrainSurfaceMaterialAt(const Systems::SHIELD_WorldSystem& world_system,
+                                      float world_x,
+                                      float world_z,
+                                      float terrain_height) {
     // Identical sampling to GenerateCoarseHeightfieldTerrain: just below the
     // surface so the classifier never lands on Air/Water.
     return GetTerrainMaterialAt(world_system, Vec3(world_x, terrain_height - 0.1f, world_z));
 }
 
-FarLodRegionMeshStats GenerateFarLodRegionMesh(
-    const World::FarLodTile& tile,
-    World::FarLodRegionMesh& out_mesh) {
+FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
+                                               World::FarLodRegionMesh& out_mesh) {
     FarLodRegionMeshStats stats;
     out_mesh.vertices.clear();
     out_mesh.indices.clear();
@@ -706,8 +736,7 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     if ((tile.tier != World::FarLodTier::F1 && tile.tier != World::FarLodTier::F2) ||
         n != World::FarLodSamplesPerSide(tile.tier) ||
         tile.height_q.size() != tile.sample_count() ||
-        tile.material.size() != tile.sample_count() ||
-        tile.flags.size() != tile.sample_count()) {
+        tile.material.size() != tile.sample_count() || tile.flags.size() != tile.sample_count()) {
         return stats;
     }
 
@@ -716,7 +745,8 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     std::vector<u32>& indices = out_mesh.indices;
     const std::size_t surface_vertex_count = tile.sample_count();
     vertices.reserve(surface_vertex_count + static_cast<std::size_t>(4u * (n - 1u)) * 4u);
-    indices.reserve(static_cast<std::size_t>(n - 1u) * (n - 1u) * 6u + static_cast<std::size_t>(4u * (n - 1u)) * 6u);
+    indices.reserve(static_cast<std::size_t>(n - 1u) * (n - 1u) * 6u +
+                    static_cast<std::size_t>(4u * (n - 1u)) * 6u);
 
     // The no-brick path below deliberately remains byte-for-byte the original
     // heightfield mesher. Once a tile carries an SDF brick, the brick's chunk
@@ -797,11 +827,13 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             const int base_x = static_cast<int>(brick.local_chunk_x) * CHUNK_SIZE_X;
             const int base_y = brick.chunk_y * CHUNK_SIZE_Y;
             const int base_z = static_cast<int>(brick.local_chunk_z) * CHUNK_SIZE_Z;
-            SdfColumnStack& stack = sdf_column_stacks[static_cast<std::size_t>(brick.local_chunk_x) +
-                static_cast<std::size_t>(brick.local_chunk_z) * 32u];
+            SdfColumnStack& stack =
+                sdf_column_stacks[static_cast<std::size_t>(brick.local_chunk_x) +
+                                  static_cast<std::size_t>(brick.local_chunk_z) * 32u];
             if (!stack.present) {
                 stack.present = true;
-                stack.authoritative = brick.source_kind == World::FarLodBrickSourceKind::Authoritative;
+                stack.authoritative =
+                    brick.source_kind == World::FarLodBrickSourceKind::Authoritative;
                 stack.min_y = base_y;
                 stack.max_y = base_y;
                 if (stack.authoritative) {
@@ -841,22 +873,22 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             for (u32 local_z = 0; local_z < side; ++local_z) {
                 for (u32 local_y = 0; local_y < side; ++local_y) {
                     for (u32 local_x = 0; local_x < side; ++local_x) {
-                        const std::size_t sample_index = payload_base + static_cast<std::size_t>(local_x) +
+                        const std::size_t sample_index =
+                            payload_base + static_cast<std::size_t>(local_x) +
                             static_cast<std::size_t>(local_y) * side +
                             static_cast<std::size_t>(local_z) * side * side;
                         const i16 density_q = tile.sdf_density_q[sample_index];
                         if (density_q == World::kFarLodSdfInvalid) {
                             return stats;
                         }
-                        const SdfSampleKey key{
-                            base_x + static_cast<int>(local_x) * sdf_step,
-                            base_y + static_cast<int>(local_y) * sdf_step,
-                            base_z + static_cast<int>(local_z) * sdf_step
-                        };
-                        const SdfSample sample{World::DequantizeFarLodSdf(density_q), tile.sdf_material[sample_index]};
+                        const SdfSampleKey key{base_x + static_cast<int>(local_x) * sdf_step,
+                                               base_y + static_cast<int>(local_y) * sdf_step,
+                                               base_z + static_cast<int>(local_z) * sdf_step};
+                        const SdfSample sample{World::DequantizeFarLodSdf(density_q),
+                                               tile.sdf_material[sample_index]};
                         const auto [it, inserted] = sdf_samples.emplace(key, sample);
-                        if (!inserted &&
-                            (it->second.density != sample.density || it->second.material != sample.material)) {
+                        if (!inserted && (it->second.density != sample.density ||
+                                          it->second.material != sample.material)) {
                             // Shared brick faces are a single world-aligned
                             // lattice. Unequal duplicates are corrupt authority,
                             // never an invitation to choose one side.
@@ -870,8 +902,9 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         bool have_authoritative_column = false;
         for (int column_z = 0; column_z < 32; ++column_z) {
             for (int column_x = 0; column_x < 32; ++column_x) {
-                const SdfColumnStack& source = sdf_column_stacks[static_cast<std::size_t>(column_x) +
-                    static_cast<std::size_t>(column_z) * 32u];
+                const SdfColumnStack& source =
+                    sdf_column_stacks[static_cast<std::size_t>(column_x) +
+                                      static_cast<std::size_t>(column_z) * 32u];
                 if (!source.authoritative) {
                     continue;
                 }
@@ -900,8 +933,10 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                                     tile.height_q[sample_x + sample_z * n]);
                                 const int surface_chunk_y = static_cast<int>(
                                     std::floor(height / static_cast<float>(CHUNK_SIZE_Y)));
-                                required_min_chunk_y = std::min(required_min_chunk_y, surface_chunk_y - 1);
-                                required_max_chunk_y = std::max(required_max_chunk_y, surface_chunk_y + 1);
+                                required_min_chunk_y =
+                                    std::min(required_min_chunk_y, surface_chunk_y - 1);
+                                required_max_chunk_y =
+                                    std::max(required_max_chunk_y, surface_chunk_y + 1);
                             }
                         }
                     }
@@ -910,13 +945,15 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                 const int required_max_y = required_max_chunk_y * CHUNK_SIZE_Y;
                 for (int halo_z = column_z - 1; halo_z <= column_z + 1; ++halo_z) {
                     for (int halo_x = column_x - 1; halo_x <= column_x + 1; ++halo_x) {
-                        const SdfColumnStack& halo = sdf_column_stacks[static_cast<std::size_t>(halo_x) +
-                            static_cast<std::size_t>(halo_z) * 32u];
-                        if (!halo.present || halo.min_y > required_min_y || halo.max_y < required_max_y) {
+                        const SdfColumnStack& halo =
+                            sdf_column_stacks[static_cast<std::size_t>(halo_x) +
+                                              static_cast<std::size_t>(halo_z) * 32u];
+                        if (!halo.present || halo.min_y > required_min_y ||
+                            halo.max_y < required_max_y) {
                             return stats;
                         }
                         sdf_owned_columns[static_cast<std::size_t>(halo_x) +
-                            static_cast<std::size_t>(halo_z) * 32u] = true;
+                                          static_cast<std::size_t>(halo_z) * 32u] = true;
                     }
                 }
             }
@@ -931,8 +968,10 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         if (!has_sdf_bricks) {
             return false;
         }
-        const std::size_t column_x = (static_cast<std::size_t>(sample_x) * sample_step_i) / CHUNK_SIZE_X;
-        const std::size_t column_z = (static_cast<std::size_t>(sample_z) * sample_step_i) / CHUNK_SIZE_Z;
+        const std::size_t column_x =
+            (static_cast<std::size_t>(sample_x) * sample_step_i) / CHUNK_SIZE_X;
+        const std::size_t column_z =
+            (static_cast<std::size_t>(sample_z) * sample_step_i) / CHUNK_SIZE_Z;
         return column_x < 32u && column_z < 32u && sdf_owned_columns[column_x + column_z * 32u];
     };
 
@@ -940,13 +979,11 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     std::size_t sample_index = 0;
     for (u32 z = 0; z < n; ++z) {
         for (u32 x = 0; x < n; ++x, ++sample_index) {
-            vertices.push_back({
-                Vec3(static_cast<float>(x) * step,
-                     World::DequantizeFarLodHeight(tile.height_q[sample_index]),
-                     static_cast<float>(z) * step),
-                Vec3(0.0f),
-                static_cast<u32>(tile.material[sample_index])
-            });
+            vertices.push_back({Vec3(static_cast<float>(x) * step,
+                                     World::DequantizeFarLodHeight(tile.height_q[sample_index]),
+                                     static_cast<float>(z) * step),
+                                Vec3(0.0f),
+                                static_cast<u32>(tile.material[sample_index])});
         }
     }
 
@@ -976,13 +1013,19 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
 
     if (has_sdf_bricks) {
         const IVec3 far_corner_offsets[8] = {
-            {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
-            {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
-        };
-        const int far_edge_connections[12][2] = {
-            {0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
-            {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}
-        };
+            {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
+        const int far_edge_connections[12][2] = {{0, 1},
+                                                 {1, 2},
+                                                 {2, 3},
+                                                 {3, 0},
+                                                 {4, 5},
+                                                 {5, 6},
+                                                 {6, 7},
+                                                 {7, 4},
+                                                 {0, 4},
+                                                 {1, 5},
+                                                 {2, 6},
+                                                 {3, 7}};
         const auto background_material = [&](const IVec3& position) {
             const std::size_t sample_x = static_cast<std::size_t>(position.x / sample_step_i);
             const std::size_t sample_z = static_cast<std::size_t>(position.z / sample_step_i);
@@ -1011,8 +1054,9 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                         int cube_index = 0;
                         for (int corner = 0; corner < 8; ++corner) {
                             const IVec3 local = IVec3(static_cast<int>(local_x),
-                                                       static_cast<int>(local_y),
-                                                       static_cast<int>(local_z)) + far_corner_offsets[corner];
+                                                      static_cast<int>(local_y),
+                                                      static_cast<int>(local_z)) +
+                                                far_corner_offsets[corner];
                             const std::size_t brick_sample_index =
                                 payload_base + static_cast<std::size_t>(local.x) +
                                 static_cast<std::size_t>(local.y) * brick_side +
@@ -1041,19 +1085,23 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                             }
                             const int corner_a = far_edge_connections[edge][0];
                             const int corner_b = far_edge_connections[edge][1];
-                            const int solid_corner = cell.val[corner_a] < 0.0f ? corner_a : corner_b;
+                            const int solid_corner =
+                                cell.val[corner_a] < 0.0f ? corner_a : corner_b;
                             const u8 authored_material = corner_samples[solid_corner].material;
                             const IVec3 solid_position(static_cast<int>(cell.p[solid_corner].x),
                                                        static_cast<int>(cell.p[solid_corner].y),
                                                        static_cast<int>(cell.p[solid_corner].z));
                             const u8 material = authored_material == 0xffu
-                                ? background_material(solid_position)
-                                : authored_material;
+                                                    ? background_material(solid_position)
+                                                    : authored_material;
                             edge_vertices[edge] = static_cast<u32>(vertices.size());
-                            vertices.push_back({
-                                VertexInterp(0.0f, cell.p[corner_a], cell.p[corner_b],
-                                             cell.val[corner_a], cell.val[corner_b]),
-                                Vec3(0.0f), static_cast<u32>(material)});
+                            vertices.push_back({VertexInterp(0.0f,
+                                                             cell.p[corner_a],
+                                                             cell.p[corner_b],
+                                                             cell.val[corner_a],
+                                                             cell.val[corner_b]),
+                                                Vec3(0.0f),
+                                                static_cast<u32>(material)});
                         }
 
                         const Vec3 gradient = EstimateDensityGradient(cell);
@@ -1062,8 +1110,9 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                             u32 i0 = edge_vertices[triangle_row[triangle]];
                             u32 i1 = edge_vertices[triangle_row[triangle + 1]];
                             u32 i2 = edge_vertices[triangle_row[triangle + 2]];
-                            const Vec3 face_normal = glm::cross(vertices[i1].position - vertices[i0].position,
-                                                                vertices[i2].position - vertices[i0].position);
+                            const Vec3 face_normal =
+                                glm::cross(vertices[i1].position - vertices[i0].position,
+                                           vertices[i2].position - vertices[i0].position);
                             if (glm::dot(face_normal, face_normal) <= 1.0e-10f) {
                                 continue;
                             }
@@ -1105,7 +1154,7 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     // boundaries (F1 vs F2 sample density, live ring vs F1).
     const float drop = step;
     const auto add_skirt_edge = [&](u32 top_a, u32 top_b, const Vec3& outward) {
-        // T-I4-DR-live-needle-streak: copy the two source vertices BY VALUE.
+        // copy the two source vertices BY VALUE.
         // The four push_back calls below can reallocate `vertices`, and the
         // reads of b.position on the 2nd/3rd push (and a.position on the 4th)
         // would otherwise dereference dangling references (UB: garbage skirt
@@ -1117,8 +1166,10 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         vertices.push_back({b.position, outward, b.material_id});
         vertices.push_back({b.position - Vec3(0.0f, drop, 0.0f), outward, b.material_id});
         vertices.push_back({a.position - Vec3(0.0f, drop, 0.0f), outward, a.material_id});
-        const bool first = AppendOrientedTriangle(indices, vertices, base, base + 1u, base + 2u, outward);
-        const bool second = AppendOrientedTriangle(indices, vertices, base, base + 2u, base + 3u, outward);
+        const bool first =
+            AppendOrientedTriangle(indices, vertices, base, base + 1u, base + 2u, outward);
+        const bool second =
+            AppendOrientedTriangle(indices, vertices, base, base + 2u, base + 3u, outward);
         if (!first && !second) {
             vertices.pop_back();
             vertices.pop_back();
@@ -1133,7 +1184,8 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             add_skirt_edge(vertex_index(x, 0), vertex_index(x + 1u, 0), Vec3(0.0f, 0.0f, -1.0f));
         }
         if (!sdf_owned_cell(x, n - 2u)) {
-            add_skirt_edge(vertex_index(x, n - 1u), vertex_index(x + 1u, n - 1u), Vec3(0.0f, 0.0f, 1.0f));
+            add_skirt_edge(
+                vertex_index(x, n - 1u), vertex_index(x + 1u, n - 1u), Vec3(0.0f, 0.0f, 1.0f));
         }
     }
     for (u32 z = 0; z + 1u < n; ++z) {
@@ -1141,7 +1193,8 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             add_skirt_edge(vertex_index(0, z), vertex_index(0, z + 1u), Vec3(-1.0f, 0.0f, 0.0f));
         }
         if (!sdf_owned_cell(n - 2u, z)) {
-            add_skirt_edge(vertex_index(n - 1u, z), vertex_index(n - 1u, z + 1u), Vec3(1.0f, 0.0f, 0.0f));
+            add_skirt_edge(
+                vertex_index(n - 1u, z), vertex_index(n - 1u, z + 1u), Vec3(1.0f, 0.0f, 0.0f));
         }
     }
 
@@ -1151,19 +1204,17 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     return stats;
 }
 
-FarLodRegionMeshStats GenerateFarLodRegionMesh(
-    const World::FarLodTile& tile,
-    const World::FarLodRegionSdfAssembly& assembly,
-    World::FarLodRegionMesh& out_mesh) {
+FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
+                                               const World::FarLodRegionSdfAssembly& assembly,
+                                               World::FarLodRegionMesh& out_mesh) {
     // Preserve the original zero-authority path (including its mesh-byte pin),
     // but only for a genuinely empty assembly bound to this tile. Metadata
     // that claims authority without payload is malformed and must fail closed.
     if (assembly.bricks.empty()) {
-        if (assembly.tier != tile.tier || assembly.rx != tile.rx ||
-            assembly.rz != tile.rz || assembly.params_hash != tile.params_hash ||
-            !assembly.authority_columns.empty() || !assembly.owned_columns.empty() ||
-            !assembly.density_q.empty() || !assembly.material.empty() ||
-            !assembly.legacy_surface_samples.empty()) {
+        if (assembly.tier != tile.tier || assembly.rx != tile.rx || assembly.rz != tile.rz ||
+            assembly.params_hash != tile.params_hash || !assembly.authority_columns.empty() ||
+            !assembly.owned_columns.empty() || !assembly.density_q.empty() ||
+            !assembly.material.empty() || !assembly.legacy_surface_samples.empty()) {
             out_mesh.vertices.clear();
             out_mesh.indices.clear();
             return {};
@@ -1172,7 +1223,8 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     }
 
     FarLodRegionMeshStats stats;
-    out_mesh.vertices.clear(); out_mesh.indices.clear();
+    out_mesh.vertices.clear();
+    out_mesh.indices.clear();
     const auto valid_region_coordinate = [](int region) {
         const std::int64_t minimum =
             static_cast<std::int64_t>(region) * World::kFarLodRegionSizeMeters;
@@ -1180,8 +1232,7 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         const std::int64_t min_chunk = static_cast<std::int64_t>(region) * 32 - 1;
         const std::int64_t max_chunk = min_chunk + 33;
         return minimum >= std::numeric_limits<int>::min() &&
-               maximum <= std::numeric_limits<int>::max() &&
-               min_chunk >= Chunk::kPackedMinXz &&
+               maximum <= std::numeric_limits<int>::max() && min_chunk >= Chunk::kPackedMinXz &&
                max_chunk <= Chunk::kPackedMaxXz;
     };
     const auto valid_chunk_coordinate = [](int chunk, int extent) {
@@ -1193,13 +1244,15 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     const u32 n = tile.samples_per_side;
     const int step_i = World::FarLodSampleStepMeters(tile.tier);
     if (assembly.tier != tile.tier || assembly.rx != tile.rx || assembly.rz != tile.rz ||
-        assembly.params_hash != tile.params_hash ||
-        !valid_region_coordinate(tile.rx) || !valid_region_coordinate(tile.rz) ||
-        n != World::FarLodSamplesPerSide(tile.tier) || tile.height_q.size() != tile.sample_count() ||
-        tile.material.size() != tile.sample_count() || tile.flags.size() != tile.sample_count()) return stats;
+        assembly.params_hash != tile.params_hash || !valid_region_coordinate(tile.rx) ||
+        !valid_region_coordinate(tile.rz) || n != World::FarLodSamplesPerSide(tile.tier) ||
+        tile.height_q.size() != tile.sample_count() ||
+        tile.material.size() != tile.sample_count() || tile.flags.size() != tile.sample_count())
+        return stats;
     const std::size_t count = World::FarLodSdfBrickSampleCount(tile.tier);
     if (assembly.density_q.size() != assembly.bricks.size() * count ||
-        assembly.material.size() != assembly.density_q.size()) return stats;
+        assembly.material.size() != assembly.density_q.size())
+        return stats;
 
     const auto fail = [&]() -> FarLodRegionMeshStats {
         out_mesh.vertices.clear();
@@ -1216,20 +1269,18 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     }
     const auto legacy_less = [](const World::FarLodWorldLegacySurfaceSample& lhs,
                                 const World::FarLodWorldLegacySurfaceSample& rhs) {
-        return std::tie(lhs.world_z, lhs.world_x) <
-               std::tie(rhs.world_z, rhs.world_x);
+        return std::tie(lhs.world_z, lhs.world_x) < std::tie(rhs.world_z, rhs.world_x);
     };
-    if (!std::is_sorted(
-            assembly.legacy_surface_samples.begin(),
-            assembly.legacy_surface_samples.end(), legacy_less) ||
-        std::adjacent_find(
-            assembly.legacy_surface_samples.begin(),
-            assembly.legacy_surface_samples.end(),
-            [](const auto& lhs, const auto& rhs) {
-                return lhs.world_x == rhs.world_x && lhs.world_z == rhs.world_z;
-            }) != assembly.legacy_surface_samples.end()) return fail();
-    std::map<std::pair<int, int>, World::FarLodWorldLegacySurfaceSample>
-        legacy_metadata;
+    if (!std::is_sorted(assembly.legacy_surface_samples.begin(),
+                        assembly.legacy_surface_samples.end(),
+                        legacy_less) ||
+        std::adjacent_find(assembly.legacy_surface_samples.begin(),
+                           assembly.legacy_surface_samples.end(),
+                           [](const auto& lhs, const auto& rhs) {
+                               return lhs.world_x == rhs.world_x && lhs.world_z == rhs.world_z;
+                           }) != assembly.legacy_surface_samples.end())
+        return fail();
+    std::map<std::pair<int, int>, World::FarLodWorldLegacySurfaceSample> legacy_metadata;
     for (const auto& sample : assembly.legacy_surface_samples) {
         constexpr u8 kKnownLegacyFlags =
             World::kFarLodSampleFlagWater | World::kFarLodSampleFlagEdited;
@@ -1238,18 +1289,19 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
             sample.world_x % step_i != 0 || sample.world_z % step_i != 0) {
             return fail();
         }
-        legacy_metadata.emplace(
-            std::make_pair(sample.world_z, sample.world_x), sample);
+        legacy_metadata.emplace(std::make_pair(sample.world_z, sample.world_x), sample);
     }
-    const std::set<std::pair<i32, i32>> authority_columns(
-        assembly.authority_columns.begin(), assembly.authority_columns.end());
-    if (authority_columns.empty()) return fail();
+    const std::set<std::pair<i32, i32>> authority_columns(assembly.authority_columns.begin(),
+                                                          assembly.authority_columns.end());
+    if (authority_columns.empty())
+        return fail();
     std::set<std::pair<i32, i32>> expected_owned;
     for (const auto& [chunk_z, chunk_x] : authority_columns) {
         if (chunk_x < Chunk::kPackedMinXz || chunk_x > Chunk::kPackedMaxXz ||
             chunk_z < Chunk::kPackedMinXz || chunk_z > Chunk::kPackedMaxXz ||
             !valid_chunk_coordinate(chunk_x, CHUNK_SIZE_X) ||
-            !valid_chunk_coordinate(chunk_z, CHUNK_SIZE_Z)) return fail();
+            !valid_chunk_coordinate(chunk_z, CHUNK_SIZE_Z))
+            return fail();
         for (int dz = -1; dz <= 1; ++dz) {
             for (int dx = -1; dx <= 1; ++dx) {
                 const std::int64_t owned_z = static_cast<std::int64_t>(chunk_z) + dz;
@@ -1257,19 +1309,20 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
                 if (owned_z < std::numeric_limits<int>::min() ||
                     owned_z > std::numeric_limits<int>::max() ||
                     owned_x < std::numeric_limits<int>::min() ||
-                    owned_x > std::numeric_limits<int>::max() ||
-                    owned_z < Chunk::kPackedMinXz || owned_z > Chunk::kPackedMaxXz ||
-                    owned_x < Chunk::kPackedMinXz || owned_x > Chunk::kPackedMaxXz ||
+                    owned_x > std::numeric_limits<int>::max() || owned_z < Chunk::kPackedMinXz ||
+                    owned_z > Chunk::kPackedMaxXz || owned_x < Chunk::kPackedMinXz ||
+                    owned_x > Chunk::kPackedMaxXz ||
                     !valid_chunk_coordinate(static_cast<int>(owned_z), CHUNK_SIZE_Z) ||
-                    !valid_chunk_coordinate(static_cast<int>(owned_x), CHUNK_SIZE_X)) return fail();
-                expected_owned.emplace(
-                    static_cast<int>(owned_z), static_cast<int>(owned_x));
+                    !valid_chunk_coordinate(static_cast<int>(owned_x), CHUNK_SIZE_X))
+                    return fail();
+                expected_owned.emplace(static_cast<int>(owned_z), static_cast<int>(owned_x));
             }
         }
     }
-    const std::set<std::pair<i32, i32>> owned(
-        assembly.owned_columns.begin(), assembly.owned_columns.end());
-    if (owned != expected_owned) return fail();
+    const std::set<std::pair<i32, i32>> owned(assembly.owned_columns.begin(),
+                                              assembly.owned_columns.end());
+    if (owned != expected_owned)
+        return fail();
     const auto floor_div = [](int value, int divisor) {
         const int quotient = value / divisor;
         const int remainder = value % divisor;
@@ -1282,19 +1335,23 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         const int first_z = world_z % CHUNK_SIZE_Z == 0 ? chunk_z - 1 : chunk_z;
         for (int z = first_z; z <= chunk_z; ++z) {
             for (int x = first_x; x <= chunk_x; ++x) {
-                if (owned.count({z, x}) != 0u) return true;
+                if (owned.count({z, x}) != 0u)
+                    return true;
             }
         }
         return false;
     };
-    if (std::any_of(
-            assembly.legacy_surface_samples.begin(),
-            assembly.legacy_surface_samples.end(),
-            [&](const auto& sample) {
-                return !sample_touches_owned_cell(sample.world_x, sample.world_z);
-            })) return fail();
+    if (std::any_of(assembly.legacy_surface_samples.begin(),
+                    assembly.legacy_surface_samples.end(),
+                    [&](const auto& sample) {
+                        return !sample_touches_owned_cell(sample.world_x, sample.world_z);
+                    }))
+        return fail();
 
-    struct Sample { i16 density; u8 material; };
+    struct Sample {
+        i16 density;
+        u8 material;
+    };
     std::map<std::tuple<int, int, int>, Sample> samples;
     const u32 brick_side = World::FarLodSdfBrickSamplesPerSide(tile.tier);
     std::set<std::pair<i32, i32>> seen_authority_columns;
@@ -1306,18 +1363,18 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     for (std::size_t brick_index = 0; brick_index < assembly.bricks.size(); ++brick_index) {
         const auto& brick = assembly.bricks[brick_index];
         if (brick.source_kind != World::FarLodBrickSourceKind::Authoritative &&
-            brick.source_kind != World::FarLodBrickSourceKind::RegenerableCache) return fail();
-        if (brick.chunk_x < Chunk::kPackedMinXz ||
-            brick.chunk_x > Chunk::kPackedMaxXz ||
-            brick.chunk_y < Chunk::kPackedMinY ||
-            brick.chunk_y > Chunk::kPackedMaxY ||
-            brick.chunk_z < Chunk::kPackedMinXz ||
-            brick.chunk_z > Chunk::kPackedMaxXz ||
+            brick.source_kind != World::FarLodBrickSourceKind::RegenerableCache)
+            return fail();
+        if (brick.chunk_x < Chunk::kPackedMinXz || brick.chunk_x > Chunk::kPackedMaxXz ||
+            brick.chunk_y < Chunk::kPackedMinY || brick.chunk_y > Chunk::kPackedMaxY ||
+            brick.chunk_z < Chunk::kPackedMinXz || brick.chunk_z > Chunk::kPackedMaxXz ||
             !valid_chunk_coordinate(brick.chunk_x, CHUNK_SIZE_X) ||
             !valid_chunk_coordinate(brick.chunk_y, CHUNK_SIZE_Y) ||
-            !valid_chunk_coordinate(brick.chunk_z, CHUNK_SIZE_Z)) return fail();
+            !valid_chunk_coordinate(brick.chunk_z, CHUNK_SIZE_Z))
+            return fail();
         const auto brick_key = std::make_tuple(brick.chunk_z, brick.chunk_x, brick.chunk_y);
-        if (have_previous_brick && !(previous_brick < brick_key)) return fail();
+        if (have_previous_brick && !(previous_brick < brick_key))
+            return fail();
         previous_brick = brick_key;
         have_previous_brick = true;
         stack_levels[{brick.chunk_z, brick.chunk_x}].push_back(brick.chunk_y);
@@ -1331,44 +1388,52 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
         crc.Update(assembly.material.data() + base, count);
         if (brick.payload_crc32 != crc.Value())
             return fail();
-        for (u32 z = 0; z < brick_side; ++z) for (u32 y = 0; y < brick_side; ++y) for (u32 x = 0; x < brick_side; ++x) {
-            const std::size_t offset = base + static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * brick_side + static_cast<std::size_t>(z) * brick_side * brick_side;
-            if (assembly.density_q[offset] == World::kFarLodSdfInvalid) return fail();
-            const int world_x = brick.chunk_x * CHUNK_SIZE_X +
-                static_cast<int>(x) * step_i;
-            const int world_y = brick.chunk_y * CHUNK_SIZE_Y +
-                static_cast<int>(y) * step_i;
-            const int world_z = brick.chunk_z * CHUNK_SIZE_Z +
-                static_cast<int>(z) * step_i;
-            const Sample value{assembly.density_q[offset], assembly.material[offset]};
-            const auto legacy = legacy_metadata.find({world_z, world_x});
-            if (legacy != legacy_metadata.end()) {
-                // Legacy columns must already have been promoted into scratch
-                // regenerable streams. Metadata may never overlay or coexist
-                // with a real authoritative footprint in the mesher.
-                if (brick.source_kind !=
-                        World::FarLodBrickSourceKind::RegenerableCache ||
-                    value.density != World::QuantizeFarLodSdf(
-                        static_cast<float>(world_y) -
-                        World::DequantizeFarLodHeight(legacy->second.height_q)) ||
-                    value.material != legacy->second.material) {
-                    return fail();
+        for (u32 z = 0; z < brick_side; ++z)
+            for (u32 y = 0; y < brick_side; ++y)
+                for (u32 x = 0; x < brick_side; ++x) {
+                    const std::size_t offset =
+                        base + static_cast<std::size_t>(x) +
+                        static_cast<std::size_t>(y) * brick_side +
+                        static_cast<std::size_t>(z) * brick_side * brick_side;
+                    if (assembly.density_q[offset] == World::kFarLodSdfInvalid)
+                        return fail();
+                    const int world_x = brick.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step_i;
+                    const int world_y = brick.chunk_y * CHUNK_SIZE_Y + static_cast<int>(y) * step_i;
+                    const int world_z = brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i;
+                    const Sample value{assembly.density_q[offset], assembly.material[offset]};
+                    const auto legacy = legacy_metadata.find({world_z, world_x});
+                    if (legacy != legacy_metadata.end()) {
+                        // Legacy columns must already have been promoted into scratch
+                        // regenerable streams. Metadata may never overlay or coexist
+                        // with a real authoritative footprint in the mesher.
+                        if (brick.source_kind != World::FarLodBrickSourceKind::RegenerableCache ||
+                            value.density !=
+                                World::QuantizeFarLodSdf(
+                                    static_cast<float>(world_y) -
+                                    World::DequantizeFarLodHeight(legacy->second.height_q)) ||
+                            value.material != legacy->second.material) {
+                            return fail();
+                        }
+                        seen_legacy_metadata.emplace(world_z, world_x);
+                    }
+                    const auto key = std::make_tuple(world_x, world_y, world_z);
+                    const auto inserted = samples.emplace(key, value);
+                    if (!inserted.second && (inserted.first->second.density != value.density ||
+                                             inserted.first->second.material != value.material))
+                        return fail();
                 }
-                seen_legacy_metadata.emplace(world_z, world_x);
-            }
-            const auto key = std::make_tuple(world_x, world_y, world_z);
-            const auto inserted = samples.emplace(key, value);
-            if (!inserted.second && (inserted.first->second.density != value.density || inserted.first->second.material != value.material)) return fail();
-        }
     }
-    if (seen_legacy_metadata.size() != legacy_metadata.size()) return fail();
-    if (seen_authority_columns != authority_columns) return fail();
+    if (seen_legacy_metadata.size() != legacy_metadata.size())
+        return fail();
+    if (seen_authority_columns != authority_columns)
+        return fail();
     for (const auto& column : owned) {
         const auto stack = stack_levels.find(column);
-        if (stack == stack_levels.end() || stack->second.empty()) return fail();
+        if (stack == stack_levels.end() || stack->second.empty())
+            return fail();
         for (std::size_t i = 1; i < stack->second.size(); ++i) {
-            if (static_cast<std::int64_t>(stack->second[i - 1]) + 1 !=
-                stack->second[i]) return fail();
+            if (static_cast<std::int64_t>(stack->second[i - 1]) + 1 != stack->second[i])
+                return fail();
         }
     }
     // Every authoritative brick requires one vertical support brick above and
@@ -1378,17 +1443,20 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     for (const auto& authority : authority_bricks) {
         for (int dz = -1; dz <= 1; ++dz) {
             for (int dx = -1; dx <= 1; ++dx) {
-                const auto stack = stack_levels.find({
-                    static_cast<int>(static_cast<std::int64_t>(authority.chunk_z) + dz),
-                    static_cast<int>(static_cast<std::int64_t>(authority.chunk_x) + dx)});
-                if (stack == stack_levels.end()) return fail();
+                const auto stack = stack_levels.find(
+                    {static_cast<int>(static_cast<std::int64_t>(authority.chunk_z) + dz),
+                     static_cast<int>(static_cast<std::int64_t>(authority.chunk_x) + dx)});
+                if (stack == stack_levels.end())
+                    return fail();
                 for (int dy = -1; dy <= 1; ++dy) {
                     const std::int64_t required_y =
                         static_cast<std::int64_t>(authority.chunk_y) + dy;
                     if (required_y < std::numeric_limits<int>::min() ||
                         required_y > std::numeric_limits<int>::max() ||
-                        !std::binary_search(stack->second.begin(), stack->second.end(),
-                                            static_cast<int>(required_y))) return fail();
+                        !std::binary_search(stack->second.begin(),
+                                            stack->second.end(),
+                                            static_cast<int>(required_y)))
+                        return fail();
                 }
             }
         }
@@ -1396,70 +1464,160 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(
     const int min_x = tile.rx * World::kFarLodRegionSizeMeters;
     const int min_z = tile.rz * World::kFarLodRegionSizeMeters;
     const auto owned_cell = [&](u32 x, u32 z) {
-        const int wx = min_x + static_cast<int>(x) * step_i, wz = min_z + static_cast<int>(z) * step_i;
+        const int wx = min_x + static_cast<int>(x) * step_i,
+                  wz = min_z + static_cast<int>(z) * step_i;
         return owned.count({floor_div(wz, CHUNK_SIZE_Z), floor_div(wx, CHUNK_SIZE_X)}) != 0u;
     };
 
     std::vector<VoxelVertex>& vertices = out_mesh.vertices;
     std::vector<u32>& indices = out_mesh.indices;
     vertices.reserve(tile.sample_count());
-    for (u32 z = 0; z < n; ++z) for (u32 x = 0; x < n; ++x) {
-        const std::size_t index = static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * n;
-        vertices.push_back({Vec3(static_cast<float>(x * step_i), World::DequantizeFarLodHeight(tile.height_q[index]), static_cast<float>(z * step_i)), Vec3(0.0f), static_cast<u32>(tile.material[index])});
-    }
-    const auto vertex_index = [n](u32 x, u32 z) { return z * n + x; };
-    for (u32 z = 0; z + 1 < n; ++z) for (u32 x = 0; x + 1 < n; ++x) {
-        if (owned_cell(x, z)) continue;
-        const u32 a = vertex_index(x, z), b = vertex_index(x + 1, z), c = vertex_index(x, z + 1), d = vertex_index(x + 1, z + 1);
-        indices.insert(indices.end(), {a, d, b, a, c, d});
-    }
-
-    const IVec3 corners[8] = {{0,0,0},{1,0,0},{1,0,1},{0,0,1},{0,1,0},{1,1,0},{1,1,1},{0,1,1}};
-    const int edges[12][2] = {{0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},{0,4},{1,5},{2,6},{3,7}};
-    for (const auto& brick : assembly.bricks) {
-        if (owned.count({brick.chunk_z, brick.chunk_x}) == 0u) continue;
-        for (u32 z = 0; z + 1 < brick_side; ++z) for (u32 y = 0; y + 1 < brick_side; ++y) for (u32 x = 0; x + 1 < brick_side; ++x) {
-            const int wx0 = brick.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step_i;
-            const int wz0 = brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i;
-            if (wx0 < min_x || wx0 >= min_x + World::kFarLodRegionSizeMeters || wz0 < min_z || wz0 >= min_z + World::kFarLodRegionSizeMeters) continue;
-            GridCell cell; Sample values[8];
-            int cube = 0;
-            for (int c = 0; c < 8; ++c) {
-                const int wx = wx0 + corners[c].x * step_i, wy = brick.chunk_y * CHUNK_SIZE_Y + (static_cast<int>(y) + corners[c].y) * step_i, wz = wz0 + corners[c].z * step_i;
-                const auto found = samples.find(std::make_tuple(wx, wy, wz)); if (found == samples.end()) return fail();
-                values[c] = found->second; cell.p[c] = Vec3(static_cast<float>(wx - min_x), static_cast<float>(wy), static_cast<float>(wz - min_z));
-                cell.val[c] = World::DequantizeFarLodSdf(values[c].density); if (cell.val[c] < 0.0f) cube |= 1 << c;
-            }
-            const unsigned int mask = edgeTable[cube]; if (mask == 0u) continue;
-            u32 edge_vertices[12]{};
-            for (int edge = 0; edge < 12; ++edge) if ((mask & (1u << edge)) != 0u) {
-                const int a = edges[edge][0], b = edges[edge][1], solid = cell.val[a] < 0.0f ? a : b;
-                const int local_x = static_cast<int>(cell.p[solid].x) / step_i, local_z = static_cast<int>(cell.p[solid].z) / step_i;
-                if (local_x < 0 || local_z < 0 ||
-                    local_x >= static_cast<int>(n) || local_z >= static_cast<int>(n)) return fail();
-                u8 fallback_material = tile.material[
-                    static_cast<std::size_t>(local_x) +
-                    static_cast<std::size_t>(local_z) * n];
-                const u8 material = values[solid].material == 0xffu
-                    ? fallback_material : values[solid].material;
-                edge_vertices[edge] = static_cast<u32>(vertices.size()); vertices.push_back({VertexInterp(0.0f, cell.p[a], cell.p[b], cell.val[a], cell.val[b]), Vec3(0.0f), static_cast<u32>(material)});
-            }
-            const Vec3 gradient = EstimateDensityGradient(cell);
-            for (int t = 0; triTable[cube][t] != -1; t += 3) { u32 a = edge_vertices[triTable[cube][t]], b = edge_vertices[triTable[cube][t+1]], c = edge_vertices[triTable[cube][t+2]]; const Vec3 normal = glm::cross(vertices[b].position - vertices[a].position, vertices[c].position - vertices[a].position); if (glm::dot(normal, normal) <= 1.0e-10f) continue; if (glm::dot(normal, gradient) < 0.0f) std::swap(b,c); indices.insert(indices.end(), {a,b,c}); }
+    for (u32 z = 0; z < n; ++z)
+        for (u32 x = 0; x < n; ++x) {
+            const std::size_t index = static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * n;
+            vertices.push_back({Vec3(static_cast<float>(x * step_i),
+                                     World::DequantizeFarLodHeight(tile.height_q[index]),
+                                     static_cast<float>(z * step_i)),
+                                Vec3(0.0f),
+                                static_cast<u32>(tile.material[index])});
         }
+    const auto vertex_index = [n](u32 x, u32 z) {
+        return z * n + x;
+    };
+    for (u32 z = 0; z + 1 < n; ++z)
+        for (u32 x = 0; x + 1 < n; ++x) {
+            if (owned_cell(x, z))
+                continue;
+            const u32 a = vertex_index(x, z), b = vertex_index(x + 1, z),
+                      c = vertex_index(x, z + 1), d = vertex_index(x + 1, z + 1);
+            indices.insert(indices.end(), {a, d, b, a, c, d});
+        }
+
+    const IVec3 corners[8] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
+    const int edges[12][2] = {{0, 1},
+                              {1, 2},
+                              {2, 3},
+                              {3, 0},
+                              {4, 5},
+                              {5, 6},
+                              {6, 7},
+                              {7, 4},
+                              {0, 4},
+                              {1, 5},
+                              {2, 6},
+                              {3, 7}};
+    for (const auto& brick : assembly.bricks) {
+        if (owned.count({brick.chunk_z, brick.chunk_x}) == 0u)
+            continue;
+        for (u32 z = 0; z + 1 < brick_side; ++z)
+            for (u32 y = 0; y + 1 < brick_side; ++y)
+                for (u32 x = 0; x + 1 < brick_side; ++x) {
+                    const int wx0 = brick.chunk_x * CHUNK_SIZE_X + static_cast<int>(x) * step_i;
+                    const int wz0 = brick.chunk_z * CHUNK_SIZE_Z + static_cast<int>(z) * step_i;
+                    if (wx0 < min_x || wx0 >= min_x + World::kFarLodRegionSizeMeters ||
+                        wz0 < min_z || wz0 >= min_z + World::kFarLodRegionSizeMeters)
+                        continue;
+                    GridCell cell;
+                    Sample values[8];
+                    int cube = 0;
+                    for (int c = 0; c < 8; ++c) {
+                        const int wx = wx0 + corners[c].x * step_i,
+                                  wy = brick.chunk_y * CHUNK_SIZE_Y +
+                                       (static_cast<int>(y) + corners[c].y) * step_i,
+                                  wz = wz0 + corners[c].z * step_i;
+                        const auto found = samples.find(std::make_tuple(wx, wy, wz));
+                        if (found == samples.end())
+                            return fail();
+                        values[c] = found->second;
+                        cell.p[c] = Vec3(static_cast<float>(wx - min_x),
+                                         static_cast<float>(wy),
+                                         static_cast<float>(wz - min_z));
+                        cell.val[c] = World::DequantizeFarLodSdf(values[c].density);
+                        if (cell.val[c] < 0.0f)
+                            cube |= 1 << c;
+                    }
+                    const unsigned int mask = edgeTable[cube];
+                    if (mask == 0u)
+                        continue;
+                    u32 edge_vertices[12]{};
+                    for (int edge = 0; edge < 12; ++edge)
+                        if ((mask & (1u << edge)) != 0u) {
+                            const int a = edges[edge][0], b = edges[edge][1],
+                                      solid = cell.val[a] < 0.0f ? a : b;
+                            const int local_x = static_cast<int>(cell.p[solid].x) / step_i,
+                                      local_z = static_cast<int>(cell.p[solid].z) / step_i;
+                            if (local_x < 0 || local_z < 0 || local_x >= static_cast<int>(n) ||
+                                local_z >= static_cast<int>(n))
+                                return fail();
+                            u8 fallback_material =
+                                tile.material[static_cast<std::size_t>(local_x) +
+                                              static_cast<std::size_t>(local_z) * n];
+                            const u8 material = values[solid].material == 0xffu
+                                                    ? fallback_material
+                                                    : values[solid].material;
+                            edge_vertices[edge] = static_cast<u32>(vertices.size());
+                            vertices.push_back(
+                                {VertexInterp(0.0f, cell.p[a], cell.p[b], cell.val[a], cell.val[b]),
+                                 Vec3(0.0f),
+                                 static_cast<u32>(material)});
+                        }
+                    const Vec3 gradient = EstimateDensityGradient(cell);
+                    for (int t = 0; triTable[cube][t] != -1; t += 3) {
+                        u32 a = edge_vertices[triTable[cube][t]],
+                            b = edge_vertices[triTable[cube][t + 1]],
+                            c = edge_vertices[triTable[cube][t + 2]];
+                        const Vec3 normal = glm::cross(vertices[b].position - vertices[a].position,
+                                                       vertices[c].position - vertices[a].position);
+                        if (glm::dot(normal, normal) <= 1.0e-10f)
+                            continue;
+                        if (glm::dot(normal, gradient) < 0.0f)
+                            std::swap(b, c);
+                        indices.insert(indices.end(), {a, b, c});
+                    }
+                }
     }
 
     const float drop = static_cast<float>(step_i);
     const auto skirt = [&](u32 a_index, u32 b_index, const Vec3& out) {
-        const VoxelVertex a = vertices[a_index], b = vertices[b_index]; const u32 base = static_cast<u32>(vertices.size());
-        vertices.push_back({a.position,out,a.material_id}); vertices.push_back({b.position,out,b.material_id}); vertices.push_back({b.position-Vec3(0.0f,drop,0.0f),out,b.material_id}); vertices.push_back({a.position-Vec3(0.0f,drop,0.0f),out,a.material_id});
-        AppendOrientedTriangle(indices, vertices, base, base+1u, base+2u, out); AppendOrientedTriangle(indices, vertices, base, base+2u, base+3u, out); ++stats.skirt_quads;
+        const VoxelVertex a = vertices[a_index], b = vertices[b_index];
+        const u32 base = static_cast<u32>(vertices.size());
+        vertices.push_back({a.position, out, a.material_id});
+        vertices.push_back({b.position, out, b.material_id});
+        vertices.push_back({b.position - Vec3(0.0f, drop, 0.0f), out, b.material_id});
+        vertices.push_back({a.position - Vec3(0.0f, drop, 0.0f), out, a.material_id});
+        AppendOrientedTriangle(indices, vertices, base, base + 1u, base + 2u, out);
+        AppendOrientedTriangle(indices, vertices, base, base + 2u, base + 3u, out);
+        ++stats.skirt_quads;
     };
-    for (u32 x = 0; x + 1 < n; ++x) { if (!owned_cell(x,0)) skirt(vertex_index(x,0),vertex_index(x+1,0),Vec3(0,0,-1)); if (!owned_cell(x,n-2)) skirt(vertex_index(x,n-1),vertex_index(x+1,n-1),Vec3(0,0,1)); }
-    for (u32 z = 0; z + 1 < n; ++z) { if (!owned_cell(0,z)) skirt(vertex_index(0,z),vertex_index(0,z+1),Vec3(-1,0,0)); if (!owned_cell(n-2,z)) skirt(vertex_index(n-1,z),vertex_index(n-1,z+1),Vec3(1,0,0)); }
-    for (std::size_t i = 0; i + 2 < indices.size(); i += 3) { VoxelVertex& a = vertices[indices[i]], &b = vertices[indices[i+1]], &c = vertices[indices[i+2]]; const Vec3 normal = glm::cross(b.position-a.position,c.position-a.position); a.normal += normal; b.normal += normal; c.normal += normal; }
-    for (VoxelVertex& vertex : vertices) vertex.normal = glm::dot(vertex.normal, vertex.normal) > 0.0f ? glm::normalize(vertex.normal) : Vec3(0,1,0);
-    stats.vertices = vertices.size(); stats.indices = indices.size(); stats.triangles = indices.size()/3u; return stats;
+    for (u32 x = 0; x + 1 < n; ++x) {
+        if (!owned_cell(x, 0))
+            skirt(vertex_index(x, 0), vertex_index(x + 1, 0), Vec3(0, 0, -1));
+        if (!owned_cell(x, n - 2))
+            skirt(vertex_index(x, n - 1), vertex_index(x + 1, n - 1), Vec3(0, 0, 1));
+    }
+    for (u32 z = 0; z + 1 < n; ++z) {
+        if (!owned_cell(0, z))
+            skirt(vertex_index(0, z), vertex_index(0, z + 1), Vec3(-1, 0, 0));
+        if (!owned_cell(n - 2, z))
+            skirt(vertex_index(n - 1, z), vertex_index(n - 1, z + 1), Vec3(1, 0, 0));
+    }
+    for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+        VoxelVertex &a = vertices[indices[i]], &b = vertices[indices[i + 1]],
+                    &c = vertices[indices[i + 2]];
+        const Vec3 normal = glm::cross(b.position - a.position, c.position - a.position);
+        a.normal += normal;
+        b.normal += normal;
+        c.normal += normal;
+    }
+    for (VoxelVertex& vertex : vertices)
+        vertex.normal = glm::dot(vertex.normal, vertex.normal) > 0.0f
+                            ? glm::normalize(vertex.normal)
+                            : Vec3(0, 1, 0);
+    stats.vertices = vertices.size();
+    stats.indices = indices.size();
+    stats.triangles = indices.size() / 3u;
+    return stats;
 }
 
 void ResetTerrainMeshBuildStats() {
@@ -1492,14 +1650,12 @@ TerrainMeshBuildStats GetTerrainMeshBuildStats() {
 
 // ===================== TERRAIN MESH GENERATION =====================
 
-void PolygoniseTerrain(
-    const Systems::SHIELD_WorldSystem& world_system,
-    Chunk& chunk,
-    float isolevel,
-    int step
-) {
+void PolygoniseTerrain(const Systems::SHIELD_WorldSystem& world_system,
+                       Chunk& chunk,
+                       float isolevel,
+                       int step) {
     const auto build_start = std::chrono::steady_clock::now();
-    // T-I4-18: reset the per-worker meshing arena at job entry. Covers BOTH the
+    // reset the per-worker meshing arena at job entry. Covers BOTH the
     // coarse heightfield path (remap) and the unit-step path below (edge cache,
     // world positions, materials, remap). Reset is an offset rewind - negligible
     // vs. the elapsed_us this build is timed against.
@@ -1517,8 +1673,11 @@ void PolygoniseTerrain(
         LUMINUMBRA_CORE_WARN(
             "PolygoniseTerrain: chunk ({},{},{}) sdf_data size {} != full lattice {} — "
             "rejecting (no mesh) instead of falling back to heightfield data",
-            chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z,
-            chunk.sdf_data.size(), kFullLatticeCount);
+            chunk.get_coords().x,
+            chunk.get_coords().y,
+            chunk.get_coords().z,
+            chunk.sdf_data.size(),
+            kFullLatticeCount);
         chunk.mesh_vertices.clear();
         chunk.mesh_indices.clear();
         return;
@@ -1552,9 +1711,10 @@ void PolygoniseTerrain(
         // Chunk is entirely above or below the surface
         chunk.mesh_vertices.clear();
         chunk.mesh_indices.clear();
-        const auto elapsed_us = static_cast<std::uint64_t>(
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - build_start).count()
-        );
+        const auto elapsed_us =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                           std::chrono::steady_clock::now() - build_start)
+                                           .count());
         RecordTerrainMeshBuildStats(sample_step, 0, 0, 0, 0, elapsed_us);
         return;
     }
@@ -1568,20 +1728,27 @@ void PolygoniseTerrain(
     vertices.reserve(CHUNK_VOLUME / 4);
     indices.reserve(CHUNK_VOLUME);
 
-    const IVec3 chunk_base_pos = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    const IVec3 chunk_base_pos =
+        chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
     constexpr u32 kYStride = CHUNK_SIZE_X + 1;
     constexpr u32 kZStride = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1);
     constexpr u32 kLatticeCount = (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
 
     const IVec3 corner_offsets[8] = {
-        {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
-        {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}
-    };
+        {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
 
-    const int edge_connections[12][2] = {
-        {0,1}, {1,2}, {2,3}, {3,0}, {4,5}, {5,6},
-        {6,7}, {7,4}, {0,4}, {1,5}, {2,6}, {3,7}
-    };
+    const int edge_connections[12][2] = {{0, 1},
+                                         {1, 2},
+                                         {2, 3},
+                                         {3, 0},
+                                         {4, 5},
+                                         {5, 6},
+                                         {6, 7},
+                                         {7, 4},
+                                         {0, 4},
+                                         {1, 5},
+                                         {2, 6},
+                                         {3, 7}};
 
     // Flat per-edge vertex cache replacing the previous unordered_map keyed
     // by corner-index pairs. Every unique cell edge is one of three canonical
@@ -1590,13 +1757,9 @@ void PolygoniseTerrain(
     // allocations. First-writer-wins semantics are identical to the map
     // because the cell scan order and the per-cell edge order are unchanged.
     constexpr u32 kNoCachedVertex = 0xFFFFFFFFu;
-    constexpr u8 kEdgeAnchorCorner[12] = {
-        0u, 1u, 3u, 0u, 4u, 5u, 7u, 4u, 0u, 1u, 2u, 3u
-    };
-    constexpr u8 kEdgeAxis[12] = {
-        0u, 2u, 0u, 2u, 0u, 2u, 0u, 2u, 1u, 1u, 1u, 1u
-    };
-    // T-I4-18: the per-edge vertex cache is the dominant per-job scratch alloc
+    constexpr u8 kEdgeAnchorCorner[12] = {0u, 1u, 3u, 0u, 4u, 5u, 7u, 4u, 0u, 1u, 2u, 3u};
+    constexpr u8 kEdgeAxis[12] = {0u, 2u, 0u, 2u, 0u, 2u, 0u, 2u, 1u, 1u, 1u, 1u};
+    // the per-edge vertex cache is the dominant per-job scratch alloc
     // (kLatticeCount*3 u32 ~= 59 KB at 17^3). It is pure scratch (index-addressed,
     // never escapes), so it comes from the reset-per-job arena, value-set to
     // kNoCachedVertex exactly as the prior std::vector(count, kNoCachedVertex) did.
@@ -1607,11 +1770,10 @@ void PolygoniseTerrain(
 
     const float* const sdf = chunk.sdf_data.data();
 
-    // FR-B1: per-voxel structure material channel (parallel to sdf, same index
+    // per-voxel structure material channel (parallel to sdf, same index
     // formula). Empty for chunks with no authored structure voxels => the stored
     // material is never consulted and PASS 1b stays byte-identical to today.
-    const bool has_material =
-        chunk.material_data.size() == chunk.sdf_data.size();
+    const bool has_material = chunk.material_data.size() == chunk.sdf_data.size();
     const u8* const material = has_material ? chunk.material_data.data() : nullptr;
     // Stored override material captured per emitted vertex during PASS 1 (0 = no
     // override; classify analytically). Re-applied after PASS 1b only where != 0.
@@ -1633,9 +1795,9 @@ void PolygoniseTerrain(
 
                 for (int i = 0; i < 8; ++i) {
                     const IVec3 lattice_corner = IVec3(x, y, z) + corner_offsets[i] * sample_step;
-                    const u32 lattice_index = static_cast<u32>(lattice_corner.x)
-                        + static_cast<u32>(lattice_corner.y) * kYStride
-                        + static_cast<u32>(lattice_corner.z) * kZStride;
+                    const u32 lattice_index = static_cast<u32>(lattice_corner.x) +
+                                              static_cast<u32>(lattice_corner.y) * kYStride +
+                                              static_cast<u32>(lattice_corner.z) * kZStride;
                     corner_lattice_indices[i] = lattice_index;
                     gridcell.val[i] = sdf[lattice_index];
                     if (gridcell.val[i] < isolevel) {
@@ -1644,7 +1806,8 @@ void PolygoniseTerrain(
                 }
 
                 const unsigned int edge_mask = edgeTable[cube_index];
-                if (edge_mask == 0) continue;
+                if (edge_mask == 0)
+                    continue;
                 ++active_cells;
 
                 for (int i = 0; i < 8; ++i) {
@@ -1668,26 +1831,25 @@ void PolygoniseTerrain(
                             f32 v2 = gridcell.val[corner_b];
                             Vec3 new_pos = VertexInterp(isolevel, p1, p2, v1, v2);
 
-                            // T-I4-DR-shaping-perf: material is classified in a
+                            // material is classified in a
                             // single SIMD-batched pass after all vertices are
                             // emitted (ClassifyVertexMaterials below) instead of
                             // a per-vertex GetTerrainMaterialAt - byte-identical
                             // result, but the shaped-height + climate noise reads
                             // ride FastNoise's GenPositionArray2D batch path. The
-                            // placeholder material_id is overwritten by that pass.
+                            // Sentinel material_id is overwritten by that pass.
                             vertices.push_back({new_pos, Vec3(0.0f), 0u});
                             u32 new_idx = static_cast<u32>(vertices.size() - 1);
                             vert_indices[i] = new_idx;
                             cached_index = new_idx;
 
-                            // FR-B1: capture the authored material of this edge's
+                            // capture the authored material of this edge's
                             // SOLID corner (val < isolevel). First-writer-wins on
                             // the shared edge cache => stamped per edge exactly
                             // once, fixed scan order => deterministic. 0 = no
                             // authored material (classify analytically in 1b).
                             if (has_material) {
-                                const int solid_corner =
-                                    (v1 < isolevel) ? corner_a : corner_b;
+                                const int solid_corner = (v1 < isolevel) ? corner_a : corner_b;
                                 vertex_material_override.push_back(
                                     material[corner_lattice_indices[solid_corner]]);
                             }
@@ -1696,7 +1858,7 @@ void PolygoniseTerrain(
                 }
 
                 const Vec3 density_gradient = EstimateDensityGradient(gridcell);
-                // #7 SMOOTHER MC NORMALS (handover §2 #7): the analytic SDF-density
+                // #7 SMOOTHER MC NORMALS (rendering contract): the analytic SDF-density
                 // gradient is the true surface normal direction (points toward AIR /
                 // +density = outward). It was computed here only to orient triangle
                 // winding; seed it onto each emitted vertex too, BLENDED with the
@@ -1705,21 +1867,21 @@ void PolygoniseTerrain(
                 // faceting; the smooth analytic gradient settles them. Render-only:
                 // mesh NORMALS are excluded from world_hash.
                 const Vec3 grad_n = (glm::dot(density_gradient, density_gradient) > 1.0e-12f)
-                    ? glm::normalize(density_gradient) : Vec3(0.0f);
+                                        ? glm::normalize(density_gradient)
+                                        : Vec3(0.0f);
                 const auto& tri_row = triTable[cube_index];
                 for (int i = 0; tri_row[i] != -1; i += 3) {
                     u32 i0 = vert_indices[tri_row[i]];
-                    u32 i1 = vert_indices[tri_row[i+1]];
-                    u32 i2 = vert_indices[tri_row[i+2]];
+                    u32 i1 = vert_indices[tri_row[i + 1]];
+                    u32 i2 = vert_indices[tri_row[i + 2]];
 
                     if (i0 == i1 || i1 == i2 || i2 == i0) {
                         continue;
                     }
 
-                    const Vec3 face_normal = glm::cross(
-                        vertices[i1].position - vertices[i0].position,
-                        vertices[i2].position - vertices[i0].position
-                    );
+                    const Vec3 face_normal =
+                        glm::cross(vertices[i1].position - vertices[i0].position,
+                                   vertices[i2].position - vertices[i0].position);
 
                     if (glm::dot(face_normal, face_normal) <= 1.0e-10f) {
                         continue;
@@ -1745,13 +1907,13 @@ void PolygoniseTerrain(
             }
         }
     }
-    
-    // --- PASS 1b: SIMD-batched material classification (T-I4-DR-shaping-perf).
+
+    // --- PASS 1b: SIMD-batched material classification.
     // One pass over every emitted vertex world position; ClassifyVertexMaterials
     // returns the exact GetTerrainMaterialAt material per vertex but evaluates
     // the shaped-height/climate noise through FastNoise's batch entry points.
     if (!vertices.empty()) {
-        // T-I4-18: both scratch arrays are index-filled then consumed in-place
+        // both scratch arrays are index-filled then consumed in-place
         // (ClassifyVertexMaterials reads positions, writes materials) and never
         // escape, so they are arena-backed. world_positions is overwritten for
         // every element below before use; materials is fully written by the batch
@@ -1762,12 +1924,12 @@ void PolygoniseTerrain(
         for (size_t i = 0; i < vertices.size(); ++i) {
             world_positions[i] = base + vertices[i].position;
         }
-        world_system.ClassifyVertexMaterials(world_positions.data(), world_positions.size(),
-                                             materials.data());
+        world_system.ClassifyVertexMaterials(
+            world_positions.data(), world_positions.size(), materials.data());
         for (size_t i = 0; i < vertices.size(); ++i) {
             vertices[i].material_id = materials[i];
         }
-        // FR-B1: override the analytic classification with the authored structure
+        // override the analytic classification with the authored structure
         // material on vertices created on a structure edge-corner (override != 0).
         // Empty material_data => vertex_material_override is empty => no-op =>
         // PASS 1b byte-identical to today.
@@ -1783,8 +1945,8 @@ void PolygoniseTerrain(
     // --- PASS 2: Calculate smoothed normals ---
     for (size_t i = 0; i < indices.size(); i += 3) {
         VoxelVertex& v1 = vertices[indices[i]];
-        VoxelVertex& v2 = vertices[indices[i+1]];
-        VoxelVertex& v3 = vertices[indices[i+2]];
+        VoxelVertex& v2 = vertices[indices[i + 1]];
+        VoxelVertex& v3 = vertices[indices[i + 2]];
 
         Vec3 face_normal = glm::cross(v2.position - v1.position, v3.position - v1.position);
 
@@ -1800,7 +1962,7 @@ void PolygoniseTerrain(
         }
     }
 
-    // T-I4-18: remap is pure index-addressed scratch (never escapes) -> arena.
+    // remap is pure index-addressed scratch (never escapes) -> arena.
     // Value-set to 0xFFFFFFFF, identical to the prior std::vector(count, -1).
     ArenaSpan<u32> remap = ArenaAlloc<u32>(vertices.size(), static_cast<u32>(-1));
     std::vector<VoxelVertex> compact_vertices;
@@ -1815,28 +1977,25 @@ void PolygoniseTerrain(
 
     chunk.mesh_vertices = std::move(compact_vertices);
     chunk.mesh_indices = std::move(indices);
-    const auto elapsed_us = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - build_start).count()
-    );
-    RecordTerrainMeshBuildStats(
-        sample_step,
-        cells_visited,
-        active_cells,
-        chunk.mesh_vertices.size(),
-        chunk.mesh_indices.size(),
-        elapsed_us
-    );
+    const auto elapsed_us =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - build_start)
+                                       .count());
+    RecordTerrainMeshBuildStats(sample_step,
+                                cells_visited,
+                                active_cells,
+                                chunk.mesh_vertices.size(),
+                                chunk.mesh_indices.size(),
+                                elapsed_us);
 
     // Mesh generation complete
 }
 
-TerrainTransitionSkirtStats AddBoundaryTransitionSkirts(
-    Chunk& chunk,
-    int step,
-    TerrainTransitionFaceMask faces
-) {
+TerrainTransitionSkirtStats
+AddBoundaryTransitionSkirts(Chunk& chunk, int step, TerrainTransitionFaceMask faces) {
     TerrainTransitionSkirtStats stats;
-    if (step <= 1 || faces == kNoTransitionFaces || chunk.mesh_vertices.empty() || chunk.mesh_indices.empty()) {
+    if (step <= 1 || faces == kNoTransitionFaces || chunk.mesh_vertices.empty() ||
+        chunk.mesh_indices.empty()) {
         return stats;
     }
 
@@ -1867,7 +2026,7 @@ TerrainTransitionSkirtStats AddBoundaryTransitionSkirts(
         if (a >= chunk.mesh_vertices.size() || b >= chunk.mesh_vertices.size()) {
             return;
         }
-        // T-I4-DR-live-needle-streak: copy the two top vertices BY VALUE before
+        // copy the two top vertices BY VALUE before
         // any push_back below. They previously aliased chunk.mesh_vertices via
         // reference; the first push_back can reallocate the vector, leaving
         // later reads dereferencing dangling references (UB: garbage skirt
@@ -1908,8 +2067,10 @@ TerrainTransitionSkirtStats AddBoundaryTransitionSkirts(
         chunk.mesh_vertices.push_back(skirt_b);
 
         const std::size_t index_count_before = chunk.mesh_indices.size();
-        const bool first = AppendOrientedTriangle(chunk.mesh_indices, chunk.mesh_vertices, a, b, down_b, face_normal);
-        const bool second = AppendOrientedTriangle(chunk.mesh_indices, chunk.mesh_vertices, a, down_b, down_a, face_normal);
+        const bool first = AppendOrientedTriangle(
+            chunk.mesh_indices, chunk.mesh_vertices, a, b, down_b, face_normal);
+        const bool second = AppendOrientedTriangle(
+            chunk.mesh_indices, chunk.mesh_vertices, a, down_b, down_a, face_normal);
         if (!first && !second) {
             chunk.mesh_vertices.pop_back();
             chunk.mesh_vertices.pop_back();
@@ -1950,17 +2111,17 @@ TerrainTransitionSkirtStats AddBoundaryTransitionSkirts(
 
 // ===================== NEW WATER MESH GENERATION =====================
 
-void GenerateWaterMesh(
-    const Systems::WaterSystem& water_system,
-    const Systems::SHIELD_WorldSystem& world_system,
-    Chunk& chunk
-) {
+void GenerateWaterMesh(const Systems::WaterSystem& water_system,
+                       const Systems::SHIELD_WorldSystem& world_system,
+                       Chunk& chunk) {
     (void)water_system;
     const int resolution = chunk.current_water_resolution.load(std::memory_order_acquire);
     std::vector<VoxelVertex> water_vertices;
     std::vector<u32> water_indices;
-    water_vertices.reserve(static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution) * 4u);
-    water_indices.reserve(static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution) * 6u);
+    water_vertices.reserve(static_cast<std::size_t>(resolution) *
+                           static_cast<std::size_t>(resolution) * 4u);
+    water_indices.reserve(static_cast<std::size_t>(resolution) *
+                          static_cast<std::size_t>(resolution) * 6u);
 
     if (!HasCompleteWaterGrid(chunk, resolution)) {
         chunk.water_mesh_vertices.clear();
@@ -1969,17 +2130,20 @@ void GenerateWaterMesh(
         return;
     }
 
-    const IVec3 chunk_base_pos = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    const IVec3 chunk_base_pos =
+        chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
     const Vec3 normal = {0.0f, 1.0f, 0.0f}; // Water surface normal is always up
     const u32 water_mat_id = static_cast<u32>(MaterialType::Water);
     constexpr float kMinRenderableWaterDepth = 0.05f;
-    // Spec 010 fix: cull on the ACTUAL standing depth (water_depth_mm, which terraform edits update), NOT
-    // on (water_level - GetTerrainHeightAt). GetTerrainHeightAt is pure worldgen and is blind to runtime
-    // digs, so water filling a CARVED basin (its surface below the original worldgen height) was wrongly
-    // judged "underground" and never rendered. The per-cell depth is edit-aware, so dug/rain ponds show.
+    //  fix: cull on the ACTUAL standing depth (water_depth_mm, which terraform edits update), NOT
+    // on (water_level - GetTerrainHeightAt). GetTerrainHeightAt is pure worldgen and is blind to
+    // runtime digs, so water filling a CARVED basin (its surface below the original worldgen
+    // height) was wrongly judged "underground" and never rendered. The per-cell depth is
+    // edit-aware, so dug/rain ponds show.
     constexpr std::int32_t kMinRenderableWaterDepthMm = 50; // 5 cm
-    const bool have_depth = (chunk.water_depth_mm.size() ==
-                             static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution));
+    const bool have_depth =
+        (chunk.water_depth_mm.size() ==
+         static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution));
 
     const float cell_width_x = static_cast<float>(CHUNK_SIZE_X) / static_cast<float>(resolution);
     const float cell_width_z = static_cast<float>(CHUNK_SIZE_Z) / static_cast<float>(resolution);
@@ -1997,23 +2161,25 @@ void GenerateWaterMesh(
             float water_h01 = SampleChunkWaterLevel(chunk, world_x0, world_z1, resolution);
             float water_h11 = SampleChunkWaterLevel(chunk, world_x1, world_z1, resolution);
 
-            // Render a quad where this cell holds standing water (edit-aware depth). Fall back to the
-            // legacy worldgen-height test only if the depth array is unavailable.
+            // Render a quad where this cell holds standing water (edit-aware depth). Fall back to
+            // the legacy worldgen-height test only if the depth array is unavailable.
             bool renderable;
             if (have_depth) {
                 renderable = chunk.water_depth_mm[static_cast<std::size_t>(z) * resolution + x] >
                              kMinRenderableWaterDepthMm;
             } else {
-                renderable = (water_h00 - world_system.GetTerrainHeightAt(world_x0, world_z0)) > kMinRenderableWaterDepth;
+                renderable = (water_h00 - world_system.GetTerrainHeightAt(world_x0, world_z0)) >
+                             kMinRenderableWaterDepth;
             }
             if (renderable) {
                 u32 base_idx = static_cast<u32>(water_vertices.size());
-                
+
                 // Define vertices relative to chunk origin
                 Vec3 p00 = {x * cell_width_x, water_h00 - chunk_base_pos.y, z * cell_width_z};
-                Vec3 p10 = {(x+1) * cell_width_x, water_h10 - chunk_base_pos.y, z * cell_width_z};
-                Vec3 p01 = {x * cell_width_x, water_h01 - chunk_base_pos.y, (z+1) * cell_width_z};
-                Vec3 p11 = {(x+1) * cell_width_x, water_h11 - chunk_base_pos.y, (z+1) * cell_width_z};
+                Vec3 p10 = {(x + 1) * cell_width_x, water_h10 - chunk_base_pos.y, z * cell_width_z};
+                Vec3 p01 = {x * cell_width_x, water_h01 - chunk_base_pos.y, (z + 1) * cell_width_z};
+                Vec3 p11 = {
+                    (x + 1) * cell_width_x, water_h11 - chunk_base_pos.y, (z + 1) * cell_width_z};
 
                 water_vertices.push_back({p00, normal, water_mat_id});
                 water_vertices.push_back({p01, normal, water_mat_id});
@@ -2029,7 +2195,7 @@ void GenerateWaterMesh(
             }
         }
     }
-    
+
     chunk.water_mesh_vertices = std::move(water_vertices);
     chunk.water_mesh_indices = std::move(water_indices);
     chunk.water_mesh_generated.store(true, std::memory_order_release);

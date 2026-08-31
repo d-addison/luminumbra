@@ -32,17 +32,17 @@
 
             <!-- Version info -->
             <div class="version-info">
-                <p class="text-sm text-center">v0.1.0 alpha</p>
+                <p class="text-sm text-center">v0.1.0</p>
             </div>
         </div>
-        
+
         <!-- Background particles (CSS animation) -->
         <div class="quantum-background">
             <div class="particle"></div>
             <div class="particle"></div>
             <div class="particle"></div>
         </div>
-        
+
         <!-- Notification area -->
         <div id="notification" class="notification hidden">
             <span id="notification_text"></span>

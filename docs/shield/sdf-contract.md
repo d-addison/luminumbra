@@ -119,7 +119,7 @@ been extracted.
 ## Two Producer Tiers
 
 A chunk's `Chunk::sdf_data` is produced at one of two tiers, selected by the
-meshing **sample step** the chunk needs (SHIELD-04). The meshing promotion lane
+meshing **sample step** the chunk needs (). The meshing promotion lane
 and every SDF producer must agree on which tier a chunk is in from its
 `sdf_data` size alone:
 

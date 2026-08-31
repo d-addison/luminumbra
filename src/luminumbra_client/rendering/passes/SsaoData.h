@@ -1,8 +1,8 @@
 #pragma once
 
-// Spec 016 (016-P1, struct extraction): SSAOData moved out of RenderPipeline.h so
+//  (, struct extraction): SSAOData moved out of RenderPipeline.h so
 // SsaoPass can own it without including the pipeline god-object. RenderPipeline.h
-// still includes this header (it reads ssao() resources for the inventory/VRAM
+// still includes this header (it reads ssao resources for the inventory/VRAM
 // stats), so the move is behavior-neutral. Self-contained per the verified-T02
 // lesson: an extracted struct header must carry its own includes + fwd-decls.
 

@@ -1,6 +1,6 @@
 #pragma once
 
-// Spec 002 Item 2 — SEMANTIC KNOBS (separate persisted layer).
+// SEMANTIC KNOBS (separate persisted layer).
 //
 // The create-world DEFAULT surface is ~6 OUTCOME knobs (mountainousness,
 // ruggedness, wetness, erosion/age, climate, feature density). Each knob is a
@@ -19,9 +19,9 @@
 // PERSISTENCE MODEL (owner decision: separate persisted layer; the lossy one-way
 // lerp is rejected). A world save / user preset carries an ADDITIVE
 // generation_params.knob_layer:
-//   { "knobs":   { "mountainousness": 0.7, ... },     // the knob vector
-//     "baseline": { ...generation_params snapshot... }, // the override baseline
-//     "overrides":[ {"path":..., "value":..., "type":...}, ... ] }  // sparse raw diff
+//   { "knobs":   { "mountainousness": 0.7,... },     // the knob vector
+//     "baseline": {...generation_params snapshot... }, // the override baseline
+//     "overrides":[ {"path":..., "value":..., "type":...},... ] }  // sparse raw diff
 // apply = ApplyKnobLayer(baseline, knobs) THEN overlay the sparse overrides. The
 // resolved generation_params are ALSO written in full (so loaders that ignore the
 // knob layer still work). Reopen is EXACT: recomputing apply+overlay reproduces
@@ -84,12 +84,12 @@ struct ParamDescriptor {
 };
 
 // Every descriptor (terrain/water/biomes/features), in a stable order. The RML
-// min/max for each .worldgen-param control should match its descriptor here.
+// min/max for each.worldgen-param control should match its descriptor here.
 const std::vector<ParamDescriptor>& ParamDescriptors();
 // Lookup a descriptor by dotted path; nullptr if unknown.
 const ParamDescriptor* FindParamDescriptor(const std::string& path);
 
-// Startup invariant (FR-2): assert every knob spline's endpoint OUTPUTS lie
+// Startup invariant: assert every knob spline's endpoint OUTPUTS lie
 // within the mapped param's declared [min,max] range, and every spline is a
 // monotone, in-order [0,1]-domain control set. Returns false + fills `errors` on
 // any violation. Called once at startup (the host asserts it).
@@ -115,9 +115,9 @@ struct KnobOverride {
 };
 
 struct KnobLayerData {
-    bool present = false;          // a knob_layer block existed
-    KnobVector knobs{};            // the knob vector (neutral if absent)
-    nlohmann::json baseline;       // the override baseline (a generation_params object)
+    bool present = false;                // a knob_layer block existed
+    KnobVector knobs{};                  // the knob vector (neutral if absent)
+    nlohmann::json baseline;             // the override baseline (a generation_params object)
     std::vector<KnobOverride> overrides; // sparse raw diff over ApplyKnobLayer(baseline,knobs)
 };
 
@@ -144,4 +144,4 @@ nlohmann::json ResolveKnobLayer(const nlohmann::json& baseline,
                                 const KnobVector& knobs,
                                 const std::vector<KnobOverride>& overrides);
 
-}  // namespace Luminumbra::world
+} // namespace Luminumbra::world

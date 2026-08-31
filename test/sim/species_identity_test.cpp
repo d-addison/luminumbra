@@ -1,4 +1,4 @@
-// Phase 0/1 keystone — CREATURE SPECIES IDENTITY feeds the photo CODEX.
+//  keystone — CREATURE SPECIES IDENTITY feeds the photo CODEX.
 //
 // Before this slice the client adapter (main_client.cpp GatherPhotoSubjects) keyed the
 // codex on a binary predator/prey proxy (`is_predator ? 1 : 2`), so a world of many
@@ -32,18 +32,17 @@
 namespace {
 
 namespace Components = Luminumbra::Components;
-using luminumbra::game::PhotoSubjectView;
 using luminumbra::game::BuildShotInput;
 using luminumbra::game::CaptureShot;
-using luminumbra::game::PhotoCodex;
 using luminumbra::game::LensSettings;
+using luminumbra::game::PhotoCodex;
+using luminumbra::game::PhotoSubjectView;
 using luminumbra::game::ShotInput;
 
 // The species-resolution policy, identical to main_client.cpp GatherPhotoSubjects: a
 // real (nonzero) species_id keys the codex; 0 falls back to the role proxy.
 int ResolveCodexSpecies(const Components::CreatureComponent& cr) {
-    return cr.species_id != 0 ? static_cast<int>(cr.species_id)
-                              : (cr.is_predator ? 1 : 2);
+    return cr.species_id != 0 ? static_cast<int>(cr.species_id) : (cr.is_predator ? 1 : 2);
 }
 
 LensSettings MakeLens() {
@@ -61,7 +60,7 @@ LensSettings MakeLens() {
 // is well-formed and the main species is unambiguous.
 PhotoSubjectView ViewFor(const Components::CreatureComponent& cr) {
     PhotoSubjectView v;
-    v.ndc_x = 0.33333334f;  // a power point so the shot scores above the zero floor
+    v.ndc_x = 0.33333334f; // a power point so the shot scores above the zero floor
     v.ndc_y = 0.33333334f;
     v.size = 0.55f;
     v.light = 0.7f;
@@ -93,10 +92,10 @@ TEST(SpeciesIdentity, SpeciesIdIsDeterministicNonzeroAndDistinct) {
 // (2) A roster of distinct real species fills the codex beyond two buckets.
 // ---------------------------------------------------------------------------
 TEST(SpeciesIdentity, RealSpeciesFillTheCodexBeyondTwoBuckets) {
-    // Five distinct named species — the kind of variety procedural creatures (Phase 2)
+    // Five distinct named species — the kind of variety procedural creatures
     // will produce. Each is photographed once.
-    const char* names[] = {"grovestrider", "ridgeback_stalker", "lumen_moth",
-                           "tide_grazer", "ashen_corvid"};
+    const char* names[] = {
+        "grovestrider", "ridgeback_stalker", "lumen_moth", "tide_grazer", "ashen_corvid"};
 
     PhotoCodex codex;
     for (const char* name : names) {
@@ -119,7 +118,7 @@ TEST(SpeciesIdentity, RealSpeciesFillTheCodexBeyondTwoBuckets) {
 // (3) Unspecified (species_id==0) creatures fall back to the role proxy.
 // ---------------------------------------------------------------------------
 TEST(SpeciesIdentity, UnspecifiedCreaturesFallBackToRoleProxy) {
-    Components::CreatureComponent predator;  // species_id defaults to 0
+    Components::CreatureComponent predator; // species_id defaults to 0
     predator.is_predator = true;
     Components::CreatureComponent prey;
     prey.is_predator = false;
@@ -136,4 +135,4 @@ TEST(SpeciesIdentity, UnspecifiedCreaturesFallBackToRoleProxy) {
     EXPECT_TRUE(codex.discovered(2));
 }
 
-}  // namespace
+} // namespace

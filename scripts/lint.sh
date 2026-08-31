@@ -115,7 +115,15 @@ if [[ "$tidy_only" -eq 0 ]]; then
         fi
         set +e
         format_diff=$(
-            git -C "$repo_root" diff --no-ext-diff -U0 "$changed_from" -- src include test tools |
+            git -C "$repo_root" diff --no-ext-diff -U0 "$changed_from" -- \
+                'src/**/*.c' 'src/**/*.cc' 'src/**/*.cpp' 'src/**/*.cxx' \
+                'src/**/*.h' 'src/**/*.hh' 'src/**/*.hpp' 'src/**/*.hxx' \
+                'include/**/*.c' 'include/**/*.cc' 'include/**/*.cpp' 'include/**/*.cxx' \
+                'include/**/*.h' 'include/**/*.hh' 'include/**/*.hpp' 'include/**/*.hxx' \
+                'test/**/*.c' 'test/**/*.cc' 'test/**/*.cpp' 'test/**/*.cxx' \
+                'test/**/*.h' 'test/**/*.hh' 'test/**/*.hpp' 'test/**/*.hxx' \
+                'tools/**/*.c' 'tools/**/*.cc' 'tools/**/*.cpp' 'tools/**/*.cxx' \
+                'tools/**/*.h' 'tools/**/*.hh' 'tools/**/*.hpp' 'tools/**/*.hxx' |
                 "$clang_format_diff" -p1 -style=file
         )
         format_status=$?

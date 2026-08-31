@@ -77,25 +77,23 @@ const char* WorldHashAlgorithm();
 const char* EntitySnapshotArtifactSchema();
 
 std::string SerializeWorldStreamingStateSnapshotJson(const WorldStreamingState& state);
-bool LoadWorldStreamingStateSnapshotJson(
-    const std::string& json_text,
-    WorldStreamingState& out_state,
-    std::vector<std::string>& errors);
-bool ValidateWorldStreamingChunkFormatJson(
-    const std::string& chunk_json,
-    std::vector<std::string>& errors);
+bool LoadWorldStreamingStateSnapshotJson(const std::string& json_text,
+                                         WorldStreamingState& out_state,
+                                         std::vector<std::string>& errors);
+bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
+                                           std::vector<std::string>& errors);
 // Deterministic world hash over the canonical snapshot bytes (same
 // fnv1a_64_stable_json machinery the WorldHash gate artifact records).
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 
-// T-I4-11 determinism contract: per-system sub-hashes for desync localization.
+//  determinism contract: per-system sub-hashes for desync localization.
 // The TOP-LEVEL world_hash (ComputeWorldStreamingStateHash above) is unchanged
 // byte-for-byte; these are ADDITIVE. Each field is an independent
 // fnv1a_64_stable_json checksum over a PROJECTION of the same canonical
 // per-chunk snapshot, grouping the persisted fields by subsystem so a future
-// lockstep desync (T-I4-13) reports WHICH system diverged and at what tick
+// lockstep desync reports WHICH system diverged and at what tick
 // (Factorio CRC-per-system playbook, research Area 2 takeaway 4). Same
-// chunk-id-ascending ordering and same Checksum() as the top-level hash, so
+// chunk-id-ascending ordering and same Checksum as the top-level hash, so
 // sub-hashes are as reproducible as the whole.
 struct WorldStreamingStateSubHashes {
     // Terrain field + heightmap + chunk identity/state (the worldgen output).
@@ -108,26 +106,26 @@ struct WorldStreamingStateSubHashes {
     // no entity snapshot is supplied; ServerWorldRunner fills it from the
     // session registry.
     std::string entities;
-    // T-I5a-2 (A2): the deterministic wind field cell values (its own
-    // world_hash sub-hash slot, design-decisions.md S2). NOT chunk-derived: the
+    // the deterministic wind field cell values (its own
+    // world_hash sub-hash slot, the deterministic runtime contract ). NOT chunk-derived: the
     // wind field lives on GameSession, so the runner supplies this string from
-    // WindFieldSystem::ComputeWindSubHash(). Empty when no wind field exists
+    // WindFieldSystem::ComputeWindSubHash. Empty when no wind field exists
     // (e.g. the persistence fixtures, which never construct one).
     std::string wind;
-    // T-I5a-3 (B1): the deterministic weather state (region category map + storm
+    // the deterministic weather state (region category map + storm
     // cells + precipitation field, with a reserved lightning strike-schedule
-    // slot for T-I5a-5) -- its own world_hash sub-hash slot (design-decisions.md
-    // S2). NOT chunk-derived: the weather core lives on GameSession, so the runner
-    // supplies this string from WeatherSystem::ComputeWeatherSubHash(). Empty when
+    // slot for ) -- its own world_hash sub-hash slot (the deterministic runtime contract
+    // ). NOT chunk-derived: the weather core lives on GameSession, so the runner
+    // supplies this string from WeatherSystem::ComputeWeatherSubHash. Empty when
     // no weather core exists (e.g. the persistence fixtures, which never make one).
     std::string weather;
-    // T-I6-A1: the deterministic Aether scalar-field cell values -- its own
+    // the deterministic Aether scalar-field cell values -- its own
     // world_hash sub-hash slot. NOT chunk-derived: the field lives on
     // GameSession, so the runner supplies this from
-    // AetherFieldSystem::ComputeAetherSubHash(). Empty when no field exists
+    // AetherFieldSystem::ComputeAetherSubHash. Empty when no field exists
     // (e.g. the persistence fixtures, which never construct one).
     std::string aether;
-    // Spec 024 (AETHER-06): the STATE-ONLY aether_state:v1: sub-hash
+    // the STATE-ONLY aether_state:v1: sub-hash
     // (GameSession::ComputeAetherStateSubHash). Codex finding A: the folded
     // |aether: composite embeds the tick-dependent re-derivable half, which the
     // heavy oracle recompute-and-excludes -- so the AUTHORITATIVE stateful
@@ -146,48 +144,46 @@ WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStre
 // snapshot (the canonical SerializeEntityRegistrySnapshotJson output), checksummed
 // with the SAME fnv1a_64_stable_json machinery as the chunk groups. Pass the
 // empty-snapshot serialization for a terrain/water-only headless world.
-WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(
-    const WorldStreamingState& state,
-    const std::string& entity_snapshot_json);
+WorldStreamingStateSubHashes
+ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
+                                    const std::string& entity_snapshot_json);
 
 // Exposes the determinism-stable checksum (fnv1a_64_stable_json) used by every
 // world/sub hash so callers can hash auxiliary canonical strings (e.g. an
 // entity snapshot) with the identical algorithm.
 std::string StableChecksum(const std::string& canonical_text);
 
-WorldPersistenceRoundtripAnalysis BuildWorldPersistenceRoundtripAnalysis(const std::string& build_preset);
-std::string SerializeWorldPersistenceRoundtripJson(const WorldPersistenceRoundtripAnalysis& analysis);
+WorldPersistenceRoundtripAnalysis
+BuildWorldPersistenceRoundtripAnalysis(const std::string& build_preset);
+std::string
+SerializeWorldPersistenceRoundtripJson(const WorldPersistenceRoundtripAnalysis& analysis);
 bool WorldPersistenceRoundtripMeetsBaseline(const WorldPersistenceRoundtripAnalysis& analysis);
-bool WriteWorldPersistenceRoundtripArtifact(
-    const std::filesystem::path& output_path,
-    const std::string& build_preset,
-    std::vector<std::string>* errors = nullptr);
+bool WriteWorldPersistenceRoundtripArtifact(const std::filesystem::path& output_path,
+                                            const std::string& build_preset,
+                                            std::vector<std::string>* errors = nullptr);
 ChunkFormatValidationAnalysis BuildChunkFormatValidationAnalysis(const std::string& build_preset);
 std::string SerializeChunkFormatValidationJson(const ChunkFormatValidationAnalysis& analysis);
 bool ChunkFormatValidationMeetsBaseline(const ChunkFormatValidationAnalysis& analysis);
-bool WriteChunkFormatValidationArtifact(
-    const std::filesystem::path& output_path,
-    const std::string& build_preset,
-    std::vector<std::string>* errors = nullptr);
+bool WriteChunkFormatValidationArtifact(const std::filesystem::path& output_path,
+                                        const std::string& build_preset,
+                                        std::vector<std::string>* errors = nullptr);
 WorldHashAnalysis BuildWorldHashAnalysis(const std::string& build_preset);
 std::string SerializeWorldHashJson(const WorldHashAnalysis& analysis);
 bool WorldHashMeetsBaseline(const WorldHashAnalysis& analysis);
-bool WriteWorldHashArtifact(
-    const std::filesystem::path& output_path,
-    const std::string& build_preset,
-    std::vector<std::string>* errors = nullptr);
-// T-I3-17: the game-flavored snapshot fixture moved to test-support code
+bool WriteWorldHashArtifact(const std::filesystem::path& output_path,
+                            const std::string& build_preset,
+                            std::vector<std::string>* errors = nullptr);
+// the game-flavored snapshot fixture moved to test-support code
 // (test/support/EntitySnapshotFixture.h); the analysis/artifact builders now
 // receive the fixture registry as a parameter.
-EntitySnapshotAnalysis BuildEntitySnapshotAnalysis(
-    const std::string& build_preset,
-    const Luminumbra::Ecs::EntityRegistrySnapshot& fixture);
+EntitySnapshotAnalysis
+BuildEntitySnapshotAnalysis(const std::string& build_preset,
+                            const Luminumbra::Ecs::EntityRegistrySnapshot& fixture);
 std::string SerializeEntitySnapshotJson(const EntitySnapshotAnalysis& analysis);
 bool EntitySnapshotMeetsBaseline(const EntitySnapshotAnalysis& analysis);
-bool WriteEntitySnapshotArtifact(
-    const std::filesystem::path& output_path,
-    const std::string& build_preset,
-    const Luminumbra::Ecs::EntityRegistrySnapshot& fixture,
-    std::vector<std::string>* errors = nullptr);
+bool WriteEntitySnapshotArtifact(const std::filesystem::path& output_path,
+                                 const std::string& build_preset,
+                                 const Luminumbra::Ecs::EntityRegistrySnapshot& fixture,
+                                 std::vector<std::string>* errors = nullptr);
 
 } // namespace Luminumbra::Persistence

@@ -10,7 +10,7 @@ namespace Luminumbra::Rendering {
 class RenderPipeline;
 
 // ===========================================================================
-// framescan — deterministic "what's-in-frame" scan tool. RENDER-ONLY.
+// framescan — deterministic "what's-in-frame" scan tool..
 //
 // Reads back the settled frame's G-buffer + back color buffer and computes a
 // per-MATERIAL coverage + luminance summary, plus a water and a foliage tally,
@@ -39,9 +39,9 @@ class RenderPipeline;
 // ===========================================================================
 struct MaterialFrameStat {
     int id = 0;
-    std::string name;       // from data/common/materials.json (best-effort)
+    std::string name; // from data/common/materials.json (best-effort)
     std::uint64_t pixels = 0;
-    double coverage = 0.0;  // pixels / total frame pixels
+    double coverage = 0.0;       // pixels / total frame pixels
     double mean_luminance = 0.0; // mean back-buffer luminance over those pixels [0,1]
     double max_luminance = 0.0;  // brightest pixel of this material — catches spec/spark outliers
 };
@@ -62,7 +62,7 @@ struct FrameScanReport {
 // Reads back the CURRENT settled frame (caller must have rendered it and NOT yet
 // drawn UI over the back buffer) and computes the scan. `materials_json` is the
 // path to data/common/materials.json for id->name labels (optional; missing ->
-// numeric ids only). RENDER-ONLY: issues only glGetTexImage / glReadPixels, no
+// numeric ids only).: issues only glGetTexImage / glReadPixels, no
 // draws, no GL state that survives the call.
 FrameScanReport ScanFrame(const RenderPipeline& pipeline,
                           int framebuffer_width,
@@ -71,7 +71,6 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
 
 // Serializes the report to JSON and writes it to `out_path`. Returns false on a
 // write failure. Creates parent directories.
-bool WriteFrameScanReport(const FrameScanReport& report,
-                          const std::filesystem::path& out_path);
+bool WriteFrameScanReport(const FrameScanReport& report, const std::filesystem::path& out_path);
 
 } // namespace Luminumbra::Rendering

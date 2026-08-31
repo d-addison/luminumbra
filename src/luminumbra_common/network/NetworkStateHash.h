@@ -48,21 +48,20 @@ struct NetworkStateHashReport {
     std::vector<NetworkStateHashCheck> checks;
 };
 
-// T-I3-17: the durable-entity fixture (game-flavored snapshot data) moved to
+// the durable-entity fixture (game-flavored snapshot data) moved to
 // test-support code; the fixture registry is now a parameter so the engine
 // carries no game content. The data the tests pass is byte-identical to the
 // pre-relocation fixture, so committed state hashes are unchanged.
-NetworkStateHashReport BuildNetworkStateHashFixture(
-    const Luminumbra::Ecs::EntityRegistrySnapshot& entities,
-    const std::string& buildPreset = "debug");
+NetworkStateHashReport
+BuildNetworkStateHashFixture(const Luminumbra::Ecs::EntityRegistrySnapshot& entities,
+                             const std::string& buildPreset = "debug");
 
 std::string SerializeNetworkStateHashJson(const NetworkStateHashReport& report);
 
 bool NetworkStateHashMeetsBaseline(const NetworkStateHashReport& report);
 
-bool WriteNetworkStateHashArtifact(
-    const std::string& path,
-    const Luminumbra::Ecs::EntityRegistrySnapshot& entities,
-    const std::string& buildPreset = "debug");
+bool WriteNetworkStateHashArtifact(const std::string& path,
+                                   const Luminumbra::Ecs::EntityRegistrySnapshot& entities,
+                                   const std::string& buildPreset = "debug");
 
 } // namespace luminumbra::network

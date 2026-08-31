@@ -1,7 +1,7 @@
 {
   "schema": "luminumbra.particle_emitter.v1",
   "name": "precip_rain",
-  "_comment": "T-I5a-DR-storm-motion-v3: the ONE real gameplay rain emitter (used both in-game AND by the motion-capture clip -- there is no demo-only variant). The emitter GEOMETRY (spawn_rate/lifetime/origin/extent/fall/jitter/aspect/wind_response/size) is kept BYTE-IDENTICAL to the gate-blessed B2 values so the WeatherVisual/Precipitation wind-slant relationship (windy streaks lean measurably more than calm) is unperturbed. The CLEAN-RAIN look is produced entirely in the particle frag shader, which now draws each streak as a CONSTANT light blue-white translucent filament (no per-particle hue, no scene-light tint), eliminating the coloured-static speckle. The colour_*_curve values below are a neutral fallback only; the shader overrides the streak colour.",
+  "_comment": ": the ONE real gameplay rain emitter (used both in-game AND by the motion-capture clip -- there is no demo-only variant). The emitter GEOMETRY (spawn_rate/lifetime/origin/extent/fall/jitter/aspect/wind_response/size) is kept BYTE-IDENTICAL to the gate-blessed  values so the WeatherVisual/Precipitation wind-slant relationship (windy streaks lean measurably more than calm) is unperturbed. The CLEAN-RAIN look is produced entirely in the particle frag shader, which now draws each streak as a CONSTANT light blue-white translucent filament (no per-particle hue, no scene-light tint), eliminating the coloured-static speckle. The colour_*_curve values below are a neutral fallback only; the shader overrides the streak colour.",
   "type": 1,
   "spawn_rate": 4200.0,
   "lifetime": 1.4,

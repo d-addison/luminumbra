@@ -1,17 +1,17 @@
 #pragma once
 
-// §1a SystemConfig — data-driven feature-flag + per-system tuning registry.
+//  SystemConfig — data-driven feature-flag + per-system tuning registry.
 // One registry (data/common/systems.json)
 // queried by every system so each can be turned on/off + tuned from data, no recompile.
 //
 // Determinism contract (verified against persistence/WorldPersistenceRoundtrip.h):
 //   * Flags split into `sim.*` (may affect sim state) and `render.*` (render-only).
-//   * ComputeConfigSubHash() is an ADDITIVE per-system sub-hash (modelled on wind/
+//   * ComputeConfigSubHash is an ADDITIVE per-system sub-hash (modelled on wind/
 //     weather/aether): it does NOT alter the top-level world_hash, and it is empty
 //     ("") whenever every sim.* flag is at its compiled default -> the canonical
 //     baseline d950a6afc12a5cdc and the sub-hash SET both stay byte-identical.
 //   * render.* flags NEVER appear in the sub-hash and never touch any hash.
-//   * enabled() is an O(1) bit test on a resolved immutable snapshot (no map lookup,
+//   * enabled is an O(1) bit test on a resolved immutable snapshot (no map lookup,
 //     no string compare, no allocation) so it is safe on the 36k-entity / 30 Hz tick.
 
 #include <array>

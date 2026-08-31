@@ -7,7 +7,6 @@ namespace Luminumbra::Client {
 
 EnvironmentalAudioSystem::EnvironmentalAudioSystem(MiniaudioManager* audioManager)
     : m_audioManager(audioManager) {
-    
     // Initialize material-to-footstep sound mapping
     m_materialFootstepMap["grass"] = "footstep_grass";
     m_materialFootstepMap["stone"] = "footstep_stone";
@@ -16,7 +15,7 @@ EnvironmentalAudioSystem::EnvironmentalAudioSystem(MiniaudioManager* audioManage
     m_materialFootstepMap["metal"] = "footstep_metal";
     m_materialFootstepMap["wood"] = "footstep_wood";
     m_materialFootstepMap["water"] = "footstep_water_splash";
-    
+
     LUMINUMBRA_CORE_INFO("Environmental Audio System Initialized");
 }
 
@@ -27,32 +26,36 @@ EnvironmentalAudioSystem::~EnvironmentalAudioSystem() {
             m_audioManager->StopAmbientLoop(zone->soundEvent);
         }
     }
-    // AUDIO-07: stop the day/night beds this system owns.
+    // stop the day/night beds this system owns.
     if (m_audioManager) {
-        if (m_dayNight.day_bed_started) m_audioManager->StopAmbientLoop(m_dayBedEvent);
-        if (m_dayNight.night_bed_started) m_audioManager->StopAmbientLoop(m_nightBedEvent);
+        if (m_dayNight.day_bed_started)
+            m_audioManager->StopAmbientLoop(m_dayBedEvent);
+        if (m_dayNight.night_bed_started)
+            m_audioManager->StopAmbientLoop(m_nightBedEvent);
     }
 }
 
 void EnvironmentalAudioSystem::Update(const glm::vec3& listenerPosition, float deltaTime) {
     m_updateTimer += deltaTime;
-    
+
     if (m_updateTimer >= UPDATE_INTERVAL) {
         UpdateAmbientZones(listenerPosition);
         UpdateWeatherAudio();
-        UpdateDayNightBeds(listenerPosition, m_updateTimer); // AUDIO-07
+        UpdateDayNightBeds(listenerPosition, m_updateTimer); //
         m_updateTimer = 0.0f;
     }
 }
 
-void EnvironmentalAudioSystem::SetEnvironment(AudioEnvironmentType type, const glm::vec3& position) {
-    if (type == m_currentEnvironmentType) return;
-    
+void EnvironmentalAudioSystem::SetEnvironment(AudioEnvironmentType type,
+                                              const glm::vec3& position) {
+    if (type == m_currentEnvironmentType)
+        return;
+
     m_currentEnvironmentType = type;
     AudioEnvironment environment = CreateEnvironmentProfile(type);
-    
+
     m_audioManager->SetEnvironment(environment);
-    
+
     // Start appropriate ambient sounds based on environment
     switch (type) {
         case AudioEnvironmentType::Cave:
@@ -67,32 +70,38 @@ void EnvironmentalAudioSystem::SetEnvironment(AudioEnvironmentType type, const g
         default:
             break;
     }
-    
+
     LUMINUMBRA_CORE_INFO("Environment changed to: {}", static_cast<int>(type));
 }
 
-void EnvironmentalAudioSystem::UpdateWeatherConditions(float windStrength, const glm::vec3& windDirection, bool isRaining) {
+void EnvironmentalAudioSystem::UpdateWeatherConditions(float windStrength,
+                                                       const glm::vec3& windDirection,
+                                                       bool isRaining) {
     m_weatherState.windStrength = windStrength;
     m_weatherState.windDirection = windDirection;
     m_weatherState.isRaining = isRaining;
-    
+
     // Update wind parameters in audio manager
     m_audioManager->SetWindParameters(windDirection, windStrength);
-    
+
     LUMINUMBRA_CORE_INFO("Weather updated - Wind: {}, Rain: {}", windStrength, isRaining);
 }
 
-void EnvironmentalAudioSystem::RegisterAmbientZone(const std::string& zoneId, const glm::vec3& center, float radius, const AudioEventID& ambientSound) {
+void EnvironmentalAudioSystem::RegisterAmbientZone(const std::string& zoneId,
+                                                   const glm::vec3& center,
+                                                   float radius,
+                                                   const AudioEventID& ambientSound) {
     auto zone = std::make_unique<AmbientZone>();
     zone->id = zoneId;
     zone->center = center;
     zone->radius = radius;
     zone->soundEvent = ambientSound;
     zone->fadeDistance = radius * 0.2f; // 20% of radius for fade
-    
+
     m_ambientZones[zoneId] = std::move(zone);
-    
-    LUMINUMBRA_CORE_INFO("Registered ambient zone: {} at ({}, {}, {})", zoneId, center.x, center.y, center.z);
+
+    LUMINUMBRA_CORE_INFO(
+        "Registered ambient zone: {} at ({}, {}, {})", zoneId, center.x, center.y, center.z);
 }
 
 void EnvironmentalAudioSystem::UnregisterAmbientZone(const std::string& zoneId) {
@@ -106,7 +115,8 @@ void EnvironmentalAudioSystem::UnregisterAmbientZone(const std::string& zoneId) 
     }
 }
 
-void EnvironmentalAudioSystem::PlayFootstepSound(const glm::vec3& position, const std::string& materialType) {
+void EnvironmentalAudioSystem::PlayFootstepSound(const glm::vec3& position,
+                                                 const std::string& materialType) {
     auto it = m_materialFootstepMap.find(materialType);
     if (it != m_materialFootstepMap.end()) {
         m_audioManager->PlayOneShot(it->second, position);
@@ -124,14 +134,14 @@ void EnvironmentalAudioSystem::SetSeasonalEffects(float seasonFactor) {
     m_weatherState.seasonalFactor = std::clamp(seasonFactor, 0.0f, 1.0f);
 }
 
-void EnvironmentalAudioSystem::ApplyBiomeReverb(const std::string& preset, float wet, float dry, float decay) {
+void EnvironmentalAudioSystem::ApplyBiomeReverb(const std::string& preset,
+                                                float wet,
+                                                float dry,
+                                                float decay) {
     // Idempotent: skip when the active profile already matches (avoids churning
     // the audio backend every Update tick while the listener stays in a biome).
-    if (m_biomeReverb.applied &&
-        m_biomeReverb.preset == preset &&
-        m_biomeReverb.wet == wet &&
-        m_biomeReverb.dry == dry &&
-        m_biomeReverb.decay == decay) {
+    if (m_biomeReverb.applied && m_biomeReverb.preset == preset && m_biomeReverb.wet == wet &&
+        m_biomeReverb.dry == dry && m_biomeReverb.decay == decay) {
         return;
     }
     m_biomeReverb.applied = true;
@@ -143,20 +153,23 @@ void EnvironmentalAudioSystem::ApplyBiomeReverb(const std::string& preset, float
     if (m_audioManager) {
         m_audioManager->SetGlobalReverb(wet, dry, decay);
     }
-    LUMINUMBRA_CORE_INFO("Biome reverb applied: preset={} wet={} dry={} decay={}",
-                         preset, wet, dry, decay);
+    LUMINUMBRA_CORE_INFO(
+        "Biome reverb applied: preset={} wet={} dry={} decay={}", preset, wet, dry, decay);
 }
 
 void EnvironmentalAudioSystem::ApplyBiomeReverbFromSize(const std::string& preset, float size01) {
-    // AUDIO-09: canonical monotone size->reverb curve (see EnvironmentalAudioModel.h).
+    // canonical monotone size->reverb curve (see EnvironmentalAudioModel.h).
     const AudioModel::BiomeReverbParams p = AudioModel::BiomeReverbFromSize(size01);
     ApplyBiomeReverb(preset, p.wet, p.dry, p.decay);
 }
 
-AtmosphereAudioState EnvironmentalAudioSystem::ComputeAtmosphere(
-        const glm::vec3& wind, float precipIntensity, float stormIntensity,
-        float biomeWet, float biomeDry, float biomeDecay) {
-    // T-I5b-3 (AU1) PINNED model (design-decisions.md §4). Pure function of the
+AtmosphereAudioState EnvironmentalAudioSystem::ComputeAtmosphere(const glm::vec3& wind,
+                                                                 float precipIntensity,
+                                                                 float stormIntensity,
+                                                                 float biomeWet,
+                                                                 float biomeDry,
+                                                                 float biomeDecay) {
+    //  (AU1) PINNED model (the deterministic runtime contract ). Pure function of the
     // replicated weather sample -> two ambience layers + a weather reverb shift.
     AtmosphereAudioState state;
     state.applied = true;
@@ -193,20 +206,21 @@ AtmosphereAudioState EnvironmentalAudioSystem::ComputeAtmosphere(
 void EnvironmentalAudioSystem::UpdateAtmosphere(const glm::vec3& wind,
                                                 float precipIntensity,
                                                 float stormIntensity) {
-    AtmosphereAudioState next = ComputeAtmosphere(
-        wind, precipIntensity, stormIntensity,
-        m_biomeReverb.wet, m_biomeReverb.dry, m_biomeReverb.decay);
+    AtmosphereAudioState next = ComputeAtmosphere(wind,
+                                                  precipIntensity,
+                                                  stormIntensity,
+                                                  m_biomeReverb.wet,
+                                                  m_biomeReverb.dry,
+                                                  m_biomeReverb.decay);
     next.apply_count = m_atmosphere.apply_count;
 
     // Idempotent at the backend: only push when the audible state changed (keeps
     // the per-tick Update path from churning the audio engine while weather holds).
-    const bool changed =
-        !m_atmosphere.applied ||
-        next.wind.volume != m_atmosphere.wind.volume ||
-        next.rain.volume != m_atmosphere.rain.volume ||
-        next.reverb_wet != m_atmosphere.reverb_wet ||
-        next.reverb_dry != m_atmosphere.reverb_dry ||
-        next.reverb_decay != m_atmosphere.reverb_decay;
+    const bool changed = !m_atmosphere.applied || next.wind.volume != m_atmosphere.wind.volume ||
+                         next.rain.volume != m_atmosphere.rain.volume ||
+                         next.reverb_wet != m_atmosphere.reverb_wet ||
+                         next.reverb_dry != m_atmosphere.reverb_dry ||
+                         next.reverb_decay != m_atmosphere.reverb_decay;
 
     if (!changed) {
         return;
@@ -220,29 +234,32 @@ void EnvironmentalAudioSystem::UpdateAtmosphere(const glm::vec3& wind,
     // null-audio mode (the manager is null/Null), so the null-audio gates are
     // unaffected -- this is optional dressing layered on the existing systems.
     m_weatherState.windStrength = m_atmosphere.wind.intensity;
-    m_weatherState.windDirection = glm::length(wind) > 1e-4f ? glm::normalize(wind) : m_weatherState.windDirection;
+    m_weatherState.windDirection =
+        glm::length(wind) > 1e-4f ? glm::normalize(wind) : m_weatherState.windDirection;
     m_weatherState.isRaining = m_atmosphere.rain.present;
     m_weatherState.rainIntensity = m_atmosphere.rain.intensity;
 
     if (m_audioManager) {
         m_audioManager->SetWindParameters(m_weatherState.windDirection, m_atmosphere.wind.volume);
-        m_audioManager->SetGlobalReverb(m_atmosphere.reverb_wet,
-                                        m_atmosphere.reverb_dry,
-                                        m_atmosphere.reverb_decay);
+        m_audioManager->SetGlobalReverb(
+            m_atmosphere.reverb_wet, m_atmosphere.reverb_dry, m_atmosphere.reverb_decay);
     }
 
-    LUMINUMBRA_CORE_INFO(
-        "Atmosphere audio: wind={:.2f} rain={:.2f} reverb wet={:.2f} dry={:.2f} decay={:.2f} (shift={:.2f})",
-        m_atmosphere.wind.volume, m_atmosphere.rain.volume,
-        m_atmosphere.reverb_wet, m_atmosphere.reverb_dry, m_atmosphere.reverb_decay,
-        m_atmosphere.reverb_weather_shift);
+    LUMINUMBRA_CORE_INFO("Atmosphere audio: wind={:.2f} rain={:.2f} reverb wet={:.2f} dry={:.2f} "
+                         "decay={:.2f} (shift={:.2f})",
+                         m_atmosphere.wind.volume,
+                         m_atmosphere.rain.volume,
+                         m_atmosphere.reverb_wet,
+                         m_atmosphere.reverb_dry,
+                         m_atmosphere.reverb_decay,
+                         m_atmosphere.reverb_weather_shift);
 }
 
 void EnvironmentalAudioSystem::UpdateAmbientZones(const glm::vec3& listenerPosition) {
     for (auto& [id, zone] : m_ambientZones) {
         float distance = glm::distance(listenerPosition, zone->center);
         bool shouldBeActive = distance <= zone->radius;
-        
+
         if (shouldBeActive && !zone->isActive) {
             // Start ambient sound
             m_audioManager->PlayAmbientLoop(zone->soundEvent, zone->center, zone->radius);
@@ -252,12 +269,13 @@ void EnvironmentalAudioSystem::UpdateAmbientZones(const glm::vec3& listenerPosit
             m_audioManager->StopAmbientLoop(zone->soundEvent);
             zone->isActive = false;
         }
-        
+
         // Adjust volume based on distance for smooth fading
         if (zone->isActive) {
             float fadeFactor = 1.0f;
             if (distance > zone->radius - zone->fadeDistance) {
-                fadeFactor = 1.0f - ((distance - (zone->radius - zone->fadeDistance)) / zone->fadeDistance);
+                fadeFactor =
+                    1.0f - ((distance - (zone->radius - zone->fadeDistance)) / zone->fadeDistance);
                 fadeFactor = std::clamp(fadeFactor, 0.0f, 1.0f);
             }
             // Volume adjustment would require extending the audio manager interface
@@ -276,11 +294,11 @@ void EnvironmentalAudioSystem::UpdateWeatherAudio() {
         } else {
             windEvent = "wind_strong";
         }
-        
+
         // This would need a way to transition between wind sounds
         // For now, just ensure wind is playing
     }
-    
+
     // Handle rain
     if (m_weatherState.isRaining) {
         // Start rain ambient if not already playing
@@ -293,8 +311,7 @@ void EnvironmentalAudioSystem::ConfigureDayNightBeds(const AudioEventID& dayBed,
     m_dayBedEvent = dayBed;
     m_nightBedEvent = nightBed;
     m_dayNight.configured = true;
-    LUMINUMBRA_CORE_INFO("Day/night soundscape configured: day='{}' night='{}'",
-                         dayBed, nightBed);
+    LUMINUMBRA_CORE_INFO("Day/night soundscape configured: day='{}' night='{}'", dayBed, nightBed);
 }
 
 void EnvironmentalAudioSystem::SetSunElevation(float sinSunElevation) {
@@ -308,14 +325,16 @@ void EnvironmentalAudioSystem::SetSunElevation(float sinSunElevation) {
 }
 
 void EnvironmentalAudioSystem::UpdateDayNightBeds(const glm::vec3& listenerPosition, float dt) {
-    // AUDIO-07: sun-gated day/night ambient-bed crossfade (replaces the old
-    // do-nothing time-of-day stub: the birdsong bed used to play 24/7).
-    if (!m_dayNight.configured) return;
+    // sun-gated day/night ambient-bed crossfade (replaces the old
+    // do-nothing time-of-day no-op: the birdsong bed used to play 24/7).
+    if (!m_dayNight.configured)
+        return;
 
     m_dayNight.target_night_factor = AudioModel::NightFactor(m_dayNight.sin_sun_elevation);
-    m_dayNight.night_factor = AudioModel::SmoothTowards(
-        m_dayNight.night_factor, m_dayNight.target_night_factor,
-        dt, AudioModel::kDayNightCrossfadeTau);
+    m_dayNight.night_factor = AudioModel::SmoothTowards(m_dayNight.night_factor,
+                                                        m_dayNight.target_night_factor,
+                                                        dt,
+                                                        AudioModel::kDayNightCrossfadeTau);
     const AudioModel::DayNightWeights weights =
         AudioModel::DayNightCrossfade(m_dayNight.night_factor);
     m_dayNight.day_weight = weights.day;
@@ -323,10 +342,12 @@ void EnvironmentalAudioSystem::UpdateDayNightBeds(const glm::vec3& listenerPosit
 
     // Null-audio (telemetry/harness) keeps the model state observable without a
     // backend; only the bed start/stop/volume calls need a live manager.
-    if (!m_audioManager) return;
+    if (!m_audioManager)
+        return;
 
     const auto driveBed = [&](const AudioEventID& bed, float weight, bool& started) {
-        if (bed.empty()) return;
+        if (bed.empty())
+            return;
         if (weight > AudioModel::kBedSilenceFloor) {
             if (!started) {
                 // Huge radius = effectively constant world ambience (matches the
@@ -351,7 +372,7 @@ void EnvironmentalAudioSystem::UpdateDayNightBeds(const glm::vec3& listenerPosit
 AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnvironmentType type) {
     AudioEnvironment env;
     env.type = type;
-    
+
     switch (type) {
         case AudioEnvironmentType::Cave:
             env.reverb_decay = 2.5f;
@@ -362,7 +383,7 @@ AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnviron
             env.ambient_volume = 1.2f;
             env.wind_strength = 0.0f;
             break;
-            
+
         case AudioEnvironmentType::Forest:
             env.reverb_decay = 0.8f;
             env.reverb_wet = 0.2f;
@@ -372,7 +393,7 @@ AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnviron
             env.ambient_volume = 1.0f;
             env.wind_strength = m_weatherState.windStrength * 0.8f;
             break;
-            
+
         case AudioEnvironmentType::Water:
             env.reverb_decay = 1.0f;
             env.reverb_wet = 0.4f;
@@ -382,7 +403,7 @@ AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnviron
             env.ambient_volume = 0.8f;
             env.wind_strength = m_weatherState.windStrength * 0.6f;
             break;
-            
+
         case AudioEnvironmentType::Canyon:
             env.reverb_decay = 3.0f;
             env.reverb_wet = 0.7f;
@@ -392,7 +413,7 @@ AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnviron
             env.ambient_volume = 1.1f;
             env.wind_strength = m_weatherState.windStrength * 1.2f;
             break;
-            
+
         case AudioEnvironmentType::Underground:
             env.reverb_decay = 2.0f;
             env.reverb_wet = 0.5f;
@@ -402,7 +423,7 @@ AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnviron
             env.ambient_volume = 0.9f;
             env.wind_strength = 0.0f;
             break;
-            
+
         default: // Outdoor
             env.reverb_decay = 0.3f;
             env.reverb_wet = 0.1f;
@@ -413,9 +434,9 @@ AudioEnvironment EnvironmentalAudioSystem::CreateEnvironmentProfile(AudioEnviron
             env.wind_strength = m_weatherState.windStrength;
             break;
     }
-    
+
     env.wind_direction = m_weatherState.windDirection;
-    
+
     return env;
 }
 

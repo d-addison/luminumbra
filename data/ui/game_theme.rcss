@@ -11,7 +11,7 @@ body {
     height: 100%;
     color: #F2EDE4;
     font-family: Lora;
-    /* F4: the menus render over the LIVE golden-hour world (main_client renders a scenic world
+    /* The menus render over the live golden-hour world (main_client renders a scenic world
        behind the menu branch). Keep the field transparent so the world shows through; a gentle
        top-to-bottom darkening veil lifts text legibility without hiding the vista. When the
        backdrop is disabled the cleared back buffer shows through as near-black. */
@@ -27,7 +27,7 @@ body#main_menu {
     align-items: center;
 }
 
-body#main_menu .container {
+body#main_menu.container {
     padding-top: 18%;
 }
 
@@ -278,7 +278,7 @@ h2.settings-heading {
     margin-left: 3px;
     background-color: #F2EDE4;
 }
-.toggle.on .toggle-knob { margin-left: 27px; }
+.toggle.on.toggle-knob { margin-left: 27px; }
 
 /* Window-mode stepper. */
 .stepper {
@@ -318,7 +318,7 @@ h2.settings-heading {
     font-size: 15px;
     letter-spacing: 1px;
 }
-.keybind-row.selected .keybind-label { color: #F2EDE4; }
+.keybind-row.selected.keybind-label { color: #F2EDE4; }
 .keybind-chip {
     color: #D8CFBC;
     font-size: 14px;
@@ -516,7 +516,7 @@ body#world_selection h1 {
     text-align: center;
 }
 
-/* Thumbnail placeholder (real captures come later). */
+/* Thumbnail styling used while a capture is loading or unavailable. */
 .world-thumbnail {
     display: block;
     width: 100%;
@@ -538,7 +538,7 @@ body#world_selection h1 {
     background-color: #C9A86A;
     opacity: 0;
 }
-.list-item.selected .select-dot { opacity: 1; }
+.list-item.selected.select-dot { opacity: 1; }
 
 .btn-danger { border-color: #7A4A42; color: #D8A39A; }
 .btn-danger:hover { background-color: #7A4A42; border-color: #9A6A60; color: #16130E; }
@@ -568,8 +568,8 @@ button:disabled { color: #6E6656; border-color: #2A2620; }
     justify-content: center;
     align-items: center;
 }
-/* .modal-overlay's display:flex is defined after .hidden{display:none}, so a plain
-   .hidden can't win on equal specificity — make the hidden state explicit for modals. */
+/*.modal-overlay's display:flex is defined after.hidden{display:none}, so a plain
+.hidden can't win on equal specificity — make the hidden state explicit for modals. */
 .modal-overlay.hidden { display: none; }
 .modal {
     width: 440px;
@@ -616,9 +616,9 @@ body#world_creation {
     margin: 4px 0 6px;
 }
 
-#world_creation .title-ornament { margin-bottom: 34px; }
+#world_creation.title-ornament { margin-bottom: 34px; }
 
-/* Spec 002 Item 1 — live world-preview diorama. The pane is a TRANSPARENT
+/*   — live world-preview diorama. The pane is a TRANSPARENT
    framed hole: the host blits the rendered candidate world into this rect under
    the panel, so the pane itself only draws the frosted frame + vignette. */
 .preview-section {
@@ -700,16 +700,16 @@ body#world_creation {
     letter-spacing: 3px;
 }
 
-#world_creation .form-container {
+#world_creation.form-container {
     width: 100%;
     text-align: left;
 }
 
-#world_creation .form-group {
+#world_creation.form-group {
     margin-bottom: 28px;
 }
 
-#world_creation .form-group label {
+#world_creation.form-group label {
     display: block;
     color: #C3B9A2;
     font-size: 13px;
@@ -718,7 +718,7 @@ body#world_creation {
 }
 
 /* Underline-style inputs. */
-#world_creation .form-control {
+#world_creation.form-control {
     background-color: transparent;
     border-width: 0;
     border-bottom-width: 1px;
@@ -727,7 +727,7 @@ body#world_creation {
     font-size: 18px;
     padding: 0;
 }
-#world_creation .form-control:focus {
+#world_creation.form-control:focus {
     border-bottom-color: #C9A86A;
 }
 
@@ -843,18 +843,18 @@ body#world_creation {
 }
 
 /* ---- Collapsible "customize world" advanced worldgen params ---- */
-/* Spec 002 Item 2: the SEMANTIC KNOBS are the default surface — a prominent
+/* The semantic knobs are the default surface — a prominent
    "world feel" block above the advanced fold. Same dusk palette as the params. */
 .knob-section {
     margin-top: 20px;
     margin-bottom: 8px;
 }
 
-/* Wave 0.3: flex [label][slider][value] rows so the live value reads BESIDE its
+/* Flex [label][slider][value] rows so the live value reads beside its
    slider (align-items:center) instead of floated above a full-width slider. The
-   compound selectors (.settings-row.knob-row / .settings-row.param-row) target
+   compound selectors (.settings-row.knob-row /.settings-row.param-row) target
    ONLY the create-world slider rows; the inline toggle rows (.settings-row-inline
-   .param-row) and the shared block .settings-row keep their own layout. */
+.param-row) and the shared block.settings-row keep their own layout. */
 .settings-row.knob-row,
 .settings-row.param-row,
 .settings-row.preview-tod-row {
@@ -872,9 +872,9 @@ body#world_creation {
     color: rgba(224, 215, 198, 200);
     letter-spacing: 1px;
 }
-.settings-row.knob-row .settings-slider,
-.settings-row.param-row .settings-slider,
-.settings-row.preview-tod-row .settings-slider {
+.settings-row.knob-row.settings-slider,
+.settings-row.param-row.settings-slider,
+.settings-row.preview-tod-row.settings-slider {
     flex: 1 1 auto;
 }
 .knob-row label {
@@ -905,8 +905,8 @@ body#world_creation {
     border-top-color: rgba(201, 168, 106, 90);
     letter-spacing: 3px;
 }
-.customize-header:hover .customize-label { color: #F2EDE4; }
-.customize-header:hover .customize-caret { color: #E0C488; }
+.customize-header:hover.customize-label { color: #F2EDE4; }
+.customize-header:hover.customize-caret { color: #E0C488; }
 
 .customize-label {
     color: #C9C0AE;
@@ -919,7 +919,7 @@ body#world_creation {
     letter-spacing: 0;
 }
 
-/* Wave 0.3: the advanced groups are now TAB PANES (one shown at a time), so the
+/* The advanced groups are tab panes (one shown at a time), so the
    body no longer needs to be a bounded scroll container. Dropping overflow-y:auto
    removes the RmlUi scroll-container that intercepted slider drags inside the
    panel — sliders are now directly draggable. */
@@ -928,7 +928,7 @@ body#world_creation {
 }
 .customize-body.collapsed { display: none; }
 
-/* Advanced-param TAB strip + panes (Wave 0.3). A chip row toggles .active on one
+/* Advanced-param TAB strip + panes (). A chip row toggles.active on one
    pane; only the active pane renders, so the long advanced column no longer
    scrolls and the inactive groups don't pile up vertically. */
 .param-tabs {
@@ -965,10 +965,9 @@ body#world_creation {
     margin-bottom: 12px;
 }
 
-/* Tighter than the stock .settings-row (applies to the inline toggle rows too;
-   the slider rows get their flex layout from the .settings-row.param-row block
-   above). .param-value styling lives with .knob-value above (flex sibling). */
+/* Tighter than the stock.settings-row (applies to the inline toggle rows too;
+   the slider rows get their flex layout from the.settings-row.param-row block
+   above)..param-value styling lives with.knob-value above (flex sibling). */
 .param-row {
     margin-bottom: 12px;
 }
-

@@ -1,4 +1,4 @@
-// Track sim.weather_events — the deterministic world-level WEATHER-EVENT scheduler
+// sim.weather_events: the deterministic world-level WEATHER-EVENT scheduler
 // that sits ON TOP of WeatherSystem (no edit to it). These tests pin the contract:
 // the schedule is a pure function of (tick, seed); events tile fixed-length windows
 // and turn over (not stuck on one); intensity stays in [0, 1]; transitions are
@@ -153,7 +153,7 @@ TEST(WeatherEvents, DriverMatchesPureFunction) {
     }
 }
 
-// Step() (one tick at a time) reproduces the same stream as the pure function.
+// Step (one tick at a time) reproduces the same stream as the pure function.
 TEST(WeatherEvents, DriverStepReproducesStream) {
     const std::uint64_t seed = 246ull;
     WeatherEventDriver driver(seed);

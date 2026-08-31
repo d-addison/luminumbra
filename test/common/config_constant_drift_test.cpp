@@ -1,11 +1,11 @@
-// OPS-07 — Config schema owning-CONSTANT cross-check (spec 020 FR-B-003, second half).
+// Config schema owning-CONSTANT cross-check ( , second half).
 //
-// The existing FR-B-003 gate (tools/config_codegen.py --check, the ConfigSchemaCheck
+// The existing  gate (tools/config_codegen.py --check, the ConfigSchemaCheck
 // frontier gate) proves the GENERATED registry header is fresh vs ConfigSchema.json and
 // that residency is schema-declared. It does NOT prove that each schema DEFAULT still
 // equals the live C++ constant it is supposed to MIRROR. That second half is the hazard
 // this test closes: when a sim system is ENABLED but a param is left UNSET,
-// ComputeConfigSubHash() serializes the schema default (SystemConfig.cpp), while the
+// ComputeConfigSubHash serializes the schema default (SystemConfig.cpp), while the
 // system's behaviour uses the owning-struct fallback (the Resolve* functions in
 // ai/EcologyTuningConfig.h + ai/SimTuningConfig.h pass `t.<member>` as the fallback). If
 // the schema default silently drifts from that member, the config sub-hash no longer
@@ -15,12 +15,12 @@
 // Cross-check design (non-tautological): the "live" value is read from a
 // DEFAULT-CONSTRUCTED tuning struct — an INDEPENDENT compiled source in another header —
 // never re-typed as a literal here. Edit a tuning constant without updating the schema
-// and BuildLiveConstants() moves while the schema default does not, so this test fails.
+// and BuildLiveConstants moves while the schema default does not, so this test fails.
 //
 // Each mirrored param now names its owning constant in the schema ("constant" +
-// "constant_system"); render-only (excluded, never hashed) params and PlantMutationRate
-// (which has no C++ consumer/constant yet) are honestly annotated "constant": null and
-// listed in ExemptParams() — a param in NEITHER partition fails the test (fail-closed).
+// "constant_system"); render-only (excluded, never hashed) params are honestly
+// annotated "constant": null and
+// listed in ExemptParams — a param in NEITHER partition fails the test (fail-closed).
 #include <gtest/gtest.h>
 
 #include <nlohmann/json.hpp>
@@ -35,13 +35,14 @@
 #include <string>
 #include <vector>
 
-#include "ai/EcologyTuningConfig.h"  // EcologyTuning (via CreatureBrainSystem.h)
-#include "ai/SimTuningConfig.h"      // WildlifeFoliage/Thirst/Scavenging/Foraging/Reproduction tunings
+#include "ai/EcologyTuningConfig.h" // EcologyTuning (via CreatureBrainSystem.h)
+#include "ai/SimTuningConfig.h" // WildlifeFoliage/Thirst/Scavenging/Foraging/Reproduction tunings
+#include "systems/PollinationSystem.h"
 
 namespace {
 
 // The float equivalence ComputeConfigSubHash (which serializes pm.default_scalar as a
-// float) and SystemConfig::param() (which returns a float) actually operate under: cast
+// float) and SystemConfig::param (which returns a float) actually operate under: cast
 // the schema's JSON double to float and compare. Schema defaults are authored as the SAME
 // literals as the owning struct members, so exact equality is the intent; kDriftEps only
 // absorbs decimal->double->float double-rounding, orders of magnitude below any real drift
@@ -67,6 +68,7 @@ std::map<std::string, float> BuildLiveConstants() {
     const ForagingParams forage{};
     const ReproductionTuning repro{};
     return {
+        {"PlantMutationRate", luminumbra::foliage::kPollinationMutationFrac},
         {"EcoEnergyDrain", eco.energy_drain_per_second},
         {"EcoEnergyRestRecover", eco.energy_rest_recover},
         {"EcoEnergySleepRecover", eco.energy_sleep_recover},
@@ -107,16 +109,20 @@ std::map<std::string, float> BuildLiveConstants() {
 
 // Params with no live compiled constant reachable from this (common) test: render-only
 // params (excluded from every hash; their defaults are inline literals in the
-// luminumbra_client TU, not linked here) and PlantMutationRate (no C++ consumer at all).
+// luminumbra_client TU, not linked here).
 // This test OWNS the checked/exempt partition — a JSON flag could be mis-set, so we do not
 // trust one.
 std::set<std::string> ExemptParams() {
     return {
-        "PlantMutationRate",  // sim/hashed but no C++ consumer/constant yet (schema is sole def)
-        "MoonlightStrength", "MoonlightColor",  // render.moonlight (excluded)
-        "CircadianAmplitude",                   // render.circadian (excluded)
-        "SpawnHerdCount", "SpawnPredatorSpeed", "SpawnPreySpeed", "SpawnInitialHunger",
-        "ColonyAntCount", "ColonyFoodAmount",
+        "MoonlightStrength",
+        "MoonlightColor",     // render.moonlight (excluded)
+        "CircadianAmplitude", // render.circadian (excluded)
+        "SpawnHerdCount",
+        "SpawnPredatorSpeed",
+        "SpawnPreySpeed",
+        "SpawnInitialHunger",
+        "ColonyAntCount",
+        "ColonyFoodAmount",
     };
 }
 
@@ -147,7 +153,7 @@ std::vector<std::string> FindDrifts(const nlohmann::json& schema,
             continue;
         }
         if (is_live) {
-            // Schema half of OPS-07: a mirrored param must NAME its owning constant.
+            // Schema half of: a mirrored param must NAME its owning constant.
             if (!(p.contains("constant") && p.at("constant").is_string() &&
                   !p.at("constant").get<std::string>().empty())) {
                 issues.push_back(name + ": missing owning-constant ref (\"constant\") in schema");
@@ -177,7 +183,8 @@ std::vector<std::string> FindDrifts(const nlohmann::json& schema,
 
 std::string Join(const std::vector<std::string>& lines) {
     std::string out;
-    for (const auto& l : lines) out += "  - " + l + "\n";
+    for (const auto& l : lines)
+        out += "  - " + l + "\n";
     return out;
 }
 
@@ -193,14 +200,16 @@ TEST(ConfigConstantDrift, SchemaDefaultsMatchLiveConstants) {
     // Reverse coverage: every name this test wires must actually exist in the schema
     // (guards a typo / stale rename in BuildLiveConstants or ExemptParams).
     std::set<std::string> schema_names;
-    for (const auto& p : schema.at("params")) schema_names.insert(p.at("enum").get<std::string>());
+    for (const auto& p : schema.at("params"))
+        schema_names.insert(p.at("enum").get<std::string>());
     for (const auto& kv : live)
         EXPECT_TRUE(schema_names.count(kv.first)) << "live-map param not in schema: " << kv.first;
     for (const auto& name : exempt)
         EXPECT_TRUE(schema_names.count(name)) << "exempt param not in schema: " << name;
 
     const auto issues = FindDrifts(schema, live, exempt);
-    EXPECT_TRUE(issues.empty()) << "config schema default != owning C++ constant:\n" << Join(issues);
+    EXPECT_TRUE(issues.empty()) << "config schema default != owning C++ constant:\n"
+                                << Join(issues);
 }
 
 // FAIL-CLOSED proof #1: an intentionally-drifted schema default is DETECTED by the SAME
@@ -210,7 +219,7 @@ TEST(ConfigConstantDrift, IntentionalDriftIsDetected) {
     bool drifted = false;
     for (auto& p : schema.at("params")) {
         if (p.at("enum").get<std::string>() == "EcoEnergyDrain") {
-            p["default"] = p.at("default").get<double>() + 0.5;  // 0.006 -> 0.506 (real drift)
+            p["default"] = p.at("default").get<double>() + 0.5; // 0.006 -> 0.506 (real drift)
             drifted = true;
             break;
         }
@@ -231,8 +240,8 @@ TEST(ConfigConstantDrift, IntentionalDriftIsDetected) {
 TEST(ConfigConstantDrift, UnwiredParamIsFailClosed) {
     const nlohmann::json schema = LoadSchema();
     auto live = BuildLiveConstants();
-    live.erase("EcoEnergyDrain");  // simulate "forgot to wire the cross-check"
-    const auto exempt = ExemptParams();  // and it is not exempt either
+    live.erase("EcoEnergyDrain");       // simulate "forgot to wire the cross-check"
+    const auto exempt = ExemptParams(); // and it is not exempt either
 
     const auto issues = FindDrifts(schema, live, exempt);
     const bool flagged = std::any_of(issues.begin(), issues.end(), [](const std::string& s) {
@@ -249,9 +258,9 @@ TEST(ConfigConstantDrift, DriftComparatorMatchesFloatEquivalence) {
     EXPECT_TRUE(DefaultsMatch(0.006, EcologyTuning{}.energy_drain_per_second));
     EXPECT_TRUE(DefaultsMatch(90.0, static_cast<float>(ReproductionTuning{}.maturity_ticks)));
     EXPECT_TRUE(DefaultsMatch(1.0, static_cast<float>(ForagingParams{}.deposit)));
-    EXPECT_FALSE(DefaultsMatch(0.006, 0.007f));  // ~16% drift
+    EXPECT_FALSE(DefaultsMatch(0.006, 0.007f)); // ~16% drift
     EXPECT_FALSE(DefaultsMatch(0.5, EcologyTuning{}.energy_drain_per_second));
     EXPECT_FALSE(DefaultsMatch(0.006, 0.0f));
 }
 
-}  // namespace
+} // namespace

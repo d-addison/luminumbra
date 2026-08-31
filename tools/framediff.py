@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """framediff.py — compare two rendered frames by horizontal band means.
 
-GPU-P09 render-scale diagnostic. Splits each image into three horizontal bands
+ render-scale diagnostic. Splits each image into three horizontal bands
 (SKY = top 30%, HORIZON = 30-55%, GROUND = 55-100%) and reports the mean RGB of
 each band plus the per-band ratio b/a. A correct render-scale seam makes the 0.67
 frame's band means ~= the 1.0 reference (ratios ~1.0); the scale<1.0 viewport-seam

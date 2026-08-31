@@ -3,7 +3,7 @@ layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space po
 layout (location = 1) out vec4 gNormalMaterial;    // RGB10A2: Octahedral normal + material ID
 layout (location = 2) out vec4 gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 layout (location = 3) out vec2 gMetallicAO;        // RG16F: Metallic + AO
-layout (location = 4) out vec2 gMotionVector;      // RG16F: screen motion (NDC delta); FR-R5/TAAU
+layout (location = 4) out vec2 gMotionVector;      // RG16F: screen motion (NDC delta); /TAAU
 
 // Octahedral normal encoding functions
 vec2 octWrap(vec2 v) {
@@ -12,46 +12,46 @@ vec2 octWrap(vec2 v) {
 
 vec2 encode_octahedral(vec3 n) {
     n /= (abs(n.x) + abs(n.y) + abs(n.z));
-    return n.z >= 0.0 ? n.xy : octWrap(n.xy);
+    return n.z >= 0.0 ? n.xy: octWrap(n.xy);
 }
 
-// Material lookup texture (256 x 4 rows, T-I4-7/T-I4-9/I8). Row centers for a
+// Material lookup texture (256 x 4 rows, //). Row centers for a
 // 4-tall NEAREST texture are v = (row+0.5)/4 = 0.125, 0.375, 0.625, 0.875:
 //   row 0 (v=0.125): [metallic, roughness, ao, magical]
 //   row 1 (v=0.375): [texture_layer/255, normal_layer/255, tiling/64, has_texture]
 //   row 2 (v=0.625): [emissive_intensity/scale, albedo_scale, reserved] (emissive read by lighting)
-//   row 3 (v=0.875): [albedo_tint.rgb, reserved]  (I8 dusty-BF1 palette)
+//   row 3 (v=0.875): [albedo_tint.rgb, reserved]  ( dusty-warm palette palette)
 uniform sampler2D u_materialLUT;
-// I8: single source of truth for the LUT row count. Row-center v-coords are
+// single source of truth for the LUT row count. Row-center v-coords are
 // derived from it so a future row-count bump can't leave stale literals that
 // silently sample the wrong row under NEAREST filtering. MUST match
 // RenderPipeline::init_material_lut ROWS.
 const int LUT_ROWS = 4;
 float lutRowV(int row) { return (float(row) + 0.5) / float(LUT_ROWS); }
 
-// T-I4-7 triplanar terrain arrays (texture arrays, not bindless — design §10).
+//  triplanar terrain arrays (texture arrays, not bindless — design ).
 // Layer indices come from the material LUT texture_layer / normal_layer columns.
 uniform sampler2DArray u_terrainTextures;   // sRGB albedo
 uniform sampler2DArray u_terrainNormals;    // tangent-space (OpenGL) normal maps
-// I7.1-PBR B1d: per-material roughness-map array (linear; roughness in .r). When
+// terrain PBR roughness-map: per-material roughness-map array (linear; roughness in.r). When
 // u_terrainRoughnessValid == 0 (a layer failed to load) the shader keeps the flat
 // per-material scalar instead of a wrong constant.
 uniform sampler2DArray u_terrainRoughness;
 uniform int u_terrainRoughnessValid;
 
-// GPU-P09 render-scale mip bias (RENDER-ONLY). When the scene renders at a reduced
+//  render-scale mip bias. When the scene renders at a reduced
 // internal resolution (render_scale < 1.0) the implicit-derivative LOD picks a
 // coarser mip, so material textures read blurry after upscale. A negative bias of
 // log2(render_scale) restores near-native sharpness. The uniform defaults to 0.0
 // and the client sets exactly log2(1.0)==0.0 at render_scale 1.0, so the
-// `!= 0.0` guard below takes the VERBATIM original texture() path there — the
-// scale-1.0 output is byte-identical to the pre-P09 build by construction (the
+// `!= 0.0` guard below takes the VERBATIM original texture path there — the
+// scale-1.0 output is byte-identical to the legacy build by construction (the
 // whole-frame A/B gate proves dispatch determinism, not equivalence, so the no-op
 // must hold structurally). Only material arrays (mipmapped) are biased; the NEAREST
 // material LUT is not.
 uniform float u_lodBias = 0.0;
 vec4 sampleBias(sampler2DArray s, vec3 uvw) {
-    return u_lodBias != 0.0 ? texture(s, uvw, u_lodBias) : texture(s, uvw);
+    return u_lodBias != 0.0 ? texture(s, uvw, u_lodBias): texture(s, uvw);
 }
 
 // View rotation (mat3 of the camera view matrix). The normal-mapped normal is
@@ -59,28 +59,28 @@ vec4 sampleBias(sampler2DArray s, vec3 uvw) {
 // keeps storing a VIEW-SPACE octahedral normal (lighting pass unchanged).
 uniform mat3 u_normalViewMatrix;
 
-// T-I4-8 skinned (UV-mapped) texturing. Skinned creatures sample an albedo (and
+//  skinned (UV-mapped) texturing. Skinned creatures sample an albedo (and
 // optional normal) layer by their mesh UVs instead of the terrain triplanar
 // path. Layers < 0 disable it (terrain/static draws set these to -1).
 uniform sampler2DArray u_skinnedTextures;
 uniform int u_skinnedAlbedoLayer = -1;
 uniform int u_skinnedNormalLayer = -1;
-// Phase 2 procedural creatures: per-creature albedo tint (linear RGB), set per skinned
+//  procedural creatures: per-creature albedo tint (linear RGB), set per skinned
 // draw from the species base_color. Defaults to white so an unset/uninitialised creature
 // renders exactly as authored; only multiplies the skinned albedo sample below, so no
 // other (terrain/static) path is affected.
 uniform vec3 u_albedo_tint = vec3(1.0);
-uniform int u_alphaTest = 0; // I8: 1 = luma-keyed cutout (tree leaves), 0 = opaque
+uniform int u_alphaTest = 0; // 1 = luma-keyed cutout (tree leaves), 0 = opaque.
 
-// FR-C2 (spec 003): macro ROCK-on-steep-faces overlay is a TERRAIN-only macro-variation
+// macro ROCK-on-steep-faces overlay is a TERRAIN-only macro-variation
 // (natural cliffs read as scree). It costs vnoise + up to 3 extra triplanar samples per
 // fragment. Instanced foliage/props (procgen trees/bushes/rocks) used materials 1-3 and so
 // paid this every leaf/bark fragment — heavily overdrawn — for no visual benefit (a leaf
 // card should never sample rock). Terrain sets this to 1 (byte-identical to before); the
-// instanced static-mesh path sets it to 0, which skips the branch entirely. RENDER-ONLY.
+// instanced static-mesh path sets it to 0, which skips the branch entirely..
 uniform int u_macroRockOverlay = 1;
 
-// FR-C2 (spec 003): force the cheap FLAT-material path (skip ALL triplanar sampling) for the
+// force the cheap FLAT-material path (skip ALL triplanar sampling) for the
 // procedural foliage cards (leaves + bushes). These are alpha-keyed, heavily overdrawn, and
 // get their colour almost entirely from the per-instance green tint — the world-projected
 // grass triplanar (6-9 texture-array samples/fragment) is invisible on a fluttering leaf card
@@ -88,7 +88,7 @@ uniform int u_macroRockOverlay = 1;
 // reads the same at the densities this draws. Terrain/bark/rock keep triplanar (set to 0).
 uniform int u_forceFlat = 0;
 
-// T-I3-9 far-LOD: view-space radius (meters) inside which far-region mesh
+//  far-LOD: view-space radius (meters) inside which far-region mesh
 // fragments are discarded - the live chunk ring owns that space (live wins;
 // the under-terrain far fill must not show through live LOD seam cracks at
 // close range, where shadow/SSAO render it near-black). Default 0.0 disables
@@ -107,7 +107,7 @@ uniform float u_farClipInnerRadius;
 uniform vec2 u_farPreviewCenterXZ;
 uniform float u_farPreviewInnerRadius;
 
-// FR-R5 (TAAU): previous-frame view-projection + inverse screen size for motion vectors, plus this
+//  (TAAU): previous-frame view-projection + inverse screen size for motion vectors, plus this
 // frame's sub-pixel projection jitter (removed from the current position so motion stays jitter-free).
 uniform mat4 u_prev_view_proj;
 uniform vec2 u_inv_screen_size;
@@ -119,13 +119,13 @@ in VS_OUT {
     vec3 Normal;       // VIEW SPACE
     vec3 WorldPos;     // WORLD SPACE (triplanar projection)
     vec3 WorldNormal;  // WORLD SPACE
-    vec2 UV;           // mesh UV (skinned/static texturing, T-I4-8)
+    vec2 UV;           // mesh UV (skinned/static texturing, )
     flat uint MaterialID;
     vec3 Tint;         // per-instance albedo tint (1,1,1 = no-op)
-    vec3 PrevWorldPos; // §13 TAAU: world pos with PREVIOUS-frame wind sway (== WorldPos for static)
+    vec3 PrevWorldPos; //  TAAU: world pos with PREVIOUS-frame wind sway (== WorldPos for static)
 } fs_in;
 
-// T-I6 terrain visual-fidelity (BF4/BF1 floor), RENDER-ONLY: the 256px terrain
+//  terrain visual-fidelity (visual-fidelity warm palette floor),: the 256px terrain
 // textures read muddy/low-contrast. Amplify the EXISTING high-frequency detail
 // (unsharp mask vs a mip-blurred base) so the surface de-muds + carries visible
 // detail, and boost normal-map strength so relief catches light. Mean-preserving
@@ -135,11 +135,11 @@ in VS_OUT {
 const float kDetailBlurLod = 3.0;   // mip level used as the unsharp low-freq base
 const float kDetailGain    = 1.4;   // high-freq amplification (>1 sharpens). Grass overhaul: lowered
                                     // 2.2->1.4 so the terrain (esp. grass) stops reading as a wavy/liquid
-                                    // "algae" surface — softer relief, less amplified ripple. RENDER-ONLY.
+                                    // "algae" surface — softer relief, less amplified ripple..
 // NOTE: a normal-map strength boost was tried here and dropped — it amplifies a
 // pre-existing sky-ambient blue-speckle LIGHTING artifact on terrain facets without
 // adding meaningful detail (the albedo unsharp carries the gain). The speckle is a
-// separate lighting follow-up (terrain-fidelity-plan.md).
+// separate lighting implementation note (terrain lighting contract).
 
 // Triplanar blend weights from a world-space normal (sharpened, normalized).
 vec3 triplanar_weights(vec3 n) {
@@ -147,7 +147,7 @@ vec3 triplanar_weights(vec3 n) {
     return w / max(w.x + w.y + w.z, 1e-4);
 }
 
-// T-I6 macro material variation: cheap spatially-coherent value noise to jitter the
+//  macro material variation: cheap spatially-coherent value noise to jitter the
 // slope/height material boundaries so they read as natural transitions, not clean
 // contour lines. Deterministic in WORLD space (no temporal shimmer under motion).
 float hash13(vec3 p) {
@@ -218,7 +218,7 @@ vec3 triplanar_normal(vec3 worldPos, vec3 geomN, vec3 weights, float layer, floa
     return normalize(worldN);
 }
 
-// I7.1-PBR B1d: triplanar per-texel roughness (.r), same projection as albedo.
+// terrain PBR roughness-map: triplanar per-texel roughness (.r), same projection as albedo.
 float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale) {
     vec2 uv_x = worldPos.zy * scale;
     vec2 uv_y = worldPos.xz * scale;
@@ -255,15 +255,15 @@ void main()
 
     // --- Material properties from lookup texture ---
     float matIndex = float(fs_in.MaterialID) / 255.0;
-    // I8: sample at the row centers derived from LUT_ROWS (no magic literals).
+    // sample at the row centers derived from LUT_ROWS (no magic literals).
     vec4 matProps = texture(u_materialLUT, vec2(matIndex, lutRowV(0))); // row 0
     vec4 texInfo  = texture(u_materialLUT, vec2(matIndex, lutRowV(1))); // row 1
-    // T-I5b-5-water-backlog: row 2 G channel is the per-material albedo multiplier
+    // row 2 G channel is the per-material albedo multiplier
     // (default 1.0). Applied to the baked textured albedo below so a physically-
     // bright photographic texture (the noon sun-bright sand flat) calibrates to a
     // natural lit tone that survives tonemapping below the ACES clip. Render-only.
     float albedoScale = texture(u_materialLUT, vec2(matIndex, lutRowV(2))).g; // row 2
-    // I8 dusty-BF1 palette: row 3 RGB is the per-material warm albedo tint
+    //  dusty-warm palette palette: row 3 RGB is the per-material warm albedo tint
     // (default 1,1,1 = no-op). Applied alongside albedoScale in the triplanar
     // branch only, so flat/UV(model) paths are untouched. Render-only content
     // base-color nudge; distinct from the post LUMIN_GRADE / LUMIN_ATMOS stages.
@@ -281,12 +281,12 @@ void main()
         case 3u: albedo = vec3(0.2, 0.6, 0.15); break;         // Grass
         case 4u: albedo = vec3(0.9, 0.8, 0.5); break;          // Sand
         case 6u: albedo = vec3(0.85, 0.95, 1.0); break;        // Luminous Crystal
-        // T-I4-DR-far-water-sheet: flat far-water sheet. Deep-water albedo so the
+        // flat far-water sheet. Deep-water albedo so the
         // far field reads as water past the live water ring, WITHOUT the live
         // water.frag reflection/caustic pipeline (too costly and unnecessary at
         // kilometer range). Material id 200 (FarLodSystem::kFarWaterMaterialId).
         //
-        // T-I4-DR-far-water-exposure: the old albedo (~0.17,0.26,0.36 linear) was
+        // the old albedo (~0.17,0.26,0.36 linear) was
         // a mid-bright sky-tinted blue. The sheet faces straight up, so at the
         // pinned noon sun it takes near-maximum sun irradiance; run through the
         // calibrated exposure chain (SUN_IRRADIANCE_SCALE = PI in lighting_pass)
@@ -304,7 +304,7 @@ void main()
         case 200u: albedo = vec3(0.018, 0.065, 0.11); break;
     }
 
-    // --- Triplanar terrain texturing (T-I4-7) ---
+    // --- Triplanar terrain texturing ---
     // Albedo and normal are baked into the G-buffer here so the lighting pass
     // sees the fully textured surface (and the normal-map perturbation feeds
     // shadows/specular). Gated by the LUT has_texture flag so crystal/water and
@@ -312,13 +312,13 @@ void main()
     vec3 worldN = normalize(fs_in.WorldNormal);
     bool textured = false;
     if (u_skinnedAlbedoLayer >= 0) {
-        // T-I4-8: UV-mapped skinned/creature texturing. Samples the skinned
+        // UV-mapped skinned/creature texturing. Samples the skinned
         // texture array by the mesh UVs; optionally perturbs the normal by a
         // tangent-derivative-free approximation (UV-space normal map, applied in
         // world space via the geometric normal as the z axis).
-        // I8: also the static-model lane (tree bark/leaf) — same UV sampling.
+        // also the static-model lane (tree bark/leaf) — same UV sampling.
         albedo = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb * u_albedo_tint;
-        // I8 leaf cutout: the source leaf textures are RGB leaf-cards on a BLACK
+        //  leaf cutout: the source leaf textures are RGB leaf-cards on a BLACK
         // background (no alpha), so key the cutout off luminance — the black inter-
         // leaf gaps are discarded, leaving the lit leaf shapes. NOTE: the array is
         // SRGB8, so `albedo` here is LINEAR; medium-green leaves are only ~0.06-0.1
@@ -332,7 +332,7 @@ void main()
             vec3 tn = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer))).xyz * 2.0 - 1.0;
             // Build an ad-hoc tangent basis from the geometric world normal so
             // the tangent-space perturbation maps into world space.
-            vec3 up = abs(worldN.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+            vec3 up = abs(worldN.y) < 0.99 ? vec3(0.0, 1.0, 0.0): vec3(1.0, 0.0, 0.0);
             vec3 t = normalize(cross(up, worldN));
             vec3 b = cross(worldN, t);
             worldN = normalize(t * tn.x + b * tn.y + worldN * max(tn.z, 0.1));
@@ -347,15 +347,15 @@ void main()
         float geomSlope = worldN.y; // up-facing-ness (1 flat, 0 vertical), pre normal-map
         vec3 baseAlbedo = triplanar_albedo(fs_in.WorldPos, weights, texLayer, scale);
         vec3 baseN      = triplanar_normal(fs_in.WorldPos, worldN, weights, normLayer, scale);
-        // I7.1-PBR B1d: per-texel roughness from the AmbientCG roughness map
+        // terrain PBR roughness-map: per-texel roughness from the AmbientCG roughness map
         // (replaces the flat per-material scalar). Falls back to the scalar when
         // the map array is unavailable.
         float baseRoughness = (u_terrainRoughnessValid == 1)
-            ? triplanar_roughness(fs_in.WorldPos, weights, texLayer, scale) : roughness;
+            ? triplanar_roughness(fs_in.WorldPos, weights, texLayer, scale): roughness;
 
-        // T-I6 macro material variation (RENDER-ONLY, no world_hash): overlay ROCK on
+        //  macro material variation (, no world_hash): overlay ROCK on
         // steep faces so natural terrain stops reading as one uniform olive material
-        // (the BF4/BF1 macro-variation lift). Only natural ground ids (Stone/Soil/Grass
+        // (the visual-fidelity warm palette macro-variation lift). Only natural ground ids (Stone/Soil/Grass
         // = 1..3); calibrated Sand (4) and the flat far-water sheet (200) are untouched,
         // so the sand exposure calibration + the live/far water seam are unchanged. The
         // rock layers are read from the Stone (id 1) material row so this tracks
@@ -387,25 +387,25 @@ void main()
             }
         }
         worldN = baseN;
-        // T-I5b-5-water-backlog: per-material albedo calibration on the textured
+        // per-material albedo calibration on the textured
         // terrain path (live AND far-LOD sand both sample this triplanar branch -
         // sand carries has_texture). Default scale 1.0 is a no-op (byte-identical)
         // for every unscaled id. Confined to the triplanar branch so flat-material
         // and skinned paths are untouched (no spurious scaling of the case-switch
         // base colors). Brings the noon sun-bright sand flat down to a natural lit
         // tone below the ACES clip.
-        // I8 dusty-BF1 palette: warm albedo tint (default 1,1,1 -> byte-identical).
+        //  dusty-warm palette palette: warm albedo tint (default 1,1,1 -> byte-identical).
         albedo = baseAlbedo * albedoScale * albedoTint;
-        roughness = baseRoughness; // I7.1-PBR B1d: per-texel terrain roughness
+        roughness = baseRoughness; // terrain PBR roughness-map: per-texel terrain roughness
         textured = true;
     }
 
-    // MACRO ALBEDO VARIATION (handover §2 #6, all-distance terrain detail): the
+    // MACRO ALBEDO VARIATION (rendering contract, all-distance terrain detail): the
     // rock/soil triplanar textures mip to a flat uniform tone at vista distance, so
     // terrain — and cave walls especially — read as a single flat brown. Modulate
     // albedo by a low-frequency WORLD-SPACE value noise: computed analytically per
     // fragment, it does NOT mip away, so terrain keeps organic large-scale tonal
-    // variation at ANY distance (the BF-style macro-variation lift). Two octaves,
+    // variation at ANY distance (the visual-fidelity macro-variation lift). Two octaves,
     // natural-ground ids only (1..5; crystal/water/far-water untouched), subtle
     // +-12% so it reads as natural mottling, not blotches. Render-only; the mesh and
     // world_hash are untouched.
@@ -426,22 +426,22 @@ void main()
     // before (byte-identical for untextured ids); the textured path rotates the
     // normal-mapped world normal into view space so the encoding stays uniform.
     vec3 viewN = textured ? normalize(u_normalViewMatrix * worldN)
-                          : normalize(fs_in.Normal);
+: normalize(fs_in.Normal);
     vec2 encoded_normal = encode_octahedral(viewN);
     float material_id_normalized = float(fs_in.MaterialID) / 255.0;
     gNormalMaterial = vec4(encoded_normal * 0.5 + 0.5, 0.0, material_id_normalized);
 
     gAlbedoRoughness = vec4(albedo * fs_in.Tint, roughness);
     gMetallicAO = vec2(metallic, ao);
-    // FR-R5 (TAAU): screen-space motion vector = current screen pos - reprojected previous pos.
+    //  (TAAU): screen-space motion vector = current screen pos - reprojected previous pos.
     // Current pos is exact from gl_FragCoord (NDC); previous pos reprojects this surface point's
     // ABSOLUTE world position through last frame's view-proj. Captures camera/rigid motion
     // (wind/skinned animation reproject as static -> deferred follow-on). The w<=0 guard (point
     // behind the previous camera, or an unset identity prev-VP on frame 0) yields zero motion.
     vec2 currNdc = gl_FragCoord.xy * u_inv_screen_size * 2.0 - 1.0 - u_jitter_ndc; // remove jitter
-    // §13: reproject the PREVIOUS-frame world position (wind sway included) through the previous
+    // reproject the PREVIOUS-frame world position (wind sway included) through the previous
     // view-proj. For static geometry PrevWorldPos == WorldPos, so this is identical to camera-only
     // reprojection; for wind-swayed foliage it cancels the per-frame sway delta (no tree-top ghosting).
     vec4 prevClip = u_prev_view_proj * vec4(fs_in.PrevWorldPos, 1.0);
-    gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w) : vec2(0.0);
+    gMotionVector = (prevClip.w > 1e-5) ? (currNdc - prevClip.xy / prevClip.w): vec2(0.0);
 }

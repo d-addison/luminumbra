@@ -1,7 +1,7 @@
 --[[
     aetheric_field.lua
-    Game-side alias over the engine's generic energy-field sampler (spec 024
-    FR-024-5). The engine keeps generic naming ("energy field" — the split-lint
+    Game-side alias over the engine's generic energy-field sampler (
+    -5). The engine keeps generic naming ("energy field" — the split-lint
     bans game-flavored names under src/); the Aetheric flavor lives HERE, in
     scripts/ only.
 ]]

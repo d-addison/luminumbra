@@ -4,11 +4,11 @@
 
 #include <algorithm>
 
-// Spec 017-A FR-A-001/002/006 -- GL implementation of the async readback ring.
+//   -- GL implementation of the async readback ring.
 // The PUBLIC interface (AsyncReadbackRing.h) is backend-agnostic; all GL fence /
-// persistent-map machinery lives here so spec 014's RHI can re-back it without
-// touching callers. Each slot is a persistent READ-mapped SSBO; submit() copies
-// GPU->slot and inserts a fence; consume() polls fences with a ZERO timeout and
+// persistent-map machinery lives here so 's RHI can re-back it without
+// touching callers. Each slot is a persistent READ-mapped SSBO; submit copies
+// GPU->slot and inserts a fence; consume polls fences with a ZERO timeout and
 // returns the newest completed slot's coherent map -- never blocking the frame.
 
 namespace Luminumbra::Rendering {
@@ -17,11 +17,12 @@ namespace {
 // Persistent + coherent so the CPU sees the GPU's copy once the fence signals,
 // with no explicit flush/map per frame (mirrors the proven write-side ring in
 // RenderPipeline.cpp / FoliagePass.cpp, with READ instead of WRITE).
-constexpr GLbitfield kReadbackFlags =
-    GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
+constexpr GLbitfield kReadbackFlags = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT;
 } // namespace
 
-AsyncReadbackRing::~AsyncReadbackRing() { shutdown(); }
+AsyncReadbackRing::~AsyncReadbackRing() {
+    shutdown();
+}
 
 bool AsyncReadbackRing::allocate(std::size_t slot_bytes, int num_slots) {
     free_slots();
@@ -29,10 +30,10 @@ bool AsyncReadbackRing::allocate(std::size_t slot_bytes, int num_slots) {
     for (auto& slot : m_slots) {
         glGenBuffers(1, &slot.ssbo);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, slot.ssbo);
-        glBufferStorage(GL_SHADER_STORAGE_BUFFER,
-                        static_cast<GLsizeiptr>(slot_bytes), nullptr, kReadbackFlags);
-        slot.mapped = glMapBufferRange(GL_SHADER_STORAGE_BUFFER, 0,
-                                       static_cast<GLsizeiptr>(slot_bytes), kReadbackFlags);
+        glBufferStorage(
+            GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(slot_bytes), nullptr, kReadbackFlags);
+        slot.mapped = glMapBufferRange(
+            GL_SHADER_STORAGE_BUFFER, 0, static_cast<GLsizeiptr>(slot_bytes), kReadbackFlags);
         if (slot.mapped == nullptr) {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
             free_slots();
@@ -78,7 +79,9 @@ bool AsyncReadbackRing::ensure(std::size_t slot_bytes, int num_slots) {
     return allocate(std::max(slot_bytes, m_slot_bytes), std::max(num_slots, m_num_slots));
 }
 
-void AsyncReadbackRing::shutdown() { free_slots(); }
+void AsyncReadbackRing::shutdown() {
+    free_slots();
+}
 
 bool AsyncReadbackRing::begin() {
     if (!m_initialized || m_open_slot >= 0) {
@@ -91,8 +94,7 @@ bool AsyncReadbackRing::begin() {
     // SwapBuffers) -- still NON-blocking (timeout 0), and not GL_TIMEOUT_IGNORED.
     // Still unsignalled -> every slot is busy; skip this frame (stale-safe).
     if (slot.fence != nullptr) {
-        GLenum r = glClientWaitSync(static_cast<GLsync>(slot.fence),
-                                    GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+        GLenum r = glClientWaitSync(static_cast<GLsync>(slot.fence), GL_SYNC_FLUSH_COMMANDS_BIT, 0);
         if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED) {
             return false;
         }
@@ -105,8 +107,10 @@ bool AsyncReadbackRing::begin() {
     return true;
 }
 
-void AsyncReadbackRing::copy_region(unsigned int src_buffer, std::ptrdiff_t src_offset,
-                                    std::ptrdiff_t dst_offset, std::size_t num_bytes) {
+void AsyncReadbackRing::copy_region(unsigned int src_buffer,
+                                    std::ptrdiff_t src_offset,
+                                    std::ptrdiff_t dst_offset,
+                                    std::size_t num_bytes) {
     if (m_open_slot < 0) {
         return;
     }
@@ -117,8 +121,10 @@ void AsyncReadbackRing::copy_region(unsigned int src_buffer, std::ptrdiff_t src_
     }
     glBindBuffer(GL_COPY_READ_BUFFER, src_buffer);
     glBindBuffer(GL_COPY_WRITE_BUFFER, slot.ssbo);
-    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER,
-                        static_cast<GLintptr>(src_offset), static_cast<GLintptr>(dst_offset),
+    glCopyBufferSubData(GL_COPY_READ_BUFFER,
+                        GL_COPY_WRITE_BUFFER,
+                        static_cast<GLintptr>(src_offset),
+                        static_cast<GLintptr>(dst_offset),
                         static_cast<GLsizeiptr>(num_bytes));
     glBindBuffer(GL_COPY_READ_BUFFER, 0);
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
@@ -151,8 +157,8 @@ int AsyncReadbackRing::scan_newest() {
             // GL_SYNC_FLUSH_COMMANDS_BIT ensures the fence is flushed to the GPU so
             // it can signal even when nothing else flushed (offscreen render); the
             // zero timeout keeps the poll non-blocking (not GL_TIMEOUT_IGNORED).
-            GLenum r = glClientWaitSync(static_cast<GLsync>(slot.fence),
-                                        GL_SYNC_FLUSH_COMMANDS_BIT, 0);
+            GLenum r =
+                glClientWaitSync(static_cast<GLsync>(slot.fence), GL_SYNC_FLUSH_COMMANDS_BIT, 0);
             if (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED) {
                 glDeleteSync(static_cast<GLsync>(slot.fence));
                 slot.fence = nullptr;

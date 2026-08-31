@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../RenderContext.h"
 #include "../AsyncReadbackRing.h"
+#include "../RenderContext.h"
 
 #include <array>
 #include <cstdint>
@@ -19,29 +19,28 @@ class Camera;
 class Shader;
 
 // ===========================================================================
-// T-I5b-1 (F1): instanced foliage scatter + wind response. RENDER-ONLY.
+// instanced foliage scatter + wind response..
 //
 // One instanced scatter system covering grass/tufts, pebbles/gravel, clutter
 // (twigs/shells) and canopy, drawn per visible chunk from a fixed-capacity,
 // persistent-mapped instance pool (the SAME glBufferStorage +
-// GL_MAP_PERSISTENT|COHERENT pattern as the A1 ParticlePass / T-I4-16 chunk
+// GL_MAP_PERSISTENT|COHERENT pattern as the  ParticlePass /  chunk
 // pool). NOT compute / transform feedback.
 //
-// PLACEMENT (PINNED, design-decisions §2): a DETERMINISTIC PURE FUNCTION of
+// PLACEMENT (PINNED, documented design): a DETERMINISTIC PURE FUNCTION of
 // (chunk coords, biome id, slope, moisture, instance index) via a splitmix64
 // hash. NO global RNG, NO world-seed offset is consumed (foliage is render-only
-// and per-chunk, so no +14 seed is taken — design §1). Density is driven by the
-// biome table's vegetation/cover block (the iter-4 parsed-not-consumed hook,
-// now consumed render-side), modulated by slope and moisture.
+// and per-chunk, so no +14 seed is taken — documented design). Density is driven by the
+// biome table's vegetation/cover block, modulated by slope and moisture.
 //
-// WIND (design-decisions §2): each instance carries a per-instance wind
-// displacement sampled CPU-side from the A2 WindFieldSystem (the one-way
-// replicated render bridge — same pattern C3 clouds used). The vertex shader
+// WIND (documented design): each instance carries a per-instance wind
+// displacement sampled CPU-side from the  WindFieldSystem (the one-way
+// replicated render bridge — same pattern  clouds used). The vertex shader
 // bends the card tip by that displacement scaled by a per-ARCHETYPE sway flag
 // (grass/canopy wave; pebbles/clutter do not). Distance-faded against the
 // far-LOD horizon (no foliage in far tiles).
 //
-// ONE-WAY RULE (critique F2): this subsystem READS sim/world state (biome,
+// ONE-WAY RULE (regression review): this subsystem READS sim/world state (biome,
 // height, wind) but NEVER writes back into any sim/world_hash input. The
 // scatter is regenerated per frame from the deterministic hash; nothing here is
 // snapshotted into world_hash. The placement hash IS the determinism surface
@@ -58,34 +57,34 @@ public:
     static constexpr std::size_t kRingFrames = 2;
     // Per-chunk scatter cap (placement evaluates this many candidate slots per
     // chunk; density + slope/moisture decide which actually emit).
-    // T-I5b-DR-sweep-visual-fixes (defect 2): raised 256 -> 2048 so daytime ground
+    //  (defect 2): raised 256 -> 2048 so daytime ground
     // reads as real grass COVER rather than a few sparse tufts. The placement is
     // still a pure per-chunk hash (idx in [0,candidates)), so determinism + the
-    // RENDER-ONLY contract are preserved; only the candidate count per chunk grows.
-    // T-I6: 2048 -> 4096 candidate slots. The per-frame CPU rebuild that once capped this
+    //  contract are preserved; only the candidate count per chunk grows.
+    // 2048 -> 4096 candidate slots. The per-frame CPU rebuild that once capped this
     // is removed by the scatter cache (#1, rebuild only on change). Density is then capped
     // by the BIOME contract, not perf: the FoliageInstancing gate requires coverage to
     // track the biome's vegetation density (within a band), so 8192 (coverage saturates to
     // 1.0, ignoring biome) FAILS — desert would carpet too. 4096 -> ~0.73 coverage tracks
     // the plains 0.3 density (in-band). "Continuous turf" in a scene is therefore the
     // biome's vegetation density (data/common/biomes.json), not this raw cap.
-    static constexpr std::size_t kMaxCandidatesPerChunk = 8192; // grass overhaul: 2x denser per-chunk
-                                                                // carpet (paired with the tighter near
-                                                                // fade so the global cap still fits).
+    static constexpr std::size_t kMaxCandidatesPerChunk =
+        8192; // grass overhaul: 2x denser per-chunk
+              // carpet (paired with the tighter near
+              // fade so the global cap still fits).
 
     // Packed 36-byte instance record (matches the GL vertex-attribute layout).
 #pragma pack(push, 1)
     struct InstanceRecord {
-        float    pos[3];   // world ground anchor
-        float    size[2];  // half-width, height (world units)
-        uint8_t  color[4]; // rgba8 (a = per-archetype sway flag scale 0..255)
-        float    sway[2];  // per-instance wind displacement at the tip (world XZ)
-        uint16_t phase;    // f16 sway phase offset (radians)
-        uint16_t facing;   // f16 card yaw in the XZ plane (radians)
+        float pos[3];     // world ground anchor
+        float size[2];    // half-width, height (world units)
+        uint8_t color[4]; // rgba8 (a = per-archetype sway flag scale 0..255)
+        float sway[2];    // per-instance wind displacement at the tip (world XZ)
+        uint16_t phase;   // f16 sway phase offset (radians)
+        uint16_t facing;  // f16 card yaw in the XZ plane (radians)
     };
 #pragma pack(pop)
-    static_assert(sizeof(InstanceRecord) == kInstanceStride,
-                  "foliage instance must be 36 bytes");
+    static_assert(sizeof(InstanceRecord) == kInstanceStride, "foliage instance must be 36 bytes");
 
     // Per-archetype scatter parameters (game content; loaded from
     // data/common/foliage/*.json). The engine knows only this schema.
@@ -110,66 +109,101 @@ public:
     void destroy_buffers();
     void reset_shader();
 
-    // T-I6 #4: GPU grass scatter (compute). Compiles res/shaders/grass_scatter.comp
+    //  #4: GPU grass scatter (compute). Compiles res/shaders/grass_scatter.comp
     // and allocates the SSBOs. On any failure m_gpu_scatter stays false and the
     // pass transparently uses the CPU rebuild loop (graceful degradation -- the
-    // working path is never lost). RENDER-ONLY.
+    // working path is never lost)..
     void init_compute(const std::filesystem::path& root_path);
     void destroy_compute();
-    bool gpu_scatter_active() const { return m_gpu_scatter; }
+    bool gpu_scatter_active() const {
+        return m_gpu_scatter;
+    }
 
     // --- GPU scatter tuning (mirrors the CPU placement constants). ---
-    static constexpr int kSurfaceGrid = 8;                 // cells/side
+    static constexpr int kSurfaceGrid = 8;                     // cells/side
     static constexpr int kSurfaceGridVerts = kSurfaceGrid + 1; // 9 -> 81 samples/chunk
-    static constexpr std::size_t kWordsPerBlade = 9;       // 36-byte record = 9 u32
+    static constexpr std::size_t kWordsPerBlade = 9;           // 36-byte record = 9 u32
     // m_count_ssbo stores one append counter followed by a DrawArraysIndirectCommand.
     static constexpr std::size_t kGrassDrawCommandOffsetBytes = sizeof(u32);
 
-    const std::unique_ptr<Shader>& shader() const { return m_shader; }
-    u32 vao() const { return m_vao; }
-    u32 instance_buffer(std::size_t ring) const { return m_instance_vbo[ring % kRingFrames]; }
-    bool enabled() const { return m_enabled; }
-    void set_enabled(bool on) { m_enabled = on; }
-    std::size_t frame_instance_count() const { return m_frame_instance_count; }
+    const std::unique_ptr<Shader>& shader() const {
+        return m_shader;
+    }
+    u32 vao() const {
+        return m_vao;
+    }
+    u32 instance_buffer(std::size_t ring) const {
+        return m_instance_vbo[ring % kRingFrames];
+    }
+    bool enabled() const {
+        return m_enabled;
+    }
+    void set_enabled(bool on) {
+        m_enabled = on;
+    }
+    std::size_t frame_instance_count() const {
+        return m_frame_instance_count;
+    }
 
     // Loads the scatter archetype set from data/common/foliage/scatter_set.json.
     // On failure the pass stays empty (no foliage). Returns true on success.
     bool load_scatter_set(const std::filesystem::path& json_path);
-    std::size_t archetype_count() const { return m_archetypes.size(); }
-    const ArchetypeData& archetype(std::size_t i) const { return m_archetypes[i]; }
+    std::size_t archetype_count() const {
+        return m_archetypes.size();
+    }
+    const ArchetypeData& archetype(std::size_t i) const {
+        return m_archetypes[i];
+    }
 
     // --- Distance fade (gate: no foliage beyond the live ring). ---
     void set_fade_distances(float start_m, float end_m) {
         m_fade_start_m = start_m;
         m_fade_end_m = end_m;
     }
-    float fade_start_m() const { return m_fade_start_m; }
-    float fade_end_m() const { return m_fade_end_m; }
+    float fade_start_m() const {
+        return m_fade_start_m;
+    }
+    float fade_end_m() const {
+        return m_fade_end_m;
+    }
 
-    // T-I6 #1b-lush: render-only density multiplier for SHOWCASE/photo scenes (owner:
+    //  #1b-lush: render-only density multiplier for SHOWCASE/photo scenes (owner:
     // lush-per-preset, default untouched). Scales both the candidate count and the
     // accept fraction, so a scene can reach near-continuous turf WITHOUT raising the
     // biome's vegetation density (which folds into the biome content-hash / params
     // marker — determinism-adjacent). Default 1.0 == byte-identical to the biome-tracked
     // density; the FoliageInstancing gate (which runs the default) is unaffected.
-    void set_density_scale(float scale) { m_density_scale = scale > 0.0f ? scale : 1.0f; ++m_chunk_cache_gen; }
-    float density_scale() const { return m_density_scale; }
+    void set_density_scale(float scale) {
+        m_density_scale = scale > 0.0f ? scale : 1.0f;
+        ++m_chunk_cache_gen;
+    }
+    float density_scale() const {
+        return m_density_scale;
+    }
 
     // --- Per-frame wind bridge (one-way). The caller pushes the camera-region
-    // wind vector sampled from the A2 wind field; per-instance sway is the wind
-    // projected at the instance (cheap distance-attenuated copy). RENDER-ONLY. ---
-    void set_wind(const glm::vec2& wind_xz) { m_wind_xz = wind_xz; }
-    glm::vec2 wind() const { return m_wind_xz; }
-    // spec 004: the GPU scatter path reads the generated blades back to the CPU
-    // (m_instances) ONLY so the FoliageInstancing gate's instance_hash() works.
+    // wind vector sampled from the  wind field; per-instance sway is the wind
+    // projected at the instance (cheap distance-attenuated copy).. ---
+    void set_wind(const glm::vec2& wind_xz) {
+        m_wind_xz = wind_xz;
+    }
+    glm::vec2 wind() const {
+        return m_wind_xz;
+    }
+    // the GPU scatter path reads the generated blades back to the CPU
+    // (m_instances) ONLY so the FoliageInstancing gate's instance_hash works.
     // That readback is a synchronous glGetBufferSubData -> a ~5 ms CPU stall on
-    // the hot path. execute() draws straight from the SSBO via glDrawArraysIndirect,
+    // the hot path. execute draws straight from the SSBO via glDrawArraysIndirect,
     // so normal play / the budget benchmark disable the readback (default ON keeps
-    // the gate exact). RENDER-ONLY.
-    void set_readback_enabled(bool e) { m_readback_enabled = e; }
-    // FOLIAGE-11: the gate must be able to tell a real instance count from the
+    // the gate exact)..
+    void set_readback_enabled(bool e) {
+        m_readback_enabled = e;
+    }
+    // the gate must be able to tell a real instance count from the
     // play-mode kMaxInstances marker (readback OFF publishes the marker).
-    bool readback_enabled() const { return m_readback_enabled; }
+    bool readback_enabled() const {
+        return m_readback_enabled;
+    }
     void set_sway_strength(float amplitude, float speed) {
         m_sway_amplitude = amplitude;
         m_sway_speed = speed;
@@ -179,15 +213,15 @@ public:
     // per-chunk biome id + density + surface samples; the pass scatters
     // instances deterministically inside the chunk footprint.
     struct ChunkScatter {
-        glm::ivec2 chunk_xz{0, 0};   // chunk coords (X,Z) — placement hash input
-        glm::vec3 origin{0.0f};      // world origin of the chunk column footprint
-        float extent_m = 32.0f;      // chunk footprint side length (world units)
-        u8 biome_id = 255;           // placement hash input
-        float density = 0.0f;        // biome vegetation density [0,1]
+        glm::ivec2 chunk_xz{0, 0}; // chunk coords (X,Z) — placement hash input
+        glm::vec3 origin{0.0f};    // world origin of the chunk column footprint
+        float extent_m = 32.0f;    // chunk footprint side length (world units)
+        u8 biome_id = 255;         // placement hash input
+        float density = 0.0f;      // biome vegetation density [0,1]
     };
 
     // Surface query callback: returns the terrain surface world Y + a slope
-    // estimate [0,1] (0 flat .. 1 steep) + moisture [0,1] at a world (x,z).
+    // estimate [0,1] (0 flat.. 1 steep) + moisture [0,1] at a world (x,z).
     // Supplied by the caller so the pass never depends on the world system.
     struct SurfaceSample {
         float height = 0.0f;
@@ -199,14 +233,15 @@ public:
 
     // Rebuilds the instance set for the supplied visible chunks. PURE function
     // of the chunk inputs + the surface query (no RNG). Fills the persistent
-    // mapping for this frame. RENDER-ONLY.
+    // mapping for this frame..
     void rebuild_instances(const std::vector<ChunkScatter>& chunks,
-                           SurfaceQuery query, void* query_ctx,
+                           SurfaceQuery query,
+                           void* query_ctx,
                            const glm::vec3& camera_pos);
 
     // Draws the live foliage instances into the lit HDR target (ctx.lit_scene).
     // Reads scene depth for occlusion. No-op (returns 0) when no instances or
-    // disabled. Spec 016-P3-T17: reads frame state from the RenderContext seam
+    // disabled. -T17: reads frame state from the RenderContext seam
     // (sun/ambient/moon/cloud/time/lit_scene) instead of RenderPipeline; RETURNS
     // the instance count drawn so the call site owns the stat bump.
     std::size_t execute(const RenderContext& ctx, const Camera& camera);
@@ -214,8 +249,7 @@ public:
     // --- Gate hooks (FoliageInstancing). All PURE; never touch GL. ---
     // The deterministic placement hash, exposed so the gate can assert the
     // scatter is reproducible (same inputs -> same hash) independently.
-    static uint64_t placement_hash(int chunk_x, int chunk_z, u8 biome_id,
-                                    uint32_t instance_index);
+    static uint64_t placement_hash(int chunk_x, int chunk_z, u8 biome_id, uint32_t instance_index);
     // FNV-1a over the live instance record bytes (stable, order-preserving):
     // the determinism surface for the gate.
     uint64_t instance_hash() const;
@@ -229,38 +263,41 @@ public:
     // the fade end is inside the live ring).
     std::size_t instances_beyond(const glm::vec3& center, float radius_m) const;
     // Read-back of the CPU-side instance set (for the gate density/fade probes).
-    const std::vector<InstanceRecord>& instances() const { return m_instances; }
+    const std::vector<InstanceRecord>& instances() const {
+        return m_instances;
+    }
 
 private:
     void map_instances_for_frame();
-    // T-I6 #4: GPU scatter rebuild (dispatch compute -> SSBO, read back into
+    //  #4: GPU scatter rebuild (dispatch compute -> SSBO, read back into
     // m_instances for the gate/cache surface). Returns false if it could not run
     // (caller then falls back to the CPU loop).
     bool rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
-                               SurfaceQuery query, void* query_ctx,
+                               SurfaceQuery query,
+                               void* query_ctx,
                                const glm::vec3& camera_pos);
-    // Spec 017-A FR-A-004: drain the most-recent COMPLETED async blade readback
+    // drain the most-recent COMPLETED async blade readback
     // into m_instances (stale-safe). Called every frame from rebuild_instances so
-    // the gate's instance_hash()/coverage probes stay populated independent of the
-    // scatter-cache elision. RENDER-ONLY.
+    // the gate's instance_hash/coverage probes stay populated independent of the
+    // scatter-cache elision..
     void poll_foliage_readback();
 
-    // spec 008 follow-up (foliage streaming-burst amortization): build (or fetch the cached)
+    //  implementation note (foliage streaming-burst amortization): build (or fetch the cached)
     // CAMERA-INDEPENDENT instance records for one chunk. The records (position/size/color/phase/
     // facing) are a pure function of chunk_xz + the static terrain surface query + density_scale +
     // archetypes, so they are computed ONCE per chunk and reused as the camera moves. The per-frame
     // rebuild then just copies these with the cheap camera distance-fade cull applied and a fresh
     // wind sway — eliminating the ~660ms re-query when moving. sway is baked as 0 here and set at
-    // copy time so the output matches the uncached loop exactly. RENDER-ONLY.
-    const std::vector<InstanceRecord>& build_or_get_chunk_records(
-        const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx);
+    // copy time so the output matches the uncached loop exactly..
+    const std::vector<InstanceRecord>&
+    build_or_get_chunk_records(const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx);
 
     std::unique_ptr<Shader> m_shader;
     u32 m_vao = 0;
 
-    // GPU scatter resources (T-I6 #4). m_gpu_scatter gates the whole path; when
+    // GPU scatter resources ( #4). m_gpu_scatter gates the whole path; when
     // false the CPU loop runs. m_gpu_active is true once a GPU build populated
-    // m_blade_ssbo this session (execute() then draws from it directly through
+    // m_blade_ssbo this session (execute then draws from it directly through
     // the command stored in m_count_ssbo).
     u32 m_compute_prog = 0;
     u32 m_chunk_ssbo = 0;
@@ -270,14 +307,14 @@ private:
     u32 m_arch_ssbo = 0;
     bool m_gpu_scatter = false;
     bool m_gpu_active = false;
-    bool m_readback_enabled = true; // spec 004: gate needs CPU readback; play/benchmark disable it
-    // Spec 017-A FR-A-004: the gate-only blade readback routes through this async
+    bool m_readback_enabled = true; // gate needs CPU readback; play/benchmark disable it
+    // the gate-only blade readback routes through this async
     // ring instead of a synchronous glGetBufferSubData, so it never blocks the
     // frame. m_instances holds the LAST-COMPLETED result (replaced only when the
-    // ring delivers a newer one) -> it is never re-emptied, keeping instance_hash()
+    // ring delivers a newer one) -> it is never re-emptied, keeping instance_hash
     // stable + non-empty once primed (an empty hash would break the gate). Lazily
     // allocated on first readback use, so the play path (readback disabled) pays
-    // nothing. RENDER-ONLY.
+    // nothing..
     AsyncReadbackRing m_readback_ring;
     std::array<u32, kRingFrames> m_instance_vbo{};
     std::array<InstanceRecord*, kRingFrames> m_instance_ptr{};
@@ -295,39 +332,47 @@ private:
     float m_fade_start_m = 96.0f;
     float m_fade_end_m = 160.0f;
 
-    // T-I6 scatter cache: rebuild_instances is called EVERY frame, but the instance set
+    //  scatter cache: rebuild_instances is called EVERY frame, but the instance set
     // only changes when the visible chunk-set, the camera chunk (the coarse per-chunk
     // fade cull), or the wind changes. Skip the per-frame CPU rebuild + GPU upload when
     // the signature is unchanged — the ring buffer + frame_instance_count from the last
-    // build are reused (execute() redraws the same VBO). This removes the per-frame CPU
+    // build are reused (execute redraws the same VBO). This removes the per-frame CPU
     // cost that capped scatter density. Determinism-neutral (render-only).
     std::uint64_t m_last_scatter_sig = 0;
     bool m_scatter_built = false;
-    // I8: denser default foliage (owner: fuller ground cover). GPU-scattered
+    // denser default foliage (owner: fuller ground cover). GPU-scattered
     // blades are cheap, so a modest lift fills the dusk/low-sun fields without a
     // meaningful perf cost. Deeper grass work (moonlit grass, dusk brightness,
-    // BF1-grove shading) is the Phase 1 foliage substrate.
+    // -grove shading) is the  foliage substrate.
     float m_density_scale = 1.35f; // #1b-lush: showcase density multiplier (1.0 = baseline)
 
-    // spec 008 follow-up: per-chunk CAMERA-INDEPENDENT instance cache (see build_or_get_chunk_records).
-    // Keyed by packed chunk_xz. Each entry stores the generation it was built at; when m_chunk_cache_gen
-    // bumps (density scale / archetypes changed) the entry is stale and rebuilt on next use. Bounded by
-    // pruning chunks absent from the current renderable set once the cache grows past a soft cap.
-    struct CachedChunkRecords { std::uint64_t gen = 0; std::vector<InstanceRecord> records; };
+    //  implementation note: per-chunk CAMERA-INDEPENDENT instance cache (see
+    //  build_or_get_chunk_records).
+    // Keyed by packed chunk_xz. Each entry stores the generation it was built at; when
+    // m_chunk_cache_gen bumps (density scale / archetypes changed) the entry is stale and rebuilt
+    // on next use. Bounded by pruning chunks absent from the current renderable set once the cache
+    // grows past a soft cap.
+    struct CachedChunkRecords {
+        std::uint64_t gen = 0;
+        std::vector<InstanceRecord> records;
+    };
     std::unordered_map<std::uint64_t, CachedChunkRecords> m_chunk_cache;
     std::uint64_t m_chunk_cache_gen = 1;
-    // spec 008 follow-up: the GPU scatter path (rebuild_instances_gpu, the path that actually runs
+    //  implementation note: the GPU scatter path (rebuild_instances_gpu, the path that actually
+    //  runs
     // in normal play) sampled the per-chunk SURFACE GRID (kSurfaceGridVerts^2 GetTerrainHeightAt
-    // calls) on the CPU for EVERY renderable chunk on every rebuild — ~1s when moving. The grid is a
-    // pure function of chunk_xz + the static terrain, so cache it per chunk (keyed by packed chunk_xz)
-    // and rebuild only a budgeted few new chunks per frame. Keyed identically to m_chunk_cache.
+    // calls) on the CPU for EVERY renderable chunk on every rebuild — ~1s when moving. The grid is
+    // a pure function of chunk_xz + the static terrain, so cache it per chunk (keyed by packed
+    // chunk_xz) and rebuild only a budgeted few new chunks per frame. Keyed identically to
+    // m_chunk_cache.
     std::unordered_map<std::uint64_t, std::vector<glm::vec4>> m_surf_grid_cache;
-    // spec 008 follow-up: when MOVING fast, many chunks stream into the renderable set in one frame,
+    //  implementation note: when MOVING fast, many chunks stream into the renderable set in one
+    //  frame,
     // and building their (uncached) records all at once re-ran hundreds of SurfaceQuery calls -> a
     // ~960ms hitch. Budget the per-frame chunk-record BUILDS; chunks over budget contribute no
-    // foliage this frame and build over the next few frames (the foliage fades in — RENDER-ONLY, so
-    // no determinism impact). While a build backlog exists the scatter-cache elision is suppressed so
-    // the rebuild keeps draining it even when the camera is still.
+    // foliage this frame and build over the next few frames (the foliage fades in —, so
+    // no determinism impact). While a build backlog exists the scatter-cache elision is suppressed
+    // so the rebuild keeps draining it even when the camera is still.
     bool m_foliage_build_backlog = false;
 };
 

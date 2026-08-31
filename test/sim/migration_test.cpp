@@ -1,4 +1,4 @@
-// Track sim.migration — SEASONAL MIGRATION toward a MOVING target. Migratory creatures are
+// sim.migration: SEASONAL MIGRATION toward a MOVING target. Migratory creatures are
 // pulled toward a seasonal target that travels a closed loop over the year; the urge ("drive")
 // PEAKS at the season transitions and is ~0 mid-season; the per-creature wish points toward the
 // current target. Deterministic (id-ordered, DeterministicMath only, NO rng), gated by the

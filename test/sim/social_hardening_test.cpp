@@ -1,5 +1,5 @@
 // Adversarial hardening for the PERCEPTION & SOCIAL / BRAIN cluster:
-//   * ai/HerdAlarmSystem.h (+ AlarmComponents.h): alarm level propagation in WAVES,
+//   * ai/HerdAlarmSystem.h (+ AlarmComponents.h): alarm level propagation in,
 //     full DECAY-to-zero once the threat clears, and the "pin keys off the FLAG, not
 //     level>=1" rule (the recent self-pin regression).
 //   * ai/CreatureBrainSystem.h + CreatureBrain.h: IAUS decide -> wish-VELOCITY, flee/hunt
@@ -38,27 +38,32 @@ namespace {
 namespace Comp = ::Luminumbra::Components;
 namespace ai = ::luminumbra::ai;
 
-using ai::RunHerdAlarmOnTick;
-using ai::HerdAlarmStats;
-using ai::RunCreatureBrainSystemOnTick;
-using ai::DecideCreatureAction;
+using ai::Consideration;
 using ai::CreatureAction;
 using ai::CreatureSenses;
-using ai::Consideration;
 using ai::CurveType;
-using ai::UtilityAction;
-using ai::SelectAction;
+using ai::DecideCreatureAction;
+using ai::HerdAlarmStats;
+using ai::kAlarmDecay;
 using ai::kAlarmRadius;
 using ai::kAlarmSourceThreshold;
-using ai::kAlarmDecay;
 using ai::kCatchRadius;
+using ai::RunCreatureBrainSystemOnTick;
+using ai::RunHerdAlarmOnTick;
+using ai::SelectAction;
+using ai::UtilityAction;
 
-constexpr float kDt = Luminumbra::SECONDS_PER_TICK;  // one fixed 30Hz tick
+constexpr float kDt = Luminumbra::SECONDS_PER_TICK; // one fixed 30Hz tick
 
 // ----------------------------------------------------------------------------- helpers
 
-entt::entity spawnAlarm(entt::registry& r, float x, float z, bool predator = false,
-                        float level = 0.0f, std::uint8_t alarmed = 0, bool eaten = false) {
+entt::entity spawnAlarm(entt::registry& r,
+                        float x,
+                        float z,
+                        bool predator = false,
+                        float level = 0.0f,
+                        std::uint8_t alarmed = 0,
+                        bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -71,8 +76,13 @@ entt::entity spawnAlarm(entt::registry& r, float x, float z, bool predator = fal
     return e;
 }
 
-entt::entity spawnCreature(entt::registry& r, float x, float z, bool predator,
-                           float hunger = 0.0f, float stamina = 1.0f, bool eaten = false) {
+entt::entity spawnCreature(entt::registry& r,
+                           float x,
+                           float z,
+                           bool predator,
+                           float hunger = 0.0f,
+                           float stamina = 1.0f,
+                           bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -84,7 +94,9 @@ entt::entity spawnCreature(entt::registry& r, float x, float z, bool predator,
     return e;
 }
 
-bool isFinite(float v) { return v == v && v <= 1.0e30f && v >= -1.0e30f; }
+bool isFinite(float v) {
+    return v == v && v <= 1.0e30f && v >= -1.0e30f;
+}
 
 // =============================================================================
 // UtilityAI — curve bounds, Dave-Mark compensation, tie-break.
@@ -92,8 +104,8 @@ bool isFinite(float v) { return v == v && v <= 1.0e30f && v >= -1.0e30f; }
 
 // Every curve, for ANY input/param, must return a value in [0,1] with no NaN/inf.
 TEST(SocialHardening, UtilityCurvesClampedAndFinite) {
-    const CurveType curves[] = {CurveType::Linear, CurveType::InvLinear,
-                                CurveType::Quadratic, CurveType::Logistic};
+    const CurveType curves[] = {
+        CurveType::Linear, CurveType::InvLinear, CurveType::Quadratic, CurveType::Logistic};
     const float params[] = {-5.0f, -1.0f, -0.001f, 0.0f, 0.001f, 0.5f, 1.0f, 5.0f, 100.0f};
     const float inputs[] = {-10.0f, -0.5f, 0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 2.0f, 1.0e9f};
     for (CurveType cv : curves) {
@@ -102,7 +114,11 @@ TEST(SocialHardening, UtilityCurvesClampedAndFinite) {
                 for (float b : params) {
                     for (float c : params) {
                         Consideration k;
-                        k.input = in; k.curve = cv; k.m = m; k.b = b; k.c = c;
+                        k.input = in;
+                        k.curve = cv;
+                        k.m = m;
+                        k.b = b;
+                        k.c = c;
                         const float v = k.Evaluate();
                         EXPECT_TRUE(isFinite(v)) << "non-finite curve output";
                         EXPECT_GE(v, 0.0f);
@@ -115,13 +131,19 @@ TEST(SocialHardening, UtilityCurvesClampedAndFinite) {
 }
 
 // A single consideration must apply NO Dave-Mark compensation (modFactor = 1 - 1/1 = 0):
-// the action score is exactly weight*Evaluate(), not inflated.
+// the action score is exactly weight*Evaluate, not inflated.
 TEST(SocialHardening, SingleConsiderationNoCompensation) {
     UtilityAction a;
-    a.id = 0; a.weight = 1.0f;
-    Consideration k; k.input = 0.5f; k.curve = CurveType::Linear; k.m = 1.0f; k.b = 0.0f; k.c = 0.0f;
+    a.id = 0;
+    a.weight = 1.0f;
+    Consideration k;
+    k.input = 0.5f;
+    k.curve = CurveType::Linear;
+    k.m = 1.0f;
+    k.b = 0.0f;
+    k.c = 0.0f;
     a.considerations.push_back(k);
-    // Evaluate() = clamp01(1*(0.5-0)+0) = 0.5; with n==1 modFactor=0 so score == 0.5 exactly.
+    // Evaluate = clamp01(1*(0.5-0)+0) = 0.5; with n==1 modFactor=0 so score == 0.5 exactly.
     EXPECT_FLOAT_EQ(a.Score(), 0.5f);
 }
 
@@ -129,9 +151,15 @@ TEST(SocialHardening, SingleConsiderationNoCompensation) {
 // above 1 or below the un-compensated product), and stay in [0,1].
 TEST(SocialHardening, CompensationRaisesButStaysBounded) {
     UtilityAction a;
-    a.id = 0; a.weight = 1.0f;
+    a.id = 0;
+    a.weight = 1.0f;
     auto mk = [](float in) {
-        Consideration k; k.input = in; k.curve = CurveType::Linear; k.m = 1.0f; k.b = 0.0f; k.c = 0.0f;
+        Consideration k;
+        k.input = in;
+        k.curve = CurveType::Linear;
+        k.m = 1.0f;
+        k.b = 0.0f;
+        k.c = 0.0f;
         return k;
     };
     a.considerations = {mk(0.5f), mk(0.5f), mk(0.5f)};
@@ -145,16 +173,24 @@ TEST(SocialHardening, CompensationRaisesButStaysBounded) {
 // Empty action set -> -1; weight-only action scores to clamped weight.
 TEST(SocialHardening, SelectActionEmptyAndWeightOnly) {
     EXPECT_EQ(SelectAction({}), -1);
-    UtilityAction w; w.id = 7; w.weight = 0.42f;
+    UtilityAction w;
+    w.id = 7;
+    w.weight = 0.42f;
     EXPECT_FLOAT_EQ(w.Score(), 0.42f);
 }
 
 // Tie-break: equal-scoring actions MUST resolve to the LOWEST id, independent of vector
 // order (canonical -> run==replay). Probe both orderings.
 TEST(SocialHardening, SelectActionLowestIdTieBreak) {
-    UtilityAction a; a.id = 5; a.weight = 0.5f;   // identical scores (no considerations)
-    UtilityAction b; b.id = 2; b.weight = 0.5f;
-    UtilityAction c; c.id = 9; c.weight = 0.5f;
+    UtilityAction a;
+    a.id = 5;
+    a.weight = 0.5f; // identical scores (no considerations)
+    UtilityAction b;
+    b.id = 2;
+    b.weight = 0.5f;
+    UtilityAction c;
+    c.id = 9;
+    c.weight = 0.5f;
     EXPECT_EQ(SelectAction({a, b, c}), 2);
     EXPECT_EQ(SelectAction({c, a, b}), 2);
     EXPECT_EQ(SelectAction({b, c, a}), 2);
@@ -170,7 +206,7 @@ TEST(SocialHardening, PreyFleesNearPredator) {
     CreatureSenses s;
     s.is_predator = false;
     s.threat_proximity = 0.9f;
-    s.hunger = 0.8f;          // hungry, but flee must still win
+    s.hunger = 0.8f; // hungry, but flee must still win
     s.food_proximity = 0.6f;
     s.stamina = 1.0f;
     EXPECT_EQ(DecideCreatureAction(s), CreatureAction::Flee);
@@ -194,7 +230,7 @@ TEST(SocialHardening, ExhaustedSafeCreatureRests) {
     s.threat_proximity = 0.0f;
     s.hunger = 0.0f;
     s.food_proximity = 0.0f;
-    s.stamina = 0.0f;         // exhausted
+    s.stamina = 0.0f; // exhausted
     EXPECT_EQ(DecideCreatureAction(s), CreatureAction::Rest);
 }
 
@@ -210,8 +246,10 @@ TEST(SocialHardening, HungryPredatorHunts) {
 
 // Degenerate senses (all zero) must yield a valid action id (Wander baseline), never -1.
 TEST(SocialHardening, ZeroSensesGivesValidAction) {
-    CreatureSenses prey; prey.is_predator = false;
-    CreatureSenses pred; pred.is_predator = true;
+    CreatureSenses prey;
+    prey.is_predator = false;
+    CreatureSenses pred;
+    pred.is_predator = true;
     const auto ap = DecideCreatureAction(prey);
     const auto aq = DecideCreatureAction(pred);
     EXPECT_GE(static_cast<int>(ap), 0);
@@ -228,7 +266,7 @@ TEST(SocialHardening, ZeroSensesGivesValidAction) {
 TEST(SocialHardening, BrainEmptyRosterNoOp) {
     entt::registry r;
     auto e = r.create();
-    r.emplace<Comp::TransformComponent>(e);  // a transform but NO creature
+    r.emplace<Comp::TransformComponent>(e); // a transform but NO creature
     const auto stats = RunCreatureBrainSystemOnTick(r, kDt);
     EXPECT_EQ(stats.updated, 0);
 }
@@ -238,7 +276,7 @@ TEST(SocialHardening, BrainEmptyRosterNoOp) {
 TEST(SocialHardening, FleeWishIsSprintVelocityMagnitude) {
     entt::registry r;
     auto prey = spawnCreature(r, 0.0f, 0.0f, /*predator=*/false);
-    spawnCreature(r, 4.0f, 0.0f, /*predator=*/true, /*hunger=*/0.9f);  // near threat
+    spawnCreature(r, 4.0f, 0.0f, /*predator=*/true, /*hunger=*/0.9f); // near threat
     const float move_speed = r.get<Comp::CreatureComponent>(prey).move_speed;
     RunCreatureBrainSystemOnTick(r, kDt);
     const auto& cr = r.get<Comp::CreatureComponent>(prey);
@@ -255,7 +293,7 @@ TEST(SocialHardening, FleeWishIsSprintVelocityMagnitude) {
 TEST(SocialHardening, HuntWishStreersTowardPrey) {
     entt::registry r;
     auto pred = spawnCreature(r, 0.0f, 0.0f, /*predator=*/true, /*hunger=*/0.95f);
-    spawnCreature(r, 10.0f, 0.0f, /*predator=*/false);  // prey to the +x, beyond catch reach
+    spawnCreature(r, 10.0f, 0.0f, /*predator=*/false); // prey to the +x, beyond catch reach
     RunCreatureBrainSystemOnTick(r, kDt);
     const auto& cr = r.get<Comp::CreatureComponent>(pred);
     ASSERT_EQ(cr.last_action, static_cast<int>(CreatureAction::Hunt));
@@ -276,7 +314,8 @@ TEST(SocialHardening, CatchRadiusEdges) {
         spawnCreature(r, 0.0f, 0.0f, /*predator=*/true, /*hunger=*/0.95f);
         auto prey = spawnCreature(r, kCatchRadius + 0.05f, 0.0f, /*predator=*/false);
         RunCreatureBrainSystemOnTick(r, kDt);
-        EXPECT_FALSE(r.get<Comp::CreatureComponent>(prey).eaten) << "outside catch radius -> not eaten";
+        EXPECT_FALSE(r.get<Comp::CreatureComponent>(prey).eaten)
+            << "outside catch radius -> not eaten";
     }
 }
 
@@ -301,11 +340,11 @@ TEST(SocialHardening, OnePreyFeedsAtMostOnePredatorPerTick) {
     entt::registry r;
     auto p1 = spawnCreature(r, -1.0f, 0.0f, /*predator=*/true, /*hunger=*/0.95f);
     auto p2 = spawnCreature(r, 1.0f, 0.0f, /*predator=*/true, /*hunger=*/0.95f);
-    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false);  // single prey between them, both in reach
+    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false); // single prey between them, both in reach
     RunCreatureBrainSystemOnTick(r, kDt);
     const float h1 = r.get<Comp::CreatureComponent>(p1).hunger;
     const float h2 = r.get<Comp::CreatureComponent>(p2).hunger;
-    const bool fed1 = h1 < 0.9f;  // satiation drops hunger by ~0.8
+    const bool fed1 = h1 < 0.9f; // satiation drops hunger by ~0.8
     const bool fed2 = h2 < 0.9f;
     EXPECT_FALSE(fed1 && fed2) << "one prey must not sate BOTH predators in a single tick";
 }
@@ -319,7 +358,8 @@ TEST(SocialHardening, BrainRunEqualsReplay) {
         spawnCreature(r, 3.0f, -3.0f, /*predator=*/false, 0.2f, 1.0f);
     };
     entt::registry a, b;
-    build(a); build(b);
+    build(a);
+    build(b);
     for (int t = 0; t < 20; ++t) {
         RunCreatureBrainSystemOnTick(a, kDt);
         RunCreatureBrainSystemOnTick(b, kDt);
@@ -334,13 +374,19 @@ TEST(SocialHardening, BrainRunEqualsReplay) {
         for (auto e : es) {
             const auto& c = v.get<Comp::CreatureComponent>(e);
             const auto& tf = v.get<Comp::TransformComponent>(e);
-            out.insert(out.end(), {c.hunger, c.stamina, c.wish_x, c.wish_z,
-                                   tf.position.x, tf.position.z,
-                                   static_cast<float>(c.last_action),
-                                   static_cast<float>(c.eaten ? 1 : 0)});
+            out.insert(out.end(),
+                       {c.hunger,
+                        c.stamina,
+                        c.wish_x,
+                        c.wish_z,
+                        tf.position.x,
+                        tf.position.z,
+                        static_cast<float>(c.last_action),
+                        static_cast<float>(c.eaten ? 1 : 0)});
         }
     };
-    dump(a, sa); dump(b, sb);
+    dump(a, sa);
+    dump(b, sb);
     ASSERT_EQ(sa.size(), sb.size());
     for (std::size_t i = 0; i < sa.size(); ++i)
         EXPECT_FLOAT_EQ(sa[i], sb[i]) << "run!=replay at field " << i;
@@ -349,7 +395,11 @@ TEST(SocialHardening, BrainRunEqualsReplay) {
 // ORDER-INDEPENDENCE: shuffling creation order yields the SAME per-creature result keyed
 // by geometry (positions are unique). Pre-tick snapshot must make order irrelevant.
 TEST(SocialHardening, BrainOrderIndependentByGeometry) {
-    struct Spec { float x, z; bool pred; float hunger, stamina; };
+    struct Spec {
+        float x, z;
+        bool pred;
+        float hunger, stamina;
+    };
     const Spec specs[] = {
         {0.0f, 0.0f, false, 0.3f, 1.0f},
         {6.0f, 0.0f, true, 0.8f, 0.9f},
@@ -362,19 +412,20 @@ TEST(SocialHardening, BrainOrderIndependentByGeometry) {
             const Spec& s = specs[i];
             spawnCreature(r, s.x, s.z, s.pred, s.hunger, s.stamina);
         }
-        for (int t = 0; t < 5; ++t) RunCreatureBrainSystemOnTick(r, kDt);
+        for (int t = 0; t < 5; ++t)
+            RunCreatureBrainSystemOnTick(r, kDt);
         // key results by spawn position (unique) so iteration order is removed.
         std::vector<std::pair<std::pair<float, float>, std::vector<float>>> out;
         auto v = r.view<Comp::CreatureComponent, Comp::TransformComponent>();
         for (auto e : v) {
             const auto& c = v.get<Comp::CreatureComponent>(e);
             const auto& tf = v.get<Comp::TransformComponent>(e);
-            out.push_back({{tf.position.x, tf.position.z},
-                           {c.hunger, c.stamina, c.wish_x, c.wish_z,
-                            static_cast<float>(c.last_action)}});
+            out.push_back(
+                {{tf.position.x, tf.position.z},
+                 {c.hunger, c.stamina, c.wish_x, c.wish_z, static_cast<float>(c.last_action)}});
         }
         std::sort(out.begin(), out.end(), [](const auto& A, const auto& B) {
-            return A.second < B.second;  // stable-ish ordering for comparison
+            return A.second < B.second; // stable-ish ordering for comparison
         });
         return out;
     };
@@ -384,7 +435,8 @@ TEST(SocialHardening, BrainOrderIndependentByGeometry) {
     // Build position-keyed maps for a geometry-keyed compare.
     auto findByPos = [](const auto& v, float x, float z) -> std::vector<float> {
         for (const auto& kv : v)
-            if (kv.first.first == x && kv.first.second == z) return kv.second;
+            if (kv.first.first == x && kv.first.second == z)
+                return kv.second;
         return {};
     };
     for (const Spec& s : specs) {
@@ -392,18 +444,19 @@ TEST(SocialHardening, BrainOrderIndependentByGeometry) {
         auto g = findByPos(reverse, s.x, s.z);
         ASSERT_EQ(f.size(), g.size());
         for (std::size_t i = 0; i < f.size(); ++i)
-            EXPECT_FLOAT_EQ(f[i], g[i]) << "order-dependent result at pos (" << s.x << "," << s.z << ")";
+            EXPECT_FLOAT_EQ(f[i], g[i])
+                << "order-dependent result at pos (" << s.x << "," << s.z << ")";
     }
 }
 
 // =============================================================================
-// HerdAlarmSystem — gating, propagation waves, full decay, pin-keys-off-flag.
+// HerdAlarmSystem — gating, propagation, full decay, pin-keys-off-flag.
 // =============================================================================
 
 // GATING: no AlarmComponent anywhere -> strict no-op even with creatures present.
 TEST(SocialHardening, AlarmGatingNoComponentNoOp) {
     entt::registry r;
-    spawnCreature(r, 0.0f, 0.0f, false);  // creature WITHOUT an AlarmComponent
+    spawnCreature(r, 0.0f, 0.0f, false); // creature WITHOUT an AlarmComponent
     const auto stats = RunHerdAlarmOnTick(r, kDt);
     EXPECT_EQ(stats.participants, 0);
     EXPECT_EQ(stats.sources, 0);
@@ -422,7 +475,8 @@ TEST(SocialHardening, AlarmLevelStaysClamped) {
     entt::registry r;
     auto a = spawnAlarm(r, 0.0f, 0.0f, false, /*level=*/5.0f, /*alarmed=*/0);
     auto b = spawnAlarm(r, 1.0f, 0.0f, false, /*level=*/-3.0f, /*alarmed=*/1);
-    for (int t = 0; t < 10; ++t) RunHerdAlarmOnTick(r, kDt);
+    for (int t = 0; t < 10; ++t)
+        RunHerdAlarmOnTick(r, kDt);
     for (auto e : {a, b}) {
         const float L = r.get<Comp::AlarmComponent>(e).level;
         EXPECT_TRUE(isFinite(L));
@@ -439,7 +493,8 @@ TEST(SocialHardening, AlarmPinKeysOffFlagNotLevel) {
     {
         entt::registry r;
         auto src = spawnAlarm(r, 0.0f, 0.0f, false, /*level=*/0.0f, /*alarmed=*/1);
-        for (int t = 0; t < 5; ++t) RunHerdAlarmOnTick(r, kDt);
+        for (int t = 0; t < 5; ++t)
+            RunHerdAlarmOnTick(r, kDt);
         EXPECT_FLOAT_EQ(r.get<Comp::AlarmComponent>(src).level, 1.0f) << "flagged source must pin";
     }
     // (b) a creature at level 1.0 with alarmed==0 and NO source nearby must DECAY, not pin.
@@ -450,7 +505,7 @@ TEST(SocialHardening, AlarmPinKeysOffFlagNotLevel) {
         RunHerdAlarmOnTick(r, kDt);
         const float after = r.get<Comp::AlarmComponent>(relay).level;
         EXPECT_LT(after, before) << "level==1.0 with alarmed==0 must NOT pin; it must decay";
-        EXPECT_FLOAT_EQ(after, 1.0f * kAlarmDecay);  // exactly one decay step at 30Hz
+        EXPECT_FLOAT_EQ(after, 1.0f * kAlarmDecay); // exactly one decay step at 30Hz
     }
 }
 
@@ -459,49 +514,53 @@ TEST(SocialHardening, AlarmPinKeysOffFlagNotLevel) {
 TEST(SocialHardening, AlarmDecaysToZeroAfterThreatClears) {
     entt::registry r;
     // A line of 4 same-role prey within relay range; seed the first as a flagged source so
-    // the wave propagates, then clear the flag and let it decay.
+    // the, then clear the flag and let it decay.
     auto e0 = spawnAlarm(r, 0.0f, 0.0f, false, 0.0f, /*alarmed=*/1);
     auto e1 = spawnAlarm(r, 4.0f, 0.0f, false);
     auto e2 = spawnAlarm(r, 8.0f, 0.0f, false);
     auto e3 = spawnAlarm(r, 12.0f, 0.0f, false);
-    // Propagate the wave for several ticks.
-    for (int t = 0; t < 8; ++t) RunHerdAlarmOnTick(r, kDt);
-    // The relay nearest the source must have lit up (wave reached it).
-    EXPECT_GT(r.get<Comp::AlarmComponent>(e1).level, 0.0f) << "wave should reach the herd";
+    // Propagate the  several ticks.
+    for (int t = 0; t < 8; ++t)
+        RunHerdAlarmOnTick(r, kDt);
+    // The relay nearest the source must have lit up ( it).
+    EXPECT_GT(r.get<Comp::AlarmComponent>(e1).level, 0.0f) << " reach the herd";
     // Threat clears: drop the flag. Now NOTHING should remain a source past the threshold.
     r.get<Comp::AlarmComponent>(e0).alarmed = 0;
-    for (int t = 0; t < 200; ++t) RunHerdAlarmOnTick(r, kDt);
+    for (int t = 0; t < 200; ++t)
+        RunHerdAlarmOnTick(r, kDt);
     for (auto e : {e0, e1, e2, e3}) {
         EXPECT_LT(r.get<Comp::AlarmComponent>(e).level, 1.0e-3f)
             << "alarm must fully decay to ~0 after the threat clears";
     }
 }
 
-// PROPAGATION IN WAVES: an alarmed source raises the level of a same-role neighbour in
-// range; the wave reaches a chained relay only over successive ticks (not instantly across
+// PROPAGATION IN: an alarmed source raises the level of a same-role neighbour in
+// range; the  a chained relay only over successive ticks (not instantly across
 // the whole chain). Probe that the near relay lights before the far one.
 TEST(SocialHardening, AlarmPropagatesInWaves) {
     entt::registry r;
     auto src = spawnAlarm(r, 0.0f, 0.0f, false, 0.0f, /*alarmed=*/1);
-    auto near_ = spawnAlarm(r, 6.0f, 0.0f, false);   // within radius (12) of src
-    auto far_ = spawnAlarm(r, 16.0f, 0.0f, false);   // dist 16 from src (out), 10 from near_ (in)
+    auto near_ = spawnAlarm(r, 6.0f, 0.0f, false); // within radius (12) of src
+    auto far_ = spawnAlarm(r, 16.0f, 0.0f, false); // dist 16 from src (out), 10 from near_ (in)
     (void)src;
     // After ONE tick: near lights (direct from source); far still 0 (source out of range,
     // and near isn't a strong-enough relay yet).
     RunHerdAlarmOnTick(r, kDt);
     EXPECT_GT(r.get<Comp::AlarmComponent>(near_).level, 0.0f) << "near relay lights tick 1";
     EXPECT_FLOAT_EQ(r.get<Comp::AlarmComponent>(far_).level, 0.0f) << "far relay still dark tick 1";
-    // After several more ticks the far relay should receive the relayed wave.
-    for (int t = 0; t < 6; ++t) RunHerdAlarmOnTick(r, kDt);
-    EXPECT_GT(r.get<Comp::AlarmComponent>(far_).level, 0.0f) << "wave should reach far relay over time";
+    // After several more ticks the far relay should receive the relayed
+    for (int t = 0; t < 6; ++t)
+        RunHerdAlarmOnTick(r, kDt);
+    EXPECT_GT(r.get<Comp::AlarmComponent>(far_).level, 0.0f) << " reach far relay over time";
 }
 
 // ROLE-GATED: an alarmed PREDATOR does NOT raise nearby PREY (different is_predator role).
 TEST(SocialHardening, AlarmDoesNotCrossRoles) {
     entt::registry r;
-    spawnAlarm(r, 0.0f, 0.0f, /*predator=*/true, 0.0f, /*alarmed=*/1);  // alarmed predator
-    auto prey = spawnAlarm(r, 2.0f, 0.0f, /*predator=*/false);          // prey right next to it
-    for (int t = 0; t < 5; ++t) RunHerdAlarmOnTick(r, kDt);
+    spawnAlarm(r, 0.0f, 0.0f, /*predator=*/true, 0.0f, /*alarmed=*/1); // alarmed predator
+    auto prey = spawnAlarm(r, 2.0f, 0.0f, /*predator=*/false);         // prey right next to it
+    for (int t = 0; t < 5; ++t)
+        RunHerdAlarmOnTick(r, kDt);
     EXPECT_FLOAT_EQ(r.get<Comp::AlarmComponent>(prey).level, 0.0f)
         << "alarm must not cross is_predator roles";
 }
@@ -520,7 +579,7 @@ TEST(SocialHardening, AlarmCarcassEmitsNothingAndDrains) {
 TEST(SocialHardening, AlarmRadiusEdgeExcluded) {
     entt::registry r;
     spawnAlarm(r, 0.0f, 0.0f, false, 0.0f, /*alarmed=*/1);
-    auto edge = spawnAlarm(r, kAlarmRadius, 0.0f, false);  // exactly at the radius
+    auto edge = spawnAlarm(r, kAlarmRadius, 0.0f, false); // exactly at the radius
     RunHerdAlarmOnTick(r, kDt);
     EXPECT_FLOAT_EQ(r.get<Comp::AlarmComponent>(edge).level, 0.0f)
         << "a neighbour exactly at kAlarmRadius is out of earshot";
@@ -530,7 +589,7 @@ TEST(SocialHardening, AlarmRadiusEdgeExcluded) {
 TEST(SocialHardening, AlarmCoincidentNoNaN) {
     entt::registry r;
     spawnAlarm(r, 0.0f, 0.0f, false, 0.0f, /*alarmed=*/1);
-    auto co = spawnAlarm(r, 0.0f, 0.0f, false);  // coincident with the source
+    auto co = spawnAlarm(r, 0.0f, 0.0f, false); // coincident with the source
     RunHerdAlarmOnTick(r, kDt);
     const float L = r.get<Comp::AlarmComponent>(co).level;
     EXPECT_TRUE(isFinite(L));
@@ -545,11 +604,12 @@ TEST(SocialHardening, AlarmRunEqualsReplay) {
         spawnAlarm(r, 0.0f, 0.0f, false, 0.0f, 1);
         spawnAlarm(r, 5.0f, 1.0f, false, 0.3f, 0);
         spawnAlarm(r, -3.0f, 4.0f, false, 0.0f, 0);
-        spawnAlarm(r, 9.0f, -2.0f, true, 0.0f, 1);   // a predator source (own role)
+        spawnAlarm(r, 9.0f, -2.0f, true, 0.0f, 1); // a predator source (own role)
         spawnAlarm(r, 7.0f, -2.0f, true, 0.0f, 0);
     };
     entt::registry a, b;
-    build(a); build(b);
+    build(a);
+    build(b);
     for (int t = 0; t < 30; ++t) {
         RunHerdAlarmOnTick(a, kDt);
         RunHerdAlarmOnTick(b, kDt);
@@ -561,7 +621,8 @@ TEST(SocialHardening, AlarmRunEqualsReplay) {
             return entt::to_integral(x) < entt::to_integral(y);
         });
         std::vector<float> out;
-        for (auto e : es) out.push_back(r.get<Comp::AlarmComponent>(e).level);
+        for (auto e : es)
+            out.push_back(r.get<Comp::AlarmComponent>(e).level);
         return out;
     };
     auto da = dump(a), db = dump(b);
@@ -573,7 +634,12 @@ TEST(SocialHardening, AlarmRunEqualsReplay) {
 // ORDER-INDEPENDENCE: shuffling creation order yields identical per-position alarm levels
 // (two-phase snapshot must make iteration order irrelevant).
 TEST(SocialHardening, AlarmOrderIndependentByGeometry) {
-    struct Spec { float x, z; bool pred; float level; std::uint8_t alarmed; };
+    struct Spec {
+        float x, z;
+        bool pred;
+        float level;
+        std::uint8_t alarmed;
+    };
     const Spec specs[] = {
         {0.0f, 0.0f, false, 0.0f, 1},
         {5.0f, 0.0f, false, 0.0f, 0},
@@ -586,7 +652,8 @@ TEST(SocialHardening, AlarmOrderIndependentByGeometry) {
             const Spec& s = specs[i];
             spawnAlarm(r, s.x, s.z, s.pred, s.level, s.alarmed);
         }
-        for (int t = 0; t < 6; ++t) RunHerdAlarmOnTick(r, kDt);
+        for (int t = 0; t < 6; ++t)
+            RunHerdAlarmOnTick(r, kDt);
         std::vector<std::pair<std::pair<float, float>, float>> out;
         auto v = r.view<Comp::AlarmComponent, Comp::TransformComponent>();
         for (auto e : v) {
@@ -599,7 +666,8 @@ TEST(SocialHardening, AlarmOrderIndependentByGeometry) {
     auto rev = runWith({3, 2, 1, 0});
     auto findByPos = [](const auto& v, float x, float z) -> float {
         for (const auto& kv : v)
-            if (kv.first.first == x && kv.first.second == z) return kv.second;
+            if (kv.first.first == x && kv.first.second == z)
+                return kv.second;
         return -1.0f;
     };
     for (const Spec& s : specs) {
@@ -616,20 +684,21 @@ TEST(SocialHardening, BrainRaisesAndClearsAlarmFlag) {
         entt::registry r;
         auto prey = spawnCreature(r, 0.0f, 0.0f, /*predator=*/false);
         r.emplace<Comp::AlarmComponent>(prey);
-        spawnCreature(r, 3.0f, 0.0f, /*predator=*/true, 0.9f);  // close threat -> nearNorm high
+        spawnCreature(r, 3.0f, 0.0f, /*predator=*/true, 0.9f); // close threat -> nearNorm high
         RunCreatureBrainSystemOnTick(r, kDt);
-        EXPECT_EQ(r.get<Comp::AlarmComponent>(prey).alarmed, 1u) << "close predator must raise flag";
+        EXPECT_EQ(r.get<Comp::AlarmComponent>(prey).alarmed, 1u)
+            << "close predator must raise flag";
     }
     {
         entt::registry r;
         auto prey = spawnCreature(r, 0.0f, 0.0f, /*predator=*/false);
         auto& al = r.emplace<Comp::AlarmComponent>(prey);
-        al.alarmed = 1;  // was alarmed
-        spawnCreature(r, 100.0f, 0.0f, /*predator=*/true, 0.9f);  // far -> nearNorm ~0
+        al.alarmed = 1;                                          // was alarmed
+        spawnCreature(r, 100.0f, 0.0f, /*predator=*/true, 0.9f); // far -> nearNorm ~0
         RunCreatureBrainSystemOnTick(r, kDt);
         EXPECT_EQ(r.get<Comp::AlarmComponent>(prey).alarmed, 0u)
             << "a distant predator must clear the flag (so the alarm can decay)";
     }
 }
 
-}  // namespace
+} // namespace

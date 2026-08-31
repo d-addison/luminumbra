@@ -32,7 +32,8 @@ std::filesystem::path MakeTempSaveDir(const std::string& tag) {
 }
 
 struct TempSaveDir {
-    explicit TempSaveDir(const std::string& tag) : path(MakeTempSaveDir(tag)) {}
+    explicit TempSaveDir(const std::string& tag)
+        : path(MakeTempSaveDir(tag)) {}
     ~TempSaveDir() {
         std::error_code remove_error;
         std::filesystem::remove_all(path, remove_error);
@@ -41,20 +42,17 @@ struct TempSaveDir {
     std::filesystem::path path;
 };
 
-std::shared_ptr<Chunk> AddFixtureChunk(
-    WorldStreamingState& state,
-    const IVec3& coords,
-    ChunkState chunk_state,
-    Luminumbra::u32 salt) {
+std::shared_ptr<Chunk> AddFixtureChunk(WorldStreamingState& state,
+                                       const IVec3& coords,
+                                       ChunkState chunk_state,
+                                       Luminumbra::u32 salt) {
     auto chunk = state.get_or_create_chunk(coords);
     chunk->set_state(chunk_state);
     chunk->sdf_data = {-1.5f + static_cast<float>(salt), -0.25f, 0.5f, 1.25f};
     chunk->heightmap_data = {7.0f + static_cast<float>(salt), 8.5f};
-    chunk->mesh_vertices = {
-        {Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
-        {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u},
-        {Vec3(0.0f, 1.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 3u}
-    };
+    chunk->mesh_vertices = {{Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
+                            {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u},
+                            {Vec3(0.0f, 1.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 3u}};
     chunk->mesh_indices = {0u, 1u, 2u};
     chunk->water_level_data = {2.0f, 2.25f};
     chunk->water_flow_data = {Vec2(0.25f, -0.125f)};
@@ -88,7 +86,7 @@ TEST(WorldSaveService, SaveThenLoadRoundTripPreservesWorldHash) {
     std::vector<std::string> save_errors;
     ASSERT_TRUE(service.save_world(original, save_dir.path, &save_errors));
     EXPECT_TRUE(save_errors.empty());
-    // Persistence v2 (T-I3-7): the writer emits the LMR1 region container,
+    // Persistence v2: the writer emits the LMR1 region container,
     // never the legacy v1 single snapshot.
     EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
     EXPECT_TRUE(std::filesystem::exists(WorldSaveService::world_manifest_path(save_dir.path)));

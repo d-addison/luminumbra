@@ -1,14 +1,14 @@
-// T-I4-11 determinism contract: golden bit-pattern lock for the deterministic
+//  determinism contract: golden bit-pattern lock for the deterministic
 // transcendental wrappers (src/luminumbra_common/core/DeterministicMath.h).
 //
-// These wrappers exist so the lockstep world tick (T-I4-13) and replay
-// (T-I4-12) produce bit-identical floating point across machines/compilers/
+// These wrappers exist so the lockstep world tick and replay
+// produce bit-identical floating point across machines/compilers/
 // libms. This test pins the EXACT IEEE binary32 bit pattern each function emits
 // for a sweep of inputs. The expected values were generated from the
 // implementation itself under -ffp-contract=off (the flag pinned on
 // luminumbra_common in CMakeLists.txt) and committed as goldens: any change to
 // a result bit pattern is a determinism-contract break and must move these
-// constants DELIBERATELY in the same commit, exactly like the G1 pose checksum.
+// constants DELIBERATELY in the same commit, exactly like the  pose checksum.
 //
 // The assertions compare raw uint32 bit patterns (not float ==) so a one-ULP
 // drift -- the entire class of bug this contract guards against -- fails loudly
@@ -25,8 +25,12 @@ namespace dm = Luminumbra::DeterministicMath;
 
 namespace {
 
-float F(std::uint32_t bits) { return dm::FromBits(bits); }
-std::uint32_t B(float v) { return dm::BitsOf(v); }
+float F(std::uint32_t bits) {
+    return dm::FromBits(bits);
+}
+std::uint32_t B(float v) {
+    return dm::BitsOf(v);
+}
 
 struct UnaryGolden {
     std::uint32_t in;
@@ -103,24 +107,21 @@ const BinaryGolden kAtan2Golden[] = {
 TEST(DeterministicMath, SinGoldenBitPatterns) {
     for (const auto& g : kSinGolden) {
         const float x = F(g.in);
-        EXPECT_EQ(B(dm::Sin(x)), g.out)
-            << "Sin(" << x << ") bit pattern drifted from golden";
+        EXPECT_EQ(B(dm::Sin(x)), g.out) << "Sin(" << x << ") bit pattern drifted from golden";
     }
 }
 
 TEST(DeterministicMath, CosGoldenBitPatterns) {
     for (const auto& g : kCosGolden) {
         const float x = F(g.in);
-        EXPECT_EQ(B(dm::Cos(x)), g.out)
-            << "Cos(" << x << ") bit pattern drifted from golden";
+        EXPECT_EQ(B(dm::Cos(x)), g.out) << "Cos(" << x << ") bit pattern drifted from golden";
     }
 }
 
 TEST(DeterministicMath, SqrtGoldenBitPatterns) {
     for (const auto& g : kSqrtGolden) {
         const float x = F(g.in);
-        EXPECT_EQ(B(dm::Sqrt(x)), g.out)
-            << "Sqrt(" << x << ") bit pattern drifted from golden";
+        EXPECT_EQ(B(dm::Sqrt(x)), g.out) << "Sqrt(" << x << ") bit pattern drifted from golden";
     }
 }
 
@@ -148,9 +149,9 @@ TEST(DeterministicMath, ApproximatesLibmWithinBound) {
     }
     for (float y = -4.0f; y <= 4.0f; y += 0.31f) {
         for (float x = -4.0f; x <= 4.0f; x += 0.31f) {
-            if (x == 0.0f && y == 0.0f) continue;
-            EXPECT_NEAR(dm::Atan2(y, x), std::atan2(y, x), 2.0e-3f)
-                << "y=" << y << " x=" << x;
+            if (x == 0.0f && y == 0.0f)
+                continue;
+            EXPECT_NEAR(dm::Atan2(y, x), std::atan2(y, x), 2.0e-3f) << "y=" << y << " x=" << x;
         }
     }
     for (float x = 0.0f; x <= 1000.0f; x += 3.7f) {

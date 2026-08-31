@@ -2,12 +2,12 @@
 
 #include <algorithm>
 
-// ATMO-14 (Wave G S1.3): the RENDER-ONLY snow-cover model. A single [0,1] ground
+// the  snow-cover model. A single [0,1] ground
 // cover scalar accumulated from the live Snow weather intensity and melted by sun
 // elevation (plus a slow ambient thaw), advanced with render dt — never sim state,
 // never world_hash. The lighting pass blends up-facing terrain albedo toward snow
 // white (+ roughness up) by this cover; 0.0 (the default) is byte-identical.
-// Behind render.snow_cover (default OFF until the R1.X re-bless).
+// Controlled by render.snow_cover, which is enabled in the shipped config.
 namespace Luminumbra::Rendering::SnowCover {
 
 // Full cover after ~120 s of heavy snowfall; bare again after ~240 s of full sun.

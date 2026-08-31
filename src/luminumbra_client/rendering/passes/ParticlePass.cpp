@@ -1,7 +1,7 @@
 #include "ParticlePass.h"
 
+#include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "PassGlHelpers.h"
-#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "core/Log.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -96,7 +96,7 @@ void ParticlePass::init_shader(const std::filesystem::path& root_path) {
         (root_path / "res/shaders/magical_particles.vert").string().c_str(),
         (root_path / "res/shaders/magical_particles.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.particles");
-    // FR-D (GPU-05): validate the soft-particle depth sampler against the registry.
+    // validate the soft-particle depth sampler against the registry.
     if (m_shader && m_shader->IsValid()) {
         if (const ExpectedLayout* layout = FindPassExpectedLayout("magical_particles"))
             m_shader->ValidateLayout(*layout);
@@ -121,11 +121,11 @@ void ParticlePass::init_buffers() {
         glBufferStorage(GL_ARRAY_BUFFER, bytes, nullptr, storage_flags);
         m_instance_ptr[ring] = static_cast<InstanceRecord*>(
             glMapBufferRange(GL_ARRAY_BUFFER, 0, bytes, storage_flags));
-        PassGl::label_gl_object(GL_BUFFER, m_instance_vbo[ring],
-                                "particles.instances." + std::to_string(ring));
+        PassGl::label_gl_object(
+            GL_BUFFER, m_instance_vbo[ring], "particles.instances." + std::to_string(ring));
     }
 
-    // Bind ring slot 0's layout into the VAO; execute() rebinds the live ring
+    // Bind ring slot 0's layout into the VAO; execute rebinds the live ring
     // slot's buffer to binding point 0 before drawing (same VAO, swapped VBO).
     glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[0]);
     glVertexBindingDivisor(0, 1); // one record per instance
@@ -172,7 +172,10 @@ void ParticlePass::destroy_buffers() {
         }
     }
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
+    if (m_vao) {
+        glDeleteVertexArrays(1, &m_vao);
+        m_vao = 0;
+    }
     m_particles.clear();
     m_particles.shrink_to_fit();
     m_ring_head = 0;
@@ -185,10 +188,12 @@ void ParticlePass::reset_shader() {
     m_shader.reset();
 }
 
-uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path, const glm::vec3& world_origin) {
+uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path,
+                                   const glm::vec3& world_origin) {
     if (m_active_emitters.size() >= kMaxEmitters) {
         LUMINUMBRA_CORE_WARN("ParticlePass: emitter cap ({}) reached, ignoring '{}'.",
-                             kMaxEmitters, json_path.string());
+                             kMaxEmitters,
+                             json_path.string());
         return kInvalidEmitter;
     }
     std::ifstream in(json_path);
@@ -205,29 +210,37 @@ uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path, const
         data.spawn_rate = doc.value("spawn_rate", 0.0f);
         data.lifetime = std::max(0.01f, doc.value("lifetime", 1.0f));
         if (doc.contains("origin") && doc["origin"].is_array() && doc["origin"].size() == 3) {
-            data.origin = glm::vec3(doc["origin"][0].get<float>(), doc["origin"][1].get<float>(),
+            data.origin = glm::vec3(doc["origin"][0].get<float>(),
+                                    doc["origin"][1].get<float>(),
                                     doc["origin"][2].get<float>());
         }
-        if (doc.contains("origin_extent") && doc["origin_extent"].is_array() && doc["origin_extent"].size() == 3) {
+        if (doc.contains("origin_extent") && doc["origin_extent"].is_array() &&
+            doc["origin_extent"].size() == 3) {
             data.origin_extent = glm::vec3(doc["origin_extent"][0].get<float>(),
                                            doc["origin_extent"][1].get<float>(),
                                            doc["origin_extent"][2].get<float>());
         }
-        if (doc.contains("base_velocity") && doc["base_velocity"].is_array() && doc["base_velocity"].size() == 3) {
+        if (doc.contains("base_velocity") && doc["base_velocity"].is_array() &&
+            doc["base_velocity"].size() == 3) {
             data.base_velocity = glm::vec3(doc["base_velocity"][0].get<float>(),
                                            doc["base_velocity"][1].get<float>(),
                                            doc["base_velocity"][2].get<float>());
         }
         data.velocity_jitter = doc.value("velocity_jitter", 0.0f);
-        if (doc.contains("size_curve")) parse_curve(doc["size_curve"], data.size_curve);
-        if (doc.contains("color_r_curve")) parse_curve(doc["color_r_curve"], data.r_curve);
-        if (doc.contains("color_g_curve")) parse_curve(doc["color_g_curve"], data.g_curve);
-        if (doc.contains("color_b_curve")) parse_curve(doc["color_b_curve"], data.b_curve);
-        if (doc.contains("color_a_curve")) parse_curve(doc["color_a_curve"], data.a_curve);
+        if (doc.contains("size_curve"))
+            parse_curve(doc["size_curve"], data.size_curve);
+        if (doc.contains("color_r_curve"))
+            parse_curve(doc["color_r_curve"], data.r_curve);
+        if (doc.contains("color_g_curve"))
+            parse_curve(doc["color_g_curve"], data.g_curve);
+        if (doc.contains("color_b_curve"))
+            parse_curve(doc["color_b_curve"], data.b_curve);
+        if (doc.contains("color_a_curve"))
+            parse_curve(doc["color_a_curve"], data.a_curve);
         data.atlas_layer = static_cast<uint16_t>(doc.value("atlas_layer", 0u));
         const std::string blend = doc.value("blend", std::string("additive"));
         data.blend = (blend == "alpha") ? BlendMode::AlphaBlend : BlendMode::Additive;
-        // T-I5a-4 (B2 precipitation): optional wind/streak/splash fields. Absent
+        //  ( precipitation): optional wind/streak/splash fields. Absent
         // for legacy magical emitters (defaults keep them unaffected).
         data.wind_response = doc.value("wind_response", 0.0f);
         data.streak_aspect = std::max(1.0f, doc.value("streak_aspect", 1.0f));
@@ -235,7 +248,8 @@ uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path, const
         data.impact_plane_y = doc.value("impact_plane_y", 0.0f);
         data.loaded = true;
     } catch (const std::exception& e) {
-        LUMINUMBRA_CORE_WARN("ParticlePass: failed to parse emitter '{}': {}", json_path.string(), e.what());
+        LUMINUMBRA_CORE_WARN(
+            "ParticlePass: failed to parse emitter '{}': {}", json_path.string(), e.what());
         return kInvalidEmitter;
     }
 
@@ -247,7 +261,8 @@ uint32_t ParticlePass::add_emitter(const std::filesystem::path& json_path, const
     emitter.rng_state = 1;
     m_active_emitters.push_back(std::move(emitter));
     LUMINUMBRA_CORE_INFO("ParticlePass: emitter '{}' id={} added (rate={}/s).",
-                         m_active_emitters.back().data.name, m_active_emitters.back().id,
+                         m_active_emitters.back().data.name,
+                         m_active_emitters.back().id,
                          m_active_emitters.back().data.spawn_rate);
     return m_active_emitters.back().id;
 }
@@ -259,19 +274,20 @@ void ParticlePass::clear_emitters() {
     m_splash_emitter_index = kNoSplashEmitter;
     // Kill any live particles so existing byte-stable visual gates render an
     // empty (no-op) particle pass.
-    for (auto& p : m_particles) p.alive = false;
+    for (auto& p : m_particles)
+        p.alive = false;
     m_ring_head = 0;
     m_live_count = 0;
 }
 
 void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base_origin) {
-    // T-I5a-DR-storm-motion-v4: re-anchor a live emitter's spawn region. We apply
+    //  re-anchor a live emitter's spawn region. We apply
     // the SAME convention as add_emitter (world_origin = base + data.origin) so the
     // authored height offset (rain: [0,22,0]) is preserved as the camera moves.
     // Render-only: this never feeds rebuild_emitter_descriptors at a fixed tick, and
     // the descriptor snapshot (world_hash surface) is rebuilt independently from the
     // sim-deterministic schedule -- so moving the render anchor leaves world_hash
-    // untouched (one-way rule, critique F2).
+    // untouched (one-way rule, regression review).
     for (ActiveEmitter& emitter : m_active_emitters) {
         if (emitter.id == emitter_id) {
             emitter.world_origin = base_origin + emitter.data.origin;
@@ -281,7 +297,7 @@ void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base
 }
 
 uint32_t ParticlePass::add_splash_emitter(const std::filesystem::path& json_path) {
-    // T-I5a-4 (B2): a splash burst is a normal emitter loaded with spawn_rate
+    // a splash burst is a normal emitter loaded with spawn_rate
     // forced to 0 -- it never self-emits; only rain-impact events spawn from it.
     // It carries no descriptor "enable" (spawn_rate 0), so it does not perturb
     // the deterministic emitter-descriptor snapshot.
@@ -300,7 +316,7 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
                                            const glm::vec3& plunge_pos,
                                            float drop_height,
                                            float channel_width) {
-    // T-I5b-4 (W1): a waterfall spray emitter is a normal emitter anchored at the
+    // a waterfall spray emitter is a normal emitter anchored at the
     // plunge foot. After loading we re-shape its spawn box + emission rate to the
     // detected fall's geometry so a tall/wide fall throws a proportionally larger
     // mist plume. add_emitter applies world_origin = base + data.origin, so we
@@ -324,7 +340,8 @@ uint32_t ParticlePass::add_waterfall_spray(const std::filesystem::path& json_pat
     return id;
 }
 
-uint64_t ParticlePass::derive_emitter_seed(uint64_t world_seed, uint64_t world_tick, uint32_t emitter_id) {
+uint64_t
+ParticlePass::derive_emitter_seed(uint64_t world_seed, uint64_t world_tick, uint32_t emitter_id) {
     // Pure function of world state + emitter identity. Mixing three splitmix64
     // rounds de-correlates seeds across ticks and emitters.
     uint64_t s = splitmix64(world_seed ^ 0xA24BAED4963EE407ull);
@@ -369,7 +386,8 @@ void ParticlePass::spawn_from_emitter(ActiveEmitter& emitter, float dt) {
     if (!emitter.data.loaded || emitter.data.spawn_rate <= 0.0f) {
         return;
     }
-    emitter.spawn_accumulator += static_cast<double>(emitter.data.spawn_rate) * static_cast<double>(dt);
+    emitter.spawn_accumulator +=
+        static_cast<double>(emitter.data.spawn_rate) * static_cast<double>(dt);
     int to_spawn = static_cast<int>(emitter.spawn_accumulator);
     if (to_spawn <= 0) {
         return;
@@ -388,21 +406,24 @@ void ParticlePass::spawn_from_emitter(ActiveEmitter& emitter, float dt) {
         p.age = 0.0f;
         p.lifetime = emitter.data.lifetime;
         p.emitter_index = emitter_index;
-        p.pos = emitter.world_origin
-              + glm::vec3(rng_signed(emitter.rng_state) * emitter.data.origin_extent.x,
+        p.pos = emitter.world_origin +
+                glm::vec3(rng_signed(emitter.rng_state) * emitter.data.origin_extent.x,
                           rng_signed(emitter.rng_state) * emitter.data.origin_extent.y,
                           rng_signed(emitter.rng_state) * emitter.data.origin_extent.z);
-        p.vel = emitter.data.base_velocity
-              + glm::vec3(rng_signed(emitter.rng_state),
-                          rng_signed(emitter.rng_state),
-                          rng_signed(emitter.rng_state)) * emitter.data.velocity_jitter;
+        p.vel = emitter.data.base_velocity + glm::vec3(rng_signed(emitter.rng_state),
+                                                       rng_signed(emitter.rng_state),
+                                                       rng_signed(emitter.rng_state)) *
+                                                 emitter.data.velocity_jitter;
         m_ring_head = (m_ring_head + 1) % kMaxInstances;
     }
 }
 
-void ParticlePass::spawn_splash_burst(const glm::vec3& world_pos, int count, ActiveEmitter& splash_template) {
+void ParticlePass::spawn_splash_burst(const glm::vec3& world_pos,
+                                      int count,
+                                      ActiveEmitter& splash_template) {
     // Render-only: emit `count` short-lived splash particles at the impact point.
-    const uint32_t splash_index = static_cast<uint32_t>(&splash_template - m_active_emitters.data());
+    const uint32_t splash_index =
+        static_cast<uint32_t>(&splash_template - m_active_emitters.data());
     for (int i = 0; i < count; ++i) {
         Particle& p = m_particles[m_ring_head];
         if (!p.alive) {
@@ -412,15 +433,15 @@ void ParticlePass::spawn_splash_burst(const glm::vec3& world_pos, int count, Act
         p.age = 0.0f;
         p.lifetime = splash_template.data.lifetime;
         p.emitter_index = splash_index;
-        p.pos = world_pos
-              + glm::vec3(rng_signed(splash_template.rng_state) * 0.15f, 0.02f,
-                          rng_signed(splash_template.rng_state) * 0.15f);
+        p.pos = world_pos + glm::vec3(rng_signed(splash_template.rng_state) * 0.15f,
+                                      0.02f,
+                                      rng_signed(splash_template.rng_state) * 0.15f);
         // Outward + upward spray (a tiny crown), no wind response.
-        p.vel = splash_template.data.base_velocity
-              + glm::vec3(rng_signed(splash_template.rng_state),
-                          rng_unit(splash_template.rng_state),
-                          rng_signed(splash_template.rng_state))
-                    * splash_template.data.velocity_jitter;
+        p.vel =
+            splash_template.data.base_velocity + glm::vec3(rng_signed(splash_template.rng_state),
+                                                           rng_unit(splash_template.rng_state),
+                                                           rng_signed(splash_template.rng_state)) *
+                                                     splash_template.data.velocity_jitter;
         m_ring_head = (m_ring_head + 1) % kMaxInstances;
     }
 }
@@ -444,9 +465,11 @@ void ParticlePass::update(float dt) {
         return;
     }
 
-    // T-I5a-4 (B2): collect impact-splash spawn points this frame, then emit them
+    // collect impact-splash spawn points this frame, then emit them
     // after the integration loop (so we never mutate the ring while iterating it).
-    struct ImpactEvent { glm::vec3 pos; };
+    struct ImpactEvent {
+        glm::vec3 pos;
+    };
     std::vector<ImpactEvent> impacts;
 
     std::size_t live = 0;
@@ -463,22 +486,20 @@ void ParticlePass::update(float dt) {
 
         const ActiveEmitter& emitter = m_active_emitters[p.emitter_index];
 
-        // T-I5a-4: WIND-ADVECTION (render-only). Apply the per-frame wind velocity
+        //  WIND-ADVECTION (render-only). Apply the per-frame wind velocity
         // scaled by the emitter's wind_response, so rain/snow SLANT in storms.
         // wind_response == 0 leaves magical/splash particles unaffected.
-        const glm::vec3 advected_vel =
-            p.vel + m_wind_velocity * emitter.data.wind_response;
+        const glm::vec3 advected_vel = p.vel + m_wind_velocity * emitter.data.wind_response;
         p.pos += advected_vel * dt;
 
-        // T-I5a-4: IMPACT SPLASH. A descending precip particle that crosses the
+        //  IMPACT SPLASH. A descending precip particle that crosses the
         // emitter's impact plane spawns a splash burst and dies (depth/ground
         // impact -- the soft-particle depth fade in the frag shader handles the
         // G-buffer surface intersection visually; this is the spray response).
         if (emitter.data.impact_splash && advected_vel.y < 0.0f &&
-            p.pos.y <= emitter.data.impact_plane_y &&
-            m_splash_emitter_index != kNoSplashEmitter) {
-            impacts.push_back(ImpactEvent{
-                glm::vec3(p.pos.x, emitter.data.impact_plane_y, p.pos.z)});
+            p.pos.y <= emitter.data.impact_plane_y && m_splash_emitter_index != kNoSplashEmitter) {
+            impacts.push_back(
+                ImpactEvent{glm::vec3(p.pos.x, emitter.data.impact_plane_y, p.pos.z)});
             p.alive = false;
             continue;
         }
@@ -492,7 +513,7 @@ void ParticlePass::update(float dt) {
         // vertical one. The frag-shader quad stays square; the visible slant comes
         // from this rotation + the wind-advected spatial envelope of the field.
         float rotation = life_t * 6.2831853f;
-        // T-I5b-DR-storm-blockers (M7): SCREEN-projected streak orientation. The old
+        // SCREEN-projected streak orientation. The old
         // code fed RAW WORLD velocity (advected_vel.x/.y) into atan2 and elongated the
         // billboard along that fixed screen axis regardless of where the camera looked.
         // Looking DOWN, a falling drop (world -Y) still painted a full-length vertical
@@ -500,7 +521,7 @@ void ParticlePass::update(float dt) {
         // rain. The fix projects the world velocity onto the camera screen plane
         // (right/up) so the streak follows its true on-screen motion: end-on rain
         // (looking down) projects to a near-zero screen vector and collapses to a
-        // short droplet, while side-on rain stays a vertical streak. Render-only (F2).
+        // short droplet, while side-on rain stays a vertical streak. Render-only .
         float screen_vel_scale = 1.0f; // 1 = full streak; <1 shrinks toward a droplet
         if (emitter.data.streak_aspect > 1.0f) {
             if (m_have_view_basis) {
@@ -508,8 +529,7 @@ void ParticlePass::update(float dt) {
                 const float sy = glm::dot(advected_vel, m_view_up);
                 const float screen_speed = std::sqrt(sx * sx + sy * sy);
                 const float world_speed =
-                    std::sqrt(advected_vel.x * advected_vel.x +
-                              advected_vel.y * advected_vel.y +
+                    std::sqrt(advected_vel.x * advected_vel.x + advected_vel.y * advected_vel.y +
                               advected_vel.z * advected_vel.z);
                 // atan2(screen-right, screen-up): a vertical on-screen fall -> 0; wind
                 // shear or an oblique view tilts it. NDC y grows UP and the vertex
@@ -521,7 +541,7 @@ void ParticlePass::update(float dt) {
                 // a fake vertical bar. Smoothstep so side-on rain stays full-length.
                 if (world_speed > 1e-4f) {
                     const float frac = std::clamp(screen_speed / world_speed, 0.0f, 1.0f);
-                    // T-I5b-DR-storm2 (M7): keep a VISIBLE streak floor when looking
+                    // keep a VISIBLE streak floor when looking
                     // down. The previous frac/0.45 collapsed end-on rain all the way to
                     // a ~round dot; combined with the down-view grey veil, the down-look
                     // read as fog with no rain at all. We now (a) widen the side-on band
@@ -552,9 +572,10 @@ void ParticlePass::update(float dt) {
         // aspect as unorm8 (aspect/kMaxStreakAspect). Round particles carry aspect
         // 1 -> a square billboard; rain carries streak_aspect > 1 -> the vertex
         // stage elongates the velocity-aligned quad into a streak.
-        const float angle_norm = std::clamp(rotation * (1.0f / 3.14159265358979323846f), -1.0f, 1.0f);
+        const float angle_norm =
+            std::clamp(rotation * (1.0f / 3.14159265358979323846f), -1.0f, 1.0f);
         rec.rotation = static_cast<int8_t>(std::lround(angle_norm * 127.0f));
-        // T-I5a-DR-green-precip: WIND-DRIVEN streak STRETCH. The streak elongation
+        //  WIND-DRIVEN streak STRETCH. The streak elongation
         // is no longer a constant -- it RESPONDS to the wind, so still air renders
         // soft, near-round droplets and a storm gust SHEARS them into long hard
         // streaks. This (a) is physically correct (wind-sheared rain), (b) honours
@@ -569,7 +590,7 @@ void ParticlePass::update(float dt) {
         // reduced windy wind) read as a much higher ratio -> windy clears calm by the
         // required margin. Round/magical emitters (streak_aspect <= 1) are untouched.
         // The wind factor ramps the aspect from a soft droplet floor up to a long
-        // streak as the horizontal wind grows; deterministic, render-only (F2).
+        // streak as the horizontal wind grows; deterministic, render-only .
         float effective_aspect = emitter.data.streak_aspect;
         if (emitter.data.streak_aspect > 1.0f && emitter.data.wind_response > 0.0f) {
             const glm::vec3 wind = m_wind_velocity * emitter.data.wind_response;
@@ -583,10 +604,9 @@ void ParticlePass::update(float dt) {
             constexpr float kWindyStreakAspect = 16.0f; // long hard streak in a gust
             constexpr float kWindFullStretch = 4.0f;    // wind speed for full streak
             const float t = std::clamp(wind_horiz / kWindFullStretch, 0.0f, 1.0f);
-            effective_aspect = kCalmStreakAspect +
-                (kWindyStreakAspect - kCalmStreakAspect) * t;
+            effective_aspect = kCalmStreakAspect + (kWindyStreakAspect - kCalmStreakAspect) * t;
         }
-        // T-I5b-DR-storm-blockers (M7): shrink the streak toward a round droplet as
+        // shrink the streak toward a round droplet as
         // its on-screen motion vanishes (camera looking along the fall direction), so
         // down-pitched rain reads as droplets, not a fake vertical grey veil. Lerp
         // the elongation back toward 1 (square) by the screen-velocity scale; side-on
@@ -594,8 +614,7 @@ void ParticlePass::update(float dt) {
         if (emitter.data.streak_aspect > 1.0f) {
             effective_aspect = 1.0f + (effective_aspect - 1.0f) * screen_vel_scale;
         }
-        const float aspect_norm =
-            std::clamp(effective_aspect / kMaxStreakAspect, 0.0f, 1.0f);
+        const float aspect_norm = std::clamp(effective_aspect / kMaxStreakAspect, 0.0f, 1.0f);
         rec.streak = static_cast<uint8_t>(std::lround(aspect_norm * 255.0f));
         ++written;
         if (written >= kMaxInstances) {
@@ -629,7 +648,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: particles into the internal scene
+    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // particles into the internal scene
 
     // Transparent particles: test against scene depth but do not write depth,
     // and blend additively into the HDR lighting target.
@@ -637,7 +656,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     glDepthMask(GL_FALSE);
     glDepthFunc(GL_LEQUAL);
     glEnable(GL_BLEND);
-    // T-I5a-DR-particle-motion-quality: honour the emitter blend mode. The old
+    //  honour the emitter blend mode. The old
     // path hardcoded additive (GL_SRC_ALPHA, GL_ONE) for EVERY emitter -- but RAIN
     // is alpha-blended translucent water, and drawing it additively over the dark
     // storm sky made the streaks glow/clip oddly instead of reading as a soft
@@ -664,14 +683,15 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     }
 
     m_shader->use();
-    const glm::mat4 projection = glm::perspective(
-        glm::radians(camera.Zoom),
-        static_cast<float>(ctx.screen_width) / static_cast<float>(ctx.screen_height),
-        camera.GetNearPlane(), camera.GetFarPlane());
+    const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
+                                                  static_cast<float>(ctx.screen_width) /
+                                                      static_cast<float>(ctx.screen_height),
+                                                  camera.GetNearPlane(),
+                                                  camera.GetFarPlane());
     const glm::mat4 view = camera.GetViewMatrix();
-    // T-I5b-DR-storm-blockers (M7): cache the camera screen basis so next frame's
-    // update() can orient rain streaks by SCREEN-projected velocity (kills the
-    // grey vertical-veil haze when looking down). update()->execute() run back to
+    // cache the camera screen basis so next frame's
+    // update can orient rain streaks by SCREEN-projected velocity (kills the
+    // grey vertical-veil haze when looking down). update->execute run back to
     // back on the same camera, so a one-frame-stale basis is imperceptible.
     m_view_right = camera.Right;
     m_view_up = camera.Up;
@@ -682,12 +702,12 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     m_shader->setVec3("u_cameraRight", camera.Right);
     m_shader->setVec3("u_cameraUp", camera.Up);
     m_shader->setVec3("u_cameraPos", camera.Position);
-    // WAVE-F F1: the per-frame wall-clock SNAPSHOT (Group K ctx.time_seconds), not a
-    // live glfwGetTime() read — dispatch must be bit-idempotent per prepared frame.
+    // the per-frame wall-clock SNAPSHOT (Group K ctx.time_seconds), not a
+    // live glfwGetTime read — dispatch must be bit-idempotent per prepared frame.
     m_shader->setFloat("u_time", ctx.time_seconds);
     m_shader->setVec2("u_screenSize",
                       glm::vec2(static_cast<float>(ctx.internal_w()),
-                                static_cast<float>(ctx.internal_h()))); // GPU-P09: internal scene extent
+                                static_cast<float>(ctx.internal_h()))); // internal scene extent
     m_shader->setFloat("u_nearPlane", camera.GetNearPlane());
     m_shader->setFloat("u_farPlane", camera.GetFarPlane());
 

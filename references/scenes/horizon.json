@@ -1,5 +1,0 @@
-{ "camera": { "pos": [8, 120, 8], "yaw": 30, "pitch": -3, "fov": 55 },
-  "time_of_day": 0.02,
-  "clouds": { "coverage": 0.3, "plane_height": 1400, "shadow": false },
-  "weather": { "type": "none", "intensity": 0.0 },
-  "screenshot": "references/compare/horizon.ppm" }

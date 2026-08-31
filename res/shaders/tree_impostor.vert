@@ -1,5 +1,5 @@
 #version 450 core
-// Wave-3 far-field tree impostor. One camera-facing billboard quad per distant tree, drawn instanced.
+//  far-field tree impostor. One camera-facing billboard quad per distant tree, drawn instanced.
 // gl_VertexID gives the quad corner (triangle strip); the per-instance attribute carries the tree's
 // world base position + uniform scale. The quad faces the camera with WORLD-UP orientation so it lines
 // up with the octahedral atlas tiles (each baked with up = +Y).
@@ -29,7 +29,7 @@ void main() {
     vec3 up = vec3(0.0, 1.0, 0.0);
     vec3 right = cross(vd, up);
     float rl = length(right);
-    right = (rl < 0.01) ? vec3(1.0, 0.0, 0.0) : right / rl; // top-down fallback
+    right = (rl < 0.01) ? vec3(1.0, 0.0, 0.0): right / rl; // top-down fallback
     vec3 bUp = normalize(cross(right, vd));                 // billboard up tilts toward world-up
 
     vec3 worldPos = treeCenter + right * (c.x * halfSize) + bUp * (c.y * halfSize);

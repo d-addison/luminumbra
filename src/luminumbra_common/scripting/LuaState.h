@@ -11,8 +11,8 @@ namespace Luminumbra::scripting {
 
 struct LuaApiManifest;
 
-// The engine's sandboxed script host. Spec 024 (AETHER-07) promoted this from
-// a pure manifest stub to a LIVE (sol2) interpreter carrying the FIRST real
+// The engine's sandboxed script host. promoted this from
+// a manifest-only host to a live sol2 interpreter carrying the read-only
 // binding: the read-only energy-field sampler `sample_energy_field(x, y, z)`
 // (also reachable as `world.sample_energy_field`, its manifest home). The VM
 // opens NO standard libraries — the exposed surface is exactly what this class
@@ -20,7 +20,7 @@ struct LuaApiManifest;
 // corpus in test/scripting/) enforces that every binding has a manifest entry
 // and no escape-shaped surface exists.
 //
-// SIM-PATH RULE (the T-I6-A1d bridge rule): script sampling is one-way
+// SIM-PATH RULE (the  bridge rule): script sampling is one-way
 // read-only. Bindings CONSUME sim state through const pointers wired by the
 // host; nothing registered here may write back — gameplay writes go through
 // components (FieldEmitterComponent), never through Lua.
@@ -34,7 +34,7 @@ public:
 
     static const LuaApiManifest& api_manifest();
 
-    // Spec 024 (AETHER-07): session-context seam. The host (GameSession owner)
+    // session-context seam. The host (GameSession owner)
     // points the sampler at the stateful energy layer — or nullptr when the
     // session is absent or sim.aether_state is OFF, in which case the binding
     // reads 0.0 everywhere. The layer is BORROWED: the caller keeps it alive

@@ -1,12 +1,12 @@
 #pragma once
 
-// Track sim.irrigation — DETERMINISTIC soil-MOISTURE / water-diffusion grid that
+// sim.irrigation: DETERMINISTIC soil-MOISTURE / water-diffusion grid that
 // feeds plant moisture. This is the WATER half of the foliage resource loop (the
 // nutrient half is systems/SoilNutrientSystem.h): a dug channel / spring deposits
 // moisture into its cell, the moisture SPREADS to neighbours (so a single channel
 // waters a band of soil, not just one tile), and fallow soil slowly DRAINS toward
-// a dry baseline (so the player must keep water flowing). Growth can later READ
-// MoistureAt(x,z) to fold availability into PlantGrowthSystem's suitability.
+// a dry baseline (so the player must keep water flowing). PlantGrowthSystem reads
+// MoistureAt(x,z) when evaluating suitability.
 //
 // FIELD MODEL (mirrors systems/SoilNutrientSystem.h SoilGrid shape + ai/ScentField.h
 // diffusion style): a fixed-size 2D grid anchored at a world (origin_x, origin_z)
@@ -54,7 +54,7 @@ namespace luminumbra::foliage {
 // Components live in the capital-L namespace (engine convention).
 namespace Comp = ::Luminumbra::Components;
 
-// Reserved seed-stream offset for the irrigation track (registry: wind+11,
+// Reserved seed-stream offset for the irrigation subsystem (registry: wind+11,
 // weather+12/13, aether+14, plant+15, creature-reproduction+16, fire+17, soil+18,
 // pollination+19, disease+20). The irrigation flow is a PURE diffusion grid (no
 // rng), so this is recorded for collision-avoidance but intentionally never used.

@@ -1,8 +1,8 @@
 #pragma once
 
-// T-I4-11 determinism contract: deterministic transcendental wrappers.
+//  determinism contract: deterministic transcendental wrappers.
 //
-// PURPOSE. The lockstep world tick (T-I4-13) and replay (T-I4-12) require that
+// PURPOSE. The lockstep world tick and replay require that
 // simulation math produce BIT-IDENTICAL results across machines, compilers, and
 // C runtime libraries. libm's sin/cos/atan2/etc. are NOT specified to the last
 // ULP and differ between implementations (glibc vs musl vs MSVCRT vs MinGW) --
@@ -29,16 +29,16 @@
 //
 // SCOPE / MIGRATION. This task LANDS the wrappers + the lint that bans raw libm
 // transcendentals in sim code; it does NOT migrate existing call sites (that
-// would churn the world_hash). New sim code (T-I4-12/13 onward) must call these;
+// would churn the world_hash). New sim code (/13 onward) must call these;
 // the SimDeterminismLint validator mode enforces it going forward. The only
 // transcendental presently on a sim path is sqrt (WaterSystem / InstinctSystem /
 // AnimationRuntime distance math, glm::distance in PhysicsSystem) -- sqrt is
 // IEEE-deterministic so those sites are correct as-is and are documented in the
 // progress log, not rewritten here.
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <cmath>
 
 namespace Luminumbra::DeterministicMath {
 
@@ -46,9 +46,9 @@ namespace Luminumbra::DeterministicMath {
 // Constants (binary32). Authored as the nearest float to the true value so the
 // reduction arithmetic below is reproducible.
 // ---------------------------------------------------------------------------
-inline constexpr float kPi      = 3.14159265358979323846f;
-inline constexpr float kTwoPi   = 6.28318530717958647692f;
-inline constexpr float kHalfPi  = 1.57079632679489661923f;
+inline constexpr float kPi = 3.14159265358979323846f;
+inline constexpr float kTwoPi = 6.28318530717958647692f;
+inline constexpr float kHalfPi = 1.57079632679489661923f;
 inline constexpr float kInvTwoPi = 0.15915494309189533577f; // 1 / (2*pi)
 
 // ---------------------------------------------------------------------------
@@ -88,8 +88,8 @@ inline float Sqrt(float x) {
 inline float ReduceToPi(float x) {
     // round-half-to-even via the standard "add/sub a big constant" trick would
     // be FP-mode sensitive; use nearbyint-free explicit rounding in float.
-    const float k = static_cast<float>(static_cast<std::int64_t>(
-        x * kInvTwoPi + (x >= 0.0f ? 0.5f : -0.5f)));
+    const float k =
+        static_cast<float>(static_cast<std::int64_t>(x * kInvTwoPi + (x >= 0.0f ? 0.5f : -0.5f)));
     return x - k * kTwoPi;
 }
 
@@ -100,9 +100,9 @@ inline float ReduceToPi(float x) {
 inline float SinPoly(float x) {
     const float x2 = x * x;
     // s(x) = x * (s1 + x2*(s3 + x2*(s5 + x2*s7)))
-    const float s1 =  0.99999660f;
+    const float s1 = 0.99999660f;
     const float s3 = -0.16664824f;
-    const float s5 =  0.00830629f;
+    const float s5 = 0.00830629f;
     const float s7 = -0.00018363f;
     float p = s7;
     p = p * x2 + s5;
@@ -116,9 +116,9 @@ inline float SinPoly(float x) {
 inline float CosPoly(float x) {
     const float x2 = x * x;
     // c(x) = c0 + x2*(c2 + x2*(c4 + x2*c6))
-    const float c0 =  0.99999440f;
+    const float c0 = 0.99999440f;
     const float c2 = -0.49999040f;
-    const float c4 =  0.04154732f;
+    const float c4 = 0.04154732f;
     const float c6 = -0.00133926f;
     float p = c6;
     p = p * x2 + c4;
@@ -169,11 +169,11 @@ inline float AtanUnit(float x) {
     // |x| <= 1 assumed by callers below.
     const float x2 = x * x;
     // a(x) = x * (a1 + x2*(a3 + x2*(a5 + x2*a7)))
-    const float a1 =  0.99997726f;
+    const float a1 = 0.99997726f;
     const float a3 = -0.33262347f;
-    const float a5 =  0.19354346f;
+    const float a5 = 0.19354346f;
     const float a7 = -0.11643287f;
-    const float a9 =  0.05265332f;
+    const float a9 = 0.05265332f;
     const float a11 = -0.01172120f;
     float p = a11;
     p = p * x2 + a9;
@@ -196,7 +196,7 @@ inline float Atan(float x) {
 
 inline float Atan2(float y, float x) {
     // Deterministic quadrant resolution. Each branch returns a value built from
-    // Atan() plus exact constant offsets; no libm, no errno, no signed-zero
+    // Atan plus exact constant offsets; no libm, no errno, no signed-zero
     // surprises.
     if (x > 0.0f) {
         return Atan(y / x);

@@ -1,5 +1,5 @@
 #version 450 core
-// Spec 015 C-1 (RENDER-15): glass occluders into the shadow TINT cascade.
+// glass occluders into the shadow TINT cascade.
 // Position-only: the pane's unit quad under its model matrix, projected by the
 // same light-space matrix the depth cascade used.
 layout (location = 0) in vec3 aPos;

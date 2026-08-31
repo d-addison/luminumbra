@@ -232,9 +232,8 @@ $summary = [ordered]@{
 }
 
 $budgetReport = [ordered]@{
-    schema = "luminumbra.performance_overhaul_budget.v1"
-    feature = "performance-overhaul"
-    policy = "conservative debug smoke budgets; tighten after upload and streaming waves land"
+    schema = "luminumbra.runtime_boot_safety_budget.v1"
+    policy = "debug smoke safety limits; relative comparisons own regression decisions"
     observed = $observed
     budgets = $budgets
     passed = $passed

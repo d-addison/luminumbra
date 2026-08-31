@@ -1,4 +1,4 @@
-// OPS-11 (spec 021): the opt-in named-phase wedge watchdog that wraps the three
+// the opt-in named-phase wedge watchdog that wraps the three
 // unbounded EnsureSurfaceReadyNear waits (generation-drain / meshing-drain /
 // collision-build). The helper is observability-only: it must never alter the
 // wait, must emit nothing when disabled or when the wait finishes inside the
@@ -18,7 +18,9 @@ using namespace std::chrono_literals;
 TEST(JobWatchdog, DisabledRunsTheWaitAndNeverReports) {
     bool wait_ran = false;
     const std::size_t reports = WaitWithJobWatchdog(
-        /*enabled=*/false, "test/disabled-phase",
+        /*enabled=*/
+        false,
+        "test/disabled-phase",
         [&wait_ran]() {
             wait_ran = true;
             std::this_thread::sleep_for(30ms);
@@ -31,7 +33,9 @@ TEST(JobWatchdog, DisabledRunsTheWaitAndNeverReports) {
 TEST(JobWatchdog, WedgedWaitEmitsNamedPhaseReports) {
     bool wait_ran = false;
     const std::size_t reports = WaitWithJobWatchdog(
-        /*enabled=*/true, "test/wedged-phase",
+        /*enabled=*/
+        true,
+        "test/wedged-phase",
         [&wait_ran]() {
             wait_ran = true;
             // Outlive several report intervals: the reporter must fire while
@@ -46,9 +50,10 @@ TEST(JobWatchdog, WedgedWaitEmitsNamedPhaseReports) {
 
 TEST(JobWatchdog, FastWaitEmitsNoReports) {
     const std::size_t reports = WaitWithJobWatchdog(
-        /*enabled=*/true, "test/fast-phase",
+        /*enabled=*/
+        true,
+        "test/fast-phase",
         []() { std::this_thread::sleep_for(5ms); },
         /*report_interval=*/60s);
-    EXPECT_EQ(reports, 0u)
-        << "a wait finishing inside the first interval must stay silent";
+    EXPECT_EQ(reports, 0u) << "a wait finishing inside the first interval must stay silent";
 }

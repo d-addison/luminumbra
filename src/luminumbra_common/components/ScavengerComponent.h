@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.scavenging — SCAVENGING participant component. Ties DEATH -> FOOD: a creature
+// sim.scavenging: SCAVENGING participant component. Ties DEATH -> FOOD: a creature
 // carrying this component (alongside a CreatureComponent) is a SCAVENGER that, when hungry,
 // seeks out and EATS CARCASSES (creatures that are dead — CreatureComponent.eaten==1, or
 // MortalComponent.dead==1). This complements active hunting: predators make carcasses, the
@@ -14,7 +14,7 @@
 // PURE no-op, so the canonical headless NetworkStateHash baseline stays byte-identical
 // until scavengers are deliberately spawned.
 //
-// LOAD-BEARING RULE (mirrors the ecology/foliage pillars): this is SIM truth — small,
+// LOAD-BEARING RULE: this is simulation truth — small,
 // integer/fixed-point-friendly, deterministic — never render state. The scavenger's desire
 // to MOVE toward food is written here as a wish vector; the orchestrator blends it into
 // actual movement (the same shape as CreatureComponent.wish_x/z). Geometry / feeding VFX

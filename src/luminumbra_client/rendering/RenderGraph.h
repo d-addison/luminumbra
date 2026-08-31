@@ -1,8 +1,8 @@
 #pragma once
 
-// Spec 016 FR-C (spec-021 rank 71, RENDER-11): the DECLARATIVE FRAME GRAPH.
+//   ( , ): the DECLARATIVE FRAME GRAPH.
 //
-// RenderPipeline::render_frame() dispatches ~23 GPU stages in a hand-scripted sequence whose
+// RenderPipeline::render_frame dispatches ~23 GPU stages in a hand-scripted sequence whose
 // ordering is IMPLICIT -- each stage's GL writes happen to be read (or blended onto) by a later
 // stage, and the correctness of the whole frame rests on a human keeping those ~600 lines in the
 // right order. This header promotes that sequence to DATA: an ordered list of nodes, each
@@ -13,22 +13,13 @@
 // internally consistent (no read-before-write; every latest-writer edge resolves to a real prior
 // writer).
 //
-// v1 SCOPE -- DECLARATION + VALIDATION ONLY (RENDER-11 declaration half). The graph is a
-// VALIDATED MIRROR of render_frame's real order, not (yet) its executor:
-//   * render_frame emits its stage sequence at run time (RenderPipeline::record_frame_stage);
-//   * a gate asserts BuildLuminumbraFrameGraph().schedule() == that emitted trace (drift guard),
-//   * and asserts validate() is clean (internal consistency),
-//   * and asserts the god-rays latest-writer resolves to the correct snapshot under BOTH branches.
-// render_frame still runs the hand-scripted sequence -- NOT ONE GL CALL MOVES -- so the frame is
-// byte-identical by construction. That matters here specifically: there is NO byte-exact frame
-// gate to lean on (the headless server --smoke does not render, and whole-frame FLIP floors at
-// ~0.057 run-to-run noise), so a blind execution rewrite of this GL-state-dense hot path would be
-// unverifiable. Migrating EXECUTION onto the scheduler is a later increment, gated by an
-// in-process old-path-vs-graph-path whole-frame A/B (the deterministic same-process FLIP the
-// render-parity modes already prototype). See docs handoff.
+// The graph drives render_frame through the executor table. Runtime stage tracing
+// asserts that the scheduled declaration and executed order stay identical;
+// validation catches missing resource dependencies, and the god-rays contract
+// verifies its latest opaque snapshot under both weather branches.
 //
 // DETERMINISM. Pure CPU ordering logic over resource NAME strings. No GL, no sim, no readback.
-// Render-only observability -- it can NEVER feed world_hash (spec 018 FR-E-003); the server never
+// Render-only observability -- it can never feed world_hash; the server never
 // even constructs it.
 
 #include <algorithm>
@@ -53,14 +44,21 @@ struct RenderGraphNode {
 // The ordered declaration + the schedule/validation derived from it.
 class RenderGraph {
 public:
-    void add(RenderGraphNode node) { m_nodes.push_back(std::move(node)); }
-    const std::vector<RenderGraphNode>& nodes() const { return m_nodes; }
-    std::size_t size() const { return m_nodes.size(); }
+    void add(RenderGraphNode node) {
+        m_nodes.push_back(std::move(node));
+    }
+    const std::vector<RenderGraphNode>& nodes() const {
+        return m_nodes;
+    }
+    std::size_t size() const {
+        return m_nodes.size();
+    }
 
     // Stable topological order. Edges are derived from the declared resource flow:
     //   RAW: a read of R depends on the most-recent prior WRITER of R;
-    //   WAW: writer_i of R depends on writer_{i-1} of R (writers of a target stay in authored order);
-    //   latest_writer_reads: same RAW edge, but the validator also PINS the identity of that writer.
+    //   WAW: writer_i of R depends on writer_{i-1} of R (writers of a target stay in authored
+    //   order); latest_writer_reads: same RAW edge, but the validator also PINS the identity of
+    //   that writer.
     // Ties (nodes with all dependencies already satisfied and no edge between them -- e.g. shadow
     // vs g-buffer, which share no resource) break on AUTHORED INDEX, matching render_frame's chosen
     // linearization of the partial order. A well-formed authored graph therefore schedules to
@@ -72,7 +70,8 @@ public:
         std::vector<std::vector<std::size_t>> succ(n);
         std::vector<int> indeg(n, 0);
         auto add_edge = [&](std::size_t from, std::size_t to) {
-            if (from == to) return;
+            if (from == to)
+                return;
             succ[from].push_back(to);
             ++indeg[to];
         };
@@ -83,21 +82,25 @@ public:
                 long w = -1;
                 for (std::size_t j = 0; j < i; ++j) {
                     const RenderGraphNode& p = m_nodes[j];
-                    if (std::find(p.writes.begin(), p.writes.end(), res) != p.writes.end()) w = static_cast<long>(j);
+                    if (std::find(p.writes.begin(), p.writes.end(), res) != p.writes.end())
+                        w = static_cast<long>(j);
                 }
                 return w;
             };
             for (const std::string& r : m_nodes[i].reads) {
                 const long w = latest_writer(r);
-                if (w >= 0) add_edge(static_cast<std::size_t>(w), i);
+                if (w >= 0)
+                    add_edge(static_cast<std::size_t>(w), i);
             }
             for (const std::string& r : m_nodes[i].latest_writer_reads) {
                 const long w = latest_writer(r);
-                if (w >= 0) add_edge(static_cast<std::size_t>(w), i);
+                if (w >= 0)
+                    add_edge(static_cast<std::size_t>(w), i);
             }
             for (const std::string& wres : m_nodes[i].writes) {
                 const long prev = latest_writer(wres); // previous writer of this same target
-                if (prev >= 0) add_edge(static_cast<std::size_t>(prev), i);
+                if (prev >= 0)
+                    add_edge(static_cast<std::size_t>(prev), i);
             }
         }
         // Kahn's algorithm, always draining the READY node of LOWEST authored index.
@@ -107,14 +110,19 @@ public:
         for (std::size_t emitted = 0; emitted < n; ++emitted) {
             long pick = -1;
             for (std::size_t i = 0; i < n; ++i) {
-                if (!done[i] && indeg[i] == 0) { pick = static_cast<long>(i); break; }
+                if (!done[i] && indeg[i] == 0) {
+                    pick = static_cast<long>(i);
+                    break;
+                }
             }
-            if (pick < 0) break; // cycle: leave the schedule short so the gate fails loudly
+            if (pick < 0)
+                break; // cycle: leave the schedule short so the gate fails loudly
             const std::size_t p = static_cast<std::size_t>(pick);
             done[p] = 1;
             indeg[p] = -1;
             order.push_back(m_nodes[p].name);
-            for (std::size_t s : succ[p]) --indeg[s];
+            for (std::size_t s : succ[p])
+                --indeg[s];
         }
         return order;
     }
@@ -129,27 +137,32 @@ public:
         auto writes_before = [&](const std::string& res, std::size_t before) {
             for (std::size_t j = 0; j < before; ++j) {
                 const RenderGraphNode& p = m_nodes[j];
-                if (std::find(p.writes.begin(), p.writes.end(), res) != p.writes.end()) return true;
+                if (std::find(p.writes.begin(), p.writes.end(), res) != p.writes.end())
+                    return true;
             }
             return false;
         };
         auto written_anywhere = [&](const std::string& res) {
             for (const RenderGraphNode& p : m_nodes) {
-                if (std::find(p.writes.begin(), p.writes.end(), res) != p.writes.end()) return true;
+                if (std::find(p.writes.begin(), p.writes.end(), res) != p.writes.end())
+                    return true;
             }
             return false;
         };
         for (std::size_t i = 0; i < m_nodes.size(); ++i) {
             const RenderGraphNode& node = m_nodes[i];
             for (const std::string& r : node.reads) {
-                // A graph-internal resource (written by some node) must be written BEFORE this read.
+                // A graph-internal resource (written by some node) must be written BEFORE this
+                // read.
                 if (written_anywhere(r) && !writes_before(r, i)) {
-                    violations.push_back(node.name + " reads '" + r + "' before any node writes it");
+                    violations.push_back(node.name + " reads '" + r +
+                                         "' before any node writes it");
                 }
             }
             for (const std::string& r : node.latest_writer_reads) {
                 if (!writes_before(r, i)) {
-                    violations.push_back(node.name + " latest-writer-reads '" + r + "' but no prior node writes it");
+                    violations.push_back(node.name + " latest-writer-reads '" + r +
+                                         "' but no prior node writes it");
                 }
             }
         }
@@ -163,7 +176,8 @@ public:
     std::string latest_writer_of(const std::string& resource, const std::string& consumer) const {
         std::string writer;
         for (const RenderGraphNode& node : m_nodes) {
-            if (node.name == consumer) break;
+            if (node.name == consumer)
+                break;
             if (std::find(node.writes.begin(), node.writes.end(), resource) != node.writes.end()) {
                 writer = node.name;
             }
@@ -173,9 +187,11 @@ public:
 
     // Remove a node by name (used to model a conditional stage that did not run this frame).
     void prune(const std::string& name) {
-        m_nodes.erase(std::remove_if(m_nodes.begin(), m_nodes.end(),
-                                     [&](const RenderGraphNode& node) { return node.name == name; }),
-                      m_nodes.end());
+        m_nodes.erase(
+            std::remove_if(m_nodes.begin(),
+                           m_nodes.end(),
+                           [&](const RenderGraphNode& node) { return node.name == name; }),
+            m_nodes.end());
     }
 
 private:
@@ -184,9 +200,9 @@ private:
 
 // The canonical Luminumbra frame graph: render_frame's authored dispatch sequence AS DATA.
 // The node names + order MUST match the RenderPipeline::record_frame_stage calls in render_frame
-// (the gate asserts schedule() == the emitted trace). Resource names are the load-bearing render
+// (the gate asserts schedule == the emitted trace). Resource names are the load-bearing render
 // targets; external inputs (meshes, LUTs, camera) are intentionally omitted from `reads` so
-// validate() only checks graph-internal producer/consumer ordering.
+// validate only checks graph-internal producer/consumer ordering.
 inline RenderGraph BuildLuminumbraFrameGraph() {
     RenderGraph g;
     // The four G-buffer color attachments, written by the geometry stage and any stage that draws
@@ -200,7 +216,7 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     };
 
     // 1. Shadow cascades. Reads terrain (external); writes the cascade depth array
-    // + (spec 015 C-1, RENDER-15) the tinted-transmission cascade the glass
+    // + ( , ) the tinted-transmission cascade the glass
     // occluder sub-pass fills (white = identity when no glass exists).
     g.add({"shadow", {}, {"shadow.depth_array", "shadow.tint_array"}, {}, false});
     // 2. G-buffer: the deferred geometry pass writes all four attachments + depth.
@@ -208,7 +224,6 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     // 2a/2b: procedural plants + experimental far-field raymarch draw into the SAME G-buffer,
     // depth-tested against gbuffer.depth (they read depth, over-write color + depth).
     g.add({"plant_procgen", {"gbuffer.depth"}, gbuf_all(), {}, true});
-    g.add({"farfield_raymarch", {"gbuffer.depth"}, gbuf_all(), {}, true});
     // 2c: pheromone ground decals additively tint the ALBEDO attachment only.
     g.add({"ground_decals", {"gbuffer.albedo"}, {"gbuffer.albedo"}, {}, true});
     // 3: SSAO reads position+normal, writes raw; blur reads raw, writes blur.
@@ -218,7 +233,7 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     {
         std::vector<std::string> reads = gbuf_color;
         reads.push_back("shadow.depth_array");
-        reads.push_back("shadow.tint_array"); // spec 015 C-1: the glass transmission multiply
+        reads.push_back("shadow.tint_array"); //  the glass transmission multiply
         reads.push_back("ssao.blur");
         g.add({"lighting", reads, {"lighting.color", "lighting.depth"}, {}, false});
     }
@@ -232,31 +247,43 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     g.add({"water", {"lighting.opaque_color", "lighting.depth"}, {"lighting.color"}, {}, true});
     // 7-W: waterfall veils blend over the lit scene, depth-tested.
     g.add({"waterfall", {"lighting.depth"}, {"lighting.color"}, {}, true});
-    // Spec 015 C-2 (RENDER-18): WBOIT glass — panes accumulate into oit.accum/
+    // WBOIT glass — panes accumulate into oit.accum/
     // oit.reveal (depth-tested vs the shared lighting depth, refraction from the
     // pre-water opaque snapshot), then the resolve composites over lighting.color
     // BEFORE the weather snapshot so god-rays/weather see resolved glass.
-    g.add({"glass_oit_accum", {"lighting.depth", "lighting.opaque_color"}, {"oit.accum", "oit.reveal"}, {}, true});
+    g.add({"glass_oit_accum",
+           {"lighting.depth", "lighting.opaque_color"},
+           {"oit.accum", "oit.reveal"},
+           {},
+           true});
     g.add({"glass_oit_resolve", {"oit.accum", "oit.reveal"}, {"lighting.color"}, {}, true});
     // 7a: snapshot #2 (only when the weather overlay runs), then the weather overlay reads it.
     g.add({"weather_opaque_snapshot", {"lighting.color"}, {"lighting.opaque_color"}, {}, true});
     g.add({"weather_overlay", {"lighting.opaque_color"}, {"lighting.color"}, {}, false});
-    // Spec 015 Pillar B (RENDER-17, Wave F F7): the froxel media volume — inject
-    // (density + in-scatter per froxel, sampling the shadow depth AND the C-1 tint
+    //  rendering (,  ): the froxel media volume — inject
+    // (density + in-scatter per froxel, sampling the shadow depth AND the  tint
     // cascade for colored shafts) then front-to-back integrate. The aerial stage
-    // composes the integrated volume (FR-B-004: extends the analytic, never
+    // composes the integrated volume (: extends the analytic, never
     // replaces it). Quality 0 (default) leaves both stages as zero-GL no-ops.
-    g.add({"froxel_inject", {"shadow.depth_array", "shadow.tint_array"}, {"froxel.scatter"}, {}, true});
+    g.add({"froxel_inject",
+           {"shadow.depth_array", "shadow.tint_array"},
+           {"froxel.scatter"},
+           {},
+           true});
     g.add({"froxel_integrate", {"froxel.scatter"}, {"froxel.integrated"}, {}, true});
     // 7b: aerial-perspective in-scatter over the lit scene (+ the froxel compose).
-    g.add({"aerial", {"lighting.color", "lighting.depth", "froxel.integrated"}, {"lighting.color"}, {}, true});
+    g.add({"aerial",
+           {"lighting.color", "lighting.depth", "froxel.integrated"},
+           {"lighting.color"},
+           {},
+           true});
     // 7b2: god rays sample the LATEST opaque snapshot (#2 if weather ran, else #1) + composite.
     g.add({"god_rays", {"lighting.color"}, {"lighting.color"}, {"lighting.opaque_color"}, false});
     // 7c: foliage cards blend into the lit target, depth-tested.
     g.add({"foliage", {"lighting.depth"}, {"lighting.color"}, {}, true});
     // TAAU resolve of the opaque lit color before the transparent particle/lightning composite.
     g.add({"taau_resolve", {"lighting.color"}, {"lighting.color"}, {}, true});
-    // Rank 69 (Wave F F6): mean-log-luminance meter of the resolved lit scene ->
+    // mean-log-luminance meter of the resolved lit scene ->
     // the AsyncReadbackRing (consumed next prepare_frame). The first BORN-graph-
     // native stage: it exists as a node + executor entry, never in a hand script.
     g.add({"luminance_meter", {"lighting.color"}, {"exposure.meter"}, {}, true});

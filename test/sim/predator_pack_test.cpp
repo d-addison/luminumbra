@@ -1,4 +1,4 @@
-// Track sim.predator_pack — EMERGENT PACK HUNTING via FLANKING coordination. Predators that
+// sim.predator_pack: EMERGENT PACK HUNTING via FLANKING coordination. Predators that
 // hunt close together SURROUND the prey: each pack-mate aims for a different approach angle
 // around the shared nearest prey so they encircle it, while a lone predator pursues directly.
 // Deterministic (id-ordered, two-phase snapshot, DeterministicMath only, NO rng), gated by the

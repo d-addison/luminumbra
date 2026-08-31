@@ -163,6 +163,21 @@ TEST(Pollination, CrossIsSymmetricAndOrderIndependent) {
     }
 }
 
+TEST(Pollination, ConfiguredMutationRateChangesTheDeterministicCross) {
+    const Comp::PlantGenomeComponent a = uniformGenome(0.2f);
+    const Comp::PlantGenomeComponent b = uniformGenome(0.8f);
+    const auto unmutated = PollinateCross(a, b, 10, 25, 7, 99, 0.0f);
+    const auto mutated = PollinateCross(a, b, 10, 25, 7, 99, 0.25f);
+
+    bool differs = false;
+    for (std::size_t i = 0; i < unmutated.genes.size(); ++i) {
+        EXPECT_GE(mutated.genes[i], 0.0f);
+        EXPECT_LE(mutated.genes[i], 1.0f);
+        differs = differs || unmutated.genes[i] != mutated.genes[i];
+    }
+    EXPECT_TRUE(differs);
+}
+
 // Through the SYSTEM: two mutually-flowering adjacent plants each receive the SAME
 // mixed genome from the other (symmetric pair).
 TEST(Pollination, MutualPairConvergesToSameMix) {

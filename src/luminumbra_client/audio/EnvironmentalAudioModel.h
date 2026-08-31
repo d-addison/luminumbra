@@ -1,5 +1,5 @@
 #pragma once
-// AUDIO-07 + AUDIO-09 (spec 021, ranks ~93/100): the PURE math behind the
+//  +  (, ranks ~93/100): the PURE math behind the
 // day/night soundscape crossfade and the biome/weather reverb mapping.
 //
 // This header is deliberately dependency-free (std only: no miniaudio, no glm,
@@ -17,7 +17,7 @@
 namespace Luminumbra::Client::AudioModel {
 
 // ---------------------------------------------------------------------------
-// AUDIO-07: day/night gating driven by SUN ELEVATION.
+// day/night gating driven by SUN ELEVATION.
 //
 // The input is sin(sun elevation angle) in [-1, 1] — i.e. the vertical
 // component of the normalized TOWARD-sun direction. The client feeds it from
@@ -33,7 +33,7 @@ namespace Luminumbra::Client::AudioModel {
 // ---------------------------------------------------------------------------
 
 inline constexpr float kNightEdgeSinElevation = -0.10f; // sun ~5.7 deg below horizon: full night
-inline constexpr float kDayEdgeSinElevation   =  0.05f; // sun ~2.9 deg above horizon: full day
+inline constexpr float kDayEdgeSinElevation = 0.05f;    // sun ~2.9 deg above horizon: full day
 
 // Time constant (seconds) of the day<->night bed crossfade. The smoothed
 // factor covers ~63% of a step change per tau; it converges (>95%) within
@@ -92,12 +92,12 @@ inline float SmoothTowards(float current, float target, float dtSeconds, float t
 }
 
 // ---------------------------------------------------------------------------
-// AUDIO-09: biome -> reverb-parameter mapping.
+// biome -> reverb-parameter mapping.
 //
 // The canonical size01 -> (wet, dry, decay) curve. size01 is the perceived
 // acoustic-space size in [0, 1] (0 ~ open field, 1 ~ canyon). The endpoints
 // and monotone envelope match the hand-authored profiles that already ship
-// (CreateEnvironmentProfile / biomes.json): Outdoor(.1/.9/.3) ... Canyon
+// (CreateEnvironmentProfile / biomes.json): Outdoor(.1/.9/.3)... Canyon
 // (.7/.3/3.0). Authored biomes keep their authored values (biomes.json is the
 // source of truth there); this curve serves procedural/unauthored biomes and
 // pins the monotonicity contract the gtest asserts.
@@ -119,20 +119,19 @@ inline BiomeReverbParams BiomeReverbFromSize(float size01) {
 }
 
 // ---------------------------------------------------------------------------
-// AUDIO-09: reverb PROXY parameter mapping for the miniaudio delay-line node.
+// reverb PROXY parameter mapping for the miniaudio delay-line node.
 //
 // The vendored miniaudio (0.11.22, vendor/CMakeLists.txt FetchContent pin) has
 // NO built-in reverb DSP node. The runtime therefore uses a single feedback
 // delay line (ma_delay_node — core miniaudio >= 0.11) as an HONEST PROXY: a
 // short slap-back with feedback reads as early reflections + tail, which is
-// convincing for outdoor/canyon/cave ambience even though it is not a true
-// diffuse reverb. Real convolution/allpass reverb is future work (the swap is
-// contained inside MiniaudioManager::SetGlobalReverb).
+// convincing for outdoor/canyon/cave ambience even though it intentionally does
+// not model a diffuse convolution reverb.
 //
 // Mapping:
 //   wet/dry  -> the delay node's wet/dry mix (clamped [0, 1]).
 //   decay    -> the delay line FEEDBACK gain. Authored decay is pseudo-RT60
-//               seconds (0.3 .. 3.0); feedback must stay < 1 or the line runs
+//               seconds (0.3.. 3.0); feedback must stay < 1 or the line runs
 //               away, so decay maps through d/(d + kHalf), capped at
 //               kReverbProxyMaxFeedback. Monotone in decay, always stable.
 //   delay time is FIXED at node init (kReverbProxyDelayMs): ma_delay's buffer
@@ -140,9 +139,9 @@ inline BiomeReverbParams BiomeReverbFromSize(float size01) {
 //               setter, so only the mix/feedback are driven live.
 // ---------------------------------------------------------------------------
 
-inline constexpr float kReverbProxyDelayMs = 90.0f;      // fixed slap-back time
-inline constexpr float kReverbProxyMaxFeedback = 0.85f;  // hard stability cap (< 1)
-inline constexpr float kReverbProxyDecayHalf = 1.2f;     // decay (s) giving ~half-scale feedback
+inline constexpr float kReverbProxyDelayMs = 90.0f;     // fixed slap-back time
+inline constexpr float kReverbProxyMaxFeedback = 0.85f; // hard stability cap (< 1)
+inline constexpr float kReverbProxyDecayHalf = 1.2f;    // decay (s) giving ~half-scale feedback
 
 struct ReverbProxyParams {
     float wet = 0.0f;

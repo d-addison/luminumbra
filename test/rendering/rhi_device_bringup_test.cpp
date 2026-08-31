@@ -1,4 +1,4 @@
-// spec 021 GPU-P02 / spec 014 FR-B.1 -- the device-creation leg of the
+//   /   -- the device-creation leg of the
 // RhiDeviceBringupGpu proving signal: Diligent creates GL AND Vulkan devices
 // HEADLESS under the ucrt64 GCC 15 toolchain, and LUMIN_RHI parses all three
 // backends. Compile-green is not enough; these are live devices on the box.
@@ -45,11 +45,17 @@ public:
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -61,7 +67,9 @@ private:
 class RhiDeviceBringupGpu : public ::testing::Test {
 protected:
     static HiddenGlContext* s_context;
-    static void SetUpTestSuite() { s_context = new HiddenGlContext(); }
+    static void SetUpTestSuite() {
+        s_context = new HiddenGlContext();
+    }
     static void TearDownTestSuite() {
         delete s_context;
         s_context = nullptr;
@@ -89,17 +97,9 @@ TEST_F(RhiDeviceBringupGpu, VulkanDeviceCreatesHeadless) {
     EXPECT_FALSE(result.adapter.empty()) << "adapter description empty -> vacuous device";
 }
 
-TEST_F(RhiDeviceBringupGpu, Dx12ReportsDeferredHonestly) {
-    const auto result = CreateHeadlessDevice(Backend::Dx12);
-    EXPECT_FALSE(result.created) << "dx12 device creation is not part of P02";
-    EXPECT_EQ(result.backend, "dx12");
-    EXPECT_FALSE(result.diagnostic.empty()) << "deferral must be reported, not silent";
-}
-
-TEST_F(RhiDeviceBringupGpu, LuminRhiParsesAllThreeBackends) {
+TEST_F(RhiDeviceBringupGpu, LuminRhiParsesSupportedBackends) {
     EXPECT_EQ(ParseRhiBackend("gl"), Backend::Gl);
     EXPECT_EQ(ParseRhiBackend("vulkan"), Backend::Vulkan);
-    EXPECT_EQ(ParseRhiBackend("dx12"), Backend::Dx12);
 }
 
-}  // namespace
+} // namespace

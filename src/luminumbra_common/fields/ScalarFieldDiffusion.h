@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I3-17: generic conservative scalar-field diffusion (engine). Relocated
+// generic conservative scalar-field diffusion (engine). Relocated
 // from the game-flavored field-diffusion module; the legacy game-named
 // compatibility alias forwards here (alias removal at iteration close). The
 // solver, fixtures, and contracts are unchanged.

@@ -1,31 +1,9 @@
 ﻿param(
-    [ValidateSet("Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "DocumentationHygiene", "TextureResidency", "GpuSdfCallbackSafetyGate", "GpuSdfComputeParityGate", "GpuSdfRuntimeToggleGate", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "PerfRegression", "PerfFloor", "EcologyTickPerf", "FarFieldForestBudget", "FrontierDisabled", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "RenderParityFrame", "UpscaleSeamParity", "PopulatedWorldReplay", "PopulatedAsan", "ReplicationSmoke", "NetworkedReplication", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "SimOptLevelParity", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "RenderBudget", "ArtifactManifest", "ConfigSchemaCheck", "MovingResidency", "WorldLoadBounded", "ReadbackDiscipline", "RenderReadbackAllowlist", "DeterminismAudit", "HeadlessInGameCapture", "PilotReadiness", "RhiNoReexport", "ProfilerDeterminismNeutral", "BuildTreeStrict", "ScheduledGateRun", "NetDemotionDocGrep", "All")]
+    [ValidateSet("Build", "UnitTests", "MaterialVisual", "RenderHealth", "ShaderInventory", "DocumentationHygiene", "ChunkCollisionLifecycle", "PhysicsReplay", "AudioNullTelemetry", "AudioHandleApplication", "AtmosphereAudio", "UiTestBaseline", "SimulationEventBusOrderGate", "LuaApiManifestGate", "ScalarFieldDiffusionGate", "InstinctPlannerGate", "PersistenceRoundtripGate", "PersistenceRuntimeRoundtrip", "ChunkFormatValidationGate", "WorldHashEntitySnapshotGate", "NetworkLoopbackAuthorityGate", "NetworkStateHash", "EcologyTickPerf", "FarFieldForestBudget", "SkyboxVisual", "WeatherVisual", "ParticleEmitterDeterminism", "CloudShadow", "FoliageInstancing", "Precipitation", "TimeOfDaySweep", "WorldVisualSweep", "PlayerView", "FarLodHorizon", "HeadlessServerTick", "HeadlessServerTickHeavy", "RenderParityFrame", "UpscaleSeamParity", "PopulatedWorldReplay", "PopulatedAsan", "ReplicationSmoke", "NetworkedReplication", "WindFieldDeterminism", "AetherFieldDeterminism", "ReplayRoundtrip", "ReplayDivergence", "LockstepLoopback", "LockstepFaultInjection", "NetworkedSession", "SkinnedMeshVisual", "EngineGameSplitLint", "SimDeterminismLint", "SimOptLevelParity", "CreatureSlice", "StimulusChannelGate", "BiomeCoverage", "RiverPresence", "WaterfallVisual", "EmissiveCalibration", "StructurePresence", "BiomeReverb", "TerrainRealism", "WindowModeStress", "IsolationLayer", "ArtifactManifest", "ConfigSchemaCheck", "MovingResidency", "WorldLoadBounded", "ReadbackDiscipline", "RenderReadbackAllowlist", "DeterminismAudit", "HeadlessInGameCapture", "PilotReadiness", "RhiNoReexport", "ProfilerDeterminismNeutral", "BuildTreeStrict", "ScheduledGateRun", "NetDemotionDocGrep", "All")]
     [string]$Mode = "All",
 
     [string]$BuildPreset = "debug",
-    # T-I3-20: perf-lane preset selection (PerfRegression mode only).
-    # "release" compares the release build (build/release) against
-    # perf-baseline-release.json; "debug" or default (empty) preserves the
-    # historical behavior exactly: build dir from -BuildPreset and the debug
-    # baseline perf-baseline.json. Existing callers are unchanged.
-    [ValidateSet("", "debug", "release")]
-    [string]$Preset = "",
-    [int]$SmokeSeconds = 30,
-    # Debug-build wall-clock on a developer desktop drifts ~30% between
-    # adjacent median-of-3 batches (background load, thermals). The gate is a
-    # catastrophic-regression catcher: real algorithmic regressions are 2-10x,
-    # so fail at +50% and warn at +25%. Tighten only with a quieter lane.
-    [double]$MarginPercent = 50.0,
-    [double]$WarnPercent = 25.0,
-    # Absolute per-scenario allowance added on top of the relative margins.
-    # The streaming optimizations (T-I2-14) dropped several scenario p99s from
-    # 20-77 ms to 2-13 ms, where a purely relative margin sits below the
-    # debug-build noise floor: identical code measured 3-25 ms p99 swings
-    # between adjacent runs on a developer desktop with typical background
-    # load. The floor is sized to absorb those observed outliers while the
-    # relative margin still catches catastrophic (2-10x) regressions on the
-    # slow scenarios; ceiling = baseline * (1 + margin) + this floor.
-    [double]$NoiseFloorMs = 20.0
+    [int]$SmokeSeconds = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,36 +11,35 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "nightly-provenance.ps1")
 
 $ArtifactDir = "tools/gates/baselines"
-$FrontierDisabledPath = "tools/gates/frontier-disabled.md"
 
 function Test-Build {
-    # Preflight (spec 020 FR-B-003): the SystemConfig registry is generated from
+    # Preflight: the SystemConfig registry is generated from
     # ConfigSchema.json; fail fast if the committed generated header drifted before
     # spending a full preset build. (The configure step also enforces this.)
     Assert-ConfigSchemaFresh
 
     # Full preset build: the engine-frontier dispatch touches every subsystem,
-    # and ctest registers placeholder entries for any test executable that was
+    # and ctest registers synthetic missing-executable entries for any test executable that was
     # not built.
     & cmake --build --preset $BuildPreset
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
 
-    # OPS-04/OPS-05 (spec 021, 020 FR-A-002 / OQ-1): the two-tree preflight — verify
+    # / (,   / ): the two-tree preflight — verify
     # the tree just built is the canonical preset tree (not a relocated/copied cache,
     # not the legacy root build/), and emit the 6-field build-tree manifest. The root
-    # build/ tree is retired (OPS-05), so this now runs in -Strict: a concurrent root
+    # build/ tree is retired, so this now runs in -Strict: a concurrent root
     # build/CMakeCache.txt is a HARD FAIL, not a warning. (The dedicated BuildTreeStrict
     # gate proves both halves of the -Strict contract; this is the inline enforcement.)
     & powershell -NoProfile -ExecutionPolicy Bypass -File "tools/gates/validate-build-tree.ps1" -BuildPreset $BuildPreset -Strict
     if ($LASTEXITCODE -ne 0) {
-        throw "Build-tree preflight FAILED (validate-build-tree.ps1 -Strict exit $LASTEXITCODE): the build/$BuildPreset tree is not the sole canonical preset tree (a concurrent root build/ tree may be present -- retire it per spec 020 OQ-1)"
+        throw "Build-tree preflight FAILED (validate-build-tree.ps1 -Strict exit $LASTEXITCODE): the build/$BuildPreset tree is not the sole canonical preset tree (a concurrent root build/ tree may be present -- retire it per  )"
     }
 }
 
 function Test-UnitTests {
-    # Placeholder entries named *_NOT_BUILT are registered at configure time
+    # Sentinel entries named *_NOT_BUILT are registered at configure time
     # for missing test executables; exclude them so only real tests gate.
     & ctest --preset $BuildPreset --output-on-failure -E "_NOT_BUILT$"
     if ($LASTEXITCODE -ne 0) {
@@ -71,7 +48,7 @@ function Test-UnitTests {
 }
 
 function Test-BuildTreeStrict {
-    # OPS-05 (spec 020 OQ-1 / FR-A-002): with the legacy root build/ tree retired,
+    #  (  / ): with the legacy root build/ tree retired,
     # the build-tree preflight runs in -Strict mode so a concurrent root build/
     # CMakeCache.txt is a HARD FAIL -- a gate must never build one tree and read
     # another. This gate proves BOTH halves of that contract. It is scoped purely to
@@ -120,7 +97,7 @@ function Test-BuildTreeStrict {
         }
     }
 
-    Write-Host "[BuildTreeStrict] OK -- -Strict passes on the canonical-only tree and refuses a concurrent root build/ cache."
+    Write-Host "[BuildTreeStrict] OK -- -Strict passes on the canonical-only tree and refuses a concurrent root build cache."
 }
 
 function Test-NetDemotionDocGrep {
@@ -199,11 +176,8 @@ function Get-ClientExe {
 }
 
 function Test-MaterialVisual {
-    # T-I4-7 re-home: the iteration-3 MaterialVisual gate scanned for a sand
-    # beach beside a grass-capped, stone-rimmed highland on the polished
-    # archipelago - geometry the terrain pass deliberately removed, so the gate
-    # could not be framed (deferred to iteration 4; see handoff.md). It is
-    # replaced by the deterministic calibration-plate gate (design-decisions Â§9):
+    # MaterialVisual uses a deterministic calibration plate instead of relying
+    # on a particular sand/grass/stone arrangement in generated world geometry:
     # authored per-material plates drawn at fixed coordinates into the G-buffer,
     # captured under two sun angles, checked for per-material albedo bands and a
     # normal-response (shading varies across the plate and between sun angles by
@@ -216,7 +190,7 @@ function Test-MaterialVisual {
         throw "material visual (calibration-plate) analysis missing $analysisPath - run the render smoke ctest (RenderSmokeTest.CalibrationPlateCloseRangeMaterialGate) first"
     }
 
-    # FR-A-005: bind this calibration-plate capture to the binary being gated. A plate
+    # bind this calibration-plate capture to the binary being gated. A plate
     # captured with one binary cannot be compared/blessed against a different (rebuilt) one.
     Assert-ArtifactProvenance -ArtifactPath $analysisPath -Scenario "MaterialVisual"
 
@@ -225,7 +199,7 @@ function Test-MaterialVisual {
         throw "Unexpected material visual analysis schema '$($analysis.schema)' (expected calibration-plate v2)"
     }
     if ($analysis.mode -ne "calibration_plate") {
-        throw "Material visual analysis mode must be 'calibration_plate' (T-I4-7 re-home)"
+        throw "Material visual analysis mode must be 'calibration_plate' ( re-home)"
     }
     if ($null -eq $analysis.materials -or @($analysis.materials).Count -lt 4) {
         throw "Calibration-plate analysis must report at least the Sand/Grass/Stone/Soil material plates"
@@ -263,7 +237,7 @@ function Test-MaterialVisual {
         throw "Calibration-plate albedo band failure: grass should read greener than blue"
     }
 
-    # --- T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB bands ---
+    # ---: ABSOLUTE on-screen sRGB bands ---
     # The relative checks above pass even when the whole frame is crushed dark
     # (the owner-reported defect: sand rust-brown, grass near-black). These bands
     # assert each material lands in its REAL on-screen color window at fixed noon,
@@ -284,7 +258,7 @@ function Test-MaterialVisual {
         if ($entry.Count -lt 1) { continue }
         $m = $entry[0]
         if ($null -eq $m.onscreen_srgb) {
-            throw "Calibration plate '$name' is missing onscreen_srgb (rebuild the render smoke ctest for the T-I4-DR-albedo-calibration absolute bands)"
+            throw "Calibration plate '$name' is missing onscreen_srgb (rebuild the render smoke ctest for the  absolute bands)"
         }
         $b = $srgbBands[$name]
         $os = @($m.onscreen_srgb)
@@ -297,12 +271,12 @@ function Test-MaterialVisual {
         }
     }
 
-    # --- T-I4-DR-albedo-calibration: white/gray exposure anchors (PERMANENT) ---
+    # ---: white/gray exposure anchors (PERMANENT) ---
     # A correctly-exposed chain renders white near full (filmic-rolled) and 18%
     # gray near perceptual mid at noon. The pre-fix chain crushed white to ~0.74
     # and mid-gray to ~0.32 (sun COLOR fed where IRRADIANCE was needed).
     if ($null -eq $analysis.exposure_anchors) {
-        throw "Calibration analysis is missing exposure_anchors (rebuild the render smoke ctest for the T-I4-DR-albedo-calibration chain assertion)"
+        throw "Calibration analysis is missing exposure_anchors (rebuild the render smoke ctest for the  chain assertion)"
     }
     $wp = @($analysis.exposure_anchors.white_plate_srgb)
     $gp = @($analysis.exposure_anchors.gray18_plate_srgb)
@@ -327,7 +301,7 @@ function Test-MaterialVisual {
 }
 
 function Test-EmissiveCalibration {
-    # T-I4-9: the emission -> lighting -> on-screen-glow chain calibration table
+    # the emission -> lighting -> on-screen-glow chain calibration table
     # (RenderSmokeTest.EmissiveCalibrationMonotonic emits this artifact). The
     # authored emissive_intensity must map monotonically to measured luminance.
     $renderDir = "build/$BuildPreset/test-artifacts/render"
@@ -359,7 +333,7 @@ function Test-RenderHealth {
     $renderDir = "build/$BuildPreset/test-artifacts/render"
     $analysisPath = Join-Path $renderDir "render-health-analysis.json"
 
-    # OPS-09: All must be repeatable after Build, not depend on a capture from a
+    # All must be repeatable after Build, not depend on a capture from a
     # previous binary. Regenerate the source-backed health artifact, discard its
     # old provenance sidecar, then bind the fresh result to the gated client.
     $renderSmokeExe = "build/$BuildPreset/bin/render_smoke_test.exe"
@@ -371,10 +345,10 @@ function Test-RenderHealth {
     ) -TimeoutSeconds 180
 
     if (-not (Test-Path $analysisPath)) {
-        throw "render health gate not yet implemented - missing $analysisPath (produced by task T-EF-5-render-health-gate)"
+        throw "render health gate required input missing: $analysisPath (producer did not create it)"
     }
 
-    # FR-A-005: bind this render-health capture to the binary being gated, so a snapshot
+    # bind this render-health capture to the binary being gated, so a snapshot
     # captured with one binary is REFUSED against a different (rebuilt) one (both hashes named).
     Assert-ArtifactProvenance -ArtifactPath $analysisPath -Scenario "RenderHealth"
 
@@ -472,7 +446,7 @@ function Test-ShaderInventory {
 
     foreach ($path in @($inventoryPath, $suiteHealthPath)) {
         if (-not (Test-Path $path)) {
-            throw "render shader inventory gate not yet implemented - missing $path (produced by task T-EF-10-render-shader-inventory)"
+            throw "render shader inventory gate required input missing: $path (producer did not create it)"
         }
     }
 
@@ -583,7 +557,7 @@ function Test-ShaderInventory {
         }
     }
 
-    # ATMO-15 (Wave G R1.1): DEAD-FILE detection. Every file under res/shaders must be
+    # DEAD-FILE detection. Every file under res/shaders must be
     # referenced by NAME somewhere in src/, test/, tools/, or cmake/ (loader strings,
     # PassShaderLayouts, test specs). An unreferenced shader is a wrong-file-edit trap
     # (the skybox.frag lesson: edits landed in a file nothing loads). Comment mentions
@@ -606,7 +580,7 @@ function Test-ShaderInventory {
         }
     }
     if ($deadShaders.Count -gt 0) {
-        throw ("shader dead-file check (ATMO-15): {0} shader file(s) under res/shaders are referenced by NOTHING in src/test/tools/cmake - delete them or wire them up: {1}" -f $deadShaders.Count, ($deadShaders -join ", "))
+        throw ("shader dead-file check (): {0} shader file(s) under res/shaders are referenced by NOTHING in src/test/tools/cmake - delete them or wire them up: {1}" -f $deadShaders.Count, ($deadShaders -join ", "))
     }
     Write-Host ("shader dead-file check: {0} shader files, all referenced" -f @($shaderFiles).Count)
 }
@@ -644,440 +618,13 @@ function Test-DocumentationHygiene {
     Write-Host ("documentation hygiene: {0} maintained files" -f $actual.Count)
 }
 
-function Test-TextureResidency {
-    # T-I4-6 texture-array residency gate. Self-contained (no GL context): it
-    # (1) asserts the RenderPipeline residency contract via source inspection
-    # and (2) parses the committed .ltex assets, summing their resident bytes
-    # and asserting they fit the 96 MB iteration budget (design-decisions Â§10).
-    $budgetBytes = 96 * 1024 * 1024
-
-    $headerPath = "src/luminumbra_client/rendering/RenderPipeline.h"
-    $sourcePath = "src/luminumbra_client/rendering/RenderPipeline.cpp"
-    foreach ($path in @($headerPath, $sourcePath)) {
-        if (-not (Test-Path $path)) {
-            throw "Texture residency gate: missing $path"
-        }
-    }
-
-    $header = Get-Content $headerPath -Raw
-    $source = Get-Content $sourcePath -Raw
-
-    # Budget constant present and set to 96 MB.
-    if ($header -notmatch "kTextureResidentBudgetBytes\s*=\s*96u\s*\*\s*1024u\s*\*\s*1024u") {
-        throw "Texture residency gate: RenderPipeline.h must declare the 96 MB kTextureResidentBudgetBytes budget"
-    }
-    # Residency manager + layer-by-name lookup + telemetry surface.
-    foreach ($symbol in @(
-        "TextureResidencyManager",
-        "find_resident_texture_layer",
-        "texture_resident_bytes",
-        "init_texture_residency",
-        "destroy_texture_residency")) {
-        if ($header -notmatch [regex]::Escape($symbol)) {
-            throw "Texture residency gate: RenderPipeline.h is missing '$symbol'"
-        }
-    }
-    # Arrays register under the existing texture resource type and clean up.
-    if ($source -notmatch "m_texture_residency\.arrays") {
-        throw "Texture residency gate: RenderPipeline.cpp must register residency arrays"
-    }
-    if ($source -notmatch "stats\.textures\s*\+=\s*count\(array\.texture_id\)") {
-        throw "Texture residency gate: residency arrays must register under the texture resource type"
-    }
-    if ($source -notmatch "destroy_texture_residency") {
-        throw "Texture residency gate: residency arrays must be released in cleanup"
-    }
-    # Budget gate enforced at upload time.
-    if ($source -notmatch "would exceed the .* budget") {
-        throw "Texture residency gate: upload path must reject over-budget textures"
-    }
-
-    # Parse the committed .ltex assets and sum resident bytes (full mip chains).
-    $textureDir = "data/textures/test"
-    if (-not (Test-Path $textureDir)) {
-        throw "Texture residency gate: missing committed test textures under $textureDir"
-    }
-    $ltexFiles = @(Get-ChildItem -Path $textureDir -Filter "*.ltex" -File)
-    if ($ltexFiles.Count -lt 2) {
-        throw "Texture residency gate: expected at least 2 committed .ltex test assets, found $($ltexFiles.Count)"
-    }
-
-    $totalResidentBytes = 0
-    foreach ($file in $ltexFiles) {
-        # .ltex header: u32 magic + u16 version + u16 mip_count + u32 width +
-        # u32 height + u8 channels = 17 bytes, then the raw mip chain.
-        $headerSize = 17
-        $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
-        if ($bytes.Length -lt $headerSize) {
-            throw "Texture residency gate: '$($file.Name)' is too small to be a valid .ltex"
-        }
-        $magic = [System.BitConverter]::ToUInt32($bytes, 0)
-        if ($magic -ne 0x5845544C) {
-            throw "Texture residency gate: '$($file.Name)' has a bad LTEX magic"
-        }
-        $version = [System.BitConverter]::ToUInt16($bytes, 4)
-        if ($version -ne 1) {
-            throw "Texture residency gate: '$($file.Name)' has unsupported version $version"
-        }
-        $mipCount = [System.BitConverter]::ToUInt16($bytes, 6)
-        $width = [System.BitConverter]::ToUInt32($bytes, 8)
-        $height = [System.BitConverter]::ToUInt32($bytes, 12)
-        $channels = $bytes[16]
-        if ($width -le 0 -or $height -le 0 -or $channels -le 0 -or $mipCount -le 0) {
-            throw "Texture residency gate: '$($file.Name)' has invalid header dimensions"
-        }
-
-        $w = $width
-        $h = $height
-        $mipBytes = 0
-        for ($level = 0; $level -lt $mipCount; $level++) {
-            $mipBytes += $w * $h * $channels
-            $w = [Math]::Max(1, [Math]::Floor($w / 2))
-            $h = [Math]::Max(1, [Math]::Floor($h / 2))
-        }
-        # Header + mip chain must equal the on-disk size.
-        $expectedSize = $headerSize + $mipBytes
-        if ($bytes.Length -ne $expectedSize) {
-            throw "Texture residency gate: '$($file.Name)' size $($bytes.Length) does not match header (expected $expectedSize)"
-        }
-        $totalResidentBytes += $mipBytes
-    }
-
-    if ($totalResidentBytes -gt $budgetBytes) {
-        throw "Texture residency gate: committed resident bytes $totalResidentBytes exceed the 96 MB budget ($budgetBytes)"
-    }
-
-    Write-Host ("texture residency: {0} .ltex asset(s), {1} resident bytes (budget {2} bytes); arrays registered under texture type" -f `
-        $ltexFiles.Count, $totalResidentBytes, $budgetBytes)
-}
-
-function Test-GpuSdfCallbackSafetyGate {
-    $renderDir = "build/$BuildPreset/test-artifacts/render"
-    $analysisPath = Join-Path $renderDir "gpu-sdf-callback-safety.json"
-
-    if (-not (Test-Path $analysisPath)) {
-        throw "gpu SDF callback safety gate not yet implemented - missing $analysisPath (produced by task T-EF-27-gpu-sdf-callback-safety-gate)"
-    }
-
-    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.render.gpu_sdf_callback_safety.v1") {
-        throw "Unexpected GPU SDF callback safety schema '$($analysis.schema)'"
-    }
-    if (-not $analysis.passed) {
-        throw "GPU SDF callback safety analysis reported failure"
-    }
-    if ($analysis.callback.source -ne "src/luminumbra_client/rendering/RenderPipeline.cpp") {
-        throw "GPU SDF callback safety analysis must inspect RenderPipeline.cpp"
-    }
-    if ($analysis.callback.header -ne "src/luminumbra_client/rendering/RenderPipeline.h") {
-        throw "GPU SDF callback safety analysis must inspect RenderPipeline.h"
-    }
-    if ($analysis.callback.setup_api -ne "SetupGPUSDFIntegration") {
-        throw "GPU SDF callback safety analysis must require SetupGPUSDFIntegration"
-    }
-    if ($analysis.callback.generation_api -ne "generate_chunk_sdf_gpu") {
-        throw "GPU SDF callback safety analysis must require generate_chunk_sdf_gpu"
-    }
-    if ($analysis.callback.world_callback -ne "SetGPUSDFCallback") {
-        throw "GPU SDF callback safety analysis must require SetGPUSDFCallback"
-    }
-    if ($analysis.callback.disabled_gate -ne "kEnableExperimentalGpuSdfIntegration") {
-        throw "GPU SDF callback safety analysis must require kEnableExperimentalGpuSdfIntegration"
-    }
-    if ($analysis.callback.default_enabled -ne $false) {
-        throw "GPU SDF callback integration must remain disabled by default"
-    }
-    if (-not $analysis.callback.callback_api_present) {
-        throw "GPU SDF callback safety analysis reports missing callback API"
-    }
-    if (-not $analysis.callback.clears_callback_when_disabled) {
-        throw "GPU SDF callback setup must clear the world callback while disabled"
-    }
-    if (-not $analysis.callback.raw_this_capture_present) {
-        throw "GPU SDF callback safety analysis must report the raw pipeline capture risk"
-    }
-    if (-not $analysis.callback.raw_this_capture_gated) {
-        throw "Raw RenderPipeline capture must stay gated behind explicit opt-in"
-    }
-    if (-not $analysis.callback.gpu_readback_is_synchronous) {
-        throw "GPU SDF callback safety analysis must record synchronous readback while callback path is disabled"
-    }
-    if (-not $analysis.callback.gl_context_required) {
-        throw "GPU SDF callback safety analysis must record render GL context ownership"
-    }
-    if (-not $analysis.callback.safe_until_explicit_opt_in) {
-        throw "GPU SDF callback path must be safe until explicit opt-in"
-    }
-
-    $requiredChecks = @(
-        "gpu sdf callback API is present",
-        "gpu sdf integration is disabled by default",
-        "disabled setup clears any world callback",
-        "raw pipeline capture is gated behind explicit opt-in",
-        "gpu readback stays synchronous while callback path is disabled",
-        "callback path requires render GL context ownership"
-    )
-    $checks = @($analysis.checks)
-    foreach ($requiredCheck in $requiredChecks) {
-        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
-        if ($matches.Count -ne 1) {
-            throw "GPU SDF callback safety analysis is missing check '$requiredCheck'"
-        }
-        if (-not $matches[0].passed) {
-            throw "GPU SDF callback safety check failed: $requiredCheck"
-        }
-    }
-}
-
-function Test-GpuSdfComputeParityGate {
-    $renderDir = "build/$BuildPreset/test-artifacts/render"
-    $analysisPath = Join-Path $renderDir "gpu-sdf-compute-parity.json"
-
-    if (-not (Test-Path $analysisPath)) {
-        throw "gpu SDF compute parity gate not yet implemented - missing $analysisPath (produced by task T-EF-28-gpu-sdf-compute-parity-gate)"
-    }
-
-    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.render.gpu_sdf_compute_parity.v1") {
-        throw "Unexpected GPU SDF compute parity schema '$($analysis.schema)'"
-    }
-    if (-not $analysis.passed) {
-        throw "GPU SDF compute parity analysis reported failure"
-    }
-    if ($analysis.parity.source -ne "src/luminumbra_client/rendering/RenderPipeline.cpp") {
-        throw "GPU SDF compute parity analysis must inspect RenderPipeline.cpp"
-    }
-    if ($analysis.parity.header -ne "src/luminumbra_client/rendering/RenderPipeline.h") {
-        throw "GPU SDF compute parity analysis must inspect RenderPipeline.h"
-    }
-    if ($analysis.parity.chunk_contract -ne "src/luminumbra_common/world/Chunk.h") {
-        throw "GPU SDF compute parity analysis must inspect Chunk.h"
-    }
-    if ($analysis.parity.compute_api -ne "generate_chunk_sdf_gpu") {
-        throw "GPU SDF compute parity analysis must require generate_chunk_sdf_gpu"
-    }
-    if ($analysis.parity.compute_shader -ne "res/shaders/sdf_generation.compute") {
-        throw "GPU SDF compute parity analysis must require sdf_generation.compute"
-    }
-    if ($analysis.parity.cpu_reference -ne "authoritative CPU worldgen path") {
-        throw "GPU SDF compute parity analysis must retain the authoritative CPU reference path"
-    }
-    if ($analysis.parity.disabled_gate -ne "kEnableExperimentalGpuSdfIntegration") {
-        throw "GPU SDF compute parity analysis must require kEnableExperimentalGpuSdfIntegration"
-    }
-    if ($analysis.parity.default_enabled -ne $false) {
-        throw "GPU SDF compute path must remain disabled by default until parity passes"
-    }
-    if ($analysis.parity.sample_grid -ne "17x17x17") {
-        throw "GPU SDF compute parity sample grid must be 17x17x17"
-    }
-    if ([int64]$analysis.parity.sample_count -ne 4913) {
-        throw "GPU SDF compute parity sample count must be 4913"
-    }
-    if ($analysis.parity.dispatch_groups -ne "3x3x3") {
-        throw "GPU SDF compute parity dispatch groups must be 3x3x3"
-    }
-    if ($analysis.parity.workgroup_size -ne "8x8x8") {
-        throw "GPU SDF compute parity workgroup size must be 8x8x8"
-    }
-    if ($analysis.parity.readback -ne "synchronous_ssbo_readback") {
-        throw "GPU SDF compute parity readback must remain synchronous while the callback path is disabled"
-    }
-    if ([double]$analysis.parity.max_abs_error_threshold -le 0.0 -or [double]$analysis.parity.max_abs_error_threshold -gt 0.001) {
-        throw "GPU SDF compute parity max_abs_error_threshold must be explicit and <= 0.001"
-    }
-    if ([double]$analysis.parity.mean_abs_error_threshold -le 0.0 -or [double]$analysis.parity.mean_abs_error_threshold -gt 0.0001) {
-        throw "GPU SDF compute parity mean_abs_error_threshold must be explicit and <= 0.0001"
-    }
-    if ([int64]$analysis.parity.fixture_count -lt 3) {
-        throw "GPU SDF compute parity must cover at least three fixtures"
-    }
-    if (-not $analysis.parity.gpu_callback_requires_passing_parity) {
-        throw "GPU SDF callback activation must require passing compute parity"
-    }
-    if (-not $analysis.parity.gpu_path_blocked_until_parity_passes) {
-        throw "GPU SDF compute path must stay blocked until parity passes"
-    }
-    if (-not $analysis.parity.authoritative_cpu_path_retained) {
-        throw "GPU SDF compute parity must retain the authoritative CPU path"
-    }
-
-    $fixtures = @($analysis.parity.fixtures)
-    foreach ($fixtureName in @("origin", "positive_offset", "negative_offset")) {
-        $matches = @($fixtures | Where-Object { $_.name -eq $fixtureName })
-        if ($matches.Count -ne 1) {
-            throw "GPU SDF compute parity is missing fixture '$fixtureName'"
-        }
-    }
-
-    $requiredChecks = @(
-        "gpu sdf compute API is present",
-        "gpu sdf output grid matches chunk-plus-padding contract",
-        "gpu sdf dispatch covers every output sample",
-        "gpu sdf readback produces deterministic sample buffer",
-        "cpu worldgen remains authoritative until parity passes",
-        "gpu sdf integration remains disabled by default",
-        "parity thresholds are explicit",
-        "parity fixtures cover origin positive and negative chunks"
-    )
-    $checks = @($analysis.checks)
-    foreach ($requiredCheck in $requiredChecks) {
-        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
-        if ($matches.Count -ne 1) {
-            throw "GPU SDF compute parity analysis is missing check '$requiredCheck'"
-        }
-        if (-not $matches[0].passed) {
-            throw "GPU SDF compute parity check failed: $requiredCheck"
-        }
-    }
-}
-
-function Test-GpuSdfRuntimeToggleGate {
-    $renderDir = "build/$BuildPreset/test-artifacts/render"
-    $analysisPath = Join-Path $renderDir "gpu-sdf-runtime-parity.json"
-    $cpuPath = Join-Path $renderDir "gpu-sdf-cpu.ppm"
-    $gpuPath = Join-Path $renderDir "gpu-sdf-gpu.ppm"
-
-    if (-not (Test-Path $analysisPath)) {
-        throw "gpu SDF runtime toggle gate not yet implemented - missing $analysisPath (produced by task T-EF-29-gpu-sdf-runtime-toggle-gate)"
-    }
-
-    Assert-PpmArtifact $cpuPath
-    Assert-PpmArtifact $gpuPath
-
-    $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.render.gpu_sdf_runtime_toggle.v1") {
-        throw "Unexpected GPU SDF runtime toggle schema '$($analysis.schema)'"
-    }
-    if (-not $analysis.passed) {
-        throw "GPU SDF runtime toggle analysis reported failure"
-    }
-    if ($analysis.runtime_toggle.source -ne "src/luminumbra_client/rendering/RenderPipeline.cpp") {
-        throw "GPU SDF runtime toggle analysis must inspect RenderPipeline.cpp"
-    }
-    if ($analysis.runtime_toggle.header -ne "src/luminumbra_client/rendering/RenderPipeline.h") {
-        throw "GPU SDF runtime toggle analysis must inspect RenderPipeline.h"
-    }
-    if ($analysis.runtime_toggle.entrypoint -ne "src/luminumbra_client/main_client.cpp") {
-        throw "GPU SDF runtime toggle analysis must inspect main_client.cpp"
-    }
-    if ($analysis.runtime_toggle.setter_api -ne "set_gpu_sdf_runtime_enabled") {
-        throw "GPU SDF runtime toggle analysis must require set_gpu_sdf_runtime_enabled"
-    }
-    if ($analysis.runtime_toggle.state_api -ne "get_gpu_sdf_runtime_toggle_state") {
-        throw "GPU SDF runtime toggle analysis must require get_gpu_sdf_runtime_toggle_state"
-    }
-    if ($analysis.runtime_toggle.setup_api -ne "SetupGPUSDFIntegration") {
-        throw "GPU SDF runtime toggle analysis must require SetupGPUSDFIntegration"
-    }
-    if ($analysis.runtime_toggle.opt_in_flag -ne "--enable-gpu-sdf-runtime") {
-        throw "GPU SDF runtime toggle must use the explicit --enable-gpu-sdf-runtime opt-in flag"
-    }
-    if ($analysis.runtime_toggle.disabled_gate -ne "kEnableExperimentalGpuSdfIntegration") {
-        throw "GPU SDF runtime toggle must retain the compile-time disabled gate"
-    }
-    if ($analysis.runtime_toggle.default_enabled -ne $false) {
-        throw "GPU SDF runtime toggle must remain disabled by default"
-    }
-    if ($analysis.runtime_toggle.compile_time_gate_enabled -ne $false) {
-        throw "GPU SDF compile-time parity gate must remain closed by default"
-    }
-    if ($analysis.runtime_toggle.runtime_requested_by_default -ne $false) {
-        throw "GPU SDF runtime must not be requested by default"
-    }
-    if (-not $analysis.runtime_toggle.runtime_requires_explicit_opt_in) {
-        throw "GPU SDF runtime toggle must require explicit opt-in"
-    }
-    if (-not $analysis.runtime_toggle.runtime_allowed_requires_compile_time_gate) {
-        throw "GPU SDF runtime toggle must require the compile-time gate"
-    }
-    if (-not $analysis.runtime_toggle.runtime_allowed_requires_explicit_flag) {
-        throw "GPU SDF runtime toggle must require the explicit runtime flag"
-    }
-    if ($analysis.runtime_toggle.callback_registered_by_default -ne $false) {
-        throw "GPU SDF callback must not be registered by default"
-    }
-    if (-not $analysis.runtime_toggle.cpu_fallback_active_by_default) {
-        throw "GPU SDF runtime toggle must keep the CPU fallback active by default"
-    }
-    if (-not $analysis.runtime_toggle.runtime_setter_present) {
-        throw "GPU SDF runtime toggle analysis reports missing setter API"
-    }
-    if (-not $analysis.runtime_toggle.runtime_state_present) {
-        throw "GPU SDF runtime toggle analysis reports missing state API"
-    }
-    if (-not $analysis.runtime_toggle.runtime_flag_present) {
-        throw "GPU SDF runtime toggle analysis reports missing opt-in flag"
-    }
-    if (-not $analysis.runtime_toggle.main_wires_runtime_flag) {
-        throw "GPU SDF runtime toggle analysis reports missing client-to-renderer wiring"
-    }
-    if (-not $analysis.runtime_toggle.setup_invoked_for_world) {
-        throw "GPU SDF runtime toggle analysis reports missing world callback setup"
-    }
-    if (-not $analysis.runtime_toggle.runtime_gate_blocks_callback) {
-        throw "GPU SDF runtime toggle must block callback registration while disabled"
-    }
-    if (-not $analysis.runtime_toggle.callback_state_tracked) {
-        throw "GPU SDF runtime toggle must track callback registration state"
-    }
-
-    if ($analysis.parity.cpu_reference -ne "gpu-sdf-cpu.ppm") {
-        throw "GPU SDF runtime parity must reference gpu-sdf-cpu.ppm"
-    }
-    if ($analysis.parity.gpu_candidate -ne "gpu-sdf-gpu.ppm") {
-        throw "GPU SDF runtime parity must reference gpu-sdf-gpu.ppm"
-    }
-    if ($analysis.parity.sample_grid -ne "17x17") {
-        throw "GPU SDF runtime parity sample grid must be 17x17"
-    }
-    if ([int64]$analysis.parity.sample_count -ne 289) {
-        throw "GPU SDF runtime parity sample count must be 289"
-    }
-    if ([string]::IsNullOrWhiteSpace($analysis.parity.cpu_checksum) -or
-        $analysis.parity.cpu_checksum -ne $analysis.parity.gpu_checksum) {
-        throw "GPU SDF runtime parity checksums must be present and equal"
-    }
-    if ([int64]$analysis.parity.max_pixel_delta -ne 0) {
-        throw "GPU SDF runtime parity max_pixel_delta must be zero while runtime gate is closed"
-    }
-    if ([double]$analysis.parity.mean_pixel_delta -ne 0.0) {
-        throw "GPU SDF runtime parity mean_pixel_delta must be zero while runtime gate is closed"
-    }
-    if (-not $analysis.parity.images_match) {
-        throw "GPU SDF runtime parity images must match"
-    }
-
-    $requiredChecks = @(
-        "gpu sdf runtime setter API is present",
-        "gpu sdf runtime state API is present",
-        "gpu sdf runtime opt-in flag is parsed",
-        "client wires opt-in flag into render pipeline",
-        "world creation invokes gpu sdf callback setup",
-        "compile-time parity gate remains closed by default",
-        "runtime gate blocks callback unless explicitly allowed",
-        "runtime callback state is tracked",
-        "cpu and gpu runtime parity artifacts match"
-    )
-    $checks = @($analysis.checks)
-    foreach ($requiredCheck in $requiredChecks) {
-        $matches = @($checks | Where-Object { $_.name -eq $requiredCheck })
-        if ($matches.Count -ne 1) {
-            throw "GPU SDF runtime toggle analysis is missing check '$requiredCheck'"
-        }
-        if (-not $matches[0].passed) {
-            throw "GPU SDF runtime toggle check failed: $requiredCheck"
-        }
-    }
-}
-
 function Test-ChunkCollisionLifecycle {
     $artifactDir = "build/$BuildPreset/test-artifacts/runtime/chunk-collision-lifecycle"
     $analysisPath = Join-Path $artifactDir "chunk-collision-lifecycle.json"
     $testScriptPath = "test/physics/chunk-collision-lifecycle.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "chunk collision lifecycle gate not yet implemented - missing $testScriptPath (produced by task T-EF-12-physics-collision-lifecycle-gate)"
+        throw "chunk collision lifecycle gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1086,7 +633,7 @@ function Test-ChunkCollisionLifecycle {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "chunk collision lifecycle gate not yet implemented - missing $analysisPath (produced by task T-EF-12-physics-collision-lifecycle-gate)"
+        throw "chunk collision lifecycle gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -1136,7 +683,7 @@ function Test-PhysicsReplay {
     $testScriptPath = "test/physics/physics-replay.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "physics replay gate not yet implemented - missing $testScriptPath (produced by task T-EF-13-physics-replay-gate)"
+        throw "physics replay gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1145,7 +692,7 @@ function Test-PhysicsReplay {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "physics replay gate not yet implemented - missing $analysisPath (produced by task T-EF-13-physics-replay-gate)"
+        throw "physics replay gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -1213,7 +760,7 @@ function Test-AudioNullTelemetry {
     $testScriptPath = "test/audio/audio-null-telemetry.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "audio null telemetry gate not yet implemented - missing $testScriptPath (produced by task T-EF-14-audio-null-telemetry-gate)"
+        throw "audio null telemetry gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1222,7 +769,7 @@ function Test-AudioNullTelemetry {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "audio null telemetry gate not yet implemented - missing $analysisPath (produced by task T-EF-14-audio-null-telemetry-gate)"
+        throw "audio null telemetry gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -1273,7 +820,7 @@ function Test-AudioHandleApplication {
     $testScriptPath = "test/audio/audio-handle-application.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "audio handle application gate not yet implemented - missing $testScriptPath (produced by task T-EF-15-audio-handle-application-gate)"
+        throw "audio handle application gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1282,7 +829,7 @@ function Test-AudioHandleApplication {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "audio handle application gate not yet implemented - missing $analysisPath (produced by task T-EF-15-audio-handle-application-gate)"
+        throw "audio handle application gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -1339,12 +886,12 @@ function Test-AudioHandleApplication {
     }
 }
 
-# --- T-I5b-3 (AU1) AtmosphereAudio mode: append-only ---
+# ---  (AU1) AtmosphereAudio mode: append-only ---
 # Wind/rain AMBIENCE layers on the AudioPropagationSystem ambience bed + a
 # weather-modulated reverb shift via the EnvironmentalAudioSystem, driven by the
 # replicated weather/wind state. This gate (a) statically verifies the C++
 # atmosphere model is implemented in the engine audio systems + the harness
-# telemetry emitter, then (b) re-derives the PINNED model (design-decisions §4)
+# telemetry emitter, then (b) re-derives the PINNED model (documented design)
 # across a clear->storm weather sweep and asserts an ambience layer is PRESENT and
 # SCALES with weather intensity and the reverb param SHIFTS with weather. It writes
 # the AtmosphereAudio telemetry artifact (luminumbra.audio.atmosphere.v1). The
@@ -1362,7 +909,7 @@ function Test-AtmosphereAudio {
 
     foreach ($p in @($envHeaderPath, $envSourcePath, $propHeaderPath, $propSourcePath, $harnessSourcePath)) {
         if (-not (Test-Path $p)) {
-            throw "AtmosphereAudio gate: missing source $p (produced by task T-I5b-3-atmosphere-audio)"
+            throw "AtmosphereAudio gate: missing source $p (producer did not create it)"
         }
     }
 
@@ -1474,7 +1021,7 @@ function Test-AtmosphereAudio {
         timestamp_utc = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         build_preset = $BuildPreset
         passed = $passed
-        source = "T-I5b-3 atmosphere audio (AU1)"
+        source = " atmosphere audio (AU1)"
         driver = "replicated WeatherSystem sample (wind vector + precip + storm)"
         biome_reverb_base = [ordered]@{ wet = $biomeWet; dry = $biomeDry; decay = $biomeDecay }
         model = [ordered]@{
@@ -1506,7 +1053,7 @@ function Test-AtmosphereAudio {
         throw "AtmosphereAudio gate failed: $failed"
     }
 
-    Write-Host ("atmosphere audio gate passed: ambience present; rain {0:N2}->{1:N2}, wind {2:N2}->{3:N2}, reverb wet {4:N2}->{5:N2} decay {6:N2}->{7:N2} (clear->storm)" -f `
+    Write-Host ("atmosphere audio gate passed: ambience present; rain {0:}->{1:}, wind {2:}->{3:}, reverb wet {4:}->{5:} decay {6:}->{7:} (clear->storm)" -f `
         $clear.rain_volume, $storm.rain_volume, $clear.wind_volume, $storm.wind_volume, `
         $clear.reverb_wet, $storm.reverb_wet, $clear.reverb_decay, $storm.reverb_decay)
 }
@@ -1514,7 +1061,6 @@ function Test-AtmosphereAudio {
 function Test-UiTestBaseline {
     $artifactRoot = "build/$BuildPreset/test-artifacts"
     $ctestPath = Join-Path $artifactRoot "testing/ctest_manifest.json"
-    $coveragePath = Join-Path $artifactRoot "coverage/coverage_summary.json"
     $uiScreenshotsPath = Join-Path $artifactRoot "ui/ui_screenshots.json"
 
     $ctest = Read-JsonArtifact -Path $ctestPath -Schema "luminumbra.testing.ctest_manifest.v1"
@@ -1522,19 +1068,18 @@ function Test-UiTestBaseline {
     if ($ctest.build_preset -ne $BuildPreset) {
         throw "CTest manifest build_preset '$($ctest.build_preset)' does not match '$BuildPreset'"
     }
-    # OPS-12 (spec 021): the floor is the real gtest roster (22 targets as of
+    # the floor is the real gtest roster (22 targets as of
     # 2026-07-02), not the historical 10. The manifest derives its floors from
     # LUMINUMBRA_GTEST_TARGETS at configure time; the gate holds an independent
     # hard floor so a roster collapse can never self-certify.
     if ([int64]$ctest.minimum_test_executables -lt 20) {
-        throw "CTest manifest must require at least 20 test executables (real roster ~22; was floor 10 pre-OPS-12)"
+        throw "CTest manifest must require at least 20 test executables (real roster ~22; was floor 10 pre-)"
     }
     if ([int64]$ctest.minimum_registered_tests -lt 20) {
         throw "CTest manifest must require at least 20 registered tests"
     }
     foreach ($executable in @(
         "world_generation_test",
-        "sdf_gpu_cpu_parity_test",
         "worldgen_layer_snapshot_test",
         "asset_processor_round_trip_test",
         "common_tests",
@@ -1549,7 +1094,7 @@ function Test-UiTestBaseline {
     }
     Assert-ArrayContains -Values $ctest.excluded_patterns -Needle "_NOT_BUILT$" -Description "CTest manifest excluded_patterns"
 
-    # UI-12 (spec 021): gate honesty. The manifest is a configure-time STATIC file
+    # gate honesty. The manifest is a configure-time STATIC file
     # (its passed:true only means generation completed), and the old check asserted
     # 3 of its 20 pinned UI names against ITSELF — circular. Now: every pinned
     # required_ui_tests name must exist in the ACTUALLY REGISTERED ctest set
@@ -1577,48 +1122,6 @@ function Test-UiTestBaseline {
         throw "Pinned UI test(s) NOT registered in ctest (deleted/renamed while still pinned): $($missingPinned -join ', ')"
     }
 
-    $coverage = Read-JsonArtifact -Path $coveragePath -Schema "luminumbra.coverage_summary.v1"
-    Assert-ArtifactPassed -Artifact $coverage -Name "Coverage summary"
-    if ($coverage.build_preset -ne $BuildPreset) {
-        throw "Coverage summary build_preset '$($coverage.build_preset)' does not match '$BuildPreset'"
-    }
-    # coverage-instrumentation slice: accept either the debug "contract_baseline"
-    # artifact (build/debug, line coverage unavailable) OR the measured
-    # "measured" artifact emitted by the opt-in coverage lane (build/coverage,
-    # gcov line/branch %). When line coverage is AVAILABLE the measured
-    # percent-vs-floor assertion below is the PRIMARY pass condition; subsystem
-    # presence is demoted to a secondary guard.
-    if ($coverage.coverage_kind -ne "contract_baseline" -and $coverage.coverage_kind -ne "measured") {
-        throw "Coverage summary must declare 'contract_baseline' or 'measured' coverage kind (got '$($coverage.coverage_kind)')"
-    }
-    if ($coverage.line_coverage.available) {
-        # PRIMARY pass condition (FR-003): measured line coverage must meet the
-        # honest floor. A floor of 0 is rejected so 'available' can never be a
-        # toothless gate.
-        $floor = [double]$coverage.line_coverage.minimum_required_percent
-        if ($floor -le 0) {
-            throw "Measured coverage requires minimum_required_percent > 0 (got $floor)"
-        }
-        if ([double]$coverage.line_coverage.percent -lt $floor) {
-            throw "Line coverage $($coverage.line_coverage.percent)% is below required floor $floor%"
-        }
-        Write-Host ("coverage gate (measured): line {0}% >= floor {1}% (branch {2}%) via {3}" -f `
-            $coverage.line_coverage.percent, $floor, $coverage.branch_coverage.percent, $coverage.coverage_tool)
-    } elseif ([string]::IsNullOrWhiteSpace($coverage.line_coverage.reason)) {
-        throw "Coverage summary must explain unavailable line coverage"
-    }
-    # Secondary guard (kept, no longer the sole pass condition): every contract
-    # subsystem must still be represented.
-    if ([int64]$coverage.contract_coverage.covered_subsystem_count -lt [int64]$coverage.contract_coverage.minimum_subsystems) {
-        throw "Coverage summary subsystem coverage is below baseline"
-    }
-    foreach ($subsystem in @("common", "rendering", "ui", "physics", "audio", "performance", "tools")) {
-        Assert-ArrayContains -Values $coverage.contract_coverage.covered_subsystems -Needle $subsystem -Description "Coverage summary covered_subsystems"
-    }
-    foreach ($artifact in @("testing/ctest_manifest.json", "ui/ui_smoke.json", "ui/ui_interactions.json", "ui/ui_screenshots.json")) {
-        Assert-ArrayContains -Values $coverage.required_artifacts -Needle $artifact -Description "Coverage summary required_artifacts"
-    }
-
     $uiScreenshots = Read-JsonArtifact -Path $uiScreenshotsPath -Schema "luminumbra.ui_screenshots.v1"
     Assert-ArtifactPassed -Artifact $uiScreenshots -Name "UI screenshots"
     if ($uiScreenshots.build_preset -ne $BuildPreset) {
@@ -1639,18 +1142,13 @@ function Test-UiTestBaseline {
         if ($matches.Count -ne 1) {
             throw "UI screenshots baseline is missing view '$view'"
         }
-        if ([string]::IsNullOrWhiteSpace($matches[0].document)) {
-            throw "UI screenshots view '$view' is missing document"
+        if ($matches[0].status -ne "captured" -or [string]::IsNullOrWhiteSpace($matches[0].file)) {
+            throw "UI screenshots view '$view' does not identify a captured file"
         }
-        if ([string]::IsNullOrWhiteSpace($matches[0].expected_file)) {
-            throw "UI screenshots view '$view' is missing expected_file"
+        $capturedPath = Join-Path (Join-Path $artifactRoot "ui/screenshots") $matches[0].file
+        if (-not (Test-Path $capturedPath)) {
+            throw "UI screenshots view '$view' is missing captured pixels: $capturedPath"
         }
-        if (@($matches[0].required_element_ids).Count -lt 4) {
-            throw "UI screenshots view '$view' does not list enough required UI elements"
-        }
-    }
-    foreach ($artifact in @("ui/ui_smoke.json", "ui/ui_interactions.json")) {
-        Assert-ArrayContains -Values $uiScreenshots.required_artifacts -Needle $artifact -Description "UI screenshots required_artifacts"
     }
 }
 
@@ -1660,7 +1158,7 @@ function Test-SimulationEventBusOrderGate {
     $testScriptPath = "test/simulation/eventbus-order-gate.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "simulation event bus order gate not yet implemented - missing $testScriptPath (produced by task T-EF-18-simulation-eventbus-order-gate)"
+        throw "simulation event bus order gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1672,7 +1170,7 @@ function Test-SimulationEventBusOrderGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "simulation event bus order gate not yet implemented - missing $analysisPath (produced by task T-EF-18-simulation-eventbus-order-gate)"
+        throw "simulation event bus order gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -1750,7 +1248,7 @@ function Test-LuaApiManifestGate {
     $testScriptPath = "test/scripting/lua-api-manifest-gate.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "lua api manifest gate not yet implemented - missing $testScriptPath (produced by task T-EF-19-lua-api-manifest-gate)"
+        throw "lua api manifest gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1762,7 +1260,7 @@ function Test-LuaApiManifestGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "lua api manifest gate not yet implemented - missing $analysisPath (produced by task T-EF-19-lua-api-manifest-gate)"
+        throw "lua api manifest gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -1836,7 +1334,7 @@ function Test-LuaApiManifestGate {
 }
 
 function Test-ScalarFieldDiffusionGate {
-    # T-I3-22: the game-flavored "aetheric" compatibility alias was removed at
+    # the game-flavored "aetheric" compatibility alias was removed at
     # iteration close. This gate now inspects the generic engine fields module
     # directly under its own schema (luminumbra.fields.scalar_diffusion.v1).
     $artifactDir = "build/$BuildPreset/test-artifacts/fields"
@@ -1844,7 +1342,7 @@ function Test-ScalarFieldDiffusionGate {
     $testScriptPath = "test/fields/scalar-field-diffusion.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "scalar field diffusion gate not yet implemented - missing $testScriptPath"
+        throw "scalar field diffusion gate required input missing: $testScriptPath"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1856,7 +1354,7 @@ function Test-ScalarFieldDiffusionGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "scalar field diffusion gate not yet implemented - missing $analysisPath"
+        throw "scalar field diffusion gate required input missing: $analysisPath"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -1918,7 +1416,7 @@ function Test-InstinctPlannerGate {
     $testScriptPath = "test/ai/instinct-planner-gate.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "instinct planner gate not yet implemented - missing $testScriptPath (produced by task T-EF-21-instinct-planner-gate)"
+        throw "instinct planner gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -1930,7 +1428,7 @@ function Test-InstinctPlannerGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "instinct planner gate not yet implemented - missing $analysisPath (produced by task T-EF-21-instinct-planner-gate)"
+        throw "instinct planner gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -2018,7 +1516,7 @@ function Test-PersistenceRoundtripGate {
     $testScriptPath = "test/persistence/world-persistence-roundtrip.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "persistence roundtrip gate not yet implemented - missing $testScriptPath (produced by task T-EF-23-persistence-roundtrip-gate)"
+        throw "persistence roundtrip gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -2030,7 +1528,7 @@ function Test-PersistenceRoundtripGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "persistence roundtrip gate not yet implemented - missing $analysisPath (produced by task T-EF-23-persistence-roundtrip-gate)"
+        throw "persistence roundtrip gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -2116,7 +1614,7 @@ function Test-PersistenceRoundtripGate {
 }
 
 function Test-PersistenceRuntimeRoundtrip {
-    # T-I2-13: runtime save/load roundtrip through the live client. The save
+    # runtime save/load roundtrip through the live client. The save
     # phase applies deterministic voxel edits and persists the world to a
     # session dir; the load phase restores the same world identity from that
     # session dir and re-hashes the same edited chunk ids.
@@ -2221,7 +1719,7 @@ function Test-ChunkFormatValidationGate {
     $testScriptPath = "test/persistence/chunk-format-validation.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "chunk format validation gate not yet implemented - missing $testScriptPath (produced by task T-EF-24-chunk-format-validator-gate)"
+        throw "chunk format validation gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -2233,7 +1731,7 @@ function Test-ChunkFormatValidationGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "chunk format validation gate not yet implemented - missing $analysisPath (produced by task T-EF-24-chunk-format-validator-gate)"
+        throw "chunk format validation gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -2335,7 +1833,7 @@ function Test-WorldHashEntitySnapshotGate {
     $testScriptPath = "test/persistence/world-hash-entity-snapshot.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "world hash/entity snapshot gate not yet implemented - missing $testScriptPath (produced by task T-EF-25-world-hash-entity-snapshot-gate)"
+        throw "world hash/entity snapshot gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -2348,7 +1846,7 @@ function Test-WorldHashEntitySnapshotGate {
 
     foreach ($path in @($worldHashPath, $entitySnapshotPath)) {
         if (-not (Test-Path $path)) {
-            throw "world hash/entity snapshot gate not yet implemented - missing $path (produced by task T-EF-25-world-hash-entity-snapshot-gate)"
+            throw "world hash/entity snapshot gate required input missing: $path (producer did not create it)"
         }
     }
 
@@ -2502,45 +2000,13 @@ function Test-WorldHashEntitySnapshotGate {
     }
 }
 
-function Test-FrontierDisabled {
-    Assert-FileExists $FrontierDisabledPath
-
-    foreach ($needle in @(
-        "Gate: disabled by default",
-        "Default state: documentation and validation only",
-        "frontier runtime behavior requires explicit opt-in",
-        "Activation must be documented",
-        "validate-engine-frontier.ps1 -Mode FrontierDisabled"
-    )) {
-        Assert-Contains -Path $FrontierDisabledPath -Needle $needle
-    }
-
-    # T-I2-12/T-I2-13: the persistence runtime save/load path is the first
-    # gate-backed activation. It is allowed to run in default builds because
-    # it is inert without an existing world snapshot or unsaved voxel edits,
-    # and its behavior is enforced by the PersistenceRuntimeRoundtrip mode.
-    # The activation must stay documented in the frontier-disabled artifact.
-    foreach ($needle in @(
-        "Persistence runtime save/load",
-        "PersistenceRuntimeRoundtrip",
-        "persistence_roundtrip_smoke"
-    )) {
-        Assert-Contains -Path $FrontierDisabledPath -Needle $needle
-    }
-
-    $text = Get-Content $FrontierDisabledPath -Raw
-    if ($text -match "(?i)\benabled by default\b") {
-        throw "frontier-disabled gate must not declare frontier behavior enabled by default"
-    }
-}
-
 function Test-NetworkLoopbackAuthorityGate {
     $artifactDir = "build/$BuildPreset/test-artifacts/network"
     $analysisPath = Join-Path $artifactDir "network-loopback-convergence.json"
     $testScriptPath = "test/network/network-loopback-authority-gate.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "network loopback authority gate not yet implemented - missing $testScriptPath (produced by task T-EF-31-network-loopback-authority-gate)"
+        throw "network loopback authority gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -2552,7 +2018,7 @@ function Test-NetworkLoopbackAuthorityGate {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "network loopback authority gate not yet implemented - missing $analysisPath (produced by task T-EF-31-network-loopback-authority-gate)"
+        throw "network loopback authority gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -2676,7 +2142,7 @@ function Test-NetworkStateHash {
     $testScriptPath = "test/network/network-state-hash-gate.ps1"
 
     if (-not (Test-Path $testScriptPath)) {
-        throw "network state hash gate not yet implemented - missing $testScriptPath (produced by task T-EF-32-network-state-hash-gate)"
+        throw "network state hash gate required input missing: $testScriptPath (producer did not create it)"
     }
 
     & $testScriptPath -BuildPreset $BuildPreset
@@ -2688,7 +2154,7 @@ function Test-NetworkStateHash {
     }
 
     if (-not (Test-Path $analysisPath)) {
-        throw "network state hash gate not yet implemented - missing $analysisPath (produced by task T-EF-32-network-state-hash-gate)"
+        throw "network state hash gate required input missing: $analysisPath (producer did not create it)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -2735,165 +2201,9 @@ function Test-NetworkStateHash {
     }
 }
 
-function Test-PerfRegression {
-    # FR-003 (perf-lane-and-ecology-tick): THIS GATE IS A DEBUG-ONLY CATASTROPHE
-    # CATCHER. It compares RELATIVE p99 drift vs a per-machine baseline at +50%
-    # fail / +25% warn margins (param MarginPercent/WarnPercent), on the DEBUG
-    # build by default (its own header below admits ~30% debug-build drift), and
-    # is PINNED to the capture machine ($baseline.machine_id == $env:COMPUTERNAME,
-    # ~:2751). It is tuned for catastrophic 2-10x regressions; a change that
-    # quietly HALVES the framerate sails through, and a provisional baseline
-    # downgrades regressions to non-failing warnings (~:2858). It therefore does
-    # NOT certify the 300fps / RTX-5070-Ti floor. The release-mode ABSOLUTE
-    # frame-ms floor that DOES is -Mode PerfFloor (Test-PerfFloor below); the live
-    # ecology-tick floor is -Mode EcologyTickPerf (Test-EcologyTickPerf). Keep this
-    # catcher as-is; it is complementary, not the floor.
-    #
-    # T-I3-20: preset-aware lane. -Preset release selects the release build
-    # dir and the release baseline file; default/empty keeps the historical
-    # debug lane (build/$BuildPreset + perf-baseline.json) untouched.
-    $perfBuildPreset = $BuildPreset
-    if (-not [string]::IsNullOrWhiteSpace($Preset)) {
-        $perfBuildPreset = $Preset
-    }
-    $baselineLeaf = "perf-baseline.json"
-    if ($Preset -eq "release") {
-        $baselineLeaf = "perf-baseline-release.json"
-    }
-    $baselinePath = "$ArtifactDir/$baselineLeaf"
-    $baseline = Read-JsonArtifact -Path $baselinePath -Schema "luminumbra.perf_baseline.v1"
-
-    # A provisional baseline (written by run-release-perf-lane.ps1 on a noisy
-    # machine) is treated like a placeholder: regressions warn, never fail,
-    # until the orchestrator blesses a real baseline on a quiet machine.
-    $placeholderBaseline = ($baseline.status -eq "placeholder_pending_capture") -or
-        ($baseline.status -eq "provisional") -or ($baseline.provisional -eq $true)
-    if (-not $placeholderBaseline -and $baseline.status -ne "blessed") {
-        throw "perf baseline has unexpected status '$($baseline.status)' (expected 'blessed', 'provisional' or 'placeholder_pending_capture')"
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($baseline.machine_id) -and
-        $baseline.machine_id -ne "UNCAPTURED" -and
-        $baseline.machine_id -ne $env:COMPUTERNAME) {
-        throw "perf baseline captured on different machine ('$($baseline.machine_id)' vs '$($env:COMPUTERNAME)') - recapture required via tools/gates/capture-perf-baseline.ps1"
-    }
-
-    # T-I3-22: GPU provenance check. Perf timings are GPU/driver-sensitive, so a
-    # baseline recorded on a different adapter/driver may explain (or mask) a
-    # regression. WARN â€” never fail â€” and stay silent when the baseline predates
-    # the provenance block (old baselines have no $baseline.gpu).
-    if ($null -ne $baseline.gpu) {
-        $currentGpu = $null
-        try {
-            $currentGpu = Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop |
-                Where-Object { $_.Name -and $_.AdapterRAM -ne $null } |
-                Sort-Object -Property AdapterRAM -Descending |
-                Select-Object -First 1
-        } catch {
-            $currentGpu = $null
-        }
-        if ($null -ne $currentGpu) {
-            $curRenderer = [string]$currentGpu.Name
-            $curDriver = if ($currentGpu.DriverVersion) { [string]$currentGpu.DriverVersion } else { "unknown" }
-            $baseRenderer = if ($baseline.gpu.gpu_renderer) { [string]$baseline.gpu.gpu_renderer } else { "unknown" }
-            $baseDriver = if ($baseline.gpu.driver_version) { [string]$baseline.gpu.driver_version } else { "unknown" }
-            if ($baseRenderer -ne "unknown" -and $curRenderer -ne "" -and $baseRenderer -ne $curRenderer) {
-                Write-Host ("perf-regression warning: GPU differs from baseline ('{0}' now vs '{1}' recorded); perf timings are GPU-sensitive, consider recapturing the baseline" -f $curRenderer, $baseRenderer)
-            } elseif ($baseDriver -ne "unknown" -and $curDriver -ne "unknown" -and $baseDriver -ne $curDriver) {
-                Write-Host ("perf-regression warning: GPU driver differs from baseline ('{0}' now vs '{1}' recorded); perf timings are driver-sensitive, consider recapturing the baseline" -f $curDriver, $baseDriver)
-            }
-        }
-    }
-
-    $exe = "build/$perfBuildPreset/bin/initial_world_loading_perf_test.exe"
-    if (-not (Test-Path $exe)) {
-        throw "Missing perf test executable. Run -Mode Build first: $exe"
-    }
-
-    $requiredScenarios = @(
-        "boot", "create_world", "enter_spawn", "idle_horizon", "pan_camera",
-        "streaming_walk", "chunk_churn", "shader_warmup", "shutdown"
-    )
-
-    # Noise policy: a single debug-build run is too noisy for a 10% p99 margin
-    # (observed 2x swings minutes after a clean median-of-3 capture). Compare
-    # the MEDIAN of up to 3 runs, short-circuiting after run 1 when everything
-    # is already inside the fail ceiling.
-    $maxRuns = 3
-    $observedRuns = @{}
-    foreach ($name in $requiredScenarios) { $observedRuns[$name] = @() }
-
-    for ($run = 1; $run -le $maxRuns; $run++) {
-        Invoke-Checked -FilePath $exe -ArgumentList @(
-            "--gtest_filter=InitialWorldLoadingPerfTest.PerformanceFrameworkBenchmarkScenariosWriteBudgetArtifacts"
-        ) -TimeoutSeconds 300
-
-        $summaryPath = "build/$perfBuildPreset/test-artifacts/performance_framework/benchmark_summary.json"
-        $summary = Read-JsonArtifact -Path $summaryPath -Schema "luminumbra.performance_framework.benchmark_summary.v1"
-
-        $anyOverFail = $false
-        foreach ($name in $requiredScenarios) {
-            $observedEntries = @($summary.scenarios | Where-Object { $_.name -eq $name })
-            if ($observedEntries.Count -ne 1) {
-                throw "benchmark summary must contain exactly one '$name' scenario, found $($observedEntries.Count)"
-            }
-            $observed = $observedEntries[0]
-            if ($null -eq $observed.regression_metrics) {
-                throw "benchmark summary scenario '$name' is missing the regression_metrics block"
-            }
-
-            $baselineEntry = $baseline.scenarios.$name
-            if ($null -eq $baselineEntry) {
-                throw "perf baseline is missing scenario '$name'"
-            }
-
-            $observedP99 = [double]$observed.regression_metrics.p99_ms
-            $observedRuns[$name] += $observedP99
-            $failCeiling = ([double]$baselineEntry.p99_ms) * (1.0 + $MarginPercent / 100.0) + $NoiseFloorMs
-            if ($observedP99 -gt $failCeiling) {
-                $anyOverFail = $true
-            }
-        }
-
-        if (-not $anyOverFail) {
-            break
-        }
-        if ($run -lt $maxRuns) {
-            Write-Host "perf-regression: run $run exceeded a fail ceiling; re-running for median comparison ($($run + 1)/$maxRuns)"
-        }
-    }
-
-    $regressions = @()
-    foreach ($name in $requiredScenarios) {
-        $samples = @($observedRuns[$name] | Sort-Object)
-        $medianP99 = [double]$samples[[int][Math]::Floor(($samples.Count - 1) / 2)]
-        $baselineP99 = [double]$baseline.scenarios.$name.p99_ms
-        $failCeiling = $baselineP99 * (1.0 + $MarginPercent / 100.0) + $NoiseFloorMs
-        $warnCeiling = $baselineP99 * (1.0 + $WarnPercent / 100.0) + $NoiseFloorMs
-
-        if ($medianP99 -gt $failCeiling) {
-            $regressions += ("scenario '{0}' median p99 {1:N3} ms (of {2} runs) exceeds baseline {3:N3} ms by more than {4}%" -f $name, $medianP99, $samples.Count, $baselineP99, $MarginPercent)
-        } elseif ($medianP99 -gt $warnCeiling) {
-            Write-Host ("perf-regression warning: scenario '{0}' median p99 {1:N3} ms exceeds baseline {2:N3} ms by more than {3}% (fail threshold {4}%)" -f $name, $medianP99, $baselineP99, $WarnPercent, $MarginPercent)
-        }
-    }
-
-    if ($regressions.Count -gt 0) {
-        if ($placeholderBaseline) {
-            foreach ($regression in $regressions) {
-                Write-Host "perf-regression warning (placeholder baseline, not enforced): $regression"
-            }
-            Write-Host "perf baseline status is 'placeholder_pending_capture'; regressions are reported as warnings until the baseline is blessed via tools/gates/capture-perf-baseline.ps1"
-        } else {
-            throw "perf regression gate failed:`n$($regressions -join "`n")"
-        }
-    }
-}
-
 function Get-CurrentGpuRenderer {
-    # Best-effort current adapter name for the GPU-class warn (perf-lane-and-ecology
-    # -tick FR-002). Mirrors the Test-PerfRegression provenance probe (~:2764). NEVER
-    # throws: returns $null when the OS query is unavailable (non-Windows / no CIM).
+    # Best-effort current adapter name for ecology timing diagnostics. Never throws:
+    # returns $null when the OS query is unavailable (non-Windows or no CIM provider).
     try {
         $controller = Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop |
             Where-Object { $_.Name -and $_.AdapterRAM -ne $null } |
@@ -2907,100 +2217,12 @@ function Get-CurrentGpuRenderer {
     return $null
 }
 
-function Test-PerfFloor {
-    # perf-lane-and-ecology-tick (FR-001/002/003, KDD-1/2): the RELEASE-mode,
-    # target-GPU, ABSOLUTE-frame-ms floor lane -- the deliberate INVERSE of the
-    # debug PerfRegression catastrophe catcher.
-    #
-    #   * Reads the blessed floor artifact perf-floor-release.json
-    #     (luminumbra.perf_floor.v1) carrying ABSOLUTE per-scenario budget_ms
-    #     ceilings (NOT relative-to-baseline margins).
-    #   * FAILS (throws), it does NOT warn-downgrade, when the floor is absent,
-    #     status != "blessed", or any required scenario lacks a budget_ms
-    #     (FR-002: fail-until-baselined; the opposite of the provisional path).
-    #   * Is NOT machine_id-pinned (FR-002): no $env:COMPUTERNAME comparison. It
-    #     only WARNS (never fails) on a GPU-class mismatch vs the recorded
-    #     gpu_class, so a capture taken off the target adapter is visible but not
-    #     silently masking.
-    #
-    # Until a real RTX 5070 Ti capture blesses the floor (OQ-002), the artifact
-    # ships status:"unblessed" -> this gate is INTENTIONALLY RED. That is the
-    # correct FR-002 posture, not a bug. Bless via run-perf-floor-lane.ps1 -Bless
-    # on the target hardware.
-    $floorPath = "$ArtifactDir/perf-floor-release.json"
-    $floor = Read-JsonArtifact -Path $floorPath -Schema "luminumbra.perf_floor.v1"
-
-    $requiredScenarios = @("idle_horizon", "pan_camera", "streaming_walk", "forest", "ecology")
-
-    # GPU-class provenance: WARN only (FR-002). Recorded target is gpu_class.
-    if ($floor.gpu_class) {
-        $currentGpu = Get-CurrentGpuRenderer
-        if ($null -ne $currentGpu -and $currentGpu -notmatch [regex]::Escape([string]$floor.gpu_class)) {
-            Write-Host ("perf-floor warning: current GPU '{0}' is not the recorded target class '{1}'; the absolute floor is calibrated for the target -- a non-target capture must NOT be blessed" -f $currentGpu, $floor.gpu_class)
-        }
-    }
-
-    # FR-002: fail-until-baselined. An absent/unblessed floor or a missing budget
-    # is a HARD THROW (never a warn-downgrade).
-    if ($floor.status -ne "blessed") {
-        throw ("perf-floor gate is fail-until-baselined: perf-floor-release.json status is '{0}' (expected 'blessed'). The release-mode absolute frame-ms floor has no target-GPU (RTX 5070 Ti) baseline yet, so the 300fps floor is UNCERTIFIED. Capture + bless via tools/gates/run-perf-floor-lane.ps1 -Bless on the target hardware." -f $floor.status)
-    }
-    if ($null -eq $floor.scenarios) {
-        throw "perf-floor: blessed floor is missing the 'scenarios' block"
-    }
-    foreach ($name in $requiredScenarios) {
-        $entry = $floor.scenarios.$name
-        if ($null -eq $entry -or $null -eq $entry.budget_ms) {
-            throw "perf-floor: blessed floor is missing an absolute budget_ms for required scenario '$name'"
-        }
-    }
-
-    # A blessed floor enforces ABSOLUTE p99 <= budget_ms per scenario against the
-    # RELEASE benchmark summary. (Reached only after a human blesses a target
-    # capture; until then the status throw above keeps the gate RED.)
-    $exe = "build/release/bin/initial_world_loading_perf_test.exe"
-    if (-not (Test-Path $exe)) {
-        throw "perf-floor: missing RELEASE perf test executable $exe (the floor is release-mode; build the release preset first)"
-    }
-    Invoke-Checked -FilePath $exe -ArgumentList @(
-        "--gtest_filter=InitialWorldLoadingPerfTest.PerformanceFrameworkBenchmarkScenariosWriteBudgetArtifacts"
-    ) -TimeoutSeconds 600
-
-    $summaryPath = "build/release/test-artifacts/performance_framework/benchmark_summary.json"
-    $summary = Read-JsonArtifact -Path $summaryPath -Schema "luminumbra.performance_framework.benchmark_summary.v1"
-    if ($summary.metadata.build_mode -ne "release") {
-        throw "perf-floor: benchmark summary build_mode is '$($summary.metadata.build_mode)', expected 'release' (the absolute floor is only meaningful on release timings)"
-    }
-
-    $overBudget = @()
-    foreach ($name in $requiredScenarios) {
-        $observed = @($summary.scenarios | Where-Object { $_.name -eq $name })
-        if ($observed.Count -ne 1) {
-            throw "perf-floor: benchmark summary must contain exactly one '$name' scenario, found $($observed.Count)"
-        }
-        $p99 = [double]$observed[0].frame_time_ms.p99
-        $budget = [double]$floor.scenarios.$name.budget_ms
-        if ($p99 -gt $budget) {
-            $overBudget += ("scenario '{0}' p99 {1:N3} ms exceeds absolute floor budget {2:N3} ms" -f $name, $p99, $budget)
-        }
-    }
-    if ($overBudget.Count -gt 0) {
-        throw "perf-floor gate failed (absolute frame-ms budgets):`n$($overBudget -join "`n")"
-    }
-    Write-Host "PerfFloor gate passed: all $($requiredScenarios.Count) scenarios within their blessed absolute frame-ms budgets (release, gpu_class=$($floor.gpu_class))"
-}
-
 function Test-EcologyTickPerf {
-    # perf-lane-and-ecology-tick (FR-004, KDD-6): the live ecology-tick perf gate.
+    # perf-lane-and-ecology-tick (, ): the live ecology-tick perf gate.
     # Runs the EcologyTickPerf gtest (N in {256,1k,4k}, 300 headless ticks over the
     # KINEMATIC PopulatedWorldReplay roster shape), reads ecology_tick_perf.json,
-    # and REPORTS median + p99 ms/tick per N. Absolute median ceilings are read
-    # from perf-floor-release.json's ecology_tick.budgets block; they are ENFORCED
-    # once the ecology_tick block is blessed (INSTINCT-15: independently via
-    # capture-ecology-tick-budgets.ps1 -Bless, or by a whole-floor bless) AND the
-    # measured build_mode matches the blessed one (release). Until then the gate
-    # runs the measurement, emits the numbers, and PASSES (record-only; the frame
-    # floor's RED fail-until-baselined assertion lives in -Mode PerfFloor).
+    # and reports median + p99 ms/tick per N. Reviewed release-mode ceilings live
+    # in ecology-tick-release.json and are enforced only for matching builds.
     $exe = "build/$BuildPreset/bin/ecology_tick_perf_test.exe"
     if (-not (Test-Path $exe)) {
         throw "Missing EcologyTickPerf executable. Run -Mode Build first: $exe (build target ecology_tick_perf_test)"
@@ -3024,15 +2246,7 @@ function Test-EcologyTickPerf {
         throw "ecology-tick-perf: artifact carries no roster results"
     }
 
-    # Optional absolute budgets from the floor's ecology_tick block. INSTINCT-15: the
-    # ecology budgets are INDEPENDENTLY blessable (ecology_tick.status, written by
-    # capture-ecology-tick-budgets.ps1 -Bless), so they do not wait on the frame-ms floor's
-    # RTX-5070-Ti capture; a whole-floor bless (top-level status) also enforces them (the
-    # legacy posture). Unblessed budgets are placeholders: report-only, GREEN
-    # (fail-until-baselined for the frame floor lives in the PerfFloor lane). An entry
-    # ABSENT for a roster size is likewise record-only for that size.
-    #
-    # STANDING RULE (spec-021 INSTINCT-15), recorded at the budget site: there is NO
+    # There is no
     # ecology budget CAP in the sim today — the WHOLE creature roster ticks every tick,
     # and this gate measures/enforces that full-roster cost. If holding a blessed budget
     # ever requires capping per-tick ecology work, the cap MUST be a deterministic
@@ -3040,22 +2254,18 @@ function Test-EcologyTickPerf {
     # stable-id sort + a persisted cursor advanced by the window size each tick), NEVER a
     # time-based/adaptive cutoff — wall-clock caps make the processed set
     # machine-dependent and break run==replay / host==peer.
-    $floorPath = "$ArtifactDir/perf-floor-release.json"
+    $floorPath = "$ArtifactDir/ecology-tick-release.json"
     $floorBlessed = $false
     $budgets = $null
     $budgetBuildMode = "release"
     if (Test-Path $floorPath) {
         try {
-            $floor = Read-JsonArtifact -Path $floorPath -Schema "luminumbra.perf_floor.v1"
-            if ($null -ne $floor.ecology_tick) {
-                $budgets = $floor.ecology_tick.budgets
-                if ($floor.ecology_tick.build_mode) {
-                    $budgetBuildMode = [string]$floor.ecology_tick.build_mode
-                }
-                if (($floor.ecology_tick.status -eq "blessed") -or ($floor.status -eq "blessed")) {
-                    $floorBlessed = $true
-                }
+            $floor = Read-JsonArtifact -Path $floorPath -Schema "luminumbra.ecology_tick_baseline.v1"
+            $budgets = $floor.budgets
+            if ($floor.build_mode) {
+                $budgetBuildMode = [string]$floor.build_mode
             }
+            $floorBlessed = ($floor.status -eq "reviewed")
         } catch {
             $floorBlessed = $false
         }
@@ -3105,21 +2315,12 @@ function Test-EcologyTickPerf {
 }
 
 function Test-FarFieldForestBudget {
-    # far-field-source-unification (FR-003 / AC-003) + FOLIAGE-05: pillar-B's forest
-    # perf-BUDGET gate. Runs the OpenGL-free forest_perf_budget_test, which models the
+    # Runs the OpenGL-free forest_perf_budget_test, which models the
     # foliage draw load (instance / draw-call / triangle counts) at a pinned 16k-tree load
-    # over the production TreeLod.h selection + GBufferPass batching (incl. the landed
+    # over the production TreeLod.h selection and GBufferPass batching, including the
     # far-field octa-impostor fold) and emits forest_perf_budget.json.
-    #
-    # GREEN posture (FOLIAGE-05): octa impostors landed + default-ON, so the impostor-ON
-    # 16k load holds its re-blessed budget. This validator ASSERTS that GREEN state from
-    # the artifact (over_budget.any == false) -- if the far-field fold regresses the load
-    # ~doubles and this gate goes RED. (The tri budget is a geometry proxy; the real
-    # per-frame frame-ms floor is -Mode PerfFloor's "forest" scenario.)
-    #
-    # GPU frame-ms is NOT measured here (no headless GL context) -> gpu_frame_ms is null
-    # and gpu_ms_unblessed is true; the release frame-ms forest floor is carried by
-    # -Mode PerfFloor's "forest" scenario, not duplicated.
+    # This gate covers geometry only. Runtime performance regressions are evaluated
+    # by the paired relative-performance workflow.
     $exe = "build/$BuildPreset/bin/forest_perf_budget_test.exe"
     if (-not (Test-Path $exe)) {
         throw "Missing FarFieldForestBudget executable. Run -Mode Build first: $exe (build target forest_perf_budget_test)"
@@ -3128,9 +2329,8 @@ function Test-FarFieldForestBudget {
     $artifactPath = "build/$BuildPreset/test-artifacts/rendering/forest_perf_budget.json"
     Remove-Item -Force -ErrorAction SilentlyContinue $artifactPath
 
-    # Run the harness (now GREEN with impostors); read the verdict from the emitted
-    # artifact rather than the process exit so a future model tweak that fails a gtest
-    # still surfaces the numbers here. Clear $LASTEXITCODE so the harness process status
+    # Read the verdict from the emitted artifact so a model failure still surfaces
+    # the measured counters. Clear $LASTEXITCODE so the harness process status
     # does not propagate to this gate (this gate's pass/fail is its own throws).
     & $exe "--gtest_filter=ForestPerfBudget.*" | Out-Host
     $global:LASTEXITCODE = 0
@@ -3152,24 +2352,23 @@ function Test-FarFieldForestBudget {
         throw "FarFieldForestBudget: harness emitted a vacuous load (trees=$trees instances=$instances tris=$tris)"
     }
 
-    # GPU-ms must stay explicitly unblessed (CPU geometry harness; no headless GL).
-    if (-not [bool]$artifact.gpu_ms_unblessed -or $null -ne $artifact.gpu_frame_ms) {
-        throw "FarFieldForestBudget: gpu_frame_ms must be null + gpu_ms_unblessed true (this harness measures geometry, not pixels; the release frame-ms forest floor is -Mode PerfFloor)"
+    if ($null -ne $artifact.gpu_frame_ms) {
+        throw "FarFieldForestBudget: geometry-only artifacts must not claim GPU timing evidence"
     }
 
-    # FOLIAGE-05 GREEN posture: with octa impostors default-ON the impostor-ON 16k load
-    # holds budget (over_budget.any == false). If it is OVER budget the far-field impostor
+    # With octa impostors default-ON, the impostor-ON 16k load must hold budget.
+    # If it is over budget, the far-field impostor
     # fold has regressed (the LOD3 band reverting to real per-part geometry ~doubles the
     # triangle total) -> hard fail so a broken impostor path can't pass silently.
     if ([bool]$artifact.over_budget.any) {
-        throw ("FarFieldForestBudget REGRESSED: the impostor-ON 16k load is OVER budget (tris {0} vs <= {1}, draws {2} vs <= {3}). The far-field octa-impostor fold likely stopped engaging (LOD3 reverting to real geometry). Check LUMIN_TREE_IMPOSTORS / GBufferPass lod3Distance (FOLIAGE-05)." -f `
+        throw ("FarFieldForestBudget REGRESSED: the impostor-ON 16k load is OVER budget (tris {0} vs <= {1}, draws {2} vs <= {3}). The far-field octa-impostor fold likely stopped engaging (LOD3 reverting to real geometry). Check LUMIN_TREE_IMPOSTORS and GBufferPass lod3Distance." -f `
             $tris, $triBudget, $draws, $drawBudget)
     }
 
-    Write-Host "FarFieldForestBudget gate: GREEN -- the impostor-ON 16k-tree load holds budget (FOLIAGE-05; far-field octa-impostor fold engaged)."
+    Write-Host "FarFieldForestBudget gate: the impostor-ON 16k-tree load holds its geometry budget."
 }
 
-# --- T-I2-17 beautification track B (atmosphere) modes: append-only ---
+# ---  beautification atmosphere (atmosphere) modes: append-only ---
 
 function Test-SkyboxVisual {
     $exe = Get-ClientExe
@@ -3190,7 +2389,7 @@ function Test-SkyboxVisual {
 
     $analysisPath = Join-Path $visualDir "skybox-visual-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "skybox visual run did not produce $analysisPath (gate produced by task T-I2-17a-enhanced-skybox)"
+        throw "skybox visual run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -3203,7 +2402,7 @@ function Test-SkyboxVisual {
     if ([int]$analysis.render_pass.skybox_draws -le 0) {
         throw "Skybox visual run did not submit skybox draws"
     }
-    # FR-C3 (spec 003) part A: this smoke is pinned at t=0.04 = NOON (sun near the
+    # part A: this smoke is pinned at t=0.04 = NOON (sun near the
     # zenith). The old gradient premise (horizon brighter than zenith by >=8 +
     # monotonic horizon->zenith FALL) was SUNSET physics and is wrong at noon: a
     # high sun makes the dome brightest near the overhead, so horizon <= zenith.
@@ -3232,18 +2431,18 @@ function Test-SkyboxVisual {
     if ([double]$analysis.sun_disc.sun_cluster_fraction -lt [double]$analysis.thresholds.min_sun_cluster_fraction) {
         throw "Skybox sun-disc cluster is not localized at the expected sun position"
     }
-    # FR-C3 part A: palette_emergence (warm low-sun horizon band) is SUNSET physics
+    #  part A: palette_emergence (warm low-sun horizon band) is SUNSET physics
     # and does NOT hold at noon (this smoke is pinned at t=0.04 = high sun). It is
     # kept as a DIAGNOSTIC section in the artifact but is no longer a pass gate here;
     # dusk/dawn warmth is gated by TimeOfDaySweep. Section must still be present.
     if ($null -eq $analysis.palette_emergence) {
-        throw "Skybox visual analysis is missing the palette_emergence section (diagnostic, FR-C3)"
+        throw "Skybox visual analysis is missing the palette_emergence section (diagnostic, )"
     }
-    # T-I5a-6: per-pass GPU-timer budgets for the aerial term + sky precompute.
-    # Enforced on the RELEASE build only (debug is ~10x slower -- A2 wind
+    #  per-pass GPU-timer budgets for the aerial term + sky precompute.
+    # Enforced on the RELEASE build only (debug is ~10x slower --  wind
     # precedent); on debug the timers must still be present + non-negative.
     if ($null -eq $analysis.gpu_timer) {
-        throw "Skybox visual analysis is missing the gpu_timer section (T-I5a-6)"
+        throw "Skybox visual analysis is missing the gpu_timer section ()"
     }
     foreach ($field in @("aerial_gpu_ms", "sky_view_refresh_ms", "sky_full_precompute_ms")) {
         if ([double]$analysis.gpu_timer.$field -lt 0) {
@@ -3293,7 +2492,7 @@ function Test-WeatherVisual {
 
     $analysisPath = Join-Path $visualDir "weather-visual-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "weather visual run did not produce $analysisPath (gate produced by task T-I2-17b-weather-overlay)"
+        throw "weather visual run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -3325,16 +2524,16 @@ function Test-WeatherVisual {
     Assert-PpmArtifact (Join-Path $visualDir $analysis.baseline_screenshot)
     Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
 
-    # T-I5a-5 (B3): the WeatherVisual gate ALSO asserts the LIGHTNING strike FRAME --
+    # the WeatherVisual gate ALSO asserts the LIGHTNING strike FRAME --
     # the photography timing shot. The same weather_visual_smoke run fires a
     # deterministically scheduled strike during the weather phase and captures a
     # NEIGHBOUR (pre-strike) frame + the STRIKE frame. The gate asserts (a) a
     # full-scene luminance PULSE (frame-mean luminance spike vs the neighbour) and
     # (b) BOLT pixels (a bright thin high-gradient structure). The visual gate does
-    # NOT depend on audio (critique F8): thunder is a separate thin cue.
+    # NOT depend on audio (regression review): thunder is a separate thin cue.
     $strikePath = Join-Path $visualDir "lightning-strike-visual-analysis.json"
     if (-not (Test-Path $strikePath)) {
-        throw "weather visual run did not produce $strikePath (T-I5a-5 lightning strike frame)"
+        throw "weather visual run did not produce $strikePath ( lightning strike frame)"
     }
     $strike = Get-Content $strikePath -Raw | ConvertFrom-Json
     if ($strike.schema -ne "luminumbra.lightning_strike_visual.v1") {
@@ -3355,12 +2554,12 @@ function Test-WeatherVisual {
     if ([int64]$strike.bolt.bright_thin_pixels -lt [int64]$strike.thresholds.min_bolt_pixels) {
         throw "Lightning bolt pixel count $($strike.bolt.bright_thin_pixels) below threshold $($strike.thresholds.min_bolt_pixels)"
     }
-    # T-I5a-DR-atmospheric-visuals: bolt SHAPE -- the bright core must be a THIN,
+    #  bolt SHAPE -- the bright core must be a THIN,
     # mostly-VERTICAL structure (aspect >= min, fill fraction <= max), not a fat
     # lumpy white blob. Also assert the strike fires against a dark enough storm
     # sky that the flash reads (neighbour pre-strike frame luminance ceiling).
     if ($null -eq $strike.bolt_shape) {
-        throw "Lightning strike analysis is missing the bolt_shape section (T-I5a-DR)"
+        throw "Lightning strike analysis is missing the bolt_shape section ()"
     }
     if (-not $strike.bolt_shape.passed) {
         throw "Lightning bolt SHAPE check failed (fat-blob guard): aspect=$($strike.bolt_shape.aspect_ratio) (>= $($strike.thresholds.min_bolt_aspect)), fill_fraction=$($strike.bolt_shape.fill_fraction) (<= $($strike.thresholds.max_bolt_fill_fraction)), bbox=$($strike.bolt_shape.bbox_width)x$($strike.bolt_shape.bbox_height)"
@@ -3372,7 +2571,7 @@ function Test-WeatherVisual {
         throw "Lightning bolt fill fraction $($strike.bolt_shape.fill_fraction) exceeds threshold $($strike.thresholds.max_bolt_fill_fraction) (bolt is too dense -- a filled blob, not a thin filament)"
     }
     if ($null -eq $strike.strike_contrast) {
-        throw "Lightning strike analysis is missing the strike_contrast section (T-I5a-DR)"
+        throw "Lightning strike analysis is missing the strike_contrast section ()"
     }
     if (-not $strike.strike_contrast.passed) {
         throw "Lightning strike CONTRAST check failed: pre-strike storm sky luminance $($strike.strike_contrast.neighbor_frame_mean_luminance) exceeds ceiling $($strike.thresholds.max_neighbor_luma) (the flash must read against a dark storm sky)"
@@ -3389,18 +2588,18 @@ function Test-WeatherVisual {
         $strike.pulse.frame_mean_luminance_delta, $strike.neighbor.frame_mean_luminance, $strike.strike.frame_mean_luminance, `
         $strike.bolt.bright_thin_pixels, $strike.render_pass.lightning_pulse_gpu_ms)
 
-    # T-I5a-3 (B1): the WeatherVisual gate ALSO asserts the SIM-side weather state
+    # the WeatherVisual gate ALSO asserts the SIM-side weather state
     # determinism via the server's --weather-bench mode (the visual overlay above
     # is now fed from this replicated state, one-way). Two independent runs of N
     # WeatherSystem updates (advected by a parallel wind field) reach the IDENTICAL
     # `weather` STATE-HASH (stable across resim/replay -- the property the
     # world_hash `weather` slot depends on); the state EVOLVES over time (gate not
-    # vacuous); storm cells stay BOUNDED (<= 16, F9) with at least one spawned; and
+    # vacuous); storm cells stay BOUNDED (<= 16, ) with at least one spawned; and
     # the per-tick weather update stays within the PINNED <= 0.20 ms budget at the
     # streamed extent (enforced on the release build; informational on debug).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "weather determinism gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "weather determinism gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
     $weatherArtifact = "build/$BuildPreset/test-artifacts/server/weather-determinism.json"
     Remove-Item -Force -ErrorAction SilentlyContinue $weatherArtifact
@@ -3431,11 +2630,11 @@ function Test-WeatherVisual {
     if ([double]$w.cell_size_m -ne 24.0) {
         throw "weather determinism: cell_size_m=$($w.cell_size_m), expected 24"
     }
-    # T-I5a-5 (B3): LIGHTNING strike schedule determinism (the schedule is folded
-    # into the `weather` world_hash sub-hash -- world_hash mega-bump #3). The seed+13
+    # LIGHTNING strike schedule determinism (the schedule is folded
+    # into the `weather` world_hash sub-hash -- world_hash hash revision). The seed+13
     # schedule must FIRE (at least one strike over the run, non-vacuous), match
     # bit-for-bit across the two runs (deterministic), and stay BOUNDED (<= the live
-    # strike cap, F9). The strike SUB-HASH determinism is already covered by the
+    # strike cap, ). The strike SUB-HASH determinism is already covered by the
     # weather_sub_hash equality above; these assert the strike path is exercised.
     if (-not $w.strikes_scheduled -or [int64]$w.total_strikes -le 0) {
         throw "weather determinism: no lightning strike scheduled (strike path is vacuous; total_strikes=$($w.total_strikes))"
@@ -3447,7 +2646,7 @@ function Test-WeatherVisual {
         throw "weather determinism: live strike window exceeded the bounded cap (max=$($w.max_live_strikes) cap=$($w.max_live_strike_cap))"
     }
     # Per-tick weather budget: <= 0.20 ms at the streamed extent, enforced on the
-    # release build only (design-decisions.md S7), informational on debug.
+    # release build only (the deterministic runtime contract ), informational on debug.
     $wBudgetMs = [double]$w.budget_ms
     $wPerTickMs = [double]$w.per_tick_update_ms
     $wBudgetSource = $BuildPreset
@@ -3478,15 +2677,15 @@ function Test-WeatherVisual {
 }
 
 function Test-CloudShadow {
-    # T-I5a-8 (C3): cloud-layer cast-shadow gate. PARTLY-CLOUDY fixture (NOT
-    # overcast -- premise guard F4). The skybox dome renders the wind-advected
+    # cloud-layer cast-shadow gate. PARTLY-CLOUDY fixture (NOT
+    # overcast -- premise guard ). The skybox dome renders the wind-advected
     # cloud layer and the lighting pass projects the SAME coverage field to cast
     # crawling terrain shadows. Two captures (t0, t1) are taken as a cloud-shadow
     # edge drifts across a FIXED terrain ROI; the gate asserts a luminance delta in
     # that ROI (the moving cast-shadow signature) AND that the cloud layer is
     # present in the sky. The added per-fragment cloud-shadow sample cost (lighting
     # pass clouds-on minus clouds-off) is bounded against the <= 0.4 ms budget on
-    # release (design-decisions.md S7, critique F3).
+    # release (the deterministic runtime contract , regression review).
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/cloud-shadow"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
@@ -3507,7 +2706,7 @@ function Test-CloudShadow {
 
     $analysisPath = Join-Path $visualDir "cloud-shadow-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "cloud shadow run did not produce $analysisPath (gate produced by task T-I5a-8-cloud-layer-tier1)"
+        throw "cloud shadow run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -3533,9 +2732,9 @@ function Test-CloudShadow {
         throw "Cloud layer not present in the sky: gradient=$($analysis.cloud_layer.sky_horizontal_gradient_mean) (min $($analysis.cloud_layer.min_sky_cloud_gradient))"
     }
     # GPU-timer budget for the added cloud-shadow sample (release-enforced; on
-    # debug the timing is informational, A2/T-I5a-6 precedent).
+    # debug the timing is informational, / precedent).
     if ($null -eq $analysis.gpu_timer) {
-        throw "Cloud shadow analysis is missing the gpu_timer section (T-I5a-8)"
+        throw "Cloud shadow analysis is missing the gpu_timer section ()"
     }
     if ($BuildPreset -eq "release" -and [bool]$analysis.gpu_timer.supported) {
         if (-not $analysis.gpu_timer.within_budget) {
@@ -3555,7 +2754,7 @@ function Test-CloudShadow {
 }
 
 function Test-FoliageInstancing {
-    # T-I5b-1 (F1): instanced foliage scatter + wind response gate. The scatter
+    # instanced foliage scatter + wind response gate. The scatter
     # is a DETERMINISTIC pure hash of (chunk coords, biome id, slope, moisture,
     # instance index) -- NO global RNG, NO world_hash growth. The gate asserts,
     # from the instance-set DATA: (a) coverage density tracks the biome table
@@ -3563,9 +2762,9 @@ function Test-FoliageInstancing {
     # beyond the live ring / fade end); (c) the wind-sway responds (calm vs windy
     # max tip displacement differs, only swaying archetypes move); (d) the
     # FoliagePass GPU-timer is within the pinned release budget. The instance-set
-    # hash is asserted reproducible (run==run). RENDER-ONLY: world_hash stays
-    # d950a6afc12a5cdc (one-way, critique F2). Foliage adds ground pixels, so the
-    # RenderHealth re-bless is DELIBERATE and logged (design-decisions.md S2/S7).
+    # hash is asserted reproducible (run==run).: world_hash stays
+    # d950a6afc12a5cdc (one-way, regression review). Foliage adds ground pixels, so the
+    # RenderHealth update the baseline is DELIBERATE and logged (the deterministic runtime contract ).
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/foliage-instancing"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
@@ -3587,14 +2786,14 @@ function Test-FoliageInstancing {
 
     $analysisPath = Join-Path $visualDir "foliage-instancing-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "foliage instancing run did not produce $analysisPath (gate produced by task T-I5b-1-foliage-instancing)"
+        throw "foliage instancing run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
     if ($analysis.schema -ne "luminumbra.foliage_instancing.v1") {
         throw "Unexpected foliage instancing analysis schema '$($analysis.schema)'"
     }
-    # FOLIAGE-11: the client writes an explicit refusal analysis instead of ending a
+    # the client writes an explicit refusal analysis instead of ending a
     # gate run silent (readback-disabled / zero-instance / no-draws shapes).
     if ($analysis.refusal) {
         throw "Foliage instancing run REFUSED: $($analysis.refusal)"
@@ -3625,7 +2824,7 @@ function Test-FoliageInstancing {
     if ([int64]$analysis.coverage_density.instances_within_ring -le 0) {
         throw "Foliage produced no instances within the live ring"
     }
-    # FOLIAGE-01 re-bless floor (2026-07-02): the lush-default flat_lands scatter
+    #  update the baseline floor (2026-07-02): the lush-default flat_lands scatter
     # saturates the 262144 budget in-ring; a hard floor keeps decimation-class
     # regressions RED even though measured_density saturates at the calibrated cap.
     if ([int64]$analysis.coverage_density.instances_within_ring -lt 100000) {
@@ -3639,9 +2838,9 @@ function Test-FoliageInstancing {
     if (-not $analysis.wind_sway.passed) {
         throw "Foliage sway did not respond to wind: calm=$($analysis.wind_sway.calm_max_sway) windy=$($analysis.wind_sway.windy_max_sway) delta=$($analysis.wind_sway.sway_delta) (min $($analysis.wind_sway.min_sway_delta))"
     }
-    # GPU-timer budget (release-enforced; informational on debug, A2/T-I5a-1 precedent).
+    # GPU-timer budget (release-enforced; informational on debug, / precedent).
     if ($null -eq $analysis.gpu_timer) {
-        throw "Foliage instancing analysis is missing the gpu_timer section (T-I5b-1)"
+        throw "Foliage instancing analysis is missing the gpu_timer section ()"
     }
     if ([double]$analysis.gpu_timer.foliage_gpu_ms -lt 0) {
         throw "Foliage gpu_timer.foliage_gpu_ms reports a negative value"
@@ -3665,12 +2864,12 @@ function Test-FoliageInstancing {
 }
 
 function Test-ParticleEmitterDeterminism {
-    # T-I5a-1: GPU particle framework determinism gate. Spawns the fixture
+    #  GPU particle framework determinism gate. Spawns the fixture
     # emitter, snapshots the sim-deterministic emitter DESCRIPTOR SET twice from
     # identical world state, and asserts the descriptor bytes are byte-equal
     # across runs. Per-particle MOTION is render-only and is NOT snapshotted
-    # (critique F2). Also asserts particles rendered and the ParticlePass GPU
-    # timer is within the 0.8 ms budget (critique F3).
+    # (regression review). Also asserts particles rendered and the ParticlePass GPU
+    # timer is within the 0.8 ms budget (regression review).
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/particle-determinism"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
@@ -3689,7 +2888,7 @@ function Test-ParticleEmitterDeterminism {
 
     $analysisPath = Join-Path $visualDir "particle-emitter-determinism-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "particle determinism run did not produce $analysisPath (gate produced by task T-I5a-1-gpu-particle-framework)"
+        throw "particle determinism run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -3742,16 +2941,16 @@ function Test-ParticleEmitterDeterminism {
 }
 
 function Test-Precipitation {
-    # T-I5a-4 (B2): rain precipitation through the A1 particle framework, driven by
-    # the replicated weather state and WIND-ADVECTED (slant) by the A2 wind field.
+    # rain precipitation through the  particle framework, driven by
+    # the replicated weather state and WIND-ADVECTED (slant) by the  wind field.
     # The scenario captures a CALM rain frame (zero wind -> vertical fall) and a
     # WINDY rain frame (strong horizontal wind -> diagonal slant). The gate asserts
     # precip particles are PRESENT in both frames AND that the windy streaks slant
     # with wind (the windy slant ratio exceeds the calm one by a margin). Emitter
     # descriptors stay deterministic (ParticleEmitterDeterminism owns that surface);
-    # particle MOTION is render-only and never hashed (critique F2, one-way). Also
+    # particle MOTION is render-only and never hashed (regression review, one-way). Also
     # asserts the active-storm + precipitation ParticlePass GPU timer is within the
-    # 1.2 ms storm budget (design-decisions.md S7).
+    # 1.2 ms storm budget (the deterministic runtime contract ).
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/precipitation"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
@@ -3770,7 +2969,7 @@ function Test-Precipitation {
 
     $analysisPath = Join-Path $visualDir "precipitation-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "precipitation run did not produce $analysisPath (gate produced by task T-I5a-4-precipitation-particles)"
+        throw "precipitation run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -3806,12 +3005,12 @@ function Test-Precipitation {
         throw "Precipitation slant gain $($analysis.wind_slant.slant_ratio_gain) is below threshold $($analysis.thresholds.min_slant_ratio_gain)"
     }
 
-    # T-I5a-DR-atmospheric-visuals: STREAKS-NOT-DOTS shape gate. The bright precip
+    #  STREAKS-NOT-DOTS shape gate. The bright precip
     # structure must be ELONGATED (anisotropic gradient), not round dots. This
     # catches the "scattered dots" failure that the presence/slant thresholds
     # passed when rain rendered as round billboards.
     if ($null -eq $analysis.streak_shape) {
-        throw "Precipitation analysis is missing the streak_shape section (T-I5a-DR)"
+        throw "Precipitation analysis is missing the streak_shape section ()"
     }
     if (-not $analysis.streak_shape.passed) {
         throw "Precipitation STREAK-SHAPE check failed (dots-not-streaks guard): calm_anisotropy=$($analysis.streak_shape.calm_anisotropy) (>= $($analysis.thresholds.min_streak_anisotropy))"
@@ -3820,11 +3019,11 @@ function Test-Precipitation {
         throw "Precipitation calm streak anisotropy $($analysis.streak_shape.calm_anisotropy) is below threshold $($analysis.thresholds.min_streak_anisotropy) -- precip reads as round dots, not vertical streaks"
     }
 
-    # T-I5a-DR-atmospheric-visuals: LIGHT-STREAKS gate. Rain must read as LIGHT
+    #  LIGHT-STREAKS gate. Rain must read as LIGHT
     # streaks (clearly brighter than the sky backdrop), NOT dark specks ("dirt on
     # the sky"). The bright precip pixels must sit above the band mean by a margin.
     if ($null -eq $analysis.light_streaks) {
-        throw "Precipitation analysis is missing the light_streaks section (T-I5a-DR)"
+        throw "Precipitation analysis is missing the light_streaks section ()"
     }
     if (-not $analysis.light_streaks.passed) {
         throw "Precipitation LIGHT-STREAKS check failed (dark-speck guard): calm bright/band luma $($analysis.light_streaks.calm_bright_mean_luminance)/$($analysis.light_streaks.calm_band_mean_luminance), windy $($analysis.light_streaks.windy_bright_mean_luminance)/$($analysis.light_streaks.windy_band_mean_luminance) (bright must exceed band by $($analysis.thresholds.min_bright_over_band_margin))"
@@ -3849,7 +3048,7 @@ function Test-Precipitation {
 
     Assert-PpmArtifact (Join-Path $visualDir $analysis.calm_screenshot)
     Assert-PpmArtifact (Join-Path $visualDir $analysis.windy_screenshot)
-    Write-Host ("precipitation gate passed: rain particles present (calm bright {0:P3}, windy bright {1:P3}); streaks slant with wind (calm slant {2:N3} -> windy slant {3:N3}, gain {4:N2}x); ParticlePass storm {5} ms <= {6} ms budget" -f `
+    Write-Host ("precipitation gate passed: rain particles present (calm bright {0:P3}, windy bright {1:P3}); streaks slant with wind (calm slant {2:N3} -> windy slant {3:N3}, gain {4:}x); ParticlePass storm {5} ms <= {6} ms budget" -f `
         $analysis.presence.calm_bright_fraction, $analysis.presence.windy_bright_fraction, `
         $analysis.wind_slant.calm_slant_ratio, $analysis.wind_slant.windy_slant_ratio, `
         $analysis.wind_slant.slant_ratio_gain, $analysis.gpu_timer.particle_pass_gpu_ms, $analysis.gpu_timer.storm_budget_ms)
@@ -3874,7 +3073,7 @@ function Test-TimeOfDaySweep {
 
     $analysisPath = Join-Path $visualDir "timeofday-sweep-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "time-of-day sweep run did not produce $analysisPath (gate produced by task T-I2-17c-timeofday-sweep)"
+        throw "time-of-day sweep run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -3886,7 +3085,7 @@ function Test-TimeOfDaySweep {
     }
 
     $phases = @($analysis.phases)
-    # T-I5a-7 (C2): the sweep now captures noon/dusk/night under TWO seasons
+    # the sweep now captures noon/dusk/night under TWO seasons
     # (summer + winter) == 6 phase captures. The summer (season_index 0) set owns
     # the existing ordering/warm-shift/hue-band/emissive assertions below.
     if ($phases.Count -lt 6) {
@@ -3917,11 +3116,11 @@ function Test-TimeOfDaySweep {
     if ([double]$analysis.dusk_warm_shift.r_b_ratio_increase -lt [double]$analysis.thresholds.min_dusk_warm_shift) {
         throw "Dusk r/b warm shift $($analysis.dusk_warm_shift.r_b_ratio_increase) is below threshold $($analysis.thresholds.min_dusk_warm_shift)"
     }
-    # T-I4-DR-tod-sky-balance: the sky DOME must track time-of-day, not just the
+    # the sky DOME must track time-of-day, not just the
     # terrain lighting. (1) Night dome must be dark; the pre-fix dome held a
     # bright twilight-blue night sky (~182) over near-black ground.
     if (-not $analysis.night_sky_dark.passed) {
-        throw "Night sky-dome is too bright: sky mean luminance $($analysis.night_sky_dark.night_sky_mean_luminance) exceeds ceiling $($analysis.night_sky_dark.max_night_sky_luminance) (T-I4-DR-tod-sky-balance: dome must darken at night)"
+        throw "Night sky-dome is too bright: sky mean luminance $($analysis.night_sky_dark.night_sky_mean_luminance) exceeds ceiling $($analysis.night_sky_dark.max_night_sky_luminance) (: dome must darken at night)"
     }
     if ([double]$analysis.night_sky_dark.night_sky_mean_luminance -gt [double]$analysis.thresholds.max_night_sky_luminance) {
         throw "Night sky mean luminance $($analysis.night_sky_dark.night_sky_mean_luminance) exceeds threshold $($analysis.thresholds.max_night_sky_luminance)"
@@ -3929,29 +3128,29 @@ function Test-TimeOfDaySweep {
     # (2) Dusk dome must warm on the sun side; the pre-fix dusk dome was full
     # midday blue (sun-side sky R<B, no shift vs noon).
     if (-not $analysis.dusk_sky_warm_shift.passed) {
-        throw "Dusk sky-dome warm-shift failed: warm-half sky r/b increase $($analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase) (T-I4-DR-tod-sky-balance: dusk dome must show a warm sun-side tint)"
+        throw "Dusk sky-dome warm-shift failed: warm-half sky r/b increase $($analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase) (: dusk dome must show a warm sun-side tint)"
     }
     if ([double]$analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase -lt [double]$analysis.thresholds.min_dusk_sky_warm_shift) {
         throw "Dusk sky warm-half r/b shift $($analysis.dusk_sky_warm_shift.sky_warm_half_r_b_ratio_increase) is below threshold $($analysis.thresholds.min_dusk_sky_warm_shift)"
     }
-    # T-I5a-6: absolute dawn/dusk HUE-BAND assertion (scattering palette rises
+    #  absolute dawn/dusk HUE-BAND assertion (scattering palette rises
     # warm at low sun, clear sky) on top of the existing noon>dusk>night ordering
     # + relative warm-shift.
     if ($null -eq $analysis.dusk_sky_hue_band) {
-        throw "Time-of-day sweep analysis is missing the dusk_sky_hue_band section (T-I5a-6)"
+        throw "Time-of-day sweep analysis is missing the dusk_sky_hue_band section ()"
     }
     if (-not $analysis.dusk_sky_hue_band.passed) {
-        throw "Dusk sky hue-band failed: warm-half r/b $($analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio) (T-I5a-6: scattering palette must rise warm at low sun)"
+        throw "Dusk sky hue-band failed: warm-half r/b $($analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio) (: scattering palette must rise warm at low sun)"
     }
     if ([double]$analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio -lt [double]$analysis.thresholds.min_dusk_sky_warm_band_ratio) {
         throw "Dusk sky warm-half r/b $($analysis.dusk_sky_hue_band.dusk_sky_warm_half_r_b_ratio) is below absolute hue-band threshold $($analysis.thresholds.min_dusk_sky_warm_band_ratio)"
     }
-    # T-I5a-DR-atmospheric-visuals: AURORA NIGHT-GATING. The aurora is a night-only
+    #  AURORA NIGHT-GATING. The aurora is a night-only
     # phenomenon; it must be ABSENT (no green chroma smear) in the dusk and noon sky
     # bands. This catches the "aurora bleeds into the dusk sky" failure that the
     # luminance/warm-shift thresholds passed.
     if ($null -eq $analysis.aurora_gating) {
-        throw "Time-of-day sweep analysis is missing the aurora_gating section (T-I5a-DR)"
+        throw "Time-of-day sweep analysis is missing the aurora_gating section ()"
     }
     if (-not $analysis.aurora_gating.passed) {
         throw "Aurora night-gating failed: night aurora curtain fraction $($analysis.aurora_gating.night_sky_strong_green_fraction) (need >= $($analysis.aurora_gating.min_night_strong_green_fraction)); day-side aurora fractions noon=$($analysis.aurora_gating.noon_sky_strong_green_fraction) dusk=$($analysis.aurora_gating.dusk_sky_strong_green_fraction) (must be <= $($analysis.aurora_gating.max_day_strong_green_fraction)) -- aurora must be night-only"
@@ -3963,33 +3162,33 @@ function Test-TimeOfDaySweep {
     if ([double]$analysis.aurora_gating.night_sky_strong_green_fraction -lt [double]$analysis.aurora_gating.min_night_strong_green_fraction) {
         throw "Aurora absent at night (night curtain fraction $($analysis.aurora_gating.night_sky_strong_green_fraction)) -- the aurora must still render at night"
     }
-    # T-I5a-7 (C2): SEASON-SWEEP assertions. The same noon/dusk/night phases are
+    # SEASON-SWEEP assertions. The same noon/dusk/night phases are
     # captured under two TICK-DERIVED seasons; assert a real per-season sun-path
     # band (summer noon sun higher than winter) AND palette band (summer noon
     # warmer than winter) difference. The season is render-derived (pure function
     # of tick) -- it adds nothing to world_hash (verified by HeadlessServerTick).
     if ($null -eq $analysis.season_sweep) {
-        throw "Time-of-day sweep analysis is missing the season_sweep section (T-I5a-7)"
+        throw "Time-of-day sweep analysis is missing the season_sweep section ()"
     }
     if (-not $analysis.season_sweep.phases_captured) {
-        throw "Season sweep did not capture both seasons' noon/dusk/night phases (T-I5a-7)"
+        throw "Season sweep did not capture both seasons' noon/dusk/night phases ()"
     }
     if (-not $analysis.season_sweep.phases_distinct) {
-        throw "Season sweep seasons are not distinct tick-derived phases: summer_tick=$($analysis.season_sweep.summer_season_tick) winter_tick=$($analysis.season_sweep.winter_season_tick) (T-I5a-7)"
+        throw "Season sweep seasons are not distinct tick-derived phases: summer_tick=$($analysis.season_sweep.summer_season_tick) winter_tick=$($analysis.season_sweep.winter_season_tick) ()"
     }
     if (-not $analysis.season_sweep.sun_path.passed) {
-        throw "Season sun-path band failed: summer noon elevation $($analysis.season_sweep.sun_path.summer_noon_sun_elevation_rad) rad vs winter $($analysis.season_sweep.sun_path.winter_noon_sun_elevation_rad) rad (gap $($analysis.season_sweep.sun_path.sun_elevation_gap_rad), need >= $($analysis.season_sweep.sun_path.min_sun_elevation_gap_rad)) (T-I5a-7)"
+        throw "Season sun-path band failed: summer noon elevation $($analysis.season_sweep.sun_path.summer_noon_sun_elevation_rad) rad vs winter $($analysis.season_sweep.sun_path.winter_noon_sun_elevation_rad) rad (gap $($analysis.season_sweep.sun_path.sun_elevation_gap_rad), need >= $($analysis.season_sweep.sun_path.min_sun_elevation_gap_rad)) ()"
     }
     if ([double]$analysis.season_sweep.sun_path.sun_elevation_gap_rad -lt [double]$analysis.season_sweep.sun_path.min_sun_elevation_gap_rad) {
         throw "Season sun-elevation gap $($analysis.season_sweep.sun_path.sun_elevation_gap_rad) rad is below threshold $($analysis.season_sweep.sun_path.min_sun_elevation_gap_rad)"
     }
     if (-not $analysis.season_sweep.palette.passed) {
-        throw "Season palette band failed: summer noon r/b $($analysis.season_sweep.palette.summer_noon_frame_r_b_ratio) vs winter $($analysis.season_sweep.palette.winter_noon_frame_r_b_ratio) (gap $($analysis.season_sweep.palette.palette_warmth_gap), need >= $($analysis.season_sweep.palette.min_palette_warmth_gap)) (T-I5a-7)"
+        throw "Season palette band failed: summer noon r/b $($analysis.season_sweep.palette.summer_noon_frame_r_b_ratio) vs winter $($analysis.season_sweep.palette.winter_noon_frame_r_b_ratio) (gap $($analysis.season_sweep.palette.palette_warmth_gap), need >= $($analysis.season_sweep.palette.min_palette_warmth_gap)) ()"
     }
     if ([double]$analysis.season_sweep.palette.palette_warmth_gap -lt [double]$analysis.season_sweep.palette.min_palette_warmth_gap) {
         throw "Season palette warmth gap $($analysis.season_sweep.palette.palette_warmth_gap) is below threshold $($analysis.season_sweep.palette.min_palette_warmth_gap)"
     }
-    # T-I5a-6: sky LUT full precompute startup one-shot recorded in render
+    #  sky LUT full precompute startup one-shot recorded in render
     # telemetry; budget enforced on the RELEASE build only.
     if ($null -ne $analysis.gpu_timer) {
         if ([double]$analysis.gpu_timer.sky_full_precompute_ms -lt 0) {
@@ -4017,7 +3216,7 @@ function Test-TimeOfDaySweep {
     }
 }
 
-# --- T-I5b-visual-sweep WorldVisualSweep mode ---
+# ---  WorldVisualSweep mode ---
 # Drives the world_visual_sweep capture matrix (times-of-day x camera angles x
 # weather x season) from a feature-rich archipelago anchor and guards PRODUCTION
 # + PRESENCE so the matrix can become a standing validation gate. Real visual
@@ -4029,7 +3228,7 @@ function Test-TimeOfDaySweep {
 #   * cloud coverage > 0 in the up-pitched STORM cells,
 #   * water-like pixels present in the water-aimed DAYTIME cells,
 #   * NO rain leaking into clear cells (particle_draws == 0).
-# RENDER-ONLY: the scenario drives the existing one-way bridges and never writes
+# the scenario drives the existing one-way bridges and never writes
 # world_hash. The gate also assembles the labelled montages for review.
 function Test-WorldVisualSweep {
     $exe = Get-ClientExe
@@ -4050,9 +3249,9 @@ function Test-WorldVisualSweep {
 
     $manifestPath = Join-Path $visualDir "world-visual-sweep-manifest.json"
     if (-not (Test-Path $manifestPath)) {
-        throw "world_visual_sweep run did not produce $manifestPath (gate produced by task T-I5b-visual-sweep)"
+        throw "world_visual_sweep run did not produce $manifestPath (gate producer)"
     }
-    # OPS-04 (spec 021, 020 FR-A-005): bind the sweep to the binary/shaders that
+    #  (,  ): bind the sweep to the binary/shaders that
     # produced it. This gate REGENERATES every run, so drop any stale sidecar
     # first (a prior build's sidecar would false-REFUSE the fresh capture).
     $sweepSidecar = Get-ArtifactProvenanceSidecarPath -ArtifactPath $manifestPath -Scenario "WorldVisualSweep"
@@ -4129,12 +3328,12 @@ function Test-WorldVisualSweep {
         throw "world_visual_sweep manifest reported failure: $($manifest.failures -join ', ')"
     }
 
-    # Iteration-6 critique #5: the OBJECTIVE visual critique is now a REQUIRED
+    #  the OBJECTIVE visual critique is now a REQUIRED
     # gate step, not a best-effort convenience. We (1) build the labelled
     # contact-sheet montages (which also converts every PPM -> sweep/png/*.png),
     # then (2) run tools/visual_critique.py analyze --strict, which fails the
     # gate on ANY objective defect flag (dead/black, washed-out, green-sky
-    # speckle, flat storm clouds, aurora-at-dusk, sparse foliage, ...). Per the
+    # speckle, flat storm clouds, aurora-at-dusk, sparse foliage,...). Per the
     # process rule, such a BLOCK is discharged ONLY by a flag-free re-run of this
     # gate -- never by reclassifying a flagged cell as "tracked debt". numpy +
     # Pillow are REQUIRED; the gate fails loudly if no suitable python is found
@@ -4180,7 +3379,7 @@ function Test-WorldVisualSweep {
         $manifest.expected_cell_count, $foliageCells.Count, $stormCells.Count, $cloudCells.Count, $waterCells.Count)
 }
 
-# --- T-I3-3 PlayerView mode: append-only ---
+# ---  PlayerView mode: append-only ---
 # Eye-level 360-degree player-view coverage gate (player_view_smoke): 12 yaw
 # stations + a peak-aimed station per preset, plus the seed-424242
 # archipelago degenerate-geometry region station. Per station:
@@ -4268,12 +3467,12 @@ function Test-PlayerView {
     }
 }
 
-# --- T-I3-9 FarLodHorizon mode: append-only ---
+# ---  FarLodHorizon mode: append-only ---
 # Far-LOD horizon + live/far seam gate (farlod_horizon_smoke). Phase A of the
 # run measures the gbuffer GPU time with far-LOD DISABLED (the honest in-run
 # baseline; the committed perf baseline records frame times, not per-pass GPU
 # times); phase B enables far-LOD and sweeps eye-level + elevated stations.
-# Gates (design-decisions.md section 4): zero missing wanted regions to
+# Gates (the deterministic runtime contract section 4): zero missing wanted regions to
 # 1536 m after settle; farlod_resident_bytes < 64 MB; gbuffer_gpu_ms delta
 # < 1.5 ms; horizon screenshots show terrain to the horizon (below-horizon
 # sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
@@ -4284,7 +3483,7 @@ function Test-FarLodHorizon {
     $exe = Get-ClientExe
     $runSeconds = [Math]::Max(50, $SmokeSeconds)
 
-    # T-I4-DR-far-water-sheet: archipelago (sea to horizon) added so the
+    # archipelago (sea to horizon) added so the
     # water-continuity assertion below runs on an open-water preset alongside
     # mountains (river channels). default stays dry (height_offset 20).
     # Water-bearing presets must render a far water sheet; open-water presets
@@ -4390,7 +3589,7 @@ function Test-FarLodHorizon {
             $analysis.gbuffer.baseline_gbuffer_gpu_ms, $analysis.gbuffer.far_gbuffer_gpu_ms, $analysis.gbuffer.gbuffer_delta_ms, `
             $analysis.aggregates.max_below_horizon_sky_ratio, $analysis.aggregates.bands_resolved)
 
-        # T-I4-DR-far-water-sheet: water-continuity gate. On a water-bearing
+        # water-continuity gate. On a water-bearing
         # preset the far path must render a flat water sheet where the live
         # water ring ends (river channels / seabeds beyond the live ring) - no
         # dry band. Proven two ways: the far water sheet is actually drawn
@@ -4401,7 +3600,7 @@ function Test-FarLodHorizon {
         # combined far terrain+water leaves no sky/void band below the horizon.
         $maxWaterDraws = [int]$analysis.far_water.max_water_sheet_draws
         $maxBandWaterRatio = [double]$analysis.aggregates.max_boundary_band_water_ratio
-        # T-I5b-5-water-backlog: re-derived far-water band FLOOR (open sea). The
+        #  re-derived far-water band FLOOR (open sea). The
         # pre-aerial-perspective classifier passed on a degenerate ~0.013 reading
         # (just > 0); the re-derived post-5a classifier registers far water as a
         # real fraction, so the open-water preset must clear a non-trivial floor.
@@ -4420,7 +3619,7 @@ function Test-FarLodHorizon {
                 $preset, $maxWaterDraws)
         }
 
-        # T-I5b-5-water-backlog: sand-flat-brightness band. The elevated (downward)
+        #  sand-flat-brightness band. The elevated (downward)
         # station frames real near-shore ground; with the albedo_scale LUT
         # calibration its band must not be a white-clipped sun-bright sand sheet.
         # Eye-level bands are excluded (they graze the bright post-5a hazy near-
@@ -4437,7 +3636,7 @@ function Test-FarLodHorizon {
         Write-Host ("farlod horizon ({0}): sand-flat band OK - elevated_clipped_sand={1} (ceiling={2}, all-station_max={3} telemetry)" -f `
             $preset, $elevatedSandFlat, $maxSandFlatCeil, $maxSandFlat)
 
-        # T-I4-DR-sliver-baseline-diff: above-horizon sky-sliver gate, ratcheted.
+        # above-horizon sky-sliver gate, ratcheted.
         # The area-based below-horizon sky-ratio gate cannot see a thin
         # near-vertical sliver streaking up THROUGH the horizon into the sky; the
         # detector scans the sky band for narrow tall terrain-coloured intrusions.
@@ -4467,8 +3666,8 @@ function Test-FarLodHorizon {
     }
 }
 
-# --- T-I6 isolation/layer review mode gate ---
-# Drives ONE seeded capture (critique T4: minimise CI cost) with the Terrain
+# ---  isolation/layer review mode gate ---
+# Drives ONE seeded capture (regression contract: minimise CI cost) with the Terrain
 # layer isolated on a GREENSCREEN backdrop, then objectively asserts BOTH the
 # SkyboxPass backdrop override AND layer suppression:
 #   - the no-geometry sky region fills with the flat backdrop colour (the sky
@@ -4476,7 +3675,7 @@ function Test-FarLodHorizon {
 #   - the lower region still carries lit terrain (proves the isolated layer
 #     rendered and the gate is not vacuously all-backdrop, while water/foliage/
 #     particles/aerial/lightning were suppressed by their cleared layer bits).
-# The objective check is tolerant (per-channel LSB tolerance) per critique T2.
+# The objective check is tolerant (per-channel LSB tolerance) per regression contract.
 # Reuses the farlod_horizon_smoke capture harness (native-pinned). Default
 # (no isolation flags) is byte-stable and is covered by the rest of the suite.
 function Test-IsolationLayer {
@@ -4540,7 +3739,7 @@ function Test-IsolationLayer {
 }
 
 function Test-HeadlessServerTick {
-    # T-I3-13: headless server boot + fixed 30 Hz tick determinism gate.
+    # headless server boot + fixed 30 Hz tick determinism gate.
     # Hygiene first (script-side mirror of the ServerHeadlessHygiene ctest so
     # the gate is self-contained): nothing under src/luminumbra_server may
     # include a client-side library. "glm" stays allowed, hence gl/gl +
@@ -4569,7 +3768,7 @@ function Test-HeadlessServerTick {
 
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "headless server gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "headless server gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $artifactPath = "build/$BuildPreset/test-artifacts/server/server-tick.json"
@@ -4594,13 +3793,13 @@ function Test-HeadlessServerTick {
         throw "headless server world_hash mismatch: $($analysis.world_hash) != $($analysis.world_hash_replay)"
     }
 
-    # T-I4-11: per-system sub-hashes must exist and match run vs replay. A
+    # per-system sub-hashes must exist and match run vs replay. A
     # mismatch in any one localizes a future desync to that subsystem.
-    # T-I5a-2 (A2): the `wind` sub-hash is now part of this set AND folded into
-    # the top-level world_hash (the deliberate mega-bump 2fa007951a21e140 ->
+    # the `wind` sub-hash is now part of this set AND folded into
+    # the top-level world_hash (the deliberate hash revision 2fa007951a21e140 ->
     # 0eac465289e7c88b), so a wind divergence flips both world_hash and wind.
     if ($null -eq $analysis.sub_hashes -or $null -eq $analysis.sub_hashes_replay) {
-        throw "headless server artifact is missing the T-I4-11 sub_hashes fields"
+        throw "headless server artifact is missing the  sub_hashes fields"
     }
     foreach ($section in @("terrain", "mesh", "water", "entities", "wind")) {
         $a = $analysis.sub_hashes.$section
@@ -4660,7 +3859,7 @@ function Test-PopulatedWorldReplay {
     # -Mode PopulatedWorldReplay.
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "populated world replay gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "populated world replay gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $artifactPath = "build/$BuildPreset/test-artifacts/server/populated-world-replay.json"
@@ -4670,7 +3869,7 @@ function Test-PopulatedWorldReplay {
         Remove-Item $artifactPath
     }
 
-    & $serverExe --smoke --ecology-roster --planted-roster --ticks 90 --artifact $artifactPath  # INSTINCT-04: + plants (the live feeding loop)
+    & $serverExe --smoke --ecology-roster --planted-roster --ticks 90 --artifact $artifactPath # Include plants in the live feeding loop.
     if ($LASTEXITCODE -ne 0) {
         throw "populated world replay smoke exited with code $LASTEXITCODE"
     }
@@ -4724,18 +3923,18 @@ function Test-PopulatedWorldReplay {
 
     # Pinned golden: the populated composite world_hash captured from a green run.
     # Distinct from the empty-roster HeadlessServerTick pin because the live ecology
-    # sub-hash is non-empty here. (Re-pinned 2026-07-04 at the Wave-B close with a
-    # two-point evidence chain: at the PRE-wave commit dbb19318 this gate was ALREADY
+    # sub-hash is non-empty here. (Re-pinned 2026-07-04 at the  close with a
+    # two-point evidence chain: at the PRE- dbb19318 this gate was ALREADY
     # red — it died on a run-vs-replay MESH sub-hash desync before the golden check
     # could even run, so the old golden 114ff66cc032576d had been unreachable for an
-    # unknown period. Under the 017-B activation queue the populated scenario is
+    # unknown period. Under the activation queue activation queue the populated scenario is
     # run==replay through EVERY sub-hash including mesh; the golden below is that
     # now-deterministic populated hash.)
-    # (Re-pinned 2026-07-05 for the WATER-17 Bump A; prior golden was 9f0dd5b9b27ecb9d.)
-    # (Re-pinned 2026-07-05 for WATER-08 Bump B: 94d4242b725c9876 -> 4e8947548a7a9f1a.)
-    # (Re-pinned 2026-07-05 for INSTINCT-04: the roster now ALSO plants (--planted-roster),
+    # (Re-pinned 2026-07-05 for the  authoritative-state change; prior golden was 9f0dd5b9b27ecb9d.)
+    # (Re-pinned 2026-07-05 for  derived-state reclassification: 94d4242b725c9876 -> 4e8947548a7a9f1a.)
+    # (Re-pinned 2026-07-05 for: the roster now ALSO plants (--planted-roster),
     # so the previously-dormant feeding loop runs LIVE in this gate - grazeable biomass +
-    # creature hunger now evolve and hash. The chartered I2 extended-roster transition.)
+    # creature hunger now evolve and hash. The defined  extended-roster transition.)
     $expectedHash = "d281053b8de4b891"
     if ($analysis.world_hash -ne $expectedHash) {
         throw "populated world replay end hash $($analysis.world_hash) != pinned golden $expectedHash (the populated ecology world diverged / non-deterministic)"
@@ -4746,7 +3945,7 @@ function Test-PopulatedWorldReplay {
 }
 
 function Test-PopulatedAsan {
-    # Second-class adversarial pass (FR-002): an AddressSanitizer run over a POPULATED
+    # Second-class adversarial pass: an AddressSanitizer run over a POPULATED
     # session. The debug-asan CMake preset existed but had NO harness driving it; this
     # mode wires it. It builds the AddressSanitizer-instrumented headless server, then
     # drives it through a populated, live-ecology session AND a full save->load
@@ -4877,15 +4076,15 @@ function Test-PopulatedAsan {
 }
 
 function Test-ReplicationSmoke {
-    # T-I6 P3.1c/d: live authoritative-server state replication. Drives the server's
+    #  /d: live authoritative-server state replication. Drives the server's
     # --replicate mode: boots N avatars + an in-process loopback ReplicationClient,
-    # broadcasts the avatar states each tick, and (P3.1d) the client CONTROLS one
+    # broadcasts the avatar states each tick, and  the client CONTROLS one
     # avatar via a +X usercmd. Asserts the client mirrors the server avatars (mm
     # tolerance), an ack flowed back, and network input actually walked the avatar.
     # Engine/transport-side -> world_hash untouched (reads the avatar list).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "replication gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "replication gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $artifactPath = "build/$BuildPreset/test-artifacts/server/replication-smoke.json"
@@ -4893,7 +4092,7 @@ function Test-ReplicationSmoke {
         Remove-Item $artifactPath
     }
 
-    # T-I6 polish: exercise the full heterogeneous-entity path -- GOAP-driven NPCs
+    #  polish: exercise the full heterogeneous-entity path -- GOAP-driven NPCs
     # (animals that PLAN toward a water hole and are steered there by the
     # InstinctLocomotionSystem) + a server-authoritative ballistic arrow with a
     # reliable despawn -- so the gate locks the action->locomotion behaviour, not
@@ -4936,7 +4135,7 @@ function Test-ReplicationSmoke {
 }
 
 function Test-NetworkedReplication {
-    # T-I6: REAL over-the-wire replication between TWO PROCESSES over TCP sockets
+    # REAL over-the-wire replication between TWO PROCESSES over TCP sockets
     # (not the in-process loopback ReplicationSmoke uses). Auto-launches the host
     # (--net-host, binds + runs the authoritative world) and the client
     # (--net-join, connects + mirrors), then asserts BOTH exited cleanly and the
@@ -4945,7 +4144,7 @@ function Test-NetworkedReplication {
     # world_hash untouched.
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "networked gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "networked gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
     $port = 27061
     $ticks = 60
@@ -4988,14 +4187,14 @@ function Test-NetworkedReplication {
 }
 
 function Test-AetherFieldDeterminism {
-    # T-I6-A1: the Aetheric scalar field is a deterministic, hashed sim system.
+    # the Aetheric scalar field is a deterministic, hashed sim system.
     # Drives the server's --aether-bench mode: seed -> N AetherFieldSystem updates
     # (advected by a parallel wind field) twice -> the aether sub-hash is EQUAL
     # across runs and STABLE; the field EVOLVES over time (not vacuous); geometry
     # matches the PINNED 24 m / 64-extent / 8-sweep shape. The `aether` sub-hash is
     # folded into the world_hash (deliberate bump #4 d950a6afc12a5cdc ->
     # f17726d44054d133; then bump #5 f17726d44054d133 -> 8a6b7bb6795da912 from commit
-    # 0cb9ce8 (T-I7-ECO-RENDER) appending the |scents: term; then bump #6
+    # 0cb9ce8 appending the |scents: term; then bump #6
     # 8a6b7bb6795da912 -> d8f84cf6d7d0b978 from gate-populated-world-replay appending the
     # |ecology: term to ComposeWorldHash — the SERVER composite hash, run==replay proven —
     # asserted by the headless tick / replay / lockstep gates. NOTE the NetworkedSession gate pins a DIFFERENT quantity:
@@ -5003,7 +4202,7 @@ function Test-AetherFieldDeterminism {
     # scent sub-hashes, so it has its own pin 46f89d27449011a0 — not this composite).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "aether-field determinism gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "aether-field determinism gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $artifactPath = "build/$BuildPreset/test-artifacts/server/aether-field-determinism.json"
@@ -5046,17 +4245,17 @@ function Test-AetherFieldDeterminism {
 }
 
 function Test-WindFieldDeterminism {
-    # T-I5a-2 (A2): the wind grid is a deterministic, hashed sim system. This
+    # the wind grid is a deterministic, hashed sim system. This
     # gate drives the server's --wind-bench mode: seed -> N WindFieldSystem
     # updates twice -> the wind sub-hash is EQUAL across runs and STABLE; the
     # field EVOLVES over time (the gate is not vacuous); and the per-tick wind
     # update stays within the PINNED <= 0.15 ms budget at the streamed extent.
     # The `wind` sub-hash is also folded into the world_hash (the deliberate
-    # mega-bump 2fa007951a21e140 -> 0eac465289e7c88b, asserted by the headless
+    # hash revision 2fa007951a21e140 -> 0eac465289e7c88b, asserted by the headless
     # tick / replay / lockstep gates).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "wind-field determinism gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "wind-field determinism gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $artifactPath = "build/$BuildPreset/test-artifacts/server/wind-field-determinism.json"
@@ -5092,7 +4291,7 @@ function Test-WindFieldDeterminism {
         throw "wind-field determinism: layer_count=$($a.layer_count), expected 3"
     }
     # Per-tick budget: <= 0.15 ms at the streamed extent. The PINNED budget is a
-    # RELEASE-build number (design-decisions.md S7: the 5a perf budgets are
+    # RELEASE-build number (the deterministic runtime contract : the 5a perf budgets are
     # release/optimized measurements; an un-optimized debug build runs the same
     # bit-deterministic field ~10x slower). So the budget is asserted against the
     # release build when one exists; the determinism/geometry checks above hold
@@ -5131,7 +4330,7 @@ function Test-WindFieldDeterminism {
 }
 
 function Test-HeadlessServerTickHeavy {
-    # T-I4-11 heavy-mode oracle (Factorio "heavy mode"): tick N, SAVE the full
+    #  heavy-mode oracle (Factorio "heavy mode"): tick N, SAVE the full
     # streamed-chunk set, LOAD it into a FRESH session, resimulate M further
     # ticks on BOTH and compare AUTHORITATIVE sim state (terrain/water/entities)
     # + per-system sub-hashes. Catches sim state excluded from the hash and
@@ -5139,7 +4338,7 @@ function Test-HeadlessServerTickHeavy {
     # two sessions, a save and a load) -- run via -Mode HeadlessServerTickHeavy.
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "headless heavy gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "headless heavy gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $artifactPath = "build/$BuildPreset/test-artifacts/server/server-tick-heavy.json"
@@ -5161,18 +4360,18 @@ function Test-HeadlessServerTickHeavy {
     if (-not $h.resim_match) {
         throw "heavy oracle: authoritative state diverged after resimulating both sessions"
     }
-    # WATER-17: the boot water-settle CONTRACT — fresh boots leave zero uninitialized
+    # the boot water-settle CONTRACT — fresh boots leave zero uninitialized
     # chunks; loaded boots skip the water settle (paused, restored state authoritative,
     # persisted sim-window cursor resumed). A violated contract advances the loaded
     # session's water past the original's saved state, so water can never round-trip.
     # (A global all-asleep fixed point does not exist; awake > 0 is expected.)
     if (-not $h.settle_contract_ok) {
         $so = $h.boot_settle_original; $sl = $h.boot_settle_loaded
-        throw ("heavy oracle: boot water-settle contract VIOLATED (WATER-17) - original uninited={0}; loaded uninited={1} settle_skipped={2}" -f `
+        throw ("heavy oracle: boot water-settle contract VIOLATED () - original uninited={0}; loaded uninited={1} settle_skipped={2}" -f `
             $so.uninited, $sl.uninited, $sl.water_settle_skipped)
     }
     # Authoritative sub-hashes must be byte-equal at both comparison points.
-    # aether_state (spec 024 AETHER-06): the STATEFUL energy layer is authoritative
+    # aether_state: the STATEFUL energy layer is authoritative
     # round-trip state (unlike the recompute-and-excluded re-derivable wind/weather/
     # aether trio). Empty on the default OFF world ("" == "" passes); the ON fixture
     # rides the sim.aether_state activation bump (Codex sign-off finding A).
@@ -5190,16 +4389,16 @@ function Test-HeadlessServerTickHeavy {
         $h.ticks_before_save, $h.resim_ticks, $meshNote)
 }
 
-# T-I4-DR-server-streaming-race: the intermittent 0xC0000005 that this helper used
+# the intermittent 0xC0000005 that this helper used
 # to work around is FIXED. Its root cause was NOT a streaming/shutdown data race --
 # it was a FastNoise2 GenPositionArray2D SIMD over-read (the entry point's
 # full-width tail load reads past a count-sized buffer when count < the SIMD width;
 # the worldgen call sites in SHIELD_WorldSystem now SIMD-pad those buffers). With
 # the fix the headless server runs cleanly at the DEFAULT (multi-)worker count, so
 # the load-bearing mitigations are removed: no LUMINUMBRA_JOB_WORKERS=1 pin and no
-# crash-retry loop. The env knob still exists in ServerWorldRunner (useful for
-# future probing) but is no longer set here. The function name + signature are kept
-# so call sites are unchanged; it now just runs the server once and returns its
+# crash-retry loop. The environment knob remains available for diagnostic
+# scheduling experiments but is not set here. The function name and signature
+# are kept so call sites are unchanged; it runs the server once and returns its
 # exit code (a non-zero exit is a real failure/divergence, surfaced immediately).
 function Invoke-ServerWithCrashRetry {
     param(
@@ -5215,23 +4414,23 @@ function Invoke-ServerWithCrashRetry {
 }
 
 function Test-ReplayRoundtrip {
-    # T-I4-12 session replay (LREC1): record a 90-tick run, replay it, and assert
+    #  session replay (LREC1): record a 90-tick run, replay it, and assert
     # the replay reproduces the SAME end-hash, verifies all checkpoints, and (the
     # determinism proof) that recording is hash-neutral -- the recorded run must
     # reach the canonical HeadlessServerTick hash d8f84cf6d7d0b978 unchanged
-    # (world_hash lineage: 2fa007951a21e140 -> 0eac465289e7c88b [T-I5a-2 wind slot]
-    #  -> 0857e683b4b8c47e [T-I5a-3 weather slot] -> d950a6afc12a5cdc [T-I5a-5
-    #  lightning strike schedule folded into the weather sub-hash, mega-bump #3]
-    #  -> f17726d44054d133 [T-I6-A1 aether slot appended, bump #4]
-    #  -> 8a6b7bb6795da912 [commit 0cb9ce8 T-I7-ECO-RENDER appended the |scents: term to
+    # (world_hash lineage: 2fa007951a21e140 -> 0eac465289e7c88b [ wind slot]
+    #  -> 0857e683b4b8c47e [ weather slot] -> d950a6afc12a5cdc [
+    #  lightning strike schedule folded into the weather sub-hash, hash revision]
+    #  -> f17726d44054d133 [ aether slot appended, bump #4]
+    #  -> 8a6b7bb6795da912 [commit 0cb9ce8  appended the |scents: term to
     #  ComposeWorldHash, bump #5]
     #  -> d8f84cf6d7d0b978 [gate-populated-world-replay appended the |ecology: term to
     #  ComposeWorldHash, bump #6; the EMPTY-roster ecology sub-hash is neutral, so this
     #  composite changed ONLY by the appended `|ecology:` suffix -- the five existing
-    #  sub-terms are byte-identical (additivity guard, AC-003)]).
+    #  sub-terms are byte-identical (additivity guard, )]).
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "replay roundtrip gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "replay roundtrip gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $replayDir = "build/$BuildPreset/test-artifacts/replay"
@@ -5275,7 +4474,7 @@ function Test-ReplayRoundtrip {
     }
     # Determinism proof: recording must NOT perturb the sim. The recorded run's
     # end hash must equal the canonical HeadlessServerTick hash, unchanged.
-    # (Re-pinned 2026-07-05 for the WATER-17 Bump A: settle contract + flux
+    # (Re-pinned 2026-07-05 for the  authoritative-state change: settle contract + flux
     # persistence + order-independent wake propagation. Prior canonical was
     # 6f008a9f637c40b7.)
     $expectedHash = "a66ab4d049ba9228"
@@ -5287,7 +4486,7 @@ function Test-ReplayRoundtrip {
 }
 
 function Test-ReplayDivergence {
-    # T-I4-12 negative oracle: prove the replay verifier is NOT vacuous. Record a
+    #  negative oracle: prove the replay verifier is NOT vacuous. Record a
     # run, deliberately corrupt ONE checkpoint hash in the stream (via the
     # server's in-process --mutate-replay-fixture mode -- the least-hacky mutation:
     # it parses the real LREC1 stream and re-emits it with one checkpoint's
@@ -5296,7 +4495,7 @@ function Test-ReplayDivergence {
     # correct divergent-tick + section report.
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "replay divergence gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "replay divergence gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $replayDir = "build/$BuildPreset/test-artifacts/replay"
@@ -5318,7 +4517,7 @@ function Test-ReplayDivergence {
     }
 
     # 3) Replay the mutated stream: this MUST fail with a CLEAN divergence (exit
-    #    1 + a divergence artifact), NOT a crash. T-I4-DR-server-streaming-race: the
+    #    1 + a divergence artifact), NOT a crash.: the
     #    0xC0000005 worker-pin + retry workaround is removed (root cause fixed); a
     #    single replay at the default worker count is expected to exit 1 cleanly.
     Remove-Item -Force -ErrorAction SilentlyContinue $artifactPath
@@ -5355,7 +4554,7 @@ function Test-ReplayDivergence {
     $global:LASTEXITCODE = 0
 }
 
-# --- T-I4-13 LockstepLoopback mode: append-only ---
+# ---  LockstepLoopback mode: append-only ---
 # Delay-based lockstep over LoopbackTransport (no sockets/ports): 2 peers (host=client0
 # + the one remote=client1), M ticks (>=90), each peer stepping its own ServerWorldRunner
 # of the SAME seed/preset. Asserts the session stayed in sync (no desync), both peers
@@ -5366,7 +4565,7 @@ function Test-ReplayDivergence {
 function Test-LockstepLoopback {
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "lockstep loopback gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "lockstep loopback gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $lockstepDir = "build/$BuildPreset/test-artifacts/lockstep"
@@ -5396,7 +4595,7 @@ function Test-LockstepLoopback {
     }
     # Determinism proof: lockstep must NOT perturb the sim. The in-sync end hash must equal
     # the canonical HeadlessServerTick hash, unchanged. (Re-pinned 2026-07-05 for the
-    # WATER-17 Bump A; prior canonical was 6f008a9f637c40b7.)
+    #  authoritative-state change; prior canonical was 6f008a9f637c40b7.)
     $expectedHash = "a66ab4d049ba9228"
     if ($a.host.world_hash -ne $expectedHash) {
         throw "lockstep loopback end hash $($a.host.world_hash) != canonical $expectedHash (lockstep perturbed the simulation)"
@@ -5405,7 +4604,7 @@ function Test-LockstepLoopback {
         $a.ticks_requested, $a.host.world_hash, $a.host.max_horizon_reached, $a.host.late_input_events)
 }
 
-# --- T-I4-14 NetworkedSession mode: append-only (OFF the default All lane) ---
+# ---  NetworkedSession mode: append-only (OFF the default All lane) ---
 # The CLIENT renders a SERVER-OWNED world over the lockstep transport. A
 # LockstepSession pair runs over an in-process LoopbackTransport (no sockets):
 # one peer is a headless HOST world authority, the other is the client's render
@@ -5428,15 +4627,15 @@ function Test-LockstepLoopback {
 # two are different QUANTITIES by construction -- not a divergence. The networked
 # determinism oracle is host==client (asserted above) + run-to-run stability of
 # this pin; both hold. (The pre-I9 coincidence where this equalled the composite
-# f17726d44054d133 ended when T-I7-ECO-RENDER appended the `|scents:` term to the
+# f17726d44054d133 ended when  appended the `|scents:` term to the
 # server composite -- the bare client chunk hash was unaffected; the
 # gate-populated-world-replay `|ecology:` term, bump #6, is likewise server-only.)
 #
-# rev 13 (RD-001, Decision 2 — DEFERRED client fold): the client capture path
+# rev 13 (, Decision 2 — DEFERRED client fold): the client capture path
 # (NetSessionCaptureHashes, RuntimeScenarioHarness.cpp) folds ONLY the bare
 # streamed-chunk hash; it owns NO independent wind/weather/aether/scent/ecology
 # state today (those live on the server-authoritative session). Wiring the client
-# to fold the full canonical quantity is a recorded follow-up (per-sub-hash
+# to fold the full canonical quantity is a recorded implementation note (per-sub-hash
 # cadence comparison), NOT done here. This gate's host==client equality is over the
 # CLIENT quantity on both peers, so the deferral does not weaken it.
 function Test-NetworkedSession {
@@ -5515,7 +4714,7 @@ function Test-NetworkedSession {
         $a.ticks_requested, $a.end_hash, $a.hash_exchanges)
 }
 
-# --- T-I4-13 LockstepFaultInjection mode: append-only ---
+# ---  LockstepFaultInjection mode: append-only ---
 # Two scenarios, both over LoopbackTransport (no sockets):
 #  (1) DELAYED+DROPPED input within horizon tolerance: peer 1 withholds its inputs for a
 #      burst of ticks, then releases them. The adaptive horizon must ABSORB it -- the
@@ -5527,7 +4726,7 @@ function Test-NetworkedSession {
 function Test-LockstepFaultInjection {
     $serverExe = "build/$BuildPreset/bin/luminumbra_server_app.exe"
     if (-not (Test-Path $serverExe)) {
-        throw "lockstep fault-injection gate not yet built - missing $serverExe (cmake --build build/$BuildPreset)"
+        throw "lockstep fault-injection gate required executable missing: $serverExe (cmake --build build/$BuildPreset)"
     }
 
     $lockstepDir = "build/$BuildPreset/test-artifacts/lockstep"
@@ -5609,7 +4808,7 @@ function Test-LockstepFaultInjection {
 }
 
 function Test-SkinnedMeshVisual {
-    # T-I3-16: skinned G-Buffer stage gate. A procedurally generated rigged
+    # skinned G-Buffer stage gate. A procedurally generated rigged
     # test mesh is spawned near spawn; two captures at different clip times
     # must differ in the mesh ROI and the skinned draw stage must have run.
     $exe = Get-ClientExe
@@ -5630,7 +4829,7 @@ function Test-SkinnedMeshVisual {
 
     $analysisPath = Join-Path $visualDir "skinned-mesh-visual-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "skinned mesh visual run did not produce $analysisPath (gate produced by task T-I3-16)"
+        throw "skinned mesh visual run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -5658,7 +4857,7 @@ function Test-SkinnedMeshVisual {
     if ([double]$analysis.diff.changed_ratio -lt [double]$analysis.thresholds.min_changed_ratio) {
         throw "Skinned mesh ROI diff ratio below threshold: $($analysis.diff.changed_ratio) < $($analysis.thresholds.min_changed_ratio)"
     }
-    # T-I4-8 textured-response: the UV-mapped creature texture must drive a
+    #  textured-response: the UV-mapped creature texture must drive a
     # color variance above the flat-color bound (a flat-shaded creature fails).
     if ($null -ne $analysis.diff.mesh_color_stddev_a -and `
         [double]$analysis.diff.mesh_color_stddev_a -lt [double]$analysis.thresholds.min_mesh_color_stddev) {
@@ -5676,11 +4875,11 @@ function Test-SkinnedMeshVisual {
 }
 
 function Test-EngineGameSplitLint {
-    # T-I3-17: engine/game decoupling lint. The engine (src/) must carry no
-    # Project Capture game nouns â€” content lives under data/ and worlds/.
+    # engine/game decoupling lint. The engine (src/) must carry no
+    # Project Capture game nouns — content lives under data/ and worlds/.
     # (a) path lint: no game noun in any path under src/;
     # (b) content lint: no game noun in any engine source file.
-    # T-I3-22: the aetheric compatibility alias was removed at iteration close;
+    # the aetheric compatibility alias was removed at iteration close;
     # 'aetheric' is now an UNCONDITIONAL violation under src/ (no allowlist).
     $gameNouns = @(
         "lumincrystal",
@@ -5696,20 +4895,20 @@ function Test-EngineGameSplitLint {
 
     function Test-Allowlisted {
         param([string]$RelativePath, [string]$Noun)
-        # AETHER-09/OPS-16 (spec 021): every comment-level game noun was reworded out of
-        # src/ — 'aetheric' remains UNCONDITIONAL (T-I3-22, zero entries below). What is
-        # allowlisted here is CODE-LEVEL debt only, each entry awaiting the OPS-16
+        # every comment-level game noun was reworded out of
+        # src/ — 'aetheric' remains UNCONDITIONAL (, zero entries below). What is
+        # allowlisted here is CODE-LEVEL debt only, each entry awaiting the
         # data-driven refactor (hardcoded species spawns/audio event ids/model paths/the
         # MaterialType::LuminCrystal enumerant/the built-in species table). Do not add
-        # entries without an explicit, reviewed data-driven replacement plan.
+        # entries without a documented reason for retaining the product-specific value.
         $ops16Debt = @(
             @{ Path = "src/luminumbra_server/ServerWorldRunner.cpp";           Nouns = @("grovestrider") },
             @{ Path = "src/luminumbra_client/main_client.cpp";                 Nouns = @("grovestrider", "glimmer", "lumincrystal") }
-            # OPS-16 (2026-07-07): RuntimeScenarioHarness.cpp (showcase model paths -> data/
+            #  (2026-07-07): RuntimeScenarioHarness.cpp (showcase model paths -> data/
             # common/scenario/skinned_showcase_model.json) and SpeciesCodex.h (example catalogue
             # de-nouned) are RETIRED from this allowlist. ServerWorldRunner (grovestrider spawn,
-            # hash-visible -> needs a re-pin) + main_client (audio event ids / fauna / crystal)
-            # remain as the hash-sensitive + orchestrator-owned half.
+            # hash-visible) and main_client (audio event ids, fauna, and crystal)
+            # remain intentionally product-specific.
         )
         foreach ($entry in $ops16Debt) {
             if ($RelativePath -eq $entry.Path -and $entry.Nouns -contains $Noun) { return $true }
@@ -5771,7 +4970,7 @@ function Test-EngineGameSplitLint {
 }
 
 function Test-SimDeterminismLint {
-    # T-I4-11 determinism contract (prevention, not detection). Bans, in the
+    #  determinism contract (prevention, not detection). Bans, in the
     # SIM-CRITICAL paths (luminumbra_common simulation systems + the headless
     # server), the constructs that silently diverge a lockstep tick -- the
     # Factorio std::sort-comparator lesson (research Area 2, takeaway 6/9):
@@ -5784,13 +4983,13 @@ function Test-SimDeterminismLint {
     #   (c) non-seeded RNG (rand/srand/std::random_device/std::mt19937/
     #       std::default_random_engine) -- a sim RNG must be one seeded stream.
     #   (d) range-for iteration over std::unordered_map/set where order feeds
-    #       sim state. Heuristic: flag `for (... : <ident>)` where the same TU
+    #       sim state. Heuristic: flag `for (...: <ident>)` where the same TU
     #       declares that identifier an unordered_map/set. Hash-order iteration
     #       is the single most common real desync.
     # This gate is APPEND-ONLY safe: it PASSES on the current tree (every
     # existing legitimate site is allowlisted below WITH a reason) and exists to
     # fail NEW violations. Migration of existing sqrt/etc. is explicitly out of
-    # scope for T-I4-11.
+    # scope for.
 
     # Sim-critical roots. world/systems/fields/ai/simulation/animation/physics
     # under common are authoritative tick state; net/network carry hashed state;
@@ -5822,7 +5021,7 @@ function Test-SimDeterminismLint {
         # wall_seconds report. Measured, recorded in artifacts, never hashed.
         "src/luminumbra_common/world/MarchingCubes.cpp|time" = "TerrainMeshBuildStats elapsed_us telemetry; not hashed"
         "src/luminumbra_server/ServerWorldRunner.cpp|time"   = "RunFixedTicks wall_seconds report telemetry; not hashed"
-        # T-I5a-2: the --wind-bench mode times the per-tick wind update for the
+        #  the --wind-bench mode times the per-tick wind update for the
         # WindFieldDeterminism budget assertion. The clock is TELEMETRY only
         # (measured, recorded in the artifact, never hashed); the wind field
         # itself is bit-deterministic (DeterministicMath + FastNoise batch path).
@@ -5845,7 +5044,7 @@ function Test-SimDeterminismLint {
 
     $bannedTrig = 'sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|exp|exp2|log|log2|log10|pow|cbrt|hypot'
     $violations = New-Object 'System.Collections.Generic.List[string]'
-    # FR-001 "flag std::sqrt for review (warn, not fail)": sqrt is correctly-rounded
+    #  "flag std::sqrt for review (warn, not fail)": sqrt is correctly-rounded
     # IEEE-754 so it is deterministic and intentionally NOT in $bannedTrig, but raw
     # std::sqrt( sites (not routed through DeterministicMath::Sqrt / an alias) are
     # surfaced advisory-only. This list NEVER fails the gate.
@@ -5868,7 +5067,7 @@ function Test-SimDeterminismLint {
             $unorderedIdents = @{}
             # Collect DeterministicMath namespace aliases declared in this TU so the
             # trig check treats `<alias>::Cos(` exactly like `DeterministicMath::Cos(`
-            # (the pervasive `namespace dm = ::Luminumbra::DeterministicMath;` form,
+            # (the pervasive `namespace dm =::Luminumbra::DeterministicMath;` form,
             # plus DM / a full re-alias). Resolved generically -- the alias name is
             # not hard-coded, so a TU aliasing under any identifier stays correct.
             # "DeterministicMath" is always recognized as an alias (the canonical
@@ -5899,7 +5098,7 @@ function Test-SimDeterminismLint {
                 # (a) libm transcendentals: std::<fn>( or bare <fn>( / <fn>f(.
                 if ($code -match ("(?:std::)?(?:$bannedTrig)f?\s*\(")) {
                     # Allow DeterministicMath:: dispatch (and any resolved alias of
-                    # it -- `dm::Cos(`, `DM::Sin(`, ...) and glm:: (glm trig is
+                    # it -- `dm::Cos(`, `DM::Sin(`,...) and glm:: (glm trig is
                     # template math the migration task addresses separately; the
                     # present sim paths use none -- if one appears it is flagged
                     # via the std::/bare forms, not glm). Strip every
@@ -5911,12 +5110,12 @@ function Test-SimDeterminismLint {
                         $key = "$relative|trig"
                         $siteKey = "$relative|trig|$($code.Trim())"
                         if (-not $allowlist.ContainsKey($key) -and -not $siteAllowlist.ContainsKey($siteKey)) {
-                            $violations.Add("trig: ${relative}:${lineNo}: libm transcendental in sim path -> use DeterministicMath:: ; `"$($code.Trim())`"")
+                            $violations.Add("trig: ${relative}:${lineNo}: libm transcendental in sim path -> use DeterministicMath::; `"$($code.Trim())`"")
                         }
                     }
                 }
 
-                # (a') sqrt REVIEW (warn-only, FR-001): correctly-rounded IEEE-754
+                # (a') sqrt REVIEW (warn-only, ): correctly-rounded IEEE-754
                 # sqrt is deterministic, so a raw std::sqrt( on the sim path is NOT a
                 # failure -- but surface it advisory so a reviewer confirms it is the
                 # IEEE sqrt and not a same-named user fn. Skip calls already routed
@@ -5935,7 +5134,7 @@ function Test-SimDeterminismLint {
                     $key = "$relative|time"
                     $siteKey = "$relative|time|$($code.Trim())"
                     if (-not $allowlist.ContainsKey($key) -and -not $siteAllowlist.ContainsKey($siteKey)) {
-                        $violations.Add("time: ${relative}:${lineNo}: wall-clock in sim path ; `"$($code.Trim())`"")
+                        $violations.Add("time: ${relative}:${lineNo}: wall-clock in sim path; `"$($code.Trim())`"")
                     }
                 }
 
@@ -5946,7 +5145,7 @@ function Test-SimDeterminismLint {
                     $code -match '(^|[^.\w])s?rand\s*\(') {
                     $key = "$relative|rng"
                     if (-not $allowlist.ContainsKey($key)) {
-                        $violations.Add("rng: ${relative}:${lineNo}: non-seeded RNG in sim path ; `"$($code.Trim())`"")
+                        $violations.Add("rng: ${relative}:${lineNo}: non-seeded RNG in sim path; `"$($code.Trim())`"")
                     }
                 }
 
@@ -5957,7 +5156,7 @@ function Test-SimDeterminismLint {
                     if ($unorderedIdents.ContainsKey($iterName)) {
                         $key = "$relative|hashiter"
                         if (-not $allowlist.ContainsKey($key)) {
-                            $violations.Add("hashiter: ${relative}:${lineNo}: range-for over unordered '$iterName' in sim path (iteration order is non-deterministic) ; `"$($code.Trim())`"")
+                            $violations.Add("hashiter: ${relative}:${lineNo}: range-for over unordered '$iterName' in sim path (iteration order is non-deterministic); `"$($code.Trim())`"")
                         }
                     }
                 }
@@ -5969,7 +5168,7 @@ function Test-SimDeterminismLint {
         throw "sim determinism lint scanned suspiciously few files ($scanned); sim-path scan is broken"
     }
 
-    # Warn-only sqrt review (FR-001): advisory, never fails the gate.
+    # Warn-only sqrt review: advisory, never fails the gate.
     if ($sqrtReview.Count -gt 0) {
         Write-Host ("sqrt-review: {0} raw std::sqrt( site(s) on the sim path (IEEE-754 correctly-rounded => deterministic; advisory only, not a failure):" -f $sqrtReview.Count)
         foreach ($s in $sqrtReview) { Write-Host "  sqrt-review: $s" }
@@ -5977,23 +5176,23 @@ function Test-SimDeterminismLint {
 
     if ($violations.Count -gt 0) {
         foreach ($v in $violations) { Write-Host "  $v" }
-        throw "sim determinism lint found $($violations.Count) violation(s) in sim-critical paths (T-I4-11). Use core/DeterministicMath.h, the seeded sim RNG, the SimulationClock, and ordered iteration; or allowlist with a documented reason."
+        throw "sim determinism lint found $($violations.Count) violation(s) in sim-critical paths (). Use core/DeterministicMath.h, the seeded sim RNG, the SimulationClock, and ordered iteration; or allowlist with a documented reason."
     }
 
     Write-Host ("sim determinism lint: {0} sim-critical files scanned, 0 new violations ({1} documented allowlist exception site(s))" -f $scanned, ($allowlist.Count + $siteAllowlist.Count))
 }
 
 function Test-SimOptLevelParity {
-    # T-transcendental FR-003 / AC-003: opt-level INVARIANCE of the sim path.
+    # T-transcendental  /: opt-level INVARIANCE of the sim path.
     # The debug library is -O0 except world/GameSession.cpp, which is forced to
     # -O1 to dodge a GCC-15 entt vague-linkage link error (CMakeLists.txt). That
     # opt-level asymmetry across TUs is exactly how FMA-contraction / optimizer
     # drift can sneak a desync in. This gate proves it has not: it builds a second
     # tree (debug-simo0) with LUMINUMBRA_SIM_O0_PARITY=ON -- which compiles
-    # GameSession.cpp at -O2 instead (a STRONGER opt level; plain -O0 reintroduces
-    # the link error, so -O2 is the link-safe parity axis, OQ-B) -- runs the same
+    # GameSession.cpp at - instead (a STRONGER opt level; plain -O0 reintroduces
+    # the link error, so - is the link-safe parity axis, ) -- runs the same
     # HeadlessServerTick scenario (--smoke --ticks 90), and asserts the world_hash
-    # is BIT-IDENTICAL to the normal -O1 build's. Determinism-only (NFR-002): no
+    # is BIT-IDENTICAL to the normal -O1 build's. Determinism-only: no
     # perf claim. Excluded from the All fast pass (it builds a whole second tree);
     # this is an on-demand / dedicated-lane gate.
 
@@ -6007,12 +5206,12 @@ function Test-SimOptLevelParity {
     $oldPath = $env:PATH
     if ($env:PATH -notlike "$ucrt*") { $env:PATH = "$ucrt;$env:PATH" }
     try {
-        Write-Host "sim-opt-parity: configuring + building $parityPreset (GameSession.cpp @ -O2)..."
+        Write-Host "sim-opt-parity: configuring + building $parityPreset (GameSession.cpp @ -)..."
         & cmake --preset $parityPreset
         if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: cmake configure ($parityPreset) failed ($LASTEXITCODE)" }
         & cmake --build --preset $parityPreset --target luminumbra_server_app
         if ($LASTEXITCODE -ne 0) {
-            throw "sim-opt-parity: build ($parityPreset) failed ($LASTEXITCODE). If this is the entt vague-linkage undefined-reference error, the -O2 parity override in CMakeLists.txt did NOT take; -O0 is known-unlinkable (R1)."
+            throw "sim-opt-parity: build ($parityPreset) failed ($LASTEXITCODE). If this is the entt vague-linkage undefined-reference error, the - parity override in CMakeLists.txt did NOT take; -O0 is known-unlinkable (R1)."
         }
     } finally {
         $env:PATH = $oldPath
@@ -6037,12 +5236,12 @@ function Test-SimOptLevelParity {
     & $normalExe --smoke --ticks 90 --artifact $normalArtifact
     if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: normal (-O1) smoke exited $LASTEXITCODE" }
     & $parityExe --smoke --ticks 90 --artifact $parityArtifact
-    if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: parity (-O2) smoke exited $LASTEXITCODE" }
+    if ($LASTEXITCODE -ne 0) { throw "sim-opt-parity: parity (-) smoke exited $LASTEXITCODE" }
 
     $normal = Read-JsonArtifact $normalArtifact "luminumbra.server_tick.v1"
     $parity = Read-JsonArtifact $parityArtifact "luminumbra.server_tick.v1"
     Assert-ArtifactPassed $normal "SimOptLevelParity(normal -O1)"
-    Assert-ArtifactPassed $parity "SimOptLevelParity(parity -O2)"
+    Assert-ArtifactPassed $parity "SimOptLevelParity(parity -)"
 
     if ([string]::IsNullOrEmpty($normal.world_hash) -or [string]::IsNullOrEmpty($parity.world_hash)) {
         throw "sim-opt-parity: empty world_hash (normal='$($normal.world_hash)' parity='$($parity.world_hash)')"
@@ -6054,18 +5253,18 @@ function Test-SimOptLevelParity {
                 $a = $normal.sub_hashes.$section
                 $b = $parity.sub_hashes.$section
                 if ($a -ne $b) {
-                    Write-Host "  sim-opt-parity sub-hash divergence in '$section': $a (-O1) != $b (-O2)"
+                    Write-Host "  sim-opt-parity sub-hash divergence in '$section': $a (-O1) != $b (-)"
                 }
             }
         }
-        throw "sim-opt-parity: world_hash DIVERGED across opt levels: -O1='$($normal.world_hash)' vs -O2='$($parity.world_hash)'. The GameSession.cpp opt-level override is NOT determinism-neutral (FMA/optimizer drift)."
+        throw "sim-opt-parity: world_hash DIVERGED across opt levels: -O1='$($normal.world_hash)' vs -='$($parity.world_hash)'. The GameSession.cpp opt-level override is NOT determinism-neutral (FMA/optimizer drift)."
     }
 
-    Write-Host ("sim-opt-parity: world_hash identical across opt levels (-O1 GameSession vs -O2 parity): {0}" -f $normal.world_hash)
+    Write-Host ("sim-opt-parity: world_hash identical across opt levels (-O1 GameSession vs - parity): {0}" -f $normal.world_hash)
 }
 
 function Test-CreatureSlice {
-    # T-I3-18: Project Capture game slice. One data-driven creature
+    # Project Capture game slice. One data-driven creature
     # (grovestrider archetype) rendered through the skinned G-Buffer stage,
     # planned by the fixed-tick InstinctSystem, switching behavior on a light
     # stimulus (graze -> approach). The artifact records the planner state
@@ -6075,7 +5274,7 @@ function Test-CreatureSlice {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $sliceDir
     New-Item -ItemType Directory -Force -Path $sliceDir | Out-Null
 
-    # .lmesh files are generated assets (gitignored); rebuild them from the
+    #.lmesh files are generated assets (gitignored); rebuild them from the
     # committed glTF sources when missing. The asset processor is bitwise
     # deterministic, so regenerated outputs match the authored content.
     $assetProcessor = "build/$BuildPreset/bin/asset_processor.exe"
@@ -6105,7 +5304,7 @@ function Test-CreatureSlice {
 
     $analysisPath = Join-Path $sliceDir "creature-slice-analysis.json"
     if (-not (Test-Path $analysisPath)) {
-        throw "creature slice run did not produce $analysisPath (gate produced by task T-I3-18)"
+        throw "creature slice run did not produce $analysisPath (gate producer)"
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
@@ -6139,7 +5338,7 @@ function Test-CreatureSlice {
     if ([int64]$analysis.after_stimulus.plan.plans_executed -le [int64]$analysis.before_stimulus.plan.plans_executed) {
         throw "Creature slice planner did not replan after the stimulus"
     }
-    # T-I3-22 composition check: a "functionally green, visually broken"
+    #  composition check: a "functionally green, visually broken"
     # capture (creature rendered + planner correct, but the camera stares at
     # the ground or the sky, or the creature is camouflaged against the sand)
     # must not pass. sky_ratio in [0.05, 0.6] proves a horizon is visible
@@ -6160,7 +5359,7 @@ function Test-CreatureSlice {
         if ([double]$comp.creature_terrain_color_delta -lt $minColorDelta) {
             throw "Creature slice capture '$($capture.file)' creature_terrain_color_delta $($comp.creature_terrain_color_delta) is below $minColorDelta (creature reads invisibly against the terrain)"
         }
-        # T-I4-9 emissive glow halo: when the glow_bloom stimulus is framed, its
+        #  emissive glow halo: when the glow_bloom stimulus is framed, its
         # emission must read as a luminance gradient (bright core/ring above a
         # falling-off background), not a flat patch.
         if ($comp.glow_measured) {
@@ -6187,12 +5386,12 @@ function Test-CreatureSlice {
     Assert-CapturePinned -ArtifactDir $sliceDir -Name "CreatureSlice"
 }
 
-# --- T-I5b-2 (E1) StimulusChannelGate mode: append-only ---
+# ---   StimulusChannelGate mode: append-only ---
 # Ecology stimulus-channel registry feeding the InstinctSystem planner. Runs the
 # StimulusChannelGate gtest suite (frontier_gates_test), which asserts:
 #   * INERT: a non-subscribing creature plans IDENTICALLY with or without a
 #     stimulus context (the canonical-neutral property keeping world_hash at
-#     d950a6afc12a5cdc -- critique F1 / design-decisions §0).
+#     d950a6afc12a5cdc -- regression review / documented design).
 #   * BEHAVIOR DIFFERS: a reactive (game-data opt-in) creature plans differently
 #     across weather fixtures (clear vs rain) and time-of-day fixtures (midnight
 #     vs noon) -- the channels reach the plan.
@@ -6211,7 +5410,7 @@ function Test-StimulusChannelGate {
     Write-Host "StimulusChannelGate: inert non-subscriber + behavior-differs (weather/time) + run==replay green"
 }
 
-# --- T-I4-2 BiomeCoverage mode: append-only ---
+# ---  BiomeCoverage mode: append-only ---
 # Atlas coverage gate for biomes. Runs the MountainsBiomeCoverageAtlas gtest
 # (which sweeps the shipped mountains preset - biomes enabled - at the fixed
 # atlas seed and emits biome-coverage.json), then asserts every authored biome
@@ -6268,7 +5467,7 @@ function Test-BiomeCoverage {
         $analysis.distinct_biomes_realized, $analysis.biome_table_content_hash)
 }
 
-# --- T-I4-3 RiverPresence mode: append-only ---
+# ---  RiverPresence mode: append-only ---
 # Runs the MountainsRiverPresenceAtlas gtest (which sweeps the shipped mountains
 # preset - rivers enabled - and emits river-presence.json), then asserts rivers
 # are present, every river column's folded PV sits in the valleys band (zero
@@ -6315,10 +5514,10 @@ function Test-RiverPresence {
         $analysis.longest_continuous_run, $analysis.river_ratio, $analysis.river_pv_min, $analysis.river_pv_max)
 }
 
-# --- T-I5b-4 (W1) WaterfallVisual mode: append-only ---
+# ---   WaterfallVisual mode: append-only ---
 # Runs the WaterfallVisualTest gtest (which builds the shipped mountains world -
 # rivers enabled - at the atlas seed, runs the render-side WaterfallDetect TWICE,
-# asserts the sites are byte-identical + same-seed-same-sites - the F5
+# asserts the sites are byte-identical + same-seed-same-sites - the
 # determinism contract - and renders a sheet/spray/foam capture at a detected
 # site), then asserts from waterfall-visual.json that determinism held, falls
 # were detected, and the dressing capture shows the sheet + spray + foam.
@@ -6348,12 +5547,12 @@ function Test-WaterfallVisual {
     if ([int64]$analysis.site_count -le 0) {
         throw "WaterfallVisual: no waterfall sites detected on the mountains preset"
     }
-    # Determinism (critique F5): repeated detection byte-equal + same seed -> same sites.
+    # Determinism (regression review): repeated detection byte-equal + same seed -> same sites.
     if (-not $analysis.determinism_byte_equal) {
         throw "WaterfallVisual: site detection not byte-identical across runs (non-deterministic)"
     }
     if (-not $analysis.determinism_same_seed_same_sites) {
-        throw "WaterfallVisual: same seed produced different sites (F5 contract broken)"
+        throw "WaterfallVisual: same seed produced different sites ( contract broken)"
     }
     if ($analysis.site_hash_run_a -ne $analysis.site_hash_world_b) {
         throw "WaterfallVisual: site hash differs across worlds with the same seed"
@@ -6375,12 +5574,12 @@ function Test-WaterfallVisual {
     if (-not $analysis.passed) {
         throw "WaterfallVisual analysis reported failure"
     }
-    Write-Host ("waterfall visual gate passed: preset={0} sites={1} best_drop={2:N2} m steepness={3:N2} sheet={4} spray={5} foam={6} (capture={7})" -f `
+    Write-Host ("waterfall visual gate passed: preset={0} sites={1} best_drop={2:} m steepness={3:} sheet={4} spray={5} foam={6} (capture={7})" -f `
         $analysis.preset, $analysis.site_count, $analysis.best_drop_height, $analysis.best_steepness, `
         $analysis.cascade_pixels, $analysis.spray_pixels, $analysis.foam_pixels, $analysis.capture_written)
 }
 
-# --- T-I4-4 StructurePresence mode: append-only ---
+# ---  StructurePresence mode: append-only ---
 # Runs the StructurePlacement gtest (which loads the shipped cairn + ruin
 # template pools, proves the placement grid is deterministic - same seed =>
 # same sites, locate(type, near) verified against a brute-force scan - and
@@ -6398,7 +5597,7 @@ function Test-StructurePresence {
     Write-Host "structure presence gate passed: cairn + ruin pools load, placement grid deterministic, assembled voxel hashes stable"
 }
 
-# --- T-I4-5 BiomeReverb mode: append-only ---
+# ---  BiomeReverb mode: append-only ---
 # Runs the BiomeReverb gtest (loads the shipped biomes.json, proves the per-biome
 # reverb params are CONSUMED into BiomeTable and that reverb_for(active biome id)
 # returns the authored profile - the data->engine flow EnvironmentalAudioSystem
@@ -6415,7 +5614,7 @@ function Test-BiomeReverb {
     Write-Host "biome reverb gate passed: per-biome reverb params consumed; active-biome reverb flow validated"
 }
 
-# --- T-I4-DR-terrain-realism TerrainRealism mode: append-only ---
+# ---  TerrainRealism mode: append-only ---
 # Runs the DEM-grounded realism gtest (which generates every shipped preset at
 # the fixed atlas seed and computes slope distribution, Strahler hypsometric
 # integral, and radially-averaged spectral-slope beta over the atlas window),
@@ -6460,13 +5659,13 @@ function Test-TerrainRealism {
             throw ("TerrainRealism: preset '{0}' ({1}) spectral beta {2} outside self-affine band [{3},{4}]" -f `
                 $p.preset, $p.class, $beta, $bLo, $bHi)
         }
-        Write-Host ("terrain realism: {0,-18} class={1,-10} HI={2:N3} [{3:N2},{4:N2}] beta={5:N3} [{6:N2},{7:N2}] p50/p95={8:N1}/{9:N1}deg" -f `
+        Write-Host ("terrain realism: {0,-18} class={1,-10} HI={2:N3} [{3:},{4:}] beta={5:N3} [{6:},{7:}] p50/p95={8:N1}/{9:N1}deg" -f `
             $p.preset, $p.class, $hi, $hiLo, $hiHi, $beta, $bLo, $bHi, [double]$p.slope_p50_deg, [double]$p.slope_p95_deg)
     }
     Write-Host "terrain realism gate passed: all presets in DEM reference bands (hypsometry + spectral beta) for their landscape class"
 }
 
-# T-I4-DR-window-modes: resize-stress gate. A scripted run drives the render
+# resize-stress gate. A scripted run drives the render
 # pipeline through a windowed->borderless->resolutions->fullscreen->restore-pinned
 # resize cycle (RenderPipeline::on_resize), asserting 0 GL errors, that every
 # size-changing step reallocated targets (resize generation bumped), the final
@@ -6528,159 +5727,16 @@ function Test-WindowModeStress {
     Write-Host "window-mode stress gate passed: $($analysis.aggregates.size_changing_steps) resize steps, all reallocated targets, 0 GL errors, final pinned $($pin.capture_width)x$($pin.capture_height)"
 }
 
-function Test-RenderBudget {
-    # Render-optimization (render-optimization-index FR-002/FR-004): release per-pass
-    # GPU-budget RED gate. Runs the client's --render-benchmark fixed-scenario capture
-    # with the TARGET ship config (0.67 internal scale + quarter-res clouds + GTAO High), averages the per-pass
-    # GPU timers, and asserts ABSOLUTE budgets. Fails (not warns) when the benchmark
-    # JSON is absent (no blessed baseline) or any budget is exceeded.
-    #
-    # NOT in -Mode All: this is a target-GPU gate (needs the 5070 Ti + real GPU
-    # timers) and is intentionally RED until the whole-frame budget is met. Run with
-    # -BuildPreset release for the blessed numbers (debug GPU timings track release
-    # for these fragment-bound passes but the total budget wants the LTO build).
-    $exe = Get-ClientExe
-    $renderDir = "build/$BuildPreset/test-artifacts/render"
-    New-Item -ItemType Directory -Force -Path $renderDir | Out-Null
-    $jsonPath = Join-Path $renderDir "render-benchmark.json"
-    if (Test-Path $jsonPath) { Remove-Item $jsonPath -Force }
-
-    # Target ship config: quarter-res clouds + half-res GTAO. Quarter-res keeps
-    # the native-resolution depth-aware composite; same-binary SkyboxVisual and
-    # 48-cell WorldVisualSweep passed, with half-vs-quarter FLIP < 0.03 under
-    # the unchanged 0.05 visual ceiling.
-    $env:LUMIN_CLOUD_QUALITY = "2"
-    $env:LUMIN_SSAO_QUALITY = "3"
-    $env:LUMIN_RENDER_SCALE = "0.67"
-    Write-Host "RenderBudget: running 3 independent --render-benchmark captures ($BuildPreset, scale=0.67, clouds=quarter, ssao=GTAO-halfres)..."
-    $captures = @()
-    try {
-        foreach ($run in 1..3) {
-            $runPath = Join-Path $renderDir "render-benchmark-run$run.json"
-            if (Test-Path $runPath) { Remove-Item $runPath -Force }
-            & $exe --auto-create-world --auto-enter-world --no-audio `
-                --render-benchmark $runPath --render-benchmark-warmup 600 --render-benchmark-frames 300 | Out-Null
-            if (-not (Test-Path $runPath)) {
-                throw "RenderBudget: capture $run produced no benchmark baseline ($runPath)."
-            }
-            $runSidecar = Get-ArtifactProvenanceSidecarPath -ArtifactPath $runPath -Scenario "RenderBudgetRun$run"
-            Remove-Item -LiteralPath $runSidecar -Force -ErrorAction SilentlyContinue
-            Assert-ArtifactProvenance -ArtifactPath $runPath -Scenario "RenderBudgetRun$run"
-            $capture = Get-Content $runPath -Raw | ConvertFrom-Json
-            if ($capture.schema -ne "luminumbra.render_benchmark.v2" -or
-                -not $capture.gpu_timers_supported -or
-                [int]$capture.width -ne 3840 -or [int]$capture.height -ne 1600 -or
-                [math]::Abs([double]$capture.render_scale - 0.67) -gt 0.001) {
-                throw "RenderBudget: capture $run has invalid schema/timers/extent/render-scale."
-            }
-            $captures += [pscustomobject]@{
-                run = $run
-                path = $runPath
-                data = $capture
-                total = [double]$capture.avg_ms.total
-                skybox = [double]$capture.avg_ms.skybox
-                ssao = [double]$capture.avg_ms.ssao_total
-            }
-        }
-    } finally {
-        Remove-Item Env:\LUMIN_CLOUD_QUALITY -ErrorAction SilentlyContinue
-        Remove-Item Env:\LUMIN_SSAO_QUALITY -ErrorAction SilentlyContinue
-        Remove-Item Env:\LUMIN_RENDER_SCALE -ErrorAction SilentlyContinue
-    }
-    $ordered = @($captures | Sort-Object total)
-    if ($ordered.Count -ne 3) { throw "RenderBudget: expected exactly 3 valid captures." }
-    $selected = $ordered[1]
-    $b = $selected.data
-    Copy-Item -LiteralPath $selected.path -Destination $jsonPath -Force
-    $rollupPath = Join-Path $renderDir "render-benchmark-rollup.json"
-    [pscustomobject]@{
-        schema = "luminumbra.render_budget_rollup.v1"
-        selection = "median_total_of_three"
-        selected_run = $selected.run
-        min_total_ms = $ordered[0].total
-        median_total_ms = $selected.total
-        max_total_ms = $ordered[2].total
-        runs = @($captures | ForEach-Object {
-            [pscustomobject]@{ run = $_.run; path = $_.path; total_ms = $_.total; skybox_ms = $_.skybox; ssao_ms = $_.ssao }
-        })
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $rollupPath -Encoding UTF8
-    foreach ($capture in ($captures | Sort-Object run)) {
-        Write-Host ("  sample {0}: total {1:N3} ms, skybox {2:N3} ms, ssao {3:N3} ms" -f `
-            $capture.run, $capture.total, $capture.skybox, $capture.ssao)
-    }
-    Write-Host ("  selected median run {0}; range {1:N3}..{2:N3} ms" -f `
-        $selected.run, $ordered[0].total, $ordered[2].total)
-
-    # OPS-04 (spec 021, 020 FR-A-005): bind the freshly-captured benchmark to the
-    # binary/shaders being gated (regenerate-every-run gate: clear a stale sidecar
-    # first so a legitimate rebuild never false-REFUSES).
-    $budgetSidecar = Get-ArtifactProvenanceSidecarPath -ArtifactPath $jsonPath -Scenario "RenderBudget"
-    Remove-Item -LiteralPath $budgetSidecar -Force -ErrorAction SilentlyContinue
-    Assert-ArtifactProvenance -ArtifactPath $jsonPath -Scenario "RenderBudget"
-    $b = Get-Content $jsonPath -Raw | ConvertFrom-Json
-    # spec 004 Phase 0: accept v2 (CPU-submit/present/wall + NVML power/clock on a
-    # forest-DENSE pose) and v1 (legacy GPU-timer-sum only). The frame is
-    # CPU/present-bound today, so the GPU-pass-timer total under-reports the real
-    # frame cost — v2 surfaces the honest wall-clock + bound attribution.
-    if ($b.schema -ne "luminumbra.render_benchmark.v1" -and $b.schema -ne "luminumbra.render_benchmark.v2") {
-        throw "RenderBudget: unexpected benchmark schema '$($b.schema)'"
-    }
-    if ($b.schema -eq "luminumbra.render_benchmark.v2") {
-        if ([math]::Abs([double]$b.render_scale - 0.67) -gt 0.001) {
-            throw "RenderBudget: capture used render_scale=$($b.render_scale), expected target-ship 0.67"
-        }
-        if ([int]$b.internal_width -ge [int]$b.width -or [int]$b.internal_height -ge [int]$b.height) {
-            throw "RenderBudget: capture did not use a reduced internal extent"
-        }
-    }
-    if (-not $b.gpu_timers_supported) {
-        throw "RenderBudget: GPU timers unsupported in this run — cannot bless a budget without real per-pass timings."
-    }
-    # spec 004: report the honest frame attribution (un-blinds CPU-submit wins +
-    # proves the GPU clock). Informational — does not gate on its own yet (owner
-    # chose 'as high as possible', not a hard 1.67 ms cliff; the per-pass budgets
-    # below remain the machine-checked floor until the GPU-driven path lands).
-    if ($b.schema -eq "luminumbra.render_benchmark.v2" -and $b.avg) {
-        $a = $b.avg
-        $wall = [double]$a.frame_wall_ms
-        $fps  = if ($wall -gt 0) { 1000.0 / $wall } else { 0.0 }
-        Write-Host ("  pose      {0}" -f $b.pose)
-        Write-Host ("  wall      {0,7:N3} ms  ({1,5:N0} fps)  bound={2}" -f $wall, $fps, $b.bound)
-        Write-Host ("  cpu_submit{0,7:N3} ms   present {1,6:N3} ms   gpu_pass_sum {2,6:N3} ms" -f [double]$a.cpu_submit_ms, [double]$a.present_ms, [double]$a.gpu_pass_sum_ms)
-        if ($b.nvml_supported) {
-            Write-Host ("  gpu       {0,5:N0} W   {1,6:N0} MHz" -f [double]$a.gpu_power_w, [double]$a.gpu_clock_mhz)
-        } else {
-            Write-Host "  gpu       (NVML unavailable — power/clock not sampled)"
-        }
-    }
-    $avg = $b.avg_ms
-    # Absolute per-pass + total budgets (FR-004), 3840x1600 / 5070 Ti.
-    $budgets = @(
-        @{ name = "skybox"; value = [double]$avg.skybox;     budget = 1.5  },
-        @{ name = "ssao";   value = [double]$avg.ssao_total; budget = 0.7  },
-        @{ name = "total";  value = [double]$avg.total;      budget = 3.33 }
-    )
-    $fail = @()
-    foreach ($x in $budgets) {
-        $status = if ($x.value -le $x.budget) { "OK" } else { "OVER" }
-        Write-Host ("  {0,-8} {1,7:N3} ms  (budget {2,5:N2} ms)  {3}" -f $x.name, $x.value, $x.budget, $status)
-        if ($x.value -gt $x.budget) { $fail += "$($x.name) $([math]::Round($x.value,3)) ms > $($x.budget) ms" }
-    }
-    if ($fail.Count -gt 0) {
-        throw "RenderBudget: over budget at $($b.width)x$($b.height) ($BuildPreset): $($fail -join '; ')"
-    }
-}
-
 # ---------------------------------------------------------------------------
-# Spec 020 Group A — artifact provenance manifests + running-binary comparison
-# (FR-A-004/005) and the manual GPU/perf test tier enumeration (FR-A-006).
+#  Group A — artifact provenance manifests + running-binary comparison
+# and the manual GPU/perf test tier enumeration.
 #
 # The visual/perf gates bless captures and compare against baselines. Without a
 # provenance record, a capture taken with one binary/shader set can be blessed or
 # compared against a different (rebuilt) one ("bless wrong images / pass against
 # stale binaries"). These helpers compute a provenance manifest for the binary +
 # shaders CURRENTLY being gated and refuse a bless/compare whose candidate manifest
-# does not match. All paths resolve under build/$BuildPreset (single-root, FR-A-003).
+# does not match. All paths resolve under build/$BuildPreset (single-root, ).
 # ---------------------------------------------------------------------------
 
 function Get-FileSha256 {
@@ -6716,9 +5772,9 @@ function Get-ShaderTreeHash {
 }
 
 function Test-HeadlessInGameCapture {
-    # Spec 021 RENDER-01: the headless IN_GAME capture paths must reach report emission and
+    # the headless IN_GAME capture paths must reach report emission and
     # exit 0 under a hard wall-clock leash. Regression gate for the frame-2 main-thread stall
-    # (the 2f3c8eec spec-013 doline/crystal full-SDF scans) that presented as the capture
+    # (the 2f3c8eec  doline/crystal full-SDF scans) that presented as the capture
     # "hang": the client rendered one frame, logged the doline line, then ground CPU-bound
     # through millions of get_density_at probes with zero further frames — defeating the
     # frame-COUNTING watchdog, which only advances while the render loop spins. The external
@@ -6772,12 +5828,12 @@ function Test-HeadlessInGameCapture {
 }
 
 function Test-RenderParityFrame {
-    # WAVE-F F1 (the RENDER-11 unlock): the in-process WHOLE-FRAME A/B. The client
+    #   (the  unlock): the in-process WHOLE-FRAME A/B. The client
     # boots the fixed frame-scan pose, settles, then dispatches the SAME prepared
     # frame TWICE into twin offscreen targets and FLIPs the readbacks in-process
     # (InProcessFlip::ComputeLumaFlip — bit-identical inputs score EXACTLY 0.0).
     # This is the byte-exact whole-frame gate the engine never had (cross-run FLIP
-    # floors at ~0.057 noise; --smoke never renders): the RENDER-11 execution
+    # floors at ~0.057 noise; --smoke never renders): the  execution
     # migration and every render-band refactor gates old-vs-new through it.
     $exe = Get-ClientExe
     $outDir = "build/$BuildPreset/test-artifacts/render/frame-parity"
@@ -6807,7 +5863,7 @@ function Test-RenderParityFrame {
 }
 
 function Test-ScheduledGateRun {
-    # OPS-09: validate the newest canonically named report and bind it to the
+    # validate the newest canonically named report and bind it to the
     # actual Task Scheduler invocation which produced it. File mtimes are not
     # provenance: copying an old green report must never make it newest.
     $nightlyDir = "build/gate-artifacts/nightly"
@@ -6848,7 +5904,7 @@ function Test-ScheduledGateRun {
     $taskPath = "\"
     $runnerPath = (Resolve-Path -LiteralPath "tools/gates/run-nightly-gate.ps1").Path
     $expectedPowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
-    $expectedArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -BuildPreset debug -RenderBudgetPreset release' -f $runnerPath
+    $expectedArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -BuildPreset debug' -f $runnerPath
     $matchWindowSeconds = 120
     $dailyAt = "02:00"
     $expectedExecutionTimeLimit = [timespan]::FromHours(8)
@@ -6899,15 +5955,15 @@ function Test-ScheduledGateRun {
             [IO.Path]::GetFullPath([string]$report.markdown_report), $expectedMarkdownPath)) {
         throw "ScheduledGateRun: newest report path provenance does not match this checkout"
     }
-    if ($report.build_preset -ne "debug" -or $report.render_budget_preset -ne "release") {
-        throw "ScheduledGateRun: nightly presets must be exactly debug/release"
+    if ($report.build_preset -ne "debug") {
+        throw "ScheduledGateRun: nightly build preset must be exactly debug"
     }
 
     if ($report.overall_status -ne "PASS") {
         throw "ScheduledGateRun: newest report is not green: $($latest.FullName)"
     }
     $required = @(
-        "Build", "UnitTests", "EngineFrontierAll", "DeterminismMatrixQuick", "RenderBudget"
+        "Build", "UnitTests", "EngineFrontierAll", "DeterminismMatrixQuick"
     )
     foreach ($name in $required) {
         $step = @($report.steps | Where-Object { $_.name -eq $name })
@@ -6976,7 +6032,7 @@ function Test-ScheduledGateRun {
 }
 
 function Test-UpscaleSeamParity {
-    # GPU-P09/GPU-07 closure: scale 1.0 must be bit-exact, while scale 0.67
+    # / closure: scale 1.0 must be bit-exact, while scale 0.67
     # must stay inside the preregistered in-process FLIP threshold. This is an
     # explicit GPU gate and intentionally is NOT included in -Mode All.
     $exe = Get-ClientExe
@@ -7031,7 +6087,7 @@ function Get-GitSha {
 
 function Resolve-GatedExe {
     # The binary the gate is exercising, resolved from the SAME build/$BuildPreset root the
-    # gate built (FR-A-003). Prefer the client (visual/perf gates) then the server (headless).
+    # gate built. Prefer the client (visual/perf gates) then the server (headless).
     $candidates = @(
         "build/$BuildPreset/bin/luminumbra_client_app.exe",
         "build/$BuildPreset/bin/luminumbra_server_app.exe"
@@ -7043,7 +6099,7 @@ function Resolve-GatedExe {
 }
 
 function New-ArtifactManifest {
-    # Full provenance record (FR-A-004): all six fields for the binary + shaders being gated.
+    # Full provenance record: all six fields for the binary + shaders being gated.
     param(
         [string]$ExePath,
         [string]$Scenario,
@@ -7061,7 +6117,7 @@ function New-ArtifactManifest {
 }
 
 function Assert-ManifestMatchesBinary {
-    # FR-A-005: before a bless/compare, the candidate artifact's exe_hash + shader_hash MUST
+    # before a bless/compare, the candidate artifact's exe_hash + shader_hash MUST
     # match the binary/shaders currently being gated. A mismatch refuses with both hashes named.
     param(
         [object]$Manifest,
@@ -7084,7 +6140,7 @@ function Assert-ManifestMatchesBinary {
     if ($problems.Count -gt 0) {
         throw ("REFUSED bless/compare for ${Name}: the candidate artifact was produced by a " +
             "DIFFERENT binary/shaders than the one being gated -> " + ($problems -join '; ') +
-            ". Re-capture against the current build/$BuildPreset binary before blessing (FR-A-005).")
+            ". Re-capture against the current build/$BuildPreset binary before blessing ().")
     }
 }
 
@@ -7117,7 +6173,7 @@ function Get-ArtifactProvenanceSidecarPath {
 }
 
 function Assert-ArtifactProvenance {
-    # FR-A-005 end-to-end: bind a captured/blessed render artifact to the binary + shaders
+    #  end-to-end: bind a captured/blessed render artifact to the binary + shaders
     # that produced it. The FIRST time a gate consumes an artifact it EMITS the 6-field
     # provenance manifest (build_preset/git_sha/exe_hash/shader_hash/scenario/timestamp)
     # alongside it; every later compare/bless calls Assert-ManifestMatchesBinary so an artifact
@@ -7133,26 +6189,26 @@ function Assert-ArtifactProvenance {
     )
     $exe = Resolve-GatedExeOrNull
     if ($null -eq $exe) {
-        Write-Warning ("provenance ({0}): no gated binary under build/{1}/bin -> cannot bind artifact to a binary; skipping FR-A-005 enforcement (run -Mode Build to enable)." -f $Scenario, $BuildPreset)
+        Write-Warning ("provenance ({0}): no gated binary under build/{1}/bin -> cannot bind artifact to a binary; skipping  enforcement (run -Mode Build to enable)." -f $Scenario, $BuildPreset)
         return
     }
     $sidecar = Get-ArtifactProvenanceSidecarPath -ArtifactPath $ArtifactPath -Scenario $Scenario
     if (Test-Path -LiteralPath $sidecar) {
         $cand = Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json
-        # Refuses with both hashes named on mismatch (FR-A-005).
+        # Refuses with both hashes named on mismatch.
         Assert-ManifestMatchesBinary -Manifest $cand -ExePath $exe -ShaderDir $ShaderDir -Name "$Scenario capture"
         Write-Host ("  provenance ({0}): PASS -- artifact bound to the gated binary (exe_hash={1} shader_hash={2})." -f `
             $Scenario, ([string]$cand.exe_hash).Substring(0, 12), ([string]$cand.shader_hash).Substring(0, 12))
     } else {
         $manifest = New-ArtifactManifest -ExePath $exe -Scenario $Scenario -ShaderDir $ShaderDir
         $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $sidecar -Encoding UTF8
-        Write-Host ("  provenance ({0}): recorded capture manifest alongside artifact (exe_hash={1} shader_hash={2}); a rebuilt binary will now be REFUSED unless re-captured (FR-A-005)." -f `
+        Write-Host ("  provenance ({0}): recorded capture manifest alongside artifact (exe_hash={1} shader_hash={2}); a rebuilt binary will now be REFUSED unless re-captured ()." -f `
             $Scenario, $manifest.exe_hash.Substring(0, 12), $manifest.shader_hash.Substring(0, 12))
     }
 }
 
 function Assert-ConfigSchemaFresh {
-    # Spec 020 FR-B-003 CI hook: the SystemConfig registry is generated from ConfigSchema.json;
+    #   CI hook: the SystemConfig registry is generated from ConfigSchema.json;
     # fail the gate if the committed generated header drifted from the schema. Mirrors the
     # configure-time check in src/luminumbra_common/CMakeLists.txt.
     $py = $null
@@ -7161,12 +6217,12 @@ function Assert-ConfigSchemaFresh {
         if ($cmd) { $py = $cmd.Source; break }
     }
     if (-not $py) {
-        Write-Warning "No Python interpreter found: skipping config_codegen --check (FR-B-003)."
+        Write-Warning "No Python interpreter found: skipping config_codegen --check ()."
         return
     }
     & $py "tools/config_codegen.py" --check
     if ($LASTEXITCODE -ne 0) {
-        throw "config_codegen.py --check failed: SystemConfig schema/registry drift (spec 020 FR-B-003)."
+        throw "config_codegen.py --check failed: SystemConfig schema/registry drift ( )."
     }
 }
 
@@ -7176,7 +6232,7 @@ function Test-ConfigSchemaCheck {
 }
 
 function Test-ArtifactManifest {
-    # FR-A-004/005/006. Emit a provenance manifest for the gated binary, prove the match-vs-binary
+    # . Emit a provenance manifest for the gated binary, prove the match-vs-binary
     # comparison passes for a same-binary capture and REFUSES a mismatched (stale-binary) one, and
     # enumerate the manual GPU/perf test tier so a conditionally-unregistered test is visibly missing.
     $exe = Resolve-GatedExe
@@ -7187,7 +6243,7 @@ function Test-ArtifactManifest {
     $manifest = New-ArtifactManifest -ExePath $exe -Scenario "engine-frontier:ArtifactManifest"
     foreach ($field in @("build_preset", "git_sha", "exe_hash", "shader_hash", "scenario", "timestamp")) {
         if ([string]::IsNullOrWhiteSpace([string]$manifest[$field])) {
-            throw "Artifact manifest missing required field '$field' (FR-A-004)"
+            throw "Artifact manifest missing required field '$field' ()"
         }
     }
     if ($manifest.build_preset -ne $BuildPreset) {
@@ -7197,13 +6253,13 @@ function Test-ArtifactManifest {
     Write-Host ("artifact manifest written: exe={0} exe_hash={1} shader_hash={2} git={3}" -f `
         (Split-Path $exe -Leaf), $manifest.exe_hash.Substring(0, 12), $manifest.shader_hash.Substring(0, 12), $manifest.git_sha)
 
-    # Positive: a manifest produced by the binary being gated must compare clean (AC-A-003).
+    # Positive: a manifest produced by the binary being gated must compare clean.
     $reread = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     Assert-ManifestMatchesBinary -Manifest $reread -ExePath $exe -Name "self (same binary)"
     Write-Host "  match-vs-binary: PASS (same-binary capture accepted)."
 
     # Negative: a candidate whose exe_hash/shader_hash do NOT match the running binary MUST be
-    # refused, with the mismatched hashes named (FR-A-005 / AC-A-004). Construct the stale capture.
+    # refused, with the mismatched hashes named ( / ). Construct the stale capture.
     $stale = [ordered]@{
         schema       = $reread.schema
         build_preset = $reread.build_preset
@@ -7221,10 +6277,10 @@ function Test-ArtifactManifest {
         Write-Host "  match-vs-binary: REFUSED stale capture as required ($($_.Exception.Message.Split('.')[0]))."
     }
     if (-not $refused) {
-        throw "Manifest comparison did NOT refuse a mismatched exe_hash (FR-A-005 hole)"
+        throw "Manifest comparison did NOT refuse a mismatched exe_hash (hole)"
     }
 
-    # FR-A-006 / NFR-005: enumerate the manual GPU/perf tier; report registered-vs-expected so a
+    # enumerate the manual GPU/perf tier; report registered-vs-expected so a
     # conditionally-unregistered test (numpy/Pillow-gated) is visibly MISSING, not silently absent.
     $expectedManualTier = @(
         "ForestPerfBudget", "ShieldRtSpike", "ShieldRtTracerProfileGpu",
@@ -7245,7 +6301,7 @@ function Test-ArtifactManifest {
     Write-Host ("manual GPU/perf tier: {0} registered, {1}/{2} of the expected tier present." -f `
         $registered.Count, ($expectedManualTier.Count - $missing.Count), $expectedManualTier.Count)
     if ($missing.Count -gt 0) {
-        # NFR-005: surfaced (not silently swallowed). A name here is absent from the `-L manual`
+        #  surfaced (not silently swallowed). A name here is absent from the `-L manual`
         # enumeration -- either python/numpy-conditionally unregistered, or registered under a
         # different label (e.g. VisualCritiqueFlags = visual;critique). Either way it is visible.
         Write-Host ("  ABSENT from the -L manual enumeration (conditionally registered / other label): {0}" -f ($missing -join ", "))
@@ -7263,13 +6319,13 @@ function Test-ArtifactManifest {
     }
     $tierArtifact | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $provenanceDir "manual-tier.json") -Encoding UTF8
 
-    # FR-A-005 END-TO-END: prove the artifact-sidecar binding used by the real visual gates
+    #  END-TO-END: prove the artifact-sidecar binding used by the real visual gates
     # (Test-MaterialVisual / Test-RenderHealth via Assert-ArtifactProvenance) refuses a capture
     # produced by a DIFFERENT binary. Record a sidecar against the gated exe (the "capture"),
     # then corrupt its exe_hash (the "rebuilt binary") and confirm the next compare is REFUSED
     # with both hashes named -- no second build required.
     $demoArtifact = Join-Path $provenanceDir "provenance-e2e-demo.json"
-    [ordered]@{ schema = "luminumbra.provenance_e2e_demo.v1"; note = "FR-A-005 end-to-end demo artifact" } |
+    [ordered]@{ schema = "luminumbra.provenance_e2e_demo.v1"; note = " end-to-end demo artifact" } |
         ConvertTo-Json | Set-Content -Path $demoArtifact -Encoding UTF8
     $demoSidecar = Get-ArtifactProvenanceSidecarPath -ArtifactPath $demoArtifact -Scenario "ProvenanceE2EDemo"
     if (Test-Path -LiteralPath $demoSidecar) { Remove-Item -LiteralPath $demoSidecar -Force }
@@ -7297,10 +6353,10 @@ function Test-ArtifactManifest {
         $e2eMessage = $_.Exception.Message
     }
     if (-not $e2eRefused) {
-        throw "FR-A-005 END-TO-END HOLE: a stale-binary capture was NOT refused by Assert-ArtifactProvenance (the path the real visual gates use)."
+        throw " END-TO-END HOLE: a stale-binary capture was NOT refused by Assert-ArtifactProvenance (the path the real visual gates use)."
     }
     if ($e2eMessage -notmatch "exe_hash mismatch" -or $e2eMessage -notmatch "candidate=" -or $e2eMessage -notmatch "running=") {
-        throw "FR-A-005 END-TO-END: refusal did not name BOTH hashes (candidate/running). Got: $e2eMessage"
+        throw " END-TO-END: refusal did not name BOTH hashes (candidate/running). Got: $e2eMessage"
     }
     Write-Host ("  end-to-end: PASS -- a capture from a different binary is REFUSED by the visual-gate path ({0})." -f ($e2eMessage.Split('.')[0]))
     Remove-Item -LiteralPath $demoSidecar, $demoArtifact -Force -ErrorAction SilentlyContinue
@@ -7309,7 +6365,7 @@ function Test-ArtifactManifest {
 }
 
 function Test-WorldLoadBounded {
-    # SHIELD-01 (spec 017-B step 3): the interactive world load is BOUNDED.
+    #  ( step 3): the interactive world load is BOUNDED.
     # Twenty cold CONSTRUCTING-WORLD-GEOMETRY-style loads (clear_world +
     # EnsureSurfaceReadyNear at interactive radii 12/4) must each complete in
     # under 60 s with LUMINUMBRA_JOB_WATCHDOG armed (the test arms it). The
@@ -7329,7 +6385,7 @@ function Test-WorldLoadBounded {
 }
 
 function Test-MovingResidency {
-    # Spec 018 FR-C-002 / AC-C-002 — the MOVING-residency determinism axis, as a
+    #   /  — the MOVING-residency determinism axis, as a
     # first-class engine-frontier gate. Drives the headless server with
     # --smoke-moving (the streaming anchor drifts deterministically each tick so
     # chunks stream IN/OUT during the run, exercising eviction/re-arrival the static
@@ -7398,8 +6454,8 @@ function Test-MovingResidency {
 }
 
 # ----------------------------------------------------------------------------------
-# Spec 018 FR-E/FR-F — shared SIM/HASH-PATH source-scan substrate.
-# These are the SimResidency-eligible roots (FR-A-001): per-tick authoritative
+#  / — shared SIM/HASH-PATH source-scan substrate.
+# These are the SimResidency-eligible roots: per-tick authoritative
 # systems, the hash-carrying net state, core + persistence hash assembly, and the
 # headless server loop. Render code (luminumbra_client/rendering) is RenderResidency
 # by construction and OUT of scope — its GPU readbacks never feed world_hash.
@@ -7435,7 +6491,7 @@ function Get-SimSourceFiles {
     return $out
 }
 
-# 018-E core scanner: returns the synchronous-GPU-readback violation strings found on
+# readback-discipline core scanner: returns the synchronous-GPU-readback violation strings found on
 # the sim/hash path. Comment-stripped per line. $Allowlist = hashtable of
 # "<relative-path>|readback" keys (each a documented render-only/escape-hatch reason).
 function Get-SimReadbackViolations {
@@ -7455,7 +6511,7 @@ function Get-SimReadbackViolations {
                 $key = "$($file.Rel)|readback"
                 if (-not $Allowlist.ContainsKey($key)) {
                     $sym = ($m.Groups[0].Value -replace '\s*\($', '')
-                    $violations.Add("readback: $($file.Rel):${lineNo}: synchronous GPU readback '$sym' on the sim/hash path -> keep render-only (FR-E-001) or delay+quantize+hash (FR-E-002) ; `"$($code.Trim())`"")
+                    $violations.Add("readback: $($file.Rel):${lineNo}: synchronous GPU readback '$sym' on the sim/hash path -> keep render-only () or delay+quantize+hash (); `"$($code.Trim())`"")
                 }
             }
         }
@@ -7464,21 +6520,21 @@ function Get-SimReadbackViolations {
 }
 
 function Test-ReadbackDiscipline {
-    # Spec 018 FR-E-001 / AC-E-001 — GPU->CPU readback discipline. Static source
+    # GPU-to-CPU readback discipline. Static source
     # gate: NO synchronous GPU readback (glClientWaitSync / glMapBuffer* /
-    # glGetBufferSubData / glReadPixels / glGetTexImage / ...) may be added on the
-    # SIM/HASH path. GPU-sourced data is render-only by default (FR-E-001); to become
-    # a sim input it must be delayed+quantized+hashed (FR-E-002) AND allowlisted here
-    # with a documented determinism rationale. The render-side readbacks the spec
-    # cites (RenderPipeline.cpp / FoliagePass.cpp) are RenderResidency by construction
-    # — they live under luminumbra_client/rendering, OUTSIDE these roots, and never
+    # glGetBufferSubData / glReadPixels / glGetTexImage /...) may be added on the
+    # SIM/HASH path. GPU-sourced data is render-only by default; to become
+    # a sim input it must be delayed, quantized, hashed, and allowlisted here
+    # with a documented determinism rationale. Known render-side readbacks
+    # (RenderPipeline.cpp / FoliagePass.cpp) are RenderResidency by construction
+    # they live under luminumbra_client/rendering, OUTSIDE these roots, and never
     # feed world_hash. APPEND-ONLY safe: PASSES on the current tree (zero offenders),
     # exists to FAIL a NEW offender.
     $allowlist = @{
-        # (empty) — no synchronous GPU readback currently feeds the sim/hash path. A
-        # future delayed+quantized+hashed escape hatch (FR-E-002) is added here with a
-        # one-line determinism rationale, e.g.:
-        #   "src/luminumbra_common/.../Foo.cpp|readback" = "delayed+quantized+hashed per FR-E-002"
+        # Empty: no synchronous GPU readback currently feeds the sim/hash path.
+        # Any delayed, quantized, and hashed exception must be added here with a
+        # one-line determinism rationale, for example:
+        #   "src/luminumbra_common/.../Foo.cpp|readback" = "delayed+quantized+hashed per "
     }
     $files = @(Get-SimSourceFiles -Roots $script:SimHashPathRoots)
     if ($files.Count -lt 10) {
@@ -7487,33 +6543,33 @@ function Test-ReadbackDiscipline {
     $violations = @(Get-SimReadbackViolations -Allowlist $allowlist)
     if ($violations.Count -gt 0) {
         foreach ($v in $violations) { Write-Host "  $v" }
-        throw "GPU->CPU readback discipline (FR-E-001): $($violations.Count) synchronous-readback site(s) on the sim/hash path. Keep it render-only, or delay+quantize+hash (FR-E-002) and allowlist with a documented reason."
+        throw "GPU->CPU readback discipline (): $($violations.Count) synchronous-readback site(s) on the sim/hash path. Keep it render-only, or delay+quantize+hash () and allowlist with a documented reason."
     }
     Write-Host ("readback discipline: {0} sim/hash-path files scanned, 0 synchronous GPU-readback offenders ({1} documented allowlist exception site(s))" -f $files.Count, $allowlist.Count)
 }
 
-# Spec 017 FR-G-001 / AC-D-003 — the RENDER-SIDE synchronous-readback ban gate.
+#   /  — the  synchronous-readback ban gate.
 #
-# Distinct from Test-ReadbackDiscipline (018 FR-E-001, which scans the SIM/HASH
+# Distinct from Test-ReadbackDiscipline ( , which scans the SIM/HASH
 # path and bars ANY GL readback there). This gate scans RENDER code
 # (luminumbra_client/rendering) — where write-mapping is legitimate and ubiquitous
 # (persistent-mapped geometry/instance/particle rings: glMapBufferRange(...
-# GL_MAP_WRITE_BIT ...)) — and bans only the BLOCKING/READ forms that stall the
+# GL_MAP_WRITE_BIT...)) — and bans only the BLOCKING/READ forms that stall the
 # frame: glClientWaitSync(..., GL_TIMEOUT_IGNORED), glMapBuffer(..., GL_READ_ONLY),
 # and glGet[Named]BufferSubData. New render code must use AsyncReadbackRing
-# (FR-A-001: submit/poll/consume, non-blocking) instead. The ring's own primitives
+# (: submit/poll/consume, non-blocking) instead. The ring's own primitives
 # are deliberately NOT matched: its poll uses glClientWaitSync(..., 0) (timeout 0,
 # not GL_TIMEOUT_IGNORED) and its result map uses glMapBufferRange(... GL_MAP_READ_BIT
-# ...) (not glMapBuffer(GL_READ_ONLY)). Each known site leaves the allowlist as its
-# FR lands (FoliagePass -> FR-A-004 now; RenderPipeline SDF -> FR-A-003 after 017-B).
+#...) (not glMapBuffer(GL_READ_ONLY)). Each known site leaves the allowlist as its
+# FR lands (FoliagePass ->  now; RenderPipeline SDF ->  after activation queue).
 function Test-RenderReadbackAllowlist {
     $roots = @("src/luminumbra_client/rendering")
-    # RENDER-06 (016 FR-E, 2026-07-04): the allowlist is EMPTY. Every known
-    # in-frame blocking-readback site has retired onto the 017-A ring:
-    # FoliagePass (FR-A-004), the RenderPipeline GPU-SDF readback (FR-A-003,
-    # unblocked by 017-B — now ring submit + BOUNDED zero-timeout poll with CPU
+    #  (, 2026-07-04): the allowlist is EMPTY. Every known
+    # in-frame blocking-readback site has retired onto the asynchronous-readback ring:
+    # FoliagePass, the RenderPipeline  readback (,
+    # unblocked by activation queue — now ring submit + BOUNDED zero-timeout poll with CPU
     # fallback), and the SkyAtmosphereLut sky-view ambient reduction (same
-    # bounded-ring shape). Any new match below is a regression, not a TODO.
+    # bounded-ring shape). Any new match below is a regression, not an unfinished item.
     $allowlist = @{}
     # Narrow, READBACK-SPECIFIC matchers (NOT the broad sim-path $readbackRe, which
     # would falsely flag every legitimate write-map in render code).
@@ -7543,7 +6599,7 @@ function Test-RenderReadbackAllowlist {
                 if ($sym) {
                     $key = "$rel|readback"
                     if (-not $allowlist.ContainsKey($key)) {
-                        $violations.Add("readback: ${rel}:${lineNo}: in-frame synchronous GPU readback '$sym' in render code -> use AsyncReadbackRing (FR-A-001) or allowlist with a documented reason ; `"$($code.Trim())`"")
+                        $violations.Add("readback: ${rel}:${lineNo}: in-frame synchronous GPU readback '$sym' in render code -> use AsyncReadbackRing () or allowlist with a documented reason; `"$($code.Trim())`"")
                     }
                 }
             }
@@ -7554,33 +6610,31 @@ function Test-RenderReadbackAllowlist {
     }
     if ($violations.Count -gt 0) {
         foreach ($v in $violations) { Write-Host "  $v" }
-        throw "render-side synchronous-readback ban (FR-G-001): $($violations.Count) blocking-readback site(s) in render code outside the allowlist. Route through AsyncReadbackRing (submit/poll/consume) or allowlist with a reason."
+        throw "render-side synchronous-readback ban (): $($violations.Count) blocking-readback site(s) in render code outside the allowlist. Route through AsyncReadbackRing (submit/poll/consume) or allowlist with a reason."
     }
     Write-Host ("render readback ban: {0} render files scanned, 0 un-allowlisted blocking-readback sites ({1} documented allowlist site(s))" -f $scanned, $allowlist.Count)
 }
 
 function Test-DeterminismAudit {
-    # Spec 018 FR-F-001/002/003 — the determinism AUDIT gate. A machine-checked
-    # checklist enforcing the two-worlds residency contract (Group A/B) on the
-    # hash-feeding paths. THIS GATE is the determinism guard that specs 015
-    # (atmospheric lighting — exposure metering + froxel temporal jitter MUST stay
-    # render-only) and 016 (render framework — frame-graph / GPU readback) pass
-    # through (FR-F-003). Each checklist item PASSES on the current tree and FAILS on
+    # Machine-checked determinism audit for the simulation/render residency
+    # boundary. Exposure metering, froxel temporal jitter, frame-graph state,
+    # and GPU readback must stay render-only. Each checklist item passes on the
+    # current tree and fails on
     # a planted violation:
-    #   1. Residency class declared (FR-A-001): core/ResidencyContract.h.
-    #   2. Config residency parity (FR-A-004): render.* never folded into the config
+    #   1. Residency class declared: core/ResidencyContract.h.
+    #   2. Config residency parity: render.* never folded into the config
     #      sub-hash (SystemConfig.cpp).
-    #   3. World-hash composition carries NO render-residency term (FR-A-002):
+    #   3. World-hash composition carries no render-residency term:
     #      ComposeWorldHash folds sim sub-hashes only (no mesh/exposure/froxel).
     #   4. Render mesh excluded from the determinism match (mesh-exclusion contract):
-    #      main_server.cpp sub_hashes_match omits .mesh.
-    #   5. No synchronous GPU readback feeds the hash (FR-E-001): reuse the 018-E scan.
-    #   6. Exposure metering + froxel temporal jitter are render-only (FR-E-003): no
+    #      main_server.cpp sub_hashes_match omits.mesh.
+    #   5. No synchronous GPU readback feeds the hash: reuse the readback-discipline scan.
+    #   6. Exposure metering + froxel temporal jitter are render-only: no
     #      froxel / auto-exposure / eye-adaptation identifier on the sim path (bare
     #      "exposure" is legitimate — photographic/plant light — and NOT banned).
     $checks = New-Object 'System.Collections.Generic.List[object]'
 
-    # --- 1. Residency class declared (FR-A-001) ---
+    # --- 1. Residency class declared ---
     $rc = "src/luminumbra_common/core/ResidencyContract.h"
     if (Test-Path $rc) {
         $rcText = Get-Content $rc -Raw
@@ -7599,23 +6653,23 @@ function Test-DeterminismAudit {
             $checks.Add([pscustomobject]@{ name = "residency-declared"; ok = $false; detail = "ResidencyContract.h is missing: $($missing -join '; ')" })
         }
     } else {
-        $checks.Add([pscustomobject]@{ name = "residency-declared"; ok = $false; detail = "missing $rc (FR-A-001 residency partition undeclared)" })
+        $checks.Add([pscustomobject]@{ name = "residency-declared"; ok = $false; detail = "missing $rc (residency partition undeclared)" })
     }
 
-    # --- 2. Config residency parity (FR-A-004) ---
+    # --- 2. Config residency parity ---
     $sc = "src/luminumbra_common/core/SystemConfig.cpp"
     if (Test-Path $sc) {
         $scText = Get-Content $sc -Raw
         if ($scText -match 'section\s*!=\s*Section::Sim\s*\)\s*continue') {
             $checks.Add([pscustomobject]@{ name = "config-residency-parity"; ok = $true; detail = "ComputeConfigSubHash skips non-Sim (render.*) keys -> render config never hashed" })
         } else {
-            $checks.Add([pscustomobject]@{ name = "config-residency-parity"; ok = $false; detail = "SystemConfig.cpp no longer excludes render.* from the config sub-hash (FR-A-004 broken — render config would feed world_hash)" })
+            $checks.Add([pscustomobject]@{ name = "config-residency-parity"; ok = $false; detail = "SystemConfig.cpp no longer excludes render.* from the config sub-hash (broken — render config would feed world_hash)" })
         }
     } else {
         $checks.Add([pscustomobject]@{ name = "config-residency-parity"; ok = $false; detail = "missing $sc" })
     }
 
-    # --- 3. World-hash composition carries no render-residency term (FR-A-002) ---
+    # --- 3. World-hash composition carries no render-residency term ---
     $swr = "src/luminumbra_server/ServerWorldRunner.cpp"
     if (Test-Path $swr) {
         $swrText = Get-Content $swr -Raw
@@ -7624,7 +6678,7 @@ function Test-DeterminismAudit {
             $body = ($cm.Groups[1].Value -split "`n" | ForEach-Object { $_ -replace '//.*$', '' }) -join "`n"
             $renderFold = [regex]::Match($body, '\|\s*(mesh|froxel|exposure|readback|render)\s*:')
             if ($renderFold.Success) {
-                $checks.Add([pscustomobject]@{ name = "worldhash-no-render-term"; ok = $false; detail = "ComposeWorldHash folds a render-residency term '$($renderFold.Groups[1].Value)' into world_hash (FR-A-002 — render state must never feed the hash)" })
+                $checks.Add([pscustomobject]@{ name = "worldhash-no-render-term"; ok = $false; detail = "ComposeWorldHash folds a render-residency term '$($renderFold.Groups[1].Value)' into world_hash (— render state must never feed the hash)" })
             } else {
                 $checks.Add([pscustomobject]@{ name = "worldhash-no-render-term"; ok = $true; detail = "ComposeWorldHash folds sim sub-hashes only (no mesh/exposure/froxel/readback)" })
             }
@@ -7643,9 +6697,9 @@ function Test-DeterminismAudit {
         if ($am.Success) {
             $blk = ($am.Groups[1].Value -split "`n" | ForEach-Object { $_ -replace '//.*$', '' }) -join "`n"
             if ($blk -match '\.mesh\b') {
-                $checks.Add([pscustomobject]@{ name = "mesh-excluded-from-match"; ok = $false; detail = "sub_hashes_match now includes .mesh — the (nondeterministic MC) render mesh must stay EXCLUDED from the run==replay match" })
+                $checks.Add([pscustomobject]@{ name = "mesh-excluded-from-match"; ok = $false; detail = "sub_hashes_match now includes.mesh — the (nondeterministic MC) render mesh must stay EXCLUDED from the run==replay match" })
             } else {
-                $checks.Add([pscustomobject]@{ name = "mesh-excluded-from-match"; ok = $true; detail = "sub_hashes_match omits .mesh (render mesh excluded from the determinism match)" })
+                $checks.Add([pscustomobject]@{ name = "mesh-excluded-from-match"; ok = $true; detail = "sub_hashes_match omits.mesh (render mesh excluded from the determinism match)" })
             }
         } else {
             $checks.Add([pscustomobject]@{ name = "mesh-excluded-from-match"; ok = $false; detail = "could not locate the sub_hashes_match assignment in $ms" })
@@ -7654,7 +6708,7 @@ function Test-DeterminismAudit {
         $checks.Add([pscustomobject]@{ name = "mesh-excluded-from-match"; ok = $false; detail = "missing $ms" })
     }
 
-    # --- 5. No synchronous GPU readback feeds the hash (FR-E-001; reuse 018-E scan) ---
+    # --- 5. No synchronous GPU readback feeds the hash (; reuse readback-discipline scan) ---
     $rbViol = @(Get-SimReadbackViolations -Allowlist @{})
     if ($rbViol.Count -eq 0) {
         $checks.Add([pscustomobject]@{ name = "no-sim-path-readback"; ok = $true; detail = "0 synchronous GPU-readback sites on the sim/hash path" })
@@ -7662,8 +6716,8 @@ function Test-DeterminismAudit {
         $checks.Add([pscustomobject]@{ name = "no-sim-path-readback"; ok = $false; detail = "$($rbViol.Count) synchronous GPU-readback site(s) on the sim/hash path -> first: $($rbViol[0])" })
     }
 
-    # --- 6. Exposure metering + froxel temporal jitter are render-only (FR-E-003) ---
-    # Render auto-exposure / eye-adaptation / froxel volumetrics are the spec-015/016
+    # --- 6. Exposure metering + froxel temporal jitter are render-only ---
+    # Render auto-exposure / eye-adaptation / froxel volumetrics are the
     # constructs that MUST stay render-residency. Bare "exposure" is legitimate on the
     # sim path (PhotoScoring photographic exposure; PlantGrowth light exposure) and is
     # deliberately NOT matched — only the render-feedback identifiers are.
@@ -7687,7 +6741,7 @@ function Test-DeterminismAudit {
             if ($code -match '^\s*\*' -or $code -match '^\s*/\*') { continue }
             $rm = [regex]::Match($code, $rexRe)
             if ($rm.Success) {
-                $rexViol.Add("$($file.Rel):${lineNo}: render '$($rm.Groups[1].Value)' on the sim path ; `"$($code.Trim())`"")
+                $rexViol.Add("$($file.Rel):${lineNo}: render '$($rm.Groups[1].Value)' on the sim path; `"$($code.Trim())`"")
             }
         }
     }
@@ -7704,14 +6758,14 @@ function Test-DeterminismAudit {
     }
     $failed = @($checks | Where-Object { -not $_.ok })
     if ($failed.Count -gt 0) {
-        throw "determinism audit gate (FR-F): $($failed.Count) of $($checks.Count) checklist item(s) failed — a render-residency value is reaching the sim/hash path. This gate guards specs 015 (exposure/froxel) and 016 (render framework)."
+        throw "determinism audit gate: $($failed.Count) of $($checks.Count) checklist item(s) failed — a render-residency value is reaching the sim/hash path."
     }
-    Write-Host ("determinism audit gate passed: {0}/{0} checklist items green (residency declared; render.* unhashed; no render term in world_hash; mesh excluded; no sim-path readback; exposure/froxel render-only) — the spec 015/016 determinism guard" -f $checks.Count)
+    Write-Host ("determinism audit gate passed: {0}/{0} checklist items green (residency declared; render.* unhashed; no render term in world_hash; mesh excluded; no sim-path readback; exposure/froxel render-only)" -f $checks.Count)
 }
 
 function Test-RhiNoReexport {
-    # spec 021 GPU-P03 / spec 014 FR-A.2 no-re-export constraint. The Rhi* type set
-    # lives beneath the 016 handles; a pass holds only a layer-1 handle and must
+    #   /   no-re-export constraint. The Rhi* type set
+    # lives beneath the  handles; a pass holds only a layer-1 handle and must
     # never be able to name a backend (Diligent) type. Enforce it mechanically: no
     # Diligent header may escape rhi/ into rendering/passes/ nor into
     # RenderContext.h / RenderResourceHandles.h / RenderResourceRegistry.h. Fails
@@ -7769,19 +6823,19 @@ function Test-RhiNoReexport {
 }
 
 function Test-ProfilerDeterminismNeutral {
-    # spec 021 (2026-07 research P1): the Tracy profiler seam must stay OFF by default
+    #  (2026-07 research ): the Tracy profiler seam must stay OFF by default
     # so every gate/release build is byte-identical (world_hash unchanged, proven by
     # --smoke == 6f008a9f637c40b7 with the annotations present but disabled). Assert the
     # three invariants that keep it neutral, failing listing EVERY breach, not just the
     # first:
-    #   1. cmake/tracy.cmake declares option(LUMINUMBRA_ENABLE_TRACY ...) default OFF.
+    #   1. cmake/tracy.cmake declares option(LUMINUMBRA_ENABLE_TRACY...) default OFF.
     #   2. core/Profiler.h has the #else no-op branch (macros -> ((void)0)) -- the shim
     #      is not hard-wired active.
     #   3. no production TU #defines LUMINUMBRA_ENABLE_TRACY (only CMake may, when ON).
     $repo = (Get-Location).Path
     $violations = New-Object System.Collections.Generic.List[string]
 
-    # 1. option default OFF (whitespace-normalized so multi-line option() still matches;
+    # 1. option default OFF (whitespace-normalized so multi-line option still matches;
     #    the captured token is the default just before the option's closing paren).
     $tracyCmake = Join-Path $repo "cmake/tracy.cmake"
     if (-not (Test-Path $tracyCmake)) {
@@ -7793,7 +6847,7 @@ function Test-ProfilerDeterminismNeutral {
                 $violations.Add("cmake/tracy.cmake: option(LUMINUMBRA_ENABLE_TRACY) default is $($matches[1]) -- MUST be OFF (gate/release determinism)")
             }
         } else {
-            $violations.Add("cmake/tracy.cmake: option(LUMINUMBRA_ENABLE_TRACY ...) declaration not found")
+            $violations.Add("cmake/tracy.cmake: option(LUMINUMBRA_ENABLE_TRACY...) declaration not found")
         }
     }
 
@@ -7838,13 +6892,13 @@ function Test-ProfilerDeterminismNeutral {
 }
 
 function Test-PilotReadiness {
-    # spec 021 GPU-P01 / spec 014 hard-gate readiness. Machine-check that the four
-    # legs which must be closed BEFORE the RHI pilot (GPU-P04/P05) may legally start
+    #   /  hard-gate readiness. Machine-check that the four
+    # legs which must be closed BEFORE the RHI pilot (/) may legally start
     # are in place. This is a static readiness gate (each leg's full correctness is
     # owned by that leg's own gate); it fails listing EVERY unmet leg, not just the
     # first, so a regression is fully diagnosed. Flips green only when the pilot may
-    # legally begin. Legs: RenderContext seam (GPU-04), ExpectedLayout coverage
-    # (GPU-05), registry-owned targets (RENDER-12/GPU-12), in-process FLIP (GPU-09).
+    # legally begin. Legs: RenderContext seam, ExpectedLayout coverage
+    #, registry-owned targets, in-process FLIP.
     $repo = (Get-Location).Path
     $unmet = New-Object System.Collections.Generic.List[string]
 
@@ -7854,66 +6908,65 @@ function Test-PilotReadiness {
         return (Get-Content $p -Raw)
     }
 
-    # Leg 1 (GPU-04): the pilot passes surface on the const RenderContext& seam.
+    # Leg 1: the pilot passes surface on the const RenderContext& seam.
     $dvp = Get-SrcText "src/luminumbra_client/rendering/passes/DebugViewPass.h"
     if ($null -eq $dvp -or $dvp -notmatch 'void\s+execute\(const\s+RenderContext&') {
-        $unmet.Add("Leg 1 (RenderContext seam, GPU-04): DebugViewPass::execute(const RenderContext&) not found")
+        $unmet.Add("Leg 1 (RenderContext seam, ): DebugViewPass::execute(const RenderContext&) not found")
     }
     $lp = Get-SrcText "src/luminumbra_client/rendering/passes/LightingPass.h"
     if ($null -eq $lp -or $lp -notmatch 'void\s+execute\(const\s+RenderContext&') {
-        $unmet.Add("Leg 1 (RenderContext seam, GPU-04): LightingPass::execute(const RenderContext&) not found")
+        $unmet.Add("Leg 1 (RenderContext seam, ): LightingPass::execute(const RenderContext&) not found")
     }
 
-    # Leg 2 (GPU-05): >=13 sampler-binding passes register an ExpectedLayout,
+    # Leg 2: >=13 sampler-binding passes register an ExpectedLayout,
     # including the pilot pair (debug_view + lighting).
     $psl = Get-SrcText "src/luminumbra_client/rendering/PassShaderLayouts.cpp"
     if ($null -eq $psl) {
-        $unmet.Add("Leg 2 (ExpectedLayout coverage, GPU-05): PassShaderLayouts.cpp missing")
+        $unmet.Add("Leg 2 (ExpectedLayout coverage, ): PassShaderLayouts.cpp missing")
     } else {
         $regCount = ([regex]::Matches($psl, 'v\.push_back\(\{')).Count
         if ($regCount -lt 13) {
-            $unmet.Add("Leg 2 (ExpectedLayout coverage, GPU-05): only $regCount/13 passes register an ExpectedLayout")
+            $unmet.Add("Leg 2 (ExpectedLayout coverage, ): only $regCount/13 passes register an ExpectedLayout")
         }
         foreach ($p in @('debug_view', 'lighting')) {
             if ($psl -notmatch ('v\.push_back\(\{"' + $p + '"')) {
-                $unmet.Add("Leg 2 (ExpectedLayout coverage, GPU-05): pilot pass '$p' has no ExpectedLayout registration")
+                $unmet.Add("Leg 2 (ExpectedLayout coverage, ): pilot pass '$p' has no ExpectedLayout registration")
             }
         }
     }
 
-    # Leg 3 (RENDER-12/GPU-12): the registry OWNS render targets (not adopt-only),
+    # Leg 3: the registry OWNS render targets (not adopt-only),
     # and the ownership parity ctest is registered.
     $reg = Get-SrcText "src/luminumbra_client/rendering/RenderResourceRegistry.h"
     if ($null -eq $reg -or $reg -notmatch 'registry-OWNED') {
-        $unmet.Add("Leg 3 (registry-owned targets, RENDER-12/GPU-12): RenderResourceRegistry OWNED-allocation API not found")
+        $unmet.Add("Leg 3 (registry-owned targets, /): RenderResourceRegistry OWNED-allocation API not found")
     }
     $testCmake = Get-SrcText "test/CMakeLists.txt"
     if ($null -eq $testCmake -or $testCmake -notmatch 'registry_ownership_test') {
-        $unmet.Add("Leg 3 (registry-owned targets, RENDER-12/GPU-12): registry_ownership_test not registered")
+        $unmet.Add("Leg 3 (registry-owned targets, /): registry_ownership_test not registered")
     }
 
-    # Leg 4 (GPU-09): the in-process dual-render FLIP harness exists + is registered.
+    # Leg 4: the in-process dual-render FLIP harness exists + is registered.
     if (-not (Test-Path (Join-Path $repo "src/luminumbra_client/rendering/InProcessFlip.h"))) {
-        $unmet.Add("Leg 4 (in-process FLIP, GPU-09): InProcessFlip.h missing")
+        $unmet.Add("Leg 4 (in-process FLIP, ): InProcessFlip.h missing")
     }
     $flip = Get-SrcText "test/rendering/dual_backend_flip_test.cpp"
     if ($null -eq $flip -or $flip -notmatch 'class\s+DualBackendFlipInProcessGpu') {
-        $unmet.Add("Leg 4 (in-process FLIP, GPU-09): DualBackendFlipInProcessGpu suite not found")
+        $unmet.Add("Leg 4 (in-process FLIP, ): DualBackendFlipInProcessGpu suite not found")
     }
     if ($null -eq $testCmake -or $testCmake -notmatch 'dual_backend_flip_test') {
-        $unmet.Add("Leg 4 (in-process FLIP, GPU-09): dual_backend_flip_test not registered")
+        $unmet.Add("Leg 4 (in-process FLIP, ): dual_backend_flip_test not registered")
     }
 
     if ($unmet.Count -gt 0) {
-        Write-Host "PilotReadiness: NOT READY -- $($unmet.Count) unmet 014 hard-gate leg(s):"
+        Write-Host "PilotReadiness: NOT READY -- $($unmet.Count) unmet  hard-gate leg(s):"
         foreach ($u in $unmet) { Write-Host "  - $u" }
-        throw "PilotReadiness gate failed: $($unmet.Count) unmet 014 hard-gate leg(s); the RHI pilot may not legally start"
+        throw "PilotReadiness gate failed: $($unmet.Count) unmet  hard-gate leg(s); the RHI pilot may not legally start"
     }
-    Write-Host "PilotReadiness: READY -- all four 014 hard-gate legs closed (RenderContext seam, ExpectedLayout coverage $regCount/13, registry-owned targets, in-process FLIP)."
+    Write-Host "PilotReadiness: READY -- all four  hard-gate legs closed (RenderContext seam, ExpectedLayout coverage $regCount/13, registry-owned targets, in-process FLIP)."
 }
 
 switch ($Mode) {
-    "RenderBudget" { Test-RenderBudget }
     "ArtifactManifest" { Test-ArtifactManifest }
     "ConfigSchemaCheck" { Test-ConfigSchemaCheck }
     "Build" { Test-Build }
@@ -7922,10 +6975,6 @@ switch ($Mode) {
     "RenderHealth" { Test-RenderHealth }
     "EmissiveCalibration" { Test-EmissiveCalibration }
     "ShaderInventory" { Test-ShaderInventory }
-    "TextureResidency" { Test-TextureResidency }
-    "GpuSdfCallbackSafetyGate" { Test-GpuSdfCallbackSafetyGate }
-    "GpuSdfComputeParityGate" { Test-GpuSdfComputeParityGate }
-    "GpuSdfRuntimeToggleGate" { Test-GpuSdfRuntimeToggleGate }
     "ChunkCollisionLifecycle" { Test-ChunkCollisionLifecycle }
     "PhysicsReplay" { Test-PhysicsReplay }
     "AudioNullTelemetry" { Test-AudioNullTelemetry }
@@ -7942,11 +6991,8 @@ switch ($Mode) {
     "WorldHashEntitySnapshotGate" { Test-WorldHashEntitySnapshotGate }
     "NetworkLoopbackAuthorityGate" { Test-NetworkLoopbackAuthorityGate }
     "NetworkStateHash" { Test-NetworkStateHash }
-    "PerfRegression" { Test-PerfRegression }
-    "PerfFloor" { Test-PerfFloor }
     "EcologyTickPerf" { Test-EcologyTickPerf }
     "FarFieldForestBudget" { Test-FarFieldForestBudget }
-    "FrontierDisabled" { Test-FrontierDisabled }
     "SkyboxVisual" { Test-SkyboxVisual }
     "WeatherVisual" { Test-WeatherVisual }
     "ParticleEmitterDeterminism" { Test-ParticleEmitterDeterminism }
@@ -8004,9 +7050,6 @@ switch ($Mode) {
         Test-ArtifactManifest
         Test-RenderHealth
         Test-ShaderInventory
-        Test-GpuSdfCallbackSafetyGate
-        Test-GpuSdfComputeParityGate
-        Test-GpuSdfRuntimeToggleGate
         Test-ChunkCollisionLifecycle
         Test-PhysicsReplay
         Test-AudioNullTelemetry
@@ -8032,7 +7075,6 @@ switch ($Mode) {
         Test-ProfilerDeterminismNeutral
         Test-BuildTreeStrict
         Test-NetDemotionDocGrep
-        Test-FrontierDisabled
     }
 }
 

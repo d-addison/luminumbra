@@ -9,7 +9,7 @@
             <h1>create world</h1>
             <div class="title-ornament">&#9670;</div>
 
-            <!-- Spec 002 Item 1: the LIVE WORLD-PREVIEW DIORAMA renders the candidate
+            <!--  : the LIVE WORLD-PREVIEW DIORAMA renders the candidate
                  world FULL-SCREEN behind this (transparent) panel — a cinematic
                  backdrop you orbit by dragging over the world (outside the panel) and
                  zoom with the scroll wheel. This compact control strip drives the live
@@ -80,12 +80,12 @@
                         </select>
                     </div>
 
-                    <!-- Spec 002 Item 2: SEMANTIC KNOBS — the DEFAULT create surface.
+                    <!--  : SEMANTIC KNOBS — the DEFAULT create surface.
                          6 outcome knobs (data-knob id, [0,1]); the host applies the
                          engine-side KnobLayer response curves, then overlays any
                          advanced-panel override diff. Curated presets carry no knob
                          layer, so these seed NEUTRAL (0.5) — never inverse-lerped.
-                         Wave 0.3: each row is a flex [label][slider][value] line so the
+: each row is a flex [label][slider][value] line so the
                          live value reads BESIDE its slider, not floated above it. -->
                     <div class="knob-section">
                         <h3 class="param-group-heading">world feel</h3>
@@ -122,11 +122,11 @@
                     </div>
 
                     <!-- Collapsible ADVANCED raw worldgen parameters. Collapsed by default;
-                         a C++ click handler toggles .collapsed on #customize_body and the
+                         a C++ click handler toggles.collapsed on #customize_body and the
                          caret glyph, then seeds the controls per-preset. Edits here overlay
                          the knob layer as a sparse raw-override diff (both persist).
-                         Wave 0.3: the four advanced groups are now TAB PANES (a chip strip
-                         toggles .active on one pane at a time) so the panel no longer
+: the four advanced groups are now TAB PANES (a chip strip
+                         toggles.active on one pane at a time) so the panel no longer
                          scrolls a long single column — only the active group shows. -->
                     <div class="customize-section">
                         <div class="customize-header" id="customize_toggle">
@@ -135,7 +135,7 @@
                         </div>
                         <div class="customize-body collapsed" id="customize_body">
 
-                            <!-- Tab strip: one .active pane at a time (C++ click handler). -->
+                            <!-- Tab strip: one.active pane at a time (C++ click handler). -->
                             <div class="param-tabs">
                                 <span class="param-tab active" data-tab="terrain">terrain</span>
                                 <span class="param-tab" data-tab="water">water</span>

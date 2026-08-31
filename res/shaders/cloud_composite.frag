@@ -1,5 +1,5 @@
 #version 450 core
-// Render-optimization (cloud-raymarch-optimization, slice 1): composite the
+// Render-optimization (cloud-raymarch-optimization, ): composite the
 // half-resolution sky dome (raymarched clouds + scattering + sun/stars) back
 // into the full-res lighting FBO. The dome is rendered to a reduced-resolution
 // FBO (1/2 or 1/4 each axis) where the expensive cloud raymarch runs at a

@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.territory — HOME-RANGE / TERRITORIALITY. A creature that carries a
+// sim.territory: HOME-RANGE / TERRITORIALITY. A creature that carries a
 // TerritoryComponent claims a HOME location (its spawn position) and prefers to stay near it:
 // the territory system (luminumbra::ai::RunTerritoryOnTick) computes, each tick, a HOMING wish
 // bias — a horizontal vector that points back toward home and GROWS the further the creature

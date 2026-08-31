@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.herd_alarm — COLLECTIVE VIGILANCE. The presence of this component is the
+// sim.herd_alarm: COLLECTIVE VIGILANCE. The presence of this component is the
 // per-entity opt-in for luminumbra::ai::RunHerdAlarmOnTick (mirrors the PlantTag /
 // CreatureGenomeComponent gating pattern): a world whose creatures carry NO
 // AlarmComponent — and any world with NO creatures — runs the herd-alarm system as a
@@ -9,7 +9,7 @@
 // The alarm system maintains a propagating "alarm field" over the creatures that carry
 // this component: an alarmed creature (alarmed==1, or level above a threshold) RAISES the
 // alarm level of nearby SAME-ROLE neighbours (same CreatureComponent.is_predator), so a
-// startle ripples through the herd in waves over successive ticks (collective vigilance).
+// startle ripples through the herd in  over successive ticks (collective vigilance).
 // Every creature's level DECAYS toward 0 each tick when no source is nearby. The
 // brain/flee reaction that consumes this field is wired separately (this component is
 // pure sim state — a clamped float level + a uint8 flag; geometry/rendering is elsewhere).
@@ -36,4 +36,4 @@ struct AlarmComponent {
     std::uint8_t alarmed = 0;
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

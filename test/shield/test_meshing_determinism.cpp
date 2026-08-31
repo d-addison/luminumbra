@@ -1,4 +1,4 @@
-// T-I2-10a: Marching cubes meshing determinism gate.
+// Marching cubes meshing determinism gate.
 //
 // Locks the bit-exact bytes of PolygoniseTerrain output (mesh_vertices +
 // mesh_indices) for a set of fixture chunks at LOD steps 1, 2 and 4 via

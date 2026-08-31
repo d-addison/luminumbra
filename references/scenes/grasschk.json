@@ -1,5 +1,0 @@
-{ "camera": { "pos": [8, 30, 8], "yaw": 40, "pitch": -8, "fov": 60 },
-  "time_of_day": 0.0,
-  "clouds": { "coverage": 0.3, "plane_height": 1600, "shadow": false },
-  "weather": { "type": "none", "intensity": 0.0 },
-  "screenshot": "references/compare/grasschk.ppm" }

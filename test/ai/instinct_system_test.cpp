@@ -1,4 +1,4 @@
-// T-I3-17: InstinctSystem runtime coverage — the planner running over EnTT
+// InstinctSystem runtime coverage — the planner running over EnTT
 // on the fixed simulation tick. Content here is synthetic engine-test data;
 // game archetypes live under data/.
 
@@ -34,12 +34,11 @@ entt::entity MakeAgent(entt::registry& registry, std::uint32_t replan_interval_t
     return agent;
 }
 
-entt::entity MakeOpportunity(
-    entt::registry& registry,
-    const std::string& id,
-    const std::string& need,
-    float satisfaction,
-    float urgency) {
+entt::entity MakeOpportunity(entt::registry& registry,
+                             const std::string& id,
+                             const std::string& need,
+                             float satisfaction,
+                             float urgency) {
     const auto entity = registry.create();
     auto& opportunity = registry.emplace<OpportunityComponent>(entity);
     opportunity.id = id;
@@ -143,5 +142,6 @@ TEST(InstinctSystem, RespectsOpportunityRadiusWithTransforms) {
     EXPECT_EQ(identity.current_plan.candidates.front().id, "near");
     // Distance feeds the score: 3 m at weight 0.35.
     EXPECT_NEAR(identity.current_plan.candidates.front().score,
-                (0.9 * 0.5 * 2.0) + (0.5 * 1.5) - (3.0 * 0.35), 1.0e-4);
+                (0.9 * 0.5 * 2.0) + (0.5 * 1.5) - (3.0 * 0.35),
+                1.0e-4);
 }

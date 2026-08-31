@@ -1,14 +1,13 @@
 #pragma once
 
-// T-I6 P3.0: authoritative-server STATE REPLICATION protocol (multiplayer).
+// Authoritative-server state replication protocol.
 //
-// Per MULTIPLAYER-BLOCKER-SPEC.md v2 + research/mp-replication.md: the
-// authoritative dedicated server sends each client an entity-state SNAPSHOT;
+// The authoritative dedicated server sends each client an entity-state snapshot;
 // clients send their per-tick USERCMD upstream and ACK the latest snapshot.
 // This header defines the WIRE MESSAGES + their encode/decode only (the first
 // tested sub-phase). It carries opaque framed bytes over the EXISTING
 // ILockstepTransport seam (LoopbackTransport for tests now; a UDP socket
-// transport is the next sub-step), so no transport code is duplicated here.
+// transport), so no transport code is duplicated here.
 //
 // Wire discipline (identical to LockstepSession): fixed-width little-endian,
 // length-prefixed strings/blobs, NO struct padding on the wire, NO float bit-
@@ -33,9 +32,9 @@ inline constexpr float kReplPosScale = 1000.0f;   // metres -> millimetres
 inline constexpr float kReplAngleScale = 1000.0f; // radians -> milli-radians
 
 enum class ReplMessageType : std::uint8_t {
-    Usercmd  = 0x01, // client -> server: one tick of player input
+    Usercmd = 0x01,  // client -> server: one tick of player input
     Snapshot = 0x02, // server -> client: authoritative entity-state set
-    Ack      = 0x03, // client -> server: latest snapshot received + latest usercmd produced
+    Ack = 0x03,      // client -> server: latest snapshot received + latest usercmd produced
 };
 
 // One tick of a player's input (the opaque blob the server applies to that
@@ -44,10 +43,10 @@ enum class ReplMessageType : std::uint8_t {
 struct UsercmdMsg {
     std::uint64_t tick = 0;
     std::uint32_t player_id = 0;
-    std::int16_t  move_x = 0;
-    std::int16_t  move_z = 0;
-    std::int16_t  yaw_mrad = 0;
-    std::uint8_t  action_bits = 0; // bit0 jump, bit1 crouch, ... (game-defined)
+    std::int16_t move_x = 0;
+    std::int16_t move_z = 0;
+    std::int16_t yaw_mrad = 0;
+    std::uint8_t action_bits = 0; // bit0 jump, bit1 crouch,... (game-defined)
 
     bool operator==(const UsercmdMsg& o) const {
         return tick == o.tick && player_id == o.player_id && move_x == o.move_x &&
@@ -56,20 +55,20 @@ struct UsercmdMsg {
 };
 
 // One entity's replicated transform + class inside a snapshot (quantized).
-// T-I6 P6: type_id lets the client instantiate the right mesh/behaviour (player /
+// type_id lets the client instantiate the right mesh or behaviour (player,
 // animal / NPC / projectile -- like a Quake3 eType / Source server-class index);
 // anim_state is the current clip enum and anim_phase its normalized time
 // (0..255 -> 0..1) -- NEVER joint data. All game-defined; the engine only carries them.
 struct ReplEntityState {
     std::uint32_t entity_id = 0;
-    std::int32_t  px_mm = 0;
-    std::int32_t  py_mm = 0;
-    std::int32_t  pz_mm = 0;
-    std::int16_t  yaw_mrad = 0;
-    std::uint8_t  flags = 0;       // bit0 grounded, bit1 owned/predicted, ... (game-defined)
-    std::uint16_t type_id = 0;     // archetype/class (0 = default/player avatar)
-    std::uint8_t  anim_state = 0;  // current clip enum (game-defined)
-    std::uint8_t  anim_phase = 0;  // normalized clip time, 0..255
+    std::int32_t px_mm = 0;
+    std::int32_t py_mm = 0;
+    std::int32_t pz_mm = 0;
+    std::int16_t yaw_mrad = 0;
+    std::uint8_t flags = 0;      // bit0 grounded, bit1 owned/predicted,... (game-defined)
+    std::uint16_t type_id = 0;   // archetype/class (0 = default/player avatar)
+    std::uint8_t anim_state = 0; // current clip enum (game-defined)
+    std::uint8_t anim_phase = 0; // normalized clip time, 0..255
 
     bool operator==(const ReplEntityState& o) const {
         return entity_id == o.entity_id && px_mm == o.px_mm && py_mm == o.py_mm &&
@@ -78,22 +77,23 @@ struct ReplEntityState {
     }
 };
 
-// The server's authoritative entity-state set for one client at one tick. P3.0
+// The server's authoritative entity-state set for one client at one tick.
 // is a FULL set (baseline); delta-vs-acked compression + AOI scoping land in
-// P3.1/P3.2 -- the message already carries the seq + acked-usercmd fields they need.
+// / -- the message already carries the seq + acked-usercmd fields they need.
 struct SnapshotMsg {
     std::uint64_t server_tick = 0;
-    std::uint32_t snapshot_seq = 0;        // monotonically increasing per receiver
-    // T-I6 P3.1: the baseline seq this snapshot was DELTA-compressed against (Quake3
+    std::uint32_t snapshot_seq = 0; // monotonically increasing per receiver
+    //  the baseline seq this snapshot was DELTA-compressed against (Quake3
     // "deltaFrom"). 0 = a FULL snapshot (no baseline; decode it standalone). When
     // non-zero the receiver reconstructs the full set via ApplySnapshotDelta against
     // the snapshot it previously reconstructed at this seq. Ack-driven: the server
     // only ever deltas against a seq the client has ACKed, so a dropped delta never
     // strands the client (the next delta is still against the same acked baseline).
     std::uint32_t delta_from_seq = 0;
-    std::uint64_t acked_usercmd_tick = 0;  // newest usercmd the server has folded in (reconciliation)
+    std::uint64_t acked_usercmd_tick =
+        0; // newest usercmd the server has folded in (reconciliation)
     std::vector<ReplEntityState> entities;
-    // T-I6 P6: explicit RELIABLE despawn -- ids that LEFT this client's set (died /
+    //  explicit RELIABLE despawn -- ids that LEFT this client's set (died /
     // expired / left AOI). Full snapshots drop absent entities implicitly, but a
     // transient (a spent arrow) needs an explicit removal so a lost update can't
     // strand a ghost (Halo's "cosmetic one-shot events get lost" lesson).
@@ -122,15 +122,19 @@ bool DecodeAck(const std::vector<std::uint8_t>& frame, AckMsg& out);
 inline std::int32_t ReplQuantPos(float metres) {
     return static_cast<std::int32_t>(metres * kReplPosScale + (metres >= 0.0f ? 0.5f : -0.5f));
 }
-inline float ReplDequantPos(std::int32_t mm) { return static_cast<float>(mm) / kReplPosScale; }
+inline float ReplDequantPos(std::int32_t mm) {
+    return static_cast<float>(mm) / kReplPosScale;
+}
 inline std::int16_t ReplQuantAngle(float radians) {
     const float v = radians * kReplAngleScale;
     return static_cast<std::int16_t>(v >= 0.0f ? v + 0.5f : v - 0.5f);
 }
-inline float ReplDequantAngle(std::int16_t mrad) { return static_cast<float>(mrad) / kReplAngleScale; }
+inline float ReplDequantAngle(std::int16_t mrad) {
+    return static_cast<float>(mrad) / kReplAngleScale;
+}
 
 // ---------------------------------------------------------------------------
-// T-I6 P3.0b: unreliable-delivery reliability layer (what makes UDP usable).
+//  unreliable-delivery reliability layer (what makes UDP usable).
 // State replication runs over UNRELIABLE UDP (research/mp-replication.md): a
 // datagram can arrive late, out of order, or duplicated, and an OLD snapshot is
 // superseded by a newer one (most-recent-wins -- TCP head-of-line blocking is
@@ -145,13 +149,18 @@ class SnapshotReceiver {
 public:
     // Returns true if accepted (strictly newer seq), false if stale/duplicate.
     bool Receive(const SnapshotMsg& snap) {
-        if (m_has && snap.snapshot_seq <= m_current.snapshot_seq) return false;
+        if (m_has && snap.snapshot_seq <= m_current.snapshot_seq)
+            return false;
         m_current = snap;
         m_has = true;
         return true;
     }
-    [[nodiscard]] bool has_snapshot() const { return m_has; }
-    [[nodiscard]] const SnapshotMsg& current() const { return m_current; }
+    [[nodiscard]] bool has_snapshot() const {
+        return m_has;
+    }
+    [[nodiscard]] const SnapshotMsg& current() const {
+        return m_current;
+    }
     // The Ack to send upstream: newest snapshot applied + newest usercmd produced.
     [[nodiscard]] AckMsg make_ack(std::uint64_t latest_usercmd_tick) const {
         return AckMsg{m_has ? m_current.snapshot_seq : 0u, latest_usercmd_tick};
@@ -164,24 +173,32 @@ private:
 
 // SERVER side, per connected client: keeps the NEWEST usercmd seen (by tick;
 // UDP may reorder) and tracks the latest snapshot_seq that client has acked (so
-// the server can delta against it in P3.1).
+// the server can delta against it in ).
 class UsercmdReceiver {
 public:
     // Returns true if accepted (strictly newer tick), false if stale/duplicate.
     bool Receive(const UsercmdMsg& cmd) {
-        if (m_has && cmd.tick <= m_latest.tick) return false;
+        if (m_has && cmd.tick <= m_latest.tick)
+            return false;
         m_latest = cmd;
         m_has = true;
         return true;
     }
-    [[nodiscard]] bool has_command() const { return m_has; }
-    [[nodiscard]] const UsercmdMsg& latest() const { return m_latest; }
+    [[nodiscard]] bool has_command() const {
+        return m_has;
+    }
+    [[nodiscard]] const UsercmdMsg& latest() const {
+        return m_latest;
+    }
 
     // Record an Ack from this client (monotonic: a stale ack never lowers state).
     void ApplyAck(const AckMsg& ack) {
-        if (ack.snapshot_seq > m_acked_snapshot_seq) m_acked_snapshot_seq = ack.snapshot_seq;
+        if (ack.snapshot_seq > m_acked_snapshot_seq)
+            m_acked_snapshot_seq = ack.snapshot_seq;
     }
-    [[nodiscard]] std::uint32_t acked_snapshot_seq() const { return m_acked_snapshot_seq; }
+    [[nodiscard]] std::uint32_t acked_snapshot_seq() const {
+        return m_acked_snapshot_seq;
+    }
 
 private:
     UsercmdMsg m_latest;

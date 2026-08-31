@@ -1,9 +1,9 @@
 #pragma once
 
-// Track sim.wildlife_foliage — the ECOLOGY x FOLIAGE coupling: non-predator CREATURES
+// sim.wildlife_foliage: the ECOLOGY x FOLIAGE coupling: non-predator CREATURES
 // GRAZE/TRAMPLE the nearby PLANTS, and the plants slowly REGROW when left alone. This
 // closes the loop between the creature ecology (ai/CreatureBrain, CreatureReproduction)
-// and the living-world foliage pillar (PlantGrowth / Soil): herds draw down the standing
+// and the living-world foliage system (PlantGrowth / Soil): herds draw down the standing
 // biomass where they congregate (overgrazed patches go bare), and fallow ground recovers,
 // so creature density visibly shapes the plant cover (and, optionally, grazing feeds the
 // creature — lowering its hunger).

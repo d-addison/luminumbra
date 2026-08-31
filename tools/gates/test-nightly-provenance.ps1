@@ -74,24 +74,22 @@ Assert-False `
     "an unresolved identity is rejected"
 
 $null = Assert-NightlyTrackedChangePolicy -ChangedPaths @()
-$null = Assert-NightlyTrackedChangePolicy -ChangedPaths @(".banso/config.yaml")
-$null = Assert-NightlyTrackedChangePolicy -ChangedPaths @(".banso\config.yaml")
 Assert-Throws {
     Assert-NightlyTrackedChangePolicy -ChangedPaths @(
-        ".banso/config.yaml", "src/luminumbra_client/main_client.cpp")
-} "a tracked source change outside the user-local allowlist"
+        "src/luminumbra_client/main_client.cpp")
+} "a tracked source change"
 Assert-Throws {
     Assert-NightlyTrackedChangePolicy -ChangedPaths @(
-        ".banso/config.yaml.backup")
-} "a path which only prefixes the user-local allowlist"
+        "docs/development.md") -AllowedPaths @("README.md")
+} "a path outside an explicit allowlist"
 
 $expectedPath = "\Luminumbra Nightly Gate"
 $expectedAction = "C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"
 $expectedPid = [uint32]4242
 $expectedTaskName = "Luminumbra Nightly Gate"
 $expectedTaskRoot = "\"
-$expectedArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\src\luminumbra\tools\gates\run-nightly-gate.ps1" -BuildPreset debug -RenderBudgetPreset release'
-$expectedWorkingDirectory = "C:\src\luminumbra"
+$expectedArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\fixture\luminumbra\tools\gates\run-nightly-gate.ps1" -BuildPreset debug'
+$expectedWorkingDirectory = "C:\fixture\luminumbra"
 
 function New-TaskDefinitionFixture {
     param([string]$UserId = "gateuser")

@@ -1,14 +1,14 @@
-// T-I6-A3b (increment 2b): GPU max-mip reduction parity.
+// Standalone GPU max-mip reduction parity.
 //
-// The live far-field raymarch (inc2c) needs the heightfield max-mip pyramid built
-// on the GPU as the player streams. GL's glGenerateMipmap is a BOX (average)
+// The experimental heightfield raymarch uses a max-mip pyramid. GL's
+// glGenerateMipmap is a box (average)
 // filter — unusable: the conservative ray-above-surface test requires per-cell
-// MAX. This increment delivers the GPU max-reduction (two compute passes: build
+// max. This test exercises GPU max-reduction (two compute passes: build
 // level 0 = max over each 2x2 block of base samples, then halve+max each coarser
 // level) and proves it BYTE-IDENTICAL to the CPU reference BuildHeightMaxMip
-// (shieldrt_far_field.h) — max() of identical uploaded floats is exact, so the
+// (shieldrt_far_field.h) — max of identical uploaded floats is exact, so the
 // GPU and CPU pyramids must match to the bit. This validates the acceleration-
-// structure build in isolation before it is wired into a live render pass.
+// structure build in isolation without claiming a shipping render integration.
 //
 // Render-only, GPU-gated (skips headless/software). Label manual;perf;gpu:
 //   ctest -L manual -R ShieldRtFarFieldMaxMipGpu --output-on-failure
@@ -40,8 +40,8 @@ namespace fs = std::filesystem;
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
 using namespace luminumbra_shieldrt;
-using Luminumbra::World::FarLodTier;
 using Luminumbra::World::ComputeTerrainParamsHash;
+using Luminumbra::World::FarLodTier;
 
 namespace {
 
@@ -54,8 +54,12 @@ namespace {
 
 constexpr int kSeed = 424242;
 
-fs::path SourceRoot() { return fs::weakly_canonical(fs::path(LUMINUMBRA_SOURCE_ROOT)); }
-fs::path ArtifactRoot() { return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "performance"; }
+fs::path SourceRoot() {
+    return fs::weakly_canonical(fs::path(LUMINUMBRA_SOURCE_ROOT));
+}
+fs::path ArtifactRoot() {
+    return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "performance";
+}
 
 TerrainGenParams LoadPresetParams(const fs::path& path) {
     const Luminumbra::world::TerrainPresetLoadResult result =
@@ -122,9 +126,11 @@ GLuint MakeRWBuffer(GLsizeiptr bytes) {
     return b;
 }
 
-GLuint Groups(int dim) { return static_cast<GLuint>((dim + 7) / 8); }
+GLuint Groups(int dim) {
+    return static_cast<GLuint>((dim + 7) / 8);
+}
 
-}  // namespace
+} // namespace
 
 TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
     HiddenGlContext ctx("shieldrt_far_field_maxmip_gpu");
@@ -159,7 +165,7 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
         const std::uint64_t params_hash = ComputeTerrainParamsHash(params, kSeed);
 
         // Single F1 region (n = 129) keeps the test quick while exercising the
-        // odd-dimension halving (128 -> 64 -> ... and the (n-1)=128 base cells).
+        // odd-dimension halving (128 -> 64 ->... and the (n-1)=128 base cells).
         const HeightField hf =
             BuildHeightFieldFromTiles(world, FarLodTier::F1, kRx0, kRz0, 1, params_hash);
         const HeightMaxMip cpu = BuildHeightMaxMip(hf);
@@ -171,8 +177,8 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
         // Allocate one RW buffer per CPU level (same dims).
         std::vector<GLuint> level_buf(cpu.levels, 0u);
         for (int L = 0; L < cpu.levels; ++L) {
-            level_buf[L] = MakeRWBuffer(
-                static_cast<GLsizeiptr>(cpu.max_h[L].size() * sizeof(float)));
+            level_buf[L] =
+                MakeRWBuffer(static_cast<GLsizeiptr>(cpu.max_h[L].size() * sizeof(float)));
         }
 
         // Level 0 from base.
@@ -196,20 +202,22 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
         }
         glFinish();
 
-        // Read back + compare each level to the CPU reference (exact: max() of the
+        // Read back + compare each level to the CPU reference (exact: max of the
         // same uploaded floats performs no rounding).
         long long total_cells = 0, mismatches = 0;
         double max_abs_diff = 0.0;
         for (int L = 0; L < cpu.levels; ++L) {
             std::vector<float> gpu(cpu.max_h[L].size(), 0.0f);
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, level_buf[L]);
-            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                               static_cast<GLsizeiptr>(gpu.size() * sizeof(float)), gpu.data());
+            glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                               0,
+                               static_cast<GLsizeiptr>(gpu.size() * sizeof(float)),
+                               gpu.data());
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
             for (std::size_t i = 0; i < gpu.size(); ++i) {
                 ++total_cells;
-                const double diff = std::abs(static_cast<double>(gpu[i]) -
-                                             static_cast<double>(cpu.max_h[L][i]));
+                const double diff =
+                    std::abs(static_cast<double>(gpu[i]) - static_cast<double>(cpu.max_h[L][i]));
                 if (diff != 0.0) {
                     ++mismatches;
                     max_abs_diff = std::max(max_abs_diff, diff);
@@ -217,7 +225,8 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
             }
         }
 
-        if (mismatches != 0) all_exact = false;
+        if (mismatches != 0)
+            all_exact = false;
         results.push_back({
             {"preset", preset},
             {"base_n", hf.n},
@@ -232,7 +241,8 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
                                  << max_abs_diff << ")";
 
         glDeleteBuffers(1, &base_buf);
-        for (GLuint b : level_buf) glDeleteBuffers(1, &b);
+        for (GLuint b : level_buf)
+            glDeleteBuffers(1, &b);
     }
 
     jobs.shutdown();
@@ -246,8 +256,8 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
 #endif
     const nlohmann::json report = {
         {"schema", "luminumbra.shieldrt_far_field_maxmip.v1"},
-        {"task", "T-I6-A3b"},
-        {"generated_by", "shieldrt_far_field_maxmip_gpu (GPU max-reduction vs CPU BuildHeightMaxMip)"},
+        {"generated_by",
+         "shieldrt_far_field_maxmip_gpu (GPU max-reduction vs CPU BuildHeightMaxMip)"},
         {"seed", kSeed},
         {"build_mode", build_mode},
         {"gpu", {{"renderer", renderer}, {"software_renderer", software}}},
@@ -258,7 +268,7 @@ TEST(ShieldRtFarFieldMaxMipGpu, GpuMaxReductionMatchesCpuReference) {
          "halve+max per level) is byte-identical to the CPU BuildHeightMaxMip "
          "reference. glGenerateMipmap (box filter) is unusable for the conservative "
          "ray-above test; this is the net-new acceleration-structure build for the "
-         "live far-field pass (A3b inc2c)."},
+         "live far-field pass ( inc2c)."},
     };
     std::ofstream out(ArtifactRoot() / "shieldrt-far-field-maxmip.json");
     ASSERT_TRUE(out);

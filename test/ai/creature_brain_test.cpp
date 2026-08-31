@@ -1,4 +1,4 @@
-// I9-ECO: creature brain (perception -> IAUS -> action) tests. Deterministic predator/prey
+//  creature brain (perception -> IAUS -> action) tests. Deterministic predator/prey
 // behaviour emerging from the utility scores.
 #include <gtest/gtest.h>
 
@@ -22,22 +22,26 @@ CreatureSenses prey(float hunger, float threat, float food, float stamina) {
 
 TEST(CreatureBrain, PreyFleesNearPredator) {
     // Even hungry with food next to it, a near predator -> flee.
-    EXPECT_EQ(DecideCreatureAction(prey(/*hunger*/ 0.9f, /*threat*/ 0.95f, /*food*/ 0.9f, /*stamina*/ 0.8f)),
+    EXPECT_EQ(DecideCreatureAction(
+                  prey(/*hunger*/ 0.9f, /*threat*/ 0.95f, /*food*/ 0.9f, /*stamina*/ 0.8f)),
               CreatureAction::Flee);
 }
 
 TEST(CreatureBrain, PreyGrazesWhenSafeHungryFoodNear) {
-    EXPECT_EQ(DecideCreatureAction(prey(/*hunger*/ 0.9f, /*threat*/ 0.05f, /*food*/ 0.9f, /*stamina*/ 0.9f)),
+    EXPECT_EQ(DecideCreatureAction(
+                  prey(/*hunger*/ 0.9f, /*threat*/ 0.05f, /*food*/ 0.9f, /*stamina*/ 0.9f)),
               CreatureAction::Graze);
 }
 
 TEST(CreatureBrain, PreyRestsWhenExhaustedAndSafe) {
-    EXPECT_EQ(DecideCreatureAction(prey(/*hunger*/ 0.2f, /*threat*/ 0.05f, /*food*/ 0.1f, /*stamina*/ 0.03f)),
+    EXPECT_EQ(DecideCreatureAction(
+                  prey(/*hunger*/ 0.2f, /*threat*/ 0.05f, /*food*/ 0.1f, /*stamina*/ 0.03f)),
               CreatureAction::Rest);
 }
 
 TEST(CreatureBrain, PreyWandersWhenNothingPressing) {
-    EXPECT_EQ(DecideCreatureAction(prey(/*hunger*/ 0.15f, /*threat*/ 0.05f, /*food*/ 0.1f, /*stamina*/ 0.9f)),
+    EXPECT_EQ(DecideCreatureAction(
+                  prey(/*hunger*/ 0.15f, /*threat*/ 0.05f, /*food*/ 0.1f, /*stamina*/ 0.9f)),
               CreatureAction::Wander);
 }
 
@@ -45,7 +49,7 @@ TEST(CreatureBrain, PredatorHuntsWhenHungryAndPreyNear) {
     CreatureSenses s;
     s.is_predator = true;
     s.hunger = 0.8f;
-    s.food_proximity = 0.85f;  // prey nearby
+    s.food_proximity = 0.85f; // prey nearby
     s.threat_proximity = 0.0f;
     s.stamina = 0.9f;
     EXPECT_EQ(DecideCreatureAction(s), CreatureAction::Hunt);
@@ -57,7 +61,7 @@ TEST(CreatureBrain, Deterministic) {
 }
 
 // ---------------------------------------------------------------------------
-// INSTINCT-05 (Wave H I2.4): Drink/Forage join the IAUS arbiter.
+//  ( needs arbitration): Drink/Forage join the IAUS arbiter.
 // ---------------------------------------------------------------------------
 
 TEST(CreatureBrain, DrinkWinsWhenParchedSafeNearWater) {
@@ -67,7 +71,7 @@ TEST(CreatureBrain, DrinkWinsWhenParchedSafeNearWater) {
     EXPECT_EQ(DecideCreatureAction(s), CreatureAction::Drink);
 }
 
-// THE ADVERSARIAL FIXTURE the charter names: a parched creature at the water's
+// THE ADVERSARIAL FIXTURE the contract names: a parched creature at the water's
 // edge STILL flees a near predator — the whole point of moving thirst from the
 // out-of-band additive blend (which pulled fleeing creatures toward water) into
 // the arbiter, where Flee's weight + steep logistic dominate.
@@ -81,8 +85,8 @@ TEST(CreatureBrain, FleeStillDominatesDrink) {
 TEST(CreatureBrain, PredatorDrinksToo) {
     CreatureSenses s;
     s.is_predator = true;
-    s.hunger = 0.1f;          // not worth hunting
-    s.food_proximity = 0.0f;  // no prey anyway
+    s.hunger = 0.1f;         // not worth hunting
+    s.food_proximity = 0.0f; // no prey anyway
     s.stamina = 0.9f;
     s.thirst = 0.9f;
     s.water_proximity = 0.85f;
@@ -90,10 +94,10 @@ TEST(CreatureBrain, PredatorDrinksToo) {
 }
 
 // The zero-defaults contract: senses WITHOUT thirst/water/availability decide
-// exactly as the pre-INSTINCT-05 brain (every earlier fixture above re-proves
+// exactly as the pre- brain (every earlier fixture above re-proves
 // this; this one pins the pathological all-zero case to Wander, not Drink).
 TEST(CreatureBrain, DefaultSensesNeverPickTheNewActions) {
     EXPECT_EQ(DecideCreatureAction(prey(0.15f, 0.05f, 0.1f, 0.9f)), CreatureAction::Wander);
 }
 
-}  // namespace
+} // namespace

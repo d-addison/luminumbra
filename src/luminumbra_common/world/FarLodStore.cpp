@@ -26,7 +26,7 @@ void FnvMix(u64& hash, const void* data, std::size_t size) {
     }
 }
 
-template <typename T>
+template<typename T>
 void FnvMixValue(u64& hash, const T& value) {
     FnvMix(hash, &value, sizeof(T));
 }
@@ -35,12 +35,12 @@ void AppendBytes(std::string& buffer, const void* data, std::size_t size) {
     buffer.append(static_cast<const char*>(data), size);
 }
 
-template <typename T>
+template<typename T>
 void AppendValue(std::string& buffer, const T& value) {
     AppendBytes(buffer, &value, sizeof(T));
 }
 
-template <typename T>
+template<typename T>
 bool ReadValue(const std::string& buffer, std::size_t& offset, T& out) {
     if (offset + sizeof(T) > buffer.size()) {
         return false;
@@ -74,7 +74,7 @@ bool ReadBytes(const std::string& buffer, std::size_t& offset, void* out, std::s
 
 bool IsValidSourceKind(FarLodBrickSourceKind source_kind) {
     return source_kind == FarLodBrickSourceKind::RegenerableCache ||
-        source_kind == FarLodBrickSourceKind::Authoritative;
+           source_kind == FarLodBrickSourceKind::Authoritative;
 }
 
 bool IsValidFarLodTier(FarLodTier tier) {
@@ -92,8 +92,8 @@ bool BrickLess(const FarLodSdfBrickDescriptor& left, const FarLodSdfBrickDescrip
 }
 
 bool SameBrickKey(const FarLodSdfBrickDescriptor& left, const FarLodSdfBrickDescriptor& right) {
-    return left.local_chunk_x == right.local_chunk_x &&
-        left.local_chunk_z == right.local_chunk_z && left.chunk_y == right.chunk_y;
+    return left.local_chunk_x == right.local_chunk_x && left.local_chunk_z == right.local_chunk_z &&
+           left.chunk_y == right.chunk_y;
 }
 
 u32 Crc32(const i16* density_q, const u8* material, std::size_t count) {
@@ -105,14 +105,16 @@ u32 Crc32(const i16* density_q, const u8* material, std::size_t count) {
 
 bool ValidateTileStreams(const FarLodTile& tile, std::string* error) {
     if (!IsValidFarLodTier(tile.tier)) {
-        if (error) *error = "far-LOD tile has an invalid tier";
+        if (error)
+            *error = "far-LOD tile has an invalid tier";
         return false;
     }
     const std::size_t background_count = tile.sample_count();
     if (tile.samples_per_side != FarLodSamplesPerSide(tile.tier) ||
         tile.height_q.size() != background_count || tile.material.size() != background_count ||
         tile.flags.size() != background_count) {
-        if (error) *error = "far-LOD tile has inconsistent background arrays";
+        if (error)
+            *error = "far-LOD tile has inconsistent background arrays";
         return false;
     }
 
@@ -120,29 +122,32 @@ bool ValidateTileStreams(const FarLodTile& tile, std::string* error) {
     if (tile.sdf_bricks.size() > std::numeric_limits<std::size_t>::max() / samples_per_brick ||
         tile.sdf_density_q.size() != tile.sdf_bricks.size() * samples_per_brick ||
         tile.sdf_material.size() != tile.sdf_bricks.size() * samples_per_brick) {
-        if (error) *error = "far-LOD tile has inconsistent SDF brick streams";
+        if (error)
+            *error = "far-LOD tile has inconsistent SDF brick streams";
         return false;
     }
     for (std::size_t index = 0; index < tile.sdf_bricks.size(); ++index) {
         const FarLodSdfBrickDescriptor& descriptor = tile.sdf_bricks[index];
-        if (descriptor.local_chunk_x >= 32u || descriptor.local_chunk_z >= 32u || descriptor.reserved != 0 ||
-            !IsValidSourceKind(descriptor.source_kind) ||
+        if (descriptor.local_chunk_x >= 32u || descriptor.local_chunk_z >= 32u ||
+            descriptor.reserved != 0 || !IsValidSourceKind(descriptor.source_kind) ||
             (index != 0 && !BrickLess(tile.sdf_bricks[index - 1], descriptor))) {
-            if (error) *error = "far-LOD tile has invalid or unsorted SDF brick descriptors";
+            if (error)
+                *error = "far-LOD tile has invalid or unsorted SDF brick descriptors";
             return false;
         }
         const std::size_t payload_offset = index * samples_per_brick;
         for (std::size_t sample = 0; sample < samples_per_brick; ++sample) {
             if (tile.sdf_density_q[payload_offset + sample] == kFarLodSdfInvalid) {
-                if (error) *error = "far-LOD tile contains an invalid SDF density sentinel";
+                if (error)
+                    *error = "far-LOD tile contains an invalid SDF density sentinel";
                 return false;
             }
         }
-        if (descriptor.payload_crc32 != Crc32(
-                tile.sdf_density_q.data() + payload_offset,
-                tile.sdf_material.data() + payload_offset,
-                samples_per_brick)) {
-            if (error) *error = "far-LOD tile SDF brick CRC mismatch";
+        if (descriptor.payload_crc32 != Crc32(tile.sdf_density_q.data() + payload_offset,
+                                              tile.sdf_material.data() + payload_offset,
+                                              samples_per_brick)) {
+            if (error)
+                *error = "far-LOD tile SDF brick CRC mismatch";
             return false;
         }
     }
@@ -171,10 +176,7 @@ i16 QuantizeFarLodSdf(float density) {
     if (!std::isfinite(density)) {
         return kFarLodSdfInvalid;
     }
-    const float scaled = std::clamp(
-        density * kFarLodSdfQuantScale,
-        -32767.0f,
-        32767.0f);
+    const float scaled = std::clamp(density * kFarLodSdfQuantScale, -32767.0f, 32767.0f);
     i16 quantized = static_cast<i16>(std::lround(scaled));
     if (density < 0.0f && quantized == 0) {
         quantized = -1;
@@ -203,16 +205,16 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
     FnvMixValue(hash, params.cave_carve_value);
     FnvMixValue(hash, static_cast<u8>(params.island_mask_enabled ? 1 : 0));
     FnvMixValue(hash, params.island_mask_frequency);
-    // T-I4-2: mix the biome-table content hash ONLY when biomes are enabled, so
+    // mix the biome-table content hash ONLY when biomes are enabled, so
     // pristine far-LOD tiles self-invalidate on a table content change
-    // (design-decisions section 2). Worlds without biomes contribute nothing
+    // in the stable terrain identity. Worlds without biomes contribute nothing
     // here, keeping every pre-biome far-tile cache key byte-identical (the
     // disabled path stays byte-zero; FarLodStore fixtures pass unchanged).
     if (params.biomes_enabled && params.biome_table_content_hash != 0) {
         FnvMixValue(hash, static_cast<u8>(1));
         FnvMixValue(hash, params.biome_table_content_hash);
     }
-    // T-I4-3: mix river params ONLY when rivers are enabled, so river presets'
+    // mix river params ONLY when rivers are enabled, so river presets'
     // pristine far tiles invalidate on a river-tuning change while non-river
     // worlds keep byte-identical far-tile cache keys.
     if (params.rivers_enabled) {
@@ -223,7 +225,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.river_depth);
         FnvMixValue(hash, params.river_max_carve);
     }
-    // Slice 2: mix lake params ONLY when lakes are enabled (byte-zero drift off).
+    //  mix lake params ONLY when lakes are enabled (byte-zero drift off).
     if (params.lakes_enabled) {
         FnvMixValue(hash, static_cast<u8>(4));
         FnvMixValue(hash, params.lake_frequency);
@@ -232,29 +234,29 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.lake_max_carve);
         FnvMixValue(hash, params.lake_bank_offset);
     }
-    // Slice 3: per-biome relief modulation (only when enabled).
+    //  per-biome relief modulation (only when enabled).
     if (params.biome_relief_enabled) {
         FnvMixValue(hash, static_cast<u8>(5));
         FnvMixValue(hash, params.biome_relief_strength);
     }
-    // Slice 4: cliff terracing (only when enabled).
+    //  cliff terracing (only when enabled).
     if (params.cliffs_enabled) {
         FnvMixValue(hash, static_cast<u8>(6));
         FnvMixValue(hash, params.cliff_frequency);
         FnvMixValue(hash, params.cliff_threshold);
         FnvMixValue(hash, params.cliff_step);
     }
-    // T-I4-4: mix the structure template content hash ONLY when structures are
+    // mix the structure template content hash ONLY when structures are
     // enabled, so structure presets' pristine far tiles invalidate on a template
     // change while non-structure worlds keep byte-identical far-tile cache keys.
     if (params.structures_enabled && params.structures_content_hash != 0) {
         FnvMixValue(hash, static_cast<u8>(3));
         FnvMixValue(hash, params.structures_content_hash);
     }
-    // T-I6-A1.5: mix the SHAPING params ONLY when shaping is enabled, so shaped
+    // mix the SHAPING params ONLY when shaping is enabled, so shaped
     // presets' pristine far-LOD tiles self-invalidate on a shaping-spline / freq
-    // change (closing the latent gap where continentalness/erosion/peaks were
-    // NOT in the cache key). Non-shaped worlds skip this block entirely, so their
+    // change; continentalness, erosion, and peaks are all part of the key.
+    // Non-shaped worlds skip this block entirely, so their
     // far-tile cache key is byte-identical to before (FarLodStore fixtures + the
     // shaping-off legacy preset hash stay green). Canonical spline encoding:
     // count (size_t) then each [input,output] control point in stored order via
@@ -278,7 +280,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         mix_spline(params.erosion_spline);
         mix_spline(params.peaks_spline);
     }
-    // T-I6-A2: mix the hydraulic-relief params ONLY when hydro is enabled, so a
+    // mix the hydraulic-relief params ONLY when hydro is enabled, so a
     // relief-tuning change invalidates shaped presets' pristine far-LOD tiles.
     // Disabled worlds skip the block (byte-stable cache key). marker 0x06.
     if (params.hydro_enabled) {
@@ -295,7 +297,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.hydro_sediment_capacity);
         FnvMixValue(hash, params.hydro_max_offset);
     }
-    // FR-A3: mix surface-break params ONLY when enabled, so dolines/cave-mouths
+    // mix surface-break params ONLY when enabled, so dolines/cave-mouths
     // tuning invalidates pristine far-LOD tiles. Disabled worlds skip the block
     // (byte-stable cache key -> byte-zero drift). marker 0x07.
     if (params.surface_breaks_enabled) {
@@ -354,12 +356,11 @@ u64 ComputeFarLodTileHash(const FarLodTile& tile) {
     return hash;
 }
 
-FarLodTile BuildPristineFarLodTile(
-    const Systems::SHIELD_WorldSystem& world_system,
-    FarLodTier tier,
-    i32 rx,
-    i32 rz,
-    u64 params_hash) {
+FarLodTile BuildPristineFarLodTile(const Systems::SHIELD_WorldSystem& world_system,
+                                   FarLodTier tier,
+                                   i32 rx,
+                                   i32 rz,
+                                   u64 params_hash) {
     FarLodTile tile;
     tile.tier = tier;
     tile.rx = rx;
@@ -385,7 +386,7 @@ FarLodTile BuildPristineFarLodTile(
         const float world_z = origin_z + static_cast<float>(z * step);
         for (u32 x = 0; x < n; ++x, ++index) {
             const float world_x = origin_x + static_cast<float>(x * step);
-            // T-I4-DR-river-seam-sliver: coarse sampler anti-aliases the river
+            // coarse sampler anti-aliases the river
             // carve over the tile's sample step so a sub-step-width channel no
             // longer aliases into an isolated deep notch (the FarLodHorizon
             // sliver). Non-river worlds are byte-identical (the coarse path
@@ -402,36 +403,39 @@ FarLodTile BuildPristineFarLodTile(
     return tile;
 }
 
-FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
-    FarLodTile& tile,
-    const FarLodSdfSnapshot& snapshot,
-    std::string* error) {
+FarLodSdfReduceResult
+ReduceChunkSdfIntoFarTile(FarLodTile& tile, const FarLodSdfSnapshot& snapshot, std::string* error) {
     const std::size_t source_side_x = static_cast<std::size_t>(CHUNK_SIZE_X) + 1u;
     const std::size_t source_side_y = static_cast<std::size_t>(CHUNK_SIZE_Y) + 1u;
     const std::size_t source_side_z = static_cast<std::size_t>(CHUNK_SIZE_Z) + 1u;
     const std::size_t source_count = source_side_x * source_side_y * source_side_z;
     if (source_side_x != 17u || source_side_y != 17u || source_side_z != 17u ||
         snapshot.sdf_data.size() != source_count) {
-        if (error) *error = "far-LOD SDF reduction requires an exact 17^3 lattice";
+        if (error)
+            *error = "far-LOD SDF reduction requires an exact 17^3 lattice";
         return FarLodSdfReduceResult::Error;
     }
     if (!snapshot.material_data.empty() && snapshot.material_data.size() != source_count) {
-        if (error) *error = "far-LOD SDF material lattice is neither empty nor 17^3";
+        if (error)
+            *error = "far-LOD SDF material lattice is neither empty nor 17^3";
         return FarLodSdfReduceResult::Error;
     }
     if (!IsValidSourceKind(snapshot.source_kind)) {
-        if (error) *error = "far-LOD SDF snapshot has an invalid source kind";
+        if (error)
+            *error = "far-LOD SDF snapshot has an invalid source kind";
         return FarLodSdfReduceResult::Error;
     }
     const int chunks_per_region = kFarLodRegionSizeMeters / CHUNK_SIZE_X;
     if (FloorDiv(snapshot.coords.x, chunks_per_region) != tile.rx ||
         FloorDiv(snapshot.coords.z, chunks_per_region) != tile.rz) {
-        if (error) *error = "far-LOD SDF snapshot lies outside the tile home region";
+        if (error)
+            *error = "far-LOD SDF snapshot lies outside the tile home region";
         return FarLodSdfReduceResult::Error;
     }
     std::string tile_error;
     if (!ValidateTileStreams(tile, &tile_error)) {
-        if (error) *error = tile_error;
+        if (error)
+            *error = tile_error;
         return FarLodSdfReduceResult::Error;
     }
 
@@ -444,17 +448,19 @@ FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
     for (int z = 0; z <= CHUNK_SIZE_Z; z += step) {
         for (int y = 0; y <= CHUNK_SIZE_Y; y += step) {
             for (int x = 0; x <= CHUNK_SIZE_X; x += step) {
-                const std::size_t source_index = static_cast<std::size_t>(x) +
-                    static_cast<std::size_t>(y) * source_side_x +
+                const std::size_t source_index =
+                    static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * source_side_x +
                     static_cast<std::size_t>(z) * source_side_x * source_side_y;
                 const float density = snapshot.sdf_data[source_index];
                 if (!std::isfinite(density)) {
-                    if (error) *error = "far-LOD SDF snapshot contains a non-finite density";
+                    if (error)
+                        *error = "far-LOD SDF snapshot contains a non-finite density";
                     return FarLodSdfReduceResult::Error;
                 }
                 density_q.push_back(QuantizeFarLodSdf(density));
                 material.push_back(snapshot.material_data.empty()
-                    ? kFarLodMaterialAnalytic : snapshot.material_data[source_index]);
+                                       ? kFarLodMaterialAnalytic
+                                       : snapshot.material_data[source_index]);
             }
         }
     }
@@ -476,27 +482,31 @@ FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
         const int samples_per_chunk = CHUNK_SIZE_X / step + 1;
         for (int dz = 0; dz < samples_per_chunk; ++dz) {
             for (int dx = 0; dx < samples_per_chunk; ++dx) {
-                const std::size_t index = static_cast<std::size_t>(sx0 + dx) +
+                const std::size_t index =
+                    static_cast<std::size_t>(sx0 + dx) +
                     static_cast<std::size_t>(sz0 + dz) * tile.samples_per_side;
                 tile.flags[index] &= static_cast<u8>(~kFarLodSampleFlagEdited);
             }
         }
-        tile.legacy_surface_authority = std::any_of(tile.flags.begin(), tile.flags.end(), [](u8 flags) {
-            return (flags & kFarLodSampleFlagEdited) != 0;
-        });
+        tile.legacy_surface_authority =
+            std::any_of(tile.flags.begin(), tile.flags.end(), [](u8 flags) {
+                return (flags & kFarLodSampleFlagEdited) != 0;
+            });
     };
 
-    const auto found = std::lower_bound(
-        tile.sdf_bricks.begin(), tile.sdf_bricks.end(), descriptor, BrickLess);
+    const auto found =
+        std::lower_bound(tile.sdf_bricks.begin(), tile.sdf_bricks.end(), descriptor, BrickLess);
     const std::size_t insert_index = static_cast<std::size_t>(found - tile.sdf_bricks.begin());
     if (found != tile.sdf_bricks.end() && SameBrickKey(*found, descriptor)) {
         const std::size_t payload_offset = insert_index * samples_per_brick;
-        const bool same_payload = found->payload_crc32 == descriptor.payload_crc32 &&
-            std::equal(density_q.begin(), density_q.end(), tile.sdf_density_q.begin() + payload_offset) &&
-            std::equal(material.begin(), material.end(), tile.sdf_material.begin() + payload_offset);
-        if (same_payload &&
-            (found->source_kind == descriptor.source_kind ||
-             found->source_kind == FarLodBrickSourceKind::Authoritative)) {
+        const bool same_payload =
+            found->payload_crc32 == descriptor.payload_crc32 &&
+            std::equal(
+                density_q.begin(), density_q.end(), tile.sdf_density_q.begin() + payload_offset) &&
+            std::equal(
+                material.begin(), material.end(), tile.sdf_material.begin() + payload_offset);
+        if (same_payload && (found->source_kind == descriptor.source_kind ||
+                             found->source_kind == FarLodBrickSourceKind::Authoritative)) {
             return FarLodSdfReduceResult::Unchanged;
         }
 
@@ -506,7 +516,8 @@ FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
         // the far descriptor monotonic by advancing from the persisted value.
         if (descriptor.source_kind == FarLodBrickSourceKind::Authoritative) {
             const u32 next_revision = found->revision == std::numeric_limits<u32>::max()
-                ? found->revision : found->revision + 1u;
+                                          ? found->revision
+                                          : found->revision + 1u;
             descriptor.revision = std::max(descriptor.revision, next_revision);
         } else {
             if (found->source_kind == FarLodBrickSourceKind::Authoritative ||
@@ -524,18 +535,18 @@ FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
 
     tile.sdf_bricks.insert(found, descriptor);
     tile.sdf_density_q.insert(tile.sdf_density_q.begin() + insert_index * samples_per_brick,
-        density_q.begin(), density_q.end());
+                              density_q.begin(),
+                              density_q.end());
     tile.sdf_material.insert(tile.sdf_material.begin() + insert_index * samples_per_brick,
-        material.begin(), material.end());
+                             material.begin(),
+                             material.end());
     supersede_legacy_surface();
     tile.edited = tile.edited || descriptor.source_kind == FarLodBrickSourceKind::Authoritative;
     return FarLodSdfReduceResult::Inserted;
 }
 
-std::size_t ApplyChunkHeightmapToFarLodTile(
-    FarLodTile& tile,
-    const Chunk& chunk,
-    bool mark_edited) {
+std::size_t
+ApplyChunkHeightmapToFarLodTile(FarLodTile& tile, const Chunk& chunk, bool mark_edited) {
     const IVec3 coords = chunk.get_coords();
     const int chunks_per_region = kFarLodRegionSizeMeters / CHUNK_SIZE_X;
     if (FloorDiv(coords.x, chunks_per_region) != tile.rx ||
@@ -564,13 +575,13 @@ std::size_t ApplyChunkHeightmapToFarLodTile(
         for (int dx = 0; dx < samples_per_chunk; ++dx) {
             const int sx = sx0 + dx;
             const int chunk_x = dx * step;
-            if (sx < 0 || sz < 0 ||
-                sx >= static_cast<int>(tile.samples_per_side) ||
+            if (sx < 0 || sz < 0 || sx >= static_cast<int>(tile.samples_per_side) ||
                 sz >= static_cast<int>(tile.samples_per_side)) {
                 continue;
             }
-            const float height = chunk.heightmap_data[
-                static_cast<std::size_t>(chunk_x) + static_cast<std::size_t>(chunk_z) * kHeightmapSide];
+            const float height =
+                chunk.heightmap_data[static_cast<std::size_t>(chunk_x) +
+                                     static_cast<std::size_t>(chunk_z) * kHeightmapSide];
             const std::size_t tile_index =
                 static_cast<std::size_t>(sx) + static_cast<std::size_t>(sz) * tile.samples_per_side;
             tile.height_q[tile_index] = QuantizeFarLodHeight(height);
@@ -662,13 +673,12 @@ bool FarLodStore::save_tile(const FarLodTile& tile, std::vector<std::string>* er
     return Persistence::WorldSaveService::upsert_container_records(region_file, {record}, errors);
 }
 
-bool FarLodStore::load_tile(
-    FarLodTier tier,
-    i32 rx,
-    i32 rz,
-    u64 expected_params_hash,
-    FarLodTile& out_tile,
-    std::vector<std::string>* errors) const {
+bool FarLodStore::load_tile(FarLodTier tier,
+                            i32 rx,
+                            i32 rz,
+                            u64 expected_params_hash,
+                            FarLodTile& out_tile,
+                            std::vector<std::string>* errors) const {
     if (!IsValidFarLodTier(tier)) {
         PushError(errors, "far-LOD load requested an invalid tier");
         return false;
@@ -688,8 +698,10 @@ bool FarLodStore::load_tile(
         }
 
         FarLodTile tile;
-        const bool is_v2 = record.payload.size() >= sizeof(kFarLodPayloadMagic) &&
-            std::memcmp(record.payload.data(), kFarLodPayloadMagic, sizeof(kFarLodPayloadMagic)) == 0;
+        const bool is_v2 =
+            record.payload.size() >= sizeof(kFarLodPayloadMagic) &&
+            std::memcmp(record.payload.data(), kFarLodPayloadMagic, sizeof(kFarLodPayloadMagic)) ==
+                0;
         std::size_t offset = 0;
         u8 tier_byte = 0;
         u8 edited_byte = 0;
@@ -736,9 +748,10 @@ bool FarLodStore::load_tile(
             }
             if (tile.edited) {
                 tile.legacy_surface_authority = true;
-                const bool any_edited = std::any_of(tile.flags.begin(), tile.flags.end(), [](u8 flags) {
-                    return (flags & kFarLodSampleFlagEdited) != 0;
-                });
+                const bool any_edited =
+                    std::any_of(tile.flags.begin(), tile.flags.end(), [](u8 flags) {
+                        return (flags & kFarLodSampleFlagEdited) != 0;
+                    });
                 if (!any_edited) {
                     for (u8& flags : tile.flags) {
                         flags |= kFarLodSampleFlagEdited;
@@ -767,19 +780,22 @@ bool FarLodStore::load_tile(
         offset = sizeof(kFarLodPayloadMagic);
         if (!ReadValue(record.payload, offset, version) || version != kFarLodPayloadVersion ||
             !ReadValue(record.payload, offset, tier_byte) ||
-            !ReadValue(record.payload, offset, tile.rx) || !ReadValue(record.payload, offset, tile.rz) ||
+            !ReadValue(record.payload, offset, tile.rx) ||
+            !ReadValue(record.payload, offset, tile.rz) ||
             !ReadValue(record.payload, offset, tile.samples_per_side) ||
-            !ReadValue(record.payload, offset, tile.params_hash) || !ReadValue(record.payload, offset, edited_byte) ||
+            !ReadValue(record.payload, offset, tile.params_hash) ||
+            !ReadValue(record.payload, offset, edited_byte) ||
             !ReadValue(record.payload, offset, legacy_byte) ||
-            !ReadValue(record.payload, offset, height_count) || !ReadValue(record.payload, offset, height_bytes)) {
+            !ReadValue(record.payload, offset, height_count) ||
+            !ReadValue(record.payload, offset, height_bytes)) {
             return fail_v2("far-LOD FSD2 payload header is truncated or unsupported");
         }
         tile.tier = static_cast<FarLodTier>(tier_byte);
         tile.edited = edited_byte != 0;
         tile.legacy_surface_authority = legacy_byte != 0;
         if (tile.tier != tier || tile.rx != rx || tile.rz != rz ||
-            tile.samples_per_side != FarLodSamplesPerSide(tier) ||
-            (edited_byte > 1u) || (legacy_byte > 1u)) {
+            tile.samples_per_side != FarLodSamplesPerSide(tier) || (edited_byte > 1u) ||
+            (legacy_byte > 1u)) {
             return fail_v2("far-LOD FSD2 payload header mismatch");
         }
         const std::size_t count = tile.sample_count();
@@ -789,14 +805,16 @@ bool FarLodStore::load_tile(
         }
         tile.height_q.resize(count);
         if (!ReadBytes(record.payload, offset, tile.height_q.data(), height_bytes) ||
-            !ReadValue(record.payload, offset, material_count) || !ReadValue(record.payload, offset, material_bytes) ||
-            material_count != count || material_bytes != count || material_bytes > record.payload.size() - offset) {
+            !ReadValue(record.payload, offset, material_count) ||
+            !ReadValue(record.payload, offset, material_bytes) || material_count != count ||
+            material_bytes != count || material_bytes > record.payload.size() - offset) {
             return fail_v2("far-LOD FSD2 material stream is invalid");
         }
         tile.material.resize(count);
         if (!ReadBytes(record.payload, offset, tile.material.data(), material_bytes) ||
-            !ReadValue(record.payload, offset, flags_count) || !ReadValue(record.payload, offset, flags_bytes) ||
-            flags_count != count || flags_bytes != count || flags_bytes > record.payload.size() - offset) {
+            !ReadValue(record.payload, offset, flags_count) ||
+            !ReadValue(record.payload, offset, flags_bytes) || flags_count != count ||
+            flags_bytes != count || flags_bytes > record.payload.size() - offset) {
             return fail_v2("far-LOD FSD2 flags stream is invalid");
         }
         tile.flags.resize(count);
@@ -814,39 +832,49 @@ bool FarLodStore::load_tile(
             u8 source_kind = 0;
             if (!ReadValue(record.payload, offset, descriptor.local_chunk_x) ||
                 !ReadValue(record.payload, offset, descriptor.local_chunk_z) ||
-                !ReadValue(record.payload, offset, source_kind) || !ReadValue(record.payload, offset, descriptor.reserved) ||
-                !ReadValue(record.payload, offset, descriptor.chunk_y) || !ReadValue(record.payload, offset, descriptor.revision) ||
+                !ReadValue(record.payload, offset, source_kind) ||
+                !ReadValue(record.payload, offset, descriptor.reserved) ||
+                !ReadValue(record.payload, offset, descriptor.chunk_y) ||
+                !ReadValue(record.payload, offset, descriptor.revision) ||
                 !ReadValue(record.payload, offset, descriptor.payload_crc32)) {
                 return fail_v2("far-LOD FSD2 brick descriptor is truncated");
             }
             descriptor.source_kind = static_cast<FarLodBrickSourceKind>(source_kind);
         }
         u32 density_count = 0, density_bytes = 0, sdf_material_count = 0, sdf_material_bytes = 0;
-        const std::size_t expected_payload_count = static_cast<std::size_t>(brick_count) * samples_per_brick;
-        if (!ReadValue(record.payload, offset, density_count) || !ReadValue(record.payload, offset, density_bytes) ||
-            density_count != expected_payload_count || density_bytes != expected_payload_count * sizeof(i16) ||
+        const std::size_t expected_payload_count =
+            static_cast<std::size_t>(brick_count) * samples_per_brick;
+        if (!ReadValue(record.payload, offset, density_count) ||
+            !ReadValue(record.payload, offset, density_bytes) ||
+            density_count != expected_payload_count ||
+            density_bytes != expected_payload_count * sizeof(i16) ||
             density_bytes > record.payload.size() - offset) {
             return fail_v2("far-LOD FSD2 density stream is invalid");
         }
         tile.sdf_density_q.resize(expected_payload_count);
         if (!ReadBytes(record.payload, offset, tile.sdf_density_q.data(), density_bytes) ||
-            !ReadValue(record.payload, offset, sdf_material_count) || !ReadValue(record.payload, offset, sdf_material_bytes) ||
-            sdf_material_count != expected_payload_count || sdf_material_bytes != expected_payload_count ||
+            !ReadValue(record.payload, offset, sdf_material_count) ||
+            !ReadValue(record.payload, offset, sdf_material_bytes) ||
+            sdf_material_count != expected_payload_count ||
+            sdf_material_bytes != expected_payload_count ||
             sdf_material_bytes > record.payload.size() - offset) {
             return fail_v2("far-LOD FSD2 SDF material stream is invalid");
         }
         tile.sdf_material.resize(expected_payload_count);
-        if (!ReadBytes(record.payload, offset, tile.sdf_material.data(), sdf_material_bytes) || offset != record.payload.size()) {
+        if (!ReadBytes(record.payload, offset, tile.sdf_material.data(), sdf_material_bytes) ||
+            offset != record.payload.size()) {
             return fail_v2("far-LOD FSD2 payload has trailing or truncated bytes");
         }
         std::string validation_error;
         if (!ValidateTileStreams(tile, &validation_error)) {
             return fail_v2(validation_error);
         }
-        const bool has_authoritative_brick = std::any_of(
-            tile.sdf_bricks.begin(), tile.sdf_bricks.end(), [](const FarLodSdfBrickDescriptor& descriptor) {
-                return descriptor.source_kind == FarLodBrickSourceKind::Authoritative;
-            });
+        const bool has_authoritative_brick =
+            std::any_of(tile.sdf_bricks.begin(),
+                        tile.sdf_bricks.end(),
+                        [](const FarLodSdfBrickDescriptor& descriptor) {
+                            return descriptor.source_kind == FarLodBrickSourceKind::Authoritative;
+                        });
         if (!tile.legacy_surface_authority && !has_authoritative_brick &&
             tile.params_hash != expected_params_hash) {
             return false;

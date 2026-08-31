@@ -1,4 +1,4 @@
-// T-I9-AI: scent/pheromone stigmergy field coverage — deposit, diffusion,
+// scent/pheromone stigmergy field coverage — deposit, diffusion,
 // evaporation, gradient sensing, channel isolation, and determinism. Pure (no
 // ECS/world); this is the substrate for tracking/hunting/ant-trail behaviors.
 
@@ -22,8 +22,8 @@ TEST(ScentField, DiffusionSpreadsToNeighbors) {
     ScentField f(8, 8, 1);
     f.Deposit(0, 4, 4, 100.0);
     f.Step(/*diffusion_rate=*/0.2, /*iters=*/1, /*evaporation=*/0.0);
-    EXPECT_LT(f.Sample(0, 4, 4), 100.0);  // center gave scent to neighbors
-    EXPECT_GT(f.Sample(0, 5, 4), 0.0);    // a neighbor now carries some
+    EXPECT_LT(f.Sample(0, 4, 4), 100.0); // center gave scent to neighbors
+    EXPECT_GT(f.Sample(0, 5, 4), 0.0);   // a neighbor now carries some
     EXPECT_GT(f.Sample(0, 4, 5), 0.0);
 }
 
@@ -33,7 +33,8 @@ TEST(ScentField, EvaporationDecaysTowardZero) {
     const double before = f.Sample(0, 1, 1);
     f.Step(/*diffusion_rate=*/0.0, /*iters=*/0, /*evaporation=*/0.5); // pure decay
     EXPECT_NEAR(f.Sample(0, 1, 1), before * 0.5, 1e-9);
-    for (int i = 0; i < 40; ++i) f.Step(0.0, 0, 0.5);
+    for (int i = 0; i < 40; ++i)
+        f.Step(0.0, 0, 0.5);
     EXPECT_LT(f.Sample(0, 1, 1), 1e-6); // stale trail fades away
 }
 
@@ -111,11 +112,13 @@ TEST(ScentField, IsDeterministicAcrossRuns) {
         f.Deposit(0, 3, 4, 20.0);
         f.Deposit(0, 8, 9, 15.0);
         f.Deposit(1, 5, 5, 30.0);
-        for (int i = 0; i < 5; ++i) f.Step(0.18, 2, 0.05);
+        for (int i = 0; i < 5; ++i)
+            f.Step(0.18, 2, 0.05);
         double acc = 0.0;
         for (int c = 0; c < 2; ++c)
             for (int z = 0; z < 12; ++z)
-                for (int x = 0; x < 12; ++x) acc += f.Sample(c, x, z);
+                for (int x = 0; x < 12; ++x)
+                    acc += f.Sample(c, x, z);
         return acc;
     };
     const double a = run();
@@ -123,7 +126,7 @@ TEST(ScentField, IsDeterministicAcrossRuns) {
     EXPECT_EQ(a, b); // bit-identical accumulation across identical runs
 }
 
-// FR-2 wind-advection: a pure +X wind shifts the deposited blob downwind (+X). With an integer
+//  wind-advection: a pure +X wind shifts the deposited blob downwind (+X). With an integer
 // wind the semi-Lagrangian backtrace lands exactly on source cells, so the blob translates cleanly.
 TEST(ScentField, WindAdvectionDriftsScentDownwind) {
     ScentField f(20, 16, 1);
@@ -138,11 +141,13 @@ TEST(ScentField, WindAdvectionDriftsScentDownwind) {
 // (which passes 0 until tuned) is unchanged and needs no re-pin.
 TEST(ScentField, ZeroWindStepMatchesNoWindStep) {
     ScentField a(16, 16, 2), b(16, 16, 2);
-    a.Deposit(0, 5, 6, 30.0); b.Deposit(0, 5, 6, 30.0);
-    a.Deposit(1, 9, 9, 12.0); b.Deposit(1, 9, 9, 12.0);
+    a.Deposit(0, 5, 6, 30.0);
+    b.Deposit(0, 5, 6, 30.0);
+    a.Deposit(1, 9, 9, 12.0);
+    b.Deposit(1, 9, 9, 12.0);
     for (int i = 0; i < 4; ++i) {
-        a.Step(0.2, 2, 0.05);               // no wind args (legacy call)
-        b.Step(0.2, 2, 0.05, 0.0, 0.0);     // explicit zero wind
+        a.Step(0.2, 2, 0.05);           // no wind args (legacy call)
+        b.Step(0.2, 2, 0.05, 0.0, 0.0); // explicit zero wind
     }
     for (int c = 0; c < 2; ++c)
         for (int z = 0; z < 16; ++z)
@@ -155,17 +160,20 @@ TEST(ScentField, WindAdvectionIsDeterministic) {
     auto run = []() {
         ScentField f(18, 18, 1);
         f.Deposit(0, 4, 4, 25.0);
-        for (int i = 0; i < 6; ++i) f.Step(0.18, 2, 0.05, 1.5, -0.5);
+        for (int i = 0; i < 6; ++i)
+            f.Step(0.18, 2, 0.05, 1.5, -0.5);
         double acc = 0.0;
         for (int z = 0; z < 18; ++z)
-            for (int x = 0; x < 18; ++x) acc += f.Sample(0, x, z);
+            for (int x = 0; x < 18; ++x)
+                acc += f.Sample(0, x, z);
         return acc;
     };
     EXPECT_EQ(run(), run());
 }
 
 // Hunt-enabling property: advection carries prey scent FURTHER downwind than diffusion alone, so a
-// predator downwind detects scent it otherwise could not — the cue to then move up-wind to the prey.
+// predator downwind detects scent it otherwise could not — the cue to then move up-wind to the
+// prey.
 TEST(ScentField, WindCarriesScentFartherDownwindThanDiffusionAlone) {
     ScentField wind(24, 12, 1), still(24, 12, 1);
     wind.Deposit(0, 4, 6, 100.0);

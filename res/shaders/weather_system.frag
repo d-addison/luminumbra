@@ -18,12 +18,12 @@ uniform mat4 u_inverseProjection;
 
 // Weather state
 uniform float u_rainIntensity = 0.0;      // 0.0 = no rain, 1.0 = heavy rain
-uniform float u_snowIntensity = 0.0;      // 0.0 = no snow, 1.0 = heavy snow  
+uniform float u_snowIntensity = 0.0;      // 0.0 = no snow, 1.0 = heavy snow
 uniform float u_fogDensity = 0.0;         // 0.0 = clear, 1.0 = thick fog
 uniform float u_stormIntensity = 0.0;     // 0.0 = calm, 1.0 = storm
 uniform vec3 u_windDirection = vec3(1.0, 0.0, 0.0);
 uniform float u_windStrength = 0.5;
-// T-I5a-3 (B1): local precipitation -> material WETNESS response. RENDER-ONLY:
+// local precipitation -> material WETNESS response.:
 // darkens albedo and adds a sun-glossy sheen on wet (upward-facing) surfaces.
 // Fed from the replicated WeatherSystem precipitation; never written to the sim.
 uniform float u_wetness = 0.0;
@@ -46,12 +46,12 @@ float noise(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
-    
+
     float a = hash(i + vec2(0.0, 0.0));
     float b = hash(i + vec2(1.0, 0.0));
     float c = hash(i + vec2(0.0, 1.0));
     float d = hash(i + vec2(1.0, 1.0));
-    
+
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -59,7 +59,7 @@ float noise3D(vec3 p) {
     vec3 i = floor(p);
     vec3 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
-    
+
     return mix(
         mix(mix(hash3(i + vec3(0,0,0)), hash3(i + vec3(1,0,0)), f.x),
             mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),
@@ -72,7 +72,7 @@ float fbm(vec3 p, int octaves) {
     float value = 0.0;
     float amplitude = 0.5;
     float frequency = 1.0;
-    
+
     for(int i = 0; i < octaves; i++) {
         value += amplitude * noise3D(p * frequency);
         amplitude *= 0.5;
@@ -92,7 +92,7 @@ vec3 worldPosFromDepth(vec2 uv, float depth) {
 }
 
 // Thin per-column vertical streak field. hash01(column) selects which columns
-// carry a streak; a fract() phase scrolls them downward over time. This is a
+// carry a streak; a fract phase scrolls them downward over time. This is a
 // 1D-along-X structure (NOT a 2D value-noise blob field), so it reads as faint
 // vertical RAIN STREAKS rather than the old "lens-dirt" speckle.
 float rainStreaks(vec2 uv, float density, float speed, float colScale) {
@@ -112,7 +112,7 @@ float rainStreaks(vec2 uv, float density, float speed, float colScale) {
 
 // Rain effect.
 //
-// T-I5a-DR-particle-motion-quality: the old screen-space rain painted a 2D value
+// the old screen-space rain painted a 2D value
 // noise (noise(screenUV*vec2(80,200))) over EVERY pixel -- blobby grain across
 // the whole sky dome, the "lens-dirt" speckle the owner saw. The bulk rain is now
 // the 3D ParticlePass streak volume around the camera; this screen-space term is
@@ -135,7 +135,7 @@ vec3 renderRain(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     // Light water-white, low intensity -> a translucent veil, not bright dirt.
     vec3 veilColor = vec3(0.82, 0.9, 1.0) * (0.35 + u_stormIntensity * 0.25);
 
-    // T-I5b-DR-storm2 (M7): KILL THE DOWN-VIEW GREY VEIL. This screen-space veil
+    // KILL THE DOWN-VIEW GREY VEIL. This screen-space veil
     // paints fixed VERTICAL screen-space dashes over EVERY pixel. When the camera
     // pitches DOWN, the frame fills with NEAR terrain, and those vertical dashes
     // smear into a flat desaturated grey haze across the ground -- the "grey fog,
@@ -166,35 +166,35 @@ vec3 renderRain(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
 // Snow effect
 vec3 renderSnow(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     if (u_snowIntensity < 0.01) return sceneColor;
-    
+
     vec3 snowColor = sceneColor;
-    
+
     // Multiple snow layers for depth
     for(int layer = 0; layer < 3; layer++) {
         float layerScale = 1.0 + float(layer) * 0.5;
         float layerSpeed = 1.0 - float(layer) * 0.2;
-        
+
         vec2 snowUV = screenUV * vec2(60.0, 60.0) * layerScale;
         snowUV.y += u_time * 3.0 * layerSpeed; // Gentle falling
         snowUV.x += sin(u_time * 0.5 + snowUV.y * 0.2) * 2.0; // Wind drift
-        
+
         float snowPattern = noise(snowUV);
         snowPattern = smoothstep(0.85, 0.95, snowPattern);
-        
+
         // Distance falloff. Clamped like rain: near-field flakes stay
         // visible against far-plane sky pixels.
         float distance = length(worldPos - u_cameraPos);
         float snowFalloff = exp(-min(distance, 100.0) * 0.008);
-        
+
         // Layer depth effect
         float layerIntensity = u_snowIntensity * (1.0 - float(layer) * 0.3);
-        
+
         vec3 snowFlakeColor = vec3(0.95, 0.98, 1.0) * (0.8 + float(layer) * 0.1);
         float snowStrength = snowPattern * layerIntensity * snowFalloff;
-        
+
         snowColor = mix(snowColor, snowFlakeColor, snowStrength * 0.4);
     }
-    
+
     // Snow accumulation effect on surfaces
     vec3 worldNormal = texture(gNormal, screenUV).rgb;
     if (length(worldNormal) > 0.1) {
@@ -202,84 +202,84 @@ vec3 renderSnow(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
         accumulation *= u_snowIntensity * 0.3;
         snowColor = mix(snowColor, vec3(0.9, 0.95, 1.0), accumulation);
     }
-    
+
     return snowColor;
 }
 
 // Fog effect with enhanced scattering
 vec3 renderFog(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     if (u_fogDensity < 0.01) return sceneColor;
-    
+
     float distance = length(worldPos - u_cameraPos);
     float height = worldPos.y;
-    
+
     // Height-based fog density (more fog at lower elevations)
     float heightFactor = exp(-max(0.0, height - (-10.0)) * 0.1);
-    
+
     // Volumetric fog with noise
     vec3 fogSamplePos = worldPos * 0.01 + vec3(u_time * 0.02, 0.0, u_time * 0.015);
     float fogNoise = fbm(fogSamplePos, 4);
     fogNoise = fogNoise * 0.5 + 0.5; // Normalize
-    
+
     // Distance-based fog accumulation
     float fogFactor = 1.0 - exp(-distance * u_fogDensity * 0.01 * heightFactor * fogNoise);
-    
+
     // Fog color based on time of day and sun direction
     vec3 fogColor = mix(
         vec3(0.7, 0.8, 0.9),  // Day fog
         vec3(0.3, 0.4, 0.6),  // Night fog
         1.0 - u_sunIntensity
     );
-    
+
     // Sun scattering in fog
     vec3 viewDir = normalize(worldPos - u_cameraPos);
     float sunDot = dot(viewDir, -u_sunDirection);
     float sunScatter = pow(max(0.0, sunDot), 8.0) * u_sunIntensity;
     fogColor += u_sunColor * sunScatter * 0.3;
-    
+
     return mix(sceneColor, fogColor, fogFactor);
 }
 
 // Lightning effect for storms
 vec3 renderLightning(vec3 sceneColor, vec2 screenUV) {
     if (u_stormIntensity < 0.3) return sceneColor;
-    
+
     // Random lightning flashes
     float lightningTime = u_time * 0.1;
     float lightningChance = hash(vec2(floor(lightningTime), floor(lightningTime * 0.7)));
-    
+
     if (lightningChance > 0.98) { // Rare lightning flashes
         float flashIntensity = hash(vec2(floor(lightningTime * 10.0))) * u_stormIntensity;
-        
+
         // Lightning branch pattern
         float branch = fbm(vec3(screenUV * 50.0, u_time * 10.0), 3);
         branch = smoothstep(0.6, 0.8, branch);
-        
+
         vec3 lightningColor = vec3(0.8, 0.9, 1.0) * flashIntensity * 2.0;
         sceneColor += lightningColor * (0.1 + branch * 0.3);
     }
-    
+
     return sceneColor;
 }
 
 // Wind distortion effect
 vec3 renderWind(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     if (u_windStrength < 0.1) return sceneColor;
-    
+
     // Wind-based screen distortion for vegetation and particles
     vec2 windOffset = vec2(
         sin(u_time * 2.0 + worldPos.x * 0.1) * u_windStrength * 0.002,
         cos(u_time * 1.5 + worldPos.z * 0.1) * u_windStrength * 0.001
     );
-    
+
     // Sample with slight offset for wind effect
     vec2 distortedUV = screenUV + windOffset;
     distortedUV = clamp(distortedUV, vec2(0.0), vec2(1.0));
-    
+
     return texture(u_sceneColor, distortedUV).rgb;
 }
 
-// T-I5a-3 (B1): wetness material response (RENDER-ONLY). On upward-facing solid
+// wetness material response. On upward-facing solid
 // surfaces, local precipitation darkens the albedo (wet ground reads darker) and
 // adds a view-dependent specular sheen toward the sun (wet surfaces glisten). The
 // sim provides u_wetness (local precip intensity); this writes only the rendered
@@ -316,7 +316,7 @@ void main() {
     // Start with wind distortion as base
     vec3 finalColor = renderWind(sceneColor, screenUV, worldPos);
 
-    // T-I5a-3: wetness material response BEFORE the volumetric weather so the wet
+    // wetness material response BEFORE the volumetric weather so the wet
     // surface tint is then occluded by fog/rain like the rest of the scene.
     finalColor = renderWetness(finalColor, screenUV, worldPos);
 
@@ -324,14 +324,14 @@ void main() {
     finalColor = renderFog(finalColor, screenUV, worldPos);
     finalColor = renderRain(finalColor, screenUV, worldPos);
     finalColor = renderSnow(finalColor, screenUV, worldPos);
-    // T-I5a-DR-particle-motion-quality: the legacy random fbm "lightning" here
+    // the legacy random fbm "lightning" here
     // (renderLightning) fired on its OWN screen-space hash schedule and painted a
     // smeared fbm splotch -- it competes with the deterministic lightning_overlay
     // bolt/flash and added more sky noise. The dedicated lightning_overlay pass
     // owns the strike now, so this redundant flash is removed.
 
     // Global weather tinting.
-    // T-I5a-DR-particle-motion-quality: the storm must DIM the whole scene
+    // the storm must DIM the whole scene
     // (overcast dome + darkened terrain) so the rain streaks read as bright water
     // over a dark backdrop and the lightning bolt + flash have contrast. The old
     // factor (0.7 + storm*0.2) barely darkened (>=0.9) and left a bright clear-blue
@@ -345,13 +345,13 @@ void main() {
         vec3 overcast = mix(vec3(luma), finalColor, 0.55) * vec3(0.86, 0.92, 1.04);
         finalColor = mix(finalColor, overcast, clamp(u_stormIntensity, 0.0, 1.0) * 0.8);
 
-        // T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM legibility floor on
+        //  (defect 3): NIGHT-STORM legibility floor on
         // SURFACES. At night the lit scene is near-black and the storm dim above
         // crushes it the rest of the way, so a night storm read as an empty black
         // frame. Lift a faint cool storm-ambient floor on solid surfaces (the sky
         // has no normal, so it is untouched and stays a dark dome). Only meaningful
         // where the surface is already very dark (night), so the daytime storm is
-        // unaffected. The max() never darkens -- it only sets a minimum.
+        // unaffected. The max never darkens -- it only sets a minimum.
         vec3 stormNormal = texture(gNormal, screenUV).rgb;
         if (length(stormNormal) > 0.1) {
             float surfLuma = dot(finalColor, vec3(0.299, 0.587, 0.114));
@@ -360,12 +360,12 @@ void main() {
             finalColor += vec3(0.7, 0.8, 1.0) * floorLift;
         }
     }
-    
+
     if (u_fogDensity > 0.1) {
         // Fog desaturation
         float luminance = dot(finalColor, vec3(0.299, 0.587, 0.114));
         finalColor = mix(finalColor, vec3(luminance), u_fogDensity * 0.4);
     }
-    
+
     FragColor = vec4(finalColor, 1.0);
 }

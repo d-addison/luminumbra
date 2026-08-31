@@ -1,4 +1,4 @@
-// Spec 024 (AETHER-12, FR-024-7): StimulusChannel::Aether -- the composite
+//  (, -7): StimulusChannel::Aether -- the composite
 // energy environment reaching the instinct planner. Asserts:
 //   * APPEND-ONLY REGISTRY: Aether landed as slot 5 and kStimulusChannelCount
 //     moved to 6 WITHOUT touching slots 0..4 (names + values pinned here so a

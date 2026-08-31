@@ -1,6 +1,6 @@
 #pragma once
 
-// Spec 002 Item 4 — CONSTRAINED layer graph (flagged authoring tool).
+// CONSTRAINED layer graph (flagged authoring tool).
 //
 // Authors worldgen as a SMALL, FIXED-TOPOLOGY graph of the EXISTING pipeline
 // stages (base FBM -> domain warp/shaping -> biome relief -> rivers -> lakes ->
@@ -40,11 +40,11 @@ namespace Luminumbra::world {
 // order is the edge topology of the graph (read-only in v1).
 enum class LayerStage : std::size_t {
     BaseTerrain = 0, // generation_params.terrain scalars (FBM: freq/amp/octaves/...)
-    Shaping,         // generation_params.terrain.shaping (continentalness/erosion/peaks + domain warp)
-    Hydro,           // generation_params.terrain.hydro (hydraulic/thermal erosion)
-    Biomes,          // generation_params.biomes (temperature/humidity/relief + table)
-    Features,        // generation_params.features (caves/rivers/lakes/cliffs/structures)
-    Materials,       // generation_params.materials (strata/veins)
+    Shaping,   // generation_params.terrain.shaping (continentalness/erosion/peaks + domain warp)
+    Hydro,     // generation_params.terrain.hydro (hydraulic/thermal erosion)
+    Biomes,    // generation_params.biomes (temperature/humidity/relief + table)
+    Features,  // generation_params.features (caves/rivers/lakes/cliffs/structures)
+    Materials, // generation_params.materials (strata/veins)
     Count
 };
 inline constexpr std::size_t kLayerStageCount = static_cast<std::size_t>(LayerStage::Count);
@@ -69,8 +69,8 @@ bool LayerStageFromId(const std::string& id, LayerStage& out);
 //   - Materials.params    = generation_params.materials (if present).
 struct LayerNode {
     LayerStage stage = LayerStage::BaseTerrain;
-    bool present = false;        // the block existed in the source generation_params
-    nlohmann::json params;       // the verbatim JSON slice for this stage
+    bool present = false;  // the block existed in the source generation_params
+    nlohmann::json params; // the verbatim JSON slice for this stage
 };
 
 // The constrained, fixed-topology graph. Holds exactly one node per stage (in
@@ -106,7 +106,7 @@ nlohmann::json CompileLayerGraph(const LayerGraph& graph);
 
 // Serialize the graph to its provenance JSON (the value stored at
 // generation_params.graph): { "schema": "...", "nodes": [ {"stage","present",
-// "params"}, ... ], "passthrough": {...} }. Deserialize is the inverse and
+// "params"},... ], "passthrough": {...} }. Deserialize is the inverse and
 // round-trips byte-for-byte.
 nlohmann::json SerializeLayerGraph(const LayerGraph& graph);
 // Parse a serialized graph back. On a malformed/absent block returns a graph
@@ -125,4 +125,4 @@ const char* LayerGraphSchema();
 // the graph block is additive provenance the create/authoring tool reopens.
 nlohmann::json& WriteLayerGraph(nlohmann::json& preset, const LayerGraph& graph);
 
-}  // namespace Luminumbra::world
+} // namespace Luminumbra::world

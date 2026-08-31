@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.day_night_activity — DIURNAL / NOCTURNAL ACTIVITY. The presence of this
+// sim.day_night_activity: DIURNAL / NOCTURNAL ACTIVITY. The presence of this
 // component is the per-entity opt-in for luminumbra::ai::RunCircadianOnTick (mirrors the
 // AlarmComponent / CreatureGenomeComponent gating pattern): a world whose creatures carry
 // NO CircadianComponent — and any world with NO creatures — runs the circadian system as a
@@ -9,9 +9,9 @@
 // A creature is either DIURNAL (nocturnal == 0; active by day, peaks at noon) or NOCTURNAL
 // (nocturnal != 0; active by night, peaks at midnight). Each tick the system reads the day
 // clock's time-of-day in [0,1] (0 = midnight, 0.5 = noon) and writes a smooth ACTIVITY in
-// [0,1] that the orchestrator can later scale move_speed / wake behaviour by. This component
-// is pure sim state — a uint8 phenotype flag + a clamped float activity; geometry/rendering
-// is elsewhere.
+// [0,1] that CreatureBrainSystem consumes for sleep and wake behaviour. This
+// component is pure sim state: a phenotype flag and a clamped activity value;
+// geometry/rendering is elsewhere.
 //
 // DETERMINISM: activity is a plain float kept clamped to [0,1] and updated only via
 // DeterministicMath (Cos for the smooth day curve; +-*/), so the same roster + the same

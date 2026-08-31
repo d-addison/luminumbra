@@ -1,4 +1,4 @@
-// Track game.photo_session — the photography-loop GLUE. These tests pin the
+// game.photo_session: the photography-loop GLUE. These tests pin the
 // blended verdict + codex feed: a well-composed, well-exposed, sharp shallow-DoF
 // shot scores HIGH with many stars; a blown-out / out-of-focus shot scores LOWER;
 // stars are a monotonic function of the total; CommitShot records the MAIN species
@@ -14,13 +14,13 @@
 
 namespace {
 
+using luminumbra::game::CommitShot;
+using luminumbra::game::EvaluateShot;
+using luminumbra::game::LensSettings;
+using luminumbra::game::PhotoCodex;
 using luminumbra::game::ShotInput;
 using luminumbra::game::ShotVerdict;
-using luminumbra::game::EvaluateShot;
-using luminumbra::game::CommitShot;
 using luminumbra::game::StarsForTotal;
-using luminumbra::game::PhotoCodex;
-using luminumbra::game::LensSettings;
 namespace photo = ::luminumbra::photo;
 
 // ---------------------------------------------------------------------------
@@ -34,26 +34,26 @@ namespace photo = ::luminumbra::photo;
 ShotInput MakeGreatShot() {
     ShotInput in;
     photo::PhotoSubject s;
-    s.ndc_x = luminumbra::photo::kThird;   // on a power point
+    s.ndc_x = luminumbra::photo::kThird; // on a power point
     s.ndc_y = luminumbra::photo::kThird;
-    s.size  = 0.6f;                         // bold, prominent
-    s.light = 0.7f;                         // ideal luminance
+    s.size = 0.6f;  // bold, prominent
+    s.light = 0.7f; // ideal luminance
     s.species_id = 42;
     in.composition.subjects.push_back(s);
-    in.composition.exposure = 0.5f;         // ideal mid exposure
-    in.composition.focus    = 1.0f;         // tack sharp
+    in.composition.exposure = 0.5f; // ideal mid exposure
+    in.composition.focus = 1.0f;    // tack sharp
 
     // Wide aperture short-tele, focused ON the subject -> shallow DoF, in focus.
     in.lens.focal_length_mm = 85.0f;
-    in.lens.aperture_f      = 1.8f;
+    in.lens.aperture_f = 1.8f;
     in.lens.focus_distance_m = 3.0f;
-    in.lens.iso             = 100.0f;
-    in.lens.shutter_s       = 0.004f;       // ~1/250
+    in.lens.iso = 100.0f;
+    in.lens.shutter_s = 0.004f; // ~1/250
 
-    in.main_species_id        = 42;
-    in.main_subject_distance_m = 3.0f;      // exactly at focus distance
-    in.main_subject_size_m    = 0.6f;
-    in.scene_luminance        = 0.5f;
+    in.main_species_id = 42;
+    in.main_subject_distance_m = 3.0f; // exactly at focus distance
+    in.main_subject_size_m = 0.6f;
+    in.scene_luminance = 0.5f;
     return in;
 }
 
@@ -64,26 +64,26 @@ ShotInput MakeGreatShot() {
 ShotInput MakeBadShot() {
     ShotInput in;
     photo::PhotoSubject s;
-    s.ndc_x = 0.97f;    // jammed into the right edge (clipped, off thirds)
+    s.ndc_x = 0.97f; // jammed into the right edge (clipped, off thirds)
     s.ndc_y = 0.97f;
-    s.size  = 0.05f;    // tiny, weak
-    s.light = 0.99f;    // blown out
+    s.size = 0.05f;  // tiny, weak
+    s.light = 0.99f; // blown out
     s.species_id = 7;
     in.composition.subjects.push_back(s);
-    in.composition.exposure = 0.98f;   // wildly over-exposed
-    in.composition.focus    = 0.05f;   // out of focus
+    in.composition.exposure = 0.98f; // wildly over-exposed
+    in.composition.focus = 0.05f;    // out of focus
 
     // Deep stop, focused at infinity, subject very close -> subject outside DoF.
     in.lens.focal_length_mm = 24.0f;
-    in.lens.aperture_f      = 22.0f;
+    in.lens.aperture_f = 22.0f;
     in.lens.focus_distance_m = 100.0f;
-    in.lens.iso             = 100.0f;
-    in.lens.shutter_s       = 0.001f;  // very fast -> high EV, wrong for dark scene
+    in.lens.iso = 100.0f;
+    in.lens.shutter_s = 0.001f; // very fast -> high EV, wrong for dark scene
 
-    in.main_species_id        = 7;
+    in.main_species_id = 7;
     in.main_subject_distance_m = 0.5f; // close, far from the 100m focus
-    in.main_subject_size_m    = 0.1f;
-    in.scene_luminance        = 0.02f; // near-dark scene
+    in.main_subject_size_m = 0.1f;
+    in.scene_luminance = 0.02f; // near-dark scene
     return in;
 }
 
@@ -114,7 +114,7 @@ TEST(PhotoSession, BadShotScoresLowWithFewStars) {
 // The bad shot scores strictly lower than the great shot on every axis and total.
 TEST(PhotoSession, GreatBeatsBad) {
     const ShotVerdict good = EvaluateShot(MakeGreatShot());
-    const ShotVerdict bad  = EvaluateShot(MakeBadShot());
+    const ShotVerdict bad = EvaluateShot(MakeBadShot());
 
     EXPECT_GT(good.composition, bad.composition);
     EXPECT_GT(good.exposure, bad.exposure);
@@ -123,7 +123,7 @@ TEST(PhotoSession, GreatBeatsBad) {
     EXPECT_GE(good.stars, bad.stars);
 }
 
-// REBALANCE GUARD (spec 012): focus/optics now lead, but composition must still
+// REBALANCE GUARD: focus/optics now lead, but composition must still
 // anchor the verdict — a well-composed, sharp DEEP shot (f/8, poor isolation) beats a
 // badly-composed shallow one (f/1.4, creamy bokeh) so lens craft cannot buy a win on a
 // poorly-framed subject. Without the composition anchor the focus tilt would invert this.
@@ -133,13 +133,22 @@ TEST(PhotoSession, WellComposedDeepBeatsBadlyComposedShallow) {
     ShotInput deep;
     {
         photo::PhotoSubject s;
-        s.ndc_x = luminumbra::photo::kThird; s.ndc_y = luminumbra::photo::kThird;
-        s.size = 0.6f; s.light = 0.7f; s.species_id = 1;
+        s.ndc_x = luminumbra::photo::kThird;
+        s.ndc_y = luminumbra::photo::kThird;
+        s.size = 0.6f;
+        s.light = 0.7f;
+        s.species_id = 1;
         deep.composition.subjects.push_back(s);
-        deep.composition.exposure = 0.5f; deep.composition.focus = 1.0f;
-        deep.lens.focal_length_mm = 50.0f; deep.lens.aperture_f = 8.0f;
-        deep.lens.focus_distance_m = 3.0f; deep.lens.iso = 100.0f; deep.lens.shutter_s = 0.004f;
-        deep.main_species_id = 1; deep.main_subject_distance_m = 3.0f; deep.main_subject_size_m = 0.6f;
+        deep.composition.exposure = 0.5f;
+        deep.composition.focus = 1.0f;
+        deep.lens.focal_length_mm = 50.0f;
+        deep.lens.aperture_f = 8.0f;
+        deep.lens.focus_distance_m = 3.0f;
+        deep.lens.iso = 100.0f;
+        deep.lens.shutter_s = 0.004f;
+        deep.main_species_id = 1;
+        deep.main_subject_distance_m = 3.0f;
+        deep.main_subject_size_m = 0.6f;
         deep.scene_luminance = 0.5f;
     }
     // Badly composed, wide open (f/1.4): subject jammed in the corner, tiny, but tack
@@ -147,28 +156,38 @@ TEST(PhotoSession, WellComposedDeepBeatsBadlyComposedShallow) {
     ShotInput shallow;
     {
         photo::PhotoSubject s;
-        s.ndc_x = 0.97f; s.ndc_y = 0.97f; s.size = 0.06f; s.light = 0.7f; s.species_id = 2;
+        s.ndc_x = 0.97f;
+        s.ndc_y = 0.97f;
+        s.size = 0.06f;
+        s.light = 0.7f;
+        s.species_id = 2;
         shallow.composition.subjects.push_back(s);
-        shallow.composition.exposure = 0.5f; shallow.composition.focus = 1.0f;
-        shallow.lens.focal_length_mm = 85.0f; shallow.lens.aperture_f = 1.4f;
-        shallow.lens.focus_distance_m = 3.0f; shallow.lens.iso = 100.0f; shallow.lens.shutter_s = 0.004f;
-        shallow.main_species_id = 2; shallow.main_subject_distance_m = 3.0f; shallow.main_subject_size_m = 0.5f;
+        shallow.composition.exposure = 0.5f;
+        shallow.composition.focus = 1.0f;
+        shallow.lens.focal_length_mm = 85.0f;
+        shallow.lens.aperture_f = 1.4f;
+        shallow.lens.focus_distance_m = 3.0f;
+        shallow.lens.iso = 100.0f;
+        shallow.lens.shutter_s = 0.004f;
+        shallow.main_species_id = 2;
+        shallow.main_subject_distance_m = 3.0f;
+        shallow.main_subject_size_m = 0.5f;
         shallow.scene_luminance = 0.5f;
     }
 
     const ShotVerdict d = EvaluateShot(deep);
     const ShotVerdict h = EvaluateShot(shallow);
     EXPECT_GT(d.focus_isolation, 0.0f);
-    EXPECT_GT(h.focus_isolation, d.focus_isolation);   // the shallow shot DOES win the optics axis
-    EXPECT_GT(d.composition, h.composition);            // ...but loses framing badly
-    EXPECT_GT(d.total, h.total);                        // and composition anchors the overall win
+    EXPECT_GT(h.focus_isolation, d.focus_isolation); // the shallow shot DOES win the optics axis
+    EXPECT_GT(d.composition, h.composition);         //...but loses framing badly
+    EXPECT_GT(d.total, h.total);                     // and composition anchors the overall win
 }
 
 // CommitShot folds the capture's ObservationMetadata.subject_action into the codex so
 // the behavioural progression layer can later match it. A plain capture sets no bit.
 TEST(PhotoSession, CommitCarriesBehaviourIntoCodex) {
     PhotoCodex codex;
-    ShotInput in = MakeGreatShot();         // species 42
+    ShotInput in = MakeGreatShot(); // species 42
 
     // Plain capture: no behaviour recorded.
     CommitShot(codex, in, EvaluateShot(in));
@@ -186,11 +205,16 @@ TEST(PhotoSession, CommitCarriesBehaviourIntoCodex) {
 TEST(PhotoSession, VerdictAxesAreClamped) {
     for (const ShotInput& in : {MakeGreatShot(), MakeBadShot()}) {
         const ShotVerdict v = EvaluateShot(in);
-        EXPECT_GE(v.composition, 0.0f);     EXPECT_LE(v.composition, 1.0f);
-        EXPECT_GE(v.exposure, 0.0f);        EXPECT_LE(v.exposure, 1.0f);
-        EXPECT_GE(v.focus_isolation, 0.0f); EXPECT_LE(v.focus_isolation, 1.0f);
-        EXPECT_GE(v.total, 0.0f);           EXPECT_LE(v.total, 1.0f);
-        EXPECT_GE(v.stars, 0);              EXPECT_LE(v.stars, 5);
+        EXPECT_GE(v.composition, 0.0f);
+        EXPECT_LE(v.composition, 1.0f);
+        EXPECT_GE(v.exposure, 0.0f);
+        EXPECT_LE(v.exposure, 1.0f);
+        EXPECT_GE(v.focus_isolation, 0.0f);
+        EXPECT_LE(v.focus_isolation, 1.0f);
+        EXPECT_GE(v.total, 0.0f);
+        EXPECT_LE(v.total, 1.0f);
+        EXPECT_GE(v.stars, 0);
+        EXPECT_LE(v.stars, 5);
     }
 }
 
@@ -290,7 +314,7 @@ TEST(PhotoSession, CommitDistinctSpecies) {
 // Defined edge case: a subject-less frame is a defined low verdict, not NaN/inf.
 // ---------------------------------------------------------------------------
 TEST(PhotoSession, EmptyFrameIsDefinedLowVerdict) {
-    ShotInput in;                 // no subjects
+    ShotInput in; // no subjects
     in.main_species_id = 1;
     const ShotVerdict v = EvaluateShot(in);
 

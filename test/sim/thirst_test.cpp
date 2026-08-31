@@ -1,4 +1,4 @@
-// Track sim.thirst — creatures get THIRSTY and seek water (complements hunger). Thirst rises
+// sim.thirst: creatures get THIRSTY and seek water (complements hunger). Thirst rises
 // each tick; a thirsty creature steers toward the nearest water hole; inside a hole's radius
 // it drinks (thirst falls, drinking=1). Deterministic (id-ordered, DeterministicMath only,
 // NO rng), gated by the ThirstComponent opt-in.

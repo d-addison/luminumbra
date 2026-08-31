@@ -1,20 +1,19 @@
-// T-I6-A3a: SHIELD-RT GPU tracer micro-profile.
+// GPU tracer micro-profile.
 //
-// The iteration-4 CPU spike (shieldrt_spike_bench.cpp) established the
+// The  CPU spike (shieldrt_spike_bench.cpp) established the
 // REPRESENTATION-LEVEL facts: heightfield max-mip marching of FarLodStore tiles
 // beats generic SDF sphere-tracing on per-ray step count, memory footprint, and
 // the conservative-mip correctness criterion. Those facts are CPU/GPU-invariant.
 //
-// What the spike explicitly deferred to iteration 6 is the *wall-clock* question
-// on real hardware: does the heightfield march stay the cheaper tracer once both
+// This profile answers the wall-clock question on real hardware: whether the
+// heightfield march stays the cheaper tracer once both
 // run as massively parallel GPU compute kernels on the target GPU (RTX 5070 Ti)?
 // This micro-profile answers it. It re-implements the SAME two tracers as GLSL
 // compute shaders over the SAME FarLodStore-derived terrain (shared builders in
 // shieldrt_far_field.h), fires the SAME 320x180 ray grid from the SAME four
 // representative views, and times each kernel with GL_TIME_ELAPSED queries
 // (median of N runs). It emits shieldrt-tracer-profile.json — the decision
-// artifact that PINS the heightfield-primary far-field tracer before A3b builds
-// the production far-field render pass.
+// artifact that pins the heightfield-primary far-field tracer.
 //
 // Render-only: touches NO world_hash / determinism contract. GPU-gated: skips
 // gracefully under a headless/software context (CI), runs for real on the dev
@@ -24,8 +23,9 @@
 
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <array>
@@ -53,8 +53,8 @@ namespace fs = std::filesystem;
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
 using namespace luminumbra_shieldrt;
-using Luminumbra::World::FarLodTier;
 using Luminumbra::World::ComputeTerrainParamsHash;
+using Luminumbra::World::FarLodTier;
 
 namespace {
 
@@ -67,12 +67,12 @@ namespace {
 
 constexpr int kSeed = 424242;
 constexpr int kWarmupRuns = 2;
-constexpr int kTimedRuns = 5;     // median of 5 GPU runs
+constexpr int kTimedRuns = 5; // median of 5 GPU runs
 constexpr int kLocalSizeX = 64;
 constexpr int kMaxMipLevels = 24; // uniform array bound; chain depth is ~10
 
 // Generous per-view raymarch ceiling for a 320x180 far-field probe of a ~1536 m
-// block. This is a viability sanity ceiling, NOT the production budget (Phase 0.3
+// block. This is a viability sanity ceiling, NOT the production budget (.3
 // sets the real frame budget); on the 5070 Ti the heightfield march is ~0.07 ms.
 constexpr double kFarFieldBudgetCeilingMs = 2.0;
 
@@ -238,7 +238,7 @@ void main() {
         }
         t += max(advance, base_cell * 0.5);
     }
-    outv[i] = (hit ? 0x80000000u : 0u) | uint(steps);
+    outv[i] = (hit ? 0x80000000u: 0u) | uint(steps);
 }
 )GLSL";
 
@@ -304,7 +304,7 @@ void main() {
         float stp = max(d, u_baseStep * 0.25);
         t += stp;
     }
-    outv[i] = (hit ? 0x80000000u : 0u) | uint(steps);
+    outv[i] = (hit ? 0x80000000u: 0u) | uint(steps);
 }
 )GLSL";
 
@@ -313,7 +313,7 @@ struct TracerRun {
     std::vector<double> ms_runs;
     long long hits = 0;
     double mean_steps_per_ray = 0.0;
-    std::vector<std::uint8_t> hit_mask;  // per-ray hit (1) / miss (0)
+    std::vector<std::uint8_t> hit_mask; // per-ray hit (1) / miss (0)
 };
 
 // Time a compute dispatch over `ray_count` rays with GL_TIME_ELAPSED, median of
@@ -333,7 +333,8 @@ TracerRun TimeTracer(GLuint program, GLuint out_buffer, int ray_count) {
         glFinish();
     };
 
-    for (int w = 0; w < kWarmupRuns; ++w) dispatch();
+    for (int w = 0; w < kWarmupRuns; ++w)
+        dispatch();
 
     for (int r = 0; r < kTimedRuns; ++r) {
         glBeginQuery(GL_TIME_ELAPSED, query);
@@ -352,7 +353,8 @@ TracerRun TimeTracer(GLuint program, GLuint out_buffer, int ray_count) {
     // Readback (untimed): tally hits + steps + per-ray hit mask.
     std::vector<std::uint32_t> out(static_cast<std::size_t>(ray_count), 0u);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, out_buffer);
-    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                       0,
                        static_cast<GLsizeiptr>(out.size() * sizeof(std::uint32_t)),
                        out.data());
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
@@ -361,14 +363,15 @@ TracerRun TimeTracer(GLuint program, GLuint out_buffer, int ray_count) {
     for (int i = 0; i < ray_count; ++i) {
         const bool hit = (out[i] & 0x80000000u) != 0u;
         run.hit_mask[i] = hit ? 1u : 0u;
-        if (hit) ++run.hits;
+        if (hit)
+            ++run.hits;
         steps_total += static_cast<long long>(out[i] & 0x7fffffffu);
     }
     run.mean_steps_per_ray = static_cast<double>(steps_total) / ray_count;
     return run;
 }
 
-}  // namespace
+} // namespace
 
 TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
     HiddenGlContext ctx("shieldrt_tracer_profile_gpu");
@@ -473,11 +476,14 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
         // --- Heightfield march program uniforms + bindings ---
         glUseProgram(hf_prog);
         glUniform3f(glGetUniformLocation(hf_prog, "u_eye"),
-                    static_cast<float>(eye.x), static_cast<float>(eye.y), static_cast<float>(eye.z));
+                    static_cast<float>(eye.x),
+                    static_cast<float>(eye.y),
+                    static_cast<float>(eye.z));
         glUniform1i(glGetUniformLocation(hf_prog, "u_n"), hf.n);
         glUniform1f(glGetUniformLocation(hf_prog, "u_step"), static_cast<float>(hf.step));
         glUniform2f(glGetUniformLocation(hf_prog, "u_origin"),
-                    static_cast<float>(hf.ox), static_cast<float>(hf.oz));
+                    static_cast<float>(hf.ox),
+                    static_cast<float>(hf.oz));
         glUniform1f(glGetUniformLocation(hf_prog, "u_tmax"), static_cast<float>(t_max));
         glUniform1i(glGetUniformLocation(hf_prog, "u_rayCount"), ray_count);
         glUniform1i(glGetUniformLocation(hf_prog, "u_levels"), flat_mip.levels);
@@ -493,10 +499,14 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
         // --- SDF sphere-trace program uniforms + bindings ---
         glUseProgram(sdf_prog);
         glUniform3f(glGetUniformLocation(sdf_prog, "u_eye"),
-                    static_cast<float>(eye.x), static_cast<float>(eye.y), static_cast<float>(eye.z));
+                    static_cast<float>(eye.x),
+                    static_cast<float>(eye.y),
+                    static_cast<float>(eye.z));
         glUniform1f(glGetUniformLocation(sdf_prog, "u_baseStep"), static_cast<float>(sdf.step));
         glUniform3f(glGetUniformLocation(sdf_prog, "u_origin"),
-                    static_cast<float>(sdf.ox), static_cast<float>(sdf.oy), static_cast<float>(sdf.oz));
+                    static_cast<float>(sdf.ox),
+                    static_cast<float>(sdf.oy),
+                    static_cast<float>(sdf.oz));
         glUniform1f(glGetUniformLocation(sdf_prog, "u_tmax"), static_cast<float>(t_max));
         glUniform1i(glGetUniformLocation(sdf_prog, "u_rayCount"), ray_count);
         glUniform1i(glGetUniformLocation(sdf_prog, "u_levels"), flat_sdf.levels);
@@ -514,18 +524,21 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
         total_hf_ms += hf_run.ms_median;
         total_sdf_ms += sdf_run.ms_median;
         total_hf_hits += hf_run.hits;
-        if (hf_run.ms_median <= sdf_run.ms_median) ++views_hf_faster;
+        if (hf_run.ms_median <= sdf_run.ms_median)
+            ++views_hf_faster;
 
         // The heightfield march is the analytic ground truth for terrain hit/miss
         // (it samples the surface directly). Measure how often the SDF sphere
         // trace's hit/miss classification AGREES with it. A correct far-field
         // tracer must agree; a degenerate one (e.g. over-conservative coarse mips
         // collapsing to ~0 -> spurious far hits) disagrees on the sky rays.
-        long long sdf_false_hit = 0;   // SDF says hit, ground truth says miss
-        long long sdf_false_miss = 0;  // SDF says miss, ground truth says hit
+        long long sdf_false_hit = 0;  // SDF says hit, ground truth says miss
+        long long sdf_false_miss = 0; // SDF says miss, ground truth says hit
         for (int i = 0; i < ray_count; ++i) {
-            if (sdf_run.hit_mask[i] && !hf_run.hit_mask[i]) ++sdf_false_hit;
-            if (!sdf_run.hit_mask[i] && hf_run.hit_mask[i]) ++sdf_false_miss;
+            if (sdf_run.hit_mask[i] && !hf_run.hit_mask[i])
+                ++sdf_false_hit;
+            if (!sdf_run.hit_mask[i] && hf_run.hit_mask[i])
+                ++sdf_false_miss;
         }
         const double sdf_agreement =
             1.0 - static_cast<double>(sdf_false_hit + sdf_false_miss) / ray_count;
@@ -536,31 +549,33 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
             {"preset", vs.preset},
             {"grazing", vs.grazing},
             {"rays", ray_count},
-            {"heightfield_march", {
-                {"ms_median", hf_run.ms_median},
-                {"ms_runs", hf_run.ms_runs},
-                {"hits", hf_run.hits},
-                {"hit_fraction", hf_hit_fraction},
-                {"mean_steps_per_ray", hf_run.mean_steps_per_ray},
-                {"accel_bytes", hf.bytes() + hmip.bytes()},
-            }},
-            {"sdf_sphere_trace", {
-                {"ms_median", sdf_run.ms_median},
-                {"ms_runs", sdf_run.ms_runs},
-                {"hits", sdf_run.hits},
-                {"mean_steps_per_ray", sdf_run.mean_steps_per_ray},
-                {"voxel_step_m", voxel_step},
-                {"total_bytes", sdf_cons.bytes()},
-                {"agreement_vs_ground_truth", sdf_agreement},
-                {"false_hits", sdf_false_hit},
-                {"false_misses", sdf_false_miss},
-            }},
+            {"heightfield_march",
+             {
+                 {"ms_median", hf_run.ms_median},
+                 {"ms_runs", hf_run.ms_runs},
+                 {"hits", hf_run.hits},
+                 {"hit_fraction", hf_hit_fraction},
+                 {"mean_steps_per_ray", hf_run.mean_steps_per_ray},
+                 {"accel_bytes", hf.bytes() + hmip.bytes()},
+             }},
+            {"sdf_sphere_trace",
+             {
+                 {"ms_median", sdf_run.ms_median},
+                 {"ms_runs", sdf_run.ms_runs},
+                 {"hits", sdf_run.hits},
+                 {"mean_steps_per_ray", sdf_run.mean_steps_per_ray},
+                 {"voxel_step_m", voxel_step},
+                 {"total_bytes", sdf_cons.bytes()},
+                 {"agreement_vs_ground_truth", sdf_agreement},
+                 {"false_hits", sdf_false_hit},
+                 {"false_misses", sdf_false_miss},
+             }},
             {"hf_faster", hf_run.ms_median <= sdf_run.ms_median},
         });
 
         total_sdf_agreement += sdf_agreement;
 
-        // The heightfield far-field tracer (the path A3b builds on) must be
+        // The heightfield far-field tracer (the path  builds on) must be
         // viable: a sensible terrain/sky hit mix (not a degenerate all-hit or
         // all-miss) AND within a generous far-field GPU raymarch budget ceiling.
         EXPECT_GT(hf_hit_fraction, 0.02)
@@ -603,12 +618,14 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
 
     const nlohmann::json report = {
         {"schema", "luminumbra.shieldrt_tracer_profile.v1"},
-        {"task", "T-I6-A3a"},
         {"generated_by", "shieldrt_tracer_profile_gpu (GPU micro-profile, GL_TIME_ELAPSED)"},
         {"seed", kSeed},
         {"build_mode", build_mode},
-        {"gpu", {{"renderer", renderer}, {"vendor", vendor}, {"gl_version", gl_version},
-                 {"software_renderer", software}}},
+        {"gpu",
+         {{"renderer", renderer},
+          {"vendor", vendor},
+          {"gl_version", gl_version},
+          {"software_renderer", software}}},
         {"ray_grid", {{"w", kRayGridW}, {"h", kRayGridH}}},
         {"warmup_runs", kWarmupRuns},
         {"timed_runs", kTimedRuns},
@@ -616,18 +633,19 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
         {"budget_ceiling_ms", kFarFieldBudgetCeilingMs},
         {"agreement_bar", kTracerAgreementBar},
         {"views", results},
-        {"totals", {
-            {"heightfield_march_ms", total_hf_ms},
-            {"sdf_sphere_trace_ms", total_sdf_ms},
-            {"views_heightfield_faster_ms", views_hf_faster},
-            {"views_total", n_views},
-            {"mean_sdf_agreement_vs_ground_truth", mean_sdf_agreement},
-            {"sdf_naive_mip_viable", sdf_viable},
-        }},
+        {"totals",
+         {
+             {"heightfield_march_ms", total_hf_ms},
+             {"sdf_sphere_trace_ms", total_sdf_ms},
+             {"views_heightfield_faster_ms", views_hf_faster},
+             {"views_total", n_views},
+             {"mean_sdf_agreement_vs_ground_truth", mean_sdf_agreement},
+             {"sdf_naive_mip_viable", sdf_viable},
+         }},
         {"decision", decision},
         {"decision_note",
          "Heightfield max-mip march of FarLodStore tiles is PINNED as the "
-         "SHIELD-RT far-field tracer for A3b. Rationale (GPU-confirmed): it is "
+         " far-field tracer for . Rationale (GPU-confirmed): it is "
          "correct-by-construction and within the far-field raymarch budget on the "
          "RTX 5070 Ti (~0.07 ms for a 1536 m / 320x180 probe), and it adds only a "
          "cheap max-mip over tiles that already exist. The naive conservative-mip "
@@ -635,7 +653,7 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
          "mips collapse toward zero (min-magnitude minus coarse half-diagonal), so "
          "it false-hits sky rays beyond the near band, scoring low agreement with "
          "ground truth despite a deceptively low ms. Sparse SDF bricks stay "
-         "reserved for genuine 3D far content (Wave C+), not the terrain field."},
+         "reserved for genuine 3D far content (+), not the terrain field."},
     };
     std::ofstream out(ArtifactRoot() / "shieldrt-tracer-profile.json");
     ASSERT_TRUE(out);
@@ -646,7 +664,7 @@ TEST(ShieldRtTracerProfileGpu, HeightfieldMarchVsSdfSphereTraceWallClock) {
                      << "): timing not representative; artifact written for record";
     }
 
-    // Decision gate guards the path A3b depends on: the heightfield far-field
+    // Decision gate guards the path  depends on: the heightfield far-field
     // tracer must be VIABLE — correct hit/sky classification (asserted per view
     // above) and within the budget ceiling. The SDF sphere trace's agreement is
     // recorded as the evidence behind reserving SDF for true 3D content; we do

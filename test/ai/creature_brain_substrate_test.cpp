@@ -1,6 +1,5 @@
-// INSTINCT-09 FOLLOW-UP: route the IAUS CreatureBrain's inline nearest-target scan
-// onto the SHARED PerceptionField substrate (PerceptionSubstrate.h), additive and
-// default-OFF. These tests are the proving signal that the substrate-routed scan
+// CreatureBrain nearest-target scan equivalence for the shared PerceptionField
+// substrate. These tests prove that the substrate-routed scan
 // returns the SAME target/stimulus set the inline scan produces (determinism +
 // equivalence), so the opt-in is behaviour-preserving:
 //   1. Behaviour-preserving: RunCreatureBrainSystemOnTick with use_perception_substrate
@@ -14,7 +13,7 @@
 //      (Flee/Hunt) across the run — a roster where nothing senses anything would pass
 //      trivially in both paths and prove nothing (mirrors perception_substrate_test's
 //      "guards against an all-empty false pass").
-//   3. Flag defaults OFF: the default-argument call binds the inline path.
+//   3. The default call selects the canonical substrate path.
 //   4. The substrate path is itself deterministic (run == replay).
 //
 // NOTE: the default OFF path's byte-identity is ALSO guarded by the existing
@@ -46,8 +45,14 @@ constexpr float kDt = 1.0f / 30.0f;
 // BOTH gate paths are exercised. Insertion order is scrambled relative to role so the
 // id-sort — and therefore the substrate's index/order equivalence — is actually tested.
 void BuildRoster(entt::registry& r) {
-    auto spawn = [&](float x, float z, bool predator, float hunger, bool genome,
-                     float vis_range = 20.0f, float hear_range = 24.0f, float cos_fov = 0.5f) {
+    auto spawn = [&](float x,
+                     float z,
+                     bool predator,
+                     float hunger,
+                     bool genome,
+                     float vis_range = 20.0f,
+                     float hear_range = 24.0f,
+                     float cos_fov = 0.5f) {
         const auto e = r.create();
         auto& tf = r.emplace<Comp::TransformComponent>(e);
         tf.position.x = x;
@@ -68,21 +73,50 @@ void BuildRoster(entt::registry& r) {
     // predators + prey. Prey at (3,0) is ~5.4 m from the predator at (8,2) -> Flee;
     // that genome-less predator senses every prey -> Hunt. Both target-driven actions
     // are guaranteed, so the target scan is genuinely exercised.
-    spawn(  3.0f,  0.0f, /*pred*/ false, 0.40f, /*genome*/ true,  /*vis*/ 15.0f, /*hear*/  8.0f, /*cos*/ 0.7f);
-    spawn(  8.0f,  2.0f, /*pred*/ true,  0.90f, /*genome*/ false);
-    spawn( -6.0f,  5.0f, /*pred*/ false, 0.60f, /*genome*/ false);
-    spawn( 12.0f, -4.0f, /*pred*/ true,  0.80f, /*genome*/ true,  /*vis*/ 30.0f, /*hear*/ 10.0f, /*cos*/ 0.3f);
-    spawn( -2.0f, -9.0f, /*pred*/ false, 0.50f, /*genome*/ true,  /*vis*/ 25.0f, /*hear*/ 20.0f, /*cos*/ 0.6f);
-    spawn(  5.0f,  7.0f, /*pred*/ false, 0.30f, /*genome*/ false);
-    spawn(-10.0f,  1.0f, /*pred*/ true,  0.95f, /*genome*/ true,  /*vis*/ 18.0f, /*hear*/ 12.0f, /*cos*/ 0.5f);
-    spawn(  1.0f, 11.0f, /*pred*/ false, 0.70f, /*genome*/ false);
+    spawn(3.0f,
+          0.0f,
+          /*pred*/ false,
+          0.40f,
+          /*genome*/ true,
+          /*vis*/ 15.0f,
+          /*hear*/ 8.0f,
+          /*cos*/ 0.7f);
+    spawn(8.0f, 2.0f, /*pred*/ true, 0.90f, /*genome*/ false);
+    spawn(-6.0f, 5.0f, /*pred*/ false, 0.60f, /*genome*/ false);
+    spawn(12.0f,
+          -4.0f,
+          /*pred*/ true,
+          0.80f,
+          /*genome*/ true,
+          /*vis*/ 30.0f,
+          /*hear*/ 10.0f,
+          /*cos*/ 0.3f);
+    spawn(-2.0f,
+          -9.0f,
+          /*pred*/ false,
+          0.50f,
+          /*genome*/ true,
+          /*vis*/ 25.0f,
+          /*hear*/ 20.0f,
+          /*cos*/ 0.6f);
+    spawn(5.0f, 7.0f, /*pred*/ false, 0.30f, /*genome*/ false);
+    spawn(-10.0f,
+          1.0f,
+          /*pred*/ true,
+          0.95f,
+          /*genome*/ true,
+          /*vis*/ 18.0f,
+          /*hear*/ 12.0f,
+          /*cos*/ 0.5f);
+    spawn(1.0f, 11.0f, /*pred*/ false, 0.70f, /*genome*/ false);
 }
 
 // Capture every creature's full sim state in a stable (id-sorted) order, so two
 // registries can be compared for BYTE-IDENTITY with a single vector equality.
 std::vector<float> CaptureState(entt::registry& r) {
     std::vector<entt::entity> ents;
-    for (auto e : r.view<Comp::CreatureComponent>()) ents.push_back(e);
+    for (auto e : r.view<Comp::CreatureComponent>())
+        ents.push_back(e);
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
@@ -104,7 +138,7 @@ std::vector<float> CaptureState(entt::registry& r) {
     return out;
 }
 
-}  // namespace
+} // namespace
 
 // The load-bearing wiring test: the additive substrate flag must not change the
 // CreatureBrain's output for ANY creature. Fifty compounding ticks amplify any
@@ -116,11 +150,23 @@ TEST(CreatureBrainSubstrate, SubstrateFlagIsBehaviorPreserving) {
     BuildRoster(inline_reg);
     BuildRoster(substrate_reg);
 
-    bool any_target_driven = false;  // saw a Flee/Hunt -> the target scan actually found a target
+    bool any_target_driven = false; // saw a Flee/Hunt -> the target scan actually found a target
     for (int t = 0; t < 50; ++t) {
-        RunCreatureBrainSystemOnTick(inline_reg, kDt, {}, nullptr, 0.0f, 0.0f, 0.0f,
+        RunCreatureBrainSystemOnTick(inline_reg,
+                                     kDt,
+                                     {},
+                                     nullptr,
+                                     0.0f,
+                                     0.0f,
+                                     0.0f,
                                      /*use_perception_substrate=*/false);
-        RunCreatureBrainSystemOnTick(substrate_reg, kDt, {}, nullptr, 0.0f, 0.0f, 0.0f,
+        RunCreatureBrainSystemOnTick(substrate_reg,
+                                     kDt,
+                                     {},
+                                     nullptr,
+                                     0.0f,
+                                     0.0f,
+                                     0.0f,
                                      /*use_perception_substrate=*/true);
         // Compare EVERY tick, not just at the end: byte-identity must hold at each step
         // (state feeds forward, so an early divergence would compound and could even
@@ -142,11 +188,8 @@ TEST(CreatureBrainSubstrate, SubstrateFlagIsBehaviorPreserving) {
         << "roster too inert to exercise the target scan (equivalence would be vacuous)";
 }
 
-// The flag defaults OFF: the default-argument call must bind the inline path, i.e. be
-// identical to an explicit use_perception_substrate=false call. (ON == OFF is proven
-// separately above; here we pin that the DEFAULT resolves to the OFF path.)
-// INSTINCT-09 retirement: the flag now DEFAULTS TRUE (substrate is the canonical path),
-// so the default call must remain byte-identical to the retained explicit inline path.
+// The default call selects the canonical substrate path and remains equivalent
+// to the retained explicit inline reference used for regression comparison.
 TEST(CreatureBrainSubstrate, DefaultSubstrateByteIdenticalToInline) {
     entt::registry default_reg;
     entt::registry explicit_off_reg;
@@ -154,9 +197,17 @@ TEST(CreatureBrainSubstrate, DefaultSubstrateByteIdenticalToInline) {
     BuildRoster(explicit_off_reg);
 
     for (int t = 0; t < 30; ++t) {
-        RunCreatureBrainSystemOnTick(default_reg, kDt);  // all defaults -> flag now defaults TRUE (substrate)
-        RunCreatureBrainSystemOnTick(explicit_off_reg, kDt, {}, nullptr, 0.0f, 0.0f, 0.0f,
-                                     /*use_perception_substrate=*/false);  // retained inline reference
+        RunCreatureBrainSystemOnTick(default_reg,
+                                     kDt); // all defaults -> flag now defaults TRUE (substrate)
+        RunCreatureBrainSystemOnTick(
+            explicit_off_reg,
+            kDt,
+            {},
+            nullptr,
+            0.0f,
+            0.0f,
+            0.0f,
+            /*use_perception_substrate=*/false); // retained inline reference
     }
     EXPECT_EQ(CaptureState(default_reg), CaptureState(explicit_off_reg))
         << "the default (now substrate) call must be byte-identical to the retained inline path";
@@ -168,7 +219,13 @@ TEST(CreatureBrainSubstrate, SubstratePathDeterministic) {
         entt::registry r;
         BuildRoster(r);
         for (int t = 0; t < 40; ++t) {
-            RunCreatureBrainSystemOnTick(r, kDt, {}, nullptr, 0.0f, 0.0f, 0.0f,
+            RunCreatureBrainSystemOnTick(r,
+                                         kDt,
+                                         {},
+                                         nullptr,
+                                         0.0f,
+                                         0.0f,
+                                         0.0f,
                                          /*use_perception_substrate=*/true);
         }
         return CaptureState(r);

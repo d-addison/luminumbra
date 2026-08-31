@@ -1,4 +1,4 @@
-// T-I3-4: SimulationClock accumulator/clamp behavior and the deterministic
+// SimulationClock accumulator/clamp behavior and the deterministic
 // fixed-tick + ordered-event-bus hosting in GameSession::TickSimulation.
 #include <gtest/gtest.h>
 
@@ -108,9 +108,7 @@ SessionRunResult RunHostedSimulation() {
     OrderedEventBus& bus = session.GetSimulationEventBus();
 
     std::vector<SimulationEvent> delivered;
-    bus.subscribe([&delivered](const SimulationEvent& event) {
-        delivered.push_back(event);
-    });
+    bus.subscribe([&delivered](const SimulationEvent& event) { delivered.push_back(event); });
 
     // Publish out of tick order, across lanes, before any tick runs.
     bus.publish(2, "ai.intent", "npc-1:turn");
@@ -120,9 +118,9 @@ SessionRunResult RunHostedSimulation() {
     bus.publish(3, "audio.event", "stone:slide");
 
     // GameSession's clock clamps catch-up at 2 ticks/frame (GameSession.h: spike guard), so a 0.1 s
-    // frame yields 2 ticks (the 3rd possible tick's TIME is dropped, but no tick id is skipped — the
-    // cadence just falls behind real-time). Frame 1 -> ticks 1..2; events for ticks <= 2 drain in
-    // deterministic tick/lane/sequence order.
+    // frame yields 2 ticks (the 3rd possible tick's TIME is dropped, but no tick id is skipped —
+    // the cadence just falls behind real-time). Frame 1 -> ticks 1..2; events for ticks <= 2 drain
+    // in deterministic tick/lane/sequence order.
     EXPECT_EQ(session.TickSimulation(0.1), 2u);
 
     // Late-published events for an already-future tick drain when that tick runs.

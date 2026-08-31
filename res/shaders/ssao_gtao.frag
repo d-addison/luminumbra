@@ -1,18 +1,18 @@
 #version 450 core
-// Render-optimization (ssao-gtao, slice 1): Ground-Truth Ambient Occlusion
+// Render-optimization (ssao-gtao, ): Ground-Truth Ambient Occlusion
 // (Jimenez et al. 2016 / Intel XeGTAO), horizon-slice formulation, replacing the
 // 64-sample hemisphere SSAO (ssao.frag). Quality comes from the horizon arc
 // integral + a spatio-temporal denoise, NOT raw tap count: High = 3 slices x 6
 // steps = 18 spp (vs 64), cheaper AND ground-truth-closer. Reads the SAME
 // view-space G-buffer (gPosition + octahedral gNormal), so it drops into the
-// existing SSAO FBO + blur path. RENDER-ONLY: no world_hash impact. Selected at
+// existing SSAO FBO + blur path.: no world_hash impact. Selected at
 // runtime by render ssao_quality (legacy ssao.frag is the byte-identical default).
 out float FragColor;
 
 in vec2 TexCoords;
 
 uniform sampler2D gPosition;       // view-space position (xyz)
-uniform sampler2D gNormalMaterial; // octahedral view-space normal in .xy
+uniform sampler2D gNormalMaterial; // octahedral view-space normal in.xy
 uniform mat4  u_projection;        // for the world->pixel radius (proj[1][1])
 uniform vec2  u_screenSize;
 uniform float u_radius   = 0.8;    // view-space AO radius (metres), matches legacy RADIUS
@@ -108,7 +108,7 @@ void main() {
         weightSum += projNLen;
     }
 
-    float visibility = (weightSum > 1e-4) ? (occlusion / weightSum) : 1.0;
+    float visibility = (weightSum > 1e-4) ? (occlusion / weightSum): 1.0;
     visibility = clamp(visibility, 0.0, 1.0);
     // Match the legacy contrast curve so the lighting pass AO response is familiar.
     FragColor = pow(visibility, 2.2);

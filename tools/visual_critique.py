@@ -12,7 +12,7 @@ Usage:
   python tools/visual_critique.py combine <sweep_dir> <ai.json>    # merge AI critique
 
   --strict : exit non-zero if ANY objective defect flag is raised. This is the
-             mode the WorldVisualSweep validator gate runs. Per the iteration-6
+             mode the WorldVisualSweep validator gate runs. Per the
              process rule, a visual-critique BLOCK is discharged ONLY by a
              passing (flag-free) re-run of this gate -- never by reclassifying a
              flagged cell as "tracked debt". So there is intentionally NO
@@ -75,7 +75,7 @@ HARD_FLAGS = {
 }
 
 # Visual-FIDELITY-FLOOR flags (owner principle: minimum realistic fidelity at the
-# Battlefield 4/BF1 / Frostbite level — don't ship flat/low-fi visuals). Distinct
+# Battlefield 4/ / Frostbite level — don't ship flat/low-fi visuals). Distinct
 # from the DEFECT flags above: those catch BROKEN renders, these catch renders that
 # work but fall below the beauty floor. They BLOCK in --strict exactly like the
 # defect flags, so the critique enforces the floor; a fidelity BLOCK is discharged
@@ -94,7 +94,7 @@ def detail_energy(L):
     """High-frequency surface detail of a luma plane: mean abs discrete Laplacian
     (4-neighbour). Flat/untextured surfaces -> near 0; textured surfaces (real
     terrain micro-detail, normal-mapped relief) -> markedly higher. This is the
-    objective proxy for the BF4/BF1 texture-fidelity floor."""
+    objective proxy for the visual-fidelity  texture-fidelity floor."""
     if L.shape[0] < 3 or L.shape[1] < 3:
         return 0.0
     lap = np.abs(4.0*L[1:-1, 1:-1] - L[:-2, 1:-1] - L[2:, 1:-1] - L[1:-1, :-2] - L[1:-1, 2:])
@@ -155,7 +155,7 @@ def analyze_array(a, m):
     # Brightness-normalized micro-contrast: |Laplacian| / mean-luma is light-independent,
     # so the SAME texture scores identically at noon and dusk (the raw |Laplacian| above
     # scales with luma and spuriously fails dim-but-textured terrain). This is the metric
-    # the BF4/BF1 fidelity floor judges on.
+    # the visual-fidelity  fidelity floor judges on.
     metrics["ground_relative_detail"] = (
         metrics["ground_detail_energy"] / max(metrics["ground_luma"], T["fidelity_luma_floor"]))
     # --- universal flags ---
@@ -191,7 +191,7 @@ def analyze_array(a, m):
     daytime = bool(m.get("daytime"))
     tod = m.get("tod"); angle = m.get("angle")
 
-    # --- VISUAL-FIDELITY FLOOR: terrain micro-contrast (BF4/BF1 realism) ---
+    # --- VISUAL-FIDELITY FLOOR: terrain micro-contrast (visual-fidelity  realism) ---
     # Judge ONLY on DOWN-PITCHED daytime-clear cells: those frame NEAR terrain (where
     # micro-detail is the honest signal). Eye-level horizon vistas legitimately minify
     # distant terrain (low detail is correct there, not a defect); pitched-up sky views
@@ -313,7 +313,7 @@ def combine(sweep_dir, ai_json):
 
 def _strict_exit(rep):
     """Exit 1 if any blocking objective flag was raised (gate mode). Blocking =
-    DEFECT flags (broken renders) + FIDELITY flags (sub-BF4/BF1-floor visuals)."""
+    DEFECT flags (broken renders) + FIDELITY flags (sub-threshold visuals)."""
     blocking = HARD_FLAGS | FIDELITY_FLAGS
     hard = {fl: n for fl, n in rep["flag_counts"].items() if fl in blocking}
     if hard:
@@ -324,7 +324,7 @@ def _strict_exit(rep):
               f"{len(rep['defects'])} cell(s): {tally}", file=sys.stderr)
         if fid:
             print(f"  (visual-fidelity-floor flags: {fid} — raise the visuals to the "
-                  f"BF4/BF1 floor to clear)", file=sys.stderr)
+                  f"visual-fidelity  floor to clear)", file=sys.stderr)
         sys.exit(1)
     print("\nGATE PASS (--strict): no blocking objective/fidelity flags.")
     sys.exit(0)

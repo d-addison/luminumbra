@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim/render.creature_procgen — the creature analogue of PlantProcgen: a PURE,
+// sim/render.creature_procgen: the creature analogue of PlantProcgen: a PURE,
 // deterministic function from a normalized BUILD GENOME to a creature's body proportions
 // (silhouette). The engine stays generic — a creature's shape is a pure function of its
 // genes, just as a plant's geometry is. This is the third rung of the procedural-creature

@@ -1,7 +1,7 @@
 #include "WaterPass.h"
 
+#include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
 #include "../RenderResourceRegistry.h"
-#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
 #include "PassGlHelpers.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -34,19 +34,24 @@ WaterPass::WaterPass() = default;
 WaterPass::~WaterPass() = default;
 
 void WaterPass::init_shader(const std::filesystem::path& root_path) {
-    m_water_shader = std::make_unique<Shader>((root_path / "res/shaders/water.vert").string().c_str(), (root_path / "res/shaders/water.frag").string().c_str());
+    m_water_shader =
+        std::make_unique<Shader>((root_path / "res/shaders/water.vert").string().c_str(),
+                                 (root_path / "res/shaders/water.frag").string().c_str());
     PassGl::label_gl_object(GL_PROGRAM, m_water_shader ? m_water_shader->Id() : 0u, "shader.water");
-    // FR-D (GPU-05): validate water.frag's sampler bindings (the caustics generator
+    // validate water.frag's sampler bindings (the caustics generator
     // program binds no samplers, so it has no registry entry).
     if (m_water_shader && m_water_shader->IsValid()) {
         if (const ExpectedLayout* layout = FindPassExpectedLayout("water"))
             m_water_shader->ValidateLayout(*layout);
     }
-    // T-I2-16a: offscreen caustics generation reuses the shared fullscreen
+    // offscreen caustics generation reuses the shared fullscreen
     // quad layout (lighting_pass.vert) with the dormant caustics fragment
     // shader.
-    m_caustics_shader = std::make_unique<Shader>((root_path / "res/shaders/lighting_pass.vert").string().c_str(), (root_path / "res/shaders/caustics_generator.frag").string().c_str());
-    PassGl::label_gl_object(GL_PROGRAM, m_caustics_shader ? m_caustics_shader->Id() : 0u, "shader.water_caustics");
+    m_caustics_shader = std::make_unique<Shader>(
+        (root_path / "res/shaders/lighting_pass.vert").string().c_str(),
+        (root_path / "res/shaders/caustics_generator.frag").string().c_str());
+    PassGl::label_gl_object(
+        GL_PROGRAM, m_caustics_shader ? m_caustics_shader->Id() : 0u, "shader.water_caustics");
 }
 
 void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
@@ -57,15 +62,17 @@ void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
 
     // Fallback textures stay PASS-OWNED: 1x1 solid-color inputs with uploaded
     // pixel data, not render targets.
-    m_water_flat_normal_texture = make_solid_rgba_texture(flat_normal, "water.fallback.flat_normal");
-    m_water_neutral_flow_texture = make_solid_rgba_texture(neutral_flow, "water.fallback.neutral_flow");
+    m_water_flat_normal_texture =
+        make_solid_rgba_texture(flat_normal, "water.fallback.flat_normal");
+    m_water_neutral_flow_texture =
+        make_solid_rgba_texture(neutral_flow, "water.fallback.neutral_flow");
     m_water_black_texture = make_solid_rgba_texture(black, "water.fallback.black");
     m_water_underwater_texture = make_solid_rgba_texture(underwater, "water.fallback.underwater");
 
-    // RENDER-12/GPU-12: the offscreen caustics target is registry-owned. The desc
+    // the offscreen caustics target is registry-owned. The desc
     // reproduces the retired glTexImage2D/glTexParameter call (RGBA8, LINEAR,
     // MIRRORED_REPEAT - mirrored repeat avoids hard tile seams since the
-    // wave-interference pattern is not toroidally tileable). It is then cleared to
+    //  pattern is not toroidally tileable). It is then cleared to
     // (0,0,0,0), byte-identical to the retired zero-initialized upload, so
     // consumers that sample it before the first generated frame read black.
     TextureDesc caustics;
@@ -99,10 +106,22 @@ void WaterPass::init_water_fallback_textures(RenderResourceRegistry& registry) {
 }
 
 void WaterPass::destroy_water_fallback_textures(RenderResourceRegistry& registry) {
-    if (m_water_flat_normal_texture) { glDeleteTextures(1, &m_water_flat_normal_texture); m_water_flat_normal_texture = 0; }
-    if (m_water_neutral_flow_texture) { glDeleteTextures(1, &m_water_neutral_flow_texture); m_water_neutral_flow_texture = 0; }
-    if (m_water_black_texture) { glDeleteTextures(1, &m_water_black_texture); m_water_black_texture = 0; }
-    if (m_water_underwater_texture) { glDeleteTextures(1, &m_water_underwater_texture); m_water_underwater_texture = 0; }
+    if (m_water_flat_normal_texture) {
+        glDeleteTextures(1, &m_water_flat_normal_texture);
+        m_water_flat_normal_texture = 0;
+    }
+    if (m_water_neutral_flow_texture) {
+        glDeleteTextures(1, &m_water_neutral_flow_texture);
+        m_water_neutral_flow_texture = 0;
+    }
+    if (m_water_black_texture) {
+        glDeleteTextures(1, &m_water_black_texture);
+        m_water_black_texture = 0;
+    }
+    if (m_water_underwater_texture) {
+        glDeleteTextures(1, &m_water_underwater_texture);
+        m_water_underwater_texture = 0;
+    }
     // The caustics target is registry-owned.
     registry.destroy_owned("water_caustics_fbo");
     registry.destroy_owned("water_caustics");
@@ -116,9 +135,9 @@ void WaterPass::reset_shader() {
 }
 
 // Renders the animated caustics pattern into the offscreen target. Runs at
-// the start of execute(), so the cost is reported inside water_gpu_ms. The
+// the start of execute, so the cost is reported inside water_gpu_ms. The
 // lighting pass (which runs earlier in the frame) samples the previous
-// frame's pattern through black_texture(); a one-frame lag is invisible for
+// frame's pattern through black_texture; a one-frame lag is invisible for
 // a slowly-flowing intensity field.
 void WaterPass::generate_caustics(const RenderContext& ctx) {
     if (m_caustics_fbo == 0 || !m_caustics_shader || !m_caustics_shader->IsValid()) {
@@ -139,10 +158,11 @@ void WaterPass::generate_caustics(const RenderContext& ctx) {
 
     glEnable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // GPU-P09: water composite into the internal scene
+    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // water composite into the internal scene
 }
 
-WaterDrawStats WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera) {
+WaterDrawStats
+WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const Camera& camera) {
     WaterDrawStats stats;
     // --- 0. Generate the animated caustics pattern (offscreen) ---
     generate_caustics(ctx);
@@ -156,7 +176,10 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx, const WaterPassInput
     // --- 2. Activate Shader and Set Uniforms ---
     m_water_shader->use();
 
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)ctx.screen_width / (float)ctx.screen_height, camera.GetNearPlane(), camera.GetFarPlane());
+    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
+                                            (float)ctx.screen_width / (float)ctx.screen_height,
+                                            camera.GetNearPlane(),
+                                            camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
 
     // Set matrices
@@ -169,7 +192,9 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx, const WaterPassInput
 
     // Set scene and material properties (as before)
     m_water_shader->setVec3("u_camera_pos", camera.Position);
-    m_water_shader->setVec2("u_screen_size", glm::vec2(ctx.internal_w(), ctx.internal_h())); // GPU-P09: samples the internal scene
+    m_water_shader->setVec2(
+        "u_screen_size",
+        glm::vec2(ctx.internal_w(), ctx.internal_h())); // samples the internal scene
     m_water_shader->setFloat("u_time", ctx.time_seconds);
     m_water_shader->setVec3("u_sun_direction", ctx.sun.direction);
     m_water_shader->setVec3("u_sun_color", ctx.sun.color);
@@ -203,11 +228,11 @@ WaterDrawStats WaterPass::execute(const RenderContext& ctx, const WaterPassInput
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, m_water_underwater_texture);
     m_water_shader->setInt("u_underwater_texture", 5);
-    // T-I2-16c: shoreline foam is generated procedurally in the shader; the
+    // shoreline foam is generated procedurally in the shader; the
     // old u_foam_texture slot (black fallback) is gone.
 
     // --- 3. Draw Water Meshes ---
-    // Spec 016: iterate the pre-built draw list (same chunk order -> byte-stable);
+    // iterate the pre-built draw list (same chunk order -> byte-stable);
     // stats returned for the call site to fold in.
     for (const auto& item : input.draw_items) {
         m_water_shader->setMat4("u_model", item.model);

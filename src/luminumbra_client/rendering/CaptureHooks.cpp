@@ -6,15 +6,15 @@
 #include <string>
 
 #if defined(_WIN32)
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <windows.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #else
-#  include <dlfcn.h>
+#include <dlfcn.h>
 #endif
 
 #include "renderdoc/renderdoc_app.h"
@@ -27,17 +27,18 @@ std::string sanitize_scenario_name(std::string name) {
     if (name.empty()) {
         return "unnamed";
     }
-    std::replace_if(name.begin(), name.end(), [](char value) {
-        return !(value >= 'a' && value <= 'z') &&
-               !(value >= 'A' && value <= 'Z') &&
-               !(value >= '0' && value <= '9') &&
-               value != '_' &&
-               value != '-';
-    }, '_');
+    std::replace_if(
+        name.begin(),
+        name.end(),
+        [](char value) {
+            return !(value >= 'a' && value <= 'z') && !(value >= 'A' && value <= 'Z') &&
+                   !(value >= '0' && value <= '9') && value != '_' && value != '-';
+        },
+        '_');
     return name;
 }
 
-// GPU-06 test seam (see detail::SetRenderDocApiForTesting): when set, this fake
+//  test seam (see detail::SetRenderDocApiForTesting): when set, this fake
 // RENDERDOC_API_1_x_x* is used instead of the real load, so the exact production
 // Begin/End path runs against a double without a real RenderDoc DLL.
 void* g_injected_renderdoc_api = nullptr;
@@ -90,7 +91,7 @@ RENDERDOC_API_1_6_0* get_renderdoc_api() {
     return real_api;
 }
 
-// GPU-14 test seams (see detail::SetPixApiForTesting / SetNsightApiForTesting):
+//  test seams (see detail::SetPixApiForTesting / SetNsightApiForTesting):
 // same shape as the RenderDoc seam above.
 void* g_injected_pix_api = nullptr;
 void* g_injected_nsight_api = nullptr;
@@ -119,7 +120,7 @@ PixCaptureApi* load_real_pix_api() {
     std::memcpy(&api.EndCapture, &end_raw, sizeof(api.EndCapture));
     return &api;
 #else
-    return nullptr;  // PIX is Windows-only
+    return nullptr; // PIX is Windows-only
 #endif
 }
 
@@ -155,7 +156,7 @@ NsightCaptureApi* get_nsight_api() {
     // The injected interception layer exports no documented begin/end trigger
     // (programmatic capture needs the NGFX Injection SDK, not vendored), so no
     // real api is ever materialized -- the real leg is detection-only, surfaced
-    // via nsight_injection_detected() in the Begin diagnostic.
+    // via nsight_injection_detected in the Begin diagnostic.
     return nullptr;
 }
 
@@ -163,15 +164,15 @@ NsightCaptureApi* get_nsight_api() {
 
 std::string CaptureBackendName(CaptureBackend backend) {
     switch (backend) {
-    case CaptureBackend::RenderDoc:
-        return "RenderDoc";
-    case CaptureBackend::PIX:
-        return "PIX";
-    case CaptureBackend::Nsight:
-        return "Nsight";
-    case CaptureBackend::MarkerOnly:
-    default:
-        return "MarkerOnly";
+        case CaptureBackend::RenderDoc:
+            return "RenderDoc";
+        case CaptureBackend::PIX:
+            return "PIX";
+        case CaptureBackend::Nsight:
+            return "Nsight";
+        case CaptureBackend::MarkerOnly:
+        default:
+            return "MarkerOnly";
     }
 }
 
@@ -189,15 +190,15 @@ bool IsCaptureSdkAvailable(CaptureBackend backend) {
     // Honest per-backend report: true only when that backend's Begin/End bracket
     // can actually run (an Nsight injection WITHOUT a trigger api stays false).
     switch (backend) {
-    case CaptureBackend::RenderDoc:
-        return get_renderdoc_api() != nullptr;
-    case CaptureBackend::PIX:
-        return get_pix_api() != nullptr;
-    case CaptureBackend::Nsight:
-        return get_nsight_api() != nullptr;
-    case CaptureBackend::MarkerOnly:
-    default:
-        return false;
+        case CaptureBackend::RenderDoc:
+            return get_renderdoc_api() != nullptr;
+        case CaptureBackend::PIX:
+            return get_pix_api() != nullptr;
+        case CaptureBackend::Nsight:
+            return get_nsight_api() != nullptr;
+        case CaptureBackend::MarkerOnly:
+        default:
+            return false;
     }
 }
 
@@ -209,78 +210,78 @@ FrameCaptureSession BeginFrameCapture(const CaptureRequest& request,
     session.marker = "luminumbra.capture.ready:" + scenario + ":" + session.backend;
 
     switch (request.preferred_backend) {
-    case CaptureBackend::RenderDoc: {
-        RENDERDOC_API_1_6_0* api = get_renderdoc_api();
-        if (api == nullptr) {
-            break;
-        }
-        if (api->SetCaptureFilePathTemplate != nullptr) {
-            const std::string path_template =
-                capture_dir.empty() ? scenario : (capture_dir + "/" + scenario);
-            api->SetCaptureFilePathTemplate(path_template.c_str());
-        }
-        api->StartFrameCapture(nullptr, nullptr);
-        session.active = true;
-        session.sdk_backend = CaptureBackend::RenderDoc;
-        session.backend = "RenderDoc";
-        session.diagnostic = "RenderDoc in-app API frame capture started";
-        return session;
-    }
-    case CaptureBackend::PIX: {
-        PixCaptureApi* api = get_pix_api();
-        if (api == nullptr || api->BeginCapture == nullptr || api->EndCapture == nullptr) {
-            break;
-        }
-        // PIX reports no capture path back at End (unlike RenderDoc GetCapture):
-        // the target handed to Begin is the only record of it.
-        const std::string capture_file =
-            (capture_dir.empty() ? scenario : (capture_dir + "/" + scenario)) + ".wpix";
-        // ASCII-by-construction widening (the scenario is sanitized; capture
-        // dirs are repo/artifact paths). PIX copies the params at the call.
-        const std::wstring wide_path(capture_file.begin(), capture_file.end());
-        PixCaptureParameters params;
-        params.gpu_capture_file_name = wide_path.c_str();
-        // 1ul == PIX_CAPTURE_GPU (pix3.h). PIX GPU capture targets D3D -- on the
-        // GL client a real WinPixGpuCapturer fails this HRESULT, reported
-        // honestly below (a real capture needs the DX12 backend, spec 014 M5).
-        const long begin_hr = api->BeginCapture(1ul, &params);
-        if (begin_hr != 0) {
-            session.diagnostic = "PIXBeginCapture failed (hr=" + std::to_string(begin_hr) +
-                                 "); emitted capture-ready marker";
+        case CaptureBackend::RenderDoc: {
+            RENDERDOC_API_1_6_0* api = get_renderdoc_api();
+            if (api == nullptr) {
+                break;
+            }
+            if (api->SetCaptureFilePathTemplate != nullptr) {
+                const std::string path_template =
+                    capture_dir.empty() ? scenario : (capture_dir + "/" + scenario);
+                api->SetCaptureFilePathTemplate(path_template.c_str());
+            }
+            api->StartFrameCapture(nullptr, nullptr);
+            session.active = true;
+            session.sdk_backend = CaptureBackend::RenderDoc;
+            session.backend = "RenderDoc";
+            session.diagnostic = "RenderDoc in-app API frame capture started";
             return session;
         }
-        session.active = true;
-        session.sdk_backend = CaptureBackend::PIX;
-        session.backend = "PIX";
-        session.requested_capture_file = capture_file;
-        session.diagnostic = "PIX programmatic GPU capture started";
-        return session;
-    }
-    case CaptureBackend::Nsight: {
-        NsightCaptureApi* api = get_nsight_api();
-        if (api == nullptr || api->BeginCapture == nullptr || api->EndCapture == nullptr) {
-            if (nsight_injection_detected()) {
-                session.diagnostic =
-                    "Nsight injection detected but exports no programmatic trigger "
-                    "(needs the NGFX Injection SDK); emitted capture-ready marker";
+        case CaptureBackend::PIX: {
+            PixCaptureApi* api = get_pix_api();
+            if (api == nullptr || api->BeginCapture == nullptr || api->EndCapture == nullptr) {
+                break;
+            }
+            // PIX reports no capture path back at End (unlike RenderDoc GetCapture):
+            // the target handed to Begin is the only record of it.
+            const std::string capture_file =
+                (capture_dir.empty() ? scenario : (capture_dir + "/" + scenario)) + ".wpix";
+            // ASCII-by-construction widening (the scenario is sanitized; capture
+            // dirs are repo/artifact paths). PIX copies the params at the call.
+            const std::wstring wide_path(capture_file.begin(), capture_file.end());
+            PixCaptureParameters params;
+            params.gpu_capture_file_name = wide_path.c_str();
+            // 1ul == PIX_CAPTURE_GPU (pix3.h). PIX GPU capture targets D3D -- on the
+            // GL client a real WinPixGpuCapturer fails this HRESULT, reported
+            // honestly below (a real capture needs the DX12 backend,  ).
+            const long begin_hr = api->BeginCapture(1ul, &params);
+            if (begin_hr != 0) {
+                session.diagnostic = "PIXBeginCapture failed (hr=" + std::to_string(begin_hr) +
+                                     "); emitted capture-ready marker";
                 return session;
             }
-            break;
-        }
-        if (api->BeginCapture() != 1u) {
-            session.diagnostic =
-                "Nsight BeginCapture reported failure; emitted capture-ready marker";
+            session.active = true;
+            session.sdk_backend = CaptureBackend::PIX;
+            session.backend = "PIX";
+            session.requested_capture_file = capture_file;
+            session.diagnostic = "PIX programmatic GPU capture started";
             return session;
         }
-        session.active = true;
-        session.sdk_backend = CaptureBackend::Nsight;
-        session.backend = "Nsight";
-        session.diagnostic = "Nsight trigger frame capture started";
-        return session;
-    }
-    case CaptureBackend::MarkerOnly:
-    default:
-        break;
+        case CaptureBackend::Nsight: {
+            NsightCaptureApi* api = get_nsight_api();
+            if (api == nullptr || api->BeginCapture == nullptr || api->EndCapture == nullptr) {
+                if (nsight_injection_detected()) {
+                    session.diagnostic =
+                        "Nsight injection detected but exports no programmatic trigger "
+                        "(needs the NGFX Injection SDK); emitted capture-ready marker";
+                    return session;
+                }
+                break;
+            }
+            if (api->BeginCapture() != 1u) {
+                session.diagnostic =
+                    "Nsight BeginCapture reported failure; emitted capture-ready marker";
+                return session;
+            }
+            session.active = true;
+            session.sdk_backend = CaptureBackend::Nsight;
+            session.backend = "Nsight";
+            session.diagnostic = "Nsight trigger frame capture started";
+            return session;
+        }
+        case CaptureBackend::MarkerOnly:
+        default:
+            break;
     }
 
     session.active = false;
@@ -302,65 +303,66 @@ FrameCaptureResult EndFrameCapture(FrameCaptureSession& session) {
     session.active = false;
 
     switch (session.sdk_backend) {
-    case CaptureBackend::RenderDoc: {
-        RENDERDOC_API_1_6_0* api = get_renderdoc_api();
-        if (api == nullptr) {
-            break;
-        }
-        const uint32_t ended_ok = api->EndFrameCapture(nullptr, nullptr);
-        result.capture_started = (ended_ok == 1u);
-        if (result.capture_started && api->GetNumCaptures != nullptr && api->GetCapture != nullptr) {
-            const uint32_t count = api->GetNumCaptures();
-            if (count > 0u) {
-                uint32_t path_length = 0u;
-                if (api->GetCapture(count - 1u, nullptr, &path_length, nullptr) == 1u && path_length > 0u) {
-                    std::string path(path_length, '\0');
-                    if (api->GetCapture(count - 1u, path.data(), &path_length, nullptr) == 1u) {
-                        // RenderDoc reports the length including the trailing null.
-                        if (!path.empty() && path.back() == '\0') {
-                            path.pop_back();
+        case CaptureBackend::RenderDoc: {
+            RENDERDOC_API_1_6_0* api = get_renderdoc_api();
+            if (api == nullptr) {
+                break;
+            }
+            const uint32_t ended_ok = api->EndFrameCapture(nullptr, nullptr);
+            result.capture_started = (ended_ok == 1u);
+            if (result.capture_started && api->GetNumCaptures != nullptr &&
+                api->GetCapture != nullptr) {
+                const uint32_t count = api->GetNumCaptures();
+                if (count > 0u) {
+                    uint32_t path_length = 0u;
+                    if (api->GetCapture(count - 1u, nullptr, &path_length, nullptr) == 1u &&
+                        path_length > 0u) {
+                        std::string path(path_length, '\0');
+                        if (api->GetCapture(count - 1u, path.data(), &path_length, nullptr) == 1u) {
+                            // RenderDoc reports the length including the trailing null.
+                            if (!path.empty() && path.back() == '\0') {
+                                path.pop_back();
+                            }
+                            result.capture_file = path;
                         }
-                        result.capture_file = path;
                     }
                 }
             }
+            result.diagnostic = result.capture_started
+                                    ? "RenderDoc in-app API capture completed"
+                                    : "RenderDoc EndFrameCapture reported failure";
+            return result;
         }
-        result.diagnostic = result.capture_started
-                                ? "RenderDoc in-app API capture completed"
-                                : "RenderDoc EndFrameCapture reported failure";
-        return result;
-    }
-    case CaptureBackend::PIX: {
-        PixCaptureApi* api = get_pix_api();
-        if (api == nullptr || api->EndCapture == nullptr) {
+        case CaptureBackend::PIX: {
+            PixCaptureApi* api = get_pix_api();
+            if (api == nullptr || api->EndCapture == nullptr) {
+                break;
+            }
+            const long end_hr = api->EndCapture(0 /* discard == FALSE: keep the capture */);
+            result.capture_started = (end_hr == 0);
+            if (result.capture_started) {
+                // PIX reports no path back; this is the target handed to Begin.
+                result.capture_file = session.requested_capture_file;
+            }
+            result.diagnostic = result.capture_started
+                                    ? "PIX programmatic GPU capture completed"
+                                    : "PIXEndCapture failed (hr=" + std::to_string(end_hr) + ")";
+            return result;
+        }
+        case CaptureBackend::Nsight: {
+            NsightCaptureApi* api = get_nsight_api();
+            if (api == nullptr || api->EndCapture == nullptr) {
+                break;
+            }
+            // Nsight owns its capture output location; no path is reported back.
+            result.capture_started = (api->EndCapture() == 1u);
+            result.diagnostic = result.capture_started ? "Nsight trigger capture completed"
+                                                       : "Nsight EndCapture reported failure";
+            return result;
+        }
+        case CaptureBackend::MarkerOnly:
+        default:
             break;
-        }
-        const long end_hr = api->EndCapture(0 /* discard == FALSE: keep the capture */);
-        result.capture_started = (end_hr == 0);
-        if (result.capture_started) {
-            // PIX reports no path back; this is the target handed to Begin.
-            result.capture_file = session.requested_capture_file;
-        }
-        result.diagnostic = result.capture_started
-                                ? "PIX programmatic GPU capture completed"
-                                : "PIXEndCapture failed (hr=" + std::to_string(end_hr) + ")";
-        return result;
-    }
-    case CaptureBackend::Nsight: {
-        NsightCaptureApi* api = get_nsight_api();
-        if (api == nullptr || api->EndCapture == nullptr) {
-            break;
-        }
-        // Nsight owns its capture output location; no path is reported back.
-        result.capture_started = (api->EndCapture() == 1u);
-        result.diagnostic = result.capture_started
-                                ? "Nsight trigger capture completed"
-                                : "Nsight EndCapture reported failure";
-        return result;
-    }
-    case CaptureBackend::MarkerOnly:
-    default:
-        break;
     }
 
     result.capture_started = false;
@@ -372,7 +374,7 @@ namespace detail {
 void SetRenderDocApiForTesting(void* renderdoc_api) {
     g_injected_renderdoc_api = renderdoc_api;
 }
-// GPU-14 seams, cloning the RenderDoc one: pass a PixCaptureApi* /
+//  seams, cloning the RenderDoc one: pass a PixCaptureApi* /
 // NsightCaptureApi* as void*; nullptr resets to real module detection.
 void SetPixApiForTesting(void* pix_api) {
     g_injected_pix_api = pix_api;

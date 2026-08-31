@@ -107,8 +107,8 @@ protected:
     std::string m_elementId;
     Rml::Element* m_element = nullptr;
     Rml::ElementDocument* m_document = nullptr;
-    
-    // RAII property subscriptions; cleared (= unsubscribed) on Destroy()
+
+    // RAII property subscriptions; cleared (= unsubscribed) on Destroy
     // and in the destructor. The bound Property must outlive this component
     // (UI properties live in UIStateManager / manager singletons).
     std::vector<ScopedSubscription> m_bindings;

@@ -1,4 +1,4 @@
-// T-I4-12: LREC1 session replay stream unit tests
+// LREC1 session replay stream unit tests
 // (src/luminumbra_common/replay/ReplayStream.{h,cpp}).
 //
 // These tests lock the ENGINE-GENERIC stream behavior independent of the server:
@@ -40,8 +40,7 @@ fs::path ReplayTempDir() {
 class ReplayStreamTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        const ::testing::TestInfo* info =
-            ::testing::UnitTest::GetInstance()->current_test_info();
+        const ::testing::TestInfo* info = ::testing::UnitTest::GetInstance()->current_test_info();
         m_path = (ReplayTempDir() / (std::string(info->name()) + ".lrec1")).string();
         std::error_code ec;
         fs::remove(m_path, ec);

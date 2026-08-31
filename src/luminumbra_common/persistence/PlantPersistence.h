@@ -1,16 +1,17 @@
 #pragma once
 
-// I9-FOLIAGE Phase 3B: plant PERSISTENCE projection. Projects every PlantTag entity's SIM TRUTH
+//  plant PERSISTENCE projection. Projects every PlantTag entity's SIM TRUTH
 // (genome + integer growth/soil/disease/pollination/lifecycle state + position) into the engine's
-// generic, deterministic EntityRegistrySnapshot (ecs/EntitySnapshot.h) and reconstructs it. Geometry
-// is VISUAL-ONLY and is NOT persisted — only the small integer/genome sim state, so a saved world
-// reloads its crops (stage, genetics, husbandry, health, pollination cross, annual/perennial cycle)
-// byte-exact. There is no runtime component registry, so each component type is projected and rebuilt
-// explicitly by name (the EntitySnapshot `data` is free-form JSON per component).
+// generic, deterministic EntityRegistrySnapshot (ecs/EntitySnapshot.h) and reconstructs it.
+// Geometry is VISUAL-ONLY and is NOT persisted — only the small integer/genome sim state, so a
+// saved world reloads its crops (stage, genetics, husbandry, health, pollination cross,
+// annual/perennial cycle) byte-exact. There is no runtime component registry, so each component
+// type is projected and rebuilt explicitly by name (the EntitySnapshot `data` is free-form JSON per
+// component).
 //
 // DETERMINISM: id-ordered entities, fixed component set + ascending type names (SortEntityRegistry-
-// Snapshot), full nlohmann float precision for genes. An EMPTY roster yields an EMPTY snapshot, so the
-// no-plant save path stays byte-identical.
+// Snapshot), full nlohmann float precision for genes. An EMPTY roster yields an EMPTY snapshot, so
+// the no-plant save path stays byte-identical.
 
 #include <algorithm>
 #include <cstdint>
@@ -29,25 +30,30 @@
 namespace luminumbra::foliage {
 
 namespace pp_detail {
-inline nlohmann::json GenesToJson(const std::array<float, ::Luminumbra::Components::kPlantGeneCount>& g) {
+inline nlohmann::json
+GenesToJson(const std::array<float, ::Luminumbra::Components::kPlantGeneCount>& g) {
     nlohmann::json a = nlohmann::json::array();
-    for (float v : g) a.push_back(v);
+    for (float v : g)
+        a.push_back(v);
     return a;
 }
 inline void GenesFromJson(const nlohmann::json& a,
                           std::array<float, ::Luminumbra::Components::kPlantGeneCount>& g) {
-    for (std::size_t i = 0; i < g.size() && i < a.size(); ++i) g[i] = a[i].get<float>();
+    for (std::size_t i = 0; i < g.size() && i < a.size(); ++i)
+        g[i] = a[i].get<float>();
 }
-}  // namespace pp_detail
+} // namespace pp_detail
 
 // Project all plant entities into a deterministic snapshot. Plants need (at minimum) PlantTag +
 // growth + genome + transform; soil/health/pollination/lifecycle are optional (per-plant opt-in).
-[[nodiscard]] inline ::Luminumbra::Ecs::EntityRegistrySnapshot BuildPlantEntitySnapshot(
-    const entt::registry& reg) {
+[[nodiscard]] inline ::Luminumbra::Ecs::EntityRegistrySnapshot
+BuildPlantEntitySnapshot(const entt::registry& reg) {
     namespace C = ::Luminumbra::Components;
     ::Luminumbra::Ecs::EntityRegistrySnapshot snap;
-    auto view = reg.view<const C::PlantTag, const C::PlantGrowthComponent,
-                         const C::PlantGenomeComponent, const C::TransformComponent>();
+    auto view = reg.view<const C::PlantTag,
+                         const C::PlantGrowthComponent,
+                         const C::PlantGenomeComponent,
+                         const C::TransformComponent>();
     std::vector<entt::entity> ents(view.begin(), view.end());
     std::sort(ents.begin(), ents.end());
     for (auto e : ents) {
@@ -56,8 +62,8 @@ inline void GenesFromJson(const nlohmann::json& a,
         rec.name = "plant";
 
         const auto& tf = reg.get<const C::TransformComponent>(e);
-        rec.components.push_back({"Transform",
-                                  {{"x", tf.position.x}, {"y", tf.position.y}, {"z", tf.position.z}}});
+        rec.components.push_back(
+            {"Transform", {{"x", tf.position.x}, {"y", tf.position.y}, {"z", tf.position.z}}});
 
         const auto& gn = reg.get<const C::PlantGenomeComponent>(e);
         rec.components.push_back({"PlantGenome", {{"genes", pp_detail::GenesToJson(gn.genes)}}});
@@ -85,11 +91,12 @@ inline void GenesFromJson(const nlohmann::json& a,
                                        {"infected_ticks", h->infected_ticks}}});
         }
         if (const auto* pc = reg.try_get<const C::PollinationComponent>(e)) {
-            rec.components.push_back({"Pollination",
-                                      {{"pollinated", pc->pollinated},
-                                       {"last_pollen_tick", pc->last_pollen_tick},
-                                       {"crosses", pc->crosses},
-                                       {"next_genome", pp_detail::GenesToJson(pc->next_genome.genes)}}});
+            rec.components.push_back(
+                {"Pollination",
+                 {{"pollinated", pc->pollinated},
+                  {"last_pollen_tick", pc->last_pollen_tick},
+                  {"crosses", pc->crosses},
+                  {"next_genome", pp_detail::GenesToJson(pc->next_genome.genes)}}});
         }
         if (const auto* lc = reg.try_get<const C::CropLifecycleComponent>(e)) {
             rec.components.push_back({"CropLifecycle",
@@ -111,15 +118,16 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
                                      const ::Luminumbra::Ecs::EntityRegistrySnapshot& snap) {
     namespace C = ::Luminumbra::Components;
     for (const auto& rec : snap.entities) {
-        if (rec.name != "plant") continue;
+        if (rec.name != "plant")
+            continue;
         const auto e = reg.create();
         reg.emplace<C::PlantTag>(e);
         for (const auto& comp : rec.components) {
             const nlohmann::json& d = comp.data;
             if (comp.type == "Transform") {
                 auto& tf = reg.emplace<C::TransformComponent>(e);
-                tf.position = ::Luminumbra::Vec3(d.at("x").get<float>(), d.at("y").get<float>(),
-                                                 d.at("z").get<float>());
+                tf.position = ::Luminumbra::Vec3(
+                    d.at("x").get<float>(), d.at("y").get<float>(), d.at("z").get<float>());
             } else if (comp.type == "PlantGenome") {
                 auto& gn = reg.emplace<C::PlantGenomeComponent>(e);
                 pp_detail::GenesFromJson(d.at("genes"), gn.genes);
@@ -145,9 +153,10 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
                 h.infected_ticks = d.at("infected_ticks").get<std::uint32_t>();
             } else if (comp.type == "Pollination") {
                 // Restore the opt-in TAG too (a marker carries no data, so it isn't serialized): a
-                // persisted PollinationComponent means the plant participated in cross-pollination, and
-                // the pollination tick views PollinationTag — without it a reloaded field would stop
-                // drifting. Co-emplaced with the component (they are always added together at spawn).
+                // persisted PollinationComponent means the plant participated in cross-pollination,
+                // and the pollination tick views PollinationTag — without it a reloaded field would
+                // stop drifting. Co-emplaced with the component (they are always added together at
+                // spawn).
                 reg.emplace<C::PollinationTag>(e);
                 auto& pc = reg.emplace<C::PollinationComponent>(e);
                 pc.pollinated = d.at("pollinated").get<bool>();
@@ -166,4 +175,4 @@ inline void ApplyPlantEntitySnapshot(entt::registry& reg,
     }
 }
 
-}  // namespace luminumbra::foliage
+} // namespace luminumbra::foliage

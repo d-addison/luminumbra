@@ -1,10 +1,10 @@
 #pragma once
 
-// T-I5b-2 (E1): ecology stimulus-channel REGISTRY feeding the InstinctSystem
-// planner. Extends the T-I3-18 single-channel (light_stimulus) pattern to a
+// Ecology stimulus-channel registry feeding the InstinctSystem
+// planner. Extends the  single-channel (light_stimulus) pattern to a
 // registry of named environmental channels the planner samples per tick.
 //
-// DESIGN (design-decisions.md engine-iteration-5b §3, critique F1).
+// Deterministic runtime contract:
 //   * The engine knows only "channel -> scalar stimulus in [0, 1]". Creature
 //     REACTIONS (shelter in rain, dawn activity) are GAME DATA: an archetype
 //     opts a creature in via a StimulusSubscriptionComponent listing
@@ -26,8 +26,8 @@
 
 #include <cstdint>
 
-#include "../systems/WeatherSystem.h"
 #include "../../../include/luminumbra/core/Types.h"
+#include "../systems/WeatherSystem.h"
 
 namespace luminumbra::ai {
 
@@ -35,15 +35,15 @@ namespace luminumbra::ai {
 // canonical iteration order (stable for any hashing of subscription state).
 // Append-only: never reorder/reuse a slot.
 enum class StimulusChannel : std::uint8_t {
-    Weather = 0,      // precipitation intensity at the sampled position [0, 1]
-    Temperature = 1,  // local temperature, normalized cold->hot [0, 1]
-    TimeOfDay = 2,    // day fraction stimulus: 0 at night, 1 at midday [0, 1]
-    Season = 3,       // season phase stimulus: spring/autumn ~0.5, summer 1, winter 0
-    LightLevel = 4,   // ambient light level [0, 1] (0 dark, 1 full daylight)
-    Aether = 5,       // composite energy environment [0, 1] (spec 024 AETHER-12):
-                      // the stateful layer when sim.aether_state is ON, else the
-                      // re-derivable ambience. The CALLER supplies the
-                      // already-sampled scalar via StimulusContext::aether_level.
+    Weather = 0,     // precipitation intensity at the sampled position [0, 1]
+    Temperature = 1, // local temperature, normalized cold->hot [0, 1]
+    TimeOfDay = 2,   // day fraction stimulus: 0 at night, 1 at midday [0, 1]
+    Season = 3,      // season phase stimulus: spring/autumn ~0.5, summer 1, winter 0
+    LightLevel = 4,  // ambient light level [0, 1] (0 dark, 1 full daylight)
+    Aether = 5,      // composite energy environment [0, 1] ():
+                     // the stateful layer when sim.aether_state is ON, else the
+                     // re-derivable ambience. The CALLER supplies the
+                     // already-sampled scalar via StimulusContext::aether_level.
 };
 inline constexpr int kStimulusChannelCount = 6;
 const char* StimulusChannelName(StimulusChannel channel) noexcept;
@@ -54,7 +54,7 @@ const char* StimulusChannelName(StimulusChannel channel) noexcept;
 // channel is a pure function of (tick % kTicksPerDayCycle).
 inline constexpr std::uint64_t kTicksPerDayCycle = 7200ull;
 
-// PINNED season-cycle period (ticks). Mirrors the C2 render-side season cycle
+// PINNED season-cycle period (ticks). Mirrors the  render-side season cycle
 // (RenderPipeline kTicksPerSeasonCycle = 432000 = 4 h at 30 Hz) so the engine
 // Season channel and the render season palette agree on the same tick.
 inline constexpr std::uint64_t kTicksPerSeasonCycle = 432000ull;
@@ -81,7 +81,7 @@ struct StimulusContext {
     // caller has no light system it leaves this < 0 and the LightLevel channel
     // derives a deterministic day/night curve from the tick instead.
     float ambient_light = -1.0f;
-    // Spec 024 (AETHER-12): composite energy-environment level [0, 1] at the
+    // composite energy-environment level [0, 1] at the
     // sample position. Same contract as ambient_light: the CALLER supplies the
     // already-sampled scalar and the registry never touches a field system --
     // the stateful EnergyFieldState cell (normalized by the pinned
@@ -110,7 +110,9 @@ public:
     // channel is computed.
     [[nodiscard]] float Sample(StimulusChannel channel) const noexcept;
 
-    [[nodiscard]] const StimulusContext& context() const noexcept { return m_context; }
+    [[nodiscard]] const StimulusContext& context() const noexcept {
+        return m_context;
+    }
 
 private:
     [[nodiscard]] float SampleWeather() const noexcept;

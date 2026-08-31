@@ -174,7 +174,7 @@
       "is_3d": true
     },
     "ambient_night": {
-      "_placeholder_note": "AUDIO-07 PLACEHOLDER: no crickets/owls asset exists in the sfx bank yet, so the NIGHT bed reuses the forest-rustle loop at LOW volume. Replace files[] with a real night-ambience loop (crickets + occasional owl) via the ElevenLabs pipeline (AUDIO-14). The bank loader ignores this key.",
+      "_fallback_note": "Degraded-mode fallback: the optional local audio bank may omit a dedicated night bed, so this event intentionally reuses forest rustle at low volume. The bank loader ignores this descriptive key.",
       "files": ["assets/audio/sfx/environment/forest_rustle.mp3"],
       "volume": 0.14,
       "is_3d": true
@@ -185,7 +185,7 @@
       "is_3d": true
     },
     "waterfall_roar": {
-      "_placeholder_note": "AUDIO-06 PLACEHOLDER: reuses water_stream.mp3 until a real deep-roar asset lands via the ElevenLabs pipeline (AUDIO-14). Volume driven live by ComputeWaterfallRoar.",
+      "_fallback_note": "Degraded-mode fallback: the optional local audio bank intentionally reuses the stream event for waterfalls. ComputeWaterfallRoar drives its live volume. The bank loader ignores this descriptive key.",
       "files": ["assets/audio/sfx/environment/water_stream.mp3"],
       "volume": 0.55,
       "is_3d": true

@@ -599,7 +599,7 @@ body#gallery {
     border-color: transparent;
 }
 
-/* Placeholder thumbnail tile — a soft warm field with a vignette. */
+/* Default thumbnail tile: a soft warm field with a vignette. */
 .photo-thumb {
     width: 100%;
     height: 132px;

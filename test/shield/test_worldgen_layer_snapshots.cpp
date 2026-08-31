@@ -160,7 +160,7 @@ TerrainGenParams WaterLayerParams() {
 }
 
 TerrainGenParams LoadPresetParams(const fs::path& path) {
-    // T-I3-5: delegate to the canonical engine preset parser.
+    // delegate to the canonical engine preset parser.
     const Luminumbra::world::TerrainPresetLoadResult result =
         Luminumbra::world::LoadTerrainPreset(path);
     EXPECT_TRUE(result.ok) << path.string();
@@ -765,7 +765,7 @@ TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
     PhysicsSystem physics;
     physics.startup();
 
-    // The preview centers on (8, 40, 8), surface radius 4 / collision 0, then update()s (which
+    // The preview centers on (8, 40, 8), surface radius 4 / collision 0, then updates (which
     // now also ticks the water system + generates water meshes for the lake/ocean).
     const Vec3 center(8.0f, 40.0f, 8.0f);
     world.EnsureSurfaceReadyNear(center, &physics, 4, 0);
@@ -826,7 +826,7 @@ TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborho
     const Vec3 spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f);
     const std::vector<IVec3> initial_chunks = world.GetInitialChunkLoadList(spawn);
 
-    // DELIBERATE expectation update (T-I3-2): the initial load list used to
+    // DELIBERATE expectation update: the initial load list used to
     // emit exactly 3 chunks per column (center-point surface sample +-1, the
     // old 25*25*3 constant). It now emits the column's 5-point surface SPAN
     // (min..max chunk-Y across the column center + 4 footprint corners) plus
@@ -1005,7 +1005,7 @@ TEST(WorldGenLayerSnapshotTest, LodRemeshKeepsPreviousMeshRenderableWhilePending
 }
 
 TEST(WorldGenLayerSnapshotTest, ExplicitEnsureSurfaceReadyNearMakesTeleportNearFieldRenderable) {
-    // T-I4-DR-churn-perf: engine streaming is fully asynchronous - it does NOT
+    // engine streaming is fully asynchronous - it does NOT
     // synchronously catch the near field up on a camera discontinuity (the old
     // ee4f378 engine-side auto-catch-up was removed because churn workloads,
     // which jump every frame, turned it into a per-frame synchronous meshing
@@ -1013,7 +1013,7 @@ TEST(WorldGenLayerSnapshotTest, ExplicitEnsureSurfaceReadyNearMakesTeleportNearF
     // scenarios that need a guaranteed-renderable near field in the exact frame
     // they screenshot (LodGround/FarLod) instead call EnsureSurfaceReadyNear
     // explicitly BEFORE the capture. This pins that contract: after a teleport,
-    // a streaming update() alone does NOT immediately make the destination near
+    // a streaming update alone does NOT immediately make the destination near
     // field fully renderable (async), but an explicit EnsureSurfaceReadyNear
     // call does - 49/49 renderable, no holes - which is exactly what the
     // pre-capture call provides to the LodGround coverage gate.
@@ -1074,15 +1074,15 @@ TEST(WorldGenLayerSnapshotTest, ExplicitEnsureSurfaceReadyNearMakesTeleportNearF
 }
 
 TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
-    // T-I3-2 (F4): the camera-relative vertical unload test evicted surface
+    // the camera-relative vertical unload test evicted surface
     // chunks of tall peaks (> 10 chunk-Ys above the camera), which the
     // surface scan immediately re-candidated - a churn loop that left holes
     // on mountain summits. Chunks inside their column's surface band must be
     // exempt from the vertical test; chunks far off the surface still unload.
     TerrainGenParams params;
     params.base_frequency = 0.01f;
-    params.base_amplitude = 0.0f;  // flat world ...
-    params.height_offset = 200.0f; // ... with its surface in chunk-Y 12
+    params.base_amplitude = 0.0f;  // flat world...
+    params.height_offset = 200.0f; //... with its surface in chunk-Y 12
     params.caves_enabled = false;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
@@ -1108,9 +1108,9 @@ TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
 }
 
 TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudget) {
-    // T-I3-2 budget proof: the steady-state activation wanted set with
+    //  budget proof: the steady-state activation wanted set with
     // 5-point surface spans must fit the 8192 active-chunk budget on the
-    // worst-case params (frozen copy of the pre-T-I3-11 mountains preset:
+    // worst-case params (frozen copy of the pre- mountains preset:
     // amplitude 120, 6 octaves, no shaping - the shipped shaped mountains
     // is strictly gentler, so this stays the upper bound; the PlayerView
     // gate checks the live budget on the shipped preset at runtime). The
@@ -1189,7 +1189,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudg
 }
 
 // ---------------------------------------------------------------------------
-// T-I3-10 terrain shaping gates
+//  terrain shaping gates
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -1238,9 +1238,9 @@ constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gc
 }
 
 // Frozen copies of the five shipped presets' terrain params as of the commit
-// BEFORE T-I3-10 (shaping defaults off). These fixtures deliberately do NOT
+// BEFORE  (shaping defaults off). These fixtures deliberately do NOT
 // load the preset JSON files: shipped presets may later opt into shaping
-// (T-I3-11), but legacy params must keep producing bit-identical heights
+//, but legacy params must keep producing bit-identical heights
 // forever. The expected hashes were captured by running this exact grid hash
 // against the pre-shaping GetTerrainHeightAt implementation.
 std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
@@ -1318,10 +1318,10 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
 
 } // namespace
 
-// T-I3-10 zero-hash-drift proof: legacy params (shaping_enabled == false, the
+//  zero-hash-drift proof: legacy params (shaping_enabled == false, the
 // default) must produce heights bit-identical to the pre-shaping
 // implementation. Hashes captured pre-change; any drift here is a
-// review-blocking defect, never a re-bless.
+// review-blocking defect, never a update the baseline.
 TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) {
     for (const LegacyPresetHeightFixture& fixture : LegacyPresetHeightFixtures()) {
         SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
@@ -1335,14 +1335,14 @@ TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) 
     }
 }
 
-// T-I3-22 slice polish: CURRENT shipped-preset terrain hash. Unlike the
+//  slice polish: CURRENT shipped-preset terrain hash. Unlike the
 // legacy fixture above (frozen pre-shaping params, must NEVER change), this
 // gate loads the LIVE preset JSON through the canonical loader and hashes the
 // resulting GetTerrainHeightAt grid. It catches accidental drift in a shipped
 // preset's generated terrain AND forces any deliberate preset edit to bump the
 // expected hash in the same commit (documented in the commit message).
 //
-// The archipelago hash was bumped deliberately in T-I3-22 when the schema_rev
+// The archipelago hash was bumped deliberately in  when the schema_rev
 // 2 `shaping` block was added (spiky-blade shores -> rolling shores / walkable
 // interiors). The pre-shaping archipelago hash (0xc075cf55c182393c) is frozen
 // forever in the LEGACY fixture above as the default-off shaping proof.
@@ -1350,15 +1350,15 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/archipelago.json";
     const TerrainGenParams params = LoadPresetParams(preset);
     ASSERT_TRUE(params.shaping_enabled)
-        << "archipelago.json must carry an enabled shaping block (T-I3-22)";
+        << "archipelago.json must carry an enabled shaping block ()";
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     const std::uint64_t hash = HashTerrainHeightGrid(world);
     std::cout << "[ CURRENTHASH ] archipelago seed=" << kSeed << " hash=0x" << std::hex
               << std::setfill('0') << std::setw(16) << hash << std::dec << std::setfill(' ')
               << std::endl;
-    // DELIBERATE BUMP (T-I3-22 slice polish). Before (legacy, shaping-off):
+    // DELIBERATE BUMP ( slice polish). Before (legacy, shaping-off):
     // 0xc075cf55c182393c. After (schema_rev 2 shaping): 0x940d621a2e3c0436.
-    // T-I6-A2b-2 DELIBERATE BUMP: GENTLE hydraulic relief enabled on the
+    //  DELIBERATE BUMP: GENTLE hydraulic relief enabled on the
     // archipelago preset (the player walks the eroded surface). Tuned subtle
     // (iterations 10, talus 2.5, max_offset 4) so the walkable-interior +
     // self-affine gates below still pass (land_h_p95 7.85>6; spectral beta 2.70 in
@@ -1374,7 +1374,7 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
 
 namespace {
 
-// Synthetic shaping params for the T-I3-10 parity/determinism gates (engine
+// Synthetic shaping params for the  parity/determinism gates (engine
 // tests must not depend on game preset data choices).
 TerrainGenParams ShapingTestParams() {
     TerrainGenParams params;
@@ -1402,7 +1402,7 @@ TerrainGenParams ShapingTestParams() {
 
 } // namespace
 
-// T-I3-10 batch-vs-scalar parity: with shaping enabled, every generation path
+//  batch-vs-scalar parity: with shaping enabled, every generation path
 // computes heights through the one shared scalar helper (GenSingle* APIs in
 // both the scalar and batch paths), so the batch heightmap bytes must be
 // EXACTLY equal (==, no epsilon) to GetTerrainHeightAt at the same world
@@ -1455,11 +1455,11 @@ TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
     }
 }
 
-// T-I6-A2b: hydraulic relief (decision a). With hydro enabled the baked erosion
+// hydraulic relief (decision a). With hydro enabled the baked erosion
 // offset must (1) actually shift terrain height vs the hydro-off world, (2) be
 // deterministic across two worlds, and (3) keep the chunk-batch heightmap path
 // BYTE-IDENTICAL to the scalar GetTerrainHeightAt (both add the same offset).
-// This is the integration gate; the kernel itself is covered by the A2a unit
+// This is the integration gate; the kernel itself is covered by the hydraulic erosion kernel unit
 // tests (determinism + halo-independence).
 TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndKeepsBatchParity) {
     TerrainGenParams off_params = ShapingTestParams();
@@ -1489,7 +1489,7 @@ TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndK
 
     // Position-array batch (ComputeShapedHeightsAtPositions, used for runtime
     // surface-spans) must include the hydro offset too -> byte-identical to the
-    // scalar GetTerrainHeightAt with hydro on (T-I6-A2 surface-span consistency).
+    // scalar GetTerrainHeightAt with hydro on ( surface-span consistency).
     {
         std::vector<float> pxs, pzs;
         for (int z = -120; z <= 120; z += 31) {
@@ -1527,7 +1527,7 @@ TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndK
     }
 }
 
-// T-I4-DR-shaping-perf: the SIMD-batched position-array shaped-height helper
+// the SIMD-batched position-array shaped-height helper
 // (ComputeShapedHeightsAtPositions, used to batch the per-column surface-span
 // corner samples) must return heights BYTE-IDENTICAL to the scalar
 // GetTerrainHeightAt at arbitrary (warped, non-grid) world coordinates. If a
@@ -1554,7 +1554,7 @@ TEST(WorldGenLayerSnapshotTest, ShapedHeightPositionArrayPathExactlyMatchesScala
     }
 }
 
-// T-I4-DR-shaping-perf: the SIMD-batched material classifier
+// the SIMD-batched material classifier
 // (ClassifyVertexMaterials, used by the LOD0 marching-cubes mesher) must return
 // the SAME material id per vertex as the per-vertex surface classification it
 // replaced. Verified against the public-API equivalent of
@@ -1611,7 +1611,7 @@ TEST(WorldGenLayerSnapshotTest, BatchedVertexMaterialsMatchPerVertexClassificati
     }
 }
 
-// T-I3-10: generation with shaping ON stays deterministic for a fixed seed
+// generation with shaping ON stays deterministic for a fixed seed
 // (two independent systems produce byte-identical SDF + heightmap), and a
 // different seed produces different terrain (the control channels actually
 // consume the seed offsets).
@@ -1642,7 +1642,7 @@ TEST(WorldGenLayerSnapshotTest, ShapedGenerationIsDeterministicWithSameSeed) {
 }
 
 // ---------------------------------------------------------------------------
-// T-I4-1 biome selection.
+//  biome selection.
 //
 // The shipped biome table loads, its lookup is deterministic and resolves the
 // documented edge cases (clamping at the domain edges, overlapping ranges =
@@ -1676,7 +1676,7 @@ TEST(WorldGenLayerSnapshotTest, BiomeTableLoadsAuthoredBiomes) {
     ASSERT_TRUE(table.ok()) << "errors: "
                             << (table.errors().empty() ? "<none>" : table.errors().front());
     EXPECT_TRUE(table.errors().empty());
-    EXPECT_GE(table.size(), 4u) << "design-decisions section 2 mandates 4-6 authored biomes";
+    EXPECT_GE(table.size(), 4u) << "documented design mandates 4-6 authored biomes";
     EXPECT_LE(table.size(), 6u);
     EXPECT_NE(table.content_hash(), 0u);
 
@@ -1703,7 +1703,7 @@ TEST(WorldGenLayerSnapshotTest, BiomeLookupResolvesEdgeCasesDeterministically) {
     using Luminumbra::World::BiomeClimateRange;
     using Luminumbra::World::kNoBiome;
 
-    // Range contains() contract: inclusive-min, exclusive-max, with the domain
+    // Range contains contract: inclusive-min, exclusive-max, with the domain
     // ceiling 1.0 inclusive so a value sitting exactly at the top resolves.
     const BiomeClimateRange r{0.0f, 0.5f};
     EXPECT_TRUE(r.contains(0.0f)); // inclusive min
@@ -1793,7 +1793,7 @@ TEST(WorldGenLayerSnapshotTest, BiomesDisabledIsByteZeroDrift) {
     EXPECT_EQ(legacy_chunk.mesh_vertices.size(), reference_chunk.mesh_vertices.size());
 }
 
-// T-I4-2 BiomeCoverage source: a CPU atlas sweep over the shipped mountains
+//  BiomeCoverage source: a CPU atlas sweep over the shipped mountains
 // preset (biomes ENABLED) at the fixed atlas seed. Asserts every authored
 // biome is present in the window and per-biome surface-material distribution
 // bands hold, then writes biome-coverage.json for the BiomeCoverage validator
@@ -1803,7 +1803,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsBiomeCoverageAtlas) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/mountains.json";
     ASSERT_TRUE(fs::exists(preset)) << preset.string();
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.biomes_enabled) << "mountains must opt into biomes (T-I4-2)";
+    ASSERT_TRUE(params.biomes_enabled) << "mountains must opt into biomes ()";
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     ASSERT_TRUE(world.biomes_enabled());
@@ -1925,7 +1925,7 @@ TEST(WorldGenLayerSnapshotTest, MountainsBiomeCoverageAtlas) {
               << std::setfill('0') << table.content_hash() << std::dec << "\n";
 }
 
-// T-I4-3 RiverPresence source: a CPU sweep over the shipped mountains preset
+//  RiverPresence source: a CPU sweep over the shipped mountains preset
 // (rivers ENABLED) at the atlas seed. Asserts (a) rivers are actually present,
 // (b) every river column's folded PV sits in the authored valleys band, (c) the
 // channel carves terrain to a waterline (below SEA_LEVEL, so the existing global
@@ -1936,12 +1936,12 @@ TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/mountains.json";
     ASSERT_TRUE(fs::exists(preset)) << preset.string();
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.rivers_enabled) << "mountains must opt into rivers (T-I4-3)";
+    ASSERT_TRUE(params.rivers_enabled) << "mountains must opt into rivers ()";
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
 
     // 256 x 256 m window at 4 m spacing centered on the origin (the river
-    // sampling lattice matches the F1 far-tile step so near/far agree).
+    // sampling lattice matches the  far-tile step so near/far agree).
     constexpr int kHalf = 768;
     constexpr int kStep = 4;
     const int side = (2 * kHalf) / kStep + 1;
@@ -2026,9 +2026,9 @@ TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
 }
 
 // ---------------------------------------------------------------------------
-// T-I3-11 slope-histogram atlas gate.
+//  slope-histogram atlas gate.
 //
-// Decision (T-I3-11): the slope gate is folded into the worldgen atlas ctest
+// Decision: the slope gate is folded into the worldgen atlas ctest
 // (this file / worldgen_layer_snapshot_test target) rather than wired as a new
 // validator mode - it is a pure deterministic function of preset params + the
 // fixed kSeed, needs no client executable, and therefore runs on every full
@@ -2060,7 +2060,7 @@ struct SlopeHistogramMetrics {
     double cliff_fraction = 0.0;        // slope > 60 deg
     // Normal land: walkable-ish slope at habitable height (owner complaint).
     double normal_land_fraction = 0.0; // slope < 20 deg AND height in [sea+2, sea+40]
-    // Land-restricted walkability (T-I3-22): for mostly-ocean presets
+    // Land-restricted walkability: for mostly-ocean presets
     // (archipelago) the whole-grid fractions are dominated by the flat sea
     // floor, so island quality is invisible in them. These restrict the
     // slope spectrum to dry land (height > sea+1) — the surface a player
@@ -2074,7 +2074,7 @@ struct SlopeHistogramMetrics {
     float height_p10 = 0.0f;
     float height_p50 = 0.0f;
     float height_p95 = 0.0f;
-    // 5-degree slope histogram bins [0,5), [5,10), ... [85,90].
+    // 5-degree slope histogram bins [0,5), [5,10),... [85,90].
     std::array<std::size_t, 18> slope_bins{};
 };
 
@@ -2284,7 +2284,7 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetSlopeHistogramsMeetWalkabilityGate
     const SlopeHistogramMetrics& default_preset = find_preset("default");
     EXPECT_GT(default_preset.walkable_fraction, 0.60) << "default walkable(<25deg) fraction";
 
-    // Shaped mountains (T-I3-11): dramatic peaks BUT walkable valleys and
+    // Shaped mountains: dramatic peaks BUT walkable valleys and
     // plateaus - the measurable encoding of "lots of really jagged mountains,
     // no normal land".
     const SlopeHistogramMetrics& mountains = find_preset("mountains");
@@ -2295,14 +2295,14 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetSlopeHistogramsMeetWalkabilityGate
     // and real mountains, not a uniform mid-slope scramble...
     EXPECT_GT(mountains.flat_fraction, 0.20) << "mountains flat(<15deg) mass";
     EXPECT_GT(mountains.steep_fraction, 0.05) << "mountains steep(>35deg) mass";
-    // ...and the height distribution must be plains-mode-heavy with a long
+    //...and the height distribution must be plains-mode-heavy with a long
     // peak tail (panel-1 bimodality approximation: the p10->p50 height span
     // stays under 35% of the p10->p95 relief span).
     EXPECT_LT(mountains.height_p50 - mountains.height_p10,
               0.35f * (mountains.height_p95 - mountains.height_p10))
         << "mountains relief spectrum is not bimodal (no plains mode)";
 
-    // Shaped archipelago (T-I3-22 slice polish): islands must keep their
+    // Shaped archipelago ( slice polish): islands must keep their
     // identity (a deep ocean still dominates the grid, so whole-grid
     // habitable-land fractions stay near zero by construction) BUT lose the
     // spiky-blade silhouette — rolling shores and walkable interiors. The
@@ -2332,7 +2332,7 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetSlopeHistogramsMeetWalkabilityGate
 }
 
 // ---------------------------------------------------------------------------
-// T-I4-DR-terrain-realism: DEM-grounded TerrainRealism gate.
+// DEM-grounded TerrainRealism gate.
 //
 // The walkability gate above encodes the OWNER COMPLAINT (jagged/no-normal-
 // land). This gate grounds the presets in REAL-WORLD DEM statistics so the
@@ -2354,7 +2354,7 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetSlopeHistogramsMeetWalkabilityGate
 // The spectral beta target is the PUBLISHED self-affine band (1.8-2.2), not
 // the resampling-biased tile beta (see fixture reference_beta_band).
 //
-// Preset -> landscape class (declared here; design-decisions / roadmap):
+// Preset-to-landscape-class mapping exercised by these snapshots:
 //   flat_lands -> plains, mountains -> alpine, archipelago -> coastal,
 //   default/temperate_forest -> foothills.
 // ---------------------------------------------------------------------------
@@ -2362,13 +2362,13 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetSlopeHistogramsMeetWalkabilityGate
 namespace {
 
 // 256x256 sample window. The sample SPACING is adaptive per preset: it is set
-// so the window spans a fixed number of base-frequency wavelengths
+// so the window spans a fixed number of base-frequency
 // (kWindowWavelengths), which normalizes the octave coverage across presets
 // whose base frequencies differ by 2x. This makes the dimensionless spectral
 // beta a FAIR cross-preset comparison (beta is scale-free for a true fractal);
 // slope magnitude is then preset-relative and gated as SHAPE vs the DEM ref.
 constexpr int kRealismGrid = 256;
-constexpr float kWindowWavelengths = 24.0f; // base-frequency wavelengths per window
+constexpr float kWindowWavelengths = 24.0f; // base-frequency  per window
 
 struct RealismMetrics {
     std::string preset;
@@ -2771,7 +2771,7 @@ void WriteRealismReliefPpm(const RealismMetrics& m, const fs::path& path) {
 // requirement), which statistically matches the foothills HI signature
 // (HI~0.29, dissected) rather than the alpine plateau signature (HI~0.51).
 // Its SLOPE p95 still reaches alpine-class steepness (the peaks) - asserted
-// directly below against the alpine reference. design-decisions allows the
+// directly below against the alpine reference. The landscape contract allows the
 // "mountains -> alpine/foothills" mapping.
 std::string LandscapeClassFor(const std::string& preset) {
     if (preset == "flat_lands")
@@ -2826,7 +2826,7 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetsMeetDemReferenceRealismBands) {
         const std::string klass = LandscapeClassFor(preset_name);
         const TerrainGenParams params = LoadPresetParams(entry.path());
         SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
-        // Adaptive spacing: window spans kWindowWavelengths base wavelengths, so
+        // Adaptive spacing: window spans kWindowWavelengths base, so
         // spacing = (kWindowWavelengths / base_frequency) / kRealismGrid. Clamp
         // base_frequency to a sane floor so a degenerate preset cannot blow up
         // the window.
@@ -2882,7 +2882,7 @@ TEST(WorldGenLayerSnapshotTest, AuthoredPresetsMeetDemReferenceRealismBands) {
             << ") hypsometric integral above DEM reference band";
     }
 
-    // Class-specific slope-shape grounding (base-wavelength-normalized window):
+    // Class-specific slope-shape grounding (base--normalized window):
     // plains (flat_lands) must be nearly flat like the Kansas patch.
     const RealismMetrics& plains = find("flat_lands").first;
     const RealismBand& plains_b = find("flat_lands").second;

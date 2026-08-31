@@ -1,5 +1,5 @@
-// Track game.photo_filters — a PURE, DETERMINISTIC post-capture FILTER/grade scorer
-// (pillar G: how well a chosen colour grade SUITS a shot). These tests pin the
+// game.photo_filters: a PURE, DETERMINISTIC post-capture FILTER/grade scorer
+// (photography: how well a chosen colour grade SUITS a shot). These tests pin the
 // rubric: Noir suits low-light/high-contrast scenes (beating Vivid there); Warm and
 // Cool are mirror images keyed on scene warmth; Vivid rewards saturated subjects in
 // good light; BestFilter returns the max-total filter; every score stays in [0,1];
@@ -11,50 +11,50 @@
 
 namespace {
 
-using luminumbra::game::PhotoFilter;
+using luminumbra::game::BestFilter;
 using luminumbra::game::FilterContext;
 using luminumbra::game::FilterScore;
-using luminumbra::game::ScoreFilter;
-using luminumbra::game::BestFilter;
 using luminumbra::game::kPhotoFilterCount;
+using luminumbra::game::PhotoFilter;
+using luminumbra::game::ScoreFilter;
 
 // A low-light, high-contrast scene with little usable colour — classic noir setup.
 FilterContext noirScene() {
     FilterContext c;
-    c.scene_warmth01       = 0.45f;
-    c.scene_contrast01     = 0.9f;
+    c.scene_warmth01 = 0.45f;
+    c.scene_contrast01 = 0.9f;
     c.subject_saturation01 = 0.25f;
-    c.low_light01          = 0.9f;
+    c.low_light01 = 0.9f;
     return c;
 }
 
 // A warm, golden-hour scene: high warmth, bright, moderate contrast + colour.
 FilterContext warmScene() {
     FilterContext c;
-    c.scene_warmth01       = 0.92f;
-    c.scene_contrast01     = 0.5f;
+    c.scene_warmth01 = 0.92f;
+    c.scene_contrast01 = 0.5f;
     c.subject_saturation01 = 0.6f;
-    c.low_light01          = 0.2f;
+    c.low_light01 = 0.2f;
     return c;
 }
 
 // A cold, blue scene: low warmth, bright, moderate contrast.
 FilterContext coolScene() {
     FilterContext c;
-    c.scene_warmth01       = 0.08f;
-    c.scene_contrast01     = 0.5f;
+    c.scene_warmth01 = 0.08f;
+    c.scene_contrast01 = 0.5f;
     c.subject_saturation01 = 0.5f;
-    c.low_light01          = 0.2f;
+    c.low_light01 = 0.2f;
     return c;
 }
 
 // A bright scene with a richly saturated subject — made for Vivid.
 FilterContext vividScene() {
     FilterContext c;
-    c.scene_warmth01       = 0.5f;
-    c.scene_contrast01     = 0.5f;
+    c.scene_warmth01 = 0.5f;
+    c.scene_contrast01 = 0.5f;
     c.subject_saturation01 = 0.95f;
-    c.low_light01          = 0.05f;
+    c.low_light01 = 0.05f;
     return c;
 }
 
@@ -64,7 +64,7 @@ FilterContext vividScene() {
 // dark frame is exactly noir's wheelhouse and exactly where vivid colour fails.
 TEST(PhotoFilters, NoirBeatsVividOnLowLightHighContrast) {
     const FilterContext c = noirScene();
-    const float noir  = ScoreFilter(PhotoFilter::Noir, c).total;
+    const float noir = ScoreFilter(PhotoFilter::Noir, c).total;
     const float vivid = ScoreFilter(PhotoFilter::Vivid, c).total;
     EXPECT_GT(noir, vivid);
 }
@@ -74,9 +74,9 @@ TEST(PhotoFilters, NoirBeatsVividOnLowLightHighContrast) {
 TEST(PhotoFilters, NoirSuitabilityTracksDarknessAndContrast) {
     FilterContext bright;
     bright.scene_contrast01 = 0.1f;
-    bright.low_light01      = 0.1f;
+    bright.low_light01 = 0.1f;
     const float dark_total = ScoreFilter(PhotoFilter::Noir, noirScene()).total;
-    const float lit_total  = ScoreFilter(PhotoFilter::Noir, bright).total;
+    const float lit_total = ScoreFilter(PhotoFilter::Noir, bright).total;
     EXPECT_GT(dark_total, lit_total);
 }
 
@@ -85,15 +85,13 @@ TEST(PhotoFilters, NoirSuitabilityTracksDarknessAndContrast) {
 // On a warm/golden scene, the Warm grade beats the Cool grade.
 TEST(PhotoFilters, WarmBeatsCoolOnWarmScene) {
     const FilterContext c = warmScene();
-    EXPECT_GT(ScoreFilter(PhotoFilter::Warm, c).total,
-              ScoreFilter(PhotoFilter::Cool, c).total);
+    EXPECT_GT(ScoreFilter(PhotoFilter::Warm, c).total, ScoreFilter(PhotoFilter::Cool, c).total);
 }
 
 // On a cold/blue scene, the Cool grade beats the Warm grade (the mirror).
 TEST(PhotoFilters, CoolBeatsWarmOnCoolScene) {
     const FilterContext c = coolScene();
-    EXPECT_GT(ScoreFilter(PhotoFilter::Cool, c).total,
-              ScoreFilter(PhotoFilter::Warm, c).total);
+    EXPECT_GT(ScoreFilter(PhotoFilter::Cool, c).total, ScoreFilter(PhotoFilter::Warm, c).total);
 }
 
 // ---- VIVID ----
@@ -112,8 +110,7 @@ TEST(PhotoFilters, VividRewardsSaturatedSubjectsInGoodLight) {
 // Noir there (the inverse of the noir-scene case).
 TEST(PhotoFilters, VividBeatsNoirOnBrightSaturatedScene) {
     const FilterContext c = vividScene();
-    EXPECT_GT(ScoreFilter(PhotoFilter::Vivid, c).total,
-              ScoreFilter(PhotoFilter::Noir, c).total);
+    EXPECT_GT(ScoreFilter(PhotoFilter::Vivid, c).total, ScoreFilter(PhotoFilter::Noir, c).total);
 }
 
 // ---- BestFilter ----
@@ -122,7 +119,10 @@ TEST(PhotoFilters, VividBeatsNoirOnBrightSaturatedScene) {
 // independent brute-force scan over every filter for several distinct scenes.
 TEST(PhotoFilters, BestFilterReturnsMaxTotal) {
     const FilterContext scenes[] = {
-        noirScene(), warmScene(), coolScene(), vividScene(),
+        noirScene(),
+        warmScene(),
+        coolScene(),
+        vividScene(),
     };
     for (const auto& c : scenes) {
         const PhotoFilter best = BestFilter(c);
@@ -146,19 +146,19 @@ TEST(PhotoFilters, BestFilterPicksExpectedLook) {
 // Every field of every filter's score stays within [0,1] across a strong, neutral,
 // and deliberately out-of-range FilterContext.
 TEST(PhotoFilters, ScoresAreClampedToUnitRange) {
-    FilterContext over;     // out-of-range on purpose: must still clamp
-    over.scene_warmth01       = 2.0f;
-    over.scene_contrast01     = -1.0f;
+    FilterContext over; // out-of-range on purpose: must still clamp
+    over.scene_warmth01 = 2.0f;
+    over.scene_contrast01 = -1.0f;
     over.subject_saturation01 = 5.0f;
-    over.low_light01          = -3.0f;
+    over.low_light01 = -3.0f;
 
     FilterContext neutral; // all defaults (0.5)
 
-    const FilterContext scenes[] = { noirScene(), warmScene(), neutral, over };
+    const FilterContext scenes[] = {noirScene(), warmScene(), neutral, over};
     for (const auto& c : scenes) {
         for (int i = 0; i < kPhotoFilterCount; ++i) {
             const FilterScore s = ScoreFilter(static_cast<PhotoFilter>(i), c);
-            for (float v : { s.suitability, s.mood, s.total }) {
+            for (float v : {s.suitability, s.mood, s.total}) {
                 EXPECT_GE(v, 0.0f);
                 EXPECT_LE(v, 1.0f);
             }
@@ -172,10 +172,10 @@ TEST(PhotoFilters, ScoresAreClampedToUnitRange) {
 // (pure, libm-free, no rng/wall-clock). This is the run==replay contract.
 TEST(PhotoFilters, RunEqualsReplay) {
     FilterContext c;
-    c.scene_warmth01       = 0.37f;
-    c.scene_contrast01     = 0.71f;
+    c.scene_warmth01 = 0.37f;
+    c.scene_contrast01 = 0.71f;
     c.subject_saturation01 = 0.58f;
-    c.low_light01          = 0.64f;
+    c.low_light01 = 0.64f;
 
     for (int i = 0; i < kPhotoFilterCount; ++i) {
         const PhotoFilter f = static_cast<PhotoFilter>(i);

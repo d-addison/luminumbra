@@ -90,6 +90,22 @@ def write_build_manifest(path: Path) -> None:
 
 
 class PerfContractTest(unittest.TestCase):
+    def test_reviewed_calibration_matches_relative_policy(self) -> None:
+        calibration_path = Path(__file__).with_name("baselines") / "relative-calibration.json"
+        calibration = json.loads(calibration_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(calibration["schema"], "luminumbra.relative_performance_calibration.v1")
+        self.assertGreaterEqual(
+            calibration["workload"]["paired_observations"], perf.MIN_GATING_SAMPLES
+        )
+        self.assertEqual(calibration["policy"]["minimum_samples"], perf.MIN_GATING_SAMPLES)
+        self.assertEqual(calibration["policy"]["effect_floor_percent"], perf.MIN_EFFECT_PERCENT)
+        self.assertEqual(calibration["policy"]["p_value_max"], perf.P_VALUE_MAX)
+        self.assertEqual(calibration["observed"]["verdict"], "stable")
+        self.assertLess(abs(calibration["observed"]["delta_percent"]), perf.MIN_EFFECT_PERCENT)
+        for digest in calibration["raw_evidence_sha256"].values():
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
     def test_summary_records_tail_and_dispersion(self) -> None:
         summary = perf.summarize([1.0, 2.0, 3.0, 4.0, 10.0], "ms")
         self.assertEqual(summary["sample_count"], 5)
@@ -101,7 +117,7 @@ class PerfContractTest(unittest.TestCase):
     def test_clear_slowdown_is_a_regression(self) -> None:
         base = run_document([10.0 + (index % 3) * 0.01 for index in range(20)])
         candidate = run_document([12.0 + (index % 3) * 0.01 for index in range(20)])
-        comparison = perf.compare_runs(base, candidate, 10.0)
+        comparison = perf.compare_runs(base, candidate, 5.0)
         self.assertEqual(comparison["status"], "evaluated")
         self.assertEqual(comparison["verdict"], "regression")
 
@@ -142,6 +158,11 @@ class PerfContractTest(unittest.TestCase):
             0.01,
         )
 
+    def test_paired_sign_test_detects_consistent_slowdown(self) -> None:
+        base = [10.0 + index * 0.01 for index in range(20)]
+        candidate = [value * 1.06 for value in base]
+        self.assertLessEqual(perf.paired_sign_p(base, candidate), 0.05)
+
     def test_mismatched_runs_are_unevaluated(self) -> None:
         base = run_document([10.0] * 10)
         candidate = run_document([10.0] * 10, key="different")
@@ -157,13 +178,15 @@ class PerfContractTest(unittest.TestCase):
     def test_underpowered_comparison_is_unevaluated(self) -> None:
         base = run_document([10.0])
         candidate = run_document([20.0])
-        self.assertEqual(perf.compare_runs(base, candidate, 10.0)["status"], "unevaluated")
+        comparison = perf.compare_runs(base, candidate, 5.0)
+        self.assertEqual(comparison["status"], "evaluated")
+        self.assertEqual(comparison["verdict"], "warning")
 
     def test_equivalent_observation_fragments_combine_into_gating_run(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             paths = [Path(directory) / f"fragment-{index}.json" for index in range(2)]
             for index, path in enumerate(paths):
-                document = run_document([10.0 + index] * 5)
+                document = run_document([10.0 + index] * 10)
                 document["enforcement"] = "observation"
                 document["comparability_key"] = perf.stable_hash(
                     perf.canonical_identity(document)
@@ -182,7 +205,7 @@ class PerfContractTest(unittest.TestCase):
             self.assertEqual(status, 0)
             combined = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(combined["enforcement"], "gating")
-            self.assertEqual(combined["metrics"]["wall_time"]["sample_count"], 10)
+            self.assertEqual(combined["metrics"]["wall_time"]["sample_count"], 20)
             self.assertEqual(perf.validate_run(combined), [])
 
     def test_mismatched_fragments_are_unevaluated(self) -> None:

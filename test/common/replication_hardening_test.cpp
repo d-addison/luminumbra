@@ -9,8 +9,6 @@
 // "net/..." headers, `using namespace Luminumbra::Net;`. Everything net here lives under the
 // single namespace Luminumbra::Net (capital-L). No ::Luminumbra::Components types are touched.
 //
-// Where a test asserts behaviour the production code does NOT yet satisfy, it is flagged in the
-// returned report as an EXPECTED-FAIL (it asserts the CORRECT contract, never the bug).
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -51,7 +49,8 @@ std::vector<ReplEntityState> SortedEnts(std::vector<ReplEntityState> v) {
 std::vector<std::uint32_t> IdsOf(const std::vector<ReplEntityState>& v) {
     std::vector<std::uint32_t> ids;
     ids.reserve(v.size());
-    for (const auto& e : v) ids.push_back(e.entity_id);
+    for (const auto& e : v)
+        ids.push_back(e.entity_id);
     return ids;
 }
 
@@ -63,8 +62,9 @@ ReplEntityState RichEntity(std::uint32_t id, int salt) {
                               : std::numeric_limits<std::int32_t>::max();
     e.py_mm = (salt % 3 == 0) ? 0 : -((salt + 1) * 123457);
     e.pz_mm = (salt % 4 == 0) ? std::numeric_limits<std::int32_t>::min() + 1 : (salt * 999983);
-    e.yaw_mrad = static_cast<std::int16_t>((salt % 2 == 0) ? std::numeric_limits<std::int16_t>::min()
-                                                           : std::numeric_limits<std::int16_t>::max());
+    e.yaw_mrad =
+        static_cast<std::int16_t>((salt % 2 == 0) ? std::numeric_limits<std::int16_t>::min()
+                                                  : std::numeric_limits<std::int16_t>::max());
     e.flags = static_cast<std::uint8_t>(0xA5 ^ salt);
     e.type_id = static_cast<std::uint16_t>(0xFFFF - (salt * 7));
     e.anim_state = static_cast<std::uint8_t>(salt * 13);
@@ -84,7 +84,8 @@ TEST(ReplHardening, SnapshotRichAdversarialRosterRoundTripsBitExact) {
     in.snapshot_seq = std::numeric_limits<std::uint32_t>::max();
     in.delta_from_seq = 0xDEADBEEFu;
     in.acked_usercmd_tick = std::numeric_limits<std::uint64_t>::max() - 17;
-    for (int i = 0; i < 64; ++i) in.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
+    for (int i = 0; i < 64; ++i)
+        in.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
     in.removed_ids = {0u, 1u, std::numeric_limits<std::uint32_t>::max(), 123456u};
 
     SnapshotMsg out;
@@ -99,12 +100,12 @@ TEST(ReplHardening, SnapshotRichAdversarialRosterRoundTripsBitExact) {
     EXPECT_EQ(out.removed_ids, in.removed_ids);
 }
 
-// delta_from_seq is a real wire field (P3.1). A non-zero value MUST survive the round-trip,
+// delta_from_seq is a real wire field. A non-zero value MUST survive the round-trip,
 // else the client cannot find the baseline to apply the delta against.
 TEST(ReplHardening, DeltaFromSeqFieldRoundTrips) {
     SnapshotMsg in;
     in.snapshot_seq = 9;
-    in.delta_from_seq = 7;  // "deltaFrom" the seq-7 baseline
+    in.delta_from_seq = 7; // "deltaFrom" the seq-7 baseline
     in.entities.push_back(Ent(1, 5, 6, 7));
     SnapshotMsg out;
     ASSERT_TRUE(DecodeSnapshot(EncodeSnapshot(in), out));
@@ -116,7 +117,8 @@ TEST(ReplHardening, EncodeIsByteStable) {
     SnapshotMsg in;
     in.server_tick = 4242;
     in.snapshot_seq = 5;
-    for (int i = 0; i < 10; ++i) in.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
+    for (int i = 0; i < 10; ++i)
+        in.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
     in.removed_ids = {99u, 7u, 3u};
     EXPECT_EQ(EncodeSnapshot(in), EncodeSnapshot(in));
 }
@@ -159,7 +161,7 @@ TEST(ReplHardening, TruncatedSnapshotRejected) {
     in.entities.push_back(Ent(1, 1, 2, 3));
     in.entities.push_back(Ent(2, 4, 5, 6));
     std::vector<std::uint8_t> frame = EncodeSnapshot(in);
-    frame.pop_back();  // payload now shorter than the declared length
+    frame.pop_back(); // payload now shorter than the declared length
     SnapshotMsg out;
     EXPECT_FALSE(DecodeSnapshot(frame, out));
 }
@@ -184,10 +186,11 @@ TEST(ReplHardening, EmptyFrameRejected) {
 TEST(ReplHardening, DeltaThenApplyReproducesRichSnapshot) {
     SnapshotMsg base;
     base.snapshot_seq = 1;
-    for (int i = 0; i < 20; ++i) base.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
+    for (int i = 0; i < 20; ++i)
+        base.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
     SnapshotMsg cur;
     cur.snapshot_seq = 2;
-    for (int i = 5; i < 30; ++i)  // 0..4 removed, 5..19 partly changed, 20..29 new
+    for (int i = 5; i < 30; ++i) // 0..4 removed, 5..19 partly changed, 20..29 new
         cur.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i + (i % 2)));
 
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
@@ -213,9 +216,10 @@ TEST(ReplHardening, ApplyDeltaPreservesHeader) {
 
 // Empty base (a fresh client) + full current: delta carries every entity, applies to full set.
 TEST(ReplHardening, DeltaAgainstEmptyBaseIsFullSet) {
-    SnapshotMsg base;  // empty
+    SnapshotMsg base; // empty
     SnapshotMsg cur;
-    for (int i = 0; i < 8; ++i) cur.entities.push_back(Ent(static_cast<std::uint32_t>(i), i, 0, 0));
+    for (int i = 0; i < 8; ++i)
+        cur.entities.push_back(Ent(static_cast<std::uint32_t>(i), i, 0, 0));
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
     EXPECT_EQ(delta.entities.size(), cur.entities.size());
     EXPECT_TRUE(delta.removed_ids.empty());
@@ -225,8 +229,9 @@ TEST(ReplHardening, DeltaAgainstEmptyBaseIsFullSet) {
 // Current empty (everything despawned): delta removes ALL baseline ids; reconstruct is empty.
 TEST(ReplHardening, DeltaToEmptyRemovesAll) {
     SnapshotMsg base;
-    for (int i = 0; i < 5; ++i) base.entities.push_back(Ent(static_cast<std::uint32_t>(i), i, 0, 0));
-    SnapshotMsg cur;  // empty
+    for (int i = 0; i < 5; ++i)
+        base.entities.push_back(Ent(static_cast<std::uint32_t>(i), i, 0, 0));
+    SnapshotMsg cur; // empty
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
     EXPECT_EQ(delta.removed_ids.size(), base.entities.size());
     EXPECT_TRUE(ApplySnapshotDelta(base, delta).entities.empty());
@@ -235,7 +240,8 @@ TEST(ReplHardening, DeltaToEmptyRemovesAll) {
 // Identical base==cur: a zero-change delta (no entities, no removals) that round-trips.
 TEST(ReplHardening, NoChangeDeltaIsEmptyAndReconstructs) {
     SnapshotMsg base;
-    for (int i = 0; i < 6; ++i) base.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
+    for (int i = 0; i < 6; ++i)
+        base.entities.push_back(RichEntity(static_cast<std::uint32_t>(i), i));
     SnapshotMsg cur = base;
     cur.snapshot_seq = base.snapshot_seq + 1;
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
@@ -252,9 +258,10 @@ TEST(ReplHardening, NoChangeDeltaIsEmptyAndReconstructs) {
 // after the codec's canonical (id) ordering -- a result that depends on insertion order is a bug.
 // MakeSnapshotDelta sorts by id, so deltaing each ordering against the same base must match.
 TEST(ReplHardening, DeltaWireBytesIndependentOfInsertionOrder) {
-    SnapshotMsg base;  // empty -> the whole set is "new"
+    SnapshotMsg base; // empty -> the whole set is "new"
     std::vector<ReplEntityState> es;
-    for (int i = 0; i < 12; ++i) es.push_back(RichEntity(static_cast<std::uint32_t>(100 - i), i));
+    for (int i = 0; i < 12; ++i)
+        es.push_back(RichEntity(static_cast<std::uint32_t>(100 - i), i));
 
     SnapshotMsg a;
     a.snapshot_seq = 3;
@@ -262,7 +269,7 @@ TEST(ReplHardening, DeltaWireBytesIndependentOfInsertionOrder) {
     SnapshotMsg b;
     b.snapshot_seq = 3;
     b.entities = es;
-    std::reverse(b.entities.begin(), b.entities.end());  // different insertion order, same set
+    std::reverse(b.entities.begin(), b.entities.end()); // different insertion order, same set
 
     const SnapshotMsg da = MakeSnapshotDelta(base, a);
     const SnapshotMsg db = MakeSnapshotDelta(base, b);
@@ -287,7 +294,7 @@ TEST(ReplHardening, ApplyDeltaOutputIsIdAscending) {
 TEST(ReplHardening, DeltaRemovedIdsSortedDeterministic) {
     SnapshotMsg base;
     base.entities = {Ent(50, 0, 0, 0), Ent(3, 0, 0, 0), Ent(20, 0, 0, 0), Ent(7, 0, 0, 0)};
-    SnapshotMsg cur;  // all gone
+    SnapshotMsg cur; // all gone
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
     EXPECT_EQ(delta.removed_ids, (std::vector<std::uint32_t>{3, 7, 20, 50}));
 }
@@ -299,9 +306,11 @@ TEST(ReplHardening, DeltaRemovedIdsSortedDeterministic) {
 // Re-applying the SAME delta to the SAME base is a no-op (idempotent reconstruction).
 TEST(ReplHardening, ReapplyingSameDeltaIsIdempotent) {
     SnapshotMsg base;
-    for (int i = 0; i < 10; ++i) base.entities.push_back(Ent(static_cast<std::uint32_t>(i), i, 0, 0));
+    for (int i = 0; i < 10; ++i)
+        base.entities.push_back(Ent(static_cast<std::uint32_t>(i), i, 0, 0));
     SnapshotMsg cur;
-    for (int i = 3; i < 13; ++i) cur.entities.push_back(Ent(static_cast<std::uint32_t>(i), i * 2, 0, 0));
+    for (int i = 3; i < 13; ++i)
+        cur.entities.push_back(Ent(static_cast<std::uint32_t>(i), i * 2, 0, 0));
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
     const SnapshotMsg once = ApplySnapshotDelta(base, delta);
     const SnapshotMsg twice = ApplySnapshotDelta(base, delta);
@@ -318,7 +327,7 @@ TEST(ReplHardening, ReceiverRejectsDuplicateSeq) {
     s.entities.push_back(Ent(1, 7, 0, 0));
     EXPECT_TRUE(rx.Receive(s));
     SnapshotMsg dup = s;
-    dup.entities[0].px_mm = 999;  // a corrupted duplicate must NOT overwrite
+    dup.entities[0].px_mm = 999; // a corrupted duplicate must NOT overwrite
     EXPECT_FALSE(rx.Receive(dup));
     ASSERT_TRUE(rx.has_snapshot());
     EXPECT_EQ(rx.current().entities[0].px_mm, 7);
@@ -338,8 +347,8 @@ TEST(ReplHardening, UsercmdReceiverOutOfOrderConverges) {
     t11.move_x = 11;
     EXPECT_TRUE(rx.Receive(t10));
     EXPECT_TRUE(rx.Receive(t12));
-    EXPECT_FALSE(rx.Receive(t11));  // older than 12 -> rejected
-    EXPECT_FALSE(rx.Receive(t12));  // duplicate -> rejected
+    EXPECT_FALSE(rx.Receive(t11)); // older than 12 -> rejected
+    EXPECT_FALSE(rx.Receive(t12)); // duplicate -> rejected
     EXPECT_EQ(rx.latest().tick, 12u);
     EXPECT_EQ(rx.latest().move_x, 12);
 }
@@ -348,10 +357,10 @@ TEST(ReplHardening, UsercmdReceiverOutOfOrderConverges) {
 TEST(ReplHardening, AckMonotonicUnderReorder) {
     UsercmdReceiver rx;
     rx.ApplyAck(AckMsg{8, 0});
-    rx.ApplyAck(AckMsg{2, 0});  // stale, arrives later
-    rx.ApplyAck(AckMsg{5, 0});  // also stale vs 8
+    rx.ApplyAck(AckMsg{2, 0}); // stale, arrives later
+    rx.ApplyAck(AckMsg{5, 0}); // also stale vs 8
     EXPECT_EQ(rx.acked_snapshot_seq(), 8u);
-    rx.ApplyAck(AckMsg{8, 0});  // duplicate of current -> no change
+    rx.ApplyAck(AckMsg{8, 0}); // duplicate of current -> no change
     EXPECT_EQ(rx.acked_snapshot_seq(), 8u);
 }
 
@@ -368,16 +377,18 @@ TEST(ReplHardening, AoiRadiusBoundaryIsDeterministicInclusive) {
     ReplicationClient client(kClientId, pair.second.get());
     server.SetAoiRadiusMm(5000);
     std::vector<ReplEntityState> entities = {
-        Ent(1, 0, 0, 0),       // own avatar (always in)
-        Ent(10, 5000, 0, 0),   // exactly at the radius
-        Ent(11, 5001, 0, 0),   // one mm beyond
+        Ent(1, 0, 0, 0),     // own avatar (always in)
+        Ent(10, 5000, 0, 0), // exactly at the radius
+        Ent(11, 5001, 0, 0), // one mm beyond
     };
     server.BroadcastSnapshot(1, entities);
     client.PumpInbound();
     ASSERT_TRUE(client.has_snapshot());
     const std::vector<std::uint32_t> ids = IdsOf(client.snapshot().entities);
-    EXPECT_NE(std::find(ids.begin(), ids.end(), 10u), ids.end()) << "at-radius entity must be in (inclusive)";
-    EXPECT_EQ(std::find(ids.begin(), ids.end(), 11u), ids.end()) << "beyond-radius entity must be out";
+    EXPECT_NE(std::find(ids.begin(), ids.end(), 10u), ids.end())
+        << "at-radius entity must be in (inclusive)";
+    EXPECT_EQ(std::find(ids.begin(), ids.end(), 11u), ids.end())
+        << "beyond-radius entity must be out";
 }
 
 // The client's OWN avatar is always included even when far outside any radius of itself's center
@@ -387,7 +398,7 @@ TEST(ReplHardening, AoiAlwaysIncludesOwnAvatar) {
     ReplicationServer server;
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
-    server.SetAoiRadiusMm(1);  // tiny radius
+    server.SetAoiRadiusMm(1); // tiny radius
     std::vector<ReplEntityState> entities = {Ent(1, 7000000, 0, 0), Ent(2, 7100000, 0, 0)};
     server.BroadcastSnapshot(1, entities);
     client.PumpInbound();
@@ -407,15 +418,16 @@ TEST(ReplHardening, AoiNoOverflowAtExtremeCoordinates) {
     server.SetAoiRadiusMm(1000);
     const std::int32_t big = std::numeric_limits<std::int32_t>::max() - 10;
     std::vector<ReplEntityState> entities = {
-        Ent(1, big, 0, 0),                                 // own avatar at the world edge
-        Ent(2, std::numeric_limits<std::int32_t>::min(), 0, 0),  // opposite edge -> far, out
+        Ent(1, big, 0, 0),                                      // own avatar at the world edge
+        Ent(2, std::numeric_limits<std::int32_t>::min(), 0, 0), // opposite edge -> far, out
     };
     server.BroadcastSnapshot(1, entities);
     client.PumpInbound();
     ASSERT_TRUE(client.has_snapshot());
     const std::vector<std::uint32_t> ids = IdsOf(client.snapshot().entities);
     EXPECT_NE(std::find(ids.begin(), ids.end(), 1u), ids.end());
-    EXPECT_EQ(std::find(ids.begin(), ids.end(), 2u), ids.end()) << "overflow misclassified a far entity";
+    EXPECT_EQ(std::find(ids.begin(), ids.end(), 2u), ids.end())
+        << "overflow misclassified a far entity";
 }
 
 // Chunk-AOI at a chunk SEAM: an entity whose coordinate is the exact chunk-boundary belongs to
@@ -435,7 +447,8 @@ TEST(ReplHardening, ChunkAoiSeamRadiusZero) {
     ASSERT_TRUE(client.has_snapshot());
     const std::vector<std::uint32_t> ids = IdsOf(client.snapshot().entities);
     EXPECT_NE(std::find(ids.begin(), ids.end(), 1u), ids.end());
-    EXPECT_EQ(std::find(ids.begin(), ids.end(), 10u), ids.end()) << "seam entity leaked across chunk boundary";
+    EXPECT_EQ(std::find(ids.begin(), ids.end(), 10u), ids.end())
+        << "seam entity leaked across chunk boundary";
 }
 
 // Chunk-AOI with a negative-coordinate centre: floor-divide must keep boundaries stable across
@@ -447,8 +460,11 @@ TEST(ReplHardening, ChunkAoiNegativeOriginStable) {
     ReplicationClient client(kClientId, pair.second.get());
     server.SetAoiChunkRadius(0, 16000);
     std::vector<ReplEntityState> entities = {
-        Ent(1, -1, 0, -1),     // chunk (-1,-1)
-        Ent(10, -16000, 0, -1), // chunk (-1,-1)? -16000 -> chunk -1 boundary: floor(-16000/16000) = -1
+        Ent(1, -1, 0, -1), // chunk (-1,-1)
+        Ent(10,
+            -16000,
+            0,
+            -1), // chunk (-1,-1)? -16000 -> chunk -1 boundary: floor(-16000/16000) = -1
         Ent(11, -16001, 0, -1), // chunk (-2,-1) -> out at radius 0
     };
     server.BroadcastSnapshot(1, entities);
@@ -456,7 +472,8 @@ TEST(ReplHardening, ChunkAoiNegativeOriginStable) {
     ASSERT_TRUE(client.has_snapshot());
     const std::vector<std::uint32_t> ids = IdsOf(client.snapshot().entities);
     EXPECT_NE(std::find(ids.begin(), ids.end(), 1u), ids.end());
-    EXPECT_NE(std::find(ids.begin(), ids.end(), 10u), ids.end()) << "negative-origin chunk math drifted";
+    EXPECT_NE(std::find(ids.begin(), ids.end(), 10u), ids.end())
+        << "negative-origin chunk math drifted";
     EXPECT_EQ(std::find(ids.begin(), ids.end(), 11u), ids.end());
 }
 
@@ -481,7 +498,7 @@ TEST(ReplHardening, AoiDisabledSendsFullSet) {
 // entity, e.g. a spent arrow) reaches the client. This is the baseline the delta path must match.
 TEST(ReplHardening, FullModeDeliversTransientDespawn) {
     auto pair = MakeLoopbackPair();
-    ReplicationServer server;  // delta OFF
+    ReplicationServer server; // delta OFF
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
     server.BroadcastSnapshot(1, {Ent(1, 0, 0, 0)}, {/*removed*/ 2000u});
@@ -558,7 +575,7 @@ TEST(ReplHardening, DeltaModePruneDespawnReachesSurvivor) {
 
     server.BroadcastSnapshot(1, world);
     sync();
-    server.BroadcastSnapshot(2, world);  // survivor acks a real baseline
+    server.BroadcastSnapshot(2, world); // survivor acks a real baseline
     sync();
     ASSERT_GT(server.AckedSnapshotSeq(1), 0u);
 
@@ -576,7 +593,8 @@ TEST(ReplHardening, DeltaModePruneDespawnReachesSurvivor) {
         server.PumpInbound();
         if (client_a.has_snapshot()) {
             const auto& rem = client_a.snapshot().removed_ids;
-            if (std::find(rem.begin(), rem.end(), 2u) != rem.end()) saw_despawn = true;
+            if (std::find(rem.begin(), rem.end(), 2u) != rem.end())
+                saw_despawn = true;
         }
     }
     EXPECT_TRUE(saw_despawn) << "delta mode never told the survivor to despawn the leaver's avatar";
@@ -591,9 +609,10 @@ TEST(ReplHardening, DeltaDropsEntityThatLeavesSet) {
     base.entities = {Ent(1, 0, 0, 0), Ent(2, 0, 0, 0), Ent(3, 0, 0, 0)};
     SnapshotMsg cur;
     cur.snapshot_seq = 2;
-    cur.entities = {Ent(1, 0, 0, 0), Ent(3, 0, 0, 0)};  // entity 2 left
+    cur.entities = {Ent(1, 0, 0, 0), Ent(3, 0, 0, 0)}; // entity 2 left
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
-    EXPECT_NE(std::find(delta.removed_ids.begin(), delta.removed_ids.end(), 2u), delta.removed_ids.end());
+    EXPECT_NE(std::find(delta.removed_ids.begin(), delta.removed_ids.end(), 2u),
+              delta.removed_ids.end());
     const SnapshotMsg recon = ApplySnapshotDelta(base, delta);
     EXPECT_EQ(IdsOf(SortedEnts(recon.entities)), (std::vector<std::uint32_t>{1, 3}));
 }
@@ -608,8 +627,8 @@ TEST(ReplHardening, DeltaLoopRunEqualsReplayWireExact) {
     auto authoritative = [](int tick) {
         std::vector<ReplEntityState> set;
         for (int i = 0; i < 6; ++i) {
-            ReplEntityState e = Ent(static_cast<std::uint32_t>(i + 1), (i == 2) ? tick * 50 : i * 1000,
-                                    0, i * 250);
+            ReplEntityState e =
+                Ent(static_cast<std::uint32_t>(i + 1), (i == 2) ? tick * 50 : i * 1000, 0, i * 250);
             e.yaw_mrad = static_cast<std::int16_t>(i * 10);
             set.push_back(e);
         }
@@ -635,7 +654,8 @@ TEST(ReplHardening, DeltaLoopRunEqualsReplayWireExact) {
                 server.PumpInbound();
             }
         }
-        return client.has_snapshot() ? EncodeSnapshot(client.snapshot()) : std::vector<std::uint8_t>{};
+        return client.has_snapshot() ? EncodeSnapshot(client.snapshot())
+                                     : std::vector<std::uint8_t>{};
     };
     EXPECT_EQ(run(), run());
 }
@@ -646,7 +666,8 @@ TEST(ReplHardening, DeltaLoopConvergesUnderLoss) {
     auto authoritative = [](int tick) {
         std::vector<ReplEntityState> set;
         for (int i = 0; i < 5; ++i)
-            set.push_back(Ent(static_cast<std::uint32_t>(i + 1), (i == 1) ? tick * 33 : i * 500, 0, i * 100));
+            set.push_back(
+                Ent(static_cast<std::uint32_t>(i + 1), (i == 1) ? tick * 33 : i * 500, 0, i * 100));
         return set;
     };
     NetworkConditions cond;
@@ -701,7 +722,7 @@ TEST(ReplHardening, EmptyRosterBroadcastDecodes) {
     ReplicationServer server;
     server.AddClient(kClientId, pair.first.get());
     ReplicationClient client(kClientId, pair.second.get());
-    server.BroadcastSnapshot(1, {});  // empty authoritative set
+    server.BroadcastSnapshot(1, {}); // empty authoritative set
     client.PumpInbound();
     ASSERT_TRUE(client.has_snapshot());
     EXPECT_TRUE(client.snapshot().entities.empty());
@@ -727,4 +748,4 @@ TEST(ReplHardening, InterpolatorSingleSnapshotClamps) {
     EXPECT_EQ(interp.Sample(1000.0)[0].px_mm, 500);
 }
 
-}  // namespace
+} // namespace

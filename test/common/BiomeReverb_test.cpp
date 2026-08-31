@@ -1,4 +1,4 @@
-// T-I4-5: per-biome environmental-audio reverb flow gate.
+// per-biome environmental-audio reverb flow gate.
 // Validates that the shipped biomes.json reverb params are CONSUMED (parsed
 // into BiomeTable) and that reverb_for(active biome id) returns the authored
 // profile - the data->engine flow the EnvironmentalAudioSystem drives.

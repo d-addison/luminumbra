@@ -25,4 +25,24 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_performance_measurement.py")
     set_tests_properties(PerformanceMeasurementValidatorContract
         PROPERTIES LABELS "perf;tools" TIMEOUT 30)
+    add_test(
+        NAME PublicTreeValidatorContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_public_tree.py")
+    set_tests_properties(PublicTreeValidatorContract
+        PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME PublicAssetInventory
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/validate_assets.py"
+                --root "${CMAKE_SOURCE_DIR}"
+                --check "${CMAKE_SOURCE_DIR}/config/public-asset-inventory.json")
+    set_tests_properties(PublicAssetInventory
+        PROPERTIES LABELS "hygiene;assets;tools" TIMEOUT 60)
+    add_test(
+        NAME DocumentationLinkValidatorContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_docs.py")
+    set_tests_properties(DocumentationLinkValidatorContract
+        PROPERTIES LABELS "docs;hygiene;tools" TIMEOUT 30)
 endif()

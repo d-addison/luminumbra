@@ -6,14 +6,13 @@
 
 namespace {
 
-void require_gate(const bool condition)
-{
+void require_gate(const bool condition) {
     if (!condition) {
         std::abort();
     }
 }
 
-// T-I3-22: the game-flavored "aetheric" compatibility alias was removed at
+// the game-flavored "aetheric" compatibility alias was removed at
 // iteration close. The generic engine fields::ScalarFieldDiffusion solver is
 // now exercised directly under its own schema.
 const bool kScalarFieldDiffusionGate = [] {
@@ -29,11 +28,11 @@ const bool kScalarFieldDiffusionGate = [] {
     require_gate(std::abs(report.initial_energy - report.final_energy) <= 1.0e-9);
     require_gate(report.maximum_cell_energy < report.initial_energy);
 
-    const std::string json =
-        luminumbra::fields::SerializeScalarDiffusionReportJson(report);
+    const std::string json = luminumbra::fields::SerializeScalarDiffusionReportJson(report);
     require_gate(json.find("conservative_pairwise_flux") != std::string::npos);
     require_gate(json.find("deterministic_row_major_edges") != std::string::npos);
-    require_gate(json.find("src/luminumbra_common/fields/ScalarFieldDiffusion.cpp") != std::string::npos);
+    require_gate(json.find("src/luminumbra_common/fields/ScalarFieldDiffusion.cpp") !=
+                 std::string::npos);
 
     return true;
 }();

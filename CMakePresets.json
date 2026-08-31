@@ -39,7 +39,7 @@
     {
       "name": "debug-simo0",
       "displayName": "Debug Sim Opt-Parity",
-      "description": "Debug build with GameSession.cpp forced to the sim opt-parity level (-O2) for the Test-SimOptLevelParity world_hash invariance gate (FR-003).",
+      "description": "Debug build with GameSession.cpp forced to the sim opt-parity level (-) for the Test-SimOptLevelParity world_hash invariance gate ().",
       "inherits": "debug",
       "cacheVariables": {
         "LUMINUMBRA_SIM_O0_PARITY": "ON"

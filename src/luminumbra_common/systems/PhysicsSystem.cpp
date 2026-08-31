@@ -1,6 +1,6 @@
 #include "PhysicsSystem.h"
-#include "../world/Chunk.h"
 #include "../../../include/luminumbra/core/Types.h"
+#include "../world/Chunk.h"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
@@ -32,22 +32,24 @@ namespace Systems {
 
 // --- Jolt Layer Implementations (Unchanged) ---
 namespace Layers {
-    static constexpr ObjectLayer NON_MOVING = 0;
-    static constexpr ObjectLayer MOVING     = 1;
-    static constexpr ObjectLayer NUM_LAYERS = 2;
-}
+static constexpr ObjectLayer NON_MOVING = 0;
+static constexpr ObjectLayer MOVING = 1;
+static constexpr ObjectLayer NUM_LAYERS = 2;
+} // namespace Layers
 namespace BroadPhaseLayers {
-    static constexpr BroadPhaseLayer NON_MOVING(0);
-    static constexpr BroadPhaseLayer MOVING(1);
-    static constexpr uint32 NUM_LAYERS = 2;
-}
+static constexpr BroadPhaseLayer NON_MOVING(0);
+static constexpr BroadPhaseLayer MOVING(1);
+static constexpr uint32 NUM_LAYERS = 2;
+} // namespace BroadPhaseLayers
 class BPLayerInterfaceImpl final : public BroadPhaseLayerInterface {
 public:
     BPLayerInterfaceImpl() {
         m_object_to_broad[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        m_object_to_broad[Layers::MOVING]     = BroadPhaseLayers::MOVING;
+        m_object_to_broad[Layers::MOVING] = BroadPhaseLayers::MOVING;
     }
-    uint GetNumBroadPhaseLayers() const override { return BroadPhaseLayers::NUM_LAYERS; }
+    uint GetNumBroadPhaseLayers() const override {
+        return BroadPhaseLayers::NUM_LAYERS;
+    }
     BroadPhaseLayer GetBroadPhaseLayer(ObjectLayer inLayer) const override {
         JPH_ASSERT(inLayer < Layers::NUM_LAYERS);
         return m_object_to_broad[inLayer];
@@ -55,9 +57,13 @@ public:
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
     const char* GetBroadPhaseLayerName(BroadPhaseLayer inLayer) const override {
         switch ((BroadPhaseLayer::Type)inLayer) {
-            case (BroadPhaseLayer::Type)BroadPhaseLayers::NON_MOVING: return "NON_MOVING";
-            case (BroadPhaseLayer::Type)BroadPhaseLayers::MOVING:   return "MOVING";
-            default: JPH_ASSERT(false); return "INVALID";
+            case (BroadPhaseLayer::Type)BroadPhaseLayers::NON_MOVING:
+                return "NON_MOVING";
+            case (BroadPhaseLayer::Type)BroadPhaseLayers::MOVING:
+                return "MOVING";
+            default:
+                JPH_ASSERT(false);
+                return "INVALID";
         }
     }
 #endif
@@ -68,26 +74,34 @@ class ObjectVsBroadPhaseLayerFilterImpl final : public ObjectVsBroadPhaseLayerFi
 public:
     bool ShouldCollide(ObjectLayer inLayer1, BroadPhaseLayer inLayer2) const override {
         switch (inLayer1) {
-            case Layers::NON_MOVING: return inLayer2 == BroadPhaseLayers::MOVING;
-            case Layers::MOVING:     return true;
-            default:                 return false;
+            case Layers::NON_MOVING:
+                return inLayer2 == BroadPhaseLayers::MOVING;
+            case Layers::MOVING:
+                return true;
+            default:
+                return false;
         }
     }
 };
 class ObjectLayerPairFilterImpl final : public ObjectLayerPairFilter {
 public:
     bool ShouldCollide(ObjectLayer inObject1, ObjectLayer inObject2) const override {
-        if (inObject1 == Layers::NON_MOVING && inObject2 == Layers::NON_MOVING) return false;
+        if (inObject1 == Layers::NON_MOVING && inObject2 == Layers::NON_MOVING)
+            return false;
         return true;
     }
 };
 class BroadPhaseLayerFilterAll final : public BroadPhaseLayerFilter {
 public:
-    bool ShouldCollide(BroadPhaseLayer) const override { return true; }
+    bool ShouldCollide(BroadPhaseLayer) const override {
+        return true;
+    }
 };
 class ObjectLayerFilterAll final : public ObjectLayerFilter {
 public:
-    bool ShouldCollide(ObjectLayer) const override { return true; }
+    bool ShouldCollide(ObjectLayer) const override {
+        return true;
+    }
 };
 
 namespace {
@@ -117,9 +131,11 @@ void ReleaseJoltRuntime() {
 }
 } // namespace
 
-// --- PhysicsSystem Implementation (Unchanged parts omitted for brevity) ---
+// --- PhysicsSystem implementation -------------------------------------------
 PhysicsSystem::PhysicsSystem() = default;
-PhysicsSystem::~PhysicsSystem() { shutdown(); }
+PhysicsSystem::~PhysicsSystem() {
+    shutdown();
+}
 
 void PhysicsSystem::startup() {
     if (m_started) {
@@ -131,12 +147,19 @@ void PhysicsSystem::startup() {
     m_temp_allocator = std::make_unique<TempAllocatorImpl>(10 * 1024 * 1024);
     const uint hardware_threads = std::thread::hardware_concurrency();
     const uint num_worker_threads = hardware_threads > 1 ? hardware_threads - 1 : 1;
-    m_jolt_job_system = std::make_unique<JobSystemThreadPool>(cMaxPhysicsJobs, cMaxPhysicsBarriers, num_worker_threads);
+    m_jolt_job_system = std::make_unique<JobSystemThreadPool>(
+        cMaxPhysicsJobs, cMaxPhysicsBarriers, num_worker_threads);
     m_jolt_system = std::make_unique<JPH::PhysicsSystem>();
     static BPLayerInterfaceImpl broad_phase_layer_interface;
     static ObjectVsBroadPhaseLayerFilterImpl object_vs_broadphase_layer_filter;
     static ObjectLayerPairFilterImpl object_vs_object_layer_filter;
-    m_jolt_system->Init(10240, 0, 10240, 10240, broad_phase_layer_interface, object_vs_broadphase_layer_filter, object_vs_object_layer_filter);
+    m_jolt_system->Init(10240,
+                        0,
+                        10240,
+                        10240,
+                        broad_phase_layer_interface,
+                        object_vs_broadphase_layer_filter,
+                        object_vs_object_layer_filter);
     m_body_interface = &m_jolt_system->GetBodyInterface();
     m_started = true;
     LUMINUMBRA_CORE_INFO("Jolt Physics System Initialized.");
@@ -156,7 +179,7 @@ void PhysicsSystem::shutdown() {
     }
     m_chunk_bodies.clear();
     m_player_character.reset();
-    m_avatar_characters.clear(); // T-I6 P2: release server avatars before the Jolt system
+    m_avatar_characters.clear(); // Release server avatars before the Jolt system.
     // Properly release the reference-counted shapes
     m_player_stand_shape = nullptr;
     m_player_crouch_shape = nullptr;
@@ -170,27 +193,32 @@ void PhysicsSystem::shutdown() {
 }
 
 void PhysicsSystem::update(float delta_time) {
-    if (!m_jolt_system) return;
+    if (!m_jolt_system)
+        return;
     m_jolt_system->Update(delta_time, 1, m_temp_allocator.get(), m_jolt_job_system.get());
-    
+
     // Process batched physics queries each frame
     m_batched_queries.ProcessBatch(this);
 }
 
-
 void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
-    if (!m_body_interface) return;
-    if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end()) return;
-    
+    if (!m_body_interface)
+        return;
+    if (m_chunk_bodies.find(chunk.get_id()) != m_chunk_bodies.end())
+        return;
+
     if (chunk.heightmap_data.empty()) {
-        LUMINUMBRA_CORE_WARN("Attempted to add chunk collision for chunk ({}, {}, {}) with no heightmap data.", 
-            chunk.get_coords().x, chunk.get_coords().y, chunk.get_coords().z);
+        LUMINUMBRA_CORE_WARN(
+            "Attempted to add chunk collision for chunk ({}, {}, {}) with no heightmap data.",
+            chunk.get_coords().x,
+            chunk.get_coords().y,
+            chunk.get_coords().z);
         return;
     }
 
     // 1. Copy the cached heightmap data into a Jolt-compatible array.
     // The resolution of our heightmap includes the +1 padding for seamless chunk borders.
-    const int resolution = CHUNK_SIZE_X + 1; 
+    const int resolution = CHUNK_SIZE_X + 1;
     JPH::Array<float> height_samples;
     height_samples.resize(resolution * resolution);
 
@@ -200,10 +228,12 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     for (int i = 0; i < resolution * resolution; ++i) {
         float h = chunk.heightmap_data[i];
         height_samples[i] = h;
-        if (h < min_h) min_h = h;
-        if (h > max_h) max_h = h;
+        if (h < min_h)
+            min_h = h;
+        if (h > max_h)
+            max_h = h;
     }
-    
+
     glm::ivec3 cc = chunk.get_coords();
     const float chunk_min_y = static_cast<float>(cc.y) * static_cast<float>(CHUNK_SIZE_Y);
     const float chunk_max_y = static_cast<float>(cc.y + 1) * static_cast<float>(CHUNK_SIZE_Y);
@@ -217,63 +247,81 @@ void PhysicsSystem::add_chunk_collision(Chunk& chunk) {
     // The height samples are in absolute world coordinates. We provide Jolt with the
     // world-space position of the heightmap's origin (the corner of the chunk).
     glm::vec3 chunk_base_pos(cc.x * CHUNK_SIZE_X, 0.0f, cc.z * CHUNK_SIZE_Z);
-    JPH::HeightFieldShapeSettings shape_settings(height_samples.data(), 
-                                                 JPH::Vec3(chunk_base_pos.x, 0.0f, chunk_base_pos.z), 
-                                                 JPH::Vec3(1.0f, 1.0f, 1.0f), 
-                                                 resolution);
+    JPH::HeightFieldShapeSettings shape_settings(
+        height_samples.data(),
+        JPH::Vec3(chunk_base_pos.x, 0.0f, chunk_base_pos.z),
+        JPH::Vec3(1.0f, 1.0f, 1.0f),
+        resolution);
     shape_settings.mBlockSize = 2; // Recommended default for good performance
-    
+
     JPH::ShapeSettings::ShapeResult result = shape_settings.Create();
     if (result.HasError()) {
-        LUMINUMBRA_CORE_ERROR("HeightFieldShape error for chunk ({},{},{}): {}", 
-            cc.x, cc.y, cc.z, result.GetError());
+        LUMINUMBRA_CORE_ERROR(
+            "HeightFieldShape error for chunk ({},{},{}): {}", cc.x, cc.y, cc.z, result.GetError());
         return;
     }
-    
+
     // Additional safety check
     if (!result.Get()) {
-        LUMINUMBRA_CORE_ERROR("HeightFieldShape creation returned null for chunk ({},{},{})", cc.x, cc.y, cc.z);
+        LUMINUMBRA_CORE_ERROR(
+            "HeightFieldShape creation returned null for chunk ({},{},{})", cc.x, cc.y, cc.z);
         return;
     }
-    
+
     // The position is baked into the shape, so the body itself can be created at the world origin.
-    JPH::BodyCreationSettings body_settings(result.Get(), JPH::RVec3::sZero(), JPH::Quat::sIdentity(), JPH::EMotionType::Static, Layers::NON_MOVING);
+    JPH::BodyCreationSettings body_settings(result.Get(),
+                                            JPH::RVec3::sZero(),
+                                            JPH::Quat::sIdentity(),
+                                            JPH::EMotionType::Static,
+                                            Layers::NON_MOVING);
     JPH::Body* body = m_body_interface->CreateBody(body_settings);
     m_body_interface->AddBody(body->GetID(), JPH::EActivation::DontActivate);
-    m_chunk_bodies[chunk.get_id()] = ChunkCollisionData{ body->GetID() };
+    m_chunk_bodies[chunk.get_id()] = ChunkCollisionData{body->GetID()};
 }
 
 void PhysicsSystem::remove_chunk_collision(ChunkID id) {
-    if (!m_body_interface) return;
+    if (!m_body_interface)
+        return;
     auto it = m_chunk_bodies.find(id);
-    if (it == m_chunk_bodies.end()) return;
+    if (it == m_chunk_bodies.end())
+        return;
     m_body_interface->RemoveBody(it->second.body_id);
     m_body_interface->DestroyBody(it->second.body_id);
     m_chunk_bodies.erase(it);
 }
 
 void PhysicsSystem::create_player_controller(const glm::vec3& start_pos) {
-    if (!m_jolt_system) return;
+    if (!m_jolt_system)
+        return;
 
     // Create and cache shapes using reference-counted pointers
     m_player_stand_shape = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
     m_player_crouch_shape = JPH::CapsuleShapeSettings(0.45f, 0.4f).Create().Get();
-    
+
     JPH::CharacterVirtualSettings settings;
     settings.mShape = m_player_stand_shape; // Start with the standing shape
     settings.mMass = 80.0f;
     settings.mMaxSlopeAngle = glm::radians(50.0f);
     settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.1f);
-    m_player_character = std::make_unique<JPH::CharacterVirtual>(&settings, JPH::RVec3(start_pos.x, start_pos.y, start_pos.z), JPH::Quat::sIdentity(), m_jolt_system.get());
+    m_player_character =
+        std::make_unique<JPH::CharacterVirtual>(&settings,
+                                                JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
+                                                JPH::Quat::sIdentity(),
+                                                m_jolt_system.get());
     LUMINUMBRA_CORE_INFO("Player controller created.");
 }
 
-void PhysicsSystem::update_player(const glm::vec3& wish_velocity, bool wants_to_jump, float jump_force, float dt) {
-    if (!m_player_character || !m_jolt_system) return;
-    
+void PhysicsSystem::update_player(const glm::vec3& wish_velocity,
+                                  bool wants_to_jump,
+                                  float jump_force,
+                                  float dt) {
+    if (!m_player_character || !m_jolt_system)
+        return;
+
     // Get the character's current state
     JPH::Vec3 current_velocity = m_player_character->GetLinearVelocity();
-    bool is_grounded = m_player_character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+    bool is_grounded =
+        m_player_character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
     // Start with the desired horizontal velocity from player input.
     // The vertical component will be calculated next.
     JPH::Vec3 desired_velocity(wish_velocity.x, current_velocity.GetY(), wish_velocity.z);
@@ -294,14 +342,14 @@ void PhysicsSystem::update_player(const glm::vec3& wish_velocity, bool wants_to_
         JPH::Vec3 gravity = m_jolt_system->GetGravity();
         desired_velocity.SetY(current_velocity.GetY() + gravity.GetY() * dt);
     }
-    
+
     // Set the calculated velocity on the character controller.
     m_player_character->SetLinearVelocity(desired_velocity);
 
     // Update the character controller, which will handle movement and collision.
     // The gravity parameter here is used for ground detection, not for applying acceleration.
     //
-    // TRAVERSAL-LITE step-up / mantle (spec 003 FR-C1): use Jolt's ExtendedUpdate
+    // TRAVERSAL-LITE step-up / mantle: use Jolt's ExtendedUpdate
     // instead of the plain Update. ExtendedUpdate runs WalkStairs internally, which
     // robustly lifts the capsule over short ledges (up to mWalkStairsStepUp high)
     // when forward motion is blocked by a low obstacle that has clear space above --
@@ -322,20 +370,32 @@ void PhysicsSystem::update_player(const glm::vec3& wish_velocity, bool wants_to_
     step_settings.mWalkStairsStepDownExtra = JPH::Vec3(0.0f, -0.7f, 0.0f);
     // Keep the default stick-to-floor sweep so it tracks down the far side of a step.
     // (mStickToFloorStepDown left at its default of {0,-0.5,0}.)
-    m_player_character->ExtendedUpdate(dt, m_jolt_system->GetGravity(), step_settings,
-                                       BroadPhaseLayerFilterAll(), ObjectLayerFilterAll(),
-                                       JPH::BodyFilter(), JPH::ShapeFilter(), *m_temp_allocator);
+    m_player_character->ExtendedUpdate(dt,
+                                       m_jolt_system->GetGravity(),
+                                       step_settings,
+                                       BroadPhaseLayerFilterAll(),
+                                       ObjectLayerFilterAll(),
+                                       JPH::BodyFilter(),
+                                       JPH::ShapeFilter(),
+                                       *m_temp_allocator);
 }
 
 void PhysicsSystem::set_player_crouched(bool is_crouched) {
-    if (!m_player_character) return;
+    if (!m_player_character)
+        return;
 
     // --- REFACTORED: Use cached shapes to avoid memory leaks/reallocation ---
     JPH::Ref<JPH::Shape> target_shape = is_crouched ? m_player_crouch_shape : m_player_stand_shape;
-    
+
     // Only change the shape if it's actually different
     if (m_player_character->GetShape() != target_shape) {
-        m_player_character->SetShape(target_shape, 1.5f, BroadPhaseLayerFilterAll(), ObjectLayerFilterAll(), JPH::BodyFilter(), JPH::ShapeFilter(), *m_temp_allocator);
+        m_player_character->SetShape(target_shape,
+                                     1.5f,
+                                     BroadPhaseLayerFilterAll(),
+                                     ObjectLayerFilterAll(),
+                                     JPH::BodyFilter(),
+                                     JPH::ShapeFilter(),
+                                     *m_temp_allocator);
     }
 }
 
@@ -346,25 +406,29 @@ void PhysicsSystem::set_player_position(const glm::vec3& position) {
 }
 
 glm::vec3 PhysicsSystem::get_player_position() const {
-    if (!m_player_character) return glm::vec3(0.0f);
+    if (!m_player_character)
+        return glm::vec3(0.0f);
     const JPH::RVec3 p = m_player_character->GetPosition();
     return glm::vec3((float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
 }
 
 bool PhysicsSystem::is_player_grounded() const {
-    if (!m_player_character) return false;
+    if (!m_player_character)
+        return false;
     return m_player_character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
 }
 
-// --- T-I6 P6.3: dynamic rigid-body projectiles ---
-JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position, const glm::vec3& velocity, float radius) {
-    if (!m_body_interface) return JPH::BodyID();
-    JPH::BodyCreationSettings settings(
-        new JPH::SphereShape(radius),
-        JPH::RVec3(position.x, position.y, position.z),
-        JPH::Quat::sIdentity(),
-        JPH::EMotionType::Dynamic,
-        Layers::MOVING);
+// ---  : dynamic rigid-body projectiles ---
+JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position,
+                                                 const glm::vec3& velocity,
+                                                 float radius) {
+    if (!m_body_interface)
+        return JPH::BodyID();
+    JPH::BodyCreationSettings settings(new JPH::SphereShape(radius),
+                                       JPH::RVec3(position.x, position.y, position.z),
+                                       JPH::Quat::sIdentity(),
+                                       JPH::EMotionType::Dynamic,
+                                       Layers::MOVING);
     settings.mLinearVelocity = JPH::Vec3(velocity.x, velocity.y, velocity.z);
     // A light, lively projectile: low gravity factor would float it; keep 1.0 so it
     // arcs naturally and rests on the terrain. Continuous collision avoids tunnelling
@@ -375,34 +439,39 @@ JPH::BodyID PhysicsSystem::create_dynamic_sphere(const glm::vec3& position, cons
 }
 
 glm::vec3 PhysicsSystem::get_body_position(JPH::BodyID body) const {
-    if (!m_body_interface || body.IsInvalid()) return glm::vec3(0.0f);
+    if (!m_body_interface || body.IsInvalid())
+        return glm::vec3(0.0f);
     const JPH::RVec3 p = m_body_interface->GetPosition(body);
     return glm::vec3((float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
 }
 
 bool PhysicsSystem::body_is_active(JPH::BodyID body) const {
-    if (!m_body_interface || body.IsInvalid()) return false;
+    if (!m_body_interface || body.IsInvalid())
+        return false;
     return m_body_interface->IsActive(body);
 }
 
 void PhysicsSystem::destroy_body(JPH::BodyID body) {
-    if (!m_body_interface || body.IsInvalid()) return;
+    if (!m_body_interface || body.IsInvalid())
+        return;
     m_body_interface->RemoveBody(body);
     m_body_interface->DestroyBody(body);
 }
 
-// --- T-I6 P2: server-authoritative avatar characters ---
+// ---  : server-authoritative avatar characters ---
 void PhysicsSystem::clear_avatar_characters() {
     m_avatar_characters.clear();
     m_avatar_wish.clear();
 }
 
 void PhysicsSystem::set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz) {
-    if (index < m_avatar_wish.size()) m_avatar_wish[index] = wish_xz;
+    if (index < m_avatar_wish.size())
+        m_avatar_wish[index] = wish_xz;
 }
 
 std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
-    if (!m_jolt_system) return 0;
+    if (!m_jolt_system)
+        return 0;
     // Shared capsule (same dimensions as the standing player) created once.
     if (m_avatar_shape == nullptr) {
         m_avatar_shape = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
@@ -412,25 +481,31 @@ std::size_t PhysicsSystem::create_avatar_character(const glm::vec3& start_pos) {
     settings.mMass = 80.0f;
     settings.mMaxSlopeAngle = glm::radians(50.0f);
     settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.1f);
-    m_avatar_characters.push_back(std::make_unique<JPH::CharacterVirtual>(
-        &settings, JPH::RVec3(start_pos.x, start_pos.y, start_pos.z), JPH::Quat::sIdentity(), m_jolt_system.get()));
+    m_avatar_characters.push_back(
+        std::make_unique<JPH::CharacterVirtual>(&settings,
+                                                JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
+                                                JPH::Quat::sIdentity(),
+                                                m_jolt_system.get()));
     m_avatar_wish.emplace_back(0.0f, 0.0f);
     return m_avatar_characters.size() - 1;
 }
 
 void PhysicsSystem::update_avatars(float dt) {
-    if (!m_jolt_system) return;
+    if (!m_jolt_system)
+        return;
     // Step every avatar IN INDEX (player_id) ORDER so the per-character collide-
-    // and-slide sequence is deterministic same-binary. P2: no horizontal input
+    // and-slide sequence is deterministic same-binary. : no horizontal input
     // yet -- gravity when airborne, ground-stick when grounded (the avatars fall
     // and settle on the terrain). Mirrors update_player's vertical handling.
     const JPH::Vec3 gravity = m_jolt_system->GetGravity();
     for (std::size_t i = 0; i < m_avatar_characters.size(); ++i) {
         auto& character = m_avatar_characters[i];
-        if (!character) continue;
+        if (!character)
+            continue;
         const glm::vec2 wish = i < m_avatar_wish.size() ? m_avatar_wish[i] : glm::vec2(0.0f);
         const JPH::Vec3 current_velocity = character->GetLinearVelocity();
-        const bool grounded = character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+        const bool grounded =
+            character->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
         JPH::Vec3 desired_velocity(wish.x, current_velocity.GetY(), wish.y);
         if (grounded) {
             desired_velocity.SetY(-1.0f); // stick to slopes / ground
@@ -438,35 +513,44 @@ void PhysicsSystem::update_avatars(float dt) {
             desired_velocity.SetY(current_velocity.GetY() + gravity.GetY() * dt);
         }
         character->SetLinearVelocity(desired_velocity);
-        character->Update(dt, gravity, BroadPhaseLayerFilterAll(), ObjectLayerFilterAll(),
-                          JPH::BodyFilter(), JPH::ShapeFilter(), *m_temp_allocator);
+        character->Update(dt,
+                          gravity,
+                          BroadPhaseLayerFilterAll(),
+                          ObjectLayerFilterAll(),
+                          JPH::BodyFilter(),
+                          JPH::ShapeFilter(),
+                          *m_temp_allocator);
     }
 }
 
 glm::vec3 PhysicsSystem::get_avatar_position(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) return glm::vec3(0.0f);
+    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+        return glm::vec3(0.0f);
     const JPH::RVec3 p = m_avatar_characters[index]->GetPosition();
     return glm::vec3((float)p.GetX(), (float)p.GetY(), (float)p.GetZ());
 }
 
 glm::vec3 PhysicsSystem::get_avatar_velocity(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) return glm::vec3(0.0f);
+    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+        return glm::vec3(0.0f);
     const JPH::Vec3 v = m_avatar_characters[index]->GetLinearVelocity();
     return glm::vec3((float)v.GetX(), (float)v.GetY(), (float)v.GetZ());
 }
 
 bool PhysicsSystem::is_avatar_grounded(std::size_t index) const {
-    if (index >= m_avatar_characters.size() || !m_avatar_characters[index]) return false;
-    return m_avatar_characters[index]->GetGroundState() == JPH::CharacterBase::EGroundState::OnGround;
+    if (index >= m_avatar_characters.size() || !m_avatar_characters[index])
+        return false;
+    return m_avatar_characters[index]->GetGroundState() ==
+           JPH::CharacterBase::EGroundState::OnGround;
 }
 
 bool PhysicsSystem::player_has_space_to_stand() const {
-    if (!m_player_character) return true;
+    if (!m_player_character)
+        return true;
 
     // A small, local class that implements Jolt's abstract collector interface.
     // This is the intended use pattern for the library.
-    class StandUpCollector final : public CollideShapeCollector
-    {
+    class StandUpCollector final : public CollideShapeCollector {
     public:
         StandUpCollector() = default;
 
@@ -478,7 +562,9 @@ bool PhysicsSystem::player_has_space_to_stand() const {
             ForceEarlyOut();
         }
 
-        bool HadHit() const { return mHadHit; }
+        bool HadHit() const {
+            return mHadHit;
+        }
 
     private:
         bool mHadHit = false;
@@ -486,65 +572,67 @@ bool PhysicsSystem::player_has_space_to_stand() const {
 
     // Create an instance of our custom collector.
     StandUpCollector collector;
-    
+
     // Note: We use the cached m_player_stand_shape here for consistency
     const JPH::Shape* standing_shape = m_player_stand_shape.GetPtr();
 
-    JPH::Mat44 transform = JPH::Mat44::sRotationTranslation(
-        m_player_character->GetRotation(),
-        m_player_character->GetPosition()
-    );
+    JPH::Mat44 transform = JPH::Mat44::sRotationTranslation(m_player_character->GetRotation(),
+                                                            m_player_character->GetPosition());
 
     CollideShapeSettings settings;
 
-    m_jolt_system->GetNarrowPhaseQuery().CollideShape(
-        standing_shape,
-        JPH::Vec3::sReplicate(1.0f),
-        transform,
-        settings,
-        JPH::RVec3::sZero(),
-        collector,
-        BroadPhaseLayerFilterAll(),
-        ObjectLayerFilterAll(),
-        BodyFilter()
-    );
+    m_jolt_system->GetNarrowPhaseQuery().CollideShape(standing_shape,
+                                                      JPH::Vec3::sReplicate(1.0f),
+                                                      transform,
+                                                      settings,
+                                                      JPH::RVec3::sZero(),
+                                                      collector,
+                                                      BroadPhaseLayerFilterAll(),
+                                                      ObjectLayerFilterAll(),
+                                                      BodyFilter());
 
     // If our collector had a hit, there's no space to stand.
     return !collector.HadHit();
 }
 
-// === AUDIO-PHYSICS INTEGRATION ===
+// ===  INTEGRATION ===
 
-PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& from, const glm::vec3& to) const {
+PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& from,
+                                                               const glm::vec3& to) const {
     AudioRaycastResult result;
-    
-    if (!m_jolt_system) return result;
-    
+
+    if (!m_jolt_system)
+        return result;
+
     JPH::Vec3 ray_start(from.x, from.y, from.z);
     JPH::Vec3 ray_direction = JPH::Vec3(to.x, to.y, to.z) - ray_start;
     float ray_length = ray_direction.Length();
-    
-    if (ray_length < 0.001f) return result; // Too short
-    
+
+    if (ray_length < 0.001f)
+        return result; // Too short
+
     ray_direction = ray_direction.Normalized();
-    
+
     JPH::RRayCast ray(ray_start, ray_direction * ray_length);
     JPH::RayCastResult closest_hit;
-    
-    if (m_jolt_system->GetNarrowPhaseQuery().CastRay(ray, closest_hit, 
-                                                   BroadPhaseLayerFilterAll(), 
-                                                   ObjectLayerFilterAll(), 
-                                                   JPH::BodyFilter())) {
+
+    if (m_jolt_system->GetNarrowPhaseQuery().CastRay(ray,
+                                                     closest_hit,
+                                                     BroadPhaseLayerFilterAll(),
+                                                     ObjectLayerFilterAll(),
+                                                     JPH::BodyFilter())) {
         result.hit = true;
         result.distance = closest_hit.mFraction * ray_length;
         JPH::Vec3 hit_pos = ray_start + ray_direction * result.distance;
         result.hit_point = {hit_pos.GetX(), hit_pos.GetY(), hit_pos.GetZ()};
-        
+
         // RayCastResult doesn't have surface normal - we need to get it differently
-        // For now, use a default upward normal (this should be improved with proper surface queries)
+        // For now, use a default upward normal (this should be improved with proper surface
+        // queries)
         result.surface_normal = glm::vec3(0.0f, 1.0f, 0.0f);
-        
-        // Determine material type based on hit point (simplified - could be enhanced with material system)
+
+        // Determine material type based on hit point (simplified - could be enhanced with material
+        // system)
         if (result.hit_point.y < 10.0f) {
             result.material_type = 0; // Stone
             result.material_absorption = 0.15f;
@@ -556,103 +644,121 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
             result.material_absorption = 0.4f;
         }
     }
-    
+
     return result;
 }
 
-float PhysicsSystem::calculate_audio_occlusion(const glm::vec3& source, const glm::vec3& listener) const {
+float PhysicsSystem::calculate_audio_occlusion(const glm::vec3& source,
+                                               const glm::vec3& listener) const {
     // Primary line-of-sight check
     AudioRaycastResult primary_ray = audio_raycast(source, listener);
-    
+
     if (!primary_ray.hit) {
         return 0.0f; // Clear line of sight
     }
-    
+
     float total_occlusion = 0.0f;
     float source_listener_distance = glm::distance(source, listener);
-    
+
     // If we hit something, calculate occlusion based on material and geometry
     float obstruction_factor = primary_ray.distance / source_listener_distance;
     total_occlusion += primary_ray.material_absorption * obstruction_factor;
-    
+
     // Additional rays for more accurate occlusion (performance vs accuracy trade-off)
     const std::vector<glm::vec3> offsets = {
-        {0.3f, 0.0f, 0.0f}, {-0.3f, 0.0f, 0.0f},  // Left/right
-        {0.0f, 0.3f, 0.0f}, {0.0f, -0.3f, 0.0f},   // Up/down
+        {0.3f, 0.0f, 0.0f},
+        {-0.3f, 0.0f, 0.0f}, // Left/right
+        {0.0f, 0.3f, 0.0f},
+        {0.0f, -0.3f, 0.0f}, // Up/down
     };
-    
+
     int clear_paths = 0;
     for (const auto& offset : offsets) {
         AudioRaycastResult ray = audio_raycast(source + offset, listener + offset);
         if (!ray.hit) {
             clear_paths++;
         } else {
-            float offset_obstruction = ray.distance / glm::distance(source + offset, listener + offset);
-            total_occlusion += ray.material_absorption * offset_obstruction * 0.2f; // Reduced weight
+            float offset_obstruction =
+                ray.distance / glm::distance(source + offset, listener + offset);
+            total_occlusion +=
+                ray.material_absorption * offset_obstruction * 0.2f; // Reduced weight
         }
     }
-    
+
     // Reduce occlusion if we have alternative paths
     float path_factor = 1.0f - (static_cast<float>(clear_paths) / offsets.size() * 0.6f);
     total_occlusion *= path_factor;
-    
+
     return std::clamp(total_occlusion, 0.0f, 0.95f); // Max 95% occlusion
 }
 
-std::vector<glm::vec3> PhysicsSystem::calculate_audio_reflection_points(const glm::vec3& source, const glm::vec3& listener, int max_bounces) const {
+std::vector<glm::vec3> PhysicsSystem::calculate_audio_reflection_points(const glm::vec3& source,
+                                                                        const glm::vec3& listener,
+                                                                        int max_bounces) const {
     std::vector<glm::vec3> reflection_points;
-    
-    if (!m_jolt_system || max_bounces <= 0) return reflection_points;
-    
+
+    if (!m_jolt_system || max_bounces <= 0)
+        return reflection_points;
+
     glm::vec3 current_pos = source;
     glm::vec3 target = listener;
-    
+
     for (int bounce = 0; bounce < max_bounces; ++bounce) {
         AudioRaycastResult ray = audio_raycast(current_pos, target);
-        
+
         if (!ray.hit) {
             break; // Direct path found, no more reflections
         }
-        
+
         // Calculate reflection point
         glm::vec3 incident = glm::normalize(ray.hit_point - current_pos);
-        glm::vec3 reflected = incident - 2.0f * glm::dot(incident, ray.surface_normal) * ray.surface_normal;
-        
+        glm::vec3 reflected =
+            incident - 2.0f * glm::dot(incident, ray.surface_normal) * ray.surface_normal;
+
         reflection_points.push_back(ray.hit_point);
-        
+
         // Set up for next bounce
-        current_pos = ray.hit_point + ray.surface_normal * 0.01f; // Small offset to avoid self-intersection
-        
-        // Reflect towards listener (direction unused for now; kept for future
-        // angle-of-incidence weighting).
-        (void)glm::normalize(listener - current_pos);
+        current_pos =
+            ray.hit_point + ray.surface_normal * 0.01f; // Small offset to avoid self-intersection
+
         target = current_pos + reflected * 10.0f; // Extend reflection ray
-        
+
         // Early termination if reflection quality becomes too poor
-        if (ray.material_absorption > 0.8f) break;
+        if (ray.material_absorption > 0.8f)
+            break;
     }
-    
+
     return reflection_points;
 }
 
 float PhysicsSystem::get_material_audio_absorption(int material_type) const {
     switch (material_type) {
-        case 0: return 0.15f; // Stone - hard, reflective
-        case 1: return 0.25f; // Dirt - moderate absorption
-        case 2: return 0.4f;  // Grass - soft, absorbing
-        case 3: return 0.6f;  // Sand - high absorption
-        case 4: return 0.8f;  // Fabric/organic - very absorbing
-        case 5: return 0.05f; // Metal - highly reflective
-        case 6: return 0.9f;  // Water - high absorption for airborne sound
-        default: return 0.2f; // Default medium absorption
+        case 0:
+            return 0.15f; // Stone - hard, reflective
+        case 1:
+            return 0.25f; // Dirt - moderate absorption
+        case 2:
+            return 0.4f; // Grass - soft, absorbing
+        case 3:
+            return 0.6f; // Sand - high absorption
+        case 4:
+            return 0.8f; // Fabric/organic - very absorbing
+        case 5:
+            return 0.05f; // Metal - highly reflective
+        case 6:
+            return 0.9f; // Water - high absorption for airborne sound
+        default:
+            return 0.2f; // Default medium absorption
     }
 }
 
 // === BATCHED PHYSICS QUERY SYSTEM ===
 
-int PhysicsSystem::BatchedPhysicsQueries::QueueRaycast(const glm::vec3& from, const glm::vec3& to, 
-                                                      std::function<void(const AudioRaycastResult&)> callback,
-                                                      float priority) {
+int PhysicsSystem::BatchedPhysicsQueries::QueueRaycast(
+    const glm::vec3& from,
+    const glm::vec3& to,
+    std::function<void(const AudioRaycastResult&)> callback,
+    float priority) {
     int query_id = m_next_query_id++;
     m_queued_queries.push_back({from, to, callback, query_id, priority});
     return query_id;
@@ -663,13 +769,14 @@ void PhysicsSystem::BatchedPhysicsQueries::ProcessBatch(const PhysicsSystem* phy
         m_processed_this_frame = 0;
         return;
     }
-    
+
     // Sort queries by priority (higher priority first) and then spatially
-    std::sort(m_queued_queries.begin(), m_queued_queries.end(), 
+    std::sort(m_queued_queries.begin(),
+              m_queued_queries.end(),
               [](const BatchedRaycastQuery& a, const BatchedRaycastQuery& b) {
                   return a.priority > b.priority;
               });
-    
+
     // Limit processing to avoid frame spikes
     const std::size_t queries_to_process =
         std::min(m_queued_queries.size(), m_max_queries_per_frame);
@@ -688,23 +795,23 @@ void PhysicsSystem::BatchedPhysicsQueries::ProcessBatch(const PhysicsSystem* phy
 
     // Sort the queries we're processing spatially for better cache performance
     SortQueriesSpatially(high_priority_queries);
-    
+
     m_results_buffer.clear();
     m_results_buffer.reserve(high_priority_queries.size());
-    
+
     // Batch process raycasts
     for (const auto& query : high_priority_queries) {
         AudioRaycastResult result = physics_system->audio_raycast(query.from, query.to);
         m_results_buffer.push_back({result, query.query_id});
-        
+
         // Immediately invoke callback for this result
         if (query.callback) {
             query.callback(result);
         }
     }
-    
+
     m_processed_this_frame = high_priority_queries.size();
-    
+
     // Replace queued queries with remaining ones
     m_queued_queries = std::move(remaining_queries);
 }
@@ -715,31 +822,34 @@ void PhysicsSystem::BatchedPhysicsQueries::ClearCompleted() {
     // Note: We don't clear m_queued_queries here as they represent pending work
 }
 
-void PhysicsSystem::BatchedPhysicsQueries::SortQueriesSpatially(std::vector<BatchedRaycastQuery>& queries) {
+void PhysicsSystem::BatchedPhysicsQueries::SortQueriesSpatially(
+    std::vector<BatchedRaycastQuery>& queries) {
     // Simple spatial sorting based on query start position
     // This improves cache coherency when accessing the physics world
-    std::sort(queries.begin(), queries.end(), [](const BatchedRaycastQuery& a, const BatchedRaycastQuery& b) {
-        // Morton encoding for better spatial locality
-        auto morton_encode = [](float x, float y, float z) -> uint64_t {
-            // Simple 3D morton encoding (interleave bits)
-            uint32_t ix = static_cast<uint32_t>(x * 100.0f) & 0x3FF; // 10 bits
-            uint32_t iy = static_cast<uint32_t>(y * 100.0f) & 0x3FF;
-            uint32_t iz = static_cast<uint32_t>(z * 100.0f) & 0x3FF;
-            
-            uint64_t result = 0;
-            for (int i = 0; i < 10; ++i) {
-                result |= ((ix & (1u << i)) << (2 * i)) |
-                         ((iy & (1u << i)) << (2 * i + 1)) |
-                         ((iz & (1u << i)) << (2 * i + 2));
-            }
-            return result;
-        };
-        
-        uint64_t morton_a = morton_encode(a.from.x, a.from.y, a.from.z);
-        uint64_t morton_b = morton_encode(b.from.x, b.from.y, b.from.z);
-        
-        return morton_a < morton_b;
-    });
+    std::sort(queries.begin(),
+              queries.end(),
+              [](const BatchedRaycastQuery& a, const BatchedRaycastQuery& b) {
+                  // Morton encoding for better spatial locality
+                  auto morton_encode = [](float x, float y, float z) -> uint64_t {
+                      // Simple 3D morton encoding (interleave bits)
+                      uint32_t ix = static_cast<uint32_t>(x * 100.0f) & 0x3FF; // 10 bits
+                      uint32_t iy = static_cast<uint32_t>(y * 100.0f) & 0x3FF;
+                      uint32_t iz = static_cast<uint32_t>(z * 100.0f) & 0x3FF;
+
+                      uint64_t result = 0;
+                      for (int i = 0; i < 10; ++i) {
+                          result |= ((ix & (1u << i)) << (2 * i)) |
+                                    ((iy & (1u << i)) << (2 * i + 1)) |
+                                    ((iz & (1u << i)) << (2 * i + 2));
+                      }
+                      return result;
+                  };
+
+                  uint64_t morton_a = morton_encode(a.from.x, a.from.y, a.from.z);
+                  uint64_t morton_b = morton_encode(b.from.x, b.from.y, b.from.z);
+
+                  return morton_a < morton_b;
+              });
 }
 
 } // namespace Systems

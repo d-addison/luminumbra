@@ -1,13 +1,13 @@
 #pragma once
 
-// Track sim.day_night_activity — DIURNAL / NOCTURNAL ACTIVITY.
+// sim.day_night_activity: DIURNAL / NOCTURNAL ACTIVITY.
 //
 // Creatures keep a daily rhythm: a DIURNAL creature is most active at NOON and at rest at
 // MIDNIGHT; a NOCTURNAL creature is the inverse. This system reads the day clock's
 // time-of-day in [0,1] (0 = midnight, 0.5 = noon, 1 = midnight again) and writes each
 // participating creature's ACTIVITY in [0,1] — a smooth, continuous, libm-free day curve.
-// The orchestrator can later scale move_speed / wake behaviour by activity (a resting
-// creature moves slowly / sleeps); this system only maintains the scalar.
+// CreatureBrainSystem consumes activity to choose sleep and wake behaviour;
+// this system maintains the scalar.
 //
 // THE CURVE. activity is built from the IEEE-deterministic cosine wrapper
 // (DeterministicMath::Cos) so it is bit-stable and has NO discontinuity across the day

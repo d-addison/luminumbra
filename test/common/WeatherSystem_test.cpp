@@ -1,11 +1,11 @@
-// T-I5a-3 (B1): deterministic weather-core snapshot + determinism test.
+// deterministic weather-core snapshot + determinism test.
 //
 // Proves the weather core is bit-deterministic (the property the world_hash
 // `weather` sub-hash and the WeatherVisual state-hash assertion depend on): two
 // independent instances advanced through the same ticks with the same seed/anchor
 // (and a parallel wind field for advection) produce the IDENTICAL weather
 // sub-hash; a different seed produces a different hash; the state evolves over
-// time; the storm-cell set stays bounded (<= kMaxStormCells, F9); the public
+// time; the storm-cell set stays bounded (<= kMaxStormCells, ); the public
 // query API returns the in-region category/precip; and the geometry matches the
 // PINNED 24 m / 64-cell shape.
 
@@ -20,12 +20,12 @@
 namespace {
 
 using Luminumbra::Vec3;
-using Luminumbra::Systems::WeatherSystem;
-using Luminumbra::Systems::WeatherCategory;
-using Luminumbra::Systems::WindFieldSystem;
+using Luminumbra::Systems::kMaxStormCells;
 using Luminumbra::Systems::kWeatherCellSizeM;
 using Luminumbra::Systems::kWeatherExtentCells;
-using Luminumbra::Systems::kMaxStormCells;
+using Luminumbra::Systems::WeatherCategory;
+using Luminumbra::Systems::WeatherSystem;
+using Luminumbra::Systems::WindFieldSystem;
 
 constexpr int kSeed = 424242;
 constexpr std::uint64_t kTicks = 300; // Endurance300Storm horizon
@@ -83,7 +83,7 @@ TEST(WeatherSystem, SubHashDependsOnSeed) {
 }
 
 TEST(WeatherSystem, StormCellsAreBounded) {
-    // Critique F9: the active storm-cell set never exceeds the pinned cap, and at
+    // regression contract: the active storm-cell set never exceeds the pinned cap, and at
     // least one cell spawns over the run (so advection + precip are exercised).
     const RunResult r = RunWeather(kSeed, kTicks, kAnchor);
     EXPECT_LE(r.max_storm_cells, kMaxStormCells);
@@ -126,16 +126,18 @@ TEST(WeatherSystem, AdvectionIsDeterministicAndStormsMove) {
     WindFieldSystem wind_a(kSeed), wind_b(kSeed);
     WeatherSystem wa(kSeed), wb(kSeed);
     for (std::uint64_t t = 1; t <= 120; ++t) {
-        wind_a.Update(t, kAnchor); wa.Update(t, kAnchor, &wind_a);
-        wind_b.Update(t, kAnchor); wb.Update(t, kAnchor, &wind_b);
+        wind_a.Update(t, kAnchor);
+        wa.Update(t, kAnchor, &wind_a);
+        wind_b.Update(t, kAnchor);
+        wb.Update(t, kAnchor, &wind_b);
     }
     EXPECT_EQ(wa.ComputeWeatherSubHash(), wb.ComputeWeatherSubHash());
 }
 
-// T-I5a-5 (B3): lightning strike schedule. The strike schedule is folded into the
-// `weather` sub-hash (world_hash mega-bump #3); it must FIRE over a storm-bearing
+// lightning strike schedule. The strike schedule is folded into the
+// `weather` sub-hash (world_hash hash revision); it must FIRE over a storm-bearing
 // run (non-vacuous), be bit-deterministic across runs (same total strike count +
-// same sub-hash), stay BOUNDED (<= kMaxLiveStrikes, F9), and depend on the +13
+// same sub-hash), stay BOUNDED (<= kMaxLiveStrikes, ), and depend on the +13
 // seed offset (a different seed -> a different strike total in general).
 TEST(WeatherSystem, StrikeScheduleFiresDeterministicallyAndBounded) {
     using Luminumbra::Systems::kMaxLiveStrikes;
@@ -144,11 +146,14 @@ TEST(WeatherSystem, StrikeScheduleFiresDeterministicallyAndBounded) {
     std::uint64_t total_a = 0, total_b = 0;
     int max_live_a = 0;
     for (std::uint64_t t = 1; t <= kTicks; ++t) {
-        wind_a.Update(t, kAnchor); wa.Update(t, kAnchor, &wind_a);
-        wind_b.Update(t, kAnchor); wb.Update(t, kAnchor, &wind_b);
+        wind_a.Update(t, kAnchor);
+        wa.Update(t, kAnchor, &wind_a);
+        wind_b.Update(t, kAnchor);
+        wb.Update(t, kAnchor, &wind_b);
         total_a += static_cast<std::uint64_t>(wa.StrikesThisTick().size());
         total_b += static_cast<std::uint64_t>(wb.StrikesThisTick().size());
-        if (wa.live_strike_count() > max_live_a) max_live_a = wa.live_strike_count();
+        if (wa.live_strike_count() > max_live_a)
+            max_live_a = wa.live_strike_count();
     }
     EXPECT_GT(total_a, 0u) << "no lightning strike scheduled (strike path vacuous)";
     EXPECT_EQ(total_a, total_b) << "strike schedule diverged across identical runs";
@@ -162,8 +167,10 @@ TEST(WeatherSystem, StrikeFieldsAreReplayableWorldEvents) {
     WindFieldSystem wind_a(kSeed), wind_b(kSeed);
     WeatherSystem wa(kSeed), wb(kSeed);
     for (std::uint64_t t = 1; t <= kTicks; ++t) {
-        wind_a.Update(t, kAnchor); wa.Update(t, kAnchor, &wind_a);
-        wind_b.Update(t, kAnchor); wb.Update(t, kAnchor, &wind_b);
+        wind_a.Update(t, kAnchor);
+        wa.Update(t, kAnchor, &wind_a);
+        wind_b.Update(t, kAnchor);
+        wb.Update(t, kAnchor, &wind_b);
     }
     const auto& sa = wa.StrikeSchedule();
     const auto& sb = wb.StrikeSchedule();

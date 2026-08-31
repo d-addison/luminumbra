@@ -1,4 +1,4 @@
-// FR-B1: per-voxel material channel + true voxel structure stamping.
+// per-voxel material channel + true voxel structure stamping.
 //
 // These gates pin the four load-bearing properties of the structure-stamping
 // feature against a FIXED TerrainGenParams literal (NOT default.json, so the
@@ -14,12 +14,12 @@
 //                           byte-exact.
 #include "gtest/gtest.h"
 
+#include "persistence/WorldPersistenceRoundtrip.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 #include "world/StructurePlacement.h"
 #include "world/WorldStreamingState.h"
-#include "persistence/WorldPersistenceRoundtrip.h"
 
 #include <memory>
 #include <string>
@@ -44,10 +44,10 @@ constexpr int kSeed = 4242;
 // caves / islands / biomes / hydro all OFF, a small flat-ish surface lifted well
 // above SEA_LEVEL so every cairn site stamps (height = 40 + small noise term).
 Systems::TerrainGenParams FixedParams() {
-    Systems::TerrainGenParams p;   // start from the documented defaults
+    Systems::TerrainGenParams p; // start from the documented defaults
     p.base_frequency = 0.01f;
-    p.base_amplitude = 4.0f;       // tiny relief; surface stays ~[36, 44]
-    p.height_offset = 40.0f;       // comfortably above SEA_LEVEL (= 0)
+    p.base_amplitude = 4.0f; // tiny relief; surface stays ~[36, 44]
+    p.height_offset = 40.0f; // comfortably above SEA_LEVEL (= 0)
     p.caves_enabled = false;
     p.surface_breaks_enabled = false;
     p.island_mask_enabled = false;
@@ -71,8 +71,8 @@ Luminumbra::World::StructureTemplatePool LoadCairn() {
 // Finds a cairn site whose entire footprint (origin +-1 on X/Z, the cairn
 // half-extent) lands strictly inside one chunk, so the whole structure is in a
 // single generated chunk and the count assertions are unambiguous.
-std::optional<World::StructureSite> FindInteriorCairnSite(
-    const World::StructureTemplatePool& cairn) {
+std::optional<World::StructureSite>
+FindInteriorCairnSite(const World::StructureTemplatePool& cairn) {
     // Scan a generous window of cells.
     auto sites = World::SitesInArea(cairn, kSeed, -2000, -2000, 2000, 2000);
     for (const auto& s : sites) {
@@ -83,8 +83,7 @@ std::optional<World::StructureSite> FindInteriorCairnSite(
         const int lx = floor_mod(s.origin.x, CHUNK_SIZE_X);
         const int lz = floor_mod(s.origin.z, CHUNK_SIZE_Z);
         // Cairn half-extent on X/Z is 1; keep a 2-voxel margin from each border.
-        if (lx >= 2 && lx <= CHUNK_SIZE_X - 2 &&
-            lz >= 2 && lz <= CHUNK_SIZE_Z - 2) {
+        if (lx >= 2 && lx <= CHUNK_SIZE_X - 2 && lz >= 2 && lz <= CHUNK_SIZE_Z - 2) {
             return s;
         }
     }
@@ -103,7 +102,8 @@ IVec3 CairnChunkCoords(const World::StructureSite& site, float surface) {
 std::size_t CountMaterial(const std::vector<u8>& data, u8 mat) {
     std::size_t n = 0;
     for (u8 v : data) {
-        if (v == mat) ++n;
+        if (v == mat)
+            ++n;
     }
     return n;
 }
@@ -113,16 +113,15 @@ std::size_t CountMaterial(const std::vector<u8>& data, u8 mat) {
 TEST(StructureStampingTest, MaterialDataDeterministic) {
     Systems::TerrainGenParams params = FixedParams();
     Systems::SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
-    ASSERT_TRUE(world.structures_enabled())
-        << "fixed params must load the shipped structure pools";
+    ASSERT_TRUE(world.structures_enabled()) << "fixed params must load the shipped structure pools";
 
     World::StructureTemplatePool cairn = LoadCairn();
     ASSERT_TRUE(cairn.ok());
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value()) << "no interior cairn site found in scan window";
 
-    const float surface = world.GetTerrainHeightAt(
-        static_cast<float>(site->origin.x), static_cast<float>(site->origin.z));
+    const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
+                                                   static_cast<float>(site->origin.z));
     const IVec3 coords = CairnChunkCoords(*site, surface);
 
     Chunk a(coords);
@@ -172,8 +171,8 @@ TEST(StructureStampingTest, CairnStoneVoxelsAppearInChunk) {
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value());
 
-    const float surface = world.GetTerrainHeightAt(
-        static_cast<float>(site->origin.x), static_cast<float>(site->origin.z));
+    const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
+                                                   static_cast<float>(site->origin.z));
     const int floor_y = static_cast<int>(std::floor(surface));
     const IVec3 coords = CairnChunkCoords(*site, surface);
 
@@ -222,8 +221,7 @@ TEST(StructureStampingTest, CairnStoneVoxelsAppearInChunk) {
             break;
         }
     }
-    EXPECT_TRUE(any_stone_vertex)
-        << "expected a Stone-classified mesh vertex on the cairn";
+    EXPECT_TRUE(any_stone_vertex) << "expected a Stone-classified mesh vertex on the cairn";
 }
 
 TEST(StructureStampingTest, MiningClearsStructureVoxel) {
@@ -235,8 +233,8 @@ TEST(StructureStampingTest, MiningClearsStructureVoxel) {
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value());
 
-    const float surface = world.GetTerrainHeightAt(
-        static_cast<float>(site->origin.x), static_cast<float>(site->origin.z));
+    const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
+                                                   static_cast<float>(site->origin.z));
     const int floor_y = static_cast<int>(std::floor(surface));
     const IVec3 coords = CairnChunkCoords(*site, surface);
 
@@ -254,8 +252,7 @@ TEST(StructureStampingTest, MiningClearsStructureVoxel) {
     const int lz = site->origin.z - base.z;
     ASSERT_GE(ly, 0);
     ASSERT_LT(ly, size_y);
-    const std::size_t idx = static_cast<std::size_t>(lx) +
-                            static_cast<std::size_t>(ly) * size_x +
+    const std::size_t idx = static_cast<std::size_t>(lx) + static_cast<std::size_t>(ly) * size_x +
                             static_cast<std::size_t>(lz) * size_x * size_y;
     ASSERT_EQ(chunk.material_data[idx], static_cast<u8>(MaterialType::Stone));
     ASSERT_LE(chunk.sdf_data[idx], 0.0f);
@@ -278,8 +275,8 @@ TEST(StructureStampingTest, PersistenceRoundtripPreservesMaterialData) {
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value());
 
-    const float surface = world.GetTerrainHeightAt(
-        static_cast<float>(site->origin.x), static_cast<float>(site->origin.z));
+    const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
+                                                   static_cast<float>(site->origin.z));
     const IVec3 coords = CairnChunkCoords(*site, surface);
 
     // Serialize a streaming state holding the structure chunk + a pristine
@@ -303,8 +300,8 @@ TEST(StructureStampingTest, PersistenceRoundtripPreservesMaterialData) {
         Luminumbra::Persistence::SerializeWorldStreamingStateSnapshotJson(state);
     WorldStreamingState restored;
     std::vector<std::string> errors;
-    ASSERT_TRUE(Luminumbra::Persistence::LoadWorldStreamingStateSnapshotJson(
-        json_text, restored, errors))
+    ASSERT_TRUE(
+        Luminumbra::Persistence::LoadWorldStreamingStateSnapshotJson(json_text, restored, errors))
         << (errors.empty() ? "" : errors.front());
 
     auto restored_structure = restored.find_chunk(coords);

@@ -1,6 +1,6 @@
 #pragma once
 
-// sim.disease — the deterministic PLANT PEST/BLIGHT tick (Track: disease).
+// sim.disease — the deterministic PLANT PEST/BLIGHT tick .
 //
 // A configurable blight that spreads by PROXIMITY and is resisted by tending /
 // quality. Each fixed 30 Hz tick:
@@ -25,7 +25,7 @@
 //
 // GATING: a plant only participates if it carries BOTH PlantTag (it IS a plant) and
 // PlantHealthComponent (the disease opt-in). A registry with no PlantHealthComponent
-// — and in particular the canonical headless roster with no plants — does ZERO work
+// and in particular the canonical headless roster with no plants — does ZERO work
 // and creates/mutates nothing, so the NetworkStateHash baseline stays byte-identical.
 
 #include <algorithm>
@@ -37,8 +37,8 @@
 #include "../components/CoreComponents.h"
 #include "../components/DiseaseComponents.h"
 #include "../components/PlantComponents.h"
-#include "../core/DeterministicMath.h"  // Sqrt (IEEE-deterministic)
-#include "../core/DeterministicRng.h"   // reserved (offset +20) for a stochastic variant
+#include "../core/DeterministicMath.h" // Sqrt (IEEE-deterministic)
+#include "../core/DeterministicRng.h"  // reserved (offset +20) for a stochastic variant
 
 namespace luminumbra::foliage {
 
@@ -75,11 +75,11 @@ inline constexpr std::uint16_t kRecoveryResistanceGain = 250u;
 inline constexpr std::uint16_t kInfectionDecayPerTick = 8u;
 
 struct PlantDiseaseStats {
-    int considered = 0;   // plants with a health component examined this tick
-    int infected = 0;     // plants currently in the Infected state after the tick
+    int considered = 0;     // plants with a health component examined this tick
+    int infected = 0;       // plants currently in the Infected state after the tick
     int new_infections = 0; // Healthy -> Infected transitions this tick
-    int recovered = 0;    // Infected -> Recovered transitions this tick
-    int died = 0;         // Infected -> Dead transitions this tick
+    int recovered = 0;      // Infected -> Recovered transitions this tick
+    int died = 0;           // Infected -> Dead transitions this tick
 };
 
 // Saturating fixed-point add/sub helpers (clamp to [0, kDiseaseUnitScale]).
@@ -95,26 +95,27 @@ inline std::uint16_t SatSub(std::uint16_t a, std::uint32_t b) {
 // tick id. Returns telemetry (also useful for the world sub-hash). Deterministic,
 // id-ordered, two-phase. `world_seed` lets distinct worlds diverge (reserved for a
 // future stochastic variant); the default deterministic path ignores it.
-inline PlantDiseaseStats RunPlantDiseaseOnTick(entt::registry& reg,
-                                               std::uint64_t tick,
-                                               std::uint64_t world_seed = 0) {
-    (void)tick;        // unused by the deterministic threshold path
-    (void)world_seed;  // reserved for the +20 stochastic variant
+inline PlantDiseaseStats
+RunPlantDiseaseOnTick(entt::registry& reg, std::uint64_t tick, std::uint64_t world_seed = 0) {
+    (void)tick;       // unused by the deterministic threshold path
+    (void)world_seed; // reserved for the +20 stochastic variant
     PlantDiseaseStats stats;
 
-    auto view = reg.view<Comp::PlantTag, Comp::PlantHealthComponent,
-                         const Comp::TransformComponent>();
+    auto view =
+        reg.view<Comp::PlantTag, Comp::PlantHealthComponent, const Comp::TransformComponent>();
 
     // id-ordered participant ids so accumulation + transition order is deterministic.
     std::vector<entt::entity> ents;
-    for (auto e : view) ents.push_back(e);
+    for (auto e : view)
+        ents.push_back(e);
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
 
-    if (ents.empty()) return stats; // explicit no-op for the empty roster
+    if (ents.empty())
+        return stats; // explicit no-op for the empty roster
 
-    // Phase 1 (snapshot): record every INFECTED plant's position. Reading the
+    //  (snapshot): record every INFECTED plant's position. Reading the
     // infected set BEFORE any mutation makes spread order-independent within a tick.
     struct Source {
         float x, y, z;
@@ -131,7 +132,7 @@ inline PlantDiseaseStats RunPlantDiseaseOnTick(entt::registry& reg,
 
     const float radius2 = kDiseaseRadius * kDiseaseRadius;
 
-    // Phase 2 (expose + resolve): mutate each plant's health from the snapshot.
+    //  (expose + resolve): mutate each plant's health from the snapshot.
     for (auto e : ents) {
         ++stats.considered;
         auto& h = view.get<Comp::PlantHealthComponent>(e);
@@ -151,18 +152,21 @@ inline PlantDiseaseStats RunPlantDiseaseOnTick(entt::registry& reg,
             const float dy = tf.position.y - s.y;
             const float dz = tf.position.z - s.z;
             const float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 >= radius2) continue;        // out of range
-            if (d2 <= 0.0000001f) continue;     // self / coincident source
+            if (d2 >= radius2)
+                continue; // out of range
+            if (d2 <= 0.0000001f)
+                continue; // self / coincident source
             const float dist = ::Luminumbra::DeterministicMath::Sqrt(d2);
             // falloff in [0,1): (radius - dist) / radius.
             const float falloff = (kDiseaseRadius - dist) * (1.0f / kDiseaseRadius);
-            pressure += static_cast<std::uint32_t>(
-                static_cast<float>(kDiseaseBasePressure) * falloff);
+            pressure +=
+                static_cast<std::uint32_t>(static_cast<float>(kDiseaseBasePressure) * falloff);
         }
 
         // Resistance scales DOWN the effective pressure: a plant with resistance r
         // (milli-units) admits pressure * (1000 - r) / 1000.
-        const std::uint32_t admit = static_cast<std::uint32_t>(Comp::kDiseaseUnitScale) - h.resistance;
+        const std::uint32_t admit =
+            static_cast<std::uint32_t>(Comp::kDiseaseUnitScale) - h.resistance;
         const std::uint32_t effective = (pressure * admit) / Comp::kDiseaseUnitScale;
 
         if (h.state == static_cast<std::uint8_t>(Comp::PlantDiseaseState::Infected)) {

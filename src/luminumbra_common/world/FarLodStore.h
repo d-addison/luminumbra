@@ -1,6 +1,6 @@
 #pragma once
 
-// Far-LOD region tile store (T-I3-8, design-decisions.md sections 3/4).
+// Far-LOD region tile store (, the deterministic runtime contract sections 3/4).
 //
 // Far tiers extend the visible horizon past the live chunk ring with packed
 // per-region heightfield tiles:
@@ -35,7 +35,7 @@
 namespace Luminumbra::Systems {
 class SHIELD_WorldSystem;
 struct TerrainGenParams;
-}
+} // namespace Luminumbra::Systems
 
 namespace Luminumbra::World {
 
@@ -200,10 +200,9 @@ constexpr std::size_t FarLodSdfBrickSampleCount(FarLodTier tier) {
 // Decimates a full 17^3 lattice at the aligned far-tier stride and upserts the
 // corresponding brick. Material data is optional; an absent full material
 // lattice is encoded as 0xff. Heightmap-only input is never accepted.
-FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(
-    FarLodTile& tile,
-    const FarLodSdfSnapshot& snapshot,
-    std::string* error = nullptr);
+FarLodSdfReduceResult ReduceChunkSdfIntoFarTile(FarLodTile& tile,
+                                                const FarLodSdfSnapshot& snapshot,
+                                                std::string* error = nullptr);
 
 // Region mesh output (consumed by MarchingCubes::GenerateFarLodRegionMesh and
 // the far render path). Vertex positions are region-local in X/Z (relative to
@@ -229,28 +228,26 @@ u64 ComputeFarLodTileHash(const FarLodTile& tile);
 // component recorded into the tile (ComputeTerrainParamsHash of the world's
 // params and seed - passed in because the world system does not expose its
 // seed).
-FarLodTile BuildPristineFarLodTile(
-    const Systems::SHIELD_WorldSystem& world_system,
-    FarLodTier tier,
-    i32 rx,
-    i32 rz,
-    u64 params_hash);
+FarLodTile BuildPristineFarLodTile(const Systems::SHIELD_WorldSystem& world_system,
+                                   FarLodTier tier,
+                                   i32 rx,
+                                   i32 rz,
+                                   u64 params_hash);
 
 // Legacy migration helper: downsamples a chunk's 17x17 heightmap_data into
 // the covering tile samples. New authoritative far data must use
 // ReduceChunkSdfIntoFarTile instead. Returns the number of samples written;
 // 0 when the chunk lies outside the tile's region or carries no heightmap.
-std::size_t ApplyChunkHeightmapToFarLodTile(
-    FarLodTile& tile,
-    const Chunk& chunk,
-    bool mark_edited);
+std::size_t ApplyChunkHeightmapToFarLodTile(FarLodTile& tile, const Chunk& chunk, bool mark_edited);
 
 // Persists far-LOD tiles through the LMR1 container beside the chunk records.
 class FarLodStore {
 public:
     explicit FarLodStore(std::filesystem::path save_dir);
 
-    const std::filesystem::path& save_dir() const { return m_save_dir; }
+    const std::filesystem::path& save_dir() const {
+        return m_save_dir;
+    }
 
     // Record id for a tile inside its region file (the (lod_level, id) pair
     // keys the record; lod_level carries the tier).
@@ -262,13 +259,12 @@ public:
     // params_hash mismatch is a clean miss (returns false, no error) so the
     // caller rebuilds. Edited tiles are authoritative and load regardless of
     // the params hash. A missing record/file is a clean miss.
-    bool load_tile(
-        FarLodTier tier,
-        i32 rx,
-        i32 rz,
-        u64 expected_params_hash,
-        FarLodTile& out_tile,
-        std::vector<std::string>* errors = nullptr) const;
+    bool load_tile(FarLodTier tier,
+                   i32 rx,
+                   i32 rz,
+                   u64 expected_params_hash,
+                   FarLodTile& out_tile,
+                   std::vector<std::string>* errors = nullptr) const;
 
 private:
     std::filesystem::path m_save_dir;

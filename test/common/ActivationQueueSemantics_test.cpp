@@ -1,4 +1,4 @@
-// SHIELD-03 (spec 017-B FR-B-005): the activation queue's tick-keyed
+// the activation queue's tick-keyed
 // publication semantics, exercised DIRECTLY (no per-tick barrier). A batch
 // dispatched at tick D with the fixed pipeline latency K publishes at
 // activate_due(D+K) — not one tick earlier — even when its jobs finished long
@@ -7,17 +7,17 @@
 // schedule, tick), never job-completion timing.
 #include <gtest/gtest.h>
 
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 namespace fs = std::filesystem;
 
@@ -26,8 +26,8 @@ namespace {
 using Luminumbra::ChunkState;
 using Luminumbra::JobSystem;
 using Luminumbra::Vec3;
-using Luminumbra::world::GameSession;
 using Luminumbra::Systems::SHIELD_WorldSystem;
+using Luminumbra::world::GameSession;
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
 #define LUMINUMBRA_SOURCE_ROOT "."
@@ -42,13 +42,18 @@ public:
         root_ = fs::temp_directory_path() / "luminumbra_activation_queue_test";
         fs::remove_all(root_);
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
-        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" / "default.json",
+        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
+                          "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
     }
-    ~HeadlessRoot() { std::error_code ec; fs::remove_all(root_, ec); }
+    ~HeadlessRoot() {
+        std::error_code ec;
+        fs::remove_all(root_, ec);
+    }
     [[nodiscard]] std::string root_string() const {
         return root_.string() + static_cast<char>(fs::path::preferred_separator);
     }
+
 private:
     fs::path root_;
 };
@@ -104,7 +109,7 @@ TEST(ActivationQueueSemantics, BatchPublishesAtDispatchTickPlusKNotEarlier) {
         world->activate_due(dispatch_tick + kExpectedPipelineLatencyTicks - 1);
         EXPECT_EQ(LoadingChunkIds(world).size(), loading_before.size())
             << "a batch published BEFORE its due tick — availability leaked "
-               "job-completion timing (FR-B-005 violation)";
+               "job-completion timing (violation)";
 
         // At the due tick: the batch publishes (Loading -> Idle flips).
         world->activate_due(dispatch_tick + kExpectedPipelineLatencyTicks);

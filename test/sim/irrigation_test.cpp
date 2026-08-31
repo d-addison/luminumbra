@@ -1,4 +1,4 @@
-// Track sim.irrigation — DETERMINISTIC soil-MOISTURE / water-diffusion grid that
+// sim.irrigation: DETERMINISTIC soil-MOISTURE / water-diffusion grid that
 // feeds plant moisture. A WaterSourceComponent (dug channel / spring) deposits
 // moisture into its cell; the grid DIFFUSES it to neighbours and DRAINS every
 // cell toward a dry baseline each tick. Deterministic: integer fixed-point store,

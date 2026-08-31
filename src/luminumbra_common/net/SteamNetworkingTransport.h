@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I6: Steamworks transport for the authoritative-server replication stack.
+// Steamworks transport for the authoritative-server replication stack.
 // Implements the engine's ILockstepTransport seam over ISteamNetworkingSockets
 // (the Steam SDK's build of GameNetworkingSockets): real UDP with reliable +
 // unreliable channels, encryption, and -- via P2P/SDR later -- NAT traversal and
@@ -49,10 +49,10 @@ public:
     SteamNetworkingTransport& operator=(const SteamNetworkingTransport&) = delete;
 
     // Host: listen on `port` (all interfaces). Accept happens asynchronously via
-    // the connection-status callback; poll IsPeerConnected() after RunCallbacks().
+    // the connection-status callback; poll IsPeerConnected after RunCallbacks.
     bool Listen(std::uint16_t port);
     // Client: connect to host:port. Connection completes asynchronously; poll
-    // IsPeerConnected() after RunCallbacks().
+    // IsPeerConnected after RunCallbacks.
     bool Connect(const std::string& host, std::uint16_t port);
 
     bool SendFrame(const std::vector<std::uint8_t>& frame,

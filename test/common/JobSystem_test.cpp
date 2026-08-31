@@ -117,7 +117,7 @@ TEST(JobSystemStressTest, BatchDispatchCompletesManyIndependentBatches) {
 }
 
 // Single-worker fixture whose worker is parked on a gate job until
-// release() is called, so every dispatch made while the gate is held lands
+// release is called, so every dispatch made while the gate is held lands
 // in the queues before the worker pops anything. This makes lane-selection
 // order fully deterministic without timing assumptions.
 class GatedSingleWorker {
@@ -154,12 +154,10 @@ private:
 constexpr int kHighLaneMarker = 1;
 constexpr int kNormalLaneMarker = 0;
 
-std::vector<Luminumbra::Job> MakeLaneMarkerJobs(
-    int count,
-    int marker,
-    std::mutex& order_mutex,
-    std::vector<int>& completion_order)
-{
+std::vector<Luminumbra::Job> MakeLaneMarkerJobs(int count,
+                                                int marker,
+                                                std::mutex& order_mutex,
+                                                std::vector<int>& completion_order) {
     std::vector<Luminumbra::Job> jobs;
     jobs.reserve(static_cast<std::size_t>(count));
     for (int i = 0; i < count; ++i) {
@@ -308,9 +306,8 @@ TEST(JobSystemStressTest, BatchCountersCanBeReusedAcrossSequentialBatches) {
         jobs.reserve(kJobsPerBatch);
 
         for (int i = 0; i < kJobsPerBatch; ++i) {
-            jobs.emplace_back([&completed]() {
-                completed.fetch_add(1, std::memory_order_relaxed);
-            });
+            jobs.emplace_back(
+                [&completed]() { completed.fetch_add(1, std::memory_order_relaxed); });
         }
 
         const Luminumbra::JobHandle handle = system.job_system.dispatch_batch(jobs);
@@ -320,7 +317,7 @@ TEST(JobSystemStressTest, BatchCountersCanBeReusedAcrossSequentialBatches) {
     }
 }
 
-// T-I4-17-jobsystem-pod-pool: exercise the pooled-slot ring hard -- many
+// exercise the pooled-slot ring hard -- many
 // dispatch/complete cycles that force the lane ring well past its initial
 // capacity (256/lane) and back to empty repeatedly, asserting every job runs
 // exactly once and the completion barrier drains each time. A leak or
@@ -332,7 +329,7 @@ TEST(JobSystemPoolTest, RingGrowsAndRecyclesAcrossManyCycles) {
     }
 
     constexpr int kCycles = 200;
-    constexpr int kJobsPerCycle = 1000;  // > initial 256/lane capacity -> growth
+    constexpr int kJobsPerCycle = 1000; // > initial 256/lane capacity -> growth
 
     RunningJobSystem system;
     std::atomic<long long> grand_total{0};
@@ -349,20 +346,19 @@ TEST(JobSystemPoolTest, RingGrowsAndRecyclesAcrossManyCycles) {
         }
         const Luminumbra::JobHandle handle = system.job_system.dispatch_batch(jobs);
         system.job_system.wait(handle);
-        ASSERT_EQ(ran.load(std::memory_order_acquire), kJobsPerCycle)
-            << "cycle " << cycle;
+        ASSERT_EQ(ran.load(std::memory_order_acquire), kJobsPerCycle) << "cycle " << cycle;
     }
 
     EXPECT_EQ(grand_total.load(std::memory_order_acquire),
               static_cast<long long>(kCycles) * kJobsPerCycle);
 }
 
-// T-I4-17-jobsystem-pod-pool: nested dispatch -- outer jobs each dispatch an
+// nested dispatch -- outer jobs each dispatch an
 // inner batch (collecting handles) WITHOUT blocking inside the worker. The main
 // thread then drains the outer barrier and every inner handle. This stresses
 // the ring with interleaved outer+inner slots and recycling, but avoids the
 // fixed-pool deadlock that blocking on inner work from inside a worker would
-// cause (a worker parked in wait() cannot service the inner jobs it waits on --
+// cause (a worker parked in wait cannot service the inner jobs it waits on --
 // a pre-existing thread-pool hazard, unrelated to the pooling change). The
 // engine itself never blocks inside a job; nested *dispatch* is the realistic
 // pattern.
@@ -387,20 +383,17 @@ TEST(JobSystemPoolTest, NestedDispatchCompletesFully) {
             std::vector<Luminumbra::Job> inner_jobs;
             inner_jobs.reserve(kInner);
             for (int i = 0; i < kInner; ++i) {
-                inner_jobs.emplace_back([&inner_ran]() {
-                    inner_ran.fetch_add(1, std::memory_order_relaxed);
-                });
+                inner_jobs.emplace_back(
+                    [&inner_ran]() { inner_ran.fetch_add(1, std::memory_order_relaxed); });
             }
-            Luminumbra::JobHandle inner_handle =
-                system.job_system.dispatch_batch(inner_jobs);
+            Luminumbra::JobHandle inner_handle = system.job_system.dispatch_batch(inner_jobs);
             std::lock_guard<std::mutex> lock(handles_mutex);
             inner_handles.push_back(std::move(inner_handle));
         });
     }
 
-    const Luminumbra::JobHandle outer_handle =
-        system.job_system.dispatch_batch(outer_jobs);
-    system.job_system.wait(outer_handle);  // all inner batches now dispatched
+    const Luminumbra::JobHandle outer_handle = system.job_system.dispatch_batch(outer_jobs);
+    system.job_system.wait(outer_handle); // all inner batches now dispatched
 
     std::vector<Luminumbra::JobHandle> to_wait;
     {
@@ -414,7 +407,7 @@ TEST(JobSystemPoolTest, NestedDispatchCompletesFully) {
     EXPECT_EQ(inner_ran.load(std::memory_order_acquire), kOuter * kInner);
 }
 
-// T-I4-17-jobsystem-pod-pool: an empty batch returns a default (null) handle
+// an empty batch returns a default (null) handle
 // and waiting on it is a no-op -- no allocation, no hang.
 TEST(JobSystemPoolTest, EmptyBatchReturnsNullHandleAndWaitIsNoop) {
     RunningJobSystem system;
@@ -426,7 +419,7 @@ TEST(JobSystemPoolTest, EmptyBatchReturnsNullHandleAndWaitIsNoop) {
     system.job_system.wait(handle);
 }
 
-// T-I4-17-jobsystem-pod-pool: jobs that throw must still complete their batch
+// jobs that throw must still complete their batch
 // slot (run_slot's Finisher runs during unwind) so the barrier drains and the
 // worker survives to serve later work.
 TEST(JobSystemPoolTest, ThrowingJobsStillDrainTheBarrier) {
@@ -454,7 +447,7 @@ TEST(JobSystemPoolTest, ThrowingJobsStillDrainTheBarrier) {
     system.job_system.wait(handle);
     EXPECT_EQ(survived.load(std::memory_order_acquire), kJobs);
 
-    // The pool/workers are still healthy: a follow-up batch completes.
+    // The pool/workers are still healthy: a subsequent batch completes.
     std::atomic<int> after{0};
     std::vector<Luminumbra::Job> more;
     more.reserve(8);
@@ -465,9 +458,9 @@ TEST(JobSystemPoolTest, ThrowingJobsStillDrainTheBarrier) {
     EXPECT_EQ(after.load(std::memory_order_acquire), 8);
 }
 
-// T-I4-17-jobsystem-pod-pool: after shutdown, dispatch_batch must reject the
-// batch, drive the counter to 0, and return a handle whose wait() does not
-// hang (the lost-wakeup-safe reject path). dispatch() of a single job after
+// after shutdown, dispatch_batch must reject the
+// batch, drive the counter to 0, and return a handle whose wait does not
+// hang (the lost-wakeup-safe reject path). dispatch of a single job after
 // shutdown must be a no-op.
 TEST(JobSystemPoolTest, DispatchAfterShutdownRejectsWithoutHang) {
     Luminumbra::JobSystem job_system;
@@ -491,9 +484,9 @@ TEST(JobSystemPoolTest, DispatchAfterShutdownRejectsWithoutHang) {
     EXPECT_EQ(ran.load(std::memory_order_acquire), 0);
 }
 
-// T-I4-17-jobsystem-pod-pool: PERF micro-benchmark, DISABLED by default (run
+// PERF micro-benchmark, DISABLED by default (run
 // with --gtest_also_run_disabled_tests). Measures empty-job dispatch_batch +
-// wait throughput so the pooled-slot win can be reported without re-blessing
+// wait throughput so the pooled-slot win can be reported without update the baseline
 // any baseline. Reports to stdout; asserts nothing timing-dependent.
 TEST(JobSystemPoolTest, DISABLED_DispatchThroughputBenchmark) {
     if (std::thread::hardware_concurrency() == 0) {
@@ -518,11 +511,13 @@ TEST(JobSystemPoolTest, DISABLED_DispatchThroughputBenchmark) {
     }
     const auto end = std::chrono::steady_clock::now();
 
-    const double seconds =
-        std::chrono::duration<double>(end - start).count();
+    const double seconds = std::chrono::duration<double>(end - start).count();
     const double per_job_ns = (seconds * 1e9) / static_cast<double>(kTotal);
     std::printf("[PERF] dispatch_batch+wait: %d jobs in %.4f s = %.1f ns/job (%.0f jobs/s)\n",
-                kTotal, seconds, per_job_ns, static_cast<double>(kTotal) / seconds);
+                kTotal,
+                seconds,
+                per_job_ns,
+                static_cast<double>(kTotal) / seconds);
     EXPECT_EQ(ran.load(std::memory_order_acquire), static_cast<long long>(kTotal));
 }
 

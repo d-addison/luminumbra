@@ -1,4 +1,4 @@
-// Track sim.soil — DETERMINISTIC soil NUTRIENT field. Plants (PlantTag +
+// sim.soil: DETERMINISTIC soil NUTRIENT field. Plants (PlantTag +
 // SoilFeederComponent) draw nutrient from their cell proportional to growth stage;
 // fallow soil regenerates toward a baseline each tick. Deterministic: integer
 // fixed-point store, id-ordered traversal, per-cell consumption summed so the

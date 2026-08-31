@@ -1,4 +1,4 @@
-// Phase 1 — game/Objectives: the progression layer over the codex. Pins the pure
+// game/Objectives: the progression layer over the codex. Pins the pure
 // evaluation contract the HUD/journal reads: each objective is a deterministic function
 // of codex state, progress is monotonic toward completion, and the starter set advances
 // as captures accrue. No GL, no rng, no wall-clock.
@@ -9,16 +9,18 @@
 
 namespace {
 
+using luminumbra::game::DefaultObjectives;
+using luminumbra::game::EvaluateObjective;
 using luminumbra::game::Objective;
 using luminumbra::game::ObjectiveKind;
 using luminumbra::game::ObjectiveSet;
-using luminumbra::game::EvaluateObjective;
-using luminumbra::game::DefaultObjectives;
 using luminumbra::game::PhotoCodex;
 
 // kStar4 is 0.75 (PhotoSession): a best_score >= 0.75 is a 4-star shot.
 TEST(Objectives, DiscoverCountProgressAndCompletion) {
-    Objective o; o.kind = ObjectiveKind::DiscoverCount; o.target_count = 3;
+    Objective o;
+    o.kind = ObjectiveKind::DiscoverCount;
+    o.target_count = 3;
     PhotoCodex codex;
 
     EXPECT_FALSE(EvaluateObjective(o, codex).complete);
@@ -38,7 +40,9 @@ TEST(Objectives, DiscoverCountProgressAndCompletion) {
 }
 
 TEST(Objectives, DiscoverSpeciesIsBinary) {
-    Objective o; o.kind = ObjectiveKind::DiscoverSpecies; o.species_id = 77;
+    Objective o;
+    o.kind = ObjectiveKind::DiscoverSpecies;
+    o.species_id = 77;
     PhotoCodex codex;
     EXPECT_FALSE(EvaluateObjective(o, codex).complete);
     codex.Record(77, 0.1f);
@@ -47,10 +51,13 @@ TEST(Objectives, DiscoverSpeciesIsBinary) {
 }
 
 TEST(Objectives, StarRatingNeedsAGoodEnoughBestShot) {
-    Objective o; o.kind = ObjectiveKind::StarRating; o.species_id = 5; o.min_stars = 4;
+    Objective o;
+    o.kind = ObjectiveKind::StarRating;
+    o.species_id = 5;
+    o.min_stars = 4;
     PhotoCodex codex;
     // A weak shot discovers the species but does not satisfy the star goal.
-    codex.Record(5, 0.30f);  // ~1 star
+    codex.Record(5, 0.30f); // ~1 star
     EXPECT_FALSE(EvaluateObjective(o, codex).complete);
     // A strong shot (>=0.75 total -> 4 stars) completes it; codex keeps the best.
     codex.Record(5, 0.80f);
@@ -59,13 +66,15 @@ TEST(Objectives, StarRatingNeedsAGoodEnoughBestShot) {
 }
 
 TEST(Objectives, CollectionScoreAccumulates) {
-    Objective o; o.kind = ObjectiveKind::CollectionScore; o.min_score = 1.5f;
+    Objective o;
+    o.kind = ObjectiveKind::CollectionScore;
+    o.min_score = 1.5f;
     PhotoCodex codex;
     codex.Record(1, 0.6f);
     codex.Record(2, 0.6f);
-    EXPECT_FALSE(EvaluateObjective(o, codex).complete);  // 1.2 < 1.5
+    EXPECT_FALSE(EvaluateObjective(o, codex).complete); // 1.2 < 1.5
     codex.Record(3, 0.6f);
-    EXPECT_TRUE(EvaluateObjective(o, codex).complete);   // 1.8 >= 1.5
+    EXPECT_TRUE(EvaluateObjective(o, codex).complete); // 1.8 >= 1.5
 }
 
 TEST(Objectives, StarterSetAdvancesAndReportsNextIncomplete) {
@@ -87,7 +96,8 @@ TEST(Objectives, StarterSetAdvancesAndReportsNextIncomplete) {
 
     // Discover six species, each a strong shot -> every species/score goal completes,
     // but the behavioural goal still pends (none captured asleep yet).
-    for (int i = 0; i < 6; ++i) codex.Record(grove + 100 + i, 0.90f);
+    for (int i = 0; i < 6; ++i)
+        codex.Record(grove + 100 + i, 0.90f);
     EXPECT_FALSE(set.all_complete(codex));
     const Objective* pending = set.next_incomplete(codex);
     ASSERT_NE(pending, nullptr);
@@ -104,10 +114,14 @@ TEST(Objectives, StarterSetAdvancesAndReportsNextIncomplete) {
 TEST(Objectives, BehavioralMatchAnyAndSpeciesScoped) {
     PhotoCodex codex;
 
-    Objective any_sleep; any_sleep.kind = ObjectiveKind::BehavioralMatch;
-    any_sleep.target_action = 5; any_sleep.species_id = 0;  // any species asleep
-    Objective grove_sleep; grove_sleep.kind = ObjectiveKind::BehavioralMatch;
-    grove_sleep.target_action = 5; grove_sleep.species_id = 1234; // the grovestrider asleep
+    Objective any_sleep;
+    any_sleep.kind = ObjectiveKind::BehavioralMatch;
+    any_sleep.target_action = 5;
+    any_sleep.species_id = 0; // any species asleep
+    Objective grove_sleep;
+    grove_sleep.kind = ObjectiveKind::BehavioralMatch;
+    grove_sleep.target_action = 5;
+    grove_sleep.species_id = 1234; // the grovestrider asleep
 
     EXPECT_FALSE(EvaluateObjective(any_sleep, codex).complete);
     EXPECT_FALSE(EvaluateObjective(grove_sleep, codex).complete);
@@ -127,4 +141,4 @@ TEST(Objectives, BehavioralMatchAnyAndSpeciesScoped) {
     EXPECT_TRUE(EvaluateObjective(grove_sleep, codex).complete);
 }
 
-}  // namespace
+} // namespace

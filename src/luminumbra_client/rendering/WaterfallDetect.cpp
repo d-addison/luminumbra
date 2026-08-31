@@ -36,9 +36,8 @@ struct LipCandidate {
 
 } // namespace
 
-std::vector<WaterfallSite> DetectWaterfalls(
-    const Luminumbra::Systems::SHIELD_WorldSystem& world,
-    const WaterfallDetectParams& params) {
+std::vector<WaterfallSite> DetectWaterfalls(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                                            const WaterfallDetectParams& params) {
     std::vector<WaterfallSite> sites;
 
     // Rivers carve the drops; with no river course there are no waterfalls.
@@ -86,8 +85,7 @@ std::vector<WaterfallSite> DetectWaterfalls(
 
             // Walk downstream until the cumulative drop qualifies, the river
             // course ends, or we exceed max_run.
-            const int max_steps =
-                std::max(1, static_cast<int>(params.max_run / step));
+            const int max_steps = std::max(1, static_cast<int>(params.max_run / step));
             float run = 0.0f;
             float prev_h = h0;
             float best_drop = 0.0f;
@@ -143,7 +141,7 @@ std::vector<WaterfallSite> DetectWaterfalls(
     }
 
     // --- 1b. Scan perched-lake / tarn RIMS for spill (outlet) dropoffs. ---
-    // Spec 003 A1.1 / OWNER directive: waterfalls must also be CREATED BY a lake
+    //   / OWNER directive: waterfalls must also be CREATED BY a lake
     // spilling over its rim. A cell that is INSIDE a perched lake (WaterLevelAt >
     // SEA_LEVEL) whose downhill direction leaves the lake and FALLS away below the
     // lake surface over a short run is a spill point — a waterfall crest at the
@@ -151,8 +149,7 @@ std::vector<WaterfallSite> DetectWaterfalls(
     // GetTerrainHeightAt. Only runs when lakes are enabled (else byte-zero work).
     if (world.get_params().lakes_enabled) {
         const float lake_eps = std::max(0.0f, params.lake_surface_epsilon);
-        const int lake_max_steps =
-            std::max(1, static_cast<int>(params.lake_outlet_max_run / step));
+        const int lake_max_steps = std::max(1, static_cast<int>(params.lake_outlet_max_run / step));
         for (int zi = 0; zi < side; ++zi) {
             const float cz = static_cast<float>(-half) + static_cast<float>(zi) * step;
             for (int xi = 0; xi < side; ++xi) {
@@ -245,7 +242,7 @@ std::vector<WaterfallSite> DetectWaterfalls(
         return sites;
     }
 
-    // --- 1c. CONNECT each lip to the live water surfaces (spec 003 A1.1). -----
+    // --- 1c. CONNECT each lip to the live water surfaces. -----
     // Upstream: pin the crest Y to the UPSTREAM water surface (river/lake) at the
     // lip so the sheet starts AT the water, not the bare channel floor. For lake
     // outlets the crest Y is already the lake surface; for river lips this lifts
@@ -272,11 +269,14 @@ std::vector<WaterfallSite> DetectWaterfalls(
     // true cliff face). This is order-stable: the sort key is a pure function of
     // the lip fields.
     std::sort(lips.begin(), lips.end(), [](const LipCandidate& a, const LipCandidate& b) {
-        if (a.drop != b.drop) return a.drop > b.drop;
+        if (a.drop != b.drop)
+            return a.drop > b.drop;
         const int32_t ax = quant_mm(a.crest.x), bx = quant_mm(b.crest.x);
-        if (ax != bx) return ax < bx;
+        if (ax != bx)
+            return ax < bx;
         const int32_t az = quant_mm(a.crest.z), bz = quant_mm(b.crest.z);
-        if (az != bz) return az < bz;
+        if (az != bz)
+            return az < bz;
         return quant_mm(a.crest.y) < quant_mm(b.crest.y);
     });
 
@@ -316,9 +316,11 @@ std::vector<WaterfallSite> DetectWaterfalls(
     // byte-identical across runs regardless of the scan/cluster traversal.
     std::sort(sites.begin(), sites.end(), [](const WaterfallSite& a, const WaterfallSite& b) {
         const int32_t ax = quant_mm(a.crest.x), bx = quant_mm(b.crest.x);
-        if (ax != bx) return ax < bx;
+        if (ax != bx)
+            return ax < bx;
         const int32_t az = quant_mm(a.crest.z), bz = quant_mm(b.crest.z);
-        if (az != bz) return az < bz;
+        if (az != bz)
+            return az < bz;
         return quant_mm(a.crest.y) < quant_mm(b.crest.y);
     });
 
@@ -331,10 +333,18 @@ uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites) {
     fnv1a(h, &count, sizeof(count));
     for (const WaterfallSite& s : sites) {
         const int32_t q[] = {
-            quant_mm(s.crest.x), quant_mm(s.crest.y), quant_mm(s.crest.z),
-            quant_mm(s.foot.x),  quant_mm(s.foot.y),  quant_mm(s.foot.z),
-            quant_mm(s.drop_height), quant_mm(s.run_length), quant_mm(s.width),
-            quant_mm(s.flow_dir.x),  quant_mm(s.flow_dir.y), quant_mm(s.steepness),
+            quant_mm(s.crest.x),
+            quant_mm(s.crest.y),
+            quant_mm(s.crest.z),
+            quant_mm(s.foot.x),
+            quant_mm(s.foot.y),
+            quant_mm(s.foot.z),
+            quant_mm(s.drop_height),
+            quant_mm(s.run_length),
+            quant_mm(s.width),
+            quant_mm(s.flow_dir.x),
+            quant_mm(s.flow_dir.y),
+            quant_mm(s.steepness),
             s.lake_outlet ? 1 : 0,
         };
         fnv1a(h, q, sizeof(q));
@@ -342,16 +352,15 @@ uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites) {
     return h;
 }
 
-WaterfallDetectKey MakeWaterfallDetectKey(
-    const Luminumbra::Systems::SHIELD_WorldSystem& world,
-    const WaterfallDetectParams& params) {
+WaterfallDetectKey MakeWaterfallDetectKey(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                                          const WaterfallDetectParams& params) {
     WaterfallDetectKey key;
     key.seed = world.get_seed();
     key.half_extent = params.half_extent;
     key.lattice_step_milli = quant_mm(params.lattice_step);
     key.min_drop_milli = quant_mm(params.min_drop);
     key.min_steepness_milli = quant_mm(params.min_steepness);
-    key.water_epoch = world.water_epoch(); // WATER-11: terraform edits re-key
+    key.water_epoch = world.water_epoch(); // terraform edits re-key
     return key;
 }
 
@@ -362,19 +371,19 @@ std::size_t WaterfallSiteCache::KeyHash::operator()(const WaterfallDetectKey& k)
     fnv1a(h, &k.lattice_step_milli, sizeof(k.lattice_step_milli));
     fnv1a(h, &k.min_drop_milli, sizeof(k.min_drop_milli));
     fnv1a(h, &k.min_steepness_milli, sizeof(k.min_steepness_milli));
-    fnv1a(h, &k.water_epoch, sizeof(k.water_epoch)); // WATER-11
+    fnv1a(h, &k.water_epoch, sizeof(k.water_epoch)); //
     return static_cast<std::size_t>(h);
 }
 
-const std::vector<WaterfallSite>& WaterfallSiteCache::sites_for(
-    const Luminumbra::Systems::SHIELD_WorldSystem& world,
-    const WaterfallDetectParams& params) {
+const std::vector<WaterfallSite>&
+WaterfallSiteCache::sites_for(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                              const WaterfallDetectParams& params) {
     const WaterfallDetectKey key = MakeWaterfallDetectKey(world, params);
     auto it = m_cache.find(key);
     if (it != m_cache.end()) {
         return it->second;
     }
-    // WATER-11: epoch changes create new entries; keep the cache BOUNDED so a
+    // epoch changes create new entries; keep the cache BOUNDED so a
     // terraform-happy session doesn't accumulate stale surveys (each holds a
     // full site vector). Dropping all entries on overflow is fine — the next
     // query recomputes exactly one survey.
@@ -386,9 +395,10 @@ const std::vector<WaterfallSite>& WaterfallSiteCache::sites_for(
     return inserted->second;
 }
 
-// WATER-11: the live upstream water factor (see the header contract).
+// the live upstream water factor (see the header contract).
 float LiveWaterFactorAt(const Luminumbra::Systems::SHIELD_WorldSystem& world,
-                        const WaterfallSite& site, float full_depth) {
+                        const WaterfallSite& site,
+                        float full_depth) {
     // "Unknown" (no streamed grid at the crest) must read NEUTRAL, not
     // extinguished — distant sites keep their authored sheets.
     if (!world.debug_water_grid_at(site.crest.x, site.crest.z)) {
@@ -397,7 +407,8 @@ float LiveWaterFactorAt(const Luminumbra::Systems::SHIELD_WorldSystem& world,
     const float surface = world.live_water_surface_at(site.crest.x, site.crest.z);
     const float terrain = world.GetTerrainHeightAt(site.crest.x, site.crest.z);
     const float depth = surface - terrain;
-    if (full_depth <= 1e-4f) return depth > 0.0f ? 1.0f : 0.0f;
+    if (full_depth <= 1e-4f)
+        return depth > 0.0f ? 1.0f : 0.0f;
     return std::clamp(depth / full_depth, 0.0f, 1.0f);
 }
 

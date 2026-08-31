@@ -23,6 +23,7 @@ option(LUMINUMBRA_WARNINGS_AS_ERRORS "Treat first-party compiler warnings as err
 option(LUMINUMBRA_ENABLE_ASAN "Enable AddressSanitizer for first-party targets in Debug builds" OFF)
 option(LUMINUMBRA_ENABLE_COVERAGE "Instrument first-party targets with gcov coverage counters (--coverage)" OFF)
 option(LUMINUMBRA_ENABLE_FRAME_POINTERS "Preserve frame pointers in first-party targets" OFF)
+option(ENABLE_BINARY_RELEASES "Enable Windows/Linux runtime package generation" OFF)
 
 include(cmake/performance_manifest.cmake)
 
@@ -45,7 +46,7 @@ endfunction()
 # LUMINUMBRA_ENABLE_COVERAGE is set, which is owned exclusively by the dedicated
 # `coverage` preset (binaryDir build/coverage). It appends GCC/Clang's
 # --coverage (== -fprofile-arcs -ftest-coverage) to compile + link options of
-# first-party targets so gcov emits .gcno/.gcda counters. It is a no-op on MSVC
+# first-party targets so gcov emits.gcno/.gcda counters. It is a no-op on MSVC
 # (no gcov) and never touches -ffp-contract=off: the determinism contract is
 # about FP contraction / integer RNG / id-ordering, none of which --coverage
 # relaxes, and the coverage tree is never hashed, so any residual codegen drift
@@ -70,7 +71,7 @@ function(luminumbra_enable_coverage TARGET_NAME)
   if(_lec_type STREQUAL "STATIC_LIBRARY" OR _lec_type STREQUAL "OBJECT_LIBRARY"
      OR _lec_type STREQUAL "SHARED_LIBRARY")
     # An instrumented library's objects reference the gcov runtime
-    # (__gcov_init / __gcov_merge_add ...). Propagate --coverage to LINK as
+    # (__gcov_init / __gcov_merge_add...). Propagate --coverage to LINK as
     # PUBLIC so every consumer (test executables, the apps) pulls in the gcov
     # runtime and links cleanly, even if the consumer itself is not routed
     # through luminumbra_configure_first_party_target.
@@ -123,10 +124,10 @@ function(luminumbra_configure_first_party_target TARGET_NAME)
   luminumbra_enable_coverage(${TARGET_NAME})
 endfunction()
 
-# T-I4-11 determinism contract (FP flag pinning). The simulation-authority
+#  determinism contract (FP flag pinning). The simulation-authority
 # targets (luminumbra_common, luminumbra_server_app) must produce bit-identical
 # floating point across optimization levels and machines so the lockstep
-# world_hash oracle (T-I4-13) can rely on it. The hazard here is FMA
+# world_hash oracle can rely on it. The hazard here is FMA
 # CONTRACTION: Jolt exports -mavx2 -mfma -mfpmath=sse as PUBLIC compile options
 # (vendor/Jolt/Jolt.cmake:677/681), so those flags flow transitively onto every
 # sim translation unit; with -mfma available, GCC's default -ffp-contract=fast
@@ -214,7 +215,7 @@ add_custom_target(copy_data ALL DEPENDS "${COPY_DATA_STAMP}")
 
 # 3. Find source mesh assets at configure time. New source assets require an explicit
 # CMake reconfigure; avoiding CONFIGURE_DEPENDS prevents a recursive assets/ scan on
-# every no-op build while still allowing untracked work-in-progress .glb inputs.
+# every no-op build while still allowing untracked work-in-progress.glb inputs.
 set(ASSET_SOURCE_DIR ${CMAKE_SOURCE_DIR}/assets)
 set(ASSET_OUTPUT_DIR ${DATA_OUTPUT_DIR})
 
@@ -232,14 +233,14 @@ foreach(SOURCE_ASSET IN LISTS SOURCE_ASSETS)
     # Get the relative path for prettier log messages during build.
     file(RELATIVE_PATH RELATIVE_SOURCE_PATH ${CMAKE_SOURCE_DIR} ${SOURCE_ASSET})
 
-    # This is the core of the automation. It defines how to create the .lmesh from the .glb.
+    # This is the core of the automation. It defines how to create the.lmesh from the.glb.
     add_custom_command(
         OUTPUT "${DESTINATION_ASSET}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${DESTINATION_DIR}"
         # The command to run: path/to/asset_processor.exe <input> <output>
         COMMAND $<TARGET_FILE:asset_processor> "${SOURCE_ASSET}" "${DESTINATION_ASSET}"
         # This command depends on the source file and the processor itself.
-        # It will re-run if the .glb changes, data is recopied, or asset_processor is recompiled.
+        # It will re-run if the.glb changes, data is recopied, or asset_processor is recompiled.
         MAIN_DEPENDENCY "${SOURCE_ASSET}"
         DEPENDS asset_processor "${COPY_DATA_STAMP}"
         COMMENT "Processing asset: ${RELATIVE_SOURCE_PATH}"
@@ -269,7 +270,7 @@ target_include_directories(luminumbra_common PUBLIC
     "${LUMINUMBRA_ENGINE_VERSION_INCLUDE_DIR}"
 )
 
-# T-I4-11: pin FP determinism on the simulation-authority targets (see the
+# pin FP determinism on the simulation-authority targets (see the
 # luminumbra_pin_fp_determinism rationale above). Proven hash-neutral in the
 # landing commit (HeadlessServerTick world_hash unchanged) because debug -O0
 # never contracted; this guards the release lane and cross-machine builds.
@@ -319,3 +320,35 @@ foreach(PROFILING_TARGET IN ITEMS
 )
   luminumbra_enable_frame_pointers(${PROFILING_TARGET})
 endforeach()
+
+# Binary packaging is implemented for release dry runs but is dormant by
+# default. Source releases are produced directly from Git and never traverse
+# this install graph.
+if(ENABLE_BINARY_RELEASES)
+  install(TARGETS luminumbra_client_app luminumbra_server_app
+          RUNTIME DESTINATION bin)
+  install(DIRECTORY data res worlds
+          DESTINATION share/luminumbra
+          PATTERN "audio" EXCLUDE
+          PATTERN "captures" EXCLUDE)
+  install(FILES README.md LICENSE THIRD_PARTY_LICENSES.md SECURITY.md
+          DESTINATION share/doc/luminumbra)
+  set(CPACK_PACKAGE_NAME "luminumbra")
+  set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+  set(CPACK_PACKAGE_FILE_NAME "luminumbra-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+  if(WIN32)
+    set(CPACK_GENERATOR "ZIP")
+  else()
+    set(CPACK_GENERATOR "TGZ")
+  endif()
+  set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+  include(CPack)
+else()
+  # Some fetched dependencies include CPack in the parent configure scope.
+  # Their generated package files must not make a source-only Luminumbra build
+  # appear to have binary release packaging enabled.
+  file(REMOVE
+       "${CMAKE_BINARY_DIR}/CPackConfig.cmake"
+       "${CMAKE_BINARY_DIR}/CPackSourceConfig.cmake"
+       "${CMAKE_BINARY_DIR}/CPackProperties.cmake")
+endif()

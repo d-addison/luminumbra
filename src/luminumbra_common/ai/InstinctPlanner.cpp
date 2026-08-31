@@ -60,7 +60,8 @@ std::string BuildChecksum(const InstinctPlan& plan) {
         hash = HashText(hash, candidate.action);
         hash = HashText(hash, candidate.target);
         hash = HashText(hash, candidate.need);
-        hash = HashText(hash, std::to_string(static_cast<int>(std::round(candidate.score * 10000.0))));
+        hash =
+            HashText(hash, std::to_string(static_cast<int>(std::round(candidate.score * 10000.0))));
     }
 
     std::ostringstream out;
@@ -73,41 +74,45 @@ std::string JsonEscape(const std::string& value) {
     std::ostringstream out;
     for (const unsigned char ch : value) {
         switch (ch) {
-        case '"':
-            out << "\\\"";
-            break;
-        case '\\':
-            out << "\\\\";
-            break;
-        case '\b':
-            out << "\\b";
-            break;
-        case '\f':
-            out << "\\f";
-            break;
-        case '\n':
-            out << "\\n";
-            break;
-        case '\r':
-            out << "\\r";
-            break;
-        case '\t':
-            out << "\\t";
-            break;
-        default:
-            if (ch < 0x20u) {
-                out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(ch);
-                out << std::dec << std::setfill(' ');
-            } else {
-                out << static_cast<char>(ch);
-            }
-            break;
+            case '"':
+                out << "\\\"";
+                break;
+            case '\\':
+                out << "\\\\";
+                break;
+            case '\b':
+                out << "\\b";
+                break;
+            case '\f':
+                out << "\\f";
+                break;
+            case '\n':
+                out << "\\n";
+                break;
+            case '\r':
+                out << "\\r";
+                break;
+            case '\t':
+                out << "\\t";
+                break;
+            default:
+                if (ch < 0x20u) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<int>(ch);
+                    out << std::dec << std::setfill(' ');
+                } else {
+                    out << static_cast<char>(ch);
+                }
+                break;
         }
     }
     return out.str();
 }
 
-void JsonString(std::ostringstream& out, const std::string& key, const std::string& value, bool comma = true) {
+void JsonString(std::ostringstream& out,
+                const std::string& key,
+                const std::string& value,
+                bool comma = true) {
     out << "\"" << key << "\":\"" << JsonEscape(value) << "\"";
     if (comma) {
         out << ",";
@@ -134,8 +139,7 @@ InstinctPlan PlanInstincts(const InstinctPlanRequest& request) {
         const double pressure = NeedPressure(request.needs, opportunity.need);
         const double score = (pressure * Clamp01(opportunity.satisfaction) * 2.0) +
                              (Clamp01(opportunity.urgency) * 1.5) -
-                             (Clamp01(opportunity.risk) * 1.2) -
-                             (opportunity.distance * 0.35) -
+                             (Clamp01(opportunity.risk) * 1.2) - (opportunity.distance * 0.35) -
                              (opportunity.stamina_cost * 0.4);
 
         InstinctCandidate candidate;
@@ -149,18 +153,19 @@ InstinctPlan PlanInstincts(const InstinctPlanRequest& request) {
         plan.candidates.push_back(candidate);
     }
 
-    std::stable_sort(plan.candidates.begin(), plan.candidates.end(), [](const auto& lhs, const auto& rhs) {
-        if (lhs.score != rhs.score) {
-            return lhs.score > rhs.score;
-        }
-        if (lhs.need != rhs.need) {
-            return lhs.need < rhs.need;
-        }
-        if (lhs.action != rhs.action) {
-            return lhs.action < rhs.action;
-        }
-        return lhs.target < rhs.target;
-    });
+    std::stable_sort(
+        plan.candidates.begin(), plan.candidates.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.score != rhs.score) {
+                return lhs.score > rhs.score;
+            }
+            if (lhs.need != rhs.need) {
+                return lhs.need < rhs.need;
+            }
+            if (lhs.action != rhs.action) {
+                return lhs.action < rhs.action;
+            }
+            return lhs.target < rhs.target;
+        });
 
     for (std::size_t index = 0; index < plan.candidates.size(); ++index) {
         plan.candidates[index].rank = static_cast<int>(index + 1u);
@@ -168,7 +173,7 @@ InstinctPlan PlanInstincts(const InstinctPlanRequest& request) {
 
     plan.selected_index = plan.candidates.empty() ? -1 : 0;
     plan.checksum = BuildChecksum(plan);
-    // Generic pass semantics (T-I3-17): a non-empty deterministic ranking
+    // Generic pass semantics: a non-empty deterministic ranking
     // with the top candidate selected. Content-specific expectations live in
     // the game-data `expected` block consumed by the gate.
     plan.passed = plan.selected_index == 0 && !plan.candidates.empty();
@@ -177,7 +182,8 @@ InstinctPlan PlanInstincts(const InstinctPlanRequest& request) {
 
 std::string SerializeInstinctPlanJson(const InstinctPlan& plan, const std::string& build_preset) {
     const InstinctCandidate* selected = nullptr;
-    if (plan.selected_index >= 0 && static_cast<std::size_t>(plan.selected_index) < plan.candidates.size()) {
+    if (plan.selected_index >= 0 &&
+        static_cast<std::size_t>(plan.selected_index) < plan.candidates.size()) {
         selected = &plan.candidates[static_cast<std::size_t>(plan.selected_index)];
     }
 

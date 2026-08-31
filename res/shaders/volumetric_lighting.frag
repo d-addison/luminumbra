@@ -3,11 +3,11 @@ out vec4 FragColor;
 
 in vec2 TexCoords;
 
-// T-I5a-6: ANALYTIC aerial-perspective (distance fog) term.
+// ANALYTIC aerial-perspective (distance fog) term.
 //
 // This previously-dormant shader is now wired as the aerial-perspective pass
 // (RenderPipeline::execute_aerial_pass). It is a CHEAP per-pixel ANALYTIC term
-// (no raymarch loop, no froxel volume -- critique F6 scope stop): a single
+// (no raymarch loop, no froxel volume -- regression contract scope stop): a single
 // exponential extinction over view distance whose in-scatter color comes from
 // the SAME sky scattering as the dome (the sky-view + transmittance LUTs), so
 // distance fog, sky, sun and ambient share one transmittance and the low-sun
@@ -32,7 +32,7 @@ uniform float u_skyDayFactor;  // night-darkening envelope (matches the dome)
 // far field hazes (the FarLodHorizon sky-ratio premise is unaffected).
 uniform float u_aerialDensity = 0.0016;
 uniform float u_aerialMaxDistance = 1600.0;
-// T-I7 controllable atmosphere: HDR scale of the sky in-scatter veil, and a
+//  controllable atmosphere: HDR scale of the sky in-scatter veil, and a
 // warmth blend (0 = raw sky-view hue -> bluer/crisp aerial; 1 = warmed land
 // veil with b clamped <= g -> warm hazy depth without blue-tinting ground).
 uniform float u_inscatterStrength = 60.0;
@@ -51,7 +51,7 @@ uniform float u_underwater = 0.0;             // 1.0 when the camera is below a 
 uniform vec3  u_underwaterTint = vec3(0.04, 0.18, 0.26);
 uniform float u_underwaterVisibility = 26.0;  // metres to near-full murk
 
-// Spec 015 Pillar B (RENDER-17): the integrated froxel media volume — rgb = the
+//  froxel volumetrics: the integrated froxel media volume — rgb = the
 // accumulated in-scatter (HDR-linear) in front of a given depth, a = the
 // transmittance to it. Mode 0 (default) skips the sampling: byte-identical to
 // the pre-froxel analytic-only render. Slice mapping mirrors FroxelGrid.h.
@@ -147,7 +147,7 @@ void main() {
     inscatter *= clamp(u_skyDayFactor, 0.0, 1.0);
     vec3 rawInscatter = inscatter; // un-warmed sky-view hue (crisp/aerial blue)
 
-    // T-I5a-6 FIX (FarLodHorizon): the raw sky-view in-scatter is BLUE-dominant
+    //  FIX (FarLodHorizon): the raw sky-view in-scatter is BLUE-dominant
     // (b > r). Composited over the far-LOD terrain at the live/far seam it tinted
     // the distant ground blue enough to trip the FarLodHorizon boundary-band sky
     // detector (b >= r+35, g >= r+18 reads as "sky") -- the aerial term was
@@ -164,13 +164,13 @@ void main() {
     inscatter *= aHue / aLuma;               // warm hue, luminance preserved
     inscatter.b = min(inscatter.b, inscatter.g);   // warmed: never blue-dominant
 
-    // T-I7 controllable atmosphere: blend between the raw sky-view in-scatter
+    //  controllable atmosphere: blend between the raw sky-view in-scatter
     // (bluer, crisp aerial perspective) and the warmed land veil. warmth=1
     // reproduces the prior FarLodHorizon-safe warm haze; warmth<1 lets distance
     // read with cooler atmospheric blue when the look calls for it.
     inscatter = mix(rawInscatter, inscatter, clamp(u_atmosphereWarmth, 0.0, 1.0));
 
-    // T-I7 horizon blowout fix: this pass composites OVER the lighting FBO, which
+    //  horizon blowout fix: this pass composites OVER the lighting FBO, which
     // is already tonemapped + gamma display-space (sRGB 0..1), but `inscatter` is
     // HDR-linear radiance (sky-view * strength). Compositing it raw drove distant
     // terrain past pure white ("overpaying in the distance"). Map the in-scatter
@@ -193,7 +193,7 @@ void main() {
     // still reads (Distant-Horizons style) instead of dissolving to flat sky.
     fog = min(fog, 0.94);
 
-    // Spec 015 Pillar B (RENDER-17, FR-B-004): compose the froxel media IN FRONT
+    //  froxel volumetrics (, ): compose the froxel media IN FRONT
     // of the analytic haze — total = froxelL + T_froxel * analytic. The volume's
     // W coordinate is the exponential-slice mapping of the RADIAL view distance
     // (FroxelGrid.h DepthToTextureW).

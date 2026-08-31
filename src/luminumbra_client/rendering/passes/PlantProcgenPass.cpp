@@ -4,7 +4,7 @@
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 
-#include <GLFW/glfw3.h>  // glfwGetTime() for render-only leaf wind animation
+#include <GLFW/glfw3.h> // glfwGetTime for render-only leaf wind animation
 #include <glm/gtc/matrix_transform.hpp>
 
 namespace Luminumbra::Rendering {

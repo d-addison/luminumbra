@@ -1,4 +1,4 @@
-// T-I3-8: far-LOD tile store + region mesher gates.
+// far-LOD tile store + region mesher gates.
 // - tile determinism: pristine builds are pure functions of
 //   (seed, params, tier, region); pregen hash == hash after a
 //   rebuild-from-live pass over an unedited chunk's heightmap.
@@ -847,7 +847,7 @@ TEST(FarLodStoreTest, SaveRejectsInvalidTier) {
 }
 
 TEST(FarLodStoreTest, TierGeometryMatchesPinnedNumbers) {
-    // Design-decisions section 4: F1 = 4 m samples, F2 = 8 m; region = 512 m
+    // F1 uses 4 m samples, F2 uses 8 m samples, and each region spans 512 m.
     // with a shared border row/column.
     EXPECT_EQ(FarLodSampleStepMeters(FarLodTier::F1), 4);
     EXPECT_EQ(FarLodSampleStepMeters(FarLodTier::F2), 8);
@@ -1252,7 +1252,7 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
     EXPECT_EQ(HashMeshBytes(mesh_f2), HashMeshBytes(mesh_f2_repeat))
         << "zero-brick F2 mesh bytes must remain deterministic";
     EXPECT_EQ(HashMeshBytes(mesh_f2), 0xe0c514794eaa306eull)
-        << "zero-brick F2 mesh hash must remain pre-SHIELD-08 byte-identical";
+        << "zero-brick F2 mesh hash must remain pre- byte-identical";
 }
 
 TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {
@@ -1273,7 +1273,7 @@ TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {
     }
 }
 
-// T-I6-A1.5: the shaping params (continentalness/erosion/peaks freqs + splines)
+// the shaping params (continentalness/erosion/peaks freqs + splines)
 // are folded into ComputeTerrainParamsHash, gated on shaping_enabled, so shaped
 // presets' pristine far-LOD tiles self-invalidate on a shaping change. Pins the
 // contract: shaping-OFF ignores the shaping fields (byte-stable cache key for

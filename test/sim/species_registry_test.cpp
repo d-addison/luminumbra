@@ -1,4 +1,4 @@
-// I9-FOLIAGE Phase 5A: data-driven SpeciesRegistry — species are JSON data (genome ranges /
+//  data-driven SpeciesRegistry — species are JSON data (genome ranges /
 // annual-perennial / lifespan / render archetype); the engine stays generic. Loader + deterministic
 // genome sampling from a species' per-gene ranges.
 #include <gtest/gtest.h>
@@ -7,11 +7,11 @@
 #include <string>
 #include <vector>
 
-#include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/components/CropLifecycleComponents.h"
+#include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/core/DeterministicRng.h"
 #include "luminumbra_common/foliage/SpeciesRegistry.h"
-#include "luminumbra_common/systems/FarmingSystem.h"  // MakePlantFromSpecies
+#include "luminumbra_common/systems/FarmingSystem.h" // MakePlantFromSpecies
 
 namespace {
 namespace F = luminumbra::foliage;
@@ -56,7 +56,8 @@ TEST(SpeciesRegistry, SampleGenomeStaysInRangeAndIsDeterministic) {
     ASSERT_NE(w, nullptr);
 
     auto sample = [&] {
-        DeterministicRng rng = DeterministicRng::seeded(F::SpeciesGeneIndex("GrowthRate") + 1, 7, 3);
+        DeterministicRng rng =
+            DeterministicRng::seeded(F::SpeciesGeneIndex("GrowthRate") + 1, 7, 3);
         return F::SpeciesRegistry::SampleGenome(*w, rng);
     };
     const auto a = sample();
@@ -80,8 +81,8 @@ TEST(SpeciesRegistry, LoadsShippedSpeciesFromDirectory) {
     const auto* oak = reg.Find("oak");
     ASSERT_NE(wheat, nullptr);
     ASSERT_NE(oak, nullptr);
-    EXPECT_FALSE(wheat->perennial);              // annual crop
-    EXPECT_TRUE(oak->perennial);                 // perennial tree
+    EXPECT_FALSE(wheat->perennial); // annual crop
+    EXPECT_TRUE(oak->perennial);    // perennial tree
     EXPECT_GT(oak->lifespan_ticks, wheat->lifespan_ticks);
 }
 
@@ -94,7 +95,7 @@ TEST(SpeciesRegistry, ShippedCropsSpanSeasonalNiches) {
     const std::filesystem::path dir =
         std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data" / "common" / "foliage" / "species";
     const std::size_t n = reg.LoadFromDirectory(dir, errors);
-    EXPECT_GE(n, 6u) << (errors.empty() ? "" : errors.front());  // oak, wheat + the 4 new crops
+    EXPECT_GE(n, 6u) << (errors.empty() ? "" : errors.front()); // oak, wheat + the 4 new crops
     using G = C::PlantGene;
     auto leansWarm = [](const F::SpeciesTemplate* t) {
         const auto h = static_cast<std::size_t>(G::HeatTolerance);
@@ -113,7 +114,7 @@ TEST(SpeciesRegistry, ShippedCropsSpanSeasonalNiches) {
     }
 }
 
-// I9-FOLIAGE Phase 5A wiring: MakePlantFromSpecies is the single bridge from a data-driven species
+//   wiring: MakePlantFromSpecies is the single bridge from a data-driven species
 // template to a live PlantTag entity — it samples the genome, plants the seed, and stamps the crop
 // lifecycle, deterministically.
 TEST(SpeciesRegistry, MakePlantFromSpeciesSpawnsAndStampsLifecycle) {
@@ -131,7 +132,8 @@ TEST(SpeciesRegistry, MakePlantFromSpeciesSpawnsAndStampsLifecycle) {
     auto spawn = [&] {
         entt::registry r;
         DeterministicRng rng = DeterministicRng::seeded(101, 5, 9);
-        const entt::entity e = F::MakePlantFromSpecies(r, ::Luminumbra::Vec3{1.0f, 2.0f, 3.0f}, *w, rng, 42);
+        const entt::entity e =
+            F::MakePlantFromSpecies(r, ::Luminumbra::Vec3{1.0f, 2.0f, 3.0f}, *w, rng, 42);
         return std::make_pair(std::move(r), e);
     };
 
@@ -147,8 +149,8 @@ TEST(SpeciesRegistry, MakePlantFromSpeciesSpawnsAndStampsLifecycle) {
     EXPECT_EQ(g1.species_id, sid);
     EXPECT_EQ(g1.planted_tick, 42u);
     const auto& cl1 = r1.get<C::CropLifecycleComponent>(e1);
-    EXPECT_FALSE(cl1.perennial);                 // wheat is annual
-    EXPECT_EQ(cl1.lifespan_ticks, 900u);         // from the template
+    EXPECT_FALSE(cl1.perennial);         // wheat is annual
+    EXPECT_EQ(cl1.lifespan_ticks, 900u); // from the template
     EXPECT_EQ(cl1.species_id, sid);
     const auto& tf1 = r1.get<C::TransformComponent>(e1);
     EXPECT_FLOAT_EQ(tf1.position.x, 1.0f);
@@ -162,7 +164,7 @@ TEST(SpeciesRegistry, MakePlantFromSpeciesSpawnsAndStampsLifecycle) {
     EXPECT_EQ(gen1.genes, gen2.genes);
 }
 
-// I9-FOLIAGE Phase 5B: the player-facing FarmingController loop (seed -> tend -> harvest), all on
+//  the player-facing FarmingController loop (seed -> tend -> harvest), all on
 // the deterministic FarmingSystem verbs. Client-agnostic, so unit-testable here.
 TEST(SpeciesRegistry, FarmingControllerLoop) {
     namespace C = ::Luminumbra::Components;
@@ -184,8 +186,10 @@ TEST(SpeciesRegistry, FarmingControllerLoop) {
     EXPECT_TRUE(r.all_of<C::PlantTag>(e));
 
     // NearestPlant: found within reach, null outside.
-    EXPECT_TRUE(F::FarmingController::NearestPlant(r, ::Luminumbra::Vec3{1.0f, 0.0f, 1.0f}, 5.0f) == e);
-    EXPECT_TRUE(F::FarmingController::NearestPlant(r, ::Luminumbra::Vec3{100.0f, 0.0f, 100.0f}, 5.0f) == entt::null);
+    EXPECT_TRUE(F::FarmingController::NearestPlant(r, ::Luminumbra::Vec3{1.0f, 0.0f, 1.0f}, 5.0f) ==
+                e);
+    EXPECT_TRUE(F::FarmingController::NearestPlant(
+                    r, ::Luminumbra::Vec3{100.0f, 0.0f, 100.0f}, 5.0f) == entt::null);
 
     // Water raises the tended husbandry bonus.
     const auto tended0 = r.get<C::PlantGrowthComponent>(e).tended;
@@ -196,7 +200,8 @@ TEST(SpeciesRegistry, FarmingControllerLoop) {
     EXPECT_FALSE(fc.Harvest(r, e).harvestable);
     EXPECT_EQ(fc.harvests, 0);
 
-    // Force mature + quality, then harvest -> banks yield + returned seeds, removes the annual plant.
+    // Force mature + quality, then harvest -> banks yield + returned seeds, removes the annual
+    // plant.
     r.get<C::PlantGrowthComponent>(e).stage = static_cast<std::uint8_t>(C::PlantStage::Fruiting);
     r.get<C::PlantGrowthComponent>(e).quality = 80;
     const int seedsBefore = fc.seeds;
@@ -204,11 +209,11 @@ TEST(SpeciesRegistry, FarmingControllerLoop) {
     EXPECT_TRUE(hr.harvestable);
     EXPECT_EQ(fc.harvests, 1);
     EXPECT_GT(fc.total_yield, 0.0f);
-    EXPECT_GE(fc.seeds, seedsBefore);  // harvest returns seeds
-    EXPECT_FALSE(r.valid(e));          // annual plant removed
+    EXPECT_GE(fc.seeds, seedsBefore); // harvest returns seeds
+    EXPECT_FALSE(r.valid(e));         // annual plant removed
 }
 
-// Phase 5B perennial reset: harvesting a PERENNIAL plant regrows it (reset to vegetative + generation
+//  perennial reset: harvesting a PERENNIAL plant regrows it (reset to vegetative + generation
 // bump) instead of destroying it; an annual is consumed (covered in FarmingControllerLoop).
 TEST(SpeciesRegistry, FarmingHarvestPerennialRegrows) {
     namespace C = ::Luminumbra::Components;
@@ -226,9 +231,10 @@ TEST(SpeciesRegistry, FarmingHarvestPerennialRegrows) {
     const auto hr = fc.Harvest(r, e);
     EXPECT_TRUE(hr.harvestable);
     EXPECT_TRUE(r.valid(e)) << "perennial regrows, not destroyed";
-    EXPECT_EQ(r.get<C::PlantGrowthComponent>(e).stage, static_cast<std::uint8_t>(C::PlantStage::Sprout));
+    EXPECT_EQ(r.get<C::PlantGrowthComponent>(e).stage,
+              static_cast<std::uint8_t>(C::PlantStage::Sprout));
     EXPECT_EQ(r.get<C::CropLifecycleComponent>(e).generations, 1);
     EXPECT_EQ(fc.harvests, 1);
 }
 
-}  // namespace
+} // namespace

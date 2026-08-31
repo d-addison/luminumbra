@@ -26,7 +26,7 @@ float ray_sphere_nearest(const glm::vec3& origin, const glm::vec3& dir, float ra
     const float t0 = -b - sqrt_disc;
     const float t1 = -b + sqrt_disc;
     if (t1 < 0.0f) return -1.0f;
-    return t0 < 0.0f ? t1 : t0;
+    return t0 < 0.0f ? t1: t0;
 }
 
 // Density-ratio of Rayleigh / Mie at a given altitude (metres above ground).
@@ -49,12 +49,12 @@ float mie_phase(float cos_theta, float g) {
 
 constexpr float kEpsilonM = 10.0f; // lift the viewer off the exact ground sphere
 
-// spec 008 WS-4: GPU-compute port of build_sky_view_cpu. One invocation per sky-view texel
+//  GPU-compute port of build_sky_view_cpu. One invocation per sky-view texel
 // (192x108), marching kMarchSamples=30 single+multi scatter, sampling the already-uploaded
 // transmittance/multiscatter textures with the SAME nearest indexing as the CPU helpers. Writes
 // L (vec3) into an std430 float[] SSBO (3 per texel) so it can be uploaded to the RGB16F sky-view
 // texture via a PIXEL_UNPACK_BUFFER (RGB16F is not image-store-able) and read back for the CPU
-// ambient reduction. The math mirrors the CPU reference line-for-line. GPU-VALIDATION PENDING.
+// ambient reduction. The math mirrors the CPU reference line-for-line.
 const char* kSkyViewComputeSrc = R"GLSL(
 #version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -87,7 +87,7 @@ float raySphere(vec3 o, vec3 d, float r) {
   float sq = sqrt(disc);
   float t0 = -b - sq; float t1 = -b + sq;
   if (t1 < 0.0) return -1.0;
-  return t0 < 0.0 ? t1 : t0;
+  return t0 < 0.0 ? t1: t0;
 }
 vec2 densityRatio(float alt) { return vec2(exp(-alt / RAYLEIGH_H), exp(-alt / MIE_H)); }
 float rayleighPhase(float ct) { return 3.0 / (16.0 * PI) * (1.0 + ct * ct); }
@@ -112,7 +112,7 @@ void main() {
   vec3 origin = vec3(0.0, PLANET_R + EPS, 0.0);
   vec3 sunHoriz = vec3(u_sunDir.x, 0.0, u_sunDir.z);
   float shl = length(sunHoriz);
-  vec3 forward = shl > 1e-4 ? sunHoriz / shl : vec3(0.0, 0.0, 1.0);
+  vec3 forward = shl > 1e-4 ? sunHoriz / shl: vec3(0.0, 0.0, 1.0);
   vec3 right = vec3(-forward.z, 0.0, forward.x);
   vec3 betaR = BETA_R;
   vec3 betaMsca = vec3(MIE_SCA);
@@ -166,7 +166,7 @@ void main() {
 }
 )GLSL";
 
-// spec 008 WS-4 §9: GPU-compute port of build_transmittance_cpu (256x64, 40 samples, no LUT input).
+// GPU-compute port of build_transmittance_cpu (256x64, 40 samples, no LUT input).
 const char* kTransmittanceComputeSrc = R"GLSL(
 #version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -181,7 +181,7 @@ float raySphere(vec3 o, vec3 d, float r) {
   if (c > 0.0 && b > 0.0) return -1.0;
   float disc = b * b - c; if (disc < 0.0) return -1.0;
   float sq = sqrt(disc); float t0 = -b - sq; float t1 = -b + sq;
-  if (t1 < 0.0) return -1.0; return t0 < 0.0 ? t1 : t0;
+  if (t1 < 0.0) return -1.0; return t0 < 0.0 ? t1: t0;
 }
 vec2 densityRatio(float a) { return vec2(exp(-a / RAYLEIGH_H), exp(-a / MIE_H)); }
 void main() {
@@ -211,7 +211,7 @@ void main() {
 }
 )GLSL";
 
-// spec 008 WS-4 §9: GPU-compute port of build_multiscatter_cpu (32x32, 16 dirs x 20 samples; samples
+// GPU-compute port of build_multiscatter_cpu (32x32, 16 dirs x 20 samples; samples
 // the transmittance texture). Hillaire isotropic 1-bounce, folded as the analytic series L2/(1-fms).
 const char* kMultiscatterComputeSrc = R"GLSL(
 #version 450 core
@@ -230,7 +230,7 @@ float raySphere(vec3 o, vec3 d, float r) {
   if (c > 0.0 && b > 0.0) return -1.0;
   float disc = b * b - c; if (disc < 0.0) return -1.0;
   float sq = sqrt(disc); float t0 = -b - sq; float t1 = -b + sq;
-  if (t1 < 0.0) return -1.0; return t0 < 0.0 ? t1 : t0;
+  if (t1 < 0.0) return -1.0; return t0 < 0.0 ? t1: t0;
 }
 vec2 densityRatio(float a) { return vec2(exp(-a / RAYLEIGH_H), exp(-a / MIE_H)); }
 vec3 sampleTransmittance(float alt, float cz) {
@@ -460,7 +460,7 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
     const glm::vec3 origin(0.0f, kPlanetRadiusM + kEpsilonM, 0.0f);
     const float sun_cos_zenith = glm::clamp(glm::dot(sun_dir_world, up), -1.0f, 1.0f);
 
-    // T-I5a-6 FIX: build the dome in a SUN-RELATIVE horizontal frame so the LUT's
+    //  FIX: build the dome in a SUN-RELATIVE horizontal frame so the LUT's
     // azimuth column u directly matches what the skybox/aerial shaders sample
     // (az = acos(dot(view_horiz, sun_horiz)) -> u). Previously this loop built
     // view_dir on the WORLD x/z axes (the comment claimed a sun frame, the code
@@ -472,7 +472,7 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
     // bearing, right is the orthogonal horizontal axis.
     glm::vec3 sun_horiz(sun_dir_world.x, 0.0f, sun_dir_world.z);
     const float sun_horiz_len = glm::length(sun_horiz);
-    glm::vec3 forward = sun_horiz_len > 1e-4f ? sun_horiz / sun_horiz_len : glm::vec3(0.0f, 0.0f, 1.0f);
+    glm::vec3 forward = sun_horiz_len > 1e-4f ? sun_horiz / sun_horiz_len: glm::vec3(0.0f, 0.0f, 1.0f);
     const glm::vec3 right(-forward.z, 0.0f, forward.x); // 90 deg CCW about +Y
 
     constexpr int kMarchSamples = 30;
@@ -527,7 +527,7 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
                 const int msy = std::min(kMultiScatterHeight - 1, static_cast<int>(ms_v * kMultiScatterHeight));
                 const glm::vec3 ms = m_multiscatter_cpu.empty()
                     ? glm::vec3(0.0f)
-                    : m_multiscatter_cpu[static_cast<std::size_t>(msy) * kMultiScatterWidth + msx];
+: m_multiscatter_cpu[static_cast<std::size_t>(msy) * kMultiScatterWidth + msx];
                 const glm::vec3 multi = (sigma_s_r + sigma_s_m) * ms;
 
                 const glm::vec3 step_tr = glm::exp(-sigma_e * dt);
@@ -549,11 +549,11 @@ void SkyAtmosphereLut::build_sky_view_cpu(const glm::vec3& sun_dir_world) {
     }
 
     m_skyview_sun_dir = sun_dir_world;
-    m_sky_ambient = ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>() : glm::vec3(0.0f);
+    m_sky_ambient = ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>(): glm::vec3(0.0f);
     (void)sun_cos_zenith;
 }
 
-// --- GPU sky-view (spec 008 WS-4, render.sky_lut_gpu) -----------------------
+// --- GPU sky-view ( , render.sky_lut_gpu) -----------------------
 
 bool SkyAtmosphereLut::ensure_skyview_compute_resources() {
     if (m_skyview_compute_prog == 0) {
@@ -642,7 +642,7 @@ bool SkyAtmosphereLut::build_sky_lut_gpu_init(const glm::vec3& sun_dir_world) {
 
 bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     // Needs the transmittance/multiscatter textures (the compute samples them) and the sky-view
-    // texture (the compute writes it); all three are uploaded by the CPU initialize(). Refuse if
+    // texture (the compute writes it); all three are uploaded by the CPU initialize. Refuse if
     // any is missing or the compute program/SSBO can't be created -> caller falls back to CPU.
     if (m_transmittance_tex == 0 || m_multiscatter_tex == 0 || m_skyview_tex == 0) return false;
     if (!ensure_skyview_compute_resources()) return false;
@@ -671,14 +671,14 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
     glBindTexture(GL_TEXTURE_2D, 0);
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
-    // RENDER-06 (016 FR-E): the blocking glGetBufferSubData ambient readback is
-    // retired onto the 017-A ring — submit + a BOUNDED zero-timeout poll, so a
+    // the blocking glGetBufferSubData ambient readback is
+    // retired onto the asynchronous-readback ring — submit + a BOUNDED zero-timeout poll, so a
     // wedged GPU can no longer stall this call indefinitely (on timeout the
     // caller falls back to the CPU sky-view path). Same-invocation consumption
     // is retained because m_sky_ambient must match the LUT this call built and
     // the path is the default-OFF debug-stall fix ("the readback stall is
     // acceptable for the use case"); a fully deferred stale-safe consumer is
-    // the follow-up if this ever ships default-ON.
+    // the implementation note if this ever ships default-ON.
     const std::size_t skyview_bytes =
         sizeof(float) * 3u * static_cast<std::size_t>(kSkyViewWidth) * kSkyViewHeight;
     m_skyview_cpu.assign(static_cast<std::size_t>(kSkyViewWidth) * kSkyViewHeight, glm::vec3(0.0f));
@@ -723,7 +723,7 @@ bool SkyAtmosphereLut::build_sky_view_gpu(const glm::vec3& sun_dir_world) {
         }
     }
     m_skyview_sun_dir = sun_dir_world;
-    m_sky_ambient = ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>() : glm::vec3(0.0f);
+    m_sky_ambient = ambient_weight > 0.0f ? ambient_accum / ambient_weight * glm::pi<float>(): glm::vec3(0.0f);
     return true;
 }
 
@@ -752,7 +752,7 @@ void SkyAtmosphereLut::update_texture(GLuint tex, int width, int height, const s
 bool SkyAtmosphereLut::initialize(const glm::vec3& sun_dir_world, double* out_full_precompute_ms) {
     const auto t0 = std::chrono::steady_clock::now();
 
-    // spec 008 WS-4 §9: build all three LUTs on the GPU when render.sky_lut_gpu is on (the CPU
+    // build all three LUTs on the GPU when render.sky_lut_gpu is on (the CPU
     // integration is ~32 ms at startup, over the 8 ms budget). Falls back to the full CPU build if
     // any GPU resource fails.
     bool gpu_init_done = false;
@@ -785,7 +785,7 @@ bool SkyAtmosphereLut::refresh_sky_view(const glm::vec3& sun_dir_world, double* 
         return false;
     }
     const auto t0 = std::chrono::steady_clock::now();
-    // spec 008 WS-4: GPU compute path when render.sky_lut_gpu is on (it writes the texture +
+    //  GPU compute path when render.sky_lut_gpu is on (it writes the texture +
     // ambient itself); fall back to the CPU march if the path is off or its resources fail.
     bool gpu_done = false;
     if (m_use_gpu_skyview) {
@@ -806,7 +806,7 @@ void SkyAtmosphereLut::destroy() {
     if (m_transmittance_tex) { glDeleteTextures(1, &m_transmittance_tex); m_transmittance_tex = 0; }
     if (m_multiscatter_tex) { glDeleteTextures(1, &m_multiscatter_tex); m_multiscatter_tex = 0; }
     if (m_skyview_tex) { glDeleteTextures(1, &m_skyview_tex); m_skyview_tex = 0; }
-    // spec 008 WS-4: GPU sky-view resources.
+    //  GPU sky-view resources.
     if (m_skyview_compute_prog) { glDeleteProgram(m_skyview_compute_prog); m_skyview_compute_prog = 0; }
     if (m_transmittance_compute_prog) { glDeleteProgram(m_transmittance_compute_prog); m_transmittance_compute_prog = 0; }
     if (m_multiscatter_compute_prog) { glDeleteProgram(m_multiscatter_compute_prog); m_multiscatter_compute_prog = 0; }

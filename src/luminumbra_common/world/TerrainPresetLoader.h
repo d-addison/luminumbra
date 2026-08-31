@@ -1,18 +1,16 @@
 #pragma once
 
-// T-I3-5: the one canonical world-preset parser. Replaces the four duplicate
+// the one canonical world-preset parser. Replaces the four duplicate
 // parsers that previously lived in GameSession.cpp,
 // test_worldgen_layer_snapshots.cpp, runtime_world_visual_validation_test.cpp
 // and initial_world_loading_perf_test.cpp.
 //
 // Consumed parameters land in Systems::TerrainGenParams (byte-stable with the
 // legacy parsers). The `terrain.shaping` block is parsed into
-// TerrainPresetExtras AND consumed into TerrainGenParams (T-I3-10 terrain
+// TerrainPresetExtras AND consumed into TerrainGenParams ( terrain
 // shaping; an absent block leaves shaping_enabled=false -> bit-identical
-// legacy heights). Remaining forthcoming blocks — `terrain.shaping` (reserved keys per
-// the iteration-3 design doc), `biomes`, `features` river/structure flags and
-// `materials` — are parsed into TerrainPresetExtras: stored, not yet consumed
-// by generation. Unknown keys produce LUMINUMBRA_CORE_WARN warnings.
+// legacy heights). Biome and feature blocks are likewise consumed by generation.
+// Unknown keys produce LUMINUMBRA_CORE_WARN warnings.
 
 #include <array>
 #include <filesystem>
@@ -42,7 +40,7 @@ struct TerrainShapingPreset {
     std::vector<std::array<float, 2>> peaks_spline;
 };
 
-// generation_params.biomes (T-I4-1). A preset opts INTO biomes by naming a
+// generation_params.biomes. A preset opts INTO biomes by naming a
 // table: "biomes": {"table": "common/biomes.json"}. The table path is relative
 // to the data/ root and resolved to an absolute path against the preset's
 // location at load time (presets live at <root>/worlds/atlas/presets/, data at
@@ -50,47 +48,25 @@ struct TerrainShapingPreset {
 // params drift byte-zero from the pre-biome implementation.
 struct TerrainBiomesPreset {
     bool present = false;
-    bool enabled = false; // a non-empty "table" was supplied
-    std::string table;    // verbatim relative path from the preset
+    bool enabled = false;            // a non-empty "table" was supplied
+    std::string table;               // verbatim relative path from the preset
     std::string resolved_table_path; // absolute path handed to TerrainGenParams
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
-    bool relief_enabled = false;        // slice 3: temperature-driven ridge scaling
+    bool relief_enabled = false; //  temperature-driven ridge scaling
     float relief_strength = 0.45f;
 };
 
 // generation_params.features flags beyond the cave params consumed through
-// TerrainGenParams — reserved for iteration 4.
+// TerrainGenParams.
 struct TerrainFeaturesPreset {
     bool present = false;
     bool rivers_enabled = false;
     bool structures_enabled = false;
 };
 
-// generation_params.materials — strata + veins authoring data.
-struct TerrainStratumPreset {
-    std::string material;
-    int max_depth = 0;
-    int thickness = 0;
-};
-
-struct TerrainVeinPreset {
-    std::string material;
-    std::vector<std::string> host_materials;
-    float noise_frequency = 0.0f;
-    float noise_threshold = 0.0f;
-    float max_altitude = 0.0f;
-    bool has_max_altitude = false;
-};
-
-struct TerrainMaterialsPreset {
-    bool present = false;
-    std::vector<TerrainStratumPreset> strata;
-    std::vector<TerrainVeinPreset> veins;
-};
-
-// generation_params.terrain.hydro (T-I6-A2): hydraulic/thermal relief. A preset
-// opts in with "hydro": {"enabled": true, ...}. Defaults mirror
+// generation_params.terrain.hydro: hydraulic/thermal relief. A preset
+// opts in with "hydro": {"enabled": true,...}. Defaults mirror
 // TerrainGenParams' hydro_* defaults so a bare {"enabled": true} works.
 struct TerrainHydroPreset {
     bool present = false;
@@ -111,7 +87,6 @@ struct TerrainPresetExtras {
     TerrainShapingPreset shaping;
     TerrainBiomesPreset biomes;
     TerrainFeaturesPreset features;
-    TerrainMaterialsPreset materials;
     TerrainHydroPreset hydro;
 };
 
@@ -131,7 +106,7 @@ struct TerrainPresetLoadResult {
 // meaningful when ok=true.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);
 
-// Spec 002 Item 1 (ADDITIVE in-memory seam — no struct/behavior change). Parses
+//   (ADDITIVE in-memory seam — no struct/behavior change). Parses
 // an ALREADY-PARSED preset JSON with an EXPLICIT data root, so a host that holds
 // candidate preset JSON in memory (the create-world live preview) gets identical
 // TerrainGenParams WITHOUT round-tripping through a temp file (the temp-file

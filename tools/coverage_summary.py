@@ -13,7 +13,7 @@ a measured number instead of subsystem-name presence.
 
 Primary tool: gcov itself (``gcov --json-format --stdout``), which is the
 gcov-native JSON path and requires no third-party dependency. gcovr is NOT
-required (it is uninstallable offline in this environment; see plan R1). gcov
+required (it is uninstallable offline in this environment; see coverage contract). gcov
 15.1.0 matches the compiling gcc 15.1.0 exactly, so the ``.gcda`` parse is
 version-safe.
 

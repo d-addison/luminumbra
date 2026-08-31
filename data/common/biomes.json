@@ -1,6 +1,6 @@
 {
   "schema": "luminumbra.biome_table.v1",
-  "description": "Authored biome table (T-I4-1). Biome selection is BiomeTable.lookup(continentalness, erosion, pv, temperature, humidity): the engine knows only the lookup, the climate ranges and surface palettes are game data. Ranges are inclusive-min / exclusive-max in the normalized noise domain [-1, 1]; an unspecified dimension matches the full [-1, 1] span. Overlapping ranges resolve FIRST-MATCH in array order, so order biomes specific-before-general. A column matching no biome row yields id 255 (none) and falls back to the legacy single-material classifier. The vegetation block is parsed-not-consumed this iteration (forward-compat for iteration 5 scatter); reverb is reserved for T-I4-5 environmental audio.",
+  "description": "Authored biome table. Biome selection is BiomeTable.lookup(continentalness, erosion, pv, temperature, humidity): the engine knows only the lookup, while climate ranges and surface palettes are game data. Ranges are inclusive-min / exclusive-max in the normalized noise domain [-1, 1]; an unspecified dimension matches the full [-1, 1] span. Overlapping ranges resolve first-match in array order, so order biomes specific-before-general. A column matching no biome row yields id 255 (none) and falls back to the legacy single-material classifier. Vegetation density drives client foliage scattering and reverb drives the environmental audio profile.",
   "biomes": [
     {
       "id": 0,

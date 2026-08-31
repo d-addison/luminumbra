@@ -1,6 +1,6 @@
-﻿// T-I5b-4 (W1): WaterfallVisual gate.
+﻿// Waterfall visual validation.
 //
-// Two assertions, both required by design-decisions Â§5 / critique F5:
+// Two assertions, both required by documented design / regression review:
 //   (1) DETERMINISM: waterfall SITE DETECTION is a pure function of the
 //       generated world. We build the shipped mountains world (rivers enabled)
 //       at the fixed atlas seed, run DetectWaterfalls TWICE, and assert the
@@ -14,13 +14,14 @@
 //       plume above the pool, and a white foam band at the foot).
 //
 // The capture is GL; if no GL context is available the visual half SKIPs but
-// the determinism half (the gate's load-bearing F5 assertion) still runs +
+// the determinism half (the gate's load-bearing  assertion) still runs +
 // writes the artifact, so the validator always has its determinism evidence.
 
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <cmath>
@@ -35,20 +36,20 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#include "rendering/WaterfallDetect.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/TerrainPresetLoader.h"
-#include "rendering/WaterfallDetect.h"
 
 namespace fs = std::filesystem;
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
-using Luminumbra::Rendering::WaterfallSite;
-using Luminumbra::Rendering::WaterfallSiteCache;
-using Luminumbra::Rendering::WaterfallDetectParams;
 using Luminumbra::Rendering::DetectWaterfalls;
 using Luminumbra::Rendering::HashWaterfallSites;
 using Luminumbra::Rendering::MakeWaterfallDetectKey;
+using Luminumbra::Rendering::WaterfallDetectParams;
+using Luminumbra::Rendering::WaterfallSite;
+using Luminumbra::Rendering::WaterfallSiteCache;
 
 namespace {
 
@@ -76,7 +77,8 @@ TerrainGenParams LoadPresetParams(const fs::path& path) {
 
 std::string ReadTextFile(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
-    if (!file) return {};
+    if (!file)
+        return {};
     std::stringstream s;
     s << file.rdbuf();
     return s.str();
@@ -86,26 +88,40 @@ std::string ReadTextFile(const fs::path& path) {
 class HiddenGlContext {
 public:
     HiddenGlContext() {
-        if (!glfwInit()) { m_error = "glfwInit failed"; return; }
+        if (!glfwInit()) {
+            m_error = "glfwInit failed";
+            return;
+        }
         m_glfw_initialized = true;
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         m_window = glfwCreateWindow(64, 64, "waterfall_visual_test", nullptr, nullptr);
-        if (!m_window) { m_error = "glfwCreateWindow failed"; return; }
+        if (!m_window) {
+            m_error = "glfwCreateWindow failed";
+            return;
+        }
         glfwMakeContextCurrent(m_window);
         if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
-            m_error = "gladLoadGLLoader failed"; return;
+            m_error = "gladLoadGLLoader failed";
+            return;
         }
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
+
 private:
     GLFWwindow* m_window = nullptr;
     bool m_glfw_initialized = false;
@@ -134,12 +150,25 @@ GLuint CompileShaderSrc(const std::string& src, GLenum type, std::string& log) {
 GLuint LinkProgram(const fs::path& vert, const fs::path& frag, std::string& err) {
     const std::string vs = ReadTextFile(vert);
     const std::string fsrc = ReadTextFile(frag);
-    if (vs.empty()) { err = "missing vert " + vert.string(); return 0; }
-    if (fsrc.empty()) { err = "missing frag " + frag.string(); return 0; }
+    if (vs.empty()) {
+        err = "missing vert " + vert.string();
+        return 0;
+    }
+    if (fsrc.empty()) {
+        err = "missing frag " + frag.string();
+        return 0;
+    }
     std::string vlog, flog;
     GLuint v = CompileShaderSrc(vs, GL_VERTEX_SHADER, vlog);
     GLuint f = CompileShaderSrc(fsrc, GL_FRAGMENT_SHADER, flog);
-    if (!v || !f) { err = vlog + flog; if (v) glDeleteShader(v); if (f) glDeleteShader(f); return 0; }
+    if (!v || !f) {
+        err = vlog + flog;
+        if (v)
+            glDeleteShader(v);
+        if (f)
+            glDeleteShader(f);
+        return 0;
+    }
     GLuint prog = glCreateProgram();
     glAttachShader(prog, v);
     glAttachShader(prog, f);
@@ -160,7 +189,10 @@ GLuint LinkProgram(const fs::path& vert, const fs::path& frag, std::string& err)
     return prog;
 }
 
-struct Vert { glm::vec3 pos; glm::vec3 nrm; };
+struct Vert {
+    glm::vec3 pos;
+    glm::vec3 nrm;
+};
 
 // Classifies the captured pixels into the three required signatures:
 //  - cascade body: bright-ish blue-white falling water (the sheet),
@@ -168,9 +200,9 @@ struct Vert { glm::vec3 pos; glm::vec3 nrm; };
 //  - spray: bright pixels in the UPPER region above the pool (the rising mist).
 struct WaterfallPixelStats {
     std::uint64_t total = 0;
-    std::uint64_t cascade_pixels = 0;  // sheet body (blue-led, mid-bright)
-    std::uint64_t foam_pixels = 0;     // near-white froth
-    std::uint64_t spray_pixels = 0;    // bright pixels in the mist band (upper third)
+    std::uint64_t cascade_pixels = 0; // sheet body (blue-led, mid-bright)
+    std::uint64_t foam_pixels = 0;    // near-white froth
+    std::uint64_t spray_pixels = 0;   // bright pixels in the mist band (upper third)
     double cascade_ratio = 0.0;
     double foam_ratio = 0.0;
     double spray_ratio = 0.0;
@@ -178,14 +210,16 @@ struct WaterfallPixelStats {
 
 WaterfallPixelStats AnalyzeWaterfall(const std::vector<unsigned char>& rgba, int w, int h) {
     WaterfallPixelStats s;
-    const int upper_band = h / 3; // top third in OpenGL bottom-up == top of frame after flip; we read raw
+    const int upper_band =
+        h / 3; // top third in OpenGL bottom-up == top of frame after flip; we read raw
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4u;
             const int r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
             const int luma = (r * 54 + g * 183 + b * 19) >> 8;
             // Skip the dark clear background.
-            if (r + g + b <= 24) continue;
+            if (r + g + b <= 24)
+                continue;
             ++s.total;
             const bool near_white = r > 200 && g > 210 && b > 215;
             const bool bluish = b >= g && g >= r && luma > 70;
@@ -210,7 +244,8 @@ WaterfallPixelStats AnalyzeWaterfall(const std::vector<unsigned char>& rgba, int
 
 void WritePpm(const fs::path& path, int w, int h, const std::vector<unsigned char>& rgba) {
     std::ofstream out(path, std::ios::binary);
-    if (!out) return;
+    if (!out)
+        return;
     out << "P6\n" << w << " " << h << "\n255\n";
     for (int y = h - 1; y >= 0; --y) {
         for (int x = 0; x < w; ++x) {
@@ -229,7 +264,7 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
     const TerrainGenParams params = LoadPresetParams(preset);
     ASSERT_TRUE(params.rivers_enabled) << "mountains must opt into rivers";
 
-    // --- (1) DETERMINISM (critique F5). ---
+    // --- (1) DETERMINISM (regression review). ---
     SHIELD_WorldSystem world_a(nullptr, nullptr, params, kSeed);
     SHIELD_WorldSystem world_b(nullptr, nullptr, params, kSeed);
     const WaterfallDetectParams dp;
@@ -246,11 +281,10 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
     ASSERT_EQ(sites_a1.size(), sites_a2.size());
     const bool bytes_equal_run =
         sites_a1.size() == sites_a2.size() &&
-        std::memcmp(sites_a1.data(), sites_a2.data(),
-                    sites_a1.size() * sizeof(WaterfallSite)) == 0;
+        std::memcmp(sites_a1.data(), sites_a2.data(), sites_a1.size() * sizeof(WaterfallSite)) == 0;
     EXPECT_TRUE(bytes_equal_run) << "same world -> sites must be byte-identical";
     EXPECT_EQ(hash_a1, hash_a2);
-    // Same seed, separate world -> same sites (the F5 contract).
+    // Same seed, separate world -> same sites (the  contract).
     EXPECT_EQ(hash_a1, hash_b1) << "same seed must yield the same sites for every replay";
     EXPECT_EQ(sites_a1.size(), sites_b1.size());
 
@@ -280,7 +314,8 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
     // Pick the steepest+tallest site for the dressing capture.
     const WaterfallSite* best = &sites_a1.front();
     for (const WaterfallSite& s : sites_a1) {
-        if (s.drop_height > best->drop_height) best = &s;
+        if (s.drop_height > best->drop_height)
+            best = &s;
     }
 
     // --- (2) VISUAL dressing capture. ---
@@ -295,25 +330,35 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
         } else {
             std::string err;
             const fs::path shader_root = SourceRoot() / "res/shaders";
-            GLuint sheet_prog = LinkProgram(shader_root / "basic.vert",
-                                            shader_root / "waterfall.frag", err);
+            GLuint sheet_prog =
+                LinkProgram(shader_root / "basic.vert", shader_root / "waterfall.frag", err);
             ASSERT_NE(sheet_prog, 0u) << "waterfall.frag failed: " << err;
             // The spray/foam billboards reuse the same sheet shader so the
             // capture needs only one program; the foam quads sit at fall_t~1.
             GLuint fbo = 0, color_tex = 0, depth_rb = 0;
             glGenTextures(1, &color_tex);
             glBindTexture(GL_TEXTURE_2D, color_tex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCaptureWidth, kCaptureHeight, 0,
-                         GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexImage2D(GL_TEXTURE_2D,
+                         0,
+                         GL_RGBA8,
+                         kCaptureWidth,
+                         kCaptureHeight,
+                         0,
+                         GL_RGBA,
+                         GL_UNSIGNED_BYTE,
+                         nullptr);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             glGenRenderbuffers(1, &depth_rb);
             glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
-            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kCaptureWidth, kCaptureHeight);
+            glRenderbufferStorage(
+                GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kCaptureWidth, kCaptureHeight);
             glGenFramebuffers(1, &fbo);
             glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
             ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
             // Build the dressing in a CLEAN LOCAL frame (curtain in the XY plane,
@@ -331,17 +376,23 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
 
             std::vector<Vert> verts;
             std::vector<unsigned int> idx;
-            auto add_quad = [&](const glm::vec3& a, const glm::vec3& b,
-                                const glm::vec3& c, const glm::vec3& d) {
+            auto add_quad = [&](const glm::vec3& a,
+                                const glm::vec3& b,
+                                const glm::vec3& c,
+                                const glm::vec3& d) {
                 const unsigned int base = static_cast<unsigned int>(verts.size());
                 const glm::vec3 n(0, 0, 1);
-                verts.push_back({a, n}); verts.push_back({b, n});
-                verts.push_back({c, n}); verts.push_back({d, n});
+                verts.push_back({a, n});
+                verts.push_back({b, n});
+                verts.push_back({c, n});
+                verts.push_back({d, n});
                 idx.insert(idx.end(), {base, base + 1, base + 2, base + 2, base + 3, base});
             };
             // Sheet curtain: top edge at the crest, bottom edge at the foot.
-            add_quad(glm::vec3(-half_w, crest_y, 0.0f), glm::vec3(half_w, crest_y, 0.0f),
-                     glm::vec3(half_w, foot_y, 0.0f),  glm::vec3(-half_w, foot_y, 0.0f));
+            add_quad(glm::vec3(-half_w, crest_y, 0.0f),
+                     glm::vec3(half_w, crest_y, 0.0f),
+                     glm::vec3(half_w, foot_y, 0.0f),
+                     glm::vec3(-half_w, foot_y, 0.0f));
             // Plunge-pool FOAM band: a short quad straddling the foot (fall_t ~1,
             // where the shader paints plunge foam), pushed slightly toward the
             // camera so it composites over the sheet base.
@@ -356,8 +407,10 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
                 const float y0 = foot_y + 0.3f + static_cast<float>(m) * 0.9f;
                 const float y1 = y0 + 1.1f;
                 const float sw = half_w * (1.2f - 0.18f * static_cast<float>(m));
-                add_quad(glm::vec3(-sw, y0, 0.6f), glm::vec3(sw, y0, 0.6f),
-                         glm::vec3(sw, y1, 0.6f),  glm::vec3(-sw, y1, 0.6f));
+                add_quad(glm::vec3(-sw, y0, 0.6f),
+                         glm::vec3(sw, y0, 0.6f),
+                         glm::vec3(sw, y1, 0.6f),
+                         glm::vec3(-sw, y1, 0.6f));
             }
 
             GLuint vao = 0, vbo = 0, ebo = 0;
@@ -366,20 +419,32 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
             glGenBuffers(1, &ebo);
             glBindVertexArray(vao);
             glBindBuffer(GL_ARRAY_BUFFER, vbo);
-            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(Vert)),
-                         verts.data(), GL_STATIC_DRAW);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(verts.size() * sizeof(Vert)),
+                         verts.data(),
+                         GL_STATIC_DRAW);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(idx.size() * sizeof(unsigned int)),
-                         idx.data(), GL_STATIC_DRAW);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(idx.size() * sizeof(unsigned int)),
+                         idx.data(),
+                         GL_STATIC_DRAW);
             glEnableVertexAttribArray(0);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vert),
+            glVertexAttribPointer(0,
+                                  3,
+                                  GL_FLOAT,
+                                  GL_FALSE,
+                                  sizeof(Vert),
                                   reinterpret_cast<void*>(offsetof(Vert, pos)));
             glEnableVertexAttribArray(1);
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vert),
+            glVertexAttribPointer(1,
+                                  3,
+                                  GL_FLOAT,
+                                  GL_FALSE,
+                                  sizeof(Vert),
                                   reinterpret_cast<void*>(offsetof(Vert, nrm)));
 
             glViewport(0, 0, kCaptureWidth, kCaptureHeight);
-            glDisable(GL_DEPTH_TEST);  // single translucent layer; no depth needed
+            glDisable(GL_DEPTH_TEST); // single translucent layer; no depth needed
             glDepthMask(GL_FALSE);
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -394,29 +459,41 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
             const glm::vec3 cam = mid + glm::vec3(0.0f, 0.0f, dist);
             const glm::mat4 model(1.0f);
             const glm::mat4 view = glm::lookAt(cam, mid, glm::vec3(0, 1, 0));
-            const glm::mat4 proj = glm::perspective(glm::radians(55.0f),
-                static_cast<float>(kCaptureWidth) / kCaptureHeight, 0.1f, 512.0f);
+            const glm::mat4 proj =
+                glm::perspective(glm::radians(55.0f),
+                                 static_cast<float>(kCaptureWidth) / kCaptureHeight,
+                                 0.1f,
+                                 512.0f);
             const glm::mat3 nmat(1.0f);
 
             glUseProgram(sheet_prog);
-            glUniformMatrix4fv(glGetUniformLocation(sheet_prog, "model"), 1, GL_FALSE, glm::value_ptr(model));
-            glUniformMatrix4fv(glGetUniformLocation(sheet_prog, "view"), 1, GL_FALSE, glm::value_ptr(view));
-            glUniformMatrix4fv(glGetUniformLocation(sheet_prog, "projection"), 1, GL_FALSE, glm::value_ptr(proj));
-            glUniformMatrix3fv(glGetUniformLocation(sheet_prog, "normalMatrix"), 1, GL_FALSE, glm::value_ptr(nmat));
+            glUniformMatrix4fv(
+                glGetUniformLocation(sheet_prog, "model"), 1, GL_FALSE, glm::value_ptr(model));
+            glUniformMatrix4fv(
+                glGetUniformLocation(sheet_prog, "view"), 1, GL_FALSE, glm::value_ptr(view));
+            glUniformMatrix4fv(
+                glGetUniformLocation(sheet_prog, "projection"), 1, GL_FALSE, glm::value_ptr(proj));
+            glUniformMatrix3fv(glGetUniformLocation(sheet_prog, "normalMatrix"),
+                               1,
+                               GL_FALSE,
+                               glm::value_ptr(nmat));
             glUniform1f(glGetUniformLocation(sheet_prog, "u_time"), 1.25f);
             glUniform3f(glGetUniformLocation(sheet_prog, "u_camera_pos"), cam.x, cam.y, cam.z);
             glUniform1f(glGetUniformLocation(sheet_prog, "u_crest_y"), crest_y);
             glUniform1f(glGetUniformLocation(sheet_prog, "u_foot_y"), foot_y);
             glUniform3f(glGetUniformLocation(sheet_prog, "u_sun_color"), 1.0f, 0.98f, 0.92f);
-            glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(idx.size()), GL_UNSIGNED_INT, nullptr);
+            glDrawElements(
+                GL_TRIANGLES, static_cast<GLsizei>(idx.size()), GL_UNSIGNED_INT, nullptr);
             glFinish();
 
             std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) *
                                               static_cast<std::size_t>(kCaptureHeight) * 4u);
-            glReadPixels(0, 0, kCaptureWidth, kCaptureHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            glReadPixels(
+                0, 0, kCaptureWidth, kCaptureHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
             stats = AnalyzeWaterfall(pixels, kCaptureWidth, kCaptureHeight);
 
-            const fs::path art_dir = fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "render" / "waterfall";
+            const fs::path art_dir =
+                fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "render" / "waterfall";
             fs::create_directories(art_dir);
             WritePpm(art_dir / "waterfall-site.ppm", kCaptureWidth, kCaptureHeight, pixels);
             capture_relpath = "render/waterfall/waterfall-site.ppm";
@@ -445,8 +522,8 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
     std::ofstream out(out_dir / "waterfall-visual.json");
     ASSERT_TRUE(out.is_open());
     const bool determinism_ok = bytes_equal_run && hash_a1 == hash_a2 && hash_a1 == hash_b1;
-    const bool dressing_ok = !capture_written ||
-        (stats.cascade_pixels > 0 && stats.foam_pixels > 0 && stats.spray_pixels > 0);
+    const bool dressing_ok = !capture_written || (stats.cascade_pixels > 0 &&
+                                                  stats.foam_pixels > 0 && stats.spray_pixels > 0);
     out << "{\n";
     out << "  \"schema\": \"luminumbra.waterfall_visual.v1\",\n";
     out << "  \"preset\": \"mountains\",\n";
@@ -456,11 +533,14 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
     out << "  \"site_hash_run_a2\": " << hash_a2 << ",\n";
     out << "  \"site_hash_world_b\": " << hash_b1 << ",\n";
     out << "  \"determinism_byte_equal\": " << (bytes_equal_run ? "true" : "false") << ",\n";
-    out << "  \"determinism_same_seed_same_sites\": " << (hash_a1 == hash_b1 ? "true" : "false") << ",\n";
+    out << "  \"determinism_same_seed_same_sites\": " << (hash_a1 == hash_b1 ? "true" : "false")
+        << ",\n";
     out << "  \"best_drop_height\": " << (best ? best->drop_height : 0.0f) << ",\n";
     out << "  \"best_steepness\": " << (best ? best->steepness : 0.0f) << ",\n";
-    out << "  \"best_crest\": [" << best->crest.x << ", " << best->crest.y << ", " << best->crest.z << "],\n";
-    out << "  \"best_foot\": [" << best->foot.x << ", " << best->foot.y << ", " << best->foot.z << "],\n";
+    out << "  \"best_crest\": [" << best->crest.x << ", " << best->crest.y << ", " << best->crest.z
+        << "],\n";
+    out << "  \"best_foot\": [" << best->foot.x << ", " << best->foot.y << ", " << best->foot.z
+        << "],\n";
     out << "  \"capture_written\": " << (capture_written ? "true" : "false") << ",\n";
     out << "  \"capture\": \"" << capture_relpath << "\",\n";
     out << "  \"gl_skip_reason\": \"" << gl_skip_reason << "\",\n";
@@ -470,22 +550,20 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
     out << "  \"sheet_present\": " << (stats.cascade_pixels > 0 ? "true" : "false") << ",\n";
     out << "  \"spray_present\": " << (stats.spray_pixels > 0 ? "true" : "false") << ",\n";
     out << "  \"foam_present\": " << (stats.foam_pixels > 0 ? "true" : "false") << ",\n";
-    out << "  \"passed\": " << (determinism_ok && dressing_ok && sites_a1.size() > 0 ? "true" : "false") << "\n";
+    out << "  \"passed\": "
+        << (determinism_ok && dressing_ok && sites_a1.size() > 0 ? "true" : "false") << "\n";
     out << "}\n";
     out.close();
 
-    std::cout << "[ WATERFALL ] sites=" << sites_a1.size()
-              << " hash_a=" << hash_a1 << " hash_b=" << hash_b1
-              << " best_drop=" << (best ? best->drop_height : 0.0f)
-              << " cascade=" << stats.cascade_pixels
-              << " foam=" << stats.foam_pixels
+    std::cout << "[ WATERFALL ] sites=" << sites_a1.size() << " hash_a=" << hash_a1
+              << " hash_b=" << hash_b1 << " best_drop=" << (best ? best->drop_height : 0.0f)
+              << " cascade=" << stats.cascade_pixels << " foam=" << stats.foam_pixels
               << " spray=" << stats.spray_pixels
               << (capture_written ? "" : (" [GL skipped: " + gl_skip_reason + "]")) << "\n";
 }
 
-
 // ============================================================================
-// WATER-11 (Wave H T.1): LIVE-WATER waterfall response.
+//  ( T.1): LIVE-WATER waterfall response.
 // A LIVE session (real GameSession + streamed water grids): find live standing
 // water at a gridded crest, assert the live factor reads WET; then dig the
 // crest bed 8 m down (diverting the flow - the water epoch advances, the site
@@ -525,7 +603,8 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
             world->update(session.GetRegistry(), {anchor}, physics);
             world->wait_for_streaming_jobs();
         };
-        for (int t = 0; t < 24; ++t) tick();
+        for (int t = 0; t < 24; ++t)
+            tick();
 
         // Find LIVE standing water on a gridded chunk (the y=0 column probe).
         float cx = spawn.x, cz = spawn.z;
@@ -533,10 +612,13 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
             for (int gx = -12; gx <= 12 && !r.found; ++gx) {
                 const float px = spawn.x + static_cast<float>(gx) * 16.0f;
                 const float pz = spawn.z + static_cast<float>(gz) * 16.0f;
-                if (!world->debug_water_grid_at(px, pz)) continue;
+                if (!world->debug_water_grid_at(px, pz))
+                    continue;
                 if (world->live_water_surface_at(px, pz) >
                     world->GetTerrainHeightAt(px, pz) + 0.10f) {
-                    cx = px; cz = pz; r.found = true;
+                    cx = px;
+                    cz = pz;
+                    r.found = true;
                 }
             }
         }
@@ -553,7 +635,8 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
             // DIG the crest bed 8 m down: the surface (bed+depth) falls far below
             // the voxel terrain -> the fall starves. The epoch must advance.
             world->EditTerrainBed(Vec3(cx, 0.0f, cz), -8000, 6.0f);
-            for (int t = 0; t < 8; ++t) tick();
+            for (int t = 0; t < 8; ++t)
+                tick();
 
             r.factor_dammed = Luminumbra::Rendering::LiveWaterFactorAt(*world, site);
             r.epoch_after = world->water_epoch();
@@ -577,15 +660,16 @@ TEST(WaterfallLiveWater, DammingUpstreamExtinguishesSiteDeterministically) {
                   tmp / "worlds" / "atlas" / "presets" / "default.json");
     std::error_code ec;
     fs::copy_file(SourceRoot() / "data" / "common" / "biomes.json",
-                  tmp / "data" / "common" / "biomes.json", ec);
-    const std::string root = tmp.string() +
-        std::string(1, static_cast<char>(fs::path::preferred_separator));
+                  tmp / "data" / "common" / "biomes.json",
+                  ec);
+    const std::string root =
+        tmp.string() + std::string(1, static_cast<char>(fs::path::preferred_separator));
     const LiveWaterRun a = RunLiveWaterScenario(root);
     const LiveWaterRun b = RunLiveWaterScenario(root);
     ASSERT_TRUE(a.found)
         << "no LIVE standing water on a gridded chunk within 192 m of spawn (vacuous)";
-    EXPECT_GT(a.factor_wet, 0.5f)
-        << "live factor should read WET at live standing water (got " << a.factor_wet << ")";
+    EXPECT_GT(a.factor_wet, 0.5f) << "live factor should read WET at live standing water (got "
+                                  << a.factor_wet << ")";
     EXPECT_LT(a.factor_dammed, 0.02f)
         << "digging the crest away did not extinguish the fall (got " << a.factor_dammed << ")";
     EXPECT_GT(a.epoch_after, a.epoch_before)

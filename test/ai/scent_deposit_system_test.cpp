@@ -1,4 +1,4 @@
-// T-I9-AI E2: ScentDepositSystem coverage — emitters lay scent into the field at
+// ScentDepositSystem coverage — emitters lay scent into the field at
 // their cell; moving emitters lay a trail; non-emitters/inactive channels no-op.
 
 #include "gtest/gtest.h"
@@ -9,10 +9,10 @@
 #include "luminumbra_common/components/InstinctComponents.h"
 
 namespace {
-using Luminumbra::Components::SensableComponent;
-using Luminumbra::Components::TransformComponent;
 using luminumbra::ai::RunScentDepositOnTick;
 using luminumbra::ai::ScentField;
+using Luminumbra::Components::SensableComponent;
+using Luminumbra::Components::TransformComponent;
 
 entt::entity MakeEmitter(entt::registry& r, float x, float z, int channel, float amount) {
     const auto e = r.create();
@@ -37,7 +37,8 @@ TEST(ScentDeposit, RepeatedDepositsAccumulate) {
     ScentField f(20, 20, 1);
     entt::registry r;
     MakeEmitter(r, 5.0f, 5.0f, 0, 4.0f);
-    for (int i = 0; i < 3; ++i) RunScentDepositOnTick(r, f, 0.0f, 0.0f, 1.0f);
+    for (int i = 0; i < 3; ++i)
+        RunScentDepositOnTick(r, f, 0.0f, 0.0f, 1.0f);
     EXPECT_GE(f.Sample(0, 5, 5), 12.0); // 3 x 4
 }
 
@@ -62,5 +63,6 @@ TEST(ScentDeposit, MovingEmitterLaysATrail) {
         RunScentDepositOnTick(r, f, 0.0f, 0.0f, 1.0f);
     }
     // Scent present along the walked cells (2..6 on z=2).
-    for (int x = 2; x <= 6; ++x) EXPECT_GE(f.Sample(0, x, 2), 5.0);
+    for (int x = 2; x <= 6; ++x)
+        EXPECT_GE(f.Sample(0, x, 2), 5.0);
 }

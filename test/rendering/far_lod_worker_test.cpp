@@ -361,13 +361,12 @@ TEST(FarLodWorker, ZeroAuthorityMatchesPristinePath) {
     ASSERT_TRUE(snapshot);
     ASSERT_TRUE(snapshot->entries.empty());
 
-    const auto outcome = BuildFarLodWorkerTile(
-        world, *snapshot, FarLodTier::F1, 0, 0, {});
+    const auto outcome = BuildFarLodWorkerTile(world, *snapshot, FarLodTier::F1, 0, 0, {});
     ASSERT_TRUE(outcome.ok) << outcome.error;
     EXPECT_TRUE(outcome.tile.sdf_bricks.empty());
 
-    const FarLodTile pristine = BuildPristineFarLodTile(
-        world, FarLodTier::F1, 0, 0, snapshot->params_hash);
+    const FarLodTile pristine =
+        BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, snapshot->params_hash);
     FarLodRegionMesh pristine_mesh;
     MarchingCubes::GenerateFarLodRegionMesh(pristine, pristine_mesh);
     EXPECT_EQ(ComputeFarLodTileHash(outcome.tile), ComputeFarLodTileHash(pristine));
@@ -397,12 +396,11 @@ TEST(FarLodWorker, AuthoritativeCaptureBuildsPersistsAndStales) {
     ASSERT_EQ(snapshot->entries.size(), 1u);
 
     TempSaveDir save;
-    const FarLodTile previous = BuildPristineFarLodTile(
-        world, FarLodTier::F1, 0, 0, snapshot->params_hash);
+    const FarLodTile previous =
+        BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, snapshot->params_hash);
     std::vector<std::string> errors;
     ASSERT_TRUE(FarLodStore(save.path).save_tile(previous, &errors));
-    const auto outcome = BuildFarLodWorkerTile(
-        world, *snapshot, FarLodTier::F1, 0, 0, save.path);
+    const auto outcome = BuildFarLodWorkerTile(world, *snapshot, FarLodTier::F1, 0, 0, save.path);
     ASSERT_TRUE(outcome.ok) << outcome.error;
     EXPECT_TRUE(outcome.changed);
     // Generated stack support is transient mesh input.  The persisted home
@@ -443,8 +441,8 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
     ASSERT_TRUE(old_snapshot);
 
     TempSaveDir save;
-    const auto old_outcome = BuildFarLodWorkerTile(
-        old_world, *old_snapshot, FarLodTier::F1, 0, 0, save.path);
+    const auto old_outcome =
+        BuildFarLodWorkerTile(old_world, *old_snapshot, FarLodTier::F1, 0, 0, save.path);
     ASSERT_TRUE(old_outcome.ok) << old_outcome.error;
     std::vector<std::string> save_errors;
     ASSERT_TRUE(FarLodStore(save.path).save_tile(old_outcome.tile, &save_errors));
@@ -473,8 +471,8 @@ TEST(FarLodWorker, ParamsRebasePreservesAuthorityAndRegeneratesBackground) {
     ASSERT_TRUE(new_snapshot);
     ASSERT_NE(new_snapshot->params_hash, old_snapshot->params_hash);
 
-    const auto rebased = BuildFarLodWorkerTile(
-        new_world, *new_snapshot, FarLodTier::F1, 0, 0, save.path);
+    const auto rebased =
+        BuildFarLodWorkerTile(new_world, *new_snapshot, FarLodTier::F1, 0, 0, save.path);
     ASSERT_TRUE(rebased.ok) << rebased.error;
     EXPECT_EQ(rebased.tile.params_hash, new_snapshot->params_hash);
     EXPECT_NE(rebased.tile.height_q[0], old_outcome.tile.height_q[0]);
@@ -593,8 +591,8 @@ TEST(FarLodWorker, RejectsRegionsOutsideTheInvertibleChunkIdRange) {
     ASSERT_TRUE(snapshot);
     for (const int region_x : {-32768, 32768}) {
         EXPECT_FALSE(world.capture_far_lod_sdf_snapshot(region_x, 0));
-        const auto outcome = BuildFarLodWorkerTile(
-            world, *snapshot, FarLodTier::F1, region_x, 0, {});
+        const auto outcome =
+            BuildFarLodWorkerTile(world, *snapshot, FarLodTier::F1, region_x, 0, {});
         EXPECT_FALSE(outcome.ok);
         EXPECT_NE(outcome.error.find("supported world range"), std::string::npos)
             << outcome.error;

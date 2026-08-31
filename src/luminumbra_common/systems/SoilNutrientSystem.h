@@ -1,8 +1,8 @@
 #pragma once
 
-// Track sim.soil — DETERMINISTIC soil NUTRIENT field, consumed by plants and
+// sim.soil: DETERMINISTIC soil NUTRIENT field, consumed by plants and
 // slowly REGENERATING toward a baseline each tick. This is the substrate that
-// makes the foliage pillar a true resource LOOP: a dense stand of mature plants
+// makes foliage a true resource loop: a dense stand of mature plants
 // draws its cell down (so unmanaged monoculture starves itself), and fallow soil
 // recovers over time (so crop rotation / spacing pays off). Growth can later
 // READ NutrientAt(x,z) to fold availability into PlantGrowthSystem's suitability.
@@ -44,7 +44,7 @@ namespace luminumbra::foliage {
 // Components live in the capital-L namespace (engine convention).
 namespace Comp = ::Luminumbra::Components;
 
-// Reserved seed-stream offset for the soil track (registry: wind+11, weather+12/13,
+// Reserved seed-stream offset for the soil subsystem (registry: wind+11, weather+12/13,
 // aether+14, plant+15, creature-reproduction+16). The soil flow is PURE (no rng),
 // so this is recorded for collision-avoidance but intentionally never consumed.
 inline constexpr std::uint64_t kSoilSeedOffset = 18ull;

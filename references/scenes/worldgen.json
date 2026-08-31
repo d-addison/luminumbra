@@ -1,6 +1,0 @@
-{ "_comment": "enriched default world overview — biomes + rivers + hydro relief",
-  "camera": { "pos": [8, 95, 8], "yaw": 35, "pitch": -22, "fov": 68 },
-  "time_of_day": 0.05,
-  "clouds": { "coverage": 0.4, "plane_height": 1100, "shadow": false },
-  "weather": { "type": "none", "intensity": 0.0 },
-  "screenshot": "references/compare/worldgen.ppm" }

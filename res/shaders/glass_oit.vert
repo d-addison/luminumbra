@@ -1,5 +1,5 @@
 #version 450 core
-// Spec 015 C-2 (RENDER-18): glass panes into the WBOIT accumulation targets.
+// glass panes into the WBOIT accumulation targets.
 layout (location = 0) in vec3 aPos;
 
 uniform mat4 u_model;

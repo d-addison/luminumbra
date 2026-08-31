@@ -17,17 +17,17 @@
  * `cgltf_result cgltf_parse(const cgltf_options*, const void*,
  * cgltf_size, cgltf_data**)` parses both glTF and GLB data. If
  * this function returns `cgltf_result_success`, you have to call
- * `cgltf_free()` on the created `cgltf_data*` variable.
+ * `cgltf_free` on the created `cgltf_data*` variable.
  * Note that contents of external files for buffers and images are not
  * automatically loaded. You'll need to read these files yourself using
  * URIs in the `cgltf_data` structure.
  *
- * `cgltf_options` is the struct passed to `cgltf_parse()` to control
+ * `cgltf_options` is the struct passed to `cgltf_parse` to control
  * parts of the parsing process. You can use it to force the file type
  * and provide memory allocation as well as file operation callbacks.
  * Should be zero-initialized to trigger default behavior.
  *
- * `cgltf_data` is the struct allocated and filled by `cgltf_parse()`.
+ * `cgltf_data` is the struct allocated and filled by `cgltf_parse`.
  * It generally mirrors the glTF format as described by the spec (see
  * https://github.com/KhronosGroup/glTF/tree/master/specification/2.0).
  *
@@ -42,12 +42,12 @@
  *
  * `cgltf_result cgltf_load_buffer_base64(const cgltf_options* options,
  * cgltf_size size, const char* base64, void** out_data)` decodes
- * base64-encoded data content. Used internally by `cgltf_load_buffers()`.
+ * base64-encoded data content. Used internally by `cgltf_load_buffers`.
  * This is useful when decoding data URIs in images.
  *
  * `cgltf_result cgltf_parse_file(const cgltf_options* options, const
  * char* path, cgltf_data** out_data)` can be used to open the given
- * file using `FILE*` APIs and parse the data using `cgltf_parse()`.
+ * file using `FILE*` APIs and parse the data using `cgltf_parse`.
  *
  * `cgltf_result cgltf_validate(cgltf_data*)` can be used to do additional
  * checks to make sure the parsed glTF data is valid.

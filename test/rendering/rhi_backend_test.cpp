@@ -1,4 +1,4 @@
-// spec 021 GPU-P02 / spec 014 FR-B.2 — the LUMIN_RHI parse leg of the RHI bring-up
+//   /   — the LUMIN_RHI parse leg of the RHI bring-up
 // proving signal. Pure string logic: no GPU, no GL context, no Diligent. This half
 // of RhiDeviceBringupGpu is toolchain-independent and passes on any box; the
 // device/swapchain-creation leg lives in the GPU ctest.
@@ -21,10 +21,9 @@ TEST(RhiBackendParse, DefaultsToGlOnNullEmptyOrGarbage) {
     EXPECT_EQ(ParseRhiBackend("d3d11"), Backend::Gl);
 }
 
-TEST(RhiBackendParse, ParsesAllThreeCanonicalValues) {
+TEST(RhiBackendParse, ParsesCanonicalValues) {
     EXPECT_EQ(ParseRhiBackend("gl"), Backend::Gl);
     EXPECT_EQ(ParseRhiBackend("vulkan"), Backend::Vulkan);
-    EXPECT_EQ(ParseRhiBackend("dx12"), Backend::Dx12);
 }
 
 TEST(RhiBackendParse, IsCaseInsensitiveAndAcceptsAliases) {
@@ -32,16 +31,15 @@ TEST(RhiBackendParse, IsCaseInsensitiveAndAcceptsAliases) {
     EXPECT_EQ(ParseRhiBackend("OpenGL"), Backend::Gl);
     EXPECT_EQ(ParseRhiBackend("VK"), Backend::Vulkan);
     EXPECT_EQ(ParseRhiBackend("Vulkan"), Backend::Vulkan);
-    EXPECT_EQ(ParseRhiBackend("D3D12"), Backend::Dx12);
+    EXPECT_EQ(ParseRhiBackend("D3D12"), Backend::Gl);
 }
 
 TEST(RhiBackendParse, BackendNameRoundTrips) {
-    for (Backend b : {Backend::Gl, Backend::Vulkan, Backend::Dx12}) {
+    for (Backend b : {Backend::Gl, Backend::Vulkan}) {
         EXPECT_EQ(ParseRhiBackend(BackendName(b)), b) << "round-trip failed for " << BackendName(b);
     }
     EXPECT_STREQ(BackendName(Backend::Gl), "gl");
     EXPECT_STREQ(BackendName(Backend::Vulkan), "vulkan");
-    EXPECT_STREQ(BackendName(Backend::Dx12), "dx12");
 }
 
-}  // namespace
+} // namespace

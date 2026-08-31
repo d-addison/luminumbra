@@ -1,6 +1,5 @@
 {
   "schema": "luminumbra.albedo_calibration_reference.v1",
-  "task": "T-I4-DR-albedo-calibration",
   "summary": "Per-material reference surface reflectance (physical albedo) and the on-screen sRGB bands those albedos must land in at the fixed noon calibration capture, AFTER the exposure-chain root fix (sun COLOR -> IRRADIANCE, x PI). The bands are derived by running the measured texture linear-albedo through the real lighting_pass.frag chain at noon and allowing a tolerance for normal/roughness variation and RGBA8 quantization. These are ABSOLUTE bands: a render that is globally too dark (the pre-fix defect) fails them even though relative ordering passes.",
 
   "exposure_audit": {

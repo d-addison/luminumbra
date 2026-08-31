@@ -24,25 +24,30 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
     // sort discipline). entt entity ids are creation-ordered integers.
     std::vector<entt::entity> agents;
     {
-        auto view = registry.view<ActionPlanComponent, const TransformComponent,
-                                   const LocomotionProfile>();
+        auto view =
+            registry.view<ActionPlanComponent, const TransformComponent, const LocomotionProfile>();
         for (auto entity : view) {
             agents.push_back(entity);
         }
     }
-    std::sort(agents.begin(), agents.end(),
-              [](entt::entity lhs, entt::entity rhs) {
-                  return entt::to_integral(lhs) < entt::to_integral(rhs);
-              });
+    std::sort(agents.begin(), agents.end(), [](entt::entity lhs, entt::entity rhs) {
+        return entt::to_integral(lhs) < entt::to_integral(rhs);
+    });
 
-    // T-I9-AI: snapshot of all locomotion agents (position + PRIOR-tick heading),
+    // snapshot of all locomotion agents (position + PRIOR-tick heading),
     // in deterministic id order, for the optional Reynolds flocking terms below
     // (separation / cohesion / alignment). Built ONCE per tick BEFORE the per-agent
     // wish is recomputed, so alignment reads last tick's velocities — there is no
     // intra-tick read-after-write coupling and the result is order-independent.
     // When no agent enables flocking this is unused; the canonical roster leaves
     // every strength at 0 so world_hash is unchanged.
-    struct AgentPos { entt::entity id; float x; float z; float wx; float wz; };
+    struct AgentPos {
+        entt::entity id;
+        float x;
+        float z;
+        float wx;
+        float wz;
+    };
     std::vector<AgentPos> neighbors;
     neighbors.reserve(agents.size());
     for (auto entity : agents) {
@@ -66,8 +71,7 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
         intent.arrived = false;
 
         // No current action (empty plan or index past the end) -> hold/idle.
-        if (plan.plan.empty() ||
-            plan.current_action_index >= plan.plan.size()) {
+        if (plan.plan.empty() || plan.current_action_index >= plan.plan.size()) {
             ++stats.agents_idle;
             continue;
         }
@@ -82,18 +86,15 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
         const auto& target_tf = registry.get<const TransformComponent>(target);
         const bool flee = plan.plan[plan.current_action_index].flee;
 
-        // T-I9-AI path-following: when the agent carries a LocomotionPathComponent
+        //  path-following: when the agent carries a LocomotionPathComponent
         // with a remaining waypoint (and is not fleeing), seek the WAYPOINT instead
         // of the action target directly. On waypoint arrival the index advances;
         // once the route is exhausted the agent resumes the plain action-target
         // seek so it still finishes onto its goal. No component -> byte-identical.
         auto* path = registry.try_get<LocomotionPathComponent>(entity);
-        const bool following =
-            !flee && path != nullptr && path->index < path->waypoints.size();
-        const float goal_x =
-            following ? path->waypoints[path->index].x : target_tf.position.x;
-        const float goal_z =
-            following ? path->waypoints[path->index].y : target_tf.position.z;
+        const bool following = !flee && path != nullptr && path->index < path->waypoints.size();
+        const float goal_x = following ? path->waypoints[path->index].x : target_tf.position.x;
+        const float goal_z = following ? path->waypoints[path->index].y : target_tf.position.z;
 
         // Horizontal vector to the goal (XZ plane; Y handled by the character's
         // ground-stick in physics). Float-only; Sqrt is IEEE-deterministic.
@@ -101,12 +102,11 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
         const float dz = goal_z - tf.position.z;
         const float dist = Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
 
-        const float slow = profile.slow_radius > profile.arrival_radius
-                               ? profile.slow_radius
-                               : profile.arrival_radius;
+        const float slow = profile.slow_radius > profile.arrival_radius ? profile.slow_radius
+                                                                        : profile.arrival_radius;
 
         if (flee) {
-            // T-I9-AI flee/avoidance: move AWAY from the (threat) target until
+            //  flee/avoidance: move AWAY from the (threat) target until
             // beyond slow_radius (the "safe" distance), then the action completes.
             const float safe = slow > 0.0f ? slow : profile.arrival_radius;
             if (dist >= safe) {
@@ -119,12 +119,13 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
             // Full-speed flight directly away. Degenerate dist~0 (agent on top of
             // the threat) picks a deterministic +X so the wish is never NaN.
             float adx = dx, adz = dz;
-            if (dist < 1e-4f) { adx = -1.0f; adz = 0.0f; } // away = -dir; -(-1)=+X
-            const float ainv = 1.0f /
-                Luminumbra::DeterministicMath::Sqrt(adx * adx + adz * adz);
-            intent.wish_xz =
-                Luminumbra::Vec2(-adx * ainv * profile.move_speed,
-                                 -adz * ainv * profile.move_speed);
+            if (dist < 1e-4f) {
+                adx = -1.0f;
+                adz = 0.0f;
+            } // away = -dir; -(-1)=+X
+            const float ainv = 1.0f / Luminumbra::DeterministicMath::Sqrt(adx * adx + adz * adz);
+            intent.wish_xz = Luminumbra::Vec2(-adx * ainv * profile.move_speed,
+                                              -adz * ainv * profile.move_speed);
         } else {
             if (dist <= profile.arrival_radius) {
                 if (following) {
@@ -152,7 +153,7 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
             intent.wish_xz = Luminumbra::Vec2(dx * inv * speed, dz * inv * speed);
         }
 
-        // T-I9-AI obstacle/crowd avoidance (Reynolds separation), DATA-FLAGGED.
+        //  obstacle/crowd avoidance (Reynolds separation), DATA-FLAGGED.
         // When separation is enabled, push away from nearby agents so they do not
         // pile onto a shared target at scale. Deterministic: neighbors are scanned
         // in id order; float-only; Sqrt is IEEE-deterministic. A zero strength (the
@@ -190,7 +191,7 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
             }
         }
 
-        // T-I9-AI flocking/herding: cohesion (steer toward the local group's center
+        //  flocking/herding: cohesion (steer toward the local group's center
         // of mass) + alignment (match the group's mean heading). Both use
         // flock_radius and last tick's neighbor headings (snapshotted above), so the
         // result is deterministic and order-independent. DATA-FLAGGED: zero strength
@@ -203,7 +204,8 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
             float hx = 0.0f, hz = 0.0f; // sum of neighbor headings (alignment)
             int count = 0;
             for (const auto& nb : neighbors) {
-                if (nb.id == entity) continue;
+                if (nb.id == entity)
+                    continue;
                 const float nx = nb.x - tf.position.x;
                 const float nz = nb.z - tf.position.z;
                 const float nd = Luminumbra::DeterministicMath::Sqrt(nx * nx + nz * nz);
@@ -221,8 +223,7 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
                     // Toward the neighbor centroid (unit) * strength * cruise speed.
                     const float ccx = cx * invn - tf.position.x;
                     const float ccz = cz * invn - tf.position.z;
-                    const float cl =
-                        Luminumbra::DeterministicMath::Sqrt(ccx * ccx + ccz * ccz);
+                    const float cl = Luminumbra::DeterministicMath::Sqrt(ccx * ccx + ccz * ccz);
                     if (cl > 0.0f) {
                         const float cs = profile.cohesion_strength * profile.move_speed / cl;
                         intent.wish_xz.x += ccx * cs;
@@ -233,8 +234,7 @@ InstinctLocomotionTickStats RunInstinctLocomotionOnTick(entt::registry& registry
                     // Toward the mean neighbor heading (unit) * strength * cruise speed.
                     const float mhx = hx * invn;
                     const float mhz = hz * invn;
-                    const float al =
-                        Luminumbra::DeterministicMath::Sqrt(mhx * mhx + mhz * mhz);
+                    const float al = Luminumbra::DeterministicMath::Sqrt(mhx * mhx + mhz * mhz);
                     if (al > 0.0f) {
                         const float as = profile.alignment_strength * profile.move_speed / al;
                         intent.wish_xz.x += mhx * as;

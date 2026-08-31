@@ -1,6 +1,6 @@
 #pragma once
 
-// Spec 016: the NON-RenderContext per-pass inputs (callbacks, std::function
+// the NON-RenderContext per-pass inputs (callbacks, std::function
 // lookups, draw-item lists) that do not belong in the shared RenderContext
 // field-union because they are pass-specific behavior/data, not frame state.
 //
@@ -8,16 +8,16 @@
 // sun, terrain arrays, gbuffer handles, frustum_planes, taau jitter, prev view-
 // proj, isolation) travels through RenderContext. These structs carry the rest.
 
-#include "TerrainSubmit.h"            // SubmitTerrainChunksFn + TerrainSubmitStats
-#include "StaticModelTex.h"           // namespace-scope StaticModelTex (the lookup return)
 #include "../../include/luminumbra/core/Types.h" // u32
+#include "StaticModelTex.h" // namespace-scope StaticModelTex (the lookup return)
+#include "TerrainSubmit.h"  // SubmitTerrainChunksFn + TerrainSubmitStats
 
-#include <glm/glm.hpp>                // glm::mat4 (WaterDrawItem model)
-#include <functional>                // std::function (static_model_tex lookup)
-#include <filesystem>                // std::filesystem::path (LOD mesh root)
-#include <string>                    // mesh-path lookup key
-#include <vector>                    // WaterDrawItem list
-#include <cstddef>                   // std::size_t
+#include <cstddef>     // std::size_t
+#include <filesystem>  // std::filesystem::path (LOD mesh root)
+#include <functional>  // std::function (static_model_tex lookup)
+#include <glm/glm.hpp> // glm::mat4 (WaterDrawItem model)
+#include <string>      // mesh-path lookup key
+#include <vector>      // WaterDrawItem list
 
 namespace Luminumbra::Rendering {
 
@@ -45,16 +45,16 @@ struct GBufferPassInput {
     // Root path for resolving on-disk LOD mesh variants (procgen tree palette).
     std::filesystem::path root_path;
 
-    // I8 static-model UV texture lane (bark/leaf plates). Raw GL array name +
+    //  static-model UV texture lane (bark/leaf plates). Raw GL array name +
     // per-meshPath layer/alpha lookup (returns nullptr when the mesh has none).
     u32 static_model_texture_array = 0;
     std::function<const StaticModelTex*(const std::string&)> static_model_tex;
 
-    // Wave-3 far-field tree impostors (opt-in; all 0/false when disabled).
-    bool  tree_impostor_enabled = false;
-    u32   tree_impostor_albedo = 0;   // raw GL texture name (bound directly)
-    u32   tree_impostor_normal = 0;   // raw GL texture name (bound directly)
-    int   tree_impostor_grid = 0;
+    //  far-field tree impostors (opt-in; all 0/false when disabled).
+    bool tree_impostor_enabled = false;
+    u32 tree_impostor_albedo = 0; // raw GL texture name (bound directly)
+    u32 tree_impostor_normal = 0; // raw GL texture name (bound directly)
+    int tree_impostor_grid = 0;
     float tree_impostor_radius = 0.0f;
     float tree_impostor_sphere_y = 0.0f;
 };
@@ -83,13 +83,13 @@ struct GBufferDrawStats {
 struct WaterDrawItem {
     glm::mat4 model = glm::mat4(1.0f); // translate(chunk.coords * CHUNK_SIZE_{X,Y,Z})
     u32 vao_id = 0;                    // WaterRenderData::vao_id
-    u32 element_count = 0;             // WaterRenderData::element_count (GL_UNSIGNED_INT count, > 0)
+    u32 element_count = 0; // WaterRenderData::element_count (GL_UNSIGNED_INT count, > 0)
 };
 
 // Water reads sun direction/color/intensity from ctx.sun (RenderContext Group H,
 // DirectionalLight by value) -- the same source make_particle_context /
 // make_foliage_context already populate. The pass also reads ctx.time_seconds
-// (the per-frame wall-clock snapshot) in place of the two live glfwGetTime()
+// (the per-frame wall-clock snapshot) in place of the two live glfwGetTime
 // calls, ctx.screen_quad_vao for the caustics quad, ctx.opaque_scene +
 // ctx.gbuffer_depth (adopted) for the SSR/refraction reads, and ctx.lit_scene
 // for the draw target. So WaterPassInput carries ONLY the draw-item list.
@@ -109,9 +109,9 @@ struct WaterDrawStats {
 // ----------------------------------------------------------------------------
 // light_space_matrices are PRECOMPUTED at the call site (get_light_space_matrices,
 // a pipeline-private the terrain-submit callback does not cover). submit_terrain is
-// make_terrain_submitter(); the pass calls it ONCE PER CASCADE and returns the
+// make_terrain_submitter; the pass calls it ONCE PER CASCADE and returns the
 // per-cascade TerrainSubmitStats so the call site applies the exact =/+= policy.
-// Spec 015 C-1 (RENDER-15): one translucent occluder for the shadow TINT cascade —
+// one translucent occluder for the shadow TINT cascade —
 // a unit quad under `model` carrying the GlassTintModel unit-thickness tint.
 struct GlassPaneItem {
     glm::mat4 model{1.0f};
@@ -122,7 +122,7 @@ struct GlassPaneItem {
 struct ShadowPassInput {
     std::vector<glm::mat4> light_space_matrices;
     SubmitTerrainChunksFn submit_terrain;
-    // Spec 015 C-1: translucent occluders drawn into the tint cascades after the
+    //  translucent occluders drawn into the tint cascades after the
     // opaque depth sub-pass (empty -> the tint stays init-cleared white = identity).
     const std::vector<GlassPaneItem>* glass_items = nullptr;
     unsigned int glass_vao = 0; // the pipeline's shared unit-quad VAO

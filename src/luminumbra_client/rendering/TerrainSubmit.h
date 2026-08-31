@@ -1,6 +1,6 @@
 #pragma once
 
-// Spec 016 terrain-submit seam (Codex-signed-off:
+//  terrain-submit seam (Codex-signed-off:
 // shadow submitter sign-off).
 //
 // GBuffer and Shadow share live-terrain submission. Today each does, via the
@@ -19,12 +19,12 @@
 //
 // Contract: ONE call per shadow cascade + ONE for the G-buffer terrain submit.
 // `renderable_chunks` is intentionally ABSENT from the signature: its only use
-// in either pass was `visible.reserve(renderable_chunks.size())`, a capacity
+// in either pass was `visible.reserve(renderable_chunks.size)`, a capacity
 // hint with no observable effect on draw order or stats.
 
-#include <glm/glm.hpp>   // glm::vec4 (frustum plane)
-#include <cstddef>       // std::size_t
-#include <functional>    // std::function
+#include <cstddef>     // std::size_t
+#include <functional>  // std::function
+#include <glm/glm.hpp> // glm::vec4 (frustum plane)
 
 namespace Luminumbra::Rendering {
 

@@ -1,15 +1,15 @@
 #pragma once
 
-#include "Rml_Interfaces.h" // The one true source for interface definitions
+#include "Rml_Interfaces.h"         // The one true source for interface definitions
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
 #include "world/WorldgenOverride.h" // WorldGenParam transport (engine-owned, not UI)
 #include <RmlUi/Core.h>
-#include <filesystem> // UI-07: gallery fixture capture-source override
-#include <string>
+#include <filesystem> // gallery fixture capture-source override
 #include <functional>
 #include <memory>
-#include <vector>
+#include <string>
 #include <utility> // For std::move
+#include <vector>
 
 struct GLFWwindow;
 
@@ -19,15 +19,18 @@ class IAudioManager;
 
 // --- Callbacks for UI interaction ---
 // WorldGenParam (the customize-form param transport) lives in the world layer, not here.
-using WorldCreationCallback = std::function<void(const std::string& name, const std::string& seed,
+using WorldCreationCallback = std::function<void(const std::string& name,
+                                                 const std::string& seed,
                                                  const std::string& worldType,
                                                  const std::vector<WorldGenParam>& params)>;
 // Read a generation parameter's current value from a preset (for seeding the customize form
 // when a preset chip is selected). Returns "" if the preset doesn't set that key.
-using WorldParamGetter = std::function<std::string(const std::string& worldType, const std::string& path)>;
+using WorldParamGetter =
+    std::function<std::string(const std::string& worldType, const std::string& path)>;
 // Save the current customize-form config (base preset + overrides) as a reusable, named user
 // preset; returns the new world-type id (e.g. "user_my_canyon") on success, "" on failure.
-using WorldPresetSaver = std::function<std::string(const std::string& displayName, const std::string& baseType,
+using WorldPresetSaver = std::function<std::string(const std::string& displayName,
+                                                   const std::string& baseType,
                                                    const std::vector<WorldGenParam>& params)>;
 // List saved user presets as (display name, world-type id) so create-world can offer them as
 // selectable starting points alongside the curated presets.
@@ -40,22 +43,24 @@ using WorldPresetExists = std::function<bool(const std::string& displayName)>;
 using WorldPresetDeleter = std::function<bool(const std::string& worldType)>;
 // Rename a saved user preset (worldType) to `newDisplayName`; returns the (possibly new)
 // world-type id on success, "" on failure. The id may change because it's slug-derived.
-using WorldPresetRenamer = std::function<std::string(const std::string& worldType, const std::string& newDisplayName)>;
+using WorldPresetRenamer =
+    std::function<std::string(const std::string& worldType, const std::string& newDisplayName)>;
 using LoadWorldCallback = std::function<void(const std::string&)>;
-// Pause-menu actions ("resume" / "quit") routed back to main_client, which owns game state + cursor.
+// Pause-menu actions ("resume" / "quit") routed back to main_client, which owns game state +
+// cursor.
 using PauseActionCallback = std::function<void(const std::string&)>;
 
 // --- Settings bridge ---
 // The UI layer must not depend on luminumbra_common's SystemConfig directly (it lives in
 // main_client, which owns the global g_systemConfig). Instead the host wires this small POD
 // of callbacks: the Settings screen (settings.rml) reads initial values via the getters,
-// pushes live changes via the setters, and persists via Save(). Every field is optional —
+// pushes live changes via the setters, and persists via Save. Every field is optional —
 // any null callback is simply skipped, so the screen degrades gracefully if unwired.
 struct SettingsBridge {
     // Video
-    std::function<std::string()> GetResolution;        // "" = native/default, else "WxH"
+    std::function<std::string()> GetResolution; // "" = native/default, else "WxH"
     std::function<void(const std::string&)> SetResolution;
-    std::function<std::string()> GetWindowMode;        // "windowed" | "borderless" | "fullscreen"
+    std::function<std::string()> GetWindowMode; // "windowed" | "borderless" | "fullscreen"
     std::function<void(const std::string&)> SetWindowMode;
     std::function<bool()> GetVSync;
     std::function<void(bool)> SetVSync;
@@ -63,7 +68,7 @@ struct SettingsBridge {
     std::function<void(float)> SetFov;
     std::function<float()> GetMouseSensitivity;
     std::function<void(float)> SetMouseSensitivity;
-    std::function<float()> GetUiScale;          // HUD/UI density-independent-pixel ratio (0.5..2.5)
+    std::function<float()> GetUiScale; // HUD/UI density-independent-pixel ratio (0.5..2.5)
     std::function<void(float)> SetUiScale;
     // Audio (0..1)
     std::function<float()> GetAudioMaster;
@@ -95,20 +100,24 @@ public:
     void Update();
     void Render();
 
-    // T007: last UI-pass submit time in ms (CPU draw-submission cost; meaningful while the UI
-    // renderer is unbatched). A GPU timer-query refinement is deferred to the perf-hardening phase.
-    double GetLastUiFrameMs() const { return m_lastUiFrameMs; }
+    // Last UI-pass submit time in ms. This is deliberately a CPU draw-submission
+    // metric; whole-frame GPU timing is owned by the render-pipeline profiler.
+    double GetLastUiFrameMs() const {
+        return m_lastUiFrameMs;
+    }
 
     void RequestLoadDocument(std::string path);
 
-    // Hot reload (F3): clear RmlUi's stylesheet/template caches and reload the active document
-    // so .rml/.rcss edits show without a restart. Called from the UIHotReload watcher callback.
+    // Hot reload : clear RmlUi's stylesheet/template caches and reload the active document
+    // so.rml/.rcss edits show without a restart. Called from the UIHotReload watcher callback.
     void ReloadActiveDocument();
-    
-    // Fixed: GetContext() is now defined inline here, solving the redefinition error.
-    Rml::Context* GetContext() { return m_context; }
-    
-    // Spec 002 Item 1: the host reads this each frame to drive the live preview
+
+    // Fixed: GetContext is now defined inline here, solving the redefinition error.
+    Rml::Context* GetContext() {
+        return m_context;
+    }
+
+    //  the host reads this each frame to drive the live preview
     // diorama. `active` is true only while world_creation.rml is the loaded,
     // visible document AND its #preview_pane exists. The pane rect is in PIXELS
     // (top-left origin, matching glfw framebuffer coords). worldType + params are
@@ -132,18 +141,38 @@ public:
     // pending marker (the host then re-centers the orbit camera).
     bool ConsumeWorldCreationResetView();
 
-    void SetWorldCreationCallback(WorldCreationCallback callback) { m_worldCreationCallback = std::move(callback); }
-    void SetWorldParamGetter(WorldParamGetter getter) { m_worldParamGetter = std::move(getter); }
-    void SetWorldPresetSaver(WorldPresetSaver saver) { m_worldPresetSaver = std::move(saver); }
-    void SetWorldPresetList(WorldPresetList lister) { m_worldPresetList = std::move(lister); }
-    void SetWorldPresetExists(WorldPresetExists exists) { m_worldPresetExists = std::move(exists); }
-    void SetWorldPresetDeleter(WorldPresetDeleter deleter) { m_worldPresetDeleter = std::move(deleter); }
-    void SetWorldPresetRenamer(WorldPresetRenamer renamer) { m_worldPresetRenamer = std::move(renamer); }
-    void SetLoadWorldCallback(LoadWorldCallback callback) { m_loadWorldCallback = std::move(callback); }
-    void SetSettingsBridge(SettingsBridge bridge) { m_settingsBridge = std::move(bridge); }
-    void SetPauseActionCallback(PauseActionCallback cb) { m_pauseActionCallback = std::move(cb); }
+    void SetWorldCreationCallback(WorldCreationCallback callback) {
+        m_worldCreationCallback = std::move(callback);
+    }
+    void SetWorldParamGetter(WorldParamGetter getter) {
+        m_worldParamGetter = std::move(getter);
+    }
+    void SetWorldPresetSaver(WorldPresetSaver saver) {
+        m_worldPresetSaver = std::move(saver);
+    }
+    void SetWorldPresetList(WorldPresetList lister) {
+        m_worldPresetList = std::move(lister);
+    }
+    void SetWorldPresetExists(WorldPresetExists exists) {
+        m_worldPresetExists = std::move(exists);
+    }
+    void SetWorldPresetDeleter(WorldPresetDeleter deleter) {
+        m_worldPresetDeleter = std::move(deleter);
+    }
+    void SetWorldPresetRenamer(WorldPresetRenamer renamer) {
+        m_worldPresetRenamer = std::move(renamer);
+    }
+    void SetLoadWorldCallback(LoadWorldCallback callback) {
+        m_loadWorldCallback = std::move(callback);
+    }
+    void SetSettingsBridge(SettingsBridge bridge) {
+        m_settingsBridge = std::move(bridge);
+    }
+    void SetPauseActionCallback(PauseActionCallback cb) {
+        m_pauseActionCallback = std::move(cb);
+    }
 
-    // UI-07 (spec 001 FR-011, --ui-fixtures): point the gallery at a deterministic
+    //  (, --ui-fixtures): point the gallery at a deterministic
     // capture source. `capture_dir` is the ABSOLUTE directory PopulateGallery
     // enumerates for cap_<N>.tga; `img_prefix` is the document-relative <img src>
     // prefix those ids resolve through (gallery.rml lives in data/ui/, so the
@@ -162,21 +191,21 @@ public:
     static void ScrollCallback(GLFWwindow* window, double xoffset, double yoffset);
 
 private:
-    // This is now a public function on the manager, called by Update().
+    // This is now a public function on the manager, called by Update.
     void ProcessDocumentLoadRequest();
     void BindEventListeners(Rml::ElementDocument* document);
     void LoadDocument(const std::string& rml_path);
 
     // settings.rml support: populate widgets from the bridge on load, and push a single
     // changed widget's value back through the bridge live.
-    // gallery.rml: replace the placeholder grid with the player's real captures (newest first),
+    // gallery.rml: populate the grid with the player's real captures (newest first),
     // each thumbnail loaded from data/ui/captures/cap_<N>.tga written at shutter time.
     void PopulateGallery(Rml::ElementDocument* document);
     void PopulateSettingsForm(Rml::ElementDocument* document);
     void ApplySettingFromElement(Rml::Element* element);
     void BindSettingsListeners(Rml::ElementDocument* document);
 
-    // world_creation.rml: seed every .worldgen-param control from the given preset (via the
+    // world_creation.rml: seed every.worldgen-param control from the given preset (via the
     // WorldParamGetter), updating slider values + toggle states + value labels.
     void SeedWorldGenParams(Rml::ElementDocument* document, const std::string& worldType);
 
@@ -198,11 +227,11 @@ private:
     // must already be initialised when the manager is constructed (main_client: glad at the
     // GLFW context, manager constructed right after).
     RenderInterface_GL3 m_renderInterface;
-    
+
     Rml::Context* m_context = nullptr;
     GLFWwindow* m_window = nullptr;
     IAudioManager* m_audioManager = nullptr;
-    
+
     WorldCreationCallback m_worldCreationCallback;
     WorldParamGetter m_worldParamGetter;
     WorldPresetSaver m_worldPresetSaver;
@@ -213,24 +242,24 @@ private:
     LoadWorldCallback m_loadWorldCallback;
     SettingsBridge m_settingsBridge;
     PauseActionCallback m_pauseActionCallback;
-    
+
     std::string m_documentToLoad;
     std::string m_activeDocument;
     std::string m_selectedWorldId;
 
     // The asset root the file interface resolves against (kept here too so the
     // gallery enumerates the SAME root its <img src> paths load through — the
-    // old CWD-relative enumeration only worked when CWD == root). UI-07: an
+    // old CWD-relative enumeration only worked when CWD == root).: an
     // explicit capture source overrides the live shutter path.
     std::string m_assetRoot;
-    std::filesystem::path m_galleryCaptureDir;   // empty = <root>/data/ui/captures
+    std::filesystem::path m_galleryCaptureDir;    // empty = <root>/data/ui/captures
     std::string m_galleryImgPrefix = "captures/"; // document-relative img prefix
 
-    // T006: cache the last pushed context size so SetDimensions only fires on an actual resize
+    //  cache the last pushed context size so SetDimensions only fires on an actual resize
     // (a per-frame SetDimensions can needlessly dirty layout). -1 forces the first push.
     int m_lastWidth = -1;
     int m_lastHeight = -1;
-    // T007: last UI-pass CPU submit time (ms).
+    //  last UI-pass CPU submit time (ms).
     double m_lastUiFrameMs = 0.0;
 
     // Static pointer to the active instance for callbacks

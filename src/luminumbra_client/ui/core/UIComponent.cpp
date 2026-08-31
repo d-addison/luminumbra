@@ -10,9 +10,9 @@ UIComponent::UIComponent(const std::string& elementId) : m_elementId(elementId) 
 }
 
 UIComponent::~UIComponent() {
-    // Unsubscribe all property subscriptions even if Destroy() was never
+    // Unsubscribe all property subscriptions even if Destroy was never
     // called, so a destroyed component cannot be invoked by a later
-    // Property::Set() (use-after-free).
+    // Property::Set (use-after-free).
     CleanupBindings();
     CleanupEventListeners();
 }

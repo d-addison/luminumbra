@@ -1,4 +1,4 @@
-// RENDER-20 (spec 021): CPU-only determinism coverage for the extracted
+// CPU-only determinism coverage for the extracted
 // world-dressing placement computation (src/luminumbra_client/WorldDressing.cpp).
 // The computation was moved VERBATIM out of main_client's first-IN_GAME-frame
 // bring-up so it can run on a background job; the load-bearing property is that
@@ -41,29 +41,53 @@ struct FnvHasher {
             h *= 1099511628211ull;
         }
     }
-    template <typename T>
+    template<typename T>
     void field(const T& v) {
         static_assert(std::is_trivially_copyable_v<T>, "hash fields must be POD");
         bytes(&v, sizeof(v));
     }
-    void vec3(const glm::vec3& v) { field(v.x); field(v.y); field(v.z); }
-    void quat(const glm::quat& q) { field(q.x); field(q.y); field(q.z); field(q.w); }
+    void vec3(const glm::vec3& v) {
+        field(v.x);
+        field(v.y);
+        field(v.z);
+    }
+    void quat(const glm::quat& q) {
+        field(q.x);
+        field(q.y);
+        field(q.z);
+        field(q.w);
+    }
 };
 
 std::uint64_t HashPlacements(const WorldDressingResult& r) {
     FnvHasher f;
     for (const TreePlacement& t : r.trees) {
-        f.vec3(t.position); f.quat(t.rotation); f.field(t.eff_scale); f.field(t.palette_index);
+        f.vec3(t.position);
+        f.quat(t.rotation);
+        f.field(t.eff_scale);
+        f.field(t.palette_index);
     }
     for (const RockPlacement& k : r.rocks) {
-        f.vec3(k.position); f.vec3(k.scale); f.quat(k.rotation); f.field(k.palette_index);
+        f.vec3(k.position);
+        f.vec3(k.scale);
+        f.quat(k.rotation);
+        f.field(k.palette_index);
     }
     for (const BushPlacement& b : r.bushes) {
-        f.vec3(b.position); f.vec3(b.scale); f.quat(b.rotation); f.field(b.palette_index);
+        f.vec3(b.position);
+        f.vec3(b.scale);
+        f.quat(b.rotation);
+        f.field(b.palette_index);
     }
     for (const CreaturePlacement& c : r.wildlife) {
-        f.field(c.kind); f.vec3(c.position); f.field(c.yaw); f.field(c.species_index);
-        f.field(c.size); f.vec3(c.build_scale); f.field(c.thirst); f.field(c.anim_phase);
+        f.field(c.kind);
+        f.vec3(c.position);
+        f.field(c.yaw);
+        f.field(c.species_index);
+        f.field(c.size);
+        f.vec3(c.build_scale);
+        f.field(c.thirst);
+        f.field(c.anim_phase);
         f.field(c.female);
     }
     return f.h;
@@ -72,7 +96,10 @@ std::uint64_t HashPlacements(const WorldDressingResult& r) {
 std::uint64_t HashBushes(const WorldDressingResult& r) {
     FnvHasher f;
     for (const BushPlacement& b : r.bushes) {
-        f.vec3(b.position); f.vec3(b.scale); f.quat(b.rotation); f.field(b.palette_index);
+        f.vec3(b.position);
+        f.vec3(b.scale);
+        f.quat(b.rotation);
+        f.field(b.palette_index);
     }
     return f.h;
 }
@@ -80,7 +107,10 @@ std::uint64_t HashBushes(const WorldDressingResult& r) {
 std::uint64_t HashTrees(const WorldDressingResult& r) {
     FnvHasher f;
     for (const TreePlacement& t : r.trees) {
-        f.vec3(t.position); f.quat(t.rotation); f.field(t.eff_scale); f.field(t.palette_index);
+        f.vec3(t.position);
+        f.quat(t.rotation);
+        f.field(t.eff_scale);
+        f.field(t.palette_index);
     }
     return f.h;
 }
@@ -93,12 +123,20 @@ WorldDressingCallbacks SyntheticCallbacks(float terrain_base = 10.0f) {
     cbs.terrain_height = [terrain_base](float x, float z) {
         return terrain_base + std::sin(x * 0.05f) * 3.0f + std::cos(z * 0.07f) * 2.0f;
     };
-    cbs.water_level = [](float, float) { return 0.0f; };
-    cbs.density_at = [](float, float, float) { return 1.0f; };  // air everywhere
-    cbs.vegetation_density = [](float, float) { return 0.6f; };
-    cbs.biome_name = [](float, float) { return std::string("meadow"); };
+    cbs.water_level = [](float, float) {
+        return 0.0f;
+    };
+    cbs.density_at = [](float, float, float) {
+        return 1.0f;
+    }; // air everywhere
+    cbs.vegetation_density = [](float, float) {
+        return 0.6f;
+    };
+    cbs.biome_name = [](float, float) {
+        return std::string("meadow");
+    };
     cbs.species_for_biome = [](const std::string&, std::size_t pick) {
-        return static_cast<int>(pick % 5);  // deterministic 5-species roster
+        return static_cast<int>(pick % 5); // deterministic 5-species roster
     };
     return cbs;
 }
@@ -115,7 +153,7 @@ WorldDressingParams SyntheticParams() {
     return p;
 }
 
-}  // namespace
+} // namespace
 
 // Same params + same callbacks twice -> byte-identical placement stream (hash
 // AND field-by-field), non-empty in every lane, order stable by construction
@@ -179,7 +217,8 @@ TEST(WorldDressing, WildlifeDeterministicAndWaterHolesCapped) {
         const WorldDressingResult b = ComputeWorldDressing(params, cbs);
         std::size_t creatures = 0;
         for (const CreaturePlacement& c : a.wildlife) {
-            if (c.kind != CreaturePlacement::Kind::Creature) continue;
+            if (c.kind != CreaturePlacement::Kind::Creature)
+                continue;
             ++creatures;
             EXPECT_GE(c.species_index, 0);
             EXPECT_LT(c.species_index, 5);
@@ -196,8 +235,10 @@ TEST(WorldDressing, WildlifeDeterministicAndWaterHolesCapped) {
         const WorldDressingResult r = ComputeWorldDressing(params, flooded);
         std::size_t holes = 0, creatures = 0;
         for (const CreaturePlacement& c : r.wildlife) {
-            if (c.kind == CreaturePlacement::Kind::WaterHole) ++holes;
-            else ++creatures;
+            if (c.kind == CreaturePlacement::Kind::WaterHole)
+                ++holes;
+            else
+                ++creatures;
         }
         EXPECT_EQ(creatures, 0u);
         EXPECT_LE(holes, 3u);
@@ -221,8 +262,8 @@ TEST(WorldDressing, ScatterStreamSharedAcrossLayers) {
     const WorldDressingResult a = ComputeWorldDressing(with_rocks, cbs);
     const WorldDressingResult b = ComputeWorldDressing(no_rocks, cbs);
 
-    EXPECT_EQ(HashTrees(a), HashTrees(b));   // trees draw before rocks: unchanged
-    EXPECT_TRUE(b.rocks.empty());            // legacy gate: empty palette = no loop
+    EXPECT_EQ(HashTrees(a), HashTrees(b)); // trees draw before rocks: unchanged
+    EXPECT_TRUE(b.rocks.empty());          // legacy gate: empty palette = no loop
     ASSERT_GT(a.bushes.size(), 0u);
     ASSERT_GT(b.bushes.size(), 0u);
     EXPECT_NE(HashBushes(a), HashBushes(b)); // bushes continue the stream after rocks

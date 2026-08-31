@@ -7,7 +7,7 @@ in vec3 WorldPos;
 uniform vec3 u_sunDirection;
 uniform vec3 u_moonDirection;
 uniform float u_sunIntensity;
-// T-I4-DR-tod-sky-balance: continuous day->twilight->night factor from the sun
+// continuous day->twilight->night factor from the sun
 // elevation (1 sun high, ~0 sun below horizon). Drives the dome's brightness
 // and tint so the dusk dome warms/darkens and the night dome goes genuinely
 // dark, instead of riding the clamped u_sunIntensity that saturates to 1 while
@@ -18,13 +18,13 @@ uniform float u_atmosDensity = 1.0;
 uniform float u_cloudCoverage = 0.5;
 uniform vec3 u_skyTint = vec3(1.0, 0.95, 0.8);
 
-// T-I5a-8 (C3): wind-advected 2.5D cloud coverage field. The coverage is a pure
+// wind-advected 2.5D cloud coverage field. The coverage is a pure
 // function of world XZ position, a wind-driven scroll offset, the weather-derived
 // coverage amount, and a biome variation factor. The IDENTICAL coverage function
 // (cloudCoverageAt below) is evaluated here for the sky-dome cloud layer AND in
 // lighting_pass.frag for the projected cast shadow, so the drifting dome clouds
 // and the crawling terrain shadows stay registered. Render-only: nothing here
-// writes back into any sim/world_hash input (critique F2, one-way render->sim).
+// writes back into any sim/world_hash input (regression contract, one-way render->sim).
 //   u_cloudScrollOffset  - wind * tick-phase, in world metres (drift vector)
 //   u_cloudCoverageAmount - [0,1] sky fraction the weather state wants covered
 //   u_cloudBiomeVariation - biome-driven coverage bias (e.g. wetter biomes cloudier)
@@ -36,7 +36,7 @@ uniform float u_cloudBiomeVariation = 0.0;
 uniform float u_cloudPlaneHeight = 900.0;
 uniform float u_cloudShadowStrength = 0.0;
 
-// T-I5a-6: PBR atmospheric scattering. The authored vertical gradient + ad-hoc
+// PBR atmospheric scattering. The authored vertical gradient + ad-hoc
 // rayleigh/mie haze is replaced by the precomputed Hillaire 2020 sky-view LUT
 // (192x108 sky dome radiance for the current sun) plus the transmittance LUT
 // (256x64). The sun disc is colored by the transmittance toward the sun, so the
@@ -51,7 +51,7 @@ uniform float u_sunCosZenith = 1.0;   // dot(toward-sun, up)
 uniform float u_skyExposure = 38.0;   // LUT radiance -> HDR display scale
 uniform int u_useSkyLut = 1;          // 0 falls back to the legacy gradient
 
-// T-I5b-DR-sweep-visual-fixes (defect 5): aurora is a DEEP-NIGHT-ONLY phenomenon.
+//  (defect 5): aurora is a DEEP-NIGHT-ONLY phenomenon.
 // u_skyDayFactor alone cannot cleanly separate DUSK (sun on the horizon ->
 // dayFactor ~0.02) from NIGHT (sun well below -> dayFactor ~0): both round to a
 // hair above zero and the old envelope let the aurora bleed into the twilight
@@ -60,7 +60,7 @@ uniform int u_useSkyLut = 1;          // 0 falls back to the legacy gradient
 // and pushes it here. 0 == no aurora; the dusk dome stays clean.
 uniform float u_auroraStrength = 0.0;
 
-// T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM visibility floor. A night
+//  (defect 3): NIGHT-STORM visibility floor. A night
 // storm was rendering as a near-black dome (dayFactor ~0 -> the dome scattering
 // and the cloud layer both collapse to black). This is a small additive sky-grey
 // floor under the storm clouds so a NIGHT storm is dark-but-legible (rain +
@@ -68,7 +68,7 @@ uniform float u_auroraStrength = 0.0;
 // the storm intensity; it is 0 for clear sky so clear night stays genuinely dark.
 uniform float u_stormSkyFloor = 0.0;   // [0,1] storm intensity for the night floor
 
-// T-I6 isolation/layer mode: when > 0 the skybox renders a flat neutral BACKDROP
+//  isolation/layer mode: when > 0 the skybox renders a flat neutral BACKDROP
 // (the no-geometry background) instead of the sky dome, so an isolated subsystem
 // can be reviewed against a void/greenscreen/checker. 0 = normal sky (default).
 //   1 = void (flat u_backdropColor), 2 = greenscreen, 3 = checker.
@@ -109,7 +109,7 @@ float fbm(vec2 p, int octaves) {
     return value;
 }
 
-// T-I5a-8 (C3): the SHARED wind-advected cloud coverage field. Returns the cloud
+// the SHARED wind-advected cloud coverage field. Returns the cloud
 // optical density [0,1] at a world XZ position. This EXACT function is duplicated
 // verbatim in lighting_pass.frag (GLSL has no shared includes here); the dome
 // clouds below and the projected cast shadow there evaluate the same field at the
@@ -122,7 +122,7 @@ float fbm(vec2 p, int octaves) {
 //     low coverage yields sparse fair-weather puffs and a high coverage an
 //     overcast sheet. PARTLY-CLOUDY is the mid range the CloudShadow gate uses.
 float cloudCoverageAt(vec2 worldXZ) {
-    // T-I7: larger cloud clusters (~2400 m feature scale, was 1200) for bolder,
+    // larger cloud clusters (~2400 m feature scale, was 1200) for bolder,
     // more pronounced cloud masses. MUST stay identical to
     // lighting_pass.frag::cloudCoverageAt so the dome cloud and its cast shadow
     // remain registered.
@@ -137,7 +137,7 @@ float cloudCoverageAt(vec2 worldXZ) {
     return smoothstep(lo, hi, field);
 }
 
-// T-I5a-6: sample the sky-view LUT for a view direction. u = azimuth around the
+// sample the sky-view LUT for a view direction. u = azimuth around the
 // sun [0,2pi]->[0,1]; v = view zenith [0 (up), pi (down)]->[0,1].
 vec3 sampleSkyView(vec3 viewDir) {
     float cosV = clamp(viewDir.y, -1.0, 1.0);
@@ -158,13 +158,13 @@ vec3 sunTransmittance(float cosZenith) {
 }
 
 // ===========================================================================
-// T-I6 #2: VOLUMETRIC clouds (tier-2, Nubis-style raymarch). RENDER-ONLY.
+//  #2: VOLUMETRIC clouds (tier-2, Nubis-style raymarch)..
 //
 // The tier-1 layer projected the view ray onto a single cloud PLANE and shaded
 // a 2.5D coverage sheet -- it had no depth, no parallax, no real silhouette
 // (the CLOUDS_FLAT_NO_STRUCTURE risk). This replaces that with a bounded
 // view-ray raymarch through a cloud SLAB [kCloudBottom, kCloudTop]:
-//   * horizontal density still comes from the SHARED cloudCoverageAt() field,
+//   * horizontal density still comes from the SHARED cloudCoverageAt field,
 //     so the dome clouds stay registered with the ground shadow the lighting
 //     pass projects from the SAME field (CloudShadow gate intact, render-only);
 //   * a vertical PROFILE (rounded base, anvil-tapered top) shapes the slab;
@@ -197,7 +197,7 @@ float hgPhase(float cosTheta, float g) {
 // Volumetric cloud density at a world-space sample p. Combines the shared 2D
 // coverage field (registration), a vertical profile, and 3D erosion. Returns
 // [0,1]; also outputs the raw horizontal coverage for the caller's cheap reject.
-// structureWeight (0 fair .. 1 storm) fills the slab into an overcast deck.
+// structureWeight (0 fair.. 1 storm) fills the slab into an overcast deck.
 float cloudDensity(vec3 p, float structureWeight, out float coverageOut) {
     float coverage = cloudCoverageAt(p.xz);
     // Storm fills holes: lift a coverage floor so a heavy deck is unbroken.
@@ -223,7 +223,7 @@ float cloudDensity(vec3 p, float structureWeight, out float coverageOut) {
     return clamp(d, 0.0, 1.0);
 }
 
-// T-I6 #2: bounded volumetric raymarch through the cloud slab. Replaces the
+//  #2: bounded volumetric raymarch through the cloud slab. Replaces the
 // tier-1 single-plane projection. dayFactor lights the clouds; at night they
 // fall to a faint dark silhouette (storm night held legible by u_stormSkyFloor).
 vec3 renderClouds(vec3 viewDir, vec3 baseColor, float dayFactor) {
@@ -354,12 +354,12 @@ vec3 renderStars(vec3 viewDir, float nightIntensity) {
     return starColor * totalStars;
 }
 
-// Aurora effect for magical atmosphere. T-I5a-DR-atmospheric-visuals: aurora is a
+// Aurora effect for magical atmosphere. : aurora is a
 // NIGHT-ONLY phenomenon, gated by u_auroraStrength (CPU-derived from the sun's RAW
 // elevation): a hard 0 through day + dusk + dawn, only opening once the sun is well
-// below the horizon, so the twilight dome stays clean (defect M6).
+// below the horizon, so the twilight dome stays clean .
 //
-// T-I5b-DR-sky-fixes (defect M5): the aurora is rebuilt as flowing vertical
+// the aurora is rebuilt as flowing vertical
 // CURTAINS (draped sheets), NOT the old soft circular blobs. The previous version
 // took a product sin(uv.x)*cos(uv.y) of the raw screen-space viewDir.x/.y and
 // smoothstep(abs(.)) -> isolated 2D lobes that read as discrete green/magenta ORBS
@@ -372,7 +372,7 @@ vec3 renderStars(vec3 viewDir, float nightIntensity) {
 // envelope so the curtain hangs from the upper dome and feathers out at the
 // horizon and the zenith. The result is band/sheet structure, not splotches.
 vec3 renderAurora(vec3 viewDir, float dayFactor) {
-    // T-I5b-DR-sky2 (defect M6/N5): aurora must NOT show through a STORM/overcast
+    // aurora must NOT show through a STORM/overcast
     // sky. The night gate (u_auroraStrength) alone let the green curtains bleed up
     // THROUGH a heavy night-storm deck (the aurora is added AFTER the cloud layer,
     // so a high-coverage overcast did not occlude it). Gate the aurora OFF as the
@@ -393,7 +393,7 @@ vec3 renderAurora(vec3 viewDir, float dayFactor) {
 
     // Azimuth around the dome [-pi,pi] -> [0,1], continuous and seamless so a
     // curtain does not hard-cut where the view frustum clips the dome. Height is
-    // the view elevation [0 horizon .. 1 zenith].
+    // the view elevation [0 horizon.. 1 zenith].
     float az = atan(viewDir.z, viewDir.x);     // [-pi, pi]
     float azu = az / (2.0 * PI_SKY) + 0.5;     // [0, 1], wraps
     float height = clamp(viewDir.y, 0.0, 1.0);
@@ -428,7 +428,7 @@ vec3 renderAurora(vec3 viewDir, float dayFactor) {
     // Fine vertical filaments give the curtain its rayed texture; they scroll
     // upward slowly. Kept SMOOTH + low-contrast (lower amplitude + frequency) so the
     // aurora reads as soft luminous curtains rather than high-frequency green specks
-    // — sharp striations registered as firefly speckle in the up-view sky critique.
+    // sharp striations registered as firefly speckle in the up-view sky critique.
     float striation = 0.82 + 0.18 * fbm(vec2(curtainCoord * 3.0, height * 5.0 - t * 1.5), 3);
     sheet *= striation;
 
@@ -451,7 +451,7 @@ vec3 renderAurora(vec3 viewDir, float dayFactor) {
     // sky-filling green wash. Still clearly present in the night ROI.
     float auroraIntensity = sheet * vertEnv * nightEnvelope * 0.30;
 
-    // Colour: a tall GREEN body (O2) topped by a thin magenta/violet fringe (N2)
+    // Colour: a tall GREEN body  topped by a thin magenta/violet fringe
     // only near the zenith. The split is driven by HEIGHT plus a slow azimuthal
     // drift, so a single sheet grades vertically. The green is held dominant
     // through almost the whole dome (transition pushed near the zenith); the
@@ -481,7 +481,7 @@ vec3 legacyGradient(vec3 viewDir, float dayFactor) {
 
 void main()
 {
-    // T-I6: isolation backdrop — flat-fill the background, skip the sky dome.
+    // isolation backdrop — flat-fill the background, skip the sky dome.
     if (u_backdropMode > 0) {
         if (u_backdropMode == 3) {  // checker (scale/alignment reference)
             vec2 c = floor(gl_FragCoord.xy / 64.0);
@@ -496,7 +496,7 @@ void main()
     float dayFactor = clamp(u_skyDayFactor, 0.0, 1.0);
     float nightFactor = 1.0 - dayFactor;
 
-    // T-I5a-6: aerial warm-grade factors, computed once and applied POST-tonemap
+    // aerial warm-grade factors, computed once and applied POST-tonemap
     // (section 7). The dome is bright (~0.8-1.0 after exposure), which is exactly
     // the ACES saturating region where R,G,B all crush toward white -- a
     // pre-tonemap chroma tint is flattened back to neutral (the root-cause "the
@@ -533,7 +533,7 @@ void main()
     vec3 skyColor;
     if (u_useSkyLut != 0) {
         vec3 lutRadiance = sampleSkyView(viewDir) * u_skyExposure;
-        // T-I5a-6 FIX: the night envelope must DARKEN the warm scattering, not
+        //  FIX: the night envelope must DARKEN the warm scattering, not
         // CROSS-FADE it to a fixed blue base. The old `mix(nightBase, lut,
         // dayFactor)` blended ~57% deep-blue base into the dusk dome (dayFactor
         // ~0.43 at the t=0.22 dusk), pulling the sun-side r/b DOWN below noon --
@@ -542,7 +542,7 @@ void main()
         // its warm scattering hue, and (2) add a tiny deep-night ADDITIVE floor
         // that only matters once dayFactor ~ 0 (true night), so stars/moon still
         // read against a dark dome. The warm low-sun palette now survives dusk.
-        // T-I5a-6 FIX (aerial reddening of the dome): the sky-view LUT in-scatter
+        //  FIX (aerial reddening of the dome): the sky-view LUT in-scatter
         // is Rayleigh/multi-scatter blue-dominant at ALL sun angles, and at a low
         // sun the (faint, reddened) single-scatter is overpowered by the
         // ISOTROPIC multi-scatter blue floor, so the dome paradoxically read
@@ -573,7 +573,7 @@ void main()
     // Sun disc / corona ride dayFactor so a low dusk sun renders a soft warm disc
     // and the disc fades out below the horizon.
     float sunMask = smoothstep(0.9985, 0.9999, sunDot) * dayFactor;
-    // T-003 (FR-C3 part B): NOON sun-disc localization. At a HIGH sun the broad
+    //  ( part B): NOON sun-disc localization. At a HIGH sun the broad
     // pow(sunDot,32) corona washed a wide swath of the already-bright pale dome up
     // past the disc-detection luminance, so the SkyboxVisual "brightest cluster
     // sits at the sun" check could not localize (cluster_fraction ~0.22 vs 0.6).
@@ -596,7 +596,7 @@ void main()
     // high sun (highSun gate); low sun keeps the original sunMask disc alone.
     float sunCore = smoothstep(0.99965, 0.99995, sunDot) * dayFactor * highSun;
 
-    // T-I5a-6: the disc color IS the atmospheric transmittance toward the sun
+    // the disc color IS the atmospheric transmittance toward the sun
     // (same LUT the lighting pass + aerial fog read). At low sun the long path
     // eats blue first, so the disc reddens to deep orange coherently with the
     // warm horizon scattering -- no hand-authored sunset color.
@@ -622,7 +622,7 @@ void main()
     // --- 4. CLOUDS WITH ATMOSPHERIC LIGHTING ---
     skyColor = renderClouds(viewDir, skyColor, dayFactor);
 
-    // T-I5b-DR-sweep-visual-fixes (defect 3): NIGHT-STORM dome floor. Independent
+    //  (defect 3): NIGHT-STORM dome floor. Independent
     // of the cloud layer, lift the whole night-storm dome to a faint cool storm-grey
     // so the sky behind the rain/lightning is dark-but-legible rather than pure
     // black. Gated by storm intensity AND nightFactor, and faded toward the horizon
@@ -641,7 +641,7 @@ void main()
     // --- 7. HDR TONEMAPPING ---
     skyColor = skyColor * (2.51 * skyColor + 0.03) / (skyColor * (2.43 * skyColor + 0.59) + 0.14);
 
-    // T-I5a-6: POST-tonemap aerial warm grade. The bright dome lives in the ACES
+    // POST-tonemap aerial warm grade. The bright dome lives in the ACES
     // saturating region where a pre-tonemap chroma tint is crushed back to white,
     // so the warm sun-path-transmittance hue is re-applied HERE where it survives.
     // Implemented as a luminance-preserving channel rescale: push the tonemapped
@@ -657,7 +657,7 @@ void main()
         float tintLuma = max(dot(tint, kLumaW), 1e-4);
         skyColor *= tint / tintLuma;
 
-        // T-I5b-DR-sky-fixes (defect M6): kill the SICKLY YELLOW-GREEN dawn cast.
+        // kill the SICKLY YELLOW-GREEN dawn cast.
         // At a low-but-positive sun (dawn, sun ~27 deg up) the sky-view LUT radiance
         // is green-dominant (G leads R and B), and the luminance-preserving warm
         // grade above cannot fix a base whose GREEN already leads -- the bright dawn
@@ -698,7 +698,7 @@ void main()
     // Color grading for fantasy atmosphere
     skyColor = pow(skyColor, vec3(0.9, 0.95, 1.05));
 
-    // T-003 (FR-C3 part B): NOON sun-disc PUNCH. At a high sun the open pale dome
+    //  ( part B): NOON sun-disc PUNCH. At a high sun the open pale dome
     // ALSO saturates near the tonemap ceiling, so the pre-tonemap disc/corona above
     // never reads measurably brighter than the dome -- the brightest cluster could
     // not localize at the sun (SkyboxVisual cluster_fraction ~0.24 vs 0.6). This

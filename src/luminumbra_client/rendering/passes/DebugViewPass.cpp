@@ -1,10 +1,10 @@
 #include "DebugViewPass.h"
 
-#include "PassGlHelpers.h"
+#include "../Camera.h"            // near/far planes for Depth-mode linearization
+#include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
+#include "../RenderContext.h"     // the pass reads the G-buffer via ctx handles
 #include "../Shader.h"
-#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
-#include "../RenderContext.h"   // Spec 016 GPU-04: the pass reads the G-buffer via ctx handles
-#include "../Camera.h"          // near/far planes for Depth-mode linearization
+#include "PassGlHelpers.h"
 
 namespace Luminumbra::Rendering {
 
@@ -15,7 +15,7 @@ void DebugViewPass::init_shader(const std::filesystem::path& root_path) {
     const std::string vert = (root_path / "res/shaders/fullscreen_tri.vert").string();
     const std::string frag = (root_path / "res/shaders/debug_view.frag").string();
     m_shader = std::make_unique<Shader>(vert.c_str(), frag.c_str());
-    // FR-D (GPU-05): validate the four G-buffer samplers against the registry.
+    // validate the four G-buffer samplers against the registry.
     if (m_shader && m_shader->IsValid()) {
         if (const ExpectedLayout* layout = FindPassExpectedLayout("debug_view"))
             m_shader->ValidateLayout(*layout);
@@ -23,20 +23,27 @@ void DebugViewPass::init_shader(const std::filesystem::path& root_path) {
 }
 
 void DebugViewPass::init_buffers() {
-    glGenVertexArrays(1, &m_vao);   // empty; the VS builds the triangle from gl_VertexID
+    glGenVertexArrays(1, &m_vao); // empty; the VS builds the triangle from gl_VertexID
     PassGl::label_gl_object(GL_VERTEX_ARRAY, m_vao, "debug_view.vao");
 }
 
 void DebugViewPass::destroy_buffers() {
-    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
+    if (m_vao) {
+        glDeleteVertexArrays(1, &m_vao);
+        m_vao = 0;
+    }
 }
 
-void DebugViewPass::reset_shader() { m_shader.reset(); }
+void DebugViewPass::reset_shader() {
+    m_shader.reset();
+}
 
 void DebugViewPass::execute(const RenderContext& ctx) {
     // Default-OFF guard: Mode::None (0) is a true no-op so the normal render is untouched.
-    if (m_mode == Mode::None) return;
-    if (!m_shader || !m_shader->IsValid() || m_vao == 0) return;
+    if (m_mode == Mode::None)
+        return;
+    if (!m_shader || !m_shader->IsValid() || m_vao == 0)
+        return;
 
     // Diagnostic overlay: never depth-test or blend; we fully replace the bound target.
     glDisable(GL_DEPTH_TEST);
@@ -45,7 +52,7 @@ void DebugViewPass::execute(const RenderContext& ctx) {
     // Near/far come from the frame camera (ctx), used only for Depth-mode linearization.
     // Fall back to the historic defaults if a context arrives without a camera.
     const float near_plane = ctx.camera ? ctx.camera->GetNearPlane() : 0.1f;
-    const float far_plane  = ctx.camera ? ctx.camera->GetFarPlane()  : 4000.0f;
+    const float far_plane = ctx.camera ? ctx.camera->GetFarPlane() : 4000.0f;
 
     m_shader->use();
     m_shader->setInt("u_mode", m_mode);

@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I9-AI E1: PerceptionSystem — the live ECS read-side of the senses. For every
+// PerceptionSystem — the live ECS read-side of the senses. For every
 // perceiver (Transform + PerceptionComponent + AwarenessComponent) it fuses VISION
 // (forward cone + range) and HEARING (audiogram) over the SensableComponent
 // entities of OTHER factions, picks the strongest sensed target, and advances the
@@ -55,20 +55,21 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, f
         for (auto e : view) {
             const auto& tf = view.get<const TransformComponent>(e);
             const auto& s = view.get<const SensableComponent>(e);
-            sensables.push_back({e, tf.position.x, tf.position.z, s.noise_loudness, s.noise_pitch,
-                                 s.faction});
+            sensables.push_back(
+                {e, tf.position.x, tf.position.z, s.noise_loudness, s.noise_pitch, s.faction});
         }
-        std::sort(sensables.begin(), sensables.end(),
-                  [](const Sensable& a, const Sensable& b) {
-                      return entt::to_integral(a.id) < entt::to_integral(b.id);
-                  });
+        std::sort(sensables.begin(), sensables.end(), [](const Sensable& a, const Sensable& b) {
+            return entt::to_integral(a.id) < entt::to_integral(b.id);
+        });
     }
 
     std::vector<entt::entity> perceivers;
     {
-        auto view = registry.view<const TransformComponent, const PerceptionComponent,
-                                  AwarenessComponent>();
-        for (auto e : view) perceivers.push_back(e);
+        auto view =
+            registry
+                .view<const TransformComponent, const PerceptionComponent, AwarenessComponent>();
+        for (auto e : view)
+            perceivers.push_back(e);
         std::sort(perceivers.begin(), perceivers.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
@@ -84,21 +85,30 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, f
         float bx = 0.0f;
         float bz = 0.0f;
         for (const auto& s : sensables) {
-            if (s.id == e || s.faction == perc.faction) continue; // self / same faction ignored
+            if (s.id == e || s.faction == perc.faction)
+                continue; // self / same faction ignored
             const float dx = s.x - tf.position.x;
             const float dz = s.z - tf.position.z;
             const float dist = Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
 
             // Vision: in-cone clarity falls off with range.
             float vis = 0.0f;
-            if (InVisionCone(tf.position.x, tf.position.z, perc.facing_x, perc.facing_z,
-                             perc.vision_cos_half_fov, perc.vision_range, s.x, s.z)) {
+            if (InVisionCone(tf.position.x,
+                             tf.position.z,
+                             perc.facing_x,
+                             perc.facing_z,
+                             perc.vision_cos_half_fov,
+                             perc.vision_range,
+                             s.x,
+                             s.z)) {
                 vis = 1.0f - dist / perc.vision_range;
-                if (vis < 0.0f) vis = 0.0f;
+                if (vis < 0.0f)
+                    vis = 0.0f;
             }
             // Hearing: audiogram response, clamped to a [0,1] signal contribution.
             float hear = HeardLoudness(dist, s.loudness, s.pitch, perc.ear);
-            if (hear > 1.0f) hear = 1.0f;
+            if (hear > 1.0f)
+                hear = 1.0f;
 
             const float sig = vis > hear ? vis : hear; // strongest sense wins
             if (sig > best_signal) {
@@ -108,9 +118,11 @@ inline PerceptionTickStats RunPerceptionSystemOnTick(entt::registry& registry, f
             }
         }
 
-        if (best_signal > 0.0f) ++stats.sensing;
+        if (best_signal > 0.0f)
+            ++stats.sensing;
         aw.awareness = UpdateAwareness(aw.awareness, best_signal, bx, bz, dt, aw.params);
-        if (aw.awareness.state == AwarenessState::Engaged) ++stats.engaged;
+        if (aw.awareness.state == AwarenessState::Engaged)
+            ++stats.engaged;
     }
 
     return stats;

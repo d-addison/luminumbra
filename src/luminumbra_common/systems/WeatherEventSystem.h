@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.weather_events — a deterministic WEATHER-EVENT scheduler that sits ON
+// sim.weather_events: a deterministic WEATHER-EVENT scheduler that sits ON
 // TOP of the existing sim-authoritative WeatherSystem (systems/WeatherSystem.h),
 // WITHOUT editing it. Where WeatherSystem produces the spatial weather field
 // (category map + storm cells + strikes), THIS layer produces a single world-level
@@ -41,7 +41,7 @@ namespace luminumbra::sim {
 
 namespace Rng = ::luminumbra::core;
 
-// Reserved seed-stream offset for the weather-events track (registry: wind+11,
+// Reserved seed-stream offset for the weather-events subsystem (registry: wind+11,
 // weather+12/13, aether+14, plant+15, creature-repro+16, fire+17, soil+18,
 // pollination+19, disease+20, irrigation+21, lifespan+22, wildlife+23, photo+24,
 // weather-events+25). Mixed with the caller seed via XOR before splitmix64 stream
@@ -129,7 +129,7 @@ inline Rng::DeterministicRng WindowRng(std::uint64_t window_index, std::uint64_t
 
 // Pick the event for a window GIVEN the previous window's event, using a uniform
 // draw against that from-state's transition row. Deterministic: a single
-// next_unit() draw scaled by the row total, walked term by term. Pure integer/float.
+// next_unit draw scaled by the row total, walked term by term. Pure integer/float.
 inline WeatherEvent NextEvent(WeatherEvent from, std::uint64_t window_index, std::uint64_t seed) {
     const int fi = static_cast<int>(from);
 
@@ -191,9 +191,9 @@ inline WeatherEventState WeatherEventAt(std::uint64_t tick, std::uint64_t seed =
 
 // ---------------------------------------------------------------------------
 // WeatherEventDriver — an OPTIONAL tiny stateful convenience. It advances per tick
-// and caches the current window so repeated current() reads inside a window don't
+// and caches the current window so repeated current reads inside a window don't
 // re-walk the chain. It changes NOTHING observable vs WeatherEventAt: at any tick,
-// current() == WeatherEventAt(tick, seed). No entt, no allocation, no wall-clock.
+// current == WeatherEventAt(tick, seed). No entt, no allocation, no wall-clock.
 // ---------------------------------------------------------------------------
 class WeatherEventDriver {
 public:

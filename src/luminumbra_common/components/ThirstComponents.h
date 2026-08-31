@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.thirst — CREATURE THIRST / WATER-SEEKING (complements hunger).
+// sim.thirst: CREATURE THIRST /  (complements hunger).
 //
 // A creature that carries a ThirstComponent gets THIRSTIER each tick. Above a threshold it
 // wants to walk toward the nearest WATER SOURCE; the system writes that desire into
@@ -24,7 +24,7 @@ namespace Luminumbra::Components {
 // Per-creature thirst state. The orchestrator reads wish_x/wish_z each tick and blends the
 // water-seeking direction into the creature's movement (mirrors CreatureComponent.wish_*).
 struct ThirstComponent {
-    // 0 quenched .. 1 parched. Rises each tick; drinking inside a water hole drops it.
+    // 0 quenched.. 1 parched. Rises each tick; drinking inside a water hole drops it.
     float thirst = 0.0f;
     // Desired HORIZONTAL move direction toward the nearest water hole, scaled by thirst.
     // Zero when the creature is not thirsty enough to seek (or there is no water hole).
@@ -32,7 +32,7 @@ struct ThirstComponent {
     float wish_z = 0.0f;
     // 1 while the creature is within a water hole's radius and actively drinking; else 0.
     std::uint8_t drinking = 0;
-    // INSTINCT-05 (Wave H I2.4): nearness of the nearest known water hole in [0,1]
+    //  ( needs arbitration): nearness of the nearest known water hole in [0,1]
     // (1 = at it, 0 = none within the sensing horizon). Written by RunThirstOnTick;
     // read by the brain's Drink utility so thirst competes INSIDE the arbiter
     // instead of the old out-of-band additive wish blend.
@@ -46,4 +46,4 @@ struct WaterHoleComponent {
     float radius = 4.0f;
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

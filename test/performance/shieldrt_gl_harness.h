@@ -1,13 +1,14 @@
-// Shared GL compute harness for the SHIELD-RT GPU benches (T-I6-A3a profile +
-// T-I6-A3b parity). Hidden GL 4.5 core context, compute-program compile, SSBO
+// Shared GL compute harness for the  GPU benches ( profile +
+//  parity). Hidden GL 4.5 core context, compute-program compile, SSBO
 // helpers, renderer-string + software-renderer detection. Header-only; depends
 // on glad + glfw. Kept separate from shieldrt_far_field.h (which is the terrain
 // data/builders) so a bench pulls exactly the harness it needs.
 
 #pragma once
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <cctype>
@@ -18,7 +19,7 @@
 
 namespace luminumbra_shieldrt {
 
-// Hidden GL 4.5 core context (matches render_smoke_test's harness). ready() is
+// Hidden GL 4.5 core context (matches render_smoke_test's harness). ready is
 // false on a headless machine (the bench then GTEST_SKIPs).
 class HiddenGlContext {
 public:
@@ -45,11 +46,17 @@ public:
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -65,12 +72,11 @@ inline std::string GlString(GLenum name) {
 
 inline bool IsSoftwareRenderer(const std::string& renderer) {
     std::string r = renderer;
-    std::transform(r.begin(), r.end(), r.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return r.find("llvmpipe") != std::string::npos ||
-           r.find("softpipe") != std::string::npos ||
-           r.find("software") != std::string::npos ||
-           r.find("swiftshader") != std::string::npos ||
+    std::transform(r.begin(), r.end(), r.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return r.find("llvmpipe") != std::string::npos || r.find("softpipe") != std::string::npos ||
+           r.find("software") != std::string::npos || r.find("swiftshader") != std::string::npos ||
            (r.find("microsoft") != std::string::npos && r.find("warp") != std::string::npos);
 }
 
@@ -119,7 +125,8 @@ inline GLuint MakeStorageBuffer(GLsizeiptr bytes, const void* data) {
 
 inline void SetIntArray(GLuint prog, const char* name, const std::int32_t* data, int count) {
     const GLint loc = glGetUniformLocation(prog, name);
-    if (loc >= 0) glUniform1iv(loc, count, data);
+    if (loc >= 0)
+        glUniform1iv(loc, count, data);
 }
 
 inline double MedianOf(std::vector<double> v) {
@@ -127,4 +134,4 @@ inline double MedianOf(std::vector<double> v) {
     return v[v.size() / 2];
 }
 
-}  // namespace luminumbra_shieldrt
+} // namespace luminumbra_shieldrt

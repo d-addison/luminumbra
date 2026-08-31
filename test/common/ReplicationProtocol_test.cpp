@@ -1,4 +1,4 @@
-// T-I6 P3.0: authoritative-server state-replication wire protocol. Proves the
+//  authoritative-server state-replication wire protocol. Proves the
 // Usercmd / Snapshot / Ack messages round-trip (encode -> decode -> equal),
 // including a multi-entity snapshot and truncation-robustness, and that the
 // position/angle quantization round-trips within tolerance.
@@ -74,9 +74,24 @@ TEST(ReplicationProtocol, EntityTypeAnimAndRemovedIdsRoundTrip) {
     SnapshotMsg in;
     in.server_tick = 77;
     in.snapshot_seq = 5;
-    ReplEntityState player; player.entity_id = 1; player.type_id = 0; player.anim_state = 2; player.anim_phase = 128;
-    ReplEntityState deer;   deer.entity_id = 50; deer.type_id = 7; deer.px_mm = 4000; deer.anim_state = 1; deer.anim_phase = 200; deer.flags = 1;
-    ReplEntityState arrow;  arrow.entity_id = 900; arrow.type_id = 42; arrow.px_mm = -1234; arrow.yaw_mrad = 1570; arrow.flags = 2;
+    ReplEntityState player;
+    player.entity_id = 1;
+    player.type_id = 0;
+    player.anim_state = 2;
+    player.anim_phase = 128;
+    ReplEntityState deer;
+    deer.entity_id = 50;
+    deer.type_id = 7;
+    deer.px_mm = 4000;
+    deer.anim_state = 1;
+    deer.anim_phase = 200;
+    deer.flags = 1;
+    ReplEntityState arrow;
+    arrow.entity_id = 900;
+    arrow.type_id = 42;
+    arrow.px_mm = -1234;
+    arrow.yaw_mrad = 1570;
+    arrow.flags = 2;
     in.entities = {player, deer, arrow};
     in.removed_ids = {901, 902, 17};
 
@@ -132,7 +147,7 @@ TEST(ReplicationProtocol, QuantizationRoundTripsWithinTolerance) {
     }
 }
 
-// --- P3.0b: unreliable-delivery reliability layer ---
+// --- : unreliable-delivery reliability layer ---
 
 SnapshotMsg MakeSnap(std::uint32_t seq, std::uint64_t tick) {
     SnapshotMsg s;
@@ -173,8 +188,12 @@ TEST(ReplicationReliability, AckReflectsNewestSnapshotAndUsercmd) {
 
 TEST(ReplicationReliability, UsercmdReceiverKeepsNewestTick) {
     UsercmdReceiver rx;
-    UsercmdMsg a; a.tick = 10; a.move_x = 100;
-    UsercmdMsg b; b.tick = 12; b.move_x = 200;
+    UsercmdMsg a;
+    a.tick = 10;
+    a.move_x = 100;
+    UsercmdMsg b;
+    b.tick = 12;
+    b.move_x = 200;
     EXPECT_TRUE(rx.Receive(a));
     EXPECT_TRUE(rx.Receive(b));
     EXPECT_EQ(rx.latest().tick, 12u);

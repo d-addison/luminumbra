@@ -9,7 +9,7 @@
 //   * coincident / zero-distance degeneracies (separation -> inf, cohesion -> NaN),
 //   * run==replay EXACT float equality, and NaN/inf survival.
 //
-// Registered into frontier_gates_test (include root ../src), so the canonical
+// Registered into frontier_gates_test (include root../src), so the canonical
 // "luminumbra_common/ai/..." include form is used (matches evolution_test.cpp
 // and astar_grid_test.cpp). Components are unused here (pure helpers), so no
 // Luminumbra::Components alias is needed.
@@ -52,14 +52,27 @@ using NList = std::vector<std::pair<float, float>>;
 // between forward and reverse order under the production summation. Verified
 // offline: fwd vs reverse steer differs in the last ULPs on BOTH x and z.
 NList DivergingSet() {
-    return {
-        {2.13f, 0.37f},  {-1.77f, 1.11f}, {2.59f, -2.41f}, {0.43f, 1.97f},
-        {-1.19f, -2.73f}, {2.31f, 1.55f}, {-0.77f, 0.83f}, {1.93f, -0.61f},
-        {2.66f, -1.83f}, {-0.91f, 2.27f}, {1.41f, 2.66f},  {-2.31f, -0.49f},
-        {0.83f, -2.55f}, {2.07f, 0.91f},  {-1.55f, 1.73f}, {0.29f, -1.37f}};
+    return {{2.13f, 0.37f},
+            {-1.77f, 1.11f},
+            {2.59f, -2.41f},
+            {0.43f, 1.97f},
+            {-1.19f, -2.73f},
+            {2.31f, 1.55f},
+            {-0.77f, 0.83f},
+            {1.93f, -0.61f},
+            {2.66f, -1.83f},
+            {-0.91f, 2.27f},
+            {1.41f, 2.66f},
+            {-2.31f, -0.49f},
+            {0.83f, -2.55f},
+            {2.07f, 0.91f},
+            {-1.55f, 1.73f},
+            {0.29f, -1.37f}};
 }
 
-std::vector<GeneBound> Bounds4() { return {{-1, 1}, {-1, 1}, {-1, 1}, {-1, 1}}; }
+std::vector<GeneBound> Bounds4() {
+    return {{-1, 1}, {-1, 1}, {-1, 1}, {-1, 1}};
+}
 
 NavGrid FromAscii(const std::vector<std::string>& rows) {
     const int h = static_cast<int>(rows.size());
@@ -84,13 +97,8 @@ int PathCost(const std::vector<GridCoord>& p) {
 // FLOCKING — order independence (the header's load-bearing determinism claim).
 // ---------------------------------------------------------------------------
 
-// THE headline bug: the header promises order-independent ("commutative")
-// accumulation, but the centroid/separation SUMS are plain float += in neighbour
-// order with NO sort. Float addition is non-associative, so reversing the list
-// changes the result. run==replay over a roster is only EXACT if a system feeds
-// neighbours in a fixed (id-sorted) order every tick; the helper itself must be
-// order-stable to honour its contract. Asserts CORRECT (order-independent)
-// behaviour -> expected to FAIL until the producer sorts/compensates.
+// Order-independent accumulation is required because run==replay must remain
+// exact even when callers provide equivalent neighbour permutations.
 TEST(FlockHardening, ForwardVsReverseOrderIdentical) {
     NList fwd = DivergingSet();
     NList rev(fwd.rbegin(), fwd.rend());
@@ -105,7 +113,7 @@ TEST(FlockHardening, ForwardVsReverseOrderIdentical) {
 TEST(FlockHardening, RotatedOrderIdentical) {
     NList base = DivergingSet();
     NList rot = base;
-    std::rotate(rot.begin(), rot.begin() + 1, rot.end());  // offset that diverges fwd
+    std::rotate(rot.begin(), rot.begin() + 1, rot.end()); // offset that diverges fwd
     const FlockSteer a = ComputeFlockSteer(0.0f, 0.0f, base);
     const FlockSteer b = ComputeFlockSteer(0.0f, 0.0f, rot);
     EXPECT_FLOAT_EQ(a.x, b.x);
@@ -131,17 +139,20 @@ TEST(FlockHardening, RunEqualsReplaySameOrder) {
     EXPECT_EQ(a.z, b.z);
 }
 
-// ORDER-INDEPENDENCE via a DETERMINISTIC SEEDED SHUFFLE (test-rigor KD-2 / NFR-001).
+// ORDER-INDEPENDENCE via a DETERMINISTIC SEEDED SHUFFLE (test-rigor  / ).
 // RunEqualsReplaySameOrder above re-runs the SAME order and so cannot catch the order
 // dependence the boids bug (a8b689c) was. The reverse/rotate tests above use ad-hoc
-// permutations; this closes that gap with the integer-SEEDED Fisher-Yates NFR-001 wants,
+// permutations; this closes that gap with the integer-SEEDED Fisher-Yates  wants,
 // over the VERIFIED order-diverging set, asserting byte-identical steer.
 TEST(FlockHardening, SeededShuffleOrderIdentical) {
     NList base = DivergingSet();
     NList shuffled = Luminumbra::TestSupport::SeededShuffled(base, /*seed=*/0x51EED99u);
-    bool reordered = false;  // guard R-4: the seed must actually permute.
+    bool reordered = false; // guard : the seed must actually permute.
     for (std::size_t i = 0; i < base.size(); ++i)
-        if (shuffled[i] != base[i]) { reordered = true; break; }
+        if (shuffled[i] != base[i]) {
+            reordered = true;
+            break;
+        }
     ASSERT_TRUE(reordered) << "seed must actually permute the neighbour order";
 
     const FlockSteer a = ComputeFlockSteer(0.4f, -0.6f, base);
@@ -175,7 +186,7 @@ TEST(FlockHardening, CoincidentNeighborIsFiniteZero) {
 // Many coincident neighbours stacked on self: still finite (cohesion centroid is
 // self, separation all guarded out).
 TEST(FlockHardening, ManyCoincidentNeighborsFinite) {
-    NList n(20, {2.5f, -1.5f});  // all identical, none on self
+    NList n(20, {2.5f, -1.5f}); // all identical, none on self
     const FlockSteer s = ComputeFlockSteer(2.5f, -1.5f, n);
     EXPECT_TRUE(std::isfinite(s.x));
     EXPECT_TRUE(std::isfinite(s.z));
@@ -184,7 +195,7 @@ TEST(FlockHardening, ManyCoincidentNeighborsFinite) {
 // A neighbour an epsilon away (inside the 1e-5 separation guard band but nonzero):
 // the separation term must stay finite, not explode through the 1/dist factor.
 TEST(FlockHardening, NearZeroDistanceSeparationFinite) {
-    NList n = {{1.0e-4f, 0.0f}};  // dist ~1e-4 > 1e-5 guard -> inv ~1e4
+    NList n = {{1.0e-4f, 0.0f}}; // dist ~1e-4 > 1e-5 guard -> inv ~1e4
     const FlockSteer s = ComputeFlockSteer(0.0f, 0.0f, n);
     EXPECT_TRUE(std::isfinite(s.x));
     EXPECT_TRUE(std::isfinite(s.z));
@@ -195,7 +206,7 @@ TEST(FlockHardening, NearZeroDistanceSeparationFinite) {
 // (crowd = 1 - dist/sep = 0), and the strict < means it is excluded anyway.
 // It is still inside the cohesion radius, so the net steer is pure cohesion (+x).
 TEST(FlockHardening, NeighborAtSeparationRadiusNoSeparation) {
-    FlockParams p;  // sep radius 3, neighbour radius 12
+    FlockParams p; // sep radius 3, neighbour radius 12
     NList n = {{3.0f, 0.0f}};
     const FlockSteer s = ComputeFlockSteer(0.0f, 0.0f, n, p);
     EXPECT_TRUE(std::isfinite(s.x));
@@ -209,8 +220,8 @@ TEST(FlockHardening, NeighborAtSeparationRadiusNoSeparation) {
 TEST(FlockHardening, NeighborExactlyAtCohesionRadiusIncluded) {
     FlockParams p;
     p.neighbor_radius = 5.0f;
-    p.separation_radius = 1.0f;  // keep the neighbour out of separation
-    NList at = {{5.0f, 0.0f}};   // dist == neighbor_radius -> included
+    p.separation_radius = 1.0f; // keep the neighbour out of separation
+    NList at = {{5.0f, 0.0f}};  // dist == neighbor_radius -> included
     NList just_out = {{5.0001f, 0.0f}};
     const FlockSteer s_at = ComputeFlockSteer(0.0f, 0.0f, at, p);
     const FlockSteer s_out = ComputeFlockSteer(0.0f, 0.0f, just_out, p);
@@ -222,7 +233,7 @@ TEST(FlockHardening, NeighborExactlyAtCohesionRadiusIncluded) {
 // pulls directly toward it (centroid == that neighbour).
 TEST(FlockHardening, SingleNeighborCohesionPointsAtIt) {
     FlockParams p;
-    p.separation_radius = 1.0f;  // neighbour at dist 6 is well outside sep
+    p.separation_radius = 1.0f; // neighbour at dist 6 is well outside sep
     NList n = {{0.0f, 6.0f}};
     const FlockSteer s = ComputeFlockSteer(0.0f, 0.0f, n, p);
     EXPECT_NEAR(s.x, 0.0f, 1e-6f);
@@ -241,7 +252,7 @@ TEST(FlockHardening, EmptyNeighborsZeroNoNaN) {
 TEST(FlockHardening, ZeroCohesionWeightLeavesSeparation) {
     FlockParams p;
     p.cohesion_weight = 0.0f;
-    NList n = {{1.0f, 0.0f}};  // inside sep radius
+    NList n = {{1.0f, 0.0f}}; // inside sep radius
     const FlockSteer s = ComputeFlockSteer(0.0f, 0.0f, n, p);
     EXPECT_TRUE(std::isfinite(s.x));
     EXPECT_LT(s.x, 0.0f) << "separation pushes off the close neighbour";
@@ -263,7 +274,7 @@ TEST(FlockHardening, SymmetricRingCancelsToFiniteNearZero) {
 // lone too-close neighbour yields a net push AWAY, not toward. Producer->consumer
 // sign contract.
 TEST(FlockHardening, SeparationOutweighsCohesionUpClose) {
-    NList n = {{0.5f, 0.0f}};  // very close on +x, inside sep radius
+    NList n = {{0.5f, 0.0f}}; // very close on +x, inside sep radius
     const FlockSteer s = ComputeFlockSteer(0.0f, 0.0f, n);
     EXPECT_LT(s.x, 0.0f) << "net steer must be away from a crowding neighbour";
 }
@@ -288,10 +299,10 @@ TEST(EvoHardening, BlendCrossoverRunEqualsReplay) {
         EXPECT_FLOAT_EQ(c1[i], c2[i]) << "bred gene " << i << " not reproducible";
 }
 
-// ORACLE (test-rigor KD-4): INDEPENDENT-RECOMPUTE + GOLDEN-LITERAL for BlendCrossover.
+// ORACLE (test-rigor ): INDEPENDENT-RECOMPUTE + GOLDEN-LITERAL for BlendCrossover.
 // BlendCrossoverRunEqualsReplay above only proves the operator is reproducible (zero
 // correctness signal). This recomputes the expected child by HAND from the documented
-// formula child[i] = a[i] + (b[i]-a[i])*u with u=rng.next_unit() per gene (Evolution.h:
+// formula child[i] = a[i] + (b[i]-a[i])*u with u=rng.next_unit per gene (Evolution.h:
 // 57-60), driving a SECOND identically-seeded rng in the SAME draw order, then pins the
 // result to frozen golden literals. A sign/operator flip in the lerp breaks BOTH the
 // recompute (different code path) and the golden (fixed numbers) -> RED (mutation-pass).
@@ -327,10 +338,12 @@ TEST(EvoHardening, BlendCrossoverOracle) {
 TEST(EvoHardening, EvolveGenerationByteExactReplay) {
     auto run = [&]() {
         DeterministicRng rng(424242u);
-        std::vector<std::vector<float>> pop = {
-            {0.1f, 0.2f, 0.3f, 0.4f}, {-0.5f, 0.6f, -0.7f, 0.8f},
-            {0.9f, -0.1f, 0.2f, -0.3f}, {0.0f, 0.0f, 0.0f, 0.0f},
-            {0.4f, 0.4f, -0.4f, -0.4f}, {-0.9f, 0.9f, 0.1f, -0.1f}};
+        std::vector<std::vector<float>> pop = {{0.1f, 0.2f, 0.3f, 0.4f},
+                                               {-0.5f, 0.6f, -0.7f, 0.8f},
+                                               {0.9f, -0.1f, 0.2f, -0.3f},
+                                               {0.0f, 0.0f, 0.0f, 0.0f},
+                                               {0.4f, 0.4f, -0.4f, -0.4f},
+                                               {-0.9f, 0.9f, 0.1f, -0.1f}};
         std::vector<float> fitness = {3.0f, 1.0f, 5.0f, 2.0f, 4.0f, 0.0f};
         return EvolveGeneration(pop, fitness, Bounds4(), 0.12f, 2, 3, rng);
     };
@@ -366,7 +379,7 @@ TEST(EvoHardening, ZeroSigmaDoesNotAdvanceRng) {
 
     DeterministicRng rng(99u);
     std::vector<float> g = {0.1f, 0.2f, 0.3f, 0.4f};
-    GaussianMutate(g, Bounds4(), 0.0f, rng);  // must not touch rng
+    GaussianMutate(g, Bounds4(), 0.0f, rng); // must not touch rng
     const float got = rng.next_unit();
     EXPECT_FLOAT_EQ(got, expected) << "zero-sigma mutate must not advance the RNG";
 }
@@ -378,7 +391,8 @@ TEST(EvoHardening, LargeSigmaMutateReproducibleAndInBounds) {
     auto run = [&]() {
         DeterministicRng rng(13u);
         std::vector<float> g = {0.0f, 0.0f, 0.0f, 0.0f};
-        for (int it = 0; it < 50; ++it) GaussianMutate(g, bounds, 1.0f, rng);
+        for (int it = 0; it < 50; ++it)
+            GaussianMutate(g, bounds, 1.0f, rng);
         return g;
     };
     const std::vector<float> a = run();
@@ -397,7 +411,7 @@ TEST(EvoHardening, LargeSigmaMutateReproducibleAndInBounds) {
 // in-range even at sigma 0.
 TEST(EvoHardening, OutOfBoundsGenomeIsClampedIn) {
     DeterministicRng rng(8u);
-    std::vector<float> g = {5.0f, -5.0f, 0.0f, 9.0f};  // 3 genes OOB for [-1,1]
+    std::vector<float> g = {5.0f, -5.0f, 0.0f, 9.0f}; // 3 genes OOB for [-1,1]
     GaussianMutate(g, Bounds4(), 0.0f, rng);
     EXPECT_FLOAT_EQ(g[0], 1.0f);
     EXPECT_FLOAT_EQ(g[1], -1.0f);
@@ -431,7 +445,8 @@ TEST(EvoHardening, CrossoverIdenticalParentsIsIdentity) {
     for (int it = 0; it < 100; ++it) {
         const std::vector<float> c = BlendCrossover(a, a, rng);
         ASSERT_EQ(c.size(), a.size());
-        for (std::size_t i = 0; i < a.size(); ++i) EXPECT_FLOAT_EQ(c[i], a[i]);
+        for (std::size_t i = 0; i < a.size(); ++i)
+            EXPECT_FLOAT_EQ(c[i], a[i]);
     }
 }
 
@@ -467,7 +482,8 @@ TEST(EvoHardening, TournamentKZeroClampsToOneRound) {
         DeterministicRng rng(55u);
         std::vector<float> fitness = {1.0f, 2.0f, 3.0f, 4.0f};
         std::vector<std::size_t> picks;
-        for (int it = 0; it < 20; ++it) picks.push_back(TournamentSelect(fitness, k, rng));
+        for (int it = 0; it < 20; ++it)
+            picks.push_back(TournamentSelect(fitness, k, rng));
         return picks;
     };
     EXPECT_EQ(draw(0), draw(1)) << "k=0 must be identical to k=1 (one round)";
@@ -479,7 +495,8 @@ TEST(EvoHardening, TournamentReproducible) {
         DeterministicRng rng(7777u);
         std::vector<float> fitness = {0.2f, 0.9f, 0.1f, 0.5f, 0.7f};
         std::vector<std::size_t> picks;
-        for (int it = 0; it < 100; ++it) picks.push_back(TournamentSelect(fitness, 3, rng));
+        for (int it = 0; it < 100; ++it)
+            picks.push_back(TournamentSelect(fitness, 3, rng));
         return picks;
     };
     EXPECT_EQ(draw(), draw());
@@ -490,12 +507,14 @@ TEST(EvoHardening, TournamentReproducible) {
 // lower index must be favoured over the run.
 TEST(EvoHardening, TournamentTieBreaksToLowerIndex) {
     DeterministicRng rng(2u);
-    std::vector<float> fitness = {9.0f, 9.0f, 0.0f, 0.0f};  // indices 0,1 tie at top
+    std::vector<float> fitness = {9.0f, 9.0f, 0.0f, 0.0f}; // indices 0,1 tie at top
     int got0 = 0, got1 = 0;
     for (int it = 0; it < 400; ++it) {
         const std::size_t p = TournamentSelect(fitness, 4, rng);
-        if (p == 0u) ++got0;
-        if (p == 1u) ++got1;
+        if (p == 0u)
+            ++got0;
+        if (p == 1u)
+            ++got1;
     }
     // When both 0 and 1 appear among contestants, 0 must win the tie (strict >).
     EXPECT_GT(got0, got1) << "ties must resolve to the lower index";
@@ -505,10 +524,11 @@ TEST(EvoHardening, TournamentTieBreaksToLowerIndex) {
 // when the best is NOT at index 0 (ordering by fitness desc, index asc).
 TEST(EvoHardening, ElitismCarriesTopTwoUnchanged) {
     DeterministicRng rng(4u);
-    std::vector<std::vector<float>> pop = {
-        {0.1f, 0.1f, 0.1f, 0.1f}, {0.9f, 0.8f, 0.7f, 0.6f},
-        {0.2f, 0.2f, 0.2f, 0.2f}, {0.5f, 0.4f, 0.3f, 0.2f}};
-    std::vector<float> fitness = {1.0f, 99.0f, 2.0f, 50.0f};  // best=1, second=3
+    std::vector<std::vector<float>> pop = {{0.1f, 0.1f, 0.1f, 0.1f},
+                                           {0.9f, 0.8f, 0.7f, 0.6f},
+                                           {0.2f, 0.2f, 0.2f, 0.2f},
+                                           {0.5f, 0.4f, 0.3f, 0.2f}};
+    std::vector<float> fitness = {1.0f, 99.0f, 2.0f, 50.0f}; // best=1, second=3
     auto next = EvolveGeneration(pop, fitness, Bounds4(), 0.1f, 2, 2, rng);
     ASSERT_EQ(next.size(), pop.size());
     EXPECT_EQ(next[0], pop[1]) << "fittest elite carried byte-for-byte";
@@ -519,9 +539,10 @@ TEST(EvoHardening, ElitismCarriesTopTwoUnchanged) {
 // of 4 must still return exactly 4 genomes and not crash / over-copy.
 TEST(EvoHardening, ElitismExceedingPopIsClamped) {
     DeterministicRng rng(9u);
-    std::vector<std::vector<float>> pop = {
-        {0.1f, 0.1f, 0.1f, 0.1f}, {0.2f, 0.2f, 0.2f, 0.2f},
-        {0.3f, 0.3f, 0.3f, 0.3f}, {0.4f, 0.4f, 0.4f, 0.4f}};
+    std::vector<std::vector<float>> pop = {{0.1f, 0.1f, 0.1f, 0.1f},
+                                           {0.2f, 0.2f, 0.2f, 0.2f},
+                                           {0.3f, 0.3f, 0.3f, 0.3f},
+                                           {0.4f, 0.4f, 0.4f, 0.4f}};
     std::vector<float> fitness = {1.0f, 2.0f, 3.0f, 4.0f};
     auto next = EvolveGeneration(pop, fitness, Bounds4(), 0.1f, 10, 2, rng);
     EXPECT_EQ(next.size(), pop.size());
@@ -531,8 +552,7 @@ TEST(EvoHardening, ElitismExceedingPopIsClamped) {
 TEST(EvoHardening, NegativeElitismIsZero) {
     DeterministicRng rng(11u);
     std::vector<std::vector<float>> pop = {
-        {0.1f, 0.1f, 0.1f, 0.1f}, {0.2f, 0.2f, 0.2f, 0.2f},
-        {0.3f, 0.3f, 0.3f, 0.3f}};
+        {0.1f, 0.1f, 0.1f, 0.1f}, {0.2f, 0.2f, 0.2f, 0.2f}, {0.3f, 0.3f, 0.3f, 0.3f}};
     std::vector<float> fitness = {1.0f, 2.0f, 3.0f};
     auto next = EvolveGeneration(pop, fitness, Bounds4(), 0.1f, -5, 2, rng);
     EXPECT_EQ(next.size(), pop.size());
@@ -565,9 +585,14 @@ TEST(EvoHardening, SingletonPopulationPreservesElite) {
 // promises a tie-break by ascending cell index -> a single stable path. Two
 // calls must return the identical sequence (run==replay on a tie-rich board).
 TEST(AStarHardening, TieRichOpenGridIsStable) {
-    auto grid = FromAscii({
-        "........", "........", "........", "........",
-        "........", "........", "........", "........"});
+    auto grid = FromAscii({"........",
+                           "........",
+                           "........",
+                           "........",
+                           "........",
+                           "........",
+                           "........",
+                           "........"});
     auto a = FindPath(grid, {0, 0}, {7, 7});
     auto b = FindPath(grid, {0, 0}, {7, 7});
     ASSERT_FALSE(a.empty());
@@ -579,9 +604,14 @@ TEST(AStarHardening, TieRichOpenGridIsStable) {
 // Optimality on the open grid: corner-to-corner cost must equal the octile
 // optimum 7*14 = 98 (pure diagonal), not a longer detour.
 TEST(AStarHardening, OpenGridDiagonalCostIsOptimal) {
-    auto grid = FromAscii({
-        "........", "........", "........", "........",
-        "........", "........", "........", "........"});
+    auto grid = FromAscii({"........",
+                           "........",
+                           "........",
+                           "........",
+                           "........",
+                           "........",
+                           "........",
+                           "........"});
     auto p = FindPath(grid, {0, 0}, {7, 7});
     ASSERT_FALSE(p.empty());
     EXPECT_EQ(PathCost(p), 7 * 14);
@@ -592,9 +622,13 @@ TEST(AStarHardening, OpenGridDiagonalCostIsOptimal) {
 // Symmetric reverse: forward and reversed-endpoint searches yield the SAME total
 // cost (the cost field is symmetric even if the exact cells differ).
 TEST(AStarHardening, ReverseSearchSameCost) {
-    auto grid = FromAscii({
-        "..........", ".##.###.#.", "....#...#.", ".#.##.##..",
-        "..#....#..", ".##.##.#..", ".........."});
+    auto grid = FromAscii({"..........",
+                           ".##.###.#.",
+                           "....#...#.",
+                           ".#.##.##..",
+                           "..#....#..",
+                           ".##.##.#..",
+                           ".........."});
     auto fwd = FindPath(grid, {0, 0}, {9, 6});
     auto rev = FindPath(grid, {9, 6}, {0, 0});
     ASSERT_FALSE(fwd.empty());
@@ -604,8 +638,7 @@ TEST(AStarHardening, ReverseSearchSameCost) {
 
 // Unreachable goal (fully walled) -> empty path, not a partial/garbage one.
 TEST(AStarHardening, UnreachableGoalIsEmpty) {
-    auto enclosed = FromAscii({
-        ".....", ".###.", ".#.#.", ".###.", "....."});
+    auto enclosed = FromAscii({".....", ".###.", ".#.#.", ".###.", "....."});
     auto p = FindPath(enclosed, {0, 0}, {2, 2});
     EXPECT_TRUE(p.empty());
 }
@@ -646,9 +679,13 @@ TEST(AStarHardening, NoDiagonalCornerCut) {
 // Every returned step is an 8-neighbour move onto a walkable cell, and the path
 // is contiguous start..goal (no teleports through walls). Stress board.
 TEST(AStarHardening, PathContiguousAndWalkable) {
-    auto grid = FromAscii({
-        "..........", ".##.###.#.", "....#...#.", ".#.##.##..",
-        "..#....#..", ".##.##.#..", ".........."});
+    auto grid = FromAscii({"..........",
+                           ".##.###.#.",
+                           "....#...#.",
+                           ".#.##.##..",
+                           "..#....#..",
+                           ".##.##.#..",
+                           ".........."});
     auto p = FindPath(grid, {0, 0}, {9, 6});
     ASSERT_FALSE(p.empty());
     EXPECT_TRUE((p.front() == GridCoord{0, 0}));
@@ -662,4 +699,4 @@ TEST(AStarHardening, PathContiguousAndWalkable) {
     }
 }
 
-}  // namespace
+} // namespace

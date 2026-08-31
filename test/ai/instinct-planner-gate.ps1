@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# T-I3-17: the grovestrider hunger fixture is game data; the engine planner
+# the grovestrider hunger fixture is game data; the engine planner
 # is content-free. This gate loads data/common/archetypes/grovestrider.json,
 # asserts the engine source no longer embeds the game nouns (inverting the
 # old "mossberry_grove must appear in InstinctPlanner.cpp" assertion), and

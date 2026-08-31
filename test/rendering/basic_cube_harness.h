@@ -1,6 +1,6 @@
 #pragma once
-// Shared, GPU-API-free description of the dual-backend FLIP calibration pass
-// (GPU-09 rank 60 / GPU-03+GPU-P05 rank 66). The raw-GL golden (glad, in
+// Shared, -free description of the dual-backend FLIP calibration pass
+// (  / + ). The raw-GL golden (glad, in
 // dual_backend_flip_test.cpp) and the GL-via-Diligent candidate
 // (dual_backend_diligent.cpp, the only Diligent-including render TU) MUST feed
 // byte-identical geometry + camera + light so a non-zero in-process FLIP score is
@@ -48,12 +48,12 @@ inline std::vector<MeshVertex> BuildCubeMesh() {
         std::array<glm::vec3, 4> corners;
     };
     const std::array<Face, 6> faces = {{
-        {{ 1, 0, 0}, {{{ h,-h,-h}, { h, h,-h}, { h, h, h}, { h,-h, h}}}},
-        {{-1, 0, 0}, {{{-h,-h, h}, {-h, h, h}, {-h, h,-h}, {-h,-h,-h}}}},
-        {{ 0, 1, 0}, {{{-h, h,-h}, {-h, h, h}, { h, h, h}, { h, h,-h}}}},
-        {{ 0,-1, 0}, {{{-h,-h, h}, {-h,-h,-h}, { h,-h,-h}, { h,-h, h}}}},
-        {{ 0, 0, 1}, {{{-h,-h, h}, { h,-h, h}, { h, h, h}, {-h, h, h}}}},
-        {{ 0, 0,-1}, {{{ h,-h,-h}, {-h,-h,-h}, {-h, h,-h}, { h, h,-h}}}},
+        {{1, 0, 0}, {{{h, -h, -h}, {h, h, -h}, {h, h, h}, {h, -h, h}}}},
+        {{-1, 0, 0}, {{{-h, -h, h}, {-h, h, h}, {-h, h, -h}, {-h, -h, -h}}}},
+        {{0, 1, 0}, {{{-h, h, -h}, {-h, h, h}, {h, h, h}, {h, h, -h}}}},
+        {{0, -1, 0}, {{{-h, -h, h}, {-h, -h, -h}, {h, -h, -h}, {h, -h, h}}}},
+        {{0, 0, 1}, {{{-h, -h, h}, {h, -h, h}, {h, h, h}, {-h, h, h}}}},
+        {{0, 0, -1}, {{{h, -h, -h}, {-h, -h, -h}, {-h, h, -h}, {h, h, -h}}}},
     }};
     std::vector<MeshVertex> verts;
     verts.reserve(faces.size() * 6);
@@ -71,8 +71,8 @@ inline std::vector<MeshVertex> BuildCubeMesh() {
 // bottom-up rows; Diligent normalises texture readback to top-left origin. This is
 // the ONE convention difference between the two backends -- exposing it (rather
 // than hiding it) is why leg B measures BOTH orientations and reports each score.
-inline std::vector<unsigned char> FlipRowsVertically(const std::vector<unsigned char>& src,
-                                                     int width, int height) {
+inline std::vector<unsigned char>
+FlipRowsVertically(const std::vector<unsigned char>& src, int width, int height) {
     std::vector<unsigned char> out(src.size());
     const std::size_t row_bytes = static_cast<std::size_t>(width) * 4u;
     for (int y = 0; y < height; ++y) {
@@ -87,4 +87,4 @@ inline std::vector<unsigned char> FlipRowsVertically(const std::vector<unsigned 
     return out;
 }
 
-}  // namespace luminumbra_test
+} // namespace luminumbra_test

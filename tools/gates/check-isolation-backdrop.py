@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""T-I6 isolation/layer gate — objective backdrop + layer-suppression check.
+""" isolation/layer gate — objective backdrop + layer-suppression check.
 
 Reads one or more PPM frames captured with an isolation backdrop active
 (`--isolation-backdrop <mode>` + `--isolation-layers <csv>`) and asserts,
-tolerantly (critique T2: AA/quantization-fragile -> per-channel LSB tolerance):
+tolerantly (regression contract: AA/quantization-fragile -> per-channel LSB tolerance):
 
   1. BACKDROP FILL — the no-geometry SKY region (top third of a horizon-level
      capture) is filled with the requested flat backdrop colour to >= MIN_FILL,
@@ -17,9 +17,9 @@ Writes a decision JSON and exits non-zero on failure. numpy is REQUIRED (a gate
 that cannot run is not a gate).
 
 Usage:
-  check-isolation-backdrop.py <backdrop> <out_json> <expect_geometry> <ppm> [<ppm> ...]
-    backdrop         : void | greenscreen | checker
-    expect_geometry  : 1/true if an opaque geometry layer (terrain) was isolated
+  check-isolation-backdrop.py <backdrop> <out_json> <expect_geometry> <ppm> [<ppm>...]
+    backdrop: void | greenscreen | checker
+    expect_geometry: 1/true if an opaque geometry layer (terrain) was isolated
 """
 import json
 import sys

@@ -1,8 +1,8 @@
 #version 450 core
-#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_ARB_gpu_shader_int64: require
 
 // ===========================================================================
-// T-I6 #4: GPU grass scatter (compute). RENDER-ONLY.
+//  #4: GPU grass scatter (compute)..
 //
 // Ports the CPU FoliagePass::rebuild_instances scatter loop to a compute pass:
 // one thread per candidate slot, deterministic splitmix64 placement (bit-exact
@@ -18,7 +18,7 @@
 // ~81x/chunk instead of up to 4096x), bilinearly interpolated here; slope is the
 // grid height gradient. This shifts placement vs the exact CPU query slightly
 // (coverage stays in the FoliageInstancing biome band) but is fully
-// deterministic run-to-run (the gate's requirement). RENDER-ONLY: nothing here
+// deterministic run-to-run (the gate's requirement).: nothing here
 // writes back to sim/world_hash.
 // ===========================================================================
 

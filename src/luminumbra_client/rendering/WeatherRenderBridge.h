@@ -9,16 +9,15 @@
 #include "RenderFrameTypes.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 
-// ATMO-07 (Wave G R1.4): the LIVE weather bridge — the PURE mapping from a
+// Live weather bridge: the pure mapping from a
 // replicated WeatherSystem sample to the render-side weather + cloud state PODs.
 // This is the same sample->state shape the WeatherVisual scenario builds inline,
 // WITHOUT the scenario's capture floors (max(precip,1), max(storm,0.4) — those
-// exist to stabilize gate captures and stay scenario-local). One-way (critique
-// F2): reads sim state, writes render PODs, feeds nothing back; never world_hash.
+// exist to stabilize gate captures and stay scenario-local). It is one-way:
+// reads sim state, writes render PODs, feeds nothing back, and never affects world_hash.
 //
-// Wired per frame from live play behind `render.live_weather` (default OFF until
-// the R1.X batched re-bless): sample at the camera -> set_weather_state +
-// set_cloud_state. Unit-tested as pure functions (WeatherRenderBridge ctests).
+// Wired per frame from live play behind `render.live_weather`, enabled in the
+// shipped config. Unit-tested as pure functions (WeatherRenderBridge CTests).
 namespace Luminumbra::Rendering::WeatherBridge {
 
 // Wind speed (m/s) that maps to full overlay wind strength — the scenario's
@@ -52,11 +51,21 @@ inline float CloudCoverageFor(Systems::WeatherCategory category, float storm_int
     using Systems::WeatherCategory;
     float base = 0.30f; // Clear: scattered fair-weather cover
     switch (category) {
-        case WeatherCategory::Clear:    base = 0.30f; break;
-        case WeatherCategory::Overcast: base = 0.70f; break;
-        case WeatherCategory::Rain:     base = 0.80f; break;
-        case WeatherCategory::Snow:     base = 0.75f; break;
-        case WeatherCategory::Fog:      base = 0.60f; break;
+        case WeatherCategory::Clear:
+            base = 0.30f;
+            break;
+        case WeatherCategory::Overcast:
+            base = 0.70f;
+            break;
+        case WeatherCategory::Rain:
+            base = 0.80f;
+            break;
+        case WeatherCategory::Snow:
+            base = 0.75f;
+            break;
+        case WeatherCategory::Fog:
+            base = 0.60f;
+            break;
     }
     // An active storm pushes toward full cover regardless of category.
     return std::clamp(base + 0.25f * std::clamp(storm_intensity, 0.0f, 1.0f), 0.0f, 1.0f);
@@ -69,16 +78,17 @@ inline constexpr float kCloudScrollMetresPerTick = 0.35f;
 
 // sun_travel_dir defaults to overhead — the same POD default the WeatherVisual
 // scenario ships (the passes register the live sun themselves where needed).
-inline CloudRenderState BuildCloudRenderState(const Systems::WeatherSample& s,
-                                              std::uint64_t simTick,
-                                              const glm::vec3& sun_travel_dir = glm::vec3(0.0f, -1.0f, 0.0f)) {
+inline CloudRenderState
+BuildCloudRenderState(const Systems::WeatherSample& s,
+                      std::uint64_t simTick,
+                      const glm::vec3& sun_travel_dir = glm::vec3(0.0f, -1.0f, 0.0f)) {
     CloudRenderState c;
     c.enabled = true;
     c.shadow_enabled = true;
     c.coverage_amount = CloudCoverageFor(s.category, s.storm_intensity);
     const float wlen = std::sqrt(s.wind.x * s.wind.x + s.wind.y * s.wind.y);
-    const glm::vec2 wind_dir = (wlen > 1e-4f)
-        ? glm::vec2(s.wind.x / wlen, s.wind.y / wlen) : glm::vec2(1.0f, 0.0f);
+    const glm::vec2 wind_dir =
+        (wlen > 1e-4f) ? glm::vec2(s.wind.x / wlen, s.wind.y / wlen) : glm::vec2(1.0f, 0.0f);
     const float wind01 = std::clamp(wlen / kWindFullStrength, 0.0f, 1.0f);
     const float phase = static_cast<float>(simTick % 4320000ull); // wraps ~40 h; float-safe
     c.scroll_offset = wind_dir * (phase * kCloudScrollMetresPerTick * (0.35f + 0.65f * wind01));

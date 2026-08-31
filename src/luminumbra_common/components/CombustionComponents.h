@@ -3,8 +3,8 @@
 // sim.fire — emergent FIRE SPREAD: the SIMULATION-SIDE combustion state.
 //
 // LOAD-BEARING RULE (determinism contract): this is small, fixed-point / integer
-// sim truth that feeds world_hash. The renderer may later read burn_state to swap
-// a scorched material or spawn flame VFX, but NOTHING here touches the renderer and
+// sim truth that feeds world_hash. The renderer may read burn_state for a
+// scorched material or flame VFX, but nothing here touches the renderer and
 // nothing here uses wall-clock / std::random / libm transcendentals. Fire spread
 // advances on the fixed 30 Hz tick (systems/FireSpreadSystem.h).
 //

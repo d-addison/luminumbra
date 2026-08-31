@@ -1,6 +1,6 @@
-// SHIELD-RT far-field shared builders (T-I4-15 spike + T-I6-A3a GPU profile).
+//  far-field shared builders ( spike +  GPU profile).
 //
-// The iteration-4 CPU spike (shieldrt_spike_bench.cpp) and the iteration-6 GPU
+// The  CPU spike (shieldrt_spike_bench.cpp) and the  GPU
 // micro-profile (shieldrt_tracer_profile_gpu.cpp) BOTH compare the same two
 // candidate far-field source representations against the SAME FarLodStore-derived
 // terrain region:
@@ -42,14 +42,15 @@ struct Vec3d {
 
 inline Vec3d Normalize(const Vec3d& v) {
     const double len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-    if (len <= 0.0) return v;
+    if (len <= 0.0)
+        return v;
     return {v.x / len, v.y / len, v.z / len};
 }
 
 // ---------------------------------------------------------------------------
 // A dense, region-local height field assembled from FarLodStore tiles. The far
 // representation in the engine IS a packed heightfield (4 m F1 / 8 m F2 samples)
-// — both raymarch paths sample exactly this data so the comparison is apples to
+// both raymarch paths sample exactly this data so the comparison is apples to
 // apples. The grid is (n x n) samples at `step` meters, origin at (ox, oz).
 // ---------------------------------------------------------------------------
 struct HeightField {
@@ -59,9 +60,15 @@ struct HeightField {
     std::vector<float> h;      // row-major n*n
     double min_h = 0.0, max_h = 0.0;
 
-    double world_x(int i) const { return ox + i * step; }
-    double world_z(int j) const { return oz + j * step; }
-    double extent() const { return (n - 1) * step; }
+    double world_x(int i) const {
+        return ox + i * step;
+    }
+    double world_z(int j) const {
+        return oz + j * step;
+    }
+    double extent() const {
+        return (n - 1) * step;
+    }
 
     // Bilinear height sample in world XZ, clamped to the field domain.
     double sample(double wx, double wz) const {
@@ -84,16 +91,20 @@ struct HeightField {
         return a + (b - a) * tz;
     }
 
-    std::size_t bytes() const { return h.size() * sizeof(float); }
+    std::size_t bytes() const {
+        return h.size() * sizeof(float);
+    }
 };
 
 // Build a region-local height field by stitching FarLodStore tiles. We use the
 // requested tier and assemble a `regions x regions` block. The samples come
 // straight from BuildPristineFarLodTile so this is the real engine far-LOD data.
-inline HeightField BuildHeightFieldFromTiles(
-    const Luminumbra::Systems::SHIELD_WorldSystem& world,
-    Luminumbra::World::FarLodTier tier, std::int32_t rx0, std::int32_t rz0,
-    int regions, std::uint64_t params_hash) {
+inline HeightField BuildHeightFieldFromTiles(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                                             Luminumbra::World::FarLodTier tier,
+                                             std::int32_t rx0,
+                                             std::int32_t rz0,
+                                             int regions,
+                                             std::uint64_t params_hash) {
     const int step = Luminumbra::World::FarLodSampleStepMeters(tier);
     const int per_region = 512 / step;
     HeightField hf;
@@ -105,17 +116,17 @@ inline HeightField BuildHeightFieldFromTiles(
 
     for (int rz = 0; rz < regions; ++rz) {
         for (int rx = 0; rx < regions; ++rx) {
-            const Luminumbra::World::FarLodTile tile =
-                Luminumbra::World::BuildPristineFarLodTile(world, tier, rx0 + rx,
-                                                           rz0 + rz, params_hash);
+            const Luminumbra::World::FarLodTile tile = Luminumbra::World::BuildPristineFarLodTile(
+                world, tier, rx0 + rx, rz0 + rz, params_hash);
             const int sps = static_cast<int>(tile.samples_per_side);
             for (int z = 0; z < sps; ++z) {
                 for (int x = 0; x < sps; ++x) {
                     const int gx = rx * per_region + x;
                     const int gz = rz * per_region + z;
-                    if (gx >= hf.n || gz >= hf.n) continue;
-                    const float height = Luminumbra::World::DequantizeFarLodHeight(
-                        tile.height_q[z * sps + x]);
+                    if (gx >= hf.n || gz >= hf.n)
+                        continue;
+                    const float height =
+                        Luminumbra::World::DequantizeFarLodHeight(tile.height_q[z * sps + x]);
                     hf.h[static_cast<std::size_t>(gz) * hf.n + gx] = height;
                 }
             }
@@ -144,12 +155,13 @@ struct HeightMaxMip {
     int base_n = 0;
     double step = 0.0;
     double ox = 0.0, oz = 0.0;
-    std::vector<int> dims;                  // dims[L] = cell count per side
-    std::vector<std::vector<float>> max_h;  // per level, row-major
+    std::vector<int> dims;                 // dims[L] = cell count per side
+    std::vector<std::vector<float>> max_h; // per level, row-major
 
     std::size_t bytes() const {
         std::size_t b = 0;
-        for (const auto& lvl : max_h) b += lvl.size() * sizeof(float);
+        for (const auto& lvl : max_h)
+            b += lvl.size() * sizeof(float);
         return b;
     }
 };
@@ -202,13 +214,15 @@ struct SdfVolume {
     int nx = 0, ny = 0, nz = 0;
     double step = 0.0;
     double ox = 0.0, oy = 0.0, oz = 0.0;
-    std::vector<float> d;  // signed distance, row-major (x + nx*(y + ny*z))
+    std::vector<float> d; // signed distance, row-major (x + nx*(y + ny*z))
 
     std::size_t idx(int x, int y, int z) const {
         return static_cast<std::size_t>(x) +
                nx * (static_cast<std::size_t>(y) + ny * static_cast<std::size_t>(z));
     }
-    std::size_t bytes() const { return d.size() * sizeof(float); }
+    std::size_t bytes() const {
+        return d.size() * sizeof(float);
+    }
 };
 
 // True conservative SDF from the heightfield: signed vertical gap scaled by the
@@ -219,7 +233,7 @@ inline double HeightfieldSdf(const HeightField& hf, double wx, double wy, double
     const double dhx = (hf.sample(wx + e, wz) - hf.sample(wx - e, wz)) / (2.0 * e);
     const double dhz = (hf.sample(wx, wz + e) - hf.sample(wx, wz - e)) / (2.0 * e);
     const double lip = std::sqrt(1.0 + dhx * dhx + dhz * dhz);
-    return (wy - surf) / lip;  // negative below surface
+    return (wy - surf) / lip; // negative below surface
 }
 
 inline SdfVolume BuildSdfVolume(const HeightField& hf, double voxel_step) {
@@ -252,14 +266,17 @@ struct SdfMipChain {
     std::vector<int> nx, ny, nz;
     double base_step = 0.0;
     double ox = 0.0, oy = 0.0, oz = 0.0;
-    std::vector<std::vector<float>> levels;  // [L] row-major
+    std::vector<std::vector<float>> levels; // [L] row-major
 
     std::size_t bytes() const {
         std::size_t b = 0;
-        for (const auto& l : levels) b += l.size() * sizeof(float);
+        for (const auto& l : levels)
+            b += l.size() * sizeof(float);
         return b;
     }
-    double level_step(int L) const { return base_step * static_cast<double>(1 << L); }
+    double level_step(int L) const {
+        return base_step * static_cast<double>(1 << L);
+    }
 };
 
 // Build a mip chain. conservative=true -> coarse value is the signed distance of
@@ -290,8 +307,7 @@ inline SdfMipChain BuildSdfMips(const SdfVolume& base, bool conservative) {
             y = std::min(y, ly - 1);
             z = std::min(z, lz - 1);
             return prev[static_cast<std::size_t>(x) +
-                        plx * (static_cast<std::size_t>(y) +
-                               ply * static_cast<std::size_t>(z))];
+                        plx * (static_cast<std::size_t>(y) + ply * static_cast<std::size_t>(z))];
         };
         std::vector<float> next(static_cast<std::size_t>(cx) * cy * cz);
         const double coarse_cell = c.level_step(static_cast<int>(c.levels.size()));
@@ -309,19 +325,21 @@ inline SdfMipChain BuildSdfMips(const SdfVolume& base, bool conservative) {
                     if (conservative) {
                         float best = vals[0];
                         for (int i = 1; i < 8; ++i)
-                            if (std::abs(vals[i]) < std::abs(best)) best = vals[i];
+                            if (std::abs(vals[i]) < std::abs(best))
+                                best = vals[i];
                         const float sign = best < 0.0f ? -1.0f : 1.0f;
-                        const float mag = std::max(
-                            0.0f, std::abs(best) - static_cast<float>(half_diag));
+                        const float mag =
+                            std::max(0.0f, std::abs(best) - static_cast<float>(half_diag));
                         out = sign * mag;
                     } else {
                         double avg = 0.0;
-                        for (int i = 0; i < 8; ++i) avg += vals[i];
+                        for (int i = 0; i < 8; ++i)
+                            avg += vals[i];
                         out = static_cast<float>(avg / 8.0);
                     }
                     next[static_cast<std::size_t>(x) +
-                         cx * (static_cast<std::size_t>(y) +
-                               cy * static_cast<std::size_t>(z))] = out;
+                         cx * (static_cast<std::size_t>(y) + cy * static_cast<std::size_t>(z))] =
+                        out;
                 }
             }
         }
@@ -357,7 +375,8 @@ inline std::vector<Vec3d> BuildRayDirs(const View& v) {
     Vec3d right = Normalize({fwd.z * world_up.y - fwd.y * world_up.z,
                              fwd.x * world_up.z - fwd.z * world_up.x,
                              fwd.y * world_up.x - fwd.x * world_up.y});
-    Vec3d up{right.y * fwd.z - right.z * fwd.y, right.z * fwd.x - right.x * fwd.z,
+    Vec3d up{right.y * fwd.z - right.z * fwd.y,
+             right.z * fwd.x - right.x * fwd.z,
              right.x * fwd.y - right.y * fwd.x};
     const double aspect = static_cast<double>(kRayGridW) / kRayGridH;
     const double th = std::tan(v.fov_deg * 0.5 * 3.14159265358979 / 180.0);
@@ -386,4 +405,4 @@ inline constexpr std::int32_t kRx0 = 4;
 inline constexpr std::int32_t kRz0 = 4;
 inline constexpr int kRegions = 3;
 
-}  // namespace luminumbra_shieldrt
+} // namespace luminumbra_shieldrt

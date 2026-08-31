@@ -1,12 +1,12 @@
 #pragma once
 
-// Track sim.lifespan — MORTALITY participant component. Closes the
+// sim.lifespan: MORTALITY participant component. Closes the
 // birth -> life -> death cycle: a creature carrying this component AGES every
 // tick and is MARKED dead when it outlives its lifespan (old age) or, if it is
 // also a CreatureComponent, when it has starved (hunger maxed). Bounding death
 // keeps the population finite so reproduction can't grow without limit.
 //
-// LOAD-BEARING RULE (mirrors the ecology/foliage pillars): this is SIM truth —
+// LOAD-BEARING RULE: this is simulation truth —
 // small, integer/fixed-point, deterministic — never render state. Geometry /
 // carcass rendering is derived elsewhere.
 //

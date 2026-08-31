@@ -1,5 +1,5 @@
 #version 450 core
-// I9-FOLIAGE render-only PROCEDURAL plant pass (behind render.plant_procgen).
+//  render-only PROCEDURAL plant pass (behind render.plant_procgen).
 // Vertices arrive PRE-TRANSFORMED into WORLD space (the CPU bake in
 // PlantProcgenPass transforms each plant's local mesh to its world position),
 // so there is no per-instance model matrix here — the model transform is

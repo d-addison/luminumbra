@@ -1,5 +1,5 @@
 #include "gtest/gtest.h"
-#include <chrono>   // For performance testing
+#include <chrono> // For performance testing
 #include <functional>
 #include <iostream> // For printing benchmark results
 #include <memory>   // For std::unique_ptr
@@ -7,15 +7,15 @@
 #include <unordered_map>
 #include <vector>
 
-#include "entt/entt.hpp"
 #include "FastNoise/FastNoise.h"
 #include "core/JobSystem.h"
+#include "entt/entt.hpp"
 #include "world/Chunk.h"
 
 #include "systems/SHIELD_WorldSystem.h"
 
-#include "world/MarchingCubes.h"
 #include "systems/WaterSystem.h"
+#include "world/MarchingCubes.h"
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
@@ -44,11 +44,11 @@ protected:
         // A realistic preset that generates complex terrain within chunk bounds
         // Assuming CHUNK_SIZE_Y is 16 or 32, place terrain in the middle
         params_archipelago.base_frequency = 0.004f;
-        params_archipelago.base_amplitude = 8.0f;  // Reduced from 120 to keep within chunk
+        params_archipelago.base_amplitude = 8.0f; // Reduced from 120 to keep within chunk
         params_archipelago.octaves = 6;
         params_archipelago.persistence = 0.5f;
         params_archipelago.lacunarity = 2.2f;
-        params_archipelago.height_offset = 8.0f;  // Changed from 30 to be within chunk (0,0,0)
+        params_archipelago.height_offset = 8.0f; // Changed from 30 to be within chunk (0,0,0)
         params_archipelago.island_mask_enabled = false;
         params_archipelago.caves_enabled = false;
 
@@ -56,7 +56,7 @@ protected:
         params_underwater_world.height_offset = -20.0f;
         params_underwater_world.base_amplitude = 5.0f;
         params_underwater_world.caves_enabled = false;
-        
+
         // A preset that generates a surface high in the air, guaranteed to be above sea level.
         params_sky_world.height_offset = 100.0f;
         params_sky_world.base_amplitude = 10.0f;
@@ -74,8 +74,9 @@ protected:
 class WorldAndWaterTest : public WorldGenerationTest {
 protected:
     void SetUp() override {
-        WorldGenerationTest::SetUp(); 
-        world_system = std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params_underwater_world, 1337);
+        WorldGenerationTest::SetUp();
+        world_system =
+            std::make_unique<SHIELD_WorldSystem>(nullptr, nullptr, params_underwater_world, 1337);
         water_system = std::make_unique<WaterSystem>(nullptr, world_system.get());
         world_system->SetWaterSystem(water_system.get());
     }
@@ -83,7 +84,6 @@ protected:
     std::unique_ptr<SHIELD_WorldSystem> world_system;
     std::unique_ptr<WaterSystem> water_system;
 };
-
 
 // =====================================================================================
 // CORE FUNCTIONALITY TESTS
@@ -94,7 +94,8 @@ TEST_F(WorldGenerationTest, ChunkIsGeneratedWithSDFAndHeightmap) {
     Chunk chunk({0, 0, 0});
     world_system.GenerateChunkData(chunk);
     ASSERT_FALSE(chunk.sdf_data.empty());
-    const size_t expected_sdf_size = (size_t)(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    const size_t expected_sdf_size =
+        (size_t)(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
     ASSERT_EQ(chunk.sdf_data.size(), expected_sdf_size);
     ASSERT_FALSE(chunk.heightmap_data.empty());
     const size_t expected_heightmap_size = (size_t)(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Z + 1);
@@ -123,7 +124,7 @@ TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {
     SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
     Chunk chunk({0, 0, 0});
     world_system.GenerateChunkData(chunk);
-    float inside_density = world_system.get_density_at({8, 4, 8}); 
+    float inside_density = world_system.get_density_at({8, 4, 8});
     float outside_density = world_system.get_density_at({8, 12, 8});
     EXPECT_LT(inside_density, 0.0f);
     EXPECT_GT(outside_density, 0.0f);
@@ -134,7 +135,7 @@ TEST_F(WorldGenerationTest, HeightmapIsCorrectForFlatSurface) {
     Chunk chunk({0, 0, 0});
     world_system.GenerateChunkData(chunk);
     ASSERT_FALSE(chunk.heightmap_data.empty());
-    for(float height : chunk.heightmap_data) {
+    for (float height : chunk.heightmap_data) {
         EXPECT_NEAR(height, params_guaranteed_surface.height_offset, 1e-6f);
     }
 }
@@ -162,16 +163,16 @@ TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
     params_with_caves.cave_threshold = 0.55f;
     params_with_caves.cave_frequency = 0.15f;
     params_with_caves.cave_carve_value = 4.0f;
-    
+
     int seed = 12345;
 
     SHIELD_WorldSystem world_no_caves(nullptr, nullptr, params_no_caves, seed);
-    Chunk chunk_no_caves({0,0,0});
+    Chunk chunk_no_caves({0, 0, 0});
     world_no_caves.GenerateChunkData(chunk_no_caves);
     World::MarchingCubes::PolygoniseTerrain(world_no_caves, chunk_no_caves, 0.0f, 1);
-    
+
     SHIELD_WorldSystem world_caves(nullptr, nullptr, params_with_caves, seed);
-    Chunk chunk_caves({0,0,0});
+    Chunk chunk_caves({0, 0, 0});
     world_caves.GenerateChunkData(chunk_caves);
     World::MarchingCubes::PolygoniseTerrain(world_caves, chunk_caves, 0.0f, 1);
 
@@ -187,10 +188,12 @@ TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
         }
     }
 
-    ASSERT_TRUE(chunk_no_caves.mesh_vertices.empty()) << "No-caves deep chunk should have no exposed surface";
+    ASSERT_TRUE(chunk_no_caves.mesh_vertices.empty())
+        << "No-caves deep chunk should have no exposed surface";
     ASSERT_FALSE(chunk_caves.mesh_vertices.empty()) << "Caves chunk should have vertices";
     ASSERT_GT(carved_air_samples, 0u) << "Caves should carve solid SDF samples into air";
-    ASSERT_GT(remaining_solid_samples, 0u) << "Caves should not erase the entire solid terrain volume";
+    ASSERT_GT(remaining_solid_samples, 0u)
+        << "Caves should not erase the entire solid terrain volume";
     EXPECT_NE(chunk_caves.mesh_vertices.size(), chunk_no_caves.mesh_vertices.size());
 }
 
@@ -254,7 +257,7 @@ TEST_F(WorldGenerationTest, NormalsPointUpwardsOnHorizontalSurface) {
     world_system.GenerateChunkData(chunk);
     World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, 1);
     ASSERT_FALSE(chunk.mesh_vertices.empty());
-    for(const auto& vertex : chunk.mesh_vertices) {
+    for (const auto& vertex : chunk.mesh_vertices) {
         EXPECT_NEAR(vertex.normal.y, 1.0f, 1e-5);
         EXPECT_NEAR(vertex.normal.x, 0.0f, 1e-5);
         EXPECT_NEAR(vertex.normal.z, 0.0f, 1e-5);
@@ -345,12 +348,12 @@ TEST_F(WorldAndWaterTest, DryHighAltitudeCellsStayDryAfterSimulation) {
 
     ASSERT_TRUE(chunk->has_water_sim.load());
     ASSERT_FALSE(chunk->water_level_data.empty());
-    // WATER-16 contract refresh (spec 021, 2026-07-03): spec 009 made the integer
+    //  contract refresh (, 2026-07-03):  made the integer
     // DEPTH the authoritative dryness (water_depth_mm == 0) and repurposed the
     // float water_level_data as the resting SURFACE mirror (bed + depth — i.e.
     // ~terrain height on dry land), seeded from WaterLevelAt at init
     // (WaterSystem.cpp seed_chunk_water). The old assertion pinned the
-    // pre-spec-009 sentinel convention (dry == SEA_LEVEL) and went RED the day
+    // pre- sentinel convention (dry == SEA_LEVEL) and went RED the day
     // the new seeding landed — this asserts what "dry" actually means now:
     // zero standing depth, and a surface that never rises above the bed.
     ASSERT_EQ(chunk->water_depth_mm.size(), chunk->water_level_data.size());
@@ -358,8 +361,7 @@ TEST_F(WorldAndWaterTest, DryHighAltitudeCellsStayDryAfterSimulation) {
     for (std::size_t i = 0; i < chunk->water_level_data.size(); ++i) {
         EXPECT_EQ(chunk->water_depth_mm[i], 0)
             << "high-altitude cell " << i << " gained standing water";
-        EXPECT_LE(chunk->water_level_data[i],
-                  chunk->water_sim_terrain_height[i] + 0.002f)
+        EXPECT_LE(chunk->water_level_data[i], chunk->water_sim_terrain_height[i] + 0.002f)
             << "cell " << i << " surface mirror rises above its bed (renders wet)";
     }
 
@@ -373,7 +375,7 @@ TEST_F(WorldAndWaterTest, WaterMeshNormalsPointUp) {
     chunk.has_water_sim.store(true);
     World::MarchingCubes::GenerateWaterMesh(*water_system, *world_system, chunk);
     ASSERT_FALSE(chunk.water_mesh_vertices.empty());
-    for(const auto& vertex : chunk.water_mesh_vertices) {
+    for (const auto& vertex : chunk.water_mesh_vertices) {
         EXPECT_NEAR(vertex.normal.y, 1.0f, 1e-5);
         EXPECT_NEAR(vertex.normal.x, 0.0f, 1e-5);
         EXPECT_NEAR(vertex.normal.z, 0.0f, 1e-5);
@@ -399,10 +401,10 @@ TEST_F(WorldGenerationTest, Performance_GenerateChunkData) {
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double, std::milli> duration_ms = end - start;
     double avg_time_ms = duration_ms.count() / num_chunks_to_test;
-    std::cout << "\n[  PERF  ] GenerateChunkData (" << num_chunks_to_test << " chunks): "
-              << duration_ms.count() << " ms total, "
-              << avg_time_ms << " ms average." << std::endl;
-    EXPECT_LT(avg_time_ms, 50.0); 
+    std::cout << "\n[  PERF  ] GenerateChunkData (" << num_chunks_to_test
+              << " chunks): " << duration_ms.count() << " ms total, " << avg_time_ms
+              << " ms average." << std::endl;
+    EXPECT_LT(avg_time_ms, 50.0);
 }
 
 // This test should now pass because params_archipelago is fixed in SetUp.
@@ -425,8 +427,8 @@ TEST_F(WorldGenerationTest, Performance_PolygoniseTerrain) {
     }
     double total_time_ms = std::accumulate(timings.begin(), timings.end(), 0.0);
     double avg_time_ms = total_time_ms / num_iterations;
-    std::cout << "\n[  PERF  ] PolygoniseTerrain (" << num_iterations << " iterations): "
-              << total_time_ms << " ms total, "
-              << avg_time_ms << " ms average." << std::endl;
+    std::cout << "\n[  PERF  ] PolygoniseTerrain (" << num_iterations
+              << " iterations): " << total_time_ms << " ms total, " << avg_time_ms << " ms average."
+              << std::endl;
     EXPECT_LT(avg_time_ms, 30.0);
 }

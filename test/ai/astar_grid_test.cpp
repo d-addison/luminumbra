@@ -1,4 +1,4 @@
-// T-I9-AI: deterministic grid A* pathfinding coverage. Pure (no ECS/world);
+// deterministic grid A* pathfinding coverage. Pure (no ECS/world);
 // validates shortest-path optimality, obstacle avoidance, corner-cut prevention,
 // the no-path case, and bit-stable determinism (the sim contract).
 
@@ -57,7 +57,8 @@ TEST(AStarGrid, RoutesAroundAWall) {
     EXPECT_TRUE((path.back() == GridCoord{4, 0}));
     // Never steps on a blocked cell (the x==2 column for z in 0..2).
     for (const auto& c : path) {
-        EXPECT_FALSE(c.x == 2 && c.z <= 2) << "path entered the wall at (" << c.x << "," << c.z << ")";
+        EXPECT_FALSE(c.x == 2 && c.z <= 2)
+            << "path entered the wall at (" << c.x << "," << c.z << ")";
     }
 }
 

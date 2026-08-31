@@ -7,8 +7,8 @@
 #include <sstream>
 #include <vector>
 
-#include "WindFieldSystem.h"
 #include "../core/DeterministicMath.h"
+#include "WindFieldSystem.h"
 
 // NOTE: call the wrappers via the fully-qualified DeterministicMath:: name (not
 // a short alias) so the SimDeterminismLint trig allow-check (which looks for the
@@ -24,7 +24,7 @@ namespace {
 // The base weather pressure is a LOW-FREQUENCY function of tick-time, drifting
 // over minutes (1800 ticks/in-game-minute at 30 Hz) so the sky state evolves
 // slowly, not every second. Same crawl-through-noise scheme the wind base uses.
-constexpr double kPressureDriftPerTick = 0.04; // noise-space units per tick
+constexpr double kPressureDriftPerTick = 0.04;    // noise-space units per tick
 constexpr float kPressureNoiseFrequency = 0.012f; // low-frequency large-scale swing
 // The per-cell spatial weather sample (the category map) is sampled over the
 // cell world coordinates, scrolled slowly by tick-time.
@@ -41,15 +41,15 @@ constexpr std::uint32_t kStormRampTicks = 45;       // ramp-in / decay-out windo
 constexpr float kStormRadiusM = 220.0f;             // influence radius (world metres)
 constexpr float kStormPeakIntensity = 1.0f;
 
-// Lightning strike schedule (T-I5a-5 B3). A storm cell whose envelope intensity is
+// Lightning strike schedule. A storm cell whose envelope intensity is
 // at/above kStrikeIntensityThreshold has a STRIKE OPPORTUNITY on a fixed tick epoch.
 // Whether it actually strikes, and where/how strongly, is a deterministic seeded
 // draw keyed on (seed+13, the cell's seed_salt, the strike-epoch index) -- NO
 // wall-clock, NO std::random. The schedule is bounded (kMaxLiveStrikes) and folded
 // into the `weather` world_hash sub-hash so strikes are replayable WORLD EVENTS.
-constexpr std::uint64_t kStrikeEpochTicks = 18;     // a strike opportunity every 18 ticks (~0.6 s)
-constexpr float kStrikeProbabilityAtPeak = 0.40f;   // per-opportunity strike chance at full intensity
-constexpr float kStrikeScatterM = 180.0f;           // strike scatter radius around the cell centre
+constexpr std::uint64_t kStrikeEpochTicks = 18;   // a strike opportunity every 18 ticks (~0.6 s)
+constexpr float kStrikeProbabilityAtPeak = 0.40f; // per-opportunity strike chance at full intensity
+constexpr float kStrikeScatterM = 180.0f;         // strike scatter radius around the cell centre
 
 // Category classification thresholds over the normalized pressure/climate. The
 // weather pressure dominates (clear at high pressure, precip at low); the
@@ -110,11 +110,16 @@ float UnitFloat(std::uint64_t key) {
 
 const char* WeatherCategoryName(WeatherCategory category) noexcept {
     switch (category) {
-        case WeatherCategory::Clear: return "clear";
-        case WeatherCategory::Overcast: return "overcast";
-        case WeatherCategory::Rain: return "rain";
-        case WeatherCategory::Snow: return "snow";
-        case WeatherCategory::Fog: return "fog";
+        case WeatherCategory::Clear:
+            return "clear";
+        case WeatherCategory::Overcast:
+            return "overcast";
+        case WeatherCategory::Rain:
+            return "rain";
+        case WeatherCategory::Snow:
+            return "snow";
+        case WeatherCategory::Fog:
+            return "fog";
     }
     return "clear";
 }
@@ -154,20 +159,23 @@ WeatherSystem::WeatherSystem(int world_seed)
     Update(0, Vec3(0.0f), nullptr);
 }
 
-void WeatherSystem::LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const {
+void WeatherSystem::LocalCell(const Vec3& world_pos,
+                              int& out_lx,
+                              int& out_lz,
+                              bool& in_region) const {
     const float cell = m_precip.cell_size_m();
     const std::int64_t gx = static_cast<std::int64_t>(std::floor(world_pos.x / cell));
     const std::int64_t gz = static_cast<std::int64_t>(std::floor(world_pos.z / cell));
     const std::int64_t lx = gx - m_precip.origin_cell_x();
     const std::int64_t lz = gz - m_precip.origin_cell_z();
-    in_region = lx >= 0 && lz >= 0 &&
-                lx < static_cast<std::int64_t>(m_precip.extent_cells()) &&
+    in_region = lx >= 0 && lz >= 0 && lx < static_cast<std::int64_t>(m_precip.extent_cells()) &&
                 lz < static_cast<std::int64_t>(m_precip.extent_cells());
     out_lx = static_cast<int>(lx);
     out_lz = static_cast<int>(lz);
 }
 
-WeatherCategory WeatherSystem::Classify(float pressure, float temperature, float humidity) noexcept {
+WeatherCategory
+WeatherSystem::Classify(float pressure, float temperature, float humidity) noexcept {
     // High pressure: clear, unless very humid (-> overcast haze).
     if (pressure >= kClearPressure) {
         return humidity > 0.55f ? WeatherCategory::Overcast : WeatherCategory::Clear;
@@ -216,8 +224,8 @@ void WeatherSystem::RebuildFields(std::uint64_t tick, const Vec3& region_anchor)
             const std::size_t i = m_precip.index(lx, lz);
             // Fold the slow pressure drift into the X coordinate so the whole
             // region's pressure evolves over time while keeping spatial variety.
-            px[i] = (base_world_x + static_cast<float>(lx) * cell) * kClimateNoiseFrequency
-                    + static_cast<float>(drift) * kPressureNoiseFrequency;
+            px[i] = (base_world_x + static_cast<float>(lx) * cell) * kClimateNoiseFrequency +
+                    static_cast<float>(drift) * kPressureNoiseFrequency;
             pz[i] = (base_world_z + static_cast<float>(lz) * cell) * kClimateNoiseFrequency;
         }
     }
@@ -226,10 +234,20 @@ void WeatherSystem::RebuildFields(std::uint64_t tick, const Vec3& region_anchor)
         m_scratch_pressure.data(), static_cast<int>(count), px, pz, 0.0f, 0.0f, m_weather_seed);
     // Distinct seed salts for the climate channels so temperature/humidity are
     // decorrelated from pressure but still come from the +12 stream.
-    m_temperature_noise->GenPositionArray2D(
-        m_scratch_temperature.data(), static_cast<int>(count), px, pz, 0.0f, 0.0f, m_weather_seed + 101);
-    m_humidity_noise->GenPositionArray2D(
-        m_scratch_humidity.data(), static_cast<int>(count), px, pz, 0.0f, 0.0f, m_weather_seed + 211);
+    m_temperature_noise->GenPositionArray2D(m_scratch_temperature.data(),
+                                            static_cast<int>(count),
+                                            px,
+                                            pz,
+                                            0.0f,
+                                            0.0f,
+                                            m_weather_seed + 101);
+    m_humidity_noise->GenPositionArray2D(m_scratch_humidity.data(),
+                                         static_cast<int>(count),
+                                         px,
+                                         pz,
+                                         0.0f,
+                                         0.0f,
+                                         m_weather_seed + 211);
 
     for (int lz = 0; lz < extent; ++lz) {
         for (int lx = 0; lx < extent; ++lx) {
@@ -265,7 +283,9 @@ void WeatherSystem::RebuildFields(std::uint64_t tick, const Vec3& region_anchor)
     }
 }
 
-void WeatherSystem::StepStormCells(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind) {
+void WeatherSystem::StepStormCells(std::uint64_t tick,
+                                   const Vec3& region_anchor,
+                                   const WindFieldSystem* wind) {
     // 1) Age + advect existing cells; drop expired ones. Canonical spawn order is
     // preserved (erase-by-index keeps relative order).
     std::vector<StormCell> survivors;
@@ -308,10 +328,10 @@ void WeatherSystem::StepStormCells(std::uint64_t tick, const Vec3& region_anchor
     // distinct schedules). NO wall-clock, NO std::random.
     if (tick > 0 && (tick % kStormSpawnEpochTicks) == 0) {
         const std::uint64_t epoch = tick / kStormSpawnEpochTicks;
-        const std::int64_t region_cx = static_cast<std::int64_t>(
-            std::floor(region_anchor.x / m_precip.cell_size_m()));
-        const std::int64_t region_cz = static_cast<std::int64_t>(
-            std::floor(region_anchor.z / m_precip.cell_size_m()));
+        const std::int64_t region_cx =
+            static_cast<std::int64_t>(std::floor(region_anchor.x / m_precip.cell_size_m()));
+        const std::int64_t region_cz =
+            static_cast<std::int64_t>(std::floor(region_anchor.z / m_precip.cell_size_m()));
         std::uint64_t key = static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_weather_seed));
         key = Mix64(key ^ (epoch * 0x100000001b3ull));
         key ^= static_cast<std::uint64_t>(region_cx) * 0x9e3779b1u;
@@ -331,14 +351,14 @@ void WeatherSystem::StepStormCells(std::uint64_t tick, const Vec3& region_anchor
             cell.center_world = Vec2(region_anchor.x + ox, region_anchor.z + oz);
             // Initial velocity from the wind at the spawn point (ground layer).
             if (wind) {
-                cell.velocity = wind->SampleWind(Vec3(cell.center_world.x, 5.0f, cell.center_world.y),
-                                                 WindLayer::Ground);
+                cell.velocity = wind->SampleWind(
+                    Vec3(cell.center_world.x, 5.0f, cell.center_world.y), WindLayer::Ground);
             }
             cell.intensity = 0.0f;
             cell.spawn_tick = tick;
             cell.lifetime_ticks = kStormLifetimeTicks;
             // Per-cell salt derived from the schedule key (deterministic, unique
-            // per epoch). T-I5a-5 seeds its strike stream from this.
+            // per epoch).  seeds its strike stream from this.
             cell.seed_salt = static_cast<std::uint32_t>(Mix64(key ^ 0xC0FFEEull) & 0xffffffffull);
             m_storm_cells.push_back(cell);
         }
@@ -390,12 +410,14 @@ void WeatherSystem::StepStrikes(std::uint64_t tick) {
             continue;
         }
         if (static_cast<int>(m_strikes.size()) >= kMaxLiveStrikes) {
-            break; // bounded (F9): drop further strikes this epoch
+            break; // bounded : drop further strikes this epoch
         }
 
         // Draws 2-4: scatter offset + magnitude (independent splitmix outputs).
-        const float ox = (UnitFloat(Mix64(state ^ 0x1111222233334444ull)) * 2.0f - 1.0f) * kStrikeScatterM;
-        const float oz = (UnitFloat(Mix64(state ^ 0x5555666677778888ull)) * 2.0f - 1.0f) * kStrikeScatterM;
+        const float ox =
+            (UnitFloat(Mix64(state ^ 0x1111222233334444ull)) * 2.0f - 1.0f) * kStrikeScatterM;
+        const float oz =
+            (UnitFloat(Mix64(state ^ 0x5555666677778888ull)) * 2.0f - 1.0f) * kStrikeScatterM;
         const float mag_draw = UnitFloat(Mix64(state ^ 0x99990000AAAABBBBull));
 
         StrikeEvent s;
@@ -413,8 +435,10 @@ void WeatherSystem::StepStrikes(std::uint64_t tick) {
     // is over a bounded set; keeps the sub-hash byte layout independent of storm-
     // cell iteration order (defensive determinism). Bit-exact float compares.
     std::sort(m_strikes.begin(), m_strikes.end(), [](const StrikeEvent& a, const StrikeEvent& b) {
-        if (a.strike_tick != b.strike_tick) return a.strike_tick < b.strike_tick;
-        if (a.storm_salt != b.storm_salt) return a.storm_salt < b.storm_salt;
+        if (a.strike_tick != b.strike_tick)
+            return a.strike_tick < b.strike_tick;
+        if (a.storm_salt != b.storm_salt)
+            return a.storm_salt < b.storm_salt;
         if (DeterministicMath::BitsOf(a.world_x) != DeterministicMath::BitsOf(b.world_x)) {
             return DeterministicMath::BitsOf(a.world_x) < DeterministicMath::BitsOf(b.world_x);
         }
@@ -467,20 +491,22 @@ float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
     return best;
 }
 
-void WeatherSystem::Update(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind) {
+void WeatherSystem::Update(std::uint64_t tick,
+                           const Vec3& region_anchor,
+                           const WindFieldSystem* wind) {
     m_last_tick = tick;
     // 1) Category map + base precipitation field for this tick.
     RebuildFields(tick, region_anchor);
     // 2) Storm cells: age/advect existing, spawn on the deterministic schedule.
     StepStormCells(tick, region_anchor, wind);
     // 3) Lightning strikes: storm cells at/above the intensity threshold schedule
-    // strike events from the seed+13 stream (T-I5a-5 B3). MUST run after the storm
+    // strike events from the seed+13 stream. MUST run after the storm
     // step so cell intensities + salts are current; folded into the weather sub-hash.
     StepStrikes(tick);
     // 4) Anchor wind diagnostic (for the overlay's wind-direction uniform).
     if (wind) {
-        m_anchor_wind = wind->SampleWind(Vec3(region_anchor.x, 5.0f, region_anchor.z),
-                                         WindLayer::Ground);
+        m_anchor_wind =
+            wind->SampleWind(Vec3(region_anchor.x, 5.0f, region_anchor.z), WindLayer::Ground);
     } else {
         m_anchor_wind = Vec2(0.0f);
     }
@@ -523,9 +549,9 @@ std::string WeatherSystem::ComputeWeatherSubHash() const {
     // fnv1a-64 over: seed, tick, grid geometry, origin, the per-cell category +
     // precip in the FieldGrid canonical order, then the bounded storm-cell set
     // (count + each cell's pos/velocity/intensity/spawn/lifetime/salt), then the
-    // lightning STRIKE schedule (T-I5a-5 B3: lightning seed + count + each strike's
+    // lightning STRIKE schedule ( : lightning seed + count + each strike's
     // tick/x/z/magnitude/salt). The strike block REPLACES the reserved single-0
-    // slot B1 left -- this is world_hash MEGA-BUMP #3. Bit-exact float hashing so a
+    // slot  left -- this is world_hash hash revision. Bit-exact float hashing so a
     // one-ULP drift fails the gate loudly.
     std::uint64_t hash = 14695981039346656037ull; // fnv offset basis
     MixU64(hash, static_cast<std::uint64_t>(static_cast<std::uint32_t>(m_weather_seed)));
@@ -556,8 +582,8 @@ std::string WeatherSystem::ComputeWeatherSubHash() const {
         MixU64(hash, static_cast<std::uint64_t>(cell.seed_salt));
     }
 
-    // Lightning strike schedule (T-I5a-5 B3, world_hash MEGA-BUMP #3). This REPLACES
-    // the reserved single-0 slot B1 left here. The strikes are sim-authoritative
+    // Lightning strike schedule ( , world_hash hash revision). This REPLACES
+    // the reserved single-0 slot  left here. The strikes are sim-authoritative
     // WORLD EVENTS scheduled from the seed+13 stream; folding them in deliberately
     // changes the `weather` sub-hash (and thus the composite world_hash). Canonical
     // order (strike_tick asc, storm_salt, x, z) is enforced in StepStrikes. Bit-exact

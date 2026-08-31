@@ -1,7 +1,7 @@
 #pragma once
 
-// RENDER-20 (spec 021): world-dressing PLACEMENT COMPUTATION, extracted from the
-// two one-time first-IN_GAME-frame bring-up blocks in main_client.cpp (the T-I8
+// world-dressing PLACEMENT COMPUTATION, extracted from the
+// two one-time first-IN_GAME-frame bring-up blocks in main_client.cpp (the
 // tree/rock/bush scatter and the ambient-wildlife spawn loop, together ~30 s of
 // main-thread candidate probing in a debug build). The loops here are the legacy
 // inline loops MOVED VERBATIM — same RNG construction, same seed derivation from
@@ -20,7 +20,7 @@
 // stream state threads through the three Compute* calls explicitly. Never split
 // the loops per-cell.
 //
-// RENDER-ONLY: placements are client decoration seeded from the spawn anchor and
+// placements are client decoration seeded from the spawn anchor and
 // never feed world_hash (the inline code never did either). NO GL and NO entt
 // here — the placement structs carry everything the main-thread consume needs to
 // do the (cheap) GL upload / EnTT / physics registrations afterwards.
@@ -45,12 +45,12 @@ struct WorldDressingCallbacks {
     // ws->WaterLevelAt(x, z): sea + perched-lake water level at a column.
     std::function<float(float, float)> water_level;
     // ws->get_density_at({x, y, z}): SDF read for the roofed-cave reject.
-    // DENSITY CONVENTION (FOLIAGE-01 root cause): SOLID = < 0; air = >= 0.
+    // DENSITY CONVENTION ( root cause): SOLID = < 0; air = >= 0.
     std::function<float(float, float, float)> density_at;
-    // biomes_enabled() ? biome_table().vegetation_for(BiomeIdAt(x, z)).density
-    //                  : 0.3f — the per-biome vegetation density gating shrubs.
+    // biomes_enabled ? biome_table.vegetation_for(BiomeIdAt(x, z)).density
+    // 0.3f — the per-biome vegetation density gating shrubs.
     std::function<float(float, float)> vegetation_density;
-    // biome_table().name_for(BiomeIdAt(x, z)): the wildlife species-selection key.
+    // biome_table.name_for(BiomeIdAt(x, z)): the wildlife species-selection key.
     std::function<std::string(float, float)> biome_name;
     // Resolved index into the species roster for (biome, pick): the client binds
     // SelectForBiome plus the legacy pick-modulo-roster fallback; the placement
@@ -63,37 +63,37 @@ struct WorldDressingCallbacks {
 // themselves (reach/cell/caps/densities) stay as named constants inside the
 // moved loops — they are part of the verbatim computation, not configuration.
 struct WorldDressingParams {
-    float anchor_x = 0.0f;  // spawn anchor: seeds the scatter RNG + centres every loop
+    float anchor_x = 0.0f; // spawn anchor: seeds the scatter RNG + centres every loop
     float anchor_z = 0.0f;
     // Procgen palette sizes, pinned BEFORE dispatch (the palette builders are
     // GL-side and cheap; none of them touches the scatter RNG stream). The
     // placement stores palette_index = position-hash % count.
     int tree_palette_count = 0;
-    int rock_palette_count = 0;  // 0 = the legacy code skipped the ENTIRE rock loop
-    int bush_palette_count = 0;  // 0 = the legacy code skipped the ENTIRE bush loop
+    int rock_palette_count = 0; // 0 = the legacy code skipped the ENTIRE rock loop
+    int bush_palette_count = 0; // 0 = the legacy code skipped the ENTIRE bush loop
     // Ambient wildlife: computed only when interactive play + a species roster +
     // a successfully loaded rig were all present at dispatch time.
     bool compute_wildlife = false;
-    int herd_count = 12;  // render.creature_spawn SpawnHerdCount (config-resolved)
+    int herd_count = 12; // render.creature_spawn SpawnHerdCount (config-resolved)
 };
 
 // One tree candidate that PASSED every rejection test, in loop order.
 // palette_index is -1 when the tree palette was empty: the candidate still
 // counted toward the cap and the log (legacy `placed`), but nothing is emitted.
 struct TreePlacement {
-    glm::vec3 position{0.0f};                       // (x, terrain h, z)
-    glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};     // yaw about +Y
-    float eff_scale = 1.0f;  // s * maturityScale * geneticSize (genome stream applied)
-    std::int32_t palette_index = -1;                // procgen://tree_<idx>
+    glm::vec3 position{0.0f};                   // (x, terrain h, z)
+    glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f}; // yaw about +Y
+    float eff_scale = 1.0f;          // s * maturityScale * geneticSize (genome stream applied)
+    std::int32_t palette_index = -1; // procgen://tree_<idx>
 };
 
 // One placed rock, in loop order. Position/scale carry the settle-into-ground
 // offset and the Y-squash jitter already applied (they were RNG draws).
 struct RockPlacement {
-    glm::vec3 position{0.0f};                       // y = h - 0.35 * s
-    glm::vec3 scale{1.0f};                          // (s, s * yJitter, s)
+    glm::vec3 position{0.0f}; // y = h - 0.35 * s
+    glm::vec3 scale{1.0f};    // (s, s * yJitter, s)
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
-    std::int32_t palette_index = 0;                 // procgen://rock_<idx>
+    std::int32_t palette_index = 0; // procgen://rock_<idx>
 };
 
 // One placed shrub, in loop order (same shape as rocks; y = h - 0.12 * s).
@@ -101,7 +101,7 @@ struct BushPlacement {
     glm::vec3 position{0.0f};
     glm::vec3 scale{1.0f};
     glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
-    std::int32_t palette_index = 0;                 // procgen://bush_<idx>
+    std::int32_t palette_index = 0; // procgen://bush_<idx>
 };
 
 // One wildlife spawn-loop emission, in loop order. A water-cell candidate emits
@@ -109,19 +109,22 @@ struct BushPlacement {
 // the SAME vector so the main-thread consume replays the legacy entity-creation
 // order exactly. Creature fields carry every RNG draw the legacy loop made.
 struct CreaturePlacement {
-    enum class Kind : std::uint8_t { Creature, WaterHole };
+    enum class Kind : std::uint8_t {
+        Creature,
+        WaterHole
+    };
     Kind kind = Kind::Creature;
     // Both kinds. Creature: (wx, ground + 1.2, wz) — the settle-onto-ground spawn
     // point (also the physics avatar spawn). WaterHole: (wx, waterLevel, wz).
     glm::vec3 position{0.0f};
     // Creature-only fields (defaulted/ignored for WaterHole):
-    float yaw = 0.0f;                 // spawn heading (angleAxis about +Y)
-    std::int32_t species_index = 0;   // resolved roster index (species_for_biome)
-    float size = 1.0f;                // overall genome size multiplier
-    glm::vec3 build_scale{1.0f};      // ComputeCreatureBuild proportions (x/y/z)
-    float thirst = 0.0f;              // seeded initial thirst
-    float anim_phase = 0.0f;          // unit draw; consume sets player.time = phase * 2.0
-    bool female = false;              // alternate M/F (loop index parity)
+    float yaw = 0.0f;               // spawn heading (angleAxis about +Y)
+    std::int32_t species_index = 0; // resolved roster index (species_for_biome)
+    float size = 1.0f;              // overall genome size multiplier
+    glm::vec3 build_scale{1.0f};    // ComputeCreatureBuild proportions (x/y/z)
+    float thirst = 0.0f;            // seeded initial thirst
+    float anim_phase = 0.0f;        // unit draw; consume sets player.time = phase * 2.0
+    bool female = false;            // alternate M/F (loop index parity)
 };
 
 // The full computation output — what the background job fills in.
@@ -129,7 +132,7 @@ struct WorldDressingResult {
     std::vector<TreePlacement> trees;
     std::vector<RockPlacement> rocks;
     std::vector<BushPlacement> bushes;
-    std::vector<CreaturePlacement> wildlife;  // empty when compute_wildlife is false
+    std::vector<CreaturePlacement> wildlife; // empty when compute_wildlife is false
 };
 
 // The legacy scatter-RNG seed derivation (moved verbatim): the shared SplitMix64
@@ -160,4 +163,4 @@ std::vector<CreaturePlacement> ComputeWildlifePlacements(const WorldDressingPara
 WorldDressingResult ComputeWorldDressing(const WorldDressingParams& params,
                                          const WorldDressingCallbacks& cbs);
 
-}  // namespace Luminumbra::Client
+} // namespace Luminumbra::Client

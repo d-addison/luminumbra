@@ -1,7 +1,7 @@
 #version 450 core
 
 // ===========================================================================
-// T-I5a-1: GPU particle framework fragment stage.
+// GPU particle framework fragment stage.
 //
 // Forward-lit (sun + ambient + nearest point lights) emissive billboard with
 // soft-particle alpha fade against the scene depth. Blended into the lit HDR
@@ -61,7 +61,7 @@ float sprite_mask(vec2 uv) {
     return 1.0 - smoothstep(0.25, 0.5, dist);
 }
 
-// T-I5a-DR-atmospheric-visuals: streak (rain) mask. The quad was elongated along
+// streak (rain) mask. The quad was elongated along
 // its local Y in the vertex stage; uv.x is the ACROSS axis (thin) and uv.y the
 // ALONG axis (the streak length). A near-vertical bright filament with a soft
 // cross-falloff + rounded ends so rain reads as a light translucent STREAK, not a
@@ -79,12 +79,12 @@ float streak_mask(vec2 uv) {
 void main() {
     vec2 uv = fs_in.texCoord;
     bool isStreak = fs_in.streakAspect > 1.5;
-    // T-I5a-DR-storm-motion-v3: rain-impact FOAM is tagged with a dedicated atlas
+    // rain-impact FOAM is tagged with a dedicated atlas
     // layer sentinel (precip_splash.json atlas_layer = 4) so it renders as a clean
     // whitish foam burst rather than a scene-tinted emissive sprite. All other
     // round (non-streak) particles (e.g. magical sparkles) keep the emissive path.
     bool isFoam = (!isStreak) && (fs_in.atlasLayer > 3.5);
-    float shape = isStreak ? streak_mask(uv) : sprite_mask(uv);
+    float shape = isStreak ? streak_mask(uv): sprite_mask(uv);
     if (shape <= 0.0) {
         discard;
     }
@@ -112,7 +112,7 @@ void main() {
 
     vec4 finalColor = fs_in.color;
     if (isStreak) {
-        // T-I5a-DR-storm-motion-v3: CLEAN RAIN. The owner saw "coloured TV static"
+        // CLEAN RAIN. The owner saw "coloured TV static"
         // -- cyan/teal/pink speckle. Root cause: the streak colour was modulated by
         // the scene forward-lighting term (`lit` = ambient + sun + up to 4 coloured
         // point lights), so every streak picked up a per-position hue and the field
@@ -130,7 +130,7 @@ void main() {
         // is soft-edged. Kept well below 1 so the rain stays see-through in motion.
         finalColor.a = clamp(fs_in.color.a, 0.0, 1.0) * shape * 0.85 * softFade;
     } else if (isFoam) {
-        // T-I5a-DR-storm-motion-v3: SPLASH = subtle whitish foam burst, not coloured
+        // SPLASH = subtle whitish foam burst, not coloured
         // dots. The impact spray previously ran through the emissive path
         // (scene-light tint + additive HDR glow core), which painted small COLOURED
         // speckle scattered around the ground line. Now the splash is a fixed pale

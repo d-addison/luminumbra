@@ -1,8 +1,8 @@
-// T-I3-14: .lmesh v2 (LMS2) + .lanim round-trip coverage.
+// .lmesh v2 (LMS2) +.lanim round-trip coverage.
 //
 // Builds a tiny rigged glTF (two joints, skinned triangle, one animation with
 // rotation + translation channels) programmatically, runs the asset processor
-// import, reloads the emitted LMS2 + .lanim files and asserts field-level
+// import, reloads the emitted LMS2 +.lanim files and asserts field-level
 // equality against the authored fixture. A double-run bitwise determinism
 // check guards the writer.
 
@@ -64,7 +64,7 @@ private:
     std::filesystem::path path_;
 };
 
-template <typename T>
+template<typename T>
 BufferView AppendValues(std::vector<unsigned char>& buffer, const std::vector<T>& values) {
     while ((buffer.size() % 4) != 0) {
         buffer.push_back(0);
@@ -102,39 +102,82 @@ std::string Base64Encode(const std::vector<unsigned char>& bytes) {
 // Authored animation keys (shared between the glTF fixture and assertions).
 const std::vector<float> kAnimTimes = {0.0f, 1.0f};
 const std::vector<float> kHeadRotationKeys = {
-    0.0f, 0.0f, 0.0f, 1.0f,
-    0.0f, 0.0f, 0.7071068f, 0.7071068f,
+    0.0f,
+    0.0f,
+    0.0f,
+    1.0f,
+    0.0f,
+    0.0f,
+    0.7071068f,
+    0.7071068f,
 };
 const std::vector<float> kSpineTranslationKeys = {
-    0.0f, 0.0f, 0.0f,
-    0.0f, 0.25f, 0.0f,
+    0.0f,
+    0.0f,
+    0.0f,
+    0.0f,
+    0.25f,
+    0.0f,
 };
 
 void WriteRiggedTriangleGltf(const std::filesystem::path& path) {
     const std::vector<float> positions = {
-        0.0f, 0.0f, 0.0f,
-        1.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
     };
     const std::vector<float> normals = {
-        0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     };
     const std::vector<float> uvs = {
-        0.0f, 0.0f,
-        1.0f, 0.0f,
-        0.0f, 1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     };
     const std::vector<uint8_t> jointIndices = {
-        0, 0, 0, 0,
-        0, 1, 0, 0,
-        1, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
     };
     const std::vector<float> jointWeights = {
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.5f, 0.5f, 0.0f, 0.0f,
-        1.0f, 0.0f, 0.0f, 0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.5f,
+        0.5f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.0f,
     };
     const std::vector<uint16_t> indices = {0, 1, 2};
 
@@ -163,15 +206,17 @@ void WriteRiggedTriangleGltf(const std::filesystem::path& path) {
     gltf << R"({
   "asset": {"version": "2.0"},
   "buffers": [{
-    "byteLength": )" << buffer.size() << R"(,
-    "uri": "data:application/octet-stream;base64,)" << Base64Encode(buffer) << R"("
+    "byteLength": )"
+         << buffer.size() << R"(,
+    "uri": "data:application/octet-stream;base64,)"
+         << Base64Encode(buffer) << R"("
   }],
   "bufferViews": [
 )";
 
     for (size_t i = 0; i < views.size(); ++i) {
-        gltf << R"(    {"buffer": 0, "byteOffset": )" << views[i].offset
-             << R"(, "byteLength": )" << views[i].length << "}";
+        gltf << R"(    {"buffer": 0, "byteOffset": )" << views[i].offset << R"(, "byteLength": )"
+             << views[i].length << "}";
         gltf << ((i + 1 == views.size()) ? "\n" : ",\n");
     }
 
@@ -224,10 +269,10 @@ std::vector<char> ReadAllBytes(const std::filesystem::path& path) {
     return std::vector<char>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-const SkinnedVertexData* FindVertexByPosition(const SkinnedMeshAsset& mesh, float x, float y, float z) {
+const SkinnedVertexData*
+FindVertexByPosition(const SkinnedMeshAsset& mesh, float x, float y, float z) {
     for (const SkinnedVertexData& v : mesh.vertices) {
-        if (std::fabs(v.pos[0] - x) < 0.0001f &&
-            std::fabs(v.pos[1] - y) < 0.0001f &&
+        if (std::fabs(v.pos[0] - x) < 0.0001f && std::fabs(v.pos[1] - y) < 0.0001f &&
             std::fabs(v.pos[2] - z) < 0.0001f) {
             return &v;
         }
@@ -235,7 +280,8 @@ const SkinnedVertexData* FindVertexByPosition(const SkinnedMeshAsset& mesh, floa
     return nullptr;
 }
 
-const AnimTrack* FindTrack(const AnimClipAsset& clip, uint32_t nameHash, AnimTargetType targetType) {
+const AnimTrack*
+FindTrack(const AnimClipAsset& clip, uint32_t nameHash, AnimTargetType targetType) {
     for (const AnimTrack& track : clip.tracks) {
         if (track.header.jointNameHash == nameHash &&
             track.header.targetType == static_cast<uint32_t>(targetType)) {
@@ -300,7 +346,8 @@ TEST(SkeletalAssetRoundTrip, RiggedGltfImportsToLms2AndLanimWithFieldEquality) {
     EXPECT_EQ(v0->joints[0], 0);
     EXPECT_EQ(v0->weights[0], 255);
     EXPECT_EQ(v0->weights[1], 0);
-    EXPECT_EQ(static_cast<int>(v0->weights[0]) + v0->weights[1] + v0->weights[2] + v0->weights[3], 255);
+    EXPECT_EQ(static_cast<int>(v0->weights[0]) + v0->weights[1] + v0->weights[2] + v0->weights[3],
+              255);
 
     EXPECT_EQ(v1->joints[0], 0);
     EXPECT_EQ(v1->joints[1], 1);
@@ -308,7 +355,8 @@ TEST(SkeletalAssetRoundTrip, RiggedGltfImportsToLms2AndLanimWithFieldEquality) {
     // ties) to 128/127, summing to exactly 255.
     EXPECT_EQ(v1->weights[0], 128);
     EXPECT_EQ(v1->weights[1], 127);
-    EXPECT_EQ(static_cast<int>(v1->weights[0]) + v1->weights[1] + v1->weights[2] + v1->weights[3], 255);
+    EXPECT_EQ(static_cast<int>(v1->weights[0]) + v1->weights[1] + v1->weights[2] + v1->weights[3],
+              255);
 
     EXPECT_EQ(v2->joints[0], 1);
     EXPECT_EQ(v2->weights[0], 255);
@@ -317,7 +365,7 @@ TEST(SkeletalAssetRoundTrip, RiggedGltfImportsToLms2AndLanimWithFieldEquality) {
         EXPECT_LT(index, mesh.header.vertexCount);
     }
 
-    // --- .lanim sibling keyed by joint-name-hash ---
+    // ---.lanim sibling keyed by joint-name-hash ---
     AnimClipAsset clip;
     ASSERT_TRUE(LoadAnimClipAsset(animOutput.string(), clip));
     EXPECT_EQ(clip.header.magic, kLanimMagic);
@@ -331,20 +379,27 @@ TEST(SkeletalAssetRoundTrip, RiggedGltfImportsToLms2AndLanimWithFieldEquality) {
     EXPECT_EQ(rotation->header.componentCount, 4u);
     ASSERT_EQ(rotation->times.size(), kAnimTimes.size());
     ASSERT_EQ(rotation->values.size(), kHeadRotationKeys.size());
-    EXPECT_EQ(std::memcmp(rotation->times.data(), kAnimTimes.data(),
-                          kAnimTimes.size() * sizeof(float)), 0);
-    EXPECT_EQ(std::memcmp(rotation->values.data(), kHeadRotationKeys.data(),
-                          kHeadRotationKeys.size() * sizeof(float)), 0);
+    EXPECT_EQ(
+        std::memcmp(rotation->times.data(), kAnimTimes.data(), kAnimTimes.size() * sizeof(float)),
+        0);
+    EXPECT_EQ(std::memcmp(rotation->values.data(),
+                          kHeadRotationKeys.data(),
+                          kHeadRotationKeys.size() * sizeof(float)),
+              0);
 
-    const AnimTrack* translation = FindTrack(clip, HashJointName("spine"), AnimTargetType::Translation);
+    const AnimTrack* translation =
+        FindTrack(clip, HashJointName("spine"), AnimTargetType::Translation);
     ASSERT_NE(translation, nullptr);
     EXPECT_EQ(translation->header.keyCount, 2u);
     EXPECT_EQ(translation->header.componentCount, 3u);
     ASSERT_EQ(translation->values.size(), kSpineTranslationKeys.size());
-    EXPECT_EQ(std::memcmp(translation->times.data(), kAnimTimes.data(),
-                          kAnimTimes.size() * sizeof(float)), 0);
-    EXPECT_EQ(std::memcmp(translation->values.data(), kSpineTranslationKeys.data(),
-                          kSpineTranslationKeys.size() * sizeof(float)), 0);
+    EXPECT_EQ(std::memcmp(
+                  translation->times.data(), kAnimTimes.data(), kAnimTimes.size() * sizeof(float)),
+              0);
+    EXPECT_EQ(std::memcmp(translation->values.data(),
+                          kSpineTranslationKeys.data(),
+                          kSpineTranslationKeys.size() * sizeof(float)),
+              0);
 }
 
 TEST(SkeletalAssetRoundTrip, ReimportIsBitwiseDeterministic) {

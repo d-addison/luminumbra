@@ -198,10 +198,11 @@ Rml::TextureHandle RmlRenderer::LoadTexture(Rml::Vector2i& texture_dimensions, c
     // The path needs to be relative to the executable or an absolute path.
     // The RmlFileInterface prepends the root path, so we use `source` directly.
     std::string full_path = "assets/" + source; // Example, adjust if needed
-    
+
     // OLD LINE WITH TYPO:
-    // GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str(), SOIL_LOAD_AUTO, SOIL_CREATE_NEW_ID, SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
-    
+    // GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str, SOIL_LOAD_AUTO,
+    // SOIL_CREATE_NEW_ID, SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
+
     // CORRECTED LINE:
     GLuint texture_id = SOIL_load_OGL_texture(full_path.c_str(), SOIL_LOAD_AUTO, SOIL_CREATE_NEW_ID, SOIL_FLAG_INVERT_Y | SOIL_FLAG_NTSC_SAFE_RGB | SOIL_FLAG_COMPRESS_TO_DXT);
     

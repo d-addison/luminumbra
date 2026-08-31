@@ -1,13 +1,13 @@
 #version 450 core
-// Spec 015 Pillar B (RENDER-17, Wave F F7): froxel INJECT — per froxel, evaluate
+//  froxel volumetrics (,  ): froxel INJECT — per froxel, evaluate
 // the participating-media density and its in-scattered radiance, writing
 // (rgb = in-scatter, a = extinction sigma) into the scatter volume. The grid
 // geometry (160x90x64, exponential slices 0.5..160 m) mirrors FroxelGrid.h —
 // the FroxelModel gtest anchors the C++ side; FroxelGpu pins this GLSL side.
 //
-// The C-1 COMPOSE (FR-B-006): sun visibility samples BOTH the depth cascade AND
+// The  COMPOSE: sun visibility samples BOTH the depth cascade AND
 // the tinted-transmission cascade, so light through stained glass scatters as a
-// COLORED shaft — the signature Pillar B x C-1 interaction.
+// COLORED shaft — the signature froxel volumetrics x  interaction.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(rgba16f, binding = 0) uniform writeonly image3D u_scatter;
@@ -66,14 +66,14 @@ void main() {
     float h = max(worldPos.y - u_baseHeight, 0.0);
     float sigma = u_baseDensity * exp(-h * u_densityFalloff);
 
-    // Sun visibility through the cascade (single tap; media is soft) + the C-1
+    // Sun visibility through the cascade (single tap; media is soft) + the
     // tinted transmission. Cascade selection keys on the view-space |z| like the
     // lighting pass.
     float viewZ = abs(viewPos.z);
     int ci = 0;
-    ci += (viewZ > u_cascadeSplits.x) ? 1 : 0;
-    ci += (viewZ > u_cascadeSplits.y) ? 1 : 0;
-    ci += (viewZ > u_cascadeSplits.z) ? 1 : 0;
+    ci += (viewZ > u_cascadeSplits.x) ? 1: 0;
+    ci += (viewZ > u_cascadeSplits.y) ? 1: 0;
+    ci += (viewZ > u_cascadeSplits.z) ? 1: 0;
     vec4 ls = u_lightSpaceMatrices[ci] * vec4(worldPos, 1.0);
     vec3 proj = ls.xyz / ls.w * 0.5 + 0.5;
     float sunVis = 1.0;
@@ -81,7 +81,7 @@ void main() {
     if (proj.z <= 1.0 && all(greaterThanEqual(proj.xy, vec2(0.0))) &&
         all(lessThanEqual(proj.xy, vec2(1.0)))) {
         float occDepth = texture(u_shadowCascades, vec3(proj.xy, ci)).r;
-        sunVis = (proj.z - 0.002 > occDepth) ? 0.0 : 1.0;
+        sunVis = (proj.z - 0.002 > occDepth) ? 0.0: 1.0;
         if (u_shadowTintEnabled != 0) {
             sunTint = texture(u_shadowTintCascades, vec3(proj.xy, ci)).rgb;
         }

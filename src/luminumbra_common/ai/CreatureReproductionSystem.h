@@ -1,7 +1,7 @@
 #pragma once
 
-// Track (a) — CREATURE EVOLUTION via SEXUAL reproduction. Makes the ecology generational AND
-// requires a MALE + a FEMALE to find each other and COURT before a baby is born:
+// Creature evolution: CREATURE EVOLUTION via SEXUAL reproduction. Makes the ecology generational
+// AND requires a MALE + a FEMALE to find each other and COURT before a baby is born:
 //   * a "ready" creature (mature, well-fed, healthy, off cooldown) SEEKS the nearest ready
 //     opposite-sex mate (RunMateSeekingOnTick — runs BEFORE the physics bridge so the steer
 //     becomes real movement),
@@ -29,13 +29,14 @@
 
 #include <entt/entt.hpp>
 
-#include "CreatureBrain.h"   // CreatureAction (skip mate-seeking while fleeing)
+#include "CreatureBrain.h" // CreatureAction (skip mate-seeking while fleeing)
 #include "CreatureGenome.h"
-#include "UtilityAI.h"       // utility_clamp01
+#include "CreatureSpeciesRegistry.h"
+#include "UtilityAI.h" // utility_clamp01
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
-#include "../components/InstinctComponents.h"  // PerceptionComponent (FR-4 sensory phenotype)
+#include "../components/InstinctComponents.h" // PerceptionComponent ( sensory phenotype)
 #include "../core/DeterministicMath.h"
 #include "../core/DeterministicRng.h"
 
@@ -48,25 +49,25 @@ inline constexpr std::uint64_t kReproSeedOffset = 16ull;
 
 // Eligibility: mature, healthy, well-fed, off cooldown, alive (and prey — predators don't
 // breed in this slice; the heritable population being selected on is the prey).
-inline constexpr std::uint32_t kReproMaturityTicks = 90;    // ~3s @ 30Hz
-inline constexpr std::uint32_t kReproCooldownTicks = 300;   // ~10s @ 30Hz after a birth
+inline constexpr std::uint32_t kReproMaturityTicks = 90;  // ~3s @ 30Hz
+inline constexpr std::uint32_t kReproCooldownTicks = 300; // ~10s @ 30Hz after a birth
 inline constexpr float kReproHealthyStamina = 0.5f;
 // Mate search + courtship geometry.
-inline constexpr float kMateSeekRadius = 45.0f;             // can sense a mate this far
-inline constexpr float kCourtshipRadius = 2.6f;             // must be this close to court
-inline constexpr std::uint32_t kCourtshipTicks = 90;        // time together before a baby (~3s)
-inline constexpr float kReproSpawnRadius = 1.2f;            // newborn appears beside the pair
+inline constexpr float kMateSeekRadius = 45.0f;      // can sense a mate this far
+inline constexpr float kCourtshipRadius = 2.6f;      // must be this close to court
+inline constexpr std::uint32_t kCourtshipTicks = 90; // time together before a baby (~3s)
+inline constexpr float kReproSpawnRadius = 1.2f;     // newborn appears beside the pair
 
 struct CreatureReproductionStats {
-    int born = 0;        // offspring created this tick
-    int courting = 0;    // ready females currently adjacent to a ready male
+    int born = 0;     // offspring created this tick
+    int courting = 0; // ready females currently adjacent to a ready male
 };
 
 // Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig
 // sim.reproduction. Tick fields are integer; the float-valued config params are cast on resolve.
 struct ReproductionTuning {
-    std::uint32_t maturity_ticks  = kReproMaturityTicks;
-    std::uint32_t cooldown_ticks  = kReproCooldownTicks;
+    std::uint32_t maturity_ticks = kReproMaturityTicks;
+    std::uint32_t cooldown_ticks = kReproCooldownTicks;
     std::uint32_t courtship_ticks = kCourtshipTicks;
     float healthy_stamina = kReproHealthyStamina;
     float mate_seek_radius = kMateSeekRadius;
@@ -88,9 +89,16 @@ struct ReproductionTuning {
 // threat (survival beats courtship). When already within courtship range they hold still
 // (wish 0) so they stay together and court. id-ordered; reads a pre snapshot (order-stable).
 inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& tuning = {}) {
-    auto view = reg.view<Comp::CreatureComponent, Comp::CreatureGenomeComponent,
+    auto view = reg.view<Comp::CreatureComponent,
+                         Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
-    struct M { entt::entity e; float x, z; bool female; bool ready; };
+    struct M {
+        entt::entity e;
+        float x, z;
+        bool female;
+        bool ready;
+        std::uint16_t species_id;
+    };
     std::vector<entt::entity> ents(view.begin(), view.end());
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
@@ -101,30 +109,45 @@ inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& 
         const auto& tf = view.get<Comp::TransformComponent>(e);
         const auto& cr = view.get<Comp::CreatureComponent>(e);
         const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
-        snap.push_back({e, tf.position.x, tf.position.z, gn.female, IsReadyToMate(cr, gn, tuning)});
+        snap.push_back({e,
+                        tf.position.x,
+                        tf.position.z,
+                        gn.female,
+                        IsReadyToMate(cr, gn, tuning),
+                        cr.species_id});
     }
     for (std::size_t i = 0; i < ents.size(); ++i) {
         const M& self = snap[i];
-        if (!self.ready) continue;
+        if (!self.ready)
+            continue;
         auto& cr = view.get<Comp::CreatureComponent>(self.e);
-        if (cr.last_action == static_cast<int>(CreatureAction::Flee)) continue;  // survival first
+        if (cr.last_action == static_cast<int>(CreatureAction::Flee))
+            continue; // survival first
         float best = tuning.mate_seek_radius, mx = 0.0f, mz = 0.0f;
         bool found = false;
         for (const M& o : snap) {
-            if (o.e == self.e || !o.ready || o.female == self.female) continue;
+            if (o.e == self.e || !o.ready || o.female == self.female ||
+                o.species_id != self.species_id)
+                continue;
             const float dx = o.x - self.x, dz = o.z - self.z;
             const float d = dm::Sqrt(dx * dx + dz * dz);
-            if (d < best) { best = d; mx = o.x; mz = o.z; found = true; }
+            if (d < best) {
+                best = d;
+                mx = o.x;
+                mz = o.z;
+                found = true;
+            }
         }
-        if (!found) continue;
+        if (!found)
+            continue;
         const float dx = mx - self.x, dz = mz - self.z;
         const float d = dm::Sqrt(dx * dx + dz * dz);
         if (d > tuning.courtship_radius && d > 1.0e-5f) {
             const float inv = cr.move_speed / d;
-            cr.wish_x = dx * inv;   // steer toward the mate (overrides the brain's wander)
+            cr.wish_x = dx * inv; // steer toward the mate (overrides the brain's wander)
             cr.wish_z = dz * inv;
         } else {
-            cr.wish_x = 0.0f;       // close enough — hold still and court
+            cr.wish_x = 0.0f; // close enough — hold still and court
             cr.wish_z = 0.0f;
         }
     }
@@ -133,11 +156,15 @@ inline void RunMateSeekingOnTick(entt::registry& reg, const ReproductionTuning& 
 // PHASE B (run AFTER the physics bridge): advance age/cooldown, accumulate courtship for ready
 // adjacent opposite-sex pairs, and birth one offspring per completed courtship (female-driven
 // so each completion makes exactly one baby; the chosen male is consumed for the tick).
-inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std::uint64_t tick,
-                                                        std::uint64_t world_seed = 0,
-                                                        const ReproductionTuning& tuning = {}) {
+inline CreatureReproductionStats
+RunMatingResolveOnTick(entt::registry& reg,
+                       std::uint64_t tick,
+                       std::uint64_t world_seed = 0,
+                       const ReproductionTuning& tuning = {},
+                       const CreatureSpeciesRegistry* species = nullptr) {
     CreatureReproductionStats stats;
-    auto view = reg.view<Comp::CreatureComponent, Comp::CreatureGenomeComponent,
+    auto view = reg.view<Comp::CreatureComponent,
+                         Comp::CreatureGenomeComponent,
                          Comp::TransformComponent>();
     std::vector<entt::entity> ents(view.begin(), view.end());
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
@@ -147,23 +174,35 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
     // Bookkeeping: age everyone, tick down cooldowns (id-ordered, deterministic).
     for (auto e : ents) {
         auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
-        if (gn.age_ticks < 0xFFFFFFFFu) ++gn.age_ticks;
-        if (gn.reproduce_cooldown > 0) --gn.reproduce_cooldown;
+        if (gn.age_ticks < 0xFFFFFFFFu)
+            ++gn.age_ticks;
+        if (gn.reproduce_cooldown > 0)
+            --gn.reproduce_cooldown;
     }
 
     // Snapshot ready males (by position) for the courtship search.
-    struct Male { entt::entity e; float x, z; };
+    struct Male {
+        entt::entity e;
+        float x, z;
+        std::uint16_t species_id;
+    };
     std::vector<Male> males;
     for (auto e : ents) {
         const auto& cr = view.get<Comp::CreatureComponent>(e);
         const auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
         if (!gn.female && IsReadyToMate(cr, gn, tuning)) {
             const auto& tf = view.get<Comp::TransformComponent>(e);
-            males.push_back({e, tf.position.x, tf.position.z});
+            males.push_back({e, tf.position.x, tf.position.z, cr.species_id});
         }
     }
 
-    struct Birth { CreatureGenome genome; float x, y, z; std::uint32_t generation; bool female; std::uint16_t species_id; };
+    struct Birth {
+        CreatureGenome genome;
+        float x, y, z;
+        std::uint32_t generation;
+        bool female;
+        std::uint16_t species_id;
+    };
     std::vector<Birth> births;
     std::vector<bool> male_used(males.size(), false);
 
@@ -171,33 +210,51 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
     for (auto e : ents) {
         auto& cr = view.get<Comp::CreatureComponent>(e);
         auto& gn = view.get<Comp::CreatureGenomeComponent>(e);
-        if (!gn.female || !IsReadyToMate(cr, gn, tuning)) { continue; }
+        if (!gn.female || !IsReadyToMate(cr, gn, tuning)) {
+            continue;
+        }
         const auto& tf = view.get<Comp::TransformComponent>(e);
         int best = -1;
         float bestDist = tuning.courtship_radius;
         for (std::size_t m = 0; m < males.size(); ++m) {
-            if (male_used[m]) continue;
+            if (male_used[m] || males[m].species_id != cr.species_id)
+                continue;
             const float dx = males[m].x - tf.position.x, dz = males[m].z - tf.position.z;
             const float d = dm::Sqrt(dx * dx + dz * dz);
-            if (d < bestDist) { bestDist = d; best = static_cast<int>(m); }
+            if (d < bestDist) {
+                bestDist = d;
+                best = static_cast<int>(m);
+            }
         }
-        if (best < 0) { gn.courting_ticks = 0; continue; }  // no mate adjacent -> reset
+        if (best < 0) {
+            gn.courting_ticks = 0;
+            continue;
+        } // no mate adjacent -> reset
         ++stats.courting;
         ++gn.courting_ticks;
-        if (gn.courting_ticks < tuning.courtship_ticks) continue;  // still courting
+        if (gn.courting_ticks < tuning.courtship_ticks)
+            continue; // still courting
 
         // Courtship complete -> a baby. Consume this male for the tick.
         const entt::entity maleE = males[static_cast<std::size_t>(best)].e;
         male_used[static_cast<std::size_t>(best)] = true;
         auto& mgn = view.get<Comp::CreatureGenomeComponent>(maleE);
 
-        CreatureGenome fG; fG.move_speed = gn.move_speed; fG.vigilance = gn.vigilance;
-        fG.hunger_threshold = gn.hunger_threshold; fG.size_scale = gn.size_scale;
-        fG.vision_cos_half_fov = gn.vision_cos_half_fov; fG.vision_range = gn.vision_range;
+        CreatureGenome fG;
+        fG.move_speed = gn.move_speed;
+        fG.vigilance = gn.vigilance;
+        fG.hunger_threshold = gn.hunger_threshold;
+        fG.size_scale = gn.size_scale;
+        fG.vision_cos_half_fov = gn.vision_cos_half_fov;
+        fG.vision_range = gn.vision_range;
         fG.hearing_range = gn.hearing_range;
-        CreatureGenome mG; mG.move_speed = mgn.move_speed; mG.vigilance = mgn.vigilance;
-        mG.hunger_threshold = mgn.hunger_threshold; mG.size_scale = mgn.size_scale;
-        mG.vision_cos_half_fov = mgn.vision_cos_half_fov; mG.vision_range = mgn.vision_range;
+        CreatureGenome mG;
+        mG.move_speed = mgn.move_speed;
+        mG.vigilance = mgn.vigilance;
+        mG.hunger_threshold = mgn.hunger_threshold;
+        mG.size_scale = mgn.size_scale;
+        mG.vision_cos_half_fov = mgn.vision_cos_half_fov;
+        mG.vision_range = mgn.vision_range;
         mG.hearing_range = mgn.hearing_range;
 
         luminumbra::core::DeterministicRng rng = luminumbra::core::DeterministicRng::seeded(
@@ -205,12 +262,16 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
             (static_cast<std::uint64_t>(entt::to_integral(e)) * 0x9E3779B97F4A7C15ull) ^
                 static_cast<std::uint64_t>(entt::to_integral(maleE)),
             tick);
-        CreatureGenome childG = BreedOffspring(fG, mG, rng);
+        const CreatureSpecies* species_definition =
+            species ? species->Find(cr.species_id) : nullptr;
+        const SpeciesGenomeRanges ranges =
+            species_definition ? species_definition->genome_ranges : SpeciesGenomeRanges{};
+        CreatureGenome childG = BreedOffspring(fG, mG, rng, ranges);
         const bool childFemale = (rng.next_u64() & 1ull) == 0ull;
-        // FR-4: inherit the SENSORY genes from draws taken AFTER the core breed + sex draw, so the
+        // inherit the SENSORY genes from draws taken AFTER the core breed + sex draw, so the
         // 4-gene core genome and the sex bit are byte-identical to before this slice (the ecology
         // hash reads only move_speed/generation/age_ticks, so it is unchanged for genome rosters).
-        childG = BreedSensoryInto(childG, fG, mG, rng);
+        childG = BreedSensoryInto(childG, fG, mG, rng, ranges);
 
         const auto& mtf = view.get<Comp::TransformComponent>(maleE);
         Birth b;
@@ -220,7 +281,7 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         b.z = (tf.position.z + mtf.position.z) * 0.5f + tuning.spawn_radius;
         b.generation = (gn.generation > mgn.generation ? gn.generation : mgn.generation) + 1u;
         b.female = childFemale;
-        b.species_id = cr.species_id;  // offspring inherit the mother's codex species identity
+        b.species_id = cr.species_id; // offspring inherit the mother's codex species identity
         births.push_back(b);
 
         gn.courting_ticks = 0;
@@ -232,12 +293,14 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
     for (const Birth& b : births) {
         const auto child = reg.create();
         auto& tf = reg.emplace<Comp::TransformComponent>(child);
-        tf.position.x = b.x; tf.position.y = b.y; tf.position.z = b.z;
+        tf.position.x = b.x;
+        tf.position.y = b.y;
+        tf.position.z = b.z;
         tf.scale = ::Luminumbra::Vec3(b.genome.size_scale);
 
         auto& cr = reg.emplace<Comp::CreatureComponent>(child);
         cr.is_predator = false;
-        cr.species_id = b.species_id;  // inherit codex species from the mother
+        cr.species_id = b.species_id; // inherit codex species from the mother
         cr.hunger = 0.5f;
         cr.stamina = 1.0f;
         cr.move_speed = b.genome.move_speed;
@@ -251,16 +314,17 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
         gn.vision_range = b.genome.vision_range;
         gn.hearing_range = b.genome.hearing_range;
         gn.age_ticks = 0;
-        gn.reproduce_cooldown = tuning.cooldown_ticks;  // newborn can't immediately breed
+        gn.reproduce_cooldown = tuning.cooldown_ticks; // newborn can't immediately breed
         gn.generation = b.generation;
         gn.female = b.female;
         gn.courting_ticks = 0;
 
-        // FR-4: express the sensory genes into a PerceptionComponent so the offspring's senses are
+        // express the sensory genes into a PerceptionComponent so the offspring's senses are
         // genetically determined (vision cone + range, hearing range). PerceptionComponent is pure
-        // data — it is not in the ecology hash, and the perception system needs an AwarenessComponent
-        // to act — so this is inert for the canonical hash and only bites where a roster opts its
-        // creatures into sensing. This is the read side that makes sensory divergence observable.
+        // data — it is not in the ecology hash, and the perception system needs an
+        // AwarenessComponent to act — so this is inert for the canonical hash and only bites where
+        // a roster opts its creatures into sensing. This is the read side that makes sensory
+        // divergence observable.
         auto& pc = reg.emplace<Comp::PerceptionComponent>(child);
         pc.vision_cos_half_fov = b.genome.vision_cos_half_fov;
         pc.vision_range = b.genome.vision_range;
@@ -271,4 +335,4 @@ inline CreatureReproductionStats RunMatingResolveOnTick(entt::registry& reg, std
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

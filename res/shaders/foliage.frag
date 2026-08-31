@@ -1,12 +1,12 @@
 #version 450 core
 
 // ===========================================================================
-// T-I5b-1 (F1): instanced foliage scatter fragment stage.
+// instanced foliage scatter fragment stage.
 //
 // Forward-lit ground cover blended into the lit HDR target after the opaque
-// terrain. RENDER-ONLY (no sim writes).
+// terrain.  (no sim writes).
 //
-// T-I5b-DR-foliage-green: kill the CYAN/TEAL cast, scene-light so the blades go
+// kill the CYAN/TEAL cast, scene-light so the blades go
 // DARK under storm/night, and keep them clearly GREEN in daylight.
 //
 // ROOT CAUSE of the old cyan: the daytime sky ambient (u_ambientColor ==
@@ -44,7 +44,7 @@ in VS_OUT {
     vec2  texCoord;
     vec4  color;
     float fade;
-    float heightT;   // 0 root .. 1 tip
+    float heightT;   // 0 root.. 1 tip
     vec3  worldPos;
     vec3  worldNormal;
 } fs_in;
@@ -61,7 +61,7 @@ uniform vec3  u_ambientColor;  // == u_skyAmbientColor (already PI-scaled)
 // (anti-sun at midnight) so a missing-uniform path still lights blades sanely.
 uniform vec3  u_moonDir;        // toward-light dir of the moon (anti-sun)
 
-// T-I5b-DR-foliage-green: projected cloud cast-shadow uniforms, mirroring the
+// projected cloud cast-shadow uniforms, mirroring the
 // lighting pass so a storm-overcast cell darkens the blades like the terrain.
 // All default to "no clouds" so a missing-uniform path is a no-op.
 uniform int   u_cloudShadowEnabled;   // 0 == skip (clear sky)
@@ -185,14 +185,14 @@ void main() {
     // up-facing ambient-dominated cards stayed near-WHITE (~rgb 239,248,254) at night
     // while the terrain went dark. Tie the foliage ambient to the sun-up factor with a
     // small night floor so the blades darken WITH the scene across the whole dusk band;
-    // the moonlight fill below re-adds a dim cool tone. RENDER-ONLY.
+    // the moonlight fill below re-adds a dim cool tone..
     // Mirror the DEFERRED path's night transition EXACTLY: lighting_pass.frag
     // computes nightFactor = 1 - smoothstep(0, 0.06, sunLum) from the SUN COLOUR
     // luminance (which actually reaches 0 at night), NOT from u_sunIntensity (which
     // stays elevated across the dusk band). Drop the sky ambient to ZERO at night
     // with NO floor so the blades collapse with the terrain's hemispheric ambient;
     // the moon fill below re-adds the same dim cool tone the deferred moon gives the
-    // terrain. RENDER-ONLY.
+    // terrain..
     float sunLum = max(max(u_sunColor.r, u_sunColor.g), u_sunColor.b);
     float nightFactor = 1.0 - smoothstep(0.0, 0.06, sunLum);
     ambient *= (1.0 - nightFactor);
@@ -206,7 +206,7 @@ void main() {
     // Grass overhaul: SOFTEN the direct term (x0.6). Vertical blade cards rake the sun on
     // their faces and were blowing out to bright yellow slivers (reading as fake lit decals,
     // not grass). A gentler direct + the existing green ambient keeps a believable lit-grass
-    // body with bright TIPS (via the AO gradient) instead of uniform blown-out blades. RENDER-ONLY.
+    // body with bright TIPS (via the AO gradient) instead of uniform blown-out blades..
     vec3 direct = (albedo / PI) * sunRadiance * ndl * (1.0 - lightLoss) * 0.6;
 
     vec3 color = (ambient + direct) * ao;
@@ -235,7 +235,7 @@ void main() {
     color = color * (2.51 * color + 0.03) / (color * (2.43 * color + 0.59) + 0.14);
     color = pow(color, vec3(1.0 / 2.2));
 
-    // T-I6: tiny black floor so dense dark-rooted foliage (raised scatter density)
+    // tiny black floor so dense dark-rooted foliage (raised scatter density)
     // never renders a PURE-black (<=2/255) pixel. The PlayerView void-cluster gate
     // flags contiguous max(r,g,b)<=2 regions as geometry holes; a clump of deep-shadow
     // foliage roots at the camera's feet is NOT a hole, so lift it just above the

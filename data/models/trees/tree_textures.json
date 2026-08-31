@@ -1,5 +1,5 @@
 {
-  "_comment": "I8 static-model UV texture lane: maps each tree-part mesh to its albedo+normal .ltex (sampled by the mesh's own UVs in g_buffer.frag). Render-only; never hashed. leaves carry alpha_test (luma-keyed cutout) since the source leaf JPGs have no alpha channel.",
+  "_comment": " static-model UV texture lane: maps each tree-part mesh to its albedo+normal .ltex (sampled by the mesh's own UVs in g_buffer.frag). Render-only; never hashed. leaves carry alpha_test (luma-keyed cutout) since the source leaf JPGs have no alpha channel.",
   "models": [
     {
       "mesh": "data/models/trees/tree_small_02_trunk.lmesh",

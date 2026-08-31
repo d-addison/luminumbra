@@ -1,12 +1,12 @@
-// T-I6-A3b (increment 1): SHIELD-RT far-field GROUND-TRUTH parity gate.
+// far-field GROUND-TRUTH parity gate.
 //
-// A3a pinned the heightfield max-mip march as the far-field tracer. Before that
-// tracer is wired into the live G-buffer (A3b increment 2), this gate proves it
-// is CORRECT: every ray it reports as a hit must land on the real terrain
-// surface, not on a degenerate early-out (the failure mode the A3a profile caught
-// in the SDF path, where coarse mips collapsed to ~0 and false-hit the sky).
+// heightfield tracer validation pinned the heightfield max-mip march as the far-field tracer.
+// Before that tracer is wired into the live G-buffer, this gate proves it is CORRECT: every ray it
+// reports as a hit must land on the real terrain surface, not on a degenerate early-out (the
+// failure mode the heightfield tracer validation profile caught in the SDF path, where coarse mips
+// collapsed to ~0 and false-hit the sky).
 //
-// Two correctness legs (WAVE-A-SPEC MAJOR #9 — the analytic leg is load-bearing):
+// Two correctness legs (-SPEC MAJOR #9 — the analytic leg is load-bearing):
 //
 //   (1) SELF-CONSISTENCY: the GPU march's hit point must lie ON the bilinear
 //       FarLodStore heightfield it marches (|hit_h - hf.sample(hit_xz)| small).
@@ -20,10 +20,10 @@
 //       between nodes the bilinear interpolation of quantized samples deviates
 //       from the continuous coarse surface by a small, bounded amount).
 //
-// The same GPU kernel as A3a (shared algorithm), extended to emit the refined hit
-// distance t per ray. Render-only: NO world_hash / determinism contract. GPU-
-// gated like the profile (skips headless; writes artifact + skips asserts on a
-// software renderer). Label manual;perf;gpu — run:
+// The same GPU kernel as heightfield tracer validation (shared algorithm), extended to emit the
+// refined hit distance t per ray. Render-only: NO world_hash / determinism contract. GPU- gated
+// like the profile (skips headless; writes artifact + skips asserts on a software renderer). Label
+// manual;perf;gpu — run:
 //   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 
 #include "gtest/gtest.h"
@@ -54,8 +54,8 @@ namespace fs = std::filesystem;
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
 using namespace luminumbra_shieldrt;
-using Luminumbra::World::FarLodTier;
 using Luminumbra::World::ComputeTerrainParamsHash;
+using Luminumbra::World::FarLodTier;
 
 namespace {
 
@@ -129,7 +129,7 @@ FlatMaxMip FlattenMaxMip(const HeightMaxMip& mip) {
 // emitting the refined hit distance t per ray (-1.0 on miss).
 //
 // At the current mip level L it steps to the NEXT CELL BOUNDARY along the ray
-// (never by a fixed cell size from mid-cell — the overshoot bug that the A3b
+// (never by a fixed cell size from mid-cell — the overshoot bug that the
 // parity gate caught in the spike's port). Because py is linear in t, if the ray
 // is above the cell's max height at BOTH the entry and the cell-exit t, it is
 // above the whole cell (linear minimum is at an endpoint) and the cell is safely
@@ -193,11 +193,11 @@ float cellExitDist(int L, float px, float pz, float dx, float dz) {
     float tx = 1.0e30;
     float tz = 1.0e30;
     if (abs(dx) > 1.0e-9) {
-        float bound = (dx > 0.0 ? float(cx + 1) : float(cx)) * cs + u_origin.x;
+        float bound = (dx > 0.0 ? float(cx + 1): float(cx)) * cs + u_origin.x;
         tx = (bound - px) / dx;
     }
     if (abs(dz) > 1.0e-9) {
-        float bound = (dz > 0.0 ? float(cz + 1) : float(cz)) * cs + u_origin.y;
+        float bound = (dz > 0.0 ? float(cz + 1): float(cz)) * cs + u_origin.y;
         tz = (bound - pz) / dz;
     }
     return max(min(tx, tz), 0.0);
@@ -262,14 +262,15 @@ void main() {
 )GLSL";
 
 double Percentile(std::vector<double> v, double pct) {
-    if (v.empty()) return 0.0;
+    if (v.empty())
+        return 0.0;
     std::sort(v.begin(), v.end());
     const std::size_t idx = static_cast<std::size_t>(
         std::min(v.size() - 1, static_cast<std::size_t>(pct * (v.size() - 1) + 0.5)));
     return v[idx];
 }
 
-}  // namespace
+} // namespace
 
 TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
     HiddenGlContext ctx("shieldrt_far_field_parity_gpu");
@@ -297,7 +298,7 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
     constexpr double kBlockSpan = kRegions * 512.0;
     const double cx = (kRx0 + kRegions * 0.5) * 512.0;
     const double cz = (kRz0 + kRegions * 0.5) * 512.0;
-    constexpr int kFarStep = 4;  // F1 tier sample step (meters)
+    constexpr int kFarStep = 4; // F1 tier sample step (meters)
 
     nlohmann::json results = nlohmann::json::array();
     double worst_self = 0.0;
@@ -351,11 +352,14 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
             MakeStorageBuffer(static_cast<GLsizeiptr>(ray_count) * sizeof(float), nullptr);
 
         glUseProgram(prog);
-        glUniform3f(glGetUniformLocation(prog, "u_eye"), static_cast<float>(view.eye.x),
-                    static_cast<float>(view.eye.y), static_cast<float>(view.eye.z));
+        glUniform3f(glGetUniformLocation(prog, "u_eye"),
+                    static_cast<float>(view.eye.x),
+                    static_cast<float>(view.eye.y),
+                    static_cast<float>(view.eye.z));
         glUniform1i(glGetUniformLocation(prog, "u_n"), hf.n);
         glUniform1f(glGetUniformLocation(prog, "u_step"), static_cast<float>(hf.step));
-        glUniform2f(glGetUniformLocation(prog, "u_origin"), static_cast<float>(hf.ox),
+        glUniform2f(glGetUniformLocation(prog, "u_origin"),
+                    static_cast<float>(hf.ox),
                     static_cast<float>(hf.oz));
         glUniform1f(glGetUniformLocation(prog, "u_tmax"), static_cast<float>(t_max));
         glUniform1i(glGetUniformLocation(prog, "u_rayCount"), ray_count);
@@ -375,8 +379,10 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
 
         std::vector<float> hit_t(static_cast<std::size_t>(ray_count), -1.0f);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, out_buf);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0,
-                           static_cast<GLsizeiptr>(hit_t.size() * sizeof(float)), hit_t.data());
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER,
+                           0,
+                           static_cast<GLsizeiptr>(hit_t.size() * sizeof(float)),
+                           hit_t.data());
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
         // Per-ray correctness against ground truth.
@@ -385,7 +391,8 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
         std::vector<double> gt_abs;
         gt_abs.reserve(static_cast<std::size_t>(ray_count));
         for (int i = 0; i < ray_count; ++i) {
-            if (hit_t[i] < 0.0f) continue;
+            if (hit_t[i] < 0.0f)
+                continue;
             ++hits;
             const double t = static_cast<double>(hit_t[i]);
             const double hx = view.eye.x + dirs[i].x * t;
@@ -397,9 +404,8 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
             self_max = std::max(self_max, self_delta);
 
             // Leg 2: hit height vs the analytic generator that produced the tiles.
-            const double analytic =
-                static_cast<double>(world.GetTerrainHeightAtCoarse(
-                    static_cast<float>(hx), static_cast<float>(hz), kFarStep));
+            const double analytic = static_cast<double>(world.GetTerrainHeightAtCoarse(
+                static_cast<float>(hx), static_cast<float>(hz), kFarStep));
             gt_abs.push_back(std::abs(hy - analytic));
         }
 
@@ -429,7 +435,8 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
         });
 
         EXPECT_GT(hit_fraction, kMinHitFraction) << vs.name << ": march barely hit terrain";
-        EXPECT_LT(hit_fraction, kMaxHitFraction) << vs.name << ": march hit ~everything (degenerate)";
+        EXPECT_LT(hit_fraction, kMaxHitFraction)
+            << vs.name << ": march hit ~everything (degenerate)";
         EXPECT_LE(self_max, kSelfConsistencyToleranceM)
             << vs.name << ": march hit is off its own heightfield surface (overshoot/degenerate)";
         EXPECT_LE(gt_median, kGroundTruthMedianToleranceM)
@@ -437,7 +444,8 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
         EXPECT_LE(gt_p99, kGroundTruthP99ToleranceM)
             << vs.name << ": p99 hit height drifts from analytic ground truth";
 
-        for (GLuint b : {dirs_buf, hf_buf, mip_buf, out_buf}) glDeleteBuffers(1, &b);
+        for (GLuint b : {dirs_buf, hf_buf, mip_buf, out_buf})
+            glDeleteBuffers(1, &b);
     }
 
     jobs.shutdown();
@@ -451,26 +459,28 @@ TEST(ShieldRtFarFieldParityGpu, HeightfieldMarchHitsAnalyticGroundTruth) {
 
     const nlohmann::json report = {
         {"schema", "luminumbra.shieldrt_far_field_parity.v1"},
-        {"task", "T-I6-A3b"},
-        {"generated_by", "shieldrt_far_field_parity_gpu (heightfield max-mip march vs analytic ground truth)"},
+        {"generated_by",
+         "shieldrt_far_field_parity_gpu (heightfield max-mip march vs analytic ground truth)"},
         {"seed", kSeed},
         {"build_mode", build_mode},
-        {"gpu", {{"renderer", renderer}, {"gl_version", gl_version}, {"software_renderer", software}}},
+        {"gpu",
+         {{"renderer", renderer}, {"gl_version", gl_version}, {"software_renderer", software}}},
         {"far_tier_step_m", kFarStep},
-        {"tolerances", {
-            {"self_consistency_m", kSelfConsistencyToleranceM},
-            {"ground_truth_median_m", kGroundTruthMedianToleranceM},
-            {"ground_truth_p99_m", kGroundTruthP99ToleranceM},
-        }},
-        {"worst", {
-            {"self_consistency_m", worst_self},
-            {"ground_truth_median_m", worst_median_gt},
-            {"ground_truth_p99_m", worst_p99_gt},
-        }},
+        {"tolerances",
+         {
+             {"self_consistency_m", kSelfConsistencyToleranceM},
+             {"ground_truth_median_m", kGroundTruthMedianToleranceM},
+             {"ground_truth_p99_m", kGroundTruthP99ToleranceM},
+         }},
+        {"worst",
+         {
+             {"self_consistency_m", worst_self},
+             {"ground_truth_median_m", worst_median_gt},
+             {"ground_truth_p99_m", worst_p99_gt},
+         }},
         {"views", results},
         {"note",
-         "Proves the A3a-pinned heightfield max-mip march hits the real surface "
-         "before it is wired into the live G-buffer (A3b increment 2). Leg 1 "
+         "Validates the standalone heightfield max-mip march against the real surface. Leg 1 "
          "(self-consistency) catches the SDF-style degenerate false-hit; leg 2 "
          "(ground truth vs GetTerrainHeightAtCoarse) is the load-bearing "
          "correctness assertion within a quantization-aware tolerance."},

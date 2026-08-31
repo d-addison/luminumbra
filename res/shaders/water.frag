@@ -45,7 +45,7 @@ bool has_opaque_depth(float depth)
 // to the interpolated per-vertex world normal. Across the low-poly water mesh
 // that interpolation reads as hard-shaded triangle facets with visible seams
 // (the de-facet defect). To give the surface genuine per-pixel detail we add
-// an analytic ripple field: a sum of gently animated directional waves whose
+// an analytic ripple field: a sum of gently animated directional  whose
 // horizontal gradient tilts the world normal. Because it is evaluated per
 // fragment from world position + time, the lighting/reflection now varies
 // smoothly and continuously across each triangle, breaking up the facets.
@@ -58,7 +58,7 @@ vec2 ripple_gradient(vec2 p, float t, vec2 flow)
     // Drift the sample point along the flow so ripples travel with the water.
     p += flow * t * 0.35;
 
-    // A handful of overlapping directional waves at increasing frequency and
+    // A handful of overlapping directional  at increasing frequency and
     // decreasing amplitude (a small "ocean" spectrum). For wave
     //   h = A * sin(dot(dir, p) * freq + speed * t)
     // the horizontal gradient is
@@ -89,7 +89,7 @@ vec2 ripple_gradient(vec2 p, float t, vec2 flow)
 }
 
 // Smooth 2D value noise (bilinear-interpolated hash) — replaces the old blocky
-// floor()-cell foam hash that read as a hard pixel grid on the surface.
+// floor-cell foam hash that read as a hard pixel grid on the surface.
 float foam_hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
@@ -136,7 +136,7 @@ void main()
     // toward a dark night tint so the surface only carries sky/moon reflection
     // at night, while daytime water keeps its natural blue.
     float sky_luma = dot(u_sky_color, vec3(0.2126, 0.7152, 0.0722));
-    // Map the sky luminance (~0.05 night .. ~0.68 day) onto 0..1.
+    // Map the sky luminance (~0.05 night.. ~0.68 day) onto 0..1.
     float sky_light = smoothstep(0.06, 0.45, sky_luma);
     // Sun-above-horizon contribution. u_sun_direction is the light TRAVEL
     // direction (from the sun toward the surface), so the sun is overhead when
@@ -164,7 +164,7 @@ void main()
     // water plane: only the XY wobble tilts the world normal. The previous
     // code added the raw tangent vector to the world normal, which tilted a
     // perfectly flat surface 45 degrees toward +Z and broke the fresnel and
-    // reflection directions (T-I2-16b).
+    // reflection directions.
     vec3 bump = vec3(normal1.x * 0.6 + normal2.x * 0.4, 0.0, normal1.y * 0.6 + normal2.y * 0.4);
 
     // Procedural per-pixel ripple detail. The bound normal map is the flat
@@ -173,7 +173,7 @@ void main()
     // ripple gradient tilts the world normal continuously per fragment, so the
     // lighting, fresnel and reflection vectors vary smoothly across each
     // triangle and the faceting/seams break up into a rippled surface. The
-    // gradient is the XZ slope of the wave height field; a negative slope in
+    // gradient is the XZ slope of the  field; a negative slope in
     // X/Z tilts the +Y normal toward -X/-Z, matching the tangent-space bump
     // convention used above (only XZ wobble, world up stays +Y).
     vec2 ripple = ripple_gradient(fs_in.world_pos.xz, u_time, flow_vector);
@@ -203,11 +203,11 @@ void main()
     // The color input is the resolved pre-water scene, including sky. It is
     // valid even when the corresponding depth sample is at the far plane.
     vec3 refracted_color = texture(u_opaque_scene_color, refraction_uv).rgb;
-    
+
     // --- 5. Reflection (inline SSR: 8-step raymarch + binary refinement + edge fade) ---
-    // T-I2-16b decision: the whole water pass (caustics + SSR + shading)
+    //  decision: the whole water pass (caustics + SSR + shading)
     // measures ~0.2 ms GPU, so the inline march is improved in place instead
-    // of promoting the dormant screen_space_reflections.frag to its own pass.
+    // while keeping reflection sampling local to the water pass.
     vec3 reflection_vector = reflect(view_dir, surface_normal);
     // Rays that leave the screen without hitting geometry reflect the sky for
     // upward directions and the deep water tint for grazing/downward ones.
@@ -292,7 +292,7 @@ void main()
     float fresnel = pow(1.0 - max(0.0, dot(-view_dir, surface_normal)), 4.0);
     fresnel = clamp(fresnel, 0.05, 0.95);
 
-    // --- 7. Water Color & Absorption (T-I2-16c) ---
+    // --- 7. Water Color & Absorption ---
     float absorption_factor = 1.0 - exp(-water_depth * u_water_depth_scaler);
     // Smooth depth tint curve: the eased exponential keeps the first couple
     // of meters bright teal and rolls smoothly into the dark deep tint
@@ -306,7 +306,7 @@ void main()
     // dark the scene is. At noon light_scale ~= 1.0 (natural blue preserved);
     // at night it drops to a faint sheen so only sky/moon reflection remains.
     water_color *= light_scale;
-    
+
     // --- 8. Specular Highlight ---
     vec3 half_vector = normalize(u_sun_direction - view_dir);
     float specular_power = pow(max(0.0, dot(surface_normal, half_vector)), 64.0);
@@ -317,14 +317,14 @@ void main()
     if (water_depth > 0.1 && fs_in.world_pos.y > -2.0) { // Only for shallow to medium depth
         vec2 caustics_uv1 = fs_in.world_pos.xz * 0.15 + u_time * 0.02 + flow_vector * 0.5;
         vec2 caustics_uv2 = fs_in.world_pos.xz * 0.08 - u_time * 0.015 + flow_vector * 0.3;
-        
+
         float caustics1 = texture(u_caustics_texture, caustics_uv1).r;
         float caustics2 = texture(u_caustics_texture, caustics_uv2).g;
-        
+
         // Combine caustics with depth falloff
         float caustics_strength = (caustics1 + caustics2 * 0.7) * 0.8;
         float caustics_falloff = exp(-water_depth * 0.3);
-        
+
         caustics_color = vec3(0.6, 0.8, 1.0) * caustics_strength * caustics_falloff;
         caustics_color *= max(0.3, dot(u_sun_direction, vec3(0, -1, 0))); // Sun angle modulation
         // Caustics are sunlight focused through the surface; at night there is
@@ -332,17 +332,17 @@ void main()
         // letting them add a constant cyan shimmer in dark frames.
         caustics_color *= light_scale;
     }
-    
-    // --- 10. Shoreline Foam (procedural, T-I2-16c) ---
+
+    // --- 10. Shoreline Foam (procedural, ) ---
     // The old path multiplied by u_foam_texture, whose engine fallback is
     // solid black, so foam never rendered. The band is now generated
-    // procedurally: a depth-bounded shoreline band, animated wave fronts
+    // procedurally: a depth-bounded shoreline band, animated
     // rolling shoreward (u_time + flow), and hashed sparkle so it reads as
     // broken foam rather than a solid stripe.
     float shoreline_band = smoothstep(0.9, 0.1, water_depth);
     float foam_phase = water_depth * 8.0 - u_time * 1.6 + (flow_vector.x + flow_vector.y) * 4.0;
     float foam_wave = 0.5 + 0.5 * sin(foam_phase);
-    // Smooth animated noise (was a blocky floor()-cell hash -> hard pixel grid).
+    // Smooth animated noise (was a blocky floor-cell hash -> hard pixel grid).
     // Sampled in world space at ~1.5 m features so foam reads as soft broken froth
     // at any view distance instead of a fixed-screen grid.
     float foam_sparkle = foam_fbm(fs_in.world_pos.xz * 0.7, u_time * 0.6, flow_vector);
@@ -355,9 +355,9 @@ void main()
     // the critique flagged. Scale the foam colour by the same daylight factor the
     // body/caustics use so the shoreline goes dark at night and reads as natural
     // foam by day. (Dim the colour, not the coverage, so the foam *shape* -- the
-    // animated wave fronts and band width -- stays identical between day/night.)
+    // animated  and band width -- stays identical between day/night.)
     vec3 foam_color = vec3(0.92, 0.96, 0.94) * light_scale;
-    
+
     // --- 11. Underwater Environment ---
     vec3 underwater_color = vec3(0.0);
     if (water_depth > 1.0) {
@@ -366,7 +366,7 @@ void main()
         underwater_color = texture(u_underwater_texture, underwater_uv).rgb * 0.4;
         underwater_color *= exp(-water_depth * 0.1); // Depth attenuation
     }
-    
+
     // --- 12. Enhanced Final Composition ---
     vec3 final_color = mix(refracted_color, reflected_color, fresnel);
     final_color = mix(final_color, water_color, clamp(0.22 + absorption_factor * 0.68, 0.22, 0.9));
@@ -389,7 +389,7 @@ void main()
 
     float alpha = clamp(0.58 + absorption_factor * 0.22 + fresnel * 0.12, 0.58, 0.86);
     // Foam is opaque froth on the surface; lift alpha with the foam factor so
-    // the band stays bright over any background (T-I2-16c).
+    // the band stays bright over any background.
     alpha = clamp(alpha + foam_factor * 0.25, 0.58, 0.97);
     o_frag_color = vec4(final_color, alpha);
 }

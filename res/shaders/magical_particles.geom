@@ -1,7 +1,7 @@
 #version 450 core
 
 // ===========================================================================
-// T-I5a-1: magical_particles geometry stage (RETAINED for the shader inventory).
+// magical_particles geometry stage (RETAINED for the shader inventory).
 //
 // The LIVE particle path (ParticlePass) expands billboards in the vertex stage
 // via gl_VertexID and does NOT bind a geometry shader. This geometry stage is

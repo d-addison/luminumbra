@@ -1,4 +1,4 @@
-// I9-FOLIAGE Phase 3B: plant persistence projection — a planted field serializes to the engine's
+//  plant persistence projection — a planted field serializes to the engine's
 // deterministic EntityRegistrySnapshot and reloads byte-exact (genome + growth/soil/disease/
 // pollination/lifecycle sim truth). Empty roster -> empty snapshot (no-plant save byte-identical).
 #include <gtest/gtest.h>
@@ -59,18 +59,24 @@ TEST(PlantPersistence, RoundtripPreservesAllPlantState) {
     const auto p1 = barePlant(a, 1.0f, static_cast<std::uint8_t>(C::PlantStage::Mature), 12000);
     a.emplace<C::SoilFeederComponent>(p1, C::SoilFeederComponent{800, 4200});
     auto& h1 = a.emplace<C::PlantHealthComponent>(p1);
-    h1.infection = 640; h1.resistance = 120;
+    h1.infection = 640;
+    h1.resistance = 120;
     h1.state = static_cast<std::uint8_t>(C::PlantDiseaseState::Infected);
     h1.infected_ticks = 33;
 
     const auto p2 = barePlant(a, 2.0f, static_cast<std::uint8_t>(C::PlantStage::Fruiting), 18500);
     auto& pc2 = a.emplace<C::PollinationComponent>(p2);
-    pc2.pollinated = true; pc2.last_pollen_tick = 900; pc2.crosses = 4;
+    pc2.pollinated = true;
+    pc2.last_pollen_tick = 900;
+    pc2.crosses = 4;
     for (std::size_t i = 0; i < pc2.next_genome.genes.size(); ++i)
         pc2.next_genome.genes[i] = 0.05f * static_cast<float>(i + 1);
     auto& lc2 = a.emplace<C::CropLifecycleComponent>(p2);
-    lc2.perennial = true; lc2.ripe_ticks = 77; lc2.lifespan_ticks = 1500;
-    lc2.generations = 3; lc2.species_id = 2;
+    lc2.perennial = true;
+    lc2.ripe_ticks = 77;
+    lc2.lifespan_ticks = 1500;
+    lc2.generations = 3;
+    lc2.species_id = 2;
 
     // Build -> serialize -> load -> apply into a FRESH registry -> re-serialize must be byte-exact.
     const std::string json = E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(a));
@@ -105,8 +111,14 @@ TEST(PlantPersistence, GenesSurviveFullPrecision) {
     entt::registry a;
     auto e = barePlant(a, 0.0f, 0, 0);
     auto& gn = a.get<C::PlantGenomeComponent>(e);
-    gn.genes = {0.123456791f, 0.987654328f, 0.333333343f, 0.0009765625f,
-                0.5f, 0.7071067691f, 0.0f, 0.999999940f};
+    gn.genes = {0.123456791f,
+                0.987654328f,
+                0.333333343f,
+                0.0009765625f,
+                0.5f,
+                0.7071067691f,
+                0.0f,
+                0.999999940f};
     const auto saved = gn.genes;
 
     const std::string json = E::SerializeEntityRegistrySnapshotJson(F::BuildPlantEntitySnapshot(a));
@@ -120,7 +132,7 @@ TEST(PlantPersistence, GenesSurviveFullPrecision) {
         EXPECT_EQ(b.get<C::PlantGenomeComponent>(pe).genes, saved) << "genes survive bit-exact";
 }
 
-// Phase 3B disk path: WorldSaveService writes/reads plant-entities.json byte-exact.
+//  disk path: WorldSaveService writes/reads plant-entities.json byte-exact.
 TEST(PlantPersistence, DiskSaveLoadByteExact) {
     namespace fs = std::filesystem;
     namespace SS = ::Luminumbra::Persistence;
@@ -154,9 +166,9 @@ TEST(PlantPersistence, EmptyRosterWritesNoFile) {
     EXPECT_FALSE(fs::exists(SS::WorldSaveService::plant_entities_path(dir)))
         << "no-plant save writes no plant-entities.json";
     E::EntityRegistrySnapshot loaded;
-    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, dir, &errs));  // clean miss
+    ASSERT_TRUE(SS::WorldSaveService::load_plant_entities(loaded, dir, &errs)); // clean miss
     EXPECT_TRUE(loaded.entities.empty());
     fs::remove_all(dir);
 }
 
-}  // namespace
+} // namespace

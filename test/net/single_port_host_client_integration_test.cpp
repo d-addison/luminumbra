@@ -1,4 +1,4 @@
-// NET-11 (FR-F-003, full form): single-port HOST<->CLIENT id fan-out over real TCP loopback.
+//  (, full form): single-port HOST<->CLIENT id fan-out over real TCP loopback.
 //
 // The single_port_accept_test proves ONE listen socket accepts N connections as distinct clients;
 // this proves the END-TO-END dedicated-server rewire that RunNetHost/RunNetJoin now use: each
@@ -15,7 +15,8 @@
 // usercmd stream is drained by PumpInbound after the host consumes the Hello pre-AddClient).
 //
 // Headless / loopback only (127.0.0.1) on an OS-assigned ephemeral port (Listen(0)); single-
-// process, bounded polls, no wall-clock pacing -- deterministic + fast, like single_port_accept_test.
+// process, bounded polls, no wall-clock pacing -- deterministic + fast, like
+// single_port_accept_test.
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -26,8 +27,8 @@
 #include <thread>
 #include <vector>
 
-#include "luminumbra_common/net/LockstepSession.h"       // TcpListener / TcpTransport / Hello
-#include "luminumbra_common/net/ReplicationEndpoint.h"    // ReplicationServer::AddClient
+#include "luminumbra_common/net/LockstepSession.h"     // TcpListener / TcpTransport / Hello
+#include "luminumbra_common/net/ReplicationEndpoint.h" // ReplicationServer::AddClient
 
 namespace {
 
@@ -36,9 +37,12 @@ using clock_type = std::chrono::steady_clock;
 
 // Non-blockingly poll one transport for a single framed message within a bounded budget (real
 // loopback sockets deliver asynchronously). Returns true and fills `out` on success.
-bool ReceiveFrameWithin(ILockstepTransport& t, std::vector<std::uint8_t>& out, int max_tries = 400) {
+bool ReceiveFrameWithin(ILockstepTransport& t,
+                        std::vector<std::uint8_t>& out,
+                        int max_tries = 400) {
     for (int i = 0; i < max_tries; ++i) {
-        if (t.TryReceiveFrame(out)) return true;
+        if (t.TryReceiveFrame(out))
+            return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     return false;
@@ -49,19 +53,25 @@ bool ReceiveFrameWithin(ILockstepTransport& t, std::vector<std::uint8_t>& out, i
 // "Hello then usercmd stream" shape is exercised, and HOLD the connection open until `done` so the
 // server-side peer stays connected for the asserts. Touches ONLY its own transport (one owning
 // thread per socket -> race-free without a mutex, like net_soak_over_the_wire_test).
-void RunDeclaringClient(std::uint16_t port, std::uint32_t declared_id,
-                        std::atomic<bool>* hello_sent, std::atomic<bool>* done) {
+void RunDeclaringClient(std::uint16_t port,
+                        std::uint32_t declared_id,
+                        std::atomic<bool>* hello_sent,
+                        std::atomic<bool>* done) {
     TcpTransport transport;
     const auto connect_deadline = clock_type::now() + std::chrono::seconds(10);
     bool connected = false;
     while (!done->load(std::memory_order_relaxed) && clock_type::now() < connect_deadline) {
-        if (transport.Connect("127.0.0.1", port, /*timeout_ms=*/2000)) { connected = true; break; }
+        if (transport.Connect("127.0.0.1", port, /*timeout_ms=*/2000)) {
+            connected = true;
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10)); // brief backoff, retry
     }
-    if (!connected) return; // hello_sent stays false -> the test fails loudly (never hangs)
+    if (!connected)
+        return; // hello_sent stays false -> the test fails loudly (never hangs)
 
     HelloMsg hello;
-    hello.seed = 424242;         // shared default world; the id fan-out (not seed) is under test here
+    hello.seed = 424242; // shared default world; the id fan-out (not seed) is under test here
     hello.preset = "default";
     hello.tick_rate_hz = 30;
     hello.client_id = declared_id;
@@ -100,11 +110,13 @@ TEST(SinglePortHostClientIntegration, ClientsFanIntoHelloDeclaredIdsOrderIndepen
     std::atomic<bool> done{false};
     std::vector<std::unique_ptr<std::atomic<bool>>> hello_sent;
     hello_sent.reserve(kNumClients);
-    for (int i = 0; i < kNumClients; ++i) hello_sent.push_back(std::make_unique<std::atomic<bool>>(false));
+    for (int i = 0; i < kNumClients; ++i)
+        hello_sent.push_back(std::make_unique<std::atomic<bool>>(false));
     std::vector<std::thread> threads;
     threads.reserve(kNumClients);
     for (int i = 0; i < kNumClients; ++i) {
-        threads.emplace_back(RunDeclaringClient, port, declared_order[i], hello_sent[i].get(), &done);
+        threads.emplace_back(
+            RunDeclaringClient, port, declared_order[i], hello_sent[i].get(), &done);
         std::this_thread::sleep_for(std::chrono::milliseconds(15));
     }
 
@@ -116,24 +128,30 @@ TEST(SinglePortHostClientIntegration, ClientsFanIntoHelloDeclaredIdsOrderIndepen
     std::set<std::uint32_t> accepted_id_set;
     for (int i = 0; i < kNumClients; ++i) {
         std::unique_ptr<TcpTransport> t = listener.AcceptOneBlocking(/*timeout_ms=*/5000);
-        ASSERT_NE(t, nullptr) << "expected to accept connection " << i << " from the single listen socket";
-        EXPECT_TRUE(t->IsPeerConnected()) << "accepted transport " << i << " should have a live peer";
+        ASSERT_NE(t, nullptr) << "expected to accept connection " << i
+                              << " from the single listen socket";
+        EXPECT_TRUE(t->IsPeerConnected())
+            << "accepted transport " << i << " should have a live peer";
 
         std::vector<std::uint8_t> frame;
-        ASSERT_TRUE(ReceiveFrameWithin(*t, frame)) << "accepted connection " << i << " sent no Hello";
+        ASSERT_TRUE(ReceiveFrameWithin(*t, frame))
+            << "accepted connection " << i << " sent no Hello";
         HelloMsg hello;
-        ASSERT_TRUE(DecodeHello(frame, hello)) << "first frame on connection " << i << " was not a valid Hello";
+        ASSERT_TRUE(DecodeHello(frame, hello))
+            << "first frame on connection " << i << " was not a valid Hello";
 
         const std::uint32_t id = hello.client_id;
-        EXPECT_EQ(accepted_id_set.count(id), 0u) << "declared id " << id << " collided -> a slot overwrite";
-        server.AddClient(id, t.get());   // slot id from the HANDSHAKE, not the accept order
+        EXPECT_EQ(accepted_id_set.count(id), 0u)
+            << "declared id " << id << " collided -> a slot overwrite";
+        server.AddClient(id, t.get()); // slot id from the HANDSHAKE, not the accept order
         accepted_ids.push_back(id);
         accepted_id_set.insert(id);
         accepted.push_back(std::move(t));
     }
 
     // (a) ORDER-INDEPENDENT id match: the accepted id SET equals the DECLARED set, regardless of
-    //     the order the connections were accepted in (proves Hello-declared, not accept-order, ids).
+    //     the order the connections were accepted in (proves Hello-declared, not accept-order,
+    //     ids).
     EXPECT_EQ(accepted_id_set, expected_ids);
     // (c) NO COLLISION: N distinct ids registered as N distinct slots.
     EXPECT_EQ(accepted_ids.size(), static_cast<std::size_t>(kNumClients));
@@ -146,13 +164,15 @@ TEST(SinglePortHostClientIntegration, ClientsFanIntoHelloDeclaredIdsOrderIndepen
     // (b) each accepted transport still has a LIVE PEER (the client threads hold their connections
     //     open until `done`).
     for (std::size_t i = 0; i < accepted.size(); ++i) {
-        EXPECT_TRUE(accepted[i]->IsPeerConnected()) << "slot " << accepted_ids[i] << " lost its peer";
+        EXPECT_TRUE(accepted[i]->IsPeerConnected())
+            << "slot " << accepted_ids[i] << " lost its peer";
     }
 
     // The post-Hello byte stream SURVIVES AddClient: the trailing marker (== the id's low byte) is
     // still buffered on the SAME transport, exactly as the real usercmd stream is drained by
     // PumpInbound after the host consumes the Hello pre-AddClient. This also pins each connection's
-    // Hello + follow-on frame to the SAME stream (the marker matches that connection's declared id).
+    // Hello + follow-on frame to the SAME stream (the marker matches that connection's declared
+    // id).
     for (std::size_t i = 0; i < accepted.size(); ++i) {
         std::vector<std::uint8_t> marker;
         ASSERT_TRUE(ReceiveFrameWithin(*accepted[i], marker))
@@ -164,13 +184,17 @@ TEST(SinglePortHostClientIntegration, ClientsFanIntoHelloDeclaredIdsOrderIndepen
 
     // Every client actually connected and sent its Hello + marker.
     for (int i = 0; i < kNumClients; ++i) {
-        EXPECT_TRUE(hello_sent[i]->load(std::memory_order_relaxed)) << "client " << i << " never sent its Hello";
+        EXPECT_TRUE(hello_sent[i]->load(std::memory_order_relaxed))
+            << "client " << i << " never sent its Hello";
     }
 
     // Stop + join every client thread BEFORE tearing down the accepted transports (join is the
-    // happens-before edge; sockets are the only cross-thread objects and the kernel synchronizes them).
+    // happens-before edge; sockets are the only cross-thread objects and the kernel synchronizes
+    // them).
     done.store(true, std::memory_order_relaxed);
-    for (std::thread& th : threads) th.join();
+    for (std::thread& th : threads)
+        th.join();
     listener.Close();
-    for (auto& t : accepted) t->Close();
+    for (auto& t : accepted)
+        t->Close();
 }

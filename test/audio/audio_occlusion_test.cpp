@@ -1,8 +1,8 @@
-// AUDIO-11 (spec 021): real audio occlusion via physics raycasts.
+// real audio occlusion via physics raycasts.
 //
 // AudioSpatialCluster::CalculateOcclusion used to depend solely on a mockable
 // raycast callback (and returned 0 when none was set) — no world geometry ever
-// muffled a sound. AUDIO-11 adds a physics-system path: when a PhysicsSystem is
+// muffled a sound.  adds a physics-system path: when a PhysicsSystem is
 // set, the occlusion query casts a ray through the real Jolt world from the
 // source to the listener; solid geometry in the path raises the 0..1 occlusion
 // scalar. This test PINS that behavior against the proving_signal:
@@ -27,9 +27,9 @@
 #include "gtest/gtest.h"
 
 #include "audio/AudioSpatialCluster.h"
+#include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
 #include "world/Chunk.h"
-#include "luminumbra/core/Types.h"
 
 #include <glm/glm.hpp>
 
@@ -51,7 +51,8 @@ using Luminumbra::Systems::PhysicsSystem;
 std::shared_ptr<Chunk> MakeFlatFloorChunk(const IVec3& coords, float floor_y) {
     auto chunk = std::make_shared<Chunk>(coords);
     const int side = Luminumbra::CHUNK_SIZE_X + 1;
-    chunk->heightmap_data.assign(static_cast<std::size_t>(side) * static_cast<std::size_t>(side), floor_y);
+    chunk->heightmap_data.assign(static_cast<std::size_t>(side) * static_cast<std::size_t>(side),
+                                 floor_y);
     return chunk;
 }
 
@@ -78,8 +79,7 @@ TEST(AudioOcclusion, PhysicsOccluderBetweenSourceAndListenerRaisesOcclusion) {
     // Clear line of sight (no bodies in the world yet): CastRay finds no hit, so
     // PhysicsSystem::calculate_audio_occlusion returns exactly 0.
     const float clear = cluster.QueryOcclusion(kSourceBelow, kListenerAbove);
-    EXPECT_NEAR(clear, 0.0f, 1e-4f)
-        << "clear line of sight must not occlude (got " << clear << ")";
+    EXPECT_NEAR(clear, 0.0f, 1e-4f) << "clear line of sight must not occlude (got " << clear << ")";
 
     // Drop a solid floor squarely between the source and the listener.
     auto floor = MakeFlatFloorChunk(IVec3(0, 0, 0), kFloorY);
@@ -87,10 +87,10 @@ TEST(AudioOcclusion, PhysicsOccluderBetweenSourceAndListenerRaisesOcclusion) {
 
     const float blocked = cluster.QueryOcclusion(kSourceBelow, kListenerAbove);
     EXPECT_GT(blocked, 0.05f)
-        << "a solid body between source and listener must occlude the sound (got " << blocked << ")";
-    EXPECT_GT(blocked, clear)
-        << "occlusion must RISE when geometry blocks the path (clear=" << clear
-        << ", blocked=" << blocked << ")";
+        << "a solid body between source and listener must occlude the sound (got " << blocked
+        << ")";
+    EXPECT_GT(blocked, clear) << "occlusion must RISE when geometry blocks the path (clear="
+                              << clear << ", blocked=" << blocked << ")";
 
     physics.shutdown();
 }
@@ -104,14 +104,13 @@ TEST(AudioOcclusion, ReturnsZeroWithoutPhysicsOrCallback) {
 
 // Fallback: when no physics system is set, the mockable raycast-callback seam is
 // used unchanged (occlusion = hit_distance / total_distance). A hit at 3 m along
-// a 10 m source->listener span yields 0.3 — the pre-AUDIO-11 behavior, preserved.
+// a 10 m source->listener span yields 0.3 — the pre- behavior, preserved.
 TEST(AudioOcclusion, MockRaycastCallbackUsedWhenNoPhysics) {
     AudioSpatialCluster cluster;
-    cluster.SetPhysicsRaycastCallback(
-        [](const glm::vec3&, const glm::vec3&, float& hit_distance) {
-            hit_distance = 3.0f;
-            return true;
-        });
+    cluster.SetPhysicsRaycastCallback([](const glm::vec3&, const glm::vec3&, float& hit_distance) {
+        hit_distance = 3.0f;
+        return true;
+    });
 
     const float occ = cluster.QueryOcclusion(glm::vec3(0.0f), glm::vec3(10.0f, 0.0f, 0.0f));
     EXPECT_NEAR(occ, 0.3f, 1e-4f)
@@ -129,11 +128,10 @@ TEST(AudioOcclusion, PhysicsTakesPrecedenceOverCallback) {
 
     AudioSpatialCluster cluster;
     cluster.SetPhysicsSystem(&physics);
-    cluster.SetPhysicsRaycastCallback(
-        [](const glm::vec3&, const glm::vec3&, float& hit_distance) {
-            hit_distance = 5.0f; // would be ~0.42 over the 12 m span if consulted
-            return true;
-        });
+    cluster.SetPhysicsRaycastCallback([](const glm::vec3&, const glm::vec3&, float& hit_distance) {
+        hit_distance = 5.0f; // would be ~0.42 over the 12 m span if consulted
+        return true;
+    });
 
     const float occ = cluster.QueryOcclusion(kSourceBelow, kListenerAbove);
     EXPECT_NEAR(occ, 0.0f, 1e-4f)

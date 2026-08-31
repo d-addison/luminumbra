@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I6 P3.1: delta-vs-acked snapshot compression (the explicit next replication slice).
+//  delta-vs-acked snapshot compression (the explicit next replication slice).
 // The server sends a client only what CHANGED since the snapshot that client last ACKed,
 // instead of a full entity set every tick -- the bandwidth win that makes 20-32+ players
 // affordable (memory multiplayer-scale-testing).
@@ -26,7 +26,8 @@ namespace Luminumbra::Net {
 [[nodiscard]] inline SnapshotMsg MakeSnapshotDelta(const SnapshotMsg& baseline,
                                                    const SnapshotMsg& current) {
     std::map<std::uint32_t, const ReplEntityState*> base;
-    for (const ReplEntityState& e : baseline.entities) base[e.entity_id] = &e;
+    for (const ReplEntityState& e : baseline.entities)
+        base[e.entity_id] = &e;
 
     SnapshotMsg delta;
     delta.server_tick = current.server_tick;
@@ -38,18 +39,21 @@ namespace Luminumbra::Net {
         seen[e.entity_id] = true;
         const auto it = base.find(e.entity_id);
         if (it == base.end() || !(*it->second == e)) {
-            delta.entities.push_back(e);  // new or changed
+            delta.entities.push_back(e); // new or changed
         }
     }
     for (const ReplEntityState& e : baseline.entities) {
-        if (seen.find(e.entity_id) == seen.end()) delta.removed_ids.push_back(e.entity_id);
+        if (seen.find(e.entity_id) == seen.end())
+            delta.removed_ids.push_back(e.entity_id);
     }
     // ALSO carry the caller-stamped despawns on `current` (explicit/pending removals -- e.g. a
     // spent transient or a disconnected client's avatar whose id is not in the acked baseline's
     // replicated set). Without this, delta mode silently drops those removals that full mode
     // delivers, leaving a stale ghost on the client. Union + dedup keeps full==delta parity.
-    for (std::uint32_t id : current.removed_ids) delta.removed_ids.push_back(id);
-    std::sort(delta.entities.begin(), delta.entities.end(),
+    for (std::uint32_t id : current.removed_ids)
+        delta.removed_ids.push_back(id);
+    std::sort(delta.entities.begin(),
+              delta.entities.end(),
               [](const ReplEntityState& a, const ReplEntityState& b) {
                   return a.entity_id < b.entity_id;
               });
@@ -65,9 +69,12 @@ namespace Luminumbra::Net {
 [[nodiscard]] inline SnapshotMsg ApplySnapshotDelta(const SnapshotMsg& baseline,
                                                     const SnapshotMsg& delta) {
     std::map<std::uint32_t, ReplEntityState> set;
-    for (const ReplEntityState& e : baseline.entities) set[e.entity_id] = e;
-    for (std::uint32_t id : delta.removed_ids) set.erase(id);
-    for (const ReplEntityState& e : delta.entities) set[e.entity_id] = e;
+    for (const ReplEntityState& e : baseline.entities)
+        set[e.entity_id] = e;
+    for (std::uint32_t id : delta.removed_ids)
+        set.erase(id);
+    for (const ReplEntityState& e : delta.entities)
+        set[e.entity_id] = e;
 
     SnapshotMsg full;
     full.server_tick = delta.server_tick;
@@ -80,8 +87,9 @@ namespace Luminumbra::Net {
     // ghost and break full==delta parity.
     full.removed_ids = delta.removed_ids;
     full.entities.reserve(set.size());
-    for (const auto& [id, e] : set) full.entities.push_back(e);  // map -> ascending id
+    for (const auto& [id, e] : set)
+        full.entities.push_back(e); // map -> ascending id
     return full;
 }
 
-}  // namespace Luminumbra::Net
+} // namespace Luminumbra::Net

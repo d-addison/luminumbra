@@ -1,4 +1,4 @@
-// Track sim.day_night_activity — DIURNAL / NOCTURNAL ACTIVITY. A creature's activity scales
+// sim.day_night_activity: DIURNAL / NOCTURNAL ACTIVITY. A creature's activity scales
 // with time-of-day: a DIURNAL creature peaks at noon and rests at midnight; a NOCTURNAL
 // creature is the inverse. Deterministic (id-ordered, DeterministicMath::Cos only, NO rng),
 // gated by the CircadianComponent opt-in. These tests pin the curve: high-at-noon /

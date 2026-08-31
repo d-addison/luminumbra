@@ -24,10 +24,6 @@
 //     stalls forever on a dropped peer input (deterministic WaitingForPeer, never a
 //     false advance or false desync), max u64 tick.
 //
-// A handful of tests assert the CORRECT (contract-mandated) behavior that the
-// current code does NOT yet implement; these are EXPECTED TO FAIL and are flagged
-// in the report. They never assert the buggy behavior.
-//
 // Hermetic: every stream is written to a unique temp file and removed; no real
 // sockets (LoopbackTransport only).
 
@@ -65,8 +61,7 @@ fs::path HardeningTempDir() {
 }
 
 fs::path UniquePath(const std::string& stem) {
-    const ::testing::TestInfo* info =
-        ::testing::UnitTest::GetInstance()->current_test_info();
+    const ::testing::TestInfo* info = ::testing::UnitTest::GetInstance()->current_test_info();
     const std::string name = (info != nullptr) ? info->name() : std::string("anon");
     return HardeningTempDir() / (name + "-" + stem + ".lrec1");
 }
@@ -74,9 +69,11 @@ fs::path UniquePath(const std::string& stem) {
 // Reads a whole binary file into a byte vector (for byte-exactness comparisons).
 std::vector<std::uint8_t> ReadAllBytes(const fs::path& p) {
     std::ifstream in(p, std::ios::binary | std::ios::ate);
-    if (!in.is_open()) return {};
+    if (!in.is_open())
+        return {};
     const std::streamsize size = in.tellg();
-    if (size <= 0) return {};
+    if (size <= 0)
+        return {};
     in.seekg(0);
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
     in.read(reinterpret_cast<char*>(bytes.data()), size);
@@ -94,13 +91,14 @@ struct FakeWorld {
     std::uint64_t corrupt_from = 0; // ticks >= this use a corrupted salt (0 = never)
 
     std::string HashAt(std::uint64_t t, const char* section) const {
-        const std::string s =
-            (corrupt_from != 0 && t >= corrupt_from) ? (salt + "X") : salt;
+        const std::string s = (corrupt_from != 0 && t >= corrupt_from) ? (salt + "X") : salt;
         return replay::Fnv1a64Hex(s + "|" + section + "|" + std::to_string(t));
     }
 };
 
-std::vector<std::uint8_t> CollectEmpty(std::uint64_t, void*) { return {}; }
+std::vector<std::uint8_t> CollectEmpty(std::uint64_t, void*) {
+    return {};
+}
 
 bool ApplyStep(std::uint64_t tick, const std::vector<std::uint8_t>&, void* user) {
     static_cast<FakeWorld*>(user)->tick = tick;
@@ -135,18 +133,20 @@ net::LockstepConfig MakeConfig(std::uint32_t local_id, std::uint32_t peer_id) {
     return c;
 }
 
-// Sends a peer Hello so a single-process Handshake() can complete, then handshakes
+// Sends a peer Hello so a single-process Handshake can complete, then handshakes
 // both ends. Returns true iff BOTH handshakes succeed.
-bool HandshakeBoth(net::LockstepSession& a, net::LockstepSession& b,
-                   net::LoopbackTransport* tb) {
+bool HandshakeBoth(net::LockstepSession& a, net::LockstepSession& b, net::LoopbackTransport* tb) {
     net::HelloMsg bh;
     bh.seed = 424242;
     bh.preset = "default";
     bh.tick_rate_hz = 30;
     bh.client_id = 1;
-    if (!tb->SendFrame(net::EncodeHello(bh))) return false;
-    if (!a.Handshake()) return false;
-    if (!b.Handshake()) return false;
+    if (!tb->SendFrame(net::EncodeHello(bh)))
+        return false;
+    if (!a.Handshake())
+        return false;
+    if (!b.Handshake())
+        return false;
     return true;
 }
 
@@ -157,10 +157,14 @@ struct DriveResult {
     std::uint64_t b_tick = 0;
 };
 
-DriveResult DriveBoth(net::LockstepSession& a, net::LockstepSession& b,
-                      std::uint64_t budget, int max_pumps = 100000) {
+DriveResult DriveBoth(net::LockstepSession& a,
+                      net::LockstepSession& b,
+                      std::uint64_t budget,
+                      int max_pumps = 100000) {
     net::TickResult ra, rb;
-    auto finished = [](net::TickOutcome o) { return o == net::TickOutcome::Finished; };
+    auto finished = [](net::TickOutcome o) {
+        return o == net::TickOutcome::Finished;
+    };
     auto fatal = [](net::TickOutcome o) {
         return o == net::TickOutcome::Desync || o == net::TickOutcome::PeerDisconnected;
     };
@@ -168,8 +172,10 @@ DriveResult DriveBoth(net::LockstepSession& a, net::LockstepSession& b,
     while (pumps++ < max_pumps) {
         ra = a.PumpTick(budget);
         rb = b.PumpTick(budget);
-        if (fatal(ra.outcome) || fatal(rb.outcome)) break;
-        if (finished(ra.outcome) && finished(rb.outcome)) break;
+        if (fatal(ra.outcome) || fatal(rb.outcome))
+            break;
+        if (finished(ra.outcome) && finished(rb.outcome))
+            break;
     }
     return {ra.outcome, rb.outcome, a.AgreedTick(), b.AgreedTick()};
 }
@@ -198,7 +204,7 @@ replay::ReplayHeader RichHeader() {
 TEST(LockstepCodecHardening, HelloRoundtripAdversarial) {
     net::HelloMsg in;
     in.protocol_version = net::kLockstepProtocolVersion;
-    in.seed = 0xFFFFFFFFFFFFFFFFULL; // max u64
+    in.seed = 0xFFFFFFFFFFFFFFFFULL;                    // max u64
     in.preset = "preset/with spaces/and-utf8-\xC3\xA9"; // non-ASCII bytes survive
     in.tick_rate_hz = 65535;                            // max u16
     in.client_id = 0xFFFFFFFFu;                         // max u32
@@ -233,9 +239,9 @@ TEST(LockstepCodecHardening, HelloPresetWithEmbeddedNulRoundtrips) {
 
 TEST(LockstepCodecHardening, InputRoundtripEmptyBlob) {
     net::InputMsg in;
-    in.tick = 0;          // tick 0 boundary
-    in.client_id = 0;     // host id boundary
-    in.inputs = {};       // empty is valid + compact
+    in.tick = 0;      // tick 0 boundary
+    in.client_id = 0; // host id boundary
+    in.inputs = {};   // empty is valid + compact
     net::InputMsg out;
     ASSERT_TRUE(net::DecodeInput(net::EncodeInput(in), out));
     EXPECT_EQ(out.tick, 0u);
@@ -248,7 +254,8 @@ TEST(LockstepCodecHardening, InputRoundtripMaxTickAndAllByteValues) {
     in.tick = 0xFFFFFFFFFFFFFFFFULL; // max u64 tick
     in.client_id = 0xFFFFFFFFu;
     in.inputs.resize(256);
-    for (int i = 0; i < 256; ++i) in.inputs[i] = static_cast<std::uint8_t>(i);
+    for (int i = 0; i < 256; ++i)
+        in.inputs[i] = static_cast<std::uint8_t>(i);
     net::InputMsg out;
     ASSERT_TRUE(net::DecodeInput(net::EncodeInput(in), out));
     EXPECT_EQ(out.tick, in.tick);
@@ -348,7 +355,11 @@ TEST(LockstepCodecHardening, DecodeIsIdempotent) {
 
 TEST(LockstepCodecHardening, DecodeHelloRejectsTruncatedFrame) {
     auto frame = net::EncodeHello([] {
-        net::HelloMsg m; m.preset = "default"; m.seed = 7; return m; }());
+        net::HelloMsg m;
+        m.preset = "default";
+        m.seed = 7;
+        return m;
+    }());
     ASSERT_GT(frame.size(), 1u);
     net::HelloMsg out;
     // Drop bytes from the tail one at a time; every short frame must be rejected.
@@ -419,7 +430,10 @@ TEST(LockstepCodecHardening, DecodeRejectsTypeMismatch) {
 // A Hello with a corrupted magic (right type tag, wrong magic bytes) is rejected.
 TEST(LockstepCodecHardening, DecodeHelloRejectsBadMagic) {
     auto frame = net::EncodeHello([] {
-        net::HelloMsg m; m.preset = "default"; return m; }());
+        net::HelloMsg m;
+        m.preset = "default";
+        return m;
+    }());
     // The magic is the first 5 bytes of the PAYLOAD: skip [type u8][len u32] = 5.
     ASSERT_GT(frame.size(), 10u);
     frame[5] ^= 0xFF; // corrupt the first magic byte
@@ -437,7 +451,8 @@ TEST(LockstepCodecHardening, DecodeHelloRejectsBadMagic) {
 TEST(ReplayRoundtripHardening, CheckpointHashSequenceIsByteExact) {
     FakeWorld live; // the "live" run
     const fs::path path = UniquePath("hashseq");
-    std::error_code ec; fs::remove(path, ec);
+    std::error_code ec;
+    fs::remove(path, ec);
 
     // Capture the live cadence hashes (ticks 30,60,90).
     std::vector<replay::CheckpointRecord> live_cps;
@@ -447,7 +462,8 @@ TEST(ReplayRoundtripHardening, CheckpointHashSequenceIsByteExact) {
         for (std::uint64_t t = 1; t <= 90; ++t) {
             w.RecordInput(t, {});
             if (t % 30 == 0) {
-                net::HashMsg hm; CaptureHashes(t, hm, &live);
+                net::HashMsg hm;
+                CaptureHashes(t, hm, &live);
                 replay::CheckpointRecord cp;
                 cp.tick = t;
                 cp.world_hash = hm.world_hash;
@@ -469,7 +485,7 @@ TEST(ReplayRoundtripHardening, CheckpointHashSequenceIsByteExact) {
         const auto& live_cp = live_cps[i];
         const auto& got = contents->checkpoints[i];
         EXPECT_EQ(got.tick, live_cp.tick);
-        EXPECT_EQ(got.world_hash, live_cp.world_hash);   // run==replay: exact
+        EXPECT_EQ(got.world_hash, live_cp.world_hash); // run==replay: exact
         EXPECT_EQ(got.terrain, live_cp.terrain);
         EXPECT_EQ(got.water, live_cp.water);
         EXPECT_EQ(got.entities, live_cp.entities);
@@ -482,7 +498,9 @@ TEST(ReplayRoundtripHardening, CheckpointHashSequenceIsByteExact) {
 TEST(ReplayRoundtripHardening, ReSaveIsByteIdentical) {
     const fs::path p1 = UniquePath("save1");
     const fs::path p2 = UniquePath("save2");
-    std::error_code ec; fs::remove(p1, ec); fs::remove(p2, ec);
+    std::error_code ec;
+    fs::remove(p1, ec);
+    fs::remove(p2, ec);
 
     auto write = [&](const fs::path& p) {
         replay::ReplayWriter w;
@@ -506,20 +524,26 @@ TEST(ReplayRoundtripHardening, ReSaveIsByteIdentical) {
     write(p2);
 
     EXPECT_EQ(ReadAllBytes(p1), ReadAllBytes(p2)) << "re-save produced different bytes";
-    fs::remove(p1, ec); fs::remove(p2, ec);
+    fs::remove(p1, ec);
+    fs::remove(p2, ec);
 }
 
 // Re-reading the same finalized stream is identical every time (read has no state).
 TEST(ReplayRoundtripHardening, ReReadIsRepeatable) {
     const fs::path path = UniquePath("reread");
-    std::error_code ec; fs::remove(path, ec);
+    std::error_code ec;
+    fs::remove(path, ec);
     {
         replay::ReplayWriter w;
         ASSERT_TRUE(w.Open(path.string(), RichHeader()));
         w.RecordInput(1, {});
         w.RecordInput(2, {0xAA, 0xBB});
         replay::CheckpointRecord cp;
-        cp.tick = 30; cp.world_hash = "x"; cp.terrain = "y"; cp.water = "z"; cp.entities = "w";
+        cp.tick = 30;
+        cp.world_hash = "x";
+        cp.terrain = "y";
+        cp.water = "z";
+        cp.entities = "w";
         w.RecordCheckpoint(cp);
         ASSERT_TRUE(w.Finalize(30));
     }
@@ -540,7 +564,8 @@ TEST(ReplayRoundtripHardening, ReReadIsRepeatable) {
 // back clean -- empty roster no-op.
 TEST(ReplayRoundtripHardening, EmptyStreamFinalizesAndReads) {
     const fs::path path = UniquePath("empty");
-    std::error_code ec; fs::remove(path, ec);
+    std::error_code ec;
+    fs::remove(path, ec);
     {
         replay::ReplayWriter w;
         ASSERT_TRUE(w.Open(path.string(), RichHeader()));
@@ -560,14 +585,19 @@ TEST(ReplayRoundtripHardening, EmptyStreamFinalizesAndReads) {
 // records (a narrowed tick field would corrupt this).
 TEST(ReplayRoundtripHardening, MaxTickRoundtrips) {
     const fs::path path = UniquePath("maxtick");
-    std::error_code ec; fs::remove(path, ec);
+    std::error_code ec;
+    fs::remove(path, ec);
     const std::uint64_t kMax = 0xFFFFFFFFFFFFFFFFULL;
     {
         replay::ReplayWriter w;
         ASSERT_TRUE(w.Open(path.string(), RichHeader()));
         w.RecordInput(kMax, {0x01});
         replay::CheckpointRecord cp;
-        cp.tick = kMax; cp.world_hash = "wh"; cp.terrain = "tr"; cp.water = "wa"; cp.entities = "en";
+        cp.tick = kMax;
+        cp.world_hash = "wh";
+        cp.terrain = "tr";
+        cp.water = "wa";
+        cp.entities = "en";
         w.RecordCheckpoint(cp);
         ASSERT_TRUE(w.Finalize(kMax));
     }
@@ -586,7 +616,8 @@ TEST(ReplayRoundtripHardening, MaxTickRoundtrips) {
 // trailer (the length-framing must dominate any byte-pattern collision).
 TEST(ReplayRoundtripHardening, BlobContainingTrailerMagicIsNotMisread) {
     const fs::path path = UniquePath("magicblob");
-    std::error_code ec; fs::remove(path, ec);
+    std::error_code ec;
+    fs::remove(path, ec);
     const std::vector<std::uint8_t> trailer_bytes = {'L', 'R', 'E', 'C', 'E', 'N', 'D', '1'};
     {
         replay::ReplayWriter w;
@@ -606,11 +637,11 @@ TEST(ReplayRoundtripHardening, BlobContainingTrailerMagicIsNotMisread) {
 
 // CONTRACT (ReplayStream.h: "playback refuses a version mismatch loudly"): a stream
 // stamped with a FUTURE/unknown LREC1 version must be REJECTED on read, not parsed
-// as if current. EXPECTED TO FAIL -- ReadReplay/ParseHeader read the version field
-// but never compare it to kLrec1Version, so a future-version stream is accepted.
+// as if current.
 TEST(ReplayRoundtripHardening, FutureVersionStreamIsRefused) {
     const fs::path path = UniquePath("futurever");
-    std::error_code ec; fs::remove(path, ec);
+    std::error_code ec;
+    fs::remove(path, ec);
     {
         replay::ReplayWriter w;
         replay::ReplayHeader h = RichHeader();
@@ -631,7 +662,8 @@ TEST(ReplayRoundtripHardening, FutureVersionStreamIsRefused) {
 // A completely empty (zero-byte) file is not a valid stream -> nullopt (degenerate).
 TEST(ReplayRoundtripHardening, ZeroByteFileRejected) {
     const fs::path path = UniquePath("zerobyte");
-    std::error_code ec; fs::remove(path, ec);
+    std::error_code ec;
+    fs::remove(path, ec);
     { std::ofstream out(path, std::ios::binary | std::ios::trunc); }
     EXPECT_FALSE(replay::ReadReplay(path.string()).has_value());
     fs::remove(path, ec);
@@ -664,7 +696,9 @@ TEST(LockstepReplayHardening, DesyncDumpReproducesLiveHashesExactly) {
 
     const fs::path dumpA = UniquePath("dumpA");
     const fs::path dumpB = UniquePath("dumpB");
-    std::error_code ec; fs::remove(dumpA, ec); fs::remove(dumpB, ec);
+    std::error_code ec;
+    fs::remove(dumpA, ec);
+    fs::remove(dumpB, ec);
     a.SetDumpPath(dumpA.string());
     b.SetDumpPath(dumpB.string());
 
@@ -686,7 +720,8 @@ TEST(LockstepReplayHardening, DesyncDumpReproducesLiveHashesExactly) {
         EXPECT_FALSE(contents->truncated);
         ASSERT_FALSE(contents->checkpoints.empty());
         // Checkpoint at tick 30 must equal what this peer's world hashed live.
-        net::HashMsg expected; CaptureHashes(30, expected, &w);
+        net::HashMsg expected;
+        CaptureHashes(30, expected, &w);
         const replay::CheckpointRecord* cp30 = replay::FindCheckpoint(*contents, 30);
         ASSERT_NE(cp30, nullptr);
         EXPECT_EQ(cp30->world_hash, expected.world_hash);
@@ -694,10 +729,13 @@ TEST(LockstepReplayHardening, DesyncDumpReproducesLiveHashesExactly) {
         EXPECT_EQ(cp30->water, expected.water);
         EXPECT_EQ(cp30->entities, expected.entities);
     };
-    if (a_desync) verify(a, wa);
-    if (b_desync) verify(b, wb);
+    if (a_desync)
+        verify(a, wa);
+    if (b_desync)
+        verify(b, wb);
 
-    fs::remove(dumpA, ec); fs::remove(dumpB, ec);
+    fs::remove(dumpA, ec);
+    fs::remove(dumpB, ec);
 }
 
 // run==replay determinism: two FULLY independent in-sync sessions, with DIFFERENT
@@ -712,7 +750,8 @@ TEST(LockstepReplayHardening, HorizonPacingDoesNotChangeEndState) {
         net::LockstepSession b(MakeConfig(1, 0), tb.get(), MakeHooks(&wb));
         EXPECT_TRUE(HandshakeBoth(a, b, tb.get()));
         if (stall) {
-            for (int i = 0; i < 12; ++i) a.PumpTick(90); // grow a's horizon
+            for (int i = 0; i < 12; ++i)
+                a.PumpTick(90); // grow a's horizon
         }
         const auto r = DriveBoth(a, b, 90);
         EXPECT_EQ(r.a_outcome, net::TickOutcome::Finished);
@@ -738,7 +777,10 @@ TEST(LockstepReplayHardening, DuplicateInputFrameIsNoOp) {
     // Inject duplicate peer-input frames into a's receive queue by sending the same
     // InputMsg from b's transport twice for a range of ticks.
     for (std::uint64_t t = 1; t <= 30; ++t) {
-        net::InputMsg dup; dup.tick = t; dup.client_id = 1; dup.inputs = {};
+        net::InputMsg dup;
+        dup.tick = t;
+        dup.client_id = 1;
+        dup.inputs = {};
         ASSERT_TRUE(tb->SendFrame(net::EncodeInput(dup)));
         ASSERT_TRUE(tb->SendFrame(net::EncodeInput(dup))); // exact duplicate
     }
@@ -760,9 +802,13 @@ TEST(LockstepReplayHardening, OutOfOrderInputFramesConverge) {
 
     // Deliver b's inputs for ticks 1..20 in REVERSE order into a's queue.
     for (std::uint64_t t = 20; t >= 1; --t) {
-        net::InputMsg in; in.tick = t; in.client_id = 1; in.inputs = {};
+        net::InputMsg in;
+        in.tick = t;
+        in.client_id = 1;
+        in.inputs = {};
         ASSERT_TRUE(tb->SendFrame(net::EncodeInput(in)));
-        if (t == 1) break; // avoid unsigned underflow
+        if (t == 1)
+            break; // avoid unsigned underflow
     }
     // a alone should now be able to advance through tick 20 (it has its own
     // pre-scheduled inputs + all of b's, regardless of order).
@@ -771,8 +817,10 @@ TEST(LockstepReplayHardening, OutOfOrderInputFramesConverge) {
         ra = a.PumpTick(20);
         if (ra.outcome == net::TickOutcome::Finished ||
             ra.outcome == net::TickOutcome::WaitingForPeer) {
-            if (a.AgreedTick() >= 20) break;
-            if (ra.outcome == net::TickOutcome::WaitingForPeer) break;
+            if (a.AgreedTick() >= 20)
+                break;
+            if (ra.outcome == net::TickOutcome::WaitingForPeer)
+                break;
         }
     }
     EXPECT_EQ(a.AgreedTick(), 20u) << "out-of-order input delivery failed to converge";
@@ -787,12 +835,17 @@ TEST(LockstepReplayHardening, DroppedPeerInputStallsDeterministically) {
     FakeWorld wa{0, "agree", 0};
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     // NOTE: no b session and no b inputs are ever sent -> a's peer inputs never arrive.
-    net::HelloMsg bh; bh.seed = 424242; bh.preset = "default"; bh.tick_rate_hz = 30; bh.client_id = 1;
+    net::HelloMsg bh;
+    bh.seed = 424242;
+    bh.preset = "default";
+    bh.tick_rate_hz = 30;
+    bh.client_id = 1;
     ASSERT_TRUE(tb->SendFrame(net::EncodeHello(bh)));
     ASSERT_TRUE(a.Handshake());
 
     net::TickResult ra;
-    for (int i = 0; i < 5000; ++i) ra = a.PumpTick(90);
+    for (int i = 0; i < 5000; ++i)
+        ra = a.PumpTick(90);
     EXPECT_EQ(ra.outcome, net::TickOutcome::WaitingForPeer)
         << "a dropped peer input did not stall deterministically";
     EXPECT_EQ(a.AgreedTick(), 0u) << "session advanced past a missing peer input";
@@ -814,7 +867,8 @@ TEST(LockstepReplayHardening, StalledSessionRecoversWhenInputsArrive) {
     // Stall a (b not pumped) so a is parked at WaitingForPeer with a grown horizon. a may have
     // agreed a FEW ticks first from inputs b buffered during the handshake before it stops being
     // pumped, so the contract is "stalled SHORT of budget" (not necessarily at exactly 0).
-    for (int i = 0; i < 20; ++i) a.PumpTick(60);
+    for (int i = 0; i < 20; ++i)
+        a.PumpTick(60);
     ASSERT_LT(a.AgreedTick(), 60u);
     ASSERT_GT(a.Status().horizon, 3u);
 
@@ -854,7 +908,9 @@ TEST(LockstepReplayHardening, DesyncIsStickyAcrossPumps) {
     net::LockstepSession b(MakeConfig(1, 0), tb.get(), MakeHooks(&wb));
     const fs::path dumpA = UniquePath("stickyA");
     const fs::path dumpB = UniquePath("stickyB");
-    std::error_code ec; fs::remove(dumpA, ec); fs::remove(dumpB, ec);
+    std::error_code ec;
+    fs::remove(dumpA, ec);
+    fs::remove(dumpB, ec);
     a.SetDumpPath(dumpA.string());
     b.SetDumpPath(dumpB.string());
     ASSERT_TRUE(HandshakeBoth(a, b, tb.get()));
@@ -870,7 +926,8 @@ TEST(LockstepReplayHardening, DesyncIsStickyAcrossPumps) {
         EXPECT_EQ(rr.outcome, net::TickOutcome::Desync);
         EXPECT_EQ(desynced->AgreedTick(), at);
     }
-    fs::remove(dumpA, ec); fs::remove(dumpB, ec);
+    fs::remove(dumpA, ec);
+    fs::remove(dumpB, ec);
 }
 
 // GATING / no-op: a peer-disconnected session is STICKY too -- further pumps keep
@@ -885,14 +942,16 @@ TEST(LockstepReplayHardening, DisconnectIsStickyAcrossPumps) {
     for (int i = 0; i < 50; ++i) {
         a.PumpTick(90);
         b.PumpTick(90);
-        if (a.AgreedTick() >= 5) break;
+        if (a.AgreedTick() >= 5)
+            break;
     }
     b.Disconnect();
 
     net::TickResult ra;
     for (int i = 0; i < 1000; ++i) {
         ra = a.PumpTick(90);
-        if (ra.outcome == net::TickOutcome::PeerDisconnected) break;
+        if (ra.outcome == net::TickOutcome::PeerDisconnected)
+            break;
     }
     ASSERT_EQ(ra.outcome, net::TickOutcome::PeerDisconnected);
     const std::uint64_t at = a.AgreedTick();
@@ -904,7 +963,7 @@ TEST(LockstepReplayHardening, DisconnectIsStickyAcrossPumps) {
     EXPECT_FALSE(a.Status().desynced) << "a clean disconnect must never become a desync";
 }
 
-// Disconnect() is IDEMPOTENT: calling it twice must not crash or send a second Bye
+// Disconnect is IDEMPOTENT: calling it twice must not crash or send a second Bye
 // (the header documents it as idempotent).
 TEST(LockstepReplayHardening, DisconnectIsIdempotent) {
     auto [ta, tb] = net::MakeLoopbackPair();
@@ -923,7 +982,11 @@ TEST(LockstepReplayHardening, HandshakeRejectsTickRateMismatch) {
     auto [ta, tb] = net::MakeLoopbackPair();
     FakeWorld wa{0, "agree", 0};
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
-    net::HelloMsg bad; bad.seed = 424242; bad.preset = "default"; bad.tick_rate_hz = 60; bad.client_id = 1;
+    net::HelloMsg bad;
+    bad.seed = 424242;
+    bad.preset = "default";
+    bad.tick_rate_hz = 60;
+    bad.client_id = 1;
     ASSERT_TRUE(tb->SendFrame(net::EncodeHello(bad)));
     EXPECT_FALSE(a.Handshake());
     EXPECT_FALSE(a.Status().handshaken);
@@ -936,7 +999,10 @@ TEST(LockstepReplayHardening, HandshakeRejectsProtocolVersionMismatch) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::HelloMsg bad;
     bad.protocol_version = static_cast<std::uint16_t>(net::kLockstepProtocolVersion + 1);
-    bad.seed = 424242; bad.preset = "default"; bad.tick_rate_hz = 30; bad.client_id = 1;
+    bad.seed = 424242;
+    bad.preset = "default";
+    bad.tick_rate_hz = 30;
+    bad.client_id = 1;
     ASSERT_TRUE(tb->SendFrame(net::EncodeHello(bad)));
     EXPECT_FALSE(a.Handshake());
 }
@@ -963,9 +1029,8 @@ TEST(LockstepReplayHardening, DesyncLocalizesToWaterSection) {
     struct SectionWorld {
         std::uint64_t corrupt_water_from = 0;
         std::string HashAt(std::uint64_t t, const char* section) const {
-            const bool corrupt = corrupt_water_from != 0 &&
-                                  t >= corrupt_water_from &&
-                                  std::string(section) == "water";
+            const bool corrupt = corrupt_water_from != 0 && t >= corrupt_water_from &&
+                                 std::string(section) == "water";
             const std::string salt = corrupt ? "agreeW" : "agree";
             return replay::Fnv1a64Hex(salt + "|" + section + "|" + std::to_string(t));
         }
@@ -974,11 +1039,13 @@ TEST(LockstepReplayHardening, DesyncLocalizesToWaterSection) {
     sw_a = SectionWorld{0};
     sw_b = SectionWorld{30};
 
-    // The shared ApplyStep() type-puns `user` as a FakeWorld* and writes `tick` into
+    // The shared ApplyStep type-puns `user` as a FakeWorld* and writes `tick` into
     // offset 0 -- which for a SectionWorld is `corrupt_water_from`. Using it here would
     // clobber each world's corruption config every tick (making both worlds corrupt
     // identically -> no divergence). Use a section-world step that advances nothing.
-    auto step = [](std::uint64_t, const std::vector<std::uint8_t>&, void*) { return true; };
+    auto step = [](std::uint64_t, const std::vector<std::uint8_t>&, void*) {
+        return true;
+    };
 
     auto cap = [](std::uint64_t tick, net::HashMsg& out, void* user) {
         auto* w = static_cast<SectionWorld*>(user);
@@ -990,16 +1057,24 @@ TEST(LockstepReplayHardening, DesyncLocalizesToWaterSection) {
     };
 
     auto [ta, tb] = net::MakeLoopbackPair();
-    net::LockstepHooks ha; ha.collect_local_input = &CollectEmpty; ha.apply_and_step = step;
-    ha.capture_hashes = cap; ha.user = &sw_a;
-    net::LockstepHooks hb; hb.collect_local_input = &CollectEmpty; hb.apply_and_step = step;
-    hb.capture_hashes = cap; hb.user = &sw_b;
+    net::LockstepHooks ha;
+    ha.collect_local_input = &CollectEmpty;
+    ha.apply_and_step = step;
+    ha.capture_hashes = cap;
+    ha.user = &sw_a;
+    net::LockstepHooks hb;
+    hb.collect_local_input = &CollectEmpty;
+    hb.apply_and_step = step;
+    hb.capture_hashes = cap;
+    hb.user = &sw_b;
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), ha);
     net::LockstepSession b(MakeConfig(1, 0), tb.get(), hb);
 
     const fs::path dumpA = UniquePath("waterA");
     const fs::path dumpB = UniquePath("waterB");
-    std::error_code ec; fs::remove(dumpA, ec); fs::remove(dumpB, ec);
+    std::error_code ec;
+    fs::remove(dumpA, ec);
+    fs::remove(dumpB, ec);
     a.SetDumpPath(dumpA.string());
     b.SetDumpPath(dumpB.string());
     ASSERT_TRUE(HandshakeBoth(a, b, tb.get()));
@@ -1016,7 +1091,8 @@ TEST(LockstepReplayHardening, DesyncLocalizesToWaterSection) {
         EXPECT_EQ(b.Status().desync_tick, 30u);
         EXPECT_EQ(b.Status().desync_section, "water");
     }
-    fs::remove(dumpA, ec); fs::remove(dumpB, ec);
+    fs::remove(dumpA, ec);
+    fs::remove(dumpB, ec);
 }
 
 // In-sync run emits a dump on NO desync? No: a clean run must NEVER set desynced and
@@ -1049,22 +1125,41 @@ TEST(LockstepReplayHardening, MergedInputBytesMatchAcrossPeers) {
     ca = Capt{};
     cb = Capt{};
     // Give each peer a NON-EMPTY, client-id-distinguishable input so merge order matters.
-    auto collect_a = [](std::uint64_t, void*) -> std::vector<std::uint8_t> { return {0xA0}; };
-    auto collect_b = [](std::uint64_t, void*) -> std::vector<std::uint8_t> { return {0xB0}; };
+    auto collect_a = [](std::uint64_t, void*) -> std::vector<std::uint8_t> {
+        return {0xA0};
+    };
+    auto collect_b = [](std::uint64_t, void*) -> std::vector<std::uint8_t> {
+        return {0xB0};
+    };
     auto apply_a = [](std::uint64_t t, const std::vector<std::uint8_t>& m, void* u) {
-        static_cast<Capt*>(u)->applied[t] = m; return true; };
+        static_cast<Capt*>(u)->applied[t] = m;
+        return true;
+    };
     auto apply_b = [](std::uint64_t t, const std::vector<std::uint8_t>& m, void* u) {
-        static_cast<Capt*>(u)->applied[t] = m; return true; };
+        static_cast<Capt*>(u)->applied[t] = m;
+        return true;
+    };
 
     auto [ta, tb] = net::MakeLoopbackPair();
-    net::LockstepHooks ha; ha.collect_local_input = collect_a; ha.apply_and_step = apply_a;
-    ha.capture_hashes = &CaptureHashes; ha.user = &ca;
-    net::LockstepHooks hb; hb.collect_local_input = collect_b; hb.apply_and_step = apply_b;
-    hb.capture_hashes = &CaptureHashes; hb.user = &cb;
+    net::LockstepHooks ha;
+    ha.collect_local_input = collect_a;
+    ha.apply_and_step = apply_a;
+    ha.capture_hashes = &CaptureHashes;
+    ha.user = &ca;
+    net::LockstepHooks hb;
+    hb.collect_local_input = collect_b;
+    hb.apply_and_step = apply_b;
+    hb.capture_hashes = &CaptureHashes;
+    hb.user = &cb;
     // capture_hashes needs a FakeWorld* user, but ours is Capt*; the hash path is not
     // exercised here (budget < cadence) so give a benign no-op capture instead.
     auto noop_cap = [](std::uint64_t tick, net::HashMsg& out, void*) {
-        out.tick = tick; out.world_hash = "x"; out.terrain = "x"; out.water = "x"; out.entities = "x"; };
+        out.tick = tick;
+        out.world_hash = "x";
+        out.terrain = "x";
+        out.water = "x";
+        out.entities = "x";
+    };
     ha.capture_hashes = noop_cap;
     hb.capture_hashes = noop_cap;
 
@@ -1098,11 +1193,13 @@ TEST(LockstepReplayHardening, FailedApplyStepHaltsAsDesync) {
     };
     auto [ta, tb] = net::MakeLoopbackPair();
     FakeWorld wa{0, "agree", 0}, wb{0, "agree", 0};
-    net::LockstepHooks ha = MakeHooks(&wa); ha.apply_and_step = apply_fail;
+    net::LockstepHooks ha = MakeHooks(&wa);
+    ha.apply_and_step = apply_fail;
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), ha);
     net::LockstepSession b(MakeConfig(1, 0), tb.get(), MakeHooks(&wb));
     const fs::path dumpA = UniquePath("applyfailA");
-    std::error_code ec; fs::remove(dumpA, ec);
+    std::error_code ec;
+    fs::remove(dumpA, ec);
     a.SetDumpPath(dumpA.string());
     ASSERT_TRUE(HandshakeBoth(a, b, tb.get()));
 
@@ -1110,8 +1207,10 @@ TEST(LockstepReplayHardening, FailedApplyStepHaltsAsDesync) {
     for (int i = 0; i < 100000; ++i) {
         ra = a.PumpTick(90);
         b.PumpTick(90);
-        if (ra.outcome == net::TickOutcome::Desync) break;
-        if (ra.outcome == net::TickOutcome::Finished) break;
+        if (ra.outcome == net::TickOutcome::Desync)
+            break;
+        if (ra.outcome == net::TickOutcome::Finished)
+            break;
     }
     EXPECT_EQ(ra.outcome, net::TickOutcome::Desync);
     EXPECT_EQ(a.Status().desync_tick, 5u);

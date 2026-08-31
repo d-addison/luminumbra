@@ -1,4 +1,4 @@
-// GPU-04 (spec 016 FR-A-001/002 — the pilot-pass seam): the two default-OFF pilot
+//  (  — the pilot-pass seam): the two default-OFF pilot
 // passes (DebugView + GroundDecal) now take a const RenderContext& and read their
 // whole input from it. A byte-identical headless flip is VACUOUS for both (DebugView
 // is mode None by default; GroundDecal has no scent mirror headless), so this drives
@@ -10,13 +10,14 @@
 //     (proves gbuffer_position + the scent path run);
 //   * each pass is a true no-op when OFF (mode None / inactive mirror) -> target stays
 //     as cleared.
-#include "luminumbra_client/rendering/passes/DebugViewPass.h"
-#include "luminumbra_client/rendering/passes/GroundDecalPass.h"
 #include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
+#include "luminumbra_client/rendering/passes/DebugViewPass.h"
+#include "luminumbra_client/rendering/passes/GroundDecalPass.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -38,26 +39,40 @@ using Luminumbra::Rendering::TextureHandle;
 class HiddenGlContext {
 public:
     HiddenGlContext() {
-        if (!glfwInit()) { m_error = "glfwInit failed"; return; }
+        if (!glfwInit()) {
+            m_error = "glfwInit failed";
+            return;
+        }
         m_glfw_initialized = true;
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         m_window = glfwCreateWindow(64, 64, "pass_context_test", nullptr, nullptr);
-        if (!m_window) { m_error = "glfwCreateWindow failed (no GL 4.5 context)"; return; }
+        if (!m_window) {
+            m_error = "glfwCreateWindow failed (no GL 4.5 context)";
+            return;
+        }
         glfwMakeContextCurrent(m_window);
         if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
-            m_error = "gladLoadGLLoader failed"; return;
+            m_error = "gladLoadGLLoader failed";
+            return;
         }
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
+
 private:
     GLFWwindow* m_window = nullptr;
     bool m_glfw_initialized = false;
@@ -86,7 +101,9 @@ struct RenderTarget {
     int w = 0, h = 0;
 };
 RenderTarget MakeTarget(int w, int h) {
-    RenderTarget rt; rt.w = w; rt.h = h;
+    RenderTarget rt;
+    rt.w = w;
+    rt.h = h;
     glGenTextures(1, &rt.tex);
     glBindTexture(GL_TEXTURE_2D, rt.tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
@@ -205,7 +222,7 @@ TEST(PassContext, GroundDecalTintsFromContextPositionAndScentMirror) {
         for (int i = 0; i < W; ++i) {
             const std::size_t o = (static_cast<std::size_t>(j) * W + i) * 4;
             pos[o + 0] = (i + 0.5f) / W * 16.0f; // world X in [0,16]
-            pos[o + 1] = 1.0f;                    // nonzero -> not rejected as sky
+            pos[o + 1] = 1.0f;                   // nonzero -> not rejected as sky
             pos[o + 2] = (j + 0.5f) / H * 16.0f; // world Z in [0,16]
             pos[o + 3] = 1.0f;
         }
@@ -239,7 +256,8 @@ TEST(PassContext, GroundDecalTintsFromContextPositionAndScentMirror) {
     // Amber FOOD_COLOR (0.95,0.62,0.18) at full intensity -> R clearly dominant, non-black.
     std::size_t tinted = 0;
     for (std::size_t p = 0; p < static_cast<std::size_t>(W) * H; ++p) {
-        if (px[p * 4 + 0] > 80 && px[p * 4 + 0] > px[p * 4 + 2]) ++tinted;
+        if (px[p * 4 + 0] > 80 && px[p * 4 + 0] > px[p * 4 + 2])
+            ++tinted;
     }
     EXPECT_GT(tinted, static_cast<std::size_t>(W) * H / 2)
         << "food trail should tint most of the ground amber";

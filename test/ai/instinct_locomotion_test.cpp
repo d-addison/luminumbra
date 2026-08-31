@@ -1,4 +1,4 @@
-// T-I6 multiplayer polish: InstinctLocomotionSystem coverage — the GOAP executor
+//  multiplayer polish: InstinctLocomotionSystem coverage — the GOAP executor
 // converting ActionPlanComponent into a seek/arrival wish-velocity intent. Pure,
 // deterministic, engine-generic (no action-name vocabulary). Synthetic test data.
 
@@ -13,17 +13,17 @@
 
 namespace {
 
+using luminumbra::ai::RunInstinctLocomotionOnTick;
 using Luminumbra::Components::Action;
 using Luminumbra::Components::ActionPlanComponent;
 using Luminumbra::Components::LocomotionIntentComponent;
 using Luminumbra::Components::LocomotionPathComponent;
 using Luminumbra::Components::LocomotionProfile;
 using Luminumbra::Components::TransformComponent;
-using luminumbra::ai::RunInstinctLocomotionOnTick;
 
 // Make an agent at (x,0,z) with a single-action plan targeting `target`.
-entt::entity MakeAgent(entt::registry& reg, float x, float z, entt::entity target,
-                       LocomotionProfile profile = {}) {
+entt::entity MakeAgent(
+    entt::registry& reg, float x, float z, entt::entity target, LocomotionProfile profile = {}) {
     const auto e = reg.create();
     auto& tf = reg.emplace<TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -43,7 +43,9 @@ entt::entity MakeTarget(entt::registry& reg, float x, float z) {
     return e;
 }
 
-float Len(const Luminumbra::Vec2& v) { return std::sqrt(v.x * v.x + v.y * v.y); }
+float Len(const Luminumbra::Vec2& v) {
+    return std::sqrt(v.x * v.x + v.y * v.y);
+}
 
 } // namespace
 
@@ -141,7 +143,7 @@ TEST(InstinctLocomotion, IsDeterministicAcrossRuns) {
     EXPECT_EQ(ay, by);
 }
 
-// T-I9-AI: with a path component the agent seeks the WAYPOINT, not the target.
+// with a path component the agent seeks the WAYPOINT, not the target.
 TEST(InstinctLocomotion, FollowsWaypointBeforeSeekingTarget) {
     entt::registry reg;
     const auto target = MakeTarget(reg, 10.0f, 0.0f); // target on +X
@@ -157,10 +159,10 @@ TEST(InstinctLocomotion, FollowsWaypointBeforeSeekingTarget) {
 
     const auto& w = reg.get<LocomotionIntentComponent>(agent).wish_xz;
     EXPECT_GT(w.y, 1.0f);          // heads toward the +Z waypoint...
-    EXPECT_NEAR(w.x, 0.0f, 1e-4f); // ...NOT directly toward the +X target
+    EXPECT_NEAR(w.x, 0.0f, 1e-4f); //...NOT directly toward the +X target
 }
 
-// T-I9-AI: reaching a waypoint advances the route; once exhausted the agent
+// reaching a waypoint advances the route; once exhausted the agent
 // resumes seeking the action target.
 TEST(InstinctLocomotion, WaypointArrivalAdvancesThenPathExhaustsToTarget) {
     entt::registry reg;
@@ -185,7 +187,7 @@ TEST(InstinctLocomotion, WaypointArrivalAdvancesThenPathExhaustsToTarget) {
     EXPECT_NEAR(w.y, 0.0f, 1e-4f);
 }
 
-// T-I9-AI: a flee action moves the agent directly AWAY from the (threat) target.
+// a flee action moves the agent directly AWAY from the (threat) target.
 TEST(InstinctLocomotion, FleeMovesAwayFromThreat) {
     entt::registry reg;
     const auto threat = MakeTarget(reg, 2.0f, 0.0f); // threat on +X, close
@@ -205,7 +207,7 @@ TEST(InstinctLocomotion, FleeMovesAwayFromThreat) {
     EXPECT_NEAR(Len(w), 3.0f, 1e-4f); // full cruise while unsafe
 }
 
-// T-I9-AI: once beyond slow_radius (the safe distance) the flee action completes.
+// once beyond slow_radius (the safe distance) the flee action completes.
 TEST(InstinctLocomotion, FleeStopsWhenSafe) {
     entt::registry reg;
     const auto threat = MakeTarget(reg, 10.0f, 0.0f); // far -> already safe
@@ -219,11 +221,11 @@ TEST(InstinctLocomotion, FleeStopsWhenSafe) {
 
     EXPECT_EQ(stats.agents_arrived, 1u);
     const auto& w = reg.get<LocomotionIntentComponent>(agent).wish_xz;
-    EXPECT_NEAR(Len(w), 0.0f, 1e-6f);              // safe: holds
+    EXPECT_NEAR(Len(w), 0.0f, 1e-6f);                                        // safe: holds
     EXPECT_EQ(reg.get<ActionPlanComponent>(agent).current_action_index, 1u); // advanced
 }
 
-// T-I9-AI flocking: cohesion adds a pull toward the neighbor group's center.
+//  flocking: cohesion adds a pull toward the neighbor group's center.
 TEST(InstinctLocomotion, CohesionPullsTowardGroupCenter) {
     auto wish_with_cohesion = [](float strength) {
         entt::registry reg;
@@ -241,11 +243,11 @@ TEST(InstinctLocomotion, CohesionPullsTowardGroupCenter) {
     };
     const auto off = wish_with_cohesion(0.0f);
     const auto on = wish_with_cohesion(1.0f);
-    EXPECT_NEAR(off.x, 0.0f, 1e-4f);  // pure +Z seek, no lateral pull
-    EXPECT_GT(on.x, off.x + 0.1f);    // cohesion pulls toward the +X group center
+    EXPECT_NEAR(off.x, 0.0f, 1e-4f); // pure +Z seek, no lateral pull
+    EXPECT_GT(on.x, off.x + 0.1f);   // cohesion pulls toward the +X group center
 }
 
-// T-I9-AI flocking: alignment steers toward the neighbors' mean heading.
+//  flocking: alignment steers toward the neighbors' mean heading.
 TEST(InstinctLocomotion, AlignmentMatchesNeighborHeading) {
     auto wish_with_alignment = [](float strength) {
         entt::registry reg;
@@ -267,7 +269,7 @@ TEST(InstinctLocomotion, AlignmentMatchesNeighborHeading) {
     EXPECT_GT(on.x, off.x + 0.1f);   // alignment turns A toward the +X mean heading
 }
 
-// T-I9-AI: separation (crowd/obstacle avoidance) pushes two crowded agents that
+// separation (crowd/obstacle avoidance) pushes two crowded agents that
 // seek the SAME target apart laterally, while both still advance toward it.
 TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {
     entt::registry reg;
@@ -287,7 +289,7 @@ TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {
     // Both still head toward the target (+X)...
     EXPECT_GT(wa.x, 0.0f);
     EXPECT_GT(wb.x, 0.0f);
-    // ...but A (at lower Z) is pushed -Z and B (at higher Z) +Z, away from each other.
+    //...but A (at lower Z) is pushed -Z and B (at higher Z) +Z, away from each other.
     EXPECT_LT(wa.y, -0.1f);
     EXPECT_GT(wb.y, 0.1f);
     // Avoidance never exceeds the locomotion budget.
@@ -295,7 +297,7 @@ TEST(InstinctLocomotion, SeparationPushesCrowdedAgentsApart) {
     EXPECT_LE(Len(wb), p.move_speed + 1e-4f);
 }
 
-// T-I9-AI: separation defaults OFF (strength 0) — a crowded neighbor must NOT
+// separation defaults OFF (strength 0) — a crowded neighbor must NOT
 // perturb the wish, so the canonical roster (which never sets separation) is
 // byte-identical and world_hash is unchanged. This is the determinism guarantee.
 TEST(InstinctLocomotion, SeparationDefaultOffIsByteIdentical) {

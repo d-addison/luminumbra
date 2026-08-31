@@ -1,8 +1,8 @@
 #include "SHIELD_WorldSystem.h"
-#include "../core/JobWatchdog.h" // OPS-11: opt-in named-phase wedge reporter for unbounded waits
+#include "../core/JobWatchdog.h" // opt-in named-phase wedge reporter for unbounded waits
 #include "../core/Log.h"
 #include "../world/FarLodStore.h"
-#include "../world/HydraulicErosion.h" // T-I6-A2
+#include "../world/HydraulicErosion.h" //
 #include "../world/MarchingCubes.h"
 #include "WaterSystem.h"
 #include "entt/entt.hpp"
@@ -10,7 +10,7 @@
 #include <algorithm> // Required for std::max and std::min
 #include <array>
 #include <atomic>
-#include <chrono> // TEMP diag (spec 008 follow-up): per-sub-phase streaming timing
+#include <chrono> // runtime telemetry ( implementation note): per-sub-phase streaming timing
 #include <cmath>
 #include <cstring> // std::memcpy for the deterministic water-state hash
 #include <filesystem>
@@ -43,13 +43,13 @@ constexpr std::size_t STREAMING_APPROX_CHUNKS_PER_SURFACE_COLUMN = 3;
 
 // Full LOD0 SDF lattice size. A chunk whose sdf_data has EXACTLY this size is
 // full-resolution sim truth; anything else (empty = surface-band/coarse
-// generated, wrong-sized = malformed, SHIELD-04) needs the promotion lane to
+// generated, wrong-sized = malformed, ) needs the promotion lane to
 // (re)generate the full field before a unit-step polygonise may read it.
 constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
                                         (Luminumbra::CHUNK_SIZE_Y + 1) *
                                         (Luminumbra::CHUNK_SIZE_Z + 1);
 
-// SHIELD-03 (017-B FR-B-005): the FIXED activation pipeline latency K, in sim
+//  (activation queue ): the FIXED activation pipeline latency K, in sim
 // ticks. A batch dispatched at tick D becomes sim-visible at D+K — a pure
 // function of the dispatch schedule, identical across worker counts and
 // machines (never measured/adaptive: that would re-couple availability to
@@ -58,7 +58,7 @@ constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(Luminumbra::CHU
 // BLOCKS activation (wall-clock cost), it never slips (schedule change).
 constexpr std::int64_t kActivationPipelineLatencyTicks = 8;
 
-// SHIELD-03 5b: deterministic dispatch backpressure — FIFO depth budgets
+//  5b: deterministic dispatch backpressure — FIFO depth budgets
 // (main-thread pure state, never job timing). Chosen so steady-state dispatch
 // cadence matches the barrier era exactly: generation dispatches at most once
 // per activation pass (every 4 ticks) and a batch lives K=8 ticks → depth
@@ -69,7 +69,7 @@ constexpr std::size_t kMaxGenerationBatchesInFlight = 3;
 constexpr std::size_t kMaxMeshingBatchesInFlight =
     static_cast<std::size_t>(kActivationPipelineLatencyTicks) + 1;
 
-// T-I4-DR-server-streaming-race: SIMD over-read guard for FastNoise2's
+// SIMD over-read guard for FastNoise2's
 // GenPositionArray2D. That entry point's tail does an UNCONDITIONAL full-width
 // SIMD load of the input position arrays (FS_Load_f32(&xPosArray[index]) in
 // vendor/fastnoise/.../Generator.inl:260) and a masked store of only the valid
@@ -101,12 +101,12 @@ FastNoise::SmartNode<T> NewWorldNoise() {
 
 constexpr float kCaveSurfaceCapDepth = 18.0f;
 constexpr float kCaveSurfaceFullDepth = 24.0f;
-// FR-A3: surface-break feature width above the cap. The blend ramps from a
+// surface-break feature width above the cap. The blend ramps from a
 // per-column effective_cap to effective_cap + this, so when effective_cap drops
 // to 0 inside a feature footprint the cave noise reaches the surface.
 constexpr float kCaveSurfaceCapBand = kCaveSurfaceFullDepth - kCaveSurfaceCapDepth;
 
-// FR-A3: distinct placement salt for surface-break dolines/cave-mouths, kept
+// distinct placement salt for surface-break dolines/cave-mouths, kept
 // separate from every structure/biome stream (StructurePlacement salts).
 constexpr u32 kSurfaceBreakSalt = 0xA3CA7E5u;
 
@@ -115,7 +115,7 @@ float smoothstep01(float value) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-// FR-A3 generalized cap blend: the depth at which the cave field starts to win is
+//  generalized cap blend: the depth at which the cave field starts to win is
 // the PER-COLUMN effective_cap (18 everywhere except inside a feature footprint).
 // Byte-identical to the original cave_surface_blend(td) when effective_cap == 18.
 float cave_surface_blend(float terrain_density, float effective_cap) {
@@ -147,7 +147,7 @@ float exp_smax(float a, float b, float k) {
     return k * std::log2(res);
 }
 
-// FR-A3 apply: combine caves with the per-column cap, then CSG-subtract the
+//  apply: combine caves with the per-column cap, then CSG-subtract the
 // analytic sinkhole carve. max(F, -carve) opens the funnel (carve>0 -> -carve<0 ->
 // where terrain is solid/negative this can flip it positive == air). Order-free.
 // When effective_cap==18 and feature_carve==0 and carve_smoothness<=0 this is
@@ -166,7 +166,7 @@ float apply_cave_field(float terrain_density,
     return exp_smax(caves, -feature_carve, params.carve_smoothness);
 }
 
-// ---- FR-A3 deterministic placement primitives (mirror StructurePlacement) ----
+// ----  deterministic placement primitives (mirror StructurePlacement) ----
 // All-unsigned; no int*prime UB. Same magic constants as the GLSL port so CPU and
 // GPU produce bit-identical placement.
 constexpr u64 kSbFnvOffsetBasis = 14695981039346656037ull;
@@ -293,7 +293,7 @@ MaterialType classify_material_legacy(float world_y, float final_height) {
     return MaterialType::Stone;
 }
 
-// (clear_completed_job_handle removed by SHIELD-03 inc 5a-2: batch handles
+// (clear_completed_job_handle removed by  : batch handles
 // now live in the lane FIFOs and retire when their batch publishes.)
 
 bool has_active_job(const JobHandle& handle) {
@@ -412,7 +412,7 @@ void SHIELD_WorldSystem::wait_for_generation_jobs() {
             }
         }
     }
-    // SHIELD-03 inc 5a: main-thread generation publication (Loading→Idle
+    // main-thread generation publication (Loading→Idle
     // flips + FIFO pops). Force: an explicit drain is a legal full-publish.
     publish_completed_generation_jobs(/*force=*/true);
 }
@@ -421,7 +421,7 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
     // Publish EXACTLY the front batch if its jobs have all completed AND (in
     // the non-force regime) its due tick has arrived. Flips are ON THE MAIN
     // THREAD (the gen job only stages data + raises pending_generation_ready
-    // — the chunk state machine is main-thread-owned). A chunk whose job
+    // the chunk state machine is main-thread-owned). A chunk whose job
     // never completed (crash) keeps Loading and never re-candidates — the
     // same terminal behavior the old in-job flip had on a crash; its batch
     // pops with the rest once the batch counter drains (a crashed job still
@@ -431,7 +431,7 @@ bool SHIELD_WorldSystem::publish_front_generation_batch(bool force) {
     }
     auto& front = m_streaming_state.generation_batches.front();
     if (!force && front.due_tick >= 0) {
-        // 017-B: a tick-stamped (server) batch publishes EXCLUSIVELY via
+        // activation queue: a tick-stamped (server) batch publishes EXCLUSIVELY via
         // activate_due / the explicit force drains — never via a per-frame
         // hook. A hook publishing a due batch at update-start would land the
         // state flips BEFORE the tick's candidate pass while activate_due
@@ -508,7 +508,7 @@ bool SHIELD_WorldSystem::generation_batch_outstanding() const {
 bool SHIELD_WorldSystem::sim_available_lod0(const ::Luminumbra::Chunk& chunk) {
     // Barrier-era definition: the LOD0 render mesh has published. The
     // activation queue redefines this to tick-keyed availability at the
-    // barrier-swap increment (017-B FR-B-005) — one function, all consumers.
+    // barrier-swap increment (activation queue ) — one function, all consumers.
     return chunk.current_lod.load(std::memory_order_acquire) == 0 && !chunk.mesh_vertices.empty() &&
            !chunk.mesh_indices.empty();
 }
@@ -523,7 +523,7 @@ bool SHIELD_WorldSystem::promotion_pipeline_pending() const {
            !m_streaming_state.pending_promotion_mesh.empty();
 }
 
-// --- SHIELD-03 shadow instrumentation (017-B step 2, increment 1) ---
+// ---  shadow instrumentation (activation queue step 2, ) ---
 // Latency shadow for the activation-queue K design: how many SIM TICKS elapse
 // between a streaming dispatch and the chunk becoming sim-visible, measured
 // under the real barrier. Main-thread only, never hashed, inert at tick -1.
@@ -612,7 +612,7 @@ void SHIELD_WorldSystem::quiesce_streaming_jobs_for_save() {
 }
 
 void SHIELD_WorldSystem::activate_due(std::int64_t tick) {
-    // 017-B FR-B-005: publish, in FIFO order, exactly the batches due at or
+    // activation queue : publish, in FIFO order, exactly the batches due at or
     // before `tick`. A due-but-unfinished batch BLOCKS on its jobs (K
     // under-covering is a wall-clock cost, never a schedule change); a batch
     // with due_tick -1 (no tick source at dispatch) publishes when drained.
@@ -691,7 +691,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     // non-force regime, the lane's due tick has arrived — publication order
     // is the dispatch order, which is the deterministic candidate-sort
     // order, so run == replay.
-    // 017-B: a tick-stamped promotion pipeline publishes exclusively via
+    // activation queue: a tick-stamped promotion pipeline publishes exclusively via
     // activate_due / force drains (see publish_front_generation_batch).
     const bool promotion_due = force || m_streaming_state.promotion_due_tick < 0;
     if (promotion_due && !m_streaming_state.promotion_job_chunks.empty() &&
@@ -704,18 +704,18 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
             const bool ready = chunk->pending_promotion_ready.load(std::memory_order_acquire);
             const bool failed = chunk->pending_promotion_failed.load(std::memory_order_acquire);
             if (ready && !failed && !chunk->pending_sdf_data.empty()) {
-                // The LOD0-promotion publish (T-I3-1, moved here from
-                // process_completed_meshing_jobs by SHIELD-02): pure
+                // The LOD0-promotion publish (, moved here from
+                // process_completed_meshing_jobs by ): pure
                 // generation output, not an edit — the dirty flag stays
                 // clear (matching GenerateChunkData's contract).
                 chunk->sdf_data = std::move(chunk->pending_sdf_data);
                 chunk->heightmap_data = std::move(chunk->pending_heightmap_data);
-                // FR-B1: publish the promoted structure material channel
+                // publish the promoted structure material channel
                 // alongside the SDF (empty -> empty, lazy alloc preserved).
                 chunk->material_data = std::move(chunk->pending_material_data);
                 chunk->mark_sdf_generated_current_params();
                 chunk->clear_voxel_data_dirty();
-                shadow_note_promotion_published(chunk->get_id()); // SHIELD-03 shadow
+                shadow_note_promotion_published(chunk->get_id()); //  shadow
                 m_streaming_state.pending_promotion_mesh.push_back(job_chunk);
             } else {
                 // Stage-A failure: revert the transient Meshing state (the
@@ -742,7 +742,7 @@ void SHIELD_WorldSystem::process_completed_promotion_jobs(bool force) {
     // Stage-B dispatch: render meshes for published promotions, down the
     // ordinary meshing lane. The items re-classify as non-promotion there
     // (their live sdf_data is full now), so there is no recursion.
-    // SHIELD-03 5b: gate by FIFO depth (deterministic), not raw job activity.
+    //  5b: gate by FIFO depth (deterministic), not raw job activity.
     if (!m_streaming_state.pending_promotion_mesh.empty() &&
         m_streaming_state.meshing_batches.size() < kMaxMeshingBatchesInFlight) {
         std::vector<MeshingWorkItem> stage_b;
@@ -800,12 +800,12 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
         chunk->pending_lod.store(work_item.lod_level, std::memory_order_release);
         m_streaming_state.promotion_job_chunks.push_back(
             {chunk, work_item.lod_level, work_item.high_priority});
-        shadow_note_promotion_dispatch(chunk->get_id()); // SHIELD-03 shadow
+        shadow_note_promotion_dispatch(chunk->get_id()); //  shadow
 
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk]() {
             try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
+                const auto worldgen_scope = acquire_worldgen_sample_scope(); //
                 // Build the full LOD0 voxel field into a scratch chunk and
                 // stage it — the live chunk's sdf_data is never touched off
                 // the main thread (a concurrent far-LOD sampler must never
@@ -835,7 +835,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
     }
     m_promotion_batches_dispatched++;
     m_promotion_chunks_dispatched += m_streaming_state.promotion_job_chunks.size();
-    // SHIELD-03 inc 5a-3: tick-keyed activation stamp (inert until the swap).
+    // tick-keyed activation stamp (inert until the swap).
     m_streaming_state.promotion_due_tick =
         m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
 
@@ -860,7 +860,7 @@ void SHIELD_WorldSystem::dispatch_promotion_jobs(
 }
 
 void SHIELD_WorldSystem::reinitialize_noise() {
-    // SHIELD-09: QUIESCE off-main-thread worldgen samplers for the rebuild.
+    // QUIESCE off-main-thread worldgen samplers for the rebuild.
     // Every sampling job holds the shared side of the epoch gate for its
     // duration; taking the exclusive side here waits out in-flight samplers
     // and blocks new ones until the generator set is consistent again — the
@@ -893,17 +893,17 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // 2. Cave Generator (3D Perlin Noise) — the cheese BODY field.
     auto cave_noise = NewWorldNoise<FastNoise::Perlin>();
     m_cave_generator = cave_noise;
-    // 2b. Spec 013 noise-router SPAGHETTI tunnel field (a second, decorrelated Perlin).
+    // 2b.  noise-router SPAGHETTI tunnel field (a second, decorrelated Perlin).
     // Built ONLY when the preset opts into the noise-router style, so legacy worlds never
     // construct this node and stay byte-identical.
     if (m_params.cave_style != 0) {
         m_spaghetti_generator = NewWorldNoise<FastNoise::Perlin>();
-        // 2c. Worley CHEESE caverns: cellular F1/F3 edge field -> big ROUNDED rooms (vs the
-        // Perlin body's blobs). Index0Div1 returns F1/F3 in [0,1]: small at cell centres
+        // 2c. Worley CHEESE caverns: cellular / edge field -> big ROUNDED rooms (vs the
+        // Perlin body's blobs). Index0Div1 returns / in [0,1]: small at cell centres
         // (carve = open room), ->1 at cell walls (stone). Built only in noise-router style.
         auto worley = NewWorldNoise<FastNoise::CellularDistance>();
         worley->SetDistanceIndex0(0);
-        worley->SetDistanceIndex1(2); // F1 and F3
+        worley->SetDistanceIndex1(2); //  and
         worley->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0Div1);
         m_worley_generator = worley;
     }
@@ -912,7 +912,7 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     auto island_noise = NewWorldNoise<FastNoise::Simplex>();
     m_island_mask_generator = island_noise;
 
-    // 4. T-I3-10 shaping control noises (seed registry: +3 continentalness,
+    // 4.  shaping control noises (seed registry: +3 continentalness,
     //    +4 erosion, +5 peaks/valleys, +6/+7 domain warp X/Z). Only built when
     //    the preset opts in; legacy worlds never construct these nodes.
     // RACE FIX (worldgen-preview panning crash): assign each generator member LAST, at
@@ -921,9 +921,8 @@ void SHIELD_WorldSystem::reinitialize_noise() {
     // then recreates it, that job can observe the transient null and call through it
     // (0xC0000005 at addr 0x0). Going old->new directly (never through null) closes the
     // window. End state is identical for every (enabled, disabled) case, so hashed worldgen
-    // is byte-identical (--smoke unchanged). NOTE: a concurrent read+assign of the same
-    // SmartNode is still technically a data race; the proper fix is to quiesce far-LOD
-    // sampling during the preview's world rebuild (see the session handoff).
+    // is byte-identical. The worldgen epoch lock above is the primary synchronization;
+    // assign-last ordering remains a defensive invariant.
     if (m_params.shaping_enabled) {
         auto continental_fractal = NewWorldNoise<FastNoise::FractalFBm>();
         continental_fractal->SetSource(NewWorldNoise<FastNoise::Simplex>());
@@ -948,7 +947,7 @@ void SHIELD_WorldSystem::reinitialize_noise() {
         m_warp_generator = {};
     }
 
-    // 4b. T-I4-3 river noise (seed registry: +10). A ridged FBm whose folded
+    // 4b.  river noise (seed registry: +10). A ridged FBm whose folded
     //     PV near-zero band carves the river channels. Built only when the
     //     preset opts in; legacy worlds never construct it. (Same never-null race fix:
     //     assign in the enabled branch, null only in the else.)
@@ -961,7 +960,7 @@ void SHIELD_WorldSystem::reinitialize_noise() {
         m_river_generator = {};
     }
 
-    // 5. T-I4-1 biome climate noises (seed registry: +8 temperature,
+    // 5.  biome climate noises (seed registry: +8 temperature,
     //    +9 humidity) and the biome table. Built/loaded only when the preset
     //    opted in (m_params.biomes_enabled); legacy worlds construct nothing
     //    here, so every height and material path stays bit-identical.
@@ -1000,7 +999,7 @@ void SHIELD_WorldSystem::reinitialize_noise() {
         }
     }
 
-    // T-I4-4: structure template pools. Loaded only when the preset opts in;
+    // structure template pools. Loaded only when the preset opts in;
     // disabled worlds load nothing and contribute a zero content hash (byte-zero
     // drift). The combined content hash is stamped into params so far-LOD cache
     // keys track template changes (ComputeTerrainParamsHash mixes it in).
@@ -1096,7 +1095,7 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     float ridge = 0.0f;
 
     // Capture the shaping generators into locals ONCE. They are created together with
-    // shaping_enabled in reinitialize_noise() (it first nulls them, then recreates them).
+    // shaping_enabled in reinitialize_noise (it first nulls them, then recreates them).
     // A far-LOD build job runs on a worker thread (FarLodSystem -> BuildPristineFarLodTile
     // -> here) and can race a worldgen REBUILD / re-seed that is mid-reinitialize_noise on
     // another thread — observing a transiently-null generator -> a null-pointer call (the
@@ -1140,7 +1139,7 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
                 m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
 
-        // Slice 3 per-biome morphology: scale the ridge by the (continuous)
+        //  per-biome morphology: scale the ridge by the (continuous)
         // temperature field — cold ground (alpine) gets taller/rugged peaks, warm
         // lowlands gentler. Only the ridge term; smooth so no seams. Byte-identical
         // to the batched path in ComputeShapedHeightGrid.
@@ -1167,7 +1166,7 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
     } else {
         terrain_height = m_params.height_offset + sample.base_noise * m_params.base_amplitude;
     }
-    // Slice 4 cliffs: terrace the shaped height inside cliff zones (byte-identical
+    //  cliffs: terrace the shaped height inside cliff zones (byte-identical
     // to ComputeShapedHeightGrid). No-op when cliffs disabled / outside a zone.
     terrain_height = CliffTerracedHeight(world_x, world_z, terrain_height);
     sample.pre_island_height = terrain_height;
@@ -1183,10 +1182,10 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         sample.final_height = glm::mix(m_params.height_offset, terrain_height, sample.island_mask);
     }
 
-    // T-I4-3: river carve. Where the +10 PV-band river noise is in the valleys
+    // river carve. Where the +10 PV-band river noise is in the valleys
     // band, lower the final height toward a channel floor below SEA_LEVEL so
     // the existing global water plane (SEA_LEVEL) fills the channel - no
-    // WaterSystem changes (critique F5). The carve depth scales with river
+    // WaterSystem changes (regression review). The carve depth scales with river
     // influence (channel center deepest) and is clamped so a high ridge in the
     // band drops a bounded amount. Applied after the island mask so the channel
     // sits in the final surface, and inside this ONE shared height helper so
@@ -1198,7 +1197,7 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         sample.final_height -= RiverCarveAmount(sample.final_height, influence);
     }
 
-    // Slice 2: lake basins. Where the lake field is high, pull the surface toward a
+    //  lake basins. Where the lake field is high, pull the surface toward a
     // floor below SEA_LEVEL so the global water plane fills it (mirrors the river
     // carve; lake_max_carve gates it to low terrain only). Skipped (byte-zero) when
     // lakes are disabled. Kept byte-identical to ComputeShapedHeightGrid.
@@ -1208,13 +1207,13 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
         sample.final_height -= LakeCarveAmount(sample.final_height, lake_influence, lake_surface);
     }
 
-    // FR-A3: sinkhole/cave-mouth RIM depression. Dips the heightfield inside a
+    // sinkhole/cave-mouth RIM depression. Dips the heightfield inside a
     // doline footprint so the feature reads at distance/coarse-LOD (the SDF carve
     // alone is invisible on the SDF-ignoring far path). Folded into ALL THREE
     // height paths byte-identically. No-op (0) when surface_breaks disabled.
     sample.final_height -= SurfaceBreakRimDepression(world_x, world_z);
 
-    // T-I6-A2: hydraulic/thermal relief (decision a). Added LAST so the baked
+    // hydraulic/thermal relief (decision a). Added LAST so the baked
     // drainage/talus sits in the final surface EVERY height consumer reads
     // (collision/spawn/water/far-LOD/mesh). The per-region bake samples the
     // NO-hydro height (apply_hydro=false) so this never recurses. Skipped (byte-
@@ -1227,9 +1226,9 @@ SHIELD_WorldSystem::ShapedHeightSample SHIELD_WorldSystem::ComputeShapedHeightSa
 }
 
 namespace {
-// T-I6-A2: hydraulic-relief region geometry. A region is kHydroRegionCells erosion
+// hydraulic-relief region geometry. A region is kHydroRegionCells erosion
 // cells per side; offsets are indexed by GLOBAL erosion cell so bilinear sampling
-// crosses region boundaries seamlessly (each region's interior is, by the A2a
+// crosses region boundaries seamlessly (each region's interior is, by the hydraulic erosion kernel
 // halo-independence proof, byte-identical to a single global bake). The halo
 // margin keeps the interior strictly independent of terrain beyond the halo.
 constexpr int kHydroRegionCells = 64;
@@ -1430,7 +1429,7 @@ float SHIELD_WorldSystem::ContinentalBaseHeight(float world_x, float world_z) co
 }
 
 float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
-    // FR-B2: the lake surface must be near-constant (flat) over a lake's extent AND
+    // the lake surface must be near-constant (flat) over a lake's extent AND
     // continuous across the coarse-cell boundaries. The old code snapped to the
     // NEAREST 768 m node (std::round), so a lake straddling a cell boundary saw two
     // different surface levels and STEPPED at the seam. Instead, sample
@@ -1465,7 +1464,7 @@ float SHIELD_WorldSystem::LakeSurfaceLevel(float world_x, float world_z) const {
 
 float SHIELD_WorldSystem::WaterLevelAt(float world_x, float world_z) const {
     // Sea level everywhere, RAISED to the local (flat) lake surface inside a lake
-    // basin so perched lakes sit at their basin elevation. max() with SEA_LEVEL
+    // basin so perched lakes sit at their basin elevation. max with SEA_LEVEL
     // keeps lakes that dip below sea level merged with the ocean.
     float level = SEA_LEVEL;
     if (m_params.lakes_enabled && LakeInfluenceFromNoise(world_x, world_z) > 0.0f) {
@@ -1513,12 +1512,12 @@ float SHIELD_WorldSystem::CliffTerracedHeight(float world_x, float world_z, floa
     return height + (terraced - height) * mask;
 }
 
-// FR-A3 shared surface-break sampler. Scans the fixed 3x3 doline-cell neighborhood
+//  shared surface-break sampler. Scans the fixed 3x3 doline-cell neighborhood
 // around world_pos, decodes each cell deterministically, and combines features with
 // order-free ops (min cap, max carve). For each feature it runs an
 // interior-proximity probe (one extra cave-noise read at y = surface - capDepth) so
 // the cap is only lifted where the cave field is ALREADY carved -> never a blind pit.
-// Spec 013: the single cave-carve composition point (MC-1.18 noise-router, on an SDF).
+// the single cave-carve composition point (MC-1.18 noise-router, on an SDF).
 // Legacy (cave_style==0): exactly the pre-existing cheese BODY threshold + cap + doline
 // carve -> byte-identical. Noise-router (cave_style==1): ALSO carve SPAGHETTI tunnels at
 // the zero-crossing EDGE of a second Perlin (abs(noise) < thickness => air), composed via
@@ -1559,7 +1558,7 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp,
         density = std::max(density, capped);
     }
 
-    // WORLEY CHEESE caverns: big ROUNDED rooms at cell interiors. F1/F3 (Index0Div1) is small
+    // WORLEY CHEESE caverns: big ROUNDED rooms at cell interiors. / (Index0Div1) is small
     // at a cell centre -> carve an open room; ->1 at the cell wall -> stone. Low frequency =>
     // dramatic chambers. Composed via the same surface cap + max as the cheese/spaghetti terms.
     if (m_worley_generator) {
@@ -1694,7 +1693,7 @@ SHIELD_WorldSystem::sample_surface_breaks(const Vec3& world_pos, float surface_h
     return out;
 }
 
-// FR-A3 2D rim depression for the height paths (coarse/far visibility). A shallow
+//  2D rim depression for the height paths (coarse/far visibility). A shallow
 // bowl that DIPS the surface inside a doline footprint so the feature reads even on
 // the SDF-ignoring coarse path. Pure 2D (no cave probe) so it is cheap to fold into
 // every height consumer; returns metres to subtract from the surface height.
@@ -1763,7 +1762,7 @@ float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(float world_x,
         }
     }
     float result = h - carve_sum / 9.0f;
-    // Slice 5 far-field fidelity: the coarse reconstruction (pre_carve + river
+    //  far-field fidelity: the coarse reconstruction (pre_carve + river
     // stencil) otherwise MISSES the lake carve the near path applies after
     // pre_carve_height, so lakes would pop in at the LOD seam. Apply the lake carve
     // here too (one cheap point-sample of the smooth lake field) so lakes read
@@ -1772,11 +1771,11 @@ float SHIELD_WorldSystem::GetTerrainHeightAtCoarse(float world_x,
         const float lake_surface = LakeSurfaceLevel(world_x, world_z);
         result -= LakeCarveAmount(result, LakeInfluenceFromNoise(world_x, world_z), lake_surface);
     }
-    // FR-A3 rim depression — same single point-sample the near/grid paths apply, so
+    //  rim depression — same single point-sample the near/grid paths apply, so
     // dolines dip the surface consistently into the far field (matches the lake
     // carve handling above).
     result -= SurfaceBreakRimDepression(world_x, world_z);
-    // FR-B3 far/amplified hydro seam fix: the near path adds the baked hydraulic
+    //  far/amplified hydro seam fix: the near path adds the baked hydraulic
     // erosion offset (ComputeShapedHeightSampleImpl), so omitting it here left a
     // faint near/far drainage STEP at the live/far LOD boundary. Add the SAME
     // offset on the coarse/far path so near and far agree. SampleHydroOffsetMeters
@@ -1874,7 +1873,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
     // helper's `sample_x * m_params.<freq>`. GenPositionArray2D samples at
     // (xPos[i] + xOffset, yPos[i] + yOffset); we fold freq into the arrays and
     // pass zero offsets.
-    // T-I4-DR-server-streaming-race: SIMD-pad the GenPositionArray2D input AND
+    // SIMD-pad the GenPositionArray2D input AND
     // output arrays so the full-width tail load/store (which runs even when count
     // is not a multiple of the SIMD width -- count = size_x*size_z is rarely a
     // multiple of 16) cannot over-read/over-write past the count-sized vectors.
@@ -1948,7 +1947,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
             float ridge = EvaluateShapingSpline(m_params.peaks_spline, peaks_valleys, 0.0f) *
                           m_params.peaks_amplitude * std::max(0.0f, 1.0f - erosion_01);
 
-            // Slice 3 per-biome morphology — byte-identical to ComputeShapedHeightSampleImpl.
+            //  per-biome morphology — byte-identical to ComputeShapedHeightSampleImpl.
             if (m_params.biome_relief_enabled && m_temperature_generator) {
                 const float world_x = static_cast<float>(base_x + x);
                 const float world_z = static_cast<float>(base_z + z);
@@ -1964,7 +1963,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 m_params.height_offset + base_level +
                 amplitude_multiplier * (base_noise[i] * m_params.base_amplitude) + ridge;
 
-            // Slice 4 cliffs — byte-identical to ComputeShapedHeightSampleImpl.
+            //  cliffs — byte-identical to ComputeShapedHeightSampleImpl.
             terrain_height = CliffTerracedHeight(
                 static_cast<float>(base_x + x), static_cast<float>(base_z + z), terrain_height);
 
@@ -1989,7 +1988,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
                 terrain_height -= LakeCarveAmount(terrain_height, lake_influence, lake_surface);
             }
 
-            // FR-A3 rim depression — byte-identical to ComputeShapedHeightSampleImpl.
+            //  rim depression — byte-identical to ComputeShapedHeightSampleImpl.
             terrain_height -= SurfaceBreakRimDepression(static_cast<float>(base_x + x),
                                                         static_cast<float>(base_z + z));
 
@@ -1997,7 +1996,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightGrid(
         }
     }
 
-    // T-I6-A2: hydraulic relief post-pass (decision a). Adds the same baked
+    // hydraulic relief post-pass (decision a). Adds the same baked
     // offset the scalar path adds in ComputeShapedHeightSampleImpl, so batch and
     // scalar stay byte-identical (parity gate). Skipped when hydro is disabled
     // -> batch output byte-identical to the legacy path (world_hash unchanged).
@@ -2127,7 +2126,7 @@ MaterialType SHIELD_WorldSystem::SurfaceMaterialForColumn(float world_y,
     }
     const float depth = final_height - world_y;
     if (depth < 1.0f) {
-        // T-I4-3: above-water river bank skin uses the filler (muddy bank)
+        // above-water river bank skin uses the filler (muddy bank)
         // rather than the top (grass).
         return static_cast<MaterialType>(river_bank ? palette.filler : palette.top);
     }
@@ -2150,7 +2149,7 @@ MaterialType SHIELD_WorldSystem::SurfaceVertexMaterial(float world_x,
     //      final_height == terrain_height (the cached heightmap value).
     //   2. if that material is not Air/Water, return it.
     //   3. otherwise reclassify at depth 0.1 m:
-    //      SurfaceMaterialForColumn(y=terrain_height-0.1, final_height, ...).
+    //      SurfaceMaterialForColumn(y=terrain_height-0.1, final_height,...).
     // Reproducing those two SurfaceMaterialForColumn calls here skips the
     // redundant shaped-height recompute inside SampleWorldGenLayers.
     const u8 biome_id = BiomeIdAt(world_x, world_z);
@@ -2176,7 +2175,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
     }
     // Warp channels (unwarped lattice), then base/peaks at warped coords, then
     // continentalness/erosion at unwarped coords - all via GenPositionArray2D.
-    // T-I4-DR-server-streaming-race: every array handed to GenPositionArray2D is
+    // every array handed to GenPositionArray2D is
     // SIMD-padded (PadToNoiseSimd) so the entry point's full-width tail load/store
     // stays in mapped memory even when count < SIMD width. Loops still touch only
     // [0,count); padding lanes are never read into results (hash-neutral).
@@ -2259,7 +2258,7 @@ void SHIELD_WorldSystem::ComputeShapedHeightsAtPositions(
             const float influence = RiverInfluenceFromNoise(xs[i], zs[i]);
             h -= RiverCarveAmount(h, influence);
         }
-        // T-I6-A2: add the baked hydro offset so this matches GetTerrainHeightAt
+        // add the baked hydro offset so this matches GetTerrainHeightAt
         // (apply_hydro=false on the erosion bake's own base samples -> no recursion).
         if (apply_hydro && m_params.hydro_enabled) {
             h += SampleHydroOffsetMeters(xs[i], zs[i]);
@@ -2297,7 +2296,7 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
     // GenPositionArray2D samples at (xPos[i] + xOffset, yPos[i] + yOffset); we
     // fold the per-channel frequency into the coordinate arrays (zero offsets),
     // mirroring the scalar helpers' `coord * frequency`.
-    // T-I4-DR-server-streaming-race: SIMD-pad every GenPositionArray2D buffer (see
+    // SIMD-pad every GenPositionArray2D buffer (see
     // PadToNoiseSimd) so the full-width tail load/store cannot over-read past the
     // count-sized vectors. Hash-neutral: only indices [0,count) are consumed.
     const std::size_t pad = PadToNoiseSimd(count);
@@ -2448,7 +2447,7 @@ void SHIELD_WorldSystem::ClassifyVertexMaterials(const Vec3* positions,
         if (m_params.caves_enabled) {
             const Vec3 wp(p.x, world_y, p.z);
             const SurfaceBreakSample sb = sample_surface_breaks(wp, final_height);
-            // Spec 013: single composition point (cheese + noise-router spaghetti tunnels).
+            // single composition point (cheese + noise-router spaghetti tunnels).
             final_density = EvaluateCaveDensity(wp, terrain_density, sb.effective_cap, sb.carve);
         }
         MaterialType material = MaterialType::Air;
@@ -2475,7 +2474,7 @@ SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const 
     const float center_x = base_x + CHUNK_SIZE_X * 0.5f;
     const float center_z = base_z + CHUNK_SIZE_Z * 0.5f;
 
-    // T-I4-DR-shaping-perf: batch the 5 footprint height samples (center + 4
+    // batch the 5 footprint height samples (center + 4
     // corners) through the SIMD position-array path instead of 5 scalar
     // GenSingle2D sweeps. Byte-identical heights (same shaped helper), but the
     // per-column span cost - the dominant cold-frame streaming cost on shaped
@@ -2496,7 +2495,7 @@ SHIELD_WorldSystem::compute_column_surface_span(int chunk_x, int chunk_z) const 
     span.center_y = world_to_chunk_coords(Vec3(center_x, center_height, center_z)).y;
     span.min_y = world_to_chunk_coords(Vec3(center_x, min_height, center_z)).y;
     span.max_y = world_to_chunk_coords(Vec3(center_x, max_height, center_z)).y;
-    // T-I4-1: cache the surface biome id for the column (kNoBiome when biomes
+    // cache the surface biome id for the column (kNoBiome when biomes
     // are disabled). Sampled at the column center, matching center_y.
     span.biome_id = BiomeIdAt(center_x, center_z);
     return span;
@@ -2539,7 +2538,7 @@ int SHIELD_WorldSystem::get_required_lod_for_chunk(const IVec3& coords,
     // no geometry, cannot open surface seams, and keep the cheaper
     // 3D-distance LOD so deep/air columns do not inflate the meshing load.
     // This mirrors the per-ring LOD already used by EnsureSurfaceReadyNear.
-    // The band covers the full column surface SPAN (T-I3-2) plus the same
+    // The band covers the full column surface SPAN plus the same
     // +-1 margin as before, so an entire cliff face keeps a single LOD per
     // column (preserving the vertical-seam invariant above). On flat terrain
     // span.min_y == span.max_y == center and this is exactly the old band.
@@ -2556,7 +2555,7 @@ int SHIELD_WorldSystem::get_required_lod_for_chunk(const IVec3& coords,
 
     const int band_lod = get_lod_level_for_distance(dist);
 
-    // Asymmetric hysteresis (T-I3-19): a chunk PROMOTES to a finer LOD the
+    // Asymmetric hysteresis: a chunk PROMOTES to a finer LOD the
     // moment it enters the finer band (dist <= D, unchanged), but DEMOTES to
     // a coarser LOD only once the camera has receded one full chunk past the
     // band edge it currently occupies (dist > D + margin). Margin = one chunk
@@ -2612,7 +2611,7 @@ std::vector<IVec3> SHIELD_WorldSystem::GetInitialChunkLoadList(const Vec3& cente
         for (int dx = -INITIAL_LOAD_RADIUS; dx <= INITIAL_LOAD_RADIUS; ++dx) {
             const int chunk_x = spawn_chunk_coords.x + dx;
             const int chunk_z = spawn_chunk_coords.z + dz;
-            // Full column surface span (T-I3-2) plus the same +-1 margin the
+            // Full column surface span plus the same +-1 margin the
             // fixed {0, -1, 1} offsets provided on flat terrain, so steep
             // spawn neighborhoods preload their cliff-wall chunks too.
             const ColumnSurfaceSpan span = compute_column_surface_span(chunk_x, chunk_z);
@@ -2678,7 +2677,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
 void SHIELD_WorldSystem::update(entt::registry& registry,
                                 const std::vector<Vec3>& anchor_positions,
                                 PhysicsSystem* physics_system) {
-    // TEMP diag (spec 008 follow-up): split the 300ms+ streaming spike by sub-phase.
+    // runtime telemetry ( implementation note): split the 300ms+ streaming spike by sub-phase.
     m_dbg_stream = {};
     auto _dbg_prev = std::chrono::steady_clock::now();
     auto _dbg_split = [&](double& slot) {
@@ -2686,7 +2685,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         slot += std::chrono::duration<double, std::milli>(_n - _dbg_prev).count();
         _dbg_prev = _n;
     };
-    // SHIELD-03 5b: the per-frame publish hooks run in the NON-FORCE regime —
+    //  5b: the per-frame publish hooks run in the NON-FORCE regime —
     // on the server (tick source present) a batch publishes only at its due
     // tick, so the per-tick schedule belongs exclusively to activate_due; on
     // the client (due -1) these publish when drained, exactly as before.
@@ -2707,7 +2706,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     m_last_streaming_budget_stats.update_interval_frames = STREAMING_ACTIVATION_INTERVAL_FRAMES;
     m_last_streaming_budget_stats.requested_render_radius = RENDER_DISTANCE;
     m_last_streaming_budget_stats.max_active_chunks_budget = STREAMING_MAX_ACTIVE_CHUNKS_BUDGET;
-    // SHIELD-03 inc 2: telemetry mirrors the publication-keyed signals the
+    // telemetry mirrors the publication-keyed signals the
     // scheduler now reads (not the wall-clock job counters).
     m_last_streaming_budget_stats.generation_job_active = generation_batch_outstanding();
     m_last_streaming_budget_stats.meshing_job_active = meshing_batch_outstanding();
@@ -2733,7 +2732,8 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             ++m_last_streaming_budget_stats.meshing_chunks;
         }
     }
-    _dbg_split(m_dbg_stream.telemetry); // TEMP diag: hydro prefetch + telemetry count loop 1
+    _dbg_split(
+        m_dbg_stream.telemetry); // runtime telemetry: hydro prefetch + telemetry count loop 1
 
     // Engine streaming stays fully asynchronous: on a camera discontinuity
     // (teleport, or a per-frame jump forced by a slow renderer driving a
@@ -2758,14 +2758,14 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         activation_ran_this_tick = update_chunk_activation(anchor_positions, physics_system);
         m_update_tick_counter = 0;
     }
-    _dbg_split(m_dbg_stream.activation); // TEMP diag
+    _dbg_split(m_dbg_stream.activation); // runtime telemetry
 
     // Step 2: Update the water system using the now-current list of active chunks.
     // This MUST happen before meshing jobs are dispatched.
     if (m_water_system) {
         m_water_system->update(registry, m_streaming_state.chunks);
     }
-    _dbg_split(m_dbg_stream.water); // TEMP diag
+    _dbg_split(m_dbg_stream.water); // runtime telemetry
 
     // Step 3: Schedule meshing jobs for chunks that need it.
     struct MeshingCandidate {
@@ -2782,7 +2782,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     std::vector<MeshingWorkItem> chunks_to_mesh_jobs;
     chunks_to_mesh_jobs.reserve(MAX_CHUNKS_TO_PROCESS_PER_FRAME);
 
-    // spec 004 streaming elision GATE. Run the Step-2/3 meshing-candidate pass only when something
+    //  streaming elision GATE. Run the Step-2/3 meshing-candidate pass only when something
     // the pass cares about changed since it last fully drained. RUN signals are deterministic +
     // main-thread-observed (NO job-completion timing — the attempt-#1 trap): a dirty-generation
     // delta (a chunk insert/erase / synchronous rebuild bumped it), an EXACT anchor-vector change
@@ -2897,7 +2897,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             } else if (state == Luminumbra::ChunkState::Ready) {
                 Vec3 chunk_center = (Vec3(chunk_ptr->get_coords()) + 0.5f) *
                                     Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
-                // T-I3-19: pass the meshed LOD so demotions go through the
+                // pass the meshed LOD so demotions go through the
                 // asymmetric hysteresis band (promote at D, demote at D + margin).
                 required_lod = get_required_lod_for_chunk(chunk_ptr->get_coords(),
                                                           chunk_center,
@@ -2978,7 +2978,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
                 ++terrain_meshing_backlog;
             }
         }
-        // SHIELD-03 5b: the meshing dispatch gate is the FIFO DEPTH BUDGET —
+        //  5b: the meshing dispatch gate is the FIFO DEPTH BUDGET —
         // deterministic main-thread state, never job timing. Promotion
         // backpressure decoupled from meshing (its own pipeline-pending guard in
         // dispatch_meshing_jobs routes promotions; a promotion pipeline in flight
@@ -2994,7 +2994,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         // hole-fill-first ordering and per-chunk LOD selection are unchanged -
         // only how quickly the same work drains. Measured on the 20s
         // EnduranceStreamDrain scenario: max_deferred_age_frames 28 -> 12 and
-        // cumulative_deferred_meshing ~15k -> ~5k versus a fixed budget. T-I7
+        // cumulative_deferred_meshing ~15k -> ~5k versus a fixed budget.
         // residency push (owner: "parts not loaded" must resolve fast + "up the caps"
         // for the RTX 5070 Ti target): the deep-backlog cap is raised from 2x to 4x
         // and the base budget bumped, so initial-load / fast-travel backlogs drain in
@@ -3063,7 +3063,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         // always converges.
         const bool produced_work =
             !meshing_candidates.empty() || m_last_streaming_budget_stats.deferred_meshing > 0;
-        // SHIELD-03 inc 2: quiescence keys on the publication-keyed outstanding
+        // quiescence keys on the publication-keyed outstanding
         // signals (main-thread events), not wall-clock job counters — the last
         // scheduler read to be de-timed ahead of the barrier removal.
         const bool quiescent = !produced_work && !meshing_batch_outstanding() &&
@@ -3073,10 +3073,11 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
             m_last_serviced_generation = m_dirty_generation;
         }
     } // streaming_dirty gate
-    _dbg_split(m_dbg_stream.meshing_pass); // TEMP diag: Step 3 meshing-candidate pass + dispatch
+    _dbg_split(
+        m_dbg_stream.meshing_pass); // runtime telemetry: Step 3 meshing-candidate pass + dispatch
 
     // Step 4. Time-slice the creation of expensive physics colliders on the main thread.
-    // spec 008 WS-1: the eligibility scan is O(N) over every streamed chunk. Gate it on
+    //  the eligibility scan is O(N) over every streamed chunk. Gate it on
     // m_collision_pass_dirty so a SETTLED world skips it entirely. The flag is set at the two
     // has_collision=false reset sites (remesh/LOD0 promotion + synchronous rebuild) and cleared
     // here once a scan drains all eligible chunks without hitting the per-frame cap. The scan body
@@ -3088,7 +3089,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         for (auto const& [id, chunk_ptr] : m_streaming_state.chunks) {
             if (chunk_ptr->get_state() == ChunkState::Ready && !chunk_ptr->has_collision.load()) {
                 // Only create collision once the chunk is sim-available at
-                // LOD0 (SHIELD-03 inc 3: predicate centralized — collision is
+                // LOD0 ( : predicate centralized — collision is
                 // built from the HEIGHTMAP; sim_available_lod0 is the single
                 // place the availability definition lives).
                 if (sim_available_lod0(*chunk_ptr)) {
@@ -3107,7 +3108,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
         // ones, so there is no collision work left until something resets has_collision again.
         m_collision_pass_dirty = hit_frame_cap;
     }
-    _dbg_split(m_dbg_stream.collision); // TEMP diag
+    _dbg_split(m_dbg_stream.collision); // runtime telemetry
 
     m_last_streaming_budget_stats.active_chunks_after = m_streaming_state.chunks.size();
     clear_streaming_state_counts(m_last_streaming_budget_stats);
@@ -3138,7 +3139,7 @@ void SHIELD_WorldSystem::update(entt::registry& registry,
     m_streaming_telemetry_stats.last_queue_depth = queue_depth;
     m_streaming_telemetry_stats.peak_queue_depth =
         std::max(m_streaming_telemetry_stats.peak_queue_depth, queue_depth);
-    // T-I5b-DR-streaming-drain: record this frame's depth into the trailing ring
+    //  record this frame's depth into the trailing ring
     // and derive the SETTLED floor (min over the last activation window). Chunk
     // activation runs only every STREAMING_ACTIVATION_INTERVAL_FRAMES frames, so
     // generation/loading arrives in periodic batches; the raw last_queue_depth
@@ -3187,7 +3188,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         camera_chunks.push_back(world_to_chunk_coords(a));
     }
 
-    // spec 008 follow-up (streaming residual): ELIDE the whole pass when the residency set is
+    //  implementation note (streaming residual): ELIDE the whole pass when the residency set is
     // provably unchanged. The wanted disc is chunk-granular and keyed only on the anchor CHUNK
     // coords, so sub-chunk camera motion never changes it. If the anchor chunks are identical to
     // last activation, no world mutation happened (dirty_generation), and the last activation
@@ -3214,10 +3215,10 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         m_streaming_state.chunks.size(),
         m_last_streaming_budget_stats.loading_chunks,
         m_last_streaming_budget_stats.idle_chunks,
-        // SHIELD-03 inc 2: publication-keyed signals — the wanted radius is
+        // publication-keyed signals — the wanted radius is
         // now a pure function of main-thread events, never job-counter timing.
         generation_batch_outstanding(),
-        // SHIELD-02: promotion work counts as meshing-lane pressure (it was
+        // promotion work counts as meshing-lane pressure (it was
         // meshing-lane work before the decoupling). Byte-neutral on the
         // per-tick-quiesced server paths — both terms read false there.
         meshing_batch_outstanding() || promotion_pipeline_pending(),
@@ -3233,7 +3234,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                                       static_cast<std::size_t>(MAX_CHUNKS_TO_PROCESS_PER_FRAME) *
                                           (anchors.size() - 1u) / 8u));
     }
-    // SHIELD-03 5b: generation dispatch backpressure = FIFO depth budget
+    //  5b: generation dispatch backpressure = FIFO depth budget
     // (deterministic; the telemetry field above keeps outstanding semantics).
     m_last_streaming_budget_stats.generation_budget =
         m_streaming_state.generation_batches.size() >= kMaxGenerationBatchesInFlight
@@ -3242,7 +3243,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
     std::vector<GenerationCandidate> to_create;
     to_create.reserve(static_cast<std::size_t>((target_radius * 2 + 1) * (target_radius * 2 + 1)));
-    // T-I6 P0: map ChunkID -> its index in to_create (was a plain seen-set). A chunk
+    //  map ChunkID -> its index in to_create (was a plain seen-set). A chunk
     // reached from multiple anchors is deduped AND its priority metrics are upgraded
     // to the CLOSEST anchor's (see add_candidate) so per-anchor near-fields are fair.
     std::unordered_map<ChunkID, std::size_t> candidate_index;
@@ -3254,7 +3255,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                              int horizontal_dist2,
                              int vertical_rank,
                              const Vec3& anchor_pos) {
-        // NOTE (T-I3-2): the active-chunk budget is no longer applied here.
+        // NOTE: the active-chunk budget is no longer applied here.
         // Enforcing it during enumeration capped candidates in row-major scan
         // order, so when the wanted set exceeded the budget (mountains preset
         // with surface spans) the dropped chunks were a directional bite out
@@ -3266,7 +3267,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             return;
         }
 
-        // Generation intent (T-I3-1): chunks whose required meshing step is
+        // Generation intent: chunks whose required meshing step is
         // coarse (> 1) generate surface-band data only - no interior SDF, no
         // 3D cave grid. Promotion to LOD0 backfills the full SDF via the
         // meshing dispatch, so a conservative step here is only a perf cost.
@@ -3275,7 +3276,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         const int required_lod = get_required_lod_for_chunk(coords, chunk_center, anchor_pos);
         const int target_step = get_lod_step_for_level(required_lod);
 
-        // T-I6 P0 (per-anchor budget fairness): when a chunk is wanted by more than
+        //  when a chunk is wanted by more than
         // one anchor, keep the CLOSEST anchor's priority metrics (smallest ring /
         // horizontal distance, finest LOD step) instead of the v1 first-anchor-wins.
         // ring_distance/horizontal_distance_sq/target_step are all monotone in the
@@ -3303,7 +3304,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
     // UNION the wanted-set across every anchor. candidate_index (in add_candidate)
     // dedupes a chunk reached from multiple anchors and upgrades it to the CLOSEST
-    // anchor's priority metrics (T-I6 P0); a chunk wanted by ANY anchor is enumerated.
+    // anchor's priority metrics; a chunk wanted by ANY anchor is enumerated.
     // One anchor -> the historical single-disc scan, unchanged.
     for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
         const IVec3 camera_chunk = camera_chunks[ai];
@@ -3317,7 +3318,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
 
                 const int chunk_x = camera_chunk.x + dx;
                 const int chunk_z = camera_chunk.z + dz;
-                // 5-point span sample (T-I3-2); the cache persists for the
+                // 5-point span sample; the cache persists for the
                 // lifetime of seed/params.
                 const ColumnSurfaceSpan span = column_surface_span(chunk_x, chunk_z);
                 const int ring_distance = horizontal_ring_distance(dx, dz);
@@ -3476,7 +3477,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         }
         // XZ in range of some anchor but vertically outside all bands -> surface-band test.
 
-        // Vertical-unload exemption (T-I3-2): a chunk inside its column's
+        // Vertical-unload exemption: a chunk inside its column's
         // surface span (+-1 stack margin) holds the terrain isosurface the
         // player can see, regardless of how far above/below the CAMERA it
         // sits. The old camera-relative test evicted mountain summits more
@@ -3501,7 +3502,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         shadow_note_evicted(id);
     }
 
-    // spec 008 follow-up: record the elision signals for next tick. m_last_activation_pending == 0
+    //  implementation note: record the elision signals for next tick. m_last_activation_pending ==
+    //  0
     // next time (with a static anchor + no world mutation) means this pass made the world fully
     // resident, so the next activation can be skipped.
     m_activation_has_run = true;
@@ -3527,13 +3529,13 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         return false;
     }
 
-    // Diagnostic breadcrumbs (spec 018 follow-up): EnsureSurfaceReadyNear blocks on
+    // Diagnostic breadcrumbs ( implementation note): EnsureSurfaceReadyNear blocks on
     // three unbounded job waits during the interactive "CONSTRUCTING WORLD GEOMETRY"
     // load. If one wedges (the intermittent freeze), the LAST line printed names the
     // exact phase that hung. Render-only logging; no world_hash impact. Cheap: this
     // runs at world-load/teleport, not per-frame.
     const auto _esrn_t0 = std::chrono::steady_clock::now();
-    // OPS-11 (spec 021): ALL THREE unbounded waits in this function run under the
+    // ALL THREE unbounded waits in this function run under the
     // opt-in LUMINUMBRA_JOB_WATCHDOG named-phase reporter (previously only the
     // collision-build batch below was wrapped, so a generation/meshing wedge still
     // hung silently). Observability only — hash-neutral, OFF in determinism gates.
@@ -3548,7 +3550,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     Luminumbra::Core::WaitWithJobWatchdog(job_watchdog,
                                           "EnsureSurfaceReadyNear/meshing-drain",
                                           [this]() { wait_for_meshing_jobs(); });
-    // SHIELD-02: settle the two-stage promotion pipeline too (publish staged
+    // settle the two-stage promotion pipeline too (publish staged
     // sim truth, dispatch + drain the stage-B render meshes) so the surface
     // band below observes fully settled chunks, exactly as before the split.
     Luminumbra::Core::WaitWithJobWatchdog(
@@ -3560,7 +3562,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     const IVec3 center_chunk = world_to_chunk_coords(world_pos);
     const int radius = std::max(0, surface_radius);
     const int collision_range = std::max(0, collision_radius);
-    // RENDER-LOD0 radius, decoupled from collision (preview fidelity follow-up).
+    //  radius, decoupled from collision (preview fidelity implementation note).
     // render_lod0_radius < 0 (the default, every game caller) preserves the
     // historical behaviour exactly: the full-detail LOD0 ring boundary == the
     // collision radius, so the game's LOD selection — and world_hash — is
@@ -3591,7 +3593,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
         for (int dx = -radius; dx <= radius; ++dx) {
             const int chunk_x = center_chunk.x + dx;
             const int chunk_z = center_chunk.z + dz;
-            // Full column surface span (T-I3-2) with the same +-1 stack
+            // Full column surface span with the same +-1 stack
             // margin the fixed {-1, 0, 1} band provided on flat terrain;
             // steep columns additionally cover every chunk-Y the isosurface
             // passes through so cliff walls are meshed before world enter.
@@ -3628,12 +3630,12 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     build_jobs.reserve(chunks_to_build.size());
     for (const SurfaceHorizonChunk& build_chunk : chunks_to_build) {
         build_jobs.emplace_back([this, build_chunk]() {
-            const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
+            const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             const auto& chunk = build_chunk.chunk;
             const bool needs_full_sdf = build_chunk.step <= 1;
-            // Stopgap guard (spec 017/018; Codex audit #2 — the most plausible load-hang
-            // cause): a non-empty but WRONG-SIZED full SDF (e.g. a malformed/wrong-version
-            // save) would reach the unit-step PolygoniseTerrain, which assumes a full
+            // Validation guard: a non-empty but wrong-sized full SDF (for example,
+            // from a malformed or unsupported save) would reach the unit-step
+            // PolygoniseTerrain, which assumes a full
             // (CHUNK_SIZE+1)^3 lattice and reads OUT OF BOUNDS -> heap corruption that can
             // clobber job-completion state and wedge the "CONSTRUCTING WORLD GEOMETRY" load.
             // Detect it and clear the buffer so it REGENERATES a correct lattice below
@@ -3668,7 +3670,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 // that already has the data its step needs is also a no-op
                 // for fresh chunks that merely need a LOD rebuild. Coarse
                 // (step > 1) horizon chunks generate the surface band only
-                // (T-I3-1): the heightfield mesher and seam fallback never
+                // the heightfield mesher and seam fallback never
                 // read interior SDF.
                 GenerateChunkData(*chunk, build_chunk.step);
             }
@@ -3686,7 +3688,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     }
 
     if (m_job_system && build_jobs.size() > 128u) {
-        // SHIELD-01 (spec 017-B step 3 — the world-load hang ROOT FIX): the
+        //  ( step 3 — the world-load hang ROOT FIX): the
         // load path never waits on one monolithic batch again. The build set
         // is dispatched in BOUNDED sub-batches; each wait is watchdog-named
         // with batch index + running progress, so (a) the worst single wait
@@ -3810,7 +3812,7 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
     // teleport / boot) WITHOUT a chunk-count or anchor delta, so re-open the candidate-pass gate
     // explicitly.
     ++m_dirty_generation;
-    // spec 008 WS-1: the rebuild reset has_collision=false on its remeshed chunks (some on worker
+    //  the rebuild reset has_collision=false on its remeshed chunks (some on worker
     // threads, now joined) and synchronously collided only the in-range subset, so re-open the
     // gated collision scan to backfill colliders for any out-of-range LOD0 chunks. Main-thread
     // store.
@@ -3819,15 +3821,15 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
 }
 
 float SHIELD_WorldSystem::GetTerrainHeightAt(float world_x, float world_z) const {
-    // T-I3-10: delegates to the one shared height implementation.
+    // delegates to the one shared height implementation.
     return ComputeShapedHeightSample(world_x, world_z).final_height;
 }
 
 SHIELD_WorldSystem::WaterStateHash SHIELD_WorldSystem::debug_water_state_hash() const {
     // Fold the live water-sim state across resident chunks, sorted by chunk id so the result is
-    // order-independent. Spec 009: FNV-1a over the FIXED-POINT int32 bits of water_depth_mm +
+    // order-independent.: FNV-1a over the FIXED-POINT int32 bits of water_depth_mm +
     // water_bed_mm (millimetres) — integers are bit-identical across compilers/CPUs so host==peer
-    // holds, and the float water_level/flow arrays are now RENDER-ONLY and are NO LONGER hashed.
+    // holds, and the float water_level/flow arrays are now  and are NO LONGER hashed.
     std::vector<ChunkID> ids;
     ids.reserve(m_streaming_state.chunks.size());
     for (const auto& [id, c] : m_streaming_state.chunks) {
@@ -4063,14 +4065,14 @@ Vec3 SHIELD_WorldSystem::debug_deepest_water_pos(std::int64_t* depth_mm_out) con
     return best_pos;
 }
 
-// Spec 009 Phase 2: terraform the water bed (dig/dam) — delegates to the WaterSystem.
+//  terraform the water bed (dig/dam) — delegates to the WaterSystem.
 int SHIELD_WorldSystem::EditTerrainBed(const Vec3& world_pos,
                                        std::int32_t delta_mm,
                                        float radius_m) {
     return m_water_system ? m_water_system->EditTerrainBed(world_pos, delta_mm, radius_m) : 0;
 }
 
-// Spec 010: configure the finite-hydrology cycle (no perpetual source + rain + evaporation).
+// configure the finite-hydrology cycle (no perpetual source + rain + evaporation).
 void SHIELD_WorldSystem::SetWaterHydrology(bool finite,
                                            std::int32_t rain_mm_per_tick,
                                            std::int32_t evap_mm_per_tick) {
@@ -4078,14 +4080,14 @@ void SHIELD_WorldSystem::SetWaterHydrology(bool finite,
         m_water_system->SetHydrology(finite, rain_mm_per_tick, evap_mm_per_tick);
 }
 
-// S1.1 (ATMO-11/WATER-07): weather-driven per-cell rain passthrough (null = OFF).
+// weather-driven per-cell rain passthrough (null = OFF).
 void SHIELD_WorldSystem::SetWaterWeatherRain(const Systems::WeatherSystem* weather,
                                              std::int32_t scale_mm) {
     if (m_water_system)
         m_water_system->SetWeatherRain(weather, scale_mm);
 }
 
-// W2.1 diagnostics passthrough.
+// water-source diagnostics passthrough.
 std::int64_t SHIELD_WorldSystem::debug_water_sources_seen() const {
     return m_water_system ? m_water_system->debug_sources_seen() : 0;
 }
@@ -4107,12 +4109,12 @@ std::vector<IVec3> SHIELD_WorldSystem::debug_water_grid_chunk_coords(std::size_t
     return out;
 }
 
-// WATER-11: epoch passthrough (0 when no water system).
+// epoch passthrough (0 when no water system).
 std::uint64_t SHIELD_WorldSystem::water_epoch() const {
     return m_water_system ? m_water_system->water_epoch() : 0;
 }
 
-// WATER-11: live water surface from the float mirror on the y=0 column chunk.
+// live water surface from the float mirror on the y=0 column chunk.
 float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) const {
     const float terrain = GetTerrainHeightAt(world_x, world_z);
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
@@ -4131,7 +4133,7 @@ float SHIELD_WorldSystem::live_water_surface_at(float world_x, float world_z) co
 
 bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const {
     // Mirrors the injection loop's precondition (has_water_sim + complete FLOAT
-    // grid). EMPIRICAL ground truth (the W2.1 staging hunt): water grids live on
+    // grid). EMPIRICAL ground truth (the water-source staging hunt): water grids live on
     // the 2.5D COLUMN's y=0 chunk regardless of the terrain sign — probe there.
     const IVec3 cc = world_to_chunk_coords(Vec3(world_x, 0.5f, world_z));
     const std::shared_ptr<Chunk> c = find_streamed_chunk(cc);
@@ -4141,19 +4143,19 @@ bool SHIELD_WorldSystem::debug_water_grid_at(float world_x, float world_z) const
     return res > 1 && static_cast<int>(c->water_level_data.size()) == res * res;
 }
 
-// WATER-17: boot-settle mode passthrough (lifts the live-play water caps during Boot only).
+// boot-settle mode passthrough (lifts the live-play water caps during Boot only).
 void SHIELD_WorldSystem::SetWaterBootSettleMode(bool on) {
     if (m_water_system)
         m_water_system->SetBootSettleMode(on);
 }
 
-// WATER-17: loaded-boot water pause passthrough (see WaterSystem::SetBootPaused).
+// loaded-boot water pause passthrough (see WaterSystem::SetBootPaused).
 void SHIELD_WorldSystem::SetWaterBootPaused(bool on) {
     if (m_water_system)
         m_water_system->SetBootPaused(on);
 }
 
-// WATER-17: rotating sim-window cursor persistence seam (see WaterSystem accessors).
+// rotating sim-window cursor persistence seam (see WaterSystem accessors).
 std::size_t SHIELD_WorldSystem::GetWaterSimWindowCursor() const {
     return m_water_system ? m_water_system->GetSimWindowCursor() : 0u;
 }
@@ -4162,7 +4164,7 @@ void SHIELD_WorldSystem::SetWaterSimWindowCursor(std::size_t cursor) {
         m_water_system->SetSimWindowCursor(cursor);
 }
 
-// Spec 009 Phase 2 — PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
+// PLAYER-FACING terraform: carve/fill the VOXEL terrain in-world,
 // then couple the water to the new bed. Edits the signed density field (sdf_data) of
 // every streamed chunk the sphere overlaps. Positive density is air (same convention
 // as CarveSphereIntoChunk / MarchingCubes), so a DIG raises each in-range sample to at
@@ -4259,7 +4261,7 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
     WorldGenLayerSample sample;
     sample.world_pos = world_pos;
 
-    // T-I3-10: heights come from the one shared implementation so this sample
+    // heights come from the one shared implementation so this sample
     // path stays exactly consistent with GetTerrainHeightAt and both
     // GenerateChunkData batch loops.
     const ShapedHeightSample height = ComputeShapedHeightSample(world_pos.x, world_pos.z);
@@ -4287,7 +4289,7 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
                                         sample.cave_noise,
                                         m_params,
                                         sb.effective_cap); // cheese component (diagnostic)
-        // Spec 013: final density routes through the single composition point so it includes
+        // final density routes through the single composition point so it includes
         // the noise-router spaghetti tunnels (legacy result stays bit-exact: same cheese noise).
         sample.final_density =
             EvaluateCaveDensity(world_pos, sample.terrain_density, sb.effective_cap, sb.carve);
@@ -4297,12 +4299,12 @@ WorldGenLayerSample SHIELD_WorldSystem::SampleWorldGenLayers(const Vec3& world_p
     if (!sample.solid) {
         sample.material = MaterialType::Air;
     } else {
-        // T-I4-2: biome-aware surface material. When biomes are disabled the
+        // biome-aware surface material. When biomes are disabled the
         // biome id is kNoBiome and SurfaceMaterialForColumn reproduces the
         // legacy classifier bit-for-bit. The column biome is resolved from the
         // surface (world_x/world_z), not the sample's depth.
         const u8 biome_id = BiomeIdAt(world_pos.x, world_pos.z);
-        // River banks (T-I4-3): a column under meaningful river influence lays
+        // River banks: a column under meaningful river influence lays
         // its above-water skin as the biome filler. The threshold keeps the
         // bank a thin rim around the channel rather than the whole valley.
         const bool river_bank = RiverInfluenceFromNoise(world_pos.x, world_pos.z) > 0.25f;
@@ -4316,7 +4318,7 @@ float SHIELD_WorldSystem::get_density_at_from_precalculated(const Vec3& world_po
                                                             float terrain_height) const {
     float terrain_density = world_pos.y - terrain_height;
     if (m_params.caves_enabled) {
-        // Spec 013: single composition point (cheese + noise-router spaghetti).
+        // single composition point (cheese + noise-router spaghetti).
         const SurfaceBreakSample sb = sample_surface_breaks(world_pos, terrain_height);
         terrain_density =
             EvaluateCaveDensity(world_pos, terrain_density, sb.effective_cap, sb.carve);
@@ -4681,7 +4683,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
     const int size_z = CHUNK_SIZE_Z + 1;
     const size_t padded_volume = static_cast<size_t>(size_x) * size_y * size_z;
 
-    // T-I3-1 SDF skip: chunks generated for a coarse meshing step (> 1) are
+    //  SDF skip: chunks generated for a coarse meshing step (> 1) are
     // only ever meshed by GenerateCoarseHeightfieldTerrain (which samples
     // GetTerrainHeightAt analytically) and by the seam-fallback face patches
     // (which read terrain density derived from heightmap_data). Neither reads
@@ -4699,7 +4701,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
         chunk.heightmap_data.resize(heightmap_size);
 
         if (m_params.shaping_enabled) {
-            // T-I3-10 / T-I4-DR-shaping-perf: shaped heights come from the one
+            // shaped heights come from the one
             // shared height definition, but via the SIMD-batched grid helper
             // (GenUniformGrid2D / GenPositionArray2D) which produces bytes
             // EXACTLY equal to the per-column GenSingle2D scalar helper
@@ -4747,43 +4749,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
         return;
     }
 
-    // Try GPU generation first
-    if (m_gpu_sdf_callback && m_gpu_sdf_callback(coords, m_params, m_seed, chunk.sdf_data)) {
-        // GPU generation successful - still need to generate heightmap for physics
-        const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
-        chunk.heightmap_data.resize(heightmap_size);
-
-        // Generate heightmap from SDF data
-        for (int z = 0; z < size_z; ++z) {
-            for (int x = 0; x < size_x; ++x) {
-                int heightmap_idx = z * size_x + x;
-
-                // Find surface by marching down through SDF
-                float surface_height = static_cast<float>(base_pos.y + size_y); // Start from top
-                for (int y = size_y - 1; y >= 0; --y) {
-                    int sdf_idx = z * (size_x * size_y) + y * size_x + x;
-                    if (chunk.sdf_data[sdf_idx] <= 0.0f) {
-                        surface_height = static_cast<float>(base_pos.y + y);
-                        break;
-                    }
-                }
-                chunk.heightmap_data[heightmap_idx] = surface_height;
-            }
-        }
-
-        // FR-B1: stamp authored structure voxels into the now-complete SDF
-        // (solid density + per-voxel material). No-op when structures disabled.
-        StampStructuresIntoChunk(chunk, base_pos);
-
-        // Generation produces the canonical voxel data; only post-generation
-        // edits count as unsaved dirty state.
-        chunk.mark_sdf_generated_current_params();
-        chunk.clear_voxel_data_dirty();
-        chunk.set_state(ChunkState::Idle);
-        return;
-    }
-
-    // Fallback to CPU generation
+    // Generate the authoritative CPU SDF and matching heightmap.
     chunk.sdf_data.resize(padded_volume);
 
     const size_t heightmap_size = static_cast<size_t>(size_x) * size_z;
@@ -4797,14 +4763,14 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
         cave_noise.resize(padded_volume);
     }
 
-    // T-I3-10: with shaping enabled the per-column heights are computed by the
+    // with shaping enabled the per-column heights are computed by the
     // one shared scalar helper (GenSingle* only) so they are EXACTLY equal to
     // GetTerrainHeightAt/SampleWorldGenLayers at the same coordinates. The
     // legacy path keeps its SIMD GenUniformGrid2D batches (bit-identical
     // pre-shaping bytes; the 1e-4 snapshot gate covers grid-vs-single drift).
     std::vector<float> shaped_heights;
     if (m_params.shaping_enabled) {
-        // T-I4-DR-shaping-perf: SIMD-batched shaped heights, byte-identical to
+        // SIMD-batched shaped heights, byte-identical to
         // the per-column GenSingle2D scalar helper (parity gtest pins ==).
         shaped_heights.resize(heightmap_size);
         ComputeShapedHeightGrid(base_pos.x, base_pos.z, size_x, size_z, shaped_heights.data());
@@ -4913,7 +4879,7 @@ void SHIELD_WorldSystem::GenerateChunkData(Luminumbra::Chunk& chunk, int target_
         }
     }
 
-    // FR-B1: stamp authored structure voxels into the populated SDF (solid
+    // stamp authored structure voxels into the populated SDF (solid
     // density + per-voxel material) before the dirty flag is cleared. No-op when
     // structures are disabled or sdf_data is empty (coarse step>1 path).
     StampStructuresIntoChunk(chunk, base_pos);
@@ -4938,7 +4904,7 @@ SHIELD_WorldSystem::dispatch_generation_jobs(const std::vector<IVec3>& chunks_to
 
 JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     const std::vector<ChunkGenerationRequest>& chunks_to_generate) {
-    // SHIELD-03 inc 5a-2: dispatch APPENDS a batch to the lane FIFO (the old
+    // dispatch APPENDS a batch to the lane FIFO (the old
     // refuse-while-active head guard is gone — the scheduler's budget gate
     // already prevents scheduling-path double-dispatch, boot-path callers
     // dispatch-then-wait, and multi-batch flight is the queue's design).
@@ -4952,7 +4918,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         // so skipping any chunk that already has voxel data (full SDF or the
         // surface-band heightmap) is a no-op for untouched chunks and the
         // load/generation contract for saved ones. A surface-band chunk later
-        // promoted to LOD0 gets its full SDF via the SHIELD-02 promotion lane.
+        // promoted to LOD0 gets its full SDF via the  promotion lane.
         const auto existing = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
         if (existing != m_streaming_state.chunks.end() && existing->second &&
             (!existing->second->sdf_data.empty() || !existing->second->heightmap_data.empty())) {
@@ -4967,9 +4933,9 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
         chunk->pending_generation_ready.store(false, std::memory_order_release);
         batch.chunks.push_back(chunk);
         jobs.emplace_back([this, chunk, target_step]() {
-            const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
+            const auto worldgen_scope = acquire_worldgen_sample_scope(); //
             GenerateChunkData(*chunk, target_step);
-            // SHIELD-03 inc 5a: stage completion only — the MAIN thread flips
+            // stage completion only — the MAIN thread flips
             // Loading→Idle in publish_completed_generation_jobs, so chunk
             // lifecycle is never a worker-timing side effect.
             chunk->pending_generation_ready.store(true, std::memory_order_release);
@@ -4978,7 +4944,7 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
 
     if (m_job_system && !jobs.empty()) {
         batch.handle = m_job_system->dispatch_batch(jobs);
-        // SHIELD-03 inc 5a-3: tick-keyed activation stamp (inert until the
+        // tick-keyed activation stamp (inert until the
         // barrier swap; -1 with no tick source = publish-when-drained).
         batch.due_tick =
             m_current_sim_tick >= 0 ? m_current_sim_tick + kActivationPipelineLatencyTicks : -1;
@@ -4991,20 +4957,20 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
 
 void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem>& chunks_to_mesh) {
     process_completed_meshing_jobs(/*force=*/false);
-    // SHIELD-03 5b: refuse by FIFO depth (deterministic), not by raw job
+    //  5b: refuse by FIFO depth (deterministic), not by raw job
     // activity. Refused items re-candidate on a later pass, as always.
     if (m_streaming_state.meshing_batches.size() >= kMaxMeshingBatchesInFlight) {
         return;
     }
 
-    // SHIELD-02 (spec 017-B step 1): LOD0 promotions of chunks without a full
+    //  ( step 1): LOD0 promotions of chunks without a full
     // voxel field ride the sim-truth PROMOTION lane — stage A generates the
     // field, the main thread publishes it, and only then is the render mesh
     // dispatched back through here (stage B, re-classifying as non-promotion
     // because the live sdf_data is full by then). Meshing never generates.
     // Classification happens HERE on the main thread (sdf_data is main-thread-
     // owned between dispatch and job start, so the value matches what the old
-    // in-job test read). SHIELD-04 (spec 021): a non-empty but WRONG-SIZED
+    // in-job test read).: a non-empty but WRONG-SIZED
     // sdf_data (corrupt save / stale coarse producer) must never be copied
     // into the unit-step polygonise — its corner indexing assumes the full
     // (CHUNK+1)^3 lattice and would read out of bounds; it re-routes through
@@ -5051,7 +5017,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     // transition-face checks below are hash lookups instead of a full
     // chunk-map scan per face per work item (O(batch * chunks) before,
     // which dominated the dispatch frame once backlog-scaled batches
-    // landed). Mirrors the candidate-side snapshot built in update().
+    // landed). Mirrors the candidate-side snapshot built in update.
     struct DispatchMeshedColumnEntry {
         const Luminumbra::Chunk* chunk = nullptr;
         int y = 0;
@@ -5076,11 +5042,11 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
     // Near-field hole-fill candidates (no active mesh yet, capped prefix of
     // the sorted batch) ride the High job lane so visible gaps close ahead of
     // bulk meshing, generation, and LOD/water remeshes; everything else stays
-    // on the Normal lane. The sort in update() already places the hole-fill
+    // on the Normal lane. The sort in update already places the hole-fill
     // prefix first, so this mirrors the existing priority order.
     std::vector<Luminumbra::Job> high_priority_jobs;
     std::vector<Luminumbra::Job> normal_priority_jobs;
-    // SHIELD-03 inc 5a-2: build this dispatch's batch record locally; it is
+    // build this dispatch's batch record locally; it is
     // appended to the lane FIFO at the dispatch below. The due stamp (5a-3)
     // is inert until the barrier swap; -1 = publish-when-drained (client).
     StreamingState::MeshingBatch mesh_batch;
@@ -5143,7 +5109,7 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
         auto& lane_jobs = work_item.high_priority ? high_priority_jobs : normal_priority_jobs;
         lane_jobs.emplace_back([this, chunk, step, transition_faces, terrain_mesh_required]() {
             try {
-                const auto worldgen_scope = acquire_worldgen_sample_scope(); // SHIELD-09
+                const auto worldgen_scope = acquire_worldgen_sample_scope(); //
                 Luminumbra::Chunk scratch(chunk->get_coords());
                 scratch.water_level_data = chunk->water_level_data;
                 scratch.water_flow_data = chunk->water_flow_data;
@@ -5157,14 +5123,14 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
 
                 if (terrain_mesh_required) {
                     if (step <= 1 && chunk->sdf_data.size() != kFullSdfLattice) {
-                        // SHIELD-02 tripwire: meshing NEVER generates sim
+                        //  tripwire: meshing NEVER generates sim
                         // truth. A unit-step item without a full live voxel
                         // field must have been routed through the promotion
                         // lane at dispatch — reaching here is a regression of
-                        // the 017-B decoupling, not a recoverable state.
+                        // the activation queue decoupling, not a recoverable state.
                         LUMINUMBRA_CORE_ERROR(
                             "MESHING JOB: chunk ({},{},{}) reached the render-only meshing "
-                            "lane without full sim truth (sdf size {} != {}) — the SHIELD-02 "
+                            "lane without full sim truth (sdf size {} != {}) — the  "
                             "promotion routing is broken; failing the mesh",
                             chunk->get_coords().x,
                             chunk->get_coords().y,
@@ -5176,14 +5142,14 @@ void SHIELD_WorldSystem::dispatch_meshing_jobs(const std::vector<MeshingWorkItem
                     }
                     scratch.sdf_data = chunk->sdf_data;
                     scratch.heightmap_data = chunk->heightmap_data;
-                    // SHIELD-02: carry the live material channel so stage-B
+                    // carry the live material channel so stage-B
                     // promotion meshes classify authored structure voxels
                     // exactly as the old fused backfill+mesh job did (its
                     // scratch had materials stamped by GenerateChunkData).
                     // Also fixes the latent authored-material loss on plain
                     // remeshes, which copied only sdf+heightmap. Mesh bytes
                     // are world_hash-excluded either way (empty -> empty,
-                    // FR-B1 lazy alloc preserved).
+                    //  lazy alloc preserved).
                     scratch.material_data = chunk->material_data;
 
                     // 1. Generate the terrain mesh from the SDF data into a scratch chunk.
@@ -5266,7 +5232,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
     }
     auto& front_batch = m_streaming_state.meshing_batches.front();
     if (!force && front_batch.due_tick >= 0) {
-        // 017-B: tick-stamped batches publish exclusively via activate_due /
+        // activation queue: tick-stamped batches publish exclusively via activate_due /
         // force drains (see publish_front_generation_batch).
         return false;
     }
@@ -5288,7 +5254,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
 
         if (mesh_ready && !mesh_failed) {
             if (job_chunk.terrain_mesh_required) {
-                // SHIELD-02 (spec 017-B step 1): the LOD0-promotion backfill
+                //  ( step 1): the LOD0-promotion backfill
                 // publish that used to live here moved to
                 // process_completed_promotion_jobs — the meshing lane is
                 // render-only and never writes sim truth.
@@ -5299,7 +5265,7 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
                                                       std::memory_order_release);
                 chunk->mesh_version++;
                 chunk->has_collision.store(false, std::memory_order_release);
-                // spec 008 WS-1: a remesh / LOD0 promotion just cleared this chunk's collider, so
+                //  a remesh / LOD0 promotion just cleared this chunk's collider, so
                 // re-open the gated collision scan (Step 4) to rebuild it. Main-thread store.
                 m_collision_pass_dirty = true;
             }
@@ -5314,14 +5280,14 @@ bool SHIELD_WorldSystem::publish_front_meshing_batch(bool force) {
             chunk->set_state(Luminumbra::ChunkState::Ready);
         }
         if (chunk->get_state() == Luminumbra::ChunkState::Ready) {
-            shadow_note_ready(chunk->get_id()); // SHIELD-03 shadow: first-activation latency
+            shadow_note_ready(chunk->get_id()); //  shadow: first-activation latency
         }
 
         chunk->pending_mesh_vertices.clear();
         chunk->pending_mesh_indices.clear();
         chunk->pending_water_mesh_vertices.clear();
         chunk->pending_water_mesh_indices.clear();
-        // SHIELD-02: pending_sdf/heightmap/material_data are promotion-lane
+        // pending_sdf/heightmap/material_data are promotion-lane
         // staging now — the meshing lane neither writes nor clears them.
         chunk->pending_mesh_ready.store(false, std::memory_order_release);
         chunk->pending_mesh_failed.store(false, std::memory_order_release);
@@ -5340,7 +5306,7 @@ void SHIELD_WorldSystem::process_completed_meshing_jobs(bool force) {
 }
 
 void SHIELD_WorldSystem::set_params(const TerrainGenParams& params) {
-    // SHIELD-02: the full sequenced drain — promotion stage-A jobs run
+    // the full sequenced drain — promotion stage-A jobs run
     // GenerateChunkData concurrently, so generator state must not be mutated
     // until the whole pipeline (including stage B) has settled.
     wait_for_streaming_jobs();
@@ -5395,23 +5361,8 @@ IVec3 SHIELD_WorldSystem::world_to_chunk_coords(const Vec3& position) {
                  static_cast<int>(std::floor(position.z / CHUNK_SIZE_Z)));
 }
 
-void SHIELD_WorldSystem::SetGPUSDFCallback(
-    std::function<bool(const IVec3&, const TerrainGenParams&, int, std::vector<float>&)> callback) {
-    wait_for_generation_jobs();
-    // SHIELD-02: promotion stage-A jobs run GenerateChunkData too (which may
-    // consult the callback) — raw waits; publication is not this call's job.
-    if (m_job_system && m_streaming_state.promotion_job_handle_high.counter) {
-        m_job_system->wait(m_streaming_state.promotion_job_handle_high);
-    }
-    if (m_job_system && m_streaming_state.promotion_job_handle.counter) {
-        m_job_system->wait(m_streaming_state.promotion_job_handle);
-    }
-
-    m_gpu_sdf_callback = callback;
-}
-
 void SHIELD_WorldSystem::wait_for_streaming_jobs() {
-    // SHIELD-02 (spec 017-B step 1): the SEQUENCED drain. Sim truth for LOD0
+    //  ( step 1): the SEQUENCED drain. Sim truth for LOD0
     // promotions is generated on the promotion lane and published before its
     // render mesh is dispatched (stage B) — and the whole two-stage pipeline
     // still settles inside ONE call, so every per-tick observation point
@@ -5424,7 +5375,7 @@ void SHIELD_WorldSystem::wait_for_streaming_jobs() {
     if (promotion_pipeline_pending()) {
         LUMINUMBRA_CORE_ERROR(
             "wait_for_streaming_jobs: promotion pipeline still pending after the "
-            "sequenced drain — the 017-B same-tick settlement invariant is broken");
+            "sequenced drain — the activation queue same-tick settlement invariant is broken");
     }
 }
 
@@ -5582,7 +5533,7 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     if (!chunk) {
         return false;
     }
-    // SHIELD-03 inc 5a lifecycle rule (streaming-owned, NOT the persistence
+    //   lifecycle rule (streaming-owned, NOT the persistence
     // codec's business): a save captured between generation-job completion and
     // the main-thread Loading→Idle publish (the save quiesce is deliberately
     // non-publishing) carries Loading WITH populated voxel data. The data is

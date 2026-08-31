@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-flag fixture tests for tools/visual_critique.py (iteration-6 critique #5).
+"""Per-flag fixture tests for tools/visual_critique.py ( ).
 
 A gate CI never runs isn't a gate: these fixtures pin every objective flag the
 WorldVisualSweep critique can raise, so a threshold edit that silently stops
@@ -76,7 +76,7 @@ check("foliage_sparse_noon", a,
 # Present foliage reads orange (r>g) and dim under low warm sun, so the green-
 # cover heuristic measures ~0 cover even though grass IS there. The detector must
 # only assert on the neutral noon cell, never warm dusk/dawn. (Regression guard
-# for the I8 re-bless: the dusk cell flagged a present-foliage false positive.)
+# for the  update the baseline: the dusk cell flagged a present-foliage false positive.)
 a = frame(70.0)
 a[2 * H // 3:] = (95.0, 55.0, 35.0)     # warm, dim, orange-lit grass (g << r)
 check("foliage_sparse_dusk_no_false_positive", a,
@@ -97,7 +97,7 @@ if "rain_vh_anisotropy" not in res["metrics"]:
     _failures.append("[rain_anis] storm horizon cell missing rain_vh_anisotropy metric")
 
 # --- LOW_TEXTURE_DETAIL: daytime clear terrain view with flat/untextured ground ---
-# (BF4/BF1 visual-fidelity floor). Solid green ground -> ~zero high-freq detail.
+# (visual-fidelity  visual-fidelity floor). Solid green ground -> ~zero high-freq detail.
 a = frame(110.0)
 a[2 * H // 3:] = (95.0, 135.0, 80.0)  # SOLID green ground (low-fi, no surface detail)
 check("low_texture_detail", a,

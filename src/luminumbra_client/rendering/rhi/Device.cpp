@@ -1,17 +1,17 @@
 #include "rendering/rhi/Device.h"
 
 // The ONLY place Diligent headers are included on the client side (rhi/ boundary).
+#include "DeviceContext.h"
 #include "EngineFactoryOpenGL.h"
 #include "EngineFactoryVk.h"
 #include "RenderDevice.h"
-#include "DeviceContext.h"
 
 namespace Luminumbra::Rendering::Rhi {
 
 namespace {
 
 // Query a freshly-created device for its adapter/type, then tear it down. The
-// immediate context is Flush()'ed before release -- Diligent logs an error on
+// immediate context is Flush'ed before release -- Diligent logs an error on
 // teardown of a context with outstanding (never-submitted) commands otherwise.
 DeviceBringupResult QueryAndRelease(Diligent::IRenderDevice* device,
                                     Diligent::IDeviceContext* context,
@@ -40,7 +40,7 @@ DeviceBringupResult QueryAndRelease(Diligent::IRenderDevice* device,
     return result;
 }
 
-}  // namespace
+} // namespace
 
 DeviceBringupResult CreateHeadlessDevice(Backend backend) {
     using namespace Diligent;
@@ -65,16 +65,14 @@ DeviceBringupResult CreateHeadlessDevice(Backend backend) {
             factory->CreateDeviceAndContextsVk(create_info, &device, &context);
             return QueryAndRelease(device, context, backend);
         }
-        case Backend::Dx12:
         default: {
             DeviceBringupResult result;
             result.backend = BackendName(backend);
             result.created = false;
-            result.diagnostic =
-                "dx12 device creation is a later phase (P02 brings up GL + Vulkan only)";
+            result.diagnostic = "unsupported RHI backend";
             return result;
         }
     }
 }
 
-}  // namespace Luminumbra::Rendering::Rhi
+} // namespace Luminumbra::Rendering::Rhi

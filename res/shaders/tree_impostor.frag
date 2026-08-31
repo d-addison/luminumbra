@@ -1,5 +1,5 @@
 #version 450 core
-// Wave-3 far-field tree impostor fragment. Selects the octahedral atlas tile from the world view
+//  far-field tree impostor fragment. Selects the octahedral atlas tile from the world view
 // direction (matching OctaImpostor.h / HemiOctaEncode), samples the albedo + normal atlases, applies
 // the silhouette cutout (atlas alpha), and writes the SAME deferred G-buffer attachments as
 // g_buffer.frag so the impostor lights + depth-sorts exactly like the real tree geometry it replaces.
@@ -24,7 +24,7 @@ uniform float u_materialId;   // tree material id (0..1, == id/255), for gNormal
 vec2 octWrap(vec2 v) { return (1.0 - abs(v.yx)) * (step(0.0, v.xy) * 2.0 - 1.0); }
 vec2 encode_octahedral(vec3 n) {
     n /= (abs(n.x) + abs(n.y) + abs(n.z));
-    return n.z >= 0.0 ? n.xy : octWrap(n.xy);
+    return n.z >= 0.0 ? n.xy: octWrap(n.xy);
 }
 
 // Hemi-octahedral view-direction ENCODE for atlas-tile selection (must match OctaImpostor.h HemiOctaEncode).

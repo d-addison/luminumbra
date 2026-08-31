@@ -9,9 +9,8 @@
 // This file registers into frontier_gates_test and matches the include style of
 // test/persistence/world_save_service_test.cpp (already building in that target).
 //
-// Where the CORRECT behavior may not yet hold, the test asserts the correct
-// behavior (so it fails until fixed) and the divergence is flagged in the
-// structured report -- tests never assert the bug.
+// Each test asserts the documented persistence behavior and reports any
+// divergence through the normal test failure path.
 #include "gtest/gtest.h"
 
 #include "persistence/WorldPersistenceRoundtrip.h"
@@ -55,7 +54,8 @@ std::filesystem::path MakeTempSaveDir(const std::string& tag) {
 }
 
 struct TempSaveDir {
-    explicit TempSaveDir(const std::string& tag) : path(MakeTempSaveDir(tag)) {}
+    explicit TempSaveDir(const std::string& tag)
+        : path(MakeTempSaveDir(tag)) {}
     ~TempSaveDir() {
         std::error_code remove_error;
         std::filesystem::remove_all(path, remove_error);
@@ -78,24 +78,21 @@ void WriteFileBytes(const std::filesystem::path& path, const std::string& bytes)
 
 // A chunk carrying an adversarial-but-finite payload keyed by salt. Avoids
 // NaN/Inf (outside the determinism contract and unrepresentable in JSON).
-std::shared_ptr<Chunk> AddRichChunk(
-    WorldStreamingState& state,
-    const IVec3& coords,
-    ChunkState chunk_state,
-    Luminumbra::u32 salt) {
+std::shared_ptr<Chunk> AddRichChunk(WorldStreamingState& state,
+                                    const IVec3& coords,
+                                    ChunkState chunk_state,
+                                    Luminumbra::u32 salt) {
     auto chunk = state.get_or_create_chunk(coords);
     chunk->set_state(chunk_state);
     chunk->sdf_data = {-1.5f + static_cast<float>(salt), -0.25f, 0.0f, 0.5f, 1.25f};
     chunk->heightmap_data = {7.0f + static_cast<float>(salt), 8.5f, -3.5f};
-    chunk->mesh_vertices = {
-        {Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
-        {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u},
-        {Vec3(0.0f, 1.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 3u}};
+    chunk->mesh_vertices = {{Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
+                            {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u},
+                            {Vec3(0.0f, 1.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 3u}};
     chunk->mesh_indices = {0u, 1u, 2u};
-    chunk->water_mesh_vertices = {
-        {Vec3(0.0f, 2.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), 5u},
-        {Vec3(1.0f, 2.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), 6u},
-        {Vec3(1.0f, 2.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), 7u}};
+    chunk->water_mesh_vertices = {{Vec3(0.0f, 2.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), 5u},
+                                  {Vec3(1.0f, 2.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), 6u},
+                                  {Vec3(1.0f, 2.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), 7u}};
     chunk->water_mesh_indices = {0u, 1u, 2u};
     chunk->pending_mesh_vertices = chunk->mesh_vertices;
     chunk->pending_mesh_indices = chunk->mesh_indices;
@@ -111,7 +108,7 @@ std::shared_ptr<Chunk> AddRichChunk(
     chunk->water_level_data = {2.0f, 2.25f};
     chunk->water_flow_data = {Vec2(0.25f, -0.125f)};
     chunk->water_sim_terrain_height = {1.0f, 1.5f};
-    // WATER-17/WATER-09 (Bump A): the authoritative fixed-point state (hashed).
+    // / (authoritative-state change): the authoritative fixed-point state (hashed).
     chunk->water_depth_mm = {static_cast<std::int32_t>(150 + salt), 0};
     chunk->water_bed_mm = {1000, static_cast<std::int32_t>(1500 + salt)};
     chunk->has_water_sim.store(true, std::memory_order_release);
@@ -121,7 +118,7 @@ std::shared_ptr<Chunk> AddRichChunk(
     chunk->max_water_delta_last_tick = 0.0625f * static_cast<float>(salt + 1u);
     chunk->ticks_below_threshold = static_cast<int>(salt);
     chunk->water_mesh_dirty_ticks = static_cast<int>(salt + 2u);
-    // WATER-17/WATER-13 (Bump A): flow momentum is persisted + hashed sim truth.
+    // / (authoritative-state change): flow momentum is persisted + hashed sim truth.
     chunk->water_edge_flux = {static_cast<std::int32_t>(3 + salt), -7, 0, 12};
     return chunk;
 }
@@ -140,8 +137,9 @@ void FlattenChunk(const Chunk& chunk, std::vector<float>& floats, std::vector<st
     const auto push_verts = [&](const std::vector<VoxelVertex>& verts) {
         ints.push_back(static_cast<std::int64_t>(verts.size()));
         for (const VoxelVertex& v : verts) {
-            floats.insert(floats.end(),
-                          {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z});
+            floats.insert(
+                floats.end(),
+                {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z});
             ints.push_back(static_cast<std::int64_t>(v.material_id));
         }
     };
@@ -151,7 +149,8 @@ void FlattenChunk(const Chunk& chunk, std::vector<float>& floats, std::vector<st
     };
     const auto push_indices = [&](const std::vector<Luminumbra::u32>& src) {
         ints.push_back(static_cast<std::int64_t>(src.size()));
-        for (Luminumbra::u32 i : src) ints.push_back(static_cast<std::int64_t>(i));
+        for (Luminumbra::u32 i : src)
+            ints.push_back(static_cast<std::int64_t>(i));
     };
 
     ints.push_back(static_cast<std::int64_t>(chunk.get_id()));
@@ -178,7 +177,8 @@ void FlattenChunk(const Chunk& chunk, std::vector<float>& floats, std::vector<st
     ints.push_back(chunk.water_mesh_version.load(std::memory_order_acquire));
     push_floats(chunk.water_level_data);
     ints.push_back(static_cast<std::int64_t>(chunk.water_flow_data.size()));
-    for (const Vec2& f : chunk.water_flow_data) floats.insert(floats.end(), {f.x, f.y});
+    for (const Vec2& f : chunk.water_flow_data)
+        floats.insert(floats.end(), {f.x, f.y});
     push_floats(chunk.water_sim_terrain_height);
     ints.push_back(chunk.has_water_sim.load(std::memory_order_acquire));
     ints.push_back(chunk.water_mesh_generated.load(std::memory_order_acquire));
@@ -188,11 +188,14 @@ void FlattenChunk(const Chunk& chunk, std::vector<float>& floats, std::vector<st
     ints.push_back(chunk.ticks_below_threshold);
     ints.push_back(chunk.water_mesh_dirty_ticks);
     ints.push_back(static_cast<std::int64_t>(chunk.water_depth_mm.size()));
-    for (std::int32_t d : chunk.water_depth_mm) ints.push_back(d);
+    for (std::int32_t d : chunk.water_depth_mm)
+        ints.push_back(d);
     ints.push_back(static_cast<std::int64_t>(chunk.water_bed_mm.size()));
-    for (std::int32_t b : chunk.water_bed_mm) ints.push_back(b);
+    for (std::int32_t b : chunk.water_bed_mm)
+        ints.push_back(b);
     ints.push_back(static_cast<std::int64_t>(chunk.water_edge_flux.size()));
-    for (std::int32_t q : chunk.water_edge_flux) ints.push_back(q);
+    for (std::int32_t q : chunk.water_edge_flux)
+        ints.push_back(q);
 }
 
 void ExpectChunkFieldExact(const Chunk& expected, const Chunk& actual) {
@@ -240,7 +243,8 @@ std::shared_ptr<Chunk> CloneChunk(const Chunk& src) {
     copy->water_edge_flux = src.water_edge_flux;
     copy->has_water_sim.store(src.has_water_sim.load(), std::memory_order_release);
     copy->water_mesh_generated.store(src.water_mesh_generated.load(), std::memory_order_release);
-    copy->current_water_resolution.store(src.current_water_resolution.load(), std::memory_order_release);
+    copy->current_water_resolution.store(src.current_water_resolution.load(),
+                                         std::memory_order_release);
     copy->is_water_sleeping.store(src.is_water_sleeping.load(), std::memory_order_release);
     copy->max_water_delta_last_tick = src.max_water_delta_last_tick;
     copy->ticks_below_threshold = src.ticks_below_threshold;
@@ -290,16 +294,21 @@ TEST(PersistenceHardening, AdversarialFloatPayloadSurvivesRoundTripBitExact) {
     WorldStreamingState original;
     auto chunk = original.get_or_create_chunk(IVec3(0, 0, 0));
     chunk->set_state(ChunkState::Ready);
-    chunk->sdf_data = {
-        0.0f,
-        -0.0f,
-        std::numeric_limits<float>::min(),       // smallest positive normal
-        std::numeric_limits<float>::denorm_min(),// smallest subnormal
-        std::numeric_limits<float>::max(),        // largest finite
-        -std::numeric_limits<float>::max(),
-        0.1f, 0.2f, 0.3f, 1.0f / 3.0f, 2.0f / 3.0f,
-        123456.789f, -987654.321f};
-    chunk->heightmap_data = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::epsilon()};
+    chunk->sdf_data = {0.0f,
+                       -0.0f,
+                       std::numeric_limits<float>::min(),        // smallest positive normal
+                       std::numeric_limits<float>::denorm_min(), // smallest subnormal
+                       std::numeric_limits<float>::max(),        // largest finite
+                       -std::numeric_limits<float>::max(),
+                       0.1f,
+                       0.2f,
+                       0.3f,
+                       1.0f / 3.0f,
+                       2.0f / 3.0f,
+                       123456.789f,
+                       -987654.321f};
+    chunk->heightmap_data = {std::numeric_limits<float>::lowest(),
+                             std::numeric_limits<float>::epsilon()};
 
     const std::string json = SerializeWorldStreamingStateSnapshotJson(original);
     WorldStreamingState restored;
@@ -361,13 +370,13 @@ TEST(PersistenceHardening, MaxU32IndicesAndMaterialIdsRoundTrip) {
 
 TEST(PersistenceHardening, NegativeAndExtremeCoordsRoundTripWithMatchingId) {
     WorldStreamingState original;
-    const std::vector<IVec3> coords = {
-        IVec3(-1, -1, -1),
-        IVec3(-100000, 50000, -75000),
-        IVec3(0, 0, 0),
-        IVec3(2147483647, -2147483647, 1073741823)};
+    const std::vector<IVec3> coords = {IVec3(-1, -1, -1),
+                                       IVec3(-100000, 50000, -75000),
+                                       IVec3(0, 0, 0),
+                                       IVec3(2147483647, -2147483647, 1073741823)};
     Luminumbra::u32 salt = 0u;
-    for (const IVec3& c : coords) AddRichChunk(original, c, ChunkState::Ready, salt++);
+    for (const IVec3& c : coords)
+        AddRichChunk(original, c, ChunkState::Ready, salt++);
 
     const std::string json = SerializeWorldStreamingStateSnapshotJson(original);
     WorldStreamingState restored;
@@ -422,7 +431,7 @@ TEST(PersistenceHardening, SubHashesIndependentOfInsertionOrder) {
     EXPECT_EQ(sa.water, sb.water);
 }
 
-// WATER-09 (folded into the WATER-17 Bump A): the water sub-hash covers the
+//  (folded into the  authoritative-state change): the water sub-hash covers the
 // AUTHORITATIVE fixed-point state — flipping one water_depth_mm bit (or one flux
 // value) must move the `water` section and ONLY the `water` section. Before this,
 // the group hashed only the float mirrors, so a fixed-point desync was invisible
@@ -457,7 +466,7 @@ TEST(WaterSubHash, CoversFixedPointState) {
         EXPECT_NE(s.water, s0.water) << "water_edge_flux must move the water sub-hash";
         EXPECT_EQ(s.terrain, s0.terrain);
     }
-    // WATER-17: meshing bookkeeping must NOT move the water section (it lives in
+    // meshing bookkeeping must NOT move the water section (it lives in
     // the mesh section now — the loaded-boot remesh flips it while water is paused).
     {
         WorldStreamingState w;
@@ -466,11 +475,11 @@ TEST(WaterSubHash, CoversFixedPointState) {
         c->water_mesh_dirty_ticks += 9;
         const WorldStreamingStateSubHashes s = ComputeWorldStreamingStateSubHashes(w);
         EXPECT_EQ(s.water, s0.water)
-            << "water-mesh bookkeeping must NOT move the water sub-hash (WATER-17)";
+            << "water-mesh bookkeeping must NOT move the water sub-hash ()";
         EXPECT_NE(s.mesh, s0.mesh) << "it localizes under mesh instead";
     }
-    // W2.3 (WATER-08, Bump B): the float mirrors are one-way DERIVED from mm —
-    // mutating them must NOT move the water section (or any section).
+    // water residency (, derived-state reclassification): the float mirrors are one-way DERIVED
+    // from mm — mutating them must NOT move the water section (or any section).
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
@@ -478,14 +487,14 @@ TEST(WaterSubHash, CoversFixedPointState) {
         c->water_flow_data[0].y -= 0.25f;
         c->water_sim_terrain_height[0] += 0.125f;
         const WorldStreamingStateSubHashes s = ComputeWorldStreamingStateSubHashes(w);
-        EXPECT_EQ(s.water, s0.water)
-            << "the float mirrors must NOT move the water sub-hash (Bump B)";
+        EXPECT_EQ(s.water, s0.water) << "the float mirrors must NOT move the water sub-hash "
+                                        "(derived-state reclassification)";
         EXPECT_EQ(s.mesh, s0.mesh);
         EXPECT_EQ(s.terrain, s0.terrain);
     }
 }
 
-// WATER-13 (folded into the WATER-17 Bump A): the save/load flow-momentum
+//  (folded into the  authoritative-state change): the save/load flow-momentum
 // contract — water_edge_flux round-trips EXACTLY (it was transient/cleared-on-load
 // before, which made the heavy oracle's resim leg diverge: the loaded session
 // restarted from zero momentum while the original carried its flux).
@@ -506,7 +515,7 @@ TEST(WaterPersistenceSettleParity, EdgeFluxRoundTripsExactly) {
     auto loaded = restored.find_chunk(IVec3(2, 0, -3));
     ASSERT_NE(loaded, nullptr);
     EXPECT_EQ(loaded->water_edge_flux, expected_flux)
-        << "flow momentum must survive save/load bit-exactly (WATER-13)";
+        << "flow momentum must survive save/load bit-exactly ()";
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +578,8 @@ TEST(PersistenceHardening, SaveLoadSaveIsByteStable) {
 
     std::vector<std::string> errors;
     ASSERT_TRUE(service.save_world(original, dir1.path, &errors));
-    const std::string region_first = ReadFileBytes(WorldSaveService::region_file_path(dir1.path, 0, 0));
+    const std::string region_first =
+        ReadFileBytes(WorldSaveService::region_file_path(dir1.path, 0, 0));
     ASSERT_FALSE(region_first.empty());
 
     WorldStreamingState restored;
@@ -578,7 +588,8 @@ TEST(PersistenceHardening, SaveLoadSaveIsByteStable) {
 
     // Re-saving the loaded world into a fresh dir must reproduce identical bytes.
     ASSERT_TRUE(service.save_world(restored, dir2.path, &errors));
-    const std::string region_second = ReadFileBytes(WorldSaveService::region_file_path(dir2.path, 0, 0));
+    const std::string region_second =
+        ReadFileBytes(WorldSaveService::region_file_path(dir2.path, 0, 0));
     EXPECT_EQ(region_second, region_first) << "save->load->save is not byte-stable";
 }
 
@@ -726,18 +737,21 @@ TEST(PersistenceHardening, RepeatedDirtySaveOfSameEditConverges) {
 
     const auto first = service.save_dirty_chunks(world, save_dir.path, &errors);
     EXPECT_TRUE(first.saved);
-    const std::string region_after_first = ReadFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0));
+    const std::string region_after_first =
+        ReadFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0));
 
     const auto second = service.save_dirty_chunks(world, save_dir.path, &errors);
     EXPECT_FALSE(second.saved) << "re-saving with nothing dirty must be a no-op";
-    EXPECT_EQ(ReadFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0)), region_after_first)
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0)),
+              region_after_first)
         << "no-op dirty save mutated the region file";
 
     // Re-marking and re-saving the SAME data must reproduce identical bytes.
     edited->mark_voxel_data_dirty();
     const auto third = service.save_dirty_chunks(world, save_dir.path, &errors);
     EXPECT_TRUE(third.saved);
-    EXPECT_EQ(ReadFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0)), region_after_first)
+    EXPECT_EQ(ReadFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0)),
+              region_after_first)
         << "re-saving identical chunk data produced different bytes";
 }
 
@@ -755,7 +769,8 @@ TEST(PersistenceHardening, FullSaveThenDirtySaveOfSameWorldAgree) {
     // from scratch.
     WorldStreamingState world_b;
     PopulateRichWorld(world_b);
-    for (auto& chunk : world_b.snapshot_chunks()) chunk->mark_voxel_data_dirty();
+    for (auto& chunk : world_b.snapshot_chunks())
+        chunk->mark_voxel_data_dirty();
     const auto report = service.save_dirty_chunks(world_b, dir_inc.path, &errors);
     EXPECT_TRUE(report.saved);
 
@@ -771,7 +786,8 @@ TEST(PersistenceHardening, FullSaveThenDirtySaveOfSameWorldAgree) {
     WorldStreamingState loaded_inc;
     std::vector<std::string> load_errors;
     ASSERT_TRUE(service.load_world(loaded_full, dir_full.path, load_errors)) << "full load failed";
-    ASSERT_TRUE(service.load_world(loaded_inc, dir_inc.path, load_errors)) << "incremental load failed";
+    ASSERT_TRUE(service.load_world(loaded_inc, dir_inc.path, load_errors))
+        << "incremental load failed";
     EXPECT_TRUE(load_errors.empty());
     EXPECT_EQ(ComputeWorldStreamingStateHash(loaded_full),
               ComputeWorldStreamingStateHash(loaded_inc))
@@ -786,7 +802,7 @@ TEST(PersistenceHardening, FullSaveThenDirtySaveOfSameWorldAgree) {
 TEST(PersistenceHardening, BadMagicRejectedWithError) {
     TempSaveDir save_dir("bad_magic");
     WorldSaveService service;
-    std::string bytes = "XXXX";          // wrong magic
+    std::string bytes = "XXXX"; // wrong magic
     bytes.append(8, '\0');
     WriteFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0), bytes);
 
@@ -805,7 +821,7 @@ TEST(PersistenceHardening, UnsupportedVersionRejectedWithError) {
     bytes.push_back('\xFF');
     bytes.push_back('\xFF'); // version u16 LE = 65535
     bytes.push_back('\0');
-    bytes.push_back('\0');   // record_count = 0
+    bytes.push_back('\0'); // record_count = 0
     WriteFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0), bytes);
 
     WorldStreamingState state;
@@ -913,32 +929,37 @@ TEST(PersistenceHardening, EachPersistedFieldMutationMovesHash) {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->mesh_indices[0] = 99u;
-        EXPECT_EQ(service.world_hash(w), base_hash) << "render mesh_indices must NOT be in the determinism hash";
+        EXPECT_EQ(service.world_hash(w), base_hash)
+            << "render mesh_indices must NOT be in the determinism hash";
     }
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->mesh_version.store(c->mesh_version.load() + 1u, std::memory_order_release);
-        EXPECT_EQ(service.world_hash(w), base_hash) << "render mesh_version must NOT be in the determinism hash";
+        EXPECT_EQ(service.world_hash(w), base_hash)
+            << "render mesh_version must NOT be in the determinism hash";
     }
-    // W2.3 (WATER-08, Bump B): the float mirrors are one-way DERIVED render state
-    // (every writer regenerates them FROM the mm truth) — mutating them must NOT
-    // move the determinism hash. The mm arrays below are the hashed sim truth.
+    // water residency (, derived-state reclassification): the float mirrors are one-way DERIVED
+    // render state (every writer regenerates them FROM the mm truth) — mutating them must NOT move
+    // the determinism hash. The mm arrays below are the hashed sim truth.
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_flow_data[0].x += 0.5f;
         EXPECT_EQ(service.world_hash(w), base_hash)
-            << "water_flow_data (float mirror) must NOT be in the determinism hash (Bump B)";
+            << "water_flow_data (float mirror) must NOT be in the determinism hash (derived-state "
+               "reclassification)";
     }
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_level_data[0] += 0.25f;
         EXPECT_EQ(service.world_hash(w), base_hash)
-            << "water_level_data (float mirror) must NOT be in the determinism hash (Bump B)";
+            << "water_level_data (float mirror) must NOT be in the determinism hash (derived-state "
+               "reclassification)";
     }
-    // W2.3 (Bump B): the mm DEPTH is the sim truth — it must move the hash.
+    // water residency (derived-state reclassification): the mm DEPTH is the sim truth — it must
+    // move the hash.
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
@@ -946,15 +967,15 @@ TEST(PersistenceHardening, EachPersistedFieldMutationMovesHash) {
         EXPECT_NE(service.world_hash(w), base_hash)
             << "water_depth_mm change not reflected in hash (the fixed-point truth)";
     }
-    // WATER-17/WATER-13 (Bump A): flow momentum is SIM TRUTH — must move the hash.
+    // / (authoritative-state change): flow momentum is SIM TRUTH — must move the hash.
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_edge_flux[0] += 5;
         EXPECT_NE(service.world_hash(w), base_hash)
-            << "water_edge_flux change not reflected in hash (WATER-13 momentum)";
+            << "water_edge_flux change not reflected in hash ( momentum)";
     }
-    // WATER-17 (Bump A): water-mesh bookkeeping is MESHING state, not sim truth — the
+    //  (authoritative-state change): water-mesh bookkeeping is MESHING state, not sim truth — the
     // render-side mesh pipeline flips it (e.g. the loaded-boot remesh, while the water
     // sim is paused), so hashing it made the save/load water round-trip impossible.
     // Mutating it must NOT move the determinism hash.
@@ -963,14 +984,14 @@ TEST(PersistenceHardening, EachPersistedFieldMutationMovesHash) {
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_mesh_generated.store(!c->water_mesh_generated.load(), std::memory_order_release);
         EXPECT_EQ(service.world_hash(w), base_hash)
-            << "water_mesh_generated must NOT be in the determinism hash (WATER-17)";
+            << "water_mesh_generated must NOT be in the determinism hash ()";
     }
     {
         WorldStreamingState w;
         auto c = AddRichChunk(w, IVec3(0, 0, 0), ChunkState::Ready, 1u);
         c->water_mesh_dirty_ticks += 7;
         EXPECT_EQ(service.world_hash(w), base_hash)
-            << "water_mesh_dirty_ticks must NOT be in the determinism hash (WATER-17)";
+            << "water_mesh_dirty_ticks must NOT be in the determinism hash ()";
     }
 }
 
@@ -984,7 +1005,7 @@ TEST(PersistenceHardening, MeshVersionAndLodSurviveRegionRoundTrip) {
     auto c = AddRichChunk(world, IVec3(0, 0, 0), ChunkState::Ready, 1u);
     c->mesh_version.store(4000000000u, std::memory_order_release); // > INT32_MAX, valid u32
     c->water_mesh_version.store(4111222333u, std::memory_order_release);
-    c->current_lod.store(-1, std::memory_order_release);          // sentinel
+    c->current_lod.store(-1, std::memory_order_release); // sentinel
     c->pending_lod.store(2, std::memory_order_release);
     const Luminumbra::u32 expect_mesh = c->mesh_version.load();
     const Luminumbra::u32 expect_water = c->water_mesh_version.load();
@@ -1007,11 +1028,16 @@ TEST(PersistenceHardening, AllChunkStatesRoundTripExactly) {
     WorldSaveService service;
 
     WorldStreamingState world;
-    const std::vector<ChunkState> states = {
-        ChunkState::Unloaded, ChunkState::Loading, ChunkState::Idle,
-        ChunkState::Meshing, ChunkState::Ready, ChunkState::Unloading};
+    const std::vector<ChunkState> states = {ChunkState::Unloaded,
+                                            ChunkState::Loading,
+                                            ChunkState::Idle,
+                                            ChunkState::Meshing,
+                                            ChunkState::Ready,
+                                            ChunkState::Unloading};
     for (std::size_t i = 0; i < states.size(); ++i) {
-        auto c = AddRichChunk(world, IVec3(static_cast<int>(i), 0, 0), states[i],
+        auto c = AddRichChunk(world,
+                              IVec3(static_cast<int>(i), 0, 0),
+                              states[i],
                               static_cast<Luminumbra::u32>(i + 1));
         c->mark_voxel_data_dirty();
     }
@@ -1023,8 +1049,8 @@ TEST(PersistenceHardening, AllChunkStatesRoundTripExactly) {
     for (std::size_t i = 0; i < states.size(); ++i) {
         auto loaded = restored.find_chunk(IVec3(static_cast<int>(i), 0, 0));
         ASSERT_NE(loaded, nullptr);
-        EXPECT_EQ(loaded->get_state(), states[i]) << "ChunkState " << static_cast<int>(states[i])
-                                                  << " not preserved across roundtrip";
+        EXPECT_EQ(loaded->get_state(), states[i])
+            << "ChunkState " << static_cast<int>(states[i]) << " not preserved across roundtrip";
     }
 }
 
@@ -1097,9 +1123,13 @@ TEST(PersistenceHardening, DuplicateCoordsInLoadRejected) {
     int depth = 0;
     std::size_t first_obj_end = std::string::npos;
     for (std::size_t i = first_obj_start; i < json.size(); ++i) {
-        if (json[i] == '{') ++depth;
+        if (json[i] == '{')
+            ++depth;
         else if (json[i] == '}') {
-            if (--depth == 0) { first_obj_end = i; break; }
+            if (--depth == 0) {
+                first_obj_end = i;
+                break;
+            }
         }
     }
     ASSERT_NE(first_obj_end, std::string::npos);
@@ -1107,7 +1137,8 @@ TEST(PersistenceHardening, DuplicateCoordsInLoadRejected) {
     json.insert(first_obj_end + 1, "," + first_obj);
     // Bump chunk_count from 1 to 2.
     const auto cc = json.find("\"chunk_count\": 1");
-    if (cc != std::string::npos) json.replace(cc, std::string("\"chunk_count\": 1").size(), "\"chunk_count\": 2");
+    if (cc != std::string::npos)
+        json.replace(cc, std::string("\"chunk_count\": 1").size(), "\"chunk_count\": 2");
 
     WorldStreamingState restored;
     std::vector<std::string> errors;

@@ -1,9 +1,9 @@
-// OPS-08 — Generated shared-constant header + config-side hot-reload ROLLBACK
-// (spec 020 FR-B-007 / FR-B-008).
+// Generated shared-constant header + config-side hot-reload ROLLBACK
+// (  / ).
 //
 // Two halves, one file:
 //
-//   (a) Codegen fidelity (FR-B-007): the GENERATED shared constant
+//   (a) Codegen fidelity: the GENERATED shared constant
 //       luminumbra::core::config_constants::kMoonlightStrength / kMoonlightColor
 //       (src/luminumbra_common/core/ConfigConstants.gen.h, emitted by
 //       tools/config_codegen.py --emit-constants) must equal the config DEFAULT authored
@@ -11,8 +11,8 @@
 //       truth, so a regenerated header with a changed default — or a stale header — fails
 //       this test even without the configure-time --check-constants gate.
 //
-//   (b/c) Config-side rollback (FR-B-008): today there is a shader-side rollback predicate
-//       (Shader::Reload, spec 016 FR-D-003: build a NEW program, validate it, ADOPT only on
+//   (b/c) Config-side rollback: today there is a shader-side rollback predicate
+//       (Shader::Reload,  : build a NEW program, validate it, ADOPT only on
 //       success, else KEEP the previous good program) but no config-side twin. This test
 //       provides the config-side mirror. `ConfigHotReloader` holds a last-good SystemConfig
 //       and applies an overlay by building a NEW candidate, validating it, and swapping only
@@ -38,7 +38,7 @@
 
 #include <glm/glm.hpp>
 
-#include "luminumbra_common/core/ConfigConstants.gen.h"  // generated shared constants (FR-B-007)
+#include "luminumbra_common/core/ConfigConstants.gen.h" // generated shared constants
 #include "luminumbra_common/core/SystemConfig.h"
 
 using luminumbra::core::SysKey;
@@ -59,9 +59,11 @@ nlohmann::json LoadSchema() {
 }
 
 // Read the JSON default for a params[].enum out of the schema (independent source of truth).
-const nlohmann::json& SchemaParamDefault(const nlohmann::json& schema, const std::string& enum_name) {
+const nlohmann::json& SchemaParamDefault(const nlohmann::json& schema,
+                                         const std::string& enum_name) {
     for (const auto& p : schema.at("params")) {
-        if (p.at("enum").get<std::string>() == enum_name) return p.at("default");
+        if (p.at("enum").get<std::string>() == enum_name)
+            return p.at("default");
     }
     ADD_FAILURE() << "schema param not found: " << enum_name;
     static const nlohmann::json kNull;
@@ -82,37 +84,43 @@ struct ValidationResult {
 ValidationResult ValidateConfig(const SystemConfig& c) {
     const float strength = c.param(SysParam::MoonlightStrength, kc::kMoonlightStrength);
     if (!std::isfinite(strength) || strength < 0.0f) {
-        return {false, "render.moonlight.strength must be finite and >= 0 (got " +
-                           std::to_string(strength) + ")"};
+        return {false,
+                "render.moonlight.strength must be finite and >= 0 (got " +
+                    std::to_string(strength) + ")"};
     }
     const glm::vec3 color = c.param3(SysParam::MoonlightColor, kc::kMoonlightColor);
     for (int i = 0; i < 3; ++i) {
         if (!std::isfinite(color[i]) || color[i] < 0.0f || color[i] > 1.0f) {
-            return {false, "render.moonlight.color component " + std::to_string(i) +
-                               " out of [0,1] (got " + std::to_string(color[i]) + ")"};
+            return {false,
+                    "render.moonlight.color component " + std::to_string(i) +
+                        " out of [0,1] (got " + std::to_string(color[i]) + ")"};
         }
     }
     return {true, {}};
 }
 
-// FR-B-008: build a NEW candidate config from the overlay text, validate it, and ADOPT it only
+// build a NEW candidate config from the overlay text, validate it, and ADOPT it only
 // on success; on ANY validation failure keep the previous good config (rollback). This is the
 // structural twin of Shader::Reload — the candidate is built into a SEPARATE object and the
 // last-good is never mutated until validation passes.
 class ConfigHotReloader {
 public:
-    explicit ConfigHotReloader(SystemConfig initial) : m_good(std::move(initial)) {}
+    explicit ConfigHotReloader(SystemConfig initial)
+        : m_good(std::move(initial)) {}
 
-    const SystemConfig& current() const { return m_good; }
+    const SystemConfig& current() const {
+        return m_good;
+    }
 
     bool TryReload(const std::string& json_text, std::string* diagnostic = nullptr) {
-        SystemConfig candidate = SystemConfig::FromJsonString(json_text);  // build a NEW config
+        SystemConfig candidate = SystemConfig::FromJsonString(json_text); // build a NEW config
         const ValidationResult vr = ValidateConfig(candidate);
         if (!vr.ok) {
-            if (diagnostic) *diagnostic = vr.diagnostic;
-            return false;  // rollback: m_good untouched — never adopt an invalid config
+            if (diagnostic)
+                *diagnostic = vr.diagnostic;
+            return false; // rollback: m_good untouched — never adopt an invalid config
         }
-        m_good = std::move(candidate);  // adopt the validated candidate
+        m_good = std::move(candidate); // adopt the validated candidate
         return true;
     }
 
@@ -159,17 +167,17 @@ TEST(ConfigHotReloadRollback, GeneratedConstantIsTheRuntimeMoonlightDefault) {
 TEST(ConfigHotReloadRollback, ValidatorAcceptsDefaultsRejectsOutOfRange) {
     EXPECT_TRUE(ValidateConfig(SystemConfig::Defaults()).ok);
     EXPECT_TRUE(ValidateConfig(SystemConfig::FromJsonString(
-                    R"({ "render": { "moonlight": { "enabled": true,
+                                   R"({ "render": { "moonlight": { "enabled": true,
                         "params": { "strength": 0.5, "color": [0.6, 0.7, 1.0] } } } })"))
                     .ok);
     // negative strength
     EXPECT_FALSE(ValidateConfig(SystemConfig::FromJsonString(
-                     R"({ "render": { "moonlight": { "enabled": true,
+                                    R"({ "render": { "moonlight": { "enabled": true,
                          "params": { "strength": -1.0 } } } })"))
                      .ok);
     // color channel out of [0,1]
     EXPECT_FALSE(ValidateConfig(SystemConfig::FromJsonString(
-                     R"({ "render": { "moonlight": { "enabled": true,
+                                    R"({ "render": { "moonlight": { "enabled": true,
                          "params": { "color": [0.6, 0.7, 5.0] } } } })"))
                      .ok);
 }
@@ -197,8 +205,9 @@ TEST(ConfigHotReloadRollback, BadOverlayRejectedPriorConfigRetained) {
     // The prior good config is retained: the invalid candidate was never adopted.
     EXPECT_FLOAT_EQ(reloader.current().param(SysParam::MoonlightStrength, kc::kMoonlightStrength),
                     0.5f);
-    const glm::vec3 color = reloader.current().param3(SysParam::MoonlightColor, kc::kMoonlightColor);
-    EXPECT_FLOAT_EQ(color.b, 1.0f);  // NOT 5.0 — rolled back
+    const glm::vec3 color =
+        reloader.current().param3(SysParam::MoonlightColor, kc::kMoonlightColor);
+    EXPECT_FLOAT_EQ(color.b, 1.0f); // NOT 5.0 — rolled back
 
     // Bad overlay #2: negative strength -> also rejected, still the last-good is kept.
     EXPECT_FALSE(reloader.TryReload(
@@ -227,7 +236,8 @@ TEST(ConfigHotReloadRollback, GoodOverlayApplies) {
     EXPECT_TRUE(reloader.current().enabled(SysKey::RenderMoonlight));
     EXPECT_FLOAT_EQ(reloader.current().param(SysParam::MoonlightStrength, kc::kMoonlightStrength),
                     0.8f);
-    const glm::vec3 color = reloader.current().param3(SysParam::MoonlightColor, kc::kMoonlightColor);
+    const glm::vec3 color =
+        reloader.current().param3(SysParam::MoonlightColor, kc::kMoonlightColor);
     EXPECT_FLOAT_EQ(color.r, 0.5f);
     EXPECT_FLOAT_EQ(color.g, 0.6f);
     EXPECT_FLOAT_EQ(color.b, 0.9f);
@@ -241,12 +251,12 @@ TEST(ConfigHotReloadRollback, GoodOverlayAppliesAfterRollback) {
     EXPECT_FALSE(reloader.TryReload(
         R"({ "render": { "moonlight": { "enabled": true, "params": { "strength": -1.0 } } } })"));
     EXPECT_FLOAT_EQ(reloader.current().param(SysParam::MoonlightStrength, kc::kMoonlightStrength),
-                    0.5f);  // rolled back
+                    0.5f); // rolled back
 
     EXPECT_TRUE(reloader.TryReload(
         R"({ "render": { "moonlight": { "enabled": true, "params": { "strength": 0.9 } } } })"));
     EXPECT_FLOAT_EQ(reloader.current().param(SysParam::MoonlightStrength, kc::kMoonlightStrength),
-                    0.9f);  // adopted
+                    0.9f); // adopted
 }
 
-}  // namespace
+} // namespace

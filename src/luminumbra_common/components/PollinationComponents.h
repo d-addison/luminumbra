@@ -17,7 +17,7 @@
 //                           live PlantGenomeComponent is left untouched so this
 //                           system stays purely additive.
 //
-// LOAD-BEARING RULE (living-world foliage pillar): sim truth stays deterministic;
+// LOAD-BEARING RULE (living-world foliage system): sim truth stays deterministic;
 // the genome type itself is reused (Luminumbra::Components::PlantGenomeComponent),
 // not reinvented.
 

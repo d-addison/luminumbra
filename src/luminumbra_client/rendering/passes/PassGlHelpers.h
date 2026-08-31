@@ -1,6 +1,6 @@
 #pragma once
 
-// Shared inline GL helpers for the extracted render pass classes (T-I2-11).
+// Shared inline GL helpers for the extracted render pass classes.
 // These mirror the anonymous-namespace helpers in RenderPipeline.cpp, which
 // keeps its own copies for the resources it still owns; the duplication is
 // intentional so the extraction stays a mechanical move with zero behavior
@@ -10,7 +10,7 @@
 #include <glm/glm.hpp>
 #include <string>
 
-// Spec 016 (016-P1): only ShadowMap is needed here (cascade-split helpers), so
+// only ShadowMap is needed here (cascade-split helpers), so
 // include the extracted header instead of the RenderPipeline god-object — this
 // decouples every pass that includes PassGlHelpers from the pipeline.
 #include "../ShadowMap.h"
@@ -55,14 +55,14 @@ inline void label_gl_object(GLenum identifier, GLuint name, const std::string& l
 #endif
 }
 
-// --- Nsight / RenderDoc debug-group markers (iteration-6 A0) -----------------
+// --- Nsight / RenderDoc debug-group markers -----------------
 // KHR_debug command-stream groups so GPU-capture tools show named per-pass spans.
 // Guarded on GL 4.3 + a non-null entry point (same discipline as label_gl_object);
 // no-ops on contexts that lack KHR_debug, so they never affect rendered pixels.
 // A shared depth counter lets a frame-end assert catch mismatched push/pop nesting
 // (which would garble a capture even though it is invisible to a pixel diff).
 inline int& debug_group_depth() {
-    static int depth = 0;  // one shared instance across TUs (inline fn local static)
+    static int depth = 0; // one shared instance across TUs (inline fn local static)
     return depth;
 }
 
@@ -88,19 +88,29 @@ inline void pop_debug_group() {
 
 // RAII scoped group: balance is guaranteed even if a pass early-returns.
 struct ScopedDebugGroup {
-    explicit ScopedDebugGroup(const std::string& label) { push_debug_group(label); }
-    ~ScopedDebugGroup() { pop_debug_group(); }
+    explicit ScopedDebugGroup(const std::string& label) {
+        push_debug_group(label);
+    }
+    ~ScopedDebugGroup() {
+        pop_debug_group();
+    }
     ScopedDebugGroup(const ScopedDebugGroup&) = delete;
     ScopedDebugGroup& operator=(const ScopedDebugGroup&) = delete;
 };
 
 inline void ExtractFrustumPlanes(const glm::mat4& m, glm::vec4 planes[6]) {
-    planes[0] = glm::vec4(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]);
-    planes[1] = glm::vec4(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]);
-    planes[2] = glm::vec4(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]);
-    planes[3] = glm::vec4(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]);
-    planes[4] = glm::vec4(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]);
-    planes[5] = glm::vec4(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]);
+    planes[0] =
+        glm::vec4(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]);
+    planes[1] =
+        glm::vec4(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]);
+    planes[2] =
+        glm::vec4(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]);
+    planes[3] =
+        glm::vec4(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]);
+    planes[4] =
+        glm::vec4(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]);
+    planes[5] =
+        glm::vec4(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]);
     for (int i = 0; i < 6; ++i) {
         float inv_len = 1.0f / glm::length(glm::vec3(planes[i]));
         planes[i] *= inv_len;

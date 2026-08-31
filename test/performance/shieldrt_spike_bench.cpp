@@ -1,4 +1,4 @@
-// T-I4-15 SHIELD-RT spike benchmark (EVIDENCE ONLY — one benchmark round).
+//   spike benchmark (EVIDENCE ONLY — one benchmark round).
 //
 // Compares two candidate far-field rendering source representations against the
 // SAME terrain region, both driven from FarLodStore tiles:
@@ -30,7 +30,7 @@
 // CPU prototype on purpose: this measures the *traversal cost shape and the
 // conservative-mip correctness criterion*, which are representation-level facts
 // independent of CPU-vs-GPU. The research notes a production build would be
-// GPU-resident; that is an iteration-6 concern, not what this round decides.
+// GPU-resident; that is an  concern, not what this round decides.
 //
 // Render-only: touches NO world_hash / determinism contract (research takeaway
 // 7). Registered in ctest under a manual label (runtime can exceed 60s in Debug).
@@ -68,12 +68,12 @@ namespace fs = std::filesystem;
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
 using namespace luminumbra_shieldrt;
-using Luminumbra::World::FarLodTier;
-using Luminumbra::World::FarLodTile;
 using Luminumbra::World::BuildPristineFarLodTile;
+using Luminumbra::World::ComputeTerrainParamsHash;
 using Luminumbra::World::DequantizeFarLodHeight;
 using Luminumbra::World::FarLodSampleStepMeters;
-using Luminumbra::World::ComputeTerrainParamsHash;
+using Luminumbra::World::FarLodTier;
+using Luminumbra::World::FarLodTile;
 
 namespace {
 
@@ -88,14 +88,19 @@ constexpr int kSeed = 424242;
 constexpr int kRunsPerView = 3; // median of 3
 
 struct ScopedJobSystem {
-    ScopedJobSystem() { jobs.startup(); }
-    ~ScopedJobSystem() { jobs.shutdown(); }
+    ScopedJobSystem() {
+        jobs.startup();
+    }
+    ~ScopedJobSystem() {
+        jobs.shutdown();
+    }
     JobSystem jobs;
 };
 
 struct Timer {
     using Clock = std::chrono::steady_clock;
-    Timer() : start(Clock::now()) {}
+    Timer()
+        : start(Clock::now()) {}
     double elapsed_ms() const {
         return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
     }
@@ -132,8 +137,10 @@ struct MarchResult {
 // of that cell (a safe skip — the ray cannot intersect terrain inside it). When
 // the ray's Y is at/below the finest cell's max we step finely and test the
 // bilinear surface for the crossing. Step budget is fixed (Claybook policy).
-MarchResult MarchHeightfield(const HeightField& hf, const HeightMaxMip& mip,
-                             const Vec3d& origin, const Vec3d& dir,
+MarchResult MarchHeightfield(const HeightField& hf,
+                             const HeightMaxMip& mip,
+                             const Vec3d& origin,
+                             const Vec3d& dir,
                              double t_max) {
     MarchResult r;
     double t = 0.0;
@@ -147,8 +154,7 @@ MarchResult MarchHeightfield(const HeightField& hf, const HeightMaxMip& mip,
 
         // Out of the field domain in XZ -> miss (far field bounded).
         if (px < hf.ox - base_cell || pz < hf.oz - base_cell ||
-            px > hf.ox + hf.extent() + base_cell ||
-            pz > hf.oz + hf.extent() + base_cell) {
+            px > hf.ox + hf.extent() + base_cell || pz > hf.oz + hf.extent() + base_cell) {
             return r;
         }
 
@@ -183,7 +189,10 @@ MarchResult MarchHeightfield(const HeightField& hf, const HeightMaxMip& mip,
                 const double mx = origin.x + dir.x * tm;
                 const double my = origin.y + dir.y * tm;
                 const double mz = origin.z + dir.z * tm;
-                if (my - hf.sample(mx, mz) <= 0.0) hi = tm; else lo = tm;
+                if (my - hf.sample(mx, mz) <= 0.0)
+                    hi = tm;
+                else
+                    lo = tm;
             }
             r.hit = true;
             r.t = hi;
@@ -200,8 +209,7 @@ MarchResult MarchHeightfield(const HeightField& hf, const HeightMaxMip& mip,
             // do not tunnel through a thin ridge (heightfield-safe step).
             const double v_margin = py - cell_max;
             const double slope_guard = std::max(0.25, std::abs(dir.y));
-            advance = std::min(advance, std::max(base_cell * 0.5,
-                                                 v_margin / slope_guard));
+            advance = std::min(advance, std::max(base_cell * 0.5, v_margin / slope_guard));
         }
         t += std::max(advance, base_cell * 0.5);
     }
@@ -217,7 +225,9 @@ float SampleMip(const SdfMipChain& c, int L, double wx, double wy, double wz) {
     x = std::clamp(x, 0, c.nx[L] - 1);
     y = std::clamp(y, 0, c.ny[L] - 1);
     z = std::clamp(z, 0, c.nz[L] - 1);
-    return c.levels[L][static_cast<std::size_t>(x) + c.nx[L] * (static_cast<std::size_t>(y) + c.ny[L] * static_cast<std::size_t>(z))];
+    return c
+        .levels[L][static_cast<std::size_t>(x) +
+                   c.nx[L] * (static_cast<std::size_t>(y) + c.ny[L] * static_cast<std::size_t>(z))];
 }
 
 // Sphere trace a mip SDF (coarse-mip-first: pick a mip level by distance so far
@@ -240,8 +250,11 @@ struct SphereTraceResult {
     bool base_overshot = false;
 };
 
-SphereTraceResult SphereTrace(const SdfMipChain& c, const HeightField& truth,
-                              const Vec3d& origin, const Vec3d& dir, double t_max) {
+SphereTraceResult SphereTrace(const SdfMipChain& c,
+                              const HeightField& truth,
+                              const Vec3d& origin,
+                              const Vec3d& dir,
+                              double t_max) {
     SphereTraceResult r;
     double t = 0.0;
     const double surf_eps = c.base_step * 0.5;
@@ -257,12 +270,12 @@ SphereTraceResult SphereTrace(const SdfMipChain& c, const HeightField& truth,
         const double px = origin.x + dir.x * t;
         const double py = origin.y + dir.y * t;
         const double pz = origin.z + dir.z * t;
-        if (px < c.ox || pz < c.oz ||
-            px > c.ox + truth.extent() || pz > c.oz + truth.extent()) {
+        if (px < c.ox || pz < c.oz || px > c.ox + truth.extent() || pz > c.oz + truth.extent()) {
             return r;
         }
         // Coarse-mip-first: deeper (coarser) level the farther we are along t.
-        const int L = std::clamp(static_cast<int>(std::log2(1.0 + t / (32.0 * c.base_step))), 0, max_level);
+        const int L =
+            std::clamp(static_cast<int>(std::log2(1.0 + t / (32.0 * c.base_step))), 0, max_level);
         const double d = SampleMip(c, L, px, py, pz);
         if (d < surf_eps) {
             r.hit = true;
@@ -277,7 +290,10 @@ SphereTraceResult SphereTrace(const SdfMipChain& c, const HeightField& truth,
         const double t_next = t + step;
         const double clear_after = true_clearance(t_next);
         if (clear_before > surf_eps && clear_after < -c.base_step) {
-            if (L > 0) r.mip_overshot = true; else r.base_overshot = true;
+            if (L > 0)
+                r.mip_overshot = true;
+            else
+                r.base_overshot = true;
             // A correct tracer would have stopped at the crossing; report the hit
             // there but flag the overshoot for the correctness tally.
             r.hit = true;
@@ -289,13 +305,12 @@ SphereTraceResult SphereTrace(const SdfMipChain& c, const HeightField& truth,
     return r;
 }
 
-
 } // namespace
 
 TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
     fs::create_directories(ArtifactRoot());
 
-    // 3 region block (~1536 m, the far-tile horizon) at the F1 (4 m) tier, the
+    // 3 region block (~1536 m, the far-tile horizon) at the  (4 m) tier, the
     // far band the research targets. Origin offset away from spawn so we sample
     // genuine far terrain.
     constexpr i32 kRx0 = 4, kRz0 = 4, kRegions = 3;
@@ -370,7 +385,8 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
             for (const Vec3d& d : dirs) {
                 const MarchResult m = MarchHeightfield(hf, hmip, view.eye, d, t_max);
                 steps += m.steps;
-                if (m.hit) ++hits;
+                if (m.hit)
+                    ++hits;
             }
             a_ms[run] = t.elapsed_ms();
             a_steps_total = steps;
@@ -386,9 +402,12 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
             for (const Vec3d& d : dirs) {
                 const SphereTraceResult s = SphereTrace(sdf_cons, hf, view.eye, d, t_max);
                 steps += s.steps;
-                if (s.hit) ++hits;
-                if (s.mip_overshot) ++mip;
-                if (s.base_overshot) ++base;
+                if (s.hit)
+                    ++hits;
+                if (s.mip_overshot)
+                    ++mip;
+                if (s.base_overshot)
+                    ++base;
             }
             bc_ms[run] = t.elapsed_ms();
             bc_steps_total = steps;
@@ -406,9 +425,12 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
             for (const Vec3d& d : dirs) {
                 const SphereTraceResult s = SphereTrace(sdf_naive, hf, view.eye, d, t_max);
                 steps += s.steps;
-                if (s.hit) ++hits;
-                if (s.mip_overshot) ++mip;
-                if (s.base_overshot) ++base;
+                if (s.hit)
+                    ++hits;
+                if (s.mip_overshot)
+                    ++mip;
+                if (s.base_overshot)
+                    ++base;
             }
             bn_ms[run] = t.elapsed_ms();
             bn_steps_total = steps;
@@ -427,12 +449,14 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
             const double mx = *std::max_element(v.begin(), v.end());
             return mn > 0.0 ? (mx - mn) / mn * 100.0 : 0.0;
         };
-        const double view_var = std::max({variance_pct(a_ms), variance_pct(bc_ms), variance_pct(bn_ms)});
+        const double view_var =
+            std::max({variance_pct(a_ms), variance_pct(bc_ms), variance_pct(bn_ms)});
         max_variance_pct = std::max(max_variance_pct, view_var);
 
         const std::string miss_line =
-            std::string(vs.name) + ": naive-mip surface misses (overshoot) = " +
-            std::to_string(bn_mip_miss) + " of " + std::to_string(total_rays) +
+            std::string(vs.name) +
+            ": naive-mip surface misses (overshoot) = " + std::to_string(bn_mip_miss) + " of " +
+            std::to_string(total_rays) +
             " rays; conservative-mip misses = " + std::to_string(bc_mip_miss) +
             " (base-grid tunneling, both chains: naive=" + std::to_string(bn_base_miss) +
             " conservative=" + std::to_string(bc_base_miss) + ")";
@@ -444,50 +468,55 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
             {"grazing", vs.grazing},
             {"rays", total_rays},
             {"ray_grid", {{"w", kRayGridW}, {"h", kRayGridH}}},
-            {"heightfield", {
-                {"samples_per_side", hf.n},
-                {"step_m", hf.step},
-                {"min_h", hf.min_h},
-                {"max_h", hf.max_h},
-                {"bytes", hf.bytes()},
-            }},
-            {"path_a_heightfield_march", {
-                {"max_mip_levels", hmip.levels},
-                {"accel_bytes", hmip.bytes()},
-                {"total_bytes", hf.bytes() + hmip.bytes()},
-                {"ms_runs", {a_ms[0], a_ms[1], a_ms[2]}},
-                {"ms_median", a_med},
-                {"mean_steps_per_ray", static_cast<double>(a_steps_total) / total_rays},
-                {"hits", a_hits},
-                {"variance_pct", variance_pct(a_ms)},
-            }},
-            {"path_b_sdf_sphere_trace", {
-                {"voxel_step_m", voxel_step},
-                {"volume_dims", {{"nx", sdf.nx}, {"ny", sdf.ny}, {"nz", sdf.nz}}},
-                {"base_volume_bytes", sdf.bytes()},
-                {"conservative", {
-                    {"mip_levels", sdf_cons.levels.size()},
-                    {"total_bytes", sdf_cons.bytes()},
-                    {"ms_runs", {bc_ms[0], bc_ms[1], bc_ms[2]}},
-                    {"ms_median", bc_med},
-                    {"mean_steps_per_ray", static_cast<double>(bc_steps_total) / total_rays},
-                    {"hits", bc_hits},
-                    {"surface_misses_mip", bc_mip_miss},
-                    {"surface_misses_base_grid", bc_base_miss},
-                    {"variance_pct", variance_pct(bc_ms)},
-                }},
-                {"naive", {
-                    {"mip_levels", sdf_naive.levels.size()},
-                    {"total_bytes", sdf_naive.bytes()},
-                    {"ms_runs", {bn_ms[0], bn_ms[1], bn_ms[2]}},
-                    {"ms_median", bn_med},
-                    {"mean_steps_per_ray", static_cast<double>(bn_steps_total) / total_rays},
-                    {"hits", bn_hits},
-                    {"surface_misses_mip", bn_mip_miss},
-                    {"surface_misses_base_grid", bn_base_miss},
-                    {"variance_pct", variance_pct(bn_ms)},
-                }},
-            }},
+            {"heightfield",
+             {
+                 {"samples_per_side", hf.n},
+                 {"step_m", hf.step},
+                 {"min_h", hf.min_h},
+                 {"max_h", hf.max_h},
+                 {"bytes", hf.bytes()},
+             }},
+            {"path_a_heightfield_march",
+             {
+                 {"max_mip_levels", hmip.levels},
+                 {"accel_bytes", hmip.bytes()},
+                 {"total_bytes", hf.bytes() + hmip.bytes()},
+                 {"ms_runs", {a_ms[0], a_ms[1], a_ms[2]}},
+                 {"ms_median", a_med},
+                 {"mean_steps_per_ray", static_cast<double>(a_steps_total) / total_rays},
+                 {"hits", a_hits},
+                 {"variance_pct", variance_pct(a_ms)},
+             }},
+            {"path_b_sdf_sphere_trace",
+             {
+                 {"voxel_step_m", voxel_step},
+                 {"volume_dims", {{"nx", sdf.nx}, {"ny", sdf.ny}, {"nz", sdf.nz}}},
+                 {"base_volume_bytes", sdf.bytes()},
+                 {"conservative",
+                  {
+                      {"mip_levels", sdf_cons.levels.size()},
+                      {"total_bytes", sdf_cons.bytes()},
+                      {"ms_runs", {bc_ms[0], bc_ms[1], bc_ms[2]}},
+                      {"ms_median", bc_med},
+                      {"mean_steps_per_ray", static_cast<double>(bc_steps_total) / total_rays},
+                      {"hits", bc_hits},
+                      {"surface_misses_mip", bc_mip_miss},
+                      {"surface_misses_base_grid", bc_base_miss},
+                      {"variance_pct", variance_pct(bc_ms)},
+                  }},
+                 {"naive",
+                  {
+                      {"mip_levels", sdf_naive.levels.size()},
+                      {"total_bytes", sdf_naive.bytes()},
+                      {"ms_runs", {bn_ms[0], bn_ms[1], bn_ms[2]}},
+                      {"ms_median", bn_med},
+                      {"mean_steps_per_ray", static_cast<double>(bn_steps_total) / total_rays},
+                      {"hits", bn_hits},
+                      {"surface_misses_mip", bn_mip_miss},
+                      {"surface_misses_base_grid", bn_base_miss},
+                      {"variance_pct", variance_pct(bn_ms)},
+                  }},
+             }},
         });
 
         // The far field MUST actually be hit by a substantial fraction of rays,
@@ -505,7 +534,6 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
     const bool contended = max_variance_pct > 25.0;
     const nlohmann::json report = {
         {"schema", "luminumbra.shieldrt_spike.v1"},
-        {"task", "T-I4-15"},
         {"seed", kSeed},
         {"build_mode", build_mode},
         {"ray_grid", {{"w", kRayGridW}, {"h", kRayGridH}}},
@@ -532,11 +560,12 @@ TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
     // (min-magnitude) chain — the spike's required demonstration of mip overshoot.
     long long total_naive_miss = 0, total_cons_miss = 0;
     for (const auto& v : results) {
-        total_naive_miss += v["path_b_sdf_sphere_trace"]["naive"]["surface_misses_mip"].get<long long>();
-        total_cons_miss += v["path_b_sdf_sphere_trace"]["conservative"]["surface_misses_mip"].get<long long>();
+        total_naive_miss +=
+            v["path_b_sdf_sphere_trace"]["naive"]["surface_misses_mip"].get<long long>();
+        total_cons_miss +=
+            v["path_b_sdf_sphere_trace"]["conservative"]["surface_misses_mip"].get<long long>();
     }
     EXPECT_GT(total_naive_miss, total_cons_miss)
         << "naive mips must demonstrably overshoot more than conservative mips";
-    EXPECT_GT(total_naive_miss, 0)
-        << "spike requires demonstrating naive-mip surface misses";
+    EXPECT_GT(total_naive_miss, 0) << "spike requires demonstrating naive-mip surface misses";
 }

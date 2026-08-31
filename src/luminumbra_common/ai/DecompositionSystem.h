@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.decomposition — DEAD creatures DECAY and RELEASE NUTRIENTS, closing the
+// sim.decomposition: DEAD creatures DECAY and RELEASE NUTRIENTS, closing the
 // death -> soil cycle. A creature that has died (MortalComponent.dead==1, OR
 // CreatureComponent.eaten==1 if present) slowly decomposes over a fixed number of ticks; as
 // it rots it releases nutrient into the world. This system maintains that per-corpse

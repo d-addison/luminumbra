@@ -1,9 +1,11 @@
 #include "WindFieldSystem.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
+#include <tuple>
 #include <vector>
 
 #include "../core/DeterministicMath.h"
@@ -30,7 +32,7 @@ constexpr float kBaseNoiseFrequency = 0.015f; // low-frequency large-scale swing
 // Per-cell spatial variation: a second low-frequency sample over the cell's
 // world coordinates, scrolled by tick-time, rotates the base angle by up to
 // +/- kCellAngleJitter radians and scales magnitude. Kept gentle so the field is
-// dominated by the coherent base direction (research S3: large-scale advection).
+// dominated by the coherent base direction used for large-scale advection.
 constexpr float kCellNoiseFrequency = 0.0035f;
 constexpr float kCellAngleJitter = 0.45f;   // radians
 constexpr double kCellScrollPerTick = 0.02; // world-units scroll per tick
@@ -196,20 +198,66 @@ void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
         }
     }
 
-    // 4) Storm-perturbation injection hook (B1). 5a: no perturbations stored, so
-    // this is a deterministic no-op pass. The application math lives here so B1
-    // adds storm cells without touching the base update.
-    // (No perturbations in 5a; ClearStormPerturbations keeps the set empty.)
+    // 4) Localized storm response. Perturbations are sorted when queued, so
+    // their additive result is independent of caller iteration order. The
+    // ground layer receives the strongest gust; upper layers retain more of
+    // the coherent large-scale flow.
+    for (const StormPerturbation& storm : m_storm_perturbations) {
+        if (storm.radius_m <= 0.0f || storm.intensity <= 0.0f)
+            continue;
+        const float radius_sq = storm.radius_m * storm.radius_m;
+        for (int lz = 0; lz < extent; ++lz) {
+            for (int lx = 0; lx < extent; ++lx) {
+                const std::size_t i = m_grid.index(lx, lz);
+                const float world_x =
+                    (static_cast<float>(m_grid.origin_cell_x() + lx) + 0.5f) * cell;
+                const float world_z =
+                    (static_cast<float>(m_grid.origin_cell_z() + lz) + 0.5f) * cell;
+                const float dx = world_x - storm.center_world.x;
+                const float dz = world_z - storm.center_world.y;
+                const float dist_sq = dx * dx + dz * dz;
+                if (dist_sq >= radius_sq)
+                    continue;
+                const float dist = DeterministicMath::Sqrt(dist_sq);
+                const float falloff = 1.0f - dist / storm.radius_m;
+                Vec2 swirl(0.0f);
+                if (dist > 1.0e-5f) {
+                    const float inv_dist = 1.0f / dist;
+                    swirl = Vec2(-dz * inv_dist, dx * inv_dist);
+                }
+                const Vec2 local = (storm.velocity + swirl * 2.0f) * (storm.intensity * falloff);
+                constexpr float kLayerResponse[kWindLayerCount] = {1.0f, 0.7f, 0.4f};
+                WindCell& wcell = m_grid.cells()[i];
+                for (int layer = 0; layer < kWindLayerCount; ++layer)
+                    wcell.layer[layer] += local * kLayerResponse[layer];
+            }
+        }
+    }
 }
 
-void WindFieldSystem::InjectStormPerturbation(const StormPerturbation&) {
-    // 5a no-op injection point (consumed by B1 weather). Deliberately empty so
-    // the public signature is stable for the B1 prompt; B1 will store the
-    // perturbation in an ordered container and apply it inside Update.
+void WindFieldSystem::InjectStormPerturbation(const StormPerturbation& perturbation) {
+    if (perturbation.radius_m <= 0.0f || perturbation.intensity <= 0.0f)
+        return;
+    m_storm_perturbations.push_back(perturbation);
+    std::sort(m_storm_perturbations.begin(),
+              m_storm_perturbations.end(),
+              [](const StormPerturbation& a, const StormPerturbation& b) {
+                  return std::tie(a.center_world.x,
+                                  a.center_world.y,
+                                  a.radius_m,
+                                  a.velocity.x,
+                                  a.velocity.y,
+                                  a.intensity) < std::tie(b.center_world.x,
+                                                          b.center_world.y,
+                                                          b.radius_m,
+                                                          b.velocity.x,
+                                                          b.velocity.y,
+                                                          b.intensity);
+              });
 }
 
 void WindFieldSystem::ClearStormPerturbations() {
-    // 5a no-op (no stored perturbations yet).
+    m_storm_perturbations.clear();
 }
 
 Vec2 WindFieldSystem::SampleWind(const Vec3& world_pos, WindLayer layer) const {

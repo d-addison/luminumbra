@@ -1,10 +1,10 @@
 #pragma once
-// AUDIO-10 (spec 021): pure mixer/ducking math for the client audio bus tree.
+// pure mixer/ducking math for the client audio bus tree.
 //
 // This header is deliberately dependency-free (no miniaudio, no GL, no engine
 // types) so the ducking envelope can be unit-tested CPU-only
 // (test/audio/mixer_model_test.cpp) without an audio device. The concrete
-// MiniaudioManager drives a MixerDucker from its per-frame Update() with
+// MiniaudioManager drives a MixerDucker from its per-frame Update with
 // WALL-CLOCK dt: this is CLIENT/render-side audio presentation only — nothing
 // here ever touches the deterministic sim or world_hash.
 //
@@ -24,11 +24,11 @@
 namespace Luminumbra::Client::Audio {
 
 struct DuckParams {
-    float attack_seconds  = 0.05f;  // time to go 1.0 -> floor once an event starts
-    float release_seconds = 0.80f;  // time to go floor -> 1.0 after the last event ends
-    float floor_gain      = 0.5f;   // ambient-bus gain when fully ducked
-    float music_floor_gain = 1.0f;  // music-bed duck floor; 1.0 = music ducking DISABLED
-                                    // (the default: byte-same audio until configured)
+    float attack_seconds = 0.05f;  // time to go 1.0 -> floor once an event starts
+    float release_seconds = 0.80f; // time to go floor -> 1.0 after the last event ends
+    float floor_gain = 0.5f;       // ambient-bus gain when fully ducked
+    float music_floor_gain = 1.0f; // music-bed duck floor; 1.0 = music ducking DISABLED
+                                   // (the default: byte-same audio until configured)
 };
 
 // Gain for a bus given a normalized duck amount and that bus's floor.
@@ -69,25 +69,33 @@ inline float DuckGainAt(float seconds_since_trigger,
 }
 
 // Stateful, dt-stepped ducker. Event-bus voices are REFERENCE-COUNTED:
-// OnEventStart()/OnEventEnd() bracket each events-bus sound's lifetime, so
+// OnEventStart/OnEventEnd bracket each events-bus sound's lifetime, so
 // overlapping events hold the duck until the LAST one ends, and a re-trigger
 // during release simply ducks again (idempotent — no state is corrupted by
 // triggering while already ducked).
 class MixerDucker {
 public:
     MixerDucker() = default;
-    explicit MixerDucker(const DuckParams& params) : m_params(params) {}
+    explicit MixerDucker(const DuckParams& params)
+        : m_params(params) {}
 
-    void SetParams(const DuckParams& params) { m_params = params; }
-    const DuckParams& params() const { return m_params; }
+    void SetParams(const DuckParams& params) {
+        m_params = params;
+    }
+    const DuckParams& params() const {
+        return m_params;
+    }
 
     // An events-bus sound started playing.
-    void OnEventStart() { ++m_active_events; }
+    void OnEventStart() {
+        ++m_active_events;
+    }
 
     // An events-bus sound finished (reaped/stopped). Robust to spurious extra
     // calls: never underflows below zero.
     void OnEventEnd() {
-        if (m_active_events > 0) --m_active_events;
+        if (m_active_events > 0)
+            --m_active_events;
     }
 
     // Hard reset (e.g. audio manager shutdown): no active events, no duck.
@@ -119,13 +127,23 @@ public:
         return m_duck01;
     }
 
-    float duck01() const { return m_duck01; }
-    int active_events() const { return m_active_events; }
-    bool IsIdle() const { return m_active_events == 0 && m_duck01 <= 0.0f; }
+    float duck01() const {
+        return m_duck01;
+    }
+    int active_events() const {
+        return m_active_events;
+    }
+    bool IsIdle() const {
+        return m_active_events == 0 && m_duck01 <= 0.0f;
+    }
 
     // Per-bus gains derived from the shared envelope.
-    float AmbientGain() const { return DuckGain(m_duck01, m_params.floor_gain); }
-    float MusicGain() const { return DuckGain(m_duck01, m_params.music_floor_gain); }
+    float AmbientGain() const {
+        return DuckGain(m_duck01, m_params.floor_gain);
+    }
+    float MusicGain() const {
+        return DuckGain(m_duck01, m_params.music_floor_gain);
+    }
 
 private:
     DuckParams m_params{};

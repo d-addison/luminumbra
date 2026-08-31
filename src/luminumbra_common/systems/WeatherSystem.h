@@ -1,18 +1,18 @@
 #pragma once
 
-// T-I5a-3 (B1): deterministic weather core (sim-authoritative).
+// deterministic weather core (sim-authoritative).
 //
-// MODEL (design-decisions.md §6 Weather core B1):
+// MODEL (the deterministic runtime contract  Weather core ):
 //   * A slow "weather pressure" base field from a `seed+12` low-frequency noise,
 //     MODULATED by a deterministic temperature/humidity climate pair (the same
-//     FBm-Simplex family the iteration-4 +8/+9 climate channels use) -> a region
+//     FBm-Simplex family the  +8/+9 climate channels use) -> a region
 //     weather CATEGORY {clear, overcast, rain, snow, fog}. The category is the
 //     spatial weather classification at a world position.
 //   * Discrete STORM CELLS spawned on a deterministic seeded schedule derived
 //     from (seed+12, region, tick-epoch) -- NO wall-clock, NO std::random on the
-//     tick path. Each storm cell is ADVECTED every tick by the A2 wind grid
+//     tick path. Each storm cell is ADVECTED every tick by the  wind grid
 //     (SampleWind), carrying an intensity that ramps in and decays out over a
-//     fixed lifetime. Bounded: <= 16 active storm cells (critique F9).
+//     fixed lifetime. Bounded: <= 16 active storm cells (regression review).
 //   * A precipitation-intensity field over the streamed extent (flat memory,
 //     FieldGrid<float>): base precip from the category plus additive storm-cell
 //     contribution. Bounded: a fixed-size grid (no growth).
@@ -26,10 +26,9 @@
 //
 // DETERMINISM SURFACE. The weather state (category map + storm cells + precip
 // field + lightning strike schedule) feeds the `weather` world_hash sub-hash
-// (design-decisions.md §2). T-I5a-5 (B3) folded the strike schedule into the slot
-// B1 reserved (replacing the placeholder 0) -- world_hash MEGA-BUMP #3.
+// alongside the rest of the replicated weather state.
 //
-// ONE-WAY (critique F2). This is a SIM system. The render overlay + wetness
+// ONE-WAY (regression review). This is a SIM system. The render overlay + wetness
 // material response READ the replicated state via the public query API below and
 // write NOTHING back into the sim or world_hash.
 
@@ -39,13 +38,13 @@
 
 #include "FastNoise/FastNoise.h"
 
-#include "../fields/FieldGrid.h"
 #include "../../../include/luminumbra/core/Types.h"
+#include "../fields/FieldGrid.h"
 
 namespace Luminumbra::Systems {
 
 // Region weather category. The enum order is the canonical hash/serialization
-// order; clear is the control-phase default (premise guard F4). Storms only
+// order; clear is the control-phase default (premise guard ). Storms only
 // raise precipitation; the category is the large-scale sky state.
 enum class WeatherCategory : std::uint8_t {
     Clear = 0,
@@ -64,20 +63,20 @@ const char* WeatherCategoryName(WeatherCategory category) noexcept;
 inline constexpr float kWeatherCellSizeM = 24.0f;
 inline constexpr int kWeatherExtentCells = 64;
 
-// PINNED bounded-state cap (critique F9 / design-decisions §7): at most this many
+// PINNED bounded-state cap (regression review / documented design): at most this many
 // storm cells are ever active. The container is fixed-capacity; a scheduled spawn
 // is dropped when full (deterministically -- the schedule itself is bounded so
 // this is belt-and-suspenders, asserted by Endurance300Storm).
 inline constexpr int kMaxStormCells = 16;
 
-// PINNED bounded-state cap (T-I5a-5 B3): at most this many lightning strike events
+// PINNED bounded-state cap: at most this many lightning strike events
 // are retained in the live schedule window at once. A strike is a transient WORLD
 // EVENT (replayable, identical on every client); the schedule is folded into the
 // `weather` world_hash sub-hash. The window is small + flat-memory so the strike
 // set never grows unbounded (Endurance300Storm asserts the bound).
 inline constexpr int kMaxLiveStrikes = 32;
 
-// PINNED storm intensity threshold for strike eligibility (T-I5a-5 B3). A storm
+// PINNED storm intensity threshold for strike eligibility. A storm
 // cell only schedules strikes once its envelope intensity is at/above this; the
 // strongest storms strike most often. Keeps clear/weak weather strike-free.
 inline constexpr float kStrikeIntensityThreshold = 0.45f;
@@ -85,41 +84,40 @@ inline constexpr float kStrikeIntensityThreshold = 0.45f;
 // One active storm cell. Position/velocity are world-space (XZ); the cell is
 // advected every tick by the wind grid. spawn_tick/lifetime_ticks bound the
 // intensity envelope (deterministic ramp-in/decay). seed_salt makes each cell's
-// later strike-schedule (T-I5a-5) an independent seeded stream.
+// later strike-schedule an independent seeded stream.
 struct StormCell {
     Vec2 center_world = Vec2(0.0f);
-    Vec2 velocity = Vec2(0.0f);     // m/s-ish, set from wind at spawn + re-advected
-    float intensity = 0.0f;         // current [0, 1] envelope value
+    Vec2 velocity = Vec2(0.0f); // m/s-ish, set from wind at spawn + re-advected
+    float intensity = 0.0f;     // current [0, 1] envelope value
     std::uint64_t spawn_tick = 0;
     std::uint32_t lifetime_ticks = 0;
-    std::uint32_t seed_salt = 0;    // per-cell RNG salt (T-I5a-5 strike stream)
+    std::uint32_t seed_salt = 0; // per-cell RNG salt ( strike stream)
 };
 
-// One scheduled lightning STRIKE event (T-I5a-5 B3). A strike is a deterministic
+// One scheduled lightning STRIKE event. A strike is a deterministic
 // WORLD EVENT scheduled by storm state from the `seed+13` RNG stream -- replayable
 // and bit-identical for every client. It folds into the `weather` world_hash
 // sub-hash (it is sim-authoritative state, not a render effect). The RENDER side
-// reads the schedule one-way (F2) to draw the bolt / inject the light pulse / spawn
+// reads the schedule one-way  to draw the bolt / inject the light pulse / spawn
 // scorch emitters / cue thunder; it writes NOTHING back.
 //
-// Iteration-6 fire-ignition hook (NOTED, not built): a future ecology system will
-// read StrikeSchedule() at `strike_tick` and probe terrain flammability at
-// world_{x,z} to seed a fire. No fire state is produced in 5a.
+// GameSession converts strikes due on the current tick into deterministic fire
+// ignition sources. Worlds without combustible entities remain a no-op.
 struct StrikeEvent {
-    std::uint64_t strike_tick = 0;  // absolute sim tick the bolt lands on
-    float world_x = 0.0f;           // strike ground position X (world metres)
-    float world_z = 0.0f;           // strike ground position Z (world metres)
-    float magnitude = 0.0f;         // [0, 1] strike strength (drives pulse/thunder)
-    std::uint32_t storm_salt = 0;   // originating storm cell's seed_salt (provenance)
+    std::uint64_t strike_tick = 0; // absolute sim tick the bolt lands on
+    float world_x = 0.0f;          // strike ground position X (world metres)
+    float world_z = 0.0f;          // strike ground position Z (world metres)
+    float magnitude = 0.0f;        // [0, 1] strike strength (drives pulse/thunder)
+    std::uint32_t storm_salt = 0;  // originating storm cell's seed_salt (provenance)
 };
 
 // Replicated weather snapshot at a world position -- what the render overlay +
 // wetness response read (one-way). POD; carries no engine handles.
 struct WeatherSample {
     WeatherCategory category = WeatherCategory::Clear;
-    float precip_intensity = 0.0f;  // [0, 1] local precipitation
-    float storm_intensity = 0.0f;   // [0, 1] nearest-storm contribution
-    Vec2 wind = Vec2(0.0f);         // local wind vector (from the storm advection field)
+    float precip_intensity = 0.0f; // [0, 1] local precipitation
+    float storm_intensity = 0.0f;  // [0, 1] nearest-storm contribution
+    Vec2 wind = Vec2(0.0f);        // local wind vector (from the storm advection field)
 };
 
 class WindFieldSystem;
@@ -127,7 +125,7 @@ class WindFieldSystem;
 class WeatherSystem {
 public:
     // seed is the WORLD seed; the weather noises use seed + 12 (seed-offset
-    // registry, design-decisions.md §1 -- appended FIRST, append only, never
+    // registry, the deterministic runtime contract  -- appended FIRST, append only, never
     // reusing +1..+11).
     explicit WeatherSystem(int world_seed);
 
@@ -139,8 +137,8 @@ public:
     // Budget: <= 0.20 ms/tick at the streamed extent (WeatherVisual gate).
     void Update(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind);
 
-    // --- Public weather-state query API (stable; consumed by T-I5a-5 lightning
-    //     + T-I5a-4 precip + 5b ecology/audio). All are pure functions of the
+    // --- Public weather-state query API (stable; consumed by  lightning
+    //     +  precip + 5b ecology/audio). All are pure functions of the
     //     CURRENT state; none mutate. ---
 
     // Region weather category at a world position (the large-scale sky state).
@@ -153,18 +151,22 @@ public:
     [[nodiscard]] WeatherSample SampleAt(const Vec3& world_pos) const;
 
     // The active storm cells (canonical order: spawn order, stable across the
-    // tick). Consumed by T-I5a-5 (strike schedule) + T-I5a-4 (precip emitters).
-    [[nodiscard]] const std::vector<StormCell>& StormCells() const noexcept { return m_storm_cells; }
+    // tick). Consumed by  (strike schedule) +  (precip emitters).
+    [[nodiscard]] const std::vector<StormCell>& StormCells() const noexcept {
+        return m_storm_cells;
+    }
     [[nodiscard]] int active_storm_count() const noexcept {
         return static_cast<int>(m_storm_cells.size());
     }
 
-    // The live lightning STRIKE schedule (T-I5a-5 B3). Canonical order: strike_tick
+    // The live lightning STRIKE schedule. Canonical order: strike_tick
     // ascending, then storm_salt, then x, then z (deterministic, stable). Folded
     // into the `weather` world_hash sub-hash. The RENDER side reads strikes whose
     // strike_tick == the current tick to fire bolt/pulse/scorch/thunder (one-way,
-    // F2). Bounded: <= kMaxLiveStrikes entries.
-    [[nodiscard]] const std::vector<StrikeEvent>& StrikeSchedule() const noexcept { return m_strikes; }
+    // ). Bounded: <= kMaxLiveStrikes entries.
+    [[nodiscard]] const std::vector<StrikeEvent>& StrikeSchedule() const noexcept {
+        return m_strikes;
+    }
     [[nodiscard]] int live_strike_count() const noexcept {
         return static_cast<int>(m_strikes.size());
     }
@@ -173,16 +175,24 @@ public:
     [[nodiscard]] std::vector<StrikeEvent> StrikesThisTick() const;
 
     // The dominant region category at the anchor (gate diagnostics / overlay).
-    [[nodiscard]] WeatherCategory AnchorCategory() const noexcept { return m_anchor_category; }
+    [[nodiscard]] WeatherCategory AnchorCategory() const noexcept {
+        return m_anchor_category;
+    }
 
     // Deterministic sub-hash over the weather state, in canonical order. Folded
-    // into the world_hash `weather` slot (mega-bump #2).
+    // into the world_hash `weather` slot (hash revision).
     [[nodiscard]] std::string ComputeWeatherSubHash() const;
 
     // Geometry accessors (gate diagnostics / downstream readers).
-    [[nodiscard]] int extent_cells() const noexcept { return m_grid_extent; }
-    [[nodiscard]] float cell_size_m() const noexcept { return m_grid_cell_size; }
-    [[nodiscard]] std::uint64_t last_tick() const noexcept { return m_last_tick; }
+    [[nodiscard]] int extent_cells() const noexcept {
+        return m_grid_extent;
+    }
+    [[nodiscard]] float cell_size_m() const noexcept {
+        return m_grid_cell_size;
+    }
+    [[nodiscard]] std::uint64_t last_tick() const noexcept {
+        return m_last_tick;
+    }
 
 private:
     // Map a world position to a local cell (clamped result reported via in_region).
@@ -191,7 +201,7 @@ private:
     static WeatherCategory Classify(float pressure, float temperature, float humidity) noexcept;
     // Deterministic per-tick storm-cell spawn schedule + lifetime/advection.
     void StepStormCells(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind);
-    // Deterministic per-tick lightning STRIKE schedule (T-I5a-5 B3): storm cells at
+    // Deterministic per-tick lightning STRIKE schedule: storm cells at
     // or above the intensity threshold schedule strike events from the `seed+13`
     // splitmix64 stream keyed on (seed+13, storm seed_salt, strike-epoch). NO
     // wall-clock, NO std::random. Bounded to kMaxLiveStrikes.
@@ -216,12 +226,12 @@ private:
 
     // Bounded storm-cell set (<= kMaxStormCells). Ordered by spawn (canonical).
     // Each cell's seed_salt is derived deterministically from (seed, tick-epoch)
-    // so it never depends on wall-clock/RNG; T-I5a-5 seeds its strike stream off it.
+    // so it never depends on wall-clock/RNG;  seeds its strike stream off it.
     std::vector<StormCell> m_storm_cells;
 
     // Bounded lightning STRIKE schedule (<= kMaxLiveStrikes). Canonical order:
     // strike_tick asc, then storm_salt, then x, then z. Folded into the `weather`
-    // sub-hash (T-I5a-5 B3, world_hash mega-bump #3). Strikes older than the
+    // sub-hash ( , world_hash hash revision). Strikes older than the
     // current tick are evicted each step so memory stays flat.
     std::vector<StrikeEvent> m_strikes;
 

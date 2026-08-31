@@ -1,6 +1,6 @@
-// Track sim.herd_alarm — ALARM signalling / collective vigilance. An alarmed prey raises
+// sim.herd_alarm: ALARM signalling / collective vigilance. An alarmed prey raises
 // the alarm of nearby same-role neighbours so the herd flees together; the alarm relays in
-// waves over ticks and decays when no source is near. Deterministic (id-ordered, two-phase
+//  over ticks and decays when no source is near. Deterministic (id-ordered, two-phase
 // snapshot, DeterministicMath only, NO rng), gated by the AlarmComponent opt-in.
 #include <gtest/gtest.h>
 
@@ -18,17 +18,22 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunHerdAlarmOnTick;
 using luminumbra::ai::HerdAlarmStats;
 using luminumbra::ai::kAlarmRadius;
+using luminumbra::ai::RunHerdAlarmOnTick;
 
 // One fixed sim tick at 30Hz (matches the engine's fixed dt; constants are tuned for it).
 constexpr float kDt = Luminumbra::SECONDS_PER_TICK;
 
 // Spawn a creature carrying an AlarmComponent (the opt-in). `predator` sets the role used
 // for same-role matching; `level`/`alarmed` seed the alarm state.
-entt::entity spawnCreature(entt::registry& r, float x, float z, bool predator = false,
-                           float level = 0.0f, std::uint8_t alarmed = 0, bool eaten = false) {
+entt::entity spawnCreature(entt::registry& r,
+                           float x,
+                           float z,
+                           bool predator = false,
+                           float level = 0.0f,
+                           std::uint8_t alarmed = 0,
+                           bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -73,49 +78,49 @@ TEST(HerdAlarm, NonParticipantsIgnored) {
 
 TEST(HerdAlarm, AlarmedRaisesNearSameRoleNeighbour) {
     entt::registry r;
-    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, /*level=*/0.0f, /*alarmed=*/1);  // source
-    auto near = spawnCreature(r, 2.0f, 0.0f, /*predator=*/false);                     // calm prey
+    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, /*level=*/0.0f, /*alarmed=*/1); // source
+    auto near = spawnCreature(r, 2.0f, 0.0f, /*predator=*/false);                    // calm prey
 
     EXPECT_FLOAT_EQ(levelOf(r, near), 0.0f);
     HerdAlarmStats s = RunHerdAlarmOnTick(r, kDt);
 
     EXPECT_GE(s.sources, 1);
-    EXPECT_GT(levelOf(r, near), 0.0f);  // the nearby neighbour was alarmed.
+    EXPECT_GT(levelOf(r, near), 0.0f); // the nearby neighbour was alarmed.
 }
 
 // ---- a FAR creature is unaffected ----
 
 TEST(HerdAlarm, FarCreatureUnaffected) {
     entt::registry r;
-    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1);            // source
-    auto far = spawnCreature(r, kAlarmRadius + 5.0f, 0.0f, /*predator=*/false);       // out of range
+    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1);      // source
+    auto far = spawnCreature(r, kAlarmRadius + 5.0f, 0.0f, /*predator=*/false); // out of range
 
     RunHerdAlarmOnTick(r, kDt);
-    EXPECT_FLOAT_EQ(levelOf(r, far), 0.0f);  // beyond kAlarmRadius -> untouched.
+    EXPECT_FLOAT_EQ(levelOf(r, far), 0.0f); // beyond kAlarmRadius -> untouched.
 }
 
 // ---- role matching: a DIFFERENT-role neighbour is not warned ----
 
 TEST(HerdAlarm, DifferentRoleNotWarned) {
     entt::registry r;
-    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1);  // prey source
-    auto pred = spawnCreature(r, 2.0f, 0.0f, /*predator=*/true);            // predator nearby
+    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1); // prey source
+    auto pred = spawnCreature(r, 2.0f, 0.0f, /*predator=*/true);           // predator nearby
 
     RunHerdAlarmOnTick(r, kDt);
-    EXPECT_FLOAT_EQ(levelOf(r, pred), 0.0f);  // alarm is herd-internal; predator unaffected.
+    EXPECT_FLOAT_EQ(levelOf(r, pred), 0.0f); // alarm is herd-internal; predator unaffected.
 }
 
 // ---- closeness: a closer neighbour ends up MORE alarmed than a farther one ----
 
 TEST(HerdAlarm, CloserNeighbourMoreAlarmed) {
     entt::registry r;
-    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1);   // source
+    spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1); // source
     auto closeE = spawnCreature(r, 2.0f, 0.0f, /*predator=*/false);
-    auto farE   = spawnCreature(r, kAlarmRadius - 1.0f, 0.0f, /*predator=*/false);
+    auto farE = spawnCreature(r, kAlarmRadius - 1.0f, 0.0f, /*predator=*/false);
 
     RunHerdAlarmOnTick(r, kDt);
     EXPECT_GT(levelOf(r, closeE), levelOf(r, farE));
-    EXPECT_GT(levelOf(r, farE), 0.0f);  // both inside the radius are raised.
+    EXPECT_GT(levelOf(r, farE), 0.0f); // both inside the radius are raised.
 }
 
 // ---- decay: with NO source nearby, an elevated creature's level fades toward 0 ----
@@ -141,11 +146,11 @@ TEST(HerdAlarm, DecaysWhenNoSource) {
 // fades. (Source pinned at full while alarmed==1.)
 TEST(HerdAlarm, AlarmedSourceHoldsFullThenFades) {
     entt::registry r;
-    auto src  = spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1);
+    auto src = spawnCreature(r, 0.0f, 0.0f, /*predator=*/false, 0.0f, /*alarmed=*/1);
     auto near = spawnCreature(r, 2.0f, 0.0f, /*predator=*/false);
 
     RunHerdAlarmOnTick(r, kDt);
-    EXPECT_FLOAT_EQ(levelOf(r, src), 1.0f);  // alarmed originator pinned to max.
+    EXPECT_FLOAT_EQ(levelOf(r, src), 1.0f); // alarmed originator pinned to max.
     const float litNeighbour = levelOf(r, near);
     EXPECT_GT(litNeighbour, 0.0f);
 
@@ -153,22 +158,23 @@ TEST(HerdAlarm, AlarmedSourceHoldsFullThenFades) {
     // (depending on its level) it may drop below the relay threshold.
     r.get<Comp::AlarmComponent>(src).alarmed = 0;
     // Run enough ticks that both drain toward zero.
-    for (int i = 0; i < 40; ++i) RunHerdAlarmOnTick(r, kDt);
+    for (int i = 0; i < 40; ++i)
+        RunHerdAlarmOnTick(r, kDt);
     EXPECT_LT(levelOf(r, src), 0.05f);
     EXPECT_LT(levelOf(r, near), 0.05f);
 }
 
-// ---- propagation in WAVES: a chain lights up over successive ticks ----
+// ---- propagation in: a chain lights up over successive ticks ----
 
 TEST(HerdAlarm, PropagatesInWavesAlongChain) {
     entt::registry r;
     // A line of prey. The far end (d) sits MORE than kAlarmRadius from the originator (a),
     // so d cannot be reached directly: the only way d lights up is if the alarm RELAYS down
     // the chain through intermediate creatures whose own raised level crosses the relay
-    // threshold (waves of collective vigilance). Step is small enough that each relayed hop
-    // stays above kAlarmSourceThreshold so the wave keeps moving.
+    // threshold ( of collective vigilance). Step is small enough that each relayed hop
+    // stays above kAlarmSourceThreshold so the  moving.
     const float step = kAlarmRadius * 0.4f;
-    auto a = spawnCreature(r, 0.0f * step, 0.0f, false, 0.0f, /*alarmed=*/1);  // originator
+    auto a = spawnCreature(r, 0.0f * step, 0.0f, false, 0.0f, /*alarmed=*/1); // originator
     auto b = spawnCreature(r, 1.0f * step, 0.0f, false);
     auto c = spawnCreature(r, 2.0f * step, 0.0f, false);
     auto d = spawnCreature(r, 3.0f * step, 0.0f, false);
@@ -185,13 +191,16 @@ TEST(HerdAlarm, PropagatesInWavesAlongChain) {
     EXPECT_GT(levelOf(r, b), 0.0f);
     EXPECT_FLOAT_EQ(levelOf(r, d), 0.0f);
 
-    // Run more ticks: the wave must relay through c to d (collective vigilance spreads).
+    // Run more ticks: the  relay through c to d (collective vigilance spreads).
     bool dLit = false;
     for (int i = 0; i < 20; ++i) {
         RunHerdAlarmOnTick(r, kDt);
-        if (levelOf(r, d) > 0.0f) { dLit = true; break; }
+        if (levelOf(r, d) > 0.0f) {
+            dLit = true;
+            break;
+        }
     }
-    EXPECT_TRUE(dLit);  // the alarm reached the far end of the chain in waves.
+    EXPECT_TRUE(dLit); // the alarm reached the far end of the chain in
     EXPECT_GT(levelOf(r, c), 0.0f);
 }
 
@@ -203,10 +212,15 @@ TEST(HerdAlarm, DeadDoNotWarnOrFear) {
     spawnCreature(r, 0.0f, 0.0f, false, /*level=*/1.0f, /*alarmed=*/1, /*eaten=*/true);
     auto living = spawnCreature(r, 2.0f, 0.0f, false);
     RunHerdAlarmOnTick(r, kDt);
-    EXPECT_FLOAT_EQ(levelOf(r, living), 0.0f);  // a carcass raises no alarm.
+    EXPECT_FLOAT_EQ(levelOf(r, living), 0.0f); // a carcass raises no alarm.
 
     // A dead creature does not hold a level either (drained to 0).
-    auto corpse = spawnCreature(r, 10.0f, 0.0f, false, /*level=*/0.8f, /*alarmed=*/0,
+    auto corpse = spawnCreature(r,
+                                10.0f,
+                                0.0f,
+                                false,
+                                /*level=*/0.8f,
+                                /*alarmed=*/0,
                                 /*eaten=*/true);
     RunHerdAlarmOnTick(r, kDt);
     EXPECT_FLOAT_EQ(levelOf(r, corpse), 0.0f);
@@ -217,7 +231,12 @@ TEST(HerdAlarm, DeadDoNotWarnOrFear) {
 TEST(HerdAlarm, OrderIndependent) {
     // Build two registries with the SAME geometry but creatures created in a different
     // order; the two-phase snapshot must make the resulting levels identical.
-    struct Spec { float x, z; bool pred; float level; std::uint8_t alarmed; };
+    struct Spec {
+        float x, z;
+        bool pred;
+        float level;
+        std::uint8_t alarmed;
+    };
     std::vector<Spec> specs = {
         {0.0f, 0.0f, false, 0.0f, 1},
         {2.0f, 0.0f, false, 0.0f, 0},
@@ -231,12 +250,14 @@ TEST(HerdAlarm, OrderIndependent) {
         for (const auto& sp : order) {
             es.push_back(spawnCreature(r, sp.x, sp.z, sp.pred, sp.level, sp.alarmed));
         }
-        for (int t = 0; t < 5; ++t) RunHerdAlarmOnTick(r, kDt);
+        for (int t = 0; t < 5; ++t)
+            RunHerdAlarmOnTick(r, kDt);
         // Read back by geometric key (x,z) so ordering of storage doesn't matter.
         std::vector<std::pair<std::pair<float, float>, float>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
-            out.push_back({{tf.position.x, tf.position.z}, r.get<Comp::AlarmComponent>(es[i]).level});
+            out.push_back(
+                {{tf.position.x, tf.position.z}, r.get<Comp::AlarmComponent>(es[i]).level});
         }
         std::sort(out.begin(), out.end());
         return out;
@@ -262,7 +283,7 @@ TEST(HerdAlarm, RunEqualsReplay) {
         es.push_back(spawnCreature(r, 0.0f, 0.0f, false, 0.0f, 1));
         es.push_back(spawnCreature(r, 5.0f, 0.0f, false));
         es.push_back(spawnCreature(r, 9.0f, 1.0f, false));
-        es.push_back(spawnCreature(r, 3.0f, 6.0f, true, 0.0f, 1));  // predator herd source
+        es.push_back(spawnCreature(r, 3.0f, 6.0f, true, 0.0f, 1)); // predator herd source
         es.push_back(spawnCreature(r, 4.0f, 7.0f, true));
         std::vector<float> trace;
         for (int t = 0; t < 30; ++t) {
@@ -284,4 +305,4 @@ TEST(HerdAlarm, RunEqualsReplay) {
     }
 }
 
-}  // namespace
+} // namespace

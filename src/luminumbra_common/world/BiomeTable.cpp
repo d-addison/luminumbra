@@ -23,7 +23,7 @@ void FnvMix(u64& hash, const void* data, std::size_t size) {
     }
 }
 
-template <typename T>
+template<typename T>
 void FnvMixValue(u64& hash, const T& value) {
     FnvMix(hash, &value, sizeof(T));
 }
@@ -37,16 +37,23 @@ i32 QuantizeClimateEdge(float value) {
 
 // Resolves a material name to its MaterialType id. The mapping mirrors the
 // MaterialType enum (Types.h); biomes.json references existing material ids by
-// name only (design-decisions section 3: palettes reference material ids, they
+// name only (palettes reference material ids; they
 // never define new materials).
 std::optional<u8> MaterialIdFromName(const std::string& name) {
-    if (name == "Air") return static_cast<u8>(MaterialType::Air);
-    if (name == "Stone") return static_cast<u8>(MaterialType::Stone);
-    if (name == "Soil") return static_cast<u8>(MaterialType::Soil);
-    if (name == "Grass") return static_cast<u8>(MaterialType::Grass);
-    if (name == "Sand") return static_cast<u8>(MaterialType::Sand);
-    if (name == "Deepslate") return static_cast<u8>(MaterialType::Deepslate);
-    if (name == "Water") return static_cast<u8>(MaterialType::Water);
+    if (name == "Air")
+        return static_cast<u8>(MaterialType::Air);
+    if (name == "Stone")
+        return static_cast<u8>(MaterialType::Stone);
+    if (name == "Soil")
+        return static_cast<u8>(MaterialType::Soil);
+    if (name == "Grass")
+        return static_cast<u8>(MaterialType::Grass);
+    if (name == "Sand")
+        return static_cast<u8>(MaterialType::Sand);
+    if (name == "Deepslate")
+        return static_cast<u8>(MaterialType::Deepslate);
+    if (name == "Water")
+        return static_cast<u8>(MaterialType::Water);
     // Game-content material names (emissive crystals etc.) are not resolvable
     // here by design: biome palettes name only the generic terrain materials.
     // Unknown names warn and fall back, keeping engine source noun-free.
@@ -70,8 +77,8 @@ void WarnUnknownKeys(const nlohmann::json& object,
             }
         }
         if (!known) {
-            std::string warning = "biome table '" + table_path.string() +
-                                  "' has unknown key " + scope + "." + item.key();
+            std::string warning = "biome table '" + table_path.string() + "' has unknown key " +
+                                  scope + "." + item.key();
             LUMINUMBRA_CORE_WARN("{}", warning);
             warnings.push_back(std::move(warning));
         }
@@ -108,7 +115,8 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
     try {
         data = nlohmann::json::parse(file);
     } catch (const nlohmann::json::parse_error& e) {
-        table.m_errors.push_back("failed to parse biome table JSON '" + table_path.string() + "': " + e.what());
+        table.m_errors.push_back("failed to parse biome table JSON '" + table_path.string() +
+                                 "': " + e.what());
         return table;
     }
 
@@ -145,15 +153,18 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
         biome.id = id;
         biome.name = entry.value("name", std::string{});
 
-        const nlohmann::json climate = entry.contains("climate") ? entry["climate"] : nlohmann::json::object();
+        const nlohmann::json climate =
+            entry.contains("climate") ? entry["climate"] : nlohmann::json::object();
         biome.continentalness = ParseRange(climate, "continentalness");
         biome.erosion = ParseRange(climate, "erosion");
         biome.peaks_valleys = ParseRange(climate, "peaks_valleys");
         biome.temperature = ParseRange(climate, "temperature");
         biome.humidity = ParseRange(climate, "humidity");
-        WarnUnknownKeys(climate, "biomes[" + std::to_string(raw_id) + "].climate",
+        WarnUnknownKeys(climate,
+                        "biomes[" + std::to_string(raw_id) + "].climate",
                         {"continentalness", "erosion", "peaks_valleys", "temperature", "humidity"},
-                        table_path, table.m_warnings);
+                        table_path,
+                        table.m_warnings);
 
         if (entry.contains("surface") && entry["surface"].is_object()) {
             const nlohmann::json& surface = entry["surface"];
@@ -165,7 +176,8 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
                         slot = *material_id;
                     } else {
                         table.m_errors.push_back("biome '" + biome.name + "' surface." + key +
-                                                 " references unknown material '" + material_name + "'");
+                                                 " references unknown material '" + material_name +
+                                                 "'");
                     }
                 }
             };
@@ -173,19 +185,24 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
             assign("filler", biome.palette.filler);
             assign("depth", biome.palette.depth);
             assign("underwater", biome.palette.underwater);
-            WarnUnknownKeys(surface, "biomes[" + std::to_string(raw_id) + "].surface",
-                            {"top", "filler", "depth", "underwater"}, table_path, table.m_warnings);
+            WarnUnknownKeys(surface,
+                            "biomes[" + std::to_string(raw_id) + "].surface",
+                            {"top", "filler", "depth", "underwater"},
+                            table_path,
+                            table.m_warnings);
         } else {
-            table.m_errors.push_back("biome '" + biome.name + "' is missing a surface palette object");
+            table.m_errors.push_back("biome '" + biome.name +
+                                     "' is missing a surface palette object");
         }
 
-        // T-I5b-1: vegetation is now CONSUMED render-side (foliage scatter
-        // density). Render-only: NOT mixed into compute_content_hash() (see the
+        //  vegetation is now CONSUMED render-side (foliage scatter
+        // density). Render-only: NOT mixed into compute_content_hash (see the
         // note there) so it never invalidates far-LOD tiles or perturbs
         // world_hash. The scatter labels stay opaque game content.
         if (entry.contains("vegetation") && entry["vegetation"].is_object()) {
             const nlohmann::json& veg = entry["vegetation"];
-            biome.vegetation.density = std::clamp(veg.value("density", biome.vegetation.density), 0.0f, 1.0f);
+            biome.vegetation.density =
+                std::clamp(veg.value("density", biome.vegetation.density), 0.0f, 1.0f);
             if (veg.contains("scatter") && veg["scatter"].is_array()) {
                 for (const auto& s : veg["scatter"]) {
                     if (s.is_string()) {
@@ -193,23 +210,31 @@ BiomeTable BiomeTable::Load(const std::filesystem::path& table_path) {
                     }
                 }
             }
-            WarnUnknownKeys(veg, "biomes[" + std::to_string(raw_id) + "].vegetation",
-                            {"density", "scatter"}, table_path, table.m_warnings);
+            WarnUnknownKeys(veg,
+                            "biomes[" + std::to_string(raw_id) + "].vegetation",
+                            {"density", "scatter"},
+                            table_path,
+                            table.m_warnings);
         }
-        // T-I4-5: reverb is now CONSUMED (per-biome environmental audio).
+        // reverb is now CONSUMED (per-biome environmental audio).
         if (entry.contains("reverb") && entry["reverb"].is_object()) {
             const nlohmann::json& reverb = entry["reverb"];
             biome.reverb.preset = reverb.value("preset", biome.reverb.preset);
             biome.reverb.wet = std::clamp(reverb.value("wet", biome.reverb.wet), 0.0f, 1.0f);
             biome.reverb.dry = std::clamp(reverb.value("dry", biome.reverb.dry), 0.0f, 1.0f);
             biome.reverb.decay = std::max(0.0f, reverb.value("decay", biome.reverb.decay));
-            WarnUnknownKeys(reverb, "biomes[" + std::to_string(raw_id) + "].reverb",
-                            {"preset", "wet", "dry", "decay"}, table_path, table.m_warnings);
+            WarnUnknownKeys(reverb,
+                            "biomes[" + std::to_string(raw_id) + "].reverb",
+                            {"preset", "wet", "dry", "decay"},
+                            table_path,
+                            table.m_warnings);
         }
 
-        WarnUnknownKeys(entry, "biomes[" + std::to_string(raw_id) + "]",
+        WarnUnknownKeys(entry,
+                        "biomes[" + std::to_string(raw_id) + "]",
                         {"id", "name", "description", "climate", "surface", "vegetation", "reverb"},
-                        table_path, table.m_warnings);
+                        table_path,
+                        table.m_warnings);
 
         table.m_biomes.push_back(std::move(biome));
     }
@@ -240,11 +265,9 @@ u8 BiomeTable::lookup(float continentalness,
                       float temperature,
                       float humidity) const {
     for (const BiomeDefinition& biome : m_biomes) {
-        if (biome.continentalness.contains(continentalness) &&
-            biome.erosion.contains(erosion) &&
+        if (biome.continentalness.contains(continentalness) && biome.erosion.contains(erosion) &&
             biome.peaks_valleys.contains(peaks_valleys) &&
-            biome.temperature.contains(temperature) &&
-            biome.humidity.contains(humidity)) {
+            biome.temperature.contains(temperature) && biome.humidity.contains(humidity)) {
             return biome.id;
         }
     }
@@ -293,7 +316,7 @@ const std::string& BiomeTable::name_for(u8 biome_id) const {
 }
 
 // NOTE: reverb AND vegetation are deliberately NOT mixed into
-// compute_content_hash(). The
+// compute_content_hash. The
 // content hash gates the terrain far-LOD cache (ComputeTerrainParamsHash), and
 // reverb is audio-only - a reverb retune must not invalidate terrain tiles.
 u64 BiomeTable::compute_content_hash() const {

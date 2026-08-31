@@ -1,5 +1,5 @@
 #version 450 core
-// Spec 015 C-1 (RENDER-15): the tinted-transmission write. Output = the pane's
+// the tinted-transmission write. Output = the pane's
 // Beer-Lambert transmission T(d) = tint^d (GlassTintModel.h — u_tint is the
 // unit-thickness transmission), composited into the tint cascade with
 // GL_DST_COLOR/GL_ZERO multiply blending so stacked panes accumulate the product.

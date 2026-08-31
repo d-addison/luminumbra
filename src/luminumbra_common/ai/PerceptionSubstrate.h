@@ -1,34 +1,29 @@
 #pragma once
 
-// INSTINCT-09: the SHARED AI perception substrate. Today the two AI stacks each
-// run their OWN inline neighbour/stimulus scan:
+// Shared AI perception substrate used by both AI stacks:
 //   * the GOAP InstinctSystem (replicated server NPCs) — a per-agent scan over
 //     the tick's OpportunityComponent set, distance-gated by each opportunity's
 //     influence radius (InstinctSystem.cpp);
 //   * the IAUS CreatureBrain (ambient wildlife) — a per-creature genome-gated
 //     vision-cone/hearing scan over the pre-tick snapshot (CreatureBrainSystem.h).
-// Both are O(perceivers x sources) full scans that re-derive the same primitive:
-// "which sources does this perceiver sense, in a deterministic order?".
-//
-// This file is that primitive, factored ONCE: a deterministic, spatially-bucketed
-// neighbour/stimulus scan producing a reusable PerceptionSnapshot. It is a
-// SCAFFOLD — the InstinctSystem consumes it behind an additive flag (default OFF,
-// behaviour byte-unchanged), and CreatureBrain keeps its own inline scan for now
-// (its retirement + re-pin is ORCHESTRATOR-owned).
+// This file factors their shared primitive into a deterministic,
+// spatially-bucketed neighbour/stimulus scan producing a reusable
+// PerceptionSnapshot. Both systems use it by default and retain their inline
+// scans only as tested equivalence references.
 //
 // DETERMINISM (sim contract): perceivers/sources are visited in the caller's
 // canonical ordinal order (the caller pre-sorts by its stable key — opportunity
-// id string, entt id, ...), so the snapshot order never depends on registry
+// id string, entt id,...), so the snapshot order never depends on registry
 // storage. The distance metric matches the WIRED consumer exactly: the GOAP
 // gather rounds the 3-D Euclidean distance in DOUBLE via std::sqrt (IEEE-754
 // correctly-rounded -> cross-platform stable, unlike libm transcendentals) and
 // std::round, so this substrate uses the identical formula. A libm-free float
-// variant (DeterministicMath::Sqrt) is the CreatureBrain adopter's path; see the
+// variant (DeterministicMath::Sqrt) is used by CreatureBrain; see the
 // per-source-vs-per-perceiver radius note on PerceptionField below.
 //
 // SHARED-PRIMITIVE / CreatureBrain adoption note: sources carry a per-SOURCE
 // influence radius (the opportunity model). The CreatureBrain model is a per-
-// PERCEIVER sense radius with cone/hearing refinement — a future adopter buckets
+// PERCEIVER sense radius with cone/hearing refinement. CreatureBrain buckets
 // sources at cell_size == the perceiver's max sense radius, radius-queries the
 // 3x3 block, and applies its own cone/hearing gate on the returned snapshot. The
 // bucketing + deterministic snapshot below is the reusable half; the sensory GATE
@@ -124,12 +119,13 @@ public:
         float max_radius = 0.0f;
         for (const PerceptionSourceInput& s : sources) {
             if (!s.has_position) {
-                m_positionless.push_back(s.index);  // global: always perceived, dist 0
+                m_positionless.push_back(s.index); // global: always perceived, dist 0
             } else if (s.radius <= 0.0f) {
-                m_ungated.push_back(s);             // ungated: always perceived, dist computed
+                m_ungated.push_back(s); // ungated: always perceived, dist computed
             } else {
-                m_gated.push_back(s);               // radius-gated: bucketed
-                if (s.radius > max_radius) max_radius = s.radius;
+                m_gated.push_back(s); // radius-gated: bucketed
+                if (s.radius > max_radius)
+                    max_radius = s.radius;
             }
         }
 
@@ -144,7 +140,7 @@ public:
             std::vector<GridPoint> pts;
             pts.reserve(m_gated.size());
             for (std::uint32_t gi = 0; gi < static_cast<std::uint32_t>(m_gated.size()); ++gi) {
-                pts.push_back({gi, m_gated[gi].x, m_gated[gi].z});  // grid payload = m_gated index
+                pts.push_back({gi, m_gated[gi].x, m_gated[gi].z}); // grid payload = m_gated index
             }
             m_grid->Build(pts);
         }
@@ -189,7 +185,7 @@ public:
                 const PerceptionSourceInput& s = m_gated[gi];
                 const double dist = PerceptionRound4Distance(q, s);
                 if (dist > static_cast<double>(s.radius)) {
-                    continue;  // outside this source's influence radius
+                    continue; // outside this source's influence radius
                 }
                 out.perceived.push_back({s.index, dist});
             }
@@ -207,11 +203,11 @@ private:
         });
     }
 
-    std::vector<std::uint32_t> m_positionless;        // global sources (dist 0)
-    std::vector<PerceptionSourceInput> m_ungated;     // positioned, radius <= 0
-    std::vector<PerceptionSourceInput> m_gated;       // positioned, radius > 0 (bucketed)
-    std::optional<UniformSpatialGrid> m_grid;         // grid over m_gated (payload = m_gated index)
-    mutable std::vector<std::uint32_t> m_scratch;     // reused 3x3 query buffer
+    std::vector<std::uint32_t> m_positionless;    // global sources (dist 0)
+    std::vector<PerceptionSourceInput> m_ungated; // positioned, radius <= 0
+    std::vector<PerceptionSourceInput> m_gated;   // positioned, radius > 0 (bucketed)
+    std::optional<UniformSpatialGrid> m_grid;     // grid over m_gated (payload = m_gated index)
+    mutable std::vector<std::uint32_t> m_scratch; // reused 3x3 query buffer
 };
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

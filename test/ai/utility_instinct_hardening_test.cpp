@@ -8,7 +8,7 @@
 // gating no-ops, NaN/inf survival, and EXACT run==replay.
 //
 // Style mirrors the sibling happy-path tests in this directory (ai/ include root,
-// `namespace Comp = ::Luminumbra::Components` inside the anon namespace).
+// `namespace Comp =::Luminumbra::Components` inside the anon namespace).
 
 #include <gtest/gtest.h>
 
@@ -45,8 +45,8 @@ using luminumbra::ai::RunCreatureBrainSystemOnTick;
 using luminumbra::ai::RunInstinctLocomotionOnTick;
 using luminumbra::ai::SelectAction;
 using luminumbra::ai::UpdateAwareness;
-using luminumbra::ai::UtilityAction;
 using luminumbra::ai::utility_clamp01;
+using luminumbra::ai::UtilityAction;
 
 constexpr float kDt = 1.0f / 30.0f;
 
@@ -78,8 +78,8 @@ CreatureSenses prey(float hunger, float threat, float food, float stamina) {
     return s;
 }
 
-entt::entity spawn(entt::registry& r, float x, float z, bool predator, float hunger = 0.0f,
-                   float stamina = 1.0f) {
+entt::entity spawn(
+    entt::registry& r, float x, float z, bool predator, float hunger = 0.0f, float stamina = 1.0f) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position.x = x;
@@ -92,10 +92,16 @@ entt::entity spawn(entt::registry& r, float x, float z, bool predator, float hun
     return e;
 }
 
-float xOf(entt::registry& r, entt::entity e) { return r.get<Comp::TransformComponent>(e).position.x; }
-float zOf(entt::registry& r, entt::entity e) { return r.get<Comp::TransformComponent>(e).position.z; }
+float xOf(entt::registry& r, entt::entity e) {
+    return r.get<Comp::TransformComponent>(e).position.x;
+}
+float zOf(entt::registry& r, entt::entity e) {
+    return r.get<Comp::TransformComponent>(e).position.z;
+}
 
-float Len2(const Luminumbra::Vec2& v) { return std::sqrt(v.x * v.x + v.y * v.y); }
+float Len2(const Luminumbra::Vec2& v) {
+    return std::sqrt(v.x * v.x + v.y * v.y);
+}
 
 // ===========================================================================
 // 1. UtilityAI scorer: curve bounds, clamp invariants, compensation, NaN/inf.
@@ -103,10 +109,10 @@ float Len2(const Luminumbra::Vec2& v) { return std::sqrt(v.x * v.x + v.y * v.y);
 
 // Every curve output MUST be clamped to [0,1] even for hostile shape params
 // (large m, negative b, c outside [0,1]) so one consideration can never make a
-// score exceed 1 or go negative. (consumer: Score()/SelectAction assume [0,1].)
+// score exceed 1 or go negative. (consumer: Score/SelectAction assume [0,1].)
 TEST(UtilityHardening, CurvesAlwaysClampedForHostileParams) {
-    const CurveType curves[] = {CurveType::Linear, CurveType::InvLinear,
-                                CurveType::Quadratic, CurveType::Logistic};
+    const CurveType curves[] = {
+        CurveType::Linear, CurveType::InvLinear, CurveType::Quadratic, CurveType::Logistic};
     const float ms[] = {-50.0f, -1.0f, 0.0f, 1.0f, 100.0f};
     const float bs[] = {-5.0f, 0.0f, 5.0f};
     const float cs[] = {-2.0f, 0.0f, 0.5f, 2.0f};
@@ -137,7 +143,8 @@ TEST(UtilityHardening, OutOfRangeInputClampedInsideCurve) {
 // This documents the contract that scores stay finite; if it fails the clamp
 // needs a NaN guard.
 TEST(UtilityHardening, NanInputDoesNotProduceNanScore) {
-    UtilityAction a = act(1, 1.0f, {con(std::numeric_limits<float>::quiet_NaN(), CurveType::Linear)});
+    UtilityAction a =
+        act(1, 1.0f, {con(std::numeric_limits<float>::quiet_NaN(), CurveType::Linear)});
     const float s = a.Score();
     EXPECT_FALSE(std::isnan(s)) << "NaN sense leaked into the utility score";
 }
@@ -163,7 +170,8 @@ TEST(UtilityHardening, SingleZeroConsiderationCollapsesToZero) {
 
 // Scoring is a pure function: same action scored twice is bit-identical.
 TEST(UtilityHardening, ScoreIsBitDeterministic) {
-    UtilityAction a = act(3, 0.77f,
+    UtilityAction a = act(3,
+                          0.77f,
                           {con(0.31f, CurveType::Logistic, 2.0f, 0.0f, 0.45f),
                            con(0.62f, CurveType::Quadratic, 1.3f, 0.1f, 0.5f)});
     EXPECT_EQ(a.Score(), a.Score());
@@ -188,7 +196,7 @@ TEST(UtilityHardening, TieResolvesToLowestIdOrderIndependent) {
 // lower-utility one at any margin. (Two actions, tiny score gap.)
 TEST(UtilityHardening, HigherUtilityAlwaysWinsEvenAtTinyMargin) {
     UtilityAction hi = act(2, 0.5001f);
-    UtilityAction lo = act(1, 0.5000f);  // lower id but lower score -> must lose
+    UtilityAction lo = act(1, 0.5000f); // lower id but lower score -> must lose
     EXPECT_EQ(SelectAction({lo, hi}), 2);
     EXPECT_EQ(SelectAction({hi, lo}), 2);
 }
@@ -204,7 +212,9 @@ TEST(UtilityHardening, IdDoesNotOverrideScore) {
 }
 
 // Empty action set -> -1 sentinel (consumers map this to Wander/0).
-TEST(UtilityHardening, EmptySelectionIsNegativeOne) { EXPECT_EQ(SelectAction({}), -1); }
+TEST(UtilityHardening, EmptySelectionIsNegativeOne) {
+    EXPECT_EQ(SelectAction({}), -1);
+}
 
 // All-zero-scoring actions still pick the lowest id (score 0 == 0 ties).
 TEST(UtilityHardening, AllZeroScoresPickLowestId) {
@@ -238,7 +248,7 @@ TEST(UtilityHardening, BrainPredatorNeverSelectsPreyActions) {
     s.is_predator = true;
     s.hunger = 0.9f;
     s.food_proximity = 0.9f;
-    s.threat_proximity = 0.9f;  // would matter only for a prey
+    s.threat_proximity = 0.9f; // would matter only for a prey
     s.stamina = 0.9f;
     const CreatureAction a = DecideCreatureAction(s);
     EXPECT_NE(a, CreatureAction::Graze);
@@ -284,7 +294,7 @@ TEST(UtilityHardening, BrainDecisionPureOverGrid) {
 // (updated == 0) so the canonical roster stays byte-identical.
 TEST(UtilityHardening, SystemEmptyRosterNoOp) {
     entt::registry r;
-    (void)r.create();  // a bare entity with no creature component
+    (void)r.create(); // a bare entity with no creature component
     EXPECT_EQ(RunCreatureBrainSystemOnTick(r, kDt).updated, 0);
 }
 
@@ -304,9 +314,9 @@ TEST(UtilityHardening, LoneWandererWishIsCruiseSpeed) {
 }
 
 // Flee/hunt sprint at 1.5x cruise. A hungry predator hunting nearby prey moves
-// at 1.5*move_speed, THEN scaled by INSTINCT-06's starvation degradation (a
+// at 1.5*move_speed, THEN scaled by 's starvation degradation (a
 // starving animal is genuinely weaker — CreatureBrainSystem.h "needs have
-// consequences, FR-A3"). Because the hunt hunger (0.95) sits inside the 0.85-1.0
+// consequences, "). Because the hunt hunger (0.95) sits inside the 0.85-1.0
 // degradation band, we recover and assert the pure 1.5x sprint MULTIPLIER by
 // dividing out the known starve_degrade — so this verifies the sprint contract
 // the test name asserts, independent of the (separately tested) starvation
@@ -323,10 +333,10 @@ TEST(UtilityHardening, HuntWishIsOnePointFiveCruise) {
     ASSERT_EQ(c.last_action, static_cast<int>(CreatureAction::Hunt));
     const float wishLen = std::sqrt(c.wish_x * c.wish_x + c.wish_z * c.wish_z);
     const float starve01 = std::clamp((kHunger - 0.85f) / 0.15f, 0.0f, 1.0f);
-    const float starve_degrade = 1.0f - 0.5f * starve01;   // 0.667 at hunger 0.95
+    const float starve_degrade = 1.0f - 0.5f * starve01; // 0.667 at hunger 0.95
     const float sprintMult = wishLen / (2.0f * starve_degrade);
     EXPECT_NEAR(sprintMult, 1.5f, 1e-3f)
-        << "hunt should sprint at 1.5x cruise (starvation-degraded per INSTINCT-06)";
+        << "hunt should sprint at 1.5x cruise (starvation-degraded per )";
 }
 
 // DIRECTION: prey flees AWAY from a predator on +x (moves toward -x), single tick.
@@ -345,13 +355,14 @@ TEST(UtilityHardening, FleeDirectionIsAwayFromThreat) {
 TEST(UtilityHardening, CoincidentPredatorPreyNoNaN) {
     entt::registry r;
     const auto pred = spawn(r, 5.0f, 5.0f, true, /*hunger=*/0.95f);
-    const auto prey_e = spawn(r, 5.0f, 5.0f, false);  // exactly coincident
+    const auto prey_e = spawn(r, 5.0f, 5.0f, false); // exactly coincident
     RunCreatureBrainSystemOnTick(r, kDt);
     const auto& pc = r.get<Comp::CreatureComponent>(pred);
     EXPECT_FALSE(std::isnan(pc.wish_x));
     EXPECT_FALSE(std::isnan(pc.wish_z));
     EXPECT_FALSE(std::isnan(xOf(r, pred)));
-    EXPECT_TRUE(r.get<Comp::CreatureComponent>(prey_e).eaten) << "adjacent (coincident) prey is caught";
+    EXPECT_TRUE(r.get<Comp::CreatureComponent>(prey_e).eaten)
+        << "adjacent (coincident) prey is caught";
 }
 
 // ORDER INDEPENDENCE: the per-creature result must not depend on the order in
@@ -394,7 +405,8 @@ TEST(UtilityHardening, SystemRunEqualsReplayExact) {
         const auto a = spawn(r, 0.0f, 0.0f, false, 0.2f);
         const auto b = spawn(r, 5.0f, 2.0f, true, 0.8f);
         const auto c = spawn(r, -3.0f, -1.0f, false, 0.5f);
-        for (int i = 0; i < 90; ++i) RunCreatureBrainSystemOnTick(r, kDt);
+        for (int i = 0; i < 90; ++i)
+            RunCreatureBrainSystemOnTick(r, kDt);
         std::vector<float> snap;
         for (auto e : {a, b, c}) {
             const auto& cr = r.get<Comp::CreatureComponent>(e);
@@ -417,9 +429,11 @@ TEST(UtilityHardening, AlarmComponentGatingByteIdentical) {
     auto run = [](bool with_alarm) {
         entt::registry r;
         const auto prey_e = spawn(r, 0.0f, 0.0f, false);
-        spawn(r, 20.0f, 0.0f, true, 0.5f);  // distant predator: nearNorm small
-        if (with_alarm) r.emplace<Comp::AlarmComponent>(prey_e);  // level 0, alarmed 0
-        for (int i = 0; i < 10; ++i) RunCreatureBrainSystemOnTick(r, kDt);
+        spawn(r, 20.0f, 0.0f, true, 0.5f); // distant predator: nearNorm small
+        if (with_alarm)
+            r.emplace<Comp::AlarmComponent>(prey_e); // level 0, alarmed 0
+        for (int i = 0; i < 10; ++i)
+            RunCreatureBrainSystemOnTick(r, kDt);
         const auto& c = r.get<Comp::CreatureComponent>(prey_e);
         return std::vector<float>{xOf(r, prey_e), zOf(r, prey_e), c.wish_x, c.wish_z};
     };
@@ -432,9 +446,10 @@ TEST(UtilityHardening, AlarmComponentGatingByteIdentical) {
 TEST(UtilityHardening, EatenCarcassStaysPutWithZeroWish) {
     entt::registry r;
     const auto prey_e = spawn(r, 2.0f, -2.0f, false);
-    spawn(r, 4.0f, -2.0f, true, 0.9f);  // a predator it would otherwise flee
+    spawn(r, 4.0f, -2.0f, true, 0.9f); // a predator it would otherwise flee
     r.get<Comp::CreatureComponent>(prey_e).eaten = true;
-    for (int i = 0; i < 30; ++i) RunCreatureBrainSystemOnTick(r, kDt);
+    for (int i = 0; i < 30; ++i)
+        RunCreatureBrainSystemOnTick(r, kDt);
     const auto& c = r.get<Comp::CreatureComponent>(prey_e);
     EXPECT_NEAR(xOf(r, prey_e), 2.0f, 1e-4f);
     EXPECT_NEAR(zOf(r, prey_e), -2.0f, 1e-4f);
@@ -448,7 +463,7 @@ TEST(UtilityHardening, OnePreySatesAtMostOnePredator) {
     entt::registry r;
     const auto p1 = spawn(r, 0.0f, 0.0f, true, 0.95f);
     const auto p2 = spawn(r, 0.0f, 0.0f, true, 0.95f);
-    spawn(r, 0.5f, 0.0f, false);  // within catch reach of both
+    spawn(r, 0.5f, 0.0f, false); // within catch reach of both
     RunCreatureBrainSystemOnTick(r, kDt);
     const float h1 = r.get<Comp::CreatureComponent>(p1).hunger;
     const float h2 = r.get<Comp::CreatureComponent>(p2).hunger;
@@ -469,8 +484,12 @@ entt::entity MakeLocoTarget(entt::registry& reg, float x, float z) {
     return e;
 }
 
-entt::entity MakeLocoAgent(entt::registry& reg, float x, float z, entt::entity target,
-                           Comp::LocomotionProfile profile = {}, bool flee = false) {
+entt::entity MakeLocoAgent(entt::registry& reg,
+                           float x,
+                           float z,
+                           entt::entity target,
+                           Comp::LocomotionProfile profile = {},
+                           bool flee = false) {
     const auto e = reg.create();
     auto& tf = reg.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -508,7 +527,7 @@ TEST(UtilityHardening, LocoArrivalRadiusBoundaryArrives) {
     p.move_speed = 3.0f;
     p.arrival_radius = 2.0f;
     p.slow_radius = 4.0f;
-    const auto t = MakeLocoTarget(reg, 2.0f, 0.0f);  // dist == arrival_radius exactly
+    const auto t = MakeLocoTarget(reg, 2.0f, 0.0f); // dist == arrival_radius exactly
     const auto a = MakeLocoAgent(reg, 0.0f, 0.0f, t, p);
     const auto stats = RunInstinctLocomotionOnTick(reg);
     EXPECT_EQ(stats.agents_arrived, 1u);
@@ -531,7 +550,7 @@ TEST(UtilityHardening, LocoNullTargetIsIdleZeroWish) {
 // (can't position it), not a crash or a garbage wish.
 TEST(UtilityHardening, LocoTargetWithoutTransformIsIdle) {
     entt::registry reg;
-    const auto bare = reg.create();  // no TransformComponent
+    const auto bare = reg.create(); // no TransformComponent
     const auto a = MakeLocoAgent(reg, 0.0f, 0.0f, bare);
     const auto stats = RunInstinctLocomotionOnTick(reg);
     EXPECT_EQ(stats.agents_idle, 1u);
@@ -562,7 +581,7 @@ TEST(UtilityHardening, LocoFleeCoincidentNoNaN) {
     Comp::LocomotionProfile p;
     p.move_speed = 3.0f;
     p.slow_radius = 5.0f;
-    const auto a = MakeLocoAgent(reg, 5.0f, 5.0f, threat, p, /*flee=*/true);  // coincident
+    const auto a = MakeLocoAgent(reg, 5.0f, 5.0f, threat, p, /*flee=*/true); // coincident
     RunInstinctLocomotionOnTick(reg);
     const auto& w = reg.get<Comp::LocomotionIntentComponent>(a).wish_xz;
     EXPECT_FALSE(std::isnan(w.x));
@@ -604,7 +623,8 @@ TEST(UtilityHardening, LocoRunEqualsReplayExact) {
 TEST(UtilityHardening, LocoOrderIndependentWish) {
     auto wish = [](bool shift) {
         entt::registry reg;
-        if (shift) (void)reg.create();
+        if (shift)
+            (void)reg.create();
         const auto t = MakeLocoTarget(reg, 10.0f, 10.0f);
         const auto a = MakeLocoAgent(reg, 0.0f, 0.0f, t);
         RunInstinctLocomotionOnTick(reg);
@@ -625,10 +645,11 @@ TEST(UtilityHardening, LocoOrderIndependentWish) {
 TEST(UtilityHardening, AwarenessAlertBoundaryInclusive) {
     AwarenessParams p;
     Awareness a;
-    a.meter = p.alert_at;  // exactly at the alert threshold
-    const Awareness r = UpdateAwareness(a, /*signal=*/0.0f, 0.0f, 0.0f, 0.0f, p);  // dt 0 -> meter unchanged
+    a.meter = p.alert_at; // exactly at the alert threshold
+    const Awareness r =
+        UpdateAwareness(a, /*signal=*/0.0f, 0.0f, 0.0f, 0.0f, p); // dt 0 -> meter unchanged
     EXPECT_FLOAT_EQ(r.meter, p.alert_at);
-    EXPECT_EQ(r.state, AwarenessState::Searching);  // at alert, not sensing -> Searching
+    EXPECT_EQ(r.state, AwarenessState::Searching); // at alert, not sensing -> Searching
 }
 
 // Losing a strong signal -> Searching (still aware, heads to last-known), and
@@ -636,7 +657,8 @@ TEST(UtilityHardening, AwarenessAlertBoundaryInclusive) {
 TEST(UtilityHardening, AwarenessSearchingRemembersLastKnown) {
     AwarenessParams p;
     Awareness a;
-    for (int i = 0; i < 60; ++i) a = UpdateAwareness(a, 1.0f, 9.0f, -4.0f, kDt, p);
+    for (int i = 0; i < 60; ++i)
+        a = UpdateAwareness(a, 1.0f, 9.0f, -4.0f, kDt, p);
     ASSERT_EQ(a.state, AwarenessState::Engaged);
     a = UpdateAwareness(a, 0.0f, 0.0f, 0.0f, kDt, p);
     EXPECT_EQ(a.state, AwarenessState::Searching);
@@ -650,8 +672,10 @@ TEST(UtilityHardening, AwarenessSearchingRemembersLastKnown) {
 TEST(UtilityHardening, AwarenessForgetsBelowSuspicious) {
     AwarenessParams p;
     Awareness a;
-    for (int i = 0; i < 60; ++i) a = UpdateAwareness(a, 1.0f, 2.0f, 2.0f, kDt, p);
-    for (int i = 0; i < 400; ++i) a = UpdateAwareness(a, 0.0f, 0.0f, 0.0f, kDt, p);
+    for (int i = 0; i < 60; ++i)
+        a = UpdateAwareness(a, 1.0f, 2.0f, 2.0f, kDt, p);
+    for (int i = 0; i < 400; ++i)
+        a = UpdateAwareness(a, 0.0f, 0.0f, 0.0f, kDt, p);
     EXPECT_EQ(a.state, AwarenessState::Unaware);
     EXPECT_FALSE(a.has_last_known);
     EXPECT_FLOAT_EQ(a.meter, 0.0f);
@@ -674,7 +698,8 @@ TEST(UtilityHardening, AwarenessMeterClampedUnderExtremes) {
 TEST(UtilityHardening, AwarenessEngagedRequiresCurrentSignal) {
     AwarenessParams p;
     Awareness a;
-    for (int i = 0; i < 60; ++i) a = UpdateAwareness(a, 1.0f, 1.0f, 1.0f, kDt, p);
+    for (int i = 0; i < 60; ++i)
+        a = UpdateAwareness(a, 1.0f, 1.0f, 1.0f, kDt, p);
     ASSERT_EQ(a.state, AwarenessState::Engaged);
     // One tick with no signal: meter barely drops but sensing is false -> not Engaged.
     a = UpdateAwareness(a, 0.0f, 0.0f, 0.0f, kDt, p);
@@ -690,7 +715,7 @@ TEST(UtilityHardening, AwarenessUpdateIsPure) {
     const Awareness r2 = UpdateAwareness(base, 0.3f, 1.0f, 2.0f, kDt, p);
     EXPECT_EQ(r1.meter, r2.meter);
     EXPECT_EQ(r1.state, r2.state);
-    EXPECT_FLOAT_EQ(base.meter, 0.42f);  // input untouched
+    EXPECT_FLOAT_EQ(base.meter, 0.42f); // input untouched
 }
 
-}  // namespace
+} // namespace

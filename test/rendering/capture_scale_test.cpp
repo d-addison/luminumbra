@@ -1,6 +1,6 @@
-// T-I6 capture-native re-bless: unit tests for the resolution-relative gate
+//  capture-native update the baseline: unit tests for the resolution-relative gate
 // threshold scaling helpers (core/CaptureScale.h). These guarantee the core risk
-// of the re-bless — that converting a gate's thresholds to resolution-relative
+// of the update the baseline — that converting a gate's thresholds to resolution-relative
 // form is BYTE-IDENTICAL at the 1280x720 tuning base — so per-gate conversions
 // cannot silently change gate behavior at the current pinned size.
 
@@ -11,11 +11,11 @@
 using namespace Luminumbra::Client::ScenarioHarness;
 
 namespace {
-constexpr int kTuneW = kThresholdTuningWidth;   // 1280
-constexpr int kTuneH = kThresholdTuningHeight;  // 720
-constexpr int kNativeW = 3840;                  // owner ultrawide
+constexpr int kTuneW = kThresholdTuningWidth;  // 1280
+constexpr int kTuneH = kThresholdTuningHeight; // 720
+constexpr int kNativeW = 3840;                 // owner ultrawide
 constexpr int kNativeH = 1600;
-}  // namespace
+} // namespace
 
 TEST(CaptureScale, IdentityAtTuningBase) {
     // At the tuning base every helper returns the base value EXACTLY (no drift),
@@ -29,8 +29,8 @@ TEST(CaptureScale, IdentityAtTuningBase) {
 
 TEST(CaptureScale, AreaScalesWithTotalPixels) {
     // 3840x1600 has 6,144,000 px vs 921,600 -> 6.6666... x.
-    const double ratio = (static_cast<double>(kNativeW) * kNativeH) /
-                         (static_cast<double>(kTuneW) * kTuneH);
+    const double ratio =
+        (static_cast<double>(kNativeW) * kNativeH) / (static_cast<double>(kTuneW) * kTuneH);
     EXPECT_NEAR(ratio, 6.6667, 0.001);
     EXPECT_EQ(ScalePinnedArea(2000, kNativeW, kNativeH), std::llround(2000.0 * ratio));   // 13333
     EXPECT_EQ(ScalePinnedArea(18000, kNativeW, kNativeH), std::llround(18000.0 * ratio)); // 120000

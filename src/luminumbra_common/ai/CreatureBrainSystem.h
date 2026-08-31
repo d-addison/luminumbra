@@ -1,6 +1,6 @@
 #pragma once
 
-// I9-ECO: the live creature tick — reads each creature's senses, decides via the Utility-AI
+//  the live creature tick — reads each creature's senses, decides via the Utility-AI
 // brain (CreatureBrain.h -> IAUS), and MOVES the creature deterministically (flee = away from
 // the nearest predator, hunt = toward the nearest prey, wander = golden-angle drift, graze/rest
 // = recover). This is "wire Utility AI into the creature tick" in practice.
@@ -11,16 +11,17 @@
 // so the canonical roster is byte-identical (the component is the opt-in, like PlantTag).
 
 #include "CreatureBrain.h"
+#include "CreatureSpeciesRegistry.h"
 #include "Flocking.h"
+#include "PerceptionSubstrate.h" // canonical shared neighbor-scan substrate
+#include "ScentField.h"          // in-brain scent tracking (GradientSteer)
 #include "SpatialGrid.h"
-#include "ScentField.h"  // INSTINCT-08: in-brain scent tracking (GradientSteer)
-#include "PerceptionSubstrate.h"  // INSTINCT-09 FOLLOW-UP: shared neighbour-scan substrate (opt-in)
 
 #include "../components/AlarmComponents.h"
 #include "../components/CircadianComponents.h"
-#include "../components/ThirstComponents.h"  // INSTINCT-05: thirst joins the arbiter
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
+#include "../components/ThirstComponents.h" // thirst joins the arbiter
 #include "../core/DeterministicMath.h"
 
 #include <algorithm>
@@ -53,86 +54,91 @@ inline constexpr float kAlignmentWeight = 0.5f;
 // Predator catch reach (m) and how much catching a prey sates the predator's hunger.
 inline constexpr float kCatchRadius = 2.2f;
 inline constexpr float kCatchSatiation = 0.8f;
-// Spec 011: energy (long-term sleep need). Drains slowly every tick (being awake costs energy);
+// energy (long-term sleep need). Drains slowly every tick (being awake costs energy);
 // Rest recovers it faster than it drains (net positive) and Sleep recovers it fastest. Per-second
-// rates (scaled by dt). Energy IS read by DecideCreatureAction (Phase E landed: the Sleep action's
-// "tired" consideration, circadian-gated via CreatureSenses.circadian_activity), so it steers the
-// sim trajectory of any sleeping roster. It is NOT yet folded into the ecology sub-hash
-// (EcologyHash.h reads hunger/stamina, not energy — hashing it is spec-021 INSTINCT-10).
+// rates (scaled by dt). Energy IS read by DecideCreatureAction (the integrated brain path: the
+// Sleep action's "tired" consideration, circadian-gated via CreatureSenses.circadian_activity), so
+// it steers the sim trajectory of any sleeping roster. EcologyHash folds the value into the
+// authoritative ecology sub-hash.
 inline constexpr float kEnergyDrainPerSecond = 0.006f;
-inline constexpr float kEnergyRestRecover    = 0.080f;
+inline constexpr float kEnergyRestRecover = 0.080f;
 // Sleep recovers energy faster than Rest (deep rest at the nest/off-phase).
-inline constexpr float kEnergySleepRecover   = 0.160f;
+inline constexpr float kEnergySleepRecover = 0.160f;
 // Per-second need rates that were inline literals (defaults preserved exactly).
-inline constexpr float kHungerGrowthPerSecond   = 0.02f;  // hunger grows while awake
-inline constexpr float kHungerGrazeSatePerSecond = 0.5f;  // grazing sates hunger
-inline constexpr float kStaminaRestRecover      = 0.3f;   // Rest/Sleep recover sprint fuel
-inline constexpr float kStaminaMoveDrain        = 0.10f;  // moving tires
+inline constexpr float kHungerGrowthPerSecond = 0.02f;   // hunger grows while awake
+inline constexpr float kHungerGrazeSatePerSecond = 0.5f; // grazing sates hunger
+inline constexpr float kStaminaRestRecover = 0.3f;       // Rest/Sleep recover sprint fuel
+inline constexpr float kStaminaMoveDrain = 0.10f;        // moving tires
 
-// Spec 011 critique #3: DATA-DRIVEN ecology tuning. Every field defaults to the constant above,
+//  DATA-DRIVEN ecology tuning. Every field defaults to the constant above,
 // so a default-constructed EcologyTuning reproduces today's behaviour BYTE-IDENTICALLY (the brain
 // tick, the tests, and the canonical gate roster are all unchanged unless a caller overrides it
 // from SystemConfig `sim.ecology`). This makes the difficulty/balance levers tunable from data
 // (energy/sleep cadence, hunger/stamina pacing, herd cohesion, predator reach) with no recompile.
 struct EcologyTuning {
-    float energy_drain_per_second   = kEnergyDrainPerSecond;
-    float energy_rest_recover       = kEnergyRestRecover;
-    float energy_sleep_recover      = kEnergySleepRecover;
-    float hunger_growth_per_second  = kHungerGrowthPerSecond;
-    float hunger_graze_sate         = kHungerGrazeSatePerSecond;
-    float stamina_rest_recover      = kStaminaRestRecover;
-    float stamina_move_drain        = kStaminaMoveDrain;
-    float herd_weight               = kHerdWeight;
-    float alignment_weight          = kAlignmentWeight;
-    float catch_radius              = kCatchRadius;
-    float catch_satiation           = kCatchSatiation;
+    float energy_drain_per_second = kEnergyDrainPerSecond;
+    float energy_rest_recover = kEnergyRestRecover;
+    float energy_sleep_recover = kEnergySleepRecover;
+    float hunger_growth_per_second = kHungerGrowthPerSecond;
+    float hunger_graze_sate = kHungerGrazeSatePerSecond;
+    float stamina_rest_recover = kStaminaRestRecover;
+    float stamina_move_drain = kStaminaMoveDrain;
+    float herd_weight = kHerdWeight;
+    float alignment_weight = kAlignmentWeight;
+    float catch_radius = kCatchRadius;
+    float catch_satiation = kCatchSatiation;
     // Boids/Reynolds flocking geometry (defaults == Flocking.h FlockParams -> byte-identical).
-    float flock_neighbor_radius     = 12.0f;  // grid cell + cohesion/alignment neighbour radius (m)
-    float flock_separation_radius   = 3.0f;   // separation kicks in below this spacing (m)
-    float flock_cohesion_weight     = 0.6f;   // pull toward the group centroid
-    float flock_separation_weight   = 1.4f;   // push off crowding
+    float flock_neighbor_radius = 12.0f;  // grid cell + cohesion/alignment neighbour radius (m)
+    float flock_separation_radius = 3.0f; // separation kicks in below this spacing (m)
+    float flock_cohesion_weight = 0.6f;   // pull toward the group centroid
+    float flock_separation_weight = 1.4f; // push off crowding
 };
 
 // Advance every CreatureComponent by one fixed tick. Pure function of registry state + dt + tuning.
 // `tuning` defaults to the compiled constants, so existing callers/tests are byte-identical.
-// INSTINCT-08: world XZ -> scent-grid cell (floor toward -inf; mirrors the
+// World XZ to scent-grid cell (floor toward negative infinity; mirrors the
 // ScentSteeringSystem::WorldToCell used on the LocomotionIntent path).
 inline int WorldToScentCell(float world, float origin, float cell_size) {
     const float v = (world - origin) / cell_size;
     int c = static_cast<int>(v);
-    if (v < static_cast<float>(c)) --c;
+    if (v < static_cast<float>(c))
+        --c;
     return c;
 }
 
-// INSTINCT-08 (Wave H I2.3): OPTIONAL scent-tracking inputs. When a ScentField is
+// Optional scent-tracking inputs. When a ScentField is
 // supplied, a PREDATOR with no directly-perceived target steers UP the prey-scent
 // gradient (channel 0) instead of wandering blind — the vertebrate half of the
 // stigmergy substrate on the BRAIN path (the ant/GOAP path uses ScentSteering's
 // LocomotionIntent, which ambient creatures never carry). Default nullptr keeps
 // every existing call byte-identical.
 //
-// INSTINCT-09 (retirement 2026-07-07): `use_perception_substrate` now DEFAULTS TRUE —
-// the shared substrate is the CANONICAL path; false selects the retained inline scan
-// (the byte-identical regression reference). When false, the per-creature nearest-target scan runs the original inline
-// snapshot loop and the tick is byte-identical. When true, that scan routes through
-// the SHARED PerceptionField (PerceptionSubstrate.h) — a deterministic, id-ordered
+// `use_perception_substrate` defaults true: the shared substrate is the canonical
+// path; false selects the retained inline scan
+// (the byte-identical regression reference). When false, the per-creature nearest-target scan runs
+// the original inline snapshot loop and the tick is byte-identical. When true, that scan routes
+// through the SHARED PerceptionField (PerceptionSubstrate.h) — a deterministic, id-ordered
 // neighbour scan built once per tick over the opposite-role live-target set — and
 // the per-creature considerTarget re-applies the EXACT sensory gate, so the chosen
 // target (and thus every downstream decision/movement) is UNCHANGED. The flag exists
 // so the shared substrate can be exercised without touching the default sim
 // trajectory (proven equivalent by test/ai/creature_brain_substrate_test.cpp).
-inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, float dt,
-                                                       const EcologyTuning& tuning = {},
-                                                       const ScentField* scent = nullptr,
-                                                       float scent_origin_x = 0.0f,
-                                                       float scent_origin_z = 0.0f,
-                                                       float scent_cell_size = 0.0f,
-                                                       bool use_perception_substrate = true) {
+inline CreatureBrainStats
+RunCreatureBrainSystemOnTick(entt::registry& reg,
+                             float dt,
+                             const EcologyTuning& tuning = {},
+                             const ScentField* scent = nullptr,
+                             float scent_origin_x = 0.0f,
+                             float scent_origin_z = 0.0f,
+                             float scent_cell_size = 0.0f,
+                             bool use_perception_substrate = true,
+                             const CreatureSpeciesRegistry* species = nullptr) {
     CreatureBrainStats stats;
     auto view = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
 
     std::vector<entt::entity> ents;
-    for (auto e : view) ents.push_back(e);
+    for (auto e : view)
+        ents.push_back(e);
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
@@ -141,7 +147,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
     struct Snap {
         entt::entity e;
         float x, z;
-        float hx, hz;  // prior-tick heading (wish velocity) for the Reynolds alignment term
+        float hx, hz; // prior-tick heading (wish velocity) for the Reynolds alignment term
         bool predator;
         bool eaten;
     };
@@ -150,7 +156,8 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
     for (auto e : ents) {
         const auto& tf = view.get<Comp::TransformComponent>(e);
         const auto& c = view.get<Comp::CreatureComponent>(e);
-        snap.push_back({e, tf.position.x, tf.position.z, c.wish_x, c.wish_z, c.is_predator, c.eaten});
+        snap.push_back(
+            {e, tf.position.x, tf.position.z, c.wish_x, c.wish_z, c.is_predator, c.eaten});
     }
 
     // Herd-flocking acceleration: bucket the snapshot into a per-role uniform spatial grid
@@ -174,9 +181,9 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         predGrid.Build(predPts);
         preyGrid.Build(preyPts);
     }
-    std::vector<std::uint32_t> herdHits;  // reused query scratch buffer across creatures
+    std::vector<std::uint32_t> herdHits; // reused query scratch buffer across creatures
 
-    // INSTINCT-09 FOLLOW-UP (additive, default OFF): build the SHARED PerceptionField over the
+    // When selected, build the shared PerceptionField over the
     // creatures' TARGET set ONCE per tick — one field of live PREDATORS (queried by prey looking
     // for threats) and one of live PREY (queried by predators looking for food). Each source's
     // ordinal is its snapshot index, and `snap` is id-sorted, so a per-creature Query returns the
@@ -188,22 +195,23 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
     // expressible as a per-source radius, so the field returns the full opposite-role candidate
     // set and the per-creature considerTarget re-applies the EXACT inline gate. Built only when
     // the flag is set, so the default path allocates nothing and stays byte-identical.
-    PerceptionField predTargetField;  // live predators — queried by PREY
-    PerceptionField preyTargetField;  // live prey — queried by PREDATORS
-    PerceptionSnapshot targetSnapshot;  // reused per-creature query buffer (Query clears it)
+    PerceptionField predTargetField;   // live predators — queried by PREY
+    PerceptionField preyTargetField;   // live prey — queried by PREDATORS
+    PerceptionSnapshot targetSnapshot; // reused per-creature query buffer (Query clears it)
     if (use_perception_substrate) {
         std::vector<PerceptionSourceInput> predSources, preySources;
         predSources.reserve(snap.size());
         preySources.reserve(snap.size());
         for (std::uint32_t i = 0; i < snap.size(); ++i) {
             const Snap& o = snap[i];
-            if (o.eaten) continue;  // carcasses are not live targets (inline scan skips o.eaten)
+            if (o.eaten)
+                continue; // carcasses are not live targets (inline scan skips o.eaten)
             PerceptionSourceInput in;
-            in.index = i;            // ordinal == snapshot index (id-sorted) -> id-ordered query
+            in.index = i; // ordinal == snapshot index (id-sorted) -> id-ordered query
             in.has_position = true;
             in.x = o.x;
-            in.z = o.z;              // y stays 0 -> the 3-D metric collapses to the XZ scan's plane
-            in.radius = 0.0f;        // ungated: considerTarget applies the per-perceiver gate
+            in.z = o.z;       // y stays 0 -> the 3-D metric collapses to the XZ scan's plane
+            in.radius = 0.0f; // ungated: considerTarget applies the per-perceiver gate
             (o.predator ? predSources : preySources).push_back(in);
         }
         predTargetField.Build(predSources);
@@ -224,24 +232,28 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         }
         const float sx = tf.position.x, sz = tf.position.z;
 
-        // FR-5 emergent PERCEPTION: a creature carrying a sensory genome only TARGETS the opposite-
+        //  emergent PERCEPTION: a creature carrying a sensory genome only TARGETS the opposite-
         // role creatures it can actually SENSE — hearing is omnidirectional within hearing_range;
         // vision is a gene-width cone (vision_cos_half_fov) within vision_range, faced along the
         // prior-tick heading. Heritable + mutable sensory genes are thus SELECTED by survival (a
         // creature that cannot sense a threat/food misses it). Genome-less creatures keep the
-        // unfiltered global-nearest scan (byte-identical to the pre-FR-5 brain; empty-roster worlds
+        // unfiltered global-nearest scan (byte-identical to the pre- brain; empty-roster worlds
         // run the whole brain as a no-op, so canonical/networked hashes are unaffected).
         const Comp::CreatureGenomeComponent* sg = reg.try_get<Comp::CreatureGenomeComponent>(e);
         float faceX = 0.0f, faceZ = 0.0f;
         if (sg != nullptr) {
-            const float hh = dm::Sqrt(snap[selfIdx].hx * snap[selfIdx].hx + snap[selfIdx].hz * snap[selfIdx].hz);
-            if (hh > 1e-4f) { faceX = snap[selfIdx].hx / hh; faceZ = snap[selfIdx].hz / hh; }
+            const float hh =
+                dm::Sqrt(snap[selfIdx].hx * snap[selfIdx].hx + snap[selfIdx].hz * snap[selfIdx].hz);
+            if (hh > 1e-4f) {
+                faceX = snap[selfIdx].hx / hh;
+                faceZ = snap[selfIdx].hz / hh;
+            }
         }
 
-        // INSTINCT-06 (Wave H I2.2): SUSTAINED STARVATION DEGRADES before the
+        //  ( starvation handling): SUSTAINED STARVATION DEGRADES before the
         // LifespanSystem death at hunger 1.0 — effective speed falls toward 0.5x
         // and the sensory ranges shrink alike as hunger crosses 0.85 -> 1.0
-        // (needs have consequences, FR-A3). Stateless: a pure function of the
+        // (needs have consequences, ). Stateless: a pure function of the
         // CURRENT hunger, so no new hashed state; a well-fed creature multiplies
         // by exactly 1.0f (IEEE identity) and stays byte-identical.
         const float starve01 = utility_clamp01((cr.hunger - 0.85f) / 0.15f);
@@ -253,7 +265,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         bool found = false;
         entt::entity te = entt::null;
         // Per-candidate sensory gate + first-wins nearest-keep, factored so the inline snapshot
-        // scan (default) and the INSTINCT-09 substrate path apply the IDENTICAL gate (genome
+        // scan (default) and the  substrate path apply the IDENTICAL gate (genome
         // hearing/vision cone, starvation shrink) and selection over the SAME id-ordered candidate
         // set — the two paths are equivalent. `o` is already known to be a LIVE opposite-role
         // creature (the inline filter / the field's Build partition guarantee it).
@@ -262,18 +274,20 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             const float d = dm::Sqrt(dx * dx + dz * dz);
             if (sg != nullptr) {
                 // Perceivable? hearing (omnidirectional within range) OR vision (cone
-                // within range). INSTINCT-06: both ranges shrink under starvation.
+                // within range).: both ranges shrink under starvation.
                 bool sensed = (d <= sg->hearing_range * starve_degrade);
                 if (!sensed && d <= sg->vision_range * starve_degrade) {
                     if (faceX == 0.0f && faceZ == 0.0f) {
-                        sensed = true;  // no prior heading (stationary) -> vision omnidirectional in range
+                        sensed = true; // no prior heading (stationary) -> vision omnidirectional in
+                                       // range
                     } else if (d > 1e-4f) {
                         sensed = ((dx * faceX + dz * faceZ) / d) >= sg->vision_cos_half_fov;
                     } else {
-                        sensed = true;  // target coincident with self
+                        sensed = true; // target coincident with self
                     }
                 }
-                if (!sensed) return;
+                if (!sensed)
+                    return;
             }
             if (d < bestDist) {
                 bestDist = d;
@@ -284,7 +298,7 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             }
         };
         if (use_perception_substrate) {
-            // INSTINCT-09 FOLLOW-UP (additive, default OFF): the shared substrate returns the
+            // The shared substrate returns the
             // OPPOSITE-role live-target set (self, same-role and carcasses pre-excluded at Build)
             // in id order — the same set/order the inline scan below visits after its
             // `o.e==e || same-role || eaten` skip. The field is UNGATED, so considerTarget
@@ -295,19 +309,20 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             PerceptionQueryInput tq;
             tq.has_position = true;
             tq.x = sx;
-            tq.z = sz;  // y stays 0 -> the substrate's 3-D metric collapses onto the XZ scan plane
+            tq.z = sz; // y stays 0 -> the substrate's 3-D metric collapses onto the XZ scan plane
             targetField.Query(tq, targetSnapshot);
             for (const PerceivedSource& ps : targetSnapshot.perceived) {
                 considerTarget(snap[ps.index]);
             }
         } else {
             for (const Snap& o : snap) {
-                if (o.e == e || o.predator == cr.is_predator || o.eaten) continue;
+                if (o.e == e || o.predator == cr.is_predator || o.eaten)
+                    continue;
                 considerTarget(o);
             }
         }
 
-        // INSTINCT-08 (Wave H I2.3): SCENT TRACKING. A predator with NO directly-
+        //  ( scent tracking): SCENT TRACKING. A predator with NO directly-
         // perceived prey follows the prey-scent gradient (channel 0) up-wind-trail:
         // the tracked point is a fixed stride along the Weber-normalized gradient
         // direction, at a nominal outside-catch distance so the arbiter picks Hunt
@@ -318,13 +333,19 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             const int cx = WorldToScentCell(sx, scent_origin_x, scent_cell_size);
             const int cz = WorldToScentCell(sz, scent_origin_z, scent_cell_size);
             float gdx = 0.0f, gdz = 0.0f;
-            const float conf = scent->GradientSteer(/*ch=*/0, cx, cz, /*sign=*/+1.0f,
-                                                    /*floor=*/1e-4f, /*k=*/0.05f, gdx, gdz);
+            const float conf = scent->GradientSteer(/*ch=*/0,
+                                                    cx,
+                                                    cz,
+                                                    /*sign=*/+1.0f,
+                                                    /*floor=*/1e-4f,
+                                                    /*k=*/0.05f,
+                                                    gdx,
+                                                    gdz);
             if (conf > 0.0f) {
-                tx = sx + gdx * 12.0f;   // a stride up the gradient
+                tx = sx + gdx * 12.0f; // a stride up the gradient
                 tz = sz + gdz * 12.0f;
-                bestDist = 20.0f;        // nominal "smelled, not seen" distance
-                found = true;            // te stays null: nothing to catch yet
+                bestDist = 20.0f; // nominal "smelled, not seen" distance
+                found = true;     // te stays null: nothing to catch yet
             }
         }
 
@@ -346,8 +367,9 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         s.energy = cr.energy;
         // Circadian off-phase drives Sleep. Absent component -> activity stays 1.0 (always
         // active) -> Sleep utility 0 -> byte-identical to a world with no circadian creatures.
-        if (const auto* cc = reg.try_get<Comp::CircadianComponent>(e)) s.circadian_activity = cc->activity;
-        // INSTINCT-05: thirst joins the arbiter. Absent ThirstComponent -> both stay 0
+        if (const auto* cc = reg.try_get<Comp::CircadianComponent>(e))
+            s.circadian_activity = cc->activity;
+        // thirst joins the arbiter. Absent ThirstComponent -> both stay 0
         // -> Drink utility 0 -> byte-identical. The values are LAST tick's (the thirst
         // system runs after the brain in the session order) — the same fixed 1-tick
         // phase convention scent uses for wind.
@@ -361,58 +383,70 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             s.food_proximity = nearNorm;
         } else {
             s.threat_proximity = nearNorm;
-            s.food_proximity = 0.6f;  // prey graze ambient plants
+            s.food_proximity = 0.6f; // prey graze ambient plants
             // Herd alarm (opt-in via AlarmComponent): a prey that directly senses a predator
             // RAISES its alarm; and it flees on either the direct threat OR the propagated herd
             // alarm level (HerdAlarmSystem, slot 7) -- so the whole herd bolts together even if
             // only one saw the predator. Collective vigilance.
             if (auto* al = reg.try_get<Comp::AlarmComponent>(e)) {
                 al->alarmed = (nearNorm > 0.4f) ? 1u : 0u;
-                if (al->level > s.threat_proximity) s.threat_proximity = al->level;
+                if (al->level > s.threat_proximity)
+                    s.threat_proximity = al->level;
             }
         }
 
-        const CreatureAction act = DecideCreatureAction(s);
+        const CreatureSpecies* species_definition =
+            species ? species->Find(cr.species_id) : nullptr;
+        const CreatureAction act = DecideCreatureAction(
+            s, species_definition ? species_definition->brain : CreatureBrainParams{});
         cr.last_action = static_cast<int>(act);
 
         float dirx = 0.0f, dirz = 0.0f;
         switch (act) {
             case CreatureAction::Flee:
-                if (found) { dirx = sx - tx; dirz = sz - tz; }
+                if (found) {
+                    dirx = sx - tx;
+                    dirz = sz - tz;
+                }
                 break;
             case CreatureAction::Hunt:
-                if (found) { dirx = tx - sx; dirz = tz - sz; }
+                if (found) {
+                    dirx = tx - sx;
+                    dirz = tz - sz;
+                }
                 break;
             case CreatureAction::Wander: {
-                const float ang = 2.39996323f *
-                    static_cast<float>(entt::to_integral(e) % 16u + 1u);  // deterministic per-id heading
+                const float ang =
+                    2.39996323f * static_cast<float>(entt::to_integral(e) % 16u +
+                                                     1u); // deterministic per-id heading
                 dirx = dm::Cos(ang);
                 dirz = dm::Sin(ang);
                 break;
             }
             case CreatureAction::Graze:
-                cr.hunger = utility_clamp01(cr.hunger - tuning.hunger_graze_sate * dt);  // eating sates
+                cr.hunger =
+                    utility_clamp01(cr.hunger - tuning.hunger_graze_sate * dt); // eating sates
                 break;
             case CreatureAction::Rest:
-                cr.stamina = utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt);  // sprint fuel
-                cr.energy  = utility_clamp01(cr.energy + tuning.energy_rest_recover * dt);  // rest off fatigue
+                cr.stamina =
+                    utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt); // sprint fuel
+                cr.energy = utility_clamp01(cr.energy +
+                                            tuning.energy_rest_recover * dt); // rest off fatigue
                 break;
             case CreatureAction::Sleep:
                 // Deep rest: stay put (dirx/dirz remain 0 -> no wish velocity) and recover energy
                 // fast. Stamina recovers too. The per-tick drain below still applies (net recover).
                 cr.stamina = utility_clamp01(cr.stamina + tuning.stamina_rest_recover * dt);
-                cr.energy  = utility_clamp01(cr.energy + tuning.energy_sleep_recover * dt);
+                cr.energy = utility_clamp01(cr.energy + tuning.energy_sleep_recover * dt);
                 break;
             case CreatureAction::Drink:
-                // INSTINCT-05: the arbiter chose water — head along the thirst system's
+                // the arbiter chose water — head along the thirst system's
                 // cached direction toward the nearest hole (drinking itself happens in
                 // RunThirstOnTick once inside the radius). No component -> stay put.
-                if (th != nullptr) { dirx = th->wish_x; dirz = th->wish_z; }
-                break;
-            case CreatureAction::Forage:
-                // INSTINCT-05 seam: food-seeking movement arrives with availability
-                // sensing; until then Forage never wins (availability defaults 0) and
-                // this arm is unreachable — a deterministic stay-put if forced.
+                if (th != nullptr) {
+                    dirx = th->wish_x;
+                    dirz = th->wish_z;
+                }
                 break;
         }
 
@@ -440,11 +474,12 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             const UniformSpatialGrid& grid = cr.is_predator ? predGrid : preyGrid;
             grid.QueryRadius(sx, sz, herdHits);
             std::vector<std::pair<float, float>> herd;
-            std::vector<std::pair<float, float>> herdHeadings;  // index-aligned with `herd`
+            std::vector<std::pair<float, float>> herdHeadings; // index-aligned with `herd`
             herd.reserve(herdHits.size());
             herdHeadings.reserve(herdHits.size());
             for (std::uint32_t hi : herdHits) {
-                if (static_cast<std::size_t>(hi) == selfIdx) continue;
+                if (static_cast<std::size_t>(hi) == selfIdx)
+                    continue;
                 herd.emplace_back(snap[hi].x, snap[hi].z);
                 herdHeadings.emplace_back(snap[hi].hx, snap[hi].hz);
             }
@@ -453,11 +488,11 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
             // herd's mean heading. Tuning it to 0 (EcologyTuning / SystemConfig sim.ecology) skips
             // alignment inside ComputeFlockSteer and reverts to the pure cohesion+separation steer.
             FlockParams fp{};
-            fp.neighbor_radius   = tuning.flock_neighbor_radius;
+            fp.neighbor_radius = tuning.flock_neighbor_radius;
             fp.separation_radius = tuning.flock_separation_radius;
-            fp.cohesion_weight   = tuning.flock_cohesion_weight;
+            fp.cohesion_weight = tuning.flock_cohesion_weight;
             fp.separation_weight = tuning.flock_separation_weight;
-            fp.alignment_weight  = tuning.alignment_weight;
+            fp.alignment_weight = tuning.alignment_weight;
             const FlockSteer fs = ComputeFlockSteer(sx, sz, herd, fp, &herdHeadings);
             adirx += fs.x * tuning.herd_weight;
             adirz += fs.z * tuning.herd_weight;
@@ -469,13 +504,15 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
         cr.wish_z = 0.0f;
         if (len > 1.0e-5f) {
             const float inv = 1.0f / len;
-            // INSTINCT-06: the starving move at up to half pace (sprint included).
-            const float speed = ((act == CreatureAction::Flee || act == CreatureAction::Hunt)
-                                     ? cr.move_speed * 1.5f
-                                     : cr.move_speed) * starve_degrade;
+            // the starving move at up to half pace (sprint included).
+            const float speed =
+                ((act == CreatureAction::Flee || act == CreatureAction::Hunt) ? cr.move_speed * 1.5f
+                                                                              : cr.move_speed) *
+                starve_degrade;
             cr.wish_x = adirx * inv * speed;
             cr.wish_z = adirz * inv * speed;
-            cr.stamina = utility_clamp01(cr.stamina - tuning.stamina_move_drain * dt);  // moving tires
+            cr.stamina =
+                utility_clamp01(cr.stamina - tuning.stamina_move_drain * dt); // moving tires
             // When a Jolt character owns this creature (CreaturePhysicsComponent), it
             // integrates the wish velocity against the terrain (gravity/collision/slopes);
             // the physics bridge reads the resolved position back. Otherwise — the pure,
@@ -485,11 +522,13 @@ inline CreatureBrainStats RunCreatureBrainSystemOnTick(entt::registry& reg, floa
                 tf.position.z += cr.wish_z * dt;
             }
         }
-        cr.hunger = utility_clamp01(cr.hunger + tuning.hunger_growth_per_second * dt);  // hunger grows
-        cr.energy = utility_clamp01(cr.energy - tuning.energy_drain_per_second * dt);  // awake tires (Rest net-recovers)
+        cr.hunger =
+            utility_clamp01(cr.hunger + tuning.hunger_growth_per_second * dt); // hunger grows
+        cr.energy = utility_clamp01(cr.energy - tuning.energy_drain_per_second *
+                                                    dt); // awake tires (Rest net-recovers)
         ++stats.updated;
     }
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

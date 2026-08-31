@@ -1,9 +1,9 @@
-// SHIELD-02 (spec 017-B step 1): sim-truth publication is DECOUPLED from render
+//  ( step 1): sim-truth publication is DECOUPLED from render
 // meshing. When a coarse (surface-band-only) chunk is promoted to LOD0, its full
 // voxel field (sdf/heightmap/material) must go live via the promotion lane —
-// observable through wait_for_promotion_jobs() — strictly BEFORE and independently
+// observable through wait_for_promotion_jobs — strictly BEFORE and independently
 // of any render-mesh publish (current_lod flip / mesh_vertices swap). On the
-// pre-SHIELD-02 code this is impossible: the voxel field is published inside the
+// pre- code this is impossible: the voxel field is published inside the
 // same process_completed_meshing_jobs body that stores current_lod=0, so the
 // decoupling pin below goes RED. The trailing assertions are the standing
 // regression pin: the render-mesh publish never writes sim truth.
@@ -18,9 +18,9 @@
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 namespace fs = std::filesystem;
 
@@ -29,16 +29,16 @@ namespace {
 using Luminumbra::ChunkState;
 using Luminumbra::JobSystem;
 using Luminumbra::Vec3;
-using Luminumbra::world::GameSession;
 using Luminumbra::Systems::SHIELD_WorldSystem;
+using Luminumbra::world::GameSession;
 
 #ifndef LUMINUMBRA_SOURCE_ROOT
 #define LUMINUMBRA_SOURCE_ROOT "."
 #endif
 
-constexpr std::size_t kFullSdfLattice =
-    static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-    (Luminumbra::CHUNK_SIZE_Y + 1) * (Luminumbra::CHUNK_SIZE_Z + 1);
+constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Y + 1) *
+                                        (Luminumbra::CHUNK_SIZE_Z + 1);
 
 // FNV-1a-64 over a raw byte span (the meshing_hardening_test helper).
 constexpr std::uint64_t kFnvOffsetBasis = 14695981039346656037ull;
@@ -54,7 +54,7 @@ std::uint64_t Fnv1a64(const void* data, std::size_t size) {
     return hash;
 }
 
-template <typename T>
+template<typename T>
 std::uint64_t HashVec(const std::vector<T>& v) {
     return Fnv1a64(v.data(), v.size() * sizeof(T));
 }
@@ -66,13 +66,18 @@ public:
         root_ = fs::temp_directory_path() / "luminumbra_promotion_decoupling_test";
         fs::remove_all(root_);
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
-        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" / "default.json",
+        fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
+                          "default.json",
                       root_ / "worlds" / "atlas" / "presets" / "default.json");
     }
-    ~HeadlessRoot() { std::error_code ec; fs::remove_all(root_, ec); }
+    ~HeadlessRoot() {
+        std::error_code ec;
+        fs::remove_all(root_, ec);
+    }
     [[nodiscard]] std::string root_string() const {
         return root_.string() + static_cast<char>(fs::path::preferred_separator);
     }
+
 private:
     fs::path root_;
 };
@@ -104,12 +109,18 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
         // generated (heightmap present, sdf empty), with an active coarse render mesh.
         std::shared_ptr<Luminumbra::Chunk> target;
         for (const auto& chunk : world->snapshot_streamed_chunks()) {
-            if (!chunk) continue;
-            if (chunk->get_state() != ChunkState::Ready) continue;
-            if (chunk->current_lod.load(std::memory_order_acquire) <= 0) continue;
-            if (!chunk->sdf_data.empty()) continue;
-            if (chunk->heightmap_data.empty()) continue;
-            if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty()) continue;
+            if (!chunk)
+                continue;
+            if (chunk->get_state() != ChunkState::Ready)
+                continue;
+            if (chunk->current_lod.load(std::memory_order_acquire) <= 0)
+                continue;
+            if (!chunk->sdf_data.empty())
+                continue;
+            if (chunk->heightmap_data.empty())
+                continue;
+            if (chunk->mesh_vertices.empty() || chunk->mesh_indices.empty())
+                continue;
             target = chunk;
             break;
         }
@@ -124,7 +135,7 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
 
         // THE DECOUPLING PIN. Drive updates WITHOUT the meshing barrier — only the
         // promotion lane may be drained. Sim truth must go live via that lane while
-        // the chunk's render state (current_lod) is still coarse. Pre-SHIELD-02,
+        // the chunk's render state (current_lod) is still coarse. Pre-,
         // sim truth only goes live inside the render-mesh publish (which stores
         // current_lod=0 in the same body), so the lod check below fails.
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
@@ -142,7 +153,7 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
         EXPECT_GT(target->current_lod.load(std::memory_order_acquire), 0)
             << "current_lod is already 0 at the instant sim truth went live — the voxel "
                "field was published by the render-mesh publish, not independently of it "
-               "(SHIELD-02 decoupling absent)";
+               "( decoupling absent)";
 
         // Byte oracle: the promoted field is pure generation output, and publication
         // did not mark the chunk dirty (GenerateChunkData's contract).
@@ -171,8 +182,7 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
             << "LOD0 render mesh never published after promotion";
         EXPECT_EQ(target->get_state(), ChunkState::Ready);
         EXPECT_FALSE(target->mesh_vertices.empty());
-        EXPECT_EQ(HashVec(target->sdf_data), sdf_hash)
-            << "render-mesh publish mutated sdf_data";
+        EXPECT_EQ(HashVec(target->sdf_data), sdf_hash) << "render-mesh publish mutated sdf_data";
         EXPECT_EQ(HashVec(target->heightmap_data), heightmap_hash)
             << "render-mesh publish mutated heightmap_data";
         EXPECT_EQ(HashVec(target->material_data), material_hash)
@@ -181,7 +191,7 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
         // The promotion lane actually carried the work (not some other path).
         EXPECT_GT(world->promotion_dispatch_totals().chunks, 0u)
             << "no promotion-lane dispatches recorded — the target was promoted "
-               "by something other than the SHIELD-02 promotion pipeline";
+               "by something other than the  promotion pipeline";
     }
     jobs.shutdown();
 }

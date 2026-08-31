@@ -1,6 +1,6 @@
 #pragma once
 
-// gate-populated-world-replay (T002): the id-ordered ECOLOGY sub-hash.
+// gate-populated-world-replay: the id-ordered ECOLOGY sub-hash.
 //
 // This is the sim-truth checksum over the live creature roster that the
 // PopulatedWorldReplay gate (and the canonical world_hash, approach a) fold in
@@ -12,7 +12,7 @@
 // (move_speed, generation, age_ticks), alarm level, and pack state (coord_x,
 // coord_z, in_pack).
 //
-// NEUTRALITY (additivity guard, plan §Architecture): an EMPTY roster (no
+// NEUTRALITY (additivity guard, architecture contract): an EMPTY roster (no
 // CreatureComponent) hashes to the empty string -- byte-identical to the scent
 // sub-hash's "empty when no participant opted in" contract
 // (GameSession::ComputeScentSubHash). This is what lets ComposeWorldHash append
@@ -20,11 +20,11 @@
 // default (empty roster) the appended value is empty, so the composite differs
 // from the pre-fold composite ONLY by the literal `|ecology:` suffix.
 //
-// DETERMINISM (NFR-001): id-ordered traversal (entity ids sorted ascending), so
+// DETERMINISM: id-ordered traversal (entity ids sorted ascending), so
 // the hash is independent of registry/view iteration order; no RNG, no wall
 // clock, no libm transcendentals -- it only READS clamped sim floats and emits a
 // canonical text the StableChecksum (fnv1a_64_stable_json) folds. Pure function
-// of the registry state => byte-exact across re-runs (AC-005).
+// of the registry state => byte-exact across re-runs.
 
 #include <algorithm>
 #include <cstdint>
@@ -35,12 +35,12 @@
 
 #include <entt/entt.hpp>
 
+#include "components/AlarmComponents.h"
+#include "components/CircadianComponents.h" //  v2: circadian activity
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
-#include "components/AlarmComponents.h"
 #include "components/PackHunterComponents.h"
-#include "components/ThirstComponents.h"     // INSTINCT-10 v2: thirst state
-#include "components/CircadianComponents.h"  // INSTINCT-10 v2: circadian activity
+#include "components/ThirstComponents.h"           //  v2: thirst state
 #include "persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum
 
 namespace luminumbra::ai {
@@ -66,7 +66,7 @@ inline std::string ComputeEcologySubHash(const entt::registry& registry) {
     // float precision (17 sig digits) so no projected bit is lost before the
     // StableChecksum folds it. Per-component presence is encoded so a creature
     // with a genome and one without are unambiguously distinguished.
-    // INSTINCT-10 (Wave H I3): sub-hash v2 — energy, species_id, the heritable
+    // sub-hash v2 — energy, species_id, the heritable
     // SENSORY genes, thirst, and circadian activity join the projection.
     // Divergence in any of these was previously invisible to the oracle until it
     // flipped an action; now it localizes under `ecology` directly. The version
@@ -77,14 +77,12 @@ inline std::string ComputeEcologySubHash(const entt::registry& registry) {
     for (auto e : es) {
         const auto& tf = registry.get<Comp::TransformComponent>(e);
         const auto& cr = registry.get<Comp::CreatureComponent>(e);
-        bytes << tf.position.x << ',' << tf.position.y << ',' << tf.position.z << ','
-              << cr.wish_x << ',' << cr.wish_z << ',' << cr.hunger << ','
-              << cr.stamina << ',' << static_cast<int>(cr.eaten) << ','
-              << cr.energy << ',' << cr.species_id;
+        bytes << tf.position.x << ',' << tf.position.y << ',' << tf.position.z << ',' << cr.wish_x
+              << ',' << cr.wish_z << ',' << cr.hunger << ',' << cr.stamina << ','
+              << static_cast<int>(cr.eaten) << ',' << cr.energy << ',' << cr.species_id;
         if (const auto* gn = registry.try_get<Comp::CreatureGenomeComponent>(e)) {
-            bytes << ",g:" << gn->move_speed << ',' << gn->generation << ',' << gn->age_ticks
-                  << ',' << gn->vision_range << ',' << gn->hearing_range << ','
-                  << gn->vision_cos_half_fov;
+            bytes << ",g:" << gn->move_speed << ',' << gn->generation << ',' << gn->age_ticks << ','
+                  << gn->vision_range << ',' << gn->hearing_range << ',' << gn->vision_cos_half_fov;
         }
         if (const auto* al = registry.try_get<Comp::AlarmComponent>(e)) {
             bytes << ",a:" << al->level;
@@ -104,4 +102,4 @@ inline std::string ComputeEcologySubHash(const entt::registry& registry) {
     return ::Luminumbra::Persistence::StableChecksum(bytes.str());
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

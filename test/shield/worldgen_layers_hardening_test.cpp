@@ -1,5 +1,5 @@
 // ADVERSARIAL determinism-hardening gate for the layered worldgen snapshot
-// pipeline + structure/feature placement (T-WORLDGEN-HARDEN).
+// pipeline + structure/feature placement.
 //
 // The sibling test/shield/test_worldgen_layer_snapshots.cpp exercises the
 // happy path: a chunk generates, meshes, and its layer metrics look sane. This
@@ -37,8 +37,8 @@
 #include <string>
 #include <vector>
 
-#include "world/Chunk.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 #include "world/StructurePlacement.h"
 
@@ -93,9 +93,8 @@ TerrainGenParams FlatParams(float height_offset) {
 std::size_t SdfIndex(int x, int y, int z) {
     constexpr int size_x = CHUNK_SIZE_X + 1;
     constexpr int size_y = CHUNK_SIZE_Y + 1;
-    return static_cast<std::size_t>(x)
-        + static_cast<std::size_t>(y) * size_x
-        + static_cast<std::size_t>(z) * size_x * size_y;
+    return static_cast<std::size_t>(x) + static_cast<std::size_t>(y) * size_x +
+           static_cast<std::size_t>(z) * size_x * size_y;
 }
 
 std::size_t HeightIndex(int x, int z) {
@@ -120,21 +119,25 @@ bool VerticesEqual(const VoxelVertex& a, const VoxelVertex& b) {
 }
 
 bool MeshesByteEqual(const Chunk& a, const Chunk& b) {
-    if (a.mesh_vertices.size() != b.mesh_vertices.size()) return false;
-    if (a.mesh_indices.size() != b.mesh_indices.size()) return false;
+    if (a.mesh_vertices.size() != b.mesh_vertices.size())
+        return false;
+    if (a.mesh_indices.size() != b.mesh_indices.size())
+        return false;
     for (std::size_t i = 0; i < a.mesh_vertices.size(); ++i) {
-        if (!VerticesEqual(a.mesh_vertices[i], b.mesh_vertices[i])) return false;
+        if (!VerticesEqual(a.mesh_vertices[i], b.mesh_vertices[i]))
+            return false;
     }
     for (std::size_t i = 0; i < a.mesh_indices.size(); ++i) {
-        if (a.mesh_indices[i] != b.mesh_indices[i]) return false;
+        if (a.mesh_indices[i] != b.mesh_indices[i])
+            return false;
     }
     return true;
 }
 
 // In-memory structure pool (no data files needed) so the pure placement /
 // assembly functions can be hammered deterministically.
-World::StructureTemplatePool MakePool(const std::string& type, u32 salt,
-                                      int spacing, int separation, float density) {
+World::StructureTemplatePool
+MakePool(const std::string& type, u32 salt, int spacing, int separation, float density) {
     World::StructureTemplatePool pool;
     pool.type = type;
     pool.spacing = spacing;
@@ -168,7 +171,7 @@ World::StructureTemplatePool MakePool(const std::string& type, u32 salt,
     cap.sockets.push_back(cap_socket);
     pool.pieces.push_back(cap);
 
-    // content_hash is consulted by ok() only via pieces non-empty; set a value.
+    // content_hash is consulted by ok only via pieces non-empty; set a value.
     pool.content_hash = 0xABCDEF1234567890ull;
     return pool;
 }
@@ -233,8 +236,7 @@ TEST(WorldgenHardening, GenerationOrderDoesNotAffectChunkA) {
         << "chunk A SDF depends on whether neighbour B was generated first";
     EXPECT_EQ(a_first.heightmap_data, a_second.heightmap_data)
         << "chunk A heightmap depends on generation order";
-    EXPECT_EQ(b_first.sdf_data, b_second.sdf_data)
-        << "chunk B SDF depends on generation order";
+    EXPECT_EQ(b_first.sdf_data, b_second.sdf_data) << "chunk B SDF depends on generation order";
 }
 
 TEST(WorldgenHardening, MeshIsByteIdenticalAcrossOrderings) {
@@ -333,9 +335,8 @@ TEST(WorldgenHardening, SeamSdfAgreesAcrossXBoundary) {
         for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
             const float lv = left.sdf_data[SdfIndex(CHUNK_SIZE_X, y, z)];
             const float rv = right.sdf_data[SdfIndex(0, y, z)];
-            EXPECT_FLOAT_EQ(lv, rv)
-                << "X-seam SDF mismatch at y=" << y << " z=" << z
-                << " (crack between chunk (0,0,0) and (1,0,0))";
+            EXPECT_FLOAT_EQ(lv, rv) << "X-seam SDF mismatch at y=" << y << " z=" << z
+                                    << " (crack between chunk (0,0,0) and (1,0,0))";
         }
     }
 }
@@ -403,16 +404,16 @@ TEST(WorldgenHardening, SeamHeightMatchesGetTerrainHeightAt) {
     for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
         for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
             const float stored = chunk.heightmap_data[HeightIndex(x, z)];
-            const float analytic = world.GetTerrainHeightAt(
-                static_cast<float>(base.x + x), static_cast<float>(base.z + z));
+            const float analytic = world.GetTerrainHeightAt(static_cast<float>(base.x + x),
+                                                            static_cast<float>(base.z + z));
             // BYTE-EXACT (was EXPECT_FLOAT_EQ = 4-ULP). The batched heightmap fill
             // (ComputeShapedHeightGrid / GenUniformGrid2D, SIMD) and the scalar
             // GetTerrainHeightAt (GenSingle2D) must agree to the BIT for either to be a
             // determinism-safe stand-in for the other (e.g. the water init reading the
             // heightmap instead of re-sampling, where lround->mm tips on a sub-ULP diff).
             EXPECT_EQ(stored, analytic)
-                << "heightmap node BIT-disagrees with GetTerrainHeightAt at world ("
-                << (base.x + x) << "," << (base.z + z) << ")";
+                << "heightmap node BIT-disagrees with GetTerrainHeightAt at world (" << (base.x + x)
+                << "," << (base.z + z) << ")";
         }
     }
 }
@@ -455,9 +456,8 @@ TEST(WorldgenHardening, SeamMeshVerticesShareBoundaryPositions) {
         for (int y = 0; y <= CHUNK_SIZE_Y; ++y) {
             const float lv = left.sdf_data[SdfIndex(CHUNK_SIZE_X, y, z)];
             const float rv = right.sdf_data[SdfIndex(0, y, z)];
-            EXPECT_FLOAT_EQ(lv, rv)
-                << "shared-plane SDF disagrees at (y=" << y << ", z=" << z
-                << ") -- generation is not a pure function of world coordinate";
+            EXPECT_FLOAT_EQ(lv, rv) << "shared-plane SDF disagrees at (y=" << y << ", z=" << z
+                                    << ") -- generation is not a pure function of world coordinate";
         }
     }
 
@@ -469,7 +469,8 @@ TEST(WorldgenHardening, SeamMeshVerticesShareBoundaryPositions) {
     auto on_plane = [&](const std::vector<VoxelVertex>& verts, float local_x) {
         std::vector<Vec3> out;
         for (const VoxelVertex& v : verts) {
-            if (std::abs(v.position.x - local_x) <= kEps) out.push_back(v.position);
+            if (std::abs(v.position.x - local_x) <= kEps)
+                out.push_back(v.position);
         }
         return out;
     };
@@ -489,9 +490,8 @@ TEST(WorldgenHardening, SeamMeshVerticesShareBoundaryPositions) {
                 break;
             }
         }
-        EXPECT_TRUE(matched)
-            << "left seam vertex at (y=" << lp.y << ", z=" << lp.z
-            << ") has no matching right-chunk vertex (watertightness hole)";
+        EXPECT_TRUE(matched) << "left seam vertex at (y=" << lp.y << ", z=" << lp.z
+                             << ") has no matching right-chunk vertex (watertightness hole)";
     }
 }
 
@@ -602,8 +602,8 @@ TEST(WorldgenHardening, AllNormalsAreUnitLength) {
     GenerateAndMesh(world, chunk, 1);
     ASSERT_FALSE(chunk.mesh_vertices.empty());
     for (const VoxelVertex& v : chunk.mesh_vertices) {
-        const float len = std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y +
-                                    v.normal.z * v.normal.z);
+        const float len =
+            std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z);
         EXPECT_TRUE(std::isfinite(len));
         EXPECT_NEAR(len, 1.0f, 1.0e-3f) << "non-unit vertex normal";
     }
@@ -616,15 +616,15 @@ TEST(WorldgenHardening, AllTrianglesNonDegenerateAndIndexed) {
     GenerateAndMesh(world, chunk, 1);
     ASSERT_EQ(chunk.mesh_indices.size() % 3u, 0u);
     for (std::size_t i = 0; i + 2u < chunk.mesh_indices.size(); i += 3u) {
-        const u32 a = chunk.mesh_indices[i], b = chunk.mesh_indices[i + 1], c = chunk.mesh_indices[i + 2];
+        const u32 a = chunk.mesh_indices[i], b = chunk.mesh_indices[i + 1],
+                  c = chunk.mesh_indices[i + 2];
         ASSERT_LT(a, chunk.mesh_vertices.size());
         ASSERT_LT(b, chunk.mesh_vertices.size());
         ASSERT_LT(c, chunk.mesh_vertices.size());
         const Vec3 ea = chunk.mesh_vertices[b].position - chunk.mesh_vertices[a].position;
         const Vec3 eb = chunk.mesh_vertices[c].position - chunk.mesh_vertices[a].position;
-        const Vec3 cr(ea.y * eb.z - ea.z * eb.y,
-                      ea.z * eb.x - ea.x * eb.z,
-                      ea.x * eb.y - ea.y * eb.x);
+        const Vec3 cr(
+            ea.y * eb.z - ea.z * eb.y, ea.z * eb.x - ea.x * eb.z, ea.x * eb.y - ea.y * eb.x);
         const float area2 = std::sqrt(cr.x * cr.x + cr.y * cr.y + cr.z * cr.z);
         EXPECT_GT(area2, 1.0e-7f) << "degenerate (zero-area) triangle " << (i / 3);
     }
@@ -654,10 +654,14 @@ TEST(WorldgenHardening, AllSolidChunkHasNoInteriorTriangles) {
     // Every SDF sample must be solid (negative) -- confirm the fixture.
     bool all_solid = true;
     for (float d : chunk.sdf_data) {
-        if (d >= 0.0f) { all_solid = false; break; }
+        if (d >= 0.0f) {
+            all_solid = false;
+            break;
+        }
     }
     ASSERT_TRUE(all_solid) << "fixture chunk is not fully solid";
-    EXPECT_TRUE(chunk.mesh_vertices.empty()) << "fully-solid interior chunk produced stray triangles";
+    EXPECT_TRUE(chunk.mesh_vertices.empty())
+        << "fully-solid interior chunk produced stray triangles";
 }
 
 TEST(WorldgenHardening, EmptyChunkRemeshClearsPreviousMesh) {
@@ -754,8 +758,8 @@ TEST(WorldgenHardening, SeamStraddlingSiteEnumeratedFromBothRegions) {
     // off-by-one drop at the seam, no duplicate.
     const World::StructureTemplatePool pool = MakePool("camp", 0x0BADu, 32, 6, 0.6f);
 
-    const int seam = 0;            // world-x seam between the two tiles
-    const int half = 96;           // tile half-width (multiple of spacing-ish)
+    const int seam = 0;  // world-x seam between the two tiles
+    const int half = 96; // tile half-width (multiple of spacing-ish)
     const int z0 = -half, z1 = half;
 
     const std::vector<World::StructureSite> left =
@@ -770,11 +774,14 @@ TEST(WorldgenHardening, SeamStraddlingSiteEnumeratedFromBothRegions) {
         return std::make_tuple(s.origin.x, s.origin.z, s.site_seed);
     };
     std::map<std::tuple<int, int, u64>, int> union_count;
-    for (const auto& s : left) ++union_count[key(s)];
-    for (const auto& s : right) ++union_count[key(s)];
+    for (const auto& s : left)
+        ++union_count[key(s)];
+    for (const auto& s : right)
+        ++union_count[key(s)];
 
     std::map<std::tuple<int, int, u64>, int> whole_count;
-    for (const auto& s : whole) ++whole_count[key(s)];
+    for (const auto& s : whole)
+        ++whole_count[key(s)];
 
     // No site may be produced by BOTH halves (the seam is exclusive on one
     // side), and the union of the two halves must exactly equal the whole-tile
@@ -812,21 +819,21 @@ TEST(WorldgenHardening, SitesInAreaIncludesSiteWhoseJitterReachesIntoWindow) {
     for (int cz = -10; cz <= 10; ++cz) {
         for (int cx = -5; cx <= 15; ++cx) {
             const auto s = World::SiteInCell(pool, kSeed, cx, cz);
-            if (s && s->origin.x >= min_x && s->origin.x < max_x &&
-                s->origin.z >= min_z && s->origin.z < max_z) {
+            if (s && s->origin.x >= min_x && s->origin.x < max_x && s->origin.z >= min_z &&
+                s->origin.z < max_z) {
                 ++brute[std::make_tuple(s->origin.x, s->origin.z)];
             }
         }
     }
     std::map<std::tuple<int, int>, int> got_set;
-    for (const auto& s : got) ++got_set[std::make_tuple(s.origin.x, s.origin.z)];
+    for (const auto& s : got)
+        ++got_set[std::make_tuple(s.origin.x, s.origin.z)];
 
     EXPECT_EQ(got_set.size(), brute.size())
         << "SitesInArea cell-scan range misses sites whose jitter reaches into the window";
     for (const auto& [k, n] : brute) {
-        EXPECT_EQ(got_set[k], n)
-            << "site at x=" << std::get<0>(k) << " z=" << std::get<1>(k)
-            << " inside the window but not enumerated (cell-scan off-by-one)";
+        EXPECT_EQ(got_set[k], n) << "site at x=" << std::get<0>(k) << " z=" << std::get<1>(k)
+                                 << " inside the window but not enumerated (cell-scan off-by-one)";
     }
 }
 
@@ -899,8 +906,7 @@ TEST(WorldgenHardening, AssembledVoxelHashIsOrderIndependent) {
     std::vector<World::StructureVoxel> voxels = World::AssembleStructure(pool, *site);
     ASSERT_FALSE(voxels.empty());
     std::vector<World::StructureVoxel> reversed(voxels.rbegin(), voxels.rend());
-    EXPECT_EQ(World::ComputeAssembledVoxelHash(voxels),
-              World::ComputeAssembledVoxelHash(reversed))
+    EXPECT_EQ(World::ComputeAssembledVoxelHash(voxels), World::ComputeAssembledVoxelHash(reversed))
         << "assembled voxel hash depends on emission order (not canonicalized)";
 }
 
@@ -926,8 +932,12 @@ TEST(WorldgenHardening, StructureSaltSeparatesTypes) {
         for (int cx = -5; cx <= 5; ++cx) {
             const auto sa = World::SiteInCell(a, kSeed, cx, cz);
             const auto sb = World::SiteInCell(b, kSeed, cx, cz);
-            if (sa.has_value() != sb.has_value()) { ++differences; continue; }
-            if (sa && sb && sa->origin != sb->origin) ++differences;
+            if (sa.has_value() != sb.has_value()) {
+                ++differences;
+                continue;
+            }
+            if (sa && sb && sa->origin != sb->origin)
+                ++differences;
         }
     }
     EXPECT_GT(differences, 0) << "type salt does not separate placement streams";
@@ -940,8 +950,12 @@ TEST(WorldgenHardening, DifferentWorldSeedMovesSites) {
         for (int cx = -5; cx <= 5; ++cx) {
             const auto a = World::SiteInCell(pool, kSeed, cx, cz);
             const auto b = World::SiteInCell(pool, kSeed + 1, cx, cz);
-            if (a.has_value() != b.has_value()) { ++differences; continue; }
-            if (a && b && (a->origin != b->origin || a->site_seed != b->site_seed)) ++differences;
+            if (a.has_value() != b.has_value()) {
+                ++differences;
+                continue;
+            }
+            if (a && b && (a->origin != b->origin || a->site_seed != b->site_seed))
+                ++differences;
         }
     }
     EXPECT_GT(differences, 0) << "world seed has no effect on structure placement";
@@ -983,8 +997,7 @@ TEST(WorldgenHardening, CoarseHeightMatchesFineHeightForStepOne) {
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     for (float x = -40.0f; x <= 40.0f; x += 9.0f) {
         for (float z = -40.0f; z <= 40.0f; z += 11.0f) {
-            EXPECT_FLOAT_EQ(world.GetTerrainHeightAt(x, z),
-                            world.GetTerrainHeightAtCoarse(x, z, 1))
+            EXPECT_FLOAT_EQ(world.GetTerrainHeightAt(x, z), world.GetTerrainHeightAtCoarse(x, z, 1))
                 << "coarse step-1 height diverges from fine height at (" << x << "," << z << ")";
         }
     }

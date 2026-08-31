@@ -1,10 +1,10 @@
-// GPU-03 + GPU-P05 (spec 021 rank 66) leg B: the RHI pilot's backend-fidelity
-// go/no-go. Renders the GPU-09 calibration cube two ways in ONE process/GL context
+//  + leg B: the RHI pilot's backend-fidelity
+// go/no-go. Renders the  calibration cube two ways in ONE process/GL context
 // -- raw GL (the golden) and GL-via-Diligent (the candidate) -- and FLIP-compares
-// them with rendering/InProcessFlip.h, the SAME metric GPU-09 calibrated.
+// them with rendering/InProcessFlip.h, the SAME metric  calibrated.
 //
-// Pre-registered threshold (scratchpad/rank66-preregistered-threshold.md, anchored
-// on dual_backend_flip.json's delta=1 = 0.0027451, NOT the ~0.08 offline full-frame
+// Pre-registered threshold, anchored on dual_backend_flip.json's
+// delta=1 = 0.0027451, not the ~0.08 offline full-frame
 // gate): two backends running math-identical shaders on identical geometry must be
 // near-bit-identical, so GO requires score < 0.0027451 (below the smallest calibrated
 // sub-perceptual perturbation). Both row orientations are measured and reported: GL
@@ -14,12 +14,13 @@
 // This is leg B only (Diligent's GL backend fidelity). Leg A (Slang shader-port on
 // raw GL) and leg C (native-Vulkan render vs raw-GL golden) are separate. Neither
 // leg tests Slang-output THROUGH Diligent -- that composition is staged to the mass
-// port (GPU-08), not this pilot go/no-go.
+// port, not this pilot go/no-go.
 
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -57,7 +58,7 @@ namespace {
 #define LUMINUMBRA_TEST_ARTIFACT_DIR "."
 #endif
 
-// The pre-registered go-thresholds (scratchpad/rank66-preregistered-threshold.md):
+// The pre-registered go thresholds:
 //   leg B (GL-via-Diligent, same driver as raw GL): delta=1 = 0.0027451 (near-bit).
 //   leg C (native Vulkan, different rasterizer/compiler + NDC): delta=16 = 0.0439216
 //     ("no structural/perceptual difference" once conventions are normalised).
@@ -93,11 +94,17 @@ public:
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -108,7 +115,8 @@ private:
 
 std::string ReadTextFile(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
-    if (!file) return {};
+    if (!file)
+        return {};
     std::string s((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     return s;
 }
@@ -138,13 +146,14 @@ GLuint CompileShader(const fs::path& path, GLenum type) {
 }
 
 // The raw-GL golden -- byte-identical to dual_backend_flip_test's RenderCubeRawGl (so
-// the GPU-09 calibration applies), lifted here against the shared harness header.
-std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<MeshVertex>& mesh,
-                                          const RenderParams& params) {
+// the  calibration applies), lifted here against the shared harness header.
+std::vector<std::uint8_t>
+RenderCubeRawGl(GLuint program, const std::vector<MeshVertex>& mesh, const RenderParams& params) {
     GLuint color_tex = 0, depth_rb = 0, fbo = 0, vao = 0, vbo = 0;
     glGenTextures(1, &color_tex);
     glBindTexture(GL_TEXTURE_2D, color_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCubeWidth, kCubeHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(
+        GL_TEXTURE_2D, 0, GL_RGBA8, kCubeWidth, kCubeHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -162,13 +171,23 @@ std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<Mesh
     glGenBuffers(1, &vbo);
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.size() * sizeof(MeshVertex)),
-                 mesh.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(mesh.size() * sizeof(MeshVertex)),
+                 mesh.data(),
+                 GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex),
+    glVertexAttribPointer(0,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(MeshVertex),
                           reinterpret_cast<void*>(offsetof(MeshVertex, px)));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(MeshVertex),
+    glVertexAttribPointer(1,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(MeshVertex),
                           reinterpret_cast<void*>(offsetof(MeshVertex, nx)));
 
     glViewport(0, 0, kCubeWidth, kCubeHeight);
@@ -178,8 +197,8 @@ std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<Mesh
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const glm::mat4 model(1.0f);
-    const glm::mat4 view = glm::lookAt(params.camera_position, params.camera_target,
-                                       glm::vec3{0.0f, 1.0f, 0.0f});
+    const glm::mat4 view =
+        glm::lookAt(params.camera_position, params.camera_target, glm::vec3{0.0f, 1.0f, 0.0f});
     const glm::mat4 projection = glm::perspective(
         glm::radians(45.0f), static_cast<float>(kCubeWidth) / kCubeHeight, 0.1f, 128.0f);
     const glm::mat3 normal_matrix(1.0f);
@@ -187,12 +206,23 @@ std::vector<std::uint8_t> RenderCubeRawGl(GLuint program, const std::vector<Mesh
     glUseProgram(program);
     glUniformMatrix4fv(glGetUniformLocation(program, "model"), 1, GL_FALSE, glm::value_ptr(model));
     glUniformMatrix4fv(glGetUniformLocation(program, "view"), 1, GL_FALSE, glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
-    glUniformMatrix3fv(glGetUniformLocation(program, "normalMatrix"), 1, GL_FALSE, glm::value_ptr(normal_matrix));
-    glUniform3f(glGetUniformLocation(program, "lightPos"), params.light_pos.x, params.light_pos.y, params.light_pos.z);
-    glUniform3f(glGetUniformLocation(program, "viewPos"), params.camera_position.x, params.camera_position.y, params.camera_position.z);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
+    glUniformMatrix3fv(
+        glGetUniformLocation(program, "normalMatrix"), 1, GL_FALSE, glm::value_ptr(normal_matrix));
+    glUniform3f(glGetUniformLocation(program, "lightPos"),
+                params.light_pos.x,
+                params.light_pos.y,
+                params.light_pos.z);
+    glUniform3f(glGetUniformLocation(program, "viewPos"),
+                params.camera_position.x,
+                params.camera_position.y,
+                params.camera_position.z);
     glUniform3f(glGetUniformLocation(program, "lightColor"), 1.0f, 1.0f, 1.0f);
-    glUniform3f(glGetUniformLocation(program, "objectColor"), params.object_color.x, params.object_color.y, params.object_color.z);
+    glUniform3f(glGetUniformLocation(program, "objectColor"),
+                params.object_color.x,
+                params.object_color.y,
+                params.object_color.z);
     glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mesh.size()));
     glFinish();
 
@@ -212,8 +242,10 @@ GLuint LinkBasicProgram() {
     GLuint vs = CompileShader(shader_root / "basic.vert", GL_VERTEX_SHADER);
     GLuint fsh = CompileShader(shader_root / "basic.frag", GL_FRAGMENT_SHADER);
     if (vs == 0 || fsh == 0) {
-        if (vs) glDeleteShader(vs);
-        if (fsh) glDeleteShader(fsh);
+        if (vs)
+            glDeleteShader(vs);
+        if (fsh)
+            glDeleteShader(fsh);
         return 0;
     }
     GLuint program = glCreateProgram();
@@ -232,7 +264,7 @@ GLuint LinkBasicProgram() {
     return program;
 }
 
-}  // namespace
+} // namespace
 
 // The pilot go/no-go: raw-GL golden vs GL-via-Diligent candidate, in-process FLIP.
 TEST(RhiPilotParityGpu, GlViaDiligentMatchesRawGl) {
@@ -256,8 +288,7 @@ TEST(RhiPilotParityGpu, GlViaDiligentMatchesRawGl) {
 
     const luminumbra_test::DiligentRenderResult diligent =
         luminumbra_test::RenderCubeDiligentGl(mesh, params);
-    ASSERT_TRUE(diligent.available)
-        << "Diligent GL render unavailable: " << diligent.diagnostic;
+    ASSERT_TRUE(diligent.available) << "Diligent GL render unavailable: " << diligent.diagnostic;
     ASSERT_EQ(diligent.pixels.size(), golden.size());
 
     using Luminumbra::Rendering::InProcessFlip::ComputeLumaFlip;
@@ -275,8 +306,7 @@ TEST(RhiPilotParityGpu, GlViaDiligentMatchesRawGl) {
     const auto& aligned = flipped_is_aligned ? flip_flip : flip_same;
 
     std::cout << "[RhiPilotParityGpu] FLIP unflipped score=" << flip_same.score
-              << " max=" << flip_same.max_error
-              << " | flipped score=" << flip_flip.score
+              << " max=" << flip_same.max_error << " | flipped score=" << flip_flip.score
               << " max=" << flip_flip.max_error
               << " | aligned=" << (flipped_is_aligned ? "flipped" : "unflipped")
               << " | go_threshold=" << kGoThreshold << std::endl;
@@ -290,25 +320,24 @@ TEST(RhiPilotParityGpu, GlViaDiligentMatchesRawGl) {
         out << "  \"leg\": \"B: GL-via-Diligent vs raw-GL\",\n";
         out << "  \"pass\": \"basic\",\n";
         out << "  \"resolution\": [" << kCubeWidth << ", " << kCubeHeight << "],\n";
-        out << "  \"metric_backend\": \""
-            << Luminumbra::Rendering::InProcessFlip::BackendName() << "\",\n";
+        out << "  \"metric_backend\": \"" << Luminumbra::Rendering::InProcessFlip::BackendName()
+            << "\",\n";
         out << "  \"go_threshold\": " << kGoThreshold << ",\n";
         out << "  \"score_unflipped\": " << flip_same.score << ",\n";
         out << "  \"score_flipped\": " << flip_flip.score << ",\n";
-        out << "  \"aligned_orientation\": \""
-            << (flipped_is_aligned ? "flipped" : "unflipped") << "\",\n";
+        out << "  \"aligned_orientation\": \"" << (flipped_is_aligned ? "flipped" : "unflipped")
+            << "\",\n";
         out << "  \"aligned_score\": " << aligned.score << ",\n";
         out << "  \"aligned_max_error\": " << aligned.max_error << ",\n";
-        out << "  \"verdict\": \"" << (aligned.score < kGoThreshold ? "GO" : "NO-GO")
-            << "\"\n";
+        out << "  \"verdict\": \"" << (aligned.score < kGoThreshold ? "GO" : "NO-GO") << "\"\n";
         out << "}\n";
     }
 
     EXPECT_LT(aligned.score, kGoThreshold)
         << "GL-via-Diligent is not pixel-faithful to raw-GL at the pre-registered "
            "sub-perceptual threshold (aligned orientation="
-        << (flipped_is_aligned ? "flipped" : "unflipped")
-        << "). unflipped=" << flip_same.score << " flipped=" << flip_flip.score;
+        << (flipped_is_aligned ? "flipped" : "unflipped") << "). unflipped=" << flip_same.score
+        << " flipped=" << flip_flip.score;
 }
 
 // Leg C: native-Vulkan render vs the raw-GL golden. The first render-through-Vulkan
@@ -318,8 +347,7 @@ TEST(RhiPilotParityGpu, GlViaDiligentMatchesRawGl) {
 TEST(RhiPilotParityGpu, NativeVulkanMatchesRawGl) {
     HiddenGlContext ctx;
     if (!ctx.ready()) {
-        GTEST_SKIP() << "no headless GL context (needed for the raw-GL golden): "
-                     << ctx.error();
+        GTEST_SKIP() << "no headless GL context (needed for the raw-GL golden): " << ctx.error();
     }
 
     const std::vector<MeshVertex> mesh = BuildCubeMesh();
@@ -334,8 +362,7 @@ TEST(RhiPilotParityGpu, NativeVulkanMatchesRawGl) {
 
     const luminumbra_test::DiligentRenderResult vk =
         luminumbra_test::RenderCubeDiligentVk(mesh, params);
-    ASSERT_TRUE(vk.available)
-        << "native Vulkan render unavailable: " << vk.diagnostic;
+    ASSERT_TRUE(vk.available) << "native Vulkan render unavailable: " << vk.diagnostic;
     ASSERT_EQ(vk.pixels.size(), golden.size());
 
     using Luminumbra::Rendering::InProcessFlip::ComputeLumaFlip;
@@ -350,8 +377,7 @@ TEST(RhiPilotParityGpu, NativeVulkanMatchesRawGl) {
     const auto& aligned = flipped_is_aligned ? flip_flip : flip_same;
 
     std::cout << "[RhiPilotParityGpu-Vk] FLIP unflipped score=" << flip_same.score
-              << " max=" << flip_same.max_error
-              << " | flipped score=" << flip_flip.score
+              << " max=" << flip_same.max_error << " | flipped score=" << flip_flip.score
               << " max=" << flip_flip.max_error
               << " | aligned=" << (flipped_is_aligned ? "flipped" : "unflipped")
               << " | go_threshold=" << kGoThresholdVk << std::endl;
@@ -364,24 +390,23 @@ TEST(RhiPilotParityGpu, NativeVulkanMatchesRawGl) {
         out << "  \"leg\": \"C: native-Vulkan vs raw-GL\",\n";
         out << "  \"pass\": \"basic\",\n";
         out << "  \"resolution\": [" << kCubeWidth << ", " << kCubeHeight << "],\n";
-        out << "  \"metric_backend\": \""
-            << Luminumbra::Rendering::InProcessFlip::BackendName() << "\",\n";
+        out << "  \"metric_backend\": \"" << Luminumbra::Rendering::InProcessFlip::BackendName()
+            << "\",\n";
         out << "  \"validation_layers\": \"VK_LAYER_KHRONOS_validation\",\n";
         out << "  \"go_threshold\": " << kGoThresholdVk << ",\n";
         out << "  \"score_unflipped\": " << flip_same.score << ",\n";
         out << "  \"score_flipped\": " << flip_flip.score << ",\n";
-        out << "  \"aligned_orientation\": \""
-            << (flipped_is_aligned ? "flipped" : "unflipped") << "\",\n";
+        out << "  \"aligned_orientation\": \"" << (flipped_is_aligned ? "flipped" : "unflipped")
+            << "\",\n";
         out << "  \"aligned_score\": " << aligned.score << ",\n";
         out << "  \"aligned_max_error\": " << aligned.max_error << ",\n";
-        out << "  \"verdict\": \"" << (aligned.score < kGoThresholdVk ? "GO" : "NO-GO")
-            << "\"\n";
+        out << "  \"verdict\": \"" << (aligned.score < kGoThresholdVk ? "GO" : "NO-GO") << "\"\n";
         out << "}\n";
     }
 
     EXPECT_LT(aligned.score, kGoThresholdVk)
         << "native-Vulkan render is not perceptually faithful to raw-GL at the "
            "pre-registered leg-C threshold (aligned orientation="
-        << (flipped_is_aligned ? "flipped" : "unflipped")
-        << "). unflipped=" << flip_same.score << " flipped=" << flip_flip.score;
+        << (flipped_is_aligned ? "flipped" : "unflipped") << "). unflipped=" << flip_same.score
+        << " flipped=" << flip_flip.score;
 }

@@ -1,5 +1,5 @@
-// T-I3-5: canonical TerrainPresetLoader unit coverage — consumed params,
-// forthcoming shaping/biomes/features/materials blocks, unknown-key
+// canonical TerrainPresetLoader unit coverage — consumed params,
+// shaping, biome, and feature blocks plus unknown-key
 // warnings, and the validation error contract.
 #include <gtest/gtest.h>
 
@@ -56,7 +56,7 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "default.json");
     ASSERT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
 
-    // DELIBERATE preset bump (T-I4-DR-terrain-realism): default.json was
+    // DELIBERATE preset bump: default.json was
     // recalibrated against real-world DEM statistics (foothills class) and
     // gained a shaping block. Before: base_amplitude 12, octaves 4, no shaping.
     // After: base_amplitude 34, octaves 6, shaping present.
@@ -89,20 +89,20 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_TRUE(result.params.cliffs_enabled);
     EXPECT_TRUE(result.params.hydro_enabled);
     EXPECT_TRUE(result.extras.features.structures_enabled);
-    // Default now ships a shaping block (T-I4-DR DEM realism calibration).
+    // Default now ships a shaping block ( DEM realism calibration).
     EXPECT_TRUE(result.extras.shaping.present);
     EXPECT_TRUE(result.params.shaping_enabled);
-    EXPECT_FALSE(result.extras.materials.present);
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
 }
 
 TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
-    // T-I4-1/2/3: mountains is the showcase preset - it opts into the biome
+    // /2/3: mountains is the showcase preset - it opts into the biome
     // table (consumed) and into rivers (consumed). Loading it must warn on
     // nothing (every key is recognized).
     const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "mountains.json");
     ASSERT_TRUE(result.ok) << (result.errors.empty() ? "" : result.errors.front());
-    EXPECT_TRUE(result.warnings.empty()) << (result.warnings.empty() ? "" : result.warnings.front());
+    EXPECT_TRUE(result.warnings.empty())
+        << (result.warnings.empty() ? "" : result.warnings.front());
 
     ASSERT_TRUE(result.extras.biomes.present);
     EXPECT_TRUE(result.extras.biomes.enabled);
@@ -118,31 +118,14 @@ TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
 }
 
 TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
-    for (const char* name : {"default", "flat_lands", "mountains", "archipelago", "temperate_forest"}) {
-        const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
+    for (const char* name :
+         {"default", "flat_lands", "mountains", "archipelago", "temperate_forest"}) {
+        const TerrainPresetLoadResult result =
+            LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         EXPECT_TRUE(result.ok) << name;
         EXPECT_TRUE(result.errors.empty()) << name << ": " << result.errors.front();
         EXPECT_TRUE(result.warnings.empty()) << name << ": " << result.warnings.front();
     }
-}
-
-TEST(TerrainPresetLoaderTest, ParsesMaterialsBlockFromTemperateForest) {
-    const TerrainPresetLoadResult result = LoadTerrainPreset(PresetDir() / "temperate_forest.json");
-    ASSERT_TRUE(result.ok);
-    ASSERT_TRUE(result.extras.materials.present);
-    ASSERT_EQ(result.extras.materials.strata.size(), 3u);
-    EXPECT_EQ(result.extras.materials.strata[0].material, "Soil");
-    EXPECT_EQ(result.extras.materials.strata[0].max_depth, 1);
-    EXPECT_EQ(result.extras.materials.strata[0].thickness, 4);
-
-    ASSERT_EQ(result.extras.materials.veins.size(), 2u);
-    EXPECT_EQ(result.extras.materials.veins[0].material, "LuminCrystal");
-    ASSERT_EQ(result.extras.materials.veins[0].host_materials.size(), 2u);
-    EXPECT_EQ(result.extras.materials.veins[0].host_materials[0], "Stone");
-    EXPECT_FLOAT_EQ(result.extras.materials.veins[0].noise_frequency, 0.08f);
-    EXPECT_FALSE(result.extras.materials.veins[0].has_max_altitude);
-    EXPECT_TRUE(result.extras.materials.veins[1].has_max_altitude);
-    EXPECT_FLOAT_EQ(result.extras.materials.veins[1].max_altitude, 40.0f);
 }
 
 TEST(TerrainPresetLoaderTest, ParsesReservedShapingBlock) {
@@ -211,8 +194,10 @@ TEST(TerrainPresetLoaderTest, WarnsOnUnknownKeys) {
     for (const std::string& warning : result.warnings) {
         top = top || warning.find("$.mystery_top") != std::string::npos;
         block = block || warning.find("generation_params.mystery_block") != std::string::npos;
-        terrain = terrain || warning.find("generation_params.terrain.mystery_terrain") != std::string::npos;
-        feature = feature || warning.find("generation_params.features.mystery_feature") != std::string::npos;
+        terrain = terrain ||
+                  warning.find("generation_params.terrain.mystery_terrain") != std::string::npos;
+        feature = feature ||
+                  warning.find("generation_params.features.mystery_feature") != std::string::npos;
     }
     EXPECT_TRUE(top);
     EXPECT_TRUE(block);
@@ -262,7 +247,8 @@ TEST(TerrainPresetLoaderTest, MissingRequiredFieldsReportContractErrors) {
 }
 
 TEST(TerrainPresetLoaderTest, MissingGenerationParamsIsAnError) {
-    const fs::path path = WriteTempPreset("luminumbra_no_genparams_preset.json", R"({ "name": "x" })");
+    const fs::path path =
+        WriteTempPreset("luminumbra_no_genparams_preset.json", R"({ "name": "x" })");
     const TerrainPresetLoadResult result = LoadTerrainPreset(path);
     EXPECT_FALSE(result.ok);
     ASSERT_EQ(result.errors.size(), 1u);
@@ -270,7 +256,7 @@ TEST(TerrainPresetLoaderTest, MissingGenerationParamsIsAnError) {
     fs::remove(path);
 }
 
-// Spec 002 Item 1: the in-memory seam (LoadTerrainPresetFromJson) must produce
+//  the in-memory seam (LoadTerrainPresetFromJson) must produce
 // the SAME params/extras as the on-disk loader for identical content — proving
 // the file path simply delegates and the create-world live preview gets the same
 // world the on-disk create would. Uses a FIXED literal with a biome table so the

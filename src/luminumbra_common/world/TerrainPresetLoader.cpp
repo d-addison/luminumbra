@@ -27,8 +27,8 @@ void WarnUnknownKeys(const nlohmann::json& object,
             }
         }
         if (!known) {
-            std::string warning = "world preset '" + provenance +
-                                  "' has unknown key " + scope + "." + item.key();
+            std::string warning =
+                "world preset '" + provenance + "' has unknown key " + scope + "." + item.key();
             LUMINUMBRA_CORE_WARN("{}", warning);
             warnings.push_back(std::move(warning));
         }
@@ -62,21 +62,32 @@ void ParseShapingBlock(const nlohmann::json& terrain,
     const nlohmann::json& block = terrain["shaping"];
     shaping.present = true;
     shaping.enabled = block.value("enabled", shaping.enabled);
-    shaping.continentalness_frequency = block.value("continentalness_frequency", shaping.continentalness_frequency);
+    shaping.continentalness_frequency =
+        block.value("continentalness_frequency", shaping.continentalness_frequency);
     shaping.erosion_frequency = block.value("erosion_frequency", shaping.erosion_frequency);
     shaping.peaks_frequency = block.value("peaks_frequency", shaping.peaks_frequency);
     shaping.peaks_amplitude = block.value("peaks_amplitude", shaping.peaks_amplitude);
-    shaping.domain_warp_amplitude = block.value("domain_warp_amplitude", shaping.domain_warp_amplitude);
-    shaping.domain_warp_frequency = block.value("domain_warp_frequency", shaping.domain_warp_frequency);
+    shaping.domain_warp_amplitude =
+        block.value("domain_warp_amplitude", shaping.domain_warp_amplitude);
+    shaping.domain_warp_frequency =
+        block.value("domain_warp_frequency", shaping.domain_warp_frequency);
     shaping.continental_spline = ParseSplinePoints(block, "continental_spline");
     shaping.erosion_spline = ParseSplinePoints(block, "erosion_spline");
     shaping.peaks_spline = ParseSplinePoints(block, "peaks_spline");
-    WarnUnknownKeys(block, "generation_params.terrain.shaping",
-                    {"enabled", "continentalness_frequency", "erosion_frequency",
-                     "peaks_frequency", "peaks_amplitude", "domain_warp_amplitude",
-                     "domain_warp_frequency", "continental_spline", "erosion_spline",
+    WarnUnknownKeys(block,
+                    "generation_params.terrain.shaping",
+                    {"enabled",
+                     "continentalness_frequency",
+                     "erosion_frequency",
+                     "peaks_frequency",
+                     "peaks_amplitude",
+                     "domain_warp_amplitude",
+                     "domain_warp_frequency",
+                     "continental_spline",
+                     "erosion_spline",
                      "peaks_spline"},
-                    provenance, warnings);
+                    provenance,
+                    warnings);
 }
 
 void ParseHydroBlock(const nlohmann::json& terrain,
@@ -99,11 +110,21 @@ void ParseHydroBlock(const nlohmann::json& terrain,
     hydro.evaporation = block.value("evaporation", hydro.evaporation);
     hydro.sediment_capacity = block.value("sediment_capacity", hydro.sediment_capacity);
     hydro.max_offset = block.value("max_offset", hydro.max_offset);
-    WarnUnknownKeys(block, "generation_params.terrain.hydro",
-                    {"enabled", "iterations", "cell_size_m", "talus_height",
-                     "thermal_rate", "rain_per_sweep", "solubility", "deposition",
-                     "evaporation", "sediment_capacity", "max_offset"},
-                    provenance, warnings);
+    WarnUnknownKeys(block,
+                    "generation_params.terrain.hydro",
+                    {"enabled",
+                     "iterations",
+                     "cell_size_m",
+                     "talus_height",
+                     "thermal_rate",
+                     "rain_per_sweep",
+                     "solubility",
+                     "deposition",
+                     "evaporation",
+                     "sediment_capacity",
+                     "max_offset"},
+                    provenance,
+                    warnings);
 }
 
 void ParseBiomesBlock(const nlohmann::json& gen_params,
@@ -116,7 +137,8 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
     }
     const nlohmann::json& block = gen_params["biomes"];
     biomes.present = true;
-    biomes.temperature_frequency = block.value("temperature_frequency", biomes.temperature_frequency);
+    biomes.temperature_frequency =
+        block.value("temperature_frequency", biomes.temperature_frequency);
     biomes.humidity_frequency = block.value("humidity_frequency", biomes.humidity_frequency);
     biomes.relief_enabled = block.value("relief_enabled", biomes.relief_enabled);
     biomes.relief_strength = block.value("relief_strength", biomes.relief_strength);
@@ -129,67 +151,15 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
         // directly so the table resolves correctly without a temp file).
         biomes.resolved_table_path = (data_root / biomes.table).lexically_normal().string();
     }
-    WarnUnknownKeys(block, "generation_params.biomes",
-                    {"temperature_frequency", "humidity_frequency", "table",
-                     "relief_enabled", "relief_strength"},
-                    provenance, warnings);
-}
-
-void ParseMaterialsBlock(const nlohmann::json& gen_params,
-                         TerrainMaterialsPreset& materials,
-                         const std::string& provenance,
-                         std::vector<std::string>& warnings) {
-    if (!JsonHasObject(gen_params, "materials")) {
-        return;
-    }
-    const nlohmann::json& block = gen_params["materials"];
-    materials.present = true;
-    WarnUnknownKeys(block, "generation_params.materials", {"strata", "veins"},
-                    provenance, warnings);
-
-    if (block.contains("strata") && block["strata"].is_array()) {
-        for (const auto& entry : block["strata"]) {
-            if (!entry.is_object()) {
-                continue;
-            }
-            TerrainStratumPreset stratum;
-            stratum.material = entry.value("material", std::string{});
-            stratum.max_depth = entry.value("max_depth", 0);
-            stratum.thickness = entry.value("thickness", 0);
-            WarnUnknownKeys(entry, "generation_params.materials.strata[]",
-                            {"material", "max_depth", "thickness"},
-                            provenance, warnings);
-            materials.strata.push_back(std::move(stratum));
-        }
-    }
-
-    if (block.contains("veins") && block["veins"].is_array()) {
-        for (const auto& entry : block["veins"]) {
-            if (!entry.is_object()) {
-                continue;
-            }
-            TerrainVeinPreset vein;
-            vein.material = entry.value("material", std::string{});
-            vein.noise_frequency = entry.value("noise_frequency", 0.0f);
-            vein.noise_threshold = entry.value("noise_threshold", 0.0f);
-            vein.has_max_altitude = entry.contains("max_altitude") && entry["max_altitude"].is_number();
-            if (vein.has_max_altitude) {
-                vein.max_altitude = entry["max_altitude"].get<float>();
-            }
-            if (entry.contains("host_materials") && entry["host_materials"].is_array()) {
-                for (const auto& host : entry["host_materials"]) {
-                    if (host.is_string()) {
-                        vein.host_materials.push_back(host.get<std::string>());
-                    }
-                }
-            }
-            WarnUnknownKeys(entry, "generation_params.materials.veins[]",
-                            {"material", "host_materials", "noise_frequency",
-                             "noise_threshold", "max_altitude"},
-                            provenance, warnings);
-            materials.veins.push_back(std::move(vein));
-        }
-    }
+    WarnUnknownKeys(block,
+                    "generation_params.biomes",
+                    {"temperature_frequency",
+                     "humidity_frequency",
+                     "table",
+                     "relief_enabled",
+                     "relief_strength"},
+                    provenance,
+                    warnings);
 }
 
 } // namespace
@@ -207,7 +177,8 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     try {
         data = nlohmann::json::parse(file);
     } catch (const nlohmann::json::parse_error& e) {
-        result.errors.push_back("failed to parse world preset JSON '" + preset_path.string() + "': " + e.what());
+        result.errors.push_back("failed to parse world preset JSON '" + preset_path.string() +
+                                "': " + e.what());
         return result;
     }
 
@@ -235,19 +206,27 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
 
     const nlohmann::json& gen_params = data["generation_params"];
     if (!JsonHasObject(gen_params, "terrain")) {
-        result.errors.push_back("world preset is missing object generation_params.terrain: " + provenance);
+        result.errors.push_back("world preset is missing object generation_params.terrain: " +
+                                provenance);
         return result;
     }
     if (!JsonHasObject(gen_params, "features")) {
-        result.errors.push_back("world preset is missing object generation_params.features: " + provenance);
+        result.errors.push_back("world preset is missing object generation_params.features: " +
+                                provenance);
         return result;
     }
 
     const nlohmann::json& terrain = gen_params["terrain"];
     const nlohmann::json& features = gen_params["features"];
-    for (const char* key : {"base_frequency", "base_amplitude", "octaves", "persistence", "lacunarity", "height_offset"}) {
+    for (const char* key : {"base_frequency",
+                            "base_amplitude",
+                            "octaves",
+                            "persistence",
+                            "lacunarity",
+                            "height_offset"}) {
         if (!terrain.contains(key) || !terrain[key].is_number()) {
-            result.errors.push_back(std::string("world preset terrain field must be numeric: ") + key);
+            result.errors.push_back(std::string("world preset terrain field must be numeric: ") +
+                                    key);
         }
     }
     if (!features.contains("caves_enabled") || !features["caves_enabled"].is_boolean()) {
@@ -276,7 +255,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     params.cave_frequency = features.value("cave_frequency", 0.02f);
     params.cave_threshold = features.value("cave_threshold", params.cave_threshold);
     params.cave_carve_value = features.value("cave_carve_value", params.cave_carve_value);
-    // Spec 013: cave style (0 = legacy cheese-only, byte-identical; 1 = noise-router with
+    // cave style (0 = legacy cheese-only, byte-identical; 1 = noise-router with
     // spaghetti tunnels). Absent => 0 => existing presets unchanged.
     params.cave_style = features.value("cave_style", params.cave_style);
     params.spaghetti_frequency = features.value("spaghetti_frequency", params.spaghetti_frequency);
@@ -284,7 +263,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     params.worley_frequency = features.value("worley_frequency", params.worley_frequency);
     params.worley_threshold = features.value("worley_threshold", params.worley_threshold);
 
-    // Shaping block: parsed into extras AND consumed (T-I3-10) - the loader is
+    // Shaping block: parsed into extras AND consumed - the loader is
     // the one place preset shaping data lands in TerrainGenParams, so every
     // host (GameSession, tests, headless server) gets identical params.
     ParseShapingBlock(terrain, result.extras.shaping, provenance, result.warnings);
@@ -302,8 +281,8 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.peaks_spline = shaping.peaks_spline;
     }
 
-    // Hydro block (T-I6-A2): hydraulic/thermal relief. Default-off; a preset opts
-    // in via "hydro": {"enabled": true, ...}. Mapped into TerrainGenParams.hydro_*
+    // Hydro block: hydraulic/thermal relief. Default-off; a preset opts
+    // in via "hydro": {"enabled": true,...}. Mapped into TerrainGenParams.hydro_*
     // (deliberate world_hash-affecting feature when enabled).
     ParseHydroBlock(terrain, result.extras.hydro, provenance, result.warnings);
     if (result.extras.hydro.present) {
@@ -334,7 +313,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.biome_relief_enabled = biomes.relief_enabled;
         params.biome_relief_strength = biomes.relief_strength;
     }
-    // Features river/structure flags: rivers (T-I4-3) and structures (T-I4-4)
+    // Features river/structure flags: rivers and structures
     // are CONSUMED when the preset opts in; an absent flag keeps the feature off
     // -> byte-zero drift. The structure template content hash is stamped later by
     // the world system when it loads the pools (mirrors the biome-table hash).
@@ -356,7 +335,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.river_pv_max = features.value("river_pv_max", params.river_pv_max);
         params.river_max_carve = features.value("river_max_carve", params.river_max_carve);
     }
-    // Slice 2: lakes. Opt-in via features.lakes_enabled; absent -> off (byte-zero).
+    //  lakes. Opt-in via features.lakes_enabled; absent -> off (byte-zero).
     if (features.value("lakes_enabled", false)) {
         params.lakes_enabled = true;
         params.lake_frequency = features.value("lake_frequency", params.lake_frequency);
@@ -365,21 +344,17 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         params.lake_max_carve = features.value("lake_max_carve", params.lake_max_carve);
         params.lake_bank_offset = features.value("lake_bank_offset", params.lake_bank_offset);
     }
-    // FR-A3: surface-breaking caves / sinkholes / cave-mouths. Opt-in via
+    // surface-breaking caves / sinkholes / cave-mouths. Opt-in via
     // features.surface_breaks_enabled; absent -> off (byte-zero drift). When on, the
     // 18 m cave cap becomes a per-column field inside hashed doline footprints.
     if (features.value("surface_breaks_enabled", false)) {
         params.surface_breaks_enabled = true;
         params.surface_break_density =
             features.value("surface_break_density", params.surface_break_density);
-        params.feature_cell_size =
-            features.value("feature_cell_size", params.feature_cell_size);
-        params.max_feature_radius =
-            features.value("max_feature_radius", params.max_feature_radius);
-        params.carve_smoothness =
-            features.value("carve_smoothness", params.carve_smoothness);
-        params.entrance_min_cap =
-            features.value("entrance_min_cap", params.entrance_min_cap);
+        params.feature_cell_size = features.value("feature_cell_size", params.feature_cell_size);
+        params.max_feature_radius = features.value("max_feature_radius", params.max_feature_radius);
+        params.carve_smoothness = features.value("carve_smoothness", params.carve_smoothness);
+        params.entrance_min_cap = features.value("entrance_min_cap", params.entrance_min_cap);
         // The 3x3 doline-cell scan only suffices if a feature's finite support
         // stays inside the immediate neighborhood. Clamp defensively rather than
         // crash a release world load on a bad preset.
@@ -389,44 +364,77 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
             params.max_feature_radius = params.feature_cell_size * 0.49f;
         }
     }
-    // Slice 4: cliffs. Opt-in via features.cliffs_enabled; absent -> off (byte-zero).
+    //  cliffs. Opt-in via features.cliffs_enabled; absent -> off (byte-zero).
     if (features.value("cliffs_enabled", false)) {
         params.cliffs_enabled = true;
         params.cliff_frequency = features.value("cliff_frequency", params.cliff_frequency);
         params.cliff_threshold = features.value("cliff_threshold", params.cliff_threshold);
         params.cliff_step = features.value("cliff_step", params.cliff_step);
     }
-    ParseMaterialsBlock(gen_params, result.extras.materials, provenance, result.warnings);
-
     // Unknown-key audit over every consumed scope.
-    WarnUnknownKeys(data, "$", {"name", "description", "schema_rev", "generation_params"},
-                    provenance, result.warnings);
+    WarnUnknownKeys(data,
+                    "$",
+                    {"name", "description", "schema_rev", "generation_params"},
+                    provenance,
+                    result.warnings);
     // "knob_layer" is the semantic-knob layer the create-world UI writes alongside the resolved
     // params (KnobLayer.h/WriteKnobLayer); it is consumed by the KnobLayer loader, not here, so
     // whitelist it to avoid a spurious unknown-key warning on every saved/knob-adjusted preset.
-    WarnUnknownKeys(gen_params, "generation_params",
-                    {"terrain", "biomes", "features", "materials", "knob_layer"},
-                    provenance, result.warnings);
-    WarnUnknownKeys(terrain, "generation_params.terrain",
-                    {"base_frequency", "base_amplitude", "octaves", "persistence",
-                     "lacunarity", "height_offset", "island_mask_enabled",
-                     "island_mask_frequency", "shaping", "hydro"},
-                    provenance, result.warnings);
-    WarnUnknownKeys(features, "generation_params.features",
-                    {"caves_enabled", "cave_frequency", "cave_threshold",
-                     "cave_carve_value", "rivers_enabled", "structures_enabled",
-                     "river_frequency", "river_depth", "river_pv_min",
-                     "river_pv_max", "river_max_carve",
-                     "lakes_enabled", "lake_frequency", "lake_threshold",
-                     "lake_depth", "lake_max_carve", "lake_bank_offset",
-                     "cliffs_enabled", "cliff_frequency", "cliff_threshold",
+    WarnUnknownKeys(gen_params,
+                    "generation_params",
+                    {"terrain", "biomes", "features", "knob_layer"},
+                    provenance,
+                    result.warnings);
+    WarnUnknownKeys(terrain,
+                    "generation_params.terrain",
+                    {"base_frequency",
+                     "base_amplitude",
+                     "octaves",
+                     "persistence",
+                     "lacunarity",
+                     "height_offset",
+                     "island_mask_enabled",
+                     "island_mask_frequency",
+                     "shaping",
+                     "hydro"},
+                    provenance,
+                    result.warnings);
+    WarnUnknownKeys(features,
+                    "generation_params.features",
+                    {"caves_enabled",
+                     "cave_frequency",
+                     "cave_threshold",
+                     "cave_carve_value",
+                     "rivers_enabled",
+                     "structures_enabled",
+                     "river_frequency",
+                     "river_depth",
+                     "river_pv_min",
+                     "river_pv_max",
+                     "river_max_carve",
+                     "lakes_enabled",
+                     "lake_frequency",
+                     "lake_threshold",
+                     "lake_depth",
+                     "lake_max_carve",
+                     "lake_bank_offset",
+                     "cliffs_enabled",
+                     "cliff_frequency",
+                     "cliff_threshold",
                      "cliff_step",
-                     "surface_breaks_enabled", "surface_break_density",
-                     "feature_cell_size", "max_feature_radius",
-                     "carve_smoothness", "entrance_min_cap",
-                     "cave_style", "spaghetti_frequency", "spaghetti_thickness",
-                     "worley_frequency", "worley_threshold"},
-                    provenance, result.warnings);
+                     "surface_breaks_enabled",
+                     "surface_break_density",
+                     "feature_cell_size",
+                     "max_feature_radius",
+                     "carve_smoothness",
+                     "entrance_min_cap",
+                     "cave_style",
+                     "spaghetti_frequency",
+                     "spaghetti_thickness",
+                     "worley_frequency",
+                     "worley_threshold"},
+                    provenance,
+                    result.warnings);
 
     result.ok = true;
     return result;

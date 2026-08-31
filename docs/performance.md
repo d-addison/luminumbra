@@ -21,7 +21,7 @@ python tools/perf/perf.py run \
   --parameter collision_radius=1 --parameter seed=1337 \
   --parameter world_preset=default --fixture-hash "$(git rev-parse HEAD:data)" \
   --evidence-contract server-smoke --evidence build/perf/server-smoke-evidence.json \
-  --warmup 1 --samples 10 --output build/perf/server-smoke.json -- \
+  --warmup 1 --samples 20 --output build/perf/server-smoke.json -- \
   build/perf/bin/luminumbra_server_app --smoke --preset default --seed 1337 \
     --ticks 30 --radius 1 --collision-radius 1 \
     --artifact build/perf/server-smoke-evidence.json
@@ -38,9 +38,10 @@ python tools/perf/perf.py compare \
 `bisect-eval` accepts the same arguments and returns `0` for good, `1` for a
 confirmed regression, and `125` when evidence is not comparable. The runner uses
 raw samples, median, p95, p99, maximum, and median absolute deviation. Its default
-relative verdict requires at least a 10% median change, a Mann-Whitney p-value no
-greater than 0.01, and an effect larger than three pooled median absolute
-deviations.
+relative verdict requires at least 20 ordered base/head observations, a median
+change of at least 5%, a paired two-sided sign-test p-value no greater than 0.05,
+and an effect larger than three pooled median absolute deviations. Smaller or
+underpowered changes are reported as warnings.
 
 ## Measurement layers
 
@@ -83,21 +84,23 @@ policy. Base and candidate results with different keys are reported as
 unevaluated rather than compared. The key is recomputed during validation rather
 than trusted from the file.
 
-Thresholds are added only after at least 20 clean baseline runs on the intended
-runner class. Initial lanes publish observations. A maintainer reviews the
-distribution and then blesses an absolute floor, relative regression budget, or
-both. No check may silently manufacture a zero baseline or treat absent evidence
-as success.
+Thresholds are added only after at least 20 clean paired runs on the intended
+runner class. The committed policy uses relative base/head comparisons so machine
+speed is not mistaken for an engine regression. No check may silently manufacture
+a zero baseline or treat absent evidence as success.
+
+The reviewed stability observation used to select this policy is recorded in
+[`tools/perf/baselines/relative-calibration.json`](../tools/perf/baselines/relative-calibration.json).
+It preserves the workload, runner class, summary statistics, and hashes of the
+untracked raw evidence without committing machine-scale trace data.
 
 ## Automation model
 
 The hosted Linux pull-request lane builds base and candidate in the same job,
 runs deterministic server batches in ABBA order, and uploads the engine evidence,
-raw samples, and comparison. Missing evidence, underpowered samples, or an
-incomparable result fails the measurement. Regression and improvement verdicts
-remain explicit observations until at least 20 clean paired runs calibrate the
-runner distribution; the workflow can then remove `--report-only` to enforce the
-reviewed policy. Windows and macOS currently exercise the portable runner contract
+raw samples, and comparison. Missing or incomparable evidence fails the
+measurement, while an underpowered result is an explicit warning. The workflow
+enforces the reviewed relative policy. Windows and macOS currently exercise the portable runner contract
 only; engine measurement on those systems remains non-blocking expansion work.
 
 Hardware rendering requires a labeled, fixed Windows runner with a pinned driver,

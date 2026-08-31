@@ -1,25 +1,25 @@
 ﻿<#
 .SYNOPSIS
-    Spec 018 FR-D â€” the determinism test matrix.
+      — the determinism test matrix.
 
 .DESCRIPTION
-    Runs the headless determinism smoke across the FR-D axes and asserts every cell
+    Runs the headless determinism smoke across the  axes and asserts every cell
     reproduces the canonical world_hash with run==replay, so a determinism regression
     is caught regardless of worker count, process, build, or replay path:
 
-      FR-D-001  cross-worker-count : --smoke under LUMINUMBRA_JOB_WORKERS in {1,2,4}
+        cross-worker-count: --smoke under LUMINUMBRA_JOB_WORKERS in {1,2,4}
                                      (each run==replay AND all counts agree)
-      FR-D-002  fast/slow-job axis : --smoke under LUMINUMBRA_JOB_THROTTLE=<seed> (the
-                                     SHIELD-07/OPS-13 shuffled-pop service-order
+        fast/slow-job axis: --smoke under LUMINUMBRA_JOB_THROTTLE=<seed> (the
+                                     / shuffled-pop service-order
                                      perturbation) must reproduce the unthrottled
                                      baseline; moving runs stay run==replay
-      FR-D-003  multiprocess one-box: two SEPARATE --smoke processes agree
-      FR-D-004  replay axis         : --record then --replay reproduces the hash
-      FR-D-005  build-mode axis     : --smoke in BOTH build/debug and build/release
-      FR-D-006  localized failure   : on any mismatch, print the axis + observed hashes
+        multiprocess one-box: two SEPARATE --smoke processes agree
+        replay axis: --record then --replay reproduces the hash
+        build-mode axis: --smoke in BOTH build/debug and build/release
+        localized failure: on any mismatch, print the axis + observed hashes
 
     Pure orchestration over existing flags (--smoke / --smoke-moving / --record /
-    --replay / LUMINUMBRA_JOB_WORKERS) â€” no engine change, no determinism risk (it RUNS
+    --replay / LUMINUMBRA_JOB_WORKERS) — no engine change, no determinism risk (it RUNS
     the determinism checks). Run via the PowerShell tool with C:\msys64\ucrt64\bin
     prepended.
 
@@ -32,24 +32,24 @@ param(
     [string[]]$Builds = @('debug', 'release'),
     # Worker-count axis (LUMINUMBRA_JOB_WORKERS). 0 = engine default (one per HW thread).
     [int[]]$Workers = @(1, 2, 4),
-    # Canonical baseline (local-dev pin) â€” PER BUILD MODE. world_hash is build-mode-dependent
+    # Canonical baseline (local-dev pin) — PER BUILD MODE. world_hash is build-mode-dependent
     # (FP/optimization differences in the sim): the DEBUG sim-truth hash and the RELEASE one are
-    # legitimately DIFFERENT deterministic values. FR-D-005 checks each build is run==replay AND
-    # matches ITS OWN baseline â€” NOT that debug == release. Override if intentionally bumped.
-    [string]$BaselineHash = 'a66ab4d049ba9228',          # DEBUG canonical (the gate tree; WATER-08 Bump B 2026-07-05)
-    [string]$ReleaseBaselineHash = '045f7c2f0645bcce',   # RELEASE canonical (distinct, also deterministic; Bump A)
+    # legitimately DIFFERENT deterministic values.  checks each build is run==replay AND
+    # matches ITS OWN baseline — NOT that debug == release. Override if intentionally bumped.
+    [string]$BaselineHash = 'a66ab4d049ba9228',          # DEBUG canonical (the gate tree;  derived-state reclassification 2026-07-05)
+    [string]$ReleaseBaselineHash = '045f7c2f0645bcce',   # RELEASE canonical (distinct, also deterministic; authoritative-state change)
     # Quick mode: workers {1,2}, debug only, skip the replay + moving axes (fast pre-commit check).
     [switch]$Quick,
-    # The --smoke-moving streaming-arrival oracle (FR-C-002) is a DEFAULT first-class axis:
+    # The --smoke-moving streaming-arrival oracle is a DEFAULT first-class axis:
     # it runs per worker count UNLESS -Quick or -SkipMoving. -IncludeMoving is retained as a
     # backward-compatible no-op (moving is on by default) that also FORCES moving under -Quick.
     [switch]$IncludeMoving,
     [switch]$SkipMoving,
     # Optional JSON report path.
     [string]$Report = '',
-    # WATER-10 (spec 009 AC-4): -Mode WaterCrossBuild runs ONLY the debug-vs-release
+    # -Mode WaterCrossBuild runs ONLY the debug-vs-release
     # per-tick water-state-hash sequence compare (both builds required). '' = the
-    # full FR-D matrix, exactly as before.
+    # full  matrix, exactly as before.
     [ValidateSet('', 'WaterCrossBuild')]
     [string]$Mode = ''
 )
@@ -60,7 +60,7 @@ $RepoRoot = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path
 
 if ($Quick) { $Workers = @(1, 2); $Builds = @('debug') }
 
-# FR-C-002 moving-residency axis: default-ON (first-class), off under -Quick or
+#  moving-residency axis: default-ON (first-class), off under -Quick or
 # -SkipMoving; -IncludeMoving forces it even under -Quick.
 $RunMoving = ((-not $Quick) -and (-not $SkipMoving)) -or $IncludeMoving
 
@@ -110,15 +110,15 @@ function Add-Cell {
     $results.Add([pscustomobject]@{ axis = $Axis; cell = $Cell; ok = $Ok; detail = $Detail })
     $status = if ($Ok) { 'PASS' } else { 'FAIL' }
     Write-Host ("[matrix] {0,-16} {1,-22} {2}  {3}" -f $Axis, $Cell, $status, $Detail)
-    if (-not $Ok) { $failures.Add("$Axis/$Cell : $Detail") }
+    if (-not $Ok) { $failures.Add("$Axis/$Cell: $Detail") }
 }
 
-# --- WATER-10 (Wave G W1.3): the water cross-PROCESS gate (re-scoped). ---
-# Spec 009 AC-4, water-scoped. FIRST-RUN FINDING (2026-07-05, the charter's
+# ---  ( water cross-process): the water cross-PROCESS gate (re-scoped). ---
+#, water-scoped. FIRST-RUN FINDING (2026-07-05, the contract's
 # anticipated re-scope): the per-tick water hash DIVERGES debug-vs-release AT
 # TICK 1 (e2e4c1d1fa39760c vs 94e9b1b5fb101a13) because water BEDS are seeded
 # from float terrain sampling (GetTerrainHeightAt), which is legitimately
-# build-mode-dependent â€” the SAME reason the canonical world_hash itself is
+# build-mode-dependent — the SAME reason the canonical world_hash itself is
 # per-build (see $BaselineHash vs $ReleaseBaselineHash above). The SIM is
 # integer-mm end to end; the INITIAL CONDITIONS are not cross-build-portable,
 # and lockstep peers run the SAME build, so the real host==peer contract is
@@ -149,7 +149,7 @@ if ($Mode -eq 'WaterCrossBuild') {
                 Write-Host "[water-crossprocess] FAIL: $build ($proc) water trace diverged IN-PROCESS (run!=replay)"
                 exit 1
             }
-            $traces += ,@((Get-Content $artPath -Raw | ConvertFrom-Json).water_hash_trace)
+            $traces +=,@((Get-Content $artPath -Raw | ConvertFrom-Json).water_hash_trace)
         }
         if ($traces[0].Count -eq 0) {
             Write-Host "[water-crossprocess] FAIL: empty water_hash_trace ($build)"
@@ -165,14 +165,14 @@ if ($Mode -eq 'WaterCrossBuild') {
                 exit 1
             }
         }
-        Write-Host ("[water-crossprocess] PASS: {0} - {1} ticks, per-tick water hash IDENTICAL across two OS processes (spec 009 AC-4 same-build host==peer, WATER-10)" -f $build, $traces[0].Count)
+        Write-Host ("[water-crossprocess] PASS: {0} - {1} ticks, per-tick water hash IDENTICAL across two OS processes (  same-build host==peer, )" -f $build, $traces[0].Count)
         $anyRan = $true
     }
     if (-not $anyRan) { exit 1 }
     exit 0
 }
 
-Write-Host "=== Spec 018 FR-D determinism matrix (debug $BaselineHash / release $ReleaseBaselineHash) ==="
+Write-Host "===   determinism matrix (debug $BaselineHash / release $ReleaseBaselineHash) ==="
 
 foreach ($build in $Builds) {
     $exe = Resolve-ServerExe -Build $build
@@ -182,8 +182,8 @@ foreach ($build in $Builds) {
         continue
     }
 
-    # FR-D-001 cross-worker-count + FR-D-005 build-mode (this tree). Each build matches ITS OWN
-    # baseline (debug 6f008a9f / release ea9a0121) â€” both deterministic, legitimately different.
+    #  cross-worker-count +  build-mode (this tree). Each build matches ITS OWN
+    # baseline (debug 6f008a9f / release ea9a0121) — both deterministic, legitimately different.
     $expected = Get-ExpectedBaseline -Build $build
     $hashesThisBuild = @{}
     foreach ($w in $Workers) {
@@ -192,9 +192,9 @@ foreach ($build in $Builds) {
         Add-Cell 'worker-count' "$build/w=$w" $rOk ("hash=$($r.hash) expected=$expected run==replay=$($r.replay_ok)")
         $hashesThisBuild["w=$w"] = $r.hash
         if ($RunMoving) {
-            # FR-C-002 moving-residency oracle (first-class default axis). CONVERGENT:
+            #  moving-residency oracle (first-class default axis). CONVERGENT:
             # per-tick residency varies run-to-run while the FINAL hash is run==replay.
-            # Gate on run==replay only â€” its hash is a distinct moving baseline, not
+            # Gate on run==replay only — its hash is a distinct moving baseline, not
             # $expected, and the per-tick availability set is NOT asserted here (the
             # richer --avail-trace convergence check lives in the engine-frontier
             # MovingResidency mode, which reads the --artifact JSON).
@@ -206,12 +206,12 @@ foreach ($build in $Builds) {
     $distinct = @($hashesThisBuild.Values | Sort-Object -Unique)
     Add-Cell 'worker-agree' $build ($distinct.Count -eq 1 -and $distinct[0] -eq $expected) ("distinct hashes: " + ($distinct -join ','))
 
-    # FR-D-003 multiprocess one-box: two SEPARATE processes (default workers) must agree + match baseline.
+    #  multiprocess one-box: two SEPARATE processes (default workers) must agree + match baseline.
     $p1 = Invoke-Smoke -ExePath $exe.FullName
     $p2 = Invoke-Smoke -ExePath $exe.FullName
     Add-Cell 'multiprocess' $build ($p1.replay_ok -and $p2.replay_ok -and $p1.hash -eq $p2.hash -and $p1.hash -eq $expected) ("pA=$($p1.hash) pB=$($p2.hash)")
 
-    # FR-D-002 fast/slow-job axis (SHIELD-07/OPS-13): the shuffled-pop throttle
+    #  fast/slow-job axis: the shuffled-pop throttle
     # perturbs job SERVICE ORDER (never mere wall-time); the sim hash must be
     # INVARIANT under it. Static runs assert the unthrottled per-build baseline;
     # moving runs assert run==replay (the convergent-oracle rule above). One
@@ -227,7 +227,7 @@ foreach ($build in $Builds) {
         }
     }
 
-    # FR-D-004 replay axis (skipped in Quick): record then replay reproduces the hash.
+    #  replay axis (skipped in Quick): record then replay reproduces the hash.
     if (-not $Quick) {
         $rec = Join-Path $env:TEMP ("lumin_detmatrix_{0}.lrec" -f $build)
         & $exe.FullName '--record' $rec 2>&1 | Out-Null

@@ -13,34 +13,35 @@ void AppendJsonString(std::ostringstream& out, const std::string& value) {
     out << '"';
     for (const unsigned char c : value) {
         switch (c) {
-        case '"':
-            out << "\\\"";
-            break;
-        case '\\':
-            out << "\\\\";
-            break;
-        case '\b':
-            out << "\\b";
-            break;
-        case '\f':
-            out << "\\f";
-            break;
-        case '\n':
-            out << "\\n";
-            break;
-        case '\r':
-            out << "\\r";
-            break;
-        case '\t':
-            out << "\\t";
-            break;
-        default:
-            if (c < 0x20) {
-                out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(c) << std::dec;
-            } else {
-                out << static_cast<char>(c);
-            }
-            break;
+            case '"':
+                out << "\\\"";
+                break;
+            case '\\':
+                out << "\\\\";
+                break;
+            case '\b':
+                out << "\\b";
+                break;
+            case '\f':
+                out << "\\f";
+                break;
+            case '\n':
+                out << "\\n";
+                break;
+            case '\r':
+                out << "\\r";
+                break;
+            case '\t':
+                out << "\\t";
+                break;
+            default:
+                if (c < 0x20) {
+                    out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<int>(c) << std::dec;
+                } else {
+                    out << static_cast<char>(c);
+                }
+                break;
         }
     }
     out << '"';
@@ -77,16 +78,58 @@ const LuaApiManifest& GetLuaApiManifest() {
         "1.0.0",
         kDeterministicOrder,
         {
-            {"core", "log", "function", "core.log(level: string, message: string)", "Emit a script log line through the engine logger."},
-            {"core", "version", "function", "core.version() -> string", "Return the engine contract version visible to scripts."},
-            {"entity", "destroy", "function", "entity.destroy(entity_id: integer)", "Queue an entity for deterministic removal."},
-            {"entity", "spawn", "function", "entity.spawn(archetype: string, position: vec3) -> integer", "Spawn an entity from an authored archetype."},
-            {"simulation", "emit_event", "function", "simulation.emit_event(topic: string, payload: table, tick: integer?)", "Publish a deterministic simulation event."},
-            {"simulation", "subscribe", "function", "simulation.subscribe(topic: string, callback: function)", "Register a script callback for a simulation event topic."},
-            {"time", "delta_seconds", "function", "time.delta_seconds() -> number", "Return the fixed simulation step for the current script tick."},
-            {"world", "get_block", "function", "world.get_block(x: integer, y: integer, z: integer) -> integer", "Read a block id from the active world."},
-            {"world", "sample_energy_field", "function", "world.sample_energy_field(x: number, y: number, z: number) -> number", "Read-only sample of the stateful energy field at a world position, in gameplay units; 0 when the layer is absent. Also exposed as the bare global sample_energy_field (spec 024 FR-024-5)."},
-            {"world", "set_block", "function", "world.set_block(x: integer, y: integer, z: integer, block_id: integer)", "Queue a block write in the active world."},
+            {"core",
+             "log",
+             "function",
+             "core.log(level: string, message: string)",
+             "Emit a script log line through the engine logger."},
+            {"core",
+             "version",
+             "function",
+             "core.version() -> string",
+             "Return the engine contract version visible to scripts."},
+            {"entity",
+             "destroy",
+             "function",
+             "entity.destroy(entity_id: integer)",
+             "Queue an entity for deterministic removal."},
+            {"entity",
+             "spawn",
+             "function",
+             "entity.spawn(archetype: string, position: vec3) -> integer",
+             "Spawn an entity from an authored archetype."},
+            {"simulation",
+             "emit_event",
+             "function",
+             "simulation.emit_event(topic: string, payload: table, tick: integer?)",
+             "Publish a deterministic simulation event."},
+            {"simulation",
+             "subscribe",
+             "function",
+             "simulation.subscribe(topic: string, callback: function)",
+             "Register a script callback for a simulation event topic."},
+            {"time",
+             "delta_seconds",
+             "function",
+             "time.delta_seconds() -> number",
+             "Return the fixed simulation step for the current script tick."},
+            {"world",
+             "get_block",
+             "function",
+             "world.get_block(x: integer, y: integer, z: integer) -> integer",
+             "Read a block id from the active world."},
+            {"world",
+             "sample_energy_field",
+             "function",
+             "world.sample_energy_field(x: number, y: number, z: number) -> number",
+             "Read-only sample of the stateful energy field at a world position, in gameplay "
+             "units; 0 when the layer is absent. Also exposed as the bare global "
+             "sample_energy_field ( -5)."},
+            {"world",
+             "set_block",
+             "function",
+             "world.set_block(x: integer, y: integer, z: integer, block_id: integer)",
+             "Queue a block write in the active world."},
         },
     };
     return manifest;

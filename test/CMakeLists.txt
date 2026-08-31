@@ -7,27 +7,10 @@ add_executable(world_generation_test
 )
 
 target_include_directories(world_generation_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(world_generation_test PRIVATE
-    gtest_main
-    luminumbra_common
-)
-
-add_executable(sdf_gpu_cpu_parity_test
-    shield/test_sdf_gpu_cpu_parity.cpp
-)
-
-target_compile_definitions(sdf_gpu_cpu_parity_test PRIVATE
-    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
-)
-
-target_include_directories(sdf_gpu_cpu_parity_test PRIVATE
-    ../src
-)
-
-target_link_libraries(sdf_gpu_cpu_parity_test PRIVATE
     gtest_main
     luminumbra_common
 )
@@ -43,7 +26,7 @@ target_compile_definitions(worldgen_layer_snapshot_test PRIVATE
 )
 
 target_include_directories(worldgen_layer_snapshot_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(worldgen_layer_snapshot_test PRIVATE
@@ -67,13 +50,13 @@ target_compile_definitions(asset_processor_round_trip_test PRIVATE
 )
 
 target_include_directories(asset_processor_round_trip_test PRIVATE
-    ../src
-    ../tools
-    ../vendor/cgltf
-    ../third_party/cgltf
-    ../third_party/meshoptimizer/src
-    ../external/cgltf
-    ../external/meshoptimizer/src
+../src
+../tools
+../vendor/cgltf
+../third_party/cgltf
+../third_party/meshoptimizer/src
+../external/cgltf
+../external/meshoptimizer/src
 )
 
 if(TARGET AssetProcessor)
@@ -202,7 +185,7 @@ target_compile_definitions(common_tests PRIVATE
 )
 
 target_include_directories(common_tests PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(common_tests PRIVATE
@@ -210,7 +193,7 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
 )
 
-# Track-B (roadmap pillar B): render-only tree LOD distance selection. The header
+# tree rendering (tree rendering): render-only tree LOD distance selection. The header
 # under test (src/luminumbra_client/rendering/TreeLod.h) is OpenGL-free pure logic,
 # so this target needs no client lib / GL link -- just the include root + gtest.
 add_executable(tree_lod_test
@@ -218,28 +201,28 @@ add_executable(tree_lod_test
 )
 
 target_include_directories(tree_lod_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(tree_lod_test PRIVATE
     gtest_main
 )
 
-# Wave-3 far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
+#  far-field impostors: the hemi-octahedral view<->tile mapping math (GL-free,
 # the shared source of truth for the atlas bake + the impostor shader).
 add_executable(octa_impostor_test
     rendering/octa_impostor_test.cpp
 )
 
 target_include_directories(octa_impostor_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(octa_impostor_test PRIVATE
     gtest_main
 )
 
-# AUDIO-10 (spec 021): the mixer/ducking envelope math. The header under test
+# the mixer/ducking envelope math. The header under test
 # (src/luminumbra_client/audio/MixerModel.h) is a pure dependency-free header
 # (no miniaudio, no audio device, no GL) -- same shape as tree_lod_test: just
 # the include roots + gtest, safe in the default CPU lane.
@@ -248,15 +231,15 @@ add_executable(mixer_model_test
 )
 
 target_include_directories(mixer_model_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(mixer_model_test PRIVATE
     gtest_main
 )
 
-# AUDIO-07/AUDIO-09 (spec 021): the day/night-soundscape gating/crossfade and
+# the day/night-soundscape gating/crossfade and
 # the biome->reverb + delay-proxy mapping math. The header under test
 # (src/luminumbra_client/audio/EnvironmentalAudioModel.h) is pure std (no
 # miniaudio, no audio device, no GL) -- same shape as tree_lod_test: just the
@@ -266,14 +249,14 @@ add_executable(environmental_audio_model_test
 )
 
 target_include_directories(environmental_audio_model_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(environmental_audio_model_test PRIVATE
     gtest_main
 )
 
-# RENDER-20 (spec 021): world-dressing placement determinism. Compiles the
+# world-dressing placement determinism. Compiles the
 # extracted client-side WorldDressing.cpp directly (it depends only on
 # luminumbra_common's DeterministicRng / plant-genome / creature-build headers +
 # glm — no GL, no entt storage, no world system) and drives it with synthetic
@@ -282,12 +265,12 @@ target_link_libraries(environmental_audio_model_test PRIVATE
 # contract that keeps the async extraction byte-equal to the old inline loops).
 add_executable(world_dressing_test
     client/world_dressing_test.cpp
-    ../src/luminumbra_client/WorldDressing.cpp
+../src/luminumbra_client/WorldDressing.cpp
 )
 
 target_include_directories(world_dressing_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(world_dressing_test PRIVATE
@@ -295,11 +278,11 @@ target_link_libraries(world_dressing_test PRIVATE
     luminumbra_common
 )
 
-# far-field-source-unification (FR-003 / AC-003): pillar-B's first slice -- the forest
+# far-field source unification: tree rendering's first slice -- the forest
 # perf-BUDGET RED harness. OpenGL-free: it models the foliage draw load (instance /
 # draw-call / triangle counts) at a pinned 16k-tree load over the pure TreeLod.h
 # selection + the GBufferPass batching model, emits forest_perf_budget.json, and
-# RED-fails the geometry budget at today's load (impostors flip it green in Wave 3).
+# RED-fails the geometry budget at today's load (impostors flip it green in ).
 # Links luminumbra_common for DeterministicMath + nlohmann_json (no world/GL).
 add_executable(forest_perf_budget_test
     rendering/forest_perf_budget_test.cpp
@@ -311,8 +294,8 @@ target_compile_definitions(forest_perf_budget_test PRIVATE
 )
 
 target_include_directories(forest_perf_budget_test PRIVATE
-    ../src
-    ../src/luminumbra_common
+../src
+../src/luminumbra_common
 )
 
 target_link_libraries(forest_perf_budget_test PRIVATE
@@ -330,7 +313,7 @@ target_compile_definitions(render_smoke_test PRIVATE
 )
 
 target_include_directories(render_smoke_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(render_smoke_test PRIVATE
@@ -351,10 +334,10 @@ endif()
 
 add_executable(render_capture_test
     rendering/render_capture_test.cpp
-    # GPU-06: the capture-hooks TU under test (GL-free; direct source, same as
+    # the capture-hooks TU under test (GL-free; direct source, same as
     # shader_reflection_test's ShaderReflection.cpp -- render_capture_test links
     # luminumbra_common, not luminumbra_client, so no duplicate symbols).
-    ../src/luminumbra_client/rendering/CaptureHooks.cpp
+../src/luminumbra_client/rendering/CaptureHooks.cpp
 )
 
 target_compile_definitions(render_capture_test PRIVATE
@@ -363,9 +346,9 @@ target_compile_definitions(render_capture_test PRIVATE
 )
 
 target_include_directories(render_capture_test PRIVATE
-    ../src
-    ../src/luminumbra_client
-    ../vendor
+../src
+../src/luminumbra_client
+../vendor
 )
 
 target_link_libraries(render_capture_test PRIVATE
@@ -385,13 +368,13 @@ else()
     target_link_libraries(render_capture_test PRIVATE OpenGL::GL)
 endif()
 
-# GPU-14 (spec 021 rank 78): the PIX + Nsight trigger legs, driven through the
+# the PIX + Nsight trigger legs, driven through the
 # CaptureHooks test seams against injected api doubles. CaptureHooks.cpp is
 # GL-free (module detection + function pointers only), so unlike
 # render_capture_test this target needs no glfw/glad/OpenGL link.
 add_executable(capture_sdk_trigger_test
     rendering/capture_sdk_trigger_test.cpp
-    ../src/luminumbra_client/rendering/CaptureHooks.cpp
+../src/luminumbra_client/rendering/CaptureHooks.cpp
 )
 
 target_compile_definitions(capture_sdk_trigger_test PRIVATE
@@ -399,9 +382,9 @@ target_compile_definitions(capture_sdk_trigger_test PRIVATE
 )
 
 target_include_directories(capture_sdk_trigger_test PRIVATE
-    ../src
-    ../src/luminumbra_client
-    ../vendor
+../src
+../src/luminumbra_client
+../vendor
 )
 
 target_link_libraries(capture_sdk_trigger_test PRIVATE
@@ -409,11 +392,11 @@ target_link_libraries(capture_sdk_trigger_test PRIVATE
     luminumbra_common
 )
 
-# RENDER-12/GPU-12 (spec 016 FR-B): the registry OWNED-resource contract against
+# the registry OWNED-resource contract against
 # a real hidden GL context — frame-boundary survival, resize re-attach, destroy.
 add_executable(registry_ownership_test
     rendering/registry_ownership_test.cpp
-    ../src/luminumbra_client/rendering/RenderResourceRegistry.cpp
+../src/luminumbra_client/rendering/RenderResourceRegistry.cpp
 )
 
 target_compile_definitions(registry_ownership_test PRIVATE
@@ -422,9 +405,9 @@ target_compile_definitions(registry_ownership_test PRIVATE
 )
 
 target_include_directories(registry_ownership_test PRIVATE
-    ../src
-    ../src/luminumbra_client
-    ../src/luminumbra_common
+../src
+../src/luminumbra_client
+../src/luminumbra_common
 )
 
 target_link_libraries(registry_ownership_test PRIVATE
@@ -444,16 +427,16 @@ else()
     target_link_libraries(registry_ownership_test PRIVATE OpenGL::GL)
 endif()
 
-# GPU-04 (spec 016 FR-A): the pilot-pass seam contract — DebugView + GroundDecal
+# the pilot-pass seam contract — DebugView + GroundDecal
 # execute(RenderContext&) active paths against a real hidden GL context (both are
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
-    ../src/luminumbra_client/rendering/passes/DebugViewPass.cpp
-    ../src/luminumbra_client/rendering/passes/GroundDecalPass.cpp
-    ../src/luminumbra_client/rendering/Shader.cpp
-    ../src/luminumbra_client/rendering/ShaderReflection.cpp
-    ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
+../src/luminumbra_client/rendering/passes/DebugViewPass.cpp
+../src/luminumbra_client/rendering/passes/GroundDecalPass.cpp
+../src/luminumbra_client/rendering/Shader.cpp
+../src/luminumbra_client/rendering/ShaderReflection.cpp
+../src/luminumbra_client/rendering/PassShaderLayouts.cpp
 )
 
 target_compile_definitions(pass_context_test PRIVATE
@@ -462,9 +445,9 @@ target_compile_definitions(pass_context_test PRIVATE
 )
 
 target_include_directories(pass_context_test PRIVATE
-    ../src
-    ../src/luminumbra_client
-    ../src/luminumbra_common
+../src
+../src/luminumbra_client
+../src/luminumbra_common
 )
 
 target_link_libraries(pass_context_test PRIVATE
@@ -484,13 +467,13 @@ else()
     target_link_libraries(pass_context_test PRIVATE OpenGL::GL)
 endif()
 
-# Spec 017-A AC-A-001: async GPU readback ring. Exercises the ring's submit/poll/
+# async GPU readback ring. Exercises the ring's submit/poll/
 # consume contract against a real hidden GL context. Links the ring TU under test
 # directly (GL-only, no luminumbra_client dependency — same shape as the reflection
 # test below).
 add_executable(async_readback_ring_test
     rendering/async_readback_ring_test.cpp
-    ../src/luminumbra_client/rendering/AsyncReadbackRing.cpp
+../src/luminumbra_client/rendering/AsyncReadbackRing.cpp
 )
 
 target_compile_definitions(async_readback_ring_test PRIVATE
@@ -499,8 +482,8 @@ target_compile_definitions(async_readback_ring_test PRIVATE
 )
 
 target_include_directories(async_readback_ring_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(async_readback_ring_test PRIVATE
@@ -519,12 +502,12 @@ else()
     target_link_libraries(async_readback_ring_test PRIVATE OpenGL::GL)
 endif()
 
-# GPU-09 (spec 021 rank 60; spec 016 FR-C.3 / FR-D.2): the in-process dual-backend
+#  ( ;   / ): the in-process dual-backend
 # FLIP parity harness. Renders a temporally-deterministic pass (basic.vert/frag)
 # into an in-memory framebuffer and diffs two framebuffers produced in ONE process
 # with the same perceptual metric as tools/flip_diff.py (rendering/InProcessFlip.h,
 # header-only + GL-free). GL-only, self-contained (no luminumbra_common); the
-# RhiDiligent second-backend leg is wired and loudly skipped until GPU-P02.
+# RhiDiligent second-backend leg is wired and loudly skipped until.
 add_executable(dual_backend_flip_test
     rendering/dual_backend_flip_test.cpp
 )
@@ -535,8 +518,8 @@ target_compile_definitions(dual_backend_flip_test PRIVATE
 )
 
 target_include_directories(dual_backend_flip_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(dual_backend_flip_test PRIVATE
@@ -556,14 +539,14 @@ else()
     target_link_libraries(dual_backend_flip_test PRIVATE OpenGL::GL)
 endif()
 
-# Spec 016 FR-D: shader-resource reflection + layout validation. Compiles small
+# shader-resource reflection + layout validation. Compiles small
 # known programs in a hidden GL context and asserts the introspected layout +
 # pass-expectation validation (incl. the hot-reload rollback predicate). Links the
 # reflection TU under test directly (GL-only, no luminumbra_client dependency).
 add_executable(shader_reflection_test
     rendering/shader_reflection_test.cpp
-    ../src/luminumbra_client/rendering/ShaderReflection.cpp
-    ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
+../src/luminumbra_client/rendering/ShaderReflection.cpp
+../src/luminumbra_client/rendering/PassShaderLayouts.cpp
 )
 
 target_compile_definitions(shader_reflection_test PRIVATE
@@ -572,8 +555,8 @@ target_compile_definitions(shader_reflection_test PRIVATE
 )
 
 target_include_directories(shader_reflection_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(shader_reflection_test PRIVATE
@@ -592,7 +575,7 @@ else()
     target_link_libraries(shader_reflection_test PRIVATE OpenGL::GL)
 endif()
 
-# spec 021 GPU-P04 / spec 014 FR-A0.1 + FR-F.2/F.3: PilotShaderReflectionParity.
+#   /   + /F.3: PilotShaderReflectionParity.
 # A SINGLE slangc invocation both compiles the pilot pair's single-source HLSL to
 # SPIR-V (-target spirv) AND emits its reflection (-reflection-json); the ctest
 # asserts that reflection == the GL-introspected GLSL layout == the declared
@@ -620,7 +603,7 @@ if(LUMINUMBRA_SLANGC)
                     -target spirv -emit-spirv-directly -O0
                     -o "${_spv}" -reflection-json "${_json}"
             DEPENDS "${_hlsl}"
-            COMMENT "GPU-P04: slangc ${_p}.frag.hlsl -> SPIR-V + reflection JSON"
+            COMMENT ": slangc ${_p}.frag.hlsl -> SPIR-V + reflection JSON"
             VERBATIM
         )
         list(APPEND _pilot_reflect_jsons "${_json}")
@@ -629,9 +612,9 @@ if(LUMINUMBRA_SLANGC)
 
     add_executable(pilot_shader_reflection_test
         rendering/pilot_shader_reflection_test.cpp
-        ../src/luminumbra_client/rendering/ShaderReflection.cpp
-        ../src/luminumbra_client/rendering/ShaderReflectionSpirv.cpp
-        ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
+../src/luminumbra_client/rendering/ShaderReflection.cpp
+../src/luminumbra_client/rendering/ShaderReflectionSpirv.cpp
+../src/luminumbra_client/rendering/PassShaderLayouts.cpp
     )
     add_dependencies(pilot_shader_reflection_test pilot_shader_reflect)
     target_compile_definitions(pilot_shader_reflection_test PRIVATE
@@ -639,8 +622,8 @@ if(LUMINUMBRA_SLANGC)
         PILOT_SHADER_REFLECT_DIR="${_pilot_reflect_dir}"
     )
     target_include_directories(pilot_shader_reflection_test PRIVATE
-        ../src
-        ../src/luminumbra_client
+../src
+../src/luminumbra_client
     )
     target_link_libraries(pilot_shader_reflection_test PRIVATE
         gtest_main
@@ -658,29 +641,29 @@ if(LUMINUMBRA_SLANGC)
         target_link_libraries(pilot_shader_reflection_test PRIVATE OpenGL::GL)
     endif()
     set(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE ON)
-    message(STATUS "GPU-P04 PilotShaderReflectionParity enabled (slangc=${LUMINUMBRA_SLANGC})")
+    message(STATUS " PilotShaderReflectionParity enabled (slangc=${LUMINUMBRA_SLANGC})")
 else()
-    message(STATUS "GPU-P04 PilotShaderReflectionParity SKIPPED (slangc not found in VULKAN_SDK)")
+    message(STATUS " PilotShaderReflectionParity SKIPPED (slangc not found in VULKAN_SDK)")
 endif()
 
-# spec 021 GPU-P02 / spec 014 FR-B.2: the LUMIN_RHI backend-selector parse gate.
+# the LUMIN_RHI backend-selector parse gate.
 # Pure string logic -- no GL, no Diligent, no GPU. Compiles the RhiBackend TU
 # directly (like shader_reflection_test) so it needs no client/GL link. This is
 # the toolchain-independent half of the RhiDeviceBringupGpu proving signal; the
 # device/swapchain-creation half lives in the GPU ctest added by the pilot.
 add_executable(rhi_backend_test
     rendering/rhi_backend_test.cpp
-    ../src/luminumbra_client/rendering/rhi/RhiBackend.cpp
+../src/luminumbra_client/rendering/rhi/RhiBackend.cpp
 )
 
 target_include_directories(rhi_backend_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(rhi_backend_test PRIVATE gtest_main)
 
-# spec 021 GPU-P02: the device-creation leg of RhiDeviceBringupGpu. This is the
+# the device-creation leg of RhiDeviceBringupGpu. This is the
 # ONLY target in the whole build that links Diligent (GL + Vk static engines) --
 # proof by construction that no shipping binary pulls it. GLFW backs a headless GL
 # context; Device.cpp + RhiBackend.cpp are compiled directly (Diligent stays out of
@@ -689,12 +672,12 @@ target_link_libraries(rhi_backend_test PRIVATE gtest_main)
 if(LUMINUMBRA_ENABLE_DILIGENT)
     add_executable(rhi_device_bringup_test
         rendering/rhi_device_bringup_test.cpp
-        ../src/luminumbra_client/rendering/rhi/Device.cpp
-        ../src/luminumbra_client/rendering/rhi/RhiBackend.cpp
+../src/luminumbra_client/rendering/rhi/Device.cpp
+../src/luminumbra_client/rendering/rhi/RhiBackend.cpp
     )
     target_include_directories(rhi_device_bringup_test PRIVATE
-        ../src
-        ../src/luminumbra_client
+../src
+../src/luminumbra_client
     )
     target_link_libraries(rhi_device_bringup_test PRIVATE
         gtest_main
@@ -706,10 +689,10 @@ if(LUMINUMBRA_ENABLE_DILIGENT)
         target_link_libraries(rhi_device_bringup_test PRIVATE opengl32 gdi32 user32)
     endif()
 
-    # spec 021 GPU-03 + GPU-P05 (rank 66) leg B: RhiPilotParityGpu -- the RHI pilot's
-    # backend-fidelity go/no-go. Renders the GPU-09 calibration cube raw-GL (glad) and
+    #   + leg B: RhiPilotParityGpu -- the RHI pilot's
+    # backend-fidelity go/no-go. Renders the  calibration cube raw-GL (glad) and
     # GL-via-Diligent (dual_backend_diligent.cpp -- the only render TU that includes
-    # Diligent) in one process and FLIP-compares with the SAME in-process metric GPU-09
+    # Diligent) in one process and FLIP-compares with the SAME in-process metric
     # calibrated. Links Diligent (GL + Vk) like the bringup test; guarded by the same
     # LUMINUMBRA_ENABLE_DILIGENT so a Diligent-less configure still builds the suite.
     add_executable(rhi_pilot_flip_test
@@ -721,8 +704,8 @@ if(LUMINUMBRA_ENABLE_DILIGENT)
         LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
     )
     target_include_directories(rhi_pilot_flip_test PRIVATE
-        ../src
-        ../src/luminumbra_client
+../src
+../src/luminumbra_client
         # The GL/Vk engine targets propagate only their own interface/ dirs; the
         # shared public headers (RefCntAutoPtr.hpp etc.) live under Common/Platforms,
         # reached via the FetchContent source dir set by cmake/diligent.cmake.
@@ -749,7 +732,7 @@ if(LUMINUMBRA_ENABLE_DILIGENT)
     endif()
 endif()
 
-# T-I5a-1: GL-free particle determinism unit tests (emitter descriptor surface).
+#  GL-free particle determinism unit tests (emitter descriptor surface).
 add_executable(particle_determinism_test
     rendering/particle_determinism_test.cpp
 )
@@ -759,8 +742,8 @@ add_executable(far_lod_worker_test
 )
 
 target_include_directories(far_lod_worker_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(far_lod_worker_test PRIVATE
@@ -786,8 +769,8 @@ target_compile_definitions(particle_determinism_test PRIVATE
 )
 
 target_include_directories(particle_determinism_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(particle_determinism_test PRIVATE
@@ -807,13 +790,13 @@ else()
     target_link_libraries(particle_determinism_test PRIVATE OpenGL::GL)
 endif()
 
-# T-I5b-4 (W1): WaterfallVisual gate. Determinism (DetectWaterfalls same-seed ->
+# WaterfallVisual gate. Determinism (DetectWaterfalls same-seed ->
 # same-sites) + a sheet/spray/foam render capture at a detected site. Compiles
 # the render-side WaterfallDetect.cpp directly (it depends only on
 # luminumbra_common's world queries + glm), plus a GL context for the capture.
 add_executable(waterfall_visual_test
     rendering/waterfall_visual_test.cpp
-    ../src/luminumbra_client/rendering/WaterfallDetect.cpp
+../src/luminumbra_client/rendering/WaterfallDetect.cpp
 )
 
 target_compile_definitions(waterfall_visual_test PRIVATE
@@ -822,8 +805,8 @@ target_compile_definitions(waterfall_visual_test PRIVATE
 )
 
 target_include_directories(waterfall_visual_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(waterfall_visual_test PRIVATE
@@ -846,8 +829,8 @@ endif()
 
 add_executable(ui_smoke_test
     ui/ui_smoke_test.cpp
-    ../src/luminumbra_client/ui/core/UIComponent.cpp
-    ../src/luminumbra_client/ui/core/UIStateManager.cpp
+../src/luminumbra_client/ui/core/UIComponent.cpp
+../src/luminumbra_client/ui/core/UIStateManager.cpp
 )
 
 target_compile_definitions(ui_smoke_test PRIVATE
@@ -856,8 +839,8 @@ target_compile_definitions(ui_smoke_test PRIVATE
 )
 
 target_include_directories(ui_smoke_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(ui_smoke_test PRIVATE
@@ -875,12 +858,12 @@ else()
     target_link_libraries(ui_smoke_test PRIVATE OpenGL::GL)
 endif()
 
-# T008 — UI page-load test. Mirrors ui_smoke_test: live headless RmlUi context
+# UI page-load test. Mirrors ui_smoke_test: live headless RmlUi context
 # (hidden GL window), loads every shipped data/ui/*.rml and asserts a populated body.
 add_executable(ui_page_load_test
     ui/ui_page_load_test.cpp
-    ../src/luminumbra_client/ui/core/UIComponent.cpp
-    ../src/luminumbra_client/ui/core/UIStateManager.cpp
+../src/luminumbra_client/ui/core/UIComponent.cpp
+../src/luminumbra_client/ui/core/UIStateManager.cpp
 )
 
 target_compile_definitions(ui_page_load_test PRIVATE
@@ -889,8 +872,8 @@ target_compile_definitions(ui_page_load_test PRIVATE
 )
 
 target_include_directories(ui_page_load_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(ui_page_load_test PRIVATE
@@ -908,7 +891,7 @@ else()
     target_link_libraries(ui_page_load_test PRIVATE OpenGL::GL)
 endif()
 
-# Spec 002 Item 1 — the create-world LIVE WORLD-PREVIEW DIORAMA. Drives the real
+# the create-world LIVE WORLD-PREVIEW DIORAMA. Drives the real
 # RenderPipeline headlessly through the WorldgenPreview controller (offscreen FBO
 # render of a bounded candidate world). GL-required: SKIP -> ctest FAILURE (3a).
 add_executable(worldgen_preview_test
@@ -921,8 +904,8 @@ target_compile_definitions(worldgen_preview_test PRIVATE
 )
 
 target_include_directories(worldgen_preview_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 
 target_link_libraries(worldgen_preview_test PRIVATE
@@ -950,7 +933,7 @@ target_compile_definitions(initial_world_loading_perf_test PRIVATE
 )
 
 target_include_directories(initial_world_loading_perf_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(initial_world_loading_perf_test PRIVATE
@@ -958,7 +941,7 @@ target_link_libraries(initial_world_loading_perf_test PRIVATE
     luminumbra_common
 )
 
-# SHIELD-01 (spec 017-B step 3): the bounded-world-load proving gate — twenty
+#  ( step 3): the bounded-world-load proving gate — twenty
 # cold interactive loads (radius 12/4), each < 60 s, watchdog armed. Standalone
 # so the -Mode WorldLoadBounded validator can run just this measurement.
 add_executable(world_load_bounded_test
@@ -970,7 +953,7 @@ target_compile_definitions(world_load_bounded_test PRIVATE
 )
 
 target_include_directories(world_load_bounded_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(world_load_bounded_test PRIVATE
@@ -978,7 +961,7 @@ target_link_libraries(world_load_bounded_test PRIVATE
     luminumbra_common
 )
 
-# Spec-021 INSTINCT-12: per-species behaviour data (IAUS "brain" overrides +
+# per-species behaviour data (IAUS "brain" overrides +
 # "genome_ranges" in the species JSON schema). Pure CPU (registry parse + brain
 # arbiter + breeding operators; no GL, no world) — pins the byte-identical-defaults
 # law: absent/default JSON resolves the compiled constants exactly, an override
@@ -992,8 +975,8 @@ target_compile_definitions(species_behavior_overrides_test PRIVATE
 )
 
 target_include_directories(species_behavior_overrides_test PRIVATE
-    ../src
-    ../src/luminumbra_common
+../src
+../src/luminumbra_common
 )
 
 target_link_libraries(species_behavior_overrides_test PRIVATE
@@ -1001,7 +984,7 @@ target_link_libraries(species_behavior_overrides_test PRIVATE
     luminumbra_common
 )
 
-# perf-lane-and-ecology-tick (KDD-6 / T011): the EcologyTickPerf gate exe. A
+# perf-lane-and-ecology-tick ( / ): the EcologyTickPerf gate exe. A
 # standalone target (NOT folded into common_tests) so the validator gate can run
 # JUST this measurement (300 ticks x 3 roster sizes) without dragging the whole
 # common test suite, and so it can be built in release for representative numbers.
@@ -1016,8 +999,8 @@ target_compile_definitions(ecology_tick_perf_test PRIVATE
 )
 
 target_include_directories(ecology_tick_perf_test PRIVATE
-    ../src
-    ../src/luminumbra_common
+../src
+../src/luminumbra_common
 )
 
 target_link_libraries(ecology_tick_perf_test PRIVATE
@@ -1035,7 +1018,7 @@ target_compile_definitions(runtime_world_visual_validation_test PRIVATE
 )
 
 target_include_directories(runtime_world_visual_validation_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(runtime_world_visual_validation_test PRIVATE
@@ -1055,7 +1038,7 @@ else()
     target_link_libraries(runtime_world_visual_validation_test PRIVATE OpenGL::GL)
 endif()
 
-# T-I4-15 SHIELD-RT spike benchmark (manual/excluded-by-default: Debug runtime
+#   spike benchmark (manual/excluded-by-default: Debug runtime
 # can exceed 60s; evidence-only, not a required gate). Registered with add_test
 # under a "manual" label below so it stays out of the default ctest selection
 # (run explicitly: ctest -L manual -R ShieldRtSpike).
@@ -1069,7 +1052,7 @@ target_compile_definitions(shieldrt_spike_bench PRIVATE
 )
 
 target_include_directories(shieldrt_spike_bench PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(shieldrt_spike_bench PRIVATE
@@ -1077,10 +1060,10 @@ target_link_libraries(shieldrt_spike_bench PRIVATE
     luminumbra_common
 )
 
-# T-I6-A3a SHIELD-RT GPU tracer micro-profile (manual/GPU: needs a real GL
+#   GPU tracer micro-profile (manual/GPU: needs a real GL
 # context + GPU. Debug SDF-volume build can exceed 60s.) Re-runs the same two
 # far-field tracers as compute kernels and times them with GL_TIME_ELAPSED to
-# confirm the iteration-4 spike's heightfield-primary conclusion on hardware;
+# confirm the  spike's heightfield-primary conclusion on hardware;
 # emits shieldrt-tracer-profile.json. Shares shieldrt_far_field.h with the spike.
 add_executable(shieldrt_tracer_profile_gpu
     performance/shieldrt_tracer_profile_gpu.cpp
@@ -1092,7 +1075,7 @@ target_compile_definitions(shieldrt_tracer_profile_gpu PRIVATE
 )
 
 target_include_directories(shieldrt_tracer_profile_gpu PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(shieldrt_tracer_profile_gpu PRIVATE
@@ -1112,9 +1095,8 @@ else()
     target_link_libraries(shieldrt_tracer_profile_gpu PRIVATE OpenGL::GL)
 endif()
 
-# T-I6-A3b (increment 1): SHIELD-RT far-field ground-truth parity gate. Manual/GPU
-# (same gating shape as the profile). Proves the heightfield max-mip march hits the
-# real analytic surface before it is wired into the live G-buffer; emits
+# Standalone far-field ground-truth parity gate (manual/GPU). It proves the
+# heightfield max-mip march hits the real analytic surface and emits
 # shieldrt-far-field-parity.json. Shares the harness + builders with the profile.
 add_executable(shieldrt_far_field_parity_gpu
     performance/shieldrt_far_field_parity_gpu.cpp
@@ -1126,7 +1108,7 @@ target_compile_definitions(shieldrt_far_field_parity_gpu PRIVATE
 )
 
 target_include_directories(shieldrt_far_field_parity_gpu PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(shieldrt_far_field_parity_gpu PRIVATE
@@ -1146,7 +1128,7 @@ else()
     target_link_libraries(shieldrt_far_field_parity_gpu PRIVATE OpenGL::GL)
 endif()
 
-# T-I6-A3b (increment 2a): far-field G-buffer raymarch validated offscreen.
+# far-field G-buffer raymarch validated offscreen.
 # Manual/GPU. Proves the fullscreen far-field raymarch writes correct deferred
 # G-buffer values (view-space position, octahedral normal, gl_FragDepth) before
 # live RenderPipeline wiring; emits shieldrt-far-field-gbuffer.json.
@@ -1160,7 +1142,7 @@ target_compile_definitions(shieldrt_far_field_gbuffer_gpu PRIVATE
 )
 
 target_include_directories(shieldrt_far_field_gbuffer_gpu PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(shieldrt_far_field_gbuffer_gpu PRIVATE
@@ -1180,7 +1162,7 @@ else()
     target_link_libraries(shieldrt_far_field_gbuffer_gpu PRIVATE OpenGL::GL)
 endif()
 
-# T-I6-A3b (increment 2b): GPU max-mip reduction parity. Manual/GPU. Proves the
+# GPU max-mip reduction parity. Manual/GPU. Proves the
 # GPU max-reduction acceleration-structure build matches the CPU BuildHeightMaxMip
 # reference byte-for-byte; emits shieldrt-far-field-maxmip.json.
 add_executable(shieldrt_far_field_maxmip_gpu
@@ -1193,7 +1175,7 @@ target_compile_definitions(shieldrt_far_field_maxmip_gpu PRIVATE
 )
 
 target_include_directories(shieldrt_far_field_maxmip_gpu PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(shieldrt_far_field_maxmip_gpu PRIVATE
@@ -1265,7 +1247,7 @@ target_compile_definitions(frontier_gates_test PRIVATE
 )
 
 target_include_directories(frontier_gates_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(frontier_gates_test PRIVATE
@@ -1273,7 +1255,7 @@ target_link_libraries(frontier_gates_test PRIVATE
     luminumbra_common
 )
 
-# Second-class adversarial pass (FR-005): Jolt tunneling / penetration test. A fast
+# Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
 # Drives the real PhysicsSystem (luminumbra_common carries Jolt) -- no GL needed.
 add_executable(jolt_tunneling_test
@@ -1281,9 +1263,9 @@ add_executable(jolt_tunneling_test
 )
 
 target_include_directories(jolt_tunneling_test PRIVATE
-    ../src
-    ../src/luminumbra_common
-    ../include
+../src
+../src/luminumbra_common
+../include
 )
 
 target_link_libraries(jolt_tunneling_test PRIVATE
@@ -1291,25 +1273,25 @@ target_link_libraries(jolt_tunneling_test PRIVATE
     luminumbra_common
 )
 
-# AUDIO-11: real physics-raycast audio occlusion. Compiles AudioSpatialCluster.cpp
+# real physics-raycast audio occlusion. Compiles AudioSpatialCluster.cpp
 # directly (now decoupled from miniaudio) + links luminumbra_common for the Jolt
 # PhysicsSystem::calculate_audio_occlusion raycast; no client/GL link needed.
 add_executable(audio_occlusion_test
     audio/audio_occlusion_test.cpp
-    ../src/luminumbra_client/audio/AudioSpatialCluster.cpp
+../src/luminumbra_client/audio/AudioSpatialCluster.cpp
 )
 target_include_directories(audio_occlusion_test PRIVATE
-    ../src
-    ../src/luminumbra_client
-    ../src/luminumbra_common
-    ../include
+../src
+../src/luminumbra_client
+../src/luminumbra_common
+../include
 )
 target_link_libraries(audio_occlusion_test PRIVATE
     gtest_main
     luminumbra_common
 )
 
-# AUDIO-12: prune guard — compile-sentinel that the SURVIVING audio headers still build
+# prune guard — compile-sentinel that the SURVIVING audio headers still build
 # (fails if anything leans on a deleted orphan) + asserts the 7 retired bank manifests are
 # gone. Includes MiniaudioManager.h so needs the miniaudio + nlohmann_json link interface.
 add_executable(audio_prune_guard_test
@@ -1319,8 +1301,8 @@ target_compile_definitions(audio_prune_guard_test PRIVATE
     LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
 )
 target_include_directories(audio_prune_guard_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 target_link_libraries(audio_prune_guard_test PRIVATE
     gtest_main
@@ -1330,14 +1312,14 @@ target_link_libraries(audio_prune_guard_test PRIVATE
     glm
 )
 
-# AUDIO-11 follow-up: occlusion read-back onto ma_sound volume. Pure test of the
+#  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
     audio/audio_volume_readback_test.cpp
 )
 target_include_directories(audio_volume_readback_test PRIVATE
-    ../src
-    ../src/luminumbra_client
+../src
+../src/luminumbra_client
 )
 target_link_libraries(audio_volume_readback_test PRIVATE
     gtest_main
@@ -1347,37 +1329,37 @@ target_link_libraries(audio_volume_readback_test PRIVATE
     glm
 )
 
-# T-I6 capture-native re-bless: resolution-relative gate-threshold scaling unit
+#  capture-native update the baseline: resolution-relative gate-threshold scaling unit
 # tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
 add_executable(capture_scale_test
     rendering/capture_scale_test.cpp
 )
 target_include_directories(capture_scale_test PRIVATE
-    ../src/luminumbra_client
+../src/luminumbra_client
 )
 target_link_libraries(capture_scale_test PRIVATE
     gtest_main
 )
 
-# T-I6 isolation/layer mode: pure config-parse unit test (core/IsolationConfig.h is
+#  isolation/layer mode: pure config-parse unit test (core/IsolationConfig.h is
 # dependency-free, so this needs no GL/common libs). Runs in the default ctest gate.
 add_executable(isolation_config_test
     rendering/isolation_config_test.cpp
 )
 target_include_directories(isolation_config_test PRIVATE
-    ../src/luminumbra_client
+../src/luminumbra_client
 )
 target_link_libraries(isolation_config_test PRIVATE
     gtest_main
 )
 
-# Standalone main() gate programs registered directly with CTest.
+# Standalone main gate programs registered directly with CTest.
 add_executable(eventbus_order_gate_test
     simulation/eventbus_order_gate_test.cpp
 )
 
 target_include_directories(eventbus_order_gate_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(eventbus_order_gate_test PRIVATE
@@ -1389,7 +1371,7 @@ add_executable(world_persistence_roundtrip_gate_test
 )
 
 target_include_directories(world_persistence_roundtrip_gate_test PRIVATE
-    ../src
+../src
 )
 
 target_link_libraries(world_persistence_roundtrip_gate_test PRIVATE
@@ -1416,21 +1398,20 @@ add_test(
 include(GoogleTest)
 set(LUMINUMBRA_GTEST_TARGETS
     world_generation_test
-    sdf_gpu_cpu_parity_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
     common_tests
     tree_lod_test
-    # FOLIAGE-06 (spec 021): the hemi-octa mapping test was built but never
+    # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
     # executing coverage. GL-free pure math, safe in the default lane.
     octa_impostor_test
-    # AUDIO-10 (spec 021): mixer/ducking envelope math (CPU-only, GL-free).
+    # mixer/ducking envelope math (CPU-only, GL-free).
     mixer_model_test
-    # AUDIO-07/AUDIO-09 (spec 021): day/night soundscape + reverb mapping math
+    # day/night soundscape + reverb mapping math
     # (CPU-only, GL-free, no audio device).
     environmental_audio_model_test
-    # RENDER-20 (spec 021): world-dressing placement determinism (CPU-only).
+    # world-dressing placement determinism (CPU-only).
     world_dressing_test
     render_smoke_test
     render_capture_test
@@ -1449,7 +1430,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     worldgen_preview_test
     initial_world_loading_perf_test
     world_load_bounded_test
-    # INSTINCT-12 (spec 021): species JSON behaviour overrides — byte-identical
+    # species JSON behaviour overrides — byte-identical
     # defaults + override round-trip (pure CPU, default lane).
     species_behavior_overrides_test
     runtime_world_visual_validation_test
@@ -1461,18 +1442,18 @@ set(LUMINUMBRA_GTEST_TARGETS
     capture_scale_test
     isolation_config_test
 )
-# spec 021 GPU-P02: register the RHI device-bringup GPU ctest only when Diligent is
+# register the RHI device-bringup GPU ctest only when Diligent is
 # vendored in (the target does not exist otherwise).
 if(LUMINUMBRA_ENABLE_DILIGENT)
     list(APPEND LUMINUMBRA_GTEST_TARGETS rhi_device_bringup_test)
     list(APPEND LUMINUMBRA_GTEST_TARGETS rhi_pilot_flip_test)
 endif()
-# spec 021 GPU-P04: register the pilot reflection-parity GPU ctest only when the
+# register the pilot reflection-parity GPU ctest only when the
 # dxc + spirv-cross toolchain was found at configure time.
 if(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE)
     list(APPEND LUMINUMBRA_GTEST_TARGETS pilot_shader_reflection_test)
 endif()
-# Gate honesty (spec 002, Item 3a): a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning the
+# Gate honesty (, ): a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning the
 # headless RmlUi UI suite (which GTEST_SKIPs without a GL context) could go GREEN with zero coverage
 # on a gate runner that lacks GL. These tests assert real behaviour and MUST run, not skip. Promote
 # any "[ SKIPPED ]" line from the UI targets to a ctest FAILURE via FAIL_REGULAR_EXPRESSION. The
@@ -1495,20 +1476,16 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     endif()
 endforeach()
 
-# far-field-source-unification (FR-003 / AC-003): the forest perf-BUDGET harness is
-# registered under the "manual" label and is INTENTIONALLY RED at today's 16k-tree
-# load (no octahedral impostor atlas yet). It is excluded from the default gate so the
-# build + default ctest run stay green; run it deliberately to see the RED budget:
-#   default gate (skip it):   ctest -LE manual
-#   run the budget harness:   ctest -L manual -R ForestPerfBudget --output-on-failure
-# The -Mode FarFieldForestBudget validator reads its forest_perf_budget.json and
-# asserts the over-budget RED state; Wave-3 impostors flip it green.
+# The deterministic forest geometry harness is manual because it validates a
+# pinned 16k-tree workload rather than ordinary unit behavior. It guards the
+# production impostor fold with draw-call and triangle-count ceilings; it makes
+# no machine-specific timing claim.
 add_test(NAME ForestPerfBudget COMMAND forest_perf_budget_test)
 set_tests_properties(ForestPerfBudget PROPERTIES
     LABELS "manual;perf;budget"
     TIMEOUT 300)
 
-# NET-07: over-the-wire N=32 replication soak (real TCP loopback, 32 client threads,
+# over-the-wire N=32 replication soak (real TCP loopback, 32 client threads,
 # ~10s wall-clock, freezes net_soak.v1). MANUAL-tier — excluded from the default gtest
 # lane (never gate the default lane on socket/wall-clock timing).
 #   run: ctest -L manual -R NetSoak --output-on-failure
@@ -1519,15 +1496,15 @@ target_compile_definitions(net_soak_over_the_wire_test PRIVATE
     LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
     LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts")
 target_include_directories(net_soak_over_the_wire_test PRIVATE
-    ../src
-    ../src/luminumbra_common)
+../src
+../src/luminumbra_common)
 target_link_libraries(net_soak_over_the_wire_test PRIVATE
     gtest_main
     luminumbra_common)
 add_test(NAME NetSoak COMMAND net_soak_over_the_wire_test)
 set_tests_properties(NetSoak PROPERTIES LABELS "manual;net;soak" TIMEOUT 120)
 
-# T-I4-15: register the spike benchmark under the "manual" label. It is
+# register the spike benchmark under the "manual" label. It is
 # evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed
 # 60s under build contention) makes it a manual/excluded-by-default bench:
 # exclude it from a default gate run with label-exclusion, run it deliberately by
@@ -1539,7 +1516,7 @@ set_tests_properties(ShieldRtSpike PROPERTIES
     LABELS "manual;perf;spike"
     TIMEOUT 600)
 
-# T-I6-A3a: GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
+# GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf
 # assertion on a software renderer). Run it deliberately:
 #   ctest -L manual -R ShieldRtTracerProfileGpu --output-on-failure
@@ -1548,28 +1525,28 @@ set_tests_properties(ShieldRtTracerProfileGpu PROPERTIES
     LABELS "manual;perf;gpu"
     TIMEOUT 600)
 
-# T-I6-A3b (increment 1): far-field ground-truth parity gate (manual;perf;gpu):
+# far-field ground-truth parity gate (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldParityGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldParityGpu COMMAND shieldrt_far_field_parity_gpu)
 set_tests_properties(ShieldRtFarFieldParityGpu PROPERTIES
     LABELS "manual;perf;gpu"
     TIMEOUT 600)
 
-# T-I6-A3b (increment 2a): far-field G-buffer raymarch (manual;perf;gpu):
+# far-field G-buffer raymarch (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldGbufferGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldGbufferGpu COMMAND shieldrt_far_field_gbuffer_gpu)
 set_tests_properties(ShieldRtFarFieldGbufferGpu PROPERTIES
     LABELS "manual;perf;gpu"
     TIMEOUT 600)
 
-# T-I6-A3b (increment 2b): GPU max-mip reduction parity (manual;perf;gpu):
+# GPU max-mip reduction parity (manual;perf;gpu):
 #   ctest -L manual -R ShieldRtFarFieldMaxMipGpu --output-on-failure
 add_test(NAME ShieldRtFarFieldMaxMipGpu COMMAND shieldrt_far_field_maxmip_gpu)
 set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
     LABELS "manual;perf;gpu"
     TIMEOUT 600)
 
-# Iteration-6 critique #5: per-flag fixtures for the WorldVisualSweep objective
+#  per-flag fixtures for the WorldVisualSweep objective
 # critique (tools/visual_critique.py). Pins every objective defect flag so a
 # threshold edit that stops catching a defect fails CI. Needs numpy (the fixtures
 # build synthetic arrays). Multiple python installs may exist on a machine and
@@ -1631,7 +1608,7 @@ else()
     message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")
 endif()
 
-# SHIELD-10 (spec 021): SDF-contract doc-lint. Assert docs/shield/sdf-contract.md
+# SDF-contract doc-lint. Assert docs/shield/sdf-contract.md
 # enumerates both producer tiers + the malformed-SDF regeneration rule, checked against
 # the contract strings quoted in test/features/sdf-contract.feature. Stdlib-only checker,
 # so any python3 from the shared candidate list works (probe a trivial import).
@@ -1658,11 +1635,8 @@ string(TOLOWER "${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}" LUMINUMBRA_TEST_BASELI
 if(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET STREQUAL "")
     set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "debug")
 endif()
-# coverage-instrumentation slice: the coverage preset reuses CMAKE_BUILD_TYPE=Debug
-# but lives in build/coverage and is validated with -BuildPreset coverage, which
-# asserts build_preset == "coverage" on every artifact. Label the configure-time
-# baseline artifacts (ctest_manifest, coverage_summary, ui_screenshots) as
-# "coverage" in that tree so the whole UiTestBaseline gate runs cleanly there.
+# The coverage preset reuses CMAKE_BUILD_TYPE=Debug but lives in build/coverage.
+# Label its configure-time test manifest with the actual preset name.
 if(LUMINUMBRA_ENABLE_COVERAGE)
     set(LUMINUMBRA_TEST_BASELINE_BUILD_PRESET "coverage")
 endif()
@@ -1670,11 +1644,10 @@ endif()
 set(LUMINUMBRA_TEST_ARTIFACT_ROOT "${CMAKE_BINARY_DIR}/test-artifacts")
 file(MAKE_DIRECTORY
     "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing"
-    "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/coverage"
     "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/ui"
 )
 
-# OPS-12 (spec 021): the manifest roster + floors are DERIVED from
+# the manifest roster + floors are DERIVED from
 # LUMINUMBRA_GTEST_TARGETS (the single source of truth the gtest_discover_tests
 # loop registers) instead of a hand-maintained 10-name list frozen at floor 10.
 # A target added to the roster is automatically required; one silently dropped
@@ -1698,6 +1671,7 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
     "${LUMINUMBRA_REQUIRED_EXECUTABLES_JSON}"
     "  ],\n"
     "  \"required_ui_tests\": [\n"
+    "    \"UiSmokeTest.CapturesMaintainedMenuScreenshots\",\n"
     "    \"UiSmokeTest.AuthoredRmlDocumentsLoadAndExposeRequiredElements\",\n"
     "    \"UiSmokeTest.UiStateNavigationMaintainsDocumentAndGameState\",\n"
     "    \"UiSmokeTest.AuthoredMenuInteractionsNavigateAndInvokeCallbacks\",\n"
@@ -1721,108 +1695,6 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
     "  ],\n"
     "  \"excluded_patterns\": [\n"
     "    \"_NOT_BUILT$\"\n"
-    "  ],\n"
-    "  \"passed\": true\n"
-    "}\n"
-)
-
-file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/coverage/coverage_summary.json"
-    "{\n"
-    "  \"schema\": \"luminumbra.coverage_summary.v1\",\n"
-    "  \"generated_by\": \"test/CMakeLists.txt\",\n"
-    "  \"build_preset\": \"${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}\",\n"
-    "  \"coverage_kind\": \"contract_baseline\",\n"
-    "  \"coverage_tool\": \"pending-source-coverage-integration\",\n"
-    "  \"line_coverage\": {\n"
-    "    \"available\": false,\n"
-    "    \"minimum_required_percent\": 0,\n"
-    "    \"reason\": \"The debug preset does not emit compiler coverage counters; this artifact gates subsystem contract coverage until coverage instrumentation is enabled.\"\n"
-    "  },\n"
-    "  \"contract_coverage\": {\n"
-    "    \"covered_subsystem_count\": 7,\n"
-    "    \"minimum_subsystems\": 7,\n"
-    "    \"covered_subsystems\": [\n"
-    "      \"common\",\n"
-    "      \"rendering\",\n"
-    "      \"ui\",\n"
-    "      \"physics\",\n"
-    "      \"audio\",\n"
-    "      \"performance\",\n"
-    "      \"tools\"\n"
-    "    ]\n"
-    "  },\n"
-    "  \"required_artifacts\": [\n"
-    "    \"testing/ctest_manifest.json\",\n"
-    "    \"ui/ui_smoke.json\",\n"
-    "    \"ui/ui_interactions.json\",\n"
-    "    \"ui/ui_screenshots.json\"\n"
-    "  ],\n"
-    "  \"passed\": true\n"
-    "}\n"
-)
-
-file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/ui/ui_screenshots.json"
-    "{\n"
-    "  \"schema\": \"luminumbra.ui_screenshots.v1\",\n"
-    "  \"generated_by\": \"test/CMakeLists.txt\",\n"
-    "  \"build_preset\": \"${LUMINUMBRA_TEST_BASELINE_BUILD_PRESET}\",\n"
-    "  \"capture_window\": {\n"
-    "    \"width\": 800,\n"
-    "    \"height\": 600,\n"
-    "    \"visible\": false\n"
-    "  },\n"
-    "  \"capture_policy\": \"baseline manifest for authored Rml UI views; runtime screenshot capture must populate these views before tightening to pixel diffs\",\n"
-    "  \"screenshot_count\": 3,\n"
-    "  \"required_artifacts\": [\n"
-    "    \"ui/ui_smoke.json\",\n"
-    "    \"ui/ui_interactions.json\"\n"
-    "  ],\n"
-    "  \"screenshots\": [\n"
-    "    {\n"
-    "      \"view\": \"main_menu\",\n"
-    "      \"document\": \"main_menu.rml\",\n"
-    "      \"expected_file\": \"main_menu.png\",\n"
-    "      \"format\": \"png\",\n"
-    "      \"status\": \"baseline_contract\",\n"
-    "      \"required_element_ids\": [\n"
-    "        \"main_menu\",\n"
-    "        \"new_world_btn\",\n"
-    "        \"load_world_btn\",\n"
-    "        \"settings_btn\",\n"
-    "        \"quit_btn\",\n"
-    "        \"notification\",\n"
-    "        \"notification_text\"\n"
-    "      ]\n"
-    "    },\n"
-    "    {\n"
-    "      \"view\": \"world_creation\",\n"
-    "      \"document\": \"world_creation.rml\",\n"
-    "      \"expected_file\": \"world_creation.png\",\n"
-    "      \"format\": \"png\",\n"
-    "      \"status\": \"baseline_contract\",\n"
-    "      \"required_element_ids\": [\n"
-    "        \"world_name\",\n"
-    "        \"world_seed\",\n"
-    "        \"world_type\",\n"
-    "        \"back_btn\",\n"
-    "        \"create_btn\"\n"
-    "      ]\n"
-    "    },\n"
-    "    {\n"
-    "      \"view\": \"world_selection\",\n"
-    "      \"document\": \"world_selection.rml\",\n"
-    "      \"expected_file\": \"world_selection.png\",\n"
-    "      \"format\": \"png\",\n"
-    "      \"status\": \"baseline_contract\",\n"
-    "      \"required_element_ids\": [\n"
-    "        \"filter_all\",\n"
-    "        \"filter_recent\",\n"
-    "        \"filter_favorites\",\n"
-    "        \"back_btn\",\n"
-    "        \"load_selected_btn\",\n"
-    "        \"import_world_btn\"\n"
-    "      ]\n"
-    "    }\n"
     "  ],\n"
     "  \"passed\": true\n"
     "}\n"

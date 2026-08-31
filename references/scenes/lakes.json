@@ -1,5 +1,0 @@
-{ "camera": { "pos": [8, 85, 8], "yaw": 35, "pitch": -28, "fov": 70 },
-  "time_of_day": 0.04,
-  "clouds": { "coverage": 0.35, "plane_height": 1100, "shadow": false },
-  "weather": { "type": "none", "intensity": 0.0 },
-  "screenshot": "references/compare/lakes.ppm" }

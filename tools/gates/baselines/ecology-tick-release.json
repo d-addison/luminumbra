@@ -1,0 +1,15 @@
+{
+  "schema": "luminumbra.ecology_tick_baseline.v1",
+  "status": "reviewed",
+  "captured_at": "2026-07-05T21:37:54Z",
+  "build_mode": "release",
+  "runs": 5,
+  "ticks": 300,
+  "headroom_multiplier": 1.5,
+  "budgets": {
+    "256": {"budget_median_ms": 0.3621, "observed_median_ms": 0.2414, "observed_p99_ms": 0.3929},
+    "1000": {"budget_median_ms": 3.008, "observed_median_ms": 2.0054, "observed_p99_ms": 2.9111},
+    "4000": {"budget_median_ms": 38.5112, "observed_median_ms": 25.6742, "observed_p99_ms": 30.4986}
+  },
+  "note": "Reviewed release-mode full-roster measurements. Work caps use a deterministic stable-id window, never a wall-clock cutoff."
+}

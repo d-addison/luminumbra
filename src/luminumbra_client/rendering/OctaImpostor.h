@@ -1,6 +1,6 @@
 #pragma once
 
-// Track-B (roadmap pillar B, Wave 3): far-field tree IMPOSTOR support — the
+// tree rendering (tree rendering, ): far-field tree IMPOSTOR support — the
 // hemi-octahedral view-direction <-> atlas-tile mapping math.
 //
 // An octahedral impostor captures a mesh's appearance from a grid of view
@@ -51,7 +51,7 @@ inline Vec2f HemiOctaEncode(Vec3f dir) {
     const float px = dir.x * inv;
     const float pz = dir.z * inv;
     // 45-degree rotation folds the upper-hemisphere diamond into the unit square.
-    Vec2f uv{ px + pz, px - pz };
+    Vec2f uv{px + pz, px - pz};
     uv.x = uv.x * 0.5f + 0.5f;
     uv.y = uv.y * 0.5f + 0.5f;
     return uv;
@@ -63,11 +63,11 @@ inline Vec3f HemiOctaDecode(Vec2f uv) {
     const float uy = uv.y * 2.0f - 1.0f;
     const float x = (ux + uy) * 0.5f;
     const float z = (ux - uy) * 0.5f;
-    Vec3f dir{ x, 1.0f - std::fabs(x) - std::fabs(z), z };
+    Vec3f dir{x, 1.0f - std::fabs(x) - std::fabs(z), z};
     // Normalize (the octahedron point projects back to the unit hemisphere).
     const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
     const float inv = (len > 0.0f) ? 1.0f / len : 0.0f;
-    return Vec3f{ dir.x * inv, dir.y * inv, dir.z * inv };
+    return Vec3f{dir.x * inv, dir.y * inv, dir.z * inv};
 }
 
 // --- Atlas grid -------------------------------------------------------------------
@@ -84,8 +84,8 @@ struct OctaImpostorGrid {
 // Direction captured by tile (i,j) — the hemi-octa decode of the cell CENTER.
 inline Vec3f OctaTileDirection(int i, int j, const OctaImpostorGrid& grid) {
     const int n = std::max(1, grid.gridResolution);
-    const Vec2f uv{ (static_cast<float>(i) + 0.5f) / static_cast<float>(n),
-                    (static_cast<float>(j) + 0.5f) / static_cast<float>(n) };
+    const Vec2f uv{(static_cast<float>(i) + 0.5f) / static_cast<float>(n),
+                   (static_cast<float>(j) + 0.5f) / static_cast<float>(n)};
     return HemiOctaDecode(uv);
 }
 
@@ -94,7 +94,7 @@ inline Vec3f OctaTileDirection(int i, int j, const OctaImpostorGrid& grid) {
 inline Vec2f OctaTileCoord(Vec3f viewDir, const OctaImpostorGrid& grid) {
     const int n = std::max(1, grid.gridResolution);
     const Vec2f uv = HemiOctaEncode(viewDir);
-    return Vec2f{ uv.x * static_cast<float>(n), uv.y * static_cast<float>(n) };
+    return Vec2f{uv.x * static_cast<float>(n), uv.y * static_cast<float>(n)};
 }
 
 // Nearest tile (i,j) for a view direction, clamped to the grid.

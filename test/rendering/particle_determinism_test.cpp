@@ -1,9 +1,9 @@
-// T-I5a-1: GPU particle framework determinism unit tests.
+//  GPU particle framework determinism unit tests.
 //
 // These exercise the SIM-DETERMINISTIC emitter-descriptor surface WITHOUT a GL
 // context (no buffers/shaders are created): the descriptor schedule is a pure
 // function of world state, and per-particle MOTION is render-only and never
-// snapshotted (critique F2). The byte-equal and seed-derivation guarantees
+// snapshotted (regression review). The byte-equal and seed-derivation guarantees
 // asserted here are exactly what the ParticleEmitterDeterminism gate relies on.
 
 #include "rendering/passes/ParticlePass.h"
@@ -33,7 +33,7 @@ fs::path FixtureEmitter() {
 
 } // namespace
 
-// Instance record stays a fixed 24-byte POD (pinned stride, design-decisions §3).
+// Instance record stays a fixed 24-byte POD (pinned stride, documented design).
 TEST(ParticleDeterminism, InstanceRecordIs24Bytes) {
     EXPECT_EQ(sizeof(ParticlePass::InstanceRecord), 24u);
     EXPECT_EQ(ParticlePass::kInstanceStride, 24u);
@@ -46,7 +46,7 @@ TEST(ParticleDeterminism, EmitterDescriptorIsFixedSizePod) {
                   "descriptor must be trivially copyable for byte-equal snapshots");
 }
 
-// Pinned capacities (design-decisions §3).
+// Pinned capacities (documented design).
 TEST(ParticleDeterminism, PinnedCapacities) {
     EXPECT_EQ(ParticlePass::kMaxInstances, 65536u);
     EXPECT_EQ(ParticlePass::kMaxEmitters, 256u);
@@ -88,8 +88,10 @@ TEST(ParticleDeterminism, DescriptorSetIsByteEqualAcrossRuns) {
     ASSERT_EQ(run_a.size(), run_b.size());
     ASSERT_EQ(run_a.size(), 1u);
     EXPECT_EQ(hash_a, hash_b);
-    EXPECT_EQ(0, std::memcmp(run_a.data(), run_b.data(),
-                             run_a.size() * sizeof(ParticlePass::EmitterDescriptor)));
+    EXPECT_EQ(0,
+              std::memcmp(run_a.data(),
+                          run_b.data(),
+                          run_a.size() * sizeof(ParticlePass::EmitterDescriptor)));
 
     // The descriptor's rng_seed must match the documented derivation.
     EXPECT_EQ(run_a[0].rng_seed,

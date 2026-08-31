@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.lifespan — creatures (and any opted-in entity) AGE and DIE. This is
+// sim.lifespan: creatures (and any opted-in entity) AGE and DIE. This is
 // the closing half of the ecology life-cycle: CreatureReproductionSystem makes
 // BIRTHS, this makes DEATHS, so the population is bounded rather than exploding.
 //
@@ -16,7 +16,7 @@
 // present, ALSO sets CreatureComponent.eaten = true so the existing brain /
 // floating-id marker treat the corpse as an inert carcass (it stops deciding /
 // moving and predators ignore it) — reusing the carcass seam rather than adding
-// a new one. The system does NOT reg.destroy() anything: the orchestrator owns
+// a new one. The system does NOT reg.destroy anything: the orchestrator owns
 // removal/cleanup later (destroying here could desync the avatar pool).
 //
 // DETERMINISM (this feeds world_hash once wired): id-ordered traversal; all

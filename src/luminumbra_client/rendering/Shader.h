@@ -1,11 +1,11 @@
 #pragma once
 
-#include <string>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include <string>
 #include <unordered_map> // Added for the cache
 
-#include "ShaderReflection.h" // Spec 016 FR-D: reflect resource layout at load time
+#include "ShaderReflection.h" // reflect resource layout at load time
 
 namespace Luminumbra::Rendering {
 
@@ -15,30 +15,44 @@ public:
     ~Shader();
 
     void use() const;
-    bool IsValid() const { return m_valid && m_id != 0; }
-    GLuint Id() const { return m_id; }
-    const std::string& DebugName() const { return m_debug_name; }
-    const std::string& Diagnostic() const { return m_diagnostic; }
-    // Spec 023 (live shader authoring): the stored source paths, exposed so the
+    bool IsValid() const {
+        return m_valid && m_id != 0;
+    }
+    GLuint Id() const {
+        return m_id;
+    }
+    const std::string& DebugName() const {
+        return m_debug_name;
+    }
+    const std::string& Diagnostic() const {
+        return m_diagnostic;
+    }
+    //  (live shader authoring): the stored source paths, exposed so the
     // auto-reload watcher can mtime-poll them. Empty for non-file-backed programs.
-    const std::string& VertexPath() const { return m_vertex_path; }
-    const std::string& FragmentPath() const { return m_fragment_path; }
+    const std::string& VertexPath() const {
+        return m_vertex_path;
+    }
+    const std::string& FragmentPath() const {
+        return m_fragment_path;
+    }
 
-    // --- Spec 016 FR-D: shader-resource reflection + layout validation --------
+    // ---: shader-resource reflection + layout validation --------
     // The resource layout introspected from the linked program (samplers / UBO /
     // SSBO / outputs). Empty until a successful link.
-    const ReflectedLayout& Reflected() const { return m_reflected; }
+    const ReflectedLayout& Reflected() const {
+        return m_reflected;
+    }
 
     // Validate the bindings a PASS adopts (declared as an ExpectedLayout) against
     // the reflected layout. A hard mismatch (wrong sampler type, wrong binding
     // point) is logged at ERROR and returns false -- a load-time tripwire for the
     // "renders garbage" class. Absence-only (the linker stripped an unused
     // sampler) is logged at WARN and returns true. The expected layout is
-    // remembered so a later hot-reload (FR-D-003) re-validates against it and
+    // remembered so a later hot-reload re-validates against it and
     // rolls back on mismatch.
     bool ValidateLayout(const ExpectedLayout& expected);
 
-    // FR-D-003 hot-reload safety: recompile+relink from the stored source paths
+    //  hot-reload safety: recompile+relink from the stored source paths
     // into a SEPARATE program, reflect it, and (if an expected layout was
     // registered) re-validate. Only on full success is the new program swapped in
     // and the old one deleted; on ANY failure (IO / compile / link / reflected-
@@ -63,7 +77,7 @@ private:
     bool checkCompileErrors(GLuint shader, const std::string& type);
     GLint getUniformLocation(const std::string& name) const; // Helper to use the cache
 
-    // Single compile+link path shared by the ctor and Reload(). Reads the two
+    // Single compile+link path shared by the ctor and Reload. Reads the two
     // source files, compiles+links, and returns a NEW program name (0 on any
     // failure; m_diagnostic holds the reason). Does NOT touch m_id -- the caller
     // decides whether to adopt it, which is what makes rollback safe.
@@ -76,7 +90,7 @@ private:
     // The cache for uniform locations. mutable allows it to be modified in const functions.
     mutable std::unordered_map<std::string, GLint> m_uniformLocationCache;
 
-    // Spec 016 FR-D: stored source paths (for Reload), the reflected resource
+    // stored source paths (for Reload), the reflected resource
     // layout, and the optional pass-declared expectation re-checked on reload.
     std::string m_vertex_path;
     std::string m_fragment_path;

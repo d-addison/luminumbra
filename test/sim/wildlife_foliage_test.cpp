@@ -1,4 +1,4 @@
-// Track sim.wildlife_foliage — the ECOLOGY x FOLIAGE coupling: non-predator creatures
+// sim.wildlife_foliage: the ECOLOGY x FOLIAGE coupling: non-predator creatures
 // GRAZE/TRAMPLE nearby grazeable plants (biomass down), and plants REGROW when ungrazed.
 // Deterministic: id-ordered traversal, creature positions snapshotted first + graze demand
 // summed per plant so the result is order-independent; NO rng / wall-clock / libm. Gated by

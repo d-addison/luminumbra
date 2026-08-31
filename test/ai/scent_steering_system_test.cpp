@@ -1,4 +1,4 @@
-// T-I9-AI E2: ScentSteeringSystem coverage — scent gradient biases the locomotion
+// ScentSteeringSystem coverage — scent gradient biases the locomotion
 // wish (track toward / flee from source), faction-free, deterministic.
 
 #include "gtest/gtest.h"
@@ -9,13 +9,13 @@
 #include "luminumbra_common/components/InstinctComponents.h"
 
 namespace {
+using luminumbra::ai::RunScentSteeringOnTick;
+using luminumbra::ai::ScentField;
+using luminumbra::ai::WorldToCell;
 using Luminumbra::Components::LocomotionIntentComponent;
 using Luminumbra::Components::LocomotionProfile;
 using Luminumbra::Components::ScentSenseComponent;
 using Luminumbra::Components::TransformComponent;
-using luminumbra::ai::RunScentSteeringOnTick;
-using luminumbra::ai::ScentField;
-using luminumbra::ai::WorldToCell;
 
 ScentField FieldWithSourceAt10x10() {
     ScentField f(20, 20, 1);
@@ -53,7 +53,7 @@ TEST(ScentSteering, TrackerBiasesWishTowardSource) {
     const auto a = MakeSniffer(r, 5.0f, 10.0f, /*sign=*/+1.0f); // west of source -> track east
     RunScentSteeringOnTick(r, f, /*origin_x=*/0.0f, /*origin_z=*/0.0f, /*cell_size=*/1.0f);
     const auto& w = r.get<LocomotionIntentComponent>(a).wish_xz;
-    EXPECT_GT(w.x, 0.0f);          // biased toward the +X source
+    EXPECT_GT(w.x, 0.0f);                                      // biased toward the +X source
     EXPECT_LE(std::sqrt(w.x * w.x + w.y * w.y), 3.0f + 1e-4f); // within move_speed budget
 }
 

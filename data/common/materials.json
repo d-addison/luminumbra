@@ -1,6 +1,6 @@
 {
   "schema": "luminumbra.material_registry.v1",
-  "_albedo_calibration": "T-I4-DR-albedo-calibration: base_color values are the MEASURED LINEAR albedo means of each material's AmbientCG source texture (the photographic PBR albedo), so the metadata is truthful against what the triplanar terrain sampler bakes into the G-buffer. The exposure root fix lives in res/shaders/lighting_pass.frag (sun COLOR -> IRRADIANCE, x PI); textures were NOT brightened because they are already physically accurate. Reference bands + sources: data/common/albedo_calibration_reference.json.",
+  "_albedo_calibration": ": base_color values are the MEASURED LINEAR albedo means of each material's AmbientCG source texture (the photographic PBR albedo), so the metadata is truthful against what the triplanar terrain sampler bakes into the G-buffer. The exposure root fix lives in res/shaders/lighting_pass.frag (sun COLOR -> IRRADIANCE, x PI); textures were NOT brightened because they are already physically accurate. Reference bands + sources: data/common/albedo_calibration_reference.json.",
   "materials": [
     {
       "id": 0,
@@ -28,7 +28,7 @@
       "texture_layer": 1,
       "normal_layer": 1,
       "tiling": 3.0,
-      "_albedo_tint_note": "I8 dusty-BF1 palette: render-only warm albedo tint toward ochre. Small + luminance-preserving, capped within ~10% (let lighting/atmosphere carry most of the warmth). LUT row 3; no world_hash impact.",
+      "_albedo_tint_note": " dusty- palette: render-only warm albedo tint toward ochre. Small + luminance-preserving, capped within ~10% (let lighting/atmosphere carry most of the warmth). LUT row 3; no world_hash impact.",
       "albedo_tint": [1.00, 0.95, 0.90]
     },
     {
@@ -41,7 +41,7 @@
       "texture_layer": 2,
       "normal_layer": 2,
       "tiling": 3.0,
-      "_albedo_tint_note": "I8 dusty-BF1 palette: render-only warm-desaturate albedo tint (khaki). Small + luminance-preserving. LUT row 3; no world_hash impact.",
+      "_albedo_tint_note": " dusty- palette: render-only warm-desaturate albedo tint (khaki). Small + luminance-preserving. LUT row 3; no world_hash impact.",
       "albedo_tint": [1.00, 0.96, 0.90]
     },
     {
@@ -54,7 +54,7 @@
       "texture_layer": 3,
       "normal_layer": 3,
       "tiling": 2.5,
-      "_albedo_scale_note": "T-I5b-5-water-backlog: the Ground087 sand albedo (linear mean ~0.52,0.32,0.11) is a bright dune sand; an UP-FACING near-sea-level dry sand flat at the pinned noon sun took near-maximum irradiance and clipped through the ACES knee to ~234-244 sRGB (washed near-white, the sun-bright sand-flat defect the FarLodHorizon boundary band reads at every eye-level station). albedo_scale multiplies the textured albedo at G-buffer bake time toward a natural damp-coastal sand tone that survives tonemapping below the clip. Render-only LUT calibration; the photographic base_color metadata is left truthful. Other materials default to 1.0 (unscaled).",
+      "_albedo_scale_note": ": the Ground087 sand albedo (linear mean ~0.52,0.32,0.11) is a bright dune sand; an UP-FACING near-sea-level dry sand flat at the pinned noon sun took near-maximum irradiance and clipped through the ACES knee to ~234-244 sRGB (washed near-white, the sun-bright sand-flat defect the FarLodHorizon boundary band reads at every eye-level station). albedo_scale multiplies the textured albedo at G-buffer bake time toward a natural damp-coastal sand tone that survives tonemapping below the clip. Render-only LUT calibration; the photographic base_color metadata is left truthful. Other materials default to 1.0 (unscaled).",
       "albedo_scale": 0.6
     },
     {

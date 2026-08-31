@@ -1,18 +1,22 @@
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
+
+#include <SOIL2/SOIL2.h>
 
 #include <RmlUi/Core.h>
 #include <RmlUi/Core/Elements/ElementFormControl.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <optional>
-#include <set>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -76,9 +80,15 @@ public:
         }
     }
 
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
-    GLFWwindow* window() const { return m_window; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
+    GLFWwindow* window() const {
+        return m_window;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -107,7 +117,8 @@ std::string ReadTextFile(const fs::path& path) {
 
 std::vector<std::string> ExtractLinkedStylesheets(const std::string& rml) {
     std::vector<std::string> links;
-    const std::regex stylesheet_regex(R"(<link[^>]*href\s*=\s*\"([^\"]+)\"[^>]*/?>)", std::regex::icase);
+    const std::regex stylesheet_regex(R"(<link[^>]*href\s*=\s*\"([^\"]+)\"[^>]*/?>)",
+                                      std::regex::icase);
     for (std::sregex_iterator it(rml.begin(), rml.end(), stylesheet_regex), end; it != end; ++it) {
         links.push_back((*it)[1].str());
     }
@@ -127,7 +138,63 @@ void WriteUiArtifact(const fs::path& path,
     output << "  \"required_elements_checked\": " << required_elements_checked << ",\n";
     output << "  \"linked_stylesheets_checked\": " << linked_stylesheets_checked << ",\n";
     output << "  \"navigation_edges_checked\": " << navigation_edges_checked << ",\n";
-    output << "  \"event_bindings_checked\": [\"new_world_btn\", \"load_world_btn\", \"quit_btn\", \"back_btn\", \"create_btn\"],\n";
+    output << "  \"event_bindings_checked\": [\"new_world_btn\", \"load_world_btn\", \"quit_btn\", "
+              "\"back_btn\", \"create_btn\"],\n";
+    output << "  \"passed\": true\n";
+    output << "}\n";
+}
+
+bool CaptureUiPng(Luminumbra::Client::Rml_UIManager& ui,
+                  GLFWwindow* window,
+                  const fs::path& output_path) {
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(window, &width, &height);
+    if (width < 1 || height < 1)
+        return false;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, width, height);
+    glClearColor(0.025f, 0.035f, 0.055f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    ui.Render();
+    glFinish();
+
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(width * height * 4));
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    const std::size_t row_bytes = static_cast<std::size_t>(width * 4);
+    std::vector<unsigned char> row(row_bytes);
+    for (int y = 0; y < height / 2; ++y) {
+        unsigned char* top = pixels.data() + static_cast<std::size_t>(y) * row_bytes;
+        unsigned char* bottom =
+            pixels.data() + static_cast<std::size_t>(height - 1 - y) * row_bytes;
+        std::copy(top, top + row_bytes, row.data());
+        std::copy(bottom, bottom + row_bytes, top);
+        std::copy(row.data(), row.data() + row_bytes, bottom);
+    }
+    fs::create_directories(output_path.parent_path());
+    return SOIL_save_image(
+               output_path.string().c_str(), SOIL_SAVE_TYPE_PNG, width, height, 4, pixels.data()) !=
+           0;
+}
+
+void WriteUiScreenshotArtifact(const fs::path& path,
+                               const std::vector<std::pair<std::string, fs::path>>& captures) {
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << "{\n";
+    output << "  \"schema\": \"luminumbra.ui_screenshots.v1\",\n";
+    output << "  \"capture_window\": {\"width\": 800, \"height\": 600, \"visible\": false},\n";
+    output << "  \"screenshot_count\": " << captures.size() << ",\n";
+    output << "  \"screenshots\": [\n";
+    for (std::size_t i = 0; i < captures.size(); ++i) {
+        output << "    {\"view\": \"" << captures[i].first << "\", \"file\": \""
+               << captures[i].second.filename().string() << "\", \"status\": \"captured\"}"
+               << (i + 1 == captures.size() ? "\n" : ",\n");
+    }
+    output << "  ],\n";
     output << "  \"passed\": true\n";
     output << "}\n";
 }
@@ -209,6 +276,42 @@ void WriteUiInteractionArtifact(const fs::path& path,
 
 } // namespace
 
+TEST(UiSmokeTest, CapturesMaintainedMenuScreenshots) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+
+    const fs::path source_root = SourceRoot();
+    const fs::path capture_root = ArtifactRoot() / "screenshots";
+    Luminumbra::Client::Rml_UIManager ui((source_root.string() + "/"));
+    ui.Init(context.window(), nullptr);
+    ASSERT_NE(ui.GetContext(), nullptr);
+
+    struct CaptureSpec {
+        const char* view;
+        const char* document;
+        const char* required_id;
+    };
+    const std::vector<CaptureSpec> specs = {
+        {"main_menu", "main_menu.rml", "main_menu"},
+        {"world_creation", "world_creation.rml", "world_creation"},
+        {"world_selection", "world_selection.rml", "world_selection"},
+    };
+    std::vector<std::pair<std::string, fs::path>> captures;
+    for (const CaptureSpec& spec : specs) {
+        ASSERT_NE(LoadDocumentAndFind(ui, spec.document, spec.required_id), nullptr)
+            << spec.document;
+        ui.Update();
+        const fs::path output = capture_root / (std::string(spec.view) + ".png");
+        ASSERT_TRUE(CaptureUiPng(ui, context.window(), output)) << output.string();
+        ASSERT_GT(fs::file_size(output), 128u);
+        captures.emplace_back(spec.view, output);
+    }
+    WriteUiScreenshotArtifact(ArtifactRoot() / "ui_screenshots.json", captures);
+    ui.Shutdown();
+}
+
 TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -227,13 +330,39 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
     };
 
     const std::vector<DocumentSpec> documents = {
-        {"main_menu.rml", {"main_menu", "new_world_btn", "load_world_btn", "settings_btn", "quit_btn", "notification", "notification_text"}},
-        {"world_creation.rml", {"world_name", "world_seed", "world_type", "back_btn", "create_btn"}},
-        {"world_selection.rml", {"filter_all", "filter_recent", "filter_favorites", "back_btn", "load_selected_btn", "import_world_btn"}},
-        {"settings.rml", {"settings", "setting_resolution", "setting_window_mode", "setting_vsync",
-                          "setting_fov", "setting_mouse_sensitivity", "setting_audio_master",
-                          "setting_audio_sfx", "setting_audio_music", "apply_settings_btn", "back_btn",
-                          "vsync_toggle", "window_mode_prev", "window_mode_next", "window_mode_value"}},
+        {"main_menu.rml",
+         {"main_menu",
+          "new_world_btn",
+          "load_world_btn",
+          "settings_btn",
+          "quit_btn",
+          "notification",
+          "notification_text"}},
+        {"world_creation.rml",
+         {"world_name", "world_seed", "world_type", "back_btn", "create_btn"}},
+        {"world_selection.rml",
+         {"filter_all",
+          "filter_recent",
+          "filter_favorites",
+          "back_btn",
+          "load_selected_btn",
+          "import_world_btn"}},
+        {"settings.rml",
+         {"settings",
+          "setting_resolution",
+          "setting_window_mode",
+          "setting_vsync",
+          "setting_fov",
+          "setting_mouse_sensitivity",
+          "setting_audio_master",
+          "setting_audio_sfx",
+          "setting_audio_music",
+          "apply_settings_btn",
+          "back_btn",
+          "vsync_toggle",
+          "window_mode_prev",
+          "window_mode_next",
+          "window_mode_value"}},
         {"pause.rml", {"pause", "resume_btn", "settings_btn", "gallery_btn", "quit_menu_btn"}},
         {"gallery.rml", {"gallery", "back_btn"}},
         {"hud.rml", {"hud"}},
@@ -273,7 +402,8 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
     const fs::path font = source_root / "data/fonts/Lora/static/Lora-Regular.ttf";
     EXPECT_TRUE(fs::exists(font)) << font.string();
 
-    const std::string manager_source = ReadTextFile(source_root / "src/luminumbra_client/ui/Rml_UIManager.cpp");
+    const std::string manager_source =
+        ReadTextFile(source_root / "src/luminumbra_client/ui/Rml_UIManager.cpp");
     ASSERT_FALSE(manager_source.empty());
     const std::vector<std::string> required_navigation_edges = {
         "new_world_btn",
@@ -289,12 +419,11 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
         EXPECT_NE(manager_source.find(edge), std::string::npos) << edge;
     }
 
-    WriteUiArtifact(
-        ArtifactRoot() / "ui_smoke.json",
-        static_cast<int>(documents.size()),
-        required_elements_checked,
-        linked_stylesheets_checked,
-        static_cast<int>(required_navigation_edges.size()));
+    WriteUiArtifact(ArtifactRoot() / "ui_smoke.json",
+                    static_cast<int>(documents.size()),
+                    required_elements_checked,
+                    linked_stylesheets_checked,
+                    static_cast<int>(required_navigation_edges.size()));
 
     ui.Shutdown();
 }
@@ -452,13 +581,13 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
 
     std::optional<CreatedWorld> created_world;
     std::optional<std::string> loaded_world_id;
-    ui.SetWorldCreationCallback([&](const std::string& name, const std::string& seed, const std::string& type,
+    ui.SetWorldCreationCallback([&](const std::string& name,
+                                    const std::string& seed,
+                                    const std::string& type,
                                     const std::vector<Luminumbra::Client::WorldGenParam>& params) {
         created_world = CreatedWorld{name, seed, type, params};
     });
-    ui.SetLoadWorldCallback([&](const std::string& world_id) {
-        loaded_world_id = world_id;
-    });
+    ui.SetLoadWorldCallback([&](const std::string& world_id) { loaded_world_id = world_id; });
 
     int navigation_clicks_checked = 0;
     int form_fields_checked = 0;
@@ -468,7 +597,8 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
     ClickAndUpdate(ui, main_menu->GetElementById("new_world_btn"));
     ++navigation_clicks_checked;
 
-    Rml::ElementDocument* world_creation = FindDocumentByElementId(ui.GetContext(), "world_creation");
+    Rml::ElementDocument* world_creation =
+        FindDocumentByElementId(ui.GetContext(), "world_creation");
     ASSERT_NE(world_creation, nullptr);
     SetControlValue(world_creation, "world_name", "Interaction Test World");
     SetControlValue(world_creation, "world_seed", "424242");
@@ -487,11 +617,13 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
 
     ClickAndUpdate(ui, main_menu->GetElementById("load_world_btn"));
     ++navigation_clicks_checked;
-    Rml::ElementDocument* world_selection = FindDocumentByElementId(ui.GetContext(), "world_selection");
+    Rml::ElementDocument* world_selection =
+        FindDocumentByElementId(ui.GetContext(), "world_selection");
     ASSERT_NE(world_selection, nullptr);
     Rml::Element* first_world = FirstWorldListItem(world_selection);
     ASSERT_NE(first_world, nullptr);
-    const std::string expected_world_id = first_world->GetAttribute<Rml::String>("data-world-id", "");
+    const std::string expected_world_id =
+        first_world->GetAttribute<Rml::String>("data-world-id", "");
     ASSERT_FALSE(expected_world_id.empty());
     ClickAndUpdate(ui, first_world);
     ++navigation_clicks_checked;
@@ -514,22 +646,21 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
     const bool quit_requested = glfwWindowShouldClose(context.window()) != 0;
     EXPECT_TRUE(quit_requested);
 
-    WriteUiInteractionArtifact(
-        ArtifactRoot() / "ui_interactions.json",
-        navigation_clicks_checked,
-        form_fields_checked,
-        created_world->name,
-        created_world->seed,
-        created_world->type,
-        *loaded_world_id,
-        quit_requested);
+    WriteUiInteractionArtifact(ArtifactRoot() / "ui_interactions.json",
+                               navigation_clicks_checked,
+                               form_fields_checked,
+                               created_world->name,
+                               created_world->seed,
+                               created_world->type,
+                               *loaded_world_id,
+                               quit_requested);
 
     ui.Shutdown();
 }
 
 // settings.rml round-trip: the SettingsBridge getters seed the form on load,
 // changing a control pushes through the matching setter live, and Apply & Save
-// flushes every control and invokes Save(). Reaches the screen via the
+// flushes every control and invokes Save. Reaches the screen via the
 // main-menu settings_btn navigation path (the menu "open settings" flow).
 TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     HiddenGlContext context;
@@ -556,23 +687,58 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     } model;
 
     Luminumbra::Client::SettingsBridge sb;
-    sb.GetResolution = [&] { return model.resolution; };
-    sb.SetResolution = [&](const std::string& v) { model.resolution = v; };
-    sb.GetWindowMode = [&] { return model.window_mode; };
-    sb.SetWindowMode = [&](const std::string& v) { model.window_mode = v; };
-    sb.GetVSync = [&] { return model.vsync; };
-    sb.SetVSync = [&](bool v) { model.vsync = v; };
-    sb.GetFov = [&] { return model.fov; };
-    sb.SetFov = [&](float v) { model.fov = v; };
-    sb.GetMouseSensitivity = [&] { return model.sensitivity; };
-    sb.SetMouseSensitivity = [&](float v) { model.sensitivity = v; };
-    sb.GetAudioMaster = [&] { return model.audio_master; };
-    sb.SetAudioMaster = [&](float v) { model.audio_master = v; };
-    sb.GetAudioSfx = [&] { return model.audio_sfx; };
-    sb.SetAudioSfx = [&](float v) { model.audio_sfx = v; };
-    sb.GetAudioMusic = [&] { return model.audio_music; };
-    sb.SetAudioMusic = [&](float v) { model.audio_music = v; };
-    sb.Save = [&] { ++model.save_count; return true; };
+    sb.GetResolution = [&] {
+        return model.resolution;
+    };
+    sb.SetResolution = [&](const std::string& v) {
+        model.resolution = v;
+    };
+    sb.GetWindowMode = [&] {
+        return model.window_mode;
+    };
+    sb.SetWindowMode = [&](const std::string& v) {
+        model.window_mode = v;
+    };
+    sb.GetVSync = [&] {
+        return model.vsync;
+    };
+    sb.SetVSync = [&](bool v) {
+        model.vsync = v;
+    };
+    sb.GetFov = [&] {
+        return model.fov;
+    };
+    sb.SetFov = [&](float v) {
+        model.fov = v;
+    };
+    sb.GetMouseSensitivity = [&] {
+        return model.sensitivity;
+    };
+    sb.SetMouseSensitivity = [&](float v) {
+        model.sensitivity = v;
+    };
+    sb.GetAudioMaster = [&] {
+        return model.audio_master;
+    };
+    sb.SetAudioMaster = [&](float v) {
+        model.audio_master = v;
+    };
+    sb.GetAudioSfx = [&] {
+        return model.audio_sfx;
+    };
+    sb.SetAudioSfx = [&](float v) {
+        model.audio_sfx = v;
+    };
+    sb.GetAudioMusic = [&] {
+        return model.audio_music;
+    };
+    sb.SetAudioMusic = [&](float v) {
+        model.audio_music = v;
+    };
+    sb.Save = [&] {
+        ++model.save_count;
+        return true;
+    };
     ui.SetSettingsBridge(std::move(sb));
 
     // Open the settings screen via the main-menu "Settings" button.
@@ -622,7 +788,7 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     change_control("setting_audio_master", "0.4");
     EXPECT_NEAR(model.audio_master, 0.4f, 1e-4f);
 
-    // Apply & Save flushes every control then persists via Save().
+    // Apply & Save flushes every control then persists via Save.
     EXPECT_EQ(model.save_count, 0);
     ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
     EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
@@ -651,18 +817,35 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     } model;
     std::string last_rebind_action;
     Luminumbra::Client::SettingsBridge sb;
-    sb.GetVSync = [&] { return model.vsync; };
-    sb.SetVSync = [&](bool v) { model.vsync = v; };
-    sb.GetWindowMode = [&] { return model.window_mode; };
-    sb.SetWindowMode = [&](const std::string& v) { model.window_mode = v; };
-    sb.GetKeybind = [&](const std::string& action) -> std::string { return action == "Jump" ? "Space" : "?"; };
-    sb.BeginRebind = [&](const std::string& action) { last_rebind_action = action; };
-    sb.Save = [&] { ++model.save_count; return true; };
+    sb.GetVSync = [&] {
+        return model.vsync;
+    };
+    sb.SetVSync = [&](bool v) {
+        model.vsync = v;
+    };
+    sb.GetWindowMode = [&] {
+        return model.window_mode;
+    };
+    sb.SetWindowMode = [&](const std::string& v) {
+        model.window_mode = v;
+    };
+    sb.GetKeybind = [&](const std::string& action) -> std::string {
+        return action == "Jump" ? "Space" : "?";
+    };
+    sb.BeginRebind = [&](const std::string& action) {
+        last_rebind_action = action;
+    };
+    sb.Save = [&] {
+        ++model.save_count;
+        return true;
+    };
     ui.SetSettingsBridge(std::move(sb));
 
     std::optional<std::vector<Luminumbra::Client::WorldGenParam>> created_params;
     std::optional<std::string> created_type;
-    ui.SetWorldCreationCallback([&](const std::string&, const std::string&, const std::string& type,
+    ui.SetWorldCreationCallback([&](const std::string&,
+                                    const std::string&,
+                                    const std::string& type,
                                     const std::vector<Luminumbra::Client::WorldGenParam>& params) {
         created_type = type;
         created_params = params;
@@ -675,10 +858,10 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     Rml::ElementDocument* settings = LoadDocumentAndFind(ui, "settings.rml", "settings");
     ASSERT_NE(settings, nullptr);
 
-    // vsync toggle: seeded .on from GetVSync (true); a click flips it and drives SetVSync.
+    // vsync toggle: seeded.on from GetVSync (true); a click flips it and drives SetVSync.
     Rml::Element* vsync_toggle = settings->GetElementById("vsync_toggle");
     ASSERT_NE(vsync_toggle, nullptr);
-    EXPECT_TRUE(vsync_toggle->IsClassSet("on")) << "vsync toggle seeds .on from GetVSync";
+    EXPECT_TRUE(vsync_toggle->IsClassSet("on")) << "vsync toggle seeds.on from GetVSync";
     ClickAndUpdate(ui, vsync_toggle);
     EXPECT_FALSE(model.vsync);
     EXPECT_FALSE(vsync_toggle->IsClassSet("on"));
@@ -697,10 +880,12 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     ASSERT_FALSE(kb_rows.empty());
     Rml::Element* jump_row = nullptr;
     for (auto* r : kb_rows) {
-        if (r->GetAttribute<Rml::String>("data-action", "") == "Jump") jump_row = r;
+        if (r->GetAttribute<Rml::String>("data-action", "") == "Jump")
+            jump_row = r;
     }
     ASSERT_NE(jump_row, nullptr);
-    if (auto* chip = settings->GetElementById("kb_Jump")) EXPECT_EQ(chip->GetInnerRML(), "Space");
+    if (auto* chip = settings->GetElementById("kb_Jump"))
+        EXPECT_EQ(chip->GetInnerRML(), "Space");
     ClickAndUpdate(ui, jump_row);
     EXPECT_EQ(last_rebind_action, "Jump");
 
@@ -714,7 +899,8 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     ASSERT_FALSE(wgp.empty());
     Rml::Element* amp = nullptr;
     for (auto* el : wgp) {
-        if (el->GetAttribute<Rml::String>("data-path", "") == "terrain.base_amplitude") amp = el;
+        if (el->GetAttribute<Rml::String>("data-path", "") == "terrain.base_amplitude")
+            amp = el;
     }
     ASSERT_NE(amp, nullptr);
     EXPECT_NEAR(std::stof(dynamic_cast<Rml::ElementFormControl*>(amp)->GetValue()), 34.0f, 0.5f)
@@ -727,9 +913,9 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     ClickAndUpdate(ui, wc->GetElementById("customize_toggle"));
     EXPECT_FALSE(body->IsClassSet("collapsed"));
 
-    // Wave 0.3: a worldgen-param slider live-updates its SIBLING .param-value label
+    // a worldgen-param slider live-updates its SIBLING.param-value label
     // as it moves (the flex [label][slider][value] row restructure must keep the
-    // change handler — GetParentNode()->.param-value — wired). amp is in the
+    // change handler — GetParentNode->.param-value — wired). amp is in the
     // default-active terrain pane.
     {
         auto* amp_fc = dynamic_cast<Rml::ElementFormControl*>(amp);
@@ -747,14 +933,15 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
             << "a param slider must live-update its sibling value label";
     }
 
-    // Wave 0.3: advanced-param TABS — clicking a tab chip activates ONLY its pane.
+    // advanced-param TABS — clicking a tab chip activates ONLY its pane.
     {
         Rml::ElementList tabs;
         wc->GetElementsByClassName(tabs, "param-tab");
         ASSERT_GE(tabs.size(), 4u) << "terrain/water/biomes/features tab chips";
         Rml::Element* water_tab = nullptr;
         for (auto* t : tabs)
-            if (t->GetAttribute<Rml::String>("data-tab", "") == "water") water_tab = t;
+            if (t->GetAttribute<Rml::String>("data-tab", "") == "water")
+                water_tab = t;
         ASSERT_NE(water_tab, nullptr);
         ClickAndUpdate(ui, water_tab);
         EXPECT_TRUE(water_tab->IsClassSet("active"));
@@ -764,7 +951,8 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
         int active_panes = 0;
         for (auto* p : panes) {
             const bool is_active = p->IsClassSet("active");
-            if (is_active) ++active_panes;
+            if (is_active)
+                ++active_panes;
             EXPECT_EQ(is_active, p->GetAttribute<Rml::String>("data-pane", "") == "water")
                 << "only the clicked tab's pane is active";
         }
@@ -772,7 +960,8 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
         // Restore the terrain pane so the rest of the test reads the default surface.
         Rml::Element* terrain_tab = nullptr;
         for (auto* t : tabs)
-            if (t->GetAttribute<Rml::String>("data-tab", "") == "terrain") terrain_tab = t;
+            if (t->GetAttribute<Rml::String>("data-tab", "") == "terrain")
+                terrain_tab = t;
         ASSERT_NE(terrain_tab, nullptr);
         ClickAndUpdate(ui, terrain_tab);
         EXPECT_TRUE(terrain_tab->IsClassSet("active"));
@@ -783,7 +972,8 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     wc->GetElementsByClassName(chips, "preset-chip");
     Rml::Element* mons = nullptr;
     for (auto* c : chips) {
-        if (c->GetAttribute<Rml::String>("data-preset", "") == "mountains") mons = c;
+        if (c->GetAttribute<Rml::String>("data-preset", "") == "mountains")
+            mons = c;
     }
     ASSERT_NE(mons, nullptr);
     ClickAndUpdate(ui, mons);
@@ -800,7 +990,8 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     bool found = false;
     for (const auto& p : *created_params) {
         // Range inputs report formatted floats (e.g. "123.000000"); compare numerically.
-        if (p.path == "terrain.base_amplitude" && std::abs(std::stof(p.value) - 123.0f) < 0.5f) found = true;
+        if (p.path == "terrain.base_amplitude" && std::abs(std::stof(p.value) - 123.0f) < 0.5f)
+            found = true;
     }
     EXPECT_TRUE(found) << "worldgen param override must reach the create callback";
 
@@ -819,13 +1010,19 @@ TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
     ui.Init(context.window(), nullptr);
     ASSERT_NE(ui.GetContext(), nullptr);
 
-    struct Saved { std::string name; std::string base; std::size_t count = 0; };
+    struct Saved {
+        std::string name;
+        std::string base;
+        std::size_t count = 0;
+    };
     std::optional<Saved> saved;
-    ui.SetWorldPresetSaver([&](const std::string& name, const std::string& base,
-                               const std::vector<Luminumbra::Client::WorldGenParam>& p) -> std::string {
-        saved = Saved{name, base, p.size()};
-        return "user_test_type";
-    });
+    ui.SetWorldPresetSaver(
+        [&](const std::string& name,
+            const std::string& base,
+            const std::vector<Luminumbra::Client::WorldGenParam>& p) -> std::string {
+            saved = Saved{name, base, p.size()};
+            return "user_test_type";
+        });
     ui.SetWorldPresetList([&]() -> std::vector<std::pair<std::string, std::string>> {
         return {{"My Canyon", "user_my_canyon"}};
     });
@@ -860,7 +1057,7 @@ TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
     ui.Shutdown();
 }
 
-// Item 3b: pause menu (pause.rml) routes resume/quit back through the PauseActionCallback with
+//  pause menu (pause.rml) routes resume/quit back through the PauseActionCallback with
 // the right action string, and its settings/gallery buttons navigate. Drives the real manager.
 TEST(UiSmokeTest, PauseMenuActionsAndNavigationAreFunctional) {
     HiddenGlContext context;
@@ -903,8 +1100,8 @@ TEST(UiSmokeTest, PauseMenuActionsAndNavigationAreFunctional) {
     ui.Shutdown();
 }
 
-// Item 3b: the gallery (gallery.rml) back-arrow returns to the main menu and the photo wall +
-// pager are present. UI-07: HERMETIC — the photo wall is driven by the committed
+//  the gallery (gallery.rml) back-arrow returns to the main menu and the photo wall +
+// pager are present.: HERMETIC — the photo wall is driven by the committed
 // data/ui/fixtures/captures set (the --ui-fixtures source), not by whatever
 // untracked shutter captures happen to exist on this machine (which made the
 // test environmentally RED on a clean checkout with 0 photos).
@@ -941,8 +1138,8 @@ TEST(UiSmokeTest, GalleryBackNavigationAndContentArePresent) {
     ui.Shutdown();
 }
 
-// Item 3b: world-select load button must NOT fire the load callback with no selection, and the
-// active document hot-reloads via ReloadActiveDocument().
+//  world-select load button must NOT fire the load callback with no selection, and the
+// active document hot-reloads via ReloadActiveDocument.
 TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -988,7 +1185,7 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     ui.Shutdown();
 }
 
-// Item 3b: every <img src> authored in the world-select + gallery screens must resolve to an
+//  every <img src> authored in the world-select + gallery screens must resolve to an
 // existing TGA on disk (RmlUi images are TGA-only; a typo'd thumb path renders nothing).
 TEST(WorldgenOverrideTest, MenuImageSourcesResolveToExistingTga) {
     const fs::path root = SourceRoot();
@@ -1008,7 +1205,7 @@ TEST(WorldgenOverrideTest, MenuImageSourcesResolveToExistingTga) {
     EXPECT_GE(checked, 4) << "expected several authored thumbnails across the two screens";
 }
 
-// Item 3b: user-preset MANAGEMENT — delete, rename, and the overwrite-collision confirm. The
+//  user-preset MANAGEMENT — delete, rename, and the overwrite-collision confirm. The
 // saver silently overwrites on slug collision, so the UI must gate it behind a confirm modal.
 TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     HiddenGlContext context;
@@ -1025,10 +1222,13 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     auto slug = [](const std::string& name) {
         std::string s;
         for (char ch : name) {
-            if (std::isalnum(static_cast<unsigned char>(ch))) s += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            else if ((ch == ' ' || ch == '-' || ch == '_') && !s.empty() && s.back() != '_') s += '_';
+            if (std::isalnum(static_cast<unsigned char>(ch)))
+                s += static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            else if ((ch == ' ' || ch == '-' || ch == '_') && !s.empty() && s.back() != '_')
+                s += '_';
         }
-        while (!s.empty() && s.back() == '_') s.pop_back();
+        while (!s.empty() && s.back() == '_')
+            s.pop_back();
         return s.empty() ? std::string("preset") : s.substr(0, 32);
     };
 
@@ -1036,32 +1236,51 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     std::string last_saved_name;
     ui.SetWorldParamGetter([&](const std::string&, const std::string&) { return std::string(); });
     ui.SetWorldPresetList([&]() { return store; });
-    ui.SetWorldPresetSaver([&](const std::string& name, const std::string&,
-                               const std::vector<Luminumbra::Client::WorldGenParam>&) -> std::string {
-        const std::string type = "user_" + slug(name);
-        // overwrite-or-insert by id (mirrors the on-disk saver).
-        for (auto& e : store) if (e.second == type) { e.first = name; ++save_count; last_saved_name = name; return type; }
-        store.emplace_back(name, type);
-        ++save_count;
-        last_saved_name = name;
-        return type;
-    });
+    ui.SetWorldPresetSaver(
+        [&](const std::string& name,
+            const std::string&,
+            const std::vector<Luminumbra::Client::WorldGenParam>&) -> std::string {
+            const std::string type = "user_" + slug(name);
+            // overwrite-or-insert by id (mirrors the on-disk saver).
+            for (auto& e : store)
+                if (e.second == type) {
+                    e.first = name;
+                    ++save_count;
+                    last_saved_name = name;
+                    return type;
+                }
+            store.emplace_back(name, type);
+            ++save_count;
+            last_saved_name = name;
+            return type;
+        });
     ui.SetWorldPresetExists([&](const std::string& name) -> bool {
         const std::string type = "user_" + slug(name);
-        for (const auto& e : store) if (e.second == type) return true;
+        for (const auto& e : store)
+            if (e.second == type)
+                return true;
         return false;
     });
     ui.SetWorldPresetDeleter([&](const std::string& worldType) -> bool {
         for (auto it = store.begin(); it != store.end(); ++it) {
-            if (it->second == worldType) { store.erase(it); return true; }
+            if (it->second == worldType) {
+                store.erase(it);
+                return true;
+            }
         }
         return false;
     });
-    ui.SetWorldPresetRenamer([&](const std::string& worldType, const std::string& newName) -> std::string {
-        const std::string newType = "user_" + slug(newName);
-        for (auto& e : store) if (e.second == worldType) { e.first = newName; e.second = newType; return newType; }
-        return "";
-    });
+    ui.SetWorldPresetRenamer(
+        [&](const std::string& worldType, const std::string& newName) -> std::string {
+            const std::string newType = "user_" + slug(newName);
+            for (auto& e : store)
+                if (e.second == worldType) {
+                    e.first = newName;
+                    e.second = newType;
+                    return newType;
+                }
+            return "";
+        });
 
     Rml::ElementDocument* wc = LoadDocumentAndFind(ui, "world_creation.rml", "world_creation");
     ASSERT_NE(wc, nullptr);
@@ -1077,7 +1296,8 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     EXPECT_EQ(save_count, 0) << "a colliding name must not silently overwrite";
     Rml::Element* ow_modal = wc->GetElementById("preset_overwrite_modal");
     ASSERT_NE(ow_modal, nullptr);
-    EXPECT_FALSE(ow_modal->IsClassSet("hidden")) << "overwrite-confirm modal must be shown on collision";
+    EXPECT_FALSE(ow_modal->IsClassSet("hidden"))
+        << "overwrite-confirm modal must be shown on collision";
 
     // Cancel dismisses without saving.
     ClickAndUpdate(ui, wc->GetElementById("cancel_overwrite_btn"));
@@ -1120,9 +1340,12 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     SetControlValue(wc, "save_preset_name", "Grand Gorge");
     ClickAndUpdate(ui, wc->GetElementById("rename_preset_btn"));
     bool found_renamed = false;
-    for (const auto& e : store) if (e.first == "Grand Gorge" && e.second == "user_grand_gorge") found_renamed = true;
+    for (const auto& e : store)
+        if (e.first == "Grand Gorge" && e.second == "user_grand_gorge")
+            found_renamed = true;
     EXPECT_TRUE(found_renamed) << "rename must update the saved preset's name + id";
-    for (const auto& e : store) EXPECT_NE(e.second, "user_my_canyon") << "old id must be gone after rename";
+    for (const auto& e : store)
+        EXPECT_NE(e.second, "user_my_canyon") << "old id must be gone after rename";
 
     // --- DELETE ---
     wc = FindDocumentByElementId(ui.GetContext(), "world_creation");
@@ -1146,12 +1369,13 @@ TEST(UiSmokeTest, UserPresetDeleteRenameAndOverwriteConfirmAreFunctional) {
     ClickAndUpdate(ui, del_ctrl);
     ClickAndUpdate(ui, wc->GetElementById("confirm_delete_preset_btn"));
     EXPECT_EQ(store.size(), before_delete - 1) << "confirming delete removes the preset";
-    for (const auto& e : store) EXPECT_NE(e.second, "user_grand_gorge");
+    for (const auto& e : store)
+        EXPECT_NE(e.second, "user_grand_gorge");
 
     ui.Shutdown();
 }
 
-// T-I3-21: token-based Subscribe/Unsubscribe on Property<T> (no GL needed).
+// token-based Subscribe/Unsubscribe on Property<T> (no GL needed).
 TEST(UiSmokeTest, PropertyTokenUnsubscribeStopsCallbacks) {
     using Luminumbra::Client::UI::Property;
     using Luminumbra::Client::UI::ScopedSubscription;
@@ -1161,8 +1385,10 @@ TEST(UiSmokeTest, PropertyTokenUnsubscribeStopsCallbacks) {
     int first_calls = 0;
     int second_calls = 0;
 
-    const SubscriptionToken first = property.Subscribe([&](const int&, const int&) { ++first_calls; });
-    const SubscriptionToken second = property.Subscribe([&](const int&, const int&) { ++second_calls; });
+    const SubscriptionToken first =
+        property.Subscribe([&](const int&, const int&) { ++first_calls; });
+    const SubscriptionToken second =
+        property.Subscribe([&](const int&, const int&) { ++second_calls; });
     EXPECT_NE(first, second);
     EXPECT_EQ(property.SubscriberCount(), 2u);
 
@@ -1188,8 +1414,8 @@ TEST(UiSmokeTest, PropertyTokenUnsubscribeStopsCallbacks) {
     EXPECT_EQ(second_calls, 2);
 }
 
-// T-I3-21: destroy-then-mutate regression — a destroyed UIComponent must not
-// be reachable from later Property::Set() calls (use-after-free guard).
+// destroy-then-mutate regression — a destroyed UIComponent must not
+// be reachable from later Property::Set calls (use-after-free guard).
 TEST(UiSmokeTest, DestroyedComponentReceivesNoPropertyMutations) {
     using Luminumbra::Client::UI::Property;
     using Luminumbra::Client::UI::UIComponent;
@@ -1228,10 +1454,11 @@ TEST(UiSmokeTest, DestroyedComponentReceivesNoPropertyMutations) {
         EXPECT_EQ(callback_fires, 1);
         EXPECT_EQ(notification_text->GetInnerRML(), "before-destroy");
 
-        // Destruction alone (no explicit Destroy() call) must unsubscribe.
+        // Destruction alone (no explicit Destroy call) must unsubscribe.
         component.reset();
     }
-    EXPECT_EQ(text_property.SubscriberCount(), 1u) << "component binding must be gone after destruction";
+    EXPECT_EQ(text_property.SubscriberCount(), 1u)
+        << "component binding must be gone after destruction";
 
     // Mutating after destroy must not crash and must not touch the element
     // through the dead component's binding.
@@ -1257,11 +1484,12 @@ TEST(WorldgenOverrideTest, BuildCustomPresetAppliesOnlyRealDeltas) {
     using P = Luminumbra::Client::WorldGenParam;
 
     nlohmann::json base = {
-        {"generation_params", {
-            {"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}},
-            {"features", {{"caves_enabled", true}}},
-            {"biomes", {{"table", "common/biomes.json"}}},
-        }},
+        {"generation_params",
+         {
+             {"terrain", {{"base_amplitude", 34.0}, {"octaves", 5}}},
+             {"features", {{"caves_enabled", true}}},
+             {"biomes", {{"table", "common/biomes.json"}}},
+         }},
     };
 
     // amplitude unchanged (34), octaves 5->8, caves on->off, biomes on->off (clears table).
@@ -1313,19 +1541,33 @@ TEST(WorldgenOverrideTest, EveryCustomizeParamPathIsAKnownWorldgenKey) {
             }
         };
     for (const auto& entry : fs::directory_iterator(root / "worlds/atlas/presets")) {
-        if (entry.path().extension() != ".json") continue;
+        if (entry.path().extension() != ".json")
+            continue;
         std::ifstream f(entry.path());
-        if (!f) continue;
+        if (!f)
+            continue;
         nlohmann::json j;
-        try { f >> j; } catch (...) { continue; }
-        if (j.contains("generation_params")) walk(j["generation_params"], "");
+        try {
+            f >> j;
+        } catch (...) {
+            continue;
+        }
+        if (j.contains("generation_params"))
+            walk(j["generation_params"], "");
     }
     // Keys the loader reads with defaults that the curated presets may omit, plus the synthetic
     // biomes toggle (maps to biomes.table).
-    for (const char* k : {"terrain.island_mask_enabled", "terrain.hydro.iterations",
-                          "terrain.hydro.thermal_rate", "features.lakes_enabled", "features.lake_depth",
-                          "features.lake_frequency", "features.cliffs_enabled", "features.cliff_step",
-                          "features.cliff_frequency", "biomes.relief_enabled", "biomes.relief_strength",
+    for (const char* k : {"terrain.island_mask_enabled",
+                          "terrain.hydro.iterations",
+                          "terrain.hydro.thermal_rate",
+                          "features.lakes_enabled",
+                          "features.lake_depth",
+                          "features.lake_frequency",
+                          "features.cliffs_enabled",
+                          "features.cliff_step",
+                          "features.cliff_frequency",
+                          "biomes.relief_enabled",
+                          "biomes.relief_strength",
                           "biomes.enabled"}) {
         known.insert(k);
     }
@@ -1342,7 +1584,7 @@ TEST(WorldgenOverrideTest, EveryCustomizeParamPathIsAKnownWorldgenKey) {
     EXPECT_GE(checked, 25) << "expected the full customize param set";
 }
 
-// Spec 002 Item 2 e2e: the SEMANTIC KNOBS are the default surface. They seed
+//   e2e: the SEMANTIC KNOBS are the default surface. They seed
 // from the preset's persisted knob layer via the WorldParamGetter (neutral 0.5
 // when a curated preset carries none), moving a knob reaches the create callback
 // as a "knob.<id>" entry, and the knob is exposed in the live-preview state so
@@ -1360,11 +1602,14 @@ TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
     // The getter serves one knob ("wetness"=0.8) from a "persisted" layer; every
     // other knob has no persisted value -> the control keeps its NEUTRAL 0.5.
     ui.SetWorldParamGetter([&](const std::string&, const std::string& path) -> std::string {
-        if (path == "knob.wetness") return "0.8";
-        return std::string();  // curated -> neutral
+        if (path == "knob.wetness")
+            return "0.8";
+        return std::string(); // curated -> neutral
     });
     std::optional<std::vector<Luminumbra::Client::WorldGenParam>> created_params;
-    ui.SetWorldCreationCallback([&](const std::string&, const std::string&, const std::string&,
+    ui.SetWorldCreationCallback([&](const std::string&,
+                                    const std::string&,
+                                    const std::string&,
                                     const std::vector<Luminumbra::Client::WorldGenParam>& params) {
         created_params = params;
     });
@@ -1378,7 +1623,9 @@ TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
     ASSERT_EQ(knobs.size(), 6u) << "exactly the six outcome knobs are the default surface";
 
     auto knob_by_id = [&](const std::string& id) -> Rml::Element* {
-        for (auto* el : knobs) if (el->GetAttribute<Rml::String>("data-knob", "") == id) return el;
+        for (auto* el : knobs)
+            if (el->GetAttribute<Rml::String>("data-knob", "") == id)
+                return el;
         return nullptr;
     };
 
@@ -1390,7 +1637,8 @@ TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
     ASSERT_NE(mountains, nullptr);
     EXPECT_NEAR(std::stof(dynamic_cast<Rml::ElementFormControl*>(wetness)->GetValue()), 0.8f, 0.01f)
         << "wetness must seed from the persisted knob layer";
-    EXPECT_NEAR(std::stof(dynamic_cast<Rml::ElementFormControl*>(mountains)->GetValue()), 0.5f, 0.01f)
+    EXPECT_NEAR(
+        std::stof(dynamic_cast<Rml::ElementFormControl*>(mountains)->GetValue()), 0.5f, 0.01f)
         << "an unset knob stays neutral, not inverse-lerped";
 
     // Move the mountainousness knob, then create -> a knob.mountainousness entry
@@ -1405,7 +1653,8 @@ TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
             EXPECT_NEAR(std::stof(p.value), 0.9f, 0.01f);
             found_mtn = true;
         }
-        if (p.path == "knob.wetness" && std::abs(std::stof(p.value) - 0.8f) < 0.01f) found_wet = true;
+        if (p.path == "knob.wetness" && std::abs(std::stof(p.value) - 0.8f) < 0.01f)
+            found_wet = true;
     }
     EXPECT_TRUE(found_mtn) << "the moved knob must reach the create callback as knob.<id>";
     EXPECT_TRUE(found_wet) << "the seeded knob must travel too";

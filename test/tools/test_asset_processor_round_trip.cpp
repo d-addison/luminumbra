@@ -75,7 +75,7 @@ private:
     std::filesystem::path path_;
 };
 
-template <typename T>
+template<typename T>
 BufferView AppendValues(std::vector<unsigned char>& buffer, const std::vector<T>& values) {
     while ((buffer.size() % 4) != 0) {
         buffer.push_back(0);
@@ -112,29 +112,53 @@ std::string Base64Encode(const std::vector<unsigned char>& bytes) {
 
 std::vector<ExpectedVertex> WriteTwoPrimitiveGltf(const std::filesystem::path& path) {
     const std::vector<float> positions0 = {
-        0.0f, 0.0f, 0.0f,
-        2.0f, 0.0f, 0.0f,
-        0.0f, 2.0f, 0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        2.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        2.0f,
+        0.0f,
     };
     const std::vector<float> positions1 = {
-        4.0f, 0.0f, 0.0f,
-        4.0f, 2.0f, 0.0f,
-        2.0f, 2.0f, 0.0f,
+        4.0f,
+        0.0f,
+        0.0f,
+        4.0f,
+        2.0f,
+        0.0f,
+        2.0f,
+        2.0f,
+        0.0f,
     };
     const std::vector<float> normals = {
-        0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     };
     const std::vector<float> uvs0 = {
-        0.0f, 0.0f,
-        1.0f, 0.0f,
-        0.0f, 1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        1.0f,
     };
     const std::vector<float> uvs1 = {
-        1.0f, 0.0f,
-        1.0f, 1.0f,
-        0.0f, 1.0f,
+        1.0f,
+        0.0f,
+        1.0f,
+        1.0f,
+        0.0f,
+        1.0f,
     };
     const std::vector<uint16_t> indices = {0, 1, 2};
 
@@ -154,15 +178,17 @@ std::vector<ExpectedVertex> WriteTwoPrimitiveGltf(const std::filesystem::path& p
     gltf << R"({
   "asset": {"version": "2.0"},
   "buffers": [{
-    "byteLength": )" << buffer.size() << R"(,
-    "uri": "data:application/octet-stream;base64,)" << Base64Encode(buffer) << R"("
+    "byteLength": )"
+         << buffer.size() << R"(,
+    "uri": "data:application/octet-stream;base64,)"
+         << Base64Encode(buffer) << R"("
   }],
   "bufferViews": [
 )";
 
     for (size_t i = 0; i < views.size(); ++i) {
-        gltf << R"(    {"buffer": 0, "byteOffset": )" << views[i].offset
-             << R"(, "byteLength": )" << views[i].length << "}";
+        gltf << R"(    {"buffer": 0, "byteOffset": )" << views[i].offset << R"(, "byteLength": )"
+             << views[i].length << "}";
         gltf << ((i + 1 == views.size()) ? "\n" : ",\n");
     }
 
@@ -226,8 +252,7 @@ bool MatchesVertex(const Vertex& actual, const ExpectedVertex& expected) {
            NearlyEqual(actual.norm[0], expected.norm[0]) &&
            NearlyEqual(actual.norm[1], expected.norm[1]) &&
            NearlyEqual(actual.norm[2], expected.norm[2]) &&
-           NearlyEqual(actual.uv[0], expected.uv[0]) &&
-           NearlyEqual(actual.uv[1], expected.uv[1]);
+           NearlyEqual(actual.uv[0], expected.uv[0]) && NearlyEqual(actual.uv[1], expected.uv[1]);
 }
 
 } // namespace
@@ -258,10 +283,10 @@ TEST(AssetProcessorRoundTrip, WritesCombinedLmeshThatCanBeReadBack) {
     ASSERT_EQ(mesh.indices.size(), 6u);
 
     for (const ExpectedVertex& expected : expectedVertices) {
-        const auto found = std::find_if(
-            mesh.vertices.begin(),
-            mesh.vertices.end(),
-            [&](const Vertex& actual) { return MatchesVertex(actual, expected); });
+        const auto found =
+            std::find_if(mesh.vertices.begin(), mesh.vertices.end(), [&](const Vertex& actual) {
+                return MatchesVertex(actual, expected);
+            });
 
         EXPECT_NE(found, mesh.vertices.end());
     }
@@ -272,13 +297,12 @@ TEST(AssetProcessorRoundTrip, WritesCombinedLmeshThatCanBeReadBack) {
         referenced[index] = true;
     }
 
-    EXPECT_TRUE(std::all_of(referenced.begin(), referenced.end(), [](bool value) {
-        return value;
-    }));
+    EXPECT_TRUE(
+        std::all_of(referenced.begin(), referenced.end(), [](bool value) { return value; }));
 }
 
 // ---------------------------------------------------------------------------
-// .ltex texture round-trip (T-I4-6)
+//.ltex texture round-trip
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -306,7 +330,7 @@ struct LtexImage {
     std::vector<LtexMipLevel> mips;
 };
 
-// Reads the .ltex layout written by asset_processor's WriteLtex (field-by-field
+// Reads the.ltex layout written by asset_processor's WriteLtex (field-by-field
 // header, then the raw mip chain).
 LtexImage ReadLtex(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
@@ -326,7 +350,8 @@ LtexImage ReadLtex(const std::filesystem::path& path) {
         mip.height = h;
         const size_t byte_count = static_cast<size_t>(w) * h * image.header.channels;
         mip.pixels.resize(byte_count);
-        in.read(reinterpret_cast<char*>(mip.pixels.data()), static_cast<std::streamsize>(byte_count));
+        in.read(reinterpret_cast<char*>(mip.pixels.data()),
+                static_cast<std::streamsize>(byte_count));
         image.mips.push_back(std::move(mip));
         w = std::max(1u, w / 2u);
         h = std::max(1u, h / 2u);
@@ -405,7 +430,8 @@ TEST(LtexRoundTrip, BuildsHalvingMipChainDownToOne) {
     for (const LtexMipLevel& mip : image.mips) {
         EXPECT_EQ(mip.width, expected_w);
         EXPECT_EQ(mip.height, expected_h);
-        EXPECT_EQ(mip.pixels.size(), static_cast<size_t>(expected_w) * expected_h * image.header.channels);
+        EXPECT_EQ(mip.pixels.size(),
+                  static_cast<size_t>(expected_w) * expected_h * image.header.channels);
         expected_w = std::max(1u, expected_w / 2u);
         expected_h = std::max(1u, expected_h / 2u);
     }
@@ -454,6 +480,7 @@ TEST(LtexRoundTrip, GradientMip0RoundTripsExactly) {
     ASSERT_NE(png, nullptr);
     ASSERT_FALSE(image.mips.empty());
     ASSERT_EQ(image.mips.front().pixels.size(), static_cast<size_t>(w) * h * 4);
-    EXPECT_EQ(0, std::memcmp(image.mips.front().pixels.data(), png, image.mips.front().pixels.size()));
+    EXPECT_EQ(0,
+              std::memcmp(image.mips.front().pixels.data(), png, image.mips.front().pixels.size()));
     stbi_image_free(png);
 }

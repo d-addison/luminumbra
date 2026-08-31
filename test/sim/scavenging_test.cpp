@@ -1,4 +1,4 @@
-// Track sim.scavenging — SCAVENGERS EAT CARCASSES (death -> food). A hungry scavenger seeks
+// sim.scavenging: SCAVENGERS EAT CARCASSES (death -> food). A hungry scavenger seeks
 // the nearest carcass (a dead creature: eaten==1 or MortalComponent.dead==1), steers toward
 // it via a wish vector, and FEEDS when in range (hunger falls, feeding=1). Deterministic
 // (id-ordered, two-phase carcass snapshot, DeterministicMath only, NO rng), gated by the

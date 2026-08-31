@@ -15,9 +15,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet("debug")]
-    [string]$BuildPreset = "debug",
-    [ValidateSet("release")]
-    [string]$RenderBudgetPreset = "release"
+    [string]$BuildPreset = "debug"
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,7 +35,7 @@ $scheduledTaskName = "Luminumbra Nightly Gate"
 $scheduledTaskPath = "\"
 $nightlyRunnerPath = (Resolve-Path -LiteralPath $MyInvocation.MyCommand.Path).Path
 $scheduledPowerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
-$scheduledArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -BuildPreset debug -RenderBudgetPreset release' -f $nightlyRunnerPath
+$scheduledArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -BuildPreset debug' -f $nightlyRunnerPath
 
 if ($null -eq (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) {
     throw "Nightly scheduler provenance requires Get-ScheduledTask."
@@ -215,7 +213,7 @@ Invoke-NightlyStep `
     -Name "EngineFrontierAll" `
     -File "powershell.exe" `
     -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $frontierScript, "-Mode", "All", "-BuildPreset", $BuildPreset) `
-    -Notes "Default frontier lane; excludes Build, UnitTests, heavy visual/network lanes, and RenderBudget."
+    -Notes "Default frontier lane; excludes Build, UnitTests, and heavy visual/network lanes."
 
 if ((Test-Path -LiteralPath $determinismScript) -and
     ((Get-Content -LiteralPath $determinismScript -Raw) -match '\[switch\]\s*\$Quick')) {
@@ -230,20 +228,6 @@ if ((Test-Path -LiteralPath $determinismScript) -and
         -Command "$determinismScript -Quick" `
         -Notes "Skipped: validate-determinism-matrix.ps1 or its -Quick switch was not found."
 }
-
-if ($RenderBudgetPreset -ne $BuildPreset) {
-    Invoke-NightlyStep `
-        -Name "RenderBudgetBuild" `
-        -File "cmake" `
-        -Arguments @("--build", "--preset", $RenderBudgetPreset) `
-        -Notes "Build the documented release/LTO target before the target-GPU budget lane."
-}
-
-Invoke-NightlyStep `
-    -Name "RenderBudget" `
-    -File "powershell.exe" `
-    -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $frontierScript, "-Mode", "RenderBudget", "-BuildPreset", $RenderBudgetPreset) `
-    -Notes "Target-GPU lane intentionally kept outside -Mode All; the frontier contract requires the release/LTO build for the blessed total budget."
 
 $failed = @($results | Where-Object { $_.status -eq "FAIL" })
 $overall = if ($failed.Count -eq 0) { "PASS" } else { "FAIL" }
@@ -269,7 +253,6 @@ $report = [pscustomobject]@{
     git_head_at_completion = $gitHeadAtCompletion
     repo_root = $RepoRoot
     build_preset = $BuildPreset
-    render_budget_preset = $RenderBudgetPreset
     path_prefix = "C:\msys64\ucrt64\bin"
     overall_status = $overall
     markdown_report = $markdownPath

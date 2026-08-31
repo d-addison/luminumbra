@@ -1,4 +1,4 @@
-// T-I4-4: structure placement + jigsaw assembly gates.
+// structure placement + jigsaw assembly gates.
 // - placement determinism: same seed => same sites; SiteInCell is a pure
 //   function of (seed, salt, cell); LocateNearestSite is verified against a
 //   brute-force scan.
@@ -184,5 +184,6 @@ TEST(StructurePlacementTest, AssembledRuinIsDeterministicAndUsesSockets) {
     ASSERT_FALSE(a.empty());
     EXPECT_EQ(ComputeAssembledVoxelHash(a), ComputeAssembledVoxelHash(b));
     std::printf("ruin assembled voxel hash (seed 0x1234567890ABCDEF): %016llx voxels=%zu\n",
-                static_cast<unsigned long long>(ComputeAssembledVoxelHash(a)), a.size());
+                static_cast<unsigned long long>(ComputeAssembledVoxelHash(a)),
+                a.size());
 }

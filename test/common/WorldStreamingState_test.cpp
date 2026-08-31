@@ -60,15 +60,16 @@ TEST(WorldStreamingStateStressTest, ChunkStateBurstsCompleteEveryRequestedTransi
         jobs.reserve(kChunkCount);
 
         for (std::size_t chunk = 0; chunk < kChunkCount; ++chunk) {
-            jobs.emplace_back([&requested_counts, &loaded_counts, &completed, &completed_cv, chunk]() {
-                requested_counts[chunk].fetch_add(1, std::memory_order_relaxed);
-                loaded_counts[chunk].fetch_add(1, std::memory_order_relaxed);
+            jobs.emplace_back(
+                [&requested_counts, &loaded_counts, &completed, &completed_cv, chunk]() {
+                    requested_counts[chunk].fetch_add(1, std::memory_order_relaxed);
+                    loaded_counts[chunk].fetch_add(1, std::memory_order_relaxed);
 
-                const int done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
-                if (done == kExpectedTransitions) {
-                    completed_cv.notify_one();
-                }
-            });
+                    const int done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (done == kExpectedTransitions) {
+                        completed_cv.notify_one();
+                    }
+                });
         }
 
         handles.push_back(system.job_system.dispatch_batch(jobs));
@@ -86,8 +87,10 @@ TEST(WorldStreamingStateStressTest, ChunkStateBurstsCompleteEveryRequestedTransi
     }
 
     for (std::size_t chunk = 0; chunk < kChunkCount; ++chunk) {
-        EXPECT_EQ(requested_counts[chunk].load(std::memory_order_relaxed), static_cast<int>(kStreamingPasses));
-        EXPECT_EQ(loaded_counts[chunk].load(std::memory_order_relaxed), static_cast<int>(kStreamingPasses));
+        EXPECT_EQ(requested_counts[chunk].load(std::memory_order_relaxed),
+                  static_cast<int>(kStreamingPasses));
+        EXPECT_EQ(loaded_counts[chunk].load(std::memory_order_relaxed),
+                  static_cast<int>(kStreamingPasses));
     }
 }
 

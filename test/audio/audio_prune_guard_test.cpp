@@ -1,17 +1,17 @@
-// AUDIO-12 (spec 021): dead-audio-weight prune guard. Two jobs, both
+// dead-audio-weight prune guard. Two jobs, both
 // GL/device-free (headers are only compiled + type-trait-inspected; NO
 // MiniaudioManager is constructed and no ma_* / GL call is ever made):
 //
 //   (1) COMPILE SENTINEL — force every SURVIVING audio header through the
 //       compiler so a future accidental dependency on one of the 5 orphan
-//       systems AUDIO-12 deleted (AdvancedReverbSystem / ProceduralSoundGenerator
+//       systems  deleted (AdvancedReverbSystem / ProceduralSoundGenerator
 //       / SoundVariationSystem / AudioStreamingManager / AudioPerformanceProfiler)
 //       fails HERE, loudly, instead of in the client link.
 //
-//   (2) MANIFEST GUARD — the 7 dormant bank manifests AUDIO-12 retired
+//   (2) MANIFEST GUARD — the 7 dormant bank manifests  retired
 //       (adaptive_music_system, complex_creature_sfx, complex_environmental_sfx,
 //       creature_sfx, environmental_sfx, sound_variation_definitions,
-//       weather_sfx — 221 orphaned .ogg refs, never LoadBank'd) must be GONE
+//       weather_sfx — 221 orphaned.ogg refs, never LoadBank'd) must be GONE
 //       from disk, and the loaded-bank set must stay exactly {sfx_main, music},
 //       the only two banks main_client.cpp ever LoadBank's.
 //
@@ -20,10 +20,10 @@
 #include <gtest/gtest.h>
 
 // --- (1) surviving-header compile sentinel ---------------------------------
-#include "audio/IAudioManager.h"
-#include "audio/MiniaudioManager.h"
 #include "audio/AudioSpatialCluster.h"
 #include "audio/EnvironmentalAudioModel.h"
+#include "audio/IAudioManager.h"
+#include "audio/MiniaudioManager.h"
 #include "audio/MixerModel.h"
 
 #include <filesystem>
@@ -39,9 +39,9 @@ namespace fs = std::filesystem;
 // building (e.g. it had leaned on one of the now-deleted orphan systems).
 static_assert(std::is_abstract_v<Luminumbra::Client::IAudioManager>,
               "IAudioManager must remain the abstract audio interface");
-static_assert(std::is_base_of_v<Luminumbra::Client::IAudioManager,
-                                Luminumbra::Client::MiniaudioManager>,
-              "MiniaudioManager must remain an IAudioManager implementation");
+static_assert(
+    std::is_base_of_v<Luminumbra::Client::IAudioManager, Luminumbra::Client::MiniaudioManager>,
+    "MiniaudioManager must remain an IAudioManager implementation");
 static_assert(std::is_class_v<Luminumbra::Client::AudioSpatialCluster>,
               "AudioSpatialCluster must remain a defined type");
 static_assert(std::is_class_v<Luminumbra::Client::Audio::MixerDucker>,
@@ -65,12 +65,14 @@ const fs::path kRoot = fs::path(LUMINUMBRA_SOURCE_ROOT);
 // runtime; every other manifest under data/audio was dormant authoring data.
 const std::vector<std::string> kLoadedBanks = {"sfx_main", "music"};
 
-// The 7 dormant manifests AUDIO-12 retired.
-const std::vector<std::string> kPrunedBanks = {
-    "adaptive_music_system",     "complex_creature_sfx",
-    "complex_environmental_sfx", "creature_sfx",
-    "environmental_sfx",         "sound_variation_definitions",
-    "weather_sfx"};
+// The 7 dormant manifests  retired.
+const std::vector<std::string> kPrunedBanks = {"adaptive_music_system",
+                                               "complex_creature_sfx",
+                                               "complex_environmental_sfx",
+                                               "creature_sfx",
+                                               "environmental_sfx",
+                                               "sound_variation_definitions",
+                                               "weather_sfx"};
 
 fs::path BankPath(const std::string& name) {
     return kRoot / "data" / "audio" / (name + ".bank.json");
@@ -99,7 +101,7 @@ TEST(AudioPruneGuard, RetiredBankManifestsDeletedLoadedSurvive) {
 
     for (const std::string& pruned : kPrunedBanks) {
         EXPECT_FALSE(fs::exists(BankPath(pruned)))
-            << "retired bank manifest still on disk (AUDIO-12 prune incomplete): "
+            << "retired bank manifest still on disk ( prune incomplete): "
             << BankPath(pruned).string();
     }
     for (const std::string& loaded : kLoadedBanks) {

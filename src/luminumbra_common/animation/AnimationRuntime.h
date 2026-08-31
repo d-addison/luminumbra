@@ -1,12 +1,12 @@
 #pragma once
 
-// T-I3-15: CPU animation core.
+// CPU animation core.
 //
 // Skeleton/Clip/Pose structs plus pure sampling/blending functions driven from
 // the 30 Hz fixed simulation tick (pose sampling is FIRST in the tick order,
-// design-decisions.md §1). All math is explicit scalar float math — no SIMD
+// the deterministic runtime contract ). All math is explicit scalar float math — no SIMD
 // intrinsics, no fast-math dependence; AnimationRuntime.cpp is compiled with
-// -ffp-contract=off so debug and release produce bit-identical poses (the G1
+// -ffp-contract=off so debug and release produce bit-identical poses (the
 // pose-determinism gate asserts a committed checksum in both presets).
 
 #include <cstdint>
@@ -42,9 +42,9 @@ struct Skeleton {
 struct ClipTrack {
     uint32_t jointNameHash = 0;
     AnimTargetType targetType = AnimTargetType::Translation;
-    uint32_t componentCount = 0;       // 3 for T/S, 4 for R
-    std::vector<float> times;          // ascending keyframe times (seconds)
-    std::vector<float> values;         // keyCount * componentCount
+    uint32_t componentCount = 0; // 3 for T/S, 4 for R
+    std::vector<float> times;    // ascending keyframe times (seconds)
+    std::vector<float> values;   // keyCount * componentCount
 };
 
 struct AnimationClip {
@@ -52,7 +52,7 @@ struct AnimationClip {
     std::vector<ClipTrack> tracks;
 };
 
-// Conversions from the on-disk LMS2/.lanim assets (T-I3-14).
+// Conversions from the on-disk LMS2/.lanim assets.
 Skeleton BuildSkeleton(const SkinnedMeshAsset& asset);
 AnimationClip BuildClip(const AnimClipAsset& asset);
 
@@ -71,27 +71,28 @@ Pose BlendPoses(const Pose& a, const Pose& b, float alpha);
 // Joint palette for GPU skinning: per joint a column-major 4x4 matrix
 // global(joint) * inverseBind(joint), flattened to 16 floats each. Parents
 // must precede children in the skeleton joint array.
-void ComputeJointPalette(const Skeleton& skeleton, const Pose& pose,
+void ComputeJointPalette(const Skeleton& skeleton,
+                         const Pose& pose,
                          std::vector<float>& outPalette);
 
-// FNV-1a 64-bit checksum over the exact float bit patterns. Used by the G1
+// FNV-1a 64-bit checksum over the exact float bit patterns. Used by the
 // pose-determinism gate (identical expectation in debug and release).
 uint64_t PoseChecksum(const Pose& pose, uint64_t seed = 14695981039346656037ull);
-uint64_t FloatSpanChecksum(const float* data, size_t count,
-                           uint64_t seed = 14695981039346656037ull);
+uint64_t
+FloatSpanChecksum(const float* data, size_t count, uint64_t seed = 14695981039346656037ull);
 
 // ECS integration: entities carrying this component get their pose sampled
 // and joint palette recomputed every fixed simulation tick.
 struct AnimationPlayerComponent {
     const Skeleton* skeleton = nullptr;
     const AnimationClip* clip = nullptr;
-    double time = 0.0;      // seconds into the clip, advanced by fixed_dt
+    double time = 0.0; // seconds into the clip, advanced by fixed_dt
     bool looping = true;
-    Pose pose;              // sampled local pose (output)
+    Pose pose;                  // sampled local pose (output)
     std::vector<float> palette; // 16 floats per joint (output, GPU skinning)
 };
 
-// First system in the deterministic tick order (design-decisions.md §1).
+// First system in the deterministic tick order (the deterministic runtime contract ).
 // Advances each player's clock by fixed_dt, samples its pose and recomputes
 // its joint palette.
 void SamplePosesOnTick(entt::registry& registry, double fixed_dt);

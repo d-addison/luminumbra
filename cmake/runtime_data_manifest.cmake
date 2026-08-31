@@ -41,7 +41,6 @@ set(LUMINUMBRA_RUNTIME_DATA_MANIFEST
     "common/structures/ruin/b_pillar.json"
     "common/structures/ruin/c_wall.json"
     "common/structures/ruin/placement.json"
-    "common/systems.game.json"
     "common/systems.json"
     "fonts/Lora/Lora-Italic-VariableFont_wght.ttf"
     "fonts/Lora/Lora-VariableFont_wght.ttf"

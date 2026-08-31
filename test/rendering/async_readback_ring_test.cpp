@@ -1,17 +1,18 @@
-// Spec 017-A AC-A-001 — the async GPU readback ring contract, exercised against a
+// the async GPU readback ring contract, exercised against a
 // REAL headless GL context (HiddenGlContext, mirroring render_smoke_test.cpp). No
 // GL mocking: the ring's fence/persistent-map path runs on real GPU commands.
 //
-// The contract under test (FR-A-001/002):
-//   * submit() issues the GPU copy + a fence and returns immediately (never waits).
-//   * consume() is a NON-BLOCKING poll: it returns the newest COMPLETED result, or
+// The contract under test:
+//   * submit issues the GPU copy + a fence and returns immediately (never waits).
+//   * consume is a NON-BLOCKING poll: it returns the newest COMPLETED result, or
 //     an ordinary "no result yet" state — it never stalls on the current frame.
 //   * a stale (older) result stays available until its slot is reused.
 
 #include "luminumbra_client/rendering/AsyncReadbackRing.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -49,11 +50,17 @@ public:
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -67,8 +74,10 @@ GLuint make_source_ssbo(const std::vector<std::uint8_t>& bytes) {
     GLuint ssbo = 0;
     glGenBuffers(1, &ssbo);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, ssbo);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(bytes.size()),
-                 bytes.data(), GL_STATIC_DRAW);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+                 static_cast<GLsizeiptr>(bytes.size()),
+                 bytes.data(),
+                 GL_STATIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
     return ssbo;
 }
@@ -98,7 +107,7 @@ TEST(AsyncReadbackRing, SubmitNonBlockingThenConsumeResult) {
     std::size_t n = 0;
     EXPECT_FALSE(ring.consume(&p, &n)) << "fresh ring must report no result";
 
-    // Submit a readback. submit() must return immediately (no blocking wait).
+    // Submit a readback. submit must return immediately (no blocking wait).
     ASSERT_TRUE(ring.begin());
     ring.copy_region(src_ssbo, 0, 0, kN);
     ring.submit();
@@ -106,7 +115,7 @@ TEST(AsyncReadbackRing, SubmitNonBlockingThenConsumeResult) {
     // A NON-DESTRUCTIVE poll on the submit frame is non-blocking: it may report
     // pending OR (if the tiny copy already finished) ready — but it must NEVER
     // hang, and it must not consume the result. We don't hard-assert "pending"
-    // (that would race the GPU). poll() leaves the result for consume() below.
+    // (that would race the GPU). poll leaves the result for consume below.
     (void)ring.poll();
 
     // Force GPU completion, then the result must be available with the right bytes.
@@ -163,7 +172,7 @@ TEST(AsyncReadbackRing, SlotRotationDeliversNewestResult) {
     glDeleteBuffers(1, &sb);
 }
 
-// Mirrors the foliage consumer EXACTLY (FR-A-004): two copy_regions into one slot
+// Mirrors the foliage consumer EXACTLY: two copy_regions into one slot
 // -- a count at byte offset 8 of a "count" SSBO -> slot+0, then a blade array ->
 // slot+4 -- then reconstruct count from slot+0 and blades from slot+4. This is the
 // offset arithmetic / multi-region pattern the (currently-broken) FoliageInstancing
@@ -185,13 +194,15 @@ TEST(AsyncReadbackRing, FoliageStyleTwoRegionReadback) {
 
     // "blade" SSBO of known 4-byte records (stand-in for InstanceRecord).
     std::vector<std::uint32_t> blades(kBlades);
-    for (std::uint32_t i = 0; i < kBlades; ++i) blades[i] = 0xB1AD0000u | i;
+    for (std::uint32_t i = 0; i < kBlades; ++i)
+        blades[i] = 0xB1AD0000u | i;
     GLuint blade_ssbo = 0;
     glGenBuffers(1, &blade_ssbo);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, blade_ssbo);
     glBufferData(GL_SHADER_STORAGE_BUFFER,
                  static_cast<GLsizeiptr>(blades.size() * sizeof(std::uint32_t)),
-                 blades.data(), GL_STATIC_DRAW);
+                 blades.data(),
+                 GL_STATIC_DRAW);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
     constexpr std::size_t kCountBytes = sizeof(std::uint32_t);
@@ -203,7 +214,9 @@ TEST(AsyncReadbackRing, FoliageStyleTwoRegionReadback) {
     // count: read draw_instance_count at byte offset 8 -> slot+0 (matches foliage).
     ring.copy_region(count_ssbo, sizeof(std::uint32_t) * 2, 0, kCountBytes);
     // blades: whole array -> slot + kCountBytes (matches foliage).
-    ring.copy_region(blade_ssbo, 0, static_cast<std::ptrdiff_t>(kCountBytes),
+    ring.copy_region(blade_ssbo,
+                     0,
+                     static_cast<std::ptrdiff_t>(kCountBytes),
                      blades.size() * sizeof(std::uint32_t));
     ring.submit();
     glFinish();
@@ -214,8 +227,8 @@ TEST(AsyncReadbackRing, FoliageStyleTwoRegionReadback) {
     std::uint32_t got_count = 0;
     std::memcpy(&got_count, slot, kCountBytes);
     EXPECT_EQ(got_count, kBlades) << "count must reconstruct from slot+0";
-    const std::uint32_t* got_blades = reinterpret_cast<const std::uint32_t*>(
-        static_cast<const char*>(slot) + kCountBytes);
+    const std::uint32_t* got_blades =
+        reinterpret_cast<const std::uint32_t*>(static_cast<const char*>(slot) + kCountBytes);
     for (std::uint32_t i = 0; i < kBlades; ++i) {
         EXPECT_EQ(got_blades[i], blades[i]) << "blade " << i << " must match";
     }
@@ -272,11 +285,11 @@ TEST(AsyncReadbackRing, EnsureIsIdempotent) {
     EXPECT_GE(ring.slot_bytes(), 512u);
 }
 
-// Rank 69 (RENDER-07/ATMO-05, Wave F F6) — the ExposureMeter gate: the SHIPPED
+//  (/,  ) — the ExposureMeter gate: the SHIPPED
 // res/shaders/luminance_reduce.comp kernel, on a constant-luminance input,
 // reduces to that exact luminance (the geometric mean of a constant is the
 // constant), and the value round-trips through the ring WITHOUT any blocking
-// call (bounded zero-timeout polls only — the FR-A-001 contract the metering
+// call (bounded zero-timeout polls only — the  contract the metering
 // servo relies on).
 TEST(AsyncReadbackRing, ExposureMeterKernelReducesConstantSceneNonBlocking) {
     HiddenGlContext ctx;
@@ -299,7 +312,8 @@ TEST(AsyncReadbackRing, ExposureMeterKernelReducesConstantSceneNonBlocking) {
     GLint ok = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
     char info_log[1024] = {};
-    if (!ok) glGetShaderInfoLog(shader, sizeof(info_log), nullptr, info_log);
+    if (!ok)
+        glGetShaderInfoLog(shader, sizeof(info_log), nullptr, info_log);
     ASSERT_TRUE(ok) << "luminance_reduce.comp failed to compile:\n" << info_log;
     GLuint program = glCreateProgram();
     glAttachShader(program, shader);
@@ -314,7 +328,8 @@ TEST(AsyncReadbackRing, ExposureMeterKernelReducesConstantSceneNonBlocking) {
     glGenTextures(1, &scene);
     glBindTexture(GL_TEXTURE_2D, scene);
     std::vector<float> texels(static_cast<std::size_t>(64) * 64 * 4, kGrey);
-    for (std::size_t i = 3; i < texels.size(); i += 4) texels[i] = 1.0f;
+    for (std::size_t i = 3; i < texels.size(); i += 4)
+        texels[i] = 1.0f;
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 64, 64, 0, GL_RGBA, GL_FLOAT, texels.data());
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -337,7 +352,7 @@ TEST(AsyncReadbackRing, ExposureMeterKernelReducesConstantSceneNonBlocking) {
     ASSERT_TRUE(ring.ensure(sizeof(float), 3));
     ASSERT_TRUE(ring.begin());
     ring.copy_region(ssbo, 0, 0, sizeof(float));
-    ring.submit(); // returns immediately (FR-A-001)
+    ring.submit(); // returns immediately ()
 
     // Bounded NON-blocking poll loop (no glFinish, no client waits).
     bool ready = false;

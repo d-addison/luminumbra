@@ -1,6 +1,6 @@
 #pragma once
 
-// I9-ECO: creature state for the Utility-AI brain (ai/CreatureBrainSystem.h). The presence
+//  creature state for the Utility-AI brain (ai/CreatureBrainSystem.h). The presence
 // of this component is the per-entity opt-in (like PlantTag): a world with no creatures runs
 // the brain system as a no-op, so the canonical headless world_hash stays byte-identical.
 // All fields are sim state (integer-ish floats, deterministic); geometry/rendering is separate.
@@ -20,32 +20,30 @@ namespace Luminumbra::Components {
 // not alter sim behaviour, and leaving it out keeps every existing determinism baseline
 // byte-identical. The PHOTO CODEX (client-only, hash-free) reads it as the species key.
 [[nodiscard]] inline std::uint16_t CreatureSpeciesId16(const char* id) {
-    std::uint64_t h = 1469598103934665603ull;  // FNV offset basis
+    std::uint64_t h = 1469598103934665603ull; // FNV offset basis
     for (const char* p = id; p && *p; ++p) {
         h ^= static_cast<unsigned char>(*p);
-        h *= 1099511628211ull;  // FNV prime
+        h *= 1099511628211ull; // FNV prime
     }
     const std::uint16_t v = static_cast<std::uint16_t>((h ^ (h >> 32)) & 0xFFFFu);
     return v == 0 ? 1 : v;
 }
 
 struct CreatureComponent {
-    bool is_predator = false;   // role: predators hunt prey; prey flee predators + graze
+    bool is_predator = false; // role: predators hunt prey; prey flee predators + graze
     // Codex species identity (CreatureSpeciesId16 of the archetype/species name). 0 ==
     // unspecified -> the photo codex falls back to the predator/prey role proxy. Set at
     // spawn, inherited by offspring, never mutated; not in the ecology sub-hash.
     std::uint16_t species_id = 0;
-    float hunger = 0.0f;        // 0 sated .. 1 starving (grows each tick)
-    float stamina = 1.0f;       // 0 exhausted .. 1 fresh (short-term exertion; recovers on Rest)
-    // Spec 011: long-term sleep/fatigue need. 0 exhausted .. 1 rested. Drains slowly every tick
+    float hunger = 0.0f;  // 0 sated.. 1 starving (grows each tick)
+    float stamina = 1.0f; // 0 exhausted.. 1 fresh (short-term exertion; recovers on Rest)
+    // long-term sleep/fatigue need. 0 exhausted.. 1 rested. Drains slowly every tick
     // (being awake costs energy), recovers on Rest and fastest on Sleep. Distinct from `stamina`
-    // (sprint fuel) -- energy gates the daily sleep cycle. Phase E LANDED: the brain reads it
-    // (CreatureSenses.energy -> the circadian-gated Sleep action), so it steers behaviour on any
-    // sleeping roster. NOT yet folded into the ecology sub-hash (EcologyHash.h reads
-    // hunger/stamina, not energy — hashing it is spec-021 INSTINCT-10).
+    // (sprint fuel), energy gates the daily sleep cycle. The brain reads it through
+    // CreatureSenses and EcologyHash includes it in authoritative state.
     float energy = 1.0f;
-    float move_speed = 3.0f;    // m/s cruise
-    int last_action = 0;        // last CreatureAction chosen (telemetry / sub-hash)
+    float move_speed = 3.0f; // m/s cruise
+    int last_action = 0;     // last CreatureAction chosen (telemetry / sub-hash)
     // The brain's desired HORIZONTAL velocity (m/s) this tick. When the creature has a
     // CreaturePhysicsComponent the brain writes this and the Jolt character controller owns
     // the resulting position (gravity / terrain collision / slopes); otherwise the brain
@@ -57,7 +55,7 @@ struct CreatureComponent {
     bool eaten = false;
 };
 
-// I9-ECO + physics: opt-in TRUE-PHYSICS locomotion. When present, the creature is driven by
+//  + physics: opt-in TRUE-PHYSICS locomotion. When present, the creature is driven by
 // a deterministic Jolt CharacterVirtual (the same controller the player/networked avatars
 // use): the brain produces a wish velocity, the avatar resolves it against the terrain
 // heightfield (gravity, ground-stick, 50deg max slope), and the resolved position is read
@@ -66,7 +64,7 @@ struct CreaturePhysicsComponent {
     std::size_t avatar_index = 0;
 };
 
-// Track (a) — CREATURE EVOLUTION: the heritable genome carried by a creature plus the
+// Creature evolution: CREATURE EVOLUTION: the heritable genome carried by a creature plus the
 // per-creature reproduction bookkeeping (age + cooldown). Presence of this component is the
 // per-entity opt-in for the CreatureReproductionSystem (luminumbra::ai): a world whose
 // creatures carry NO genome never reproduces, so the canonical roster stays byte-identical
@@ -79,11 +77,11 @@ struct CreaturePhysicsComponent {
 // behaves identically to one with no genome.
 struct CreatureGenomeComponent {
     // --- heritable traits (mirror ai::CreatureGenome field order) ---
-    float move_speed = 3.0f;        // m/s cruise
-    float vigilance = 0.5f;         // flee bias (reserved behaviour hook)
-    float hunger_threshold = 0.3f;  // reproduce only when hunger <= this
-    float size_scale = 1.0f;        // visual/sim size cue
-    // --- FR-4 SENSORY genes (mirror ai::CreatureGenome; defaults == PerceptionComponent defaults
+    float move_speed = 3.0f;       // m/s cruise
+    float vigilance = 0.5f;        // flee bias (reserved behaviour hook)
+    float hunger_threshold = 0.3f; // reproduce only when hunger <= this
+    float size_scale = 1.0f;       // visual/sim size cue
+    // ---  SENSORY genes (mirror ai::CreatureGenome; defaults == PerceptionComponent defaults
     // so a default-stamped creature perceives identically to before). Heritable + mutable -> the
     // perceptual phenotype that diverges under selection. ---
     float vision_cos_half_fov = 0.5f; // cos(half FOV); lower = wider cone
@@ -108,4 +106,4 @@ struct CreatureGenomeComponent {
     std::uint32_t courting_ticks = 0;
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

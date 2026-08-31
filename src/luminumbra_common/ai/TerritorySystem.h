@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.territory — HOME-RANGE / TERRITORIALITY.
+// sim.territory: HOME-RANGE / TERRITORIALITY.
 //
 // A creature carrying a TerritoryComponent claims a HOME (its current position the first time
 // the system sees it) and prefers to stay near it. Each tick the system produces a HOMING wish
@@ -21,8 +21,8 @@
 // claimed ground is steered back toward its own territory (territorial separation falls out of
 // each animal homing to its own range).
 //
-// DETERMINISM. id-ordered traversal (sort by entt::to_integral). TWO-PHASE: phase 1 claims
-// home (writing only the creature's OWN territory) and snapshots its position + home; phase 2
+// DETERMINISM. id-ordered traversal (sort by entt::to_integral). TWO-PHASE:  claims
+// home (writing only the creature's OWN territory) and snapshots its position + home;
 // computes the bias from that snapshot and writes TerritoryBiasComponent. Each creature's
 // output depends only on its own position + its own fixed home, so the result is fully
 // order-independent regardless. Math is DeterministicMath only (Sqrt for distance; +-*/); NO
@@ -64,9 +64,9 @@ inline constexpr float kTerritoryHomingGain = 0.25f;
 inline constexpr float kTerritoryMaxBias = 3.0f;
 
 struct TerritoryStats {
-    int participants = 0;  // creatures carrying a TerritoryComponent that took part
-    int claimed = 0;       // creatures that claimed their home this tick (first sighting)
-    int homing = 0;        // creatures with a non-zero homing bias this tick (outside radius)
+    int participants = 0; // creatures carrying a TerritoryComponent that took part
+    int claimed = 0;      // creatures that claimed their home this tick (first sighting)
+    int homing = 0;       // creatures with a non-zero homing bias this tick (outside radius)
 };
 
 // RunTerritoryOnTick: claim home on first sight, then emit each creature's homing wish bias.
@@ -83,13 +83,14 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*ti
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    if (ents.empty()) return stats;  // empty roster -> pure no-op.
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
 
-    // ---- PHASE 1: claim home where needed + snapshot (position, fixed home, radius). ----
+    // ---- First pass: claim home where needed and snapshot state. ----
     struct Snap {
         entt::entity e;
-        float x, z;     // current position
-        float hx, hz;   // claimed home
+        float x, z;   // current position
+        float hx, hz; // claimed home
         float radius;
     };
     std::vector<Snap> snap;
@@ -108,11 +109,11 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*ti
     }
     stats.participants = static_cast<int>(snap.size());
 
-    // ---- PHASE 2: compute the homing bias from the snapshot and write it. ----
+    // ---- Second pass: compute and write homing bias from the snapshot. ----
     for (const Snap& s : snap) {
         auto& bias = reg.get_or_emplace<Comp::TerritoryBiasComponent>(s.e);
 
-        const float dx = s.hx - s.x;  // vector TOWARD home
+        const float dx = s.hx - s.x; // vector TOWARD home
         const float dz = s.hz - s.z;
         const float dist = dm::Sqrt(dx * dx + dz * dz);
 
@@ -126,8 +127,9 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*ti
 
         // Outside: magnitude rises with the OVERSHOOT past the edge, capped.
         const float overshoot = dist - radius;        // > 0 here
-        float mag = overshoot * kTerritoryHomingGain;  // grows linearly with how far it strayed
-        if (mag > kTerritoryMaxBias) mag = kTerritoryMaxBias;
+        float mag = overshoot * kTerritoryHomingGain; // grows linearly with how far it strayed
+        if (mag > kTerritoryMaxBias)
+            mag = kTerritoryMaxBias;
 
         // Unit vector toward home * magnitude. dist > radius >= 0 and dist > 1e-6, safe divide.
         const float inv = mag / dist;
@@ -139,4 +141,4 @@ inline TerritoryStats RunTerritoryOnTick(entt::registry& reg, std::uint64_t /*ti
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

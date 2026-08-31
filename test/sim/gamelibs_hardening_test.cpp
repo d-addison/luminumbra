@@ -26,12 +26,12 @@
 #include <cstdint>
 #include <vector>
 
-#include "systems/PhotoScoring.h"  // luminumbra::photo
-#include "game/PhotoCamera.h"      // luminumbra::game
-#include "game/PhotoCodex.h"       // luminumbra::game
-#include "game/SpeciesCodex.h"     // luminumbra::game
-#include "game/LightTools.h"       // luminumbra::game
-#include "game/PhotoSession.h"     // luminumbra::game
+#include "game/LightTools.h"      // luminumbra::game
+#include "game/PhotoCamera.h"     // luminumbra::game
+#include "game/PhotoCodex.h"      // luminumbra::game
+#include "game/PhotoSession.h"    // luminumbra::game
+#include "game/SpeciesCodex.h"    // luminumbra::game
+#include "systems/PhotoScoring.h" // luminumbra::photo
 
 namespace {
 
@@ -44,8 +44,9 @@ namespace gm = ::luminumbra::game;
 bool IsFiniteF(float v) {
     // No std::isfinite to keep the determinism flavour explicit: NaN != NaN, and
     // +-inf compare out of any finite band.
-    if (v != v) return false;            // NaN
-    if (v > 3.0e38f || v < -3.0e38f) {   // beyond finite float range (inf)
+    if (v != v)
+        return false;                  // NaN
+    if (v > 3.0e38f || v < -3.0e38f) { // beyond finite float range (inf)
         return false;
     }
     return true;
@@ -59,7 +60,11 @@ void ExpectScoreInRange(float v, const char* what) {
 
 ph::PhotoSubject MakeSubject(float x, float y, float size, float light, int id) {
     ph::PhotoSubject s;
-    s.ndc_x = x; s.ndc_y = y; s.size = size; s.light = light; s.species_id = id;
+    s.ndc_x = x;
+    s.ndc_y = y;
+    s.size = size;
+    s.light = light;
+    s.species_id = id;
     return s;
 }
 
@@ -69,7 +74,7 @@ ph::PhotoSubject MakeSubject(float x, float y, float size, float light, int id) 
 
 // Empty frame is a strictly-defined all-zero score (the documented gating contract).
 TEST(GameLibsHardening, ScorePhotoEmptyFrameAllZero) {
-    ph::PhotoShot shot;  // no subjects
+    ph::PhotoShot shot; // no subjects
     const ph::PhotoScore s = ph::ScorePhoto(shot);
     EXPECT_EQ(s.composition, 0.0f);
     EXPECT_EQ(s.lighting, 0.0f);
@@ -82,14 +87,14 @@ TEST(GameLibsHardening, ScorePhotoEmptyFrameAllZero) {
 // must produce finite, clamped axes — never NaN/inf from a /0 or a blow-out branch.
 TEST(GameLibsHardening, ScorePhotoDegenerateInputsFiniteAndClamped) {
     const float lights[] = {-1.0f, 0.0f, 0.5f, 0.92f, 1.0f, 2.0f};
-    const float sizes[]  = {0.0f, 1.0f, 5.0f};
-    const float expos[]  = {-1.0f, 0.0f, 0.5f, 1.0f, 2.0f};
+    const float sizes[] = {0.0f, 1.0f, 5.0f};
+    const float expos[] = {-1.0f, 0.0f, 0.5f, 1.0f, 2.0f};
     for (float l : lights) {
         for (float sz : sizes) {
             for (float ex : expos) {
                 ph::PhotoShot shot;
                 shot.exposure = ex;
-                shot.focus = ex;  // reuse the sweep value as a focus too
+                shot.focus = ex; // reuse the sweep value as a focus too
                 // two coincident subjects at the dead centre, same species.
                 shot.subjects.push_back(MakeSubject(0.0f, 0.0f, sz, l, 7));
                 shot.subjects.push_back(MakeSubject(0.0f, 0.0f, sz, l, 7));
@@ -123,9 +128,14 @@ TEST(GameLibsHardening, ScorePhotoOrderIndependentDistinctSizes) {
         MakeSubject(-0.5f, 0.2f, 0.3f, 0.5f, 2),
         MakeSubject(0.1f, -0.4f, 0.2f, 0.4f, 3),
     };
-    ph::PhotoShot a; a.subjects = subs; a.exposure = 0.5f; a.focus = 0.9f;
-    ph::PhotoShot b; b.subjects.assign(subs.rbegin(), subs.rend());
-    b.exposure = 0.5f; b.focus = 0.9f;
+    ph::PhotoShot a;
+    a.subjects = subs;
+    a.exposure = 0.5f;
+    a.focus = 0.9f;
+    ph::PhotoShot b;
+    b.subjects.assign(subs.rbegin(), subs.rend());
+    b.exposure = 0.5f;
+    b.focus = 0.9f;
     const ph::PhotoScore sa = ph::ScorePhoto(a);
     const ph::PhotoScore sb = ph::ScorePhoto(b);
     EXPECT_EQ(sa.composition, sb.composition);
@@ -139,24 +149,29 @@ TEST(GameLibsHardening, ScorePhotoOrderIndependentDistinctSizes) {
 // N of the SAME species (variety bonus), and the value must not depend on order.
 TEST(GameLibsHardening, ScoreRarityVarietyAndOrderIndependent) {
     ph::PhotoShot same;
-    for (int i = 0; i < 4; ++i) same.subjects.push_back(MakeSubject(0.0f, 0.0f, 0.3f, 0.5f, 9));
+    for (int i = 0; i < 4; ++i)
+        same.subjects.push_back(MakeSubject(0.0f, 0.0f, 0.3f, 0.5f, 9));
     ph::PhotoShot varied;
-    for (int i = 0; i < 4; ++i) varied.subjects.push_back(MakeSubject(0.0f, 0.0f, 0.3f, 0.5f, 9 + i));
+    for (int i = 0; i < 4; ++i)
+        varied.subjects.push_back(MakeSubject(0.0f, 0.0f, 0.3f, 0.5f, 9 + i));
     EXPECT_GT(ph::ScoreRarity(varied), ph::ScoreRarity(same));
 
     ph::PhotoShot v1;
-    v1.subjects = {MakeSubject(0,0,0.5f,0.5f,1), MakeSubject(0.1f,0.1f,0.3f,0.5f,2),
-                   MakeSubject(0.2f,0.2f,0.2f,0.5f,2)};
+    v1.subjects = {MakeSubject(0, 0, 0.5f, 0.5f, 1),
+                   MakeSubject(0.1f, 0.1f, 0.3f, 0.5f, 2),
+                   MakeSubject(0.2f, 0.2f, 0.2f, 0.5f, 2)};
     ph::PhotoShot v2;
-    v2.subjects = {MakeSubject(0.2f,0.2f,0.2f,0.5f,2), MakeSubject(0,0,0.5f,0.5f,1),
-                   MakeSubject(0.1f,0.1f,0.3f,0.5f,2)};
+    v2.subjects = {MakeSubject(0.2f, 0.2f, 0.2f, 0.5f, 2),
+                   MakeSubject(0, 0, 0.5f, 0.5f, 1),
+                   MakeSubject(0.1f, 0.1f, 0.3f, 0.5f, 2)};
     EXPECT_EQ(ph::ScoreRarity(v1), ph::ScoreRarity(v2));
 }
 
 // run==replay: the same PhotoShot scored twice is byte-identical (pure function).
 TEST(GameLibsHardening, ScorePhotoRunEqualsReplay) {
     ph::PhotoShot shot;
-    shot.exposure = 0.42f; shot.focus = 0.83f;
+    shot.exposure = 0.42f;
+    shot.focus = 0.83f;
     shot.subjects = {MakeSubject(0.31f, -0.34f, 0.55f, 0.66f, 4),
                      MakeSubject(-0.2f, 0.5f, 0.25f, 0.4f, 7)};
     const ph::PhotoScore a = ph::ScorePhoto(shot);
@@ -178,8 +193,13 @@ TEST(GameLibsHardening, Log2ApproxAccuracyBandAcrossOctaves) {
     // Exact (to the documented band) at integer powers of two: log2(2^e) == e.
     for (int e = -10; e <= 12; ++e) {
         float x = 1.0f;
-        if (e >= 0) { for (int k = 0; k < e; ++k) x *= 2.0f; }
-        else        { for (int k = 0; k < -e; ++k) x *= 0.5f; }
+        if (e >= 0) {
+            for (int k = 0; k < e; ++k)
+                x *= 2.0f;
+        } else {
+            for (int k = 0; k < -e; ++k)
+                x *= 0.5f;
+        }
         const float got = gm::Log2Approx(x);
         EXPECT_TRUE(IsFiniteF(got));
         EXPECT_NEAR(got, static_cast<float>(e), 4.0e-3f) << "log2(2^" << e << ")";
@@ -188,12 +208,12 @@ TEST(GameLibsHardening, Log2ApproxAccuracyBandAcrossOctaves) {
     // built from the exact powers-of-two anchors via successive halving comparisons.
     // We bound it loosely (the measured worst case is ~1.9e-4, well under 4e-3).
     for (int i = 0; i < 64; ++i) {
-        const float frac = static_cast<float>(i) / 64.0f;       // [0,1)
-        const float x = 1.0f + frac;                             // [1,2)
+        const float frac = static_cast<float>(i) / 64.0f; // [0,1)
+        const float x = 1.0f + frac;                      // [1,2)
         const float got = gm::Log2Approx(x);
         EXPECT_TRUE(IsFiniteF(got));
-        EXPECT_GE(got, -4.0e-3f);                                // log2(1)=0 floor
-        EXPECT_LE(got, 1.0f + 4.0e-3f);                          // log2(2)=1 ceil
+        EXPECT_GE(got, -4.0e-3f);       // log2(1)=0 floor
+        EXPECT_LE(got, 1.0f + 4.0e-3f); // log2(2)=1 ceil
     }
 }
 
@@ -210,7 +230,9 @@ TEST(GameLibsHardening, Log2ApproxNonPositiveIsFinite) {
 // EV monotonicity: stopping DOWN (larger f-number) RAISES EV; a LONGER shutter
 // LOWERS it; a HIGHER ISO LOWERS it. These are the producer-side directional claims.
 TEST(GameLibsHardening, ExposureValueMonotoneInAperture) {
-    gm::LensSettings l; l.shutter_s = 0.008f; l.iso = 100.0f;
+    gm::LensSettings l;
+    l.shutter_s = 0.008f;
+    l.iso = 100.0f;
     float prev = -1.0e30f;
     for (float N = 1.0f; N <= 22.0f; N += 0.25f) {
         l.aperture_f = N;
@@ -222,7 +244,9 @@ TEST(GameLibsHardening, ExposureValueMonotoneInAperture) {
 }
 
 TEST(GameLibsHardening, ExposureValueMonotoneInShutterAndIso) {
-    gm::LensSettings l; l.aperture_f = 2.8f; l.iso = 100.0f;
+    gm::LensSettings l;
+    l.aperture_f = 2.8f;
+    l.iso = 100.0f;
     float prev = 1.0e30f;
     for (float t = 0.0005f; t <= 1.0f; t += 0.01f) {
         l.shutter_s = t;
@@ -230,7 +254,9 @@ TEST(GameLibsHardening, ExposureValueMonotoneInShutterAndIso) {
         EXPECT_LE(ev, prev + 1.0e-4f) << "EV rose as shutter lengthened at t=" << t;
         prev = ev;
     }
-    gm::LensSettings j; j.aperture_f = 2.8f; j.shutter_s = 0.008f;
+    gm::LensSettings j;
+    j.aperture_f = 2.8f;
+    j.shutter_s = 0.008f;
     float prevj = 1.0e30f;
     for (float iso = 100.0f; iso <= 6400.0f; iso *= 2.0f) {
         j.iso = iso;
@@ -245,7 +271,8 @@ TEST(GameLibsHardening, ExposureValueMonotoneInShutterAndIso) {
 TEST(GameLibsHardening, ExposureQualityBoundedOnMessyInput) {
     for (float N = -3.0f; N <= 30.0f; N += 1.7f) {
         for (float lum = -0.5f; lum <= 1.5f; lum += 0.13f) {
-            gm::LensSettings l; l.aperture_f = N;
+            gm::LensSettings l;
+            l.aperture_f = N;
             const float q = gm::ExposureQuality(l, lum);
             ExpectScoreInRange(q, "ExposureQuality");
         }
@@ -255,18 +282,20 @@ TEST(GameLibsHardening, ExposureQualityBoundedOnMessyInput) {
 // ComputeDof: aperture->DoF monotonicity (stopping down WIDENS the in-focus band),
 // the documented producer-side optical contract.
 TEST(GameLibsHardening, ComputeDofBandWidensWithAperture) {
-    gm::LensSettings l; l.focal_length_mm = 50.0f; l.focus_distance_m = 3.0f;
-    gm::CameraSubject subj; subj.distance_m = 3.0f;
+    gm::LensSettings l;
+    l.focal_length_mm = 50.0f;
+    l.focus_distance_m = 3.0f;
+    gm::CameraSubject subj;
+    subj.distance_m = 3.0f;
     float prev_band = -1.0f;
     for (float N = 1.4f; N <= 16.0f; N += 0.2f) {
         l.aperture_f = N;
         const gm::DofResult r = gm::ComputeDof(l, subj);
         EXPECT_TRUE(IsFiniteF(r.near_limit_m));
         EXPECT_TRUE(IsFiniteF(r.far_limit_m));
-        EXPECT_GE(r.far_limit_m, r.near_limit_m);  // far >= near always
-        const float band = (r.far_limit_m >= gm::kInfiniteFar)
-                               ? 1.0e30f
-                               : (r.far_limit_m - r.near_limit_m);
+        EXPECT_GE(r.far_limit_m, r.near_limit_m); // far >= near always
+        const float band =
+            (r.far_limit_m >= gm::kInfiniteFar) ? 1.0e30f : (r.far_limit_m - r.near_limit_m);
         EXPECT_GE(band, prev_band - 1.0e-3f) << "DoF band narrowed as N grew at N=" << N;
         prev_band = band;
     }
@@ -274,8 +303,12 @@ TEST(GameLibsHardening, ComputeDofBandWidensWithAperture) {
 
 // A subject sitting exactly at the focus distance is always in focus.
 TEST(GameLibsHardening, ComputeDofSubjectAtFocusIsInFocus) {
-    gm::LensSettings l; l.focal_length_mm = 50.0f; l.aperture_f = 2.8f; l.focus_distance_m = 3.0f;
-    gm::CameraSubject subj; subj.distance_m = 3.0f;
+    gm::LensSettings l;
+    l.focal_length_mm = 50.0f;
+    l.aperture_f = 2.8f;
+    l.focus_distance_m = 3.0f;
+    gm::CameraSubject subj;
+    subj.distance_m = 3.0f;
     EXPECT_EQ(gm::ComputeDof(l, subj).in_focus, 1.0f);
 }
 
@@ -285,8 +318,12 @@ TEST(GameLibsHardening, ComputeDofDegenerateInputsFinite) {
     for (float f = -5.0f; f <= 5.0f; f += 1.1f) {
         for (float N = -3.0f; N <= 5.0f; N += 1.3f) {
             for (float s = -2.0f; s <= 5.0f; s += 1.7f) {
-                gm::LensSettings l; l.focal_length_mm = f; l.aperture_f = N; l.focus_distance_m = s;
-                gm::CameraSubject subj; subj.distance_m = 3.0f;
+                gm::LensSettings l;
+                l.focal_length_mm = f;
+                l.aperture_f = N;
+                l.focus_distance_m = s;
+                gm::CameraSubject subj;
+                subj.distance_m = 3.0f;
                 const gm::DofResult r = gm::ComputeDof(l, subj);
                 EXPECT_TRUE(IsFiniteF(r.near_limit_m)) << "f=" << f << " N=" << N << " s=" << s;
                 EXPECT_TRUE(IsFiniteF(r.far_limit_m));
@@ -300,8 +337,12 @@ TEST(GameLibsHardening, ComputeDofDegenerateInputsFinite) {
 // Focused at/beyond hyperfocal -> far limit is the finite sentinel (not inf), and
 // SubjectIsolation treats that deep DoF as zero depth term.
 TEST(GameLibsHardening, ComputeDofHyperfocalSentinelAndIsolationDeep) {
-    gm::LensSettings l; l.focal_length_mm = 50.0f; l.aperture_f = 22.0f; l.focus_distance_m = 1000.0f;
-    gm::CameraSubject subj; subj.distance_m = 1000.0f;
+    gm::LensSettings l;
+    l.focal_length_mm = 50.0f;
+    l.aperture_f = 22.0f;
+    l.focus_distance_m = 1000.0f;
+    gm::CameraSubject subj;
+    subj.distance_m = 1000.0f;
     const gm::DofResult r = gm::ComputeDof(l, subj);
     EXPECT_EQ(r.far_limit_m, gm::kInfiniteFar);
     EXPECT_TRUE(IsFiniteF(r.far_limit_m));
@@ -312,8 +353,11 @@ TEST(GameLibsHardening, ComputeDofHyperfocalSentinelAndIsolationDeep) {
 // SubjectIsolation: a wide-aperture in-focus portrait must isolate BETTER than a
 // stopped-down deep one (monotone in aperture), and stay clamped [0,1].
 TEST(GameLibsHardening, SubjectIsolationMonotoneInAperture) {
-    gm::LensSettings l; l.focal_length_mm = 85.0f; l.focus_distance_m = 3.0f;
-    gm::CameraSubject subj; subj.distance_m = 3.0f;
+    gm::LensSettings l;
+    l.focal_length_mm = 85.0f;
+    l.focus_distance_m = 3.0f;
+    gm::CameraSubject subj;
+    subj.distance_m = 3.0f;
     float prev = 1.0e30f;
     for (float N = 1.0f; N <= 8.0f; N += 0.2f) {
         l.aperture_f = N;
@@ -327,9 +371,14 @@ TEST(GameLibsHardening, SubjectIsolationMonotoneInAperture) {
 // A subject OUTSIDE the DoF band collapses isolation to its small residual (the
 // focus gate). A missed-focus wide-open shot must rank below an in-focus one.
 TEST(GameLibsHardening, SubjectIsolationFocusGate) {
-    gm::LensSettings l; l.focal_length_mm = 85.0f; l.aperture_f = 1.8f; l.focus_distance_m = 3.0f;
-    gm::CameraSubject in_band;  in_band.distance_m = 3.0f;    // at focus
-    gm::CameraSubject out_band; out_band.distance_m = 50.0f;  // far out of focus
+    gm::LensSettings l;
+    l.focal_length_mm = 85.0f;
+    l.aperture_f = 1.8f;
+    l.focus_distance_m = 3.0f;
+    gm::CameraSubject in_band;
+    in_band.distance_m = 3.0f; // at focus
+    gm::CameraSubject out_band;
+    out_band.distance_m = 50.0f; // far out of focus
     EXPECT_GT(gm::SubjectIsolation(l, in_band), gm::SubjectIsolation(l, out_band));
 }
 
@@ -351,21 +400,27 @@ TEST(GameLibsHardening, PhotoCodexEmptyState) {
 TEST(GameLibsHardening, PhotoCodexKeepsBestScore) {
     gm::PhotoCodex c;
     c.Record(7, 0.5f);
-    c.Record(7, 0.3f);  // worse: must not lower
-    c.Record(7, 0.9f);  // better: must raise
-    c.Record(7, 0.8f);  // worse again: must not lower
+    c.Record(7, 0.3f); // worse: must not lower
+    c.Record(7, 0.9f); // better: must raise
+    c.Record(7, 0.8f); // worse again: must not lower
     ASSERT_EQ(c.species_count(), 1u);
     EXPECT_EQ(c.entries()[0].best_score, 0.9f);
     EXPECT_EQ(c.entries()[0].captures, 4u);
 }
 
 // Sorted determinism + order independence: recording in any order yields an
-// identical, species_id-sorted entries() vector and identical aggregates.
+// identical, species_id-sorted entries vector and identical aggregates.
 TEST(GameLibsHardening, PhotoCodexSortedOrderIndependent) {
     gm::PhotoCodex c1;
-    c1.Record(5, 0.4f); c1.Record(1, 0.9f); c1.Record(3, 0.2f); c1.Record(1, 0.95f);
+    c1.Record(5, 0.4f);
+    c1.Record(1, 0.9f);
+    c1.Record(3, 0.2f);
+    c1.Record(1, 0.95f);
     gm::PhotoCodex c2;
-    c2.Record(1, 0.95f); c2.Record(3, 0.2f); c2.Record(1, 0.9f); c2.Record(5, 0.4f);
+    c2.Record(1, 0.95f);
+    c2.Record(3, 0.2f);
+    c2.Record(1, 0.9f);
+    c2.Record(5, 0.4f);
     ASSERT_EQ(c1.entries().size(), c2.entries().size());
     for (std::size_t i = 0; i < c1.entries().size(); ++i) {
         EXPECT_EQ(c1.entries()[i].species_id, c2.entries()[i].species_id);
@@ -382,11 +437,13 @@ TEST(GameLibsHardening, PhotoCodexSortedOrderIndependent) {
 // discovering MORE than the world total saturates at 1.0 (no overflow above 1).
 TEST(GameLibsHardening, PhotoCodexCompletenessClamped) {
     gm::PhotoCodex c;
-    c.Record(1, 0.5f); c.Record(2, 0.5f); c.Record(3, 0.5f);
+    c.Record(1, 0.5f);
+    c.Record(2, 0.5f);
+    c.Record(3, 0.5f);
     EXPECT_EQ(c.completeness(0), 0.0f);
     EXPECT_EQ(c.completeness(-5), 0.0f);
     EXPECT_FLOAT_EQ(c.completeness(6), 0.5f);
-    EXPECT_EQ(c.completeness(2), 1.0f);  // discovered 3 of "2" -> clamp to 1
+    EXPECT_EQ(c.completeness(2), 1.0f); // discovered 3 of "2" -> clamp to 1
     EXPECT_GE(c.completeness(100), 0.0f);
     EXPECT_LE(c.completeness(100), 1.0f);
 }
@@ -405,7 +462,7 @@ TEST(GameLibsHardening, SpeciesRegistryEmptyAndUnknownWeightZero) {
     EXPECT_EQ(r.RarityWeight(1), 0.0f);
 
     gm::SpeciesRegistry d = gm::MakeDefaultSpeciesRegistry();
-    EXPECT_EQ(d.RarityWeight(99999), 0.0f);  // uncatalogued -> 0
+    EXPECT_EQ(d.RarityWeight(99999), 0.0f); // uncatalogued -> 0
 }
 
 // RarityWeight is monotonic in rarity (rarer -> strictly higher weight), and the
@@ -440,14 +497,16 @@ TEST(GameLibsHardening, SpeciesRegistryRarityMonotoneAndSorted) {
 TEST(GameLibsHardening, SpeciesRegistryReRegisterUpdatesInPlace) {
     gm::SpeciesRegistry r;
     r.Register(gm::SpeciesInfo{3, "a", 2, 0, false});
-    r.Register(gm::SpeciesInfo{3, "b", 5, 1, true});  // same id -> update
+    r.Register(gm::SpeciesInfo{3, "b", 5, 1, true}); // same id -> update
     EXPECT_EQ(r.size(), 1u);
     ASSERT_NE(r.Find(3), nullptr);
     EXPECT_EQ(static_cast<int>(r.Find(3)->rarity), 5);
 
-    gm::SpeciesRegistry r1; r1.Register(gm::SpeciesInfo{3, "a", 2, 0, false});
+    gm::SpeciesRegistry r1;
+    r1.Register(gm::SpeciesInfo{3, "a", 2, 0, false});
     r1.Register(gm::SpeciesInfo{1, "b", 0, 0, false});
-    gm::SpeciesRegistry r2; r2.Register(gm::SpeciesInfo{1, "b", 0, 0, false});
+    gm::SpeciesRegistry r2;
+    r2.Register(gm::SpeciesInfo{1, "b", 0, 0, false});
     r2.Register(gm::SpeciesInfo{3, "a", 2, 0, false});
     ASSERT_EQ(r1.all().size(), r2.all().size());
     for (std::size_t i = 0; i < r1.all().size(); ++i) {
@@ -486,7 +545,9 @@ TEST(GameLibsHardening, ScoreLightBoundedAcrossSweep) {
 TEST(GameLibsHardening, GoldenHourMonotoneInElevation) {
     float prev = 1.0e30f;
     for (float e = 0.0f; e <= 0.5f; e += 0.01f) {
-        gm::LightScene s; s.sun_elevation01 = e; s.cloud_cover01 = 0.0f;
+        gm::LightScene s;
+        s.sun_elevation01 = e;
+        s.cloud_cover01 = 0.0f;
         const float g = gm::ScoreGoldenHour(s);
         EXPECT_LE(g, prev + 1.0e-4f) << "golden rose as sun climbed at elev=" << e;
         prev = g;
@@ -502,7 +563,7 @@ TEST(GameLibsHardening, CosFalloff01EndpointsApprox) {
     for (float t = 0.0f; t <= 1.0f; t += 0.05f) {
         const float r = gm::CosFalloff01(t);
         ExpectScoreInRange(r, "CosFalloff01");
-        EXPECT_LE(r, prev + 2.0e-3f);  // non-increasing (small approx slack)
+        EXPECT_LE(r, prev + 2.0e-3f); // non-increasing (small approx slack)
         prev = r;
     }
 }
@@ -510,8 +571,12 @@ TEST(GameLibsHardening, CosFalloff01EndpointsApprox) {
 // Rim light requires BOTH back-lighting and a low sun: a high (overhead) sun yields
 // no rim however the subject faces, and the result is clamped.
 TEST(GameLibsHardening, RimLightGatedByLowSun) {
-    gm::LightScene low;  low.subject_facing01 = 1.0f; low.sun_elevation01 = 0.0f;
-    gm::LightScene high; high.subject_facing01 = 1.0f; high.sun_elevation01 = 1.0f;
+    gm::LightScene low;
+    low.subject_facing01 = 1.0f;
+    low.sun_elevation01 = 0.0f;
+    gm::LightScene high;
+    high.subject_facing01 = 1.0f;
+    high.sun_elevation01 = 1.0f;
     EXPECT_GT(gm::ScoreRimLight(low), gm::ScoreRimLight(high));
     EXPECT_NEAR(gm::ScoreRimLight(high), 0.0f, 1.0e-3f);
 }
@@ -519,8 +584,10 @@ TEST(GameLibsHardening, RimLightGatedByLowSun) {
 // run==replay for ScoreLight (pure).
 TEST(GameLibsHardening, ScoreLightRunEqualsReplay) {
     gm::LightScene s;
-    s.sun_elevation01 = 0.12f; s.subject_facing01 = 0.8f;
-    s.cloud_cover01 = 0.3f; s.ambient01 = 0.25f;
+    s.sun_elevation01 = 0.12f;
+    s.subject_facing01 = 0.8f;
+    s.cloud_cover01 = 0.3f;
+    s.ambient01 = 0.25f;
     const gm::LightScore a = gm::ScoreLight(s);
     const gm::LightScore b = gm::ScoreLight(s);
     EXPECT_EQ(a.golden_hour, b.golden_hour);
@@ -553,7 +620,7 @@ TEST(GameLibsHardening, StarsForTotalMonotoneAndThresholds) {
     EXPECT_EQ(gm::StarsForTotal(gm::kStar4), 4);
     EXPECT_EQ(gm::StarsForTotal(gm::kStar5), 5);
     EXPECT_EQ(gm::StarsForTotal(1.0f), 5);
-    EXPECT_EQ(gm::StarsForTotal(-5.0f), 0);  // clamp floor
+    EXPECT_EQ(gm::StarsForTotal(-5.0f), 0); // clamp floor
 }
 
 // PRODUCER->CONSUMER contract: EvaluateShot's composition axis must read the rubric's
@@ -561,12 +628,18 @@ TEST(GameLibsHardening, StarsForTotalMonotoneAndThresholds) {
 // axis, not a re-scaled value.
 TEST(GameLibsHardening, EvaluateShotCompositionMirrorsRubric) {
     gm::ShotInput in;
-    in.composition.exposure = 0.5f; in.composition.focus = 1.0f;
+    in.composition.exposure = 0.5f;
+    in.composition.focus = 1.0f;
     in.composition.subjects = {MakeSubject(0.33333334f, 0.33333334f, 0.6f, 0.7f, 1)};
-    in.scene_luminance = 0.5f; in.main_species_id = 1;
-    in.main_subject_distance_m = 3.0f; in.main_subject_size_m = 0.6f;
-    in.lens.focal_length_mm = 85.0f; in.lens.aperture_f = 1.8f;
-    in.lens.focus_distance_m = 3.0f; in.lens.iso = 100.0f; in.lens.shutter_s = 0.004f;
+    in.scene_luminance = 0.5f;
+    in.main_species_id = 1;
+    in.main_subject_distance_m = 3.0f;
+    in.main_subject_size_m = 0.6f;
+    in.lens.focal_length_mm = 85.0f;
+    in.lens.aperture_f = 1.8f;
+    in.lens.focus_distance_m = 3.0f;
+    in.lens.iso = 100.0f;
+    in.lens.shutter_s = 0.004f;
 
     const ph::PhotoScore rubric = ph::ScorePhoto(in.composition);
     const gm::ShotVerdict v = gm::EvaluateShot(in);
@@ -581,13 +654,19 @@ TEST(GameLibsHardening, EvaluateShotCompositionMirrorsRubric) {
 // run==replay for EvaluateShot (pure flow over deterministic libraries).
 TEST(GameLibsHardening, EvaluateShotRunEqualsReplay) {
     gm::ShotInput in;
-    in.composition.exposure = 0.47f; in.composition.focus = 0.82f;
+    in.composition.exposure = 0.47f;
+    in.composition.focus = 0.82f;
     in.composition.subjects = {MakeSubject(0.31f, -0.30f, 0.55f, 0.68f, 3),
                                MakeSubject(-0.2f, 0.4f, 0.2f, 0.5f, 5)};
-    in.scene_luminance = 0.55f; in.main_species_id = 3;
-    in.main_subject_distance_m = 2.5f; in.main_subject_size_m = 0.5f;
-    in.lens.focal_length_mm = 50.0f; in.lens.aperture_f = 2.0f;
-    in.lens.focus_distance_m = 2.5f; in.lens.iso = 200.0f; in.lens.shutter_s = 0.006f;
+    in.scene_luminance = 0.55f;
+    in.main_species_id = 3;
+    in.main_subject_distance_m = 2.5f;
+    in.main_subject_size_m = 0.5f;
+    in.lens.focal_length_mm = 50.0f;
+    in.lens.aperture_f = 2.0f;
+    in.lens.focus_distance_m = 2.5f;
+    in.lens.iso = 200.0f;
+    in.lens.shutter_s = 0.006f;
 
     const gm::ShotVerdict a = gm::EvaluateShot(in);
     const gm::ShotVerdict b = gm::EvaluateShot(in);
@@ -603,37 +682,33 @@ TEST(GameLibsHardening, EvaluateShotRunEqualsReplay) {
 // while still counting each commit as a capture.
 TEST(GameLibsHardening, CommitShotRecordsBestAndCounts) {
     gm::PhotoCodex codex;
-    gm::ShotInput in; in.main_species_id = 42;
-    gm::ShotVerdict good; good.total = 0.8f;
-    gm::ShotVerdict worse; worse.total = 0.3f;
+    gm::ShotInput in;
+    in.main_species_id = 42;
+    gm::ShotVerdict good;
+    good.total = 0.8f;
+    gm::ShotVerdict worse;
+    worse.total = 0.3f;
     gm::CommitShot(codex, in, good);
-    gm::CommitShot(codex, in, worse);  // worse: must NOT lower the record
+    gm::CommitShot(codex, in, worse); // worse: must NOT lower the record
     ASSERT_EQ(codex.species_count(), 1u);
     EXPECT_TRUE(codex.discovered(42));
     EXPECT_EQ(codex.entries()[0].best_score, 0.8f);
     EXPECT_EQ(codex.entries()[0].captures, 2u);
 }
 
-// BUG: gamelibs_empty_shot_earns_a_star
 // EvaluateShot's documented contract (PhotoSession.h header) says "An empty /
-// subject-less shot is a defined LOW verdict". It is NOT low: with an empty frame the
-// rubric (ScorePhoto) is correctly all-zero, but EvaluateShot then folds in the
-// PURELY-OPTICAL ExposureQuality + SubjectIsolation terms, which DO NOT depend on the
-// subjects in frame. With the default lens at scene_luminance 0.5 that yields
-// exposure axis ~0.373 and focus_isolation ~0.423, total ~0.239 -> StarsForTotal -> 1
-// STAR. A photo of NOTHING earns a star. The optical terms must be gated by subject
-// presence (or EvaluateShot must short-circuit to a zero verdict when the frame has
-// no subjects). This test documents the EXPECTED-correct behaviour (0 stars, ~0
-// total) and will FAIL against the current code until the gating fix lands.
+// subject-less shot is a defined LOW verdict". This regression test ensures
+// subject-independent optical terms cannot make an empty frame earn a star.
 TEST(GameLibsHardening, EvaluateShotEmptyFrameIsZeroVerdict) {
-    gm::ShotInput in;  // no subjects in in.composition; default lens/scene
+    gm::ShotInput in; // no subjects in in.composition; default lens/scene
     const gm::ShotVerdict v = gm::EvaluateShot(in);
     EXPECT_EQ(v.composition, 0.0f);
-    // Expected-correct: an empty frame is a missed shot -> 0 stars, near-zero total.
+    // An empty frame is a missed shot: zero stars and a near-zero total.
     EXPECT_EQ(v.stars, 0) << "empty (subject-less) frame earned stars: total=" << v.total;
     EXPECT_LT(v.total, gm::kStar1)
         << "empty frame total reached the 1-star threshold via subject-independent "
-           "optics: " << v.total;
+           "optics: "
+        << v.total;
 }
 
-}  // namespace
+} // namespace

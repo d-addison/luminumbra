@@ -3,7 +3,7 @@
 // =============================================================================
 // GlDebugOutput — KHR_debug (core GL 4.3+, we run 4.5) diagnostic plumbing.
 // =============================================================================
-// RENDER-ONLY / DIAGNOSTIC. None of this touches sim state, the registry, or the
+//  / DIAGNOSTIC. None of this touches sim state, the registry, or the
 // world_hash. Installing the debug callback only changes how the *driver* reports
 // errors/warnings to us (it routes them to the engine logger); it never alters a
 // rendered pixel and never feeds determinism. The whole module is a no-op unless
@@ -12,7 +12,7 @@
 // too slow to leave on by default.
 //
 // What you get:
-//   InstallGlDebugCallback()  — call once right after gladLoadGL / context init.
+//   InstallGlDebugCallback  — call once right after gladLoadGL / context init.
 //                               Enables GL_DEBUG_OUTPUT (+ SYNCHRONOUS so the log
 //                               stack trace points at the offending call), routes
 //                               driver messages to LUMINUMBRA_CORE_* with severity
@@ -50,7 +50,7 @@ namespace Luminumbra::Rendering::GlDebug {
 //     value is "verbose" (LUMIN_GL_DEBUG=verbose) which keeps notifications.
 bool InstallGlDebugCallback();
 
-// True once InstallGlDebugCallback() has actually installed the callback. Lets
+// True once InstallGlDebugCallback has actually installed the callback. Lets
 // callers cheaply skip building debug-group label strings when nothing consumes them.
 bool IsGlDebugInstalled();
 
@@ -67,7 +67,7 @@ GlDebugCounters GetGlDebugCounters();
 // ---------------------------------------------------------------------------
 // LabelGlObject — name a GL object for capture tools (no-op pre-4.3 / null entry).
 // identifier is the GL namespace enum: GL_TEXTURE, GL_FRAMEBUFFER, GL_BUFFER,
-// GL_VERTEX_ARRAY, GL_PROGRAM, GL_RENDERBUFFER, GL_QUERY, ... `name` is the id.
+// GL_VERTEX_ARRAY, GL_PROGRAM, GL_RENDERBUFFER, GL_QUERY,... `name` is the id.
 // ---------------------------------------------------------------------------
 void LabelGlObject(GLenum identifier, GLuint name, const std::string& label);
 

@@ -1,18 +1,18 @@
 #pragma once
 
-// T-I4-12: LREC1 session replay stream (engine-generic; NO client/game deps).
+// LREC1 session replay stream (engine-generic; NO client/game deps).
 //
 // WHY THIS EXISTS (research Area 2 takeaway 8): deterministic lockstep makes
 // session replay nearly free -- a recording is just (world boot parameters +
 // the per-tick input stream + periodic world_hash checkpoints). The checkpoints
 // make a replay SELF-VERIFYING: replaying the recorded inputs from the recorded
 // boot parameters must reproduce the exact same world_hash at every checkpoint;
-// the first mismatch localizes a desync to a tick (and, via the T-I4-11 sub-
+// the first mismatch localizes a desync to a tick (and, via the  sub-
 // hashes, to a subsystem). This is precisely Factorio's primary desync-repro
-// tool, and T-I4-13 (lockstep transport) will dump LREC1 streams on desync.
+// tool, and  (lockstep transport) will dump LREC1 streams on desync.
 //
-// DESIGN INVARIANTS (binding, from design-decisions.md sections 7 + 13):
-//  - TICK-INDEXED records, NEVER frame-indexed (critique F4): the simulation
+// DESIGN INVARIANTS (binding, from the deterministic runtime contract sections 7 + 13):
+//  - TICK-INDEXED records, NEVER frame-indexed (regression review): the simulation
 //    clock's wall-clock catch-up / frame-drop telemetry is excluded by design.
 //    A record's tick index is the authoritative simulation tick it applies to.
 //  - Deterministic serialization: fixed-width little-endian integers only, no
@@ -70,7 +70,7 @@ struct ReplayHeader {
 
 // One per-tick input record. The headless smoke has no player inputs today, so
 // `inputs` is typically empty -- the format still carries the (empty) set so the
-// stream shape is identical once T-I4-13 feeds real inputs. `inputs` is an
+// stream shape is identical once  feeds real inputs. `inputs` is an
 // OPAQUE engine-generic blob: the input encoding is the transport's concern.
 struct InputRecord {
     std::uint64_t tick = 0;
@@ -78,7 +78,7 @@ struct InputRecord {
 };
 
 // One checkpoint record: the world_hash + authoritative sub-hashes at a tick.
-// Mesh is EXCLUDED per the T-I4-11 caveat (it is a derived render artifact that
+// Mesh is EXCLUDED per the  caveat (it is a derived render artifact that
 // legitimately differs across save/load; authoritative state = terrain/water/
 // entities). Hashes are stored as their hex strings (no float/endianness risk).
 struct CheckpointRecord {
@@ -91,7 +91,7 @@ struct CheckpointRecord {
 
 // --- Writer: append-on-record. ----------------------------------------------
 // Usage: construct with the header (writes it immediately), RecordInput once per
-// tick, RecordCheckpoint at checkpoint ticks, then Finalize() to patch the tick
+// tick, RecordCheckpoint at checkpoint ticks, then Finalize to patch the tick
 // count and append the trailer. Recording IO is buffered in memory and flushed
 // to disk by Finalize/Close so it never sits on the simulation hot path.
 class ReplayWriter {
@@ -112,8 +112,12 @@ public:
     // Returns false on IO failure. After Finalize the writer is closed.
     bool Finalize(std::uint64_t tick_count);
 
-    [[nodiscard]] std::uint64_t InputRecordCount() const { return m_input_count; }
-    [[nodiscard]] std::uint64_t CheckpointRecordCount() const { return m_checkpoint_count; }
+    [[nodiscard]] std::uint64_t InputRecordCount() const {
+        return m_input_count;
+    }
+    [[nodiscard]] std::uint64_t CheckpointRecordCount() const {
+        return m_checkpoint_count;
+    }
 
 private:
     std::string m_path;
@@ -128,11 +132,11 @@ private:
 // tick) and exposes the header, the ordered records, and a truncation flag.
 struct ReplayContents {
     ReplayHeader header;
-    std::vector<InputRecord> inputs;            // tick-ordered as recorded
-    std::vector<CheckpointRecord> checkpoints;  // tick-ordered as recorded
-    std::uint64_t tick_count = 0;               // from the trailer
-    bool truncated = false;                     // tail did not parse cleanly
-    bool trailer_present = false;               // a valid trailer was found
+    std::vector<InputRecord> inputs;           // tick-ordered as recorded
+    std::vector<CheckpointRecord> checkpoints; // tick-ordered as recorded
+    std::uint64_t tick_count = 0;              // from the trailer
+    bool truncated = false;                    // tail did not parse cleanly
+    bool trailer_present = false;              // a valid trailer was found
 };
 
 // Reads and parses an LREC1 stream. Returns nullopt only if the file cannot be

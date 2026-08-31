@@ -18,7 +18,6 @@ $requiredFiles = @(
     "res/shaders/g_buffer.frag",
     "res/shaders/lighting_pass.vert",
     "res/shaders/lighting_pass.frag",
-    "res/shaders/sdf_generation.compute",
     "res/shaders/rml.vert",
     "res/shaders/rml.frag",
     "data/ui/main_menu.rml",

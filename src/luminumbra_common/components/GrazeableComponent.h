@@ -1,8 +1,8 @@
 #pragma once
 
-// Track sim.wildlife_foliage — the ECOLOGY x FOLIAGE coupling participant component.
+// sim.wildlife_foliage: the ECOLOGY x FOLIAGE coupling participant component.
 //
-// LOAD-BEARING RULE (mirrors the foliage + soil tracks): this is SIM truth — small,
+// LOAD-BEARING RULE (mirrors the foliage + soil subsystems): this is SIM truth — small,
 // deterministic, replay-exact — never render state. A plant that opts in by carrying
 // this component can be GRAZED/TRAMPLED down by nearby non-predator creatures and
 // slowly REGROWS its biomass when left alone. The grazed/trampled accumulation lives

@@ -1,4 +1,4 @@
-// spec-019 FR-C (Wave 019-C1): 32-CLIENT REPLICATION SOAK gate.
+//   (-C1): 32-CLIENT REPLICATION SOAK gate.
 //
 // The MULTIPROCESS soak harness (1 authoritative server + N client PROCESSES over
 // real TCP) is the runnable validation path -- `luminumbra_server_app --net-soak`
@@ -23,26 +23,26 @@
 #include <memory>
 #include <vector>
 
-#include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
 
 namespace {
 
 using namespace Luminumbra::Net;
 
-// --- Soak budgets (spec-019 FR-E-003). Explicit numbers the gate FAILS on. -----------
+// --- Soak budgets. Explicit numbers the gate FAILS on. -----------
 // 32 clients, each a player avatar entity; with the chunk-AOI neighbourhood every client
 // sees the (clustered) full set, so the per-client snapshot is ~32 small fixed-point
 // entities + header. 16 KiB is ~16x that headroom but catches a runaway (e.g. AOI that
 // stops scoping). A healthy loopback peer accepts every frame immediately, so the queue
 // drains fully each broadcast (depth 0) and the ack returns within one tick (age <= ~1).
-constexpr std::uint32_t kSoakClients          = 32;
-constexpr std::uint64_t kSoakTicks            = 300;   // 10 s of sim at 30 Hz
-constexpr std::uint32_t kQueueDepthP95Budget  = 2;     // healthy peers drain immediately
-constexpr std::uint32_t kSnapshotAgeP95Budget = 3;     // ack lag is ~1 tick
-constexpr std::size_t   kMaxClientBytesBudget = 16u * 1024u;
-constexpr std::int64_t  kChunkSizeMm          = 32 * 1000; // 32 m streaming chunk
+constexpr std::uint32_t kSoakClients = 32;
+constexpr std::uint64_t kSoakTicks = 300;          // 10 s of sim at 30 Hz
+constexpr std::uint32_t kQueueDepthP95Budget = 2;  // healthy peers drain immediately
+constexpr std::uint32_t kSnapshotAgeP95Budget = 3; // ack lag is ~1 tick
+constexpr std::size_t kMaxClientBytesBudget = 16u * 1024u;
+constexpr std::int64_t kChunkSizeMm = 32 * 1000; // 32 m streaming chunk
 
 // One simulated connection: a loopback pair (server end + client end) plus the client
 // endpoint that mirrors snapshots and acks them.
@@ -102,12 +102,12 @@ void StepTick(ReplicationServer& server, std::vector<SimClient*>& live, std::uin
     server.PumpInbound(); // drain the acks so snapshot-age does not climb
 }
 
-// --- NET-06: delta-vs-acked compression variants -------------------------------------
+// ---: delta-vs-acked compression variants -------------------------------------
 // The soaks above validate FULL snapshots only. These variants ENABLE the existing
 // ReplicationServer::SetDeltaCompression(true) flag on the SAME 32-client scenario and
 // assert (a) per-tick bandwidth stays within the 32-client budget and (b) every client
 // converges to the same authoritative state hash. (ReplicationEndpoint internals + the
-// transport/accept path are untouched -- NET-11's scope.)
+// transport/accept path are untouched -- 's scope.)
 
 // Deterministic, ORDER-INDEPENDENT hash of an entity SET (sorts a copy by entity_id,
 // then folds every quantized field FNV-1a). Two clients that reconstructed the same
@@ -115,10 +115,14 @@ void StepTick(ReplicationServer& server, std::vector<SimClient*>& live, std::uin
 // same authoritative state hash" is exactly set-equality. Test-only; world_hash-neutral
 // (this hashes transport-side replicated state, never a sim-determinism input).
 std::uint64_t HashEntityStates(std::vector<ReplEntityState> es) {
-    std::sort(es.begin(), es.end(),
-              [](const ReplEntityState& a, const ReplEntityState& b) { return a.entity_id < b.entity_id; });
+    std::sort(es.begin(), es.end(), [](const ReplEntityState& a, const ReplEntityState& b) {
+        return a.entity_id < b.entity_id;
+    });
     std::uint64_t h = 1469598103934665603ull; // FNV-1a offset basis
-    auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ull; };
+    auto mix = [&h](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
     mix(es.size());
     for (const ReplEntityState& e : es) {
         mix(e.entity_id);
@@ -136,9 +140,11 @@ std::uint64_t HashEntityStates(std::vector<ReplEntityState> es) {
 
 // A STATIC authoritative set (tick-invariant positions). Once a client acks the first
 // (full) baseline, a delta-vs-acked snapshot of an unchanged world carries ~zero
-// entities -- the bandwidth win NET-06 validates. AvatarStates(n, 0) is deterministic
+// entities -- the bandwidth win  validates. AvatarStates(n, 0) is deterministic
 // and never changes across ticks when the tick argument is held at 0.
-std::vector<ReplEntityState> StaticAvatarStates(std::uint32_t n) { return AvatarStates(n, 0); }
+std::vector<ReplEntityState> StaticAvatarStates(std::uint32_t n) {
+    return AvatarStates(n, 0);
+}
 
 // Result of a 32-client STATIC-world soak run: the steady-state (post-baseline)
 // worst per-client snapshot bytes + the converged authoritative state hash all clients
@@ -161,10 +167,12 @@ StaticSoakResult RunStaticSoak(bool delta_on, std::uint64_t ticks) {
 
     std::vector<SimClient> clients;
     clients.reserve(kSoakClients);
-    for (std::uint32_t id = 1; id <= kSoakClients; ++id) clients.push_back(MakeSimClient(server, id));
+    for (std::uint32_t id = 1; id <= kSoakClients; ++id)
+        clients.push_back(MakeSimClient(server, id));
 
     std::vector<SimClient*> live;
-    for (SimClient& c : clients) live.push_back(&c);
+    for (SimClient& c : clients)
+        live.push_back(&c);
 
     const std::vector<ReplEntityState> world = StaticAvatarStates(kSoakClients);
 
@@ -178,21 +186,24 @@ StaticSoakResult RunStaticSoak(bool delta_on, std::uint64_t ticks) {
         }
         server.PumpInbound();
         server.BroadcastSnapshot(t, world);
-        for (SimClient* sc : live) sc->client->PumpInbound(); // apply + ack
-        server.PumpInbound();                                 // drain acks
+        for (SimClient* sc : live)
+            sc->client->PumpInbound(); // apply + ack
+        server.PumpInbound();          // drain acks
 
-        if (t == ticks) r.steady_max_client_bytes = server.last_broadcast_max_client_bytes();
+        if (t == ticks)
+            r.steady_max_client_bytes = server.last_broadcast_max_client_bytes();
         for (const SimClient& c : clients) {
-            r.worst_acked_seq_gap = std::max<std::uint32_t>(
-                r.worst_acked_seq_gap,
-                static_cast<std::uint32_t>(t) - server.AckedSnapshotSeq(c.id));
+            r.worst_acked_seq_gap = std::max<std::uint32_t>(r.worst_acked_seq_gap,
+                                                            static_cast<std::uint32_t>(t) -
+                                                                server.AckedSnapshotSeq(c.id));
         }
     }
 
     // Every client reconstructed the SAME set; hash client 1 and cross-check the rest.
     r.converged_hash = HashEntityStates(clients.front().client->snapshot().entities);
     for (const SimClient& c : clients) {
-        EXPECT_TRUE(c.client->has_snapshot()) << "client " << c.id << " never got a snapshot (delta_on=" << delta_on << ")";
+        EXPECT_TRUE(c.client->has_snapshot())
+            << "client " << c.id << " never got a snapshot (delta_on=" << delta_on << ")";
         EXPECT_EQ(HashEntityStates(c.client->snapshot().entities), r.converged_hash)
             << "client " << c.id << " diverged from the shared state (delta_on=" << delta_on << ")";
     }
@@ -213,7 +224,8 @@ TEST(ReplicationScale, SustainsThirtyTwoClientsWithinBudget) {
     ASSERT_EQ(server.client_count(), kSoakClients);
 
     std::vector<SimClient*> live;
-    for (SimClient& c : clients) live.push_back(&c);
+    for (SimClient& c : clients)
+        live.push_back(&c);
 
     std::uint32_t worst_queue_p95 = 0;
     std::uint32_t worst_age_p95 = 0;
@@ -249,8 +261,8 @@ TEST(ReplicationScale, SustainsThirtyTwoClientsWithinBudget) {
     // (no connection silently fell behind over the soak).
     for (const SimClient& c : clients) {
         EXPECT_GE(server.AckedSnapshotSeq(c.id), kSoakTicks - 1)
-            << "client " << c.id << " fell behind (acked seq "
-            << server.AckedSnapshotSeq(c.id) << ")";
+            << "client " << c.id << " fell behind (acked seq " << server.AckedSnapshotSeq(c.id)
+            << ")";
     }
 
     RecordProperty("clients", kSoakClients);
@@ -276,7 +288,8 @@ TEST(ReplicationScale, DisconnectReconnectUnderLoad) {
     auto live_set = [&](std::uint32_t drop_id) {
         std::vector<SimClient*> v;
         for (SimClient& c : clients) {
-            if (c.id != drop_id) v.push_back(&c);
+            if (c.id != drop_id)
+                v.push_back(&c);
         }
         return v;
     };
@@ -286,8 +299,10 @@ TEST(ReplicationScale, DisconnectReconnectUnderLoad) {
     // Warm up with everyone connected.
     {
         std::vector<SimClient*> all;
-        for (SimClient& c : clients) all.push_back(&c);
-        for (std::uint64_t t = 1; t <= 30; ++t) StepTick(server, all, t);
+        for (SimClient& c : clients)
+            all.push_back(&c);
+        for (std::uint64_t t = 1; t <= 30; ++t)
+            StepTick(server, all, t);
     }
     const std::uint32_t survivor_seq_before = server.AckedSnapshotSeq(1);
 
@@ -322,8 +337,10 @@ TEST(ReplicationScale, DisconnectReconnectUnderLoad) {
     EXPECT_EQ(server.client_count(), kSoakClients);
 
     std::vector<SimClient*> all;
-    for (SimClient& c : clients) all.push_back(&c);
-    for (std::uint64_t t = 81; t <= 140; ++t) StepTick(server, all, t);
+    for (SimClient& c : clients)
+        all.push_back(&c);
+    for (std::uint64_t t = 81; t <= 140; ++t)
+        StepTick(server, all, t);
 
     EXPECT_TRUE(clients[leaver - 1].client->has_snapshot()) << "rejoiner never re-mirrored";
     EXPECT_EQ(clients[leaver - 1].client->snapshot().entities.size(), kSoakClients);
@@ -337,9 +354,15 @@ TEST(ReplicationScale, DisconnectReconnectUnderLoad) {
 // the across-clients p95 reflects the degradation -- WITHOUT stalling the healthy ones.
 struct BlockedSendTransport final : ILockstepTransport {
     bool SendFrame(const std::vector<std::uint8_t>&,
-                   FrameDelivery = FrameDelivery::Reliable) override { return false; }
-    bool TryReceiveFrame(std::vector<std::uint8_t>&) override { return false; }
-    [[nodiscard]] bool IsPeerConnected() const override { return true; }
+                   FrameDelivery = FrameDelivery::Reliable) override {
+        return false;
+    }
+    bool TryReceiveFrame(std::vector<std::uint8_t>&) override {
+        return false;
+    }
+    [[nodiscard]] bool IsPeerConnected() const override {
+        return true;
+    }
     void Close() override {}
 };
 
@@ -348,22 +371,28 @@ TEST(ReplicationScale, BackpressureFlaggedAndBoundedUnderStall) {
 
     // 8 healthy loopback clients + 1 stalled client.
     std::vector<SimClient> healthy;
-    for (std::uint32_t id = 1; id <= 8; ++id) healthy.push_back(MakeSimClient(server, id));
+    for (std::uint32_t id = 1; id <= 8; ++id)
+        healthy.push_back(MakeSimClient(server, id));
     BlockedSendTransport blocked;
     const std::uint32_t stalled_id = 9;
     server.AddClient(stalled_id, &blocked);
 
     std::vector<SimClient*> live;
-    for (SimClient& c : healthy) live.push_back(&c);
+    for (SimClient& c : healthy)
+        live.push_back(&c);
 
     // Drive enough ticks to overflow the stalled client's bounded queue (cap 256).
     for (std::uint64_t t = 1; t <= 400; ++t) {
         for (SimClient* sc : live) {
-            UsercmdMsg cmd; cmd.tick = t; cmd.player_id = sc->id; sc->client->SendUsercmd(cmd);
+            UsercmdMsg cmd;
+            cmd.tick = t;
+            cmd.player_id = sc->id;
+            sc->client->SendUsercmd(cmd);
         }
         server.PumpInbound();
         server.BroadcastSnapshot(t, AvatarStates(9, t));
-        for (SimClient* sc : live) sc->client->PumpInbound();
+        for (SimClient* sc : live)
+            sc->client->PumpInbound();
         server.PumpInbound();
     }
 
@@ -380,7 +409,7 @@ TEST(ReplicationScale, BackpressureFlaggedAndBoundedUnderStall) {
     }
 }
 
-// NET-06 (a)+(b): the SAME 32-client sustained soak as SustainsThirtyTwoClientsWithinBudget
+//  (a)+(b): the SAME 32-client sustained soak as SustainsThirtyTwoClientsWithinBudget
 // but with DELTA COMPRESSION ON. The authoritative avatars march every tick (worst case for
 // a delta -- every entity changes), so this proves the delta path stays within the 32-client
 // per-tick budget under load AND that every client reconstructs the identical authoritative
@@ -388,7 +417,7 @@ TEST(ReplicationScale, BackpressureFlaggedAndBoundedUnderStall) {
 // static set below -- here the marching set makes bytes ~= full, which is the budget stress.)
 TEST(ReplicationScale, DeltaCompressionSustainsThirtyTwoClientsWithinBudget) {
     ReplicationServer server;
-    server.SetDeltaCompression(true); // NET-06: enable delta-vs-acked on the soak path
+    server.SetDeltaCompression(true); // enable delta-vs-acked on the soak path
     server.SetAoiChunkRadius(/*chunk_radius=*/3, kChunkSizeMm);
     ASSERT_TRUE(server.delta_compression());
 
@@ -400,7 +429,8 @@ TEST(ReplicationScale, DeltaCompressionSustainsThirtyTwoClientsWithinBudget) {
     ASSERT_EQ(server.client_count(), kSoakClients);
 
     std::vector<SimClient*> live;
-    for (SimClient& c : clients) live.push_back(&c);
+    for (SimClient& c : clients)
+        live.push_back(&c);
 
     std::uint32_t worst_queue_p95 = 0;
     std::uint32_t worst_age_p95 = 0;
@@ -423,7 +453,8 @@ TEST(ReplicationScale, DeltaCompressionSustainsThirtyTwoClientsWithinBudget) {
     }
 
     // (b) Every client converged to the SAME authoritative state hash at the final tick.
-    const std::uint64_t authoritative_hash = HashEntityStates(AvatarStates(kSoakClients, kSoakTicks));
+    const std::uint64_t authoritative_hash =
+        HashEntityStates(AvatarStates(kSoakClients, kSoakTicks));
     for (const SimClient& c : clients) {
         ASSERT_TRUE(c.client->has_snapshot()) << "client " << c.id << " never got a snapshot";
         EXPECT_EQ(c.client->snapshot().entities.size(), kSoakClients)
@@ -437,7 +468,8 @@ TEST(ReplicationScale, DeltaCompressionSustainsThirtyTwoClientsWithinBudget) {
     // The delta path actually rode the acked baseline the whole run (no silent stall).
     for (const SimClient& c : clients) {
         EXPECT_GE(server.AckedSnapshotSeq(c.id), kSoakTicks - 1)
-            << "client " << c.id << " fell behind (acked seq " << server.AckedSnapshotSeq(c.id) << ")";
+            << "client " << c.id << " fell behind (acked seq " << server.AckedSnapshotSeq(c.id)
+            << ")";
     }
 
     RecordProperty("delta_compression", 1);
@@ -448,7 +480,7 @@ TEST(ReplicationScale, DeltaCompressionSustainsThirtyTwoClientsWithinBudget) {
     RecordProperty("worst_client_delta_bytes", static_cast<std::uint32_t>(worst_client_bytes));
 }
 
-// NET-06 discriminating check: delta compression is genuinely ENGAGED and EFFECTIVE. On an
+//  discriminating check: delta compression is genuinely ENGAGED and EFFECTIVE. On an
 // UNCHANGED 32-client world, the delta-OFF path re-sends a full snapshot every tick while the
 // delta-ON path deltas against the acked baseline and carries ~zero entities -> far fewer
 // per-client bytes. Both paths must stay within budget AND converge every client to the same
@@ -475,12 +507,16 @@ TEST(ReplicationScale, DeltaCompressionCutsPerClientBytesVsFull) {
 
     // Both paths converge every client to the SAME authoritative state.
     const std::uint64_t authoritative_hash = HashEntityStates(StaticAvatarStates(kSoakClients));
-    EXPECT_EQ(full.converged_hash, authoritative_hash) << "delta-OFF clients did not match authority";
-    EXPECT_EQ(delta.converged_hash, authoritative_hash) << "delta-ON clients did not match authority";
+    EXPECT_EQ(full.converged_hash, authoritative_hash)
+        << "delta-OFF clients did not match authority";
+    EXPECT_EQ(delta.converged_hash, authoritative_hash)
+        << "delta-ON clients did not match authority";
     EXPECT_EQ(delta.converged_hash, full.converged_hash);
 
-    RecordProperty("full_steady_client_bytes", static_cast<std::uint32_t>(full.steady_max_client_bytes));
-    RecordProperty("delta_steady_client_bytes", static_cast<std::uint32_t>(delta.steady_max_client_bytes));
+    RecordProperty("full_steady_client_bytes",
+                   static_cast<std::uint32_t>(full.steady_max_client_bytes));
+    RecordProperty("delta_steady_client_bytes",
+                   static_cast<std::uint32_t>(delta.steady_max_client_bytes));
 }
 
 } // namespace

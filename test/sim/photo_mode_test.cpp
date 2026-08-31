@@ -1,6 +1,6 @@
-// Track game.photo_mode — the pillar-G CAPTURE LOOP glue (g-vertical-slice spike).
+// game.photo_mode: the photography CAPTURE LOOP glue (feature).
 //
-// These tests pin the spike's two hard invariants (spec AC-003 / NFR-001):
+// These tests pin the capture loop's two hard invariants:
 //
 //   1. CAPTURE-SCORING DETERMINISM: a fixed set of PhotoSubjectViews -> BuildShotInput
 //      -> CaptureShot run twice yields a byte-identical ShotVerdict AND identical
@@ -28,15 +28,15 @@
 
 namespace {
 
-using luminumbra::game::PhotoSubjectView;
 using luminumbra::game::BuildShotInput;
 using luminumbra::game::CaptureShot;
-using luminumbra::game::ShotInput;
-using luminumbra::game::ShotVerdict;
 using luminumbra::game::LensSettings;
 using luminumbra::game::PhotoCodex;
 using luminumbra::game::PhotoSidecar;
+using luminumbra::game::PhotoSubjectView;
 using luminumbra::game::SerializePhotoSidecar;
+using luminumbra::game::ShotInput;
+using luminumbra::game::ShotVerdict;
 
 namespace Components = Luminumbra::Components;
 
@@ -49,47 +49,47 @@ std::vector<PhotoSubjectView> MakeFrameViews() {
     std::vector<PhotoSubjectView> views;
 
     PhotoSubjectView main;
-    main.ndc_x = 0.33333334f;  // rule-of-thirds power point
+    main.ndc_x = 0.33333334f; // rule-of-thirds power point
     main.ndc_y = 0.33333334f;
-    main.size  = 0.55f;         // largest -> principal subject
+    main.size = 0.55f; // largest -> principal subject
     main.light = 0.7f;
     main.species_id = 42;
     main.distance_m = 3.0f;
-    main.size_m     = 0.6f;
+    main.size_m = 0.6f;
     main.in_frustum = true;
     views.push_back(main);
 
     PhotoSubjectView second;
     second.ndc_x = -0.2f;
     second.ndc_y = 0.1f;
-    second.size  = 0.25f;
+    second.size = 0.25f;
     second.light = 0.6f;
     second.species_id = 7;
     second.distance_m = 5.0f;
-    second.size_m     = 0.4f;
+    second.size_m = 0.4f;
     second.in_frustum = true;
     views.push_back(second);
 
     PhotoSubjectView distant;
     distant.ndc_x = 0.05f;
     distant.ndc_y = -0.4f;
-    distant.size  = 0.08f;
+    distant.size = 0.08f;
     distant.light = 0.5f;
     distant.species_id = 42;
     distant.distance_m = 18.0f;
-    distant.size_m     = 0.5f;
+    distant.size_m = 0.5f;
     distant.in_frustum = true;
     views.push_back(distant);
 
-    PhotoSubjectView offscreen;       // BEHIND the camera / outside the frustum
+    PhotoSubjectView offscreen; // BEHIND the camera / outside the frustum
     offscreen.ndc_x = 0.0f;
     offscreen.ndc_y = 0.0f;
-    offscreen.size  = 0.9f;           // would be "main" if it counted — it must NOT
+    offscreen.size = 0.9f; // would be "main" if it counted — it must NOT
     offscreen.light = 0.7f;
     offscreen.species_id = 99;
     offscreen.distance_m = 2.0f;
-    offscreen.size_m     = 1.0f;
-    offscreen.in_frustum = false;     // dropped by BuildShotInput
+    offscreen.size_m = 1.0f;
+    offscreen.in_frustum = false; // dropped by BuildShotInput
     views.push_back(offscreen);
 
     return views;
@@ -98,10 +98,10 @@ std::vector<PhotoSubjectView> MakeFrameViews() {
 LensSettings MakePortraitLens() {
     LensSettings lens;
     lens.focal_length_mm = 85.0f;
-    lens.aperture_f      = 1.8f;
-    lens.focus_distance_m = 3.0f;  // on the main subject
-    lens.iso             = 100.0f;
-    lens.shutter_s       = 0.004f;
+    lens.aperture_f = 1.8f;
+    lens.focus_distance_m = 3.0f; // on the main subject
+    lens.iso = 100.0f;
+    lens.shutter_s = 0.004f;
     return lens;
 }
 
@@ -144,7 +144,7 @@ TEST(PhotoMode, EmptyFrameIsDefinedZeroVerdict) {
 }
 
 // ---------------------------------------------------------------------------
-// CAPTURE-SCORING DETERMINISM FIXTURE (AC-003): the same frame -> byte-identical
+// CAPTURE-SCORING DETERMINISM FIXTURE: the same frame -> byte-identical
 // verdict + codex on a re-run; commit order is irrelevant.
 // ---------------------------------------------------------------------------
 TEST(PhotoMode, CaptureRunEqualsReplay_Verdict) {
@@ -198,7 +198,7 @@ TEST(PhotoMode, SidecarSerializationIsDeterministic) {
     side.verdict = v;
     side.species_id = in.main_species_id;
     side.lens = in.lens;
-    side.observation.subject_action = 5;     // Sleep
+    side.observation.subject_action = 5; // Sleep
     side.observation.time_of_day = 0.75f;
     side.observation.scene_luminance = 0.62f;
 
@@ -208,7 +208,7 @@ TEST(PhotoMode, SidecarSerializationIsDeterministic) {
     // The sidecar names the principal species + carries the star rating.
     EXPECT_NE(a.find("\"species_id\": 42"), std::string::npos);
     EXPECT_NE(a.find("\"stars\":"), std::string::npos);
-    // Spec 012: the sidecar carries the observation context (behaviour/time/light).
+    // the sidecar carries the observation context (behaviour/time/light).
     EXPECT_NE(a.find("\"observation\""), std::string::npos);
     EXPECT_NE(a.find("\"subject_action\": 5"), std::string::npos);
     EXPECT_NE(a.find("\"time_of_day\":"), std::string::npos);
@@ -216,7 +216,7 @@ TEST(PhotoMode, SidecarSerializationIsDeterministic) {
 }
 
 // ---------------------------------------------------------------------------
-// SIM-ISOLATION GUARD (NFR-001): a capture against a CONST registry of creature
+// SIM-ISOLATION GUARD: a capture against a CONST registry of creature
 // subjects mutates no sim component state. We hash the registry's sim-relevant
 // fields (transform position + creature role/hunger/stamina) before and after a
 // full capture (the same client adapter path: read const -> BuildShotInput ->
@@ -225,12 +225,16 @@ TEST(PhotoMode, SidecarSerializationIsDeterministic) {
 
 // Build a small roster of creature entities at deterministic positions.
 void SeedCreatureRoster(entt::registry& reg) {
-    struct Spawn { float x, y, z; bool predator; float hunger; };
+    struct Spawn {
+        float x, y, z;
+        bool predator;
+        float hunger;
+    };
     const Spawn spawns[] = {
-        { 3.0f,  0.0f,  2.0f, false, 0.30f},
-        {-4.0f,  0.0f,  6.0f, true,  0.55f},
-        { 1.5f,  0.0f, 12.0f, false, 0.10f},
-        { 8.0f,  0.0f,  4.0f, true,  0.80f},
+        {3.0f, 0.0f, 2.0f, false, 0.30f},
+        {-4.0f, 0.0f, 6.0f, true, 0.55f},
+        {1.5f, 0.0f, 12.0f, false, 0.10f},
+        {8.0f, 0.0f, 4.0f, true, 0.80f},
     };
     for (const Spawn& s : spawns) {
         const entt::entity e = reg.create();
@@ -257,7 +261,8 @@ std::uint64_t HashCreatureState(const entt::registry& reg) {
         }
     };
     // entt entity ids are assigned monotonically here, so the view order is stable.
-    auto view = reg.view<const Components::TransformComponent, const Components::CreatureComponent>();
+    auto view =
+        reg.view<const Components::TransformComponent, const Components::CreatureComponent>();
     for (const entt::entity e : view) {
         const auto& t = view.get<const Components::TransformComponent>(e);
         const auto& c = view.get<const Components::CreatureComponent>(e);
@@ -280,21 +285,22 @@ std::uint64_t HashCreatureState(const entt::registry& reg) {
 // scene luminance (R1: no luminance component to read).
 std::vector<PhotoSubjectView> GatherSubjects(const entt::registry& reg) {
     std::vector<PhotoSubjectView> views;
-    auto view = reg.view<const Components::TransformComponent, const Components::CreatureComponent>();
+    auto view =
+        reg.view<const Components::TransformComponent, const Components::CreatureComponent>();
     for (const entt::entity e : view) {
         const auto& t = view.get<const Components::TransformComponent>(e);
         const auto& c = view.get<const Components::CreatureComponent>(e);
         PhotoSubjectView v;
-        v.ndc_x = 0.1f;                       // a stand-in projection (isolation test)
+        v.ndc_x = 0.1f; // a stand-in projection (isolation test)
         v.ndc_y = -0.1f;
-        v.size  = 0.4f;
+        v.size = 0.4f;
         v.light = 0.6f;
         v.species_id = c.is_predator ? 1 : 2; // deterministic role proxy
         // Distance from origin in the XZ plane (no libm: a crude L1 proxy is fine here).
         const float dx = t.position.x < 0.0f ? -t.position.x : t.position.x;
         const float dz = t.position.z < 0.0f ? -t.position.z : t.position.z;
         v.distance_m = dx + dz + 1.0f;
-        v.size_m     = 0.5f;
+        v.size_m = 0.5f;
         v.in_frustum = true;
         views.push_back(v);
     }

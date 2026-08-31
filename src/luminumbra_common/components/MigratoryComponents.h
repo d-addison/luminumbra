@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.migration — SEASONAL MIGRATION. The presence of this component is the per-entity
+// sim.migration: SEASONAL MIGRATION. The presence of this component is the per-entity
 // OPT-IN gate for luminumbra::ai::RunMigrationOnTick (mirrors CreatureGenomeComponent /
 // AlarmComponent): a world whose creatures carry NO MigratoryComponent — and any world with no
 // creatures — runs the migration system as a pure no-op, so the canonical NetworkStateHash

@@ -1,4 +1,4 @@
-// Track sim.territory — HOME-RANGE / TERRITORIALITY. A creature claims its spawn position as
+// sim.territory: HOME-RANGE / TERRITORIALITY. A creature claims its spawn position as
 // HOME on the first tick, then prefers to stay near it: the system emits a HOMING wish bias
 // that is zero inside the territory radius and points TOWARD home (growing with distance)
 // outside it. Deterministic (id-ordered, two-phase, DeterministicMath only, NO rng), gated by

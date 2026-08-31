@@ -1,9 +1,9 @@
-// Spec 002 Item 4 — CONSTRAINED layer graph.
+// CONSTRAINED layer graph.
 //
 // These tests pin the engine-side fixed-topology graph (world/LayerGraph):
 //   - decompose a curated preset's generation_params into the fixed stages and
 //     recompile BIT-EXACT field-for-field (the determinism guarantee — same keys,
-//     same values, same .dump() string -> world_hash / run==replay unchanged);
+//     same values, same.dump string -> world_hash / run==replay unchanged);
 //   - serialize -> deserialize -> compile round-trips bit-exactly (the graph block
 //     is lossless editing metadata);
 //   - WriteLayerGraph embeds the resolved params + a graph block, and the resolved
@@ -119,10 +119,10 @@ nlohmann::json FixedMinimalPreset() {
     })");
 }
 
-}  // namespace
+} // namespace
 
 // --- The headline determinism test: compile is BIT-EXACT to the source params,
-//     field-for-field (== AND identical .dump()). ----------------------------
+//     field-for-field (== AND identical.dump). ----------------------------
 TEST(LayerGraphTest, CompileIsBitExactToCuratedPresetParams) {
     const nlohmann::json preset = FixedRichPreset();
     const nlohmann::json& source_gp = preset.at("generation_params");
@@ -210,8 +210,7 @@ TEST(LayerGraphTest, SerializeDeserializeRoundTrip) {
     EXPECT_EQ(serialized["schema"], LayerGraphSchema());
     ASSERT_TRUE(serialized["nodes"].is_array());
     EXPECT_EQ(serialized["nodes"].size(), kLayerStageCount);
-    EXPECT_EQ(SerializeLayerGraph(DeserializeLayerGraph(serialized)).dump(),
-              serialized.dump());
+    EXPECT_EQ(SerializeLayerGraph(DeserializeLayerGraph(serialized)).dump(), serialized.dump());
 
     // And compiling the deserialized graph reproduces the source params bit-exact.
     const LayerGraph reloaded = DeserializeLayerGraph(serialized);
@@ -227,7 +226,7 @@ TEST(LayerGraphTest, WriteLayerGraphEmbedsResolvedParamsPlusGraph) {
     const nlohmann::json source_gp = preset.at("generation_params");
 
     const LayerGraph graph = LayerGraphFromPreset(preset);
-    nlohmann::json out = preset;  // copy
+    nlohmann::json out = preset; // copy
     WriteLayerGraph(out, graph);
 
     ASSERT_TRUE(out["generation_params"].contains("graph"));
@@ -266,7 +265,8 @@ TEST(LayerGraphTest, UnknownKeysSurviveViaPassthrough) {
 TEST(LayerGraphTest, PreExistingGraphBlockIsNotRecursed) {
     nlohmann::json preset = FixedMinimalPreset();
     // Inject a stale graph block; it must be ignored on decompose (NOT passthrough).
-    preset["generation_params"]["graph"] = {{"schema", "stale"}, {"nodes", nlohmann::json::array()}};
+    preset["generation_params"]["graph"] = {{"schema", "stale"},
+                                            {"nodes", nlohmann::json::array()}};
 
     const LayerGraph graph = LayerGraphFromPreset(preset);
     EXPECT_FALSE(graph.passthrough.contains("graph"));

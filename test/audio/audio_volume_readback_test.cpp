@@ -1,9 +1,9 @@
-// AUDIO-11 follow-up (spec 021): CPU-only unit tests for the occlusion
+//  implementation note: CPU-only unit tests for the occlusion
 // read-back math — MiniaudioManager::ComputeFinalVolume in
 // src/luminumbra_client/audio/MiniaudioManager.h.
 //
 // AudioSpatialCluster now COMPUTES per-sound spatial attenuation including a
-// physics-raycast occlusion term, and MiniaudioManager::Update() reads it back
+// physics-raycast occlusion term, and MiniaudioManager::Update reads it back
 // onto each 3D voice's ma_sound volume so a sound blocked by geometry gets
 // quieter. The volume fold is factored into ComputeFinalVolume(base, busGain,
 // spatialAttenuation, occlusion01) — a pure static helper (no audio device, no
@@ -40,20 +40,22 @@ constexpr float kEps = 1e-5f;
 // the pre-read-back volume. spatialAttenuation is kept in [0,1] here (its live
 // domain) so this and the clamp bound below are jointly consistent.
 TEST(AudioVolumeReadback, OcclusionZeroEqualsBaseTimesBusTimesSpatial) {
-    struct Case { float base, bus, sa; };
+    struct Case {
+        float base, bus, sa;
+    };
     const Case cases[] = {
         {1.0f, 1.0f, 1.0f},
         {0.5f, 0.8f, 0.75f},
         {0.9f, 0.6f, 1.0f},
-        {0.25f, 1.0f, 0.0f},   // silent source stays silent
-        {0.0f, 0.7f, 0.5f},    // zero base stays zero
+        {0.25f, 1.0f, 0.0f}, // silent source stays silent
+        {0.0f, 0.7f, 0.5f},  // zero base stays zero
     };
     for (const auto& c : cases) {
         const float expected = c.base * c.bus * c.sa;
         const float got = MiniaudioManager::ComputeFinalVolume(c.base, c.bus, c.sa, 0.0f);
         EXPECT_NEAR(got, expected, kEps)
-            << "occlusion 0 must not change the volume (base=" << c.base
-            << ", bus=" << c.bus << ", sa=" << c.sa << ")";
+            << "occlusion 0 must not change the volume (base=" << c.base << ", bus=" << c.bus
+            << ", sa=" << c.sa << ")";
     }
 }
 
@@ -67,13 +69,12 @@ TEST(AudioVolumeReadback, StrictlyDecreasingInOcclusion) {
     float prev = MiniaudioManager::ComputeFinalVolume(base, bus, sa, occlusions[0]);
     for (std::size_t i = 1; i < std::size(occlusions); ++i) {
         const float cur = MiniaudioManager::ComputeFinalVolume(base, bus, sa, occlusions[i]);
-        EXPECT_LT(cur, prev)
-            << "volume must drop as occlusion rises (occ " << occlusions[i - 1]
-            << " -> " << occlusions[i] << ": " << prev << " -> " << cur << ")";
+        EXPECT_LT(cur, prev) << "volume must drop as occlusion rises (occ " << occlusions[i - 1]
+                             << " -> " << occlusions[i] << ": " << prev << " -> " << cur << ")";
         prev = cur;
     }
 
-    // ...and monotone (non-increasing) is the strongest weaker statement — also
+    //...and monotone (non-increasing) is the strongest weaker statement — also
     // assert the fully-occluded voice is still audible (never dead silent) and
     // strictly below the fully-clear one.
     const float clear = MiniaudioManager::ComputeFinalVolume(base, bus, sa, 0.0f);
@@ -89,18 +90,17 @@ TEST(AudioVolumeReadback, StrictlyDecreasingInOcclusion) {
 TEST(AudioVolumeReadback, ClampsToZeroBaseBusRange) {
     const float bases[] = {0.0f, 0.3f, 1.0f, 2.0f};
     const float buses[] = {0.0f, 0.5f, 1.0f};
-    const float sas[]   = {-1.0f, 0.0f, 0.5f, 1.0f, 5.0f};   // incl. out-of-range
-    const float occs[]  = {-2.0f, 0.0f, 0.3f, 1.0f, 3.0f};   // incl. out-of-range
+    const float sas[] = {-1.0f, 0.0f, 0.5f, 1.0f, 5.0f};  // incl. out-of-range
+    const float occs[] = {-2.0f, 0.0f, 0.3f, 1.0f, 3.0f}; // incl. out-of-range
 
     for (float base : bases)
         for (float bus : buses)
             for (float sa : sas)
                 for (float occ : occs) {
                     const float v = MiniaudioManager::ComputeFinalVolume(base, bus, sa, occ);
-                    const float ceiling = base * bus;  // base,bus >= 0 here
-                    EXPECT_GE(v, 0.0f)
-                        << "volume floor (base=" << base << ", bus=" << bus
-                        << ", sa=" << sa << ", occ=" << occ << ")";
+                    const float ceiling = base * bus; // base,bus >= 0 here
+                    EXPECT_GE(v, 0.0f) << "volume floor (base=" << base << ", bus=" << bus
+                                       << ", sa=" << sa << ", occ=" << occ << ")";
                     EXPECT_LE(v, ceiling + kEps)
                         << "volume ceiling base*bus=" << ceiling << " (base=" << base
                         << ", bus=" << bus << ", sa=" << sa << ", occ=" << occ << ")";
@@ -118,7 +118,7 @@ TEST(AudioVolumeReadback, NegativeGainsFloorAtZero) {
 // above its base*busGain ceiling (occlusion 0).
 TEST(AudioVolumeReadback, SpatialAttenuationClampedToUnity) {
     const float base = 0.5f, bus = 0.8f;
-    const float ceiling = base * bus;  // 0.4
+    const float ceiling = base * bus; // 0.4
     const float boosted = MiniaudioManager::ComputeFinalVolume(base, bus, 5.0f, 0.0f);
     EXPECT_NEAR(boosted, ceiling, kEps)
         << "spatialAttenuation > 1 must clamp to the base*bus ceiling, not amplify";

@@ -50,7 +50,7 @@ struct InstinctPlan {
     bool passed = false;
 };
 
-// T-I3-17: the planner is pure engine — fixtures and pass expectations are
+// the planner is pure engine — fixtures and pass expectations are
 // game data (data/common/archetypes/*.json carries an `expected` block the
 // gate consumes). plan.passed is generic: a non-empty deterministic ranking
 // with the top candidate selected.

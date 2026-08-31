@@ -1,4 +1,4 @@
-// GPU-03 + GPU-P05 (spec 021 rank 66) legs B + C implementation: render the
+//  + legs B + C implementation: render the
 // calibration cube through Diligent's GL backend (leg B) and its native Vulkan
 // backend (leg C). This is the only render TU that includes Diligent headers -- no
 // Diligent type escapes (see dual_backend_diligent.h).
@@ -14,23 +14,23 @@
 
 #include "dual_backend_diligent.h"
 
+#include "Buffer.h"
+#include "DeviceContext.h"
 #include "EngineFactoryOpenGL.h"
 #include "EngineFactoryVk.h"
-#include "RenderDevice.h"
-#include "DeviceContext.h"
+#include "GraphicsTypes.h"
 #include "PipelineState.h"
+#include "RefCntAutoPtr.hpp"
+#include "RenderDevice.h"
 #include "Shader.h"
-#include "Buffer.h"
+#include "ShaderResourceBinding.h"
 #include "Texture.h"
 #include "TextureView.h"
-#include "ShaderResourceBinding.h"
-#include "GraphicsTypes.h"
-#include "RefCntAutoPtr.hpp"
 
+#include <glm/ext/matrix_clip_space.hpp>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <glm/ext/matrix_clip_space.hpp>
 
 #include <cstring>
 
@@ -112,7 +112,10 @@ void main() {
 )GLSL";
 
 void FillVec4(float* dst, const glm::vec3& v, float w) {
-    dst[0] = v.x; dst[1] = v.y; dst[2] = v.z; dst[3] = w;
+    dst[0] = v.x;
+    dst[1] = v.y;
+    dst[2] = v.z;
+    dst[3] = w;
 }
 
 // The shared render body: create shaders + PSO + buffers + RT, draw, read back via a
@@ -120,11 +123,16 @@ void FillVec4(float* dst, const glm::vec3& v, float w) {
 // bindings are assigned for SPIR-V), `projection` carries the backend's NDC. Fills
 // `out.pixels` (top-down, Diligent origin) or `out.diagnostic`. Device/context are
 // owned by the caller.
-bool RenderWithDevice(IRenderDevice* device, IDeviceContext* context,
-                      const glm::mat4& projection, SHADER_SOURCE_LANGUAGE lang,
-                      const std::vector<MeshVertex>& mesh, const RenderParams& params,
+bool RenderWithDevice(IRenderDevice* device,
+                      IDeviceContext* context,
+                      const glm::mat4& projection,
+                      SHADER_SOURCE_LANGUAGE lang,
+                      const std::vector<MeshVertex>& mesh,
+                      const RenderParams& params,
                       DiligentRenderResult& out) {
-    auto make_shader = [&](SHADER_TYPE type, const char* src, const char* name,
+    auto make_shader = [&](SHADER_TYPE type,
+                           const char* src,
+                           const char* name,
                            RefCntAutoPtr<IShader>& shader) -> bool {
         ShaderCreateInfo sci;
         sci.SourceLanguage = lang;
@@ -145,24 +153,26 @@ bool RenderWithDevice(IRenderDevice* device, IDeviceContext* context,
         return true;
     };
     RefCntAutoPtr<IShader> vs, ps;
-    if (!make_shader(SHADER_TYPE_VERTEX, kVertGlsl, "cube VS", vs)) return false;
-    if (!make_shader(SHADER_TYPE_PIXEL, kFragGlsl, "cube PS", ps)) return false;
+    if (!make_shader(SHADER_TYPE_VERTEX, kVertGlsl, "cube VS", vs))
+        return false;
+    if (!make_shader(SHADER_TYPE_PIXEL, kFragGlsl, "cube PS", ps))
+        return false;
 
     GraphicsPipelineStateCreateInfo pso_ci;
     pso_ci.PSODesc.Name = "cube PSO";
     GraphicsPipelineDesc& gp = pso_ci.GraphicsPipeline;
     gp.NumRenderTargets = 1;
-    gp.RTVFormats[0] = TEX_FORMAT_RGBA8_UNORM;   // NON-sRGB: match raw-GL byte quantisation
+    gp.RTVFormats[0] = TEX_FORMAT_RGBA8_UNORM; // NON-sRGB: match raw-GL byte quantisation
     gp.DSVFormat = TEX_FORMAT_D32_FLOAT;
     gp.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    gp.RasterizerDesc.CullMode = CULL_MODE_NONE;            // raw-GL disables face cull
+    gp.RasterizerDesc.CullMode = CULL_MODE_NONE; // raw-GL disables face cull
     gp.DepthStencilDesc.DepthEnable = True;
     gp.DepthStencilDesc.DepthWriteEnable = True;
-    gp.DepthStencilDesc.DepthFunc = COMPARISON_FUNC_LESS;   // GL default depth func
+    gp.DepthStencilDesc.DepthFunc = COMPARISON_FUNC_LESS; // GL default depth func
 
     LayoutElement layout_elems[] = {
-        LayoutElement{0, 0, 3, VT_FLOAT32, False},   // aPos
-        LayoutElement{1, 0, 3, VT_FLOAT32, False},   // aNormal
+        LayoutElement{0, 0, 3, VT_FLOAT32, False}, // aPos
+        LayoutElement{1, 0, 3, VT_FLOAT32, False}, // aNormal
     };
     gp.InputLayout.LayoutElements = layout_elems;
     gp.InputLayout.NumElements = 2;
@@ -179,8 +189,8 @@ bool RenderWithDevice(IRenderDevice* device, IDeviceContext* context,
 
     Constants c{};
     const glm::mat4 model(1.0f);
-    const glm::mat4 view = glm::lookAt(params.camera_position, params.camera_target,
-                                       glm::vec3{0.0f, 1.0f, 0.0f});
+    const glm::mat4 view =
+        glm::lookAt(params.camera_position, params.camera_target, glm::vec3{0.0f, 1.0f, 0.0f});
     const glm::mat4 normal_matrix(1.0f);
     std::memcpy(c.model, glm::value_ptr(model), sizeof(c.model));
     std::memcpy(c.view, glm::value_ptr(view), sizeof(c.view));
@@ -269,15 +279,19 @@ bool RenderWithDevice(IRenderDevice* device, IDeviceContext* context,
     context->SetRenderTargets(1, rtvs, dsv, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     const float clear_color[4] = {kClearR, kClearG, kClearB, 1.0f};
     context->ClearRenderTarget(rtv, clear_color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    context->ClearDepthStencil(dsv, CLEAR_DEPTH_FLAG, 1.0f, 0,
-                               RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    context->ClearDepthStencil(
+        dsv, CLEAR_DEPTH_FLAG, 1.0f, 0, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
     context->SetPipelineState(pso);
     context->CommitShaderResources(srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
 
     IBuffer* vbs[] = {vbo};
     const Uint64 offsets[] = {0};
-    context->SetVertexBuffers(0, 1, vbs, offsets, RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+    context->SetVertexBuffers(0,
+                              1,
+                              vbs,
+                              offsets,
+                              RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
                               SET_VERTEX_BUFFERS_FLAG_RESET);
 
     DrawAttribs draw;
@@ -304,7 +318,7 @@ bool RenderWithDevice(IRenderDevice* device, IDeviceContext* context,
     copy.DstTextureTransitionMode = RESOURCE_STATE_TRANSITION_MODE_TRANSITION;
     context->CopyTexture(copy);
 
-    context->WaitForIdle();  // ensure the readback copy has completed
+    context->WaitForIdle(); // ensure the readback copy has completed
 
     MappedTextureSubresource mapped;
     context->MapTextureSubresource(staging, 0, 0, MAP_READ, MAP_FLAG_NONE, nullptr, mapped);
@@ -318,13 +332,14 @@ bool RenderWithDevice(IRenderDevice* device, IDeviceContext* context,
     const auto* src = static_cast<const std::uint8_t*>(mapped.pData);
     for (int y = 0; y < kCubeHeight; ++y) {
         std::memcpy(out.pixels.data() + static_cast<std::size_t>(y) * row_bytes,
-                    src + static_cast<std::size_t>(y) * mapped.Stride, row_bytes);
+                    src + static_cast<std::size_t>(y) * mapped.Stride,
+                    row_bytes);
     }
     context->UnmapTextureSubresource(staging, 0, 0);
     return true;
 }
 
-}  // namespace
+} // namespace
 
 DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
                                           const RenderParams& params) {
@@ -348,8 +363,8 @@ DiligentRenderResult RenderCubeDiligentGl(const std::vector<MeshVertex>& mesh,
     const glm::mat4 projection = glm::perspective(
         glm::radians(45.0f), static_cast<float>(kCubeWidth) / kCubeHeight, 0.1f, 128.0f);
 
-    if (RenderWithDevice(device, context, projection, SHADER_SOURCE_LANGUAGE_GLSL_VERBATIM,
-                         mesh, params, out)) {
+    if (RenderWithDevice(
+            device, context, projection, SHADER_SOURCE_LANGUAGE_GLSL_VERBATIM, mesh, params, out)) {
         out.available = true;
     }
     return out;
@@ -365,7 +380,7 @@ DiligentRenderResult RenderCubeDiligentVk(const std::vector<MeshVertex>& mesh,
         return out;
     }
     EngineVkCreateInfo create_info;
-    create_info.EnableValidation = true;   // VK_LAYER_KHRONOS_validation on -- first Vulkan render
+    create_info.EnableValidation = true; // VK_LAYER_KHRONOS_validation on -- first Vulkan render
     RefCntAutoPtr<IRenderDevice> device;
     RefCntAutoPtr<IDeviceContext> context;
     factory->CreateDeviceAndContextsVk(create_info, &device, &context);
@@ -381,12 +396,12 @@ DiligentRenderResult RenderCubeDiligentVk(const std::vector<MeshVertex>& mesh,
         glm::radians(45.0f), static_cast<float>(kCubeWidth) / kCubeHeight, 0.1f, 128.0f);
     projection[1][1] *= -1.0f;
 
-    if (RenderWithDevice(device, context, projection, SHADER_SOURCE_LANGUAGE_GLSL_VERBATIM,
-                         mesh, params, out)) {
+    if (RenderWithDevice(
+            device, context, projection, SHADER_SOURCE_LANGUAGE_GLSL_VERBATIM, mesh, params, out)) {
         out.available = true;
     }
-    context->Flush();  // drain before teardown (Diligent warns on unflushed contexts)
+    context->Flush(); // drain before teardown (Diligent warns on unflushed contexts)
     return out;
 }
 
-}  // namespace luminumbra_test
+} // namespace luminumbra_test

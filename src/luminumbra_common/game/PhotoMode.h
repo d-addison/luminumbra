@@ -1,6 +1,6 @@
 #pragma once
 
-// Track game.photo_mode — the pillar-G CAPTURE LOOP glue (g-vertical-slice spike).
+// game.photo_mode: the photography CAPTURE LOOP glue (feature).
 //
 // This is the thin runtime layer that turns a frame's worth of visible subjects +
 // a lens into the existing ShotInput the landed scorers already consume, then scores
@@ -37,9 +37,9 @@
 #include <string>
 #include <vector>
 
-#include "PhotoCamera.h"   // luminumbra::game: LensSettings
-#include "PhotoSession.h"  // luminumbra::game: ShotInput/ShotVerdict/EvaluateShot/CommitShot
-#include "../systems/PhotoScoring.h"  // luminumbra::photo: PhotoSubject/PhotoShot
+#include "../systems/PhotoScoring.h" // luminumbra::photo: PhotoSubject/PhotoShot
+#include "PhotoCamera.h"             // luminumbra::game: LensSettings
+#include "PhotoSession.h" // luminumbra::game: ShotInput/ShotVerdict/EvaluateShot/CommitShot
 
 namespace luminumbra::game {
 
@@ -50,11 +50,11 @@ namespace luminumbra::game {
 // the existing optical scorer.
 // ---------------------------------------------------------------------------
 struct PhotoModeState {
-    bool         active   = false;  // enter/exit photo mode (TogglePhotoMode input)
-    LensSettings lens;              // mutated by the aperture/focus nudge inputs
-    int          captures = 0;      // session capture counter (telemetry only)
-    float        last_total = 0.0f; // last verdict total (UI readout)
-    int          last_stars = 0;    // last verdict stars  (UI readout)
+    bool active = false;     // enter/exit photo mode (TogglePhotoMode input)
+    LensSettings lens;       // mutated by the aperture/focus nudge inputs
+    int captures = 0;        // session capture counter (telemetry only)
+    float last_total = 0.0f; // last verdict total (UI readout)
+    int last_stars = 0;      // last verdict stars  (UI readout)
 };
 
 // ---------------------------------------------------------------------------
@@ -65,17 +65,17 @@ struct PhotoModeState {
 // values so the whole capture flow is deterministic + testable headlessly.
 // ---------------------------------------------------------------------------
 struct PhotoSubjectView {
-    float ndc_x = 0.0f;        // projected to normalized device coords [-1,1]
+    float ndc_x = 0.0f; // projected to normalized device coords [-1,1]
     float ndc_y = 0.0f;
-    float size  = 0.0f;        // apparent footprint as a fraction of the frame [0,1]
-    float light = 0.0f;        // derived subject luminance [0,1]
-    int   species_id = 0;      // codex key (a deterministic proxy is fine for the spike)
-    float distance_m = 3.0f;   // metres from camera (drives the optical DoF/isolation terms)
-    float size_m     = 0.5f;   // physical size in metres
-    bool  in_frustum = true;   // out-of-frustum views are dropped by BuildShotInput
-    int   subject_action = -1; // the subject's behaviour at capture (brain action; <0 = none).
-                               // Carried so the PRINCIPAL subject's behaviour reaches the
-                               // capture's ObservationMetadata (spec 012 behaviour objectives).
+    float size = 0.0f;       // apparent footprint as a fraction of the frame [0,1]
+    float light = 0.0f;      // derived subject luminance [0,1]
+    int species_id = 0;      // codex key (a deterministic proxy is fine for the spike)
+    float distance_m = 3.0f; // metres from camera (drives the optical DoF/isolation terms)
+    float size_m = 0.5f;     // physical size in metres
+    bool in_frustum = true;  // out-of-frustum views are dropped by BuildShotInput
+    int subject_action = -1; // the subject's behaviour at capture (brain action; <0 = none).
+                             // Carried so the PRINCIPAL subject's behaviour reaches the
+                             // capture's ObservationMetadata ( behaviour objectives).
 };
 
 // ---------------------------------------------------------------------------
@@ -83,8 +83,10 @@ struct PhotoSubjectView {
 // does not pull one namespace's helper into another.
 // ---------------------------------------------------------------------------
 inline float PhotoModeClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -110,10 +112,10 @@ inline ShotInput BuildShotInput(const std::vector<PhotoSubjectView>& views,
                                 float frame_focus = 1.0f,
                                 const ObservationMetadata& observation = {}) {
     ShotInput in;
-    in.lens            = lens;
+    in.lens = lens;
     in.scene_luminance = PhotoModeClamp01(scene_luminance);
     in.composition.exposure = PhotoModeClamp01(frame_exposure);
-    in.composition.focus    = PhotoModeClamp01(frame_focus);
+    in.composition.focus = PhotoModeClamp01(frame_focus);
     // Annotation: carry the caller's context (time_of_day) and stamp the light from the
     // scene luminance the shot was built with. The principal subject's behaviour is filled
     // below once the main subject is resolved.
@@ -124,26 +126,27 @@ inline ShotInput BuildShotInput(const std::vector<PhotoSubjectView>& views,
     // largest by apparent size to pick the principal subject. Iterate in the given
     // order so the main-subject tie-break (first of equal size) is deterministic.
     std::size_t main_idx = 0;
-    bool        have_main = false;
-    float       main_size = -1.0f;
+    bool have_main = false;
+    float main_size = -1.0f;
 
     for (const PhotoSubjectView& view : views) {
-        if (!view.in_frustum) continue;  // not in the photograph
+        if (!view.in_frustum)
+            continue; // not in the photograph
 
         ::luminumbra::photo::PhotoSubject s;
         s.ndc_x = view.ndc_x;
         s.ndc_y = view.ndc_y;
-        s.size  = PhotoModeClamp01(view.size);
+        s.size = PhotoModeClamp01(view.size);
         s.light = PhotoModeClamp01(view.light);
         s.species_id = view.species_id;
 
-        // The just-pushed subject is index (size()) BEFORE the push.
+        // The just-pushed subject is index (size) BEFORE the push.
         const std::size_t this_idx = in.composition.subjects.size();
         in.composition.subjects.push_back(s);
 
         if (s.size > main_size) {
             main_size = s.size;
-            main_idx  = this_idx;
+            main_idx = this_idx;
             have_main = true;
         }
     }
@@ -155,12 +158,14 @@ inline ShotInput BuildShotInput(const std::vector<PhotoSubjectView>& views,
         // re-derive the matching view by walking the in-frustum sequence again).
         std::size_t appended = 0;
         for (const PhotoSubjectView& view : views) {
-            if (!view.in_frustum) continue;
+            if (!view.in_frustum)
+                continue;
             if (appended == main_idx) {
-                in.main_species_id         = view.species_id;
+                in.main_species_id = view.species_id;
                 in.main_subject_distance_m = view.distance_m;
-                in.main_subject_size_m     = view.size_m;
-                in.observation.subject_action = view.subject_action; // principal subject's behaviour
+                in.main_subject_size_m = view.size_m;
+                in.observation.subject_action =
+                    view.subject_action; // principal subject's behaviour
                 break;
             }
             ++appended;
@@ -196,11 +201,11 @@ inline ShotVerdict CaptureShot(PhotoCodex& codex, const ShotInput& shot) {
 // sidecar is reproducible for a given verdict + lens.
 // ---------------------------------------------------------------------------
 struct PhotoSidecar {
-    std::string  stamp;          // capture identifier (e.g. timestamp or frame index)
-    ShotVerdict  verdict;        // stars + axes + total
-    int          species_id = 0; // principal subject
-    LensSettings lens;           // the lens the shot was taken with
-    ObservationMetadata observation; // behaviour/time/light context at capture (spec 012)
+    std::string stamp;               // capture identifier (e.g. timestamp or frame index)
+    ShotVerdict verdict;             // stars + axes + total
+    int species_id = 0;              // principal subject
+    LensSettings lens;               // the lens the shot was taken with
+    ObservationMetadata observation; // behaviour/time/light context at capture ()
 };
 
 // Format one float with 6 fixed decimals using only integer/char ops (no <iomanip>,
@@ -209,13 +214,16 @@ struct PhotoSidecar {
 // positive metres/mm). Negative values are emitted with a leading '-'.
 inline std::string PhotoFormatFixed6(float value) {
     std::string out;
-    if (value < 0.0f) { out.push_back('-'); value = -value; }
+    if (value < 0.0f) {
+        out.push_back('-');
+        value = -value;
+    }
     // Round to 6 decimals: scale, add 0.5, truncate. Within field ranges this stays
     // well inside uint64 range.
     const std::uint64_t scaled =
         static_cast<std::uint64_t>(static_cast<double>(value) * 1000000.0 + 0.5);
     const std::uint64_t whole = scaled / 1000000ull;
-    const std::uint64_t frac  = scaled % 1000000ull;
+    const std::uint64_t frac = scaled % 1000000ull;
 
     // Integer part.
     if (whole == 0) {
@@ -223,15 +231,23 @@ inline std::string PhotoFormatFixed6(float value) {
     } else {
         std::string digits;
         std::uint64_t w = whole;
-        while (w > 0) { digits.push_back(static_cast<char>('0' + (w % 10))); w /= 10; }
-        for (std::size_t i = digits.size(); i > 0; --i) out.push_back(digits[i - 1]);
+        while (w > 0) {
+            digits.push_back(static_cast<char>('0' + (w % 10)));
+            w /= 10;
+        }
+        for (std::size_t i = digits.size(); i > 0; --i)
+            out.push_back(digits[i - 1]);
     }
     out.push_back('.');
     // Fractional part, zero-padded to 6 digits.
     char fbuf[6];
     std::uint64_t f = frac;
-    for (int i = 5; i >= 0; --i) { fbuf[i] = static_cast<char>('0' + (f % 10)); f /= 10; }
-    for (int i = 0; i < 6; ++i) out.push_back(fbuf[i]);
+    for (int i = 5; i >= 0; --i) {
+        fbuf[i] = static_cast<char>('0' + (f % 10));
+        f /= 10;
+    }
+    for (int i = 0; i < 6; ++i)
+        out.push_back(fbuf[i]);
     return out;
 }
 

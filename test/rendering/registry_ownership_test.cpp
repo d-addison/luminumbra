@@ -1,4 +1,4 @@
-// RENDER-12 / GPU-12 (spec 016 FR-B-001/002/003 — the 014 pilot-gate ownership
+//  /  (  — the rendering pilot-gate ownership
 // leg): the registry's OWNED-resource contract against a REAL hidden GL
 // context (HiddenGlContext, mirroring async_readback_ring_test):
 //   * owned entries SURVIVE frame boundaries (clear_adopted never touches
@@ -9,8 +9,9 @@
 //   * destroy releases exactly the owned objects and forgets the names.
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -50,11 +51,17 @@ public:
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -167,7 +174,7 @@ TEST(RegistryOwnership, DestroyReleasesAndForgets) {
     registry.destroy_all_owned();
 }
 
-// RENDER-12/GPU-12: the lighting family needs a renderbuffer-backed depth
+// the lighting family needs a renderbuffer-backed depth
 // attachment. This pins that path: an owned color texture + owned depth
 // renderbuffer share an owned FBO that is complete and depth-tests correctly,
 // and destroy releases the renderbuffer and forgets its name.
@@ -195,7 +202,8 @@ TEST(RegistryOwnership, RenderbufferDepthAttachmentIsCompleteAndReleases) {
     fbo_desc.draw_buffers = {GL_COLOR_ATTACHMENT0};
     fbo_desc.debug_label = "registry_ownership_test.rb_fbo";
     const auto fbo = registry.create_fbo("rb_fbo", fbo_desc);
-    ASSERT_TRUE(static_cast<bool>(fbo)) << "FBO with an owned renderbuffer depth attachment must be complete";
+    ASSERT_TRUE(static_cast<bool>(fbo))
+        << "FBO with an owned renderbuffer depth attachment must be complete";
 
     // Functional: depth-test through the owned FBO. A near quad clears green;
     // a farther clear must NOT overwrite it once depth-test is on.
@@ -220,4 +228,4 @@ TEST(RegistryOwnership, RenderbufferDepthAttachmentIsCompleteAndReleases) {
     registry.destroy_all_owned();
 }
 
-}  // namespace
+} // namespace

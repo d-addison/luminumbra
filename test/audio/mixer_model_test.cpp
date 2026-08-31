@@ -1,4 +1,4 @@
-// AUDIO-10 (spec 021): CPU-only unit tests for the mixer/ducking math in
+// CPU-only unit tests for the mixer/ducking math in
 // src/luminumbra_client/audio/MixerModel.h. The header is dependency-free (no
 // miniaudio, no audio device, no GL), so this runs headless in the default
 // ctest lane. Covered contract:
@@ -37,7 +37,7 @@ DuckParams TestParams() {
 // Advance a ducker in fixed small steps totalling `seconds`, asserting the
 // per-step monotonicity `dir` (-1 = non-increasing, +1 = non-decreasing).
 float AdvanceChecked(MixerDucker& ducker, float seconds, int dir) {
-    const float step = 0.004f;  // ~250 Hz update, denser than any real frame rate
+    const float step = 0.004f; // ~250 Hz update, denser than any real frame rate
     float last = ducker.AmbientGain();
     for (float t = 0.0f; t < seconds; t += step) {
         ducker.Advance(step);
@@ -79,7 +79,7 @@ TEST(MixerModelDuckGain, FloorOfOneIsIdentity) {
 // --- DuckGainAt (closed-form single-trigger envelope) ------------------------
 
 TEST(MixerModelClosedForm, HitsFloorExactlyAtAttack) {
-    const float active = 1.0f;  // event sound outlives the attack
+    const float active = 1.0f; // event sound outlives the attack
     EXPECT_FLOAT_EQ(DuckGainAt(0.0f, active, kAttack, kRelease, kFloor), 1.0f);
     EXPECT_FLOAT_EQ(DuckGainAt(kAttack, active, kAttack, kRelease, kFloor), kFloor);
     // Holds the floor for as long as the event stays active.
@@ -113,7 +113,7 @@ TEST(MixerModelClosedForm, RecoversToUnityExactlyAtRelease) {
 TEST(MixerModelClosedForm, ShortEventReleasesFromPartialDuck) {
     // The event ends mid-attack: the release starts from the PARTIAL duck level,
     // so recovery is proportionally faster than a full release.
-    const float active = 0.5f * kAttack;  // reached duck01 = 0.5
+    const float active = 0.5f * kAttack; // reached duck01 = 0.5
     const float at_end = DuckGainAt(active, active, kAttack, kRelease, kFloor);
     EXPECT_FLOAT_EQ(at_end, DuckGain(0.5f, kFloor));
     // Fully recovered after HALF the release time (duck01 0.5 -> 0).
@@ -135,7 +135,7 @@ TEST(MixerDuckerTest, StartsIdleAtUnity) {
     MixerDucker ducker(TestParams());
     EXPECT_TRUE(ducker.IsIdle());
     EXPECT_FLOAT_EQ(ducker.AmbientGain(), 1.0f);
-    ducker.Advance(1.0f);  // idle advance stays at unity
+    ducker.Advance(1.0f); // idle advance stays at unity
     EXPECT_FLOAT_EQ(ducker.AmbientGain(), 1.0f);
 }
 
@@ -150,7 +150,7 @@ TEST(MixerDuckerTest, HitsFloorAfterAttackMonotonically) {
 TEST(MixerDuckerTest, RecoversToUnityAfterReleaseMonotonically) {
     MixerDucker ducker(TestParams());
     ducker.OnEventStart();
-    ducker.Advance(kAttack);  // fully ducked
+    ducker.Advance(kAttack); // fully ducked
     ASSERT_FLOAT_EQ(ducker.AmbientGain(), kFloor);
     ducker.OnEventEnd();
     const float g = AdvanceChecked(ducker, kRelease + 0.1f, /*dir=*/+1);
@@ -176,12 +176,12 @@ TEST(MixerDuckerTest, RetriggerIsIdempotentAndExtendsDuck) {
     // Two overlapping events: ending ONE must not release the duck.
     ducker.OnEventStart();
     ducker.Advance(kAttack);
-    ducker.OnEventStart();  // re-trigger while fully ducked: no state corruption
+    ducker.OnEventStart(); // re-trigger while fully ducked: no state corruption
     EXPECT_FLOAT_EQ(ducker.AmbientGain(), kFloor);
     EXPECT_EQ(ducker.active_events(), 2);
 
     ducker.OnEventEnd();
-    ducker.Advance(kRelease);  // one voice still active -> the duck holds
+    ducker.Advance(kRelease); // one voice still active -> the duck holds
     EXPECT_FLOAT_EQ(ducker.AmbientGain(), kFloor);
 
     // Last voice ends -> normal release.
@@ -195,7 +195,7 @@ TEST(MixerDuckerTest, RetriggerDuringReleaseDucksAgain) {
     ducker.OnEventStart();
     ducker.Advance(kAttack);
     ducker.OnEventEnd();
-    ducker.Advance(0.5f * kRelease);  // partially recovered
+    ducker.Advance(0.5f * kRelease); // partially recovered
     const float mid = ducker.AmbientGain();
     ASSERT_GT(mid, kFloor);
     ASSERT_LT(mid, 1.0f);
@@ -209,7 +209,7 @@ TEST(MixerDuckerTest, RetriggerDuringReleaseDucksAgain) {
 
 TEST(MixerDuckerTest, EventEndUnderflowIsSafe) {
     MixerDucker ducker(TestParams());
-    ducker.OnEventEnd();  // spurious end with no start: must not wedge the state
+    ducker.OnEventEnd(); // spurious end with no start: must not wedge the state
     EXPECT_EQ(ducker.active_events(), 0);
     ducker.OnEventStart();
     ducker.Advance(kAttack);
@@ -219,12 +219,12 @@ TEST(MixerDuckerTest, EventEndUnderflowIsSafe) {
 TEST(MixerDuckerTest, NegativeAndHugeDtAreSafe) {
     MixerDucker ducker(TestParams());
     ducker.OnEventStart();
-    ducker.Advance(-1.0f);  // negative dt: no-op
+    ducker.Advance(-1.0f); // negative dt: no-op
     EXPECT_FLOAT_EQ(ducker.AmbientGain(), 1.0f);
-    ducker.Advance(1000.0f);  // huge dt: saturates at the floor, no overshoot
+    ducker.Advance(1000.0f); // huge dt: saturates at the floor, no overshoot
     EXPECT_FLOAT_EQ(ducker.AmbientGain(), kFloor);
     ducker.OnEventEnd();
-    ducker.Advance(1000.0f);  // saturates at unity, no overshoot
+    ducker.Advance(1000.0f); // saturates at unity, no overshoot
     EXPECT_FLOAT_EQ(ducker.AmbientGain(), 1.0f);
 }
 
@@ -243,7 +243,7 @@ TEST(MixerDuckerTest, ResetClearsDuckAndVoices) {
 TEST(MixerDuckerTest, MusicLegDisabledByDefault) {
     // Default DuckParams: music floor 1.0 -> the music gain NEVER moves even
     // when the ambient leg is fully ducked (behaviour-preservation contract).
-    MixerDucker ducker;  // library defaults
+    MixerDucker ducker; // library defaults
     ducker.OnEventStart();
     ducker.Advance(10.0f);
     EXPECT_LT(ducker.AmbientGain(), 1.0f);
@@ -284,4 +284,4 @@ TEST(MixerDuckerTest, SteppedMatchesClosedForm) {
     }
 }
 
-}  // namespace
+} // namespace

@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.predator_pack — EMERGENT PACK HUNTING. The presence of this component is the
+// sim.predator_pack: EMERGENT PACK HUNTING. The presence of this component is the
 // per-entity opt-in for luminumbra::ai::RunPredatorPackOnTick (mirrors the AlarmComponent /
 // CreatureGenomeComponent gating pattern): a world whose creatures carry NO
 // PackHunterComponent — and any world with NO creatures — runs the pack-hunting system as a

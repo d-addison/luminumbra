@@ -1,4 +1,4 @@
-// Save/load partial-write + schema-version-skew corpus (FR-004 of the second-class
+// Save/load partial-write + schema-version-skew corpus ( of the second-class
 // adversarial pass).
 //
 // The existing persistence_hardening_test.cpp covers happy-path roundtrips and a
@@ -57,7 +57,8 @@ std::filesystem::path MakeTempSaveDir(const std::string& tag) {
 }
 
 struct TempSaveDir {
-    explicit TempSaveDir(const std::string& tag) : path(MakeTempSaveDir(tag)) {}
+    explicit TempSaveDir(const std::string& tag)
+        : path(MakeTempSaveDir(tag)) {}
     ~TempSaveDir() {
         std::error_code remove_error;
         std::filesystem::remove_all(path, remove_error);
@@ -84,15 +85,16 @@ void AddChunk(WorldStreamingState& state, const IVec3& coords, Luminumbra::u32 s
     chunk->set_state(ChunkState::Ready);
     chunk->sdf_data = {-1.5f + static_cast<float>(salt), -0.25f, 0.0f, 0.5f, 1.25f};
     chunk->heightmap_data = {7.0f + static_cast<float>(salt), 8.5f, -3.5f};
-    chunk->mesh_vertices = {
-        {Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
-        {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u}};
+    chunk->mesh_vertices = {{Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
+                            {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u}};
     chunk->mesh_indices = {0u, 1u};
     chunk->mark_voxel_data_dirty();
 }
 
 // Writes a real region file for a multi-chunk world and returns its bytes + path.
-std::string SaveRealRegion(WorldSaveService& service, const TempSaveDir& dir, std::filesystem::path& out_region) {
+std::string SaveRealRegion(WorldSaveService& service,
+                           const TempSaveDir& dir,
+                           std::filesystem::path& out_region) {
     WorldStreamingState world;
     AddChunk(world, IVec3(0, 0, 0), 1u);
     AddChunk(world, IVec3(1, 0, 1), 2u);
@@ -162,7 +164,8 @@ TEST(SaveLoadCorruptionCorpus, EveryPayloadBytePositionFlipIsRejectedOrConsisten
         std::vector<std::string> errors;
         const bool loaded = service.load_world(state, dir.path, errors); // must not crash
         if (!loaded) {
-            EXPECT_FALSE(errors.empty()) << "reject at payload offset " << i << " must carry a diagnostic";
+            EXPECT_FALSE(errors.empty())
+                << "reject at payload offset " << i << " must carry a diagnostic";
         } else {
             // Accepted: then it must be a coherent world (re-hash is stable), not a
             // half-decoded one.
@@ -198,8 +201,8 @@ TEST(SaveLoadCorruptionCorpus, TruncationAtEveryEighthIsRejected) {
         WorldStreamingState state;
         std::vector<std::string> errors;
         EXPECT_FALSE(service.load_world(state, dir.path, errors))
-            << "a region truncated to " << cut << "/" << full.size()
-            << " bytes (" << eighth << "/8) must be rejected";
+            << "a region truncated to " << cut << "/" << full.size() << " bytes (" << eighth
+            << "/8) must be rejected";
         EXPECT_FALSE(errors.empty()) << "truncation at " << eighth << "/8 must carry a diagnostic";
         ExpectNoPartialWorld(state);
     }
@@ -311,8 +314,9 @@ TEST(SaveLoadCorruptionCorpus, CorruptLegacyV1SnapshotIsRejectedNotMisread) {
     // a diagnostic, not loaded as an empty/partial world.
     TempSaveDir dir("legacy_v1_corrupt");
     WorldSaveService service;
-    WriteFileBytes(WorldSaveService::world_state_path(dir.path),
-                   std::string("{ \"schema\": \"luminumbra.persistence.world_state_sn")); // torn mid-JSON
+    WriteFileBytes(
+        WorldSaveService::world_state_path(dir.path),
+        std::string("{ \"schema\": \"luminumbra.persistence.world_state_sn")); // torn mid-JSON
 
     WorldStreamingState restored;
     std::vector<std::string> errors;

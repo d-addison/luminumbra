@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I9-AI: scent / pheromone STIGMERGY field — the substrate for emergent
+// scent / pheromone STIGMERGY field — the substrate for emergent
 // tracking, hunting, and trail behaviors (ants laying food/home trails; a
 // predator following prey scent up-gradient; prey fleeing down a predator-scent
 // gradient). Indirect coordination through a shared, decaying environment field
@@ -37,7 +37,8 @@ public:
     // `channels` independent scent species (e.g. 0 = prey, 1 = predator, 2 =
     // food-trail, 3 = home-trail). All share the grid dimensions.
     ScentField(int width, int height, int channels = 1)
-        : m_w(width > 0 ? width : 0), m_h(height > 0 ? height : 0) {
+        : m_w(width > 0 ? width : 0)
+        , m_h(height > 0 ? height : 0) {
         const int n = channels > 0 ? channels : 1;
         m_ch.reserve(static_cast<std::size_t>(n));
         for (int c = 0; c < n; ++c) {
@@ -45,9 +46,15 @@ public:
         }
     }
 
-    [[nodiscard]] int width() const { return m_w; }
-    [[nodiscard]] int height() const { return m_h; }
-    [[nodiscard]] int channels() const { return static_cast<int>(m_ch.size()); }
+    [[nodiscard]] int width() const {
+        return m_w;
+    }
+    [[nodiscard]] int height() const {
+        return m_h;
+    }
+    [[nodiscard]] int channels() const {
+        return static_cast<int>(m_ch.size());
+    }
 
     [[nodiscard]] bool in_bounds(int x, int z) const {
         return x >= 0 && z >= 0 && x < m_w && z < m_h;
@@ -56,7 +63,8 @@ public:
     // Lay scent: an agent deposits `amount` of species `ch` at its cell (trail-
     // laying / scent-marking). Out-of-bounds or unknown channel is a no-op.
     void Deposit(int ch, int x, int z, double amount) {
-        if (!valid(ch, x, z) || amount == 0.0) return;
+        if (!valid(ch, x, z) || amount == 0.0)
+            return;
         m_ch[static_cast<std::size_t>(ch)].add_impulse(
             static_cast<std::size_t>(x), static_cast<std::size_t>(z), amount);
     }
@@ -67,7 +75,7 @@ public:
     // Evaporation is applied AFTER diffusion so a fresh deposit both spreads and
     // begins to fade.
     //
-    // T-I9-AI E2 (FR-2) wind-advection: `wind_cx`/`wind_cz` are the wind vector in
+    // wind-advection: `wind_cx`/`wind_cz` are the wind vector in
     // CELLS PER STEP (the caller converts world-units/sec via dt and cell size).
     // The pre-pass is a semi-Lagrangian backtrace — each cell samples UPWIND
     // (x - wind, z - wind) with bilinear interpolation, so the whole field drifts
@@ -75,9 +83,13 @@ public:
     // Default (0,0) wind SKIPS advection entirely, so the step is byte-identical to
     // the diffuse+evaporate-only result (canonical roster unchanged). Deterministic:
     // double math, fixed traversal order, edge-clamped sampling — no RNG/wall-clock.
-    void Step(double diffusion_rate, std::size_t diffusion_iters, double evaporation,
-              double wind_cx = 0.0, double wind_cz = 0.0) {
-        const double keep = 1.0 - (evaporation < 0.0 ? 0.0 : (evaporation > 1.0 ? 1.0 : evaporation));
+    void Step(double diffusion_rate,
+              std::size_t diffusion_iters,
+              double evaporation,
+              double wind_cx = 0.0,
+              double wind_cz = 0.0) {
+        const double keep =
+            1.0 - (evaporation < 0.0 ? 0.0 : (evaporation > 1.0 ? 1.0 : evaporation));
         const bool did_diffuse = diffusion_iters > 0 && diffusion_rate > 0.0;
         const bool advect = (wind_cx != 0.0 || wind_cz != 0.0) && m_w > 0 && m_h > 0;
         const std::size_t W = static_cast<std::size_t>(m_w);
@@ -87,11 +99,15 @@ public:
                 // Snapshot the channel, then rewrite each cell from its upwind source.
                 std::vector<double> src(W * H);
                 for (std::size_t y = 0; y < H; ++y)
-                    for (std::size_t x = 0; x < W; ++x) src[y * W + x] = field.at(x, y);
+                    for (std::size_t x = 0; x < W; ++x)
+                        src[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
-                        field.set(x, y, BilinearClamped(src, static_cast<double>(x) - wind_cx,
-                                                        static_cast<double>(y) - wind_cz));
+                        field.set(x,
+                                  y,
+                                  BilinearClamped(src,
+                                                  static_cast<double>(x) - wind_cx,
+                                                  static_cast<double>(y) - wind_cz));
                     }
                 }
             }
@@ -107,27 +123,41 @@ public:
                 // evaporation step (iters 0) stays an exact per-cell decay.
                 std::vector<double> tmp(W * H);
                 for (std::size_t y = 0; y < H; ++y)
-                    for (std::size_t x = 0; x < W; ++x) tmp[y * W + x] = field.at(x, y);
+                    for (std::size_t x = 0; x < W; ++x)
+                        tmp[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
                         double acc = 0.5 * tmp[y * W + x];
                         double wsum = 0.5;
-                        if (x > 0)      { acc += 0.125 * tmp[y * W + (x - 1)]; wsum += 0.125; }
-                        if (x + 1 < W)  { acc += 0.125 * tmp[y * W + (x + 1)]; wsum += 0.125; }
-                        if (y > 0)      { acc += 0.125 * tmp[(y - 1) * W + x]; wsum += 0.125; }
-                        if (y + 1 < H)  { acc += 0.125 * tmp[(y + 1) * W + x]; wsum += 0.125; }
+                        if (x > 0) {
+                            acc += 0.125 * tmp[y * W + (x - 1)];
+                            wsum += 0.125;
+                        }
+                        if (x + 1 < W) {
+                            acc += 0.125 * tmp[y * W + (x + 1)];
+                            wsum += 0.125;
+                        }
+                        if (y > 0) {
+                            acc += 0.125 * tmp[(y - 1) * W + x];
+                            wsum += 0.125;
+                        }
+                        if (y + 1 < H) {
+                            acc += 0.125 * tmp[(y + 1) * W + x];
+                            wsum += 0.125;
+                        }
                         field.set(x, y, (acc / wsum) * keep);
                     }
                 }
             } else if (keep < 1.0) {
                 for (std::size_t y = 0; y < H; ++y)
-                    for (std::size_t x = 0; x < W; ++x) field.set(x, y, field.at(x, y) * keep);
+                    for (std::size_t x = 0; x < W; ++x)
+                        field.set(x, y, field.at(x, y) * keep);
             }
         }
     }
 
     // MAX-MIN Ant System anti-stagnation: clamp every cell of every channel to
-    // [tau_min, tau_max] (spec R-P2.2). A positive tau_min keeps every cell's
+    // [tau_min, tau_max] (scent-field contract). A positive tau_min keeps every cell's
     // follow-probability strictly above zero so agents never lock permanently onto
     // one trail (prevents premature convergence); tau_max caps unbounded deposit
     // buildup. Apply AFTER Step. Deterministic. Default args = no-op.
@@ -136,8 +166,10 @@ public:
             for (std::size_t y = 0; y < static_cast<std::size_t>(m_h); ++y) {
                 for (std::size_t x = 0; x < static_cast<std::size_t>(m_w); ++x) {
                     double v = field.at(x, y);
-                    if (v < tau_min) v = tau_min;
-                    if (v > tau_max) v = tau_max;
+                    if (v < tau_min)
+                        v = tau_min;
+                    if (v > tau_max)
+                        v = tau_max;
                     field.set(x, y, v);
                 }
             }
@@ -146,9 +178,10 @@ public:
 
     // Scent concentration of species `ch` at a cell (0 outside the grid).
     [[nodiscard]] double Sample(int ch, int x, int z) const {
-        if (!valid(ch, x, z)) return 0.0;
+        if (!valid(ch, x, z))
+            return 0.0;
         return m_ch[static_cast<std::size_t>(ch)].at(static_cast<std::size_t>(x),
-                                                      static_cast<std::size_t>(z));
+                                                     static_cast<std::size_t>(z));
     }
 
     // Central-difference gradient of species `ch` at (x,z). Writes (gx,gz) that
@@ -159,7 +192,8 @@ public:
     double Gradient(int ch, int x, int z, float& gx, float& gz) const {
         gx = 0.0f;
         gz = 0.0f;
-        if (!valid(ch, x, z)) return 0.0;
+        if (!valid(ch, x, z))
+            return 0.0;
         const auto& f = m_ch[static_cast<std::size_t>(ch)];
         auto sample = [&](int sx, int sz) -> double {
             const int cx = sx < 0 ? 0 : (sx >= m_w ? m_w - 1 : sx); // clamp at edges
@@ -173,7 +207,7 @@ public:
         return std::sqrt(static_cast<double>(gx) * gx + static_cast<double>(gz) * gz);
     }
 
-    // T-I9-AI E2: chemotaxis STEERING off the scent gradient — the hunting/tracking
+    // chemotaxis STEERING off the scent gradient — the hunting/tracking
     // read side (research: Weber-law normalized gradient following). Writes a UNIT
     // direction (out_dx,out_dz) to steer TOWARD (sign=+1, a predator tracking prey)
     // or AWAY FROM (sign=-1, prey fleeing) the scent source at (x,z), and returns a
@@ -181,14 +215,21 @@ public:
     // gradient magnitude — robust to absolute concentration). Returns 0 with a zero
     // direction when the gradient magnitude is below `floor` — the tracking-window
     // cutoff (a cold/evaporated trail yields no commitment). Deterministic.
-    float GradientSteer(int ch, int x, int z, float sign, float floor, float k, float& out_dx,
+    float GradientSteer(int ch,
+                        int x,
+                        int z,
+                        float sign,
+                        float floor,
+                        float k,
+                        float& out_dx,
                         float& out_dz) const {
         out_dx = 0.0f;
         out_dz = 0.0f;
         float gx = 0.0f;
         float gz = 0.0f;
         const double mag = Gradient(ch, x, z, gx, gz);
-        if (mag <= 0.0 || static_cast<float>(mag) < floor) return 0.0f;
+        if (mag <= 0.0 || static_cast<float>(mag) < floor)
+            return 0.0f;
         const float inv = 1.0f / static_cast<float>(mag); // |(gx,gz)| == mag
         out_dx = sign * gx * inv;
         out_dz = sign * gz * inv;
@@ -208,8 +249,14 @@ private:
     [[nodiscard]] double BilinearClamped(const std::vector<double>& s, double fx, double fz) const {
         const double maxx = static_cast<double>(m_w - 1);
         const double maxz = static_cast<double>(m_h - 1);
-        if (fx < 0.0) fx = 0.0; else if (fx > maxx) fx = maxx;
-        if (fz < 0.0) fz = 0.0; else if (fz > maxz) fz = maxz;
+        if (fx < 0.0)
+            fx = 0.0;
+        else if (fx > maxx)
+            fx = maxx;
+        if (fz < 0.0)
+            fz = 0.0;
+        else if (fz > maxz)
+            fz = maxz;
         const int x0 = static_cast<int>(fx);
         const int z0 = static_cast<int>(fz);
         const int x1 = x0 + 1 < m_w ? x0 + 1 : x0;

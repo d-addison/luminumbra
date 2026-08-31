@@ -1,4 +1,4 @@
-// T-I5a-2 (A2): deterministic wind-grid snapshot + determinism test.
+// deterministic wind-grid snapshot + determinism test.
 //
 // Proves the wind field is bit-deterministic (the property the world_hash `wind`
 // sub-hash and the WindFieldDeterminism gate depend on): two independent
@@ -19,11 +19,11 @@ namespace {
 
 using Luminumbra::Vec2;
 using Luminumbra::Vec3;
-using Luminumbra::Systems::WindFieldSystem;
-using Luminumbra::Systems::WindLayer;
-using Luminumbra::Systems::kWindLayerCount;
 using Luminumbra::Systems::kWindCellSizeM;
 using Luminumbra::Systems::kWindExtentCells;
+using Luminumbra::Systems::kWindLayerCount;
+using Luminumbra::Systems::WindFieldSystem;
+using Luminumbra::Systems::WindLayer;
 
 constexpr int kSeed = 424242;
 constexpr std::uint64_t kTicks = 90;
@@ -113,6 +113,41 @@ TEST(WindFieldSystem, LayerSelectionByHeight) {
     const Vec2 explicit_high = wind.SampleWind(col, WindLayer::High);
     EXPECT_FLOAT_EQ(by_height_high.x, explicit_high.x);
     EXPECT_FLOAT_EQ(by_height_high.y, explicit_high.y);
+}
+
+TEST(WindFieldSystem, StormPerturbationsAreLocalizedAndOrderIndependent) {
+    const WindFieldSystem::StormPerturbation first{
+        Vec2(kAnchor.x, kAnchor.z), 120.0f, Vec2(5.0f, 1.0f), 0.8f};
+    const WindFieldSystem::StormPerturbation second{
+        Vec2(kAnchor.x + 20.0f, kAnchor.z), 80.0f, Vec2(-1.0f, 3.0f), 0.5f};
+
+    WindFieldSystem a(kSeed);
+    a.InjectStormPerturbation(first);
+    a.InjectStormPerturbation(second);
+    a.Update(kTicks, kAnchor);
+
+    WindFieldSystem b(kSeed);
+    b.InjectStormPerturbation(second);
+    b.InjectStormPerturbation(first);
+    b.Update(kTicks, kAnchor);
+
+    EXPECT_EQ(a.ComputeWindSubHash(), b.ComputeWindSubHash());
+
+    WindFieldSystem calm(kSeed);
+    calm.Update(kTicks, kAnchor);
+    const Vec2 gust = a.SampleWind(Vec3(kAnchor.x, 5.0f, kAnchor.z));
+    const Vec2 baseline = calm.SampleWind(Vec3(kAnchor.x, 5.0f, kAnchor.z));
+    EXPECT_TRUE(gust.x != baseline.x || gust.y != baseline.y);
+
+    const Vec3 far_inside(kAnchor.x + 500.0f, 5.0f, kAnchor.z + 500.0f);
+    const Vec2 far_gust = a.SampleWind(far_inside);
+    const Vec2 far_calm = calm.SampleWind(far_inside);
+    EXPECT_FLOAT_EQ(far_gust.x, far_calm.x);
+    EXPECT_FLOAT_EQ(far_gust.y, far_calm.y);
+
+    a.ClearStormPerturbations();
+    a.Update(kTicks, kAnchor);
+    EXPECT_EQ(a.ComputeWindSubHash(), calm.ComputeWindSubHash());
 }
 
 } // namespace

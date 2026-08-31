@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I9-AI E5 (FR-5): read-only EVOLUTION TELEMETRY. Computes the mean sensory traits over the live
+//  E5: read-only EVOLUTION TELEMETRY. Computes the mean sensory traits over the live
 // creature roster (split by role) so trait DIVERGENCE under selection is observable across
 // generations — predator vision cones narrowing, prey cones widening, ranges drifting. This is a
 // pure READ: it never mutates state and never feeds world_hash, so it is safe to call from any tick
@@ -16,19 +16,21 @@ namespace luminumbra::ai {
 
 struct SensoryMeans {
     std::uint32_t count = 0;
-    double vision_cos_half_fov = 0.0;  // higher = NARROWER cone (focused predator); lower = wider (prey)
+    double vision_cos_half_fov =
+        0.0; // higher = NARROWER cone (focused predator); lower = wider (prey)
     double vision_range = 0.0;
     double hearing_range = 0.0;
 };
 
-// Mean sensory genes over creatures whose is_predator matches `predators`. Pure function of registry
-// state; id order is irrelevant to a mean, so no sort is needed.
+// Mean sensory genes over creatures whose is_predator matches `predators`. Pure function of
+// registry state; id order is irrelevant to a mean, so no sort is needed.
 [[nodiscard]] inline SensoryMeans ComputeSensoryMeans(const entt::registry& reg, bool predators) {
     namespace Comp = ::Luminumbra::Components;
     SensoryMeans m;
     auto view = reg.view<const Comp::CreatureGenomeComponent, const Comp::CreatureComponent>();
     for (auto e : view) {
-        if (view.get<const Comp::CreatureComponent>(e).is_predator != predators) continue;
+        if (view.get<const Comp::CreatureComponent>(e).is_predator != predators)
+            continue;
         const auto& gn = view.get<const Comp::CreatureGenomeComponent>(e);
         m.vision_cos_half_fov += static_cast<double>(gn.vision_cos_half_fov);
         m.vision_range += static_cast<double>(gn.vision_range);
@@ -44,4 +46,4 @@ struct SensoryMeans {
     return m;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

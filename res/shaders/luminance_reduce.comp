@@ -1,5 +1,5 @@
 #version 450 core
-// Spec 015 A-T06 (rank 69: RENDER-07 / ATMO-05, Wave F F6): mean log-luminance of
+//   (:  /,  ): mean log-luminance of
 // the lit scene -> a single float in an SSBO, copied out through the
 // AsyncReadbackRing (submit now, consume a later frame; the frame NEVER blocks).
 // One 16x16 workgroup; the 256 threads stride a fixed 64x64 sample lattice over

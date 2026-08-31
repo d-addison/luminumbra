@@ -2,7 +2,7 @@
   "schema": "luminumbra.game.archetype.v1",
   "archetype": "grovestrider",
   "actor_id": "grovestrider-01",
-  "comment": "Project Capture game content (T-I3-17): the grovestrider hunger fixture relocated out of engine source. The `expected` block is the planner gate's baseline; the engine never reads this file.",
+  "comment": "Project Capture game content (): the grovestrider hunger fixture relocated out of engine source. The `expected` block is the planner gate's baseline; the engine never reads this file.",
   "needs": [
     { "name": "hunger", "pressure": 0.92, "growth_per_tick": 0.0 },
     { "name": "safety", "pressure": 0.28, "growth_per_tick": 0.0 },
@@ -17,10 +17,10 @@
   ],
   "creature": {
     "mesh": "data/models/creatures/grovestrider/grovestrider.lmesh",
-    "comment_texture": "T-I4-DR-split-lint: UV-mapped skinned-texture set (256x256 .ltex). The engine RenderPipeline names no creature; the scenario harness reads these paths from this game archetype and hands them to the generic load_skinned_texture_set API.",
+    "comment_texture": ": UV-mapped skinned-texture set (256x256.ltex). The engine RenderPipeline names no creature; the scenario harness reads these paths from this game archetype and hands them to the generic load_skinned_texture_set API.",
     "albedo_texture": "data/textures/creatures/grovestrider/grovestrider_albedo_256.ltex",
     "normal_texture": "data/textures/creatures/grovestrider/grovestrider_normal_256.ltex",
-    "comment_material": "T-I3-22 slice polish: dark moss tone (material 3) for high contrast against the sandy archipelago shore. Material 4 (Sand) made the creature read invisibly against its own ground.",
+    "comment_material": " slice polish: dark moss tone (material 3) for high contrast against the sandy archipelago shore. Material 4 (Sand) made the creature read invisibly against its own ground.",
     "material_id": 3,
     "replan_interval_ticks": 10,
     "clips": {
@@ -30,7 +30,7 @@
     "clip_by_action": { "graze": "idle", "approach": "walk" }
   },
   "slice": {
-    "comment": "creature_slice_smoke scenario data (T-I3-18): runtime needs, the ambient graze opportunity, and the light-stimulus reaction. expected_* feed the gate.",
+    "comment": "creature_slice_smoke scenario data (): runtime needs, the ambient graze opportunity, and the light-stimulus reaction. expected_* feed the gate.",
     "needs": [
       { "name": "hunger", "pressure": 0.55, "growth_per_tick": 0.0002 },
       { "name": "curiosity", "pressure": 0.65, "growth_per_tick": 0.0001 }

@@ -1,9 +1,9 @@
-// SHIELD-01 (spec 017-B step 3) proving gate: the interactive world load is
+//  ( step 3) proving gate: the interactive world load is
 // BOUNDED. Twenty cold "CONSTRUCTING WORLD GEOMETRY"-style loads (clear_world
 // then EnsureSurfaceReadyNear at interactive radii 12/4) each complete in
 // under 60 seconds with the LUMINUMBRA_JOB_WATCHDOG reporter armed. The load
 // path dispatches its surface builds in bounded 64-job sub-batches with
-// named per-batch progress (SHIELD-01), so a wedge would surface as a named
+// named per-batch progress, so a wedge would surface as a named
 // watchdog report + a blown per-load bound here — never a silent hang.
 #include "gtest/gtest.h"
 
@@ -31,7 +31,7 @@ namespace {
 #endif
 
 constexpr int kSeed = 424242;
-constexpr int kSurfaceRadius = 12;   // the interactive client load radius
+constexpr int kSurfaceRadius = 12; // the interactive client load radius
 constexpr int kCollisionRadius = 4;
 constexpr int kLoads = 20;
 constexpr double kPerLoadBudgetMs = 60000.0;
@@ -82,15 +82,17 @@ TEST(WorldLoadBounded, TwentyColdInteractiveLoadsUnderSixtySecondsEach) {
             const Vec3 pos(x, height + 1.95f, z);
 
             const auto t0 = std::chrono::steady_clock::now();
-            ASSERT_TRUE(world.EnsureSurfaceReadyNear(pos, &physics, kSurfaceRadius, kCollisionRadius))
+            ASSERT_TRUE(
+                world.EnsureSurfaceReadyNear(pos, &physics, kSurfaceRadius, kCollisionRadius))
                 << "load " << load << " failed outright";
             const double ms =
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                    .count();
             worst_ms = std::max(worst_ms, ms);
 
             EXPECT_LT(ms, kPerLoadBudgetMs)
                 << "load " << load << " at (" << x << "," << z << ") took " << ms
-                << " ms — the SHIELD-01 bounded-load contract is broken (check the "
+                << " ms — the  bounded-load contract is broken (check the "
                    "named watchdog phase in the log for the wedged sub-batch)";
         }
         RecordProperty("worst_load_ms", static_cast<int>(worst_ms));
@@ -99,4 +101,4 @@ TEST(WorldLoadBounded, TwentyColdInteractiveLoadsUnderSixtySecondsEach) {
     jobs.shutdown();
 }
 
-}  // namespace
+} // namespace

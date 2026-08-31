@@ -1,7 +1,7 @@
 #version 450 core
 
 // ===========================================================================
-// T-I5b-4 (W1): waterfall falling-sheet shader. RENDER-ONLY DRESSING.
+// waterfall falling-sheet shader.  DRESSING.
 //
 // An animated vertical sheet of falling water drawn over a detected waterfall
 // site (WaterfallDetect). The sheet uses a procedural FLOW-MAP: vertical streaks
@@ -31,9 +31,9 @@ uniform vec3  u_sun_color; // tint for the lit froth (defaults handled by caller
 // Scene-light multiplier (sun intensity + ambient floor) so the cascade is LIT by the
 // scene instead of emitting near-white. DEFAULTS to 1.0 so the standalone WaterfallVisual
 // gate (which never sets it) renders byte-identically; the live pipeline sets it from the
-// time-of-day sun intensity so the fall darkens at dusk/night. RENDER-ONLY.
+// time-of-day sun intensity so the fall darkens at dusk/night..
 uniform vec3  u_scene_light = vec3(1.0);
-// WATER-11 (Wave H T.1): the LIVE upstream water factor [0,1] — 1 = the full
+//  ( T.1): the LIVE upstream water factor [0,1] — 1 = the full
 // authored sheet; ->0 = upstream dammed/drained, the veil thins out. Default 1
 // keeps the standalone WaterfallVisual gate (which never sets it) byte-stable.
 uniform float u_live_factor = 1.0;
@@ -107,7 +107,7 @@ void main() {
     // reads against the cliff instead of vanishing, denser at the foam/streaks.
     float alpha = clamp(0.66 + streaks * 0.30 + foam * 0.30, 0.66, 0.97);
 
-    // WATER-11: a starving fall thins toward transparent (the CPU side skips the
+    // a starving fall thins toward transparent (the CPU side skips the
     // draw entirely below 0.02, so this only shades partially-starved sheets).
     alpha *= clamp(u_live_factor, 0.0, 1.0);
 

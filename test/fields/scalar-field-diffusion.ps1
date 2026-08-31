@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# T-I3-22: the game-flavored "aetheric" compatibility alias was removed at
+# the game-flavored "aetheric" compatibility alias was removed at
 # iteration close. This gate now inspects the generic engine fields module
 # directly under its own schema (luminumbra.fields.scalar_diffusion.v1).
 $ArtifactDir = "build/$BuildPreset/test-artifacts/fields"

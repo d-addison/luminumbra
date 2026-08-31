@@ -1,4 +1,4 @@
-// T-I6-A1: deterministic Aetheric scalar-field determinism + behavior test.
+// deterministic Aetheric scalar-field determinism + behavior test.
 //
 // Proves the field is bit-deterministic (the property the world_hash `aether`
 // sub-hash and the AetherFieldDeterminism gate depend on): two independent
@@ -18,10 +18,10 @@ namespace {
 
 using Luminumbra::Vec3;
 using Luminumbra::Systems::AetherFieldSystem;
-using Luminumbra::Systems::WindFieldSystem;
 using Luminumbra::Systems::kAetherCellSizeM;
-using Luminumbra::Systems::kAetherExtentCells;
 using Luminumbra::Systems::kAetherDiffuseIterations;
+using Luminumbra::Systems::kAetherExtentCells;
+using Luminumbra::Systems::WindFieldSystem;
 
 constexpr int kSeed = 424242;
 constexpr std::uint64_t kTicks = 90;
@@ -71,8 +71,10 @@ TEST(AetherFieldSystem, FieldIsNonNegativeAndNonTrivial) {
     const float cell = aether.cell_size_m();
     for (int lz = 0; lz < aether.extent_cells(); lz += 4) {
         for (int lx = 0; lx < aether.extent_cells(); lx += 4) {
-            const float wx = kAnchor.x + (static_cast<float>(lx - aether.extent_cells() / 2)) * cell;
-            const float wz = kAnchor.z + (static_cast<float>(lz - aether.extent_cells() / 2)) * cell;
+            const float wx =
+                kAnchor.x + (static_cast<float>(lx - aether.extent_cells() / 2)) * cell;
+            const float wz =
+                kAnchor.z + (static_cast<float>(lz - aether.extent_cells() / 2)) * cell;
             const float v = aether.SampleAether(Vec3(wx, 0.0f, wz));
             EXPECT_GE(v, 0.0f) << "aether sample is negative at (" << lx << "," << lz << ")";
             min_v = (v < min_v) ? v : min_v;

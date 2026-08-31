@@ -1,24 +1,24 @@
 #pragma once
 
 #define GLFW_INCLUDE_NONE
+#include "InputActions.h"
+#include "imgui.h"
 #include <GLFW/glfw3.h>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
-#include "imgui.h"
-#include "InputActions.h"
 
 namespace Luminumbra::Rendering {
-    class Camera;
+class Camera;
 }
 
 namespace Luminumbra::Systems {
-    class PhysicsSystem;
+class PhysicsSystem;
 }
 
 namespace luminumbra::core {
-    class SystemConfig;
+class SystemConfig;
 }
 
 namespace Luminumbra::Client {
@@ -49,7 +49,9 @@ struct PlayerReplaySnapshot {
 
 class PlayerController {
 public:
-    PlayerController(GLFWwindow* window, Rendering::Camera* camera, Systems::PhysicsSystem* physicsSystem);
+    PlayerController(GLFWwindow* window,
+                     Rendering::Camera* camera,
+                     Systems::PhysicsSystem* physicsSystem);
 
     void Update(float deltaTime);
     void ApplyReplayInput(float deltaTime, const PlayerReplayInputFrame& inputFrame);
@@ -57,11 +59,18 @@ public:
     void ResetReplayFrameCounter(std::uint64_t frame = 0);
     void ProcessKeyInput(int key, int action);
 
-    MovementMode GetMovementMode() const { return m_mode; }
-    glm::vec3 GetPosition() const { return m_position; }
-    // TEMP diag (--profile-fly): drive the player forward at a constant noclip speed without reading
-    // live input, so the headless moving profiler advances the streaming anchor at a bounded rate.
-    void ProfileDriveNoclip(float deltaTime, const glm::vec3& wishDir) { UpdateNoclip(deltaTime, wishDir, false); }
+    MovementMode GetMovementMode() const {
+        return m_mode;
+    }
+    glm::vec3 GetPosition() const {
+        return m_position;
+    }
+    // runtime telemetry (--profile-fly): drive the player forward at a constant noclip speed
+    // without reading live input, so the headless moving profiler advances the streaming anchor at
+    // a bounded rate.
+    void ProfileDriveNoclip(float deltaTime, const glm::vec3& wishDir) {
+        UpdateNoclip(deltaTime, wishDir, false);
+    }
     void ProcessMouseScroll(double yoffset);
     void RenderDebugUI();
 
@@ -69,12 +78,16 @@ public:
     // falling back to the compiled defaults (kInputActionDefs). Call after construction
     // and whenever bindings change.
     void ApplyKeyBindings(const luminumbra::core::SystemConfig& cfg);
-    [[nodiscard]] int key(InputAction action) const { return m_keys[static_cast<std::size_t>(action)]; }
+    [[nodiscard]] int key(InputAction action) const {
+        return m_keys[static_cast<std::size_t>(action)];
+    }
 
-    // --- Pillar-G photo-mode capture loop (g-vertical-slice spike) ---
+    // --- photography photo-mode capture loop (feature) ---
     // Strictly read-only w.r.t. sim: these flags drive a client-only PhotoModeState
     // and capture/persist, never a tick or a registry mutation.
-    [[nodiscard]] bool photo_mode_active() const { return m_photoModeActive; }
+    [[nodiscard]] bool photo_mode_active() const {
+        return m_photoModeActive;
+    }
     // Edge-triggered shutter request: returns true ONCE per shutter key press, then
     // self-clears, so the caller captures exactly one frame per press.
     [[nodiscard]] bool consume_shutter_request() {
@@ -94,7 +107,7 @@ public:
         m_focusNudge = 0.0f;
         return n;
     }
-    // Manual-exposure nudges (spec 012): net SHUTTER-SPEED stops (+ = faster/less light)
+    // Manual-exposure nudges: net SHUTTER-SPEED stops (+ = faster/less light)
     // and net ISO stops (+ = higher ISO) accumulated since the last consume. The caller
     // applies them multiplicatively to its lens shutter_s / iso. Self-clears.
     [[nodiscard]] float consume_shutter_speed_nudge() {
@@ -107,7 +120,7 @@ public:
         m_isoNudge = 0.0f;
         return n;
     }
-    // Spec 013: photo-mode time-of-day scrub (net normalized-day delta, + = toward dusk)
+    // photo-mode time-of-day scrub (net normalized-day delta, + = toward dusk)
     // and an edge-triggered weather-preset cycle count. Self-clear.
     [[nodiscard]] float consume_tod_nudge() {
         const float n = m_todNudge;
@@ -129,7 +142,11 @@ public:
 
 private:
     PlayerReplayInputFrame ReadLiveInputFrame() const;
-    void UpdateWalking(float deltaTime, const glm::vec3& wishDir, bool jumpPressed, bool crouchPressed, bool sprintHeld);
+    void UpdateWalking(float deltaTime,
+                       const glm::vec3& wishDir,
+                       bool jumpPressed,
+                       bool crouchPressed,
+                       bool sprintHeld);
     void UpdateNoclip(float deltaTime, const glm::vec3& wishDir, bool sprintHeld);
     void UpdateCameraFromControllerPosition();
 
@@ -161,18 +178,18 @@ private:
     bool m_hasInitializedPhysicsPlayer = false;
     std::uint64_t m_replayFrameCounter = 0;
 
-    // Pillar-G photo-mode (spike): client-only, NOT sim state. The toggle flips
+    // photography photo-mode (spike): client-only, NOT sim state. The toggle flips
     // m_photoModeActive; the shutter sets an edge-triggered one-shot flag; the lens
     // keys accumulate nudges the main loop applies to its PhotoModeState lens.
-    bool  m_photoModeActive = false;
-    bool  m_shutterRequested = false;
-    float m_apertureNudge = 0.0f; // f-number stops (+ = stop down, - = open up)
-    float m_focusNudge = 0.0f;    // metres (+ = farther, - = nearer)
-    float m_shutterSpeedNudge = 0.0f; // shutter-speed stops (+ = faster / less light)
-    float m_isoNudge = 0.0f;          // ISO stops (+ = higher ISO / more sensitivity)
-    float m_todNudge = 0.0f;          // spec 013: photo-mode time-of-day scrub delta
-    int   m_weatherCycle = 0;         // spec 013: photo-mode weather-preset cycle count
-    bool  m_codexToggleRequested = false;  // edge-triggered codex screen open/close
+    bool m_photoModeActive = false;
+    bool m_shutterRequested = false;
+    float m_apertureNudge = 0.0f;        // f-number stops (+ = stop down, - = open up)
+    float m_focusNudge = 0.0f;           // metres (+ = farther, - = nearer)
+    float m_shutterSpeedNudge = 0.0f;    // shutter-speed stops (+ = faster / less light)
+    float m_isoNudge = 0.0f;             // ISO stops (+ = higher ISO / more sensitivity)
+    float m_todNudge = 0.0f;             // photo-mode time-of-day scrub delta
+    int m_weatherCycle = 0;              // photo-mode weather-preset cycle count
+    bool m_codexToggleRequested = false; // edge-triggered codex screen open/close
 };
 
 } // namespace Luminumbra::Client

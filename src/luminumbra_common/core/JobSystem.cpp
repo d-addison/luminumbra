@@ -14,7 +14,7 @@ namespace Luminumbra {
 
 namespace {
 
-// T-I4-17-jobsystem-pod-pool: cache-line size for false-sharing avoidance. The
+// cache-line size for false-sharing avoidance. The
 // completion counter is written by every worker that finishes a job in the
 // batch (a contended hot atomic); padding it onto its own line keeps those RMW
 // stores off the line that holds the mutex/condition_variable the waiter polls.
@@ -26,7 +26,7 @@ constexpr std::size_t kCacheLine = 64;
 
 } // namespace
 
-// T-I4-17-jobsystem-pod-pool: align the completion counter to its own cache
+// align the completion counter to its own cache
 // line so the batch-wide atomic decrement contended by every finishing worker
 // does not false-share with `mutex`/`condition` (the line the single waiter
 // loads under the lock). `counter` keeps its acquire/release semantics; only
@@ -61,14 +61,14 @@ void complete_job(const std::shared_ptr<JobCompletionState>& completion) {
     }
 
     if (completion->counter.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        // T-I4-DR-server-streaming-race: notify with completion->mutex HELD (the
+        // notify with completion->mutex HELD (the
         // canonical condition_variable idiom) rather than after a momentary empty
         // lock. The waiter (JobSystem::wait) evaluates `counter <= 0` under this
         // mutex before blocking; the counter is an atomic decremented OUTSIDE the
         // mutex, so holding the lock across the notify guarantees the waiter is
         // either pre-predicate (observes 0, never blocks) or already enqueued on
         // the CV (receives the notify) -- the wakeup cannot slip into the gap
-        // between the waiter releasing the mutex inside wait() and finishing its
+        // between the waiter releasing the mutex inside wait and finishing its
         // CV enqueue. Hardening (not the root cause of this task's crash, which
         // was a FastNoise SIMD over-read), kept because it is the correct idiom.
         std::lock_guard<std::mutex> lock(completion->mutex);
@@ -78,13 +78,13 @@ void complete_job(const std::shared_ptr<JobCompletionState>& completion) {
 
 } // namespace
 
-// T-I4-17-jobsystem-pod-pool: run one pooled slot and complete its batch. The
+// run one pooled slot and complete its batch. The
 // completion decrement runs on EVERY exit path (normal return or a throwing
-// job) so the batch barrier in wait() always drains -- this replaces the
+// job) so the batch barrier in wait always drains -- this replaces the
 // per-job CompletionGuard lambda the old dispatch_batch wrapped each job in.
 // A member (declared in the header) so it can name the private PooledJob type.
 void JobSystem::run_slot(PooledJob& slot) {
-    // Take ownership locally so the slot can be cleared even if job() throws.
+    // Take ownership locally so the slot can be cleared even if job throws.
     Job job = std::move(slot.job);
     std::shared_ptr<JobCompletionState> completion = std::move(slot.completion);
     slot.job = nullptr;
@@ -92,7 +92,9 @@ void JobSystem::run_slot(PooledJob& slot) {
 
     struct Finisher {
         std::shared_ptr<JobCompletionState> completion;
-        ~Finisher() { complete_job(completion); }
+        ~Finisher() {
+            complete_job(completion);
+        }
     } finisher{std::move(completion)};
 
     if (job) {
@@ -101,8 +103,8 @@ void JobSystem::run_slot(PooledJob& slot) {
 }
 
 // ---- PooledQueue --------------------------------------------------------
-// T-I4-17-jobsystem-pod-pool: a pre-sized ring of PooledJob slots replacing the
-// std::queue<Job>. push() into an already-grown lane and pop() are both
+// a pre-sized ring of PooledJob slots replacing the
+// std::queue<Job>. push into an already-grown lane and pop are both
 // allocation-free; growth doubles capacity (never shrinks) so steady-state
 // dispatch reuses slots. All calls are serialized by JobSystem::m_queue_mutex.
 
@@ -143,7 +145,7 @@ void JobSystem::PooledQueue::push(PooledJob&& slot) {
 }
 
 JobSystem::PooledJob JobSystem::PooledQueue::pop() {
-    // Caller guarantees !empty().
+    // Caller guarantees !empty.
     PooledJob out = std::move(m_slots[m_head]);
     // Release any state the vacated slot still references so a long-lived ring
     // does not pin shared_ptrs / lambda captures between reuses.
@@ -155,8 +157,8 @@ JobSystem::PooledJob JobSystem::PooledQueue::pop() {
 }
 
 JobSystem::PooledJob JobSystem::PooledQueue::pop_at(std::size_t offset) {
-    // Caller guarantees offset < size(). Swap the selected slot to the front
-    // and pop — the displaced front job is served later (the FR-D-002 service-
+    // Caller guarantees offset < size. Swap the selected slot to the front
+    // and pop — the displaced front job is served later (the  service-
     // order perturbation); ring invariants (head/tail/size) are untouched.
     const std::size_t index = (m_head + offset) % m_slots.size();
     if (index != m_head) {
@@ -191,7 +193,7 @@ void JobSystem::startup(std::size_t worker_count) {
         m_accepting_jobs = true;
         m_consecutive_high_served = 0;
 
-        // SHIELD-07/OPS-13 (spec 018 FR-D-002): opt-in adversarial job-service
+        // opt-in adversarial job-service
         // throttle. Read ONCE at startup (mirrors LUMINUMBRA_JOB_WORKERS);
         // unset/empty/0 = off = one predictable branch at the pop site.
         m_throttle_enabled = false;
@@ -212,7 +214,8 @@ void JobSystem::startup(std::size_t worker_count) {
     }
     if (m_throttle_enabled) {
         LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) +
-            " threads (FR-D-002 throttle armed, seed " + std::to_string(m_throttle_seed) + ").");
+                             " threads (throttle armed, seed " + std::to_string(m_throttle_seed) +
+                             ").");
     } else {
         LUMINUMBRA_CORE_INFO("JobSystem started with " + std::to_string(num_threads) + " threads.");
     }
@@ -248,19 +251,21 @@ JobSystem::PooledQueue& JobSystem::queue_for(JobPriority priority) {
 }
 
 JobSystem::PooledJob JobSystem::throttled_pop(PooledQueue& queue) {
-    // Caller holds m_queue_mutex and guarantees !queue.empty().
+    // Caller holds m_queue_mutex and guarantees !queue.empty.
     if (!m_throttle_enabled) {
         return queue.pop();
     }
     // SplitMix64 over (seed, pop counter): a seeded, wall-clock-free selection
-    // from a small window at the head. Adversarial to service order (spec 018
-    // FR-D-002 / OQ-2: the throttle must REORDER, not merely slow) while
+    // from a small window at the head. Adversarial to service order (
+    // the throttle must REORDER, not merely slow) while
     // repeatable for a given seed and arrival sequence. The matrix asserts sim
     // hashes are INVARIANT under it.
     constexpr std::size_t kThrottleWindow = 8;
     std::uint64_t x = m_throttle_seed + 0x9E3779B97F4A7C15ull * (++m_throttle_pop_counter);
-    x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
-    x ^= x >> 27; x *= 0x94D049BB133111EBull;
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBull;
     x ^= x >> 31;
     const std::size_t window = std::min(queue.size(), kThrottleWindow);
     return queue.pop_at(static_cast<std::size_t>(x % window));
@@ -275,7 +280,7 @@ void JobSystem::dispatch(Job job, JobPriority priority) {
     {
         std::unique_lock<std::mutex> lock(m_queue_mutex);
         if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
-            // T-I4-17-jobsystem-pod-pool: store the caller's Job directly in a
+            // store the caller's Job directly in a
             // pooled slot (no second std::function wrapper). Single dispatch has
             // no completion handle.
             queue_for(priority).push(PooledJob{std::move(job), nullptr});
@@ -297,7 +302,8 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
     }
 
     auto completion = std::make_shared<JobCompletionState>(static_cast<int>(jobs.size()));
-    JobHandle handle{std::shared_ptr<std::atomic<int>>(completion, &completion->counter), completion};
+    JobHandle handle{std::shared_ptr<std::atomic<int>>(completion, &completion->counter),
+                     completion};
     bool accepted = false;
 
     {
@@ -305,7 +311,7 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
         if (m_accepting_jobs && !m_stop_threads.load(std::memory_order_acquire)) {
             PooledQueue& queue = queue_for(priority);
             for (const auto& job : jobs) {
-                // T-I4-17-jobsystem-pod-pool: each slot carries the caller's Job
+                // each slot carries the caller's Job
                 // and a shared completion handle. The worker decrements the
                 // counter via run_slot's Finisher on every exit path -- the old
                 // per-job CompletionGuard lambda (which forced a heap-allocated
@@ -317,9 +323,9 @@ JobHandle JobSystem::dispatch_batch(const std::vector<Job>& jobs, JobPriority pr
     }
 
     if (!accepted) {
-        // T-I4-DR-server-streaming-race: same lost-wakeup discipline as
+        // same lost-wakeup discipline as
         // complete_job -- drop the counter to 0 and notify with completion->mutex
-        // HELD so a waiter that called wait() concurrently with this rejection
+        // HELD so a waiter that called wait concurrently with this rejection
         // cannot miss the wakeup.
         {
             std::lock_guard<std::mutex> lock(completion->mutex);
@@ -379,7 +385,8 @@ void JobSystem::worker_loop() {
             // arrives behind a long High burst is served promptly.
             const bool high_available = !m_high_queue.empty();
             const bool normal_available = !m_normal_queue.empty();
-            const bool serve_normal = normal_available &&
+            const bool serve_normal =
+                normal_available &&
                 (!high_available || m_consecutive_high_served >= kNormalServiceInterval);
 
             if (serve_normal) {
@@ -391,13 +398,14 @@ void JobSystem::worker_loop() {
             }
         }
 
-        // T-I4-17-jobsystem-pod-pool: run outside the queue lock. run_slot
+        // run outside the queue lock. run_slot
         // completes the batch (Finisher) on both the normal and throwing paths,
-        // so the completion barrier in wait() drains exactly as before.
+        // so the completion barrier in wait drains exactly as before.
         try {
             run_slot(slot);
         } catch (const std::exception& exception) {
-            LUMINUMBRA_CORE_ERROR("JobSystem worker caught job exception: " + std::string(exception.what()));
+            LUMINUMBRA_CORE_ERROR("JobSystem worker caught job exception: " +
+                                  std::string(exception.what()));
         } catch (...) {
             LUMINUMBRA_CORE_ERROR("JobSystem worker caught unknown job exception.");
         }

@@ -1,6 +1,6 @@
 #pragma once
 
-// Resolution-relative visual-gate threshold scaling (T-I6 capture-native re-bless).
+// Resolution-relative visual-gate threshold scaling ( capture-native update the baseline).
 //
 // Pixel-ROI gate thresholds in RuntimeScenarioHarness were tuned at a fixed base
 // resolution. When the pinned capture size is raised to a native display
@@ -41,4 +41,4 @@ inline long long ScalePinnedHeight(long long base, int h) {
                         static_cast<double>(kThresholdTuningHeight));
 }
 
-}  // namespace Luminumbra::Client::ScenarioHarness
+} // namespace Luminumbra::Client::ScenarioHarness

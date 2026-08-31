@@ -51,12 +51,11 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/DebugViewPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SsaoPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterPass.cpp
-    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShieldRtFarFieldPass.cpp
 
     # World (client-side)
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenOverride.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenPreview.cpp
-    # RENDER-20: world-dressing placement computation (extracted from main_client's
+    # world-dressing placement computation (extracted from main_client's
     # first-IN_GAME-frame scatter/wildlife bring-up; runs on a background job).
     ${CMAKE_CURRENT_LIST_DIR}/WorldDressing.cpp
 
@@ -72,7 +71,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIHotReload.cpp
     ${CMAKE_CURRENT_LIST_DIR}/ui/core/UIStateManager.cpp
     # RmlUi reference GL3 backend (vendored copy of the 6.1 renderer). It implements the
-    # layered/filter/clip-mask render API the hand-rolled RmlRenderer stubbed out, so
+    # layered/filter/clip-mask render API absent from the old renderer, so
     # backdrop-filter / filter / box-shadow actually render. Compiled against the engine's
     # own glad loader via RMLUI_GL3_CUSTOM_LOADER (set below) instead of its bundled glad.
     ${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.cpp
@@ -100,7 +99,7 @@ set(CLIENT_SOURCES
     ${CLIENT_APP_SOURCES}
 )
 
-# T-I3-18: RuntimeScenarioHarness.cpp instantiates enough EnTT storage
+# RuntimeScenarioHarness.cpp instantiates enough EnTT storage
 # templates (debug, no inlining) to overflow the default COFF section limit
 # on MinGW; -mbig-obj lifts it (same pattern googletest/nlohmann use).
 # main_client.cpp is a large monolith that likewise overflows once it gains more

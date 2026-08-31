@@ -1,9 +1,9 @@
-// I9-ECO COMPOSED-PIPELINE determinism: the per-system tests prove each system is run==replay
+//  COMPOSED-PIPELINE determinism: the per-system tests prove each system is run==replay
 // in isolation, but the integrated STACK (brain -> mate-seek -> steering consumer -> sexual
 // reproduction -> lifespan -> decomposition -> herd alarm -> pack -> migration -> territory),
 // run in GameSession's deterministic slot order, must ALSO be byte-exact run==replay -- so that
 // e2e determinism holds. This composes the sim systems (no world/physics) on a registry carrying
-// the full §4 component set and asserts two identical runs produce identical state.
+// the full  component set and asserts two identical runs produce identical state.
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -12,27 +12,27 @@
 #include <entt/entt.hpp>
 
 #include "ai/CreatureBrainSystem.h"
-#include "ai/WildlifeFoliageSystem.h"   // INSTINCT-04: the live feeding loop
-#include "systems/FarmingSystem.h"      // MakePlantFromSpecies (the sim wiring point)
-#include "ai/ScentField.h"              // INSTINCT-08: the stigmergy substrate
-#include "ai/ScentDepositSystem.h"      // INSTINCT-08: prey deposits
-#include "components/InstinctComponents.h" // SensableComponent
 #include "ai/CreatureReproductionSystem.h"
+#include "ai/DecompositionSystem.h"
 #include "ai/HerdAlarmSystem.h"
 #include "ai/LifespanSystem.h"
-#include "ai/DecompositionSystem.h"
-#include "ai/PredatorPackSystem.h"
 #include "ai/MigrationSystem.h"
-#include "ai/TerritorySystem.h"
+#include "ai/PredatorPackSystem.h"
+#include "ai/ScentDepositSystem.h" // prey deposits
+#include "ai/ScentField.h"         // the stigmergy substrate
 #include "ai/SteeringConsumer.h"
+#include "ai/TerritorySystem.h"
+#include "ai/WildlifeFoliageSystem.h" // the live feeding loop
+#include "components/AlarmComponents.h"
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
-#include "components/AlarmComponents.h"
-#include "components/MortalComponents.h"
 #include "components/DecayComponents.h"
-#include "components/PackHunterComponents.h"
+#include "components/InstinctComponents.h" // SensableComponent
 #include "components/MigratoryComponents.h"
+#include "components/MortalComponents.h"
+#include "components/PackHunterComponents.h"
 #include "components/TerritoryComponents.h"
+#include "systems/FarmingSystem.h" // MakePlantFromSpecies (the sim wiring point)
 
 namespace {
 
@@ -42,10 +42,10 @@ namespace Comp = ::Luminumbra::Components;
 // non-hashed layer; here every creature uses the brain's direct X/Z integration).
 void EcologyTick(entt::registry& r, std::uint64_t tick) {
     constexpr float dt = 1.0f / 30.0f;
-    luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt);     // decide + move (bodyless)
-    luminumbra::ai::RunMateSeekingOnTick(r);                 // 2e-mate A
-    luminumbra::ai::RunSteeringConsumerOnTick(r);            // 2e-steer
-    luminumbra::ai::RunMatingResolveOnTick(r, tick);        // 2e-mate B
+    luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt); // decide + move (bodyless)
+    luminumbra::ai::RunMateSeekingOnTick(r);             // 2e-mate A
+    luminumbra::ai::RunSteeringConsumerOnTick(r);        // 2e-steer
+    luminumbra::ai::RunMatingResolveOnTick(r, tick);     // 2e-mate B
     luminumbra::ai::RunHerdAlarmOnTick(r, dt);
     luminumbra::ai::RunLifespanOnTick(r, tick);
     luminumbra::ai::RunDecompositionOnTick(r, tick);
@@ -61,7 +61,9 @@ void Populate(entt::registry& r) {
         auto& tf = r.emplace<Comp::TransformComponent>(e);
         tf.position = Luminumbra::Vec3(x, 0.0f, z);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
-        cr.is_predator = true; cr.hunger = 0.9f; cr.move_speed = 4.2f;
+        cr.is_predator = true;
+        cr.hunger = 0.9f;
+        cr.move_speed = 4.2f;
         r.emplace<Comp::PackHunterComponent>(e);
         r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 5000u;
     };
@@ -71,9 +73,13 @@ void Populate(entt::registry& r) {
         auto& tf = r.emplace<Comp::TransformComponent>(e);
         tf.position = Luminumbra::Vec3(x, 0.0f, z);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
-        cr.is_predator = false; cr.hunger = 0.05f; cr.stamina = 1.0f; cr.move_speed = 3.0f;
+        cr.is_predator = false;
+        cr.hunger = 0.05f;
+        cr.stamina = 1.0f;
+        cr.move_speed = 3.0f;
         auto& gn = r.emplace<Comp::CreatureGenomeComponent>(e);
-        gn.female = (idx++ % 2 == 0); gn.age_ticks = 100u;
+        gn.female = (idx++ % 2 == 0);
+        gn.age_ticks = 100u;
         r.emplace<Comp::AlarmComponent>(e);
         r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 600u;
         r.emplace<Comp::DecayComponent>(e).decay_duration = 90u;
@@ -81,8 +87,10 @@ void Populate(entt::registry& r) {
         r.emplace<Comp::TerritoryComponent>(e);
         r.emplace<Comp::TerritoryBiasComponent>(e);
     };
-    pred(-6.0f, 9.0f); pred(6.0f, 9.0f);
-    for (int i = 0; i < 6; ++i) prey(-7.0f + i * 2.4f, -2.0f);
+    pred(-6.0f, 9.0f);
+    pred(6.0f, 9.0f);
+    for (int i = 0; i < 6; ++i)
+        prey(-7.0f + i * 2.4f, -2.0f);
 }
 
 // Snapshot all hashable creature state into a flat vector (entity-id sorted -> stable order).
@@ -97,13 +105,22 @@ std::vector<float> Snapshot(entt::registry& r) {
     for (auto e : es) {
         const auto& tf = r.get<Comp::TransformComponent>(e);
         const auto& cr = r.get<Comp::CreatureComponent>(e);
-        out.insert(out.end(), {tf.position.x, tf.position.y, tf.position.z,
-                               cr.wish_x, cr.wish_z, cr.hunger, cr.stamina,
-                               static_cast<float>(cr.eaten)});
+        out.insert(out.end(),
+                   {tf.position.x,
+                    tf.position.y,
+                    tf.position.z,
+                    cr.wish_x,
+                    cr.wish_z,
+                    cr.hunger,
+                    cr.stamina,
+                    static_cast<float>(cr.eaten)});
         if (const auto* gn = r.try_get<Comp::CreatureGenomeComponent>(e))
-            out.insert(out.end(), {gn->move_speed, static_cast<float>(gn->generation),
-                                   static_cast<float>(gn->age_ticks)});
-        if (const auto* al = r.try_get<Comp::AlarmComponent>(e)) out.push_back(al->level);
+            out.insert(out.end(),
+                       {gn->move_speed,
+                        static_cast<float>(gn->generation),
+                        static_cast<float>(gn->age_ticks)});
+        if (const auto* al = r.try_get<Comp::AlarmComponent>(e))
+            out.push_back(al->level);
         if (const auto* pk = r.try_get<Comp::PackHunterComponent>(e))
             out.insert(out.end(), {pk->coord_x, pk->coord_z, static_cast<float>(pk->in_pack)});
     }
@@ -113,7 +130,8 @@ std::vector<float> Snapshot(entt::registry& r) {
 std::vector<float> RunPipeline(int ticks) {
     entt::registry r;
     Populate(r);
-    for (int t = 0; t < ticks; ++t) EcologyTick(r, static_cast<std::uint64_t>(t));
+    for (int t = 0; t < ticks; ++t)
+        EcologyTick(r, static_cast<std::uint64_t>(t));
     return Snapshot(r);
 }
 
@@ -122,7 +140,7 @@ TEST(EcologyPipeline, DeterministicOverManyTicks) {
     EXPECT_EQ(RunPipeline(400), RunPipeline(400));
 }
 
-// INSTINCT-08 (Wave H I2.3): SCENT HUNTING. With wind advection ON, a predator
+//  ( scent tracking): SCENT HUNTING. With wind advection ON, a predator
 // whose sensory genome CANNOT directly perceive distant prey (short vision +
 // hearing) closes on it along the wind-advected prey-scent gradient — the
 // vertebrate stigmergy loop on the brain path. Deterministic run==replay.
@@ -137,7 +155,9 @@ TEST(ScentHunt, PredatorTracksPreyUpwind) {
         const auto prey = r.create();
         r.emplace<Comp::TransformComponent>(prey).position = Luminumbra::Vec3(40.0f, 0.0f, 0.0f);
         auto& pc = r.emplace<Comp::CreatureComponent>(prey);
-        pc.is_predator = false; pc.move_speed = 0.0f; pc.hunger = 0.0f;
+        pc.is_predator = false;
+        pc.move_speed = 0.0f;
+        pc.hunger = 0.0f;
         auto& sn = r.emplace<Comp::SensableComponent>(prey);
         sn.scent_channel = 0;
         sn.scent_deposit = 1.0f;
@@ -145,65 +165,71 @@ TEST(ScentHunt, PredatorTracksPreyUpwind) {
         const auto pred = r.create();
         r.emplace<Comp::TransformComponent>(pred).position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
         auto& dc = r.emplace<Comp::CreatureComponent>(pred);
-        dc.is_predator = true; dc.hunger = 0.7f; dc.move_speed = 3.0f;
+        dc.is_predator = true;
+        dc.hunger = 0.7f;
+        dc.move_speed = 3.0f;
         auto& gn = r.emplace<Comp::CreatureGenomeComponent>(pred);
-        gn.vision_range = 10.0f;   // prey at 40 m: invisible
-        gn.hearing_range = 8.0f;   //             : inaudible
+        gn.vision_range = 10.0f; // prey at 40 m: invisible
+        gn.hearing_range = 8.0f; // inaudible
         constexpr float dt = 1.0f / 30.0f;
         float dist_start = 40.0f, dist_end = 40.0f;
         for (int t = 0; t < 600; ++t) {
             luminumbra::ai::RunScentDepositOnTick(r, field, ox, oz, kCell);
             // Wind blows the scent FROM the prey TOWARD the predator (-X), laying
             // the advected trail the predator climbs.
-            field.Step(/*diffusion=*/0.10, /*iters=*/1, /*evaporation=*/0.01,
-                       /*wind_cx=*/-0.4, /*wind_cz=*/0.0);
+            field.Step(/*diffusion=*/0.10,
+                       /*iters=*/1,
+                       /*evaporation=*/0.01,
+                       /*wind_cx=*/-0.4,
+                       /*wind_cz=*/0.0);
             luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt, {}, &field, ox, oz, kCell);
             const auto& tp = r.get<Comp::TransformComponent>(pred).position;
             const auto& yp = r.get<Comp::TransformComponent>(prey).position;
             const float dx = yp.x - tp.x, dz = yp.z - tp.z;
             const float d = std::sqrt(dx * dx + dz * dz);
-            if (t == 0) dist_start = d;
+            if (t == 0)
+                dist_start = d;
             dist_end = d;
         }
         return std::pair<float, float>(dist_start, dist_end);
     };
     const auto [d0, d1] = run();
     EXPECT_LT(d1, d0 - 10.0f)
-        << "the predator did not close on the prey along the scent gradient (start "
-        << d0 << " m, end " << d1 << " m)";
+        << "the predator did not close on the prey along the scent gradient (start " << d0
+        << " m, end " << d1 << " m)";
     // run==replay: the scent-tracking loop is byte-exact.
     const auto again = run();
     EXPECT_EQ(d0, again.first);
     EXPECT_EQ(d1, again.second);
 }
 
-// INSTINCT-06 (Wave H I2.2): starvation DEGRADES, then KILLS, then the carcass
+//  ( starvation handling): starvation DEGRADES, then KILLS, then the carcass
 // DECAYS. A lone mortal creature with no food: as hunger crosses the 0.85
 // degradation band its effective speed (|wish|) measurably drops below cruise;
 // at hunger 1.0 the LifespanSystem marks it dead + eaten; the DecayComponent
 // then progresses the carcass. Deterministic run==replay. (Subject is a lone
 // predator — see the fixture comment for why prey can't sample this since the
-// Wave H graze arbiter.)
+//  graze arbiter.)
 TEST(EcologyPipeline, StarvationDegradesThenKills) {
     auto run = [] {
         entt::registry r;
         // Subject: a LONE PREDATOR with no prey. Why a predator and not the
-        // herbivore this test originally used? Since the Wave H arbiter (INSTINCT-04/
+        // herbivore this test originally used? Since the  arbiter (/
         // 05), a starving PREY correctly Grazes ambient plants (food_proximity is a
         // hardcoded 0.6 for prey) rather than moving — a zero-velocity action, so the
         // starving-band |wish| sample was vacuous. A predator with no prey has
         // food_proximity 0, so Hunt/Graze score ~0 and Wander (the constant baseline)
         // wins at every hunger — giving a sustained, measurable |wish| that isolates
-        // the pure INSTINCT-06 locomotion degradation (starve_degrade), which is
+        // the pure  locomotion degradation (starve_degrade), which is
         // exactly what this test verifies. LifespanSystem's starvation death (hunger
         // >= 1.0 -> dead + eaten) is role-agnostic, so the die+carcass arc is intact.
         const auto e = r.create();
         r.emplace<Comp::TransformComponent>(e).position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
         auto& cr = r.emplace<Comp::CreatureComponent>(e);
         cr.is_predator = true;
-        cr.hunger = 0.80f;      // just below the degradation band
+        cr.hunger = 0.80f; // just below the degradation band
         cr.move_speed = 3.0f;
-        cr.stamina = 1.0f;      // full (see the zero move-drain tuning below)
+        cr.stamina = 1.0f; // full (see the zero move-drain tuning below)
         r.emplace<Comp::MortalComponent>(e).lifespan_ticks = 1000000u; // starvation, not old age
         r.emplace<Comp::DecayComponent>(e).decay_duration = 60u;
 
@@ -222,12 +248,15 @@ TEST(EcologyPipeline, StarvationDegradesThenKills) {
             luminumbra::ai::RunDecompositionOnTick(r, t);
             const auto& c = r.get<Comp::CreatureComponent>(e);
             const float sp = std::sqrt(c.wish_x * c.wish_x + c.wish_z * c.wish_z);
-            if (healthy_speed < 0.0f && c.hunger < 0.85f && sp > 0.1f) healthy_speed = sp;
-            if (c.hunger > 0.97f && c.hunger < 1.0f && sp > 0.1f) starving_speed = sp;
-            if (r.get<Comp::MortalComponent>(e).dead != 0) death_tick = t;
+            if (healthy_speed < 0.0f && c.hunger < 0.85f && sp > 0.1f)
+                healthy_speed = sp;
+            if (c.hunger > 0.97f && c.hunger < 1.0f && sp > 0.1f)
+                starving_speed = sp;
+            if (r.get<Comp::MortalComponent>(e).dead != 0)
+                death_tick = t;
         }
-        return std::make_tuple(healthy_speed, starving_speed, death_tick,
-                               r.get<Comp::CreatureComponent>(e).eaten);
+        return std::make_tuple(
+            healthy_speed, starving_speed, death_tick, r.get<Comp::CreatureComponent>(e).eaten);
     };
     const auto [healthy, starving, death_tick, eaten] = run();
     ASSERT_GT(healthy, 0.0f) << "the creature never moved while healthy (vacuous)";
@@ -244,7 +273,7 @@ TEST(EcologyPipeline, StarvationDegradesThenKills) {
     EXPECT_EQ(death_tick, std::get<2>(again));
 }
 
-// INSTINCT-04 (Wave H I2.1): the LIVE feeding loop. Real plants (the
+//  ( live feeding): the LIVE feeding loop. Real plants (the
 // MakePlantFromSpecies wiring point) now carry GrazeableComponent, so a hungry
 // herd standing on a patch DRAWS DOWN its standing biomass and sates its hunger
 // through kFeedPerGraze — the previously wired-but-dormant WildlifeFoliageSystem
@@ -267,7 +296,7 @@ TEST(EcologyPipeline, GrazeDepletesLiveBiomass) {
         // The wiring-point contract: a real plant IS grazeable.
         for (auto p : plants) {
             EXPECT_TRUE(r.all_of<Comp::GrazeableComponent>(p))
-                << "MakePlantFromSpecies must emplace GrazeableComponent (INSTINCT-04)";
+                << "MakePlantFromSpecies must emplace GrazeableComponent ()";
         }
         // A hungry herd standing right on the patch (no movement needed).
         std::vector<entt::entity> herd;
@@ -284,8 +313,10 @@ TEST(EcologyPipeline, GrazeDepletesLiveBiomass) {
             luminumbra::ai::RunWildlifeFoliageOnTick(r, static_cast<std::uint64_t>(t));
         }
         float biomass = 0.0f, hunger = 0.0f;
-        for (auto p : plants) biomass += r.get<Comp::GrazeableComponent>(p).biomass;
-        for (auto e : herd) hunger += r.get<Comp::CreatureComponent>(e).hunger;
+        for (auto p : plants)
+            biomass += r.get<Comp::GrazeableComponent>(p).biomass;
+        for (auto e : herd)
+            hunger += r.get<Comp::CreatureComponent>(e).hunger;
         return std::pair<float, float>(biomass, hunger);
     };
     const auto [biomass_after, hunger_after] = build_and_run(120);
@@ -307,7 +338,8 @@ TEST(EcologyPipeline, PopulationEvolves) {
     entt::registry r;
     Populate(r);
     const std::size_t start = r.view<Comp::CreatureComponent>().size();
-    for (int t = 0; t < 400; ++t) EcologyTick(r, static_cast<std::uint64_t>(t));
+    for (int t = 0; t < 400; ++t)
+        EcologyTick(r, static_cast<std::uint64_t>(t));
     const std::size_t end = r.view<Comp::CreatureComponent>().size();
     EXPECT_NE(start, end) << "the ecology should birth and/or cull creatures over 400 ticks";
 }
@@ -315,8 +347,9 @@ TEST(EcologyPipeline, PopulationEvolves) {
 // An empty world ticks to a no-op (the whole stack is gated).
 TEST(EcologyPipeline, EmptyRosterNoOp) {
     entt::registry r;
-    for (int t = 0; t < 20; ++t) EcologyTick(r, static_cast<std::uint64_t>(t));
+    for (int t = 0; t < 20; ++t)
+        EcologyTick(r, static_cast<std::uint64_t>(t));
     EXPECT_EQ(r.view<Comp::CreatureComponent>().size(), 0u);
 }
 
-}  // namespace
+} // namespace

@@ -15,18 +15,15 @@
 //   the status-quo scope), and the activation queue implements the deterministic
 //   availability contract.
 //
-//   OQ-1 (residency partition: compile-time type distinction vs runtime registry) is
-//   left open. This header declares the vocabulary (named tag types + a
-//   runtime enum) so downstream code may key on either, but it deliberately does NOT
-//   force a `Tagged<T, Class>` wrapper onto every hash-feeding signature — that invasive
-//   choice is reserved for a consuming implementation.
+//   The runtime registry is the authoritative partition. Named tag types remain available
+//   for compile-time APIs without forcing a wrapper onto every hash-feeding signature.
 
 #include <cstdint>
 
 namespace luminumbra::core {
 
 // ---------------------------------------------------------------------------------------
-// FR-A-001 — Declared residency partition.
+// Declared residency partition.
 //
 // Two residency classes, in one authoritative location:
 //   * SimResidency    — DETERMINISTIC. Its state MAY contribute to world_hash.
@@ -36,15 +33,15 @@ namespace luminumbra::core {
 // (SystemConfig.cpp:15): Section::Sim  <-> ResidencyClass::Sim  (may be hashed),
 //                        Section::Render<-> ResidencyClass::Render (render.* never hashed,
 //                        SystemConfig.cpp:223). Keeping the same rule here is the
-//                        "config residency parity" of FR-A-004.
+//                        "config residency parity" of .
 // ---------------------------------------------------------------------------------------
 enum class ResidencyClass : std::uint8_t {
-    Sim,     // deterministic; eligible to feed world_hash
-    Render,  // nondeterministic; forbidden from feeding world_hash
+    Sim,    // deterministic; eligible to feed world_hash
+    Render, // nondeterministic; forbidden from feeding world_hash
 };
 
 // Named tag types — the exact identifiers the spec's contract is checked against
-// (FR-A-001 / AC-A-001 spell `SimResidency` and `RenderResidency`). Empty structs:
+// ( /  spell `SimResidency` and `RenderResidency`). Empty structs:
 // they carry the class as a compile-time fact without imposing storage or wiring.
 // `kClass` lets generic code recover the runtime enum from the tag type.
 struct SimResidency {
@@ -55,7 +52,7 @@ struct RenderResidency {
 };
 
 // ---------------------------------------------------------------------------------------
-// FR-A-002 — Deterministic-input invariant (the predicate form).
+// Deterministic-input invariant (the predicate form).
 //
 // MayFeedWorldHash(c) is the single source of truth for "is this class allowed to
 // contribute to ComputeWorldHash / ComputeWorldSubHashes?" Only SimResidency may.
@@ -74,68 +71,7 @@ static_assert(!MayFeedWorldHash(RenderResidency::kClass),
               "RenderResidency must be forbidden from feeding world_hash");
 
 // ---------------------------------------------------------------------------------------
-// FR-B-001 — Deterministic availability set (the contract Spec 017-B consumes).
-//
-// A SimResidency value at a given sim tick must be derivable PURELY from the
-// deterministic inputs below — never from wall-clock, job-completion order, thread
-// scheduling, or GPU readback (FR-A-002). AvailabilityKey is exactly those inputs:
-//
-//   (seed, preset, deterministic-config, tick) + position
-//
-// matching the FR-A-002 enumeration. It is the stable, tick-keyed identity Spec 017-B's
-// activation queue keys on when it replaces the main-thread wait_for_streaming_jobs()
-// barrier (ServerWorldRunner.cpp:516/:546/:591) and the boot-settle of initial residency
-// (ServerWorldRunner.cpp:369-393) with async ownership: 017 may change HOW residency
-// settles, but the sim must still advance from this set — i.e. WHAT the sim sees per tick
-// stays a pure function of AvailabilityKey.
-//
-//   config_sub_hash carries the deterministic, sim-only-when-enabled config sub-hash
-//   (SystemConfig::ComputeConfigSubHash, SystemConfig.cpp:217-244): render.* is excluded
-//   (:223) and an all-sim-default config hashes to empty (:243), so an unconfigured world
-//   leaves this field as the empty-baseline sentinel (0) and the key is byte-stable.
-// ---------------------------------------------------------------------------------------
-struct AvailabilityKey {
-    std::uint64_t seed = 0;            // world seed (deterministic)
-    std::uint32_t preset_id = 0;       // worldgen preset identity (deterministic)
-    std::uint64_t config_sub_hash = 0; // deterministic config sub-hash; 0 == empty baseline
-    std::int64_t  tick = 0;            // sim tick index (deterministic clock)
-    std::int32_t  chunk_x = 0;         // residency position (chunk coords)
-    std::int32_t  chunk_y = 0;
-    std::int32_t  chunk_z = 0;
-
-    friend constexpr bool operator==(const AvailabilityKey& a,
-                                     const AvailabilityKey& b) noexcept {
-        return a.seed == b.seed && a.preset_id == b.preset_id &&
-               a.config_sub_hash == b.config_sub_hash && a.tick == b.tick &&
-               a.chunk_x == b.chunk_x && a.chunk_y == b.chunk_y && a.chunk_z == b.chunk_z;
-    }
-    friend constexpr bool operator!=(const AvailabilityKey& a,
-                                     const AvailabilityKey& b) noexcept {
-        return !(a == b);
-    }
-};
-
-// FR-B-001/FR-B-002 — the AVAILABILITY SET contract, declared (not implemented).
-//
-//   The deterministic availability set at tick T is the set of AvailabilityKeys whose
-//   residency has SETTLED for T (per-tick streaming barrier + boot-settle). Membership is
-//   a PURE function of AvailabilityKey only:
-//
-//       IsResident(key)  ::  pure fn of AvailabilityKey
-//                            — NEVER wall-clock, job-completion order, thread schedule,
-//                              or GPU readback.
-//
-//   A deterministic system reads only keys for which IsResident(key) holds (FR-B-002:
-//   since Spec 017-B landed, the ACTIVATION QUEUE — activate_due(tick) plus the explicit
-//   force drains at boot/hash/mutate/teardown — is the only legal availability source;
-//   the per-tick barrier it replaced was the original wording) and reads terrain through
-//   the pure sampler, never shared mutable streaming buffers (FR-B-004). Membership is
-//   implemented by the consuming system / Spec 017-B; this header only fixes the
-//   contract's SHAPE, so it stays behavior-neutral. The signature alias documents it:
-using IsResidentFn = bool (*)(const AvailabilityKey& key);
-
-// ---------------------------------------------------------------------------------------
-// FR-A-003 — "Enforced, not remembered" (SHIELD-06): the serialized-chunk-field
+// "Enforced, not remembered": the serialized-chunk-field
 // residency table.
 //
 // Every field ChunkToJson serializes is classified here, in the contract's one
@@ -182,30 +118,32 @@ inline constexpr ChunkFieldResidency kChunkFieldResidency[] = {
     {"pending_lod", ResidencyClass::Render},
     // Collision (built from the heightmap; hashed).
     {"has_collision", ResidencyClass::Sim},
-    // Water sim state. W2.3 (WATER-08, Bump B, 2026-07-05): the FIXED-POINT mm
+    // Water sim state. water residency (, derived-state reclassification, 2026-07-05): the
+    // FIXED-POINT mm
     // arrays are the ONLY water sim truth; the float surface/flow mirrors and the
     // float terrain cache are one-way DERIVED render state (every writer now
     // regenerates them FROM mm — source injection, displacement, resize, and the
     // solver's own mirror update), so hashing them was double-counting derived
     // bytes and coupling the hash to float derivation. Reclassified Render as the
-    // deliberate Bump B. max_water_delta_last_tick stays Sim: it is written from
+    // deliberate derived-state reclassification. max_water_delta_last_tick stays Sim: it is written
+    // from
     // the integer mm delta and gates the sleep bookkeeping (evolution-relevant).
     {"water_level_data", ResidencyClass::Render},
     {"water_flow_data", ResidencyClass::Render},
     {"water_sim_terrain_height", ResidencyClass::Render},
     {"water_depth_mm", ResidencyClass::Sim},
     {"water_bed_mm", ResidencyClass::Sim},
-    // WATER-17/WATER-13 (Bump A): flow momentum — evolution-relevant integer sim
+    // / (authoritative-state change): flow momentum — evolution-relevant integer sim
     // truth, persisted + hashed (it was transient/cleared-on-load before, which made
     // the heavy oracle's resim leg diverge).
     {"water_edge_flux", ResidencyClass::Sim},
     {"has_water_sim", ResidencyClass::Sim},
-    // Water bookkeeping. WATER-17 resolved the parked question: water_mesh_generated
+    // Water bookkeeping.  resolved the parked question: water_mesh_generated
     // and water_mesh_dirty_ticks are MESHING bookkeeping mutated by the (worker-order-
     // dependent, render-side) mesh pipeline — the loaded-boot remesh flips them while
     // the water sim itself is paused, so hashing them makes the save/load water
-    // round-trip impossible. Reclassified Render as the deliberate WATER-17 bump
-    // (Bump A). The sleep/threshold fields stay Sim: they gate which chunks the
+    // round-trip impossible. Reclassified Render as the deliberate  bump
+    // (authoritative-state change). The sleep/threshold fields stay Sim: they gate which chunks the
     // solver steps (evolution-relevant) and are only ever written by the solver.
     {"water_mesh_generated", ResidencyClass::Render},
     {"current_water_resolution", ResidencyClass::Sim},
@@ -216,4 +154,4 @@ inline constexpr ChunkFieldResidency kChunkFieldResidency[] = {
     {"water_state", ResidencyClass::Sim},
 };
 
-}  // namespace luminumbra::core
+} // namespace luminumbra::core

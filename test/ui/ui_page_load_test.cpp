@@ -1,4 +1,4 @@
-// T008 — UI page-load test.
+// UI page-load test.
 //
 // Loads every shipped RmlUi document the same way ui_smoke_test does: through a
 // live Rml_UIManager backed by a hidden, real OpenGL context. For each document
@@ -13,8 +13,9 @@
 
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <RmlUi/Core.h>
 
@@ -33,7 +34,7 @@ namespace {
 #endif
 
 // Hidden, real OpenGL context — identical setup to ui_smoke_test so RmlUi's GL
-// render interface initializes. ready() == false means GL is unavailable and the
+// render interface initializes. ready == false means GL is unavailable and the
 // test should skip rather than fail.
 class HiddenGlContext {
 public:
@@ -73,9 +74,15 @@ public:
         }
     }
 
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
-    GLFWwindow* window() const { return m_window; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
+    GLFWwindow* window() const {
+        return m_window;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -121,9 +128,9 @@ TEST(UiPageLoadTest, EveryShippedDocumentLoadsWithAPopulatedBody) {
     ASSERT_NE(ui.GetContext(), nullptr);
 
     struct PageSpec {
-        const char* path;     // relative to data/ui
-        const char* body_id;  // authored <body id="...">
-        bool optional;        // skip the check if the file is not shipped
+        const char* path;    // relative to data/ui
+        const char* body_id; // authored <body id="...">
+        bool optional;       // skip the check if the file is not shipped
     };
 
     const std::vector<PageSpec> pages = {
@@ -142,7 +149,7 @@ TEST(UiPageLoadTest, EveryShippedDocumentLoadsWithAPopulatedBody) {
         const fs::path document_path = source_root / "data/ui" / page.path;
         if (!fs::exists(document_path)) {
             if (page.optional) {
-                continue;  // not shipped — nothing to check
+                continue; // not shipped — nothing to check
             }
             ADD_FAILURE() << "required document missing: " << document_path.string();
             continue;
@@ -152,9 +159,8 @@ TEST(UiPageLoadTest, EveryShippedDocumentLoadsWithAPopulatedBody) {
         ui.Update();
 
         Rml::ElementDocument* document = FindDocumentByBodyId(ui.GetContext(), page.body_id);
-        ASSERT_NE(document, nullptr)
-            << page.path << " — LoadDocument returned null or body #" << page.body_id
-            << " was not parsed";
+        ASSERT_NE(document, nullptr) << page.path << " — LoadDocument returned null or body #"
+                                     << page.body_id << " was not parsed";
 
         // The document IS the <body> element in RmlUi's tree. A parsed page must
         // contain at least one child element.

@@ -1,6 +1,6 @@
 #pragma once
 
-// Track game.objectives — the pillar-G PROGRESSION layer that sits on top of the codex
+// game.objectives: the photography PROGRESSION layer that sits on top of the codex
 // and gives the player a REASON to photograph: a set of objectives ("discover N species",
 // "get a 4-star shot of the flagship creature", "build a collection worth X") each evaluated
 // as a PURE function of the PhotoCodex state. Completing them is what turns "walk around
@@ -20,43 +20,45 @@
 #include <string>
 #include <vector>
 
-#include "PhotoCodex.h"     // PhotoCodex / CodexEntry
-#include "PhotoSession.h"   // StarsForTotal (0..5 from a [0,1] total)
+#include "PhotoCodex.h"   // PhotoCodex / CodexEntry
+#include "PhotoSession.h" // StarsForTotal (0..5 from a [0,1] total)
 
 namespace luminumbra::game {
 
 // What an objective measures. Kept small + explicit so evaluation is a pure switch.
 enum class ObjectiveKind : std::uint8_t {
-    DiscoverCount = 0,  // discover at least `target_count` distinct species
-    DiscoverSpecies,    // discover the species `species_id`
-    StarRating,         // own a >= `min_stars` shot of species `species_id`
-    CollectionScore,    // reach a total collection score of `min_score`
-    BehavioralMatch,    // capture a subject performing `target_action` (a brain action
-                        // value; if `species_id` > 0, of that species — else any species)
+    DiscoverCount = 0, // discover at least `target_count` distinct species
+    DiscoverSpecies,   // discover the species `species_id`
+    StarRating,        // own a >= `min_stars` shot of species `species_id`
+    CollectionScore,   // reach a total collection score of `min_score`
+    BehavioralMatch,   // capture a subject performing `target_action` (a brain action
+                       // value; if `species_id` > 0, of that species — else any species)
 };
 
 // One objective. `title` is the player-facing line; the params are interpreted per kind.
 struct Objective {
-    int          id = 0;                            // stable ordering / save key
+    int id = 0; // stable ordering / save key
     ObjectiveKind kind = ObjectiveKind::DiscoverCount;
-    std::string  title;
-    int          target_count = 0;                  // DiscoverCount
-    int          species_id = 0;                    // DiscoverSpecies / StarRating / BehavioralMatch (0 = any)
-    int          min_stars = 0;                     // StarRating (0..5)
-    float        min_score = 0.0f;                  // CollectionScore
-    int          target_action = -1;                // BehavioralMatch: brain action value (<0 = unset)
+    std::string title;
+    int target_count = 0;   // DiscoverCount
+    int species_id = 0;     // DiscoverSpecies / StarRating / BehavioralMatch (0 = any)
+    int min_stars = 0;      // StarRating (0..5)
+    float min_score = 0.0f; // CollectionScore
+    int target_action = -1; // BehavioralMatch: brain action value (<0 = unset)
 };
 
 // The evaluated state of one objective against a codex.
 struct ObjectiveStatus {
-    bool  complete = false;
-    float progress = 0.0f;  // [0,1] — fraction of the way to completion
+    bool complete = false;
+    float progress = 0.0f; // [0,1] — fraction of the way to completion
 };
 
 // Pure clamp (mirrors the libraries' helper; float +-*/ only).
 inline float ObjectiveClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -64,7 +66,8 @@ inline float ObjectiveClamp01(float v) {
 // id-sorted entries (small N) — pure, order-stable.
 inline float CodexBestScore(const PhotoCodex& codex, int species_id) {
     for (const CodexEntry& e : codex.entries()) {
-        if (e.species_id == species_id) return e.best_score;
+        if (e.species_id == species_id)
+            return e.best_score;
     }
     return 0.0f;
 }
@@ -120,16 +123,23 @@ inline ObjectiveStatus EvaluateObjective(const Objective& o, const PhotoCodex& c
 // codex; it just reports against a codex snapshot.
 class ObjectiveSet {
 public:
-    void Add(const Objective& o) { objectives_.push_back(o); }
+    void Add(const Objective& o) {
+        objectives_.push_back(o);
+    }
 
-    [[nodiscard]] const std::vector<Objective>& all() const { return objectives_; }
-    [[nodiscard]] std::size_t size() const { return objectives_.size(); }
+    [[nodiscard]] const std::vector<Objective>& all() const {
+        return objectives_;
+    }
+    [[nodiscard]] std::size_t size() const {
+        return objectives_.size();
+    }
 
     // How many objectives are complete against `codex`.
     [[nodiscard]] std::uint32_t completed_count(const PhotoCodex& codex) const {
         std::uint32_t n = 0;
         for (const Objective& o : objectives_) {
-            if (EvaluateObjective(o, codex).complete) ++n;
+            if (EvaluateObjective(o, codex).complete)
+                ++n;
         }
         return n;
     }
@@ -137,7 +147,8 @@ public:
     // True once every objective is complete (the "you finished the starter goals" gate).
     [[nodiscard]] bool all_complete(const PhotoCodex& codex) const {
         for (const Objective& o : objectives_) {
-            if (!EvaluateObjective(o, codex).complete) return false;
+            if (!EvaluateObjective(o, codex).complete)
+                return false;
         }
         return !objectives_.empty();
     }
@@ -146,7 +157,8 @@ public:
     // all are done / the set is empty.
     [[nodiscard]] const Objective* next_incomplete(const PhotoCodex& codex) const {
         for (const Objective& o : objectives_) {
-            if (!EvaluateObjective(o, codex).complete) return &o;
+            if (!EvaluateObjective(o, codex).complete)
+                return &o;
         }
         return nullptr;
     }
@@ -161,36 +173,54 @@ private:
 // goals are always achievable in the default world.
 inline ObjectiveSet DefaultObjectives(int first_species_id) {
     ObjectiveSet set;
-    Objective o0; o0.id = 0; o0.kind = ObjectiveKind::DiscoverSpecies;
-    o0.species_id = first_species_id; o0.title = "Photograph your first creature";
+    Objective o0;
+    o0.id = 0;
+    o0.kind = ObjectiveKind::DiscoverSpecies;
+    o0.species_id = first_species_id;
+    o0.title = "Photograph your first creature";
     set.Add(o0);
 
-    Objective o1; o1.id = 1; o1.kind = ObjectiveKind::DiscoverCount;
-    o1.target_count = 3; o1.title = "Discover 3 species";
+    Objective o1;
+    o1.id = 1;
+    o1.kind = ObjectiveKind::DiscoverCount;
+    o1.target_count = 3;
+    o1.title = "Discover 3 species";
     set.Add(o1);
 
-    Objective o2; o2.id = 2; o2.kind = ObjectiveKind::StarRating;
-    o2.species_id = first_species_id; o2.min_stars = 4;
+    Objective o2;
+    o2.id = 2;
+    o2.kind = ObjectiveKind::StarRating;
+    o2.species_id = first_species_id;
+    o2.min_stars = 4;
     o2.title = "Take a 4-star portrait";
     set.Add(o2);
 
-    Objective o3; o3.id = 3; o3.kind = ObjectiveKind::DiscoverCount;
-    o3.target_count = 6; o3.title = "Fill the codex (6 species)";
+    Objective o3;
+    o3.id = 3;
+    o3.kind = ObjectiveKind::DiscoverCount;
+    o3.target_count = 6;
+    o3.title = "Fill the codex (6 species)";
     set.Add(o3);
 
-    Objective o4; o4.id = 4; o4.kind = ObjectiveKind::CollectionScore;
-    o4.min_score = 3.0f; o4.title = "Build a collection worth 3.0";
+    Objective o4;
+    o4.id = 4;
+    o4.kind = ObjectiveKind::CollectionScore;
+    o4.min_score = 3.0f;
+    o4.title = "Build a collection worth 3.0";
     set.Add(o4);
 
     // Behaviour-driven goal: catch a creature in its daily life, not just present it.
     // target_action 5 == the brain's Sleep action (CreatureBrain CreatureAction::Sleep);
     // species_id 0 == any species. Satisfied by photographing a sleeping (rest-posed)
     // creature — the living-world depth the codex now rewards.
-    Objective o5; o5.id = 5; o5.kind = ObjectiveKind::BehavioralMatch;
-    o5.target_action = 5; o5.species_id = 0;
+    Objective o5;
+    o5.id = 5;
+    o5.kind = ObjectiveKind::BehavioralMatch;
+    o5.target_action = 5;
+    o5.species_id = 0;
     o5.title = "Photograph a sleeping creature";
     set.Add(o5);
     return set;
 }
 
-}  // namespace luminumbra::game
+} // namespace luminumbra::game

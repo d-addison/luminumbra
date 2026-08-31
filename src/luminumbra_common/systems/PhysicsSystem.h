@@ -46,12 +46,12 @@ public:
     void add_chunk_collision(Chunk& chunk);
     void remove_chunk_collision(ChunkID chunk_id);
 
-    // --- T-I6 P6.3: dynamic rigid bodies (projectiles e.g. an arrow) ---
+    // ---  : dynamic rigid bodies (projectiles e.g. an arrow) ---
     // Spawns a small dynamic sphere with an initial velocity: it falls under the
     // world gravity and COLLIDES with the chunk terrain (real ballistic physics,
     // not a hand-integrated arc). Returns the Jolt BodyID handle. Read its position
-    // each tick (get_body_position), detect rest via body_is_active()==false, and
-    // destroy_body() to despawn. Server-authoritative (the headless server owns the
+    // each tick (get_body_position), detect rest via body_is_active==false, and
+    // destroy_body to despawn. Server-authoritative (the headless server owns the
     // Jolt world); the resulting transform replicates like any other entity.
     JPH::BodyID
     create_dynamic_sphere(const glm::vec3& position, const glm::vec3& velocity, float radius);
@@ -71,7 +71,7 @@ public:
     void set_player_crouched(bool is_crouched);
     bool player_has_space_to_stand() const;
 
-    // --- T-I6 P2: server-authoritative avatar characters (multiplayer) ---
+    // --- Server-authoritative multiplayer avatars ---
     // The authoritative server gives every connected player's avatar a Jolt
     // CharacterVirtual (capsule) so players collide with the world (and, once
     // props exist, with dynamic props -- the Garry's-Mod model). ADDITIVE: this
@@ -79,13 +79,13 @@ public:
     // uses, so the client path is untouched. Avatars are stepped in INDEX order
     // (player_id order) on the calling thread -> deterministic same-binary, so
     // the avatar positions that fold into the `entities` sub-hash are run==replay
-    // reproducible. P2 has no per-avatar input yet (gravity + world collision
-    // only -> avatars settle on the terrain); P3 feeds the per-tick usercmd.
+    // reproducible. Per-avatar movement comes from the latest network usercmd;
+    // avatars with no input settle against world collision under gravity.
     void clear_avatar_characters();
     std::size_t create_avatar_character(const glm::vec3& initial_position);
-    // T-I6 P3.1d: set an avatar's horizontal WISH velocity (world XZ m/s) for the
+    // Set an avatar's horizontal wish velocity (world XZ m/s) for the
     // next step -- the server applies the network usercmd's movement here. Persists
-    // until changed (0 by default -> the avatar stands, the pre-P3.1d behaviour).
+    // until changed (0 by default -> the avatar stands, the without movement input behaviour).
     void set_avatar_wish_velocity(std::size_t index, const glm::vec2& wish_xz);
     // Steps every avatar character by dt: the per-avatar horizontal wish velocity
     // (gravity when airborne, ground-stick when grounded) against the world geometry.
@@ -188,10 +188,10 @@ private:
     JPH::Ref<JPH::Shape> m_player_stand_shape;
     JPH::Ref<JPH::Shape> m_player_crouch_shape;
 
-    // T-I6 P2: server-authoritative avatar characters (one per connected player)
+    // Server-authoritative avatar characters (one per connected player)
     // + the shared avatar capsule shape. Stepped in index order for determinism.
     std::vector<std::unique_ptr<JPH::CharacterVirtual>> m_avatar_characters;
-    std::vector<glm::vec2> m_avatar_wish; // T-I6 P3.1d: per-avatar horizontal wish velocity (m/s)
+    std::vector<glm::vec2> m_avatar_wish; // per-avatar horizontal wish velocity (m/s)
     JPH::Ref<JPH::Shape> m_avatar_shape;
 
     // Track collision bodies for loaded chunks

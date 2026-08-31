@@ -1,4 +1,4 @@
-// Spec 019 FR-D (track 019-D1): outbound backpressure unit tests for the lockstep/
+//   (track ): outbound backpressure unit tests for the lockstep/
 // replication TCP send path. These lock the bounded-queue + high-water backpressure
 // behaviour that REPLACED the WSAEWOULDBLOCK busy-spin in TcpTransport::SendFrame
 // (src/luminumbra_common/net/LockstepSession.cpp). Like the rest of the net tests they
@@ -39,9 +39,9 @@ TEST(OutboundBackpressure, WouldBlockSinkDoesNotSpinAndKeepsAllBytes) {
         ++calls;
         return 0; // would-block
     });
-    EXPECT_EQ(r, 0);                       // would-block reported (not fatal)
-    EXPECT_EQ(calls, 1);                   // EXACTLY ONE call -> the busy-spin is gone
-    EXPECT_EQ(q.PendingBytes(), before);   // NO message loss
+    EXPECT_EQ(r, 0);                     // would-block reported (not fatal)
+    EXPECT_EQ(calls, 1);                 // EXACTLY ONE call -> the busy-spin is gone
+    EXPECT_EQ(q.PendingBytes(), before); // NO message loss
     EXPECT_FALSE(q.Empty());
 }
 
@@ -50,8 +50,11 @@ TEST(OutboundBackpressure, WouldBlockSinkDoesNotSpinAndKeepsAllBytes) {
 TEST(OutboundBackpressure, NoLossAcrossFullThenDrainedSink) {
     net::OutboundByteQueue q;
     const std::vector<std::vector<std::uint8_t>> frames = {
-        MakeFrame(0x01, 8), MakeFrame(0x02, 5), MakeFrame(0x03, 20),
-        MakeFrame(0x04, 1), MakeFrame(0x05, 13),
+        MakeFrame(0x01, 8),
+        MakeFrame(0x02, 5),
+        MakeFrame(0x03, 20),
+        MakeFrame(0x04, 1),
+        MakeFrame(0x05, 13),
     };
     std::vector<std::uint8_t> expected;
     for (const auto& f : frames) {
@@ -69,9 +72,9 @@ TEST(OutboundBackpressure, NoLossAcrossFullThenDrainedSink) {
         got.insert(got.end(), p, p + n);
         return static_cast<int>(n);
     });
-    EXPECT_EQ(r, 1);            // fully drained
+    EXPECT_EQ(r, 1); // fully drained
     EXPECT_TRUE(q.Empty());
-    EXPECT_EQ(got, expected);   // byte-exact, in order: zero loss
+    EXPECT_EQ(got, expected); // byte-exact, in order: zero loss
 }
 
 // A sink that accepts a partial amount and then would-blocks must make progress and then
@@ -86,9 +89,9 @@ TEST(OutboundBackpressure, PartialAcceptThenWouldBlockRetainsRemainder) {
         ++calls;
         return (calls == 1) ? 30 : 0; // accept 30, then would-block
     });
-    EXPECT_EQ(r, 0);                              // would-block
-    EXPECT_EQ(calls, 2);                          // one progress call + one would-block call
-    EXPECT_EQ(q.PendingBytes(), f.size() - 30);   // remainder retained, none lost
+    EXPECT_EQ(r, 0);                            // would-block
+    EXPECT_EQ(calls, 2);                        // one progress call + one would-block call
+    EXPECT_EQ(q.PendingBytes(), f.size() - 30); // remainder retained, none lost
 }
 
 // The high-water mark trips once the queue grows past it, but messages are STILL not

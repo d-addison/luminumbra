@@ -1,5 +1,5 @@
 #pragma once
-// Spec 004 (Path to 600 fps), Phase 0 — honest measurement substrate.
+//  (Path to 600 fps),  — honest measurement substrate.
 //
 // Optional, guarded NVML sampler for GPU power (W) + core clock (MHz). The
 // frame is CPU/present-bound today and the GPU DOWNCLOCKS while it starves, so
@@ -8,7 +8,7 @@
 //
 // nvml.dll ships with the NVIDIA driver; we LOAD it dynamically (no SDK
 // link-time dependency) so non-NVIDIA / headless / CI builds keep building and
-// running — supported() simply returns false and sampling is skipped.
+// running — supported simply returns false and sampling is skipped.
 
 #include <cstdint>
 

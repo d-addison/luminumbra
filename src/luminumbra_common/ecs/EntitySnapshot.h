@@ -37,18 +37,18 @@ inline const char* EntitySnapshotOrderContract() {
 }
 
 inline void SortEntityRegistrySnapshot(EntityRegistrySnapshot& snapshot) {
-    std::sort(snapshot.entities.begin(), snapshot.entities.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.entity_id < rhs.entity_id;
-    });
+    std::sort(snapshot.entities.begin(),
+              snapshot.entities.end(),
+              [](const auto& lhs, const auto& rhs) { return lhs.entity_id < rhs.entity_id; });
 
     for (EntitySnapshotRecord& entity : snapshot.entities) {
-        std::sort(entity.components.begin(), entity.components.end(), [](const auto& lhs, const auto& rhs) {
-            return lhs.type < rhs.type;
-        });
+        std::sort(entity.components.begin(),
+                  entity.components.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.type < rhs.type; });
     }
 }
 
-// T-I3-17: BuildEntitySnapshotFixture (game-flavored fixture entities)
+// BuildEntitySnapshotFixture (game-flavored fixture entities)
 // relocated to test-support code (test/support/EntitySnapshotFixture.h).
 // This engine header keeps only the schema/ordering contract and the
 // serialize/load APIs; gate builders that hash a fixture now receive it as a
@@ -68,34 +68,26 @@ inline std::string SerializeEntityRegistrySnapshotJson(EntityRegistrySnapshot sn
     for (const EntitySnapshotRecord& entity : snapshot.entities) {
         nlohmann::json components = nlohmann::json::array();
         for (const EntityComponentSnapshot& component : entity.components) {
-            components.push_back({
-                {"type", component.type},
-                {"data", component.data}
-            });
+            components.push_back({{"type", component.type}, {"data", component.data}});
             ++component_count;
         }
 
-        entities.push_back({
-            {"entity_id", entity.entity_id},
-            {"name", entity.name},
-            {"components", std::move(components)}
-        });
+        entities.push_back({{"entity_id", entity.entity_id},
+                            {"name", entity.name},
+                            {"components", std::move(components)}});
     }
 
-    nlohmann::json output = {
-        {"schema", EntitySnapshotSchema()},
-        {"order_contract", EntitySnapshotOrderContract()},
-        {"entity_count", snapshot.entities.size()},
-        {"component_count", component_count},
-        {"entities", std::move(entities)}
-    };
+    nlohmann::json output = {{"schema", EntitySnapshotSchema()},
+                             {"order_contract", EntitySnapshotOrderContract()},
+                             {"entity_count", snapshot.entities.size()},
+                             {"component_count", component_count},
+                             {"entities", std::move(entities)}};
     return StableEntitySnapshotDump(output);
 }
 
-inline bool LoadEntityRegistrySnapshotJson(
-    const std::string& json_text,
-    EntityRegistrySnapshot& out_snapshot,
-    std::vector<std::string>& errors) {
+inline bool LoadEntityRegistrySnapshotJson(const std::string& json_text,
+                                           EntityRegistrySnapshot& out_snapshot,
+                                           std::vector<std::string>& errors) {
     try {
         const nlohmann::json snapshot = nlohmann::json::parse(json_text);
         if (snapshot.at("schema").get<std::string>() != EntitySnapshotSchema()) {
@@ -116,8 +108,7 @@ inline bool LoadEntityRegistrySnapshotJson(
 
             for (const nlohmann::json& component_json : entity_json.at("components")) {
                 entity.components.push_back(EntityComponentSnapshot{
-                    component_json.at("type").get<std::string>(),
-                    component_json.at("data")});
+                    component_json.at("type").get<std::string>(), component_json.at("data")});
                 ++component_count;
             }
             loaded.entities.push_back(std::move(entity));

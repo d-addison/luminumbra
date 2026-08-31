@@ -4,7 +4,9 @@
 
 struct GLFWwindow;
 
-namespace Luminumbra::world { class GameSession; }
+namespace Luminumbra::world {
+class GameSession;
+}
 
 namespace Luminumbra::Rendering {
 
@@ -26,7 +28,7 @@ class Camera;
 // settles the region (EnsureSurfaceReadyNear + wait_for_streaming_jobs + a few
 // rendered settle frames), and writes a labelled screenshot (.ppm) + frame-scan
 // (.json) plus a survey index. Blocking headless capture; issues no sim writes
-// (RENDER-ONLY). Pure glue over existing engine primitives.
+//. Pure glue over existing engine primitives.
 // ===========================================================================
 void RunSceneSurvey(GLFWwindow* window,
                     world::GameSession& session,

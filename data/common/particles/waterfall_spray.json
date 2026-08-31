@@ -1,7 +1,7 @@
 {
   "schema": "luminumbra.particle_emitter.v1",
   "name": "waterfall_spray",
-  "_comment": "T-I5b-4 (W1): waterfall plunge-pool SPRAY/MIST. Anchored at the detected fall's plunge foot by ParticlePass::add_waterfall_spray, which re-shapes origin_extent + spawn_rate + base_velocity from the fall's drop height + channel width. atlas_layer 4 is the render-side foam SENTINEL the particle frag shader reads to draw clean near-white mist (no emissive glow). alpha-blended white-blue so the plume reads as rising spray. wind_response lets the mist drift on the A2 wind. RENDER-ONLY: motion is render-time, never hashed.",
+  "_comment": " : waterfall plunge-pool SPRAY/MIST. Anchored at the detected fall's plunge foot by ParticlePass::add_waterfall_spray, which re-shapes origin_extent + spawn_rate + base_velocity from the fall's drop height + channel width. atlas_layer 4 is the render-side foam SENTINEL the particle frag shader reads to draw clean near-white mist (no emissive glow). alpha-blended white-blue so the plume reads as rising spray. wind_response lets the mist drift on the  wind.: motion is render-time, never hashed.",
   "type": 3,
   "spawn_rate": 80.0,
   "lifetime": 1.3,

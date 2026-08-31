@@ -29,8 +29,8 @@
 #include <cstring>
 #include <vector>
 
-#include "world/Chunk.h"
 #include "systems/SHIELD_WorldSystem.h"
+#include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 
 using namespace Luminumbra;
@@ -60,7 +60,7 @@ std::uint64_t Fnv1a64(const void* data, std::size_t size) {
     return hash;
 }
 
-template <typename T>
+template<typename T>
 std::uint64_t HashVec(const std::vector<T>& v) {
     return Fnv1a64(v.data(), v.size() * sizeof(T));
 }
@@ -110,7 +110,7 @@ TerrainGenParams MakeDeepOceanParams() {
 // A preset whose surface sits far ABOVE chunk (0,0,0): that chunk is all-solid.
 TerrainGenParams MakeBuriedParams() {
     TerrainGenParams params = MakeArchipelagoParams();
-    params.base_amplitude = 0.0f;     // flat so the whole chunk is uniformly buried
+    params.base_amplitude = 0.0f; // flat so the whole chunk is uniformly buried
     params.height_offset = 4000.0f;
     params.caves_enabled = false;
     return params;
@@ -141,18 +141,19 @@ MeshResult GenAndMesh(const TerrainGenParams& params, int seed, const IVec3& coo
 }
 
 // SDF lattice geometry: (CHUNK_SIZE+1)^3 row-major, x fastest then y then z.
-constexpr int kLat = CHUNK_SIZE_X + 1;  // 17
+constexpr int kLat = CHUNK_SIZE_X + 1; // 17
 std::size_t SdfIndex(int x, int y, int z) {
-    return static_cast<std::size_t>(x)
-         + static_cast<std::size_t>(y) * static_cast<std::size_t>(kLat)
-         + static_cast<std::size_t>(z) * static_cast<std::size_t>(kLat) * static_cast<std::size_t>(kLat);
+    return static_cast<std::size_t>(x) +
+           static_cast<std::size_t>(y) * static_cast<std::size_t>(kLat) +
+           static_cast<std::size_t>(z) * static_cast<std::size_t>(kLat) *
+               static_cast<std::size_t>(kLat);
 }
 
 [[maybe_unused]] bool VertexBytesEqual(const VoxelVertex& a, const VoxelVertex& b) {
     return std::memcmp(&a, &b, sizeof(VoxelVertex)) == 0;
 }
 
-}  // namespace
+} // namespace
 
 // =====================================================================================
 // 1. MESH PURITY -- re-meshing the SAME field must be BYTE-EXACT
@@ -202,9 +203,12 @@ TEST(MeshingHardening, NormalAccumulationIsFloatExactAcrossRemesh_Archipelago) {
     ASSERT_FALSE(a.vertices.empty());
     ASSERT_EQ(a.vertices.size(), b.vertices.size());
     for (std::size_t i = 0; i < a.vertices.size(); ++i) {
-        EXPECT_FLOAT_EQ(a.vertices[i].normal.x, b.vertices[i].normal.x) << "normal.x ULP drift at vertex " << i;
-        EXPECT_FLOAT_EQ(a.vertices[i].normal.y, b.vertices[i].normal.y) << "normal.y ULP drift at vertex " << i;
-        EXPECT_FLOAT_EQ(a.vertices[i].normal.z, b.vertices[i].normal.z) << "normal.z ULP drift at vertex " << i;
+        EXPECT_FLOAT_EQ(a.vertices[i].normal.x, b.vertices[i].normal.x)
+            << "normal.x ULP drift at vertex " << i;
+        EXPECT_FLOAT_EQ(a.vertices[i].normal.y, b.vertices[i].normal.y)
+            << "normal.y ULP drift at vertex " << i;
+        EXPECT_FLOAT_EQ(a.vertices[i].normal.z, b.vertices[i].normal.z)
+            << "normal.z ULP drift at vertex " << i;
     }
 }
 
@@ -325,7 +329,8 @@ TEST(MeshingHardening, DistinctSeedsProduceDistinctTerrain) {
     const MeshResult b = GenAndMesh(MakeArchipelagoParams(), 2, IVec3(0, 0, 0), 1);
     ASSERT_FALSE(a.sdf.empty());
     ASSERT_EQ(a.sdf.size(), b.sdf.size());
-    EXPECT_NE(HashVec(a.sdf), HashVec(b.sdf)) << "different seeds produced identical SDF -- seed ignored";
+    EXPECT_NE(HashVec(a.sdf), HashVec(b.sdf))
+        << "different seeds produced identical SDF -- seed ignored";
 }
 
 // Distinct chunk coordinates must read distinct slices of the field.
@@ -335,7 +340,8 @@ TEST(MeshingHardening, DistinctCoordsProduceDistinctSDF) {
     Chunk b(IVec3(5, 0, 5));
     world.GenerateChunkData(a);
     world.GenerateChunkData(b);
-    EXPECT_NE(HashVec(a.sdf_data), HashVec(b.sdf_data)) << "far-apart chunks share SDF -- coord ignored";
+    EXPECT_NE(HashVec(a.sdf_data), HashVec(b.sdf_data))
+        << "far-apart chunks share SDF -- coord ignored";
 }
 
 // =====================================================================================
@@ -361,7 +367,8 @@ TEST(MeshingHardening, SDFSeamContinuityAcrossXBoundary) {
             const f32 right_min_x = right.sdf_data[SdfIndex(0, y, z)];
             EXPECT_FLOAT_EQ(left_max_x, right_min_x)
                 << "SDF seam mismatch at shared X plane, y=" << y << " z=" << z;
-            if (left_max_x != right_min_x) ++mismatches;
+            if (left_max_x != right_min_x)
+                ++mismatches;
         }
     }
     EXPECT_EQ(mismatches, 0u) << "chunk seam has discontinuities -> visible crack";
@@ -437,8 +444,8 @@ TEST(MeshingHardening, SeamVerticesCoincideBetweenAdjacentChunks_Flat) {
     std::vector<Vec3> left_seam;
     for (const auto& v : left.mesh_vertices) {
         if (std::abs(v.position.x - static_cast<float>(CHUNK_SIZE_X)) < 1e-4f) {
-            left_seam.push_back(Vec3(v.position.x + static_cast<float>(0 * CHUNK_SIZE_X),
-                                     v.position.y, v.position.z));
+            left_seam.push_back(Vec3(
+                v.position.x + static_cast<float>(0 * CHUNK_SIZE_X), v.position.y, v.position.z));
         }
     }
     // Right-chunk seam vertices (local x == 0), translated into the same world X.
@@ -446,8 +453,8 @@ TEST(MeshingHardening, SeamVerticesCoincideBetweenAdjacentChunks_Flat) {
     for (const auto& v : right.mesh_vertices) {
         if (std::abs(v.position.x - 0.0f) < 1e-4f) {
             // right chunk world X for local x==0 is +CHUNK_SIZE_X.
-            right_seam.push_back(Vec3(v.position.x + static_cast<float>(CHUNK_SIZE_X),
-                                      v.position.y, v.position.z));
+            right_seam.push_back(
+                Vec3(v.position.x + static_cast<float>(CHUNK_SIZE_X), v.position.y, v.position.z));
         }
     }
 
@@ -457,8 +464,7 @@ TEST(MeshingHardening, SeamVerticesCoincideBetweenAdjacentChunks_Flat) {
     for (const Vec3& lv : left_seam) {
         bool matched = false;
         for (const Vec3& rv : right_seam) {
-            if (std::abs(lv.x - rv.x) < 1e-4f &&
-                std::abs(lv.y - rv.y) < 1e-4f &&
+            if (std::abs(lv.x - rv.x) < 1e-4f && std::abs(lv.y - rv.y) < 1e-4f &&
                 std::abs(lv.z - rv.z) < 1e-4f) {
                 matched = true;
                 break;
@@ -528,7 +534,7 @@ TEST(MeshingHardening, CoarseLODFromSDFOnlyChunkIsDeterministic_Flat) {
     world.GenerateChunkData(source);
 
     auto mesh_from_sdf = [&](Chunk& c) {
-        c.sdf_data = source.sdf_data;  // heightmap intentionally left empty
+        c.sdf_data = source.sdf_data; // heightmap intentionally left empty
         World::MarchingCubes::PolygoniseTerrain(world, c, 0.0f, 4);
     };
     Chunk a(IVec3(0, 0, 0));
@@ -561,7 +567,7 @@ TEST(MeshingHardening, ManuallyAllPositiveSDFMeshesEmpty) {
     SHIELD_WorldSystem world(nullptr, nullptr, MakeFlatSurfaceParams(), 1337);
     Chunk chunk(IVec3(0, 0, 0));
     world.GenerateChunkData(chunk);
-    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 1.0f);  // all air
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 1.0f); // all air
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     EXPECT_TRUE(chunk.mesh_vertices.empty());
     EXPECT_TRUE(chunk.mesh_indices.empty());
@@ -574,7 +580,7 @@ TEST(MeshingHardening, ManuallyAllNegativeSDFMeshesEmpty) {
     SHIELD_WorldSystem world(nullptr, nullptr, MakeFlatSurfaceParams(), 1337);
     Chunk chunk(IVec3(0, 0, 0));
     world.GenerateChunkData(chunk);
-    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), -1.0f);  // all solid
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), -1.0f); // all solid
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     EXPECT_TRUE(chunk.mesh_vertices.empty())
         << "all-solid chunk with no zero-crossing emitted interior triangles";
@@ -600,7 +606,7 @@ TEST(MeshingHardening, SingleVoxelFeatureMeshesValidly) {
     SHIELD_WorldSystem world(nullptr, nullptr, MakeFlatSurfaceParams(), 1337);
     Chunk chunk(IVec3(0, 0, 0));
     world.GenerateChunkData(chunk);
-    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 1.0f);  // all air
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 1.0f); // all air
     // Make one interior lattice corner solid -> one zero-crossing feature.
     chunk.sdf_data[SdfIndex(8, 8, 8)] = -1.0f;
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
@@ -614,7 +620,8 @@ TEST(MeshingHardening, SingleVoxelFeatureMeshesValidly) {
         ASSERT_LT(a, chunk.mesh_vertices.size());
         ASSERT_LT(b, chunk.mesh_vertices.size());
         ASSERT_LT(c, chunk.mesh_vertices.size());
-        EXPECT_TRUE(a != b && b != c && c != a) << "degenerate triangle in single-voxel mesh @" << (i / 3);
+        EXPECT_TRUE(a != b && b != c && c != a)
+            << "degenerate triangle in single-voxel mesh @" << (i / 3);
     }
 }
 
@@ -625,7 +632,10 @@ TEST(MeshingHardening, SingleVoxelFeatureMeshesValidly) {
 // Every index must reference a real vertex; no NaN positions/normals; no
 // degenerate (repeated-index) triangle. Run across several presets.
 TEST(MeshingHardening, AllIndicesInRangeNoDegenerateTriangles) {
-    struct Case { TerrainGenParams params; int seed; };
+    struct Case {
+        TerrainGenParams params;
+        int seed;
+    };
     const Case cases[] = {
         {MakeArchipelagoParams(), 42},
         {MakeCaveParams(), 12345},
@@ -642,7 +652,7 @@ TEST(MeshingHardening, AllIndicesInRangeNoDegenerateTriangles) {
             EXPECT_TRUE(a != b && b != c && c != a) << "degenerate triangle @" << (i / 3);
         }
         for (const auto& v : r.vertices) {
-            EXPECT_EQ(v.position.x, v.position.x) << "NaN position.x";  // NaN != NaN
+            EXPECT_EQ(v.position.x, v.position.x) << "NaN position.x"; // NaN != NaN
             EXPECT_EQ(v.normal.x, v.normal.x) << "NaN normal.x";
         }
     }
@@ -667,7 +677,8 @@ TEST(MeshingHardening, FlatSurfaceWindingAndNormalsConsistentlyUp) {
         const auto& v1 = chunk.mesh_vertices[chunk.mesh_indices[i + 1]];
         const auto& v2 = chunk.mesh_vertices[chunk.mesh_indices[i + 2]];
         const Vec3 fn = glm::cross(v1.position - v0.position, v2.position - v0.position);
-        EXPECT_GT(fn.y, 0.0f) << "flat-surface triangle " << (i / 3) << " has inverted (downward) winding";
+        EXPECT_GT(fn.y, 0.0f) << "flat-surface triangle " << (i / 3)
+                              << " has inverted (downward) winding";
     }
 }
 
@@ -705,13 +716,16 @@ TEST(MeshingHardening, BuriedAllSolidChunkHasNoInteriorSurface) {
 TEST(MeshingHardening, HeightAtExactBoundaryCoordIsStable) {
     SHIELD_WorldSystem world_a(nullptr, nullptr, MakeArchipelagoParams(), 42);
     SHIELD_WorldSystem world_b(nullptr, nullptr, MakeArchipelagoParams(), 42);
-    const float coords[][2] = {{0.0f, 0.0f}, {16.0f, 0.0f}, {16.0f, 16.0f}, {-16.0f, 32.0f}, {255.0f, -1.0f}};
+    const float coords[][2] = {
+        {0.0f, 0.0f}, {16.0f, 0.0f}, {16.0f, 16.0f}, {-16.0f, 32.0f}, {255.0f, -1.0f}};
     for (const auto& c : coords) {
         const float h_a1 = world_a.GetTerrainHeightAt(c[0], c[1]);
         const float h_a2 = world_a.GetTerrainHeightAt(c[0], c[1]);
         const float h_b = world_b.GetTerrainHeightAt(c[0], c[1]);
-        EXPECT_FLOAT_EQ(h_a1, h_a2) << "height not stable on repeat at (" << c[0] << "," << c[1] << ")";
-        EXPECT_FLOAT_EQ(h_a1, h_b) << "height differs across identical worlds at (" << c[0] << "," << c[1] << ")";
+        EXPECT_FLOAT_EQ(h_a1, h_a2)
+            << "height not stable on repeat at (" << c[0] << "," << c[1] << ")";
+        EXPECT_FLOAT_EQ(h_a1, h_b)
+            << "height differs across identical worlds at (" << c[0] << "," << c[1] << ")";
     }
 }
 
@@ -722,9 +736,9 @@ TEST(MeshingHardening, DensityAtBoundaryIsPureAcrossWorlds) {
     SHIELD_WorldSystem b(nullptr, nullptr, MakeArchipelagoParams(), 42);
     const Vec3 probes[] = {
         Vec3(0.0f, 8.0f, 0.0f),
-        Vec3(16.0f, 8.0f, 16.0f),   // exactly on a chunk corner column
+        Vec3(16.0f, 8.0f, 16.0f), // exactly on a chunk corner column
         Vec3(8.0f, 0.0f, 8.0f),
-        Vec3(8.0f, 16.0f, 8.0f),    // exactly on a vertical chunk boundary
+        Vec3(8.0f, 16.0f, 8.0f), // exactly on a vertical chunk boundary
     };
     for (const Vec3& p : probes) {
         EXPECT_FLOAT_EQ(a.get_density_at(p), b.get_density_at(p))
@@ -738,10 +752,16 @@ TEST(MeshingHardening, DensityAtBoundaryIsPureAcrossWorlds) {
 TEST(MeshingHardening, WorldToChunkBoundaryNoOffByOne) {
     EXPECT_EQ(SHIELD_WorldSystem::world_to_chunk_coords(Vec3(0.0f, 0.0f, 0.0f)).x, 0);
     EXPECT_EQ(SHIELD_WorldSystem::world_to_chunk_coords(Vec3(15.999f, 0.0f, 0.0f)).x, 0);
-    EXPECT_EQ(SHIELD_WorldSystem::world_to_chunk_coords(Vec3(static_cast<float>(CHUNK_SIZE_X), 0.0f, 0.0f)).x, 1);
+    EXPECT_EQ(SHIELD_WorldSystem::world_to_chunk_coords(
+                  Vec3(static_cast<float>(CHUNK_SIZE_X), 0.0f, 0.0f))
+                  .x,
+              1);
     // Negative side: -1 must land in chunk -1, not chunk 0 (floor, not truncate).
     EXPECT_EQ(SHIELD_WorldSystem::world_to_chunk_coords(Vec3(-1.0f, 0.0f, 0.0f)).x, -1);
-    EXPECT_EQ(SHIELD_WorldSystem::world_to_chunk_coords(Vec3(-static_cast<float>(CHUNK_SIZE_X), 0.0f, 0.0f)).x, -1);
+    EXPECT_EQ(SHIELD_WorldSystem::world_to_chunk_coords(
+                  Vec3(-static_cast<float>(CHUNK_SIZE_X), 0.0f, 0.0f))
+                  .x,
+              -1);
 }
 
 // Flat-surface heightmap must be exactly the configured offset at EVERY lattice
@@ -766,7 +786,7 @@ TEST(MeshingHardening, FlatHeightmapExactAtBordersNoOffByOne) {
 TEST(MeshingHardening, CaveCarvedSDFIsByteExactAcrossWorlds) {
     SHIELD_WorldSystem a(nullptr, nullptr, MakeCaveParams(), 12345);
     SHIELD_WorldSystem b(nullptr, nullptr, MakeCaveParams(), 12345);
-    Chunk ca(IVec3(0, -3, 0));   // deep enough that caves carve (cap suppresses near surface)
+    Chunk ca(IVec3(0, -3, 0)); // deep enough that caves carve (cap suppresses near surface)
     Chunk cb(IVec3(0, -3, 0));
     a.GenerateChunkData(ca);
     b.GenerateChunkData(cb);
@@ -809,7 +829,7 @@ TEST(MeshingHardening, FlatSDFSignMatchesConfiguredSurface) {
     Chunk chunk(IVec3(0, 0, 0));
     world.GenerateChunkData(chunk);
     ASSERT_FALSE(chunk.sdf_data.empty());
-    // height_offset == 8 ; local y below 8 must be solid, above must be air.
+    // height_offset == 8; local y below 8 must be solid, above must be air.
     for (int z = 0; z < kLat; ++z) {
         for (int x = 0; x < kLat; ++x) {
             EXPECT_LT(chunk.sdf_data[SdfIndex(x, 4, z)], 0.0f) << "below-surface sample not solid";
@@ -863,14 +883,14 @@ TEST(MeshingHardening, EmptyFieldRemeshClearsPreviousMesh) {
     world.GenerateChunkData(chunk);
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     ASSERT_FALSE(chunk.mesh_vertices.empty());
-    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 1.0f);  // now all air
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), 1.0f); // now all air
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     EXPECT_TRUE(chunk.mesh_vertices.empty()) << "stale surface survived an empty re-mesh";
     EXPECT_TRUE(chunk.mesh_indices.empty());
 }
 
 // ----------------------------------------------------------------------------
-// SHIELD-04 (spec 021): wrong-sized-SDF out-of-bounds hardening. The unit-step
+// wrong-sized-SDF out-of-bounds hardening. The unit-step
 // polygonise indexes the SDF as a full (CHUNK+1)^3 lattice with unchecked corner
 // offsets, so a non-empty malformed lattice (corrupt save / stale coarse
 // producer) must be REJECTED at entry — never read. These run OOB-clean under
@@ -886,7 +906,7 @@ TEST(StreamingHardening, MalformedSdfLatticeIsRejectedNotReadOutOfBounds) {
     ASSERT_EQ(chunk.sdf_data.size(), static_cast<std::size_t>(kLat * kLat * kLat));
 
     // Truncated lattice (the wrong-sized-save shape): one float short. With a
-    // straddling surface, the old code would index corners past data.end().
+    // straddling surface, the old code would index corners past data.end.
     chunk.sdf_data.resize(chunk.sdf_data.size() - 1u);
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     EXPECT_TRUE(chunk.mesh_vertices.empty())
@@ -912,9 +932,9 @@ TEST(StreamingHardening, MalformedSdfChunkRegeneratesByteIdenticalToFresh) {
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, 909);
     Chunk chunk(coords);
-    chunk.sdf_data = {-1.0f, 0.0f, 1.0f};  // malformed survivor of a corrupt save
-    chunk.sdf_data.clear();                 // the quarantine action (SHIELD-05 / promotion guard)
-    world.GenerateChunkData(chunk);         // the deterministic regeneration
+    chunk.sdf_data = {-1.0f, 0.0f, 1.0f}; // malformed survivor of a corrupt save
+    chunk.sdf_data.clear();               // the quarantine action ( / promotion guard)
+    world.GenerateChunkData(chunk);       // the deterministic regeneration
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
 
     EXPECT_EQ(HashVec(chunk.sdf_data), HashVec(fresh.sdf))

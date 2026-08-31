@@ -1,5 +1,5 @@
-// Track game.photo_camera — a PURE, DETERMINISTIC camera/lens model for the
-// photography loop (pillar G): focal length + aperture -> depth of field, exposure
+// game.photo_camera: a PURE, DETERMINISTIC camera/lens model for the
+// photography loop (photography): focal length + aperture -> depth of field, exposure
 // value/quality, and a bokeh/subject-isolation score. No render/GL/entt/rng. These
 // tests pin the optics: a wide aperture (low f) gives a SHALLOW DoF and high
 // isolation; a small aperture (high f) gives a DEEP DoF; a subject at the focus
@@ -12,15 +12,15 @@
 
 namespace {
 
-using luminumbra::game::LensSettings;
 using luminumbra::game::CameraSubject;
-using luminumbra::game::DofResult;
 using luminumbra::game::ComputeDof;
-using luminumbra::game::ExposureValue;
+using luminumbra::game::DofResult;
 using luminumbra::game::ExposureQuality;
-using luminumbra::game::SubjectIsolation;
-using luminumbra::game::Log2Approx;
+using luminumbra::game::ExposureValue;
 using luminumbra::game::kInfiniteFar;
+using luminumbra::game::LensSettings;
+using luminumbra::game::Log2Approx;
+using luminumbra::game::SubjectIsolation;
 
 // A baseline 50mm lens focused at 3m; aperture is varied per test.
 LensSettings lens(float aperture_f, float focus_m = 3.0f, float focal_mm = 50.0f) {
@@ -40,7 +40,9 @@ CameraSubject subjectAt(float distance_m, float size_m = 0.5f) {
     return s;
 }
 
-float dofBand(const DofResult& d) { return d.far_limit_m - d.near_limit_m; }
+float dofBand(const DofResult& d) {
+    return d.far_limit_m - d.near_limit_m;
+}
 
 // ---- Log2 approximation accuracy (the one libm-free transcendental) ----
 
@@ -63,9 +65,9 @@ TEST(PhotoCamera, Log2ApproxMidOctave) {
 TEST(PhotoCamera, Log2ApproxNonPositiveIsFinite) {
     const float z = Log2Approx(0.0f);
     const float n = Log2Approx(-5.0f);
-    EXPECT_TRUE(z == z);            // not NaN
+    EXPECT_TRUE(z == z); // not NaN
     EXPECT_TRUE(n == n);
-    EXPECT_GT(z, -1.0e30f);          // finite floor, not -inf
+    EXPECT_GT(z, -1.0e30f); // finite floor, not -inf
     EXPECT_GT(n, -1.0e30f);
 }
 
@@ -127,8 +129,8 @@ TEST(PhotoCamera, DegenerateLensIsDefined) {
 
 // EV RISES as the aperture stops down (larger f-number) — all else equal.
 TEST(PhotoCamera, EvMonotonicIncreasingInAperture) {
-    const float ev_wide   = ExposureValue(lens(/*f=*/2.0f));
-    const float ev_mid    = ExposureValue(lens(/*f=*/4.0f));
+    const float ev_wide = ExposureValue(lens(/*f=*/2.0f));
+    const float ev_mid = ExposureValue(lens(/*f=*/4.0f));
     const float ev_narrow = ExposureValue(lens(/*f=*/8.0f));
     EXPECT_LT(ev_wide, ev_mid);
     EXPECT_LT(ev_mid, ev_narrow);
@@ -172,15 +174,18 @@ TEST(PhotoCamera, ExposureQualityPeaksAtMatchedLuminance) {
 
     const float q_match = ExposureQuality(l, clamped);
     const float q_bright = ExposureQuality(l, 1.0f); // very bright scene -> dark frame
-    const float q_dark   = ExposureQuality(l, 0.0f); // very dark scene -> blown frame
+    const float q_dark = ExposureQuality(l, 0.0f);   // very dark scene -> blown frame
 
     EXPECT_GT(q_match, q_bright);
     EXPECT_GT(q_match, q_dark);
     EXPECT_GE(q_match, 0.9f); // near the matched point, quality is high
     // All quality scores are within [0,1].
-    EXPECT_GE(q_match, 0.0f);  EXPECT_LE(q_match, 1.0f);
-    EXPECT_GE(q_bright, 0.0f); EXPECT_LE(q_bright, 1.0f);
-    EXPECT_GE(q_dark, 0.0f);   EXPECT_LE(q_dark, 1.0f);
+    EXPECT_GE(q_match, 0.0f);
+    EXPECT_LE(q_match, 1.0f);
+    EXPECT_GE(q_bright, 0.0f);
+    EXPECT_LE(q_bright, 1.0f);
+    EXPECT_GE(q_dark, 0.0f);
+    EXPECT_LE(q_dark, 1.0f);
 }
 
 // ---- Subject isolation ----
@@ -192,15 +197,17 @@ TEST(PhotoCamera, WideApertureIsolatesSubjectMoreThanSmall) {
     const float iso_wide = SubjectIsolation(lens(/*f=*/1.4f), subj);
     const float iso_deep = SubjectIsolation(lens(/*f=*/16.0f), subj);
     EXPECT_GT(iso_wide, iso_deep);
-    EXPECT_GE(iso_wide, 0.0f); EXPECT_LE(iso_wide, 1.0f);
-    EXPECT_GE(iso_deep, 0.0f); EXPECT_LE(iso_deep, 1.0f);
+    EXPECT_GE(iso_wide, 0.0f);
+    EXPECT_LE(iso_wide, 1.0f);
+    EXPECT_GE(iso_deep, 0.0f);
+    EXPECT_LE(iso_deep, 1.0f);
 }
 
 // A subject OUT of focus collapses isolation to a small residual even wide-open.
 TEST(PhotoCamera, OutOfFocusSubjectHasLowIsolation) {
     // Wide-open focused at 3m, subject at 30m (out of the shallow band).
     const float iso_missed = SubjectIsolation(lens(/*f=*/1.4f), subjectAt(30.0f));
-    const float iso_hit    = SubjectIsolation(lens(/*f=*/1.4f), subjectAt(3.0f));
+    const float iso_hit = SubjectIsolation(lens(/*f=*/1.4f), subjectAt(3.0f));
     EXPECT_LT(iso_missed, iso_hit);
     EXPECT_LT(iso_missed, 0.3f);
 }

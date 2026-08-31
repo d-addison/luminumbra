@@ -1,0 +1,53 @@
+{
+  "schema": "luminumbra.relative_performance_calibration.v1",
+  "recorded_utc": "2026-08-31",
+  "purpose": "Stability calibration for the paired relative regression policy; raw samples remain CI or local artifacts.",
+  "runner": {
+    "class": "linux-x86_64-release",
+    "os": "Linux 6.6 WSL2",
+    "cpu": "AMD Ryzen 7 9800X3D 8-Core Processor",
+    "compiler": "GNU 13.3.0",
+    "preset": "perf",
+    "build_type": "RelWithDebInfo",
+    "binary_sha256": "03f9d1dd8c2ed52255a92a526c350265a0f799b365f99ee076712cc6a9cfd068",
+    "effective_flags_sha256": "85157ca7bd74d1e829523e2d52a479da61d61a834b1acb416dc5ade4e9d13e67"
+  },
+  "workload": {
+    "id": "server-smoke",
+    "version": "1",
+    "layer": "end-to-end",
+    "fixture_hash": "e436664678df9018be4be4f5974d4c9ef0918371a471d7734c21c62d9c90ee3d",
+    "parameters": {
+      "seed": 1337,
+      "ticks": 30,
+      "surface_radius": 1,
+      "collision_radius": 1,
+      "world_preset": "default"
+    },
+    "warmup_per_run": 1,
+    "paired_observations": 20
+  },
+  "observed": {
+    "base_p50_ms": 14166.261353,
+    "candidate_p50_ms": 13754.844755,
+    "delta_percent": -2.904200252615513,
+    "paired_sign_test_p_value": 0.26317596435546875,
+    "pooled_mad_ms": 636.5659448047974,
+    "verdict": "stable"
+  },
+  "policy": {
+    "version": "relative-paired-v2",
+    "minimum_samples": 20,
+    "effect_floor_percent": 5.0,
+    "regression_limit_percent": 5.0,
+    "p_value_max": 0.05,
+    "pooled_mad_multiplier": 3.0,
+    "test": "paired two-sided sign test",
+    "underpowered_or_smaller_changes": "warning"
+  },
+  "raw_evidence_sha256": {
+    "base_run": "62ee6e7fe95497420b25667e40f01e68199662aa892811072aee33fdd94b9ab3",
+    "candidate_run": "7f972e215b88be62bc9c7b464bd4cd78759db7476d852555ef9aea810d03d0de",
+    "comparison": "bba65b98b8840c4ce36b61dbc3206e291db001713a8f3cec11bacfcf32cac903"
+  }
+}

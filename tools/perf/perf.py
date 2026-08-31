@@ -23,7 +23,9 @@ from typing import Any, Sequence
 SCHEMA = "luminumbra.perf_run.v2"
 COMPARISON_SCHEMA = "luminumbra.perf_comparison.v1"
 UNEVALUATED = 125
-MIN_GATING_SAMPLES = 10
+MIN_GATING_SAMPLES = 20
+MIN_EFFECT_PERCENT = 5.0
+P_VALUE_MAX = 0.05
 LAYERS = (
     "algorithms",
     "simulation",
@@ -577,6 +579,22 @@ def mann_whitney_p(left: Sequence[float], right: Sequence[float]) -> float:
     return math.erfc(z / math.sqrt(2.0))
 
 
+def paired_sign_p(base: Sequence[float], candidate: Sequence[float]) -> float:
+    """Two-sided exact sign-test p value for ordered base/candidate observations."""
+    if len(base) != len(candidate) or not base:
+        raise ValueError("paired samples must be non-empty and equal in length")
+    deltas = [candidate_value - base_value
+              for base_value, candidate_value in zip(base, candidate)]
+    positive = sum(delta > 0 for delta in deltas)
+    negative = sum(delta < 0 for delta in deltas)
+    count = positive + negative
+    if count == 0:
+        return 1.0
+    tail = min(positive, negative)
+    probability = 2.0 * sum(math.comb(count, value) for value in range(tail + 1)) / (2**count)
+    return min(1.0, probability)
+
+
 def combine_command(args: argparse.Namespace) -> int:
     try:
         runs = [load_run(path) for path in args.runs]
@@ -633,11 +651,14 @@ def compare_runs(
         "status": "unevaluated",
         "verdict": "unevaluated",
         "policy": {
-            "version": "relative-v1",
-            "limit_percent": limit,
+            "version": "relative-paired-v2",
+            "requested_limit_percent": limit,
+            "effect_floor_percent": MIN_EFFECT_PERCENT,
+            "limit_percent": max(limit, MIN_EFFECT_PERCENT),
             "minimum_samples": min_samples,
-            "p_value_max": 0.01,
+            "p_value_max": P_VALUE_MAX,
             "pooled_mad_multiplier": 3.0,
+            "test": "paired two-sided sign test",
         },
         "base": {
             "commit": base.get("build", {}).get("commit"),
@@ -677,8 +698,16 @@ def compare_runs(
         ):
             result["reasons"] = [f"metric {name} schema differs"]
             return result
-        if min(len(base_metric["samples"]), len(candidate_metric["samples"])) < min_samples:
-            result["reasons"] = [f"metric {name} has insufficient samples"]
+        if len(base_metric["samples"]) != len(candidate_metric["samples"]):
+            result["reasons"] = [f"metric {name} does not contain paired samples"]
+            return result
+        if len(base_metric["samples"]) < min_samples:
+            result["status"] = "evaluated"
+            result["verdict"] = "warning"
+            result["reasons"] = [
+                f"metric {name} is underpowered: {len(base_metric['samples'])} paired "
+                f"observations, {min_samples} required"
+            ]
             return result
         base_median = float(base_metric["p50"])
         candidate_median = float(candidate_metric["p50"])
@@ -687,16 +716,21 @@ def compare_runs(
             return result
         delta = candidate_median - base_median
         delta_percent = delta / base_median * 100.0
-        p_value = mann_whitney_p(base_metric["samples"], candidate_metric["samples"])
+        p_value = paired_sign_p(base_metric["samples"], candidate_metric["samples"])
         pooled_mad = math.hypot(float(base_metric["mad"]), float(candidate_metric["mad"]))
-        significant = p_value <= 0.01 and abs(delta) > 3.0 * pooled_mad
+        significant = p_value <= P_VALUE_MAX and abs(delta) > 3.0 * pooled_mad
         metric_verdict = "stable"
         direction = base_metric["direction"]
+        effective_limit = max(limit, MIN_EFFECT_PERCENT)
         regression = (
-            delta_percent >= limit if direction == "lower" else delta_percent <= -limit
+            delta_percent >= effective_limit
+            if direction == "lower"
+            else delta_percent <= -effective_limit
         )
         improvement = (
-            delta_percent <= -limit if direction == "lower" else delta_percent >= limit
+            delta_percent <= -effective_limit
+            if direction == "lower"
+            else delta_percent >= effective_limit
         )
         if significant and regression:
             metric_verdict = "regression"
@@ -781,7 +815,7 @@ def parser() -> argparse.ArgumentParser:
         compare = commands.add_parser(name, help="compare base and candidate runs")
         compare.add_argument("--base", type=Path, required=True)
         compare.add_argument("--candidate", type=Path, required=True)
-        compare.add_argument("--limit", type=float, default=10.0)
+        compare.add_argument("--limit", type=float, default=MIN_EFFECT_PERCENT)
         compare.add_argument("--min-samples", type=int, default=MIN_GATING_SAMPLES)
         compare.add_argument("--report-only", action="store_true")
         compare.add_argument("--output", type=Path)

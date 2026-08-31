@@ -1,4 +1,4 @@
-// T-I9-AI E3: end-to-end emergent-ecology demos — compose the whole substrate
+// end-to-end emergent-ecology demos — compose the whole substrate
 // (scent deposit/diffuse/evaporate/clamp + chemotaxis steering + boids locomotion +
 // kinematic integration) and assert the EMERGENT outcomes: a predator hunts prey
 // down a scent gradient, and a herd flocks together while travelling. Deterministic
@@ -77,7 +77,8 @@ float HuntFitness(const std::vector<float>& genome) {
         RunScentSteeringOnTick(r, field, 0.0f, 0.0f, 1.0f);
         IntegrateWishes(r, kDt);
     }
-    return -Dist(r.get<TransformComponent>(pred).position, r.get<TransformComponent>(prey).position);
+    return -Dist(r.get<TransformComponent>(pred).position,
+                 r.get<TransformComponent>(prey).position);
 }
 } // namespace
 
@@ -94,20 +95,28 @@ TEST(EcologyDemo, EvolvedPredatorsHuntBetter) {
     const std::size_t P = 16;
     std::vector<std::vector<float>> pop(P, std::vector<float>(3));
     for (auto& g : pop)
-        for (std::size_t i = 0; i < 3; ++i) g[i] = rng.next_range(bounds[i].lo, bounds[i].hi);
+        for (std::size_t i = 0; i < 3; ++i)
+            g[i] = rng.next_range(bounds[i].lo, bounds[i].hi);
 
     auto best_of = [&](const std::vector<std::vector<float>>& p) {
         float best = -1e30f;
-        for (const auto& g : p) best = std::max(best, HuntFitness(g));
+        for (const auto& g : p)
+            best = std::max(best, HuntFitness(g));
         return best;
     };
     const float gen0_best = best_of(pop);
 
     for (int gen = 0; gen < 12; ++gen) {
         std::vector<float> fitness(P);
-        for (std::size_t i = 0; i < P; ++i) fitness[i] = HuntFitness(pop[i]);
-        pop = EvolveGeneration(pop, fitness, bounds, /*sigma=*/0.12f, /*elitism=*/2,
-                               /*tournament_k=*/3, rng);
+        for (std::size_t i = 0; i < P; ++i)
+            fitness[i] = HuntFitness(pop[i]);
+        pop = EvolveGeneration(pop,
+                               fitness,
+                               bounds,
+                               /*sigma=*/0.12f,
+                               /*elitism=*/2,
+                               /*tournament_k=*/3,
+                               rng);
     }
     const float evolved_best = best_of(pop);
 
@@ -147,18 +156,18 @@ TEST(EcologyDemo, PredatorHuntsPreyDownScentGradient) {
     r.emplace<LocomotionProfile>(pred).move_speed = 8.0f;
     r.emplace<ActionPlanComponent>(pred); // empty plan -> locomotion idles, nose drives
 
-    const float start = Dist(r.get<TransformComponent>(pred).position,
-                             r.get<TransformComponent>(prey).position);
+    const float start =
+        Dist(r.get<TransformComponent>(pred).position, r.get<TransformComponent>(prey).position);
     for (int t = 0; t < 400; ++t) {
         RunScentDepositOnTick(r, field, 0.0f, 0.0f, 1.0f);
         field.Step(/*rate=*/0.25, /*iters=*/4, /*evap=*/0.004); // rate is capped at 0.25
         field.Clamp(0.0, 1.0e6);
-        RunInstinctLocomotionOnTick(r); // empty plan -> wish 0
+        RunInstinctLocomotionOnTick(r);                     // empty plan -> wish 0
         RunScentSteeringOnTick(r, field, 0.0f, 0.0f, 1.0f); // nose biases the wish
         IntegrateWishes(r, kDt);
     }
-    const float end = Dist(r.get<TransformComponent>(pred).position,
-                           r.get<TransformComponent>(prey).position);
+    const float end =
+        Dist(r.get<TransformComponent>(pred).position, r.get<TransformComponent>(prey).position);
 
     EXPECT_LT(end, start * 0.4f); // closed most of the gap by following the scent
     EXPECT_LT(end, 6.0f);         // ended up near the prey
@@ -197,13 +206,15 @@ TEST(EcologyDemo, HerdFlocksTogetherWhileTravelling) {
         float maxd = 0.0f;
         for (std::size_t i = 0; i < herd.size(); ++i)
             for (std::size_t j = i + 1; j < herd.size(); ++j)
-                maxd = std::max(maxd, Dist(r.get<TransformComponent>(herd[i]).position,
-                                           r.get<TransformComponent>(herd[j]).position));
+                maxd = std::max(maxd,
+                                Dist(r.get<TransformComponent>(herd[i]).position,
+                                     r.get<TransformComponent>(herd[j]).position));
         return maxd;
     };
     auto centroid_x = [&]() {
         float s = 0.0f;
-        for (auto e : herd) s += r.get<TransformComponent>(e).position.x;
+        for (auto e : herd)
+            s += r.get<TransformComponent>(e).position.x;
         return s / static_cast<float>(herd.size());
     };
 

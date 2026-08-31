@@ -1,6 +1,6 @@
 #pragma once
 
-// Track game.difficulty — a PURE difficulty profile mapping ONE 0..1 scalar to a
+// game.difficulty: a PURE difficulty profile mapping ONE 0..1 scalar to a
 // bundle of per-system tuning multipliers. This is the single knob a player (or a
 // game-mode preset) turns to make the living world relaxed or harsh; the engine's
 // individual sim systems (plant growth, evolution, disease, fire, predator AI,

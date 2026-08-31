@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-// Spec 016 (FR-D): shader-resource REFLECTION + layout validation.
+// shader-resource REFLECTION + layout validation.
 //
 // At program-link time we introspect the linked GL program's declared resource
 // layout -- the samplers it actually uses (name + GL type + default texture unit),
@@ -18,9 +18,8 @@
 // such as binding a sampler2DArray where the shader declares sampler2D -- is
 // reported loudly instead of silently producing a corrupt frame.
 //
-// This is the introspection substrate spec-014's single-source HLSL/SPIRV-Cross
-// path plugs into: the same ReflectedLayout will later come from SPIRV-Cross
-// reflection of the cross-compiled module instead of GL program introspection.
+// ReflectedLayout is backend-neutral: linked OpenGL introspection and compiled
+// shader reflection both produce the same validation input.
 //
 // Reflection-only: every call here is a read-only GL program query
 // (glGetProgramInterfaceiv / glGetProgramResource*) plus glGetUniformiv to read a
@@ -32,31 +31,31 @@ namespace Luminumbra::Rendering {
 // --- Reflected (introspected) layout ----------------------------------------
 
 struct ReflectedSampler {
-    std::string name;          // active uniform name (e.g. "u_shadowCascades")
-    GLenum type = 0;           // GL_SAMPLER_2D / GL_SAMPLER_2D_ARRAY / GL_SAMPLER_CUBE / ...
-    GLint location = -1;       // glGetUniformLocation (for reading the unit)
-    GLint unit = 0;            // post-link sampler value: layout(binding=) default, else 0
+    std::string name;    // active uniform name (e.g. "u_shadowCascades")
+    GLenum type = 0;     // GL_SAMPLER_2D / GL_SAMPLER_2D_ARRAY / GL_SAMPLER_CUBE /...
+    GLint location = -1; // glGetUniformLocation (for reading the unit)
+    GLint unit = 0;      // post-link sampler value: layout(binding=) default, else 0
 };
 
 struct ReflectedBlock {
-    std::string name;          // block name (e.g. "ScatterParams")
-    GLint binding = 0;         // GL_BUFFER_BINDING (the layout(binding=) point)
+    std::string name;  // block name (e.g. "ScatterParams")
+    GLint binding = 0; // GL_BUFFER_BINDING (the layout(binding=) point)
 };
 
 struct ReflectedOutput {
-    std::string name;          // fragment output name (e.g. "FragColor")
-    GLint location = -1;       // GL_LOCATION (the draw-buffer / attachment index)
+    std::string name;    // fragment output name (e.g. "FragColor")
+    GLint location = -1; // GL_LOCATION (the draw-buffer / attachment index)
 };
 
 struct ReflectedLayout {
     std::vector<ReflectedSampler> samplers;
-    std::vector<ReflectedBlock>   uniform_blocks;
-    std::vector<ReflectedBlock>   storage_blocks;
-    std::vector<ReflectedOutput>  outputs;
+    std::vector<ReflectedBlock> uniform_blocks;
+    std::vector<ReflectedBlock> storage_blocks;
+    std::vector<ReflectedOutput> outputs;
 
     const ReflectedSampler* find_sampler(std::string_view name) const;
-    const ReflectedBlock*   find_uniform_block(std::string_view name) const;
-    const ReflectedBlock*   find_storage_block(std::string_view name) const;
+    const ReflectedBlock* find_uniform_block(std::string_view name) const;
+    const ReflectedBlock* find_storage_block(std::string_view name) const;
 };
 
 // Introspect a successfully-linked GL program. Safe to call on program 0 (returns
@@ -66,34 +65,34 @@ ReflectedLayout ReflectProgramLayout(GLuint program);
 // --- Expected (pass-declared) layout -----------------------------------------
 
 struct ExpectedSampler {
-    std::string name;          // sampler the pass binds into
-    GLenum type = 0;           // required GL sampler type (the garbage-prevention check)
-    int unit = -1;             // <0 => don't check the unit; >=0 => require reflected unit == this
+    std::string name; // sampler the pass binds into
+    GLenum type = 0;  // required GL sampler type (the garbage-prevention check)
+    int unit = -1;    // <0 => don't check the unit; >=0 => require reflected unit == this
 };
 
 struct ExpectedBlock {
     std::string name;
-    int binding = -1;          // <0 => don't check; >=0 => require reflected binding == this
+    int binding = -1; // <0 => don't check; >=0 => require reflected binding == this
 };
 
 struct ExpectedLayout {
-    std::string pass_name;     // for diagnostics ("lighting", "skybox", ...)
+    std::string pass_name; // for diagnostics ("lighting", "skybox",...)
     std::vector<ExpectedSampler> samplers;
-    std::vector<ExpectedBlock>   uniform_blocks;
-    std::vector<ExpectedBlock>   storage_blocks;
+    std::vector<ExpectedBlock> uniform_blocks;
+    std::vector<ExpectedBlock> storage_blocks;
 };
 
 struct ValidationResult {
-    bool ok = true;            // false only on a HARD mismatch (type / binding-point)
-    bool had_warning = false;  // a soft issue (an expected sampler the linker stripped)
-    std::string diagnostic;    // human-readable; empty when fully clean
+    bool ok = true;           // false only on a HARD mismatch (type / binding-point)
+    bool had_warning = false; // a soft issue (an expected sampler the linker stripped)
+    std::string diagnostic;   // human-readable; empty when fully clean
 };
 
 // Validate a pass's expected layout against the reflected layout.
 //
 // Hard failure (ok=false): an expected sampler/block is PRESENT in the program but
 //   has the wrong GL type or a wrong binding/unit. This is the "renders garbage"
-//   class and the load-time tripwire spec-016 FR-D targets.
+//   class and the load-time tripwire   targets.
 // Soft warning (had_warning=true, ok stays true): an expected sampler is ABSENT.
 //   The GL linker strips declared-but-unused uniforms, so absence alone is not
 //   proof of a real bug -- we surface it but do not fail the program.

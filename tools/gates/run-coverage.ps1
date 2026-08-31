@@ -28,7 +28,7 @@
 #>
 [CmdletBinding()]
 param(
-    # Honest measured floor (coverage-instrumentation OQ-002). First full
+    # Honest measured floor (coverage-instrumentation ). First full
     # instrumented run measured ~65% overall line coverage; the floor sits a few
     # points below to absorb run-to-run variance (audio/tools are GPU-/device-/
     # build-time-bound and unexercised headlessly). Ratchet UPWARD toward the
@@ -65,7 +65,7 @@ try {
     }
 
     if (-not $SkipTests) {
-        # Reset stale .gcda so percentages reflect THIS run only (plan R5).
+        # Reset stale .gcda so percentages reflect THIS run only (coverage contract).
         Write-Host "== clean stale .gcda ==" -ForegroundColor Cyan
         Get-ChildItem -Path $buildDir -Recurse -Filter *.gcda -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue

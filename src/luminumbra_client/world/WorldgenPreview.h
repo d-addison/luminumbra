@@ -1,6 +1,6 @@
 #pragma once
 
-// Spec 002 Item 1 — the create-world LIVE WORLD-PREVIEW DIORAMA controller.
+// the create-world LIVE WORLD-PREVIEW DIORAMA controller.
 //
 // Owns a bounded preview world (a real Systems::SHIELD_WorldSystem built from
 // CANDIDATE params/seed, streamed around a fixed center at a small radius), an
@@ -17,12 +17,12 @@
 // TerrainGenParams via the in-memory loader seam (LoadTerrainPresetFromJson)
 // with the correct data root, constructs a real world system, and renders it.
 //
-// Threading (TASK #6): the world BUILD (worldgen + meshing + WaterSystem init)
+// Threading: the world BUILD (worldgen + meshing + WaterSystem init)
 // is CPU-only (no GL) and runs on a background worker thread so a debounced knob
 // change never stalls the create screen. The worker writes ONLY *pending* members
 // (m_pending_world / m_pending_water / m_pending_registry); the render/main thread
 // reads the *live* members and performs the pending->live swap + bumps
-// m_rebuild_generation ON THE GL THREAD (so the TASK #4 foliage rebuild + any GL
+// m_rebuild_generation ON THE GL THREAD (so the  foliage rebuild + any GL
 // upload stay main-thread). Same seed/params/sequence -> identical world; only
 // WHEN the rebuild completes changes (render-only -> zero world_hash impact).
 
@@ -44,15 +44,24 @@
 
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
 
-// TASK #4: the FoliagePass ChunkScatter record is stored as a cached member so
+// the FoliagePass ChunkScatter record is stored as a cached member so
 // the preview scatters vegetation exactly like the real world path. The shared
 // surface-query context/callback (ScenarioHarness::FoliageScatterContext /
-// FoliageSurfaceQuery) are only used in the .cpp, so that header is included there.
-#include "rendering/passes/FoliagePass.h"          // Rendering::FoliagePass::ChunkScatter
+// FoliageSurfaceQuery) are only used in the.cpp, so that header is included there.
+#include "rendering/passes/FoliagePass.h" // Rendering::FoliagePass::ChunkScatter
 
-namespace Luminumbra::Rendering { class RenderPipeline; class Camera; class ParticlePass; }
-namespace Luminumbra { class JobSystem; }
-namespace Luminumbra::Systems { class PhysicsSystem; class WaterSystem; }
+namespace Luminumbra::Rendering {
+class RenderPipeline;
+class Camera;
+class ParticlePass;
+} // namespace Luminumbra::Rendering
+namespace Luminumbra {
+class JobSystem;
+}
+namespace Luminumbra::Systems {
+class PhysicsSystem;
+class WaterSystem;
+} // namespace Luminumbra::Systems
 
 namespace Luminumbra::Client {
 
@@ -60,7 +69,13 @@ class WorldgenPreview {
 public:
     // weather selector parallel to RenderPipeline's WeatherType, kept local so
     // the UI/host can drive it without pulling the render header everywhere.
-    enum class Weather { Clear = 0, Rain, Snow, Fog, Storm };
+    enum class Weather {
+        Clear = 0,
+        Rain,
+        Snow,
+        Fog,
+        Storm
+    };
 
     WorldgenPreview();
     ~WorldgenPreview();
@@ -71,40 +86,61 @@ public:
     // (Re)allocate the offscreen FBO at w x h. Idempotent if already this size.
     // Requires a current GL context. Safe to call repeatedly.
     void ensure_target(int width, int height);
-    int target_width() const { return m_fbo_w; }
-    int target_height() const { return m_fbo_h; }
-    GLuint color_texture() const { return m_color_texture; }
+    int target_width() const {
+        return m_fbo_w;
+    }
+    int target_height() const {
+        return m_fbo_h;
+    }
+    GLuint color_texture() const {
+        return m_color_texture;
+    }
 
     // Candidate params source. set_candidate stores the resolved preset JSON +
-    // the data root and marks a pending rebuild (debounced in tick()). Latest
+    // the data root and marks a pending rebuild (debounced in tick). Latest
     // call wins. data_root is the absolute path to data/ so biome/structure
     // tables resolve correctly (the in-memory seam, not a temp file).
     void set_candidate(const nlohmann::json& resolved_preset_json,
-                       const std::filesystem::path& data_root, int seed);
+                       const std::filesystem::path& data_root,
+                       int seed);
     // Directly set fixed params (tests / callers that already hold params). Marks
     // a pending rebuild, debounced like set_candidate.
     void set_params(const Systems::TerrainGenParams& params, int seed);
 
     // Live look controls (no rebuild — render-only).
     void set_weather(Weather w);
-    Weather weather() const { return m_weather; }
-    void set_time_of_day(float tod01); // 0=noon .. ~0.24 dusk (RenderPipeline scale)
-    float time_of_day() const { return m_tod; }
+    Weather weather() const {
+        return m_weather;
+    }
+    void set_time_of_day(float tod01); // 0=noon.. ~0.24 dusk (RenderPipeline scale)
+    float time_of_day() const {
+        return m_tod;
+    }
 
     // Orbit / turntable camera.
     void orbit(float dyaw_deg, float dpitch_deg); // mouse drag delta
     void zoom(float dscroll);                     // scroll wheel delta
     void reset_view();
-    float orbit_yaw() const { return m_yaw; }
-    float orbit_pitch() const { return m_pitch; }
-    float orbit_distance() const { return m_dist; }
+    float orbit_yaw() const {
+        return m_yaw;
+    }
+    float orbit_pitch() const {
+        return m_pitch;
+    }
+    float orbit_distance() const {
+        return m_dist;
+    }
 
-    // Whether the preview screen is active. When inactive, tick()/render() are
+    // Whether the preview screen is active. When inactive, tick/render are
     // cheap no-ops (paused) so the create screen costs nothing when hidden.
-    void set_active(bool active) { m_active = active; }
-    bool active() const { return m_active; }
+    void set_active(bool active) {
+        m_active = active;
+    }
+    bool active() const {
+        return m_active;
+    }
 
-    // Wave 0.3: drop any preview precipitation emitters from the shared
+    // drop any preview precipitation emitters from the shared
     // ParticlePass (called by the host when the create screen deactivates so the
     // preview's rain/snow never lingers into the menu backdrop or the game). A
     // cheap no-op when no precipitation is active. Render-only.
@@ -112,18 +148,18 @@ public:
 
     // Advance the debounce timer; when the debounce window elapses on the latest
     // pending candidate this SIGNALS the background worker to (re)build the world
-    // (TASK #6). The actual pending->live swap happens later, on the GL thread, in
-    // render()/render_to_backbuffer(). Returns true if a build was signalled this
+    //. The actual pending->live swap happens later, on the GL thread, in
+    // render/render_to_backbuffer. Returns true if a build was signalled this
     // tick. dt is seconds.
     bool tick(float dt);
 
     // Render the current candidate world into the offscreen FBO via the engine
     // pipeline. Builds the world lazily on first use. On a build failure keeps
-    // the last good frame and sets last_build_failed(). Returns true if a frame
+    // the last good frame and sets last_build_failed. Returns true if a frame
     // was rendered. dt is seconds (drives atmosphere/weather animation).
     // NOTE: this resizes the shared deferred pipeline to the FBO size and back,
     // which is fine for a one-shot headless capture/test but too costly per-frame
-    // on a shared pipeline — the LIVE create screen uses render_to_backbuffer().
+    // on a shared pipeline — the LIVE create screen uses render_to_backbuffer.
     bool render(Rendering::RenderPipeline& pipeline, float dt);
 
     // Live create-screen render: draw the candidate world FULL-SCREEN to the
@@ -131,37 +167,47 @@ public:
     // FBO, no per-frame pipeline resize — the "framed hole" the create panel
     // frames). This is the cheap, smooth path used by the running game; the host
     // suppresses the separate menu backdrop while it's active so only ONE world
-    // renders. Builds the world lazily/debounced like render(). Returns true if a
+    // renders. Builds the world lazily/debounced like render. Returns true if a
     // frame was drawn (false while a build is pending and no world exists yet).
     bool render_to_backbuffer(Rendering::RenderPipeline& pipeline, float dt);
 
-    bool world_ready() const { return m_world != nullptr; }
-    bool last_build_failed() const { return m_last_build_failed; }
-    const std::string& last_error() const { return m_last_error; }
+    bool world_ready() const {
+        return m_world != nullptr;
+    }
+    bool last_build_failed() const {
+        return m_last_build_failed;
+    }
+    const std::string& last_error() const {
+        return m_last_error;
+    }
     // Generation counter: bumped once per ACTUAL world rebuild. Lets tests assert
     // latest-wins debouncing (N rapid set_params -> one rebuild -> +1 here).
-    unsigned rebuild_generation() const { return m_rebuild_generation; }
+    unsigned rebuild_generation() const {
+        return m_rebuild_generation;
+    }
 
     // The fixed world-space center the diorama orbits + is streamed around.
     static Luminumbra::Vec3 look_at_center();
 
 private:
-    // TASK #6: the background worker loop + the helpers it/the main thread use.
-    void start_worker();                    // spin up m_build_thread (once)
-    void worker_loop();                     // worker: drains m_build_pending
-    void build_world_pending();             // CPU-only build into PENDING members (worker thread)
-    void swap_pending_into_live(Rendering::RenderPipeline& pipeline); // GL thread: drain far-LOD off the OLD world, then pending->live + bump generation + foliage refresh marker
-    void configure_camera(Rendering::Camera& cam) const; // orbit -> Camera pose
+    // the background worker loop + the helpers it/the main thread use.
+    void start_worker();        // spin up m_build_thread (once)
+    void worker_loop();         // worker: drains m_build_pending
+    void build_world_pending(); // CPU-only build into PENDING members (worker thread)
+    void swap_pending_into_live(
+        Rendering::RenderPipeline&
+            pipeline); // GL thread: drain far-LOD off the OLD world, then pending->live + bump
+                       // generation + foliage refresh marker
+    void configure_camera(Rendering::Camera& cam) const;        // orbit -> Camera pose
     void apply_look(Rendering::RenderPipeline& pipeline) const; // weather/tod/clouds
-    // Wave 0.3: spawn/maintain camera-followed PRECIPITATION particles in the
+    // spawn/maintain camera-followed PRECIPITATION particles in the
     // shared pipeline ParticlePass so the preview's rain/snow/storm read as REAL
     // falling particles (not just a sky/fog tint). Re-centres the emitter on the
     // orbit camera each frame and re-spawns only when the weather changes. The
     // particle MOTION is render-only — it never touches world_hash (one-way rule).
-    void apply_precipitation(Rendering::RenderPipeline& pipeline,
-                             const Rendering::Camera& cam);
+    void apply_precipitation(Rendering::RenderPipeline& pipeline, const Rendering::Camera& cam);
 
-    // TASK #4: (re)build the deterministic foliage scatter for the live world's
+    // (re)build the deterministic foliage scatter for the live world's
     // bounded chunk set, but only once per actual world rebuild (cached by
     // m_rebuild_generation so it is a one-shot per world build, not per-frame).
     void rebuild_foliage_if_needed(Rendering::RenderPipeline& pipeline);
@@ -178,7 +224,7 @@ private:
     std::unique_ptr<Systems::SHIELD_WorldSystem> m_world;
     // The water system linked to m_world. WITHOUT this, a lake/archipelago (water) preset
     // builds + renders with a null water system and the water render path crashes (0xC0000005)
-    // — the create-world "lake" crash. Linking it (like the game world) makes water meshes
+    // the create-world "lake" crash. Linking it (like the game world) makes water meshes
     // generate and renders water as water (the header's stated intent). Declared AFTER m_world
     // so it destructs FIRST (it holds a SHIELD_WorldSystem*); also reset before each rebuild.
     std::unique_ptr<Systems::WaterSystem> m_water;
@@ -199,7 +245,7 @@ private:
     Rendering::RenderPipeline* m_drain_pipeline = nullptr;
 
     // --- PENDING world (written ONLY by the worker thread). The main/render
-    // thread reads these solely inside swap_pending_into_live() once m_build_done
+    // thread reads these solely inside swap_pending_into_live once m_build_done
     // is set, then moves them into the live members. Ordered AFTER the live
     // members so they tear down first; reset water-before-world to match the dtor
     // dependency order (water holds a SHIELD_WorldSystem*). ---
@@ -212,8 +258,8 @@ private:
     std::mutex m_candidate_mutex;
     Systems::TerrainGenParams m_pending_params; // latest requested params
     int m_pending_seed = 1337;
-    bool m_have_pending = false;     // a candidate is queued
-    bool m_pending_dirty = false;    // pending differs from the built world
+    bool m_have_pending = false;  // a candidate is queued
+    bool m_pending_dirty = false; // pending differs from the built world
     float m_debounce_remaining = 0.0f;
     static constexpr float kDebounceSeconds = 0.25f;
     unsigned m_rebuild_generation = 0;
@@ -230,11 +276,12 @@ private:
     // where the worker has consumed m_build_pending but not yet set m_build_done).
     // The lazy first-build kick checks this so it never double-submits.
     std::atomic<bool> m_build_inflight{false};
-    bool m_first_build_requested = false;     // the lazy first-build kick fired once (don't re-kick)
+    bool m_first_build_requested = false; // the lazy first-build kick fired once (don't re-kick)
 
-    // TASK #4: foliage scatter cache (render-only). The scatter is a deterministic
+    // foliage scatter cache (render-only). The scatter is a deterministic
     // pure function of the world; rebuild it once per actual world rebuild.
-    std::vector<Rendering::FoliagePass::ChunkScatter> m_foliage_scatter; // per-chunk inputs for the live world
+    std::vector<Rendering::FoliagePass::ChunkScatter>
+        m_foliage_scatter;                    // per-chunk inputs for the live world
     unsigned m_last_foliage_generation = ~0u; // m_rebuild_generation the scatter was built at
     bool m_foliage_loaded = false;            // scatter archetype set loaded once
     std::filesystem::path m_data_root;        // data/ root (for the scatter set json)
@@ -243,14 +290,14 @@ private:
     Weather m_weather = Weather::Clear;
     float m_tod = 0.24f; // golden dusk by default (matches the blessed vista)
     float m_yaw = 45.0f;
-    float m_pitch = 28.0f;   // look DOWN onto the diorama
+    float m_pitch = 28.0f; // look DOWN onto the diorama
     float m_dist = 120.0f;
 
     bool m_active = false;
     bool m_last_build_failed = false;
     std::string m_last_error;
 
-    // Wave 0.3: precipitation emitter state (render-only). m_precip_emitter_id is
+    // precipitation emitter state (render-only). m_precip_emitter_id is
     // the live rain/snow emitter in the shared ParticlePass (kInvalidEmitter when
     // none); m_precip_spawned_for tracks which weather it was spawned for so a
     // weather change re-spawns the right emitter.

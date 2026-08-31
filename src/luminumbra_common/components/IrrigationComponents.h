@@ -1,8 +1,8 @@
 #pragma once
 
-// Track sim.irrigation — WATER SOURCE participant component.
+// sim.irrigation: WATER SOURCE participant component.
 //
-// LOAD-BEARING RULE (mirrors the foliage pillar / SoilComponents.h): this is SIM
+// LOAD-BEARING RULE (mirrors the foliage system / SoilComponents.h): this is SIM
 // truth — small, integer/fixed-point, deterministic — never render state. The
 // soil-MOISTURE field (systems/IrrigationSystem.h) is a diffusion grid that a
 // dug channel / spring DEPOSITS into; this component is the per-entity OPT-IN +

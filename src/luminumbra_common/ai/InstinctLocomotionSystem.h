@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I6 multiplayer polish: InstinctLocomotionSystem — the GOAP *executor* for the
+//  multiplayer polish: InstinctLocomotionSystem — the GOAP *executor* for the
 // move portion of a plan. InstinctSystem (the planner) ranks opportunities and
 // writes the winning Action into ActionPlanComponent but never moves the agent.
 // This system converts that action into a horizontal WISH VELOCITY intent using a
@@ -27,10 +27,10 @@
 namespace luminumbra::ai {
 
 struct InstinctLocomotionTickStats {
-    std::uint64_t agents_seen = 0;     // agents with profile + transform + plan considered
-    std::uint64_t agents_steered = 0;  // produced a non-zero wish toward a target this tick
-    std::uint64_t agents_arrived = 0;  // within arrival_radius of the target (holding)
-    std::uint64_t agents_idle = 0;     // no plan / no positioned target -> zero wish
+    std::uint64_t agents_seen = 0;    // agents with profile + transform + plan considered
+    std::uint64_t agents_steered = 0; // produced a non-zero wish toward a target this tick
+    std::uint64_t agents_arrived = 0; // within arrival_radius of the target (holding)
+    std::uint64_t agents_idle = 0;    // no plan / no positioned target -> zero wish
 };
 
 // For every entity carrying ActionPlanComponent + TransformComponent +

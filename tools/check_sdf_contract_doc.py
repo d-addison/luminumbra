@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SHIELD-10 doc-lint (spec 021).
+""" doc-lint ().
 
 Assert that docs/shield/sdf-contract.md enumerates the two SDF producer tiers and the
 malformed-SDF regeneration rule. The required contract strings are the quoted needles in
@@ -24,7 +24,7 @@ def main() -> int:
             print(f"SdfContractDocLint: missing required file: {p}", file=sys.stderr)
             return 1
 
-    # Only the Gherkin step lines (Then/And ...) carry required needles; prose in the
+    # Only the Gherkin step lines (Then/And...) carry required needles; prose in the
     # Feature description may mention the step template without asserting anything.
     needles = re.findall(
         r'^\s*(?:Then|And)\s+the contract documents "([^"]+)"',

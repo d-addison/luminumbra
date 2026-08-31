@@ -1,7 +1,8 @@
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <array>
@@ -18,10 +19,10 @@
 #include <unordered_map>
 #include <vector>
 
-#include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
 #include "entt/entt.hpp"
 #include "nlohmann/json.hpp"
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include "core/JobSystem.h"
 #include "systems/PhysicsSystem.h"
@@ -177,7 +178,7 @@ fs::path ArtifactRoot() {
 }
 
 TerrainGenParams LoadPresetParams(const fs::path& path) {
-    // T-I3-5: delegate to the canonical engine preset parser.
+    // delegate to the canonical engine preset parser.
     const Luminumbra::world::TerrainPresetLoadResult result =
         Luminumbra::world::LoadTerrainPreset(path);
     EXPECT_TRUE(result.ok) << path.string();
@@ -246,7 +247,8 @@ GLuint CompileShader(const fs::path& path, GLenum type) {
     GLint success = GL_FALSE;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
     if (success != GL_TRUE) {
-        ADD_FAILURE() << "Shader failed to compile: " << path.string() << "\n" << GetShaderInfoLog(shader);
+        ADD_FAILURE() << "Shader failed to compile: " << path.string() << "\n"
+                      << GetShaderInfoLog(shader);
         glDeleteShader(shader);
         return 0;
     }
@@ -294,7 +296,8 @@ void SetMat3(GLuint program, const char* name, const glm::mat3& value) {
     glUniformMatrix3fv(glGetUniformLocation(program, name), 1, GL_FALSE, glm::value_ptr(value));
 }
 
-HorizonMetrics CalculateHorizonMetrics(const std::vector<Chunk*>& chunks, const IVec3& spawn_chunk) {
+HorizonMetrics CalculateHorizonMetrics(const std::vector<Chunk*>& chunks,
+                                       const IVec3& spawn_chunk) {
     HorizonMetrics metrics;
     metrics.renderable_chunks = chunks.size();
 
@@ -322,9 +325,7 @@ HorizonMetrics CalculateHorizonMetrics(const std::vector<Chunk*>& chunks, const 
 
         const int dx = coords.x - spawn_chunk.x;
         const int dz = coords.z - spawn_chunk.z;
-        const int quadrant =
-            (dx < 0 ? 0 : 1) +
-            (dz < 0 ? 0 : 2);
+        const int quadrant = (dx < 0 ? 0 : 1) + (dz < 0 ? 0 : 2);
         ++metrics.quadrant_mesh_chunks[static_cast<std::size_t>(quadrant)];
     }
 
@@ -407,7 +408,8 @@ ImageMetrics CalculateImageMetrics(const std::vector<unsigned char>& rgba) {
     if (pixel_count > 0u) {
         metrics.mean_luminance = luminance_sum / static_cast<double>(pixel_count);
     }
-    metrics.occupied_tiles = static_cast<std::size_t>(std::count(occupied_tiles.begin(), occupied_tiles.end(), true));
+    metrics.occupied_tiles =
+        static_cast<std::size_t>(std::count(occupied_tiles.begin(), occupied_tiles.end(), true));
     return metrics;
 }
 
@@ -424,13 +426,22 @@ void WritePpm(const fs::path& path, int width, int height, const std::vector<uns
     }
 }
 
-std::vector<unsigned char> RenderCombinedMesh(GLuint program, const CombinedMesh& mesh, const Vec3& spawn) {
+std::vector<unsigned char>
+RenderCombinedMesh(GLuint program, const CombinedMesh& mesh, const Vec3& spawn) {
     GLuint color_texture = 0;
     GLuint depth_renderbuffer = 0;
     GLuint fbo = 0;
     glGenTextures(1, &color_texture);
     glBindTexture(GL_TEXTURE_2D, color_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCaptureWidth, kCaptureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RGBA8,
+                 kCaptureWidth,
+                 kCaptureHeight,
+                 0,
+                 GL_RGBA,
+                 GL_UNSIGNED_BYTE,
+                 nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -441,7 +452,8 @@ std::vector<unsigned char> RenderCombinedMesh(GLuint program, const CombinedMesh
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_renderbuffer);
+    glFramebufferRenderbuffer(
+        GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_renderbuffer);
     EXPECT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
     GLuint vao = 0;
@@ -452,13 +464,29 @@ std::vector<unsigned char> RenderCombinedMesh(GLuint program, const CombinedMesh
     glGenBuffers(1, &ebo);
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(VoxelVertex)), mesh.vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(mesh.vertices.size() * sizeof(VoxelVertex)),
+                 mesh.vertices.data(),
+                 GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(u32)), mesh.indices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(mesh.indices.size() * sizeof(u32)),
+                 mesh.indices.data(),
+                 GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), reinterpret_cast<void*>(offsetof(VoxelVertex, position)));
+    glVertexAttribPointer(0,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, position)));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), reinterpret_cast<void*>(offsetof(VoxelVertex, normal)));
+    glVertexAttribPointer(1,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, normal)));
 
     glViewport(0, 0, kCaptureWidth, kCaptureHeight);
     glEnable(GL_DEPTH_TEST);
@@ -470,7 +498,8 @@ std::vector<unsigned char> RenderCombinedMesh(GLuint program, const CombinedMesh
     const glm::vec3 camera_position(spawn.x - 180.0f, spawn.y + 118.0f, spawn.z + 180.0f);
     const glm::mat4 model(1.0f);
     const glm::mat4 view = glm::lookAt(camera_position, camera_target, glm::vec3{0.0f, 1.0f, 0.0f});
-    const glm::mat4 projection = glm::perspective(glm::radians(58.0f), static_cast<float>(kCaptureWidth) / kCaptureHeight, 0.1f, 800.0f);
+    const glm::mat4 projection = glm::perspective(
+        glm::radians(58.0f), static_cast<float>(kCaptureWidth) / kCaptureHeight, 0.1f, 800.0f);
     const glm::mat3 normal_matrix(1.0f);
 
     glUseProgram(program);
@@ -478,13 +507,21 @@ std::vector<unsigned char> RenderCombinedMesh(GLuint program, const CombinedMesh
     SetMat4(program, "view", view);
     SetMat4(program, "projection", projection);
     SetMat3(program, "normalMatrix", normal_matrix);
-    glUniform3f(glGetUniformLocation(program, "lightPos"), spawn.x - 80.0f, spawn.y + 160.0f, spawn.z + 120.0f);
-    glUniform3f(glGetUniformLocation(program, "viewPos"), camera_position.x, camera_position.y, camera_position.z);
+    glUniform3f(glGetUniformLocation(program, "lightPos"),
+                spawn.x - 80.0f,
+                spawn.y + 160.0f,
+                spawn.z + 120.0f);
+    glUniform3f(glGetUniformLocation(program, "viewPos"),
+                camera_position.x,
+                camera_position.y,
+                camera_position.z);
     glUniform3f(glGetUniformLocation(program, "lightColor"), 1.0f, 0.98f, 0.92f);
     glUniform3f(glGetUniformLocation(program, "objectColor"), 0.46f, 0.74f, 0.36f);
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(mesh.indices.size()), GL_UNSIGNED_INT, nullptr);
+    glDrawElements(
+        GL_TRIANGLES, static_cast<GLsizei>(mesh.indices.size()), GL_UNSIGNED_INT, nullptr);
 
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) * static_cast<std::size_t>(kCaptureHeight) * 4u);
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) *
+                                      static_cast<std::size_t>(kCaptureHeight) * 4u);
     glReadPixels(0, 0, kCaptureWidth, kCaptureHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
     glDeleteBuffers(1, &ebo);
@@ -510,10 +547,8 @@ float BoundaryDensityDelta(const SHIELD_WorldSystem& world, const Vec3& world_po
     const Vec3 nudged_x = world_pos + Vec3(kDensityEpsilon, 0.0f, 0.0f);
     const Vec3 nudged_z = world_pos + Vec3(0.0f, 0.0f, kDensityEpsilon);
     const float center = world.get_density_at(world_pos);
-    return std::max(
-        std::abs(center - world.get_density_at(nudged_x)),
-        std::abs(center - world.get_density_at(nudged_z))
-    );
+    return std::max(std::abs(center - world.get_density_at(nudged_x)),
+                    std::abs(center - world.get_density_at(nudged_z)));
 }
 
 enum class SeamBoundaryFace {
@@ -525,28 +560,30 @@ enum class SeamBoundaryFace {
 
 Vec3 SeamBoundaryNormal(SeamBoundaryFace face) {
     switch (face) {
-    case SeamBoundaryFace::MinX:
-        return Vec3(-1.0f, 0.0f, 0.0f);
-    case SeamBoundaryFace::MaxX:
-        return Vec3(1.0f, 0.0f, 0.0f);
-    case SeamBoundaryFace::MinZ:
-        return Vec3(0.0f, 0.0f, -1.0f);
-    case SeamBoundaryFace::MaxZ:
-        return Vec3(0.0f, 0.0f, 1.0f);
+        case SeamBoundaryFace::MinX:
+            return Vec3(-1.0f, 0.0f, 0.0f);
+        case SeamBoundaryFace::MaxX:
+            return Vec3(1.0f, 0.0f, 0.0f);
+        case SeamBoundaryFace::MinZ:
+            return Vec3(0.0f, 0.0f, -1.0f);
+        case SeamBoundaryFace::MaxZ:
+            return Vec3(0.0f, 0.0f, 1.0f);
     }
     return Vec3(0.0f, 0.0f, 0.0f);
 }
 
 bool VertexOnSeamFace(const VoxelVertex& vertex, SeamBoundaryFace face) {
     switch (face) {
-    case SeamBoundaryFace::MinX:
-        return std::abs(vertex.position.x) <= kDensityEpsilon;
-    case SeamBoundaryFace::MaxX:
-        return std::abs(vertex.position.x - static_cast<float>(CHUNK_SIZE_X)) <= kDensityEpsilon;
-    case SeamBoundaryFace::MinZ:
-        return std::abs(vertex.position.z) <= kDensityEpsilon;
-    case SeamBoundaryFace::MaxZ:
-        return std::abs(vertex.position.z - static_cast<float>(CHUNK_SIZE_Z)) <= kDensityEpsilon;
+        case SeamBoundaryFace::MinX:
+            return std::abs(vertex.position.x) <= kDensityEpsilon;
+        case SeamBoundaryFace::MaxX:
+            return std::abs(vertex.position.x - static_cast<float>(CHUNK_SIZE_X)) <=
+                   kDensityEpsilon;
+        case SeamBoundaryFace::MinZ:
+            return std::abs(vertex.position.z) <= kDensityEpsilon;
+        case SeamBoundaryFace::MaxZ:
+            return std::abs(vertex.position.z - static_cast<float>(CHUNK_SIZE_Z)) <=
+                   kDensityEpsilon;
     }
     return false;
 }
@@ -564,10 +601,8 @@ bool HasTransitionSkirtOnFace(const Chunk& chunk, SeamBoundaryFace face) {
     const Vec3 face_normal = SeamBoundaryNormal(face);
     std::size_t aligned_boundary_vertices = 0;
     for (const VoxelVertex& vertex : chunk.mesh_vertices) {
-        if (VertexOnSeamFace(vertex, face) &&
-            std::abs(vertex.normal.y) <= 0.1f &&
-            glm::dot(vertex.normal, face_normal) >= 0.98f)
-        {
+        if (VertexOnSeamFace(vertex, face) && std::abs(vertex.normal.y) <= 0.1f &&
+            glm::dot(vertex.normal, face_normal) >= 0.98f) {
             ++aligned_boundary_vertices;
         }
     }
@@ -578,17 +613,14 @@ bool HasTransitionSkirtOnFace(const Chunk& chunk, SeamBoundaryFace face) {
 // boundary coverage) across vertically adjacent chunks, so transition
 // mitigation is a property of the column: the chunk of the pair may carry no
 // surface at the shared face while its vertical sibling carries the skirt.
-bool ColumnHasTransitionSkirtOnFace(
-    const std::vector<Chunk*>& chunks,
-    const Chunk& column_chunk,
-    SeamBoundaryFace face)
-{
+bool ColumnHasTransitionSkirtOnFace(const std::vector<Chunk*>& chunks,
+                                    const Chunk& column_chunk,
+                                    SeamBoundaryFace face) {
     const IVec3 coords = column_chunk.get_coords();
     for (Chunk* chunk : chunks) {
         const IVec3 candidate = chunk->get_coords();
         if (candidate.x == coords.x && candidate.z == coords.z &&
-            HasTransitionSkirtOnFace(*chunk, face))
-        {
+            HasTransitionSkirtOnFace(*chunk, face)) {
             return true;
         }
     }
@@ -597,24 +629,26 @@ bool ColumnHasTransitionSkirtOnFace(
 
 std::string SeamFaceName(SeamBoundaryFace face) {
     switch (face) {
-    case SeamBoundaryFace::MinX:
-        return "min_x";
-    case SeamBoundaryFace::MaxX:
-        return "max_x";
-    case SeamBoundaryFace::MinZ:
-        return "min_z";
-    case SeamBoundaryFace::MaxZ:
-        return "max_z";
+        case SeamBoundaryFace::MinX:
+            return "min_x";
+        case SeamBoundaryFace::MaxX:
+            return "max_x";
+        case SeamBoundaryFace::MinZ:
+            return "min_z";
+        case SeamBoundaryFace::MaxZ:
+            return "max_z";
     }
     return "unknown";
 }
 
 std::string ChunkCoordString(const Chunk& chunk) {
     const IVec3 coords = chunk.get_coords();
-    return "(" + std::to_string(coords.x) + "," + std::to_string(coords.y) + "," + std::to_string(coords.z) + ")";
+    return "(" + std::to_string(coords.x) + "," + std::to_string(coords.y) + "," +
+           std::to_string(coords.z) + ")";
 }
 
-SeamMetrics CalculateSeamMetrics(const SHIELD_WorldSystem& world, const std::vector<Chunk*>& chunks) {
+SeamMetrics CalculateSeamMetrics(const SHIELD_WorldSystem& world,
+                                 const std::vector<Chunk*>& chunks) {
     SeamMetrics metrics;
     std::set<std::pair<ChunkID, ChunkID>> visited_pairs;
 
@@ -631,7 +665,8 @@ SeamMetrics CalculateSeamMetrics(const SHIELD_WorldSystem& world, const std::vec
         ++metrics.adjacent_pairs;
         const int lhs_lod = std::clamp(lhs->current_lod.load(std::memory_order_acquire), 0, 2);
         const int rhs_lod = std::clamp(rhs->current_lod.load(std::memory_order_acquire), 0, 2);
-        const std::string pair_key = std::to_string(std::min(lhs_lod, rhs_lod)) + "-" + std::to_string(std::max(lhs_lod, rhs_lod));
+        const std::string pair_key = std::to_string(std::min(lhs_lod, rhs_lod)) + "-" +
+                                     std::to_string(std::max(lhs_lod, rhs_lod));
         ++metrics.pair_type_counts[pair_key];
         if (lhs_lod == rhs_lod) {
             return;
@@ -642,23 +677,20 @@ SeamMetrics CalculateSeamMetrics(const SHIELD_WorldSystem& world, const std::vec
         const Chunk* fine_chunk = lhs_lod > rhs_lod ? rhs : lhs;
         const SeamBoundaryFace coarse_face = SharedFaceFor(*coarse_chunk, *fine_chunk, along_x);
         const bool vertical_offset = coarse_chunk->get_coords().y != fine_chunk->get_coords().y;
-        const bool coarse_has_transition_skirt = ColumnHasTransitionSkirtOnFace(
-            chunks,
-            *coarse_chunk,
-            coarse_face
-        );
-        const bool fine_has_transition_skirt = vertical_offset && ColumnHasTransitionSkirtOnFace(
-            chunks,
-            *fine_chunk,
-            SharedFaceFor(*fine_chunk, *coarse_chunk, along_x)
-        );
+        const bool coarse_has_transition_skirt =
+            ColumnHasTransitionSkirtOnFace(chunks, *coarse_chunk, coarse_face);
+        const bool fine_has_transition_skirt =
+            vertical_offset &&
+            ColumnHasTransitionSkirtOnFace(
+                chunks, *fine_chunk, SharedFaceFor(*fine_chunk, *coarse_chunk, along_x));
         const bool transition_is_covered = coarse_has_transition_skirt || fine_has_transition_skirt;
         if (transition_is_covered) {
             ++metrics.mixed_lod_pairs_with_transition_skirt;
             ++metrics.transition_skirt_pair_type_counts[pair_key + ":" + SeamFaceName(coarse_face)];
         } else {
             ++metrics.mixed_lod_pairs_without_transition_skirt;
-            ++metrics.missing_transition_skirt_pair_type_counts[pair_key + ":" + SeamFaceName(coarse_face)];
+            ++metrics.missing_transition_skirt_pair_type_counts[pair_key + ":" +
+                                                                SeamFaceName(coarse_face)];
             std::size_t face_vertices = 0;
             std::size_t stamped_vertices = 0;
             const Vec3 coarse_face_normal = SeamBoundaryNormal(coarse_face);
@@ -668,8 +700,7 @@ SeamMetrics CalculateSeamMetrics(const SHIELD_WorldSystem& world, const std::vec
                 }
                 ++face_vertices;
                 if (std::abs(vertex.normal.y) <= 0.1f &&
-                    glm::dot(vertex.normal, coarse_face_normal) >= 0.98f)
-                {
+                    glm::dot(vertex.normal, coarse_face_normal) >= 0.98f) {
                     ++stamped_vertices;
                 }
             }
@@ -680,45 +711,64 @@ SeamMetrics CalculateSeamMetrics(const SHIELD_WorldSystem& world, const std::vec
                         int sx = 0;
                         int sz = 0;
                         switch (coarse_face) {
-                        case SeamBoundaryFace::MinX: sx = 0; sz = major; break;
-                        case SeamBoundaryFace::MaxX: sx = CHUNK_SIZE_X; sz = major; break;
-                        case SeamBoundaryFace::MinZ: sx = major; sz = 0; break;
-                        case SeamBoundaryFace::MaxZ: sx = major; sz = CHUNK_SIZE_Z; break;
+                            case SeamBoundaryFace::MinX:
+                                sx = 0;
+                                sz = major;
+                                break;
+                            case SeamBoundaryFace::MaxX:
+                                sx = CHUNK_SIZE_X;
+                                sz = major;
+                                break;
+                            case SeamBoundaryFace::MinZ:
+                                sx = major;
+                                sz = 0;
+                                break;
+                            case SeamBoundaryFace::MaxZ:
+                                sx = major;
+                                sz = CHUNK_SIZE_Z;
+                                break;
                         }
-                        const std::size_t idx = static_cast<std::size_t>(sx)
-                            + static_cast<std::size_t>(local_y) * (CHUNK_SIZE_X + 1)
-                            + static_cast<std::size_t>(sz) * (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1);
+                        const std::size_t idx =
+                            static_cast<std::size_t>(sx) +
+                            static_cast<std::size_t>(local_y) * (CHUNK_SIZE_X + 1) +
+                            static_cast<std::size_t>(sz) * (CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1);
                         if (idx < coarse_chunk->sdf_data.size()) {
-                            min_abs_face_sdf = std::min(min_abs_face_sdf, std::abs(coarse_chunk->sdf_data[idx]));
+                            min_abs_face_sdf =
+                                std::min(min_abs_face_sdf, std::abs(coarse_chunk->sdf_data[idx]));
                         }
                     }
                 }
             }
             metrics.missing_transition_pair_details.push_back(
-                pair_key + ":" + SeamFaceName(coarse_face) +
-                ":coarse=" + ChunkCoordString(*coarse_chunk) +
-                ":fine=" + ChunkCoordString(*fine_chunk) +
+                pair_key + ":" + SeamFaceName(coarse_face) + ":coarse=" +
+                ChunkCoordString(*coarse_chunk) + ":fine=" + ChunkCoordString(*fine_chunk) +
                 ":coarse_lod=" + std::to_string(coarse_chunk->current_lod.load()) +
                 ":mesh_verts=" + std::to_string(coarse_chunk->mesh_vertices.size()) +
                 ":face_verts=" + std::to_string(face_vertices) +
                 ":stamped=" + std::to_string(stamped_vertices) +
-                ":sdf_size=" + std::to_string(coarse_chunk->sdf_data.size()) +
-                ":min_face_sdf=" + (coarse_chunk->sdf_data.empty() ? std::string("none") : std::to_string(min_abs_face_sdf))
-            );
+                ":sdf_size=" + std::to_string(coarse_chunk->sdf_data.size()) + ":min_face_sdf=" +
+                (coarse_chunk->sdf_data.empty() ? std::string("none")
+                                                : std::to_string(min_abs_face_sdf)));
         }
         const int coarse_step = lhs_lod > rhs_lod ? (lhs_lod == 1 ? 2 : 4) : (rhs_lod == 1 ? 2 : 4);
         const IVec3 lhs_coords = lhs->get_coords();
         const IVec3 rhs_coords = rhs->get_coords();
-        const int boundary_x = along_x ? std::max(lhs_coords.x, rhs_coords.x) * CHUNK_SIZE_X : lhs_coords.x * CHUNK_SIZE_X;
-        const int boundary_z = along_x ? lhs_coords.z * CHUNK_SIZE_Z : std::max(lhs_coords.z, rhs_coords.z) * CHUNK_SIZE_Z;
+        const int boundary_x = along_x ? std::max(lhs_coords.x, rhs_coords.x) * CHUNK_SIZE_X
+                                       : lhs_coords.x * CHUNK_SIZE_X;
+        const int boundary_z = along_x ? lhs_coords.z * CHUNK_SIZE_Z
+                                       : std::max(lhs_coords.z, rhs_coords.z) * CHUNK_SIZE_Z;
         const int min_y = std::min(lhs_coords.y, rhs_coords.y) * CHUNK_SIZE_Y;
         const int max_y = (std::max(lhs_coords.y, rhs_coords.y) + 1) * CHUNK_SIZE_Y;
 
         for (int major = 0; major <= CHUNK_SIZE_X; ++major) {
             for (int y = min_y; y <= max_y; ++y) {
-                const Vec3 sample_pos = along_x
-                    ? Vec3(static_cast<float>(boundary_x), static_cast<float>(y), static_cast<float>(lhs_coords.z * CHUNK_SIZE_Z + major))
-                    : Vec3(static_cast<float>(lhs_coords.x * CHUNK_SIZE_X + major), static_cast<float>(y), static_cast<float>(boundary_z));
+                const Vec3 sample_pos =
+                    along_x ? Vec3(static_cast<float>(boundary_x),
+                                   static_cast<float>(y),
+                                   static_cast<float>(lhs_coords.z * CHUNK_SIZE_Z + major))
+                            : Vec3(static_cast<float>(lhs_coords.x * CHUNK_SIZE_X + major),
+                                   static_cast<float>(y),
+                                   static_cast<float>(boundary_z));
                 ++metrics.boundary_sample_points;
 
                 const float delta = BoundaryDensityDelta(world, sample_pos);
@@ -767,23 +817,26 @@ nlohmann::json HorizonMetricsToJson(const HorizonMetrics& metrics) {
         {"vertices", metrics.vertices},
         {"indices", metrics.indices},
         {"triangles", metrics.triangles},
-        {"lod_mesh_chunks", {
-            {"lod0", metrics.lod_mesh_chunks[0]},
-            {"lod1", metrics.lod_mesh_chunks[1]},
-            {"lod2", metrics.lod_mesh_chunks[2]},
-        }},
-        {"chunk_extent", {
-            {"min_x", metrics.min_chunk_x},
-            {"max_x", metrics.max_chunk_x},
-            {"min_z", metrics.min_chunk_z},
-            {"max_z", metrics.max_chunk_z},
-        }},
-        {"quadrant_mesh_chunks", {
-            metrics.quadrant_mesh_chunks[0],
-            metrics.quadrant_mesh_chunks[1],
-            metrics.quadrant_mesh_chunks[2],
-            metrics.quadrant_mesh_chunks[3],
-        }},
+        {"lod_mesh_chunks",
+         {
+             {"lod0", metrics.lod_mesh_chunks[0]},
+             {"lod1", metrics.lod_mesh_chunks[1]},
+             {"lod2", metrics.lod_mesh_chunks[2]},
+         }},
+        {"chunk_extent",
+         {
+             {"min_x", metrics.min_chunk_x},
+             {"max_x", metrics.max_chunk_x},
+             {"min_z", metrics.min_chunk_z},
+             {"max_z", metrics.max_chunk_z},
+         }},
+        {"quadrant_mesh_chunks",
+         {
+             metrics.quadrant_mesh_chunks[0],
+             metrics.quadrant_mesh_chunks[1],
+             metrics.quadrant_mesh_chunks[2],
+             metrics.quadrant_mesh_chunks[3],
+         }},
     };
 }
 
@@ -827,7 +880,8 @@ nlohmann::json SeamMetricsToJson(const SeamMetrics& metrics) {
         {"adjacent_pairs", metrics.adjacent_pairs},
         {"mixed_lod_pairs", metrics.mixed_lod_pairs},
         {"mixed_lod_pairs_with_transition_skirt", metrics.mixed_lod_pairs_with_transition_skirt},
-        {"mixed_lod_pairs_without_transition_skirt", metrics.mixed_lod_pairs_without_transition_skirt},
+        {"mixed_lod_pairs_without_transition_skirt",
+         metrics.mixed_lod_pairs_without_transition_skirt},
         {"boundary_sample_points", metrics.boundary_sample_points},
         {"density_mismatches", metrics.density_mismatches},
         {"transition_risk_samples", metrics.transition_risk_samples},
@@ -851,10 +905,11 @@ struct ReadyWorld {
     Vec3 spawn;
 
     ReadyWorld()
-        : params(LoadPresetParams(SourceRoot() / "worlds/atlas/presets/default.json")),
-          world(&jobs.jobs, nullptr, params, kSeed),
-          spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f) {
-        EXPECT_TRUE(world.EnsureSurfaceReadyNear(spawn, &physics.physics, kSurfaceRadius, kCollisionRadius));
+        : params(LoadPresetParams(SourceRoot() / "worlds/atlas/presets/default.json"))
+        , world(&jobs.jobs, nullptr, params, kSeed)
+        , spawn(8.0f, world.GetTerrainHeightAt(8.0f, 8.0f) + 1.95f, 8.0f) {
+        EXPECT_TRUE(world.EnsureSurfaceReadyNear(
+            spawn, &physics.physics, kSurfaceRadius, kCollisionRadius));
     }
 };
 
@@ -877,7 +932,8 @@ TEST(RuntimeWorldVisualValidationTest, SpawnHorizonRendersBroadVisibleCoverage) 
     GLuint program = LinkBasicProgram();
     ASSERT_NE(program, 0u);
 
-    const std::vector<unsigned char> pixels = RenderCombinedMesh(program, combined_mesh, ready_world.spawn);
+    const std::vector<unsigned char> pixels =
+        RenderCombinedMesh(program, combined_mesh, ready_world.spawn);
     const ImageMetrics image = CalculateImageMetrics(pixels);
     WritePpm(ArtifactRoot() / "spawn_horizon.ppm", kCaptureWidth, kCaptureHeight, pixels);
     glDeleteProgram(program);
@@ -888,20 +944,21 @@ TEST(RuntimeWorldVisualValidationTest, SpawnHorizonRendersBroadVisibleCoverage) 
         {"spawn", VecToJson(ready_world.spawn)},
         {"horizon", HorizonMetricsToJson(horizon)},
         {"image", ImageMetricsToJson(image)},
-        {"thresholds", {
-            {"minimum_mesh_chunks", 600},
-            {"minimum_collision_chunks", 81},
-            {"minimum_foreground_pixels", kCaptureWidth * kCaptureHeight / 32},
-            {"minimum_occupied_tiles", 45},
-            {"minimum_quadrants_with_mesh", 4},
-        }},
+        {"thresholds",
+         {
+             {"minimum_mesh_chunks", 600},
+             {"minimum_collision_chunks", 81},
+             {"minimum_foreground_pixels", kCaptureWidth * kCaptureHeight / 32},
+             {"minimum_occupied_tiles", 45},
+             {"minimum_quadrants_with_mesh", 4},
+         }},
     };
     WriteJson(ArtifactRoot() / "runtime_world_visual.json", report);
 
-    const std::size_t quadrants_with_mesh = static_cast<std::size_t>(std::count_if(
-        horizon.quadrant_mesh_chunks.begin(),
-        horizon.quadrant_mesh_chunks.end(),
-        [](std::size_t count) { return count > 0u; }));
+    const std::size_t quadrants_with_mesh =
+        static_cast<std::size_t>(std::count_if(horizon.quadrant_mesh_chunks.begin(),
+                                               horizon.quadrant_mesh_chunks.end(),
+                                               [](std::size_t count) { return count > 0u; }));
 
     EXPECT_GE(horizon.mesh_chunks, 600u);
     EXPECT_GE(horizon.collision_chunks, 81u);
@@ -913,10 +970,12 @@ TEST(RuntimeWorldVisualValidationTest, SpawnHorizonRendersBroadVisibleCoverage) 
     EXPECT_GE(horizon.max_chunk_x, spawn_chunk.x + kSurfaceRadius);
     EXPECT_LE(horizon.min_chunk_z, spawn_chunk.z - kSurfaceRadius);
     EXPECT_GE(horizon.max_chunk_z, spawn_chunk.z + kSurfaceRadius);
-    EXPECT_GT(image.foreground_pixels, static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 32));
+    EXPECT_GT(image.foreground_pixels,
+              static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 32));
     EXPECT_GT(image.occupied_tiles, 45u);
     EXPECT_GT(image.max_luminance, 20);
-    EXPECT_LT(image.clipped_bright_pixels, static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 8));
+    EXPECT_LT(image.clipped_bright_pixels,
+              static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 8));
 }
 
 TEST(RuntimeWorldVisualValidationTest, MixedLodBoundariesAreContinuousAndReported) {
@@ -930,12 +989,13 @@ TEST(RuntimeWorldVisualValidationTest, MixedLodBoundariesAreContinuousAndReporte
         {"seed", kSeed},
         {"spawn", VecToJson(ready_world.spawn)},
         {"metrics", SeamMetricsToJson(seams)},
-        {"thresholds", {
-            {"maximum_density_mismatches", 0},
-            {"maximum_density_delta", 0.05},
-            {"maximum_unmitigated_transition_risk_samples", 0},
-            {"mixed_lod_pairs_must_be_reported", true},
-        }},
+        {"thresholds",
+         {
+             {"maximum_density_mismatches", 0},
+             {"maximum_density_delta", 0.05},
+             {"maximum_unmitigated_transition_risk_samples", 0},
+             {"mixed_lod_pairs_must_be_reported", true},
+         }},
     };
     WriteJson(ArtifactRoot() / "lod_seams.json", report);
 
@@ -962,11 +1022,12 @@ TEST(RuntimeWorldVisualValidationTest, JoinReadinessKeepsCollisionBudgetNearFiel
         {"collision_radius", kCollisionRadius},
         {"surface_radius", kSurfaceRadius},
         {"horizon", HorizonMetricsToJson(horizon)},
-        {"thresholds", {
-            {"expected_collision_chunks", 81},
-            {"maximum_collision_chunks", 81},
-            {"non_collision_horizon_chunks_allowed", true},
-        }},
+        {"thresholds",
+         {
+             {"expected_collision_chunks", 81},
+             {"maximum_collision_chunks", 81},
+             {"non_collision_horizon_chunks_allowed", true},
+         }},
     };
     WriteJson(ArtifactRoot() / "physics_water_budget.json", report);
 

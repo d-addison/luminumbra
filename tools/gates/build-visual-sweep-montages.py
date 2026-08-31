@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""T-I5b-visual-sweep: assemble labelled contact-sheet montages from the
+""": assemble labelled contact-sheet montages from the
 world_visual_sweep capture matrix so the orchestrator can review visual quality.
 
 Reads <artifact_dir>/world-visual-sweep-manifest.json + the per-cell PPMs under

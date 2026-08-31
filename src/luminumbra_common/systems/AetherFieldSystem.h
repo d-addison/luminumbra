@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I6-A1: deterministic coarse 2.5D Aether scalar field (sim-authoritative).
+// deterministic coarse 2.5D Aether scalar field (sim-authoritative).
 //
 // The engine knows only an "emissive scalar field"; game content (the attuned
 // crystals and flora) is what assigns meaning to it. The field is a single non-negative
@@ -16,7 +16,7 @@
 // (seed, tick, region origin) -- exactly like the wind field -- so a
 // save/load/resim reproduces it at the same tick WITHOUT persisting the grid
 // (the heavy world_hash oracle handles wind/weather/aether identically:
-// recompute-and-exclude from the cross-phase compare). Each Update():
+// recompute-and-exclude from the cross-phase compare). Each Update:
 //   1. derive a deterministic EMISSION source from a seed+14 low-frequency noise
 //      (sampled over the cell world coords, scrolled slowly by tick-time),
 //   2. ADVECT that source by the wind field via a deterministic semi-Lagrangian
@@ -38,8 +38,8 @@
 
 #include "FastNoise/FastNoise.h"
 
-#include "../fields/FieldGrid.h"
 #include "../../../include/luminumbra/core/Types.h"
+#include "../fields/FieldGrid.h"
 
 namespace Luminumbra::Systems {
 
@@ -50,10 +50,10 @@ inline constexpr float kAetherCellSizeM = 24.0f;
 inline constexpr int kAetherExtentCells = 64;
 
 // PINNED solver constants. Changing ANY of these changes the field bits and is
-// therefore a deliberate world_hash bump -- treat as frozen for iteration 6.
-inline constexpr int kAetherDiffuseIterations = 8;     // Gauss-Seidel sweeps/tick
-inline constexpr float kAetherDiffuseRate = 0.25f;     // neighbour coupling k
-inline constexpr float kAetherEmissionFrequency = 0.0045f; // low-freq source noise
+// therefore a deliberate world_hash bump; these values are frozen.
+inline constexpr int kAetherDiffuseIterations = 8;           // Gauss-Seidel sweeps/tick
+inline constexpr float kAetherDiffuseRate = 0.25f;           // neighbour coupling k
+inline constexpr float kAetherEmissionFrequency = 0.0045f;   // low-freq source noise
 inline constexpr double kAetherEmissionScrollPerTick = 0.02; // world scroll/tick
 inline constexpr float kAetherAdvectionMetersPerTick = 0.6f; // semi-Lagrangian step
 
@@ -67,8 +67,8 @@ public:
     // `region_anchor`. Pure function of (seed, tick, anchored origin[, wind]);
     // no wall-clock, no RNG. `wind` (optional) supplies the advection velocity;
     // when null the advection step is skipped (still deterministic + evolving).
-    void Update(std::uint64_t tick, const Vec3& region_anchor,
-                const WindFieldSystem* wind = nullptr);
+    void
+    Update(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind = nullptr);
 
     // Public sampling API: the (non-negative) aether scalar at the world
     // position, or 0 outside the streamed region. Consumed by the render
@@ -80,15 +80,25 @@ public:
     [[nodiscard]] std::string ComputeAetherSubHash() const;
 
     // Geometry / diagnostics accessors.
-    [[nodiscard]] int extent_cells() const noexcept { return m_grid.extent_cells(); }
-    [[nodiscard]] float cell_size_m() const noexcept { return m_grid.cell_size_m(); }
-    [[nodiscard]] std::uint64_t last_tick() const noexcept { return m_last_tick; }
-    [[nodiscard]] int diffuse_iterations() const noexcept { return kAetherDiffuseIterations; }
+    [[nodiscard]] int extent_cells() const noexcept {
+        return m_grid.extent_cells();
+    }
+    [[nodiscard]] float cell_size_m() const noexcept {
+        return m_grid.cell_size_m();
+    }
+    [[nodiscard]] std::uint64_t last_tick() const noexcept {
+        return m_last_tick;
+    }
+    [[nodiscard]] int diffuse_iterations() const noexcept {
+        return kAetherDiffuseIterations;
+    }
 
-    // T-I6-A1d: read-only access to the grid for the render emissive tap (the
-    // client uploads cells() as a texture, mapped by origin + cell size). One-way
+    // read-only access to the grid for the render emissive tap (the
+    // client uploads cells as a texture, mapped by origin + cell size). One-way
     // bridge: render is a pure CONSUMER, never writes back.
-    [[nodiscard]] const luminumbra::fields::FieldGrid<float>& grid() const noexcept { return m_grid; }
+    [[nodiscard]] const luminumbra::fields::FieldGrid<float>& grid() const noexcept {
+        return m_grid;
+    }
 
 private:
     // World-pos -> local cell indices for the current origin (clamped result
@@ -101,7 +111,7 @@ private:
 
     FastNoise::SmartNode<FastNoise::Generator> m_emission_noise; // seed+14, low freq
 
-    // Per-tick scratch, hoisted so Update() does no per-tick heap allocation.
+    // Per-tick scratch, hoisted so Update does no per-tick heap allocation.
     std::vector<float> m_scratch_px;       // emission-noise sample X coords
     std::vector<float> m_scratch_pz;       // emission-noise sample Z coords
     std::vector<float> m_scratch_emission; // raw emission noise -> source

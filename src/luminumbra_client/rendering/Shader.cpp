@@ -1,32 +1,77 @@
 #include "Shader.h"
 #include "core/Log.h"
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace Luminumbra::Rendering {
+
+namespace {
+
+bool LoadShaderSourceRecursive(const std::filesystem::path& path,
+                               std::unordered_set<std::string>& include_stack,
+                               std::string& output,
+                               std::string& diagnostic) {
+    const std::filesystem::path normalized = std::filesystem::absolute(path).lexically_normal();
+    const std::string key = normalized.generic_string();
+    if (!include_stack.insert(key).second) {
+        diagnostic = "cyclic shader include: " + key;
+        return false;
+    }
+
+    std::ifstream input(normalized);
+    if (!input) {
+        diagnostic = "cannot open shader source: " + key;
+        include_stack.erase(key);
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(input, line)) {
+        constexpr std::string_view prefix = "#include \"";
+        const std::size_t begin = line.find(prefix);
+        if (begin == std::string::npos) {
+            output.append(line).push_back('\n');
+            continue;
+        }
+        const std::size_t name_begin = begin + prefix.size();
+        const std::size_t name_end = line.find('"', name_begin);
+        if (begin != 0 || name_end == std::string::npos || name_end + 1 != line.size()) {
+            diagnostic = "malformed shader include in " + key + ": " + line;
+            include_stack.erase(key);
+            return false;
+        }
+        const std::filesystem::path included =
+            normalized.parent_path() / line.substr(name_begin, name_end - name_begin);
+        if (!LoadShaderSourceRecursive(included, include_stack, output, diagnostic)) {
+            include_stack.erase(key);
+            return false;
+        }
+    }
+    include_stack.erase(key);
+    return true;
+}
+
+bool LoadShaderSource(const char* path, std::string& output, std::string& diagnostic) {
+    std::unordered_set<std::string> include_stack;
+    return LoadShaderSourceRecursive(path, include_stack, output, diagnostic);
+}
+
+} // namespace
 
 // Compile+link a fresh program from the two source files. Returns a NEW program
 // name, or 0 on any IO/compile/link failure (with m_diagnostic set). Never
 // touches m_id, so the caller (ctor or Reload) owns the adopt/rollback decision.
 GLuint Shader::buildProgram(const char* vertexPath, const char* fragmentPath) {
     std::string vertexCode, fragmentCode;
-    std::ifstream vShaderFile, fShaderFile;
-    vShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
-    fShaderFile.exceptions(std::ifstream::failbit | std::ifstream::badbit);
-
-    try {
-        vShaderFile.open(vertexPath);
-        fShaderFile.open(fragmentPath);
-        std::stringstream vShaderStream, fShaderStream;
-        vShaderStream << vShaderFile.rdbuf();
-        fShaderStream << fShaderFile.rdbuf();
-        vertexCode = vShaderStream.str();
-        fragmentCode = fShaderStream.str();
-    } catch (const std::exception& e) {
-        LUMINUMBRA_CORE_ERROR("SHADER IO ERROR ({} / {}): {}", vertexPath, fragmentPath, e.what());
-        m_diagnostic = e.what();
+    if (!LoadShaderSource(vertexPath, vertexCode, m_diagnostic) ||
+        !LoadShaderSource(fragmentPath, fragmentCode, m_diagnostic)) {
+        LUMINUMBRA_CORE_ERROR(
+            "SHADER IO ERROR ({} / {}): {}", vertexPath, fragmentPath, m_diagnostic);
         return 0;
     }
 
@@ -80,20 +125,22 @@ Shader::Shader(const char* vertexPath, const char* fragmentPath) {
         return;
     }
 
-    // Spec 016 FR-D: introspect the resource layout once at link time.
+    // introspect the resource layout once at link time.
     m_reflected = ReflectProgramLayout(m_id);
     m_valid = true;
 }
 
 Shader::~Shader() {
-    if (m_id) glDeleteProgram(m_id);
+    if (m_id)
+        glDeleteProgram(m_id);
 }
 
 void Shader::use() const {
-    if (m_id) glUseProgram(m_id);
+    if (m_id)
+        glUseProgram(m_id);
 }
 
-// Spec 016 FR-D: validate the bindings a pass adopts against the reflected layout.
+// validate the bindings a pass adopts against the reflected layout.
 bool Shader::ValidateLayout(const ExpectedLayout& expected) {
     m_expected = expected;
     m_has_expected = true;
@@ -106,19 +153,23 @@ bool Shader::ValidateLayout(const ExpectedLayout& expected) {
     return vr.ok;
 }
 
-// Spec 016 FR-D-003: rollback-safe hot reload. Build a NEW program; only adopt it
+// rollback-safe hot reload. Build a NEW program; only adopt it
 // if it compiled, linked, and (when a pass expectation is registered) still
 // matches that expectation. On any failure keep the previous good program.
 bool Shader::Reload() {
     if (m_vertex_path.empty() || m_fragment_path.empty()) {
-        LUMINUMBRA_CORE_WARN("[shader-reload] {} has no stored source paths; cannot reload.", m_debug_name);
+        LUMINUMBRA_CORE_WARN("[shader-reload] {} has no stored source paths; cannot reload.",
+                             m_debug_name);
         return false;
     }
 
     const GLuint candidate = buildProgram(m_vertex_path.c_str(), m_fragment_path.c_str());
     if (candidate == 0) {
-        LUMINUMBRA_CORE_ERROR("[shader-reload] {} recompile FAILED; keeping previous program (id {}). {}",
-                              m_debug_name, m_id, m_diagnostic);
+        LUMINUMBRA_CORE_ERROR(
+            "[shader-reload] {} recompile FAILED; keeping previous program (id {}). {}",
+            m_debug_name,
+            m_id,
+            m_diagnostic);
         return false; // rollback: previous m_id untouched
     }
 
@@ -128,7 +179,8 @@ bool Shader::Reload() {
         if (!vr.ok) {
             LUMINUMBRA_CORE_ERROR("[shader-reload] {} reflected-layout MISMATCH after edit; "
                                   "ROLLING BACK to the previous good program. {}",
-                                  m_debug_name, vr.diagnostic);
+                                  m_debug_name,
+                                  vr.diagnostic);
             glDeleteProgram(candidate);
             return false; // rollback: never adopt the broken layout
         }
@@ -136,7 +188,8 @@ bool Shader::Reload() {
 
     // Adopt the new program: delete the old one, swap, refresh reflection, and
     // invalidate the uniform-location cache (locations change with relink).
-    if (m_id) glDeleteProgram(m_id);
+    if (m_id)
+        glDeleteProgram(m_id);
     m_id = candidate;
     m_reflected = std::move(candidate_layout);
     m_uniformLocationCache.clear();
@@ -216,9 +269,13 @@ bool Shader::checkCompileErrors(GLuint shader, const std::string& type) {
         if (!success) {
             glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
             std::vector<GLchar> info_log(static_cast<size_t>(std::max(log_length, 1)));
-            glGetShaderInfoLog(shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
+            glGetShaderInfoLog(
+                shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
             m_diagnostic = std::string(info_log.data());
-            LUMINUMBRA_CORE_ERROR("SHADER_COMPILATION_ERROR of type: {0} ({1})\n{2}", type, m_debug_name, m_diagnostic);
+            LUMINUMBRA_CORE_ERROR("SHADER_COMPILATION_ERROR of type: {0} ({1})\n{2}",
+                                  type,
+                                  m_debug_name,
+                                  m_diagnostic);
             return false;
         }
     } else {
@@ -226,9 +283,11 @@ bool Shader::checkCompileErrors(GLuint shader, const std::string& type) {
         if (!success) {
             glGetProgramiv(shader, GL_INFO_LOG_LENGTH, &log_length);
             std::vector<GLchar> info_log(static_cast<size_t>(std::max(log_length, 1)));
-            glGetProgramInfoLog(shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
+            glGetProgramInfoLog(
+                shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
             m_diagnostic = std::string(info_log.data());
-            LUMINUMBRA_CORE_ERROR("PROGRAM_LINKING_ERROR of type: {0} ({1})\n{2}", type, m_debug_name, m_diagnostic);
+            LUMINUMBRA_CORE_ERROR(
+                "PROGRAM_LINKING_ERROR of type: {0} ({1})\n{2}", type, m_debug_name, m_diagnostic);
             return false;
         }
     }

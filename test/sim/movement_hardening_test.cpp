@@ -9,7 +9,7 @@
 //
 // Systems covered:
 //   ai/PredatorPackSystem.h   (PackHunterComponent.coord_x/z = UNIT direction)
-//   ai/MigrationSystem.h      (MigratoryComponent.wish = unit dir * drive ; drive in [0,1])
+//   ai/MigrationSystem.h      (MigratoryComponent.wish = unit dir * drive; drive in [0,1])
 //   ai/TerritorySystem.h      (TerritoryBiasComponent.wish = unit-toward-home * capped mag)
 //   ai/ThirstSystem.h         (ThirstComponent.wish = unit-toward-hole * thirst)
 //   ai/ScavengingSystem.h     (ScavengerComponent.wish = UNIT toward carcass)
@@ -57,8 +57,8 @@ using luminumbra::ai::RunPredatorPackOnTick;
 // shared spawn helpers
 // ---------------------------------------------------------------------------
 
-entt::entity spawnPredator(entt::registry& r, float x, float z, bool predator = true,
-                           bool eaten = false) {
+entt::entity
+spawnPredator(entt::registry& r, float x, float z, bool predator = true, bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -79,7 +79,9 @@ entt::entity spawnPrey(entt::registry& r, float x, float z, bool eaten = false) 
     return e;
 }
 
-bool isFiniteF(float v) { return !std::isnan(v) && !std::isinf(v); }
+bool isFiniteF(float v) {
+    return !std::isnan(v) && !std::isinf(v);
+}
 
 // ===========================================================================
 // PredatorPackSystem
@@ -105,7 +107,7 @@ TEST(PackHarden, EmittedWishIsUnitLength) {
 TEST(PackHarden, CoincidentPredatorPreyNoNaN) {
     entt::registry r;
     auto p = spawnPredator(r, 5.0f, 5.0f);
-    spawnPrey(r, 5.0f, 5.0f);  // exactly coincident
+    spawnPrey(r, 5.0f, 5.0f); // exactly coincident
     RunPredatorPackOnTick(r, 0);
     const auto& pk = r.get<Comp::PackHunterComponent>(p);
     EXPECT_TRUE(isFiniteF(pk.coord_x));
@@ -119,7 +121,7 @@ TEST(PackHarden, CoincidentPredatorPreyNoNaN) {
 TEST(PackHarden, CoincidentPackMatesFinite) {
     entt::registry r;
     auto p0 = spawnPredator(r, 0.0f, 0.0f);
-    auto p1 = spawnPredator(r, 0.0f, 0.0f);  // coincident ally -> pack of 2
+    auto p1 = spawnPredator(r, 0.0f, 0.0f); // coincident ally -> pack of 2
     spawnPrey(r, 0.0f, 20.0f);
     RunPredatorPackOnTick(r, 0);
     for (auto e : {p0, p1}) {
@@ -140,7 +142,7 @@ TEST(PackHarden, PackRadiusBoundaryInclusive) {
     {
         entt::registry r;
         auto a = spawnPredator(r, 0.0f, 0.0f);
-        auto b = spawnPredator(r, kPackRadius, 0.0f);  // exactly on the boundary
+        auto b = spawnPredator(r, kPackRadius, 0.0f); // exactly on the boundary
         spawnPrey(r, 0.0f, 50.0f);
         RunPredatorPackOnTick(r, 0);
         EXPECT_EQ(r.get<Comp::PackHunterComponent>(a).in_pack, 1u)
@@ -150,7 +152,7 @@ TEST(PackHarden, PackRadiusBoundaryInclusive) {
     {
         entt::registry r;
         auto a = spawnPredator(r, 0.0f, 0.0f);
-        auto b = spawnPredator(r, kPackRadius + 0.5f, 0.0f);  // just beyond
+        auto b = spawnPredator(r, kPackRadius + 0.5f, 0.0f); // just beyond
         spawnPrey(r, 0.0f, 50.0f);
         RunPredatorPackOnTick(r, 0);
         EXPECT_EQ(r.get<Comp::PackHunterComponent>(a).in_pack, 0u)
@@ -176,10 +178,17 @@ TEST(PackHarden, NonPredatorTagHolderInert) {
 // ORDER-INDEPENDENCE under many ticks with a mixed roster, keyed by geometry. (Stronger than
 // the existing single-tick reverse test: 8 ticks, 3 build orderings.)
 TEST(PackHarden, OrderIndependentMultiTick) {
-    struct Spec { float x, z; bool predator; bool prey; };
+    struct Spec {
+        float x, z;
+        bool predator;
+        bool prey;
+    };
     std::vector<Spec> base = {
-        {-4.0f, 0.0f, true, false}, {0.0f, 1.0f, true, false}, {4.0f, 0.0f, true, false},
-        {0.0f, 30.0f, false, true}, {12.0f, 28.0f, false, true},
+        {-4.0f, 0.0f, true, false},
+        {0.0f, 1.0f, true, false},
+        {4.0f, 0.0f, true, false},
+        {0.0f, 30.0f, false, true},
+        {12.0f, 28.0f, false, true},
     };
     auto build = [](std::vector<Spec> order) {
         entt::registry r;
@@ -188,13 +197,18 @@ TEST(PackHarden, OrderIndependentMultiTick) {
             es.push_back(sp.prey ? spawnPrey(r, sp.x, sp.z)
                                  : spawnPredator(r, sp.x, sp.z, sp.predator));
         }
-        for (std::uint64_t t = 0; t < 8; ++t) RunPredatorPackOnTick(r, t);
+        for (std::uint64_t t = 0; t < 8; ++t)
+            RunPredatorPackOnTick(r, t);
         std::vector<std::tuple<float, float, float, float, int>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
-            if (order[i].prey) continue;
+            if (order[i].prey)
+                continue;
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
             const auto& pk = r.get<Comp::PackHunterComponent>(es[i]);
-            out.push_back({tf.position.x, tf.position.z, pk.coord_x, pk.coord_z,
+            out.push_back({tf.position.x,
+                           tf.position.z,
+                           pk.coord_x,
+                           pk.coord_z,
                            static_cast<int>(pk.in_pack)});
         }
         std::sort(out.begin(), out.end());
@@ -213,14 +227,22 @@ TEST(PackHarden, OrderIndependentMultiTick) {
     }
 }
 
-// ORDER-INDEPENDENCE via a DETERMINISTIC SEEDED SHUFFLE (test-rigor KD-2 / NFR-001).
+// ORDER-INDEPENDENCE via a DETERMINISTIC SEEDED SHUFFLE (test-rigor  / ).
 // OrderIndependentMultiTick above uses ad-hoc std::reverse/std::rotate; this adds the
-// integer-SEEDED permutation NFR-001 mandates so the reorder is itself reproducible.
+// integer-SEEDED permutation  mandates so the reorder is itself reproducible.
 TEST(PackHarden, OrderIndependentSeededShuffle) {
-    struct Spec { float x, z; bool predator; bool prey; };
+    struct Spec {
+        float x, z;
+        bool predator;
+        bool prey;
+    };
     std::vector<Spec> base = {
-        {-4.0f, 0.0f, true, false}, {0.0f, 1.0f, true, false}, {4.0f, 0.0f, true, false},
-        {-2.0f, 2.0f, true, false}, {0.0f, 30.0f, false, true}, {12.0f, 28.0f, false, true},
+        {-4.0f, 0.0f, true, false},
+        {0.0f, 1.0f, true, false},
+        {4.0f, 0.0f, true, false},
+        {-2.0f, 2.0f, true, false},
+        {0.0f, 30.0f, false, true},
+        {12.0f, 28.0f, false, true},
         {-8.0f, 33.0f, false, true},
     };
     auto build = [](const std::vector<Spec>& order) {
@@ -228,14 +250,19 @@ TEST(PackHarden, OrderIndependentSeededShuffle) {
         std::vector<entt::entity> es;
         for (const auto& sp : order)
             es.push_back(sp.prey ? spawnPrey(r, sp.x, sp.z)
-                                  : spawnPredator(r, sp.x, sp.z, sp.predator));
-        for (std::uint64_t t = 0; t < 8; ++t) RunPredatorPackOnTick(r, t);
+                                 : spawnPredator(r, sp.x, sp.z, sp.predator));
+        for (std::uint64_t t = 0; t < 8; ++t)
+            RunPredatorPackOnTick(r, t);
         std::vector<std::tuple<float, float, float, float, int>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
-            if (order[i].prey) continue;
+            if (order[i].prey)
+                continue;
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
             const auto& pk = r.get<Comp::PackHunterComponent>(es[i]);
-            out.push_back({tf.position.x, tf.position.z, pk.coord_x, pk.coord_z,
+            out.push_back({tf.position.x,
+                           tf.position.z,
+                           pk.coord_x,
+                           pk.coord_z,
                            static_cast<int>(pk.in_pack)});
         }
         std::sort(out.begin(), out.end());
@@ -244,9 +271,12 @@ TEST(PackHarden, OrderIndependentSeededShuffle) {
     const auto baseline = build(base);
 
     auto shuffled = Luminumbra::TestSupport::SeededShuffled(base, /*seed=*/0xBADC0DEu);
-    bool reordered = false;  // guard R-4: the seed must actually permute.
+    bool reordered = false; // guard : the seed must actually permute.
     for (std::size_t i = 0; i < base.size(); ++i)
-        if (shuffled[i].x != base[i].x || shuffled[i].z != base[i].z) { reordered = true; break; }
+        if (shuffled[i].x != base[i].x || shuffled[i].z != base[i].z) {
+            reordered = true;
+            break;
+        }
     ASSERT_TRUE(reordered) << "seed must actually permute the spawn order";
 
     const auto fromShuffle = build(shuffled);
@@ -256,16 +286,16 @@ TEST(PackHarden, OrderIndependentSeededShuffle) {
             << "flank result must depend on geometry, not (seeded-shuffled) spawn order";
 }
 
-// ORACLE (test-rigor KD-5): the FLANK RING POINT geometry, recomputed independently +
+// ORACLE (test-rigor ): the FLANK RING POINT geometry, recomputed independently +
 // pinned to golden literals. The flank target is
 //   baseAngle = Atan2(preyZ-cz, preyX-cx); angle = baseAngle + (2*pi/packSize)*rank;
 //   target = prey + kFlankStandoff*(Cos angle, Sin angle)   (PredatorPackSystem.h:210-215)
 // and the emitted coord is the UNIT vector self->target. We use a pack of THREE and place
-// the rank-1 member EXACTLY on the prey, so its target-self vector IS the standoff ring
+// the second member exactly on the prey, so its target-self vector is the standoff ring
 // vector and its unit coord reduces to (Cos angle, Sin angle) — recomputed here with the
-// SAME dm:: functions (R-1). packSize=3 is deliberate: a pack of 2 has step=pi, so a
-// +step*rank -> -step*rank sign flip maps rank-1 to the SAME point and cannot be caught;
-// with step=2*pi/3 the flip moves the rank-1 angle from baseAngle+2pi/3 to baseAngle-2pi/3,
+// SAME dm:: functions. packSize=3 is deliberate: a pack of 2 has step=pi, so a
+// +step*ordinal -> -step*ordinal sign flip maps the second member to the same point and cannot be
+// caught; with step=2*pi/3 the flip moves that angle from baseAngle+2pi/3 to baseAngle-2pi/3,
 // flipping coord_x's sign -> RED (proven in mutation-pass-results.md).
 TEST(PackHarden, FlankPointGeometryOracle) {
     using luminumbra::ai::kFlankStandoff;
@@ -273,9 +303,9 @@ TEST(PackHarden, FlankPointGeometryOracle) {
     // Prey to the NORTH; three predators south of it, all pairwise within kPackRadius=20.
     // Positional flank rank = sort by x then z: B(x=4)->0, A(x=10)->1, C(x=16)->2.
     const float preyX = 10.0f, preyZ = 20.0f;
-    const float ax = 10.0f, az = 20.0f;  // A: rank 1, sits EXACTLY on the prey
-    const float bx = 4.0f, bz = 8.0f;    // B: rank 0
-    const float cxp = 16.0f, czp = 8.0f; // C: rank 2
+    const float ax = 10.0f, az = 20.0f;  // A: , sits EXACTLY on the prey
+    const float bx = 4.0f, bz = 8.0f;    // B:
+    const float cxp = 16.0f, czp = 8.0f; // C:
     auto pa = spawnPredator(r, ax, az);
     auto pb = spawnPredator(r, bx, bz);
     auto pc = spawnPredator(r, cxp, czp);
@@ -292,7 +322,7 @@ TEST(PackHarden, FlankPointGeometryOracle) {
     const float cz = (az + bz + czp) / 3.0f;
     const float baseAngle = dm::Atan2(preyZ - cz, preyX - cx);
     const float step = dm::kTwoPi / 3.0f;
-    const float angleA = baseAngle + step * 1.0f;  // A is rank 1
+    const float angleA = baseAngle + step * 1.0f; // A is
     // A is ON the prey, so its unit coord toward (prey + standoff*(Cos,Sin)) is exactly
     // (Cos angleA, Sin angleA).
     const float expX = dm::Cos(angleA);
@@ -306,7 +336,7 @@ TEST(PackHarden, FlankPointGeometryOracle) {
     (void)kFlankStandoff;
 
     // GOLDEN LITERAL (frozen on THIS toolchain): centroid is due-south of the prey so
-    // baseAngle = +pi/2; A is rank 1 so angleA = pi/2 + 2pi/3 = 7pi/6 -> coord ~ (-0.866, -0.5).
+    // baseAngle = +pi/2; A is  so angleA = pi/2 + 2pi/3 = 7pi/6 -> coord ~ (-0.866, -0.5).
     // A rank-term sign flip sends angleA to pi/2 - 2pi/3 = -pi/6 -> coord ~ (+0.866, -0.5),
     // flipping coord_x's SIGN — so this golden (and the recompute) go RED. See
     // mutation-pass-results.md.
@@ -326,7 +356,7 @@ TEST(MigrationHarden, WishMagnitudeEqualsDrive) {
     entt::registry r;
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
-    tf.position = Luminumbra::Vec3(100.0f, 0.0f, 100.0f);  // away from the ellipse target
+    tf.position = Luminumbra::Vec3(100.0f, 0.0f, 100.0f); // away from the ellipse target
     r.emplace<Comp::MigratoryComponent>(e);
     // season01 = 0 -> a transition -> drive == 1 (peak).
     auto s = RunMigrationOnTick(r, 0.0f);
@@ -341,7 +371,7 @@ TEST(MigrationHarden, WishMagnitudeEqualsDrive) {
 TEST(MigrationHarden, DriveBoundedZeroToOne) {
     using luminumbra::ai::MigrationDriveAt;
     for (int i = -50; i <= 350; ++i) {
-        const float s = static_cast<float>(i) * 0.01f;  // -0.5 .. 3.5, sweeps wrapping
+        const float s = static_cast<float>(i) * 0.01f; // -0.5.. 3.5, sweeps wrapping
         const float d = MigrationDriveAt(s);
         EXPECT_TRUE(isFiniteF(d));
         EXPECT_GE(d, 0.0f);
@@ -349,11 +379,11 @@ TEST(MigrationHarden, DriveBoundedZeroToOne) {
     }
 }
 
-// THRESHOLD EDGE: at a quarter MIDPOINT (0.125) the |cos(4*pi*s)| wave is 0 and the floor
+// THRESHOLD EDGE: at a quarter MIDPOINT (0.125) the |cos(4*pi*s)|  0 and the floor
 // clamps it to a CLEAN zero -> a settled creature emits an EXACTLY-zero wish (no residue).
 TEST(MigrationHarden, MidSeasonExactlyZeroWish) {
-    using luminumbra::ai::RunMigrationOnTick;
     using luminumbra::ai::MigrationDriveAt;
+    using luminumbra::ai::RunMigrationOnTick;
     EXPECT_FLOAT_EQ(MigrationDriveAt(0.125f), 0.0f);
     EXPECT_FLOAT_EQ(MigrationDriveAt(0.375f), 0.0f);
     entt::registry r;
@@ -385,7 +415,7 @@ TEST(MigrationHarden, DrivePeaksAtTransitions) {
 TEST(MigrationHarden, TargetClosesOverAYear) {
     using luminumbra::ai::MigrationTargetAt;
     auto t0 = MigrationTargetAt(0.0f);
-    auto t1 = MigrationTargetAt(1.0f);  // one full year later
+    auto t1 = MigrationTargetAt(1.0f); // one full year later
     EXPECT_NEAR(t0.x, t1.x, 1.0e-2f);
     EXPECT_NEAR(t0.z, t1.z, 1.0e-2f);
     // And the target genuinely MOVES across the year (quarter turn is far away).
@@ -397,11 +427,11 @@ TEST(MigrationHarden, TargetClosesOverAYear) {
 // EDGE: a creature sitting EXACTLY on the seasonal target during a driven season emits a zero
 // wish (no division by ~0), still finite.
 TEST(MigrationHarden, AtTargetZeroWishNoNaN) {
-    using luminumbra::ai::RunMigrationOnTick;
     using luminumbra::ai::MigrationTargetAt;
+    using luminumbra::ai::RunMigrationOnTick;
     entt::registry r;
     auto e = r.create();
-    auto target = MigrationTargetAt(0.0f);  // season 0 -> peak drive
+    auto target = MigrationTargetAt(0.0f); // season 0 -> peak drive
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(target.x, 0.0f, target.z);
     r.emplace<Comp::MigratoryComponent>(e);
@@ -441,18 +471,18 @@ TEST(MigrationHarden, NegativePhaseWraps) {
 // kTerritoryMaxBias). The consumer ADDs this as a velocity-ish steer, so magnitude meaning is
 // load-bearing. Assert both direction and exact magnitude.
 TEST(TerritoryHarden, HomingBiasMagnitudeAndDirection) {
-    using luminumbra::ai::RunTerritoryOnTick;
     using luminumbra::ai::kTerritoryHomingGain;
     using luminumbra::ai::kTerritoryMaxBias;
+    using luminumbra::ai::RunTerritoryOnTick;
     entt::registry r;
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
     auto& terr = r.emplace<Comp::TerritoryComponent>(e);
     terr.radius = 20.0f;
-    RunTerritoryOnTick(r, 0);  // claims home at origin, bias 0
+    RunTerritoryOnTick(r, 0); // claims home at origin, bias 0
     // Now teleport it OUT past the radius along +x and re-run.
-    tf.position = Luminumbra::Vec3(30.0f, 0.0f, 0.0f);  // dist 30, overshoot 10
+    tf.position = Luminumbra::Vec3(30.0f, 0.0f, 0.0f); // dist 30, overshoot 10
     RunTerritoryOnTick(r, 1);
     const auto& bias = r.get<Comp::TerritoryBiasComponent>(e);
     const float expectedMag = std::min(10.0f * kTerritoryHomingGain, kTerritoryMaxBias);
@@ -466,15 +496,15 @@ TEST(TerritoryHarden, HomingBiasMagnitudeAndDirection) {
 // BOUNDS: a creature stranded ARBITRARILY far from home produces a bias capped at
 // kTerritoryMaxBias (no unbounded steer).
 TEST(TerritoryHarden, BiasCappedFarFromHome) {
-    using luminumbra::ai::RunTerritoryOnTick;
     using luminumbra::ai::kTerritoryMaxBias;
+    using luminumbra::ai::RunTerritoryOnTick;
     entt::registry r;
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
     r.emplace<Comp::TerritoryComponent>(e).radius = 20.0f;
     RunTerritoryOnTick(r, 0);
-    tf.position = Luminumbra::Vec3(100000.0f, 0.0f, 0.0f);  // absurdly far
+    tf.position = Luminumbra::Vec3(100000.0f, 0.0f, 0.0f); // absurdly far
     RunTerritoryOnTick(r, 1);
     const auto& bias = r.get<Comp::TerritoryBiasComponent>(e);
     const float mag = std::sqrt(bias.wish_x * bias.wish_x + bias.wish_z * bias.wish_z);
@@ -491,8 +521,8 @@ TEST(TerritoryHarden, RadiusBoundaryIsInside) {
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(0.0f, 0.0f, 0.0f);
     r.emplace<Comp::TerritoryComponent>(e).radius = 20.0f;
-    RunTerritoryOnTick(r, 0);  // home = origin
-    tf.position = Luminumbra::Vec3(20.0f, 0.0f, 0.0f);  // dist == radius exactly
+    RunTerritoryOnTick(r, 0);                          // home = origin
+    tf.position = Luminumbra::Vec3(20.0f, 0.0f, 0.0f); // dist == radius exactly
     RunTerritoryOnTick(r, 1);
     const auto& bias = r.get<Comp::TerritoryBiasComponent>(e);
     EXPECT_FLOAT_EQ(bias.wish_x, 0.0f) << "exactly at radius is INSIDE -> no homing";
@@ -545,8 +575,8 @@ TEST(TerritoryHarden, RunEqualsReplay) {
         for (int i = 0; i < 4; ++i) {
             auto e = r.create();
             auto& tf = r.emplace<Comp::TransformComponent>(e);
-            tf.position = Luminumbra::Vec3(static_cast<float>(i) * 7.0f, 0.0f,
-                                           static_cast<float>(i) * -3.0f);
+            tf.position =
+                Luminumbra::Vec3(static_cast<float>(i) * 7.0f, 0.0f, static_cast<float>(i) * -3.0f);
             r.emplace<Comp::TerritoryComponent>(e).radius = 10.0f;
             es.push_back(e);
         }
@@ -570,15 +600,15 @@ TEST(TerritoryHarden, RunEqualsReplay) {
     auto a = sim();
     auto b = sim();
     ASSERT_EQ(a.size(), b.size());
-    for (std::size_t i = 0; i < a.size(); ++i) EXPECT_EQ(a[i], b[i]) << "divergence " << i;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        EXPECT_EQ(a[i], b[i]) << "divergence " << i;
 }
 
 // ===========================================================================
 // ThirstSystem
 // ===========================================================================
 
-entt::entity spawnThirsty(entt::registry& r, float x, float z, float thirst,
-                          bool eaten = false) {
+entt::entity spawnThirsty(entt::registry& r, float x, float z, float thirst, bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -601,11 +631,11 @@ entt::entity spawnHole(entt::registry& r, float x, float z, float radius) {
 // must equal (post-rise) thirst exactly; direction toward the hole. (The dt rise is added
 // before the wish is computed, so use the post-rise thirst.)
 TEST(ThirstHarden, SeekWishMagnitudeEqualsThirst) {
-    using luminumbra::ai::RunThirstOnTick;
     using luminumbra::ai::kThirstRise;
+    using luminumbra::ai::RunThirstOnTick;
     entt::registry r;
     auto e = spawnThirsty(r, 0.0f, 0.0f, /*thirst=*/0.6f);
-    spawnHole(r, 0.0f, 100.0f, /*radius=*/4.0f);  // far north, out of range
+    spawnHole(r, 0.0f, 100.0f, /*radius=*/4.0f); // far north, out of range
     const float dt = 1.0f;
     RunThirstOnTick(r, dt);
     const auto& th = r.get<Comp::ThirstComponent>(e);
@@ -621,9 +651,9 @@ TEST(ThirstHarden, SeekWishMagnitudeEqualsThirst) {
 // THRESHOLD EDGE: just below the seek threshold -> no wish; at/above -> wish. The rise pushes a
 // just-under creature over, so set thirst so post-rise still < threshold to isolate the gate.
 TEST(ThirstHarden, SeekThresholdGate) {
-    using luminumbra::ai::RunThirstOnTick;
-    using luminumbra::ai::kThirstSeekThreshold;
     using luminumbra::ai::kThirstRise;
+    using luminumbra::ai::kThirstSeekThreshold;
+    using luminumbra::ai::RunThirstOnTick;
     // BELOW: post-rise thirst stays under the threshold -> zero wish.
     {
         entt::registry r;
@@ -651,18 +681,19 @@ TEST(ThirstHarden, SeekThresholdGate) {
 // DRINK contract: a creature INSIDE the hole radius sets drinking=1 and thirst FALLS (and is
 // clamped >= 0). The drink path must zero the wish (it has arrived).
 TEST(ThirstHarden, DrinkInsideRadiusLowersThirst) {
-    using luminumbra::ai::RunThirstOnTick;
-    using luminumbra::ai::kThirstRise;
     using luminumbra::ai::kThirstDrink;
+    using luminumbra::ai::kThirstRise;
+    using luminumbra::ai::RunThirstOnTick;
     entt::registry r;
     auto e = spawnThirsty(r, 1.0f, 1.0f, /*thirst=*/0.9f);
-    spawnHole(r, 1.0f, 1.0f, /*radius=*/4.0f);  // creature sits inside
+    spawnHole(r, 1.0f, 1.0f, /*radius=*/4.0f); // creature sits inside
     const float dt = 1.0f;
     RunThirstOnTick(r, dt);
     const auto& th = r.get<Comp::ThirstComponent>(e);
     EXPECT_EQ(th.drinking, 1);
     // thirst = clamp(0.9 + rise) then clamp(- drink). drink(0.5) > rise(0.04) -> net fall.
-    const float expected = std::max(0.0f, std::min(1.0f, 0.9f + kThirstRise * dt) - kThirstDrink * dt);
+    const float expected =
+        std::max(0.0f, std::min(1.0f, 0.9f + kThirstRise * dt) - kThirstDrink * dt);
     EXPECT_NEAR(th.thirst, expected, 1.0e-5f);
     EXPECT_FLOAT_EQ(th.wish_x, 0.0f);
     EXPECT_FLOAT_EQ(th.wish_z, 0.0f);
@@ -674,7 +705,8 @@ TEST(ThirstHarden, ThirstClampedToOne) {
     entt::registry r;
     auto e = spawnThirsty(r, 0.0f, 0.0f, 0.99f);
     // no holes -> just rises
-    for (int i = 0; i < 100; ++i) RunThirstOnTick(r, 1.0f);
+    for (int i = 0; i < 100; ++i)
+        RunThirstOnTick(r, 1.0f);
     const auto& th = r.get<Comp::ThirstComponent>(e);
     EXPECT_LE(th.thirst, 1.0f);
     EXPECT_GE(th.thirst, 0.0f);
@@ -712,8 +744,8 @@ TEST(ThirstHarden, CarcassInert) {
 
 // NO water in the world: the creature still gets thirsty but emits a zero wish.
 TEST(ThirstHarden, NoWaterStillThirstsZeroWish) {
-    using luminumbra::ai::RunThirstOnTick;
     using luminumbra::ai::kThirstRise;
+    using luminumbra::ai::RunThirstOnTick;
     entt::registry r;
     auto e = spawnThirsty(r, 0.0f, 0.0f, 0.5f);
     RunThirstOnTick(r, 1.0f);
@@ -726,10 +758,17 @@ TEST(ThirstHarden, NoWaterStillThirstsZeroWish) {
 // ORDER-INDEPENDENCE: nearest-hole + steer keyed by geometry, invariant to spawn order.
 TEST(ThirstHarden, OrderIndependent) {
     using luminumbra::ai::RunThirstOnTick;
-    struct Spec { float x, z; float thirst; bool hole; float radius; };
+    struct Spec {
+        float x, z;
+        float thirst;
+        bool hole;
+        float radius;
+    };
     std::vector<Spec> base = {
-        {0.0f, 0.0f, 0.8f, false, 0.0f}, {10.0f, 0.0f, 0.8f, false, 0.0f},
-        {3.0f, 0.0f, 0.0f, true, 2.0f},  {40.0f, 0.0f, 0.0f, true, 2.0f},
+        {0.0f, 0.0f, 0.8f, false, 0.0f},
+        {10.0f, 0.0f, 0.8f, false, 0.0f},
+        {3.0f, 0.0f, 0.0f, true, 2.0f},
+        {40.0f, 0.0f, 0.0f, true, 2.0f},
     };
     auto build = [](std::vector<Spec> order) {
         entt::registry r;
@@ -741,7 +780,8 @@ TEST(ThirstHarden, OrderIndependent) {
         RunThirstOnTick(r, 1.0f);
         std::vector<std::tuple<float, float, float, float>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
-            if (order[i].hole) continue;
+            if (order[i].hole)
+                continue;
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
             const auto& th = r.get<Comp::ThirstComponent>(es[i]);
             out.push_back({tf.position.x, tf.position.z, th.wish_x, th.wish_z});
@@ -763,8 +803,7 @@ TEST(ThirstHarden, OrderIndependent) {
 // ScavengingSystem
 // ===========================================================================
 
-entt::entity spawnScavenger(entt::registry& r, float x, float z, float hunger,
-                            bool eaten = false) {
+entt::entity spawnScavenger(entt::registry& r, float x, float z, float hunger, bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -780,7 +819,7 @@ entt::entity spawnCarcass(entt::registry& r, float x, float z) {
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
     auto& cr = r.emplace<Comp::CreatureComponent>(e);
-    cr.eaten = true;  // dead body
+    cr.eaten = true; // dead body
     return e;
 }
 
@@ -790,7 +829,7 @@ TEST(ScavengeHarden, SteerIsUnitDirection) {
     using luminumbra::ai::RunScavengingOnTick;
     entt::registry r;
     auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.9f);
-    spawnCarcass(r, 30.0f, 40.0f);  // 50 units away (3-4-5)
+    spawnCarcass(r, 30.0f, 40.0f); // 50 units away (3-4-5)
     RunScavengingOnTick(r, 0);
     const auto& sc = r.get<Comp::ScavengerComponent>(s);
     const float mag = std::sqrt(sc.wish_x * sc.wish_x + sc.wish_z * sc.wish_z);
@@ -804,11 +843,11 @@ TEST(ScavengeHarden, SteerIsUnitDirection) {
 // THRESHOLD EDGE: hunger EXACTLY at the threshold does NOT scavenge (the gate is hunger <=
 // threshold -> skip). Just above -> seeks.
 TEST(ScavengeHarden, HungerThresholdGate) {
-    using luminumbra::ai::RunScavengingOnTick;
     using luminumbra::ai::kScavengeHungerThreshold;
+    using luminumbra::ai::RunScavengingOnTick;
     {
         entt::registry r;
-        auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/kScavengeHungerThreshold);  // exactly at
+        auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/kScavengeHungerThreshold); // exactly at
         spawnCarcass(r, 20.0f, 0.0f);
         auto st = RunScavengingOnTick(r, 0);
         EXPECT_EQ(st.seeking, 0) << "hunger == threshold must NOT seek (gate is <=)";
@@ -828,12 +867,12 @@ TEST(ScavengeHarden, HungerThresholdGate) {
 // FEED contract: within feed radius, feeding=1 and hunger drops by kScavengeFeedRate (clamped
 // >=0), wish held at zero (settle on the food).
 TEST(ScavengeHarden, FeedInsideRadiusLowersHunger) {
-    using luminumbra::ai::RunScavengingOnTick;
-    using luminumbra::ai::kScavengeFeedRate;
     using luminumbra::ai::kScavengeFeedRadius;
+    using luminumbra::ai::kScavengeFeedRate;
+    using luminumbra::ai::RunScavengingOnTick;
     entt::registry r;
     auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.8f);
-    spawnCarcass(r, kScavengeFeedRadius * 0.5f, 0.0f);  // well inside feed radius
+    spawnCarcass(r, kScavengeFeedRadius * 0.5f, 0.0f); // well inside feed radius
     RunScavengingOnTick(r, 0);
     const auto& sc = r.get<Comp::ScavengerComponent>(s);
     const auto& cr = r.get<Comp::CreatureComponent>(s);
@@ -846,11 +885,11 @@ TEST(ScavengeHarden, FeedInsideRadiusLowersHunger) {
 // THRESHOLD EDGE: a carcass EXACTLY at the feed radius distance is "in range" (bestD <=
 // kScavengeFeedRadius is inclusive) -> feeds, not steers.
 TEST(ScavengeHarden, FeedRadiusBoundaryInclusive) {
-    using luminumbra::ai::RunScavengingOnTick;
     using luminumbra::ai::kScavengeFeedRadius;
+    using luminumbra::ai::RunScavengingOnTick;
     entt::registry r;
     auto s = spawnScavenger(r, 0.0f, 0.0f, 0.9f);
-    spawnCarcass(r, kScavengeFeedRadius, 0.0f);  // exactly at the feed boundary
+    spawnCarcass(r, kScavengeFeedRadius, 0.0f); // exactly at the feed boundary
     RunScavengingOnTick(r, 0);
     const auto& sc = r.get<Comp::ScavengerComponent>(s);
     EXPECT_EQ(sc.feeding, 1) << "exactly at feed radius is in range (<= inclusive)";
@@ -865,7 +904,7 @@ TEST(ScavengeHarden, MortalDeadCountsAsCarcass) {
     auto dead = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(dead);
     tf.position = Luminumbra::Vec3(15.0f, 0.0f, 0.0f);
-    r.emplace<Comp::CreatureComponent>(dead);  // eaten=false
+    r.emplace<Comp::CreatureComponent>(dead); // eaten=false
     r.emplace<Comp::MortalComponent>(dead).dead = 1;
     auto st = RunScavengingOnTick(r, 0);
     EXPECT_EQ(st.carcasses, 1);
@@ -874,7 +913,8 @@ TEST(ScavengeHarden, MortalDeadCountsAsCarcass) {
     EXPECT_GT(std::abs(sc.wish_x) + std::abs(sc.wish_z), 0.0f);
 }
 
-// A DEAD scavenger (eaten) does not scavenge: zero wish, no feeding, even with a carcass next to it.
+// A DEAD scavenger (eaten) does not scavenge: zero wish, no feeding, even with a carcass next to
+// it.
 TEST(ScavengeHarden, DeadScavengerInert) {
     using luminumbra::ai::RunScavengingOnTick;
     entt::registry r;
@@ -894,7 +934,7 @@ TEST(ScavengeHarden, StaleWishResetWhenSated) {
     entt::registry r;
     auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.9f);
     spawnCarcass(r, 30.0f, 0.0f);
-    RunScavengingOnTick(r, 0);  // writes a non-zero wish
+    RunScavengingOnTick(r, 0); // writes a non-zero wish
     ASSERT_GT(std::abs(r.get<Comp::ScavengerComponent>(s).wish_x), 0.0f);
     // Now sate it: hunger drops below threshold, re-run -> wish must reset to zero.
     r.get<Comp::CreatureComponent>(s).hunger = 0.0f;
@@ -908,9 +948,10 @@ TEST(ScavengeHarden, StaleWishResetWhenSated) {
 TEST(ScavengeHarden, HungerClampedAtZeroWhileFeeding) {
     using luminumbra::ai::RunScavengingOnTick;
     entt::registry r;
-    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.31f);  // just above threshold
-    spawnCarcass(r, 0.2f, 0.0f);  // inside feed radius
-    for (int i = 0; i < 50; ++i) RunScavengingOnTick(r, static_cast<std::uint64_t>(i));
+    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.31f); // just above threshold
+    spawnCarcass(r, 0.2f, 0.0f);                              // inside feed radius
+    for (int i = 0; i < 50; ++i)
+        RunScavengingOnTick(r, static_cast<std::uint64_t>(i));
     const auto& cr = r.get<Comp::CreatureComponent>(s);
     EXPECT_GE(cr.hunger, 0.0f);
 }
@@ -918,10 +959,16 @@ TEST(ScavengeHarden, HungerClampedAtZeroWhileFeeding) {
 // ORDER-INDEPENDENCE: nearest carcass + steer keyed by geometry, invariant to spawn order.
 TEST(ScavengeHarden, OrderIndependent) {
     using luminumbra::ai::RunScavengingOnTick;
-    struct Spec { float x, z; bool carcass; float hunger; };
+    struct Spec {
+        float x, z;
+        bool carcass;
+        float hunger;
+    };
     std::vector<Spec> base = {
-        {0.0f, 0.0f, false, 0.9f}, {20.0f, 0.0f, false, 0.9f},
-        {5.0f, 0.0f, true, 0.0f},  {25.0f, 3.0f, true, 0.0f},
+        {0.0f, 0.0f, false, 0.9f},
+        {20.0f, 0.0f, false, 0.9f},
+        {5.0f, 0.0f, true, 0.0f},
+        {25.0f, 3.0f, true, 0.0f},
     };
     auto build = [](std::vector<Spec> order) {
         entt::registry r;
@@ -933,7 +980,8 @@ TEST(ScavengeHarden, OrderIndependent) {
         RunScavengingOnTick(r, 0);
         std::vector<std::tuple<float, float, float, float>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
-            if (order[i].carcass) continue;
+            if (order[i].carcass)
+                continue;
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
             const auto& sc = r.get<Comp::ScavengerComponent>(es[i]);
             out.push_back({tf.position.x, tf.position.z, sc.wish_x, sc.wish_z});
@@ -978,7 +1026,7 @@ TEST(FlockHarden, CoincidentNeighborNoNaN) {
 // SEPARATION sign: a neighbour very close (inside separation_radius, off to +x) pushes self in
 // the -x direction (AWAY). Guards a sign error in the separation accumulation.
 TEST(FlockHarden, SeparationPushesAway) {
-    FlockParams p;  // separation_radius 3, neighbor_radius 12
+    FlockParams p; // separation_radius 3, neighbor_radius 12
     // self at origin, neighbour at +1 on x (inside separation radius)
     FlockSteer s = ComputeFlockSteer(0.0f, 0.0f, {{1.0f, 0.0f}}, p);
     // Cohesion pulls toward +x (single neighbour centroid), separation pushes -x and dominates
@@ -1053,7 +1101,7 @@ TEST(ConsumerHarden, PackCoordIsDirectionNotPoint) {
     auto& pk = r.emplace<Comp::PackHunterComponent>(e);
     pk.in_pack = 1;
     pk.coord_x = 0.6f;
-    pk.coord_z = 0.8f;  // unit direction
+    pk.coord_z = 0.8f; // unit direction
     RunSteeringConsumerOnTick(r);
     EXPECT_FLOAT_EQ(cr.wish_x, 0.6f * 5.0f * 1.5f);
     EXPECT_FLOAT_EQ(cr.wish_z, 0.8f * 5.0f * 1.5f);
@@ -1068,7 +1116,7 @@ TEST(ConsumerHarden, ZeroCoordPackNotSteered) {
     r.emplace<Comp::TransformComponent>(e);
     auto& cr = r.emplace<Comp::CreatureComponent>(e);
     cr.is_predator = true;
-    cr.wish_x = 9.0f;  // brain value
+    cr.wish_x = 9.0f; // brain value
     auto& pk = r.emplace<Comp::PackHunterComponent>(e);
     pk.in_pack = 1;
     pk.coord_x = 0.0f;
@@ -1088,7 +1136,7 @@ TEST(ConsumerHarden, PackOverrideThenMigrationTerritoryAdd) {
     auto& cr = r.emplace<Comp::CreatureComponent>(e);
     cr.is_predator = true;
     cr.move_speed = 4.0f;
-    cr.wish_x = 100.0f;  // brain value — must be OVERWRITTEN by the pack term (not added to)
+    cr.wish_x = 100.0f; // brain value — must be OVERWRITTEN by the pack term (not added to)
     cr.wish_z = 100.0f;
     auto& pk = r.emplace<Comp::PackHunterComponent>(e);
     pk.in_pack = 1;
@@ -1101,7 +1149,7 @@ TEST(ConsumerHarden, PackOverrideThenMigrationTerritoryAdd) {
     tb.wish_x = 0.1f;
     tb.wish_z = 0.2f;
     RunSteeringConsumerOnTick(r);
-    const float packX = 1.0f * 4.0f * 1.5f;  // = 6
+    const float packX = 1.0f * 4.0f * 1.5f; // = 6
     EXPECT_FLOAT_EQ(cr.wish_x, packX + 0.5f + 0.1f);
     EXPECT_FLOAT_EQ(cr.wish_z, 0.0f - 0.25f + 0.2f);
 }
@@ -1153,11 +1201,16 @@ TEST(ConsumerHarden, OrderIndependent) {
     using luminumbra::ai::RunSteeringConsumerOnTick;
     auto build = [](bool reversed) {
         entt::registry r;
-        struct E { float mx; float tx; bool pred; float coordx; };
-        std::vector<E> specs = {{0.1f, 0.2f, false, 0.0f},
-                                {0.3f, -0.1f, true, 0.5f},
-                                {-0.2f, 0.05f, false, 0.0f}};
-        if (reversed) std::reverse(specs.begin(), specs.end());
+        struct E {
+            float mx;
+            float tx;
+            bool pred;
+            float coordx;
+        };
+        std::vector<E> specs = {
+            {0.1f, 0.2f, false, 0.0f}, {0.3f, -0.1f, true, 0.5f}, {-0.2f, 0.05f, false, 0.0f}};
+        if (reversed)
+            std::reverse(specs.begin(), specs.end());
         std::vector<std::pair<float, std::pair<float, float>>> key;
         for (const auto& sp : specs) {
             auto e = r.create();
@@ -1174,7 +1227,7 @@ TEST(ConsumerHarden, OrderIndependent) {
             }
         }
         RunSteeringConsumerOnTick(r);
-        std::vector<std::pair<float, float>> out;  // key by (mx) -> wish_x
+        std::vector<std::pair<float, float>> out; // key by (mx) -> wish_x
         auto v = r.view<Comp::CreatureComponent, Comp::MigratoryComponent>();
         for (auto e : v) {
             out.push_back({v.get<Comp::MigratoryComponent>(e).wish_x,
@@ -1199,10 +1252,10 @@ TEST(ConsumerHarden, OrderIndependent) {
 // Run the actual producers, then the consumer, and assert the consumer's wish is consistent
 // with the producers' UNIT/scaled outputs (no double-scaling, no point-misread end to end).
 TEST(CrossHarden, ProducersThenConsumerConsistent) {
-    using luminumbra::ai::RunPredatorPackOnTick;
     using luminumbra::ai::RunMigrationOnTick;
-    using luminumbra::ai::RunTerritoryOnTick;
+    using luminumbra::ai::RunPredatorPackOnTick;
     using luminumbra::ai::RunSteeringConsumerOnTick;
+    using luminumbra::ai::RunTerritoryOnTick;
     entt::registry r;
     // Two predators forming a pack, far from origin, with prey ahead.
     auto p0 = spawnPredator(r, 500.0f, 500.0f);
@@ -1217,8 +1270,8 @@ TEST(CrossHarden, ProducersThenConsumerConsistent) {
 
     // Producers (slot 7), then consumer.
     RunPredatorPackOnTick(r, 0);
-    RunMigrationOnTick(r, 0.0f);  // peak drive
-    RunTerritoryOnTick(r, 0);     // claims home at current pos -> bias 0
+    RunMigrationOnTick(r, 0.0f); // peak drive
+    RunTerritoryOnTick(r, 0);    // claims home at current pos -> bias 0
     RunSteeringConsumerOnTick(r);
 
     const auto& pk = r.get<Comp::PackHunterComponent>(p0);
@@ -1237,4 +1290,4 @@ TEST(CrossHarden, ProducersThenConsumerConsistent) {
     EXPECT_NEAR(packMag, sp, 1.0e-2f);
 }
 
-}  // namespace
+} // namespace

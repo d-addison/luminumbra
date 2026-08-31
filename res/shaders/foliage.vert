@@ -1,24 +1,24 @@
 #version 450 core
 
 // ===========================================================================
-// T-I5b-1 (F1): instanced foliage scatter vertex stage.
+// instanced foliage scatter vertex stage.
 //
 // One instanced CROSSED blade/clutter sprite per scatter instance, drawn from
 // the persistent-mapped FoliageInstance pool (FoliagePass). Each instance is a
 // pair of vertical (world-up) cards crossed at 90 degrees so the blade reads as
 // upright ground cover from ANY view angle (a single flat card read as a neon
-// playing-card decal from the down-pitched cells -- T-I5b-DR-foliage-blocker).
+// playing-card decal from the down-pitched cells -- ).
 // The 12 verts per instance are two quads (2 triangles each) generated from
 // gl_VertexID; NO geometry shader (the Shader class is vert+frag only), matching
-// the A1 ParticlePass. Draw: glDrawArraysInstanced(GL_TRIANGLES, 0, 12, count).
+// the  ParticlePass. Draw: glDrawArraysInstanced(GL_TRIANGLES, 0, 12, count).
 //
-// WIND SWAY (design-decisions §2): the TOP of each card is displaced by the
-// per-instance wind vector (the A2 wind field sampled CPU-side and packed into
+// WIND SWAY (documented design): the TOP of each card is displaced by the
+// per-instance wind vector (the  wind field sampled CPU-side and packed into
 // the instance) scaled by the per-archetype sway flag. The base stays pinned to
-// the ground so the card waves from the root. RENDER-ONLY: the sway never feeds
-// the sim/world_hash (one-way, critique F2).
+// the ground so the card  from the root.: the sway never feeds
+// the sim/world_hash (one-way, regression contract).
 //
-// SKY / HORIZON CULL (T-I5b-DR-foliage-blocker, GREEN_SKY_SPECKLE): ground cover
+// SKY / HORIZON CULL (, GREEN_SKY_SPECKLE): ground cover
 // must never render against the sky. A blade whose tip projects ABOVE the
 // horizon line (camera eye height) is a distant card poking over the terrain
 // silhouette -- it is collapsed to a degenerate point so it cannot speckle the
@@ -54,7 +54,7 @@ out VS_OUT {
     vec2  texCoord;
     vec4  color;
     float fade;       // [0,1] distance fade (0 == culled at the tip)
-    float heightT;    // 0 at the blade root .. 1 at the tip (base-to-tip gradient)
+    float heightT;    // 0 at the blade root.. 1 at the tip (base-to-tip gradient)
     vec3  worldPos;
     vec3  worldNormal;
 } vs_out;
@@ -93,13 +93,13 @@ void main() {
     // Card basis: a yaw-rotated horizontal axis + world up. The second quad is
     // offset by 90 degrees so the pair forms a cross. Fixed per-instance yaw (no
     // camera spin) so the scatter looks like planted ground cover.
-    float yaw = aFacing + (quad == 1 ? 1.5707963 : 0.0);
+    float yaw = aFacing + (quad == 1 ? 1.5707963: 0.0);
     float cf = cos(yaw);
     float sf = sin(yaw);
     vec3 cardRight = vec3(cf, 0.0, sf);
     vec3 cardUp    = vec3(0.0, 1.0, 0.0);
 
-    // T-I5b-DR-foliage-green (GROUNDING): the base verts (cornerY==0) are sunk a
+    //  (GROUNDING): the base verts (cornerY==0) are sunk a
     // few cm BELOW the surface anchor so the blade root is buried in the terrain
     // -- this removes the visible hover gap (blades looked like floating dashes)
     // and guarantees ground contact even where the rendered terrain micro-varies
@@ -110,7 +110,7 @@ void main() {
 
     // WIND SWAY: displace only the upper part of the card (quadratic in height
     // so the base is pinned). The sway flag scale rides in aColor.a; pebbles /
-    // clutter pack a 0 there so they do not wave. The oscillation is a cheap
+    // clutter pack a 0 there so they do not  The oscillation is a cheap
     // deterministic sine driven by render time + the per-instance phase.
     float swayScale = aColor.a;
     float bend = cornerY * cornerY; // 0 at base, 1 at tip
@@ -155,13 +155,13 @@ void main() {
     // false aurora (AURORA_AT_DUSK). The objective critique samples the TOP THIRD,
     // i.e. NDC y > +0.33. We test the per-instance TIP (anchor + full blade
     // height) -- shared by all 12 verts so the whole blade is culled together (no
-    // torn triangles). T-I5b-DR-foliage-green: testing the TIP (not just the
+    // torn triangles). : testing the TIP (not just the
     // anchor) closes the gap where a blade rooted just under the old anchor line
     // poked its now-brighter GREEN tip into the top third at the dawn/storm
     // horizon (GREEN_SKY_SPECKLE). Cull when the TIP projects above y = +0.10,
     // comfortably below the top-third window with margin. Two clip-space tests
     // (anchor for the near floor, tip for the horizon) -> deterministic.
-    // T-I6 coverage: the objective sky-speckle sample is the TOP THIRD (NDC y > 0.33).
+    //  coverage: the objective sky-speckle sample is the TOP THIRD (NDC y > 0.33).
     // The previous thresholds (anchor 0.05 / tip 0.10) were far below that window, so a
     // DOWN-PITCHED view (horizon high in frame) culled most below-horizon ground cover
     // and the foreground read as sparse tufts. Raise the cull to just BELOW the sky

@@ -18,8 +18,8 @@ class Property;
 template<typename T>
 using PropertyCallback = std::function<void(const T&, const T&)>; // (oldValue, newValue)
 
-// Token identifying a single Subscribe() registration. Pass it back to
-// Unsubscribe() to remove the callback. 0 is never a valid token.
+// Token identifying a single Subscribe registration. Pass it back to
+// Unsubscribe to remove the callback. 0 is never a valid token.
 using SubscriptionToken = std::uint64_t;
 inline constexpr SubscriptionToken kInvalidSubscriptionToken = 0;
 
@@ -33,9 +33,9 @@ struct IsVector<std::vector<T, Allocator>> : std::true_type {};
  * Observable property that can notify listeners when its value changes.
  * Core component of the reactive data binding system.
  *
- * Lifetime contract: every Subscribe() MUST be paired with an Unsubscribe()
+ * Lifetime contract: every Subscribe MUST be paired with an Unsubscribe
  * (directly, or via ScopedSubscription / UIComponent binding cleanup) before
- * the subscriber is destroyed, otherwise a later Set() invokes a dangling
+ * the subscriber is destroyed, otherwise a later Set invokes a dangling
  * callback (use-after-free).
  */
 template<typename T>
@@ -56,7 +56,7 @@ public:
         }
     }
 
-    // Subscribe to value changes. Returns a token for Unsubscribe().
+    // Subscribe to value changes. Returns a token for Unsubscribe.
     SubscriptionToken Subscribe(PropertyCallback<T> callback) {
         const SubscriptionToken token = m_next_token++;
         m_subscriptions.push_back(Subscription{token, std::move(callback)});
@@ -66,7 +66,7 @@ public:
     // Remove a previously registered callback. Safe to call with a token that
     // was already removed (returns false). Safe to call from inside a
     // notification callback: the in-flight notification iterates a snapshot,
-    // so removal takes effect from the next Set().
+    // so removal takes effect from the next Set.
     bool Unsubscribe(SubscriptionToken token) {
         auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
                                [token](const Subscription& s) { return s.token == token; });

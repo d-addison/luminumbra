@@ -1,21 +1,20 @@
 #pragma once
 
-#include "rendering/Shader.h"
-#include "rendering/Camera.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "rendering/Camera.h"
+#include "rendering/Shader.h"
+#include <filesystem>
 #include <glad/glad.h>
-#include <vector>
 #include <memory>
 #include <string>
-#include <filesystem>
 #include <unordered_map>
+#include <vector>
 
 namespace Luminumbra::Client {
 
 enum class ChunkLoadVisualState {
     UNDEFINED,
-    DISPATCHED,
-    MESHED // Future use
+    DISPATCHED
 };
 
 struct ChunkInstanceData {
@@ -45,7 +44,7 @@ private:
     GLuint m_cube_vao = 0;
     GLuint m_cube_vbo = 0;
     GLuint m_cube_ebo = 0;
-    
+
     // Instancing
     GLuint m_instance_vbo = 0;
     std::vector<ChunkInstanceData> m_instance_data;

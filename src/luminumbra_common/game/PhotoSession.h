@@ -1,6 +1,6 @@
 #pragma once
 
-// Track game.photo_session — the photography-loop GLUE (pillar G). This is the
+// game.photo_session: the photography-loop GLUE (photography). This is the
 // thin, PURE layer that turns the three independently-graded photo libraries into
 // ONE verdict and feeds the progression codex:
 //
@@ -35,9 +35,9 @@
 // low verdict (the underlying ScorePhoto returns all-zero for an empty frame, and
 // the optical terms degrade gracefully) rather than a NaN/inf.
 
-#include "../systems/PhotoScoring.h"  // luminumbra::photo: PhotoShot/PhotoScore/ScorePhoto
-#include "PhotoCamera.h"              // luminumbra::game:  LensSettings/ComputeDof/SubjectIsolation/ExposureQuality
-#include "PhotoCodex.h"              // luminumbra::game:  PhotoCodex::Record
+#include "../systems/PhotoScoring.h" // luminumbra::photo: PhotoShot/PhotoScore/ScorePhoto
+#include "PhotoCamera.h" // luminumbra::game:  LensSettings/ComputeDof/SubjectIsolation/ExposureQuality
+#include "PhotoCodex.h" // luminumbra::game:  PhotoCodex::Record
 
 namespace luminumbra::game {
 
@@ -49,12 +49,12 @@ namespace luminumbra::game {
 // the optical DoF/isolation terms and the codex record key on it.
 // ---------------------------------------------------------------------------
 struct ShotInput {
-    ::luminumbra::photo::PhotoShot composition;   // framed subjects + camera exposure/focus
-    LensSettings lens;                            // focal length / aperture / focus dist / iso / shutter
-    float scene_luminance      = 0.5f;            // [0,1] ambient scene brightness
-    int   main_species_id      = 0;               // principal subject's species (codex key)
-    float main_subject_distance_m = 3.0f;         // principal subject distance (metres)
-    float main_subject_size_m  = 0.5f;            // principal subject physical size (metres)
+    ::luminumbra::photo::PhotoShot composition; // framed subjects + camera exposure/focus
+    LensSettings lens;                    // focal length / aperture / focus dist / iso / shutter
+    float scene_luminance = 0.5f;         // [0,1] ambient scene brightness
+    int main_species_id = 0;              // principal subject's species (codex key)
+    float main_subject_distance_m = 3.0f; // principal subject distance (metres)
+    float main_subject_size_m = 0.5f;     // principal subject physical size (metres)
     // ANNOTATION ONLY — the principal subject's behaviour/time/light context at capture.
     // EvaluateShot NEVER reads this (it is not a scoring input); CommitShot folds its
     // subject_action into the codex so behaviour objectives can match later.
@@ -66,15 +66,15 @@ struct ShotInput {
 // blend; `stars` is a 0..5 rating derived monotonically from `total`.
 // ---------------------------------------------------------------------------
 struct ShotVerdict {
-    float composition     = 0.0f; // from PhotoScoring's composition axis
-    float exposure        = 0.0f; // blend of PhotoScoring lighting + PhotoCamera exposure quality
+    float composition = 0.0f;     // from PhotoScoring's composition axis
+    float exposure = 0.0f;        // blend of PhotoScoring lighting + PhotoCamera exposure quality
     float focus_isolation = 0.0f; // blend of PhotoScoring focus + PhotoCamera subject isolation
-    float total           = 0.0f; // clamped weighted sum of the three axes
-    int   stars           = 0;    // 0..5, monotonic in total
+    float total = 0.0f;           // clamped weighted sum of the three axes
+    int stars = 0;                // 0..5, monotonic in total
 };
 
 // ---------------------------------------------------------------------------
-// VERDICT WEIGHTING (sum to 1.0). REBALANCED toward LENS CRAFT (spec 012): focus/
+// VERDICT WEIGHTING (sum to 1.0). REBALANCED toward LENS CRAFT: focus/
 // isolation now LEADS, composition second, exposure third. The old 0.40/0.30/0.30
 // taught "composition > optics", which made the aperture/focus and manual-exposure
 // mechanics nearly weightless feedback. Tilting toward focus (0.40) makes deliberate
@@ -82,8 +82,8 @@ struct ShotVerdict {
 // creamy-bokeh snapshot of a badly-framed subject cannot win on lens alone (guarded by
 // the WellComposedDeepBeatsBadlyComposedShallow test).
 // ---------------------------------------------------------------------------
-inline constexpr float kVerdictWComposition    = 0.35f;
-inline constexpr float kVerdictWExposure       = 0.25f;
+inline constexpr float kVerdictWComposition = 0.35f;
+inline constexpr float kVerdictWExposure = 0.25f;
 inline constexpr float kVerdictWFocusIsolation = 0.40f;
 
 // Per-axis blend weights folding the optics into the rubric. REBALANCED so the lens
@@ -94,8 +94,8 @@ inline constexpr float kVerdictWFocusIsolation = 0.40f;
 //   focus_iso = kFiRubric  * PhotoScoring.focus    + kFiOptics  * PhotoCamera.SubjectIsolation
 inline constexpr float kExpRubric = 0.4f;
 inline constexpr float kExpOptics = 0.6f;
-inline constexpr float kFiRubric  = 0.4f;
-inline constexpr float kFiOptics  = 0.6f;
+inline constexpr float kFiRubric = 0.4f;
+inline constexpr float kFiOptics = 0.6f;
 
 // ---------------------------------------------------------------------------
 // STAR THRESHOLDS. Stars are a monotonic step function of `total` in [0,1]:
@@ -116,19 +116,26 @@ inline constexpr float kStar5 = 0.88f;
 // Local clamp (float +-*/ only; mirrors the libraries' helper to avoid pulling one
 // namespace's helper into another).
 inline float SessionClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
 // Map a [0,1] total to a 0..5 star rating. Monotonic non-decreasing step function.
 inline int StarsForTotal(float total) {
     const float t = SessionClamp01(total);
-    if (t >= kStar5) return 5;
-    if (t >= kStar4) return 4;
-    if (t >= kStar3) return 3;
-    if (t >= kStar2) return 2;
-    if (t >= kStar1) return 1;
+    if (t >= kStar5)
+        return 5;
+    if (t >= kStar4)
+        return 4;
+    if (t >= kStar3)
+        return 3;
+    if (t >= kStar2)
+        return 2;
+    if (t >= kStar1)
+        return 1;
     return 0;
 }
 
@@ -152,19 +159,19 @@ inline ShotVerdict EvaluateShot(const ShotInput& in) {
     // (ExposureQuality / SubjectIsolation) depend only on lens + scene facts and are
     // nonzero even for an empty frame, so without this gate a photo of nothing could
     // still earn a star. A photograph with no subject is not a photograph.
-    if (in.composition.subjects.empty()) return v;
+    if (in.composition.subjects.empty())
+        return v;
 
     // (1) Rubric: grade what is IN the frame.
-    const ::luminumbra::photo::PhotoScore rubric =
-        ::luminumbra::photo::ScorePhoto(in.composition);
+    const ::luminumbra::photo::PhotoScore rubric = ::luminumbra::photo::ScorePhoto(in.composition);
 
     // (2) Optics: grade the lens facts against the scene + principal subject.
     CameraSubject subj;
     subj.distance_m = in.main_subject_distance_m;
-    subj.size_m     = in.main_subject_size_m;
+    subj.size_m = in.main_subject_size_m;
 
     const float exposure_quality = ExposureQuality(in.lens, in.scene_luminance);
-    const float isolation        = SubjectIsolation(in.lens, subj);
+    const float isolation = SubjectIsolation(in.lens, subj);
 
     // (3) Blend per axis. Composition rides directly on the rubric (it is a pure
     // framing judgement with no optical counterpart here). Exposure and
@@ -178,8 +185,7 @@ inline ShotVerdict EvaluateShot(const ShotInput& in) {
     v.focus_isolation = SessionClamp01(kFiRubric * SessionClamp01(rubric.focus) +
                                        kFiOptics * SessionClamp01(isolation));
 
-    v.total = SessionClamp01(kVerdictWComposition    * v.composition +
-                             kVerdictWExposure       * v.exposure +
+    v.total = SessionClamp01(kVerdictWComposition * v.composition + kVerdictWExposure * v.exposure +
                              kVerdictWFocusIsolation * v.focus_isolation);
 
     v.stars = StarsForTotal(v.total);

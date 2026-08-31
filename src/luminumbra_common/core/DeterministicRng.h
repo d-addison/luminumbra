@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I9-AI: shared seeded deterministic PRNG for the SIM path (evolution genome
+// shared seeded deterministic PRNG for the SIM path (evolution genome
 // mutation, future stochastic ecology). The engine already uses a splitmix64 hash
 // for render-only foliage placement (FoliagePass), but that is local and render-
 // side; sim code that feeds world_hash needs a reproducible generator that obeys
@@ -9,9 +9,9 @@
 //     integer seed, so run==replay holds and a replay reproduces the exact draws.
 //   * NO libm transcendentals (log/cos/sin) — the Gaussian uses an Irwin-Hall
 //     (sum-of-uniforms) approximation so it stays SimDeterminismLint-clean.
-// Seed streams from (offset, id, generation, ...) via splitmix64 mixing; pick a
+// Seed streams from (offset, id, generation,...) via splitmix64 mixing; pick a
 // distinct world_seed offset per subsystem (wind+11, weather+12/13, aether+14 are
-// taken — evolution/scent claim the next free slots, recorded in design-decisions).
+// taken; evolution and scent use distinct subsequent offsets.
 
 #include <cstdint>
 
@@ -19,12 +19,13 @@ namespace luminumbra::core {
 
 class DeterministicRng {
 public:
-    explicit DeterministicRng(std::uint64_t seed) : m_state(seed == 0 ? 0x9E3779B97F4A7C15ull : seed) {}
+    explicit DeterministicRng(std::uint64_t seed)
+        : m_state(seed == 0 ? 0x9E3779B97F4A7C15ull : seed) {}
 
     // Compose a stream seed from up to three integer inputs (e.g. a subsystem
     // offset, an entity id, a generation/tick). Pure + order-sensitive.
-    [[nodiscard]] static DeterministicRng seeded(std::uint64_t a, std::uint64_t b = 0,
-                                                 std::uint64_t c = 0) {
+    [[nodiscard]] static DeterministicRng
+    seeded(std::uint64_t a, std::uint64_t b = 0, std::uint64_t c = 0) {
         return DeterministicRng(mix(mix(mix(a) ^ b) ^ c));
     }
 
@@ -51,7 +52,9 @@ public:
     }
 
     // Uniform float in [lo, hi).
-    float next_range(float lo, float hi) { return lo + (hi - lo) * next_unit(); }
+    float next_range(float lo, float hi) {
+        return lo + (hi - lo) * next_unit();
+    }
 
     // Approximately-standard-normal sample, N(0,1), via the Irwin-Hall sum of 12
     // uniforms minus 6 (mean 0, variance 1). Libm-free and deterministic — the
@@ -59,7 +62,8 @@ public:
     // (fine for bounded-trait mutation; not for rare-event modeling).
     float next_gaussian() {
         float sum = 0.0f;
-        for (int i = 0; i < 12; ++i) sum += next_unit();
+        for (int i = 0; i < 12; ++i)
+            sum += next_unit();
         return sum - 6.0f;
     }
 

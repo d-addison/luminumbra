@@ -1,8 +1,8 @@
-// Spec 002 Item 2 — SEMANTIC KNOBS (separate persisted layer).
+// SEMANTIC KNOBS (separate persisted layer).
 //
 // These tests pin the engine-side knob map (world/KnobLayer): knob extremes hit
 // the expected params, a MONOTONICITY sweep proves each knob's relief metric
-// moves monotonically across 0->1 (the same relief Item 1's diorama shows —
+// moves monotonically across 0->1 (the same relief 's diorama shows —
 // max-min terrain height over a sample grid, sampled directly from the analytic
 // GetTerrainHeightAt of a real SHIELD_WorldSystem, no GL), reopen is EXACT
 // (resolve(persisted) == the resolved params byte-for-byte), curated presets are
@@ -20,9 +20,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/KnobLayer.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
-#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
 using namespace Luminumbra::world;
 using Luminumbra::Systems::SHIELD_WorldSystem;
@@ -65,14 +65,14 @@ nlohmann::json FixedBasePreset() {
 }
 
 // Build TerrainGenParams from a resolved preset JSON in memory (the same loader
-// seam Item 1 uses). data_root irrelevant here (biomes off -> no table lookup).
+// seam  uses). data_root irrelevant here (biomes off -> no table lookup).
 TerrainGenParams ParamsFrom(const nlohmann::json& preset) {
     auto res = LoadTerrainPresetFromJson(preset, std::filesystem::path("."), "<knob_test>");
     EXPECT_TRUE(res.ok);
     return res.params;
 }
 
-// Item 1's relief/roughness metric: from the REAL analytic surface (no GL, no
+// 's relief/roughness metric: from the REAL analytic surface (no GL, no
 // streaming). Combines the macro RELIEF (max-min height span) with the local
 // ROUGHNESS (mean absolute height delta between adjacent samples) so it responds
 // monotonically BOTH to taller terrain (mountainousness) AND to finer detail
@@ -95,7 +95,8 @@ double ReliefMetric(const TerrainGenParams& params, int seed = 4242) {
         }
     }
     // Mean absolute local slope (roughness).
-    double rough = 0.0; int count = 0;
+    double rough = 0.0;
+    int count = 0;
     for (int iz = 0; iz < N; ++iz) {
         for (int ix = 1; ix < N; ++ix) {
             rough += std::fabs(h[iz][ix] - h[iz][ix - 1]);
@@ -114,7 +115,8 @@ double RoughnessMetric(const TerrainGenParams& params, int seed = 4242) {
     SHIELD_WorldSystem world(nullptr, nullptr, params, seed);
     constexpr int N = 64;
     constexpr float kStep = 4.0f;
-    double rough = 0.0; int count = 0;
+    double rough = 0.0;
+    int count = 0;
     for (int iz = 0; iz < N; ++iz) {
         float prev = world.GetTerrainHeightAt((-N / 2) * kStep, (iz - N / 2) * kStep);
         for (int ix = 1; ix < N; ++ix) {
@@ -137,11 +139,12 @@ KnobVector KnobsWith(Knob k, float v) {
 
 double JsonNum(const nlohmann::json& preset, const std::string& dotted) {
     std::string ptr = "/generation_params/";
-    for (char ch : dotted) ptr += (ch == '.') ? '/' : ch;
+    for (char ch : dotted)
+        ptr += (ch == '.') ? '/' : ch;
     return preset.at(nlohmann::json::json_pointer(ptr)).get<double>();
 }
 
-}  // namespace
+} // namespace
 
 // The startup invariant the host asserts: every knob spline endpoint sits inside
 // its mapped param's declared range, splines are monotone, neutral==default.
@@ -149,7 +152,8 @@ TEST(KnobLayerTest, KnobEndpointsLieWithinDeclaredRanges) {
     std::vector<std::string> errors;
     const bool ok = ValidateKnobEndpoints(errors);
     std::string joined;
-    for (const auto& e : errors) joined += "\n  " + e;
+    for (const auto& e : errors)
+        joined += "\n  " + e;
     EXPECT_TRUE(ok) << "knob endpoint/monotonicity violations:" << joined;
 }
 
@@ -168,21 +172,26 @@ TEST(KnobLayerTest, KnobExtremesHitExpectedParams) {
     // Wetness ramps rivers/lakes ON at the high end (flag ramp, no pop).
     const nlohmann::json dry = ApplyKnobLayer(base, KnobsWith(Knob::Wetness, 0.0f));
     const nlohmann::json wet = ApplyKnobLayer(base, KnobsWith(Knob::Wetness, 1.0f));
-    EXPECT_FALSE(dry.at(nlohmann::json::json_pointer("/generation_params/features/rivers_enabled")).get<bool>());
-    EXPECT_TRUE(wet.at(nlohmann::json::json_pointer("/generation_params/features/rivers_enabled")).get<bool>());
-    EXPECT_TRUE(wet.at(nlohmann::json::json_pointer("/generation_params/features/lakes_enabled")).get<bool>());
+    EXPECT_FALSE(dry.at(nlohmann::json::json_pointer("/generation_params/features/rivers_enabled"))
+                     .get<bool>());
+    EXPECT_TRUE(wet.at(nlohmann::json::json_pointer("/generation_params/features/rivers_enabled"))
+                    .get<bool>());
+    EXPECT_TRUE(wet.at(nlohmann::json::json_pointer("/generation_params/features/lakes_enabled"))
+                    .get<bool>());
     EXPECT_GT(JsonNum(wet, "features.river_depth"), JsonNum(dry, "features.river_depth"));
 
     // Erosion ramps the hydro relief on at the high end.
     const nlohmann::json young = ApplyKnobLayer(base, KnobsWith(Knob::Erosion, 0.0f));
     const nlohmann::json old = ApplyKnobLayer(base, KnobsWith(Knob::Erosion, 1.0f));
-    EXPECT_FALSE(young.at(nlohmann::json::json_pointer("/generation_params/terrain/hydro/enabled")).get<bool>());
-    EXPECT_TRUE(old.at(nlohmann::json::json_pointer("/generation_params/terrain/hydro/enabled")).get<bool>());
+    EXPECT_FALSE(young.at(nlohmann::json::json_pointer("/generation_params/terrain/hydro/enabled"))
+                     .get<bool>());
+    EXPECT_TRUE(old.at(nlohmann::json::json_pointer("/generation_params/terrain/hydro/enabled"))
+                    .get<bool>());
 }
 
 // MONOTONICITY: sweeping the Mountainousness knob 0->1 increases the relief
 // metric monotonically (the dominant relief lever). This is the gate the spec
-// names — each knob 0->1 -> Item 1's relief metric moves monotonically.
+// names — each knob 0->1 -> 's relief metric moves monotonically.
 TEST(KnobLayerTest, MountainousnessSweepIsReliefMonotone) {
     const nlohmann::json base = FixedBasePreset();
     constexpr int kSteps = 9;
@@ -199,8 +208,10 @@ TEST(KnobLayerTest, MountainousnessSweepIsReliefMonotone) {
         prev = relief;
     }
     // And the span actually moves a meaningful amount end-to-end.
-    const double low = ReliefMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Mountainousness, 0.0f))));
-    const double high = ReliefMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Mountainousness, 1.0f))));
+    const double low =
+        ReliefMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Mountainousness, 0.0f))));
+    const double high =
+        ReliefMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Mountainousness, 1.0f))));
     EXPECT_GT(high, low + 20.0) << "mountainousness must materially raise relief";
 }
 
@@ -221,8 +232,10 @@ TEST(KnobLayerTest, RuggednessSweepIsReliefMonotone) {
         }
         prev = roughness;
     }
-    const double low = RoughnessMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Ruggedness, 0.0f))));
-    const double high = RoughnessMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Ruggedness, 1.0f))));
+    const double low =
+        RoughnessMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Ruggedness, 0.0f))));
+    const double high =
+        RoughnessMetric(ParamsFrom(ApplyKnobLayer(base, KnobsWith(Knob::Ruggedness, 1.0f))));
     EXPECT_GT(high, low * 1.1) << "ruggedness must materially raise local roughness";
 }
 

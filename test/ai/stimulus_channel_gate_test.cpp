@@ -1,8 +1,8 @@
-// T-I5b-2 (E1): StimulusChannelGate. The ecology stimulus-channel registry
+// StimulusChannelGate. The ecology stimulus-channel registry
 // feeding the InstinctSystem planner. Asserts:
 //   * INERT: a creature with NO StimulusSubscriptionComponent plans IDENTICALLY
 //     whether or not a stimulus context is supplied (the canonical-neutral
-//     property that keeps world_hash at d950a6afc12a5cdc -- critique F1 / §0).
+//     property that keeps world_hash at d950a6afc12a5cdc -- regression review / ).
 //   * BEHAVIOR DIFFERS: a reactive creature (game-data opt-in) plans DIFFERENTLY
 //     across weather fixtures (rain vs clear) and time-of-day fixtures (dawn vs
 //     noon) -- the channels actually reach the plan.
@@ -54,13 +54,12 @@ entt::entity MakeAgent(entt::registry& registry) {
     return agent;
 }
 
-void MakeOpportunity(
-    entt::registry& registry,
-    const std::string& id,
-    const std::string& action,
-    const std::string& need,
-    float satisfaction,
-    float urgency) {
+void MakeOpportunity(entt::registry& registry,
+                     const std::string& id,
+                     const std::string& action,
+                     const std::string& need,
+                     float satisfaction,
+                     float urgency) {
     const auto entity = registry.create();
     auto& opportunity = registry.emplace<OpportunityComponent>(entity);
     opportunity.id = id;
@@ -130,7 +129,7 @@ TEST(StimulusChannelGate, BehaviorDiffersAcrossWeather) {
         entt::registry registry;
         const auto agent = StageScene(registry, /*subscribe=*/true, /*gain=*/1.0f);
         StimulusContext ctx;
-        ctx.tick = 1800;           // FIXED tick: time-of-day is identical across fixtures
+        ctx.tick = 1800;              // FIXED tick: time-of-day is identical across fixtures
         ctx.precip_override = precip; // the ONLY difference: clear (0.0) vs rain (0.9)
         StimulusChannelRegistry stimulus(ctx);
         RunInstinctSystemOnTick(registry, 1, &stimulus);
@@ -178,8 +177,8 @@ TEST(StimulusChannelGate, BehaviorDiffersAcrossTimeOfDay) {
         return PlanFor(registry, agent);
     };
 
-    const std::string midnight = plan_at(0);                       // TimeOfDay ~0
-    const std::string noon = plan_at(kTicksPerDayCycle / 2);        // TimeOfDay ~1
+    const std::string midnight = plan_at(0);                 // TimeOfDay ~0
+    const std::string noon = plan_at(kTicksPerDayCycle / 2); // TimeOfDay ~1
 
     EXPECT_FALSE(midnight.empty());
     EXPECT_FALSE(noon.empty());
@@ -221,8 +220,10 @@ TEST(StimulusChannelGate, ChannelScalarsBoundedAndShaped) {
     noon.tick = kTicksPerDayCycle / 2;
     StimulusChannelRegistry day(noon);
 
-    for (const auto channel : {StimulusChannel::Weather, StimulusChannel::Temperature,
-                               StimulusChannel::TimeOfDay, StimulusChannel::Season,
+    for (const auto channel : {StimulusChannel::Weather,
+                               StimulusChannel::Temperature,
+                               StimulusChannel::TimeOfDay,
+                               StimulusChannel::Season,
                                StimulusChannel::LightLevel}) {
         for (const auto* reg : {&mid, &day}) {
             const float s = reg->Sample(channel);

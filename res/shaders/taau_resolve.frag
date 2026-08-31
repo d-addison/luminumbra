@@ -1,5 +1,5 @@
 #version 450 core
-// FR-R5 TAAU resolve: temporal anti-aliasing (and the hook for upsampling). Blends the current
+//  TAAU resolve: temporal anti-aliasing (and the hook for upsampling). Blends the current
 // jittered HDR frame with the motion-reprojected history, rejecting ghosting via a 3x3
 // neighborhood AABB clamp of the history toward the current color box. Halton sub-pixel jitter on
 // the G-buffer projection (applied in RenderPipeline) supplies the sub-sample variation that the

@@ -26,17 +26,17 @@ set(COMMON_SOURCES
 
     # Net
     ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
-    # T-I4-13: delay-based lockstep transport (engine-generic; LoopbackTransport
+    # delay-based lockstep transport (engine-generic; LoopbackTransport
     # for gates/tests, _WIN32-guarded TcpTransport for loopback+LAN).
     ${CMAKE_CURRENT_LIST_DIR}/net/LockstepSession.cpp
-    # T-I6 P3.0: authoritative-server state-replication wire protocol.
+    #  authoritative-server state-replication wire protocol.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationProtocol.cpp
-    # T-I6 P3.1: server/client replication endpoints over ILockstepTransport.
+    #  server/client replication endpoints over ILockstepTransport.
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationEndpoint.cpp
-    # T-I6: Steamworks ISteamNetworkingSockets transport (body guarded by
+    # Steamworks ISteamNetworkingSockets transport (body guarded by
     # LUMINUMBRA_ENABLE_STEAM; compiles to nothing when the SDK is not wired in).
     ${CMAKE_CURRENT_LIST_DIR}/net/SteamNetworkingTransport.cpp
-    # T-I6: standalone GameNetworkingSockets transport (body guarded by
+    # standalone GameNetworkingSockets transport (body guarded by
     # LUMINUMBRA_ENABLE_GNS; compiles to nothing when GNS is not wired in).
     ${CMAKE_CURRENT_LIST_DIR}/net/GnsTransport.cpp
 
@@ -48,7 +48,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
 
-    # Replay (T-I4-12: LREC1 session replay stream; engine-generic)
+    # Replay (: LREC1 session replay stream; engine-generic)
     ${CMAKE_CURRENT_LIST_DIR}/replay/ReplayStream.cpp
 
     # Scripting
@@ -65,13 +65,13 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/systems/PhysicsSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/systems/SHIELD_WorldSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/systems/WaterSystem.cpp
-    # T-I5a-2 (A2): deterministic wind grid (sim-authoritative; world_hash wind slot).
+    # deterministic wind grid (sim-authoritative; world_hash wind slot).
     ${CMAKE_CURRENT_LIST_DIR}/systems/WindFieldSystem.cpp
-    # T-I5a-3 (B1): deterministic weather core (sim-authoritative; world_hash weather slot).
+    # deterministic weather core (sim-authoritative; world_hash weather slot).
     ${CMAKE_CURRENT_LIST_DIR}/systems/WeatherSystem.cpp
-    # T-I6-A1: deterministic Aether scalar field (sim-authoritative; world_hash aether slot).
+    # deterministic Aether scalar field (sim-authoritative; world_hash aether slot).
     ${CMAKE_CURRENT_LIST_DIR}/systems/AetherFieldSystem.cpp
-    # T-I6-A2a: deterministic thermal+hydraulic erosion kernel (worldgen primitive).
+    # deterministic thermal+hydraulic erosion kernel (worldgen primitive).
     ${CMAKE_CURRENT_LIST_DIR}/world/HydraulicErosion.cpp
 
     # World
@@ -79,9 +79,9 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarLodStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
-    # Spec 002 Item 2: semantic-knob -> generation_params response table + persisted layer.
+    #  semantic-knob -> generation_params response table + persisted layer.
     ${CMAKE_CURRENT_LIST_DIR}/world/KnobLayer.cpp
-    # Spec 002 Item 4: constrained fixed-topology layer graph (compiles bit-exact to params).
+    #  constrained fixed-topology layer graph (compiles bit-exact to params).
     ${CMAKE_CURRENT_LIST_DIR}/world/LayerGraph.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/MarchingCubes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/PlayerAvatar.cpp

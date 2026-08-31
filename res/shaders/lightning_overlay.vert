@@ -1,5 +1,5 @@
 #version 450 core
-// T-I5a-5 (B3): lightning light-pulse + bolt overlay. Full-screen quad; reuses the
+// lightning light-pulse + bolt overlay. Full-screen quad; reuses the
 // lighting pass's screen-quad attribute layout (pos + uv). Drawn AFTER the skybox
 // so the full-scene flash + the screen-space bolt composite over BOTH the lit
 // terrain and the sky (the lighting pass shades only G-buffer geometry, and the

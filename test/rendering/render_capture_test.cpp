@@ -1,7 +1,8 @@
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <array>
@@ -23,24 +24,24 @@
 #include "world/Chunk.h"
 #include "world/MarchingCubes.h"
 
-// GPU-06: the capture-SDK trigger under test, plus the real RenderDoc in-app API
+// the capture-SDK trigger under test, plus the real RenderDoc in-app API
 // header (used here only to build an injected API double).
-#include "rendering/CaptureHooks.h"
 #include "renderdoc/renderdoc_app.h"
+#include "rendering/CaptureHooks.h"
 
-// Spec 015 Pillar A (A-T07 / spec-021 rank 67): the shipping manual-exposure model
+//  rendering ( /  ): the shipping manual-exposure model
 // under test (the SAME functions main_client.cpp + RenderPipeline.cpp call).
 #include "rendering/ExposureModel.h"
 #include "rendering/SunLightModel.h"
-// Spec 016 FR-F-001 (RENDER-14): the pure time-of-day policy facets under test.
+// the pure time-of-day policy facets under test.
 #include "rendering/TimeOfDayModel.h"
-// Spec 016 FR-C (RENDER-11): the declarative frame graph under test.
+// the declarative frame graph under test.
+#include "rendering/CelestialBodyModel.h" //  Tier 1: the celestial-body seam
+#include "rendering/FroxelGrid.h"         //  rendering: the froxel grid model
+#include "rendering/GlassTintModel.h"     // Tinted transmission.
+#include "rendering/OitModel.h"           // Weighted blended OIT model.
 #include "rendering/RenderGraph.h"
-#include "rendering/GlassTintModel.h" // Spec 015 C-1 (RENDER-15): tinted transmission
-#include "rendering/FroxelGrid.h"     // Spec 015 Pillar B (RENDER-17): the froxel grid model
-#include "rendering/CelestialBodyModel.h" // Spec 022 Tier 1: the celestial-body seam
-#include "rendering/OitModel.h"           // Spec 015 C-2 (RENDER-18): WBOIT model
-#include "rendering/SnowCoverModel.h"     // ATMO-14 (S1.3): render-only snow cover
+#include "rendering/SnowCoverModel.h" // Render-only snow cover.
 
 namespace fs = std::filesystem;
 
@@ -118,8 +119,12 @@ public:
         }
     }
 
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -183,7 +188,8 @@ GLuint CompileShader(const fs::path& path, GLenum type) {
     GLint success = GL_FALSE;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
     if (success != GL_TRUE) {
-        ADD_FAILURE() << "Shader failed to compile: " << path.string() << "\n" << GetShaderInfoLog(shader);
+        ADD_FAILURE() << "Shader failed to compile: " << path.string() << "\n"
+                      << GetShaderInfoLog(shader);
         glDeleteShader(shader);
         return 0;
     }
@@ -196,8 +202,10 @@ GLuint LinkBasicProgram() {
     GLuint vertex = CompileShader(shader_root / "basic.vert", GL_VERTEX_SHADER);
     GLuint fragment = CompileShader(shader_root / "basic.frag", GL_FRAGMENT_SHADER);
     if (vertex == 0 || fragment == 0) {
-        if (vertex != 0) glDeleteShader(vertex);
-        if (fragment != 0) glDeleteShader(fragment);
+        if (vertex != 0)
+            glDeleteShader(vertex);
+        if (fragment != 0)
+            glDeleteShader(fragment);
         return 0;
     }
 
@@ -275,9 +283,9 @@ CaptureScene BuildWaterScene() {
     WaterSystem water(nullptr, &world);
     Chunk chunk({0, 0, 0});
     world.GenerateChunkData(chunk);
-    chunk.water_level_data.assign(
-        static_cast<std::size_t>(WATER_SIM_RESOLUTION_X) * static_cast<std::size_t>(WATER_SIM_RESOLUTION_Z),
-        SEA_LEVEL);
+    chunk.water_level_data.assign(static_cast<std::size_t>(WATER_SIM_RESOLUTION_X) *
+                                      static_cast<std::size_t>(WATER_SIM_RESOLUTION_Z),
+                                  SEA_LEVEL);
     chunk.has_water_sim.store(true);
     World::MarchingCubes::GenerateWaterMesh(water, world, chunk);
 
@@ -291,7 +299,10 @@ CaptureScene BuildWaterScene() {
     return scene;
 }
 
-CaptureScene BuildFlatQuadScene(const std::string& name, const Vec3& color, float half_width, float half_height) {
+CaptureScene BuildFlatQuadScene(const std::string& name,
+                                const Vec3& color,
+                                float half_width,
+                                float half_height) {
     CaptureScene scene;
     scene.name = name;
     scene.object_color = color;
@@ -299,9 +310,9 @@ CaptureScene BuildFlatQuadScene(const std::string& name, const Vec3& color, floa
     scene.camera_target = glm::vec3{0.0f, 0.0f, 0.0f};
     scene.vertices = {
         {Vec3{-half_width, -half_height, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}, 3u},
-        {Vec3{ half_width, -half_height, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}, 3u},
-        {Vec3{ half_width,  half_height, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}, 3u},
-        {Vec3{-half_width,  half_height, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}, 3u},
+        {Vec3{half_width, -half_height, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}, 3u},
+        {Vec3{half_width, half_height, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}, 3u},
+        {Vec3{-half_width, half_height, 0.0f}, Vec3{0.0f, 0.0f, 1.0f}, 3u},
     };
     scene.indices = {0u, 1u, 2u, 2u, 3u, 0u};
     return scene;
@@ -366,12 +377,14 @@ void WritePpm(const fs::path& path, int width, int height, const std::vector<uns
     }
 }
 
-void WriteMetricsJson(const fs::path& path, const std::vector<std::pair<std::string, ImageMetrics>>& metrics) {
+void WriteMetricsJson(const fs::path& path,
+                      const std::vector<std::pair<std::string, ImageMetrics>>& metrics) {
     std::ofstream output(path);
     ASSERT_TRUE(output) << path.string();
     output << "{\n";
     output << "  \"schema\": \"luminumbra.render_captures.v1\",\n";
-    output << "  \"capture_ready_marker\": \"luminumbra.capture.ready:deterministic_render_capture:RenderDoc\",\n";
+    output << "  \"capture_ready_marker\": "
+              "\"luminumbra.capture.ready:deterministic_render_capture:RenderDoc\",\n";
     output << "  \"captures\": [\n";
     for (std::size_t i = 0; i < metrics.size(); ++i) {
         const auto& [name, image] = metrics[i];
@@ -397,7 +410,15 @@ std::vector<unsigned char> RenderScene(GLuint program, const CaptureScene& scene
     GLuint fbo = 0;
     glGenTextures(1, &color_texture);
     glBindTexture(GL_TEXTURE_2D, color_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCaptureWidth, kCaptureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RGBA8,
+                 kCaptureWidth,
+                 kCaptureHeight,
+                 0,
+                 GL_RGBA,
+                 GL_UNSIGNED_BYTE,
+                 nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -408,7 +429,8 @@ std::vector<unsigned char> RenderScene(GLuint program, const CaptureScene& scene
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_texture, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_renderbuffer);
+    glFramebufferRenderbuffer(
+        GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_renderbuffer);
     EXPECT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
     GLuint vao = 0;
@@ -419,13 +441,29 @@ std::vector<unsigned char> RenderScene(GLuint program, const CaptureScene& scene
     glGenBuffers(1, &ebo);
     glBindVertexArray(vao);
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(scene.vertices.size() * sizeof(VoxelVertex)), scene.vertices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(scene.vertices.size() * sizeof(VoxelVertex)),
+                 scene.vertices.data(),
+                 GL_STATIC_DRAW);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(scene.indices.size() * sizeof(u32)), scene.indices.data(), GL_STATIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(scene.indices.size() * sizeof(u32)),
+                 scene.indices.data(),
+                 GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), reinterpret_cast<void*>(offsetof(VoxelVertex, position)));
+    glVertexAttribPointer(0,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, position)));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VoxelVertex), reinterpret_cast<void*>(offsetof(VoxelVertex, normal)));
+    glVertexAttribPointer(1,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, normal)));
 
     glViewport(0, 0, kCaptureWidth, kCaptureHeight);
     glEnable(GL_DEPTH_TEST);
@@ -434,8 +472,10 @@ std::vector<unsigned char> RenderScene(GLuint program, const CaptureScene& scene
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const glm::mat4 model(1.0f);
-    const glm::mat4 view = glm::lookAt(scene.camera_position, scene.camera_target, glm::vec3{0.0f, 1.0f, 0.0f});
-    const glm::mat4 projection = glm::perspective(glm::radians(45.0f), static_cast<float>(kCaptureWidth) / kCaptureHeight, 0.1f, 128.0f);
+    const glm::mat4 view =
+        glm::lookAt(scene.camera_position, scene.camera_target, glm::vec3{0.0f, 1.0f, 0.0f});
+    const glm::mat4 projection = glm::perspective(
+        glm::radians(45.0f), static_cast<float>(kCaptureWidth) / kCaptureHeight, 0.1f, 128.0f);
     const glm::mat3 normal_matrix(1.0f);
 
     glUseProgram(program);
@@ -444,12 +484,20 @@ std::vector<unsigned char> RenderScene(GLuint program, const CaptureScene& scene
     SetMat4(program, "projection", projection);
     SetMat3(program, "normalMatrix", normal_matrix);
     glUniform3f(glGetUniformLocation(program, "lightPos"), 28.0f, 36.0f, 28.0f);
-    glUniform3f(glGetUniformLocation(program, "viewPos"), scene.camera_position.x, scene.camera_position.y, scene.camera_position.z);
+    glUniform3f(glGetUniformLocation(program, "viewPos"),
+                scene.camera_position.x,
+                scene.camera_position.y,
+                scene.camera_position.z);
     glUniform3f(glGetUniformLocation(program, "lightColor"), 1.0f, 1.0f, 1.0f);
-    glUniform3f(glGetUniformLocation(program, "objectColor"), scene.object_color.x, scene.object_color.y, scene.object_color.z);
-    glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(scene.indices.size()), GL_UNSIGNED_INT, nullptr);
+    glUniform3f(glGetUniformLocation(program, "objectColor"),
+                scene.object_color.x,
+                scene.object_color.y,
+                scene.object_color.z);
+    glDrawElements(
+        GL_TRIANGLES, static_cast<GLsizei>(scene.indices.size()), GL_UNSIGNED_INT, nullptr);
 
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) * static_cast<std::size_t>(kCaptureHeight) * 4u);
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) *
+                                      static_cast<std::size_t>(kCaptureHeight) * 4u);
     glReadPixels(0, 0, kCaptureWidth, kCaptureHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
     glDeleteBuffers(1, &ebo);
@@ -461,7 +509,7 @@ std::vector<unsigned char> RenderScene(GLuint program, const CaptureScene& scene
     return pixels;
 }
 
-// --- Spec 015 Pillar A (A-T07): exposure->luminance pixel-pair harness ---
+// ---  rendering: exposure->luminance pixel-pair harness ---
 // A fullscreen-triangle shader that applies the EXACT exposure + ACES filmic + gamma
 // chain lighting_pass.frag uses (res/shaders/lighting_pass.frag:665-696), with the
 // grade controls at identity so ONLY u_exposure varies. This lets the gate prove, on
@@ -485,11 +533,11 @@ uniform vec3 u_inColor;    // linear HDR input (pre-exposure)
 uniform float u_exposure;  // the RenderContext.exposure multiplier under test
 void main() {
     vec3 color = u_inColor;
-    color *= u_exposure;                                                       // :665
-    color = color * (2.51*color + 0.03) / (color*(2.43*color + 0.59) + 0.14);  // ACES :669
-    color = clamp(color, 0.0, 1.0);                                            // :681
-    color = pow(color, vec3(1.0/2.2));                                         // gamma :684
-    color = max(color, vec3(4.0/255.0));                                       // black floor :694
+    color *= u_exposure;                                                       // 665
+    color = color * (2.51*color + 0.03) / (color*(2.43*color + 0.59) + 0.14);  // ACES:669
+    color = clamp(color, 0.0, 1.0);                                            // 681
+    color = pow(color, vec3(1.0/2.2));                                         // gamma:684
+    color = max(color, vec3(4.0/255.0));                                       // black floor:694
     FragColor = vec4(color, 1.0);
 }
 )GLSL";
@@ -512,8 +560,10 @@ GLuint LinkInlineProgram(const char* vs_src, const char* fs_src) {
     GLuint vs = CompileShaderSource(vs_src, GL_VERTEX_SHADER);
     GLuint fs = CompileShaderSource(fs_src, GL_FRAGMENT_SHADER);
     if (vs == 0 || fs == 0) {
-        if (vs) glDeleteShader(vs);
-        if (fs) glDeleteShader(fs);
+        if (vs)
+            glDeleteShader(vs);
+        if (fs)
+            glDeleteShader(fs);
         return 0;
     }
     GLuint program = glCreateProgram();
@@ -533,11 +583,20 @@ GLuint LinkInlineProgram(const char* vs_src, const char* fs_src) {
 }
 
 // Render a full frame of the fixed input color at one exposure and read it back.
-std::vector<unsigned char> RenderFullscreenExposure(GLuint program, const glm::vec3& in_color, float exposure) {
+std::vector<unsigned char>
+RenderFullscreenExposure(GLuint program, const glm::vec3& in_color, float exposure) {
     GLuint color_texture = 0, depth_rb = 0, fbo = 0, vao = 0;
     glGenTextures(1, &color_texture);
     glBindTexture(GL_TEXTURE_2D, color_texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kCaptureWidth, kCaptureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RGBA8,
+                 kCaptureWidth,
+                 kCaptureHeight,
+                 0,
+                 GL_RGBA,
+                 GL_UNSIGNED_BYTE,
+                 nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glGenRenderbuffers(1, &depth_rb);
@@ -560,7 +619,8 @@ std::vector<unsigned char> RenderFullscreenExposure(GLuint program, const glm::v
     glUniform1f(glGetUniformLocation(program, "u_exposure"), exposure);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) * static_cast<std::size_t>(kCaptureHeight) * 4u);
+    std::vector<unsigned char> pixels(static_cast<std::size_t>(kCaptureWidth) *
+                                      static_cast<std::size_t>(kCaptureHeight) * 4u);
     glReadPixels(0, 0, kCaptureWidth, kCaptureHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
 
     glDeleteVertexArrays(1, &vao);
@@ -600,22 +660,26 @@ TEST(RenderCaptureTest, DeterministicMeshScenesProduceStableImages) {
         WritePpm(ArtifactRoot() / (scene.name + ".ppm"), kCaptureWidth, kCaptureHeight, pixels);
         all_metrics.push_back({scene.name, metrics});
 
-        EXPECT_GT(metrics.foreground_pixels, static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 80)) << scene.name;
+        EXPECT_GT(metrics.foreground_pixels,
+                  static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 80))
+            << scene.name;
         EXPECT_GT(metrics.max_luminance, 20) << scene.name;
-        EXPECT_LT(metrics.clipped_bright_pixels, static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 10)) << scene.name;
+        EXPECT_LT(metrics.clipped_bright_pixels,
+                  static_cast<std::size_t>(kCaptureWidth * kCaptureHeight / 10))
+            << scene.name;
     }
 
     WriteMetricsJson(ArtifactRoot() / "render_captures.json", all_metrics);
     glDeleteProgram(program);
 }
 
-// GPU-06 (spec 021 rank 62; charter FR-E-003): the capture hooks were marker-only
+//  ( ; contract ): the capture hooks were marker-only
 // (capture_started always false). They now load the RenderDoc in-app API at
 // runtime and drive a real StartFrameCapture/EndFrameCapture bracket. RenderDoc is
 // not installed on the gate box, so instead of skipping the "SDK present" clause
-// (as GPU-09's Diligent leg had to), these tests inject a RENDERDOC_API double
+// (as 's Diligent leg had to), these tests inject a RENDERDOC_API double
 // through the production seam and run the EXACT production Begin/End code path
-// against it -- capture_started=true and a real .rdc file both get asserted with
+// against it -- capture_started=true and a real.rdc file both get asserted with
 // zero skips. The untested remainder is only the real-DLL discovery success
 // branch (needs a live RenderDoc), which is documented, not skipped.
 namespace {
@@ -640,30 +704,36 @@ void RENDERDOC_CC FakeStartFrameCapture(RENDERDOC_DevicePointer, RENDERDOC_Windo
 
 std::uint32_t RENDERDOC_CC FakeEndFrameCapture(RENDERDOC_DevicePointer, RENDERDOC_WindowHandle) {
     ++g_fake_rd.end_calls;
-    std::string path = g_fake_rd.path_template.empty() ? std::string("capture") : g_fake_rd.path_template;
+    std::string path =
+        g_fake_rd.path_template.empty() ? std::string("capture") : g_fake_rd.path_template;
     path += "_frame0.rdc";
-    // Write a real stub .rdc so the "a .rdc file exists" clause runs against a
-    // real file on disk, just as a live RenderDoc would produce one.
+    // Write an explicit test-double artifact so file discovery and lifecycle handling run
+    // against the filesystem without representing it as a real RenderDoc capture.
     std::error_code ec;
     fs::create_directories(fs::path(path).parent_path(), ec);
     std::ofstream out(path, std::ios::binary);
-    out << "RDOC-stub";
+    out << "LUMINUMBRA_RENDERDOC_TEST_DOUBLE";
     out.close();
     g_fake_rd.last_capture_path = path;
     ++g_fake_rd.num_captures;
     return 1u;
 }
 
-std::uint32_t RENDERDOC_CC FakeGetNumCaptures() { return g_fake_rd.num_captures; }
+std::uint32_t RENDERDOC_CC FakeGetNumCaptures() {
+    return g_fake_rd.num_captures;
+}
 
-std::uint32_t RENDERDOC_CC FakeGetCapture(std::uint32_t idx, char* filename,
-                                          std::uint32_t* pathlength, std::uint64_t* timestamp) {
+std::uint32_t RENDERDOC_CC FakeGetCapture(std::uint32_t idx,
+                                          char* filename,
+                                          std::uint32_t* pathlength,
+                                          std::uint64_t* timestamp) {
     if (idx >= g_fake_rd.num_captures) {
         return 0u;
     }
     const std::string& p = g_fake_rd.last_capture_path;
     if (pathlength != nullptr) {
-        *pathlength = static_cast<std::uint32_t>(p.size() + 1u);  // include the null, RenderDoc's convention
+        *pathlength =
+            static_cast<std::uint32_t>(p.size() + 1u); // include the null, RenderDoc's convention
     }
     if (filename != nullptr) {
         std::memcpy(filename, p.c_str(), p.size() + 1u);
@@ -676,7 +746,7 @@ std::uint32_t RENDERDOC_CC FakeGetCapture(std::uint32_t idx, char* filename,
 
 RENDERDOC_API_1_6_0 MakeFakeRenderDocApi() {
     RENDERDOC_API_1_6_0 api;
-    std::memset(&api, 0, sizeof(api));  // trivial C struct of function pointers
+    std::memset(&api, 0, sizeof(api)); // trivial C struct of function pointers
     api.SetCaptureFilePathTemplate = &FakeSetCaptureFilePathTemplate;
     api.StartFrameCapture = &FakeStartFrameCapture;
     api.EndFrameCapture = &FakeEndFrameCapture;
@@ -760,7 +830,7 @@ TEST(RenderCaptureSdkTrigger, UnsupportedBackendsReportNotLinked) {
     EXPECT_EQ(marker.marker, "luminumbra.capture.ready:nsight:Nsight");
 }
 
-// Spec 015 Pillar A (A-T07 / spec-021 rank 67): the photo-mode MANUAL exposure model.
+//  rendering ( /  ): the photo-mode MANUAL exposure model.
 // These gates exercise the SHIPPING functions (ExposureModel.h) that both
 // main_client.cpp (the push site) and RenderPipeline.cpp (the ctx assembly) call, so
 // they are non-vacuous by construction.
@@ -776,45 +846,56 @@ TEST(ExposureModel, ManualMultiplierMapsLensEvAndPrecedenceSelects) {
     EXPECT_NEAR(base, R::kManualExposureM0, 1e-4f);
 
     // Stopping DOWN (higher f-number -> higher EV) DARKENS; opening UP BRIGHTENS.
-    LensSettings stopped = def; stopped.aperture_f = 5.6f;  // +2 stops from f/2.8
-    LensSettings opened  = def; opened.aperture_f  = 1.4f;  // -2 stops
+    LensSettings stopped = def;
+    stopped.aperture_f = 5.6f; // +2 stops from f/2.8
+    LensSettings opened = def;
+    opened.aperture_f = 1.4f; // -2 stops
     EXPECT_LT(R::ManualExposureMultiplier(stopped), base);
-    EXPECT_GT(R::ManualExposureMultiplier(opened),  base);
+    EXPECT_GT(R::ManualExposureMultiplier(opened), base);
 
     // Faster shutter DARKENS; slower BRIGHTENS.
-    LensSettings fast = def; fast.shutter_s = def.shutter_s * 0.25f;  // 2 stops faster
-    LensSettings slow = def; slow.shutter_s = def.shutter_s * 4.0f;   // 2 stops slower
+    LensSettings fast = def;
+    fast.shutter_s = def.shutter_s * 0.25f; // 2 stops faster
+    LensSettings slow = def;
+    slow.shutter_s = def.shutter_s * 4.0f; // 2 stops slower
     EXPECT_LT(R::ManualExposureMultiplier(fast), base);
     EXPECT_GT(R::ManualExposureMultiplier(slow), base);
 
     // Higher ISO (more sensitive -> lower required EV) BRIGHTENS; lower DARKENS.
-    LensSettings hi_iso = def; hi_iso.iso = 400.0f;  // +2 stops
-    LensSettings lo_iso = def; lo_iso.iso = 50.0f;   // -1 stop
+    LensSettings hi_iso = def;
+    hi_iso.iso = 400.0f; // +2 stops
+    LensSettings lo_iso = def;
+    lo_iso.iso = 50.0f; // -1 stop
     EXPECT_GT(R::ManualExposureMultiplier(hi_iso), base);
     EXPECT_LT(R::ManualExposureMultiplier(lo_iso), base);
 
     // The extremes CLAMP to the usable band (never pure black / pure white).
     LensSettings darkest = def;
-    darkest.aperture_f = 32.0f; darkest.shutter_s = 1.0f / 4000.0f; darkest.iso = 50.0f;
+    darkest.aperture_f = 32.0f;
+    darkest.shutter_s = 1.0f / 4000.0f;
+    darkest.iso = 50.0f;
     LensSettings brightest = def;
-    brightest.aperture_f = 1.0f; brightest.shutter_s = 30.0f; brightest.iso = 25600.0f;
-    EXPECT_FLOAT_EQ(R::ManualExposureMultiplier(darkest),   R::kManualExposureMin);
+    brightest.aperture_f = 1.0f;
+    brightest.shutter_s = 30.0f;
+    brightest.iso = 25600.0f;
+    EXPECT_FLOAT_EQ(R::ManualExposureMultiplier(darkest), R::kManualExposureMin);
     EXPECT_FLOAT_EQ(R::ManualExposureMultiplier(brightest), R::kManualExposureMax);
 
     // Precedence (the exact rule at RenderPipeline.cpp's ctx.exposure assignment): a
     // positive manual override wins; the -1 sentinel (photo mode inactive) falls back.
-    EXPECT_FLOAT_EQ(R::SelectRenderExposure(0.3f,  1.5f),  0.3f);
-    EXPECT_FLOAT_EQ(R::SelectRenderExposure(-1.0f, 1.5f),  1.5f);
+    EXPECT_FLOAT_EQ(R::SelectRenderExposure(0.3f, 1.5f), 0.3f);
+    EXPECT_FLOAT_EQ(R::SelectRenderExposure(-1.0f, 1.5f), 1.5f);
     EXPECT_FLOAT_EQ(R::SelectRenderExposure(-1.0f, 1.02f), 1.02f);
     // Both branches are always > 0, so the lighting pass's `ctx.exposure > 0` sentinel
     // wire always fires (no accidental fall-through to the static LUMIN_GRADE exposure).
     EXPECT_GT(R::SelectRenderExposure(base, 1.02f), 0.0f);
 }
 
-// Spec 016 FR-F-001 (RENDER-14): the AUTOMATIC time-of-day exposure curve extracted to
+// the AUTOMATIC time-of-day exposure curve extracted to
 // ExposureModel.h (Rendering::AutoExposureForElevation). Byte-exact vs the canonical-primitive
 // rebuild (glm::smoothstep/mix with the kManualExposureM0 day anchor), plus anchors: high sun ==
-// the day anchor (photo-mode continuity), deep night lifted, the golden band dips below day. GPU-free.
+// the day anchor (photo-mode continuity), deep night lifted, the golden band dips below day.
+// GPU-free.
 TEST(ExposureModel, AutoExposureCurveMatchesPrimitivesAndAnchors) {
     namespace R = Luminumbra::Rendering;
     for (float up : {-1.0f, -0.2f, -0.05f, 0.0f, 0.1f, 0.2f, 0.22f, 0.3f, 0.5f, 0.9f, 1.0f}) {
@@ -825,24 +906,29 @@ TEST(ExposureModel, AutoExposureCurveMatchesPrimitivesAndAnchors) {
         ref = glm::mix(ref, 1.02f, golden);
         EXPECT_EQ(got, ref) << "up=" << up;
     }
-    EXPECT_FLOAT_EQ(R::AutoExposureForElevation(1.0f), R::kManualExposureM0);            // high sun == day anchor
-    EXPECT_GT(R::AutoExposureForElevation(-0.5f), R::AutoExposureForElevation(1.0f));    // night lifted above day
-    EXPECT_LT(R::AutoExposureForElevation(0.22f), R::kManualExposureM0);                 // golden band dips below day
+    EXPECT_FLOAT_EQ(R::AutoExposureForElevation(1.0f),
+                    R::kManualExposureM0); // high sun == day anchor
+    EXPECT_GT(R::AutoExposureForElevation(-0.5f),
+              R::AutoExposureForElevation(1.0f)); // night lifted above day
+    EXPECT_LT(R::AutoExposureForElevation(0.22f),
+              R::kManualExposureM0); // golden band dips below day
 }
 
-// Spec 016 FR-F-001 (RENDER-14): the SEASON facet extracted from update_time_of_day
+// the SEASON facet extracted from update_time_of_day
 // (TimeOfDayModel::ComputeSeason) — the SAME function the frame runs. Byte-exact extraction
 // guard: each output is asserted == the same expression rebuilt from the CANONICAL primitive
 // (DeterministicMath::Sin) directly here — NOT a re-typed copy of the season arithmetic, so a
-// wrong-primitive swap (DM::Sin -> std::sin) or a reassociation diverges — plus phase-0
+// wrong-primitive swap (DM::Sin -> std::sin) or a reassociation diverges — plus neutral-state
 // neutrality, exact period wrap, and code-independent analytical solstice anchors. GPU-free.
 TEST(TimeOfDayModel, SeasonIsPureTickFunctionOfCanonicalPrimitives) {
     namespace R = Luminumbra::Rendering;
     namespace DM = Luminumbra::DeterministicMath;
-    constexpr std::uint64_t kCycle = 432000ull; // == RenderPipeline::kTicksPerSeasonCycle (4 h @ 30 Hz)
+    constexpr std::uint64_t kCycle =
+        432000ull; // == RenderPipeline::kTicksPerSeasonCycle (4 h @ 30 Hz)
 
-    // Phase-0 NEUTRALITY: tick 0 (the default every non-season scenario sees, because it never
-    // calls set_season_tick) must be EXACTLY season-neutral, or the whole non-season path drifts.
+    // neutral-state NEUTRALITY: tick 0 (the default every non-season scenario sees, because it
+    // never calls set_season_tick) must be EXACTLY season-neutral, or the whole non-season path
+    // drifts.
     const R::SeasonState s0 = R::ComputeSeason(0, kCycle);
     EXPECT_EQ(s0.phase, 0.0f);
     EXPECT_EQ(s0.wave, DM::Sin(0.0f)); // exactly the neutral primitive value (0)
@@ -851,15 +937,24 @@ TEST(TimeOfDayModel, SeasonIsPureTickFunctionOfCanonicalPrimitives) {
     // Dense sweep: every output bit-exact against the canonical primitive expression. DM::Sin
     // here is the library's ground-truth primitive (not a copy of the season math), so this is
     // not a closed loop — a trig swap, a changed cycle constant, or a reassociation all fail.
-    for (std::uint64_t t : {0ull, 1ull, 108000ull, 216000ull, 324000ull, 431999ull,
-                            432000ull, 540000ull, 999999ull, 12345678ull}) {
+    for (std::uint64_t t : {0ull,
+                            1ull,
+                            108000ull,
+                            216000ull,
+                            324000ull,
+                            431999ull,
+                            432000ull,
+                            540000ull,
+                            999999ull,
+                            12345678ull}) {
         const R::SeasonState s = R::ComputeSeason(t, kCycle);
         const std::uint64_t tick_in_year = t % kCycle;
-        const float phase = static_cast<float>(
-            static_cast<double>(tick_in_year) / static_cast<double>(kCycle));
+        const float phase =
+            static_cast<float>(static_cast<double>(tick_in_year) / static_cast<double>(kCycle));
         EXPECT_EQ(s.phase, phase) << "tick=" << t;
         EXPECT_EQ(s.wave, DM::Sin(phase * DM::kTwoPi)) << "tick=" << t;
-        EXPECT_EQ(s.sunDeclination, R::kSeasonalTiltAmplitude * DM::Sin(phase * DM::kTwoPi)) << "tick=" << t;
+        EXPECT_EQ(s.sunDeclination, R::kSeasonalTiltAmplitude * DM::Sin(phase * DM::kTwoPi))
+            << "tick=" << t;
     }
 
     // WRAP: the period is exactly kCycle ticks — tick 0 == tick kCycle, byte for byte.
@@ -871,21 +966,21 @@ TEST(TimeOfDayModel, SeasonIsPureTickFunctionOfCanonicalPrimitives) {
     // ANALYTICAL anchors (independent of the implementation): the solstices sit at the quarter /
     // three-quarter year, reach the tilt amplitude, and carry the summer-positive / winter-
     // negative sign convention the sun-arc code depends on.
-    const R::SeasonState summer = R::ComputeSeason(kCycle / 4, kCycle);       // phase 0.25
-    const R::SeasonState winter = R::ComputeSeason((kCycle * 3) / 4, kCycle); // phase 0.75
+    const R::SeasonState summer = R::ComputeSeason(kCycle / 4, kCycle);       // .25
+    const R::SeasonState winter = R::ComputeSeason((kCycle * 3) / 4, kCycle); // .75
     EXPECT_FLOAT_EQ(summer.phase, 0.25f);
     EXPECT_FLOAT_EQ(winter.phase, 0.75f);
-    EXPECT_NEAR(summer.wave,  1.0f, 1e-3f);   // summer solstice ~ +1 (highest arc)
+    EXPECT_NEAR(summer.wave, 1.0f, 1e-3f);    // summer solstice ~ +1 (highest arc)
     EXPECT_NEAR(winter.wave, -1.0f, 1e-3f);   // winter solstice ~ -1 (lowest arc)
     EXPECT_GT(summer.sunDeclination, 0.40f);  // ~ +0.410 rad
     EXPECT_LT(winter.sunDeclination, -0.40f); // ~ -0.410 rad
 }
 
-// Spec 016 FR-F-001 (RENDER-14): the SUN GEOMETRY facet (TimeOfDayModel::ComputeSunGeometry) —
+// the SUN GEOMETRY facet (TimeOfDayModel::ComputeSunGeometry) —
 // the SAME function the frame runs. Byte-exact extraction guard: every output == the same
 // expression rebuilt from the canonical primitives here — UNQUALIFIED sin/cos exactly as the
 // sun-direction site resolves them (this TU has <cmath> and no `using namespace std`, matching
-// the pipeline TU's global ::sin), glm::normalize/dot, std::asin, glm::smoothstep — so a std::
+// the pipeline TU's global::sin), glm::normalize/dot, std::asin, glm::smoothstep — so a std::
 // qualification of the sun trig, a reassociation, or a changed band constant diverges. Plus
 // code-independent noon / midnight / horizon / season anchors on the sign + saturation. GPU-free.
 TEST(TimeOfDayModel, SunGeometryMatchesCanonicalPrimitivesAndAnchors) {
@@ -897,8 +992,8 @@ TEST(TimeOfDayModel, SunGeometryMatchesCanonicalPrimitivesAndAnchors) {
             const R::SunGeometry g = R::ComputeSunGeometry(tod, decl);
             const float angle = tod * 2.0f * glm::pi<float>();
             const float tiltZ = DM::Sin(decl) - 0.2f;
-            // UNQUALIFIED sin/cos — global ::sin, matching the sun-direction site (not a closed loop:
-            // ::sin is the library primitive, not a re-typed copy of the arithmetic).
+            // UNQUALIFIED sin/cos — global::sin, matching the sun-direction site (not a closed
+            // loop: :sin is the library primitive, not a re-typed copy of the arithmetic).
             const glm::vec3 dir = glm::normalize(glm::vec3(sin(angle), -cos(angle), tiltZ));
             const float up = glm::dot(dir, glm::vec3(0.0f, -1.0f, 0.0f));
             EXPECT_EQ(g.angleRad, angle);
@@ -925,23 +1020,27 @@ TEST(TimeOfDayModel, SunGeometryMatchesCanonicalPrimitivesAndAnchors) {
     EXPECT_FLOAT_EQ(midnight.skyDomeDayFactor, 0.0f);
     const R::SunGeometry horizon = R::ComputeSunGeometry(0.25f, 0.0f);
     EXPECT_NEAR(horizon.upFactor, 0.0f, 0.01f);
-    // Season raises/lowers the noon arc: a summer declination lifts the noon sun above a winter one.
+    // Season raises/lowers the noon arc: a summer declination lifts the noon sun above a winter
+    // one.
     EXPECT_GT(R::ComputeSunGeometry(0.0f, 0.41015237f).upFactor,
               R::ComputeSunGeometry(0.0f, -0.41015237f).upFactor);
 }
 
-// Spec 016 FR-F-001 (RENDER-14): the MOON + SEASON-PALETTE facets extracted from
+// the MOON + SEASON-PALETTE facets extracted from
 // update_time_of_day. Byte-exact guards: each output == the same expression rebuilt from the
-// canonical primitives here — season tint via the VERBATIM manual luma sum (not a dot()); the
-// moon via std::sin/std::cos (the FLOAT overload, distinct from the sun's ::sin); the lunar cycle
+// canonical primitives here — season tint via the VERBATIM manual luma sum (not a dot); the
+// moon via std::sin/std::cos (the FLOAT overload, distinct from the sun's::sin); the lunar cycle
 // via std::cos — so a reassociation or a wrong trig/overload diverges. Plus code-independent
 // anchors: winter-warm/summer-cool + luma preserved; moon overhead at midnight; full vs new-moon
 // illumination; override precedence + clamp. GPU-free.
 TEST(TimeOfDayModel, MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors) {
     namespace R = Luminumbra::Rendering;
     namespace DM = Luminumbra::DeterministicMath;
-    auto luma = [](const glm::vec3& c) { return c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f; };
-    constexpr std::uint64_t kLunar = 54000ull; // == RenderPipeline::kTicksPerLunarCycle (30 min @ 30 Hz)
+    auto luma = [](const glm::vec3& c) {
+        return c.r * 0.2126f + c.g * 0.7152f + c.b * 0.0722f;
+    };
+    constexpr std::uint64_t kLunar =
+        54000ull; // == RenderPipeline::kTicksPerLunarCycle (30 min @ 30 Hz)
 
     // SEASON PALETTE tint: bit-exact vs the verbatim construction + manual luma normalize.
     for (float wave : {-1.0f, -0.5f, 0.0f, 0.3f, 1.0f}) {
@@ -949,23 +1048,24 @@ TEST(TimeOfDayModel, MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors) {
         constexpr float k = 0.06f;
         glm::vec3 ref(1.0f - k * wave, 1.0f, 1.0f + k * wave);
         const float lum = ref.r * 0.2126f + ref.g * 0.7152f + ref.b * 0.0722f;
-        if (lum > 1e-6f) ref /= lum;
+        if (lum > 1e-6f)
+            ref /= lum;
         EXPECT_EQ(t.r, ref.r) << "wave=" << wave;
         EXPECT_EQ(t.g, ref.g) << "wave=" << wave;
         EXPECT_EQ(t.b, ref.b) << "wave=" << wave;
         EXPECT_NEAR(luma(t), 1.0f, 1e-5f); // luminance preserved -> ~1 after normalization
     }
     EXPECT_GT(R::SeasonPaletteTint(-1.0f).r, R::SeasonPaletteTint(-1.0f).b); // winter warm (R>B)
-    EXPECT_LT(R::SeasonPaletteTint(1.0f).r,  R::SeasonPaletteTint(1.0f).b);  // summer cool (B>R)
-    EXPECT_FLOAT_EQ(R::SeasonPaletteTint(0.0f).r, R::SeasonPaletteTint(0.0f).b); // neutral at wave 0
+    EXPECT_LT(R::SeasonPaletteTint(1.0f).r, R::SeasonPaletteTint(1.0f).b);   // summer cool (B>R)
+    EXPECT_FLOAT_EQ(R::SeasonPaletteTint(0.0f).r, R::SeasonPaletteTint(0.0f).b); // neutral at
 
     // MOON GEOMETRY: bit-exact vs the std::sin/std::cos (FLOAT overload) rebuild.
     for (float tod : {0.0f, 0.25f, 0.5f, 0.75f}) {
         for (float decl : {0.0f, 0.41015237f, -0.41015237f}) {
             const R::SunGeometry sg = R::ComputeSunGeometry(tod, decl);
             const R::MoonGeometry mg = R::ComputeMoonGeometry(sg.angleRad, sg.tiltZ, sg.direction);
-            const glm::vec3 ldir = glm::normalize(glm::vec3(-std::sin(sg.angleRad),
-                                                            std::cos(sg.angleRad), sg.tiltZ));
+            const glm::vec3 ldir =
+                glm::normalize(glm::vec3(-std::sin(sg.angleRad), std::cos(sg.angleRad), sg.tiltZ));
             EXPECT_EQ(mg.direction.x, -sg.direction.x);
             EXPECT_EQ(mg.direction.y, -sg.direction.y);
             EXPECT_EQ(mg.direction.z, -sg.direction.z);
@@ -982,29 +1082,33 @@ TEST(TimeOfDayModel, MoonAndSeasonPaletteMatchCanonicalPrimitivesAndAnchors) {
     }
 
     // LUNAR illumination: bit-exact vs the std::cos rebuild; full at tick 0, floor at half-cycle.
-    for (std::uint64_t t : {0ull, 1ull, 13500ull, 27000ull, 40500ull, 53999ull, 54000ull, 123456ull}) {
+    for (std::uint64_t t :
+         {0ull, 1ull, 13500ull, 27000ull, 40500ull, 53999ull, 54000ull, 123456ull}) {
         const float got = R::LunarIllumination(t, kLunar);
         const std::uint64_t til = t % kLunar;
         const float lt = static_cast<float>(static_cast<double>(til) / static_cast<double>(kLunar));
         const float full = 0.5f + 0.5f * std::cos(lt * 2.0f * glm::pi<float>());
         EXPECT_EQ(got, glm::mix(R::kNewMoonFloor, 1.0f, full)) << "tick=" << t;
     }
-    EXPECT_FLOAT_EQ(R::LunarIllumination(0, kLunar), 1.0f);                          // tick 0 = full moon
-    EXPECT_NEAR(R::LunarIllumination(kLunar / 2, kLunar), R::kNewMoonFloor, 1e-5f);  // half = new moon
+    EXPECT_FLOAT_EQ(R::LunarIllumination(0, kLunar), 1.0f); // tick 0 = full moon
+    EXPECT_NEAR(
+        R::LunarIllumination(kLunar / 2, kLunar), R::kNewMoonFloor, 1e-5f); // half = new moon
     // Override precedence + clamp (ComputeMoonIllumination): a forced >= 0 wins, clamped to [0,1].
     EXPECT_FLOAT_EQ(R::ComputeMoonIllumination(0, 0.42f, kLunar), 0.42f);
-    EXPECT_FLOAT_EQ(R::ComputeMoonIllumination(0, 5.0f,  kLunar), 1.0f);            // clamped high
+    EXPECT_FLOAT_EQ(R::ComputeMoonIllumination(0, 5.0f, kLunar), 1.0f); // clamped high
     EXPECT_FLOAT_EQ(R::ComputeMoonIllumination(0, -1.0f, kLunar),
-                    R::LunarIllumination(0, kLunar));                                // <0 falls back to cycle
+                    R::LunarIllumination(0, kLunar)); // <0 falls back to cycle
 }
 
-// Spec 015 Pillar A (FR-A-001): the direct-sun magnitude is derived from the atmosphere
+//  rendering: the direct-sun magnitude is derived from the atmosphere
 // transmittance (SunLightModel::SunIrradiance) — the SAME function RenderPipeline uses to
 // set m_sun.color. This pins the contract: overhead sun preserved, low sun dims AND
 // reddens from that one physical term, below-horizon goes dark. GPU-free (pure logic).
 TEST(SunLightModel, NoonPinnedLowSunDimsAndReddensHorizonCutoff) {
     namespace R = Luminumbra::Rendering;
-    auto luma = [](const glm::vec3& c) { return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b; };
+    auto luma = [](const glm::vec3& c) {
+        return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+    };
 
     // A physically-plausible transmittance toward the sun as a function of elevation
     // (cos of the zenith-ish angle == sun_up_factor). Overhead: short path, near-white and
@@ -1013,13 +1117,12 @@ TEST(SunLightModel, NoonPinnedLowSunDimsAndReddensHorizonCutoff) {
     // depth increasing toward blue — the qualitative shape the real Rayleigh LUT produces.
     auto transmittance = [](float cos_up) {
         const float mu = std::max(cos_up, 0.02f);
-        const float air_mass = 1.0f / mu;             // grows sharply as the sun lowers
-        const glm::vec3 tau(0.12f, 0.20f, 0.35f);     // R < G < B optical depth (blue eaten first)
-        return glm::vec3(std::exp(-tau.r * air_mass),
-                         std::exp(-tau.g * air_mass),
-                         std::exp(-tau.b * air_mass));
+        const float air_mass = 1.0f / mu;         // grows sharply as the sun lowers
+        const glm::vec3 tau(0.12f, 0.20f, 0.35f); // R < G < B optical depth (blue eaten first)
+        return glm::vec3(
+            std::exp(-tau.r * air_mass), std::exp(-tau.g * air_mass), std::exp(-tau.b * air_mass));
     };
-    const glm::vec3 t_ref = transmittance(1.0f);      // overhead reference
+    const glm::vec3 t_ref = transmittance(1.0f); // overhead reference
 
     // Overhead sun (noon): irradiance is pinned to unit white by the 1/t_ref solar
     // constant, so m_sun.color == SunBaseHue there (the noon image is preserved).
@@ -1034,14 +1137,15 @@ TEST(SunLightModel, NoonPinnedLowSunDimsAndReddensHorizonCutoff) {
     float prev_rb = noon.r / std::max(noon.b, 1e-6f);
     for (float cos_up = 0.95f; cos_up >= 0.06f; cos_up -= 0.05f) {
         const glm::vec3 irr = R::SunIrradiance(transmittance(cos_up), t_ref, cos_up);
-        EXPECT_LE(luma(irr), prev_luma + 1e-4f) << "sun should not brighten as it lowers, cos=" << cos_up;
+        EXPECT_LE(luma(irr), prev_luma + 1e-4f)
+            << "sun should not brighten as it lowers, cos=" << cos_up;
         const float rb = irr.r / std::max(irr.b, 1e-6f);
         EXPECT_GT(rb, prev_rb - 1e-4f) << "sun should redden as it lowers, cos=" << cos_up;
         prev_luma = luma(irr);
         prev_rb = rb;
     }
 
-    // A genuinely low sun is both dimmer AND redder than noon (AC-A-002: golden hour
+    // A genuinely low sun is both dimmer AND redder than noon (: golden hour
     // reddens AND dims from ONE model).
     const glm::vec3 golden = R::SunIrradiance(transmittance(0.08f), t_ref, 0.08f);
     EXPECT_LT(luma(golden), luma(noon));
@@ -1066,13 +1170,14 @@ TEST(ExposureModel, ExposureScalesLuminanceMonotonicOnGpu) {
     // saturation so the tonemapped luminance rises monotonically with exposure.
     const glm::vec3 in_color{0.18f, 0.18f, 0.18f};
     const float exposures[3] = {
-        R::kManualExposureMin * 3.0f,  // ~0.3, a dark exposure
-        R::kManualExposureM0,          // 1.12, the noon anchor
-        3.0f,                          // bright but sub-saturation
+        R::kManualExposureMin * 3.0f, // ~0.3, a dark exposure
+        R::kManualExposureM0,         // 1.12, the noon anchor
+        3.0f,                         // bright but sub-saturation
     };
     double luma[3];
     for (int i = 0; i < 3; ++i) {
-        luma[i] = CalculateImageMetrics(RenderFullscreenExposure(program, in_color, exposures[i])).mean_luminance;
+        luma[i] = CalculateImageMetrics(RenderFullscreenExposure(program, in_color, exposures[i]))
+                      .mean_luminance;
     }
     // The genuine two(+)-exposure capture pair: a larger exposure -> a strictly brighter
     // frame on real GPU pixels.
@@ -1083,19 +1188,22 @@ TEST(ExposureModel, ExposureScalesLuminanceMonotonicOnGpu) {
     // DARKER than the noon anchor -- the effect the feature promises, end to end from
     // LensSettings through the shipping mapping to captured luminance.
     using luminumbra::game::LensSettings;
-    LensSettings stopped{}; stopped.aperture_f = 8.0f;
+    LensSettings stopped{};
+    stopped.aperture_f = 8.0f;
     const float stop_mult = R::ManualExposureMultiplier(stopped);
     const double stop_luma =
-        CalculateImageMetrics(RenderFullscreenExposure(program, in_color, stop_mult)).mean_luminance;
+        CalculateImageMetrics(RenderFullscreenExposure(program, in_color, stop_mult))
+            .mean_luminance;
     const double noon_luma =
-        CalculateImageMetrics(RenderFullscreenExposure(program, in_color, R::kManualExposureM0)).mean_luminance;
+        CalculateImageMetrics(RenderFullscreenExposure(program, in_color, R::kManualExposureM0))
+            .mean_luminance;
     EXPECT_LT(stop_luma, noon_luma) << "stopping down (" << stop_mult << ") should darken vs noon";
 
     glDeleteProgram(program);
 }
 
 // ===========================================================================
-// Spec 016 FR-C (spec-021 rank 71, RENDER-11): the DECLARATIVE FRAME GRAPH.
+//   ( , ): the DECLARATIVE FRAME GRAPH.
 //
 // These are pure-CPU tests of the ordering/validation logic (no GL context). The
 // separate DRIFT GUARD -- that the graph's schedule equals render_frame's ACTUAL
@@ -1116,19 +1224,19 @@ TEST(RenderGraph, CanonicalGraphSchedulesToAuthoredOrderAndValidatesClean) {
     // schedule must reproduce it, proving the declared resource dependencies form a
     // DAG whose only stable linearization is the one render_frame dispatches.
     std::vector<std::string> authored;
-    for (const R::RenderGraphNode& node : g.nodes()) authored.push_back(node.name);
+    for (const R::RenderGraphNode& node : g.nodes())
+        authored.push_back(node.name);
 
     const std::vector<std::string> scheduled = g.schedule();
     EXPECT_EQ(scheduled.size(), g.size()) << "topo sort dropped a node -> a dependency cycle";
     EXPECT_EQ(scheduled, authored) << "schedule diverged from the authored linearization";
 
     const std::vector<std::string> violations = g.validate();
-    EXPECT_TRUE(violations.empty())
-        << "frame graph is internally inconsistent; first: "
-        << (violations.empty() ? std::string{} : violations.front());
+    EXPECT_TRUE(violations.empty()) << "frame graph is internally inconsistent; first: "
+                                    << (violations.empty() ? std::string{} : violations.front());
 
     // Spot-check the load-bearing accumulation invariant: every stage that writes the
-    // lit color target is ordered exactly as authored (sky -> water -> ... -> the
+    // lit color target is ordered exactly as authored (sky -> water ->... -> the
     // final composite readers), so the blend order is machine-declared, not implicit.
     auto index_of = [&](const char* n) {
         return std::find(scheduled.begin(), scheduled.end(), n) - scheduled.begin();
@@ -1137,11 +1245,11 @@ TEST(RenderGraph, CanonicalGraphSchedulesToAuthoredOrderAndValidatesClean) {
     EXPECT_LT(index_of("opaque_snapshot"), index_of("water"));
     EXPECT_LT(index_of("lighting"), index_of("skybox"));
     EXPECT_LT(index_of("god_rays"), index_of("final_blit"));
-    // Spec 015 C-1 (RENDER-15): the tint cascade flows shadow -> lighting.
+    // the tint cascade flows shadow -> lighting.
     EXPECT_LT(index_of("shadow"), index_of("lighting"));
 }
 
-// Spec 015 C-1 (RENDER-15): the tinted-transmission model (GlassTintModel.h) is the
+// the tinted-transmission model (GlassTintModel.h) is the
 // ONE definition the shadow_tint shader mirrors (T(d) = tint^d, Beer-Lambert with
 // the unit-thickness tint as the authored coefficient). Anchor its algebra.
 TEST(ColoredShadow, BeerLambertTintModelAnchors) {
@@ -1153,8 +1261,7 @@ TEST(ColoredShadow, BeerLambertTintModelAnchors) {
     EXPECT_EQ(R::GlassTransmission(tint, 0.0f), glm::vec3(1.0f));
     // Two stacked unit panes == one 2x-thickness pane (the multiply-blend contract
     // the GL_DST_COLOR/GL_ZERO accumulation in the tint sub-pass relies on).
-    const glm::vec3 stacked =
-        R::GlassTransmission(tint, 1.0f) * R::GlassTransmission(tint, 1.0f);
+    const glm::vec3 stacked = R::GlassTransmission(tint, 1.0f) * R::GlassTransmission(tint, 1.0f);
     const glm::vec3 twice = R::GlassTransmission(tint, 2.0f);
     EXPECT_NEAR(stacked.r, twice.r, 1e-6f);
     EXPECT_NEAR(stacked.g, twice.g, 1e-6f);
@@ -1165,7 +1272,7 @@ TEST(ColoredShadow, BeerLambertTintModelAnchors) {
               glm::vec3(1.0f, 0.0f, 0.5f));
 }
 
-// Spec 015 Pillar B (RENDER-17): the froxel grid model — the exponential slice
+//  rendering: the froxel grid model — the exponential slice
 // distribution's anchors, monotonicity, and the depth<->slice round trip. The
 // froxel_inject/froxel_integrate GLSL kernels bake the SAME constants; these
 // anchors pin the C++ half, FroxelUniformMediumMatchesAnalyticTransmittance
@@ -1184,8 +1291,7 @@ TEST(FroxelModel, SliceDistributionAndWorldMappingAnchors) {
     // Monotonic boundaries + the depth->slice round trip at every slice centre.
     for (int i = 0; i < F::kGridZ; ++i) {
         EXPECT_LT(F::SliceBoundaryDepth(i), F::SliceBoundaryDepth(i + 1));
-        const float mid =
-            0.5f * (F::SliceBoundaryDepth(i) + F::SliceBoundaryDepth(i + 1));
+        const float mid = 0.5f * (F::SliceBoundaryDepth(i) + F::SliceBoundaryDepth(i + 1));
         EXPECT_EQ(F::DepthToSlice(mid), i) << "slice " << i;
     }
     // The composite's texture-W mapping clamps and spans [0,1].
@@ -1194,7 +1300,7 @@ TEST(FroxelModel, SliceDistributionAndWorldMappingAnchors) {
     EXPECT_GT(F::DepthToTextureW(10.0f), F::DepthToTextureW(5.0f));
 }
 
-// Spec 015 C-2 (RENDER-18): the WBOIT model — the depth weight's shape and the
+// the WBOIT model — the depth weight's shape and the
 // composite algebra. Order independence is BY CONSTRUCTION (the accumulation is
 // a commutative sum), pinned here algebraically; the glass_oit shaders mirror
 // DepthWeight exactly.
@@ -1216,7 +1322,10 @@ TEST(OitModel, WeightFunctionMonotoneAndCompositeAlgebra) {
     // Composite algebra: the accumulation is a SUM and reveal is a PRODUCT —
     // both commutative, so pane order cannot change the resolve. Two panes,
     // both orders, identical resolve inputs.
-    struct Pane { float z, a; float c; };
+    struct Pane {
+        float z, a;
+        float c;
+    };
     const Pane p1{3.0f, 0.85f, 0.9f}, p2{7.0f, 0.85f, 0.2f};
     auto accumulate = [](const Pane& first, const Pane& second) {
         const float w1 = O::DepthWeight(first.z, first.a);
@@ -1236,7 +1345,7 @@ TEST(OitModel, WeightFunctionMonotoneAndCompositeAlgebra) {
     EXPECT_FLOAT_EQ(O::ResolveCoverage(0.0f), 1.0f);
 }
 
-// ATMO-14 (Wave G S1.3): the render-only snow-cover model — accumulates under
+// the render-only snow-cover model — accumulates under
 // snowfall, melts under sun, clamps [0,1], and 0-input stays 0 (the byte-identical
 // default). The lighting_pass u_snowCover blend consumes exactly this scalar.
 TEST(SnowCoverModel, AccumulatesUnderSnowMeltsUnderSunAndClamps) {
@@ -1268,7 +1377,7 @@ TEST(SnowCoverModel, AccumulatesUnderSnowMeltsUnderSunAndClamps) {
     EXPECT_FLOAT_EQ(s.cover01, 0.0f);
 }
 
-// ATMO-10 (Wave G R1.3): TIME AUTHORITY — time-of-day is a pure function of the
+// TIME AUTHORITY — time-of-day is a pure function of the
 // sim tick. Same tick -> same TOD, bit-for-bit, no matter how many times or in
 // what order it is evaluated (there is no accumulator to drift with frame
 // pacing); the default day length reproduces the legacy 60 s/day wall pacing.
@@ -1288,7 +1397,9 @@ TEST(TodTickPurity, SameTickSameTodIndependentOfFramePacing) {
         const float a = R::TimeOfDayFromTick(t, 1800);
         const float b = R::TimeOfDayFromTick(t, 1800);
         EXPECT_EQ(a, b);
-        if (t == 7ull) { EXPECT_EQ(a, first_seven); }
+        if (t == 7ull) {
+            EXPECT_EQ(a, first_seven);
+        }
         EXPECT_GE(a, 0.0f);
         EXPECT_LT(a, 1.0f);
     }
@@ -1296,7 +1407,7 @@ TEST(TodTickPurity, SameTickSameTodIndependentOfFramePacing) {
     EXPECT_FLOAT_EQ(R::TimeOfDayFromTick(42, 0), 0.0f);
 }
 
-// ATMO-09 (Wave G R1.2): the LIVE season is the same pure function of the sim
+// the LIVE season is the same pure function of the sim
 // tick the sweeps use — feeding the authoritative tick per frame yields one
 // season trajectory reproducible from the tick alone (no wall-clock, no drift).
 TEST(LiveSeasonTick, SeasonPhaseIsPureFunctionOfSimTick) {
@@ -1314,14 +1425,14 @@ TEST(LiveSeasonTick, SeasonPhaseIsPureFunctionOfSimTick) {
     const R::SeasonState s1 = R::ComputeSeason(1234 + kCycle, kCycle);
     EXPECT_EQ(s0.phase, s1.phase);
     EXPECT_EQ(s0.wave, s1.wave);
-    // Phase 0 is the season-NEUTRAL default every pre-ATMO-09 live session sat at.
+    //  is the season-NEUTRAL default every pre- live session sat at.
     EXPECT_FLOAT_EQ(R::ComputeSeason(0, kCycle).wave, 0.0f);
 }
 
-// Spec 022 Tier 1 (Wave F F9): the celestial-body seam is PLUMBING, not math —
+//  Tier 1: the celestial-body seam is PLUMBING, not math —
 // every state field must be BIT-EQUAL to the direct TimeOfDayModel primitive
-// calls across a tod x declination x tick sweep (the RENDER-14 technique). Any
-// drift means the seam added math of its own, which Tier 1 forbids (FR-022-2).
+// calls across a tod x declination x tick sweep (the  technique). Any
+// drift means the seam added math of its own, which Tier 1 forbids (-2).
 TEST(CelestialBodyModel, SunMoonSeamBitExactAgainstPrimitives) {
     namespace R = Luminumbra::Rendering;
     constexpr std::uint64_t kLunar = 54000ull;
@@ -1338,19 +1449,22 @@ TEST(CelestialBodyModel, SunMoonSeamBitExactAgainstPrimitives) {
                     const R::SunGeometry sg = R::ComputeSunGeometry(tod, decl);
                     // Bit-equality (memcmp): the seam may not perturb a single ULP.
                     EXPECT_EQ(0, std::memcmp(&f.sun_geometry, &sg, sizeof(sg)));
-                    EXPECT_EQ(0, std::memcmp(&f.sun.travel_direction, &sg.direction, sizeof(glm::vec3)));
-                    EXPECT_EQ(0, std::memcmp(&f.sun.light_direction, &sg.direction, sizeof(glm::vec3)));
+                    EXPECT_EQ(
+                        0, std::memcmp(&f.sun.travel_direction, &sg.direction, sizeof(glm::vec3)));
+                    EXPECT_EQ(
+                        0, std::memcmp(&f.sun.light_direction, &sg.direction, sizeof(glm::vec3)));
                     EXPECT_EQ(f.sun.up_factor, sg.upFactor);
                     EXPECT_EQ(f.sun.elevation_rad, sg.elevationRad);
                     EXPECT_EQ(f.sun.day_factor, sg.sunIntensity);
                     EXPECT_EQ(f.sun.sky_dome_day_factor, sg.skyDomeDayFactor);
                     const R::MoonGeometry mg =
                         R::ComputeMoonGeometry(sg.angleRad, sg.tiltZ, sg.direction);
-                    EXPECT_EQ(0, std::memcmp(&f.moon.travel_direction, &mg.direction, sizeof(glm::vec3)));
-                    EXPECT_EQ(0, std::memcmp(&f.moon.light_direction, &mg.lightDir, sizeof(glm::vec3)));
+                    EXPECT_EQ(
+                        0, std::memcmp(&f.moon.travel_direction, &mg.direction, sizeof(glm::vec3)));
+                    EXPECT_EQ(
+                        0, std::memcmp(&f.moon.light_direction, &mg.lightDir, sizeof(glm::vec3)));
                     EXPECT_EQ(f.moon.up_factor, mg.upFactor);
-                    EXPECT_EQ(f.moon.illumination,
-                              R::ComputeMoonIllumination(tick, ov, kLunar));
+                    EXPECT_EQ(f.moon.illumination, R::ComputeMoonIllumination(tick, ov, kLunar));
                 }
             }
         }
@@ -1408,9 +1522,9 @@ TEST(RenderGraph, ValidatorReportsMisdeclaredDependencies) {
 TEST(RenderGraph, WriteAfterWriteAndReadAfterWriteOrderingHold) {
     namespace R = Luminumbra::Rendering;
     R::RenderGraph g;
-    g.add({"a", {}, {"T"}, {}, false});  // first writer of T
-    g.add({"b", {}, {"T"}, {}, false});  // second writer of T (WAW: after a)
-    g.add({"c", {"T"}, {}, {}, false});  // reader of T (RAW: after the latest writer)
+    g.add({"a", {}, {"T"}, {}, false}); // first writer of T
+    g.add({"b", {}, {"T"}, {}, false}); // second writer of T (WAW: after a)
+    g.add({"c", {"T"}, {}, {}, false}); // reader of T (RAW: after the latest writer)
 
     const std::vector<std::string> s = g.schedule();
     const std::vector<std::string> expected = {"a", "b", "c"};

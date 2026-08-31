@@ -1,5 +1,5 @@
 #version 450 core
-// I9-FOLIAGE render-only PROCEDURAL plant pass (behind render.plant_procgen).
+//  render-only PROCEDURAL plant pass (behind render.plant_procgen).
 // Writes the SAME deferred G-buffer layout as g_buffer.frag so the downstream
 // lighting / SSAO / tonemap chain treats procgen plants exactly like the other
 // solid geometry. Self-contained (no material LUT / triplanar): a flat bark vs

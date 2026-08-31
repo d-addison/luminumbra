@@ -27,15 +27,17 @@
 
 namespace {
 
+using luminumbra::fields::EnergyFieldState;
+using luminumbra::fields::kEnergyRawPerUnit;
 using Luminumbra::scripting::GetLuaApiManifest;
 using Luminumbra::scripting::LuaApiManifest;
 using Luminumbra::scripting::LuaApiManifestMeetsBaseline;
 using Luminumbra::scripting::LuaState;
 using Luminumbra::scripting::SerializeLuaApiManifestJson;
-using luminumbra::fields::EnergyFieldState;
-using luminumbra::fields::kEnergyRawPerUnit;
 
-bool ManifestExposes(const LuaApiManifest& manifest, const std::string& module, const std::string& name) {
+bool ManifestExposes(const LuaApiManifest& manifest,
+                     const std::string& module,
+                     const std::string& name) {
     for (const auto& entry : manifest.entries) {
         if (entry.module == module && entry.name == name) {
             return true;
@@ -65,7 +67,7 @@ TEST(AetherScriptBinding, ManifestCarriesTheSamplerEntry) {
     EXPECT_TRUE(LuaApiManifestMeetsBaseline(manifest))
         << "manifest baseline must stay green WITH the sample_energy_field entry";
     EXPECT_TRUE(ManifestExposes(manifest, "world", "sample_energy_field"))
-        << "FR-024-5: the binding requires a manifest entry (world.sample_energy_field)";
+        << "-5: the binding requires a manifest entry (world.sample_energy_field)";
 
     const std::string json = SerializeLuaApiManifestJson(manifest);
     EXPECT_NE(json.find("\"name\": \"sample_energy_field\""), std::string::npos);

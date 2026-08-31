@@ -30,15 +30,15 @@ std::string CaptureBackendName(CaptureBackend backend);
 CaptureResult BuildCaptureReadyMarker(const CaptureRequest& request);
 
 // -----------------------------------------------------------------------------
-// GPU-06 (spec 021; charter FR-E-003): real in-app capture-SDK trigger.
+//  (; contract ): real in-app capture-SDK trigger.
 //
 // The RenderDoc in-app API is loaded at runtime from the already-injected module
 // (GetModuleHandle / dlopen RTLD_NOLOAD) -- there is no link-time dependency on
 // RenderDoc, and nothing is loaded uninvited: if the process is not running under
 // RenderDoc the module is absent and the calls fall back to the marker path. A
-// real .rdc is only produced when the app runs under RenderDoc.
+// real.rdc is only produced when the app runs under RenderDoc.
 //
-// GPU-14 (spec 021 rank 78) adds the PIX and Nsight trigger legs with the same
+// adds the PIX and Nsight trigger legs with the same
 // discipline. Neither SDK is vendored, so their entry-point surfaces are the
 // minimal locally-declared structs below (not pix3.h / the NGFX SDK), and
 // detection is GetModuleHandle on the ALREADY-injected module only -- nothing
@@ -50,21 +50,21 @@ CaptureResult BuildCaptureReadyMarker(const CaptureRequest& request);
 // otherwise the caller should emit the marker (BuildCaptureReadyMarker) instead.
 struct FrameCaptureSession {
     bool active = false;
-    std::string backend;      // the SDK name when an SDK started it, else the requested backend name
-    std::string marker;       // the capture-ready marker (always populated)
+    std::string backend; // the SDK name when an SDK started it, else the requested backend name
+    std::string marker;  // the capture-ready marker (always populated)
     std::string diagnostic;
-    // GPU-14: which SDK's End must close this bracket (MarkerOnly when !active).
+    // which SDK's End must close this bracket (MarkerOnly when !active).
     CaptureBackend sdk_backend = CaptureBackend::MarkerOnly;
-    // GPU-14: the capture target handed to the SDK at Begin. PIX reports no path
+    // the capture target handed to the SDK at Begin. PIX reports no path
     // back at End (unlike RenderDoc's GetCapture), so this is its only record.
     std::string requested_capture_file;
 };
 
 struct FrameCaptureResult {
-    bool capture_started = false;  // true iff a real SDK capture ran end to end
+    bool capture_started = false; // true iff a real SDK capture ran end to end
     std::string backend;
     std::string marker;
-    std::string capture_file;      // absolute path to the produced .rdc, else empty
+    std::string capture_file; // absolute path to the produced.rdc, else empty
     std::string diagnostic;
 };
 
@@ -79,12 +79,12 @@ FrameCaptureSession BeginFrameCapture(const CaptureRequest& request,
                                       const std::string& capture_dir);
 
 // End the capture started by BeginFrameCapture and report the result (including
-// the .rdc path via the SDK). Safe to call when !session.active (returns a
+// the.rdc path via the SDK). Safe to call when !session.active (returns a
 // marker-only result with capture_started == false).
 FrameCaptureResult EndFrameCapture(FrameCaptureSession& session);
 
 // -----------------------------------------------------------------------------
-// GPU-14: minimal locally-declared PIX / Nsight trigger surfaces. These are OUR
+// minimal locally-declared PIX / Nsight trigger surfaces. These are OUR
 // declarations (the SDK headers are not vendored), shared with the tests so the
 // injected doubles match the exact ABI the production code calls through.
 // -----------------------------------------------------------------------------
@@ -103,8 +103,8 @@ struct PixCaptureParameters {
 // HRESULT -> long, DWORD -> unsigned long, BOOL -> int. The only Windows target
 // is x64, which has a single calling convention (WINAPI is a no-op there).
 // PIX GPU capture targets D3D: on today's GL client the trigger seam + module
-// detection handshake is what is wired and tested; a real .wpix capture needs
-// the DX12 backend (spec 014 M5).
+// detection handshake is what is wired and tested; a real.wpix capture needs
+// the DX12 backend.
 struct PixCaptureApi {
     long (*BeginCapture)(unsigned long flags, const PixCaptureParameters* params) = nullptr;
     long (*EndCapture)(int discard) = nullptr;
@@ -121,12 +121,12 @@ struct NsightCaptureApi {
 };
 
 namespace detail {
-// Test seam (GPU-06): inject a fake RENDERDOC_API_1_x_x* (passed as void* so the
+// Test seam: inject a fake RENDERDOC_API_1_x_x* (passed as void* so the
 // public header stays free of the RenderDoc header) so the capture integration
 // logic runs against a double, exercising the exact production Begin/End code
 // path without a real RenderDoc DLL. Pass nullptr to reset to real loading.
 void SetRenderDocApiForTesting(void* renderdoc_api);
-// Test seams (GPU-14), cloning the RenderDoc one: inject a fake PixCaptureApi*
+// Test seams, cloning the RenderDoc one: inject a fake PixCaptureApi*
 // / NsightCaptureApi* (as void*, matching the seam shape above) so the full
 // Begin/End bracket runs against a double without either SDK installed. Pass
 // nullptr to reset to real module detection.

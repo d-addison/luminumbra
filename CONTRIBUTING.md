@@ -1,11 +1,19 @@
 # Contributing
 
+Luminumbra is an owner-maintained hobby project. Unsolicited code, documentation,
+asset, and feature contributions are not accepted. Please do not open pull
+requests or use security reports for feature requests.
+
+The notes below document the owner's development flow and remain useful to
+people studying or building the source.
+
 ## Development flow
 
-Create focused branches from the integration branch, keep generated artifacts out
-of Git, and open a pull request for review. A change is ready to merge when its
-applicable Windows and Linux build, test, sanitizer, formatting, documentation,
-and measurement lanes report evaluated results.
+Create focused branches from `devel` and keep generated artifacts out of Git.
+Feature branches are squash-merged into `devel`; release changes merge `devel`
+into `main` with a merge commit. A change is ready when its applicable Windows
+and Linux build, test, sanitizer, formatting, documentation, and measurement
+lanes report evaluated results.
 
 Do not commit local audio, captures, build trees, editor state, credentials, or
 machine-specific paths. Design drafts, session handoffs, and task state belong in
@@ -21,7 +29,7 @@ cmake --build --preset debug --parallel
 ctest --preset debug --no-tests=error --output-on-failure
 ```
 
-Run `scripts/lint.sh` before opening a pull request. The script checks formatting
+Run `scripts/lint.sh` before merging a change. The script checks formatting
 and first-party static analysis when the required tools are available. A skipped
 or unavailable analysis is not equivalent to a pass.
 

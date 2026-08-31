@@ -1,11 +1,11 @@
-﻿// T-I4-13: delay-based lockstep transport implementation. See LockstepSession.h for
-// the binding rationale (rollback REJECTED -- design-decisions section 8 / research
-// Area 2; the adaptive horizon is measured in ticks and is hash-neutral). All on-wire
+﻿// delay-based lockstep transport implementation. See LockstepSession.h for
+// the binding rationale (rollback was rejected after evaluating its ordering
+// model; the adaptive horizon is measured in ticks and is hash-neutral). All on-wire
 // integers are little-endian via explicit per-byte shifts and strings/blobs are
 // length-prefixed, exactly mirroring ReplayStream's serialization discipline so the
 // bytes are identical on every platform/compiler (no struct padding, no float wire form).
 
-// T-I4-13: winsock2.h MUST be included before <windows.h> (which spdlog/Log.h drags in),
+// winsock2.h MUST be included before <windows.h> (which spdlog/Log.h drags in),
 // or its declarations conflict with winsock.h pulled by windows.h. Including it FIRST in
 // this TU, guarded by _WIN32, satisfies that ordering for the TcpTransport impl below.
 #ifdef _WIN32
@@ -416,7 +416,7 @@ bool TcpTransport::Listen(std::uint16_t port, int timeout_ms) {
         return false;
     }
 
-    // Accept ONE client, bounded by timeout_ms via select (no hang -- critique F3 hygiene).
+    // Accept ONE client, bounded by timeout_ms via select (no hang -- regression review hygiene).
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(static_cast<SOCKET>(m_listen_socket), &rfds);
@@ -462,7 +462,7 @@ int TcpTransport::FlushSendNonBlocking() {
     if (m_socket < 0)
         return -1;
     // Push as much of the queued outbound bytes as the kernel send buffer will take right
-    // now. DrainOnce advances while ::send makes progress and STOPS the instant it
+    // now. DrainOnce advances while::send makes progress and STOPS the instant it
     // would-blocks (returns 0) -- it never spins on a zero-progress send. The unsent remainder
     // stays queued for the next flush; nothing is dropped.
     return m_send_q.DrainOnce([this](const std::uint8_t* p, std::size_t len) -> int {
@@ -552,14 +552,14 @@ void TcpTransport::Close() {
     }
 }
 
-// --- NET-11: single-listen-socket fan-out (TcpTransport::FromAcceptedSocket + TcpListener)
+// ---: single-listen-socket fan-out (TcpTransport::FromAcceptedSocket + TcpListener)
 std::unique_ptr<TcpTransport> TcpTransport::FromAcceptedSocket(std::intptr_t sock) {
     if (sock < 0)
         return nullptr;
     auto t = std::make_unique<TcpTransport>();
     t->m_socket = sock;
     // Windows does not reliably inherit non-blocking from the listen socket; set it here
-    // so the accepted transport behaves exactly like a Connect()/Listen()-produced one.
+    // so the accepted transport behaves exactly like a Connect/Listen-produced one.
     u_long nonblock = 1;
     ::ioctlsocket(static_cast<SOCKET>(sock), FIONBIO, &nonblock);
     return t;
@@ -1016,7 +1016,7 @@ bool LockstepSession::Handshake() {
     m_handshaken = true;
     m_status.handshaken = true;
 
-    // Pre-schedule the local input for ticks [1 .. horizon]: delay-based lockstep sends
+    // Pre-schedule the local input for ticks [1.. horizon]: delay-based lockstep sends
     // inputs `horizon` ticks ahead, so the first `horizon` ticks' local inputs are in
     // flight before the first tick runs.
     for (std::uint64_t t = 1; t <= m_horizon; ++t) {
@@ -1083,7 +1083,7 @@ bool LockstepSession::DrainPeerMessages() {
             case MessageType::Bye: {
                 ByeMsg bye;
                 DecodeBye(frame, bye);
-                // A clean disconnect ENDS the session cleanly (critique F3): it is NOT a
+                // A clean disconnect ENDS the session cleanly (regression review): it is NOT a
                 // desync. Record the disconnect tick and stop.
                 m_disconnected = true;
                 m_status.peer_disconnected = true;

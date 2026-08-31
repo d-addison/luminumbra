@@ -1,4 +1,4 @@
-// Jolt tunneling / penetration test (FR-005 of the second-class adversarial pass).
+// Jolt tunneling / penetration test ( of the second-class adversarial pass).
 //
 // Jolt's discrete solver can let a fast body pass THROUGH thin geometry in a single
 // step if the body moves more than its own thickness per step. The projectile path
@@ -13,15 +13,15 @@
 // fixture. If Jolt's step ever tunnels (e.g. LinearCast is dropped, or the step grows
 // past the floor thickness), the sphere ends up at y<0 and the assertion pins the
 // failure with the penetration depth -- the mitigation (sub-stepping / linear cast)
-// is then a follow-up, not a silent change.
+// is then a separate decision, not a silent change.
 //
 // Registered as its own gtest exe (jolt_tunneling_test); links luminumbra_common,
 // which carries Jolt.
 #include "gtest/gtest.h"
 
+#include "luminumbra/core/Types.h"
 #include "systems/PhysicsSystem.h"
 #include "world/Chunk.h"
-#include "luminumbra/core/Types.h"
 
 #include <glm/glm.hpp>
 
@@ -41,7 +41,8 @@ using Luminumbra::Systems::PhysicsSystem;
 std::shared_ptr<Chunk> MakeFlatFloorChunk(const IVec3& coords, float floor_y) {
     auto chunk = std::make_shared<Chunk>(coords);
     const int side = Luminumbra::CHUNK_SIZE_X + 1;
-    chunk->heightmap_data.assign(static_cast<std::size_t>(side) * static_cast<std::size_t>(side), floor_y);
+    chunk->heightmap_data.assign(static_cast<std::size_t>(side) * static_cast<std::size_t>(side),
+                                 floor_y);
     return chunk;
 }
 
@@ -85,8 +86,8 @@ TEST(JoltTunneling, FastSphereDoesNotTunnelThroughThinFloor) {
     // The sphere must rest ON the floor (its center at >= floor_y - radius, within a
     // tolerance for Jolt's penetration-recovery slop), and CRUCIALLY must not be below
     // the floor plane -- that would be a tunnel-through.
-    EXPECT_GT(rest.y, 0.0f)
-        << "the sphere tunneled to or below the world floor (y=" << rest.y << ") -- it passed through the thin geometry";
+    EXPECT_GT(rest.y, 0.0f) << "the sphere tunneled to or below the world floor (y=" << rest.y
+                            << ") -- it passed through the thin geometry";
     EXPECT_GE(rest.y, kFloorY - kRadius - 0.5f)
         << "the sphere penetrated the floor by " << penetration << " m (rest y=" << rest.y
         << ", floor y=" << kFloorY << ") -- discrete-step tunneling through thin geometry";
@@ -108,14 +109,15 @@ TEST(JoltTunneling, SlowSphereAlsoRestsOnTheFloor) {
     physics.add_chunk_collision(*floor);
 
     constexpr float kRadius = 0.25f;
-    const JPH::BodyID ball =
-        physics.create_dynamic_sphere(glm::vec3(8.0f, 12.0f, 8.0f), glm::vec3(0.0f, -2.0f, 0.0f), kRadius);
+    const JPH::BodyID ball = physics.create_dynamic_sphere(
+        glm::vec3(8.0f, 12.0f, 8.0f), glm::vec3(0.0f, -2.0f, 0.0f), kRadius);
     ASSERT_FALSE(ball.IsInvalid());
     StepWorld(physics, 300);
 
     const glm::vec3 rest = physics.get_body_position(ball);
     EXPECT_GE(rest.y, kFloorY - kRadius - 0.5f)
-        << "slow sphere did not rest on the floor (rest y=" << rest.y << ") -- the collider is not present";
+        << "slow sphere did not rest on the floor (rest y=" << rest.y
+        << ") -- the collider is not present";
     EXPECT_LE(rest.y, kFloorY + 5.0f)
         << "slow sphere came to rest implausibly high (rest y=" << rest.y << ")";
 

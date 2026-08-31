@@ -1,8 +1,8 @@
 #pragma once
 
-// T-I4-13: delay-based lockstep transport (engine-generic; NO client/game deps).
+// delay-based lockstep transport (engine-generic; NO client/game deps).
 //
-// WHY DELAY-BASED, NOT ROLLBACK (binding decision -- design-decisions.md section 8,
+// WHY DELAY-BASED, NOT ROLLBACK (binding decision -- the deterministic runtime contract section 8,
 // research worldgen-lockstep-sdfrt.md Area 2 takeaway 1, and decision 9):
 //   Rollback netcode exists to hide input latency in reaction-critical COMPETITIVE
 //   play; its price is N-tick re-simulation + a full world snapshot/restore every
@@ -17,7 +17,7 @@
 //   live elsewhere -- this transport carries only the quantized movement/action input
 //   stream and the desync-oracle hash exchange.
 //
-// DETERMINISM INVARIANT (the load-bearing one -- design-decisions section 6/13):
+// DETERMINISM INVARIANT (the load-bearing one -- documented design):
 //   The ENTIRE adaptive-horizon / latency machinery is OUTSIDE what feeds the world
 //   hash. Horizon adaptation is measured in TICKS (how many ticks an input arrived
 //   late by), never in wall-clock; no std::chrono / RTT measurement is in the
@@ -33,7 +33,7 @@
 // tick + section (terrain/water/entities) is recorded. This is the desync-repro
 // artifact, identical in shape to the --replay path, so the existing tooling re-runs it.
 //
-// CLEAN DISCONNECT (critique F3): a peer Bye or a socket close ENDS the session
+// CLEAN DISCONNECT (regression review): a peer Bye or a socket close ENDS the session
 // cleanly -- no hang, no crash, no infinite wait. The surviving side records the
 // disconnect tick and stops; a clean disconnect is NOT a desync (there is no rejoin
 // in v1).
@@ -123,7 +123,7 @@ bool DecodeBye(const std::vector<std::uint8_t>& frame, ByeMsg& out);
 // SendMessage frames a complete message; TryReceiveMessage returns ONE complete framed
 // message or false if none is currently available (non-blocking -- the session pumps it
 // every tick rather than blocking the loop).
-// T-I6 P3 (Steam-readiness, research mp-steam-networking.md): a per-frame delivery
+//  a per-frame delivery
 // selector. State replication (Usercmd/Snapshot/Ack) sends UNRELIABLE (most-recent-
 // wins; a dropped datagram is superseded); events/handshake/world-edits/chat send
 // RELIABLE. Steam's ISteamNetworkingSockets carries BOTH on one connection
@@ -148,22 +148,22 @@ public:
 
     // Non-blocking: pops ONE complete framed message into `out` and returns true, or
     // returns false if none is available right now. A clean peer close is reported via
-    // IsPeerConnected()==false (NOT via a thrown error / hang).
+    // IsPeerConnected==false (NOT via a thrown error / hang).
     virtual bool TryReceiveFrame(std::vector<std::uint8_t>& out) = 0;
 
     // True while the peer end is still attached. A clean disconnect flips this false.
     [[nodiscard]] virtual bool IsPeerConnected() const = 0;
 
-    // Marks this end disconnected (so the peer observes IsPeerConnected()==false).
+    // Marks this end disconnected (so the peer observes IsPeerConnected==false).
     virtual void Close() = 0;
 };
 
-// --- Single-listen-socket connection acceptor (NET-11 dedicated-server shape) --------
+// --- Single-listen-socket connection acceptor ( dedicated-server shape) --------
 // A server that hosts N players on ONE port needs ONE listen socket that accepts N
 // incoming connections, fanning EACH into its own transport (which the caller then
 // registers via ReplicationServer::AddClient with a distinct client id). This is the
 // real dedicated-server accept shape, replacing the old "one port per client, one
-// connection per Listen()" scheme. The concrete impl is TcpListener; the seam is
+// connection per Listen" scheme. The concrete impl is TcpListener; the seam is
 // abstract so the test/gate (and a future GNS/Steam listener) share it.
 class IConnectionAcceptor {
 public:
@@ -276,7 +276,7 @@ public:
     // Client: connect to host:port (blocking up to timeout_ms).
     bool Connect(const std::string& host, std::uint16_t port, int timeout_ms = 10000);
 
-    // NET-11: wraps an already-accepted connection socket (handed out by TcpListener's
+    // wraps an already-accepted connection socket (handed out by TcpListener's
     // single-listen-socket fan-out) as a ready transport -- adopts the socket, sets it
     // non-blocking, and owns ONLY that connection (no listen socket). Returns nullptr if
     // `sock` is invalid. `sock` is a native SOCKET cast to intptr_t (-1 = none).
@@ -299,9 +299,9 @@ private:
     OutboundByteQueue m_send_q;              // bounded outbound queue; no busy-spin
 };
 
-// Real TCP acceptor (NET-11): ONE listen socket, N accepted connections -- the actual
+// Real TCP acceptor: ONE listen socket, N accepted connections -- the actual
 // dedicated-server shape. Bind+listen ONCE on a single port with a backlog for N pending
-// clients, then AcceptOne() each into its OWN TcpTransport (which the caller registers
+// clients, then AcceptOne each into its OWN TcpTransport (which the caller registers
 // via ReplicationServer::AddClient with a distinct id). This REPLACES the old
 // one-port-per-client scheme where every client needed its own TcpTransport::Listen on a
 // separate base_port+K port. The listen socket is non-blocking so AcceptOne never stalls
@@ -315,7 +315,7 @@ public:
     TcpListener(const TcpListener&) = delete;
     TcpListener& operator=(const TcpListener&) = delete;
 
-    // Bind+listen on `port` (0 = OS-assigned ephemeral; read back via port()), with a
+    // Bind+listen on `port` (0 = OS-assigned ephemeral; read back via port), with a
     // backlog sized for the expected concurrent client count. Returns false on failure.
     bool Listen(std::uint16_t port, int backlog = 32);
 
@@ -330,7 +330,7 @@ public:
     [[nodiscard]] bool IsListening() const {
         return m_listen_socket >= 0;
     }
-    // The actual bound port (host byte order). Meaningful after a successful Listen(),
+    // The actual bound port (host byte order). Meaningful after a successful Listen,
     // including when Listen(0) picked an ephemeral port.
     [[nodiscard]] std::uint16_t port() const {
         return m_port;
@@ -424,7 +424,7 @@ struct LockstepHooks {
 
 // --- LockstepSession ---------------------------------------------------------------
 // Drives one end of a 2-peer (<=2 clients, ONE remote) delay-based lockstep session
-// over an ILockstepTransport. Construct, Handshake(), then PumpTick() in a loop until it
+// over an ILockstepTransport. Construct, Handshake, then PumpTick in a loop until it
 // returns Finished / Desync / PeerDisconnected. The host is the sim authority; both
 // sides tick the same world and exchange hashes.
 //

@@ -1,8 +1,8 @@
-// Track game.photo_codex — the creature/subject CODEX (pillar-G progression on top
+// game.photo_codex: the creature/subject CODEX (photography progression on top
 // of PhotoScoring). These tests pin the collection model: recording a new species
 // DISCOVERS it (captures=1); recording it again increments captures and keeps the
 // BEST score (a worse later shot never lowers the record); species_count counts
-// DISTINCT species; completeness = discovered/total clamped to [0,1]; entries() are
+// DISTINCT species; completeness = discovered/total clamped to [0,1]; entries are
 // always species_id-sorted (deterministic, order-independent); total_score sums the
 // best scores; and a fresh codex is a defined zero state. PURE: no entt, no rng, no
 // wall-clock — PhotoCodex operates on plain value structs.
@@ -14,13 +14,13 @@
 
 namespace {
 
-using luminumbra::game::PhotoCodex;
 using luminumbra::game::CodexEntry;
+using luminumbra::game::PhotoCodex;
 
 // ---- gating / defined edge case ----
 
 // A fresh codex is a defined ZERO state: no species, zero aggregate score, zero
-// completeness, and an empty entries() list.
+// completeness, and an empty entries list.
 TEST(PhotoCodex, EmptyCodexIsDefinedZeroState) {
     PhotoCodex codex;
     EXPECT_EQ(codex.species_count(), 0u);
@@ -33,7 +33,7 @@ TEST(PhotoCodex, EmptyCodexIsDefinedZeroState) {
 // ---- discovery ----
 
 // Recording a never-seen species DISCOVERS it: captures=1, best_score=the score,
-// and discovered() flips true.
+// and discovered flips true.
 TEST(PhotoCodex, RecordingNewSpeciesDiscoversIt) {
     PhotoCodex codex;
     EXPECT_FALSE(codex.discovered(7));
@@ -117,7 +117,7 @@ TEST(PhotoCodex, TotalScoreSumsBestScores) {
 
 // ---- deterministic ordering ----
 
-// entries() is ALWAYS sorted ascending by species_id, regardless of the order in
+// entries is ALWAYS sorted ascending by species_id, regardless of the order in
 // which species were recorded.
 TEST(PhotoCodex, EntriesAreSpeciesIdSorted) {
     PhotoCodex codex;
@@ -144,18 +144,33 @@ TEST(PhotoCodex, EntriesAreSpeciesIdSorted) {
 // codex (same entries, counts, best scores, aggregates). This is the run==replay
 // contract: the Codex is order-independent and reproducible.
 TEST(PhotoCodex, RunEqualsReplayOrderIndependent) {
-    struct Cap { int sp; float score; };
+    struct Cap {
+        int sp;
+        float score;
+    };
     const Cap forward[] = {
-        { 3, 0.4f }, { 7, 0.9f }, { 3, 0.8f }, { 1, 0.55f }, { 7, 0.2f }, { 3, 0.1f },
+        {3, 0.4f},
+        {7, 0.9f},
+        {3, 0.8f},
+        {1, 0.55f},
+        {7, 0.2f},
+        {3, 0.1f},
     };
     const Cap shuffled[] = {
-        { 7, 0.2f }, { 1, 0.55f }, { 3, 0.1f }, { 3, 0.8f }, { 7, 0.9f }, { 3, 0.4f },
+        {7, 0.2f},
+        {1, 0.55f},
+        {3, 0.1f},
+        {3, 0.8f},
+        {7, 0.9f},
+        {3, 0.4f},
     };
 
     PhotoCodex a;
-    for (const auto& c : forward) a.Record(c.sp, c.score);
+    for (const auto& c : forward)
+        a.Record(c.sp, c.score);
     PhotoCodex b;
-    for (const auto& c : shuffled) b.Record(c.sp, c.score);
+    for (const auto& c : shuffled)
+        b.Record(c.sp, c.score);
 
     ASSERT_EQ(a.entries().size(), b.entries().size());
     for (std::size_t i = 0; i < a.entries().size(); ++i) {

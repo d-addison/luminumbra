@@ -1,6 +1,6 @@
 #pragma once
 
-// I9-ECO: the STEERING CONSUMER — blends the §4 bias systems' outputs into the creature wish
+//  the STEERING CONSUMER — blends the  bias systems' outputs into the creature wish
 // velocity before the physics bridge applies it. This is the INTEGRATION layer between the bias
 // producers (PredatorPackSystem / MigrationSystem / TerritorySystem, which run in slot 7 and
 // write their component each tick) and the locomotion (which reads CreatureComponent.wish_x/z).
@@ -15,8 +15,8 @@
 
 #include "../components/CoreComponents.h"
 #include "../components/CreatureComponents.h"
-#include "../components/PackHunterComponents.h"
 #include "../components/MigratoryComponents.h"
+#include "../components/PackHunterComponents.h"
 #include "../components/TerritoryComponents.h"
 
 namespace luminumbra::ai {
@@ -24,9 +24,9 @@ namespace luminumbra::ai {
 namespace Comp = ::Luminumbra::Components;
 
 struct SteeringConsumerStats {
-    int packed = 0;    // predators steered by a pack flank direction
-    int migrated = 0;  // creatures given a migration drift
-    int homed = 0;     // creatures given a territory homing bias
+    int packed = 0;   // predators steered by a pack flank direction
+    int migrated = 0; // creatures given a migration drift
+    int homed = 0;    // creatures given a territory homing bias
 };
 
 inline SteeringConsumerStats RunSteeringConsumerOnTick(entt::registry& reg) {
@@ -34,7 +34,8 @@ inline SteeringConsumerStats RunSteeringConsumerOnTick(entt::registry& reg) {
     auto sv = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
     for (auto e : sv) {
         auto& cr = sv.get<Comp::CreatureComponent>(e);
-        if (cr.eaten) continue;  // a carcass is inert
+        if (cr.eaten)
+            continue; // a carcass is inert
 
         // Pack flanking OVERRIDES the predator's wish with its flank-steer DIRECTION.
         // PackHunterComponent.coord_x/z is a UNIT vector toward the flank approach point (NOT a
@@ -63,4 +64,4 @@ inline SteeringConsumerStats RunSteeringConsumerOnTick(entt::registry& reg) {
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

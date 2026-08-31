@@ -1,4 +1,4 @@
-// T-I4-13: LockstepSession unit tests (src/luminumbra_common/net/LockstepSession.{h,cpp}).
+// LockstepSession unit tests (src/luminumbra_common/net/LockstepSession.{h,cpp}).
 //
 // These lock the ENGINE-GENERIC delay-based lockstep behavior over LoopbackTransport
 // ONLY (no real sockets/ports -- hermetic, no firewall/CI flakiness): handshake
@@ -38,13 +38,11 @@ fs::path LockstepTempDir() {
 // salt at/after some tick forces a desync the oracle must catch.
 struct FakeWorld {
     std::uint64_t tick = 0;
-    std::string salt;             // identical across peers => agree
+    std::string salt;               // identical across peers => agree
     std::uint64_t corrupt_from = 0; // ticks >= this use a corrupted salt (0 = never)
 
     std::string HashAt(std::uint64_t t, const char* section) const {
-        const std::string s = (corrupt_from != 0 && t >= corrupt_from)
-                                  ? (salt + "X")
-                                  : salt;
+        const std::string s = (corrupt_from != 0 && t >= corrupt_from) ? (salt + "X") : salt;
         return replay::Fnv1a64Hex(s + "|" + section + "|" + std::to_string(t));
     }
 };
@@ -103,13 +101,19 @@ TEST(LockstepSessionTest, HandshakeAccepts) {
     // Drive: send each Hello, then complete each handshake.
     // Easiest: have each send its Hello by attempting Handshake; since the peer Hello is
     // not yet queued, we send b's Hello first via a manual encode, then handshake a, then b.
-    // Simpler and faithful: call b.Handshake() AFTER a has sent -- but Handshake is atomic.
+    // Simpler and faithful: call b.Handshake AFTER a has sent -- but Handshake is atomic.
     // Use the documented pattern: send both Hellos, then handshake. We achieve that by
     // calling each Handshake twice if needed; instead we send Hellos explicitly:
-    // (Handshake() sends its own Hello, so calling a then b leaves a's Hello waiting for b.)
-    // a.Handshake() will fail to find b's Hello (not sent yet) -> so we send b's Hello first.
+    // (Handshake sends its own Hello, so calling a then b leaves a's Hello waiting for b.)
+    // a.Handshake will fail to find b's Hello (not sent yet) -> so we send b's Hello first.
     EXPECT_TRUE(tb->SendFrame(net::EncodeHello([&] {
-        net::HelloMsg m; m.seed = 424242; m.preset = "default"; m.tick_rate_hz = 30; m.client_id = 1; return m; }())));
+        net::HelloMsg m;
+        m.seed = 424242;
+        m.preset = "default";
+        m.tick_rate_hz = 30;
+        m.client_id = 1;
+        return m;
+    }())));
     EXPECT_TRUE(a.Handshake());
     // Now a has sent its Hello (into a->b queue); b can handshake against it.
     EXPECT_TRUE(b.Handshake());
@@ -124,7 +128,11 @@ TEST(LockstepSessionTest, HandshakeRejectsSeedMismatch) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
 
     // Queue a peer Hello with a DIFFERENT seed.
-    net::HelloMsg bad; bad.seed = 999; bad.preset = "default"; bad.tick_rate_hz = 30; bad.client_id = 1;
+    net::HelloMsg bad;
+    bad.seed = 999;
+    bad.preset = "default";
+    bad.tick_rate_hz = 30;
+    bad.client_id = 1;
     EXPECT_TRUE(tb->SendFrame(net::EncodeHello(bad)));
     EXPECT_FALSE(a.Handshake());
     EXPECT_FALSE(a.Status().handshaken);
@@ -135,7 +143,11 @@ TEST(LockstepSessionTest, HandshakeRejectsPresetMismatch) {
     auto [ta, tb] = net::MakeLoopbackPair();
     FakeWorld wa{0, "agree", 0};
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
-    net::HelloMsg bad; bad.seed = 424242; bad.preset = "mountains"; bad.tick_rate_hz = 30; bad.client_id = 1;
+    net::HelloMsg bad;
+    bad.seed = 424242;
+    bad.preset = "mountains";
+    bad.tick_rate_hz = 30;
+    bad.client_id = 1;
     EXPECT_TRUE(tb->SendFrame(net::EncodeHello(bad)));
     EXPECT_FALSE(a.Handshake());
 }
@@ -150,13 +162,17 @@ struct DriveResult {
     std::uint64_t b_tick;
 };
 
-DriveResult DriveBoth(net::LockstepSession& a, net::LockstepSession& b, std::uint64_t budget,
+DriveResult DriveBoth(net::LockstepSession& a,
+                      net::LockstepSession& b,
+                      std::uint64_t budget,
                       int max_pumps = 100000) {
     net::TickResult ra, rb;
     ra.outcome = net::TickOutcome::WaitingForPeer;
     rb.outcome = net::TickOutcome::WaitingForPeer;
     int pumps = 0;
-    auto finished = [](net::TickOutcome o) { return o == net::TickOutcome::Finished; };
+    auto finished = [](net::TickOutcome o) {
+        return o == net::TickOutcome::Finished;
+    };
     auto fatal = [](net::TickOutcome o) {
         return o == net::TickOutcome::Desync || o == net::TickOutcome::PeerDisconnected;
     };
@@ -165,8 +181,10 @@ DriveResult DriveBoth(net::LockstepSession& a, net::LockstepSession& b, std::uin
         rb = b.PumpTick(budget);
         // A desync/disconnect on EITHER side is terminal for the whole session (the other
         // side will stall waiting for inputs that never come -- stop driving immediately).
-        if (fatal(ra.outcome) || fatal(rb.outcome)) break;
-        if (finished(ra.outcome) && finished(rb.outcome)) break;
+        if (fatal(ra.outcome) || fatal(rb.outcome))
+            break;
+        if (finished(ra.outcome) && finished(rb.outcome))
+            break;
     }
     return {ra.outcome, rb.outcome, a.AgreedTick(), b.AgreedTick()};
 }
@@ -181,7 +199,11 @@ TEST(LockstepSessionTest, InSyncTickExchange) {
     net::LockstepSession b(MakeConfig(1, 0), tb.get(), MakeHooks(&wb));
 
     // Handshake (send b's Hello, a handshakes, then b handshakes against a's Hello).
-    net::HelloMsg bh; bh.seed = 424242; bh.preset = "default"; bh.tick_rate_hz = 30; bh.client_id = 1;
+    net::HelloMsg bh;
+    bh.seed = 424242;
+    bh.preset = "default";
+    bh.tick_rate_hz = 30;
+    bh.client_id = 1;
     ASSERT_TRUE(tb->SendFrame(net::EncodeHello(bh)));
     ASSERT_TRUE(a.Handshake());
     ASSERT_TRUE(b.Handshake());
@@ -204,7 +226,11 @@ TEST(LockstepSessionTest, HorizonAbsorbsLateInput) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::LockstepSession b(MakeConfig(1, 0), tb.get(), MakeHooks(&wb));
 
-    net::HelloMsg bh; bh.seed = 424242; bh.preset = "default"; bh.tick_rate_hz = 30; bh.client_id = 1;
+    net::HelloMsg bh;
+    bh.seed = 424242;
+    bh.preset = "default";
+    bh.tick_rate_hz = 30;
+    bh.client_id = 1;
     ASSERT_TRUE(tb->SendFrame(net::EncodeHello(bh)));
     ASSERT_TRUE(a.Handshake());
     ASSERT_TRUE(b.Handshake());
@@ -245,7 +271,11 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
     a.SetDumpPath(dumpA);
     b.SetDumpPath(dumpB);
 
-    net::HelloMsg bh; bh.seed = 424242; bh.preset = "default"; bh.tick_rate_hz = 30; bh.client_id = 1;
+    net::HelloMsg bh;
+    bh.seed = 424242;
+    bh.preset = "default";
+    bh.tick_rate_hz = 30;
+    bh.client_id = 1;
     ASSERT_TRUE(tb->SendFrame(net::EncodeHello(bh)));
     ASSERT_TRUE(a.Handshake());
     ASSERT_TRUE(b.Handshake());
@@ -280,7 +310,7 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
     fs::remove(dumpB, rmec);
 }
 
-// A clean Bye from one peer ENDS the session cleanly on the other (critique F3): the
+// A clean Bye from one peer ENDS the session cleanly on the other (regression review): the
 // surviving side reports PeerDisconnected with the disconnect tick -- NOT a desync, NOT a
 // hang.
 TEST(LockstepSessionTest, CleanDisconnect) {
@@ -289,7 +319,11 @@ TEST(LockstepSessionTest, CleanDisconnect) {
     net::LockstepSession a(MakeConfig(0, 1), ta.get(), MakeHooks(&wa));
     net::LockstepSession b(MakeConfig(1, 0), tb.get(), MakeHooks(&wb));
 
-    net::HelloMsg bh; bh.seed = 424242; bh.preset = "default"; bh.tick_rate_hz = 30; bh.client_id = 1;
+    net::HelloMsg bh;
+    bh.seed = 424242;
+    bh.preset = "default";
+    bh.tick_rate_hz = 30;
+    bh.client_id = 1;
     ASSERT_TRUE(tb->SendFrame(net::EncodeHello(bh)));
     ASSERT_TRUE(a.Handshake());
     ASSERT_TRUE(b.Handshake());
@@ -298,7 +332,8 @@ TEST(LockstepSessionTest, CleanDisconnect) {
     for (int i = 0; i < 50; ++i) {
         a.PumpTick(90);
         b.PumpTick(90);
-        if (a.AgreedTick() >= 10) break;
+        if (a.AgreedTick() >= 10)
+            break;
     }
     b.Disconnect();
 
@@ -306,7 +341,8 @@ TEST(LockstepSessionTest, CleanDisconnect) {
     net::TickResult ra;
     for (int i = 0; i < 1000; ++i) {
         ra = a.PumpTick(90);
-        if (ra.outcome == net::TickOutcome::PeerDisconnected) break;
+        if (ra.outcome == net::TickOutcome::PeerDisconnected)
+            break;
     }
     EXPECT_EQ(ra.outcome, net::TickOutcome::PeerDisconnected);
     EXPECT_TRUE(a.Status().peer_disconnected);

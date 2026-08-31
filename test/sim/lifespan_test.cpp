@@ -1,4 +1,4 @@
-// Track sim.lifespan — creatures (and any opted-in entity) AGE and DIE: old age
+// sim.lifespan: creatures (and any opted-in entity) AGE and DIE: old age
 // (age >= lifespan) OR starvation (a CreatureComponent with hunger >= 1.0).
 // Deterministic (id-ordered, integer ticks, no rng), gated by MortalComponent.
 #include <gtest/gtest.h>

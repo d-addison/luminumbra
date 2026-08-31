@@ -1,4 +1,4 @@
-// Spec-021 INSTINCT-12 — per-species behaviour data: IAUS curve/weight overrides + genome
+// per-species behaviour data: IAUS curve/weight overrides + genome
 // ranges in the species JSON schema, resolved through CreatureSpeciesRegistry at world load.
 //
 // THE CONTRACT UNDER TEST (the byte-identical-defaults law):
@@ -44,7 +44,8 @@ void ExpectBoundEq(const GeneBound& got, const GeneBound& want, const char* labe
     EXPECT_EQ(got.hi, want.hi) << label << ".hi";
 }
 
-void ExpectBrainEquals(const CreatureBrainParams& got, const CreatureBrainParams& want,
+void ExpectBrainEquals(const CreatureBrainParams& got,
+                       const CreatureBrainParams& want,
                        const std::string& label) {
     EXPECT_EQ(got.wander_weight, want.wander_weight) << label;
     EXPECT_EQ(got.rest_weight, want.rest_weight) << label;
@@ -89,8 +90,10 @@ TEST(SpeciesBehaviorOverrides, DefaultGenomeRangesMatchCanonicalBounds) {
     const auto sensory = luminumbra::ai::CreatureSensoryGeneBounds();
     ASSERT_EQ(r.core.size(), core.size());
     ASSERT_EQ(r.sensory.size(), sensory.size());
-    for (std::size_t i = 0; i < core.size(); ++i) ExpectBoundEq(r.core[i], core[i], "core");
-    for (std::size_t i = 0; i < sensory.size(); ++i) ExpectBoundEq(r.sensory[i], sensory[i], "sensory");
+    for (std::size_t i = 0; i < core.size(); ++i)
+        ExpectBoundEq(r.core[i], core[i], "core");
+    for (std::size_t i = 0; i < sensory.size(); ++i)
+        ExpectBoundEq(r.sensory[i], sensory[i], "sensory");
 }
 
 // Default params through the arbiter give the same decision as the no-params call across a
@@ -112,7 +115,7 @@ TEST(SpeciesBehaviorOverrides, DefaultParamsDecideIdenticallyAcrossSensesSweep) 
                         s.food_proximity = predator ? threat : 0.6f;
                         s.stamina = stamina;
                         s.energy = energy;
-                        s.circadian_activity = energy;  // exercise the Sleep axis too
+                        s.circadian_activity = energy; // exercise the Sleep axis too
                         EXPECT_EQ(DecideCreatureAction(s),
                                   DecideCreatureAction(s, CreatureBrainParams{}));
                     }
@@ -150,7 +153,7 @@ TEST(SpeciesBehaviorOverrides, GenomeRangeOverrideClampsBreeding) {
     // A range narrowed to a point pins the gene regardless of parents/mutation: the clamp
     // band is really consumed by the breeding operator.
     SpeciesGenomeRanges ranges;
-    ranges.core[0] = GeneBound{2.5f, 2.5f};  // move_speed pinned
+    ranges.core[0] = GeneBound{2.5f, 2.5f}; // move_speed pinned
     CreatureGenome a;
     a.move_speed = 4.0f;
     CreatureGenome b;
@@ -280,7 +283,7 @@ TEST(SpeciesBehaviorOverrides, SpeciesJsonOverridesChangeLoadedTable) {
     EXPECT_FLOAT_EQ(s->genome_ranges.sensory[2].lo, 10.0f);
     EXPECT_FLOAT_EQ(s->genome_ranges.sensory[2].hi, 30.0f);
 
-    // ...while every untouched field keeps its compiled default (partial overrides are safe).
+    //...while every untouched field keeps its compiled default (partial overrides are safe).
     const CreatureBrainParams def{};
     EXPECT_EQ(s->brain.rest_weight, def.rest_weight);
     EXPECT_EQ(s->brain.sleep_weight, def.sleep_weight);
@@ -332,4 +335,4 @@ TEST(SpeciesBehaviorOverrides, ShippedSpeciesFilesCarryNoOverrides) {
     }
 }
 
-}  // namespace
+} // namespace

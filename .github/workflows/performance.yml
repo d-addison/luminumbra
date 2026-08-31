@@ -2,8 +2,9 @@ name: Performance observations
 
 on:
   pull_request:
+    branches: [main, devel]
   push:
-    branches: [main]
+    branches: [main, devel]
   schedule:
     - cron: "17 7 * * *"
   workflow_dispatch:
@@ -88,19 +89,22 @@ jobs:
 
   server-smoke-comparison:
     name: Server smoke observation / base versus head
-    if: github.event_name == 'pull_request'
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.event.before != '0000000000000000000000000000000000000000')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: head
       - name: Check out base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
           path: base
       - name: Install build dependencies
         run: |
@@ -113,7 +117,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha }}-${{ github.event.pull_request.head.sha }}
+          key: perf-paired-linux-x64-gcc-${{ github.event.pull_request.base.sha || github.event.before }}-${{ github.event.pull_request.head.sha || github.sha }}
           restore-keys: perf-paired-linux-x64-gcc-
       - name: Configure identical builds
         run: |
@@ -148,8 +152,8 @@ jobs:
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/base/performance-build.json \
-            --commit "${{ github.event.pull_request.base.sha }}" \
-            --mode observation --warmup 1 --samples 5 --timeout 180 \
+            --commit "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
             --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
@@ -164,8 +168,8 @@ jobs:
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/head/performance-build.json \
-            --commit "${{ github.event.pull_request.head.sha }}" \
-            --mode observation --warmup 1 --samples 5 --timeout 180 \
+            --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
             --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
@@ -180,8 +184,8 @@ jobs:
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/head/performance-build.json \
-            --commit "${{ github.event.pull_request.head.sha }}" \
-            --mode observation --warmup 1 --samples 5 --timeout 180 \
+            --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
             --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
@@ -196,8 +200,8 @@ jobs:
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/base/performance-build.json \
-            --commit "${{ github.event.pull_request.base.sha }}" \
-            --mode observation --warmup 1 --samples 5 --timeout 180 \
+            --commit "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 180 \
             --parameter ticks=30 --parameter surface_radius=1 \
             --parameter collision_radius=1 --parameter seed=1337 \
             --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
@@ -219,8 +223,7 @@ jobs:
           python3 head/tools/perf/perf.py compare \
             --base build/base/server-smoke-run.json \
             --candidate build/head/server-smoke-run.json \
-            --limit 10 --min-samples 10 \
-            --report-only \
+            --limit 5 --min-samples 20 \
             --output build/server-smoke-comparison.json
       - name: Publish comparison summary
         if: always()
@@ -231,7 +234,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: server-smoke-comparison-${{ github.event.pull_request.head.sha }}
+          name: server-smoke-comparison-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
             build/base/server-smoke-run.json
             build/base/server-smoke-run-*.json

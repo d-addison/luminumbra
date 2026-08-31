@@ -49,7 +49,7 @@
     "max_fallback_layers": 0
   },
   "sky_scattering": {
-    "_rebless_note": "T-I5a-6 DELIBERATE re-bless: Hillaire 2020 scattering replaces the authored skybox gradient. Adds three RGB16F LUT textures to the resource registry (released on shutdown -> empty-after-shutdown invariant holds) + a sky-precompute startup-cost entry in render telemetry. The scattering sky changes sky pixels in ALL scenarios, so RenderHealth + SkyboxVisual + TimeOfDaySweep baselines move; PlayerView + FarLodHorizon stay green (terrain coverage + horizon sky-ratio unaffected: the aerial term skips far-depth sky pixels). world_hash unchanged (render-only).",
+    "_rebless_note": " DELIBERATE update the baseline: Hillaire 2020 scattering replaces the authored skybox gradient. Adds three RGB16F LUT textures to the resource registry (released on shutdown -> empty-after-shutdown invariant holds) + a sky-precompute startup-cost entry in render telemetry. The scattering sky changes sky pixels in ALL scenarios, so RenderHealth + SkyboxVisual + TimeOfDaySweep baselines move; PlayerView + FarLodHorizon stay green (terrain coverage + horizon sky-ratio unaffected: the aerial term skips far-depth sky pixels). world_hash unchanged (render-only).",
     "luts": [
       {"name": "sky.lut.transmittance", "dimensions": "256x64", "format": "RGB16F", "sun_dependent": false},
       {"name": "sky.lut.multiscatter", "dimensions": "32x32", "format": "RGB16F", "sun_dependent": false},
@@ -66,7 +66,7 @@
       "atmosphere_top_km": 6460
     },
     "coherence": "sun disc color = transmittance toward the sun; ambient = sky-view hemisphere integral; aerial fog = sky-view in-scatter. All read the SAME transmittance, so low-sun palettes (pinks/purples/oranges) stay coherent.",
-    "scope_stop": "three LUTs + analytic aerial term only; NO froxel volume (critique F6)."
+    "scope_stop": "three LUTs + analytic aerial term only; NO froxel volume (regression contract)."
   },
   "gpu_timers": {
     "supported": true,
@@ -85,7 +85,7 @@
       {"name": "final_blit", "gpu_ms": 0.000160}
     ],
     "sky_precompute": {
-      "_note": "T-I5a-6 startup one-shot (CPU LUT build + GL upload), not per-frame.",
+      "_note": " startup one-shot (CPU LUT build + GL upload), not per-frame.",
       "sky_full_precompute_budget_ms": 8.0,
       "sky_view_refresh_budget_ms": 0.2
     }

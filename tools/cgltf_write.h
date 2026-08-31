@@ -1255,7 +1255,7 @@ cgltf_result cgltf_write_file(const cgltf_options* options, const char* path, co
 	{
 		return cgltf_result_file_not_found;
 	}
-	// Note that cgltf_write() includes a null terminator, which we omit from the file content.
+	// Note that cgltf_write includes a null terminator, which we omit from the file content.
 	if (options->type == cgltf_file_type_glb) {
 		cgltf_write_glb(file, buffer, actual - 1, data->bin, data->bin_size);
 	} else {

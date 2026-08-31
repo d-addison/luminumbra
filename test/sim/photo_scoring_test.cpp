@@ -1,5 +1,5 @@
-// Track game.photo_scoring — a PURE, DETERMINISTIC capture-composition scorer
-// (pillar G de-risk: the photography game loop's core, no render/camera/GL). These
+// game.photo_scoring: a PURE, DETERMINISTIC capture-composition scorer
+// (photography de-risk: the photography game loop's core, no render/camera/GL). These
 // tests pin the rubric: a rule-of-thirds shot beats a dead-center or edge-clipped
 // one; a blown-out or too-dark frame loses LIGHTING; out-of-focus loses FOCUS; a
 // rarer subject scores higher RARITY; an empty shot is a defined low score; and
@@ -13,15 +13,20 @@
 
 namespace {
 
+using luminumbra::photo::kThird;
+using luminumbra::photo::PhotoScore;
 using luminumbra::photo::PhotoShot;
 using luminumbra::photo::PhotoSubject;
-using luminumbra::photo::PhotoScore;
 using luminumbra::photo::ScorePhoto;
-using luminumbra::photo::kThird;
 
 // Build a single-subject shot with sensible defaults (mid exposure, sharp focus).
-PhotoShot oneSubject(float x, float y, float light = 0.7f, float size = 0.3f,
-                     int species = 1, float exposure = 0.5f, float focus = 1.0f) {
+PhotoShot oneSubject(float x,
+                     float y,
+                     float light = 0.7f,
+                     float size = 0.3f,
+                     int species = 1,
+                     float exposure = 0.5f,
+                     float focus = 1.0f) {
     PhotoShot shot;
     PhotoSubject s;
     s.ndc_x = x;
@@ -64,7 +69,7 @@ TEST(PhotoScoring, ThirdsBeatsCenterComposition) {
 // subject clipped hard against the frame edge.
 TEST(PhotoScoring, ThirdsBeatsEdgeClipComposition) {
     const PhotoShot thirds = oneSubject(kThird, kThird);
-    const PhotoShot edge   = oneSubject(0.99f, 0.99f);
+    const PhotoShot edge = oneSubject(0.99f, 0.99f);
     const float a = ScorePhoto(thirds).composition;
     const float b = ScorePhoto(edge).composition;
     EXPECT_GT(a, b);
@@ -81,7 +86,7 @@ TEST(PhotoScoring, WellComposedBeatsCenterTotal) {
 
 // A blown-out subject (light ~1) scores lower on LIGHTING than a well-lit one.
 TEST(PhotoScoring, BlownOutLosesLighting) {
-    const PhotoShot good  = oneSubject(kThird, kThird, /*light=*/0.7f);
+    const PhotoShot good = oneSubject(kThird, kThird, /*light=*/0.7f);
     const PhotoShot blown = oneSubject(kThird, kThird, /*light=*/0.99f);
     EXPECT_GT(ScorePhoto(good).lighting, ScorePhoto(blown).lighting);
 }
@@ -105,7 +110,7 @@ TEST(PhotoScoring, OverExposureLosesLighting) {
 // An out-of-focus shot scores lower on FOCUS than an otherwise identical sharp one.
 TEST(PhotoScoring, OutOfFocusLosesFocus) {
     const PhotoShot sharp = oneSubject(kThird, kThird, 0.7f, 0.3f, 1, 0.5f, /*focus=*/1.0f);
-    const PhotoShot blur  = oneSubject(kThird, kThird, 0.7f, 0.3f, 1, 0.5f, /*focus=*/0.1f);
+    const PhotoShot blur = oneSubject(kThird, kThird, 0.7f, 0.3f, 1, 0.5f, /*focus=*/0.1f);
     EXPECT_GT(ScorePhoto(sharp).focus, ScorePhoto(blur).focus);
 }
 
@@ -142,12 +147,18 @@ TEST(PhotoScoring, VarietyBeatsMonoculture) {
     mono.focus = 1.0f;
     for (int i = 0; i < 4; ++i) {
         PhotoSubject v;
-        v.ndc_x = 0.0f; v.ndc_y = 0.0f; v.light = 0.7f; v.size = 0.3f;
+        v.ndc_x = 0.0f;
+        v.ndc_y = 0.0f;
+        v.light = 0.7f;
+        v.size = 0.3f;
         v.species_id = 100 + i; // four distinct species
         variety.subjects.push_back(v);
 
         PhotoSubject m;
-        m.ndc_x = 0.0f; m.ndc_y = 0.0f; m.light = 0.7f; m.size = 0.3f;
+        m.ndc_x = 0.0f;
+        m.ndc_y = 0.0f;
+        m.light = 0.7f;
+        m.size = 0.3f;
         m.species_id = 100; // all identical
         mono.subjects.push_back(m);
     }
@@ -160,8 +171,8 @@ TEST(PhotoScoring, VarietyBeatsMonoculture) {
 // shot alike.
 TEST(PhotoScoring, ScoresAreClampedToUnitRange) {
     const PhotoShot shots[] = {
-        oneSubject(kThird, kThird, 0.7f, 0.9f, 3),     // strong
-        oneSubject(0.0f, 0.0f, 0.5f, 0.1f, 1),         // ordinary
+        oneSubject(kThird, kThird, 0.7f, 0.9f, 3),          // strong
+        oneSubject(0.0f, 0.0f, 0.5f, 0.1f, 1),              // ordinary
         oneSubject(1.0f, -1.0f, 1.0f, 0.0f, 0, 1.0f, 0.0f), // degenerate / clipped
     };
     for (const auto& shot : shots) {
@@ -181,14 +192,21 @@ TEST(PhotoScoring, RunEqualsReplay) {
     PhotoShot shot;
     shot.exposure = 0.42f;
     shot.focus = 0.83f;
-    const struct { float x, y, light, size; int sp; } seed[] = {
-        { kThird, -kThird, 0.66f, 0.40f, 3 },
-        { -0.10f,  0.20f,  0.71f, 0.25f, 9 },
-        {  0.30f,  0.31f,  0.55f, 0.15f, 3 },
+    const struct {
+        float x, y, light, size;
+        int sp;
+    } seed[] = {
+        {kThird, -kThird, 0.66f, 0.40f, 3},
+        {-0.10f, 0.20f, 0.71f, 0.25f, 9},
+        {0.30f, 0.31f, 0.55f, 0.15f, 3},
     };
     for (const auto& d : seed) {
         PhotoSubject s;
-        s.ndc_x = d.x; s.ndc_y = d.y; s.light = d.light; s.size = d.size; s.species_id = d.sp;
+        s.ndc_x = d.x;
+        s.ndc_y = d.y;
+        s.light = d.light;
+        s.size = d.size;
+        s.species_id = d.sp;
         shot.subjects.push_back(s);
     }
 
@@ -202,7 +220,7 @@ TEST(PhotoScoring, RunEqualsReplay) {
     EXPECT_EQ(a.total, b.total);
 }
 
-// ---- AETHER_GLOW (spec 024 AETHER-12) ----
+// ---- AETHER_GLOW ----
 
 // Zero aether input (the default) contributes NOTHING: aether_glow is exactly 0
 // and the total is BIT-IDENTICAL to the legacy four-axis weighted sum -- the
@@ -219,10 +237,8 @@ TEST(PhotoScoring, ZeroAetherIsByteNeutral) {
     EXPECT_EQ(sc.aether_glow, 0.0f);
     // Recompute the PRE-AETHER total formula from the returned axes: the new
     // bonus term must have added exactly +0.0f (bit equality, not tolerance).
-    const float legacy_total = Clamp01(kwComposition * sc.composition +
-                                       kwLighting    * sc.lighting +
-                                       kwFocus       * sc.focus +
-                                       kwRarity      * sc.rarity);
+    const float legacy_total = Clamp01(kwComposition * sc.composition + kwLighting * sc.lighting +
+                                       kwFocus * sc.focus + kwRarity * sc.rarity);
     EXPECT_EQ(sc.total, legacy_total);
 
     // An EXPLICIT zero scores identically to the default (the field is inert at 0).

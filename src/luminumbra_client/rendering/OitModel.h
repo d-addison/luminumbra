@@ -3,17 +3,17 @@
 #include <algorithm>
 #include <cmath>
 
-// Spec 015 C-2 (RENDER-18, Wave F F8): the weighted-blended OIT model — the
+//   (,  ): the weighted-blended OIT model — the
 // McGuire–Bavoil depth weight and the resolve algebra, shared by the
 // glass_oit shaders and the OitModel gtests. ONE definition; the GLSL mirrors
 // these exact expressions.
 //
-// WBOIT decision (015 OQ-5): weighted-blended first — its accumulation is a
+// WBOIT decision: weighted-blended first — its accumulation is a
 // commutative SUM, so order independence holds BY CONSTRUCTION (up to float
 // non-associativity, sub-LSB for a handful of panes); the per-pixel linked-list
 // variant stays a measured contingency if stacked saturated panes ever need it.
 //
-// Render-only: never feeds the sim or world_hash (018 FR-E-003).
+// Render-only: never feeds the sim or world_hash.
 namespace Luminumbra::Rendering::Oit {
 
 // McGuire–Bavoil (2013) eq. 9-family depth weight: near surfaces dominate the

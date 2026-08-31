@@ -1,4 +1,4 @@
-// T-I9-AI: shared deterministic seeded PRNG coverage (sim-path mutation noise).
+// shared deterministic seeded PRNG coverage (sim-path mutation noise).
 // Validates reproducibility, uniform bounds, Gaussian shape, and stream separation.
 
 #include "gtest/gtest.h"
@@ -13,14 +13,16 @@ using luminumbra::core::DeterministicRng;
 
 TEST(DeterministicRng, SameSeedSameSequence) {
     DeterministicRng a(12345), b(12345);
-    for (int i = 0; i < 64; ++i) EXPECT_EQ(a.next_u64(), b.next_u64());
+    for (int i = 0; i < 64; ++i)
+        EXPECT_EQ(a.next_u64(), b.next_u64());
 }
 
 TEST(DeterministicRng, DifferentSeedsDiverge) {
     DeterministicRng a(1), b(2);
     int same = 0;
     for (int i = 0; i < 64; ++i)
-        if (a.next_u64() == b.next_u64()) ++same;
+        if (a.next_u64() == b.next_u64())
+            ++same;
     EXPECT_EQ(same, 0); // independent streams should not collide over 64 draws
 }
 

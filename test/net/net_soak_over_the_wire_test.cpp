@@ -1,4 +1,4 @@
-// NET-07: OVER-THE-WIRE 32-client replication SOAK + the frozen net_soak.v1 baseline.
+// OVER-THE-WIRE 32-client replication SOAK + the frozen net_soak.v1 baseline.
 //
 // Live over-the-wire validation before this landed was only N=4 (the multiprocess
 // `luminumbra_server_app --net-soak` + N `--net-soak-client` processes); the 32-client
@@ -6,7 +6,7 @@
 // single-executable soak that spins the whole 32-client session in-process over REAL TCP
 // sockets on loopback -- no second process, no per-client port scheme, no orchestration.
 //
-// Shape (the real NET-11 dedicated-server accept shape):
+// Shape (the real  dedicated-server accept shape):
 //   * ONE authoritative ReplicationServer on the MAIN thread.
 //   * ONE TcpListener bound to ONE OS-assigned ephemeral port (Listen(0)); it fans the
 //     32 inbound connections out via AcceptOneBlocking -> TcpTransport::FromAcceptedSocket,
@@ -55,9 +55,9 @@
 
 #include <nlohmann/json.hpp>
 
-#include "luminumbra_common/net/LockstepSession.h"      // TcpListener / TcpTransport
-#include "luminumbra_common/net/ReplicationEndpoint.h"  // ReplicationServer / ReplicationClient
-#include "luminumbra_common/net/ReplicationProtocol.h"  // UsercmdMsg / ReplEntityState
+#include "luminumbra_common/net/LockstepSession.h"     // TcpListener / TcpTransport
+#include "luminumbra_common/net/ReplicationEndpoint.h" // ReplicationServer / ReplicationClient
+#include "luminumbra_common/net/ReplicationProtocol.h" // UsercmdMsg / ReplEntityState
 
 namespace fs = std::filesystem;
 using namespace Luminumbra::Net;
@@ -72,17 +72,17 @@ namespace {
 // --- Soak size + budgets (mirror the multiprocess RunNetSoak real-TCP ceilings so the two
 // over-the-wire soak paths stay consistent). Over real TCP the kernel send buffer can hold
 // frames transiently, so these are looser than the in-process LoopbackTransport ctest's. --
-constexpr std::uint32_t kSoakClients            = 32;
-constexpr std::uint64_t kSoakTicks              = 300;    // 10 s of sim at 30 Hz
-constexpr int           kTickPeriodMs           = 33;     // ~30 Hz pacing
-constexpr std::int64_t  kChunkSizeMm            = 32 * 1000; // 32 m streaming chunk (AOI)
+constexpr std::uint32_t kSoakClients = 32;
+constexpr std::uint64_t kSoakTicks = 300;        // 10 s of sim at 30 Hz
+constexpr int kTickPeriodMs = 33;                // ~30 Hz pacing
+constexpr std::int64_t kChunkSizeMm = 32 * 1000; // 32 m streaming chunk (AOI)
 
-constexpr std::uint32_t kQueueDepthP95Budget    = 16;    // endpoint queue drains to ~0 over loopback
-constexpr std::uint32_t kSnapshotAgeP95Budget   = 30;    // ~1 s of un-acked snapshots
-constexpr std::size_t   kMaxClientBytesBudget   = 64u * 1024u;
-constexpr std::size_t   kPerTickBytesP95Budget  = 256u * 1024u; // total wire bytes / tick (32 clients)
-constexpr double        kTickMsP95Budget        = 33.0;  // per-tick work under one 30 Hz frame
-constexpr double        kTickRateToleranceFactor = 1.40; // allow 40% wall-clock overrun
+constexpr std::uint32_t kQueueDepthP95Budget = 16;  // endpoint queue drains to ~0 over loopback
+constexpr std::uint32_t kSnapshotAgeP95Budget = 30; // ~1 s of un-acked snapshots
+constexpr std::size_t kMaxClientBytesBudget = 64u * 1024u;
+constexpr std::size_t kPerTickBytesP95Budget = 256u * 1024u; // total wire bytes / tick (32 clients)
+constexpr double kTickMsP95Budget = 33.0;                    // per-tick work under one 30 Hz frame
+constexpr double kTickRateToleranceFactor = 1.40;            // allow 40% wall-clock overrun
 
 // Deterministic authoritative avatar set for tick `t`: N avatars clustered inside ONE chunk
 // (so the chunk-AOI gather includes the full set -- worst case for per-client bytes),
@@ -111,10 +111,14 @@ std::vector<ReplEntityState> AvatarStates(std::uint32_t n, std::uint64_t t) {
 // so "converge to the same authoritative hash" is exactly set-equality. Test-only; this
 // hashes transport-side replicated state, never a sim-determinism input.
 std::uint64_t HashEntityStates(std::vector<ReplEntityState> es) {
-    std::sort(es.begin(), es.end(),
-              [](const ReplEntityState& a, const ReplEntityState& b) { return a.entity_id < b.entity_id; });
+    std::sort(es.begin(), es.end(), [](const ReplEntityState& a, const ReplEntityState& b) {
+        return a.entity_id < b.entity_id;
+    });
     std::uint64_t h = 1469598103934665603ull; // FNV-1a offset basis
-    auto mix = [&h](std::uint64_t v) { h ^= v; h *= 1099511628211ull; };
+    auto mix = [&h](std::uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
     mix(es.size());
     for (const ReplEntityState& e : es) {
         mix(e.entity_id);
@@ -130,40 +134,49 @@ std::uint64_t HashEntityStates(std::vector<ReplEntityState> es) {
     return h;
 }
 
-template <typename T>
+template<typename T>
 T Percentile95(std::vector<T> v) {
-    if (v.empty()) return T{};
+    if (v.empty())
+        return T{};
     std::sort(v.begin(), v.end());
     const std::size_t idx = (v.size() - 1) * 95 / 100; // nearest-rank
     return v[idx];
 }
 
-fs::path NetSoakArtifactDir() { return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "net"; }
+fs::path NetSoakArtifactDir() {
+    return fs::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "net";
+}
 
 // Per-client cross-thread result. atomics carry the live signal (applied seq + connected)
 // the main thread polls DURING the run; the plain fields are written by the client thread
-// just before it exits and read by main ONLY after join() (the happens-before edge).
+// just before it exits and read by main ONLY after join (the happens-before edge).
 struct ClientResult {
     std::atomic<std::uint32_t> applied_seq{0};
     std::atomic<bool> connected{false};
-    std::uint64_t final_hash = 0;   // hash of the newest mirrored set at exit
-    std::uint32_t last_seq = 0;     // newest snapshot_seq mirrored at exit
+    std::uint64_t final_hash = 0; // hash of the newest mirrored set at exit
+    std::uint32_t last_seq = 0;   // newest snapshot_seq mirrored at exit
     bool has_snapshot = false;
 };
 
 // One driving-avatar client thread: connect (retry to a deadline), then stream usercmds +
 // mirror/ack snapshots until `done`, then a bounded final drain to catch the last (seq K)
 // snapshot before computing its convergence hash. Touches ONLY its own transport/client.
-void RunClient(std::uint16_t port, std::uint32_t nominal_id, ClientResult* out,
+void RunClient(std::uint16_t port,
+               std::uint32_t nominal_id,
+               ClientResult* out,
                std::atomic<bool>* done) {
     TcpTransport transport;
     const auto connect_deadline = clock_type::now() + std::chrono::seconds(15);
     bool connected = false;
     while (!done->load(std::memory_order_relaxed) && clock_type::now() < connect_deadline) {
-        if (transport.Connect("127.0.0.1", port, /*timeout_ms=*/2000)) { connected = true; break; }
+        if (transport.Connect("127.0.0.1", port, /*timeout_ms=*/2000)) {
+            connected = true;
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20)); // brief backoff, retry
     }
-    if (!connected) return; // out->connected stays false -> counted as a failed connection
+    if (!connected)
+        return; // out->connected stays false -> counted as a failed connection
     out->connected.store(true, std::memory_order_relaxed);
 
     ReplicationClient client(nominal_id, &transport);
@@ -208,10 +221,8 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
 
     // ONE listen socket on ONE OS-assigned ephemeral port (no fixed port -> no conflict/flake).
     TcpListener listener;
-    if (!listener.Listen(/*port=*/0, /*backlog=*/static_cast<int>(kSoakClients) + 8)) {
-        // Non-_WIN32 stub, or a genuinely unavailable loopback stack -> nothing to soak.
-        GTEST_SKIP() << "TCP loopback listen unavailable on this platform";
-    }
+    ASSERT_TRUE(listener.Listen(/*port=*/0, /*backlog=*/static_cast<int>(kSoakClients) + 8))
+        << "supported platforms must provide TCP loopback for the replication soak";
     const std::uint16_t port = listener.port();
 
     ReplicationServer server;
@@ -221,7 +232,8 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
     std::atomic<bool> done{false};
     std::vector<std::unique_ptr<ClientResult>> results;
     results.reserve(kSoakClients);
-    for (std::uint32_t i = 0; i < kSoakClients; ++i) results.push_back(std::make_unique<ClientResult>());
+    for (std::uint32_t i = 0; i < kSoakClients; ++i)
+        results.push_back(std::make_unique<ClientResult>());
     std::vector<std::thread> threads;
     threads.reserve(kSoakClients);
     for (std::uint32_t i = 0; i < kSoakClients; ++i) {
@@ -277,7 +289,8 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
             next_tick += std::chrono::milliseconds(kTickPeriodMs);
             std::this_thread::sleep_until(next_tick); // 30 Hz pace
         }
-        elapsed_ms = std::chrono::duration<double, std::milli>(clock_type::now() - wall_start).count();
+        elapsed_ms =
+            std::chrono::duration<double, std::milli>(clock_type::now() - wall_start).count();
 
         // Settle: keep draining acks while waiting (bounded) for every client to apply the
         // final seq-K snapshot the loop already sent. No re-broadcast (that would move seq/tick
@@ -287,9 +300,13 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
             server.PumpInbound();
             all_settled = true;
             for (const auto& r : results) {
-                if (r->applied_seq.load(std::memory_order_relaxed) < kSoakTicks) { all_settled = false; break; }
+                if (r->applied_seq.load(std::memory_order_relaxed) < kSoakTicks) {
+                    all_settled = false;
+                    break;
+                }
             }
-            if (all_settled) break;
+            if (all_settled)
+                break;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
     }
@@ -297,14 +314,16 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
     // Stop + join every client thread BEFORE reading their computed hashes (join is the
     // happens-before edge that makes the plain result fields safe to read here).
     done.store(true, std::memory_order_relaxed);
-    for (std::thread& th : threads) th.join();
+    for (std::thread& th : threads)
+        th.join();
 
     // Convergence: every client's newest mirrored set must equal AvatarStates(32, K).
     const std::uint64_t expected_hash = HashEntityStates(AvatarStates(kSoakClients, kSoakTicks));
     std::uint32_t connected_clients = 0;
     std::uint32_t converged_clients = 0;
     for (const auto& r : results) {
-        if (r->connected.load(std::memory_order_relaxed)) ++connected_clients;
+        if (r->connected.load(std::memory_order_relaxed))
+            ++connected_clients;
         if (r->has_snapshot && r->last_seq == static_cast<std::uint32_t>(kSoakTicks) &&
             r->final_hash == expected_hash) {
             ++converged_clients;
@@ -313,13 +332,15 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
 
     const std::size_t per_tick_bytes_p95 = Percentile95(per_tick_total_bytes);
     const std::size_t per_tick_bytes_max =
-        per_tick_total_bytes.empty() ? 0u
-                                     : *std::max_element(per_tick_total_bytes.begin(), per_tick_total_bytes.end());
+        per_tick_total_bytes.empty()
+            ? 0u
+            : *std::max_element(per_tick_total_bytes.begin(), per_tick_total_bytes.end());
     const double tick_ms_p95 = Percentile95(tick_work_ms);
     const double tick_ms_max =
         tick_work_ms.empty() ? 0.0 : *std::max_element(tick_work_ms.begin(), tick_work_ms.end());
 
-    // Per-budget verdicts (each surfaced individually so a breach is diagnosable from the artifact).
+    // Per-budget verdicts (each surfaced individually so a breach is diagnosable from the
+    // artifact).
     const bool clients_ok = accepted == kSoakClients;
     const bool ticks_ok = ticks_executed == kSoakTicks;
     const bool converged = converged_clients == kSoakClients;
@@ -362,7 +383,8 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
         {"queue_depth_p95", worst_queue_p95},
         {"snapshot_age_p95", worst_age_p95},
         {"converged_hash", expected_hash},
-        {"settled_within_window", all_settled}, // diagnostic: did every client reach seq K before settle timed out
+        {"settled_within_window",
+         all_settled}, // diagnostic: did every client reach seq K before settle timed out
         // explicit, bounded budgets the run is asserted against.
         {"budget_per_tick_bytes_p95", kPerTickBytesP95Budget},
         {"budget_max_client_bytes", kMaxClientBytesBudget},
@@ -395,7 +417,8 @@ TEST(NetSoak, OverTheWireThirtyTwoClientsWithinBudget) {
         << "only " << converged_clients << "/" << kSoakClients
         << " clients converged to the authoritative state hash";
     EXPECT_LE(per_tick_bytes_p95, kPerTickBytesP95Budget) << "per-tick wire bytes p95 over budget";
-    EXPECT_LE(max_client_bytes, kMaxClientBytesBudget) << "worst per-client snapshot bytes over budget";
+    EXPECT_LE(max_client_bytes, kMaxClientBytesBudget)
+        << "worst per-client snapshot bytes over budget";
     EXPECT_LE(tick_ms_p95, kTickMsP95Budget) << "per-tick processing p95 over one 30 Hz frame";
     EXPECT_LE(worst_queue_p95, kQueueDepthP95Budget) << "outbound queue-depth p95 over budget";
     EXPECT_LE(worst_age_p95, kSnapshotAgeP95Budget) << "snapshot-age p95 over budget";

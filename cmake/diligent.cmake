@@ -1,10 +1,9 @@
 # cmake/diligent.cmake
 #
-# spec 021 GPU-P02 / spec 014 FR-A.1 + FR-B.2: vendor Diligent Engine via
-# FetchContent. This is a DELIBERATE deviation from the local vendor/ norm in
-# dependencies.cmake (014 spec.md:114-116): FetchContent sidesteps the
+# Vendor Diligent Engine through FetchContent. This deliberately differs from
+# the local vendor/ convention because FetchContent avoids the worktree and
 # worktree/junction hazard a vendored submodule tree hits on this box. GL + Vulkan
-# device backends only; NO pass is ported in P02 (device bring-up only). Diligent
+# device backends only. Diligent is used for device bring-up validation, not by
 # links into the RhiDeviceBringupGpu ctest ONLY -- never a shipping binary -- so
 # building luminumbra_server_app never compiles Diligent and --smoke stays
 # byte-identical by construction.

@@ -1,12 +1,12 @@
-// T-I3-15: animation core + G1 pose-determinism gate.
+// animation core +  pose-determinism gate.
 //
-// The G1 gate hashes the exact float bit patterns of poses sampled from a
+// The  gate hashes the exact float bit patterns of poses sampled from a
 // committed fixture rig across one second of 30 Hz ticks, one blend and one
 // joint palette. The expectation is a committed constant that must hold in
 // BOTH the debug and release presets: AnimationRuntime.cpp is scalar float
 // math compiled with -ffp-contract=off, so optimization level cannot change
 // the result. Any intentional change to the sampling math requires a
-// deliberate re-bless of kG1PoseChecksum in the same commit.
+// deliberate update the baseline of kG1PoseChecksum in the same commit.
 
 #include <gtest/gtest.h>
 
@@ -32,7 +32,7 @@ using luminumbra::animation::SamplePose;
 using luminumbra::animation::Skeleton;
 using luminumbra::animation::SkeletonJoint;
 
-// G1 pose-determinism checksum (T-I3-15). Computed once from the fixture rig
+//  pose-determinism checksum. Computed once from the fixture rig
 // below and committed; the debug and release presets must both reproduce it.
 constexpr uint64_t kG1PoseChecksum = 0x80b8fec87c961238ull;
 
@@ -68,9 +68,15 @@ AnimationClip MakeFixtureClip() {
     rootTranslation.componentCount = 3;
     rootTranslation.times = {0.0f, 0.5f, 1.0f};
     rootTranslation.values = {
-        0.0f, 0.0f, 0.0f,
-        0.0f, 0.25f, 0.0f,
-        0.0f, 0.5f, 0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        0.25f,
+        0.0f,
+        0.0f,
+        0.5f,
+        0.0f,
     };
     clip.tracks.push_back(rootTranslation);
 
@@ -80,8 +86,14 @@ AnimationClip MakeFixtureClip() {
     midRotation.componentCount = 4;
     midRotation.times = {0.0f, 1.0f};
     midRotation.values = {
-        0.0f, 0.0f, 0.0f, 1.0f,
-        0.0f, 0.0f, 0.70710678f, 0.70710678f,
+        0.0f,
+        0.0f,
+        0.0f,
+        1.0f,
+        0.0f,
+        0.0f,
+        0.70710678f,
+        0.70710678f,
     };
     clip.tracks.push_back(midRotation);
 
@@ -91,8 +103,12 @@ AnimationClip MakeFixtureClip() {
     tipScale.componentCount = 3;
     tipScale.times = {0.0f, 1.0f};
     tipScale.values = {
-        1.0f, 1.0f, 1.0f,
-        2.0f, 2.0f, 2.0f,
+        1.0f,
+        1.0f,
+        1.0f,
+        2.0f,
+        2.0f,
+        2.0f,
     };
     clip.tracks.push_back(tipScale);
 
@@ -131,7 +147,7 @@ TEST(AnimationRuntime, G1PoseChecksumMatchesCommittedBaseline) {
     const uint64_t checksum = ComputeG1Checksum();
     RecordProperty("g1_pose_checksum", std::to_string(checksum));
     EXPECT_EQ(checksum, kG1PoseChecksum)
-        << "G1 pose checksum drifted: 0x" << std::hex << checksum
+        << " pose checksum drifted: 0x" << std::hex << checksum
         << ". Pose sampling math changed; re-bless deliberately in the same commit.";
 }
 
@@ -204,8 +220,8 @@ TEST(AnimationRuntime, FixedTickDrivesPoseSamplingFirstInTickOrder) {
     player.skeleton = &skeleton;
     player.clip = &clip;
 
-    // 0.1 s of frame time is 3 possible 30 Hz ticks, but GameSession clamps catch-up at 2 ticks/frame
-    // (GameSession.h spike guard), so 2 ticks run this frame.
+    // 0.1 s of frame time is 3 possible 30 Hz ticks, but GameSession clamps catch-up at 2
+    // ticks/frame (GameSession.h spike guard), so 2 ticks run this frame.
     const std::uint32_t ticks = session.TickSimulation(0.1);
     EXPECT_EQ(ticks, 2u);
     EXPECT_EQ(session.GetSimulationTickCount(), 2u);

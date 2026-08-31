@@ -1,5 +1,5 @@
 #version 450 core
-// Spec 015 C-2 (RENDER-18): the WBOIT resolve — the weighted average of the
+// the WBOIT resolve — the weighted average of the
 // accumulated premultiplied glass colors, composited over the lit scene with
 // coverage = 1 - reveal (OitModel.h). A zero-accumulation pixel (no glass)
 // resolves to coverage 0: untouched.

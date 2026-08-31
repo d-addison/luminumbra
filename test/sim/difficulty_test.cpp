@@ -1,4 +1,4 @@
-// Track game.difficulty — a PURE difficulty profile mapping ONE 0..1 scalar to a
+// game.difficulty: a PURE difficulty profile mapping ONE 0..1 scalar to a
 // bundle of per-system tuning multipliers (plant growth, evolution mutation, disease
 // virulence, fire dryness, predator speed, forage richness). These tests pin the
 // rubric: difficulty01=0 yields the RELAXED band, =1 the HARSH band; each parameter

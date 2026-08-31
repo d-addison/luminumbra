@@ -1,6 +1,0 @@
-{ "_comment": "ground-facing deep-night scene to show moonlight + cast shadows + the two night modes (LUMIN_MOON)",
-  "camera": { "pos": [120, 40, 120], "yaw": 225, "pitch": -22, "fov": 60 },
-  "time_of_day": 0.35,
-  "clouds": { "coverage": 0.25, "plane_height": 900, "shadow": false },
-  "weather": { "type": "none", "intensity": 0.0 },
-  "screenshot": "references/compare/night_ground.ppm" }

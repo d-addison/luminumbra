@@ -1,5 +1,5 @@
 #version 450 core
-// T-I5a-5 (B3): lightning light-pulse + bolt overlay (RENDER-ONLY, one-way F2).
+// lightning light-pulse + bolt overlay (, one-way ).
 // A strike is a deterministic SIM world event (in the `weather` world_hash
 // sub-hash). This overlay is the full-scene render response for the frame(s) the
 // bolt shows: a transient additive luminance PULSE over the whole frame + a
@@ -21,12 +21,12 @@ uniform float u_boltGlow = 0.040;        // bolt glow falloff radius (NDC)
 uniform int   u_boltCount = 0;
 uniform vec2  u_bolt[MAX_BOLT_POINTS];   // flattened NDC polyline (x<=-2 == pen-up)
 uniform float u_aspect = 1.777;          // framebuffer width/height
-// T-I5a-DR-storm-motion-v2: GROUND-IMPACT flash. The bolt must visibly TOUCH DOWN:
+// GROUND-IMPACT flash. The bolt must visibly TOUCH DOWN:
 // a bright radial bloom at the touchdown point sells the strike connecting to the
 // terrain. u_groundNdc is the projected ground terminus; u_groundFlash scales it.
 uniform vec2  u_groundNdc = vec2(0.0, -1.0);
 uniform float u_groundFlash = 0.0;       // 0 = no impact bloom
-// T-I5a-DR-storm-motion-v3: DARK STORM CLOUD the bolt emerges from. u_cloudNdc is
+// DARK STORM CLOUD the bolt emerges from. u_cloudNdc is
 // the bolt-top anchor (cloud base) in NDC; u_cloudDark scales a dark, billowing
 // cloud mass painted across the upper frame around that anchor. The flash then
 // lights this cloud from within so the strike clearly STEMS FROM the cloud.
@@ -89,7 +89,7 @@ void main() {
     if (u_active == 1 && u_pulse > 0.0) {
         vec2 ndc = TexCoords * 2.0 - 1.0;
 
-        // --- DARK STORM CLOUD (T-I5a-DR-storm-motion-v3) ------------------------
+        // --- DARK STORM CLOUD ------------------------
         // Paint a dark, billowing cloud mass across the upper frame, densest around
         // the bolt-top anchor (u_cloudNdc) and thinning downward, so the bolt
         // emerges from a visible cloud rather than thin air. The cloud is composited
@@ -127,14 +127,14 @@ void main() {
             color += litCloud * cloudLight * toStrike * u_pulse * 1.6;
         }
         // Bolt: a THIN hot near-white core with a soft, falling-off bluish glow
-        // halo along the polyline (T-I5a-DR-atmospheric-visuals). The old single
+        // halo along the polyline. The old single
         // wide smoothstep + core*3.0 painted a fat opaque white worm; this splits
         // the response into (1) a hard, narrow hot core only a couple px wide that
         // reads as the bright channel, and (2) an additive glow that decays
         // smoothly with distance so the bolt has a luminous halo rather than a
         // hard-edged blob. The core half-width is clamped well below the glow
         // radius so the structure stays thin regardless of the uniform tuning.
-        // T-I5a-DR-storm-motion-v2: a THIN, SHARP, near-white filament. The owner
+        // a THIN, SHARP, near-white filament. The owner
         // saw a "fat worm" -- so the core is pinned to a hard ~1-2px ribbon (a
         // near-binary edge a hair wide in NDC) regardless of the glow tuning, and
         // the glow halo is kept tight + faint so it frames the bolt rather than
@@ -158,13 +158,13 @@ void main() {
 
         // GROUND-IMPACT bloom -- a bright flash at the touchdown point so the bolt
         // visibly CONNECTS to the terrain and lights the ground it strikes.
-        // T-I5b-DR-storm-blockers (B2): the bloom is now anchored at the REAL
+        // the bloom is now anchored at the REAL
         // projected touchdown (the host only enables it when that point is on-screen),
         // and it is FLATTENED vertically + tightened so it reads as ground illumination
         // spreading along the surface at the strike, not a hovering circular saucer.
         // A small hot core sits at the contact point; a wider, low, horizontally-biased
         // wash lifts the ground around it.
-        // T-I5b-DR-storm2 (N2): TAME THE IMPACT BLOOM. The old bloom was a blown-out
+        // TAME THE IMPACT BLOOM. The old bloom was a blown-out
         // white smear that floated/bled across the water -- because (a) its radii were
         // large (core to 0.10, wash to 0.26 NDC) so it spread a big disc, (b) the wash
         // strength (0.30) was high enough to wash a wide area to white over the bright

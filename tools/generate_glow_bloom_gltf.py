@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""T-I3-18: generates the glow-bloom light-stimulus prop glTF.
+""": generates the glow-bloom light-stimulus prop glTF.
 
 Game-content generator (Project Capture). A small crystal bloom: three
 stretched octahedral shards leaning out of a common base. Processed by
-tools/asset_processor into a v1 .lmesh (the renderer paints it with the
+tools/asset_processor into a v1.lmesh (the renderer paints it with the
 emissive LUT material declared in the archetype data).
 
 Usage: python tools/generate_glow_bloom_gltf.py

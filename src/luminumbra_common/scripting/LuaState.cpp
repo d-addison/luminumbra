@@ -14,7 +14,7 @@
 namespace Luminumbra::scripting {
 
 struct LuaState::Impl {
-    // NO open_libraries(): the sandbox exposes exactly the surface registered
+    // NO open_libraries: the sandbox exposes exactly the surface registered
     // below (manifest-gated) — no io/os/debug/package, no load/dofile, no
     // wall-clock, no math.random (the escape corpus in test/scripting/ pins
     // the manifest side of this contract).
@@ -23,7 +23,7 @@ struct LuaState::Impl {
 
 LuaState::LuaState()
     : m_impl(std::make_unique<Impl>()) {
-    // FR-024-5: the read-only energy-field sampler. Registered under its
+    // -5: the read-only energy-field sampler. Registered under its
     // manifest home (`world.sample_energy_field`) and as the bare global the
     // spec names (`sample_energy_field`) — one implementation, one manifest
     // entry. Read-only by construction: the lambda routes through the const

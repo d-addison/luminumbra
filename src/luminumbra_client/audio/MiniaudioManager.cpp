@@ -1,16 +1,19 @@
 #include "audio/MiniaudioManager.h"
-#include "audio/EnvironmentalAudioModel.h"  // AUDIO-09: pure reverb-proxy param mapping
-#include "AudioSpatialCluster.h"
 #include "../../luminumbra_common/systems/PhysicsSystem.h"
-#include <algorithm>
-#include <iostream>
-#include <fstream>
-#include <random>
+#include "AudioSpatialCluster.h"
+#include "audio/EnvironmentalAudioModel.h" // pure reverb-proxy param mapping
 #include "core/Log.h"
+#include <algorithm>
+#include <fstream>
+#include <iostream>
+#include <random>
 
 namespace Luminumbra::Client {
 
-MiniaudioManager::MiniaudioManager(const std::string& root_path) : m_rootPath(root_path), m_engine(nullptr), m_rng(std::random_device{}()) {
+MiniaudioManager::MiniaudioManager(const std::string& root_path)
+    : m_rootPath(root_path)
+    , m_engine(nullptr)
+    , m_rng(std::random_device{}()) {
     // Initialize spatial clustering system
     m_spatial_cluster = std::make_unique<AudioSpatialCluster>();
 }
@@ -27,20 +30,20 @@ bool MiniaudioManager::Init() {
         return false;
     }
 
-    // AUDIO-05/AUDIO-10: build the mix-bus group tree. sfx attaches to the engine
+    // build the mix-bus group tree. sfx attaches to the engine
     // endpoint; ambient/events/ui attach UNDER sfx so user.audio_sfx scales every
     // non-music sound. All groups boot at volume 1.0 => the mix is byte-identical
     // to the pre-bus graph until a bus volume moves. A group-init failure is
-    // non-fatal: GroupFor() then returns nullptr and playback attaches straight
+    // non-fatal: GroupFor then returns nullptr and playback attaches straight
     // to the endpoint exactly as before.
-    auto init_group = [this](std::unique_ptr<ma_sound_group>& group,
-                             ma_sound_group* parent, const char* name) {
-        group = std::make_unique<ma_sound_group>();
-        if (ma_sound_group_init(m_engine.get(), 0, parent, group.get()) != MA_SUCCESS) {
-            LUMINUMBRA_CORE_WARN("Failed to init '{}' sound group; routing to endpoint.", name);
-            group.reset();
-        }
-    };
+    auto init_group =
+        [this](std::unique_ptr<ma_sound_group>& group, ma_sound_group* parent, const char* name) {
+            group = std::make_unique<ma_sound_group>();
+            if (ma_sound_group_init(m_engine.get(), 0, parent, group.get()) != MA_SUCCESS) {
+                LUMINUMBRA_CORE_WARN("Failed to init '{}' sound group; routing to endpoint.", name);
+                group.reset();
+            }
+        };
     init_group(m_sfxGroup, nullptr, "sfx");
     init_group(m_ambientGroup, m_sfxGroup.get(), "ambient");
     init_group(m_eventsGroup, m_sfxGroup.get(), "events");
@@ -57,19 +60,25 @@ bool MiniaudioManager::Init() {
 
 ma_sound_group* MiniaudioManager::GroupFor(BusId bus) const {
     switch (bus) {
-        case BusId::Sfx:     return m_sfxGroup.get();
-        case BusId::Ambient: return m_ambientGroup.get();
-        case BusId::Events:  return m_eventsGroup.get();
-        case BusId::Ui:      return m_uiGroup.get();
+        case BusId::Sfx:
+            return m_sfxGroup.get();
+        case BusId::Ambient:
+            return m_ambientGroup.get();
+        case BusId::Events:
+            return m_eventsGroup.get();
+        case BusId::Ui:
+            return m_uiGroup.get();
         // Master/Music playback never attaches to an sfx group; endpoint routing.
         case BusId::Master:
         case BusId::Music:
-        default:             return nullptr;
+        default:
+            return nullptr;
     }
 }
 
 void MiniaudioManager::ApplyAmbientBusGain() {
-    if (!m_ambientGroup) return;
+    if (!m_ambientGroup)
+        return;
     const float gain = m_ambientVolume * m_ducker.AmbientGain();
     if (gain != m_lastAppliedAmbientGain) {
         ma_sound_group_set_volume(m_ambientGroup.get(), gain);
@@ -78,26 +87,27 @@ void MiniaudioManager::ApplyAmbientBusGain() {
 }
 
 void MiniaudioManager::Update() {
-    if (!m_engine) return;
+    if (!m_engine)
+        return;
 
     // Update spatial audio clustering system
     if (m_spatial_clustering_enabled && m_spatial_cluster) {
         // Get listener position from miniaudio engine
         ma_vec3f ma_listener_pos = ma_engine_listener_get_position(m_engine.get(), 0);
         glm::vec3 listener_pos(ma_listener_pos.x, ma_listener_pos.y, ma_listener_pos.z);
-        
+
         // Update spatial clustering (this handles batched occlusion calculations)
-        m_spatial_cluster->Update(listener_pos, 1.0f/60.0f); // Assume 60 FPS for delta time
+        m_spatial_cluster->Update(listener_pos, 1.0f / 60.0f); // Assume 60 FPS for delta time
     }
 
-    for (auto it = m_activeSounds.begin(); it != m_activeSounds.end(); ) {
+    for (auto it = m_activeSounds.begin(); it != m_activeSounds.end();) {
         if (!ma_sound_is_playing(it->second.get())) {
             // Remove from spatial clustering system
             if (m_spatial_clustering_enabled && m_spatial_cluster) {
                 m_spatial_cluster->RemoveAudioSource(it->first);
             }
 
-            m_soundBaseVolume.erase(it->first);  // AUDIO-11: drop the occlusion base
+            m_soundBaseVolume.erase(it->first); // drop the occlusion base
             ma_sound_uninit(it->second.get());
             it = m_activeSounds.erase(it);
         } else {
@@ -105,7 +115,7 @@ void MiniaudioManager::Update() {
         }
     }
 
-    // AUDIO-11 read-back: make the occlusion the spatial cluster computed AUDIBLE.
+    //  read-back: make the occlusion the spatial cluster computed AUDIBLE.
     // For every active 3D voice we captured a base volume for, ask the cluster how
     // blocked its source->listener path is (physics raycast through world geometry;
     // 0 when there is no physics system or the line of sight is clear) and fold
@@ -114,13 +124,14 @@ void MiniaudioManager::Update() {
     // idempotent (never compounds). busGain/spatialAttenuation = 1: the bus group
     // node already carries the user SFX gain and miniaudio's spatializer already
     // applies the distance falloff, so passing 1 here avoids double-applying them.
-    // occlusion 0 => volume == base => byte-identical to the pre-AUDIO-11 mix.
+    // occlusion 0 => volume == base => byte-identical to the pre- mix.
     if (m_spatial_clustering_enabled && m_spatial_cluster && !m_soundBaseVolume.empty()) {
         const ma_vec3f ma_listener = ma_engine_listener_get_position(m_engine.get(), 0);
         const glm::vec3 listener_pos(ma_listener.x, ma_listener.y, ma_listener.z);
         for (const auto& [handle, base] : m_soundBaseVolume) {
             auto sit = m_activeSounds.find(handle);
-            if (sit == m_activeSounds.end()) continue;  // reaped/stopped this frame
+            if (sit == m_activeSounds.end())
+                continue; // reaped/stopped this frame
             const ma_vec3f ma_src = ma_sound_get_position(sit->second.get());
             const glm::vec3 source_pos(ma_src.x, ma_src.y, ma_src.z);
             const float occlusion = m_spatial_cluster->QueryOcclusion(source_pos, listener_pos);
@@ -134,7 +145,7 @@ void MiniaudioManager::Update() {
 
     // Reap fire-and-forget one-shots (PlayOneShot / PlayOneShot2D) that have finished
     // playing. An Events-bus voice ending releases the sidechain duck (ref-counted).
-    for (auto it = m_oneShotSounds.begin(); it != m_oneShotSounds.end(); ) {
+    for (auto it = m_oneShotSounds.begin(); it != m_oneShotSounds.end();) {
         if (!ma_sound_is_playing(it->sound.get())) {
             if (it->bus == BusId::Events) {
                 m_ducker.OnEventEnd();
@@ -146,7 +157,7 @@ void MiniaudioManager::Update() {
         }
     }
 
-    // AUDIO-10 sidechain ducking: advance the envelope with WALL-CLOCK dt (client
+    //  sidechain ducking: advance the envelope with WALL-CLOCK dt (client
     // audio presentation only — never sim time) and fold the duck gain into the
     // ambient bus (and the music bed, only when a music floor < 1 is configured).
     {
@@ -155,8 +166,10 @@ void MiniaudioManager::Update() {
         if (m_hasLastUpdateTime) {
             dt = std::chrono::duration<float>(now - m_lastUpdateTime).count();
             // Clamp a hitch/debugger pause so the envelope just saturates sanely.
-            if (dt > 0.25f) dt = 0.25f;
-            if (dt < 0.0f) dt = 0.0f;
+            if (dt > 0.25f)
+                dt = 0.25f;
+            if (dt < 0.0f)
+                dt = 0.0f;
         }
         m_lastUpdateTime = now;
         m_hasLastUpdateTime = true;
@@ -165,7 +178,7 @@ void MiniaudioManager::Update() {
         ApplyAmbientBusGain();
 
         // Optional music duck (DuckParams::music_floor_gain < 1). Off by default:
-        // MusicGain() is exactly 1.0 then, and the first pass through here caches
+        // MusicGain is exactly 1.0 then, and the first pass through here caches
         // it, so the music path is never re-scaled unless ducking music is enabled.
         const float music_duck = m_ducker.MusicGain();
         if (music_duck != m_lastAppliedMusicDuckGain) {
@@ -173,7 +186,8 @@ void MiniaudioManager::Update() {
             if (m_currentMusic && m_ducker.params().music_floor_gain < 1.0f) {
                 const AudioEventDefinition* def = nullptr;
                 auto dit = m_eventDefinitions.find(m_currentMusicID);
-                if (dit != m_eventDefinitions.end()) def = &dit->second;
+                if (dit != m_eventDefinitions.end())
+                    def = &dit->second;
                 ma_sound_set_volume(m_currentMusic.get(),
                                     (def ? def->volume : 1.0f) * m_musicVolume * music_duck);
             }
@@ -217,7 +231,7 @@ void MiniaudioManager::Shutdown() {
         uninit_group(m_eventsGroup);
         uninit_group(m_uiGroup);
         uninit_group(m_sfxGroup);
-        // AUDIO-09: the reverb-proxy delay node dies AFTER the groups (its only
+        // the reverb-proxy delay node dies AFTER the groups (its only
         // input was the ambient group, already detached above), BEFORE the engine.
         if (m_reverbNodeInitialized) {
             ma_delay_node_uninit(&m_reverbNode, nullptr);
@@ -237,7 +251,7 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
         LUMINUMBRA_CORE_ERROR("Failed to open sound bank: " + full_path);
         return false;
     }
-    
+
     nlohmann::json bank_json;
     try {
         bank_json = nlohmann::json::parse(f);
@@ -256,23 +270,21 @@ bool MiniaudioManager::LoadBank(const std::string& bankPath) {
         def.is_2d = event_def_json.value("is_2d", false);
         def.is_looping = event_def_json.value("looping", false);
         def.is_streaming = is_streaming;
-        
+
         // Enhanced 3D Audio Properties
         def.min_distance = event_def_json.value("min_distance", 1.0f);
         def.max_distance = event_def_json.value("max_distance", 100.0f);
         def.rolloff_factor = event_def_json.value("rolloff_factor", 1.0f);
         def.attenuation_model = event_def_json.value("attenuation_model", "inverse");
         def.doppler_factor = event_def_json.value("doppler_factor", 1.0f);
-        
+
         // Environmental Properties
-        def.use_reverb = event_def_json.value("use_reverb", false);
-        def.reverb_level = event_def_json.value("reverb_level", 0.0f);
-        def.reverb_type = event_def_json.value("reverb_type", "room");
-        
+
         m_eventDefinitions[event_id] = def;
     }
 
-    LUMINUMBRA_CORE_INFO("Loaded sound bank: " + std::to_string(m_eventDefinitions.size()) + " events from " + full_path);
+    LUMINUMBRA_CORE_INFO("Loaded sound bank: " + std::to_string(m_eventDefinitions.size()) +
+                         " events from " + full_path);
     return true;
 }
 
@@ -280,36 +292,44 @@ void MiniaudioManager::UnloadBank(const std::string& bankPath) {
     LUMINUMBRA_CORE_WARN("AUDIO WARNING: Unloading banks is not fully implemented.");
 }
 
-void MiniaudioManager::SetListenerTransform(const glm::vec3& position, const glm::vec3& forward, const glm::vec3& up) {
-    if (!m_engine) return;
+void MiniaudioManager::SetListenerTransform(const glm::vec3& position,
+                                            const glm::vec3& forward,
+                                            const glm::vec3& up) {
+    if (!m_engine)
+        return;
     ma_engine_listener_set_position(m_engine.get(), 0, position.x, position.y, position.z);
     ma_engine_listener_set_direction(m_engine.get(), 0, forward.x, forward.y, forward.z);
     ma_engine_listener_set_world_up(m_engine.get(), 0, up.x, up.y, up.z);
 }
 
 bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& outHandle) {
-    if (!m_engine) return false;
+    if (!m_engine)
+        return false;
     const AudioEventDefinition* def = GetEventDefinition(eventID);
-    if (!def || def->files.empty()) return false;
+    if (!def || def->files.empty())
+        return false;
 
     auto sound = std::make_unique<ma_sound>();
-    
+
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel_path;
 
     uint32_t flags = MA_SOUND_FLAG_DECODE;
-    if (def->is_2d) flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
+    if (def->is_2d)
+        flags |= MA_SOUND_FLAG_NO_SPATIALIZATION;
 
-    // Handle-based events are gameplay SFX: attach to the sfx bus (AUDIO-05).
-    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, GroupFor(BusId::Sfx), NULL, sound.get()) != MA_SUCCESS) {
+    // Handle-based events are gameplay SFX: attach to the sfx bus.
+    if (ma_sound_init_from_file(
+            m_engine.get(), full_path.c_str(), flags, GroupFor(BusId::Sfx), NULL, sound.get()) !=
+        MA_SUCCESS) {
         return false;
     }
 
     // Apply enhanced audio properties
     ma_sound_set_volume(sound.get(), def->volume);
     ma_sound_set_looping(sound.get(), def->is_looping);
-    
+
     // 3D Audio enhancements
     if (!def->is_2d) {
         ma_sound_set_min_distance(sound.get(), def->min_distance);
@@ -317,32 +337,34 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
         ma_sound_set_rolloff(sound.get(), def->rolloff_factor);
         ma_sound_set_doppler_factor(sound.get(), def->doppler_factor);
     }
-    
+
     // Apply pitch variation for realism
     if (def->pitch_variation > 0.0f) {
-        std::uniform_real_distribution<float> pitch_dist(-def->pitch_variation, def->pitch_variation);
+        std::uniform_real_distribution<float> pitch_dist(-def->pitch_variation,
+                                                         def->pitch_variation);
         float pitch = 1.0f + pitch_dist(m_rng);
         ma_sound_set_pitch(sound.get(), pitch);
     }
-    
+
     // Apply environmental effects
-    ApplyEnvironmentalEffects(sound.get(), def);
-    
+    ApplyEnvironmentalEffects(sound.get());
+
     ma_sound_start(sound.get());
 
     outHandle = m_nextHandle++;
     m_activeSounds[outHandle] = std::move(sound);
-    
+
     // Add to spatial clustering system if it's a 3D sound
     if (m_spatial_clustering_enabled && m_spatial_cluster && !def->is_2d) {
         // Default position at origin since this PlayEvent doesn't take a position parameter
         // Position will be set later via SetEventPosition
         glm::vec3 default_position(0.0f);
-        m_spatial_cluster->AddAudioSource(outHandle, default_position, def->volume, def->min_distance, def->max_distance);
+        m_spatial_cluster->AddAudioSource(
+            outHandle, default_position, def->volume, def->min_distance, def->max_distance);
     }
 
-    // AUDIO-11: remember the authored (post env-mult) volume for 3D voices so
-    // Update()'s occlusion read-back can re-derive their live volume without
+    // remember the authored (post env-mult) volume for 3D voices so
+    // Update's occlusion read-back can re-derive their live volume without
     // compounding. Tracked independently of m_spatial_clustering_enabled so the
     // base survives a later EnableSpatialClustering(true). 2D voices are never
     // occluded and are intentionally not tracked.
@@ -354,38 +376,47 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
 }
 
 bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
-    if (!m_engine) return false;
+    if (!m_engine)
+        return false;
     const AudioEventDefinition* def = GetEventDefinition(eventID);
-    if (!def || def->files.empty()) return false;
+    if (!def || def->files.empty())
+        return false;
 
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel = def->files[dist(m_rng)];
     const std::string full_path = m_rootPath + rel;
 
-    // AUDIO-05/AUDIO-10: routed as a MANAGED one-shot instead of the old
+    // routed as a MANAGED one-shot instead of the old
     // ma_engine_play_sound fire-and-forget so (a) the voice attaches to its bus
     // group and (b) an Events-bus voice's end can release the sidechain duck.
     // NO_PITCH + NO_SPATIALIZATION + volume left at the default 1.0 match the
     // inline-sound semantics ma_engine_play_sound used (bank volume was never
     // applied on this path), so the audible result is unchanged.
     auto sound = std::make_unique<ma_sound>();
-    const uint32_t flags = MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION;
-    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) != MA_SUCCESS) {
+    const uint32_t flags =
+        MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION;
+    if (ma_sound_init_from_file(
+            m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) !=
+        MA_SUCCESS) {
         return false;
     }
     ma_sound_start(sound.get());
 
     if (bus == BusId::Events) {
-        m_ducker.OnEventStart();  // released when Update() reaps the finished voice
+        m_ducker.OnEventStart(); // released when Update() reaps the finished voice
     }
     m_oneShotSounds.push_back(OneShotVoice{std::move(sound), bus});
     return true;
 }
 
-bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3& position, BusId bus) {
-    if (!m_engine) return false;
+bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID,
+                                   const glm::vec3& position,
+                                   BusId bus) {
+    if (!m_engine)
+        return false;
     const AudioEventDefinition* def = GetEventDefinition(eventID);
-    if (!def || def->files.empty()) return false;
+    if (!def || def->files.empty())
+        return false;
 
     std::uniform_int_distribution<> dist(0, static_cast<int>(def->files.size()) - 1);
     const std::string& rel_path = def->files[dist(m_rng)];
@@ -394,9 +425,11 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3&
     auto sound = std::make_unique<ma_sound>();
     uint32_t flags = MA_SOUND_FLAG_DECODE;
 
-    // AUDIO-05/AUDIO-10: spatial one-shots attach to their routed bus group
+    // spatial one-shots attach to their routed bus group
     // (default sfx; Events voices sidechain-duck the ambient bus).
-    if (ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) != MA_SUCCESS) {
+    if (ma_sound_init_from_file(
+            m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) !=
+        MA_SUCCESS) {
         return false;
     }
 
@@ -407,22 +440,23 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3&
     ma_sound_set_max_distance(sound.get(), def->max_distance);
     ma_sound_set_rolloff(sound.get(), def->rolloff_factor);
     ma_sound_set_doppler_factor(sound.get(), def->doppler_factor);
-    
+
     // Apply pitch variation
     if (def->pitch_variation > 0.0f) {
-        std::uniform_real_distribution<float> pitch_dist(-def->pitch_variation, def->pitch_variation);
+        std::uniform_real_distribution<float> pitch_dist(-def->pitch_variation,
+                                                         def->pitch_variation);
         float pitch = 1.0f + pitch_dist(m_rng);
         ma_sound_set_pitch(sound.get(), pitch);
     }
-    
-    ApplyEnvironmentalEffects(sound.get(), def);
+
+    ApplyEnvironmentalEffects(sound.get());
     ma_sound_start(sound.get());
 
     if (bus == BusId::Events) {
-        m_ducker.OnEventStart();  // released when Update() reaps the finished voice
+        m_ducker.OnEventStart(); // released when Update() reaps the finished voice
     }
 
-    // Keep the node alive until it finishes (the mixing thread is still reading it). Update()
+    // Keep the node alive until it finishes (the mixing thread is still reading it). Update
     // reaps stopped one-shots. Parking it here instead of a local unique_ptr fixes a
     // use-after-free: returning would have freed the ma_sound mid-playback.
     m_oneShotSounds.push_back(OneShotVoice{std::move(sound), bus});
@@ -431,7 +465,8 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID, const glm::vec3&
 
 // --- MODIFIED FUNCTION ---
 void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
-    if (!m_engine || musicEventID == m_currentMusicID) return;
+    if (!m_engine || musicEventID == m_currentMusicID)
+        return;
 
     StopMusic();
 
@@ -449,16 +484,17 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
     }
 
     m_currentMusic = std::make_unique<ma_sound>();
-    ma_result result = ma_sound_init_from_file(m_engine.get(), full_path.c_str(), flags, NULL, NULL, m_currentMusic.get());
-    
+    ma_result result = ma_sound_init_from_file(
+        m_engine.get(), full_path.c_str(), flags, NULL, NULL, m_currentMusic.get());
+
     if (result != MA_SUCCESS) {
-        LUMINUMBRA_CORE_ERROR("Failed to init music with ma_sound_init_from_file for '" + full_path
-                  + "'. Miniaudio result: " + ma_result_description(result)
-                  + " (" + std::to_string(result) + ")");
+        LUMINUMBRA_CORE_ERROR("Failed to init music with ma_sound_init_from_file for '" +
+                              full_path + "'. Miniaudio result: " + ma_result_description(result) +
+                              " (" + std::to_string(result) + ")");
         m_currentMusic.reset();
         return;
     }
-    
+
     ma_sound_set_volume(m_currentMusic.get(), def->volume * m_musicVolume);
     ma_sound_set_looping(m_currentMusic.get(), def->is_looping);
     ma_sound_start(m_currentMusic.get());
@@ -487,7 +523,7 @@ bool MiniaudioManager::StopEvent(AudioEventHandle handle, bool immediate) {
         if (immediate) {
             ma_sound_uninit(it->second.get());
             m_activeSounds.erase(it);
-            m_soundBaseVolume.erase(handle);  // AUDIO-11: drop the occlusion base
+            m_soundBaseVolume.erase(handle); // drop the occlusion base
         }
         return true;
     }
@@ -498,12 +534,12 @@ bool MiniaudioManager::SetEventPosition(AudioEventHandle handle, const glm::vec3
     auto it = m_activeSounds.find(handle);
     if (it != m_activeSounds.end()) {
         ma_sound_set_position(it->second.get(), position.x, position.y, position.z);
-        
+
         // Update spatial clustering system
         if (m_spatial_clustering_enabled && m_spatial_cluster) {
             m_spatial_cluster->UpdateSourcePosition(handle, position);
         }
-        
+
         return true;
     }
     return false;
@@ -521,23 +557,30 @@ void MiniaudioManager::SetMusicVolume(float volume) {
     if (m_currentMusic) {
         const AudioEventDefinition* def = nullptr;
         auto it = m_eventDefinitions.find(m_currentMusicID);
-        if (it != m_eventDefinitions.end()) def = &it->second;
+        if (it != m_eventDefinitions.end())
+            def = &it->second;
         ma_sound_set_volume(m_currentMusic.get(), (def ? def->volume : 1.0f) * m_musicVolume);
     }
 }
 
 void MiniaudioManager::SetSfxVolume(float volume) {
-    if (volume < 0.0f) volume = 0.0f; else if (volume > 1.0f) volume = 1.0f;
+    if (volume < 0.0f)
+        volume = 0.0f;
+    else if (volume > 1.0f)
+        volume = 1.0f;
     m_sfxVolume = volume;
     // Group volume applies live to every playing + future non-music sound
-    // (ambient/events/ui are children of this group). AUDIO-05.
+    // (ambient/events/ui are children of this group)..
     if (m_sfxGroup) {
         ma_sound_group_set_volume(m_sfxGroup.get(), m_sfxVolume);
     }
 }
 
 void MiniaudioManager::SetBusVolume(BusId bus, float volume) {
-    if (volume < 0.0f) volume = 0.0f; else if (volume > 1.0f) volume = 1.0f;
+    if (volume < 0.0f)
+        volume = 0.0f;
+    else if (volume > 1.0f)
+        volume = 1.0f;
     switch (bus) {
         case BusId::Master:
             SetMasterVolume(volume);
@@ -556,11 +599,13 @@ void MiniaudioManager::SetBusVolume(BusId bus, float volume) {
             break;
         case BusId::Events:
             m_eventsVolume = volume;
-            if (m_eventsGroup) ma_sound_group_set_volume(m_eventsGroup.get(), volume);
+            if (m_eventsGroup)
+                ma_sound_group_set_volume(m_eventsGroup.get(), volume);
             break;
         case BusId::Ui:
             m_uiVolume = volume;
-            if (m_uiGroup) ma_sound_group_set_volume(m_uiGroup.get(), volume);
+            if (m_uiGroup)
+                ma_sound_group_set_volume(m_uiGroup.get(), volume);
             break;
     }
 }
@@ -574,18 +619,21 @@ bool MiniaudioManager::SetEventVolume(AudioEventHandle handle, float volume) {
             m_spatial_cluster->UpdateSourceVolume(handle, volume);
         }
 
-        // AUDIO-11: rebase the occlusion read-back on the caller's new volume (only
-        // for tracked 3D voices) so Update() re-occludes THIS value next frame
+        // rebase the occlusion read-back on the caller's new volume (only
+        // for tracked 3D voices) so Update re-occludes THIS value next frame
         // instead of clobbering it back to the old base.
         auto bit = m_soundBaseVolume.find(handle);
-        if (bit != m_soundBaseVolume.end()) bit->second = volume;
+        if (bit != m_soundBaseVolume.end())
+            bit->second = volume;
 
         return true;
     }
     return false;
 }
 
-bool MiniaudioManager::SetEventParameter(AudioEventHandle handle, const AudioParamID& paramID, float value) {
+bool MiniaudioManager::SetEventParameter(AudioEventHandle handle,
+                                         const AudioParamID& paramID,
+                                         float value) {
     auto it = m_activeSounds.find(handle);
     if (it == m_activeSounds.end()) {
         return false;
@@ -596,10 +644,11 @@ bool MiniaudioManager::SetEventParameter(AudioEventHandle handle, const AudioPar
         if (m_spatial_clustering_enabled && m_spatial_cluster) {
             m_spatial_cluster->UpdateSourceVolume(handle, value);
         }
-        // AUDIO-11: rebase the occlusion read-back on the caller's new volume so
-        // Update() re-occludes it rather than clobbering it (tracked 3D voices only).
+        // rebase the occlusion read-back on the caller's new volume so
+        // Update re-occludes it rather than clobbering it (tracked 3D voices only).
         auto bit = m_soundBaseVolume.find(handle);
-        if (bit != m_soundBaseVolume.end()) bit->second = value;
+        if (bit != m_soundBaseVolume.end())
+            bit->second = value;
         return true;
     }
 
@@ -624,37 +673,42 @@ const AudioEventDefinition* MiniaudioManager::GetEventDefinition(const AudioEven
 
 void MiniaudioManager::SetEnvironment(const AudioEnvironment& environment) {
     m_currentEnvironment = environment;
-    
+
     // Initialize echo delay if not done
     if (!m_echoInitialized && m_engine) {
-        ma_delay_config delayConfig = ma_delay_config_init(2, 48000, (ma_uint32)(environment.echo_delay * 48000), 0.3f);
+        ma_delay_config delayConfig =
+            ma_delay_config_init(2, 48000, (ma_uint32)(environment.echo_delay * 48000), 0.3f);
         delayConfig.decay = environment.echo_decay;
         delayConfig.wet = 0.3f;
         delayConfig.dry = 0.7f;
-        
+
         if (ma_delay_init(&delayConfig, nullptr, &m_echoDelay) == MA_SUCCESS) {
             m_echoInitialized = true;
             LUMINUMBRA_CORE_INFO("Audio environment set: Echo initialized");
         }
     }
-    
-    LUMINUMBRA_CORE_INFO("Audio environment changed to type: {}", static_cast<int>(environment.type));
+
+    LUMINUMBRA_CORE_INFO("Audio environment changed to type: {}",
+                         static_cast<int>(environment.type));
 }
 
 void MiniaudioManager::SetWindParameters(const glm::vec3& direction, float strength) {
     m_windDirection = direction;
     m_windStrength = strength;
-    
+
     // Create or update wind sound
     if (strength > 0.0f && !m_windSound && m_engine) {
         // You would need a wind sound file
         const std::string windPath = m_rootPath + "assets/audio/sfx/weather/wind_loop.ogg";
         m_windSound = std::make_unique<ma_sound>();
-        
+
         // The wind bed is a looping ambience: route through the ambient bus.
-        if (ma_sound_init_from_file(m_engine.get(), windPath.c_str(),
-                                   MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
-                                   GroupFor(BusId::Ambient), NULL, m_windSound.get()) == MA_SUCCESS) {
+        if (ma_sound_init_from_file(m_engine.get(),
+                                    windPath.c_str(),
+                                    MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
+                                    GroupFor(BusId::Ambient),
+                                    NULL,
+                                    m_windSound.get()) == MA_SUCCESS) {
             ma_sound_set_looping(m_windSound.get(), true);
             ma_sound_set_volume(m_windSound.get(), strength * 0.6f);
             ma_sound_start(m_windSound.get());
@@ -675,14 +729,14 @@ void MiniaudioManager::UpdateAudioOcclusion(AudioEventHandle handle, float occlu
         // Apply occlusion by reducing high frequencies and volume
         float occluded_volume = (1.0f - occlusion_factor * 0.7f);
         ma_sound_set_volume(it->second.get(), occluded_volume);
-        
+
         // In a more advanced implementation, you would apply low-pass filtering
         // This is a simplified approach
     }
 }
 
 void MiniaudioManager::SetGlobalReverb(float wet, float dry, float decay) {
-    // AUDIO-09 (spec 021): the biome/weather reverb is REAL now. miniaudio
+    // the biome/weather reverb is REAL now. miniaudio
     // 0.11.22 (vendor FetchContent pin) has no built-in reverb DSP, so this is
     // an HONEST PROXY: one feedback delay line (ma_delay_node) spliced between
     // the ambient bus group and its parent. A short slap-back with feedback
@@ -699,8 +753,9 @@ void MiniaudioManager::SetGlobalReverb(float wet, float dry, float decay) {
             (AudioModel::kReverbProxyDelayMs / 1000.0f) * static_cast<float>(sampleRate));
         ma_delay_node_config cfg = ma_delay_node_config_init(
             channels, sampleRate, delayFrames > 0 ? delayFrames : 1, 0.0f);
-        if (ma_delay_node_init(ma_engine_get_node_graph(m_engine.get()), &cfg,
-                               nullptr, &m_reverbNode) == MA_SUCCESS) {
+        if (ma_delay_node_init(
+                ma_engine_get_node_graph(m_engine.get()), &cfg, nullptr, &m_reverbNode) ==
+            MA_SUCCESS) {
             // Park the mix at the incoming params BEFORE the node goes live in
             // the graph (no one-buffer blip of the config defaults).
             const AudioModel::ReverbProxyParams first =
@@ -710,11 +765,10 @@ void MiniaudioManager::SetGlobalReverb(float wet, float dry, float decay) {
             ma_delay_node_set_decay(&m_reverbNode, first.feedback);
             // Splice: ambient group -> reverb node -> the group's former parent
             // (sfx group, or the endpoint if sfx failed to init). ONE attach, so
-            // the AUDIO-05/10 ambient gain + sidechain duck upstream of the
+            // the /10 ambient gain + sidechain duck upstream of the
             // splice keep working unchanged.
-            ma_node* downstream = m_sfxGroup
-                ? reinterpret_cast<ma_node*>(m_sfxGroup.get())
-                : ma_engine_get_endpoint(m_engine.get());
+            ma_node* downstream = m_sfxGroup ? reinterpret_cast<ma_node*>(m_sfxGroup.get())
+                                             : ma_engine_get_endpoint(m_engine.get());
             ma_node_attach_output_bus(&m_reverbNode, 0, downstream, 0);
             ma_node_attach_output_bus(m_ambientGroup.get(), 0, &m_reverbNode, 0);
             m_reverbNodeInitialized = true;
@@ -722,41 +776,53 @@ void MiniaudioManager::SetGlobalReverb(float wet, float dry, float decay) {
                 "Global reverb proxy online: delay node {} ms spliced onto the ambient bus",
                 AudioModel::kReverbProxyDelayMs);
         } else {
-            LUMINUMBRA_CORE_WARN("Global reverb proxy: ma_delay_node_init failed; reverb params log-only.");
+            LUMINUMBRA_CORE_WARN(
+                "Global reverb proxy: ma_delay_node_init failed; reverb params log-only.");
         }
     }
     if (m_reverbNodeInitialized) {
-        const AudioModel::ReverbProxyParams p =
-            AudioModel::ReverbProxyFromParams(wet, dry, decay);
+        const AudioModel::ReverbProxyParams p = AudioModel::ReverbProxyFromParams(wet, dry, decay);
         ma_delay_node_set_wet(&m_reverbNode, p.wet);
         ma_delay_node_set_dry(&m_reverbNode, p.dry);
         ma_delay_node_set_decay(&m_reverbNode, p.feedback);
     }
     LUMINUMBRA_CORE_INFO("Global reverb set - Wet: {}, Dry: {}, Decay: {}{}",
-                         wet, dry, decay,
+                         wet,
+                         dry,
+                         decay,
                          m_reverbNodeInitialized ? "" : " (proxy offline: log-only)");
 }
 
-void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID, const glm::vec3& position, float radius) {
-    if (!m_engine) return;
-    
+void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID,
+                                       const glm::vec3& position,
+                                       float radius) {
+    if (!m_engine)
+        return;
+
     // Stop existing ambient if playing
     StopAmbientLoop(eventID);
-    
+
     const AudioEventDefinition* def = GetEventDefinition(eventID);
-    if (!def || def->files.empty()) return;
-    
+    if (!def || def->files.empty())
+        return;
+
     auto sound = std::make_unique<ma_sound>();
     const std::string full_path = m_rootPath + def->files[0];
-    
+
     // Decode the (short) loop fully into memory instead of streaming: ogg streaming can fail
     // silently, and a pre-decoded buffer loops seamlessly. Log failure so a missing/!decodable
     // ambient file is diagnosable rather than silent. Ambient beds attach to the
     // ambient bus (child of sfx): user.audio_sfx scales them, events sidechain-duck them.
-    const ma_result amb_rc = ma_sound_init_from_file(m_engine.get(), full_path.c_str(),
-                                                     MA_SOUND_FLAG_DECODE, GroupFor(BusId::Ambient), NULL, sound.get());
+    const ma_result amb_rc = ma_sound_init_from_file(m_engine.get(),
+                                                     full_path.c_str(),
+                                                     MA_SOUND_FLAG_DECODE,
+                                                     GroupFor(BusId::Ambient),
+                                                     NULL,
+                                                     sound.get());
     if (amb_rc != MA_SUCCESS) {
-        LUMINUMBRA_CORE_WARN("PlayAmbientLoop: failed to load '{}' (ma_result {})", full_path, static_cast<int>(amb_rc));
+        LUMINUMBRA_CORE_WARN("PlayAmbientLoop: failed to load '{}' (ma_result {})",
+                             full_path,
+                             static_cast<int>(amb_rc));
     }
     if (amb_rc == MA_SUCCESS) {
         ma_sound_set_position(sound.get(), position.x, position.y, position.z);
@@ -765,7 +831,7 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID, const glm::v
         ma_sound_set_min_distance(sound.get(), radius * 0.3f);
         ma_sound_set_max_distance(sound.get(), radius);
         ma_sound_start(sound.get());
-        
+
         m_ambientSounds[eventID] = std::move(sound);
         LUMINUMBRA_CORE_INFO("Started ambient loop: {}", eventID);
     }
@@ -782,19 +848,22 @@ void MiniaudioManager::StopAmbientLoop(const AudioEventID& eventID) {
 
 void MiniaudioManager::SetAmbientVolume(const AudioEventID& eventID, float scale) {
     auto it = m_ambientSounds.find(eventID);
-    if (it == m_ambientSounds.end()) return;  // that bed isn't playing -> nothing to scale
+    if (it == m_ambientSounds.end())
+        return; // that bed isn't playing -> nothing to scale
     auto dit = m_eventDefinitions.find(eventID);
     const float base = (dit != m_eventDefinitions.end()) ? dit->second.volume : 1.0f;
-    if (scale < 0.0f) scale = 0.0f;
+    if (scale < 0.0f)
+        scale = 0.0f;
     ma_sound_set_volume(it->second.get(), base * scale * m_currentEnvironment.ambient_volume);
 }
 
-void MiniaudioManager::ApplyEnvironmentalEffects(ma_sound* sound, const AudioEventDefinition* def) {
-    if (!sound || !def) return;
-    
+void MiniaudioManager::ApplyEnvironmentalEffects(ma_sound* sound) {
+    if (!sound)
+        return;
+
     // Apply environment-based volume adjustments
     float env_volume_multiplier = 1.0f;
-    
+
     switch (m_currentEnvironment.type) {
         case AudioEnvironmentType::Cave:
             env_volume_multiplier = 1.2f; // Caves amplify sound
@@ -809,16 +878,9 @@ void MiniaudioManager::ApplyEnvironmentalEffects(ma_sound* sound, const AudioEve
             env_volume_multiplier = 0.6f; // Water muffles sound
             break;
     }
-    
+
     float current_volume = ma_sound_get_volume(sound);
     ma_sound_set_volume(sound, current_volume * env_volume_multiplier);
-    
-    // Apply reverb if enabled for the event
-    if (def->use_reverb && def->reverb_level > 0.0f) {
-        // Custom reverb would go here
-        // For now, just log that reverb should be applied
-        LUMINUMBRA_CORE_INFO("Reverb applied - Level: {}, Type: {}", def->reverb_level, def->reverb_type);
-    }
 }
 
 void MiniaudioManager::UpdateWindEffect() {
@@ -829,7 +891,7 @@ void MiniaudioManager::UpdateWindEffect() {
             // Add wind-based sound variation
             float wind_variation = m_windStrength * 0.1f;
             std::uniform_real_distribution<float> wind_dist(-wind_variation, wind_variation);
-            
+
             // Slightly randomize pitch to simulate wind effect
             float current_pitch = ma_sound_get_pitch(sound.get());
             float wind_pitch = current_pitch + wind_dist(m_rng) * 0.05f;
@@ -841,14 +903,14 @@ void MiniaudioManager::UpdateWindEffect() {
 float MiniaudioManager::CalculateOcclusion(const glm::vec3& source, const glm::vec3& listener) {
     // This would require integration with the physics/world system
     // to perform line-of-sight checks and calculate occlusion
-    
+
     float distance = glm::distance(source, listener);
-    
+
     // Simple distance-based occlusion approximation
     if (distance > 50.0f) {
         return std::min(0.8f, (distance - 50.0f) / 100.0f);
     }
-    
+
     return 0.0f;
 }
 

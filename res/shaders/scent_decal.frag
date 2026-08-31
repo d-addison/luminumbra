@@ -1,6 +1,6 @@
 #version 450 core
 
-// PHEROMONE TRAIL GROUND DECAL — render-only deferred decal (spec 011 FR-C).
+// PHEROMONE TRAIL GROUND DECAL — render-only deferred decal.
 // Reconstructs world position from the deferred G-buffer (gPosition = VIEW-SPACE,
 // RGB16F at COLOR_ATTACHMENT0), projects world XZ into the ScentField grid, samples
 // the one-way sim->render scent mirror (RG16F: R = food-trail ch2, G = home-trail
@@ -53,6 +53,6 @@ void main() {
     float intensity = max(foodI, homeI * 0.7);
     if (intensity <= 0.0025) { FragColor = vec4(0.0); return; }
 
-    // glBlendFunc(SRC_ALPHA, ONE): rgb scaled by alpha, so carry strength in .a.
+    // glBlendFunc(SRC_ALPHA, ONE): rgb scaled by alpha, so carry strength in.a.
     FragColor = vec4(tint, intensity);
 }

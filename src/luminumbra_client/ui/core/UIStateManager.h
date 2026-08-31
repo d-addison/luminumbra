@@ -53,19 +53,19 @@ public:
     Property<int> playerHealth{100};
     Property<int> playerMaxHealth{100};
     Property<float> playerHealthPercent{1.0f};
-    
+
     // Game state properties
     Property<GameState> currentGameState;
     Property<bool> isPaused{false};
     Property<bool> isInGame{false};
     Property<bool> isMainMenu{true};
-    
+
     // World management properties
     Property<std::vector<WorldInfo>> worldList;
     Property<std::string> selectedWorldId;
     Property<bool> isLoadingWorld{false};
     Property<float> worldLoadingProgress{0.0f};
-    
+
     // Settings properties
     Property<float> masterVolume{1.0f};
     Property<float> sfxVolume{1.0f};
@@ -73,17 +73,13 @@ public:
     Property<int> renderDistance{8};
     Property<bool> vsyncEnabled{true};
     Property<bool> fullscreenEnabled{false};
-    
+
     // UI state properties
     Property<std::string> currentUIDocument{"main_menu.rml"};
     Property<std::string> activeModal;
     Property<bool> showDebugInfo{false};
     Property<std::string> notificationMessage;
     Property<float> notificationTimeout{0.0f};
-
-    // Inventory properties (for future use)
-    Property<int> selectedHotbarSlot{0};
-    Property<bool> inventoryOpen{false};
 
     // Methods for complex state updates
     void SetPlayerHealth(int health, int maxHealth);
@@ -96,7 +92,7 @@ public:
 private:
     UIStateManager() = default;
     ~UIStateManager() = default;
-    
+
     // Prevent copying
     UIStateManager(const UIStateManager&) = delete;
     UIStateManager& operator=(const UIStateManager&) = delete;

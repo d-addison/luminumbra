@@ -1,8 +1,8 @@
 #pragma once
 
-// Track sim.soil — SOIL NUTRIENT participant component.
+// sim.soil: SOIL NUTRIENT participant component.
 //
-// LOAD-BEARING RULE (mirrors the foliage pillar): this is SIM truth — small,
+// LOAD-BEARING RULE (mirrors the foliage system): this is SIM truth — small,
 // integer/fixed-point, deterministic — never render state. The soil nutrient
 // field (systems/SoilNutrientSystem.h) is consumed/produced by plants; this
 // component is the per-plant OPT-IN + per-plant sim bookkeeping for that loop.
@@ -24,8 +24,8 @@ namespace Luminumbra::Components {
 // plant draws nutrient from its cell at full maturity; the per-tick draw is
 // further scaled by the plant's current growth stage (a seed barely feeds, a
 // fruiting plant feeds hard). `absorbed` accumulates the total nutrient this
-// plant has taken (milli-units) — a deterministic integer the farming/quality
-// loop can later read (well-fed soil => healthier crop). Kept here, NOT on the
+// plant has taken (milli-units), a deterministic integer available to the
+// farming/quality loop. Kept here, not on the
 // existing PlantGrowthComponent, so the four parallel tracks stay conflict-free.
 struct SoilFeederComponent {
     std::uint16_t uptake = 1000;     // fixed-point uptake strength (milli-units), default 1.0

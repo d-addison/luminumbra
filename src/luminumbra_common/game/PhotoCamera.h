@@ -1,7 +1,7 @@
 #pragma once
 
-// Track game.photo_camera — a PURE, DETERMINISTIC camera/lens model for the
-// photography loop (pillar G). Given a lens (focal length, aperture, focus
+// game.photo_camera: a PURE, DETERMINISTIC camera/lens model for the
+// photography loop (photography). Given a lens (focal length, aperture, focus
 // distance, ISO, shutter) and a subject (distance, apparent size) it computes:
 //   * depth of field (circle-of-confusion near/far focus limits + in-focus flag),
 //   * exposure value (EV) and an exposure-quality score vs the scene luminance,
@@ -9,8 +9,8 @@
 //
 // SCOPE. NO render, NO GL, NO entt, NO rng, NO wall-clock, NO global state. It
 // operates on plain value structs (mirroring PhotoScoring.h's pure shape) so it
-// can be unit-tested in isolation and later fed by whatever capture pipeline the
-// game grows. The camera produces the optical facts (DoF, EV, isolation); the
+// can be unit-tested in isolation and fed by the runtime capture pipeline. The
+// camera produces the optical facts (DoF, EV, isolation); the
 // PhotoScoring rubric grades the resulting shot.
 //
 // DETERMINISM CONTRACT. This is sim-adjacent; if it ever feeds world_hash it must
@@ -39,16 +39,16 @@ namespace luminumbra::game {
 // ---------------------------------------------------------------------------
 struct LensSettings {
     float focal_length_mm = 50.0f;
-    float aperture_f      = 2.8f;   // f-number N (f/N): SMALL N = WIDE aperture.
+    float aperture_f = 2.8f; // f-number N (f/N): SMALL N = WIDE aperture.
     float focus_distance_m = 3.0f;
-    float iso             = 100.0f;
-    float shutter_s       = 0.008f; // ~1/125 s
+    float iso = 100.0f;
+    float shutter_s = 0.008f; // ~1/125 s
 };
 
 // The thing being photographed: how far it is and its physical size (metres).
 struct CameraSubject {
     float distance_m = 3.0f;
-    float size_m     = 0.5f;
+    float size_m = 0.5f;
 };
 
 // Depth-of-field result: the near and far distances (metres) within which the
@@ -57,8 +57,8 @@ struct CameraSubject {
 // or beyond its hyperfocal distance (DoF extends to "infinity").
 struct DofResult {
     float near_limit_m = 0.0f;
-    float far_limit_m  = 0.0f;
-    float in_focus     = 0.0f; // 1.0 if subject within [near,far], else 0.0
+    float far_limit_m = 0.0f;
+    float in_focus = 0.0f; // 1.0 if subject within [near,far], else 0.0
 };
 
 // ---------------------------------------------------------------------------
@@ -83,25 +83,29 @@ inline constexpr float kEvFalloff = 0.45f; // per-stop quality falloff
 // Map scene luminance [0,1] to a target EV. A mid-grey scene (lum ~0.18, the
 // photographic 18% grey card) wants a mid EV; brighter scenes want a higher EV
 // (stop down / faster shutter), darker scenes a lower EV. Linear, libm-free.
-inline constexpr float kSceneEvMin   = 6.0f;   // target EV at luminance 0
-inline constexpr float kSceneEvSpan  = 9.0f;   // EV added as luminance -> 1
+inline constexpr float kSceneEvMin = 6.0f;  // target EV at luminance 0
+inline constexpr float kSceneEvSpan = 9.0f; // EV added as luminance -> 1
 
 // Subject-isolation rubric. Isolation wants a SHALLOW depth of field (small
 // near..far band relative to subject distance) AND the subject in focus AND a
 // wide aperture (small f-number) for creamy bokeh.
 inline constexpr float kIsoApertureRef = 8.0f; // f/8+ is "deep"/poor isolation
-inline constexpr float kIsoDepthRef    = 4.0f; // DoF this many * distance = poor
+inline constexpr float kIsoDepthRef = 4.0f;    // DoF this many * distance = poor
 
 // ---------------------------------------------------------------------------
 // Small pure helpers (float +-*/ only — no libm).
 // ---------------------------------------------------------------------------
 inline float CameraClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
-inline float AbsF(float v) { return v < 0.0f ? -v : v; }
+inline float AbsF(float v) {
+    return v < 0.0f ? -v : v;
+}
 
 // ---------------------------------------------------------------------------
 // Log2Approx — a libm-free base-2 logarithm for x > 0.
@@ -166,12 +170,12 @@ inline DofResult ComputeDof(const LensSettings& lens, const CameraSubject& subje
     DofResult out;
 
     const float f_mm = lens.focal_length_mm;
-    const float N    = lens.aperture_f;
-    const float s    = lens.focus_distance_m;
+    const float N = lens.aperture_f;
+    const float s = lens.focus_distance_m;
 
     if (f_mm <= 0.0f || N <= 0.0f || s <= 0.0f) {
         out.near_limit_m = s > 0.0f ? s : 0.0f;
-        out.far_limit_m  = s > 0.0f ? s : 0.0f;
+        out.far_limit_m = s > 0.0f ? s : 0.0f;
         // With no real depth, the subject is "in focus" only if it sits at s.
         out.in_focus = (subject.distance_m == s) ? 1.0f : 0.0f;
         return out;
@@ -179,8 +183,8 @@ inline DofResult ComputeDof(const LensSettings& lens, const CameraSubject& subje
 
     // Hyperfocal distance in mm, then to metres. H_mm = f^2/(N*c) + f.
     const float H_mm = (f_mm * f_mm) / (N * kCircleOfConfusionMm) + f_mm;
-    const float H    = H_mm * 0.001f;        // mm -> m
-    const float f_m  = f_mm * 0.001f;        // focal length in metres
+    const float H = H_mm * 0.001f;   // mm -> m
+    const float f_m = f_mm * 0.001f; // focal length in metres
 
     // Near limit: s*(H - f) / (H + s - 2f).
     const float near_den = (H + s - 2.0f * f_m);
@@ -188,7 +192,8 @@ inline DofResult ComputeDof(const LensSettings& lens, const CameraSubject& subje
     if (near_den > 0.0f) {
         near_limit = (s * (H - f_m)) / near_den;
     }
-    if (near_limit < 0.0f) near_limit = 0.0f;
+    if (near_limit < 0.0f)
+        near_limit = 0.0f;
 
     // Far limit: s*(H - f)/(H - s). When s >= H (focused at/beyond hyperfocal),
     // DoF extends to infinity -> use the large finite sentinel.
@@ -204,10 +209,9 @@ inline DofResult ComputeDof(const LensSettings& lens, const CameraSubject& subje
     }
 
     out.near_limit_m = near_limit;
-    out.far_limit_m  = far_limit;
-    out.in_focus = (subject.distance_m >= near_limit && subject.distance_m <= far_limit)
-                       ? 1.0f
-                       : 0.0f;
+    out.far_limit_m = far_limit;
+    out.in_focus =
+        (subject.distance_m >= near_limit && subject.distance_m <= far_limit) ? 1.0f : 0.0f;
     return out;
 }
 
@@ -221,11 +225,11 @@ inline DofResult ComputeDof(const LensSettings& lens, const CameraSubject& subje
 // ---------------------------------------------------------------------------
 inline float ExposureValue(const LensSettings& lens) {
     const float N = lens.aperture_f > 0.0f ? lens.aperture_f : 1.0f;
-    const float t = lens.shutter_s  > 0.0f ? lens.shutter_s  : 1.0f;
-    const float iso = lens.iso      > 0.0f ? lens.iso        : 100.0f;
+    const float t = lens.shutter_s > 0.0f ? lens.shutter_s : 1.0f;
+    const float iso = lens.iso > 0.0f ? lens.iso : 100.0f;
 
-    const float ratio = (N * N) / t;          // > 0
-    const float iso_ratio = iso / 100.0f;     // > 0
+    const float ratio = (N * N) / t;      // > 0
+    const float iso_ratio = iso / 100.0f; // > 0
     return Log2Approx(ratio) - Log2Approx(iso_ratio);
 }
 
@@ -241,7 +245,7 @@ inline float ExposureValue(const LensSettings& lens) {
 inline float ExposureQuality(const LensSettings& lens, float scene_luminance) {
     const float lum = CameraClamp01(scene_luminance);
     const float target_ev = kSceneEvMin + lum * kSceneEvSpan;
-    const float lens_ev   = ExposureValue(lens);
+    const float lens_ev = ExposureValue(lens);
 
     const float stops_off = AbsF(lens_ev - target_ev);
     return CameraClamp01(1.0f - kEvFalloff * stops_off);
@@ -276,8 +280,8 @@ inline float SubjectIsolation(const LensSettings& lens, const CameraSubject& sub
     if (dof.far_limit_m >= kInfiniteFar) {
         depth_term = 0.0f;
     } else {
-        const float band = dof.far_limit_m - dof.near_limit_m;        // >= 0
-        const float band_ratio = band / (kIsoDepthRef * dist);        // 0 = tiny
+        const float band = dof.far_limit_m - dof.near_limit_m; // >= 0
+        const float band_ratio = band / (kIsoDepthRef * dist); // 0 = tiny
         depth_term = CameraClamp01(1.0f - band_ratio);
     }
 

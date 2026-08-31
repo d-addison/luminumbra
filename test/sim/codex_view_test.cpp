@@ -1,4 +1,4 @@
-// Phase 1 — game/CodexView: the pure presentation model the codex browse screen renders.
+// game/CodexView: the pure presentation model the codex browse screen renders.
 // Pins the content contract: every registered species appears (locked until discovered),
 // discovered rows carry the best-shot star rating + capture count, rows are id-sorted, and
 // the completion fraction tracks discovered/total. No GL, no rng.
@@ -20,7 +20,8 @@ namespace Components = Luminumbra::Components;
 CreatureSpeciesRegistry MakeRegistry() {
     CreatureSpeciesRegistry reg;
     std::string err;
-    reg.AddFromJsonText(R"({"id":"grovestrider","display_name":"Grovestrider","rarity":0.35})", err);
+    reg.AddFromJsonText(R"({"id":"grovestrider","display_name":"Grovestrider","rarity":0.35})",
+                        err);
     reg.AddFromJsonText(R"({"id":"lumen_moth","display_name":"Lumen Moth","rarity":0.85})", err);
     reg.AddFromJsonText(R"({"id":"tide_grazer","display_name":"Tide Grazer"})", err);
     return reg;
@@ -28,7 +29,7 @@ CreatureSpeciesRegistry MakeRegistry() {
 
 TEST(CodexView, EmptyCodexShowsAllSpeciesLocked) {
     const CreatureSpeciesRegistry reg = MakeRegistry();
-    PhotoCodex codex;  // nothing discovered
+    PhotoCodex codex; // nothing discovered
     const CodexView view = BuildCodexView(reg, codex);
 
     EXPECT_EQ(view.total_species, 3u);
@@ -48,8 +49,8 @@ TEST(CodexView, DiscoveredRowsCarryStarsAndCounts) {
     const std::uint16_t grove = Components::CreatureSpeciesId16("grovestrider");
 
     PhotoCodex codex;
-    codex.Record(static_cast<int>(grove), 0.40f);  // a 2-star-ish shot
-    codex.Record(static_cast<int>(grove), 0.90f);  // a better 5-star shot; codex keeps best
+    codex.Record(static_cast<int>(grove), 0.40f); // a 2-star-ish shot
+    codex.Record(static_cast<int>(grove), 0.90f); // a better 5-star shot; codex keeps best
 
     const CodexView view = BuildCodexView(reg, codex);
     EXPECT_EQ(view.discovered_count, 1u);
@@ -61,7 +62,7 @@ TEST(CodexView, DiscoveredRowsCarryStarsAndCounts) {
             found = true;
             EXPECT_TRUE(row.discovered);
             EXPECT_EQ(row.captures, 2u);
-            EXPECT_GE(row.stars, 4);  // best shot 0.90 -> 5 stars
+            EXPECT_GE(row.stars, 4); // best shot 0.90 -> 5 stars
         }
     }
     EXPECT_TRUE(found);
@@ -76,4 +77,4 @@ TEST(CodexView, RowsAreSortedBySpeciesId) {
     }
 }
 
-}  // namespace
+} // namespace

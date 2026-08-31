@@ -1,7 +1,7 @@
-Feature: SHIELD SDF producer contract (SHIELD-10, spec 021)
+Feature: SHIELD SDF producer contract ()
   docs/shield/sdf-contract.md must enumerate the two SDF producer tiers and the
   malformed-SDF regeneration rule so every producer and the meshing promotion lane
-  agree on the data shape from `sdf_data` size alone (SHIELD-04). The SdfContractDocLint
+  agree on the data shape from `sdf_data` size alone (). The SdfContractDocLint
   ctest checks the contract doc against the strings quoted in the Then/And steps below —
   those quoted needles are the single source of truth for what the doc must state (see
   tools/check_sdf_contract_doc.py).

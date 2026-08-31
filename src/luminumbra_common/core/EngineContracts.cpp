@@ -10,12 +10,18 @@ namespace Luminumbra::Contracts {
 
 std::string_view ToString(LifecycleState state) {
     switch (state) {
-        case LifecycleState::Uninitialized: return "uninitialized";
-        case LifecycleState::Starting: return "starting";
-        case LifecycleState::Running: return "running";
-        case LifecycleState::Stopping: return "stopping";
-        case LifecycleState::Stopped: return "stopped";
-        case LifecycleState::Failed: return "failed";
+        case LifecycleState::Uninitialized:
+            return "uninitialized";
+        case LifecycleState::Starting:
+            return "starting";
+        case LifecycleState::Running:
+            return "running";
+        case LifecycleState::Stopping:
+            return "stopping";
+        case LifecycleState::Stopped:
+            return "stopped";
+        case LifecycleState::Failed:
+            return "failed";
     }
     return "unknown";
 }
@@ -64,7 +70,8 @@ ContractResult LifecycleGraph::validate_startup_order(const std::vector<std::str
     return result;
 }
 
-ContractResult LifecycleGraph::validate_shutdown_order(const std::vector<std::string>& order) const {
+ContractResult
+LifecycleGraph::validate_shutdown_order(const std::vector<std::string>& order) const {
     ContractResult result;
     std::unordered_set<std::string> stopped;
     std::unordered_set<std::string> all_names;
@@ -85,7 +92,8 @@ ContractResult LifecycleGraph::validate_shutdown_order(const std::vector<std::st
         }
 
         for (const auto& contract : m_contracts) {
-            if (std::find(contract.depends_on.begin(), contract.depends_on.end(), name) != contract.depends_on.end() &&
+            if (std::find(contract.depends_on.begin(), contract.depends_on.end(), name) !=
+                    contract.depends_on.end() &&
                 stopped.find(contract.name) == stopped.end()) {
                 result.add_error(name + " shuts down before dependent " + contract.name);
             }
@@ -107,7 +115,7 @@ std::vector<SubsystemContract> KnownRuntimeSubsystemContracts() {
         {"physics_system", "game_session", {}},
         {"world_system", "game_session", {"job_system", "physics_system"}},
         {"water_system", "game_session", {"job_system", "world_system"}},
-        // T-I3-17: instinct planning runs on the fixed simulation tick after
+        // instinct planning runs on the fixed simulation tick after
         // the world systems exist (NeedsComponent migration landed with this
         // contract entry).
         {"instinct_system", "game_session", {"world_system"}},
@@ -146,8 +154,8 @@ void LifecycleTracker::mark_failed(std::string reason) {
 bool LifecycleTracker::transition(LifecycleState expected, LifecycleState next) {
     if (m_state != expected) {
         std::ostringstream message;
-        message << m_name << " cannot transition from " << ToString(m_state)
-                << " to " << ToString(next) << "; expected " << ToString(expected);
+        message << m_name << " cannot transition from " << ToString(m_state) << " to "
+                << ToString(next) << "; expected " << ToString(expected);
         m_failure_reason = message.str();
         return false;
     }
@@ -179,11 +187,10 @@ void OwnedJobTracker::track(JobHandle handle) {
 }
 
 void OwnedJobTracker::prune_completed() {
-    m_handles.erase(
-        std::remove_if(m_handles.begin(), m_handles.end(), [](const JobHandle& handle) {
-            return IsJobComplete(handle);
-        }),
-        m_handles.end());
+    m_handles.erase(std::remove_if(m_handles.begin(),
+                                   m_handles.end(),
+                                   [](const JobHandle& handle) { return IsJobComplete(handle); }),
+                    m_handles.end());
 }
 
 void OwnedJobTracker::drain(JobSystem& job_system) {
@@ -194,9 +201,10 @@ void OwnedJobTracker::drain(JobSystem& job_system) {
 }
 
 std::size_t OwnedJobTracker::outstanding_count() const {
-    return static_cast<std::size_t>(std::count_if(m_handles.begin(), m_handles.end(), [](const JobHandle& handle) {
-        return !IsJobComplete(handle);
-    }));
+    return static_cast<std::size_t>(
+        std::count_if(m_handles.begin(), m_handles.end(), [](const JobHandle& handle) {
+            return !IsJobComplete(handle);
+        }));
 }
 
 ResourceHandle ResourceGenerationTable::create() {
@@ -223,7 +231,8 @@ bool ResourceGenerationTable::destroy(ResourceHandle handle) {
 
     Slot& slot = m_slots[handle.slot];
     slot.active = false;
-    slot.generation = slot.generation == std::numeric_limits<std::uint32_t>::max() ? 1 : slot.generation + 1;
+    slot.generation =
+        slot.generation == std::numeric_limits<std::uint32_t>::max() ? 1 : slot.generation + 1;
     m_free_slots.push_back(handle.slot);
     --m_active_count;
     return true;

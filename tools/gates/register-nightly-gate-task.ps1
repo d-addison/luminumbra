@@ -5,7 +5,7 @@
 .DESCRIPTION
     This is an explicit, idempotent registration helper. It makes no change when
     the existing root task already has the exact non-elevated current-user
-    principal, runner, debug/release presets, working directory, daily 02:00
+    principal, runner, debug preset, working directory, daily 02:00
     trigger, and bounded execution settings. Use -WhatIf to inspect a proposed
     registration. The nightly runner never invokes this helper automatically.
 #>
@@ -38,7 +38,7 @@ $runnerPath = (Resolve-Path -LiteralPath (Join-Path $scriptDir "run-nightly-gate
 $taskName = "Luminumbra Nightly Gate"
 $taskPath = "\"
 $powerShellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
-$actionArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -BuildPreset debug -RenderBudgetPreset release' -f $runnerPath
+$actionArguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -BuildPreset debug' -f $runnerPath
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $identitySid = $identity.User.Value
 $taskPrincipal = New-ScheduledTaskPrincipal `
@@ -129,7 +129,7 @@ if ($existing.Count -eq 1) {
         -Trigger $trigger `
         -Settings $settings `
         -Principal $taskPrincipal `
-        -Description "Luminumbra full nightly gate (debug build/tests/frontier/determinism; release RenderBudget)." | Out-Null
+        -Description "Luminumbra full nightly gate (debug build/tests/frontier/determinism)." | Out-Null
     Write-Host "Registered nightly task: $taskPath$taskName"
 }
 

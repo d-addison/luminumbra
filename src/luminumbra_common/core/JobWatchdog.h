@@ -1,6 +1,6 @@
 #pragma once
 
-// OPS-11 (spec 021): opt-in named-phase wedge watchdog for potentially-unbounded
+// opt-in named-phase wedge watchdog for potentially-unbounded
 // job-system waits. Observability ONLY — it never bails or alters the wait, so it
 // is hash-neutral and stays OFF in determinism gates (--smoke). With
 // LUMINUMBRA_JOB_WATCHDOG=1, a wait that outlives the report interval names its
@@ -30,13 +30,13 @@ inline bool JobWatchdogEnabled() {
 // with `phase` every `report_interval`. Returns the number of reports emitted (0
 // when disabled or the wait finishes inside the first interval) so tests can
 // assert the reporter actually fires. `enabled` is a parameter (callers pass
-// JobWatchdogEnabled()) so the test does not depend on process-env mutation.
-template <typename WaitFn>
-std::size_t WaitWithJobWatchdog(bool enabled,
-                                std::string phase,
-                                WaitFn&& wait_fn,
-                                std::chrono::milliseconds report_interval =
-                                    std::chrono::seconds(30)) {
+// JobWatchdogEnabled) so the test does not depend on process-env mutation.
+template<typename WaitFn>
+std::size_t
+WaitWithJobWatchdog(bool enabled,
+                    std::string phase,
+                    WaitFn&& wait_fn,
+                    std::chrono::milliseconds report_interval = std::chrono::seconds(30)) {
     if (!enabled) {
         std::forward<WaitFn>(wait_fn)();
         return 0;
@@ -46,8 +46,8 @@ std::size_t WaitWithJobWatchdog(bool enabled,
     // Poll granularity: fine enough that short test intervals report promptly,
     // never coarser than the production 500 ms cadence.
     const auto poll = std::min<std::chrono::milliseconds>(
-        std::chrono::milliseconds(500), std::max<std::chrono::milliseconds>(
-            std::chrono::milliseconds(10), report_interval / 4));
+        std::chrono::milliseconds(500),
+        std::max<std::chrono::milliseconds>(std::chrono::milliseconds(10), report_interval / 4));
     std::thread watchdog([&wait_done, &reports, &phase, report_interval, poll]() {
         const auto started = std::chrono::steady_clock::now();
         auto next_report = started + report_interval;
@@ -59,7 +59,8 @@ std::size_t WaitWithJobWatchdog(bool enabled,
                     std::chrono::duration_cast<std::chrono::seconds>(now - started).count();
                 LUMINUMBRA_CORE_WARN(
                     "JOB_WATCHDOG: phase '{}' still waiting after {} s — possible wedge",
-                    phase, waited_s);
+                    phase,
+                    waited_s);
                 reports.fetch_add(1, std::memory_order_relaxed);
                 next_report = now + report_interval;
             }

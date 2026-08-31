@@ -1,4 +1,4 @@
-// I9-ECO: the live creature-brain tick — deterministic movement emerging from the IAUS
+//  the live creature-brain tick — deterministic movement emerging from the IAUS
 // decisions (prey flee predators, predators hunt prey), id-ordered + libm-free.
 #include <gtest/gtest.h>
 
@@ -29,10 +29,13 @@ entt::entity spawn(entt::registry& r, float x, float z, bool predator, float hun
     return e;
 }
 
-float xOf(entt::registry& r, entt::entity e) { return r.get<Comp::TransformComponent>(e).position.x; }
+float xOf(entt::registry& r, entt::entity e) {
+    return r.get<Comp::TransformComponent>(e).position.x;
+}
 
 void tick(entt::registry& r, int n) {
-    for (int i = 0; i < n; ++i) RunCreatureBrainSystemOnTick(r, 1.0f / 30.0f);
+    for (int i = 0; i < n; ++i)
+        RunCreatureBrainSystemOnTick(r, 1.0f / 30.0f);
 }
 
 // No creatures -> the system is a no-op (byte-identical canonical roster).
@@ -64,7 +67,7 @@ TEST(CreatureBrainSystem, PredatorHuntsPrey) {
 TEST(CreatureBrainSystem, PredatorCatchesAdjacentPrey) {
     entt::registry r;
     const entt::entity pred = spawn(r, /*x*/ 0.0f, 0.0f, /*predator*/ true, /*hunger*/ 0.95f);
-    const entt::entity prey = spawn(r, /*x*/ 1.0f, 0.0f, /*predator*/ false);  // within catch reach
+    const entt::entity prey = spawn(r, /*x*/ 1.0f, 0.0f, /*predator*/ false); // within catch reach
     RunCreatureBrainSystemOnTick(r, 1.0f / 30.0f);
     EXPECT_TRUE(r.get<Comp::CreatureComponent>(prey).eaten) << "adjacent prey should be caught";
     EXPECT_LT(r.get<Comp::CreatureComponent>(pred).hunger, 0.95f) << "predator should be sated";
@@ -74,22 +77,23 @@ TEST(CreatureBrainSystem, PredatorCatchesAdjacentPrey) {
 TEST(CreatureBrainSystem, EatenPreyIsInert) {
     entt::registry r;
     const entt::entity prey = spawn(r, /*x*/ 0.0f, 0.0f, /*predator*/ false);
-    spawn(r, /*x*/ 5.0f, 0.0f, /*predator*/ true, /*hunger*/ 0.8f);  // a threat it would flee
+    spawn(r, /*x*/ 5.0f, 0.0f, /*predator*/ true, /*hunger*/ 0.8f); // a threat it would flee
     r.get<Comp::CreatureComponent>(prey).eaten = true;
     tick(r, 30);
     EXPECT_NEAR(xOf(r, prey), 0.0f, 1.0e-4f) << "a carcass must not move";
 }
 
-// Spec 011 Phase A: energy (the long-term sleep need) DRAINS while a creature is active.
+//  Phase A: energy (the long-term sleep need) DRAINS while a creature is active.
 // A fresh, mildly-hungry lone prey grazes/wanders -> energy ticks down from full.
 TEST(CreatureBrainSystem, EnergyDrainsWhileActive) {
     entt::registry r;
     const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.5f);
     auto& cr = r.get<Comp::CreatureComponent>(e);
-    cr.stamina = 1.0f;  // fresh -> will not Rest
+    cr.stamina = 1.0f; // fresh -> will not Rest
     ASSERT_FLOAT_EQ(cr.energy, 1.0f);
     tick(r, 200);
-    EXPECT_LT(r.get<Comp::CreatureComponent>(e).energy, 1.0f) << "being awake should tire the creature";
+    EXPECT_LT(r.get<Comp::CreatureComponent>(e).energy, 1.0f)
+        << "being awake should tire the creature";
     EXPECT_GE(r.get<Comp::CreatureComponent>(e).energy, 0.0f) << "energy stays clamped >= 0";
 }
 
@@ -97,9 +101,10 @@ TEST(CreatureBrainSystem, EnergyDrainsWhileActive) {
 // prey chooses Rest, which recovers energy faster than being awake drains it.
 TEST(CreatureBrainSystem, EnergyRecoversWhileResting) {
     entt::registry r;
-    const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.0f);  // sated -> won't graze
+    const entt::entity e =
+        spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.0f); // sated -> won't graze
     auto& cr = r.get<Comp::CreatureComponent>(e);
-    cr.stamina = 0.0f;   // exhausted -> Rest scores highest (safe + low stamina)
+    cr.stamina = 0.0f; // exhausted -> Rest scores highest (safe + low stamina)
     cr.energy = 0.30f;
     tick(r, 60);
     const auto& out = r.get<Comp::CreatureComponent>(e);
@@ -109,16 +114,16 @@ TEST(CreatureBrainSystem, EnergyRecoversWhileResting) {
     EXPECT_LE(out.energy, 1.0f) << "energy stays clamped <= 1";
 }
 
-// Spec 011: a tired creature in its circadian OFF-phase (activity 0) and safe SLEEPS at its
+// a tired creature in its circadian OFF-phase (activity 0) and safe SLEEPS at its
 // spot, recovering energy without moving.
 TEST(CreatureBrainSystem, SleepsInOffPhaseWhenTired) {
     entt::registry r;
     const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.0f);
     auto& cr = r.get<Comp::CreatureComponent>(e);
-    cr.stamina = 1.0f;   // not exhausted -> Rest util ~0, so Sleep must win on its own merits
-    cr.energy = 0.20f;   // tired
+    cr.stamina = 1.0f; // not exhausted -> Rest util ~0, so Sleep must win on its own merits
+    cr.energy = 0.20f; // tired
     auto& cc = r.emplace<Comp::CircadianComponent>(e);
-    cc.activity = 0.0f;  // deep off-phase (night for a diurnal creature)
+    cc.activity = 0.0f; // deep off-phase (night for a diurnal creature)
     tick(r, 30);
     const auto& out = r.get<Comp::CreatureComponent>(e);
     EXPECT_EQ(out.last_action, static_cast<int>(luminumbra::ai::CreatureAction::Sleep))
@@ -134,7 +139,7 @@ TEST(CreatureBrainSystem, NoCircadianNeverSleeps) {
     const entt::entity e = spawn(r, 0.0f, 0.0f, /*predator*/ false, /*hunger*/ 0.0f);
     auto& cr = r.get<Comp::CreatureComponent>(e);
     cr.stamina = 1.0f;
-    cr.energy = 0.05f;  // very tired, but no circadian clock -> always "active"
+    cr.energy = 0.05f; // very tired, but no circadian clock -> always "active"
     tick(r, 30);
     EXPECT_NE(r.get<Comp::CreatureComponent>(e).last_action,
               static_cast<int>(luminumbra::ai::CreatureAction::Sleep))
@@ -149,10 +154,10 @@ TEST(CreatureBrainSystem, Deterministic) {
         const entt::entity b = spawn(r, 4.0f, 1.0f, true, 0.7f);
         const entt::entity c = spawn(r, -3.0f, 2.0f, false, 0.3f);
         tick(r, 50);
-        return std::vector<float>{xOf(r, a), r.get<Comp::TransformComponent>(a).position.z,
-                                  xOf(r, b), xOf(r, c)};
+        return std::vector<float>{
+            xOf(r, a), r.get<Comp::TransformComponent>(a).position.z, xOf(r, b), xOf(r, c)};
     };
     EXPECT_EQ(run(), run());
 }
 
-}  // namespace
+} // namespace

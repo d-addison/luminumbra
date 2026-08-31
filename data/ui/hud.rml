@@ -10,7 +10,7 @@
              Diegetic + mostly transparent so it never competes with the world. -->
         <div class="hud-corner">
             <div class="hud-time">
-                <span class="hud-time-value">lumin v0.1</span>
+                <span class="hud-time-value">lumin v0.1.0</span>
             </div>
             <div class="hud-watermark-sub">24 exposures</div>
         </div>

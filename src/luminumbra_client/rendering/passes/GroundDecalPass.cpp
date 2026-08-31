@@ -1,10 +1,10 @@
 #include "GroundDecalPass.h"
 
-#include "PassGlHelpers.h"
-#include "../Shader.h"
-#include "../PassShaderLayouts.h" // FR-D: enumerable ExpectedLayout registry (GPU-05)
-#include "../RenderContext.h"   // Spec 016 GPU-04: position texture + camera via ctx
 #include "../Camera.h"
+#include "../PassShaderLayouts.h" // enumerable ExpectedLayout registry
+#include "../RenderContext.h"     // position texture + camera via ctx
+#include "../Shader.h"
+#include "PassGlHelpers.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -17,7 +17,7 @@ void GroundDecalPass::init_shader(const std::filesystem::path& root_path) {
     const std::string vert = (root_path / "res/shaders/fullscreen_tri.vert").string();
     const std::string frag = (root_path / "res/shaders/scent_decal.frag").string();
     m_shader = std::make_unique<Shader>(vert.c_str(), frag.c_str());
-    // FR-D (GPU-05): validate gPosition + u_scentField against the registry.
+    // validate gPosition + u_scentField against the registry.
     if (m_shader && m_shader->IsValid()) {
         if (const ExpectedLayout* layout = FindPassExpectedLayout("scent_decal"))
             m_shader->ValidateLayout(*layout);
@@ -25,18 +25,26 @@ void GroundDecalPass::init_shader(const std::filesystem::path& root_path) {
 }
 
 void GroundDecalPass::init_buffers() {
-    glGenVertexArrays(1, &m_vao);   // empty; the VS builds the triangle from gl_VertexID
+    glGenVertexArrays(1, &m_vao); // empty; the VS builds the triangle from gl_VertexID
     PassGl::label_gl_object(GL_VERTEX_ARRAY, m_vao, "ground_decal.vao");
 }
 
 void GroundDecalPass::destroy_buffers() {
-    if (m_scent_tex) { glDeleteTextures(1, &m_scent_tex); m_scent_tex = 0; }
-    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
+    if (m_scent_tex) {
+        glDeleteTextures(1, &m_scent_tex);
+        m_scent_tex = 0;
+    }
+    if (m_vao) {
+        glDeleteVertexArrays(1, &m_vao);
+        m_vao = 0;
+    }
     m_tex_extent = 0;
     m_active = false;
 }
 
-void GroundDecalPass::reset_shader() { m_shader.reset(); }
+void GroundDecalPass::reset_shader() {
+    m_shader.reset();
+}
 
 void GroundDecalPass::update_scent(const ScentFieldRenderMirror& mirror) {
     if (!mirror.valid || !mirror.any_scent || mirror.cells <= 0 ||
@@ -47,7 +55,8 @@ void GroundDecalPass::update_scent(const ScentFieldRenderMirror& mirror) {
     const int n = mirror.cells;
 
     if (m_scent_tex == 0 || m_tex_extent != n) {
-        if (m_scent_tex) glDeleteTextures(1, &m_scent_tex);
+        if (m_scent_tex)
+            glDeleteTextures(1, &m_scent_tex);
         glGenTextures(1, &m_scent_tex);
         PassGl::label_gl_object(GL_TEXTURE, m_scent_tex, "ground_decal.scent_rg16f");
         glBindTexture(GL_TEXTURE_2D, m_scent_tex);
@@ -76,8 +85,8 @@ void GroundDecalPass::execute(const RenderContext& ctx) {
 
     // The decal projects each ground pixel through the inverse view; the frame camera
     // supplies it (identity fallback only if a context arrives without one).
-    const glm::mat4 inverse_view = ctx.camera ? glm::inverse(ctx.camera->GetViewMatrix())
-                                              : glm::mat4(1.0f);
+    const glm::mat4 inverse_view =
+        ctx.camera ? glm::inverse(ctx.camera->GetViewMatrix()) : glm::mat4(1.0f);
 
     m_shader->use();
     m_shader->setMat4("u_inverseView", inverse_view);

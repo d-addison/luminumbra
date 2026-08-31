@@ -1,9 +1,9 @@
 #pragma once
 
-// spec 021 GPU-P03 / spec 014 FR-A.2 "one abstraction, two layers": the RHI
-// backend resource vocabulary that sits BENEATH the 016 render-resource handles.
+//   /   "one abstraction, two layers": the RHI
+// backend resource vocabulary that sits BENEATH the  render-resource handles.
 //
-// Layer 1 (016) is RenderResourceHandle -- what a pass holds. Layer 2 (here) is
+// Layer 1 is RenderResourceHandle -- what a pass holds. Layer 2 (here) is
 // the backend resource an owned registry entry is ACTUALLY made of: a GL name
 // today, a Diligent IBuffer*/ITexture*/IPipelineState* tomorrow. A pass only ever
 // sees the layer-1 handle, so it can never tell a GL name from a Diligent
@@ -15,9 +15,9 @@
 // this header names a Diligent type, so no Diligent header escapes rhi/ -- the
 // invariant the RhiNoReexport frontier gate enforces mechanically.
 //
-// P03 defines the vocabulary and gives owned registry entries an (unused) optional
+// defines the vocabulary and gives owned registry entries an (unused) optional
 // backing slot; the ids are populated only when a pass is first driven through a
-// Diligent device (GPU-P05). Until then every backing is null and the GL path is
+// Diligent device. Until then every backing is null and the GL path is
 // unchanged -- byte-identical by construction.
 
 #include <cstdint>
@@ -49,9 +49,17 @@ struct RhiCmd {
     std::uint64_t id = 0;
 };
 
-inline bool is_backed(RhiBuffer h) { return h.id != 0; }
-inline bool is_backed(RhiTexture h) { return h.id != 0; }
-inline bool is_backed(RhiPipeline h) { return h.id != 0; }
-inline bool is_backed(RhiCmd h) { return h.id != 0; }
+inline bool is_backed(RhiBuffer h) {
+    return h.id != 0;
+}
+inline bool is_backed(RhiTexture h) {
+    return h.id != 0;
+}
+inline bool is_backed(RhiPipeline h) {
+    return h.id != 0;
+}
+inline bool is_backed(RhiCmd h) {
+    return h.id != 0;
+}
 
-}  // namespace Luminumbra::Rendering::Rhi
+} // namespace Luminumbra::Rendering::Rhi

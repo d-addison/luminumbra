@@ -485,7 +485,7 @@ function Assert-NightlyTrackedChangePolicy {
     param(
         [AllowEmptyCollection()]
         [object[]]$ChangedPaths,
-        [string[]]$AllowedPaths = @(".banso/config.yaml")
+        [string[]]$AllowedPaths = @()
     )
 
     $unexpected = New-Object System.Collections.Generic.List[string]
@@ -508,7 +508,7 @@ function Assert-NightlyTrackedChangePolicy {
     }
 
     if ($unexpected.Count -gt 0) {
-        throw "Nightly tree provenance: tracked paths differ from HEAD: $($unexpected.ToArray() -join ', '). Only .banso/config.yaml may be user-local."
+        throw "Nightly tree provenance: tracked paths differ from HEAD: $($unexpected.ToArray() -join ', ')."
     }
 }
 

@@ -1,11 +1,11 @@
 #version 450 core
-// Spec 015 C-2 (RENDER-18): the WBOIT glass accumulation. Each pane writes its
+// the WBOIT glass accumulation. Each pane writes its
 // premultiplied color weighted by the McGuire-Bavoil depth weight (OitModel.h -
 // the GLSL mirror) into ACCUM (blend ONE/ONE) and its coverage into REVEAL
 // (blend ZERO/ONE_MINUS_SRC_ALPHA -> reveal = product of (1 - a_i)).
 //
 // Glass color = the REFRACTED opaque scene (screen-space offset along the
-// surface normal - FR-C2-004; the same pre-water snapshot WaterPass refracts,
+// surface normal - ; the same pre-water snapshot WaterPass refracts,
 // so glass does not refract water - documented approximation) filtered by the
 // pane's Beer-Lambert transmission (GlassTintModel.h: T(d) = tint^d), plus a
 // small fresnel edge highlight.

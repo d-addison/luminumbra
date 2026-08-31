@@ -1,17 +1,22 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
+#include "core/Log.h"
 #include <atomic>
 #include <cstdint>
 #include <limits>
 #include <mutex>
 #include <vector>
-#include "core/Log.h"
 
 namespace Luminumbra {
 
 enum class ChunkState : u8 {
-    Unloaded, Loading, Idle, Meshing, Ready, Unloading
+    Unloaded,
+    Loading,
+    Idle,
+    Meshing,
+    Ready,
+    Unloading
 };
 
 // Persisted or edited SDFs remain authoritative after a save clears the
@@ -35,15 +40,19 @@ public:
     static constexpr i32 kPackedMaxY = (1 << 21) - 1;
 
     Chunk(const IVec3& coords);
-    const IVec3& get_coords() const { return m_coords; }
-    ChunkID get_id() const { return m_id; }
+    const IVec3& get_coords() const {
+        return m_coords;
+    }
+    ChunkID get_id() const {
+        return m_id;
+    }
 
     // Thread-safe state management
-    ChunkState get_state() const { 
+    ChunkState get_state() const {
         std::lock_guard<std::mutex> lock(m_state_mutex);
-        return m_state; 
+        return m_state;
     }
-    
+
     void set_state(ChunkState new_state) {
         std::lock_guard<std::mutex> lock(m_state_mutex);
         m_state = new_state;
@@ -52,7 +61,7 @@ public:
     // --- Voxel edit tracking ---
     // True when sdf/heightmap voxel data was mutated AFTER generation and has
     // not been persisted yet. Generation, loading, and meshing leave the flag
-    // clear; runtime voxel edits must call mark_voxel_data_dirty(), and a
+    // clear; runtime voxel edits must call mark_voxel_data_dirty, and a
     // successful save clears it again.
     void mark_voxel_data_dirty() {
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::LoadedOrEdited),
@@ -60,12 +69,16 @@ public:
         u32 revision = m_voxel_revision.load(std::memory_order_acquire);
         while (revision != std::numeric_limits<u32>::max() &&
                !m_voxel_revision.compare_exchange_weak(
-                   revision, revision + 1u,
-                   std::memory_order_acq_rel, std::memory_order_acquire)) {}
+                   revision, revision + 1u, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
         m_voxel_data_dirty.store(true, std::memory_order_release);
     }
-    void clear_voxel_data_dirty() { m_voxel_data_dirty.store(false, std::memory_order_release); }
-    bool is_voxel_data_dirty() const { return m_voxel_data_dirty.load(std::memory_order_acquire); }
+    void clear_voxel_data_dirty() {
+        m_voxel_data_dirty.store(false, std::memory_order_release);
+    }
+    bool is_voxel_data_dirty() const {
+        return m_voxel_data_dirty.load(std::memory_order_acquire);
+    }
     void mark_sdf_generated_current_params() {
         m_sdf_provenance.store(static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams),
                                std::memory_order_release);
@@ -82,19 +95,21 @@ public:
     ChunkSdfProvenance sdf_provenance() const {
         return static_cast<ChunkSdfProvenance>(m_sdf_provenance.load(std::memory_order_acquire));
     }
-    u32 voxel_revision() const { return m_voxel_revision.load(std::memory_order_acquire); }
+    u32 voxel_revision() const {
+        return m_voxel_revision.load(std::memory_order_acquire);
+    }
 
     // --- Voxel & SDF Data ---
     std::vector<f32> sdf_data;
     std::vector<f32> heightmap_data;
 
-    // FR-B1 per-voxel material channel. Parallel to sdf_data, same index formula
+    //  per-voxel material channel. Parallel to sdf_data, same index formula
     // (x + y*(CHUNK_SIZE_X+1) + z*(CHUNK_SIZE_X+1)*(CHUNK_SIZE_Y+1)). LAZILY
     // allocated: stays EMPTY for chunks with no authored structure voxels so
     // pristine/structures-off worlds serialize and hash byte-identically. Only
     // StampStructuresIntoChunk allocates it (assign(padded_volume, 0) where
     // 0 = MaterialType::Air sentinel = "no authored material; classify
-    // analytically"). Guard .empty() before every read. Far-LOD (step>1) chunks
+    // analytically"). Guard.empty before every read. Far-LOD (step>1) chunks
     // carry no structure material (documented gap) and never allocate this.
     std::vector<u8> material_data;
 
@@ -109,7 +124,7 @@ public:
     std::vector<VoxelVertex> pending_water_mesh_vertices;
     std::vector<u32> pending_water_mesh_indices;
 
-    // SHIELD-02 (spec 017-B step 1): voxel data produced inside a PROMOTION
+    //  ( step 1): voxel data produced inside a PROMOTION
     // generation job (LOD0 promotion of a chunk that was generated
     // surface-band-only), staged for publication on the main thread by
     // process_completed_promotion_jobs — strictly BEFORE the render-mesh
@@ -118,7 +133,7 @@ public:
     // clears these. The previous coarse mesh stays renderable while pending.
     std::vector<f32> pending_sdf_data;
     std::vector<f32> pending_heightmap_data;
-    // FR-B1: the promotion lane stamps structure materials into the scratch
+    // the promotion lane stamps structure materials into the scratch
     // chunk and stages them here for main-thread publication alongside
     // pending_sdf_data (else a promoted chunk loses its structure materials
     // -> run != replay). Empty when the promoted chunk has no structure
@@ -135,14 +150,14 @@ public:
     std::atomic<u8> applied_transition_faces{0};
     std::atomic<bool> pending_mesh_ready{false};
     std::atomic<bool> pending_mesh_failed{false};
-    // SHIELD-02 (spec 017-B step 1): completion signals for the sim-truth
+    //  ( step 1): completion signals for the sim-truth
     // PROMOTION lane. A promotion generation job stages the full LOD0 voxel
     // field into pending_sdf/heightmap/material_data and raises _ready; the
     // main thread publishes it in process_completed_promotion_jobs — before
     // and independently of any render-mesh publish.
     std::atomic<bool> pending_promotion_ready{false};
     std::atomic<bool> pending_promotion_failed{false};
-    // SHIELD-03 inc 5a (017-B): generation-completion signal. The generation
+    //   (activation queue): generation-completion signal. The generation
     // job writes this chunk's voxel data and raises the flag; the MAIN thread
     // performs the Loading→Idle flip (publish_completed_generation_jobs) — the
     // chunk state machine is main-thread-owned, so lifecycle is a pure
@@ -151,7 +166,7 @@ public:
     std::atomic<bool> pending_generation_ready{false};
     std::atomic<u32> mesh_version{0};
     std::atomic<u32> water_mesh_version{0};
-    
+
     // --- Water Simulation Data ---
     std::vector<f32> water_level_data;
     std::vector<Vec2> water_flow_data;
@@ -160,19 +175,22 @@ public:
     // elsewhere). The flow sim is clamped to never drain a cell below this, so
     // perched lakes stay filled at their basin elevation instead of flowing out.
     std::vector<f32> water_rest_level;
-    // --- Spec 009: fixed-point FLOWING-water state (HASHED; millimetres, deterministic) ---
+    // ---: fixed-point FLOWING-water state (HASHED; millimetres, deterministic) ---
     // The virtual-pipes (Mei) solver runs on integers so host==peer is bit-exact (the hash
     // FNV-1a's the raw bits). Surface height = water_bed_mm + water_depth_mm. The float arrays
-    // above become RENDER-ONLY mirrors (water_level_data regenerated from mm for the mesher).
-    std::vector<std::int32_t> water_depth_mm;  // water depth above bed (mm, >= 0). size = resolution^2
-    std::vector<std::int32_t> water_bed_mm;    // terrain bed height (mm). re-sampled on edit (Phase 2)
+    // above become  mirrors (water_level_data regenerated from mm for the mesher).
+    std::vector<std::int32_t>
+        water_depth_mm;                     // water depth above bed (mm, >= 0). size = resolution^2
+    std::vector<std::int32_t> water_bed_mm; // terrain bed height (mm). re-sampled on edit ()
     // Per-edge persisted outflow flux (mm-vol/tick), signed: +q drains the lower-index cell toward
-    // its +X or +Z neighbour. Layout: [2*i + 0] = +X edge of cell i, [2*i + 1] = +Z edge. size = 2*res^2.
+    // its +X or +Z neighbour. Layout: [2*i + 0] = +X edge of cell i, [2*i + 1] = +Z edge. size =
+    // 2*res^2.
     std::vector<std::int32_t> water_edge_flux;
-    // (water-perf-200fps spec Step 2) Cached per-cell RIVER SOURCE mask (mm/tick): RIVER_DISCHARGE_MM
-    // where RiverInfluenceAt(cell) >= threshold, else 0. A pure function of cell position, so it is
-    // computed ONCE (lazily, size-guarded in StepChunkWaterFixed) instead of re-evaluating the noise
-    // every tick. NOT serialized and NOT hashed (a derived accelerator); size = resolution^2.
+    // (water performance contract) Cached per-cell RIVER SOURCE mask (mm/tick):
+    // RIVER_DISCHARGE_MM where RiverInfluenceAt(cell) >= threshold, else 0. A pure function of cell
+    // position, so it is computed ONCE (lazily, size-guarded in StepChunkWaterFixed) instead of
+    // re-evaluating the noise every tick. NOT serialized and NOT hashed (a derived accelerator);
+    // size = resolution^2.
     std::vector<std::int32_t> water_src_mm;
     std::atomic<bool> has_water_sim{false};
     std::atomic<bool> water_mesh_generated{false};
@@ -184,7 +202,8 @@ public:
     float max_water_delta_last_tick{0.0f};
     // How many consecutive ticks the water has been calm. Only accessed by the main thread.
     int ticks_below_threshold{0};
-    // Coalesces water render mesh invalidation so simulation ticks do not force a remesh every frame.
+    // Coalesces water render mesh invalidation so simulation ticks do not force a remesh every
+    // frame.
     int water_mesh_dirty_ticks{0};
 
     static ChunkID calculate_id(const IVec3& coords);
@@ -196,7 +215,7 @@ private:
     const IVec3 m_coords;
     const ChunkID m_id;
     ChunkState m_state;
-    mutable std::mutex m_state_mutex;  // mutable for use in const getter
+    mutable std::mutex m_state_mutex; // mutable for use in const getter
     std::atomic<bool> m_voxel_data_dirty{false};
     std::atomic<u8> m_sdf_provenance{static_cast<u8>(ChunkSdfProvenance::GeneratedCurrentParams)};
     std::atomic<u32> m_voxel_revision{0};

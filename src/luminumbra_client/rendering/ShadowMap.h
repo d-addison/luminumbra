@@ -1,6 +1,6 @@
 #pragma once
 
-// Spec 016 (016-P1, struct extraction): ShadowMap moved out of RenderPipeline.h so
+//  (, struct extraction): ShadowMap moved out of RenderPipeline.h so
 // ShadowPass, LightingPass, and the shared PassGlHelpers cascade-split helpers can
 // reference it without pulling the RenderPipeline god-object. Definition unchanged;
 // RenderPipeline.h includes this header in its place.

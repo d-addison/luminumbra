@@ -1,4 +1,4 @@
-// Phase 1/2 — CreatureSpeciesRegistry: data-driven species names + metadata that the
+// CreatureSpeciesRegistry: data-driven species names + metadata that the
 // codex/HUD resolve a captured species_id against. Pins the contract the discovery
 // notification + codex UI rely on: a loaded species resolves its id-16 (the same FNV key
 // the spawners stamp) to a display name, and an unregistered id gets a stable fallback
@@ -58,10 +58,15 @@ TEST(CreatureSpeciesRegistry, LoadsShippedSpeciesFromDirectory) {
     const std::filesystem::path dir =
         std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data" / "common" / "creatures" / "species";
     const std::size_t n = reg.LoadFromDirectory(dir, errors);
-    EXPECT_GE(n, 10u) << (errors.empty() ? "" : errors.front());  // 6 original + 4 added
-    struct Expect { const char* id; bool predator; };
-    const Expect added[] = {{"dusk_heron", false}, {"ember_skink", false},
-                            {"gloomstalker", true}, {"glimmer_finch", false}};
+    EXPECT_GE(n, 10u) << (errors.empty() ? "" : errors.front()); // 6 original + 4 added
+    struct Expect {
+        const char* id;
+        bool predator;
+    };
+    const Expect added[] = {{"dusk_heron", false},
+                            {"ember_skink", false},
+                            {"gloomstalker", true},
+                            {"glimmer_finch", false}};
     for (const Expect& e : added) {
         const auto* s = reg.Find(Components::CreatureSpeciesId16(e.id));
         ASSERT_NE(s, nullptr) << e.id << " missing from the shipped roster";
@@ -70,7 +75,7 @@ TEST(CreatureSpeciesRegistry, LoadsShippedSpeciesFromDirectory) {
 }
 
 TEST(CreatureSpeciesRegistry, DisplayNameFallsBackForUnregisteredId) {
-    CreatureSpeciesRegistry reg;  // empty
+    CreatureSpeciesRegistry reg; // empty
     const std::uint16_t unknown = Components::CreatureSpeciesId16("nobody");
     // Never blank — a stable, human-readable fallback.
     const std::string name = reg.DisplayName(unknown);
@@ -94,12 +99,13 @@ TEST(CreatureSpeciesRegistry, BiomeAssociationFiltersAndSelects) {
     reg.AddFromJsonText(R"({"id":"grovestrider","biomes":["wetland","plains"]})", err);
     reg.AddFromJsonText(R"({"id":"mire_lurker","biomes":["wetland"]})", err);
     reg.AddFromJsonText(R"({"id":"ridgeback_stalker","biomes":["alpine"]})", err);
-    reg.AddFromJsonText(R"({"id":"drifter"})", err);  // generalist: lives everywhere
+    reg.AddFromJsonText(R"({"id":"drifter"})", err); // generalist: lives everywhere
 
     // Wetland: the two wetland dwellers + the generalist (NOT the alpine predator).
     const auto wet = reg.SpeciesInBiome("wetland");
     EXPECT_EQ(wet.size(), 3u);
-    for (const auto* s : wet) EXPECT_NE(s->id, "ridgeback_stalker");
+    for (const auto* s : wet)
+        EXPECT_NE(s->id, "ridgeback_stalker");
 
     // Alpine: the alpine predator + the generalist only.
     const auto alp = reg.SpeciesInBiome("alpine");
@@ -110,11 +116,11 @@ TEST(CreatureSpeciesRegistry, BiomeAssociationFiltersAndSelects) {
     const auto* b = reg.SelectForBiome("wetland", 0);
     ASSERT_NE(a, nullptr);
     EXPECT_EQ(a, b);
-    EXPECT_EQ(reg.SelectForBiome("wetland", 3), reg.SelectForBiome("wetland", 0));  // wraps (3 % 3)
+    EXPECT_EQ(reg.SelectForBiome("wetland", 3), reg.SelectForBiome("wetland", 0)); // wraps (3 % 3)
     // A biome no one lists but the generalist still covers -> generalist returned.
     const auto* d = reg.SelectForBiome("tundra", 0);
     ASSERT_NE(d, nullptr);
     EXPECT_EQ(d->id, "drifter");
 }
 
-}  // namespace
+} // namespace

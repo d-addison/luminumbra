@@ -1,4 +1,4 @@
-// T-I6 P3.1: delta-snapshot codec tests — round-trip, bandwidth, removals, and surviving
+//  delta-snapshot codec tests — round-trip, bandwidth, removals, and surviving
 // the wire through the deterministic network-condition sim.
 #include <gtest/gtest.h>
 
@@ -35,7 +35,8 @@ SnapshotMsg snap(std::uint32_t seq, std::vector<ReplEntityState> es) {
     return m;
 }
 std::vector<ReplEntityState> sortedEntities(SnapshotMsg m) {
-    std::sort(m.entities.begin(), m.entities.end(),
+    std::sort(m.entities.begin(),
+              m.entities.end(),
               [](const ReplEntityState& a, const ReplEntityState& b) {
                   return a.entity_id < b.entity_id;
               });
@@ -45,7 +46,8 @@ std::vector<ReplEntityState> sortedEntities(SnapshotMsg m) {
 // baseline + delta(baseline, current) reconstructs current exactly (changed + added + removed).
 TEST(ReplicationDelta, RoundTripReconstructsCurrent) {
     const SnapshotMsg base = snap(1, {ent(1, 100), ent(2, 200), ent(3, 300)});
-    const SnapshotMsg cur = snap(2, {ent(1, 100), ent(2, 250), ent(4, 400)});  // 2 changed, 3 gone, 4 new
+    const SnapshotMsg cur =
+        snap(2, {ent(1, 100), ent(2, 250), ent(4, 400)}); // 2 changed, 3 gone, 4 new
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
     const SnapshotMsg recon = ApplySnapshotDelta(base, delta);
     EXPECT_EQ(sortedEntities(recon), sortedEntities(cur));
@@ -54,7 +56,7 @@ TEST(ReplicationDelta, RoundTripReconstructsCurrent) {
 // A near-identical snapshot deltas down to just the changed entity (the bandwidth win).
 TEST(ReplicationDelta, DeltaCarriesOnlyChanges) {
     const SnapshotMsg base = snap(1, {ent(1, 100), ent(2, 200), ent(3, 300)});
-    const SnapshotMsg cur = snap(2, {ent(1, 100), ent(2, 999), ent(3, 300)});  // only 2 moved
+    const SnapshotMsg cur = snap(2, {ent(1, 100), ent(2, 999), ent(3, 300)}); // only 2 moved
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
     EXPECT_EQ(delta.entities.size(), 1u);
     EXPECT_EQ(delta.entities[0].entity_id, 2u);
@@ -64,7 +66,7 @@ TEST(ReplicationDelta, DeltaCarriesOnlyChanges) {
 
 TEST(ReplicationDelta, RemovedEntitiesDropped) {
     const SnapshotMsg base = snap(1, {ent(1, 100), ent(2, 200), ent(3, 300)});
-    const SnapshotMsg cur = snap(2, {ent(1, 100), ent(2, 200)});  // 3 despawned
+    const SnapshotMsg cur = snap(2, {ent(1, 100), ent(2, 200)}); // 3 despawned
     const SnapshotMsg delta = MakeSnapshotDelta(base, cur);
     EXPECT_EQ(delta.removed_ids, (std::vector<std::uint32_t>{3}));
     EXPECT_TRUE(delta.entities.empty());
@@ -87,4 +89,4 @@ TEST(ReplicationDelta, SurvivesWireThroughNetworkSim) {
     EXPECT_EQ(sortedEntities(ApplySnapshotDelta(base, decoded)), sortedEntities(cur));
 }
 
-}  // namespace
+} // namespace

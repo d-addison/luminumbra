@@ -1,4 +1,4 @@
-// T-I3-12: headless server hygiene gate. The luminumbra_server_app target
+// headless server hygiene gate. The luminumbra_server_app target
 // links luminumbra_common ONLY; nothing under src/luminumbra_server/ may
 // include any client-side library (OpenGL/glad, GLFW, miniaudio, imgui,
 // RmlUi, SOIL2) or reach into luminumbra_client. This test scans every
@@ -23,8 +23,9 @@ namespace {
 #endif
 
 std::string ToLower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
     return value;
 }
 
@@ -82,9 +83,9 @@ TEST(ServerHeadlessHygieneTest, ServerSourcesContainNoClientLibraryIncludes) {
             const std::string include_target = ToLower(match[1].str());
             for (const std::string& token : ForbiddenIncludeTokens()) {
                 if (include_target.find(token) != std::string::npos) {
-                    violations.push_back(
-                        entry.path().string() + ":" + std::to_string(line_number) +
-                        " includes forbidden client dependency '" + match[1].str() + "'");
+                    violations.push_back(entry.path().string() + ":" + std::to_string(line_number) +
+                                         " includes forbidden client dependency '" +
+                                         match[1].str() + "'");
                 }
             }
         }

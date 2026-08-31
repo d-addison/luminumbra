@@ -1,4 +1,4 @@
-// T-I6-A2a: deterministic thermal+hydraulic erosion kernel tests.
+// deterministic thermal+hydraulic erosion kernel tests.
 //
 // Pins the three load-bearing properties before this feeds a world_hash bump:
 //   1. DETERMINISM: same input + params -> bit-identical offset.
@@ -35,8 +35,8 @@ std::vector<float> BuildHeights(int n, int halo) {
             const float wz = static_cast<float>(z - halo);
             const float dist = std::fabs(wx - cx) + std::fabs(wz - cz);
             const float peak = std::max(0.0f, 80.0f - 3.0f * dist);
-            h[static_cast<std::size_t>(z) * static_cast<std::size_t>(m) + static_cast<std::size_t>(x)] =
-                peak + 0.1f * wx;
+            h[static_cast<std::size_t>(z) * static_cast<std::size_t>(m) +
+              static_cast<std::size_t>(x)] = peak + 0.1f * wx;
         }
     }
     return h;
@@ -79,10 +79,13 @@ TEST(HydraulicErosion, ProducesBoundedNonTrivialRelief) {
     bool any_positive = false; // talus/pits should gain material somewhere
     float max_abs = 0.0f;
     for (float v : offset) {
-        if (v < -1.0e-3f) any_negative = true;
-        if (v > 1.0e-3f) any_positive = true;
+        if (v < -1.0e-3f)
+            any_negative = true;
+        if (v > 1.0e-3f)
+            any_positive = true;
         const float a = (v < 0.0f) ? -v : v;
-        if (a > max_abs) max_abs = a;
+        if (a > max_abs)
+            max_abs = a;
     }
     EXPECT_TRUE(any_negative) << "erosion never lowered the steep peak";
     EXPECT_TRUE(any_positive) << "erosion never deposited material";

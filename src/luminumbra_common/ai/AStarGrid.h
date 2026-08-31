@@ -1,6 +1,6 @@
 #pragma once
 
-// T-I9-AI: deterministic grid A* pathfinding — the navigation foundation for
+// deterministic grid A* pathfinding — the navigation foundation for
 // obstacle-aware locomotion (the roadmap's "pathfinding/obstacle avoidance").
 //
 // Self-contained and PURE: operates on a caller-supplied 2D walkability grid and
@@ -25,7 +25,9 @@ namespace luminumbra::ai {
 struct GridCoord {
     int x = 0;
     int z = 0;
-    bool operator==(const GridCoord& o) const { return x == o.x && z == o.z; }
+    bool operator==(const GridCoord& o) const {
+        return x == o.x && z == o.z;
+    }
 };
 
 // A rectangular walkability grid. `walkable[z*width + x]` is true when an agent
@@ -33,18 +35,23 @@ struct GridCoord {
 class NavGrid {
 public:
     NavGrid(int width, int height, std::vector<std::uint8_t> walkable)
-        : m_w(width > 0 ? width : 0),
-          m_h(height > 0 ? height : 0),
-          m_walkable(std::move(walkable)) {}
+        : m_w(width > 0 ? width : 0)
+        , m_h(height > 0 ? height : 0)
+        , m_walkable(std::move(walkable)) {}
 
-    [[nodiscard]] int width() const { return m_w; }
-    [[nodiscard]] int height() const { return m_h; }
+    [[nodiscard]] int width() const {
+        return m_w;
+    }
+    [[nodiscard]] int height() const {
+        return m_h;
+    }
 
     [[nodiscard]] bool in_bounds(int x, int z) const {
         return x >= 0 && z >= 0 && x < m_w && z < m_h;
     }
     [[nodiscard]] bool walkable(int x, int z) const {
-        if (!in_bounds(x, z)) return false;
+        if (!in_bounds(x, z))
+            return false;
         const std::size_t i = static_cast<std::size_t>(z) * static_cast<std::size_t>(m_w) +
                               static_cast<std::size_t>(x);
         return i < m_walkable.size() && m_walkable[i] != 0u;
@@ -80,9 +87,12 @@ inline int octile(int ax, int az, int bx, int bz) {
 inline std::vector<GridCoord> FindPath(const NavGrid& grid, GridCoord start, GridCoord goal) {
     const int W = grid.width();
     const int H = grid.height();
-    if (W <= 0 || H <= 0) return {};
-    if (!grid.walkable(start.x, start.z) || !grid.walkable(goal.x, goal.z)) return {};
-    if (start == goal) return {start};
+    if (W <= 0 || H <= 0)
+        return {};
+    if (!grid.walkable(start.x, start.z) || !grid.walkable(goal.x, goal.z))
+        return {};
+    if (start == goal)
+        return {start};
 
     const std::size_t N = static_cast<std::size_t>(W) * static_cast<std::size_t>(H);
     const int INF = 0x3fffffff;
@@ -91,17 +101,23 @@ inline std::vector<GridCoord> FindPath(const NavGrid& grid, GridCoord start, Gri
                static_cast<std::size_t>(x);
     };
 
-    std::vector<int> g(N, INF);          // best known cost from start
+    std::vector<int> g(N, INF);            // best known cost from start
     std::vector<std::int64_t> came(N, -1); // predecessor cell index (-1 = none)
     std::vector<std::uint8_t> closed(N, 0u);
 
     // Open frontier as a binary min-heap of (f, g, index). Tie-break: lower f, then
     // lower g (prefer progress), then lower index (STABLE -> deterministic). Hand-
     // rolled so the comparator is explicit and container-independent.
-    struct Node { int f; int gc; std::size_t i; };
+    struct Node {
+        int f;
+        int gc;
+        std::size_t i;
+    };
     auto worse = [](const Node& a, const Node& b) {
-        if (a.f != b.f) return a.f > b.f;
-        if (a.gc != b.gc) return a.gc > b.gc;
+        if (a.f != b.f)
+            return a.f > b.f;
+        if (a.gc != b.gc)
+            return a.gc > b.gc;
         return a.i > b.i;
     };
     std::vector<Node> heap;
@@ -110,7 +126,11 @@ inline std::vector<GridCoord> FindPath(const NavGrid& grid, GridCoord start, Gri
         std::size_t c = heap.size() - 1;
         while (c > 0) {
             std::size_t p = (c - 1) / 2;
-            if (worse(heap[p], heap[c])) { std::swap(heap[p], heap[c]); c = p; } else break;
+            if (worse(heap[p], heap[c])) {
+                std::swap(heap[p], heap[c]);
+                c = p;
+            } else
+                break;
         }
     };
     auto pop = [&]() {
@@ -121,9 +141,12 @@ inline std::vector<GridCoord> FindPath(const NavGrid& grid, GridCoord start, Gri
         const std::size_t n = heap.size();
         while (true) {
             std::size_t l = 2 * c + 1, r = 2 * c + 2, best = c;
-            if (l < n && worse(heap[best], heap[l])) best = l;
-            if (r < n && worse(heap[best], heap[r])) best = r;
-            if (best == c) break;
+            if (l < n && worse(heap[best], heap[l]))
+                best = l;
+            if (r < n && worse(heap[best], heap[r]))
+                best = r;
+            if (best == c)
+                break;
             std::swap(heap[best], heap[c]);
             c = best;
         }
@@ -142,23 +165,28 @@ inline std::vector<GridCoord> FindPath(const NavGrid& grid, GridCoord start, Gri
 
     while (!heap.empty()) {
         Node cur = pop();
-        if (closed[cur.i] != 0u) continue; // stale heap entry
+        if (closed[cur.i] != 0u)
+            continue; // stale heap entry
         closed[cur.i] = 1u;
-        if (cur.i == goal_i) break;
+        if (cur.i == goal_i)
+            break;
 
         const int cx = static_cast<int>(cur.i % static_cast<std::size_t>(W));
         const int cz = static_cast<int>(cur.i / static_cast<std::size_t>(W));
         for (int k = 0; k < 8; ++k) {
             const int nx = cx + ox[k];
             const int nz = cz + oz[k];
-            if (!grid.walkable(nx, nz)) continue;
+            if (!grid.walkable(nx, nz))
+                continue;
             if (k >= 4) {
                 // Disallow diagonal corner-cutting: both shared orthogonal cells
                 // must be walkable, else the diagonal would clip a wall corner.
-                if (!grid.walkable(cx + ox[k], cz) || !grid.walkable(cx, cz + oz[k])) continue;
+                if (!grid.walkable(cx + ox[k], cz) || !grid.walkable(cx, cz + oz[k]))
+                    continue;
             }
             const std::size_t ni = idx(nx, nz);
-            if (closed[ni] != 0u) continue;
+            if (closed[ni] != 0u)
+                continue;
             const int ng = g[cur.i] + oc[k];
             if (ng < g[ni]) {
                 g[ni] = ng;
@@ -168,7 +196,8 @@ inline std::vector<GridCoord> FindPath(const NavGrid& grid, GridCoord start, Gri
         }
     }
 
-    if (came[goal_i] < 0 && goal_i != idx(start.x, start.z)) return {}; // unreachable
+    if (came[goal_i] < 0 && goal_i != idx(start.x, start.z))
+        return {}; // unreachable
 
     // Reconstruct start..goal.
     std::vector<GridCoord> path;
@@ -177,10 +206,12 @@ inline std::vector<GridCoord> FindPath(const NavGrid& grid, GridCoord start, Gri
         const int x = static_cast<int>(static_cast<std::size_t>(i) % static_cast<std::size_t>(W));
         const int z = static_cast<int>(static_cast<std::size_t>(i) / static_cast<std::size_t>(W));
         path.push_back({x, z});
-        if (static_cast<std::size_t>(i) == idx(start.x, start.z)) break;
+        if (static_cast<std::size_t>(i) == idx(start.x, start.z))
+            break;
     }
     std::vector<GridCoord> out(path.rbegin(), path.rend());
-    if (out.empty() || !(out.front() == start)) return {}; // safety: no real path
+    if (out.empty() || !(out.front() == start))
+        return {}; // safety: no real path
     return out;
 }
 

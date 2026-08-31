@@ -1131,9 +1131,9 @@ void RenderInterface_GL3::SetScissor(Rml::Rectanglei region, bool vertically_fli
 
 void RenderInterface_GL3::EnableScissorRegion(bool enable)
 {
-	// Assume enable is immediately followed by a SetScissorRegion() call, and ignore it here.
-	if (!enable)
-		SetScissor(Rml::Rectanglei::MakeInvalid(), false);
+    // Assume enable is immediately followed by a SetScissorRegion call, and ignore it here.
+    if (!enable)
+        SetScissor(Rml::Rectanglei::MakeInvalid(), false);
 }
 
 void RenderInterface_GL3::SetScissorRegion(Rml::Rectanglei region)

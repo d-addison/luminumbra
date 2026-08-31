@@ -115,7 +115,7 @@ TEST(WindHardening, NegativeHeightFallsInGroundBand) {
 }
 
 // Out-of-region CONTRACT: the clamp returns base_direction * layer_speed. Its
-// DIRECTION must equal the published BaseDirection() (a unit-ish vector), and its
+// DIRECTION must equal the published BaseDirection (a unit-ish vector), and its
 // MAGNITUDE must equal the layer speed times |BaseDirection| (no per-cell
 // modulation outside the region). This pins the documented clamp meaning.
 TEST(WindHardening, OutOfRegionClampDirectionMatchesBaseExactly) {
@@ -309,7 +309,7 @@ TEST(AetherHardening, EveryCellIsNonNegative) {
 }
 
 // SampleAether at an exact known grid point (a cell centre) returns the stored
-// cell value — the sampler floors to the owning cell and reads grid().at().
+// cell value — the sampler floors to the owning cell and reads grid.at.
 TEST(AetherHardening, SampleAtCellCentreReturnsStoredCell) {
     AetherFieldSystem a(kSeed);
     a.Update(60, kAnchor, nullptr);
@@ -472,7 +472,7 @@ TEST(WeatherHardening, StrikeThresholdGateIsExercisedNotVacuous) {
 }
 
 // Bounded caps under a long, storm-heavy run: storm cells <= kMaxStormCells and
-// live strikes <= kMaxLiveStrikes at every tick (flat memory, F9).
+// live strikes <= kMaxLiveStrikes at every tick (flat memory, ).
 TEST(WeatherHardening, CapsHoldEveryTick) {
     WindFieldSystem wind(kSeed);
     WeatherSystem w(kSeed);

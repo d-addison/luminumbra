@@ -22,15 +22,12 @@ std::string ToLowerAscii(const char* value) {
     return out;
 }
 
-}  // namespace
+} // namespace
 
 Backend ParseRhiBackend(const char* value) {
     const std::string v = ToLowerAscii(value);
     if (v == "vulkan" || v == "vk") {
         return Backend::Vulkan;
-    }
-    if (v == "dx12" || v == "d3d12") {
-        return Backend::Dx12;
     }
     // "gl", "opengl", empty, and anything unrecognized fall through to the default.
     return Backend::Gl;
@@ -40,8 +37,6 @@ const char* BackendName(Backend backend) {
     switch (backend) {
         case Backend::Vulkan:
             return "vulkan";
-        case Backend::Dx12:
-            return "dx12";
         case Backend::Gl:
         default:
             return "gl";
@@ -53,4 +48,4 @@ Backend SelectedBackendFromEnv() {
     return ParseRhiBackend(value ? value->c_str() : nullptr);
 }
 
-}  // namespace Luminumbra::Rendering::Rhi
+} // namespace Luminumbra::Rendering::Rhi

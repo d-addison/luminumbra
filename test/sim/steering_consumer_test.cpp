@@ -1,4 +1,4 @@
-// I9-ECO INTEGRATION layer: the steering consumer that blends the §4 bias systems' outputs
+//  INTEGRATION layer: the steering consumer that blends the  bias systems' outputs
 // (pack flank / migration / territory) into the creature wish. These tests guard the
 // PRODUCER->CONSUMER contract -- e.g. that the pack flank field is read as a unit STEER
 // DIRECTION, not a world POINT (the bug that made packs steer toward the origin).
@@ -11,8 +11,8 @@
 #include "ai/SteeringConsumer.h"
 #include "components/CoreComponents.h"
 #include "components/CreatureComponents.h"
-#include "components/PackHunterComponents.h"
 #include "components/MigratoryComponents.h"
+#include "components/PackHunterComponents.h"
 #include "components/TerritoryComponents.h"
 
 namespace {
@@ -38,7 +38,7 @@ TEST(SteeringConsumer, PackPredatorSteersAlongCoordDirection) {
     const entt::entity p = spawn(r, /*x*/ 500.0f, /*z*/ -300.0f, /*predator*/ true, /*speed*/ 4.0f);
     auto& pk = r.emplace<Comp::PackHunterComponent>(p);
     pk.in_pack = 1;
-    pk.coord_x = 0.6f;   // a unit-ish steer direction (already normalized by the pack system)
+    pk.coord_x = 0.6f; // a unit-ish steer direction (already normalized by the pack system)
     pk.coord_z = 0.8f;
     const auto stats = RunSteeringConsumerOnTick(r);
     EXPECT_EQ(stats.packed, 1);
@@ -54,9 +54,9 @@ TEST(SteeringConsumer, LonePredatorNotSteered) {
     auto& pk = r.emplace<Comp::PackHunterComponent>(p);
     pk.in_pack = 0;
     pk.coord_x = 1.0f;
-    r.get<Comp::CreatureComponent>(p).wish_x = 7.0f;  // brain's value
+    r.get<Comp::CreatureComponent>(p).wish_x = 7.0f; // brain's value
     RunSteeringConsumerOnTick(r);
-    EXPECT_FLOAT_EQ(r.get<Comp::CreatureComponent>(p).wish_x, 7.0f);  // unchanged
+    EXPECT_FLOAT_EQ(r.get<Comp::CreatureComponent>(p).wish_x, 7.0f); // unchanged
 }
 
 // Pack steering applies only to predators.
@@ -64,7 +64,8 @@ TEST(SteeringConsumer, PreyNotPackSteered) {
     entt::registry r;
     const entt::entity prey = spawn(r, 0.0f, 0.0f, /*predator*/ false);
     auto& pk = r.emplace<Comp::PackHunterComponent>(prey);
-    pk.in_pack = 1; pk.coord_x = 1.0f;
+    pk.in_pack = 1;
+    pk.coord_x = 1.0f;
     const auto stats = RunSteeringConsumerOnTick(r);
     EXPECT_EQ(stats.packed, 0);
 }
@@ -76,9 +77,11 @@ TEST(SteeringConsumer, MigrationAndTerritoryAddBias) {
     r.get<Comp::CreatureComponent>(e).wish_x = 1.0f;
     r.get<Comp::CreatureComponent>(e).wish_z = 2.0f;
     auto& mig = r.emplace<Comp::MigratoryComponent>(e);
-    mig.wish_x = 0.5f; mig.wish_z = -0.5f;
+    mig.wish_x = 0.5f;
+    mig.wish_z = -0.5f;
     auto& tb = r.emplace<Comp::TerritoryBiasComponent>(e);
-    tb.wish_x = 0.25f; tb.wish_z = 0.25f;
+    tb.wish_x = 0.25f;
+    tb.wish_z = 0.25f;
     const auto stats = RunSteeringConsumerOnTick(r);
     EXPECT_EQ(stats.migrated, 1);
     EXPECT_EQ(stats.homed, 1);
@@ -94,7 +97,8 @@ TEST(SteeringConsumer, CarcassUntouched) {
     r.get<Comp::CreatureComponent>(p).eaten = true;
     r.get<Comp::CreatureComponent>(p).wish_x = 3.0f;
     auto& pk = r.emplace<Comp::PackHunterComponent>(p);
-    pk.in_pack = 1; pk.coord_x = 1.0f;
+    pk.in_pack = 1;
+    pk.coord_x = 1.0f;
     RunSteeringConsumerOnTick(r);
     EXPECT_FLOAT_EQ(r.get<Comp::CreatureComponent>(p).wish_x, 3.0f);
 }
@@ -105,7 +109,9 @@ TEST(SteeringConsumer, Deterministic) {
         entt::registry r;
         auto a = spawn(r, 5.0f, 5.0f, true);
         auto& pk = r.emplace<Comp::PackHunterComponent>(a);
-        pk.in_pack = 1; pk.coord_x = 0.3f; pk.coord_z = -0.9f;
+        pk.in_pack = 1;
+        pk.coord_x = 0.3f;
+        pk.coord_z = -0.9f;
         auto b = spawn(r, -2.0f, 1.0f, false);
         r.emplace<Comp::MigratoryComponent>(b).wish_x = 0.4f;
         RunSteeringConsumerOnTick(r);
@@ -125,4 +131,4 @@ TEST(SteeringConsumer, EmptyRosterNoOp) {
     EXPECT_EQ(stats.homed, 0);
 }
 
-}  // namespace
+} // namespace

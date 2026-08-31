@@ -1,4 +1,4 @@
-// T-I9-AI: deterministic GA operators coverage — mutation bounds, crossover range,
+// deterministic GA operators coverage — mutation bounds, crossover range,
 // tournament pressure, elitism, reproducibility, and end-to-end convergence
 // (selection actually optimizes a fitness). Pure; world_hash-neutral.
 
@@ -58,18 +58,25 @@ TEST(Evolution, TournamentSelectionFavorsHigherFitness) {
     std::vector<float> fitness = {0.0f, 0.0f, 0.0f, 10.0f}; // index 3 dominates
     int picked_best = 0;
     for (int it = 0; it < 200; ++it)
-        if (TournamentSelect(fitness, /*k=*/3, rng) == 3u) ++picked_best;
+        if (TournamentSelect(fitness, /*k=*/3, rng) == 3u)
+            ++picked_best;
     EXPECT_GT(picked_best, 100); // a clear winner is selected the majority of the time
 }
 
 TEST(Evolution, ElitismCarriesBestUnchangedAndKeepsSize) {
     DeterministicRng rng(4);
-    std::vector<std::vector<float>> pop = {
-        {0.1f, 0.1f, 0.1f, 0.1f}, {0.2f, 0.2f, 0.2f, 0.2f},
-        {0.9f, 0.8f, 0.7f, 0.6f}, {0.3f, 0.3f, 0.3f, 0.3f}};
+    std::vector<std::vector<float>> pop = {{0.1f, 0.1f, 0.1f, 0.1f},
+                                           {0.2f, 0.2f, 0.2f, 0.2f},
+                                           {0.9f, 0.8f, 0.7f, 0.6f},
+                                           {0.3f, 0.3f, 0.3f, 0.3f}};
     std::vector<float> fitness = {1.0f, 2.0f, 99.0f, 3.0f}; // index 2 best
-    auto next = EvolveGeneration(pop, fitness, Bounds4(), 0.1f, /*elitism=*/1,
-                                 /*tournament_k=*/2, rng);
+    auto next = EvolveGeneration(pop,
+                                 fitness,
+                                 Bounds4(),
+                                 0.1f,
+                                 /*elitism=*/1,
+                                 /*tournament_k=*/2,
+                                 rng);
     ASSERT_EQ(next.size(), pop.size());
     EXPECT_EQ(next[0], pop[2]); // the elite is carried over byte-for-byte
 }
@@ -77,9 +84,10 @@ TEST(Evolution, ElitismCarriesBestUnchangedAndKeepsSize) {
 TEST(Evolution, EvolveGenerationIsReproducible) {
     auto run = []() {
         DeterministicRng rng(2024);
-        std::vector<std::vector<float>> pop = {
-            {0.1f, 0.2f, 0.3f, 0.4f}, {0.5f, 0.6f, 0.7f, 0.8f},
-            {-0.1f, -0.2f, -0.3f, -0.4f}, {0.0f, 0.0f, 0.0f, 0.0f}};
+        std::vector<std::vector<float>> pop = {{0.1f, 0.2f, 0.3f, 0.4f},
+                                               {0.5f, 0.6f, 0.7f, 0.8f},
+                                               {-0.1f, -0.2f, -0.3f, -0.4f},
+                                               {0.0f, 0.0f, 0.0f, 0.0f}};
         std::vector<float> fitness = {1.0f, 4.0f, 2.0f, 3.0f};
         return EvolveGeneration(pop, fitness, Bounds4(), 0.1f, 1, 2, rng);
     };
@@ -87,7 +95,7 @@ TEST(Evolution, EvolveGenerationIsReproducible) {
 }
 
 TEST(Evolution, SelectionConvergesTowardATargetGenome) {
-    // Fitness = -sum (gene - target)^2 ; GA should climb toward the target.
+    // Fitness = -sum (gene - target)^2; GA should climb toward the target.
     DeterministicRng rng(777);
     const std::vector<float> target = {0.5f, -0.3f, 0.8f, -0.6f};
     auto bounds = Bounds4();
@@ -103,23 +111,31 @@ TEST(Evolution, SelectionConvergesTowardATargetGenome) {
     const std::size_t P = 24;
     std::vector<std::vector<float>> pop(P, std::vector<float>(4));
     for (auto& g : pop)
-        for (int i = 0; i < 4; ++i) g[static_cast<std::size_t>(i)] = rng.next_range(-1.0f, 1.0f);
+        for (int i = 0; i < 4; ++i)
+            g[static_cast<std::size_t>(i)] = rng.next_range(-1.0f, 1.0f);
 
     auto best_fitness = [&]() {
         float best = -1e30f;
-        for (auto& g : pop) best = std::max(best, fit(g));
+        for (auto& g : pop)
+            best = std::max(best, fit(g));
         return best;
     };
     const float initial_best = best_fitness();
 
     for (int gen = 0; gen < 60; ++gen) {
         std::vector<float> fitness(P);
-        for (std::size_t i = 0; i < P; ++i) fitness[i] = fit(pop[i]);
-        pop = EvolveGeneration(pop, fitness, bounds, 0.12f, /*elitism=*/2,
-                               /*tournament_k=*/3, rng);
+        for (std::size_t i = 0; i < P; ++i)
+            fitness[i] = fit(pop[i]);
+        pop = EvolveGeneration(pop,
+                               fitness,
+                               bounds,
+                               0.12f,
+                               /*elitism=*/2,
+                               /*tournament_k=*/3,
+                               rng);
     }
     const float final_best = best_fitness();
 
-    EXPECT_GT(final_best, initial_best);       // selection improved the population
-    EXPECT_GT(final_best, -0.05f);             // converged close to the target (fitness -> 0)
+    EXPECT_GT(final_best, initial_best); // selection improved the population
+    EXPECT_GT(final_best, -0.05f);       // converged close to the target (fitness -> 0)
 }

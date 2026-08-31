@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.thirst — CREATURE THIRST / WATER-SEEKING (complements hunger).
+// sim.thirst: CREATURE THIRST /  (complements hunger).
 //
 // Each tick this system, for every creature carrying a ThirstComponent (the opt-in gate):
 //   * RAISES its thirst by a fixed per-second rate (clamped to [0,1]); a carcass
@@ -40,7 +40,7 @@ namespace luminumbra::ai {
 namespace Comp = ::Luminumbra::Components;
 namespace dm = ::Luminumbra::DeterministicMath;
 
-// Reserved seed-stream offset (registry: ... herd-alarm+26, thirst+33). This system is
+// Reserved seed-stream offset (registry:... herd-alarm+26, thirst+33). This system is
 // deterministic and consumes NO rng; the offset is recorded for collision-avoidance only.
 inline constexpr std::uint64_t kThirstSeedOffset = 33ull;
 
@@ -57,21 +57,24 @@ inline constexpr float kThirstDrink = 0.5f;
 inline constexpr float kThirstSeekThreshold = 0.3f;
 
 struct ThirstStats {
-    int participants = 0;  // creatures carrying a ThirstComponent that took part
-    int seeking = 0;       // creatures that wrote a non-zero water-seeking wish this tick
-    int drinking = 0;      // creatures inside a water hole's radius this tick
+    int participants = 0; // creatures carrying a ThirstComponent that took part
+    int seeking = 0;      // creatures that wrote a non-zero water-seeking wish this tick
+    int drinking = 0;     // creatures inside a water hole's radius this tick
 };
 
-// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig sim.thirst.
+// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig
+// sim.thirst.
 struct ThirstTuning {
-    float rise_rate      = kThirstRise;
-    float drink_rate     = kThirstDrink;
+    float rise_rate = kThirstRise;
+    float drink_rate = kThirstDrink;
     float seek_threshold = kThirstSeekThreshold;
 };
 
 [[nodiscard]] inline float ThirstClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -110,7 +113,8 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    if (ents.empty()) return stats;  // empty roster -> pure no-op.
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
 
     // dt-scaled rates: the sim's fixed dt (~1/30s) gives the tuned per-second constants.
     const float rise = tuning.rise_rate * dt;
@@ -165,7 +169,7 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
         }
 
         const float dist = dm::Sqrt(best_d2);
-        // INSTINCT-05: nearness for the arbiter's Drink utility — 1 at the hole,
+        // nearness for the arbiter's Drink utility — 1 at the hole,
         // fading to 0 at the 40 m sensing horizon.
         th.water_proximity = ThirstClamp01(1.0f - dist / 40.0f);
 
@@ -191,4 +195,4 @@ inline ThirstStats RunThirstOnTick(entt::registry& reg, float dt, const ThirstTu
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

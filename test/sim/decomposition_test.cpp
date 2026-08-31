@@ -1,4 +1,4 @@
-// Track sim.decomposition — DEAD creatures DECAY and RELEASE NUTRIENTS, closing the
+// sim.decomposition: DEAD creatures DECAY and RELEASE NUTRIENTS, closing the
 // death -> soil cycle. A dead entity advances its decay clock and accrues nutrient (fixed-point
 // milli-units) monotonically up to a full load reached exactly at decay_duration, where it
 // latches fully_decomposed and stops. A LIVE entity does not decay. Deterministic (id-ordered,

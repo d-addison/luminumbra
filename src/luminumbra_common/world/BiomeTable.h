@@ -1,6 +1,6 @@
 #pragma once
 
-// Biome selection table (T-I4-1, design-decisions.md section 2).
+// Biome selection table for the deterministic runtime contract.
 //
 // The engine knows ONLY the lookup: biome_id = BiomeTable::lookup(
 //   continentalness, erosion, pv, temperature, humidity). The climate ranges
@@ -17,9 +17,9 @@
 //   - a column matching no biome row yields kNoBiome (255), and the caller
 //     falls back to the legacy single-material classifier.
 //
-// Determinism: ComputeContentHash() is an fnv1a64 over the CANONICALIZED table
+// Determinism: ComputeContentHash is an fnv1a64 over the CANONICALIZED table
 // (id, climate ranges quantized to a fixed integer grid, palette material ids)
-// in declaration order. T-I4-2 mixes this hash into ComputeTerrainParamsHash so
+// in declaration order.  mixes this hash into ComputeTerrainParamsHash so
 // pristine far-LOD tiles self-invalidate when the table content changes.
 
 #include "../../../include/luminumbra/core/Types.h"
@@ -57,7 +57,7 @@ struct BiomeSurfacePalette {
     u8 underwater = static_cast<u8>(MaterialType::Sand);
 };
 
-// T-I4-5: per-biome environmental-audio reverb. Consumed by the client
+// per-biome environmental-audio reverb. Consumed by the client
 // EnvironmentalAudioSystem to set the listener's reverb profile by biome. The
 // preset name is game-authored (the engine treats it as an opaque label); the
 // numeric wet/dry/decay drive the audio environment directly.
@@ -68,15 +68,14 @@ struct BiomeReverb {
     float decay = 1.0f;
 };
 
-// T-I5b-1 (F1): per-biome vegetation/cover. Parsed in iteration 4
-// (parsed-not-consumed); now CONSUMED render-side by the FoliagePass scatter
+// Per-biome vegetation and cover, consumed by the render-side foliage scatter
 // density. The scatter names are game-authored opaque labels (the engine only
 // reads `density`); like reverb, vegetation is RENDER/CLIENT-only and is
-// DELIBERATELY NOT mixed into compute_content_hash() (the content hash gates the
+// DELIBERATELY NOT mixed into compute_content_hash (the content hash gates the
 // terrain far-LOD cache; foliage is render-only and must not invalidate tiles or
 // perturb world_hash).
 struct BiomeVegetation {
-    float density = 0.0f; // [0,1] cover fraction driving the foliage scatter
+    float density = 0.0f;             // [0,1] cover fraction driving the foliage scatter
     std::vector<std::string> scatter; // opaque archetype labels (game content)
 };
 
@@ -96,17 +95,29 @@ struct BiomeDefinition {
 class BiomeTable {
 public:
     // Loads and parses data/common/biomes.json. On any structural error the
-    // result is empty() and errors() carries human-readable messages. Unknown
-    // keys (including the parsed-not-consumed vegetation/reverb blocks) emit
+    // result is empty and errors carries human-readable messages. Unknown
+    // keys emit
     // warnings, never errors (loader discipline matches TerrainPresetLoader).
     static BiomeTable Load(const std::filesystem::path& table_path);
 
-    bool ok() const { return m_ok; }
-    bool empty() const { return m_biomes.empty(); }
-    std::size_t size() const { return m_biomes.size(); }
-    const std::vector<BiomeDefinition>& biomes() const { return m_biomes; }
-    const std::vector<std::string>& errors() const { return m_errors; }
-    const std::vector<std::string>& warnings() const { return m_warnings; }
+    bool ok() const {
+        return m_ok;
+    }
+    bool empty() const {
+        return m_biomes.empty();
+    }
+    std::size_t size() const {
+        return m_biomes.size();
+    }
+    const std::vector<BiomeDefinition>& biomes() const {
+        return m_biomes;
+    }
+    const std::vector<std::string>& errors() const {
+        return m_errors;
+    }
+    const std::vector<std::string>& warnings() const {
+        return m_warnings;
+    }
 
     // First-match biome lookup. Returns kNoBiome (255) when no row matches.
     u8 lookup(float continentalness,
@@ -119,11 +130,11 @@ public:
     // unknown id so callers never need a separate guard.
     const BiomeSurfacePalette& palette_for(u8 biome_id) const;
 
-    // T-I4-5: reverb profile for a biome id; returns the default profile for
+    // reverb profile for a biome id; returns the default profile for
     // kNoBiome / any unknown id so callers never need a separate guard.
     const BiomeReverb& reverb_for(u8 biome_id) const;
 
-    // T-I5b-1: vegetation/cover for a biome id; returns the default (zero
+    //  vegetation/cover for a biome id; returns the default (zero
     // density) for kNoBiome / any unknown id. Render-only (foliage scatter).
     const BiomeVegetation& vegetation_for(u8 biome_id) const;
 
@@ -132,7 +143,9 @@ public:
     const std::string& name_for(u8 biome_id) const;
 
     // fnv1a64 over the canonicalized table content (see header note).
-    u64 content_hash() const { return m_content_hash; }
+    u64 content_hash() const {
+        return m_content_hash;
+    }
 
 private:
     std::vector<BiomeDefinition> m_biomes;

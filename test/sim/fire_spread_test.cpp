@@ -6,6 +6,7 @@
 // run==replay, and an EMPTY roster no-op.
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -23,9 +24,14 @@ using luminumbra::sim::RunFireSpreadOnTick;
 
 // Spawn a combustible at (x,z) with given state / moisture / fuel. moisture_milli and
 // fuel_milli are 0..1000. radius is the ignition reach (m).
-entt::entity spawnFuel(entt::registry& r, float x, float z, Comp::BurnState state,
-                       std::uint16_t moisture_milli = 0, std::uint16_t fuel_milli = 1000,
-                       float radius = 2.0f, std::uint32_t burn_ticks = 0) {
+entt::entity spawnFuel(entt::registry& r,
+                       float x,
+                       float z,
+                       Comp::BurnState state,
+                       std::uint16_t moisture_milli = 0,
+                       std::uint16_t fuel_milli = 1000,
+                       float radius = 2.0f,
+                       std::uint32_t burn_ticks = 0) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position.x = x;
@@ -80,8 +86,14 @@ TEST(FireSpread, NonCombustibleIgnored) {
 // A burning cell ignites a DRY adjacent combustible.
 TEST(FireSpread, SpreadsToDryNeighbor) {
     entt::registry r;
-    spawnFuel(r, 0.0f, 0.0f, Comp::BurnState::Burning, /*moist*/ 0, /*fuel*/ 1000,
-              /*radius*/ 2.0f, /*burn_ticks*/ 90);
+    spawnFuel(r,
+              0.0f,
+              0.0f,
+              Comp::BurnState::Burning,
+              /*moist*/ 0,
+              /*fuel*/ 1000,
+              /*radius*/ 2.0f,
+              /*burn_ticks*/ 90);
     auto dry = spawnFuel(r, 1.0f, 0.0f, Comp::BurnState::Unburnt, /*moist*/ 0, /*fuel*/ 1000);
     const auto s = RunFireSpreadOnTick(r, /*tick*/ 1);
     EXPECT_EQ(s.ignited, 1);
@@ -124,7 +136,13 @@ TEST(FireSpread, OutsideRadiusDoesNotIgnite) {
 TEST(FireSpread, BurnsDownToBurntAndStopsSpreading) {
     entt::registry r;
     // Burning cell with just 1 tick of fuel-time left, plus a dry neighbor in range.
-    auto src = spawnFuel(r, 0.0f, 0.0f, Comp::BurnState::Burning, 0, 1000, 2.0f,
+    auto src = spawnFuel(r,
+                         0.0f,
+                         0.0f,
+                         Comp::BurnState::Burning,
+                         0,
+                         1000,
+                         2.0f,
                          /*burn_ticks*/ 1);
     auto dry = spawnFuel(r, 1.0f, 0.0f, Comp::BurnState::Unburnt, 0, 1000);
 
@@ -132,7 +150,7 @@ TEST(FireSpread, BurnsDownToBurntAndStopsSpreading) {
     const auto s1 = RunFireSpreadOnTick(r, /*tick*/ 1);
     EXPECT_EQ(stateOf(r, src), Comp::BurnState::Burnt);
     EXPECT_EQ(s1.burnt_out, 1);
-    EXPECT_EQ(stateOf(r, dry), Comp::BurnState::Burning);  // it caught this tick
+    EXPECT_EQ(stateOf(r, dry), Comp::BurnState::Burning); // it caught this tick
 
     // Make a SECOND unburnt neighbor of the now-Burnt src; a Burnt cell must not ignite it.
     auto other = spawnFuel(r, -1.0f, 0.0f, Comp::BurnState::Unburnt, 0, 1000);
@@ -153,8 +171,8 @@ TEST(FireSpread, NoChainWithinSameTick) {
     auto a = spawnFuel(r, 1.0f, 0.0f, Comp::BurnState::Unburnt, 0, 1000, /*radius*/ 1.5f);
     auto b = spawnFuel(r, 2.0f, 0.0f, Comp::BurnState::Unburnt, 0, 1000, /*radius*/ 1.5f);
     const auto s = RunFireSpreadOnTick(r, /*tick*/ 1);
-    EXPECT_EQ(stateOf(r, a), Comp::BurnState::Burning);  // caught from source
-    EXPECT_EQ(stateOf(r, b), Comp::BurnState::Unburnt);  // A only just lit -> no same-tick chain
+    EXPECT_EQ(stateOf(r, a), Comp::BurnState::Burning); // caught from source
+    EXPECT_EQ(stateOf(r, b), Comp::BurnState::Unburnt); // A only just lit -> no same-tick chain
     EXPECT_EQ(s.ignited, 1);
 }
 
@@ -198,6 +216,17 @@ TEST(FireSpread, IgnitionSourceStartsFire) {
     EXPECT_EQ(stateOf(r, dry), Comp::BurnState::Burning);
 }
 
+TEST(FireSpread, ExternalWeatherStrikeStartsFire) {
+    entt::registry r;
+    auto dry = spawnFuel(r, 1.0f, 0.0f, Comp::BurnState::Unburnt, /*moist*/ 0, 1000);
+    const std::array<luminumbra::sim::FireIgnitionSource, 1> strikes{{
+        {glm::vec2(0.0f, 0.0f), 2.0f, 1.0f},
+    }};
+    const auto stats = RunFireSpreadOnTick(r, /*tick*/ 1, glm::vec2(0.0f), strikes);
+    EXPECT_EQ(stats.ignited, 1);
+    EXPECT_EQ(stateOf(r, dry), Comp::BurnState::Burning);
+}
+
 // ---- determinism: run == replay ----
 
 // Identical setup + tick + wind -> identical resulting states across two independent runs.
@@ -215,7 +244,8 @@ TEST(FireSpread, RunEqualsReplay) {
             RunFireSpreadOnTick(r, t, glm::vec2(1.0f, 0.5f));
             // Snapshot every combustible's (state, burn_ticks, fuel) in id order.
             std::vector<entt::entity> ents;
-            for (auto e : r.view<Comp::CombustibleComponent>()) ents.push_back(e);
+            for (auto e : r.view<Comp::CombustibleComponent>())
+                ents.push_back(e);
             std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
                 return entt::to_integral(a) < entt::to_integral(b);
             });
@@ -231,4 +261,4 @@ TEST(FireSpread, RunEqualsReplay) {
     EXPECT_EQ(run(), run());
 }
 
-}  // namespace
+} // namespace

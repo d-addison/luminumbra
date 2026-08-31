@@ -1,13 +1,13 @@
 #pragma once
 
-// Track sim.migration — SEASONAL MIGRATION toward a MOVING target (a deterministic seasonal
+// sim.migration: SEASONAL MIGRATION toward a MOVING target (a deterministic seasonal
 // drive). Each migratory creature is pulled toward a migration target that travels a closed
 // path around the world over the course of a year, and the urge to follow it ("drive") PEAKS at
 // the season transitions (the spring + autumn migrations) and is ~0 mid-season. The result is
 // written per-creature as a wish DIRECTION scaled by the drive; the orchestrator blends that
 // wish into the creature's actual movement (this system never moves an entity itself).
 //
-// SEASONAL MODEL. season01 in [0,1] is a plain INPUT (0 = spring .. 1 = winter, wrapping): the
+// SEASONAL MODEL. season01 in [0,1] is a plain INPUT (0 = spring.. 1 = winter, wrapping): the
 // year is a circle. The caller advances it deterministically (e.g. tick / ticks-per-year); we
 // treat it purely as a phase so run==replay is the caller's to guarantee for the phase and ours
 // for everything derived from it.
@@ -19,9 +19,9 @@
 //
 //   * DRIVE (transition-peaking): migrations happen WHEN the seasons turn, not at the solstices.
 //     The four transition phases are season01 = 0, 0.25, 0.5, 0.75 (the quarter boundaries); the
-//     drive peaks there and falls to ~0 at the quarter MIDPOINTS (0.125, 0.375, ...). We build
-//     this from |cos(4*pi*season01)| — a libm-free wave that is 1 at every transition (season01 =
-//     0, 0.25, 0.5, 0.75) and 0 at every quarter midpoint (0.125, 0.375, ...) — giving two strong
+//     drive peaks there and falls to ~0 at the quarter MIDPOINTS (0.125, 0.375,...). We build
+//     this from |cos(4*pi*season01)| — a libm-free  is 1 at every transition (season01 =
+//     0, 0.25, 0.5, 0.75) and 0 at every quarter midpoint (0.125, 0.375,...) — giving two strong
 //     (spring/autumn) and two shoulder pushes per year, all
 //     bounded to [0,1]. A small threshold floors the tiny mid-season residue to a clean 0 so a
 //     settled creature emits an exactly-zero wish (and the gate stays crisp).
@@ -30,7 +30,7 @@
 // season01 is a plain float input; the target + drive are pure functions of it. Math is
 // DeterministicMath only (Cos/Sin for the path + the drive wave, Sqrt to normalise the wish
 // direction); NO rng is consumed (the drive is a deterministic seasonal function, not stochastic
-// — seed offset +32 is reserved for collision-avoidance only and never drawn), NO wall-clock, NO
+// seed offset +32 is reserved for collision-avoidance only and never drawn), NO wall-clock, NO
 // libm transcendentals (no exp/log/pow). run==replay holds.
 //
 // GATING. A creature participates only if it carries a MigratoryComponent (the opt-in). A world
@@ -52,7 +52,7 @@ namespace luminumbra::ai {
 namespace Comp = ::Luminumbra::Components;
 namespace dm = ::Luminumbra::DeterministicMath;
 
-// Reserved seed-stream offset (registry: ... herd-alarm+26, migration+32). This system is
+// Reserved seed-stream offset (registry:... herd-alarm+26, migration+32). This system is
 // deterministic and consumes NO rng; the offset is recorded for collision-avoidance only.
 inline constexpr std::uint64_t kMigrationSeedOffset = 32ull;
 
@@ -74,16 +74,18 @@ struct MigrationTarget {
 };
 
 struct MigrationStats {
-    int participants = 0;   // creatures carrying a MigratoryComponent that took part
-    int driven = 0;         // creatures with a non-zero drive this tick (actively migrating)
-    float target_x = 0.0f;  // the seasonal target this tick (telemetry / test hook)
+    int participants = 0;  // creatures carrying a MigratoryComponent that took part
+    int driven = 0;        // creatures with a non-zero drive this tick (actively migrating)
+    float target_x = 0.0f; // the seasonal target this tick (telemetry / test hook)
     float target_z = 0.0f;
-    float drive = 0.0f;     // the seasonal drive this tick (same for all participants)
+    float drive = 0.0f; // the seasonal drive this tick (same for all participants)
 };
 
 [[nodiscard]] inline float MigrationClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -91,7 +93,8 @@ struct MigrationStats {
 // Keeps the year a circle for callers that pass an unwrapped phase.
 [[nodiscard]] inline float MigrationWrap01(float season01) {
     float s = season01 - static_cast<float>(static_cast<std::int64_t>(season01));
-    if (s < 0.0f) s += 1.0f;  // map negative phase into [0,1)
+    if (s < 0.0f)
+        s += 1.0f; // map negative phase into [0,1)
     return s;
 }
 
@@ -114,12 +117,14 @@ struct MigrationStats {
 [[nodiscard]] inline float MigrationDriveAt(float season01) {
     const float s = MigrationWrap01(season01);
     // |cos(4*pi*s)|: cos(4*pi*s) is +-1 at s = 0,0.25,0.5,0.75 (the four season TRANSITIONS) and
-    // 0 at the quarter midpoints (0.125,0.375,...). Taking |.| gives a wave that PEAKS (==1) at
+    // 0 at the quarter midpoints (0.125,0.375,...). Taking |.| gives a  PEAKS (==1) at
     // every transition and dips to 0 at every midpoint — exactly the spring/autumn-style pushes.
-    float w = dm::Cos(dm::kTwoPi * 2.0f * s);  // cos(4*pi*s): +-1 at transitions, 0 at midpoints
-    if (w < 0.0f) w = -w;                       // |cos| -> [0,1], peaks (==1) AT the transitions
+    float w = dm::Cos(dm::kTwoPi * 2.0f * s); // cos(4*pi*s): +-1 at transitions, 0 at midpoints
+    if (w < 0.0f)
+        w = -w; // |cos| -> [0,1], peaks (==1) AT the transitions
     w = MigrationClamp01(w);
-    if (w < kMigrationDriveFloor) w = 0.0f;     // floor the mid-season residue to a clean 0
+    if (w < kMigrationDriveFloor)
+        w = 0.0f; // floor the mid-season residue to a clean 0
     return w;
 }
 
@@ -135,7 +140,8 @@ inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    if (ents.empty()) return stats;  // empty roster -> pure no-op.
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
 
     // Seasonal target + drive are shared by all participants this tick (pure functions of the
     // season phase). Compute once.
@@ -165,7 +171,7 @@ inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
         const float dz = target.z - tf.position.z;
         const float d = dm::Sqrt(dx * dx + dz * dz);
         if (d > 1.0e-5f) {
-            const float inv = drive / d;  // unit direction * drive
+            const float inv = drive / d; // unit direction * drive
             mig.wish_x = dx * inv;
             mig.wish_z = dz * inv;
             ++stats.driven;
@@ -179,4 +185,4 @@ inline MigrationStats RunMigrationOnTick(entt::registry& reg, float season01) {
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

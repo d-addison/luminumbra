@@ -1,21 +1,24 @@
 #pragma once
 
-// T-I9-AI E3 (FR-3): ForagingSystem — ant-trail foraging via stigmergy (Deneubourg double-bridge /
+// ForagingSystem — ant-trail foraging via stigmergy (Deneubourg double-bridge /
 // Dorigo ACO). Each tick every ForagerComponent:
-//   1. DEPOSITS pheromone on BOTH legs of its trip — an outbound ant lays the HOME trail (channel 3);
+//   1. DEPOSITS pheromone on BOTH legs of its trip — an outbound ant lays the HOME trail (channel
+//   3);
 //      a laden returning ant lays the FOOD trail (channel 2). This is the "double trail".
 //   2. STEPS one grid cell, choosing the neighbour that maximises a blend of the OPPOSITE channel's
 //      pheromone (follow the trail the other leg laid) and a deterministic pull toward its goal
-//      (nearest food when outbound, the nest when laden) so it makes progress before any trail exists.
+//      (nearest food when outbound, the nest when laden) so it makes progress before any trail
+//      exists.
 //   3. PICKS UP at a food source / DELIVERS at the nest, flipping carrying state.
-// Because a SHORTER route is completed more often per unit time, its trail is reinforced faster than
-// evaporation (ScentField::Step) erases it, so foragers converge on the shorter path. Zero
+// Because a SHORTER route is completed more often per unit time, its trail is reinforced faster
+// than evaporation (ScentField::Step) erases it, so foragers converge on the shorter path. Zero
 // evaporation removes the contrast (saturation) — the classic double-bridge result.
 //
-// DETERMINISM (sim path): id-ordered foragers + id-ordered food sources; integer grid cells; a FIXED
-// 4-neighbour scan order with first-wins tie-break; no RNG / wall-clock / libm. The field read/write
-// is the solver's deterministic add_impulse / at(). OPT-IN: no ForagerComponent -> no-op, so the
-// canonical roster's world_hash is byte-identical (same discipline as scent/creatures/plants).
+// DETERMINISM (sim path): id-ordered foragers + id-ordered food sources; integer grid cells; a
+// FIXED 4-neighbour scan order with first-wins tie-break; no RNG / wall-clock / libm. The field
+// read/write is the solver's deterministic add_impulse / at. OPT-IN: no ForagerComponent ->
+// no-op, so the canonical roster's world_hash is byte-identical (same discipline as
+// scent/creatures/plants).
 
 #include <algorithm>
 #include <cstdint>
@@ -36,47 +39,54 @@ inline constexpr int kFoodTrailChannel = 2;
 inline constexpr int kHomeTrailChannel = 3;
 
 struct ForagingParams {
-    double deposit = 1.0;       // pheromone laid per step
-    double trail_weight = 8.0;  // attraction to the opposite-channel trail
-    double goal_weight = 1.0;   // deterministic pull toward the goal (0 = pure trail following)
+    double deposit = 1.0;      // pheromone laid per step
+    double trail_weight = 8.0; // attraction to the opposite-channel trail
+    double goal_weight = 1.0;  // deterministic pull toward the goal (0 = pure trail following)
 };
 
 struct ForagingStats {
     std::uint64_t foragers = 0;
     std::uint64_t pickups = 0;
-    std::uint64_t deliveries = 0;  // food delivered to nests THIS tick
+    std::uint64_t deliveries = 0; // food delivered to nests THIS tick
 };
 
 // Advance every forager one cell. Pure function of registry + field state (+ params).
-inline ForagingStats RunForagingOnTick(entt::registry& reg, ScentField& field,
-                                       const ForagingParams& p = {}) {
+inline ForagingStats
+RunForagingOnTick(entt::registry& reg, ScentField& field, const ForagingParams& p = {}) {
     namespace Comp = ::Luminumbra::Components;
     ForagingStats stats;
 
     std::vector<entt::entity> ants;
     {
         auto view = reg.view<Comp::ForagerComponent>();
-        for (auto e : view) ants.push_back(e);
+        for (auto e : view)
+            ants.push_back(e);
     }
-    if (ants.empty()) return stats;  // opt-in: no foragers -> byte-identical no-op
-    std::sort(ants.begin(), ants.end(),
-              [](entt::entity a, entt::entity b) { return entt::to_integral(a) < entt::to_integral(b); });
+    if (ants.empty())
+        return stats; // opt-in: no foragers -> byte-identical no-op
+    std::sort(ants.begin(), ants.end(), [](entt::entity a, entt::entity b) {
+        return entt::to_integral(a) < entt::to_integral(b);
+    });
 
     // id-ordered food source cells (with a live handle so pickups can deplete them).
-    struct Food { entt::entity e; std::int32_t x, z; };
+    struct Food {
+        entt::entity e;
+        std::int32_t x, z;
+    };
     std::vector<Food> foods;
     {
         auto fv = reg.view<Comp::FoodSourceComponent>();
         std::vector<entt::entity> fe(fv.begin(), fv.end());
-        std::sort(fe.begin(), fe.end(),
-                  [](entt::entity a, entt::entity b) { return entt::to_integral(a) < entt::to_integral(b); });
+        std::sort(fe.begin(), fe.end(), [](entt::entity a, entt::entity b) {
+            return entt::to_integral(a) < entt::to_integral(b);
+        });
         for (auto e : fe) {
             const auto& f = reg.get<Comp::FoodSourceComponent>(e);
             foods.push_back({e, f.cell_x, f.cell_z});
         }
     }
 
-    static const int kDX[4] = {1, -1, 0, 0};  // FIXED scan order -> deterministic tie-break
+    static const int kDX[4] = {1, -1, 0, 0}; // FIXED scan order -> deterministic tie-break
     static const int kDZ[4] = {0, 0, 1, -1};
 
     for (auto e : ants) {
@@ -87,7 +97,8 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg, ScentField& field,
         const int layCh = a.carrying_food ? kFoodTrailChannel : kHomeTrailChannel;
         field.Deposit(layCh, a.cell_x, a.cell_z, p.deposit);
 
-        // 2. Goal cell: laden -> nest; outbound -> nearest live food (Manhattan, first-wins tie-break).
+        // 2. Goal cell: laden -> nest; outbound -> nearest live food (Manhattan, first-wins
+        // tie-break).
         std::int32_t goalX = a.cell_x, goalZ = a.cell_z;
         if (a.carrying_food) {
             goalX = a.home_x;
@@ -97,11 +108,16 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg, ScentField& field,
             for (const auto& f : foods) {
                 const std::int64_t d = std::llabs(static_cast<long long>(f.x) - a.cell_x) +
                                        std::llabs(static_cast<long long>(f.z) - a.cell_z);
-                if (best < 0 || d < best) { best = d; goalX = f.x; goalZ = f.z; }
+                if (best < 0 || d < best) {
+                    best = d;
+                    goalX = f.x;
+                    goalZ = f.z;
+                }
             }
         }
 
-        // 3. Step: maximise trail_weight * opposite-channel pheromone + goal_weight * goal progress.
+        // 3. Step: maximise trail_weight * opposite-channel pheromone + goal_weight * goal
+        // progress.
         const int followCh = a.carrying_food ? kHomeTrailChannel : kFoodTrailChannel;
         const std::int64_t curGoalDist = std::llabs(static_cast<long long>(goalX) - a.cell_x) +
                                          std::llabs(static_cast<long long>(goalZ) - a.cell_z);
@@ -113,9 +129,12 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg, ScentField& field,
             const double trail = field.Sample(followCh, nx, nz);
             const std::int64_t gd = std::llabs(static_cast<long long>(goalX) - nx) +
                                     std::llabs(static_cast<long long>(goalZ) - nz);
-            const double goalTerm = static_cast<double>(curGoalDist - gd);  // +1 closer, -1 farther
+            const double goalTerm = static_cast<double>(curGoalDist - gd); // +1 closer, -1 farther
             const double score = p.trail_weight * trail + p.goal_weight * goalTerm;
-            if (bestDir < 0 || score > bestScore) { bestScore = score; bestDir = d; }
+            if (bestDir < 0 || score > bestScore) {
+                bestScore = score;
+                bestDir = d;
+            }
         }
         if (bestDir >= 0) {
             a.cell_x += kDX[bestDir];
@@ -124,10 +143,14 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg, ScentField& field,
             // (e.g. a nest/food placed near an edge), and a downstream render mirror would then
             // map it to a far-out-of-bounds world coordinate and sample terrain there (crash /
             // garbage). Clamp to the valid cell range — deterministic integer math.
-            if (a.cell_x < 0) a.cell_x = 0;
-            else if (a.cell_x >= field.width()) a.cell_x = field.width() - 1;
-            if (a.cell_z < 0) a.cell_z = 0;
-            else if (a.cell_z >= field.height()) a.cell_z = field.height() - 1;
+            if (a.cell_x < 0)
+                a.cell_x = 0;
+            else if (a.cell_x >= field.width())
+                a.cell_x = field.width() - 1;
+            if (a.cell_z < 0)
+                a.cell_z = 0;
+            else if (a.cell_z >= field.height())
+                a.cell_z = field.height() - 1;
         }
 
         // 4. Arrival transitions.
@@ -152,4 +175,4 @@ inline ForagingStats RunForagingOnTick(entt::registry& reg, ScentField& field,
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

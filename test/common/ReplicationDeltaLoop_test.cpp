@@ -1,4 +1,4 @@
-// T-I6 P3.1: the ack-driven DELTA replication LOOP, end-to-end over the deterministic
+//  the ack-driven DELTA replication LOOP, end-to-end over the deterministic
 // NetworkSim harness (injected latency / jitter / loss). This is the slice the critique
 // gated behind a network-sim harness (single-PC constraint): the server sends each client
 // only what changed since the snapshot it last ACKed, and the client reconstructs the full
@@ -29,8 +29,8 @@ std::vector<ReplEntityState> AuthoritativeAt(int tick) {
     set.reserve(kN);
     for (int i = 0; i < kN; ++i) {
         ReplEntityState e;
-        e.entity_id = static_cast<std::uint32_t>(i + 1);  // ids 1..kN (1 == the client avatar)
-        e.px_mm = (i == 2) ? tick * 50 : i * 1000;        // entity #3 moves; others static
+        e.entity_id = static_cast<std::uint32_t>(i + 1); // ids 1..kN (1 == the client avatar)
+        e.px_mm = (i == 2) ? tick * 50 : i * 1000;       // entity #3 moves; others static
         e.py_mm = 0;
         e.pz_mm = i * 250;
         e.yaw_mrad = static_cast<std::int16_t>(i * 10);
@@ -44,9 +44,9 @@ std::vector<ReplEntityState> AuthoritativeAt(int tick) {
 void PumpRound(NetworkSim& sim, ReplicationClient& client, ReplicationServer& server) {
     for (int k = 0; k < 6; ++k) {
         sim.Tick();
-        client.PumpInbound();  // receive snapshot(s), reconstruct, send ack
+        client.PumpInbound(); // receive snapshot(s), reconstruct, send ack
         sim.Tick();
-        server.PumpInbound();  // fold in acks
+        server.PumpInbound(); // fold in acks
     }
 }
 
@@ -57,7 +57,8 @@ void ExpectConverged(const ReplicationClient& client, int tick) {
     const std::vector<ReplEntityState>& got = client.snapshot().entities;
     const std::vector<ReplEntityState> want = AuthoritativeAt(tick);
     ASSERT_EQ(got.size(), want.size());
-    for (std::size_t i = 0; i < want.size(); ++i) EXPECT_TRUE(got[i] == want[i]) << "entity " << i;
+    for (std::size_t i = 0; i < want.size(); ++i)
+        EXPECT_TRUE(got[i] == want[i]) << "entity " << i;
 }
 
 // Clean link: delta mode reconstructs the exact authoritative set every tick.
@@ -89,7 +90,7 @@ TEST(ReplicationDeltaLoop, ConvergesUnderHeavyLoss) {
     NetworkConditions cond;
     cond.latency_ticks = 1;
     cond.jitter_ticks = 1;
-    cond.drop_one_in = 2;  // ~50% of unreliable frames dropped
+    cond.drop_one_in = 2; // ~50% of unreliable frames dropped
     cond.seed = 99;
     NetworkSim sim(cond);
 
@@ -128,9 +129,9 @@ TEST(ReplicationDeltaLoop, IdleDeltaIsFarSmallerThanFullSnapshot) {
     // A STATIC world (entity #3 frozen too) so post-baseline deltas carry zero entities.
     const std::vector<ReplEntityState> world = AuthoritativeAt(7);
 
-    server.BroadcastSnapshot(0, world);  // first send: full (no baseline yet)
+    server.BroadcastSnapshot(0, world); // first send: full (no baseline yet)
     const std::size_t full_bytes = server.last_broadcast_max_client_bytes();
-    PumpRound(sim, client, server);      // client acks the full baseline
+    PumpRound(sim, client, server); // client acks the full baseline
 
     // Now the server has an acked baseline; an unchanged broadcast is a near-empty delta.
     server.BroadcastSnapshot(1, world);
@@ -138,9 +139,9 @@ TEST(ReplicationDeltaLoop, IdleDeltaIsFarSmallerThanFullSnapshot) {
     PumpRound(sim, client, server);
 
     EXPECT_GT(full_bytes, 0u);
-    EXPECT_LT(idle_bytes, full_bytes / 2) << "idle delta " << idle_bytes
-                                          << " not much smaller than full " << full_bytes;
-    ExpectConverged(client, 7);  // still correct despite sending almost nothing
+    EXPECT_LT(idle_bytes, full_bytes / 2)
+        << "idle delta " << idle_bytes << " not much smaller than full " << full_bytes;
+    ExpectConverged(client, 7); // still correct despite sending almost nothing
 }
 
 // Determinism: identical conditions + sequence -> byte-identical reconstructed state.
@@ -165,7 +166,8 @@ TEST(ReplicationDeltaLoop, DeterministicRunEqualsReplay) {
     const std::vector<ReplEntityState> a = run();
     const std::vector<ReplEntityState> b = run();
     ASSERT_EQ(a.size(), b.size());
-    for (std::size_t i = 0; i < a.size(); ++i) EXPECT_TRUE(a[i] == b[i]);
+    for (std::size_t i = 0; i < a.size(); ++i)
+        EXPECT_TRUE(a[i] == b[i]);
 }
 
 // Full-snapshot mode (delta OFF) is unchanged: the client still reconstructs the full set
@@ -175,7 +177,7 @@ TEST(ReplicationDeltaLoop, FullSnapshotModeStillWorks) {
     cond.latency_ticks = 1;
     cond.seed = 1;
     NetworkSim sim(cond);
-    ReplicationServer server;  // delta compression OFF (default)
+    ReplicationServer server; // delta compression OFF (default)
     server.AddClient(kClientId, &sim.A());
     ReplicationClient client(kClientId, &sim.B());
 
@@ -189,4 +191,4 @@ TEST(ReplicationDeltaLoop, FullSnapshotModeStillWorks) {
     ExpectConverged(client, last);
 }
 
-}  // namespace
+} // namespace

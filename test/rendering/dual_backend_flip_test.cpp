@@ -1,4 +1,4 @@
-// GPU-09 (spec 021 rank 60; spec 016 FR-C.3 / FR-D.2): the in-process dual-backend
+//  ( ;   / ): the in-process dual-backend
 // FLIP parity harness.
 //
 // The offline path (tools/flip_diff.py) is file-based and run-to-run noisy
@@ -7,7 +7,7 @@
 // two framebuffers produced in ONE process / GL context with the exact same
 // perceptual metric (rendering/InProcessFlip.h, a port of flip_diff backend_luma).
 //
-// What GPU-09 delivers and proves here:
+// What  delivers and proves here:
 //   1. ZeroNoiseFloorIsBitIdentical -- the same pass rendered twice in one
 //      process is bitwise identical -> FLIP score exactly 0.0, K times, zero
 //      within-process variance. Cross-run reproducibility follows from
@@ -18,14 +18,9 @@
 //      detects a genuine rendered (objectColor) difference. Without this, the
 //      "score < per-pass threshold" half of the proving signal would be
 //      "0 < anything" -- untested. The recorded magnitude->score curve is what
-//      gives rank 66 an empirical, non-invented threshold basis.
-//   3. SecondBackendParityLandedInRhiPilotFlip -- the raw-GL-vs-GL-via-Diligent
-//      leg. This calibration harness is GL-only (no Diligent link), so its inline
-//      seam is a documented stub; the dual-backend parity RUN (rank 66,
-//      GPU-03+GPU-P05) landed in the Diligent-linked sibling rhi_pilot_flip_test.cpp
-//      (RhiPilotParityGpu), reusing ComputeLumaFlip with the threshold from
-//      dual_backend_flip.json -- leg B verdict GO, bit-identical (FLIP 0.0). Loud
-//      GTEST_SKIP pointing at the landed run, not a silent one.
+//      gives  an empirical, non-invented threshold basis.
+// Backend parity itself runs in the Diligent-linked rhi_pilot_flip_test target,
+// reusing ComputeLumaFlip and the calibration artifact emitted here.
 //
 // The pass is `basic.vert`/`basic.frag` -- deliberately temporally deterministic
 // (no u_time, no ping-pong history, no random), so "render twice" means "same
@@ -83,13 +78,6 @@ struct RenderParams {
     glm::vec3 camera_position{3.2f, 2.6f, 4.4f};
     glm::vec3 camera_target{0.0f, 0.0f, 0.0f};
     glm::vec3 light_pos{6.0f, 8.0f, 5.0f};
-};
-
-// The seam rank 66 fills in: today only RawGl is realisable; RhiDiligent is wired
-// so the proving-signal test can name it and skip loudly until GPU-P02.
-enum class FlipBackend {
-    RawGl,
-    RhiDiligent
 };
 
 class HiddenGlContext {
@@ -235,7 +223,7 @@ std::vector<MeshVertex> BuildCubeMesh() {
 
 // Render the cube with the given params into a 256x256 RGBA8 FBO and read it
 // back. glReadPixels from the bound FBO is synchronous (it blocks until the draw
-// completes); glFinish() is added as belt-and-suspenders. No fence/glClientWaitSync
+// completes); glFinish is added as belt-and-suspenders. No fence/glClientWaitSync
 // is used, so GL_SYNC_FLUSH_COMMANDS_BIT does not apply here.
 std::vector<std::uint8_t>
 RenderCubeRawGl(GLuint program, const std::vector<MeshVertex>& mesh, const RenderParams& params) {
@@ -327,26 +315,6 @@ RenderCubeRawGl(GLuint program, const std::vector<MeshVertex>& mesh, const Rende
     return pixels;
 }
 
-// backend dispatch. RawGl renders; RhiDiligent reports unavailable (the backend
-// is not built until GPU-P02 / rank 63). available is set to false in that case.
-std::vector<std::uint8_t> RenderVia(FlipBackend backend,
-                                    GLuint program,
-                                    const std::vector<MeshVertex>& mesh,
-                                    const RenderParams& params,
-                                    bool* available) {
-    switch (backend) {
-        case FlipBackend::RawGl:
-            if (available)
-                *available = true;
-            return RenderCubeRawGl(program, mesh, params);
-        case FlipBackend::RhiDiligent:
-        default:
-            if (available)
-                *available = false;
-            return {};
-    }
-}
-
 // Additively shift every channel of every pixel by delta (saturating), leaving
 // alpha. A uniform shift moves the luma and colour terms predictably with the
 // magnitude while the gradient term stays ~flat -- a clean monotone calibration.
@@ -406,9 +374,7 @@ TEST_F(DualBackendFlipInProcessGpu, ZeroNoiseFloorIsBitIdentical) {
     std::vector<std::vector<std::uint8_t>> frames;
     frames.reserve(kRepeats);
     for (int i = 0; i < kRepeats; ++i) {
-        bool available = false;
-        frames.push_back(RenderVia(FlipBackend::RawGl, s_program, mesh, params, &available));
-        ASSERT_TRUE(available);
+        frames.push_back(RenderCubeRawGl(s_program, mesh, params));
         ASSERT_EQ(frames.back().size(), static_cast<std::size_t>(kWidth) * kHeight * 4u);
     }
 
@@ -438,16 +404,13 @@ TEST_F(DualBackendFlipInProcessGpu, ZeroNoiseFloorIsBitIdentical) {
 // (2) The acceptance content: the metric is monotone in a known perturbation
 // magnitude and strictly positive for any non-zero difference, and the full
 // render->readback->FLIP pipeline detects a genuine rendered (objectColor)
-// difference. The recorded curve gives rank 66 a non-invented threshold basis.
+// difference. The recorded curve gives  a non-invented threshold basis.
 TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
     const std::vector<MeshVertex> mesh = BuildCubeMesh();
     ASSERT_FALSE(mesh.empty());
     const RenderParams params;
 
-    bool available = false;
-    const std::vector<std::uint8_t> baseline =
-        RenderVia(FlipBackend::RawGl, s_program, mesh, params, &available);
-    ASSERT_TRUE(available);
+    const std::vector<std::uint8_t> baseline = RenderCubeRawGl(s_program, mesh, params);
 
     using Luminumbra::Rendering::InProcessFlip::ComputeLumaFlip;
 
@@ -468,8 +431,7 @@ TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
     // is caught by the full pipeline, well above the zero floor.
     RenderParams recolored = params;
     recolored.object_color = glm::vec3{0.85f, 0.30f, 0.25f};
-    const std::vector<std::uint8_t> recolored_frame =
-        RenderVia(FlipBackend::RawGl, s_program, mesh, recolored, &available);
+    const std::vector<std::uint8_t> recolored_frame = RenderCubeRawGl(s_program, mesh, recolored);
     const auto color_flip =
         ComputeLumaFlip(baseline.data(), recolored_frame.data(), kWidth, kHeight);
     EXPECT_GT(color_flip.score, 0.001)
@@ -481,7 +443,7 @@ TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
         ComputeLumaFlip(recolored_frame.data(), recolored_frame.data(), kWidth, kHeight);
     EXPECT_EQ(self_flip.score, 0.0);
 
-    // Record the calibration so rank 66 reads its per-pass threshold basis rather
+    // Record the calibration so  reads its per-pass threshold basis rather
     // than inventing one.
     fs::create_directories(ArtifactRoot());
     std::ofstream out(ArtifactRoot() / "dual_backend_flip.json");
@@ -503,31 +465,6 @@ TEST_F(DualBackendFlipInProcessGpu, DiscriminationTracksPerturbationMagnitude) {
     }
     out << "  ],\n";
     out << "  \"render_level_color_diff_score\": " << color_flip.score << ",\n";
-    out << "  \"second_backend\": \"pending GPU-P02 (rank 63); parity run is rank 66 "
-           "(GPU-03+GPU-P05)\"\n";
+    out << "  \"second_backend\": \"validated by RhiPilotParityGpu\"\n";
     out << "}\n";
-}
-
-// (3) The named dual-backend leg: raw-GL vs GL-via-Diligent. This calibration
-// harness is GL-only by design (no Diligent link), so its inline RhiDiligent seam
-// stays a documented stub -- the real parity RUN (rank 66 / GPU-03+GPU-P05) landed
-// in a Diligent-linked sibling target, test/rendering/rhi_pilot_flip_test.cpp
-// (suite RhiPilotParityGpu), which reuses ComputeLumaFlip with the threshold
-// derived from dual_backend_flip.json. VERDICT (leg B): GO -- GL-via-Diligent is
-// BIT-IDENTICAL to raw-GL (in-process FLIP score 0.0, well under the 0.0027451
-// delta=1 go-threshold; see test-artifacts/rhi_pilot_flip/rhi_pilot_flip.json).
-// This test keeps the stub honest (unavailable here) and points at the landed run.
-TEST_F(DualBackendFlipInProcessGpu, SecondBackendParityLandedInRhiPilotFlip) {
-    const std::vector<MeshVertex> mesh = BuildCubeMesh();
-    const RenderParams params;
-
-    bool available = true;
-    const std::vector<std::uint8_t> diligent_frame =
-        RenderVia(FlipBackend::RhiDiligent, s_program, mesh, params, &available);
-    ASSERT_FALSE(available) << "this GL-only calibration harness intentionally does "
-                               "not link Diligent; the parity RUN is RhiPilotParityGpu";
-    EXPECT_TRUE(diligent_frame.empty());
-
-    // The assertions above fully evaluate this target's contract: this GL-only
-    // harness must not silently acquire a second backend.
 }

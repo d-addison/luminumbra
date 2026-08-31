@@ -12,10 +12,10 @@ class Camera;
 class Shader;
 class RenderResourceRegistry;
 
-// SSAO + SSAO blur render passes extracted from RenderPipeline (T-I2-11d).
+// SSAO + SSAO blur render passes extracted from RenderPipeline.
 // Owns the SSAO FBOs, color buffers, noise texture, sample kernel, and both
-// SSAO shaders (SSAOData). Spec 016 (016-P2-T02): converted to the RenderContext
-// seam — execute() takes a const RenderContext& (G-buffer inputs, screen quad,
+// SSAO shaders (SSAOData).: converted to the RenderContext
+// seam — execute takes a const RenderContext& (G-buffer inputs, screen quad,
 // quality, screen size from the contract), NOT a RenderPipeline&. The pipeline
 // keeps orchestration order, stats collection, and the GPU timer issue/collect.
 class SsaoPass {
@@ -24,7 +24,7 @@ public:
     ~SsaoPass();
 
     void init_shaders(const std::filesystem::path& root_path);
-    // RENDER-12/GPU-12: the AO RENDER TARGETS (raw/blur full-res + half-res GTAO
+    // the AO RENDER TARGETS (raw/blur full-res + half-res GTAO
     // FBOs and their color textures) are REGISTRY-OWNED. The 4x4 noise texture is
     // NOT — it carries uploaded pixel data (a static input, not a render target),
     // so it stays pass-owned. The SSAOData struct caches the owned ids so every
@@ -33,7 +33,7 @@ public:
     void destroy_ssao(RenderResourceRegistry& registry);
     void reset_shaders();
 
-    // Spec 016 seam: source G-buffer/quality/quad/screen from the RenderContext.
+    //  seam: source G-buffer/quality/quad/screen from the RenderContext.
     // The in-process A/B parity gate lives in RenderPipeline::capture_ssao_parity
     // (which has pipeline access): it runs the original pipeline-sourced GL
     // sequence as the golden A-leg and this ctx-sourced seam as the B-leg, then
@@ -41,8 +41,12 @@ public:
     void execute_ssao(const RenderContext& ctx);
     void execute_blur(const RenderContext& ctx);
 
-    SSAOData& ssao() { return m_ssao; }
-    const SSAOData& ssao() const { return m_ssao; }
+    SSAOData& ssao() {
+        return m_ssao;
+    }
+    const SSAOData& ssao() const {
+        return m_ssao;
+    }
 
 private:
     SSAOData m_ssao;

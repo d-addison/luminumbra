@@ -1,7 +1,7 @@
 {
   "schema": "luminumbra.particle_emitter.v1",
   "name": "precip_splash",
-  "_comment": "T-I5a-DR-storm-motion-v3: rain-impact FOAM. atlas_layer 4 is a render-side SENTINEL the particle frag shader reads to draw this as a clean near-white foam burst (no scene-light tint, no additive glow) instead of a coloured emissive sprite. spawn_rate 0 (impact-spawned only) so it is excluded from the deterministic emitter-descriptor snapshot. Colours are a near-neutral pale white-blue so the burst reads as a small subtle whitish foam pop, never coloured speckle.",
+  "_comment": ": rain-impact FOAM. atlas_layer 4 is a render-side SENTINEL the particle frag shader reads to draw this as a clean near-white foam burst (no scene-light tint, no additive glow) instead of a coloured emissive sprite. spawn_rate 0 (impact-spawned only) so it is excluded from the deterministic emitter-descriptor snapshot. Colours are a near-neutral pale white-blue so the burst reads as a small subtle whitish foam pop, never coloured speckle.",
   "type": 3,
   "spawn_rate": 0.0,
   "lifetime": 0.28,

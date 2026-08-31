@@ -4,7 +4,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/sources.cmake")
 # Create the static library with all its source files at once.
 add_library(luminumbra_common STATIC ${COMMON_SOURCES})
 
-# Spec 020 FR-B-003 — config-schema drift gate (compile/CI). SystemConfig.h/.cpp GENERATE the
+# config-schema drift gate (compile/CI). SystemConfig.h/.cpp GENERATE the
 # SysKey/SysParam enums + kKeys/kParams registries by expanding the X-macro tables in
 # core/SystemConfigRegistry.gen.h, whose single authored home is core/ConfigSchema.json. If the
 # committed generated header is stale vs the schema (someone edited the schema but forgot to
@@ -58,21 +58,21 @@ endif()
 # (no FMA) and GCC does NOT reorder IEEE float ops without -ffast-math, so results are bit-
 # identical to -O0; verified by the NetworkStateHash run==replay gate.
 #
-# T-transcendental FR-003: the opt level of THIS one TU is asymmetric with the rest
+# T-transcendental: the opt level of THIS one TU is asymmetric with the rest
 # of the (-O0 debug) library, which is exactly how FMA/opt drift sneaks in. The
 # Test-SimOptLevelParity gate builds a second tree with LUMINUMBRA_SIM_O0_PARITY=ON
-# (overriding this file to -O2 -- a link-safe MORE-optimized level, since plain -O0
+# (overriding this file to - -- a link-safe MORE-optimized level, since plain -O0
 # reintroduces the vague-linkage link error above) and asserts the headless
 # world_hash is identical, proving opt-level invariance.
 option(LUMINUMBRA_SIM_O0_PARITY
        "Build GameSession.cpp at a GCC sim-parity opt level for world-hash invariance" OFF)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     if(LUMINUMBRA_SIM_O0_PARITY)
-        # -O2 (not -O0): -O0 reintroduces the entt vague-linkage undefined-reference link
-        # error this override exists to dodge. -O2 is link-safe and a STRONGER opt level
-        # than the normal -O1, so world_hash parity across -O1 vs -O2 is a stricter proof
+        # - (not -O0): -O0 reintroduces the entt vague-linkage undefined-reference link
+        # error this override exists to dodge. - is link-safe and a STRONGER opt level
+        # than the normal -O1, so world_hash parity across -O1 vs - is a stricter proof
         # of opt-level invariance than -O0 vs -O1 would have been.
-        set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O2")
+        set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-")
     else()
         set_source_files_properties(world/GameSession.cpp PROPERTIES COMPILE_OPTIONS "-O1")
     endif()
@@ -106,14 +106,14 @@ target_link_libraries(luminumbra_common PUBLIC
     FastNoise
 )
 
-# T-I4-13: the TcpTransport (net/LockstepSession.cpp) uses winsock2 under _WIN32; link
+# the TcpTransport (net/LockstepSession.cpp) uses winsock2 under _WIN32; link
 # ws2_32 where (and only where) the platform needs it. The gates/tests drive
 # LoopbackTransport (no sockets), so this link is for the real loopback/LAN session path.
 if(WIN32)
     target_link_libraries(luminumbra_common PUBLIC ws2_32)
 endif()
 
-# T-I6: Steamworks SDK transport (SteamNetworkingTransport -> ISteamNetworkingSockets:
+# Steamworks SDK transport (SteamNetworkingTransport -> ISteamNetworkingSockets:
 # real UDP + reliability + encryption + SDR). OFF by default; the SDK is owner-provided
 # and NOT redistributable (vendor/steamworks/ is gitignored). When ON, link steam_api64
 # + expose the headers + define LUMINUMBRA_ENABLE_STEAM so the transport body compiles.
@@ -132,7 +132,7 @@ if(LUMINUMBRA_ENABLE_STEAM)
     message(STATUS "Steamworks transport ENABLED (SDK: ${LUMINUMBRA_STEAM_SDK_DIR})")
 endif()
 
-# T-I6: standalone GameNetworkingSockets transport (GnsTransport). Valve's
+# standalone GameNetworkingSockets transport (GnsTransport). Valve's
 # open-source UDP networking, Steam-INDEPENDENT -- so two processes can connect on
 # ONE machine (the Steam SDK can't, one-instance-per-app), which is exactly what
 # local dev/testing needs. OFF by default (FetchContent + a multi-minute GNS build);

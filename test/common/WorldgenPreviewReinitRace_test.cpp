@@ -1,4 +1,4 @@
-// SHIELD-09 (spec 002 follow-up): the worldgen-preview reinit-vs-far-LOD race
+//  ( implementation note): the worldgen-preview reinit-vs-far-LOD race
 // is closed by a QUIESCE, not a point guard. Worker threads soak far-LOD-style
 // sampling under the worldgen-epoch gate (acquire_worldgen_sample_scope) while
 // the main thread hammers set_params (reinitialize_noise takes the exclusive
@@ -64,8 +64,7 @@ TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
     TerrainGenParams knob = params;
     const auto soak_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
     int iteration = 0;
-    while (std::chrono::steady_clock::now() < soak_end &&
-           !failed.load(std::memory_order_acquire)) {
+    while (std::chrono::steady_clock::now() < soak_end && !failed.load(std::memory_order_acquire)) {
         knob.shaping_enabled = (iteration % 2) == 1;
         knob.height_offset = static_cast<float>(iteration % 7);
         world.set_params(knob);
@@ -92,4 +91,4 @@ TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
     }
 }
 
-}  // namespace
+} // namespace

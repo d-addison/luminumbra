@@ -1,4 +1,4 @@
-// spec 021 GPU-P04 / spec 014 FR-A0.1 + FR-A.2: PilotShaderReflectionParity.
+//   /   +: PilotShaderReflectionParity.
 //
 // For each pilot shader (ssao, debug_view), assert that THREE independent views of
 // its sampler interface agree on {name -> GL sampler type}:
@@ -8,13 +8,14 @@
 // A == C is GL-free and always runs (non-vacuous coverage even headless); B == C and
 // A == B add the GL-introspection leg when a context is available. This proves the
 // HLSL port reflects the SAME interface the engine already validates -- the
-// reflection half of 014 FR-F.5; the ported-HLSL render + FLIP-vs-golden lands with
-// the pilot (GPU-P05).
+// reflection half of ; the ported-HLSL render + FLIP-vs-golden lands with
+// the pilot.
 
 #include "gtest/gtest.h"
 
-#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 #include <algorithm>
 #include <fstream>
@@ -34,26 +35,39 @@ namespace {
 class HiddenGlContext {
 public:
     HiddenGlContext() {
-        if (!glfwInit()) { m_error = "glfwInit failed"; return; }
+        if (!glfwInit()) {
+            m_error = "glfwInit failed";
+            return;
+        }
         m_glfw_initialized = true;
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         m_window = glfwCreateWindow(64, 64, "pilot_shader_reflection_test", nullptr, nullptr);
-        if (!m_window) { m_error = "glfwCreateWindow failed"; return; }
+        if (!m_window) {
+            m_error = "glfwCreateWindow failed";
+            return;
+        }
         glfwMakeContextCurrent(m_window);
         if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
-            m_error = "gladLoadGLLoader failed"; return;
+            m_error = "gladLoadGLLoader failed";
+            return;
         }
         m_ready = true;
     }
     ~HiddenGlContext() {
-        if (m_window) glfwDestroyWindow(m_window);
-        if (m_glfw_initialized) glfwTerminate();
+        if (m_window)
+            glfwDestroyWindow(m_window);
+        if (m_glfw_initialized)
+            glfwTerminate();
     }
-    bool ready() const { return m_ready; }
-    const std::string& error() const { return m_error; }
+    bool ready() const {
+        return m_ready;
+    }
+    const std::string& error() const {
+        return m_error;
+    }
 
 private:
     GLFWwindow* m_window = nullptr;
@@ -69,7 +83,8 @@ GLuint CompileStage(GLenum stage, const char* src, std::string& err) {
     GLint ok = GL_FALSE;
     glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
     if (!ok) {
-        GLint len = 0; glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &len);
+        GLint len = 0;
+        glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &len);
         std::string log(static_cast<size_t>(std::max(len, 1)), '\0');
         glGetShaderInfoLog(sh, len, nullptr, log.data());
         err = log;
@@ -81,9 +96,13 @@ GLuint CompileStage(GLenum stage, const char* src, std::string& err) {
 
 GLuint LinkProgram(const char* vs, const char* fs, std::string& err) {
     GLuint v = CompileStage(GL_VERTEX_SHADER, vs, err);
-    if (!v) return 0;
+    if (!v)
+        return 0;
     GLuint f = CompileStage(GL_FRAGMENT_SHADER, fs, err);
-    if (!f) { glDeleteShader(v); return 0; }
+    if (!f) {
+        glDeleteShader(v);
+        return 0;
+    }
     GLuint p = glCreateProgram();
     glAttachShader(p, v);
     glAttachShader(p, f);
@@ -93,7 +112,8 @@ GLuint LinkProgram(const char* vs, const char* fs, std::string& err) {
     GLint linked = GL_FALSE;
     glGetProgramiv(p, GL_LINK_STATUS, &linked);
     if (!linked) {
-        GLint len = 0; glGetProgramiv(p, GL_INFO_LOG_LENGTH, &len);
+        GLint len = 0;
+        glGetProgramiv(p, GL_INFO_LOG_LENGTH, &len);
         std::string log(static_cast<size_t>(std::max(len, 1)), '\0');
         glGetProgramInfoLog(p, len, nullptr, log.data());
         err = log;
@@ -105,7 +125,10 @@ GLuint LinkProgram(const char* vs, const char* fs, std::string& err) {
 
 bool ReadTextFile(const std::string& path, std::string& out, std::string& err) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) { err = "cannot open " + path; return false; }
+    if (!f) {
+        err = "cannot open " + path;
+        return false;
+    }
     std::ostringstream ss;
     ss << f.rdbuf();
     out = ss.str();
@@ -114,23 +137,34 @@ bool ReadTextFile(const std::string& path, std::string& out, std::string& err) {
 
 std::map<std::string, GLenum> ReflectedSamplerMap(const std::vector<ReflectedSampler>& s) {
     std::map<std::string, GLenum> m;
-    for (const auto& x : s) m[x.name] = x.type;
+    for (const auto& x : s)
+        m[x.name] = x.type;
     return m;
 }
 std::map<std::string, GLenum> ExpectedSamplerMap(const std::vector<ExpectedSampler>& s) {
     std::map<std::string, GLenum> m;
-    for (const auto& x : s) m[x.name] = x.type;
+    for (const auto& x : s)
+        m[x.name] = x.type;
     return m;
 }
 
-std::string SourceRoot() { return LUMINUMBRA_SOURCE_ROOT; }
-std::string ReflectDir() { return PILOT_SHADER_REFLECT_DIR; }
+std::string SourceRoot() {
+    return LUMINUMBRA_SOURCE_ROOT;
+}
+std::string ReflectDir() {
+    return PILOT_SHADER_REFLECT_DIR;
+}
 
 class PilotShaderReflectionParityGpu : public ::testing::Test {
 protected:
     static HiddenGlContext* s_ctx;
-    static void SetUpTestSuite() { s_ctx = new HiddenGlContext(); }
-    static void TearDownTestSuite() { delete s_ctx; s_ctx = nullptr; }
+    static void SetUpTestSuite() {
+        s_ctx = new HiddenGlContext();
+    }
+    static void TearDownTestSuite() {
+        delete s_ctx;
+        s_ctx = nullptr;
+    }
 };
 HiddenGlContext* PilotShaderReflectionParityGpu::s_ctx = nullptr;
 
@@ -150,7 +184,7 @@ void RunParity(HiddenGlContext* ctx, const char* pass_name, const char* json_bas
     ASSERT_FALSE(slang_map.empty())
         << "Slang reflection of " << json_basename << " produced no samplers (vacuous)";
 
-    // A == C : the HLSL's reflected interface equals the declared layout.
+    // A == C: the HLSL's reflected interface equals the declared layout.
     EXPECT_EQ(slang_map, expected)
         << "Slang reflected layout != declared ExpectedLayout for '" << pass_name << "'";
 
@@ -172,8 +206,8 @@ void RunParity(HiddenGlContext* ctx, const char* pass_name, const char* json_bas
             << "Slang layout != GL-introspected layout for '" << pass_name << "'";
     } else {
         // A==C already gave non-vacuous coverage; the GL leg is unavailable headless.
-        GTEST_LOG_(WARNING) << "no GL context; GL-introspection leg skipped for '"
-                            << pass_name << "' (A==C still asserted)";
+        GTEST_LOG_(WARNING) << "no GL context; GL-introspection leg skipped for '" << pass_name
+                            << "' (A==C still asserted)";
     }
 }
 
@@ -185,4 +219,4 @@ TEST_F(PilotShaderReflectionParityGpu, DebugViewLayoutMatchesAcrossReflectionSou
     RunParity(s_ctx, "debug_view", "debug_view.frag.reflect.json");
 }
 
-}  // namespace
+} // namespace

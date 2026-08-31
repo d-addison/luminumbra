@@ -1,13 +1,14 @@
 // Generates the authored grovestrider creature textures committed under
-// data/textures/creatures/grovestrider/ (T-I4-8 skinned texturing).
+// data/textures/creatures/grovestrider/ ( skinned texturing).
 //
 // Deterministic procedural patterns (no external source art). Built and run
 // once to (re)produce the committed PNGs; NOT part of the CMake build. To
 // regenerate:
 //   g++ -std=c++17 -I vendor/stb tools/generate_creature_textures.cpp -o gen_creature
-//   ./gen_creature
-//   build/.../asset_processor grovestrider_albedo.png grovestrider_albedo_256.ltex 256 --preview-png
-//   build/.../asset_processor grovestrider_normal.png grovestrider_normal_256.ltex 256 --preview-png
+//./gen_creature
+//   build/.../asset_processor grovestrider_albedo.png grovestrider_albedo_256.ltex 256
+//   --preview-png build/.../asset_processor grovestrider_normal.png grovestrider_normal_256.ltex
+//   256 --preview-png
 //
 // The grovestrider's box UVs map each face to [0,1]^2, so the albedo carries
 // a recognisable creature read: a mossy green body gradient, darker dorsal
@@ -15,8 +16,8 @@
 // deliberate and high-contrast so the skinned-mesh visual gate's color-variance
 // check has a clear signal (a flat color would fail it).
 
-#include <cstdint>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -30,8 +31,10 @@ void WritePng(const std::string& path, int w, int h, const std::vector<uint8_t>&
 }
 
 uint8_t clamp8(float v) {
-    if (v < 0.0f) v = 0.0f;
-    if (v > 255.0f) v = 255.0f;
+    if (v < 0.0f)
+        v = 0.0f;
+    if (v > 255.0f)
+        v = 255.0f;
     return static_cast<uint8_t>(v + 0.5f);
 }
 
@@ -58,24 +61,32 @@ std::vector<uint8_t> Albedo(int w, int h) {
             // Dorsal banding (dark stripes across the back, low v).
             float band = std::sin(u * 18.84955592f); // ~3 stripes
             if (v < 0.5f && band > 0.4f) {
-                r *= 0.55f; g *= 0.55f; b *= 0.55f;
+                r *= 0.55f;
+                g *= 0.55f;
+                b *= 0.55f;
             }
 
             // Warm under-belly tint.
             if (v > 0.72f) {
-                r += 50.0f; g += 18.0f; b += 8.0f;
+                r += 50.0f;
+                g += 18.0f;
+                b += 8.0f;
             }
 
             // Bright eye/marking spots near the head band (u in [0.1,0.2]).
             const float du = u - 0.15f;
             const float dv = v - 0.30f;
             if (du * du + dv * dv < 0.0035f) {
-                r = 235.0f; g = 220.0f; b = 70.0f;
+                r = 235.0f;
+                g = 220.0f;
+                b = 70.0f;
             }
 
             // Fine speckle.
             const float n = (hash(x, y) - 0.5f) * 22.0f;
-            r += n; g += n; b += n;
+            r += n;
+            g += n;
+            b += n;
 
             px[i + 0] = clamp8(r);
             px[i + 1] = clamp8(g);

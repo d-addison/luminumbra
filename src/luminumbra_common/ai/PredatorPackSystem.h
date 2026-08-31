@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.predator_pack — EMERGENT PACK HUNTING via FLANKING COORDINATION.
+// sim.predator_pack: EMERGENT PACK HUNTING via FLANKING COORDINATION.
 //
 // Predators don't just all charge the same point (which lets prey bolt out the open side);
 // when several hunt close together they SURROUND the quarry. This system maintains a
@@ -19,12 +19,12 @@
 //   * dead prey (CreatureComponent.eaten) are not targets; a carcass-predator (eaten predator)
 //     and a predator with no live prey in the world get a zero wish.
 //
-// The movement blend that consumes coord_x/coord_z is wired by the orchestrator later — this
-// system only computes the coordination field.
+// SteeringConsumer blends coord_x/coord_z into the predator's movement after
+// this system computes the coordination field.
 //
 // DETERMINISM. id-ordered traversal (sort by entt::to_integral). TWO-PHASE so the result is
-// order-INDEPENDENT: phase 1 SNAPSHOTS every predator's position + every live prey's position;
-// phase 2 computes each predator's wish from that frozen snapshot (its pack is its allies in
+// order-INDEPENDENT:  SNAPSHOTS every predator's position + every live prey's position;
+//  computes each predator's wish from that frozen snapshot (its pack is its allies in
 // range from the snapshot; its flank rank is its index among the id-sorted pack). Because all
 // reads are from the snapshot, no predator's update can see another's in-this-tick write, so
 // iteration order cannot change the outcome. Math is DeterministicMath only (Cos/Sin for the
@@ -66,34 +66,35 @@ inline constexpr float kPackRadius = 20.0f;
 inline constexpr float kFlankStandoff = 4.0f;
 
 struct PredatorPackStats {
-    int participants = 0;  // predators carrying a PackHunterComponent that took part
-    int packed = 0;        // predators that found at least one pack-mate in range (in_pack=1)
-    int hunting = 0;       // predators that got a non-zero wish (had a live prey target)
+    int participants = 0; // predators carrying a PackHunterComponent that took part
+    int packed = 0;       // predators that found at least one pack-mate in range (in_pack=1)
+    int hunting = 0;      // predators that got a non-zero wish (had a live prey target)
 };
 
 // RunPredatorPackOnTick: maintain the pack-hunting coordination field. id-ordered, two-phase
 // snapshot. Returns per-tick stats (telemetry / test hooks).
 inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_t tick) {
-    (void)tick;  // no rng / time dependence; kept for signature parity with sibling systems.
+    (void)tick; // no rng / time dependence; kept for signature parity with sibling systems.
     PredatorPackStats stats;
 
     // Predators that opted in (carry a PackHunterComponent).
-    auto predView = reg.view<Comp::PackHunterComponent, Comp::CreatureComponent,
-                             Comp::TransformComponent>();
+    auto predView =
+        reg.view<Comp::PackHunterComponent, Comp::CreatureComponent, Comp::TransformComponent>();
 
     // id-ordered participant list (deterministic traversal + stable flank ranks).
     std::vector<entt::entity> preds(predView.begin(), predView.end());
     std::sort(preds.begin(), preds.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    if (preds.empty()) return stats;  // empty roster -> pure no-op.
+    if (preds.empty())
+        return stats; // empty roster -> pure no-op.
 
-    // ---- PHASE 1: snapshot predator state + live prey positions (order-independent reads) ----
+    // ---- First pass: snapshot predator state and live prey positions. ----
     struct PredSnap {
         entt::entity e;
         float x, z;
-        bool predator;  // only true predators coordinate (a non-predator carrying the tag is inert)
-        bool dead;      // a carcass predator produces no wish
+        bool predator; // only true predators coordinate (a non-predator carrying the tag is inert)
+        bool dead;     // a carcass predator produces no wish
     };
     std::vector<PredSnap> ps;
     ps.reserve(preds.size());
@@ -106,19 +107,22 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
 
     // Live PREY positions: any creature that is NOT a predator and NOT eaten. Prey need not
     // carry a PackHunterComponent, so read the full creature roster.
-    struct PreySnap { float x, z; };
+    struct PreySnap {
+        float x, z;
+    };
     std::vector<PreySnap> prey;
     {
         auto preyView = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
         for (auto e : preyView) {
             const auto& cr = preyView.get<Comp::CreatureComponent>(e);
-            if (cr.is_predator || cr.eaten) continue;
+            if (cr.is_predator || cr.eaten)
+                continue;
             const auto& tf = preyView.get<Comp::TransformComponent>(e);
             prey.push_back({tf.position.x, tf.position.z});
         }
     }
 
-    // ---- PHASE 2: compute each predator's coordination wish from the FROZEN snapshot ----
+    // ---- Second pass: compute coordination wishes from the frozen snapshot. ----
     for (std::size_t i = 0; i < ps.size(); ++i) {
         const PredSnap& self = ps[i];
         auto& pk = predView.get<Comp::PackHunterComponent>(self.e);
@@ -134,12 +138,13 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
         // Build this predator's PACK = live predator pack-mates within kPackRadius (including
         // self). Members are kept in id order (ps is id-sorted) so flank ranks are stable.
         // Track this predator's RANK (index within its own pack member list) for the angle.
-        std::vector<std::size_t> pack;  // indices into ps
+        std::vector<std::size_t> pack; // indices into ps
         std::size_t selfRank = 0;
         float sumX = 0.0f, sumZ = 0.0f;
         for (std::size_t j = 0; j < ps.size(); ++j) {
             const PredSnap& o = ps[j];
-            if (!o.predator || o.dead) continue;
+            if (!o.predator || o.dead)
+                continue;
             if (j == i) {
                 selfRank = pack.size();
                 pack.push_back(j);
@@ -161,18 +166,24 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
         // id, so a predator's flank angle depends on WHERE it is — invariant to spawn order.
         // (ps is id-sorted, so the index `j` is the id; use it as a stable positional tiebreak.)
         std::sort(pack.begin(), pack.end(), [&](std::size_t a, std::size_t b) {
-            if (ps[a].x != ps[b].x) return ps[a].x < ps[b].x;
-            if (ps[a].z != ps[b].z) return ps[a].z < ps[b].z;
+            if (ps[a].x != ps[b].x)
+                return ps[a].x < ps[b].x;
+            if (ps[a].z != ps[b].z)
+                return ps[a].z < ps[b].z;
             return a < b;
         });
         for (std::size_t k = 0; k < pack.size(); ++k) {
-            if (pack[k] == i) { selfRank = k; break; }
+            if (pack[k] == i) {
+                selfRank = k;
+                break;
+            }
         }
 
-        const std::size_t packSize = pack.size();           // >= 1 (self always included)
-        const bool inPack = packSize >= 2;                  // a true pack needs a mate in range
+        const std::size_t packSize = pack.size(); // >= 1 (self always included)
+        const bool inPack = packSize >= 2;        // a true pack needs a mate in range
         pk.in_pack = inPack ? 1u : 0u;
-        if (inPack) ++stats.packed;
+        if (inPack)
+            ++stats.packed;
 
         // Shared target = nearest LIVE prey to the PACK CENTROID (so all members converge on
         // ONE quarry). For a lone predator the centroid is just its own position, so this is
@@ -238,4 +249,4 @@ inline PredatorPackStats RunPredatorPackOnTick(entt::registry& reg, std::uint64_
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

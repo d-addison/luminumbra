@@ -1,5 +1,5 @@
 #version 450 core
-// Render-optimization (ssao-gtao FR-003 / halfres-upsample-infra): joint-bilateral
+// Render-optimization (ssao-gtao  / halfres-upsample-infra): joint-bilateral
 // depth-aware upsample of the half-resolution GTAO buffer back to full screen,
 // replacing the box blur on the half-res path. The AO is rendered at 1/2 per axis
 // (1/4 the fragments -> the horizon march cost drops ~4x); this reconstructs the
@@ -28,11 +28,11 @@ void main() {
             float z = texture(gPosition, uv).z;
             // Depth-similarity weight (view-space metres) + mild spatial falloff.
             float wz = exp(-abs(centerZ - z) * 3.0);
-            float ws = (x == 0 && y == 0) ? 1.0 : 0.6;
+            float ws = (x == 0 && y == 0) ? 1.0: 0.6;
             float w = wz * ws;
             aoSum += a * w;
             wSum += w;
         }
     }
-    FragColor = (wSum > 1e-4) ? (aoSum / wSum) : texture(u_aoHalf, TexCoords).r;
+    FragColor = (wSum > 1e-4) ? (aoSum / wSum): texture(u_aoHalf, TexCoords).r;
 }

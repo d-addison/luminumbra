@@ -16,7 +16,7 @@ out VS_OUT {
 } vs_out;
 
 // ===========================================================================
-// T-I6 #3: gentle Gerstner SWELLS (RENDER-ONLY).
+//  #3: gentle Gerstner SWELLS.
 //
 // The water surface was a perfectly flat per-chunk mesh; all surface motion
 // lived in the fragment shader's per-pixel ripple NORMALS, so the silhouette
@@ -26,24 +26,24 @@ out VS_OUT {
 // has real rolling relief. The fragment ripple field stays on top for micro
 // detail.
 //
-// ZEN-CALM tuning (owner: "gentle, zen-calm"): long wavelengths (11..26 m), low
+// ZEN-CALM tuning (owner: "gentle, zen-calm"): long  (11..26 m), low
 // amplitudes (sum < ~0.32 m), low steepness (no curling whitecaps), slow phase.
 // The 2 m water-mesh vertex spacing (CHUNK_SIZE 16 / resolution 8) gives 5..13
-// verts per wavelength -> smooth undulation, not facets.
+// verts per  -> smooth undulation, not facets.
 //
-// RENDER-ONLY: this displaces ONLY the rendered surface mesh. The sim water
+// this displaces ONLY the rendered surface mesh. The sim water
 // level (collision, depth queries, world_hash) is untouched; nothing here feeds
 // back into any sim state. Pure function of (world XZ, u_time).
 // ===========================================================================
 
-// A single Gerstner wave: direction D (unit, XZ plane), wavelength L, amplitude
+// A single Gerstner wave: direction D (unit, XZ plane),  L, amplitude
 // A, steepness Q (0..1 share of the max non-self-intersecting pinch), phase
 // speed scalar. Accumulates the displacement and the analytic normal partials.
 void gerstner_wave(vec2 D, float L, float A, float Q, float speed,
                    vec2 base_xz, float t,
                    inout vec3 disp, inout vec3 nrm)
 {
-    float w = 6.2831853 / L;          // angular wavenumber (2*pi / wavelength)
+    float w = 6.2831853 / L;          // angular  (2*pi / )
     float phase = w * dot(D, base_xz) + speed * w * t;
     float c = cos(phase);
     float s = sin(phase);
@@ -64,7 +64,7 @@ void main()
 {
     // Position in world space (for lighting and world-based effects).
     vec4 world_pos_4 = u_model * vec4(a_pos, 1.0);
-    vec2 base_xz = world_pos_4.xz; // undisplaced world XZ drives the wave phase
+    vec2 base_xz = world_pos_4.xz; // undisplaced world XZ drives the
 
     vec3 disp = vec3(0.0);
     vec3 nrm = vec3(0.0, 1.0, 0.0); // start from the flat up-normal; partials below

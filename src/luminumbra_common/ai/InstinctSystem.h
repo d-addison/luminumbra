@@ -1,8 +1,8 @@
 #pragma once
 
-// T-I3-17: InstinctSystem — runs the (already-generic) InstinctPlanner over
+// InstinctSystem — runs the (already-generic) InstinctPlanner over
 // the EnTT registry on the fixed 30 Hz simulation tick (slot 2 of the
-// deterministic tick order, design-decisions.md §1, after animation pose
+// deterministic tick order, the deterministic runtime contract , after animation pose
 // sampling).
 //
 // Per tick:
@@ -18,12 +18,12 @@
 //
 // The system is pure engine: need names, actions, and targets are game data.
 //
-// T-I5b-2 (E1): an OPTIONAL ecology stimulus-channel context may be supplied. It
+// an OPTIONAL ecology stimulus-channel context may be supplied. It
 // is consumed ONLY for entities that carry a StimulusSubscriptionComponent (game-
 // data opt-in); for those creatures each subscribed channel scalar modulates the
 // mapped need's pressure before planning. The default roster carries no
 // subscription, so passing nullptr (the default) leaves the tick path BYTE-
-// UNCHANGED and world_hash stays `d950a6afc12a5cdc` (critique F1 / §0).
+// UNCHANGED and world_hash stays `d950a6afc12a5cdc` (regression review / ).
 
 #include <cstdint>
 
@@ -37,17 +37,17 @@ struct InstinctSystemTickStats {
     std::uint64_t agents_seen = 0;
     std::uint64_t agents_replanned = 0;
     std::uint64_t opportunities_considered = 0;
-    // T-I5b-2: how many subscribing creatures had a channel modulate a need this
+    //  how many subscribing creatures had a channel modulate a need this
     // tick (0 for the canonical roster -- the registry stays inert).
     std::uint64_t stimulus_subscribers_applied = 0;
 };
 
 // `stimulus` is OPTIONAL: when null (default), no stimulus-channel work runs and
-// the planner tick path is byte-identical to the pre-T-I5b-2 behavior. When non-
+// the planner tick path is byte-identical to the pre- behavior. When non-
 // null, ONLY entities carrying a StimulusSubscriptionComponent sample channels.
 //
-// INSTINCT-09 (retirement 2026-07-07): `use_perception_substrate` now DEFAULTS TRUE —
-// the shared substrate is the CANONICAL path; false selects the retained inline scan
+// `use_perception_substrate` defaults true: the shared substrate is the canonical
+// path; false selects the retained inline scan
 // (kept only as the byte-identical regression reference, proven equivalent by test).
 // When false, the per-agent opportunity gather runs the original inline scan and
 // this tick path is byte-identical. When true, the gather routes through the
@@ -57,10 +57,9 @@ struct InstinctSystemTickStats {
 // unchanged. The flag exists so the shared substrate can be exercised without
 // touching the default sim trajectory; world_hash is untouched either way (the
 // canonical roster carries no InstinctAgentComponent).
-InstinctSystemTickStats RunInstinctSystemOnTick(
-    entt::registry& registry,
-    std::uint64_t tick,
-    const StimulusChannelRegistry* stimulus = nullptr,
-    bool use_perception_substrate = true);
+InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
+                                                std::uint64_t tick,
+                                                const StimulusChannelRegistry* stimulus = nullptr,
+                                                bool use_perception_substrate = true);
 
 } // namespace luminumbra::ai

@@ -1,16 +1,14 @@
-// T-I6-A3b (increment 2a): SHIELD-RT far-field G-BUFFER raymarch, validated
-// offscreen.
+// Standalone far-field G-buffer raymarch, validated offscreen.
 //
-// inc1 proved the heightfield max-mip march (overshoot-free hierarchical DDA)
-// hits the real surface. This increment proves the production *render* form of
-// that tracer — a fullscreen fragment pass that writes the deferred G-buffer
+// The heightfield max-mip march (an overshoot-free hierarchical DDA) hits the
+// real surface. This test validates the render form of that tracer: a fullscreen
+// fragment pass that writes the deferred G-buffer
 // (view-space position, octahedral view-space normal + material id, albedo/
-// roughness, metallic/AO) and gl_FragDepth — produces correct G-buffer values,
-// BEFORE it is wired into the live RenderPipeline (inc 2c) and before the
-// GPU-resident heightfield/clipmap streaming infra (inc 2b).
+// roughness, metallic/AO) and gl_FragDepth. It is an isolated algorithm test,
+// not a claim that the shipping mesh-based far-LOD path uses this shader.
 //
 // The pass reconstructs a per-pixel world ray from the inverse view-projection
-// (exactly how the live pass will, after the mesh G-buffer pass), marches the
+// from the inverse view-projection, marches the
 // heightfield, and on a hit writes the G-buffer + depth; on a miss it discards
 // (the sky / nearer mesh geometry is left intact). The test renders into an
 // offscreen MRT FBO and validates:
@@ -60,8 +58,8 @@ namespace fs = std::filesystem;
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
 using namespace luminumbra_shieldrt;
-using Luminumbra::World::FarLodTier;
 using Luminumbra::World::ComputeTerrainParamsHash;
+using Luminumbra::World::FarLodTier;
 
 namespace {
 
@@ -78,7 +76,7 @@ constexpr int kViewW = 480;
 constexpr int kViewH = 270;
 constexpr float kFovDeg = 60.0f;
 constexpr float kNear = 0.1f;
-constexpr float kFar = 4000.0f;  // far enough to encompass the ~2.7 km t_max block
+constexpr float kFar = 4000.0f; // far enough to encompass the ~2.7 km t_max block
 
 // Reuse the inc1 ground-truth tolerances (same surface, same comparison).
 constexpr double kGroundTruthMedianToleranceM = 0.5;
@@ -87,7 +85,7 @@ constexpr double kMinHitFraction = 0.02;
 constexpr double kMaxHitFraction = 0.995;
 // Decoded-normal sanity: unit length within tolerance, and terrain-up (+Y).
 constexpr double kNormalUnitToleranceM = 0.02;
-constexpr double kMinUpNormalFraction = 0.95;  // ≥95% of hits have worldN.y > 0
+constexpr double kMinUpNormalFraction = 0.95; // ≥95% of hits have worldN.y > 0
 
 fs::path SourceRoot() {
     return fs::weakly_canonical(fs::path(LUMINUMBRA_SOURCE_ROOT));
@@ -146,9 +144,13 @@ GLuint CompileRenderProgram(const char* vs, const char* fs_src, std::string& err
         return s;
     };
     const GLuint v = compile(GL_VERTEX_SHADER, vs);
-    if (!v) return 0;
+    if (!v)
+        return 0;
     const GLuint f = compile(GL_FRAGMENT_SHADER, fs_src);
-    if (!f) { glDeleteShader(v); return 0; }
+    if (!f) {
+        glDeleteShader(v);
+        return 0;
+    }
     const GLuint prog = glCreateProgram();
     glAttachShader(prog, v);
     glAttachShader(prog, f);
@@ -173,7 +175,7 @@ GLuint CompileRenderProgram(const char* vs, const char* fs_src, std::string& err
 const char* kFullscreenVert = R"GLSL(
 #version 450 core
 void main() {
-    vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0, (gl_VertexID == 2) ? 3.0 : -1.0);
+    vec2 p = vec2((gl_VertexID == 1) ? 3.0: -1.0, (gl_VertexID == 2) ? 3.0: -1.0);
     gl_Position = vec4(p, 0.0, 1.0);
 }
 )GLSL";
@@ -236,11 +238,11 @@ float cellExitDist(int L, float px, float pz, float dx, float dz) {
     int cx = int(floor(lx)); int cz = int(floor(lz));
     float tx = 1.0e30; float tz = 1.0e30;
     if (abs(dx) > 1.0e-9) {
-        float bound = (dx > 0.0 ? float(cx + 1) : float(cx)) * cs + u_origin.x;
+        float bound = (dx > 0.0 ? float(cx + 1): float(cx)) * cs + u_origin.x;
         tx = (bound - px) / dx;
     }
     if (abs(dz) > 1.0e-9) {
-        float bound = (dz > 0.0 ? float(cz + 1) : float(cz)) * cs + u_origin.y;
+        float bound = (dz > 0.0 ? float(cz + 1): float(cz)) * cs + u_origin.y;
         tz = (bound - pz) / dz;
     }
     return max(min(tx, tz), 0.0);
@@ -249,7 +251,7 @@ float cellExitDist(int L, float px, float pz, float dx, float dz) {
 vec2 octWrap(vec2 v) { return (1.0 - abs(v.yx)) * (step(0.0, v.xy) * 2.0 - 1.0); }
 vec2 encode_octahedral(vec3 n) {
     n /= (abs(n.x) + abs(n.y) + abs(n.z));
-    return n.z >= 0.0 ? n.xy : octWrap(n.xy);
+    return n.z >= 0.0 ? n.xy: octWrap(n.xy);
 }
 
 void main() {
@@ -326,7 +328,7 @@ void main() {
 
     // Far terrain material: sand below the shoreline band, grass/stone above
     // (a coarse far-field classification; live mesh parity is a separate leg).
-    float matId = (P.y < u_seaLevel + 1.0) ? 4.0 : (worldN.y > 0.9 ? 3.0 : 1.0);
+    float matId = (P.y < u_seaLevel + 1.0) ? 4.0: (worldN.y > 0.9 ? 3.0: 1.0);
     gNormalMaterial = vec4(enc * 0.5 + 0.5, 0.0, matId / 255.0);
     gAlbedoRoughness = vec4(0.4, 0.45, 0.3, 0.9);
     gMetallicAO = vec2(0.0, 1.0);
@@ -334,7 +336,8 @@ void main() {
 )GLSL";
 
 double Percentile(std::vector<double> v, double pct) {
-    if (v.empty()) return 0.0;
+    if (v.empty())
+        return 0.0;
     std::sort(v.begin(), v.end());
     const std::size_t idx = static_cast<std::size_t>(
         std::min(v.size() - 1, static_cast<std::size_t>(pct * (v.size() - 1) + 0.5)));
@@ -350,7 +353,7 @@ glm::vec3 DecodeOct(glm::vec2 f) {
     return glm::normalize(n);
 }
 
-}  // namespace
+} // namespace
 
 TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
     HiddenGlContext ctx("shieldrt_far_field_gbuffer_gpu");
@@ -382,8 +385,8 @@ TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
     glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, kViewW, kViewH);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
-    const std::array<GLenum, 4> bufs{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1,
-                                     GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+    const std::array<GLenum, 4> bufs{
+        GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
     glDrawBuffers(4, bufs.data());
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
 
@@ -439,7 +442,7 @@ TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
         const glm::mat4 view_proj = proj * view;
         const glm::mat4 inv_view_proj = glm::inverse(view_proj);
         const glm::mat4 inv_view = glm::inverse(view);
-        const glm::mat3 normal_view(view);  // rotation part (lookAt has no scale)
+        const glm::mat3 normal_view(view); // rotation part (lookAt has no scale)
         const double t_max = kBlockSpan * 1.8;
 
         const GLuint hf_buf = MakeStorageBufferF(hf.h);
@@ -457,13 +460,16 @@ TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
         glUseProgram(prog);
         glUniform2f(glGetUniformLocation(prog, "u_viewport"), float(kViewW), float(kViewH));
         glUniform3f(glGetUniformLocation(prog, "u_eye"), eye.x, eye.y, eye.z);
-        glUniformMatrix4fv(glGetUniformLocation(prog, "u_invViewProj"), 1, GL_FALSE, &inv_view_proj[0][0]);
+        glUniformMatrix4fv(
+            glGetUniformLocation(prog, "u_invViewProj"), 1, GL_FALSE, &inv_view_proj[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(prog, "u_view"), 1, GL_FALSE, &view[0][0]);
         glUniformMatrix4fv(glGetUniformLocation(prog, "u_viewProj"), 1, GL_FALSE, &view_proj[0][0]);
-        glUniformMatrix3fv(glGetUniformLocation(prog, "u_normalView"), 1, GL_FALSE, &normal_view[0][0]);
+        glUniformMatrix3fv(
+            glGetUniformLocation(prog, "u_normalView"), 1, GL_FALSE, &normal_view[0][0]);
         glUniform1i(glGetUniformLocation(prog, "u_n"), hf.n);
         glUniform1f(glGetUniformLocation(prog, "u_step"), static_cast<float>(hf.step));
-        glUniform2f(glGetUniformLocation(prog, "u_origin"), static_cast<float>(hf.ox),
+        glUniform2f(glGetUniformLocation(prog, "u_origin"),
+                    static_cast<float>(hf.ox),
                     static_cast<float>(hf.oz));
         glUniform1f(glGetUniformLocation(prog, "u_tmax"), static_cast<float>(t_max));
         glUniform1i(glGetUniformLocation(prog, "u_levels"), flat_mip.levels);
@@ -490,20 +496,22 @@ TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
         std::vector<double> gt_abs;
         for (std::size_t p = 0; p < px_count; ++p) {
             const float mat = nrm[p * 4 + 3];
-            if (mat <= 0.0f) continue;  // discard (no write) left material 0
+            if (mat <= 0.0f)
+                continue; // discard (no write) left material 0
             ++hits;
             // view-space position -> world
             const glm::vec4 vpos(pos[p * 4 + 0], pos[p * 4 + 1], pos[p * 4 + 2], 1.0f);
             const glm::vec4 wpos = inv_view * vpos;
-            const double analytic = static_cast<double>(world.GetTerrainHeightAtCoarse(
-                wpos.x, wpos.z, kFarStep));
+            const double analytic =
+                static_cast<double>(world.GetTerrainHeightAtCoarse(wpos.x, wpos.z, kFarStep));
             gt_abs.push_back(std::abs(static_cast<double>(wpos.y) - analytic));
             // decode normal (stored as enc*0.5+0.5) -> view -> world
             const glm::vec2 enc(nrm[p * 4 + 0] * 2.0f - 1.0f, nrm[p * 4 + 1] * 2.0f - 1.0f);
             const glm::vec3 viewN = DecodeOct(enc);
             unit_max = std::max(unit_max, std::abs(static_cast<double>(glm::length(viewN)) - 1.0));
             const glm::vec3 worldN = glm::normalize(glm::mat3(inv_view) * viewN);
-            if (worldN.y > 0.0f) ++up_normals;
+            if (worldN.y > 0.0f)
+                ++up_normals;
         }
 
         const double hit_fraction = static_cast<double>(hits) / px_count;
@@ -532,8 +540,10 @@ TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
             {"up_normal_fraction", up_fraction},
         });
 
-        EXPECT_GT(hit_fraction, kMinHitFraction) << vs.name << ": far-field pass produced almost no hits";
-        EXPECT_LT(hit_fraction, kMaxHitFraction) << vs.name << ": far-field pass filled ~everything";
+        EXPECT_GT(hit_fraction, kMinHitFraction)
+            << vs.name << ": far-field pass produced almost no hits";
+        EXPECT_LT(hit_fraction, kMaxHitFraction)
+            << vs.name << ": far-field pass filled ~everything";
         EXPECT_LE(gt_median, kGroundTruthMedianToleranceM)
             << vs.name << ": gPosition median drifts from analytic ground truth";
         EXPECT_LE(gt_p99, kGroundTruthP99ToleranceM)
@@ -561,35 +571,39 @@ TEST(ShieldRtFarFieldGbufferGpu, RaymarchWritesCorrectGbuffer) {
 
     const nlohmann::json report = {
         {"schema", "luminumbra.shieldrt_far_field_gbuffer.v1"},
-        {"task", "T-I6-A3b"},
-        {"generated_by", "shieldrt_far_field_gbuffer_gpu (fullscreen far-field raymarch -> G-buffer)"},
+        {"generated_by",
+         "shieldrt_far_field_gbuffer_gpu (fullscreen far-field raymarch -> G-buffer)"},
         {"seed", kSeed},
         {"build_mode", build_mode},
-        {"gpu", {{"renderer", renderer}, {"gl_version", gl_version}, {"software_renderer", software}}},
+        {"gpu",
+         {{"renderer", renderer}, {"gl_version", gl_version}, {"software_renderer", software}}},
         {"viewport", {{"w", kViewW}, {"h", kViewH}}},
-        {"tolerances", {
-            {"ground_truth_median_m", kGroundTruthMedianToleranceM},
-            {"ground_truth_p99_m", kGroundTruthP99ToleranceM},
-            {"normal_unit_max_err", kNormalUnitToleranceM},
-            {"min_up_normal_fraction", kMinUpNormalFraction},
-        }},
-        {"worst", {
-            {"ground_truth_median_m", worst_median_gt},
-            {"ground_truth_p99_m", worst_p99_gt},
-            {"normal_unit_max_err", worst_unit},
-        }},
+        {"tolerances",
+         {
+             {"ground_truth_median_m", kGroundTruthMedianToleranceM},
+             {"ground_truth_p99_m", kGroundTruthP99ToleranceM},
+             {"normal_unit_max_err", kNormalUnitToleranceM},
+             {"min_up_normal_fraction", kMinUpNormalFraction},
+         }},
+        {"worst",
+         {
+             {"ground_truth_median_m", worst_median_gt},
+             {"ground_truth_p99_m", worst_p99_gt},
+             {"normal_unit_max_err", worst_unit},
+         }},
         {"views", results},
         {"note",
          "Proves the production far-field raymarch writes correct deferred G-buffer "
          "values (view-space position on the analytic surface, sane terrain-up "
          "octahedral normal, gl_FragDepth) offscreen, before live RenderPipeline "
-         "wiring (inc 2c) and GPU-resident heightfield streaming (inc 2b)."},
+         "wiring () and GPU-resident heightfield streaming ()."},
     };
     std::ofstream out(ArtifactRoot() / "shieldrt-far-field-gbuffer.json");
     ASSERT_TRUE(out);
     out << std::setw(2) << report << "\n";
 
     if (software) {
-        GTEST_SKIP() << "software renderer (" << renderer << "): not representative; artifact written";
+        GTEST_SKIP() << "software renderer (" << renderer
+                     << "): not representative; artifact written";
     }
 }

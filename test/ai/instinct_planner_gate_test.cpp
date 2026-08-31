@@ -1,4 +1,4 @@
-// T-I3-17: the grovestrider hunger fixture is GAME DATA
+// the grovestrider hunger fixture is GAME DATA
 // (data/common/archetypes/grovestrider.json); this gate builds the planner
 // request from that file and validates the plan against the file's
 // `expected` block. The engine planner stays content-free — this test also
@@ -34,9 +34,8 @@ std::string ReadFileText(const std::filesystem::path& path) {
 // Relocated baseline validation (was engine-side InstinctPlannerMeetsBaseline
 // with hardcoded game strings): the plan must match the game-data `expected`
 // block exactly.
-bool InstinctPlannerMeetsBaseline(
-    const luminumbra::ai::InstinctPlan& plan,
-    const nlohmann::json& expected) {
+bool InstinctPlannerMeetsBaseline(const luminumbra::ai::InstinctPlan& plan,
+                                  const nlohmann::json& expected) {
     if (!plan.passed || plan.selected_index != 0) {
         return false;
     }
@@ -108,7 +107,8 @@ bool LuminumbraInstinctPlannerGateTest() {
     request.actor_id = archetype.at("actor_id").get<std::string>();
     request.archetype = archetype.at("archetype").get<std::string>();
     for (const auto& need : archetype.at("needs")) {
-        request.needs.push_back({need.at("name").get<std::string>(), need.at("pressure").get<double>()});
+        request.needs.push_back(
+            {need.at("name").get<std::string>(), need.at("pressure").get<double>()});
     }
     for (const auto& opportunity : archetype.at("opportunities")) {
         request.opportunities.push_back({
@@ -133,12 +133,21 @@ bool LuminumbraInstinctPlannerGateTest() {
 
     // Engine/game split: the planner source must be free of the game nouns
     // that used to live in MakeGrovestriderHungerFixture.
-    for (const char* engine_file : {"ai/InstinctPlanner.cpp", "ai/InstinctPlanner.h", "ai/InstinctSystem.cpp", "ai/InstinctSystem.h"}) {
-        const std::string text = ReadFileText(source_root / "src" / "luminumbra_common" / engine_file);
+    for (const char* engine_file : {"ai/InstinctPlanner.cpp",
+                                    "ai/InstinctPlanner.h",
+                                    "ai/InstinctSystem.cpp",
+                                    "ai/InstinctSystem.h"}) {
+        const std::string text =
+            ReadFileText(source_root / "src" / "luminumbra_common" / engine_file);
         if (text.empty()) {
             return false;
         }
-        for (const char* noun : {"grovestrider", "Grovestrider", "mossberry", "glowcap", "thunder_hollow", "stream_reeds"}) {
+        for (const char* noun : {"grovestrider",
+                                 "Grovestrider",
+                                 "mossberry",
+                                 "glowcap",
+                                 "thunder_hollow",
+                                 "stream_reeds"}) {
             if (text.find(noun) != std::string::npos) {
                 return false;
             }
@@ -148,5 +157,6 @@ bool LuminumbraInstinctPlannerGateTest() {
     const std::string json = luminumbra::ai::SerializeInstinctPlanJson(plan, "debug");
     return json.find("\"schema\":\"luminumbra.ai.instinct_planner.v1\"") != std::string::npos &&
            json.find("\"selected_target\":\"" + selected.target + "\"") != std::string::npos &&
-           json.find("\"decision_contract\":\"deterministic_priority_then_cost\"") != std::string::npos;
+           json.find("\"decision_contract\":\"deterministic_priority_then_cost\"") !=
+               std::string::npos;
 }

@@ -1,16 +1,16 @@
 #pragma once
 
-// .lmesh v2 (magic "LMS2") and sibling .lanim (magic "LANM") binary formats.
+//.lmesh v2 (magic "LMS2") and sibling.lanim (magic "LANM") binary formats.
 //
-// v1 .lmesh files (magic "LMSH") are untouched by this header: the v1 layout
+// v1.lmesh files (magic "LMSH") are untouched by this header: the v1 layout
 // and writer remain byte-identical. LMS2 is a separate, additive format for
 // skinned meshes produced by tools/asset_processor.cpp.
 //
-// Constraints (iteration 3, T-I3-14):
+// Format constraints:
 //   - joints/weights are u8x4 per vertex (weights normalized so they sum to
 //     255 exactly; deterministic largest-remainder quantization),
 //   - at most 256 joints per skeleton (joint indices fit in a u8),
-//   - .lanim tracks are keyed by the FNV-1a 32-bit hash of the joint name.
+//   -.lanim tracks are keyed by the FNV-1a 32-bit hash of the joint name.
 
 #include <cstdint>
 #include <cstring>
@@ -22,22 +22,18 @@
 namespace luminumbra::animation {
 
 inline constexpr uint32_t kLms2Magic =
-    static_cast<uint32_t>('L') |
-    (static_cast<uint32_t>('M') << 8) |
-    (static_cast<uint32_t>('S') << 16) |
-    (static_cast<uint32_t>('2') << 24);
+    static_cast<uint32_t>('L') | (static_cast<uint32_t>('M') << 8) |
+    (static_cast<uint32_t>('S') << 16) | (static_cast<uint32_t>('2') << 24);
 
 inline constexpr uint32_t kLanimMagic =
-    static_cast<uint32_t>('L') |
-    (static_cast<uint32_t>('A') << 8) |
-    (static_cast<uint32_t>('N') << 16) |
-    (static_cast<uint32_t>('M') << 24);
+    static_cast<uint32_t>('L') | (static_cast<uint32_t>('A') << 8) |
+    (static_cast<uint32_t>('N') << 16) | (static_cast<uint32_t>('M') << 24);
 
 inline constexpr uint32_t kLms2Version = 1;
 inline constexpr uint32_t kLanimVersion = 1;
 inline constexpr uint32_t kMaxJointsPerSkeleton = 256;
 
-// FNV-1a 32-bit hash used to key .lanim tracks by joint name.
+// FNV-1a 32-bit hash used to key.lanim tracks by joint name.
 inline constexpr uint32_t HashJointName(std::string_view name) {
     uint32_t hash = 2166136261u;
     for (const char c : name) {
@@ -93,7 +89,7 @@ enum class AnimTargetType : uint32_t {
 
 struct LanimTrackHeader {
     uint32_t jointNameHash = 0;
-    uint32_t targetType = 0;     // AnimTargetType
+    uint32_t targetType = 0; // AnimTargetType
     uint32_t keyCount = 0;
     uint32_t componentCount = 0; // 3 for T/S, 4 for R
 };
@@ -115,8 +111,8 @@ struct SkinnedMeshAsset {
 
 struct AnimTrack {
     LanimTrackHeader header;
-    std::vector<float> times;   // keyCount entries, ascending
-    std::vector<float> values;  // keyCount * componentCount entries
+    std::vector<float> times;  // keyCount entries, ascending
+    std::vector<float> values; // keyCount * componentCount entries
 };
 
 struct AnimClipAsset {
@@ -126,11 +122,14 @@ struct AnimClipAsset {
 
 inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out) {
     std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
+    if (!in)
+        return false;
 
     in.read(reinterpret_cast<char*>(&out.header), sizeof(out.header));
-    if (!in || out.header.magic != kLms2Magic || out.header.version != kLms2Version) return false;
-    if (out.header.jointCount > kMaxJointsPerSkeleton) return false;
+    if (!in || out.header.magic != kLms2Magic || out.header.version != kLms2Version)
+        return false;
+    if (out.header.jointCount > kMaxJointsPerSkeleton)
+        return false;
 
     out.vertices.resize(out.header.vertexCount);
     out.indices.resize(out.header.indexCount);
@@ -146,22 +145,27 @@ inline bool LoadSkinnedMeshAsset(const std::string& path, SkinnedMeshAsset& out)
 
 inline bool LoadAnimClipAsset(const std::string& path, AnimClipAsset& out) {
     std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
+    if (!in)
+        return false;
 
     in.read(reinterpret_cast<char*>(&out.header), sizeof(out.header));
-    if (!in || out.header.magic != kLanimMagic || out.header.version != kLanimVersion) return false;
+    if (!in || out.header.magic != kLanimMagic || out.header.version != kLanimVersion)
+        return false;
 
     out.tracks.resize(out.header.trackCount);
     for (AnimTrack& track : out.tracks) {
         in.read(reinterpret_cast<char*>(&track.header), sizeof(track.header));
-        if (!in) return false;
+        if (!in)
+            return false;
         track.times.resize(track.header.keyCount);
-        track.values.resize(static_cast<size_t>(track.header.keyCount) * track.header.componentCount);
+        track.values.resize(static_cast<size_t>(track.header.keyCount) *
+                            track.header.componentCount);
         in.read(reinterpret_cast<char*>(track.times.data()),
                 static_cast<std::streamsize>(track.times.size() * sizeof(float)));
         in.read(reinterpret_cast<char*>(track.values.data()),
                 static_cast<std::streamsize>(track.values.size() * sizeof(float)));
-        if (!in) return false;
+        if (!in)
+            return false;
     }
     return true;
 }

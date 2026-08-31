@@ -2,14 +2,16 @@
 
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include <glad/glad.h>
-#include <vector>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Forward-declare so we don't need to include ImGui here
 struct ImGuiContext;
 
-namespace Luminumbra::Systems { class SHIELD_WorldSystem; }
+namespace Luminumbra::Systems {
+class SHIELD_WorldSystem;
+}
 
 namespace Luminumbra::Client {
 
@@ -20,12 +22,16 @@ public:
 
     static const char* LayerArtifactSchema();
 
-    // Spec 002 Item 4: enable the CONSTRAINED layer-graph authoring panel
+    //  enable the CONSTRAINED layer-graph authoring panel
     // (flagged via --worldgen-graph). Off by default so the normal inspector is
     // unchanged; when on, an "Layer Graph (constrained)" panel renders the fixed
     // pipeline stages as ImGui cards over the viewer's current params.
-    void SetGraphEnabled(bool enabled) { m_graphEnabled = enabled; }
-    bool GraphEnabled() const { return m_graphEnabled; }
+    void SetGraphEnabled(bool enabled) {
+        m_graphEnabled = enabled;
+    }
+    bool GraphEnabled() const {
+        return m_graphEnabled;
+    }
 
     // The main function to call each frame. It draws the ImGui window and handles updates.
     void UpdateAndRender(bool& is_open, Systems::SHIELD_WorldSystem* main_world_system);
@@ -34,7 +40,7 @@ private:
     // Regenerates the preview texture based on current parameters.
     void RegenerateTexture();
 
-    // Spec 002 Item 4: renders the constrained fixed-topology layer graph as a
+    //  renders the constrained fixed-topology layer graph as a
     // column of ImGui stage cards (edges implicit/fixed in v1) over a preset JSON
     // derived from the viewer's current params. Read-only authoring view.
     void RenderLayerGraphPanel();
@@ -53,7 +59,7 @@ private:
     // A "dirty" flag to trigger regeneration when a parameter is changed.
     bool m_paramsChanged = true;
 
-    // Spec 002 Item 4: constrained layer-graph authoring panel toggle (set from
+    //  constrained layer-graph authoring panel toggle (set from
     // the --worldgen-graph flag). Default off — the inspector is byte-identical.
     bool m_graphEnabled = false;
 

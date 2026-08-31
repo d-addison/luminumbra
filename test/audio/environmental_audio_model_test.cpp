@@ -1,4 +1,4 @@
-// AUDIO-07 + AUDIO-09 (spec 021 ranks ~93/100): CPU-only model tests for the
+//  +  ( ranks ~93/100): CPU-only model tests for the
 // day/night soundscape gating/crossfade and the biome/weather reverb mapping.
 //
 // The header under test (src/luminumbra_client/audio/EnvironmentalAudioModel.h)
@@ -19,7 +19,7 @@ namespace {
 
 using namespace Luminumbra::Client::AudioModel;
 
-// --- AUDIO-07: night factor gating curve -----------------------------------
+// ---: night factor gating curve -----------------------------------
 
 TEST(NightFactorTest, FullDayAboveDayEdge) {
     // High noon and anything at/above the day edge is FULL day (night factor 0).
@@ -44,7 +44,8 @@ TEST(NightFactorTest, TwilightIsSmoothAndMonotone) {
         const float nf = NightFactor(s);
         EXPECT_GE(nf, 0.0f);
         EXPECT_LE(nf, 1.0f);
-        EXPECT_LE(nf, prev + 1e-6f) << "night factor must not rise as the sun rises (s=" << s << ")";
+        EXPECT_LE(nf, prev + 1e-6f)
+            << "night factor must not rise as the sun rises (s=" << s << ")";
         prev = nf;
     }
     const float mid = 0.5f * (kDayEdgeSinElevation + kNightEdgeSinElevation);
@@ -53,7 +54,7 @@ TEST(NightFactorTest, TwilightIsSmoothAndMonotone) {
     EXPECT_LT(NightFactor(mid), 1.0f);
 }
 
-// --- AUDIO-07: crossfade weights --------------------------------------------
+// ---: crossfade weights --------------------------------------------
 
 TEST(DayNightCrossfadeTest, DayBedSilentAtNight) {
     const DayNightWeights w = DayNightCrossfade(NightFactor(-0.5f)); // deep night
@@ -81,7 +82,7 @@ TEST(DayNightCrossfadeTest, WeightsSumToOneAcrossTheBand) {
     EXPECT_FLOAT_EQ(hi.day + hi.night, 1.0f);
 }
 
-// --- AUDIO-07: crossfade smoothing ------------------------------------------
+// ---: crossfade smoothing ------------------------------------------
 
 TEST(SmoothTowardsTest, ConvergesWithinAFewSecondsAndIsMonotone) {
     // Step day -> night: iterate the smoother at the environmental-audio tick
@@ -120,12 +121,12 @@ TEST(SmoothTowardsTest, ConvergesWithinAFewSecondsAndIsMonotone) {
 }
 
 TEST(SmoothTowardsTest, DegenerateInputsSnapToTarget) {
-    EXPECT_FLOAT_EQ(SmoothTowards(0.0f, 1.0f, 0.1f, 0.0f), 1.0f);   // tau <= 0
-    EXPECT_FLOAT_EQ(SmoothTowards(0.0f, 1.0f, -0.1f, 2.5f), 1.0f);  // dt < 0
-    EXPECT_FLOAT_EQ(SmoothTowards(0.7f, 0.7f, 0.1f, 2.5f), 0.7f);   // at target
+    EXPECT_FLOAT_EQ(SmoothTowards(0.0f, 1.0f, 0.1f, 0.0f), 1.0f);  // tau <= 0
+    EXPECT_FLOAT_EQ(SmoothTowards(0.0f, 1.0f, -0.1f, 2.5f), 1.0f); // dt < 0
+    EXPECT_FLOAT_EQ(SmoothTowards(0.7f, 0.7f, 0.1f, 2.5f), 0.7f);  // at target
 }
 
-// --- AUDIO-09: biome size -> reverb params -----------------------------------
+// ---: biome size -> reverb params -----------------------------------
 
 TEST(BiomeReverbFromSizeTest, MonotoneInBiomeSize) {
     BiomeReverbParams prev = BiomeReverbFromSize(0.0f);
@@ -145,7 +146,7 @@ TEST(BiomeReverbFromSizeTest, MonotoneInBiomeSize) {
 
 TEST(BiomeReverbFromSizeTest, EndpointsMatchAuthoredEnvelope) {
     // The curve's endpoints pin the authored profile envelope: open field
-    // (Outdoor: .1/.9/.3) up to canyon (.7/.3/3.0).
+    // (Outdoor:.1/.9/.3) up to canyon (.7/.3/3.0).
     const BiomeReverbParams open_field = BiomeReverbFromSize(0.0f);
     EXPECT_FLOAT_EQ(open_field.wet, 0.1f);
     EXPECT_FLOAT_EQ(open_field.dry, 0.9f);
@@ -159,7 +160,7 @@ TEST(BiomeReverbFromSizeTest, EndpointsMatchAuthoredEnvelope) {
     EXPECT_FLOAT_EQ(BiomeReverbFromSize(2.0f).decay, canyon.decay);
 }
 
-// --- AUDIO-09: delay-line reverb proxy mapping --------------------------------
+// ---: delay-line reverb proxy mapping --------------------------------
 
 TEST(ReverbProxyTest, FeedbackMonotoneInDecayAndAlwaysStable) {
     float prev_feedback = -1.0f;
@@ -192,8 +193,7 @@ TEST(ReverbProxyTest, BiomeSizeSweepYieldsMonotoneProxyFeedback) {
     float prev = -1.0f;
     for (float s = 0.0f; s <= 1.0f; s += 0.05f) {
         const BiomeReverbParams biome = BiomeReverbFromSize(s);
-        const ReverbProxyParams proxy =
-            ReverbProxyFromParams(biome.wet, biome.dry, biome.decay);
+        const ReverbProxyParams proxy = ReverbProxyFromParams(biome.wet, biome.dry, biome.decay);
         EXPECT_GE(proxy.feedback, prev);
         EXPECT_LT(proxy.feedback, 1.0f);
         prev = proxy.feedback;

@@ -1,8 +1,8 @@
 #include "FrameScan.h"
 
 #include "RenderPipeline.h"
-#include "passes/FoliagePass.h"
 #include "core/Log.h"
+#include "passes/FoliagePass.h"
 
 #include <glad/glad.h>
 #include <nlohmann/json.hpp>
@@ -30,7 +30,8 @@ inline double LumaOf(unsigned char r, unsigned char g, unsigned char b) {
 std::unordered_map<int, std::string> LoadMaterialNames(const std::filesystem::path& path) {
     std::unordered_map<int, std::string> names;
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) return names;
+    if (!std::filesystem::exists(path, ec))
+        return names;
     try {
         std::ifstream f(path);
         nlohmann::json j;
@@ -56,8 +57,8 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
                           const std::filesystem::path& materials_json) {
     FrameScanReport report;
     if (framebuffer_width <= 0 || framebuffer_height <= 0) {
-        LUMINUMBRA_CORE_ERROR("FrameScan: invalid framebuffer size {}x{}",
-                              framebuffer_width, framebuffer_height);
+        LUMINUMBRA_CORE_ERROR(
+            "FrameScan: invalid framebuffer size {}x{}", framebuffer_width, framebuffer_height);
         return report;
     }
     report.width = framebuffer_width;
@@ -72,19 +73,19 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
     std::vector<unsigned char> color(pixel_count * 3u);
     glReadBuffer(GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, framebuffer_width, framebuffer_height, GL_RGB, GL_UNSIGNED_BYTE, color.data());
+    glReadPixels(
+        0, 0, framebuffer_width, framebuffer_height, GL_RGB, GL_UNSIGNED_BYTE, color.data());
 
     // --- 2. Read the G-buffer normal/material attachment (RGBA8) --------------
     // Alpha byte == MaterialID (g_buffer.frag writes alpha = MaterialID/255, so
     // the 8-bit byte recovers the id exactly). The texture is the full internal
     // render resolution; if that differs from the back-buffer framebuffer size
     // (e.g. an offscreen preview), we fall back to id-less reporting rather than
-    // index past the smaller buffer. RENDER-ONLY readback (glGetTexImage).
+    // index past the smaller buffer.  readback (glGetTexImage).
     const GBuffer& gb = pipeline.gbuffer();
     std::vector<unsigned char> id_rgba;
     bool have_ids = false;
-    if (gb.normal_texture != 0 &&
-        pipeline.screen_width() == static_cast<u32>(framebuffer_width) &&
+    if (gb.normal_texture != 0 && pipeline.screen_width() == static_cast<u32>(framebuffer_width) &&
         pipeline.screen_height() == static_cast<u32>(framebuffer_height)) {
         id_rgba.resize(pixel_count * 4u);
         glBindTexture(GL_TEXTURE_2D, gb.normal_texture);
@@ -95,8 +96,10 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
     } else if (gb.normal_texture != 0) {
         LUMINUMBRA_CORE_WARN(
             "FrameScan: G-buffer ({}x{}) != back buffer ({}x{}); reporting back-buffer luma only",
-            pipeline.screen_width(), pipeline.screen_height(),
-            framebuffer_width, framebuffer_height);
+            pipeline.screen_width(),
+            pipeline.screen_height(),
+            framebuffer_width,
+            framebuffer_height);
     }
 
     // --- 3. Accumulate per-material pixel count + summed luminance ------------
@@ -123,7 +126,8 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
             mat_pixels[static_cast<std::size_t>(id)]++;
             mat_luma_sum[static_cast<std::size_t>(id)] += luma;
             double& mx = mat_luma_max[static_cast<std::size_t>(id)];
-            if (luma > mx) mx = luma;
+            if (luma > mx)
+                mx = luma;
         }
 
         // Water (backbuffer heuristic): live water (id 7) is DISCARDED in the
@@ -143,27 +147,34 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
         }
     }
 
-    report.mean_frame_luminance = pixel_count ? frame_luma_sum / static_cast<double>(pixel_count) : 0.0;
+    report.mean_frame_luminance =
+        pixel_count ? frame_luma_sum / static_cast<double>(pixel_count) : 0.0;
     report.water_pixels = water_pixels;
-    report.water_coverage = pixel_count ? static_cast<double>(water_pixels) / static_cast<double>(pixel_count) : 0.0;
-    report.water_mean_luminance = water_pixels ? water_luma_sum / static_cast<double>(water_pixels) : 0.0;
+    report.water_coverage =
+        pixel_count ? static_cast<double>(water_pixels) / static_cast<double>(pixel_count) : 0.0;
+    report.water_mean_luminance =
+        water_pixels ? water_luma_sum / static_cast<double>(water_pixels) : 0.0;
 
     // --- 4. Build the per-material list (skip Air id 0) -----------------------
     if (have_ids) {
         const auto names = LoadMaterialNames(materials_json);
         for (int id = 1; id < 256; ++id) {
             const std::uint64_t px = mat_pixels[static_cast<std::size_t>(id)];
-            if (px == 0) continue;
+            if (px == 0)
+                continue;
             MaterialFrameStat stat;
             stat.id = id;
-            if (auto it = names.find(id); it != names.end()) stat.name = it->second;
+            if (auto it = names.find(id); it != names.end())
+                stat.name = it->second;
             stat.pixels = px;
             stat.coverage = static_cast<double>(px) / static_cast<double>(pixel_count);
-            stat.mean_luminance = mat_luma_sum[static_cast<std::size_t>(id)] / static_cast<double>(px);
+            stat.mean_luminance =
+                mat_luma_sum[static_cast<std::size_t>(id)] / static_cast<double>(px);
             stat.max_luminance = mat_luma_max[static_cast<std::size_t>(id)];
             report.materials.push_back(std::move(stat));
         }
-        std::sort(report.materials.begin(), report.materials.end(),
+        std::sort(report.materials.begin(),
+                  report.materials.end(),
                   [](const MaterialFrameStat& a, const MaterialFrameStat& b) {
                       return a.coverage > b.coverage;
                   });
@@ -178,8 +189,7 @@ FrameScanReport ScanFrame(const RenderPipeline& pipeline,
     return report;
 }
 
-bool WriteFrameScanReport(const FrameScanReport& report,
-                          const std::filesystem::path& out_path) {
+bool WriteFrameScanReport(const FrameScanReport& report, const std::filesystem::path& out_path) {
     nlohmann::json j;
     j["schema"] = "luminumbra.frame_scan.v1";
     j["width"] = report.width;
@@ -211,7 +221,8 @@ bool WriteFrameScanReport(const FrameScanReport& report,
     j["foliage"] = std::move(foliage);
 
     std::error_code ec;
-    if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path(), ec);
+    if (out_path.has_parent_path())
+        std::filesystem::create_directories(out_path.parent_path(), ec);
     std::ofstream out(out_path);
     if (!out) {
         LUMINUMBRA_CORE_ERROR("FrameScan: cannot write report -> {}", out_path.string());

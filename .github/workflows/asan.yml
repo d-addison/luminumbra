@@ -2,8 +2,9 @@ name: AddressSanitizer
 
 on:
   push:
-    branches: [main]
+    branches: [main, devel]
   pull_request:
+    branches: [main, devel]
   workflow_dispatch:
 
 permissions:

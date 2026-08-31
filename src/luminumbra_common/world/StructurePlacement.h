@@ -1,6 +1,6 @@
 #pragma once
 
-// Structure placement + jigsaw assembly (T-I4-4, design-decisions.md section 5).
+// Structure placement + jigsaw assembly (, the deterministic runtime contract section 5).
 //
 // Placement is a spacing/separation/salt GRID per structure type: the world is
 // tiled into spacing x spacing metre cells; a per-cell salted hash decides
@@ -41,9 +41,9 @@ struct StructureSocket {
 };
 
 struct StructureBox {
-    IVec3 min{0, 0, 0};      // inclusive, piece-local
-    IVec3 size{1, 1, 1};     // extent in voxels (>= 1 on each axis)
-    u8 material = 0;         // MaterialType id
+    IVec3 min{0, 0, 0};  // inclusive, piece-local
+    IVec3 size{1, 1, 1}; // extent in voxels (>= 1 on each axis)
+    u8 material = 0;     // MaterialType id
 };
 
 struct StructurePiece {
@@ -56,9 +56,9 @@ struct StructurePiece {
 struct StructureTemplatePool {
     std::string type;
     // Placement grid parameters for this type.
-    int spacing = 64;        // grid cell size in metres (site spacing)
-    int separation = 16;     // min jitter margin kept from the cell edge
-    u32 salt = 0;           // per-type seed salt (registry; collisions = defect)
+    int spacing = 64;    // grid cell size in metres (site spacing)
+    int separation = 16; // min jitter margin kept from the cell edge
+    u32 salt = 0;        // per-type seed salt (registry; collisions = defect)
     // 0..1 probability a given grid cell hosts a site (density). Quantized
     // deterministically against the cell hash.
     float density = 1.0f;
@@ -66,7 +66,7 @@ struct StructureTemplatePool {
     std::vector<std::string> errors;
     std::vector<std::string> warnings;
     u64 content_hash = 0;
-    // FR-B1: conservative half-extent (metres) of any assembled structure on the
+    // conservative half-extent (metres) of any assembled structure on the
     // X/Z plane relative to the site origin. Computed once in
     // LoadStructureTemplatePool as the max over every piece's boxes (and socket
     // attach points, which can translate jigsaw pieces away from the origin) of
@@ -78,7 +78,9 @@ struct StructureTemplatePool {
     // content_hash so a template change self-invalidates far tiles.
     int footprint_radius = 0;
 
-    bool ok() const { return errors.empty() && !pieces.empty(); }
+    bool ok() const {
+        return errors.empty() && !pieces.empty();
+    }
 };
 
 // One placed structure site: world position of the assembly origin.
@@ -98,41 +100,31 @@ struct StructureVoxel {
 // Loads every piece JSON under data/common/structures/<type>/ plus the
 // type's placement.json (spacing/separation/salt/density). Unknown keys are
 // warnings, never errors (loader discipline matches TerrainPresetLoader).
-StructureTemplatePool LoadStructureTemplatePool(
-    const std::filesystem::path& type_dir,
-    const std::string& type);
+StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& type_dir,
+                                                const std::string& type);
 
 // --- Deterministic placement grid ---
 //
 // Returns the site (if any) hosted by the grid cell that contains world (wx,wz)
 // for this pool, as a pure function of (world_seed, pool.salt, cell). The
 // y origin is left to the caller (placement drops onto the terrain surface).
-std::optional<StructureSite> SiteInCell(
-    const StructureTemplatePool& pool,
-    int world_seed,
-    int cell_x,
-    int cell_z);
+std::optional<StructureSite>
+SiteInCell(const StructureTemplatePool& pool, int world_seed, int cell_x, int cell_z);
 
 // O(1) nearest-site query: scans the cells within `search_radius_cells` of the
 // cell containing (near_x, near_z) and returns the nearest hosted site, or
 // nullopt if none. Deterministic.
-std::optional<StructureSite> LocateNearestSite(
-    const StructureTemplatePool& pool,
-    int world_seed,
-    int near_x,
-    int near_z,
-    int search_radius_cells = 2);
+std::optional<StructureSite> LocateNearestSite(const StructureTemplatePool& pool,
+                                               int world_seed,
+                                               int near_x,
+                                               int near_z,
+                                               int search_radius_cells = 2);
 
 // All sites whose grid cell centre falls inside [min, max) on X/Z (half-open),
 // in deterministic cell-scan order. Used to enumerate sites overlapping a
 // region for placement.
 std::vector<StructureSite> SitesInArea(
-    const StructureTemplatePool& pool,
-    int world_seed,
-    int min_x,
-    int min_z,
-    int max_x,
-    int max_z);
+    const StructureTemplatePool& pool, int world_seed, int min_x, int min_z, int max_x, int max_z);
 
 // --- Jigsaw assembly ---
 //
@@ -140,9 +132,8 @@ std::vector<StructureSite> SitesInArea(
 // pieces at matching sockets (a socket on the placed set joins a socket on a
 // candidate piece). Returns voxels in world coordinates relative to site.origin.
 // Pure function of (pool, site.site_seed).
-std::vector<StructureVoxel> AssembleStructure(
-    const StructureTemplatePool& pool,
-    const StructureSite& site);
+std::vector<StructureVoxel> AssembleStructure(const StructureTemplatePool& pool,
+                                              const StructureSite& site);
 
 // fnv1a64 over a canonicalized assembled voxel set (sorted by position then
 // material). Gate snapshot of the assembled fixture.

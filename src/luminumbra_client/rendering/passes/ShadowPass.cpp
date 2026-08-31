@@ -13,15 +13,21 @@ ShadowPass::ShadowPass() = default;
 ShadowPass::~ShadowPass() = default;
 
 void ShadowPass::init_shader(const std::filesystem::path& root_path) {
-    m_shadow_shader = std::make_unique<Shader>((root_path / "res/shaders/shadow_map.vert").string().c_str(), (root_path / "res/shaders/shadow_map.frag").string().c_str());
-    PassGl::label_gl_object(GL_PROGRAM, m_shadow_shader ? m_shadow_shader->Id() : 0u, "shader.shadow");
-    // Spec 015 C-1 (RENDER-15): the tinted-transmission occluder shader.
-    m_tint_shader = std::make_unique<Shader>((root_path / "res/shaders/shadow_tint.vert").string().c_str(), (root_path / "res/shaders/shadow_tint.frag").string().c_str());
-    PassGl::label_gl_object(GL_PROGRAM, m_tint_shader ? m_tint_shader->Id() : 0u, "shader.shadow_tint");
+    m_shadow_shader =
+        std::make_unique<Shader>((root_path / "res/shaders/shadow_map.vert").string().c_str(),
+                                 (root_path / "res/shaders/shadow_map.frag").string().c_str());
+    PassGl::label_gl_object(
+        GL_PROGRAM, m_shadow_shader ? m_shadow_shader->Id() : 0u, "shader.shadow");
+    // the tinted-transmission occluder shader.
+    m_tint_shader =
+        std::make_unique<Shader>((root_path / "res/shaders/shadow_tint.vert").string().c_str(),
+                                 (root_path / "res/shaders/shadow_tint.frag").string().c_str());
+    PassGl::label_gl_object(
+        GL_PROGRAM, m_tint_shader ? m_tint_shader->Id() : 0u, "shader.shadow_tint");
 }
 
 void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
-    // RENDER-12/GPU-12: allocate the layered depth array + no-color FBO THROUGH
+    // allocate the layered depth array + no-color FBO THROUGH
     // the registry. The desc reproduces the exact GL parameters of the retired
     // glTexImage3D/glTexParameter calls (DEPTH_COMPONENT32F, CASCADE_COUNT layers,
     // NEAREST, clamp-to-border white border, NO compare mode) so the object is
@@ -57,7 +63,7 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
     }
     PassGl::set_default_shadow_cascade_splits(m_shadow_map);
 
-    // Spec 015 C-1 (RENDER-15): the tinted-transmission cascade array. RGBA8,
+    // the tinted-transmission cascade array. RGBA8,
     // one layer per cascade, LINEAR (tint samples bilinearly), clamp-to-border
     // WHITE — outside a cascade == no tint, matching the depth array's lit
     // convention. Init-cleared to WHITE so an empty-glass world multiplies the
@@ -80,8 +86,7 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
     tint_desc.border_color[3] = 1.0f;
     tint_desc.expected_layout = "color_attachment";
     tint_desc.debug_label = "shadow.tint_cascades";
-    m_tint_texture_array =
-        registry.create_texture("shadow_tint_cascades", tint_desc).id;
+    m_tint_texture_array = registry.create_texture("shadow_tint_cascades", tint_desc).id;
 
     // The tint FBO: color = a tint layer, depth = the SAME cascade's opaque depth
     // layer (attached per cascade in the draw loop) so panes behind opaque
@@ -99,7 +104,8 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_tint_fbo);
         glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
         for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
-            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_tint_texture_array, 0, i);
+            glFramebufferTextureLayer(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_tint_texture_array, 0, i);
             glClear(GL_COLOR_BUFFER_BIT);
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -127,9 +133,10 @@ void ShadowPass::reset_shader() {
     m_tint_shader.reset();
 }
 
-std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> ShadowPass::execute(const RenderContext& ctx,
-                                                                            const ShadowPassInput& input) {
-    (void)ctx; // Shadow reads no RenderContext fields; its inputs are m_shadow_map + ShadowPassInput.
+std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT>
+ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
+    (void)
+        ctx; // Shadow reads no RenderContext fields; its inputs are m_shadow_map + ShadowPassInput.
     std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> cascade_stats{};
     if (!m_shadow_shader || m_shadow_map.fbo_id == 0 || m_shadow_map.depth_texture_array == 0) {
         LUMINUMBRA_CORE_ERROR("Shadow pass skipped because shadow resources are not initialized.");
@@ -138,7 +145,8 @@ std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> ShadowPass::execute(con
 
     const std::vector<glm::mat4>& light_space_matrices = input.light_space_matrices;
     if (light_space_matrices.size() < ShadowMap::CASCADE_COUNT) {
-        LUMINUMBRA_CORE_ERROR("Shadow pass skipped because light-space matrices could not be generated.");
+        LUMINUMBRA_CORE_ERROR(
+            "Shadow pass skipped because light-space matrices could not be generated.");
         return cascade_stats;
     }
 
@@ -148,26 +156,27 @@ std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> ShadowPass::execute(con
     glClear(GL_DEPTH_BUFFER_BIT);
     glCullFace(GL_FRONT);
     m_shadow_shader->use();
-    // T-I4-16: the shadow cascades draw the SAME live terrain chunks as the
+    // the shadow cascades draw the SAME live terrain chunks as the
     // G-buffer pass, now via glMultiDrawElementsIndirect from the shared pool.
     // The chunk world origin reaches shadow_map.vert through the instanced
     // aOrigin attribute (u_useInstanceOrigin == 1); the legacy per-chunk u_model
     // uniform path is left compiled but unused for live chunks.
     m_shadow_shader->setInt("u_useInstanceOrigin", 1);
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
-        glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
+        glFramebufferTextureLayer(
+            GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
         m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
 
         glm::vec4 cascade_planes[6];
         PassGl::ExtractFrustumPlanes(light_space_matrices[i], cascade_planes);
-        // Spec 016: ONE submit per cascade via the Codex-signed-off callback
+        // ONE submit per cascade via the Codex-signed-off callback
         // (reproduces CullHierarchical + draw_chunks_mdi exactly). Returns the
         // per-cascade counts; the call site folds them into stats with =/+=.
         cascade_stats[i] = input.submit_terrain(cascade_planes);
     }
     glCullFace(GL_BACK);
 
-    // Spec 015 C-1 (RENDER-15): the tinted-transmission sub-pass. AFTER the opaque
+    // the tinted-transmission sub-pass. AFTER the opaque
     // depth is complete, draw each translucent pane into the tint cascade —
     // depth-TESTED against the opaque depth (write off: panes behind opaque
     // occluders contribute nothing) with GL_DST_COLOR/GL_ZERO multiply blending so
@@ -175,8 +184,8 @@ std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> ShadowPass::execute(con
     // Cost discipline: an empty glass frame after a non-empty one pays ONE
     // clear-to-white (back to identity); a persistently empty world pays zero.
     const bool have_glass = input.glass_items && !input.glass_items->empty() &&
-                            input.glass_vao != 0 && m_tint_shader &&
-                            m_tint_shader->IsValid() && m_tint_fbo != 0;
+                            input.glass_vao != 0 && m_tint_shader && m_tint_shader->IsValid() &&
+                            m_tint_fbo != 0;
     if ((have_glass || m_tint_dirty) && m_tint_fbo != 0) {
         glBindFramebuffer(GL_FRAMEBUFFER, m_tint_fbo);
         glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -190,13 +199,16 @@ std::array<TerrainSubmitStats, ShadowMap::CASCADE_COUNT> ShadowPass::execute(con
             m_tint_shader->use();
         }
         for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
-            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_tint_texture_array, 0, i);
-            glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
+            glFramebufferTextureLayer(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_tint_texture_array, 0, i);
+            glFramebufferTextureLayer(
+                GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
             // Reset the layer to identity, then multiply the panes in.
             glDisable(GL_BLEND);
             glClear(GL_COLOR_BUFFER_BIT);
             glEnable(GL_BLEND);
-            if (!have_glass) continue;
+            if (!have_glass)
+                continue;
             m_tint_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
             glBindVertexArray(input.glass_vao);
             for (const GlassPaneItem& pane : *input.glass_items) {

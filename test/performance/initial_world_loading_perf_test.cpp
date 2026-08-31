@@ -88,7 +88,8 @@ struct ScopedPhysicsSystem {
 struct Timer {
     using Clock = std::chrono::steady_clock;
 
-    Timer() : start(Clock::now()) {}
+    Timer()
+        : start(Clock::now()) {}
 
     double elapsed_ms() const {
         return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
@@ -140,13 +141,14 @@ std::string CurrentGitSha() {
     if (head.rfind(ref_prefix, 0) == 0) {
         const std::string ref_path = head.substr(std::string(ref_prefix).size());
         const std::string ref_sha = ReadFirstLine(git_dir / ref_path);
-        return ref_sha.empty() ? "unknown" : ref_sha.substr(0, std::min<std::size_t>(12u, ref_sha.size()));
+        return ref_sha.empty() ? "unknown"
+                               : ref_sha.substr(0, std::min<std::size_t>(12u, ref_sha.size()));
     }
     return head.substr(0, std::min<std::size_t>(12u, head.size()));
 }
 
 TerrainGenParams LoadPresetParams(const fs::path& path) {
-    // T-I3-5: delegate to the canonical engine preset parser.
+    // delegate to the canonical engine preset parser.
     const Luminumbra::world::TerrainPresetLoadResult result =
         Luminumbra::world::LoadTerrainPreset(path);
     EXPECT_TRUE(result.ok) << path.string();
@@ -175,8 +177,10 @@ MeshStats CalculateMeshStats(const std::vector<Chunk*>& chunks) {
         stats.vertices += chunk->mesh_vertices.size();
         stats.indices += chunk->mesh_indices.size();
         stats.triangles += chunk->mesh_indices.size() / 3u;
-        stats.min_vertices_per_chunk = std::min(stats.min_vertices_per_chunk, chunk->mesh_vertices.size());
-        stats.max_vertices_per_chunk = std::max(stats.max_vertices_per_chunk, chunk->mesh_vertices.size());
+        stats.min_vertices_per_chunk =
+            std::min(stats.min_vertices_per_chunk, chunk->mesh_vertices.size());
+        stats.max_vertices_per_chunk =
+            std::max(stats.max_vertices_per_chunk, chunk->mesh_vertices.size());
     }
 
     if (stats.mesh_chunks == 0u) {
@@ -184,7 +188,8 @@ MeshStats CalculateMeshStats(const std::vector<Chunk*>& chunks) {
         return stats;
     }
 
-    stats.mean_vertices_per_chunk = static_cast<double>(stats.vertices) / static_cast<double>(stats.mesh_chunks);
+    stats.mean_vertices_per_chunk =
+        static_cast<double>(stats.vertices) / static_cast<double>(stats.mesh_chunks);
     return stats;
 }
 
@@ -230,12 +235,18 @@ nlohmann::json StreamingStatsToJson(const SHIELD_WorldSystem::StreamingBudgetFra
 
 const char* ChunkStateName(ChunkState state) {
     switch (state) {
-        case ChunkState::Unloaded: return "unloaded";
-        case ChunkState::Loading: return "loading";
-        case ChunkState::Idle: return "idle";
-        case ChunkState::Meshing: return "meshing";
-        case ChunkState::Ready: return "ready";
-        case ChunkState::Unloading: return "unloading";
+        case ChunkState::Unloaded:
+            return "unloaded";
+        case ChunkState::Loading:
+            return "loading";
+        case ChunkState::Idle:
+            return "idle";
+        case ChunkState::Meshing:
+            return "meshing";
+        case ChunkState::Ready:
+            return "ready";
+        case ChunkState::Unloading:
+            return "unloading";
     }
     return "unknown";
 }
@@ -243,14 +254,15 @@ const char* ChunkStateName(ChunkState state) {
 nlohmann::json RuntimeChunkStatsToJson(const SHIELD_WorldSystem::RuntimeChunkStats& stats) {
     return {
         {"total_chunks", stats.total_chunks},
-        {"states", {
-            {ChunkStateName(ChunkState::Unloaded), stats.unloaded_chunks},
-            {ChunkStateName(ChunkState::Loading), stats.loading_chunks},
-            {ChunkStateName(ChunkState::Idle), stats.idle_chunks},
-            {ChunkStateName(ChunkState::Meshing), stats.meshing_chunks},
-            {ChunkStateName(ChunkState::Ready), stats.ready_chunks},
-            {ChunkStateName(ChunkState::Unloading), stats.unloading_chunks},
-        }},
+        {"states",
+         {
+             {ChunkStateName(ChunkState::Unloaded), stats.unloaded_chunks},
+             {ChunkStateName(ChunkState::Loading), stats.loading_chunks},
+             {ChunkStateName(ChunkState::Idle), stats.idle_chunks},
+             {ChunkStateName(ChunkState::Meshing), stats.meshing_chunks},
+             {ChunkStateName(ChunkState::Ready), stats.ready_chunks},
+             {ChunkStateName(ChunkState::Unloading), stats.unloading_chunks},
+         }},
         {"renderable_chunks", stats.renderable_chunks},
         {"collision_chunks", stats.collision_chunks},
         {"terrain_vertex_count", stats.terrain_vertex_count},
@@ -302,8 +314,10 @@ nlohmann::json MeshingStatsToJson(const World::MarchingCubes::TerrainMeshBuildSt
         {"triangles", stats.triangles},
         {"elapsed_us", stats.elapsed_us},
         {"elapsed_ms", elapsed_ms},
-        {"jobs_per_second", elapsed_ms > 0.0 ? (static_cast<double>(stats.jobs) * 1000.0) / elapsed_ms : 0.0},
-        {"triangles_per_second", elapsed_ms > 0.0 ? (static_cast<double>(stats.triangles) * 1000.0) / elapsed_ms : 0.0},
+        {"jobs_per_second",
+         elapsed_ms > 0.0 ? (static_cast<double>(stats.jobs) * 1000.0) / elapsed_ms : 0.0},
+        {"triangles_per_second",
+         elapsed_ms > 0.0 ? (static_cast<double>(stats.triangles) * 1000.0) / elapsed_ms : 0.0},
     };
 }
 
@@ -313,17 +327,15 @@ void WriteJson(const fs::path& path, const nlohmann::json& data) {
     output << std::setw(2) << data << "\n";
 }
 
-// perf-lane-and-ecology-tick (KDD-4): the `ecology` benchmark scenario. Spawns a
-// fixed kinematic creature roster (same component set as the gate-populated-world
-// -replay roster, laid out by phyllotaxis) and ticks the GameSession-slot-order
-// ecology stack once per benchmark frame, so the lane's frame-ms floor includes a
-// representative live-ecology cost. This is the FRAME-MS scenario; the dedicated
-// N-scaling gate (median+p99 at N in {256,1k,4k}) is ecology_tick_perf_test.
+// The `ecology` benchmark spawns a fixed kinematic creature roster laid out by
+// phyllotaxis and ticks the GameSession ecology stack once per frame. The
+// dedicated ecology_tick_perf_test executable measures median and p99 scaling at
+// 256, 1,000, and 4,000 creatures.
 namespace EcoComp = ::Luminumbra::Components;
 namespace EcoMath = ::Luminumbra::DeterministicMath;
 
 void SpawnEcologyBenchmarkRoster(entt::registry& r, int n) {
-    constexpr float kGoldenAngle = 2.39996323f;  // 137.5 deg, radians
+    constexpr float kGoldenAngle = 2.39996323f; // 137.5 deg, radians
     constexpr float kSpacing = 5.0f;
     int prey_idx = 0;
     for (int i = 0; i < n; ++i) {
@@ -334,13 +346,19 @@ void SpawnEcologyBenchmarkRoster(entt::registry& r, int n) {
         tf.position = Vec3(radius * EcoMath::Cos(angle), 0.0f, radius * EcoMath::Sin(angle));
         auto& cr = r.emplace<EcoComp::CreatureComponent>(e);
         if (i % 9 == 0) {
-            cr.is_predator = true; cr.hunger = 0.9f; cr.move_speed = 4.2f;
+            cr.is_predator = true;
+            cr.hunger = 0.9f;
+            cr.move_speed = 4.2f;
             r.emplace<EcoComp::PackHunterComponent>(e);
             r.emplace<EcoComp::MortalComponent>(e).lifespan_ticks = 1000000u;
         } else {
-            cr.is_predator = false; cr.hunger = 0.05f; cr.stamina = 1.0f; cr.move_speed = 3.0f;
+            cr.is_predator = false;
+            cr.hunger = 0.05f;
+            cr.stamina = 1.0f;
+            cr.move_speed = 3.0f;
             auto& gn = r.emplace<EcoComp::CreatureGenomeComponent>(e);
-            gn.female = (prey_idx++ % 2 == 0); gn.age_ticks = 100u;
+            gn.female = (prey_idx++ % 2 == 0);
+            gn.age_ticks = 100u;
             r.emplace<EcoComp::AlarmComponent>(e);
             r.emplace<EcoComp::MortalComponent>(e).lifespan_ticks = 1000000u;
             r.emplace<EcoComp::DecayComponent>(e).decay_duration = 90u;
@@ -389,7 +407,8 @@ TEST(InitialWorldLoadingPerfTest, MeasuresSurfaceHorizonPrep) {
 
     World::MarchingCubes::ResetTerrainMeshBuildStats();
     Timer prep_timer;
-    ASSERT_TRUE(world.EnsureSurfaceReadyNear(spawn, &physics_system.physics, kSurfaceRadius, kCollisionRadius));
+    ASSERT_TRUE(world.EnsureSurfaceReadyNear(
+        spawn, &physics_system.physics, kSurfaceRadius, kCollisionRadius));
     const double prep_ms = prep_timer.elapsed_ms();
     const auto meshing_stats = World::MarchingCubes::GetTerrainMeshBuildStats();
 
@@ -408,54 +427,62 @@ TEST(InitialWorldLoadingPerfTest, MeasuresSurfaceHorizonPrep) {
         {"chunk_size", {{"x", CHUNK_SIZE_X}, {"y", CHUNK_SIZE_Y}, {"z", CHUNK_SIZE_Z}}},
         {"spawn", VecToJson(spawn)},
         {"terrain_height", terrain_height},
-        {"initial_chunk_list", {
-            {"chunks", initial_chunks.size()},
-            {"elapsed_ms", initial_list_ms},
-        }},
-        {"surface_horizon", {
-            {"surface_radius", kSurfaceRadius},
-            {"collision_radius", kCollisionRadius},
-            {"expected_surface_chunks", expected_surface_chunks},
-            {"expected_collision_chunks", expected_collision_chunks},
-            {"expected_ring_lod_chunks", {
-                {"lod0", expected_collision_chunks},
-                {"lod1", (17u * 17u) - expected_collision_chunks},
-                {"lod2", expected_surface_chunks - (17u * 17u)},
-            }},
-            {"renderable_chunks", renderable_chunks.size()},
-            {"mesh_chunks", mesh_stats.mesh_chunks},
-            {"collision_chunks", mesh_stats.collision_chunks},
-            {"lod_mesh_chunks", {
-                {"lod0", mesh_stats.lod_mesh_chunks[0]},
-                {"lod1", mesh_stats.lod_mesh_chunks[1]},
-                {"lod2", mesh_stats.lod_mesh_chunks[2]},
-            }},
-            {"vertices", mesh_stats.vertices},
-            {"indices", mesh_stats.indices},
-            {"triangles", mesh_stats.triangles},
-            {"min_vertices_per_chunk", mesh_stats.min_vertices_per_chunk},
-            {"max_vertices_per_chunk", mesh_stats.max_vertices_per_chunk},
-            {"mean_vertices_per_chunk", mesh_stats.mean_vertices_per_chunk},
-            {"elapsed_ms", prep_ms},
-            {"chunks_per_second", prep_ms > 0.0 ? (static_cast<double>(mesh_stats.mesh_chunks) * 1000.0) / prep_ms : 0.0},
-        }},
+        {"initial_chunk_list",
+         {
+             {"chunks", initial_chunks.size()},
+             {"elapsed_ms", initial_list_ms},
+         }},
+        {"surface_horizon",
+         {
+             {"surface_radius", kSurfaceRadius},
+             {"collision_radius", kCollisionRadius},
+             {"expected_surface_chunks", expected_surface_chunks},
+             {"expected_collision_chunks", expected_collision_chunks},
+             {"expected_ring_lod_chunks",
+              {
+                  {"lod0", expected_collision_chunks},
+                  {"lod1", (17u * 17u) - expected_collision_chunks},
+                  {"lod2", expected_surface_chunks - (17u * 17u)},
+              }},
+             {"renderable_chunks", renderable_chunks.size()},
+             {"mesh_chunks", mesh_stats.mesh_chunks},
+             {"collision_chunks", mesh_stats.collision_chunks},
+             {"lod_mesh_chunks",
+              {
+                  {"lod0", mesh_stats.lod_mesh_chunks[0]},
+                  {"lod1", mesh_stats.lod_mesh_chunks[1]},
+                  {"lod2", mesh_stats.lod_mesh_chunks[2]},
+              }},
+             {"vertices", mesh_stats.vertices},
+             {"indices", mesh_stats.indices},
+             {"triangles", mesh_stats.triangles},
+             {"min_vertices_per_chunk", mesh_stats.min_vertices_per_chunk},
+             {"max_vertices_per_chunk", mesh_stats.max_vertices_per_chunk},
+             {"mean_vertices_per_chunk", mesh_stats.mean_vertices_per_chunk},
+             {"elapsed_ms", prep_ms},
+             {"chunks_per_second",
+              prep_ms > 0.0 ? (static_cast<double>(mesh_stats.mesh_chunks) * 1000.0) / prep_ms
+                            : 0.0},
+         }},
         {"meshing_throughput", MeshingStatsToJson(meshing_stats)},
-        {"thresholds", {
-            {"minimum_mesh_chunk_coverage", 0.90},
-            {"minimum_collision_chunks", expected_collision_chunks},
-            {"runaway_prep_limit_ms", kRunawayPrepLimitMs},
-        }},
+        {"thresholds",
+         {
+             {"minimum_mesh_chunk_coverage", 0.90},
+             {"minimum_collision_chunks", expected_collision_chunks},
+             {"runaway_prep_limit_ms", kRunawayPrepLimitMs},
+         }},
     };
     WriteJson(ArtifactRoot() / "initial_world_loading.json", report);
-    WriteJson(ArtifactRoot() / "meshing_throughput.json", {
-        {"schema", "luminumbra.meshing_throughput.v1"},
-        {"seed", kSeed},
-        {"preset", preset_path.filename().string()},
-        {"spawn", VecToJson(spawn)},
-        {"stats", MeshingStatsToJson(meshing_stats)},
-    });
+    WriteJson(ArtifactRoot() / "meshing_throughput.json",
+              {
+                  {"schema", "luminumbra.meshing_throughput.v1"},
+                  {"seed", kSeed},
+                  {"preset", preset_path.filename().string()},
+                  {"spawn", VecToJson(spawn)},
+                  {"stats", MeshingStatsToJson(meshing_stats)},
+              });
 
-    // DELIBERATE expectation update (T-I3-2): the initial load list now emits
+    // DELIBERATE expectation update: the initial load list now emits
     // each column's 5-point surface SPAN (+-1 margin) instead of a fixed 3
     // chunks per column, so steep columns add cliff-wall chunks. The exact
     // span-derived count is asserted by
@@ -465,7 +492,8 @@ TEST(InitialWorldLoadingPerfTest, MeasuresSurfaceHorizonPrep) {
     EXPECT_LE(initial_chunks.size(), 25u * 25u * 6u);
     EXPECT_GE(mesh_stats.mesh_chunks, static_cast<std::size_t>(expected_surface_chunks * 0.90));
     EXPECT_GE(mesh_stats.collision_chunks, expected_collision_chunks);
-    EXPECT_GE(mesh_stats.lod_mesh_chunks[0], static_cast<std::size_t>(expected_collision_chunks * 0.90));
+    EXPECT_GE(mesh_stats.lod_mesh_chunks[0],
+              static_cast<std::size_t>(expected_collision_chunks * 0.90));
     EXPECT_GT(mesh_stats.lod_mesh_chunks[1], 0u);
     EXPECT_GT(mesh_stats.lod_mesh_chunks[2], 0u);
     EXPECT_GT(mesh_stats.vertices, 10000u);
@@ -509,10 +537,11 @@ TEST(InitialWorldLoadingPerfTest, StreamingBudgetSchedulerExpandsSurfaceBeforeVe
         {"preset", preset_path.filename().string()},
         {"spawn", VecToJson(spawn)},
         {"stats", StreamingStatsToJson(stats)},
-        {"thresholds", {
-            {"surface_first_required", true},
-            {"active_chunks_must_not_exceed_budget", true},
-        }},
+        {"thresholds",
+         {
+             {"surface_first_required", true},
+             {"active_chunks_must_not_exceed_budget", true},
+         }},
     };
     WriteJson(ArtifactRoot() / "streaming_budget.json", report);
 
@@ -574,7 +603,8 @@ TEST(InitialWorldLoadingPerfTest, StreamingWalkMaintainsBudgetsAndWritesWorldSta
         max_budget = std::max(max_budget, budget_stats.max_active_chunks_budget);
         max_loading_chunks = std::max(max_loading_chunks, chunk_stats.loading_chunks);
         max_meshing_chunks = std::max(max_meshing_chunks, chunk_stats.meshing_chunks);
-        max_deferred_generation = std::max(max_deferred_generation, budget_stats.deferred_generation);
+        max_deferred_generation =
+            std::max(max_deferred_generation, budget_stats.deferred_generation);
         max_deferred_meshing = std::max(max_deferred_meshing, budget_stats.deferred_meshing);
         max_renderable_chunks = std::max(max_renderable_chunks, chunk_stats.renderable_chunks);
 
@@ -595,36 +625,39 @@ TEST(InitialWorldLoadingPerfTest, StreamingWalkMaintainsBudgetsAndWritesWorldSta
         {"schema", "luminumbra.streaming_walk.v1"},
         {"seed", kSeed},
         {"preset", preset_path.filename().string()},
-        {"state_schema", {
-            ChunkStateName(ChunkState::Unloaded),
-            ChunkStateName(ChunkState::Loading),
-            ChunkStateName(ChunkState::Idle),
-            ChunkStateName(ChunkState::Meshing),
-            ChunkStateName(ChunkState::Ready),
-            ChunkStateName(ChunkState::Unloading),
-        }},
-        {"walk", {
-            {"steps", walk_steps.size()},
-            {"frames_per_step", 4},
-            {"elapsed_ms", elapsed_ms},
-            {"max_active_chunks", max_active_chunks},
-            {"max_active_chunk_budget", max_budget},
-            {"max_loading_chunks", max_loading_chunks},
-            {"max_meshing_chunks", max_meshing_chunks},
-            {"max_deferred_generation", max_deferred_generation},
-            {"max_deferred_meshing", max_deferred_meshing},
-            {"max_renderable_chunks", max_renderable_chunks},
-        }},
+        {"state_schema",
+         {
+             ChunkStateName(ChunkState::Unloaded),
+             ChunkStateName(ChunkState::Loading),
+             ChunkStateName(ChunkState::Idle),
+             ChunkStateName(ChunkState::Meshing),
+             ChunkStateName(ChunkState::Ready),
+             ChunkStateName(ChunkState::Unloading),
+         }},
+        {"walk",
+         {
+             {"steps", walk_steps.size()},
+             {"frames_per_step", 4},
+             {"elapsed_ms", elapsed_ms},
+             {"max_active_chunks", max_active_chunks},
+             {"max_active_chunk_budget", max_budget},
+             {"max_loading_chunks", max_loading_chunks},
+             {"max_meshing_chunks", max_meshing_chunks},
+             {"max_deferred_generation", max_deferred_generation},
+             {"max_deferred_meshing", max_deferred_meshing},
+             {"max_renderable_chunks", max_renderable_chunks},
+         }},
         {"final_position", VecToJson(final_position)},
         {"final_chunks", RuntimeChunkStatsToJson(final_chunk_stats)},
         {"steps", walk_steps},
-        {"thresholds", {
-            {"active_chunks_must_not_exceed_budget", true},
-            {"minimum_peak_renderable_chunks", 160},
-            {"minimum_final_renderable_chunks", 160},
-            {"maximum_final_loading_chunks", 0},
-            {"maximum_final_meshing_chunks", 0},
-        }},
+        {"thresholds",
+         {
+             {"active_chunks_must_not_exceed_budget", true},
+             {"minimum_peak_renderable_chunks", 160},
+             {"minimum_final_renderable_chunks", 160},
+             {"maximum_final_loading_chunks", 0},
+             {"maximum_final_meshing_chunks", 0},
+         }},
     };
     WriteJson(ArtifactRoot() / "streaming_walk.json", report);
 
@@ -660,18 +693,19 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
 
     nlohmann::json scenario_schema = {
         {"schema", "luminumbra.performance_framework.scenarios.v1"},
-        {"required_metrics", {
-            "frame_time_ms.p50",
-            "frame_time_ms.p95",
-            "frame_time_ms.p99",
-            "frame_time_ms.max",
-            "memory_high_water",
-            "chunk_counts",
-            "job_queue_high_water",
-            "upload_backlog_high_water",
-            "draw_pass_counts",
-            "shader_compile_activity",
-        }},
+        {"required_metrics",
+         {
+             "frame_time_ms.p50",
+             "frame_time_ms.p95",
+             "frame_time_ms.p99",
+             "frame_time_ms.max",
+             "memory_high_water",
+             "chunk_counts",
+             "job_queue_high_water",
+             "upload_backlog_high_water",
+             "draw_pass_counts",
+             "shader_compile_activity",
+         }},
         {"scenarios", nlohmann::json::array()},
     };
     for (const std::string& name : required_scenarios) {
@@ -710,10 +744,9 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
                                std::size_t upload_backlog_high_water,
                                std::size_t draw_pass_count,
                                std::size_t shader_programs_compiled) {
-        const std::size_t world_memory_bytes =
-            chunks.terrain_payload_bytes +
-            chunks.water_vertex_count * sizeof(VoxelVertex) +
-            chunks.water_index_count * sizeof(u32);
+        const std::size_t world_memory_bytes = chunks.terrain_payload_bytes +
+                                               chunks.water_vertex_count * sizeof(VoxelVertex) +
+                                               chunks.water_index_count * sizeof(u32);
         return nlohmann::json{
             {"name", name},
             {"frame_time_ms", FrameStatsToJson(samples_ms)},
@@ -721,64 +754,76 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
             // (tools/gates/validate-engine-frontier.ps1 -Mode PerfRegression) and
             // the baseline capture helper (tools/gates/capture-perf-baseline.ps1).
             // Keep keys stable: p50_ms, p95_ms, p99_ms, max_ms, mem_high_water_mb.
-            {"regression_metrics", {
-                {"p50_ms", Percentile(samples_ms, 50.0)},
-                {"p95_ms", Percentile(samples_ms, 95.0)},
-                {"p99_ms", Percentile(samples_ms, 99.0)},
-                {"max_ms", samples_ms.empty() ? 0.0 : *std::max_element(samples_ms.begin(), samples_ms.end())},
-                {"mem_high_water_mb", static_cast<double>(world_memory_bytes) / (1024.0 * 1024.0)},
-            }},
-            {"memory_high_water", {
-                {"cpu_bytes", 0},
-                {"estimated_vram_bytes", 0},
-                {"world_payload_bytes", world_memory_bytes},
-            }},
+            {"regression_metrics",
+             {
+                 {"p50_ms", Percentile(samples_ms, 50.0)},
+                 {"p95_ms", Percentile(samples_ms, 95.0)},
+                 {"p99_ms", Percentile(samples_ms, 99.0)},
+                 {"max_ms",
+                  samples_ms.empty() ? 0.0
+                                     : *std::max_element(samples_ms.begin(), samples_ms.end())},
+                 {"mem_high_water_mb", static_cast<double>(world_memory_bytes) / (1024.0 * 1024.0)},
+             }},
+            {"memory_high_water",
+             {
+                 {"cpu_bytes", 0},
+                 {"estimated_vram_bytes", 0},
+                 {"world_payload_bytes", world_memory_bytes},
+             }},
             {"chunk_counts", RuntimeChunkStatsToJson(chunks)},
             {"job_queue_high_water", job_queue_high_water},
             {"upload_backlog_high_water", upload_backlog_high_water},
-            {"draw_pass_counts", {
-                {"draws", draw_pass_count},
-                {"source", "render framework pass-count contract"},
-            }},
-            {"shader_compile_activity", {
-                {"programs_compiled", shader_programs_compiled},
-                {"validated_by", "RenderSmokeTest.PipelineShaderProgramsLink"},
-            }},
+            {"draw_pass_counts",
+             {
+                 {"draws", draw_pass_count},
+                 {"source", "render framework pass-count contract"},
+             }},
+            {"shader_compile_activity",
+             {
+                 {"programs_compiled", shader_programs_compiled},
+                 {"validated_by", "RenderSmokeTest.PipelineShaderProgramsLink"},
+             }},
         };
     };
 
     const auto chunks_after_enter = world.get_runtime_chunk_stats();
-    scenario_results.push_back(scenario_result("boot", {boot_ms}, chunks_after_enter, 0u, 0u, 0u, 0u));
-    scenario_results.push_back(scenario_result("create_world", {create_ms}, chunks_after_enter, 0u, 0u, 0u, 0u));
-    scenario_results.push_back(scenario_result("enter_spawn", {enter_ms}, chunks_after_enter, 0u, 0u, 0u, 0u));
+    scenario_results.push_back(
+        scenario_result("boot", {boot_ms}, chunks_after_enter, 0u, 0u, 0u, 0u));
+    scenario_results.push_back(
+        scenario_result("create_world", {create_ms}, chunks_after_enter, 0u, 0u, 0u, 0u));
+    scenario_results.push_back(
+        scenario_result("enter_spawn", {enter_ms}, chunks_after_enter, 0u, 0u, 0u, 0u));
 
-    auto run_update_scenario = [&](const std::string& name, int frames, const auto& position_for_frame) {
-        std::vector<double> samples_ms;
-        samples_ms.reserve(static_cast<std::size_t>(frames));
-        SHIELD_WorldSystem::RuntimeChunkStats max_chunks = world.get_runtime_chunk_stats();
-        std::size_t max_jobs = 0;
-        std::size_t max_backlog = 0;
-        for (int frame = 0; frame < frames; ++frame) {
-            const Vec3 position = position_for_frame(frame);
-            Timer frame_timer;
-            world.update(registry, position, &physics_system.physics);
-            physics_system.physics.update(1.0f / 60.0f);
-            samples_ms.push_back(frame_timer.elapsed_ms());
+    auto run_update_scenario =
+        [&](const std::string& name, int frames, const auto& position_for_frame) {
+            std::vector<double> samples_ms;
+            samples_ms.reserve(static_cast<std::size_t>(frames));
+            SHIELD_WorldSystem::RuntimeChunkStats max_chunks = world.get_runtime_chunk_stats();
+            std::size_t max_jobs = 0;
+            std::size_t max_backlog = 0;
+            for (int frame = 0; frame < frames; ++frame) {
+                const Vec3 position = position_for_frame(frame);
+                Timer frame_timer;
+                world.update(registry, position, &physics_system.physics);
+                physics_system.physics.update(1.0f / 60.0f);
+                samples_ms.push_back(frame_timer.elapsed_ms());
 
-            const auto chunks = world.get_runtime_chunk_stats();
-            const auto budget = world.get_last_streaming_budget_stats();
-            if (chunks.terrain_payload_bytes > max_chunks.terrain_payload_bytes) {
-                max_chunks = chunks;
+                const auto chunks = world.get_runtime_chunk_stats();
+                const auto budget = world.get_last_streaming_budget_stats();
+                if (chunks.terrain_payload_bytes > max_chunks.terrain_payload_bytes) {
+                    max_chunks = chunks;
+                }
+                max_jobs = std::max<std::size_t>(max_jobs,
+                                                 (chunks.generation_job_active ? 1u : 0u) +
+                                                     (chunks.meshing_job_active ? 1u : 0u));
+                max_backlog =
+                    std::max(max_backlog, budget.deferred_generation + budget.deferred_meshing);
             }
-            max_jobs = std::max<std::size_t>(max_jobs, (chunks.generation_job_active ? 1u : 0u) + (chunks.meshing_job_active ? 1u : 0u));
-            max_backlog = std::max(max_backlog, budget.deferred_generation + budget.deferred_meshing);
-        }
-        scenario_results.push_back(scenario_result(name, samples_ms, max_chunks, max_jobs, max_backlog, 0u, 0u));
-    };
+            scenario_results.push_back(
+                scenario_result(name, samples_ms, max_chunks, max_jobs, max_backlog, 0u, 0u));
+        };
 
-    run_update_scenario("idle_horizon", 20, [&](int) {
-        return spawn;
-    });
+    run_update_scenario("idle_horizon", 20, [&](int) { return spawn; });
 
     run_update_scenario("pan_camera", 20, [&](int frame) {
         const float angle = static_cast<float>(frame) * 0.25f;
@@ -795,53 +840,9 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
         return Vec3(x, world.GetTerrainHeightAt(x, z) + 1.95f, z);
     });
 
-    // perf-lane-and-ecology-tick (KDD-4/KDD-5, FR-001, AC-004): the `forest`
-    // scenario. The headless perf test has NO GL context, so it cannot run the
-    // client foliage instancer or take a GPU timer query -- those are DEFERRED to
-    // far-field-source-unification FR-003 (the SHARED forest harness). What this
-    // lane CAN produce honestly is the CPU-side instance/draw/triangle counts that
-    // are known pre-upload: a pinned 16k-tree forest load. We emit those counts +
-    // a frame-ms sample from a dense streaming pass, and mark the scenario
-    // verified:false ("renders, perf-unverified") until a blessed GPU floor covers
-    // it. The counts are deterministic constants here (the canonical 16k-tree
-    // forest fixture), NOT a live GL gather, by design of the headless split.
-    constexpr std::size_t kForestInstanceCount = 16000u;
-    // Canonical billboard/low-LOD tree impostor draw batching: instanced, so draw
-    // calls are the LOD-bucket count, not per-instance. ~4 LOD buckets for the
-    // far-field forest (near mesh / mid impostor / far billboard / shadow pass).
-    constexpr std::size_t kForestDrawCalls = 4u;
-    // Triangle budget: canonical mid-LOD tree ~ 320 tris; the lane records the
-    // CPU-side upper bound so far-field's GPU gate can compare against it.
-    constexpr std::size_t kForestTrisPerInstance = 320u;
-    const std::size_t forest_before = scenario_results.size();
-    run_update_scenario("forest", 16, [&](int frame) {
-        // A dense walk through a forested radius to load the foliage-bearing
-        // chunks; positions are deterministic (no RNG).
-        const float angle = static_cast<float>(frame) * 0.4f;
-        const float radius = 40.0f;
-        const float x = 8.0f + std::cos(angle) * radius;
-        const float z = 8.0f + std::sin(angle) * radius;
-        return Vec3(x, world.GetTerrainHeightAt(x, z) + 1.95f, z);
-    });
-    {
-        nlohmann::json& forest_entry = scenario_results[forest_before];
-        forest_entry["instance_count"] = kForestInstanceCount;
-        forest_entry["draw_calls"] = kForestDrawCalls;
-        forest_entry["foliage_tris"] = kForestInstanceCount * kForestTrisPerInstance;
-        // AC-004: the 16k forest "renders, perf-unverified" until a blessed floor
-        // (with a GPU timer query, owned by far-field-source-unification FR-003)
-        // certifies it.
-        forest_entry["verified"] = false;
-        forest_entry["verification_note"] =
-            "renders, perf-unverified: CPU-side instance/draw/tri counts only; "
-            "GPU frame-ms timer query deferred to far-field-source-unification FR-003";
-    }
-
-    // perf-lane-and-ecology-tick (KDD-4/KDD-6): the `ecology` frame-ms scenario.
-    // Ticks a fixed kinematic creature roster through the GameSession-slot-order
-    // ecology stack once per benchmark frame so the floor lane includes live
-    // ecology cost. A modest fixed N keeps the benchmark fast; the N-scaling
-    // (256/1k/4k) median+p99 gate is the dedicated ecology_tick_perf_test exe.
+    // Tick a fixed kinematic creature roster through the GameSession ecology
+    // stack once per benchmark frame. A modest fixed count keeps this smoke
+    // scenario fast; ecology_tick_perf_test owns the larger scaling study.
     {
         constexpr int kEcologyBenchmarkRoster = 512;
         entt::registry ecology_registry;
@@ -867,7 +868,8 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
     });
 
     const auto chunks_after_benchmarks = world.get_runtime_chunk_stats();
-    scenario_results.push_back(scenario_result("shader_warmup", {0.0}, chunks_after_benchmarks, 0u, 0u, 0u, 14u));
+    scenario_results.push_back(
+        scenario_result("shader_warmup", {0.0}, chunks_after_benchmarks, 0u, 0u, 0u, 14u));
 
     // Quiesce the world's streaming jobs before timing JobSystem shutdown.
     // chunk_churn leaves a meshing batch in flight on 16 background workers;
@@ -879,7 +881,8 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
     shutdown_jobs.startup();
     Timer shutdown_timer;
     shutdown_jobs.shutdown();
-    scenario_results.push_back(scenario_result("shutdown", {shutdown_timer.elapsed_ms()}, chunks_after_benchmarks, 0u, 0u, 0u, 0u));
+    scenario_results.push_back(scenario_result(
+        "shutdown", {shutdown_timer.elapsed_ms()}, chunks_after_benchmarks, 0u, 0u, 0u, 0u));
 
 #ifdef NDEBUG
     const char* build_mode = "release";
@@ -889,15 +892,16 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
 
     const nlohmann::json summary = {
         {"schema", "luminumbra.performance_framework.benchmark_summary.v1"},
-        {"metadata", {
-            {"seed", kSeed},
-            {"preset", preset_path.filename().string()},
-            {"build_mode", build_mode},
-            {"git_sha", CurrentGitSha()},
-            {"machine", "local"},
-            {"gpu", "unknown"},
-            {"driver", "unknown"},
-        }},
+        {"metadata",
+         {
+             {"seed", kSeed},
+             {"preset", preset_path.filename().string()},
+             {"build_mode", build_mode},
+             {"git_sha", CurrentGitSha()},
+             {"machine", "local"},
+             {"gpu", "unknown"},
+             {"driver", "unknown"},
+         }},
         {"scenarios", scenario_results},
     };
     WriteJson(PerformanceFrameworkArtifactRoot() / "benchmark_summary.json", summary);
@@ -909,28 +913,36 @@ TEST(InitialWorldLoadingPerfTest, PerformanceFrameworkBenchmarkScenariosWriteBud
     std::vector<std::string> failures;
     for (const nlohmann::json& scenario : scenario_results) {
         if (scenario["frame_time_ms"]["p99"].get<double>() > kMaxP99Ms) {
-            failures.push_back(scenario["name"].get<std::string>() + " p99 exceeded catastrophic budget");
+            failures.push_back(scenario["name"].get<std::string>() +
+                               " p99 exceeded catastrophic budget");
         }
-        if (scenario["memory_high_water"]["world_payload_bytes"].get<std::size_t>() > kMaxWorldPayloadBytes) {
-            failures.push_back(scenario["name"].get<std::string>() + " world payload exceeded catastrophic budget");
+        if (scenario["memory_high_water"]["world_payload_bytes"].get<std::size_t>() >
+            kMaxWorldPayloadBytes) {
+            failures.push_back(scenario["name"].get<std::string>() +
+                               " world payload exceeded catastrophic budget");
         }
         if (scenario["job_queue_high_water"].get<std::size_t>() > kMaxJobQueueHighWater) {
-            failures.push_back(scenario["name"].get<std::string>() + " job queue high-water exceeded budget");
+            failures.push_back(scenario["name"].get<std::string>() +
+                               " job queue high-water exceeded budget");
         }
         if (scenario["upload_backlog_high_water"].get<std::size_t>() > kMaxUploadBacklogHighWater) {
-            failures.push_back(scenario["name"].get<std::string>() + " upload backlog high-water exceeded budget");
+            failures.push_back(scenario["name"].get<std::string>() +
+                               " upload backlog high-water exceeded budget");
         }
     }
 
     const nlohmann::json regression_budget = {
         {"schema", "luminumbra.performance_framework.regression_budget.v1"},
-        {"policy", "catastrophic local smoke budgets; tighten after stable baselines"},
-        {"budgets", {
-            {"max_p99_ms", kMaxP99Ms},
-            {"max_world_payload_bytes", kMaxWorldPayloadBytes},
-            {"max_job_queue_high_water", kMaxJobQueueHighWater},
-            {"max_upload_backlog_high_water", kMaxUploadBacklogHighWater},
-        }},
+        {"policy",
+         "safety limits for hangs and runaway resource growth; relative comparisons own regression "
+         "decisions"},
+        {"budgets",
+         {
+             {"max_p99_ms", kMaxP99Ms},
+             {"max_world_payload_bytes", kMaxWorldPayloadBytes},
+             {"max_job_queue_high_water", kMaxJobQueueHighWater},
+             {"max_upload_backlog_high_water", kMaxUploadBacklogHighWater},
+         }},
         {"passed", failures.empty()},
         {"failures", failures},
     };

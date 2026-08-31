@@ -1,14 +1,14 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
-#include <mutex>
-#include <condition_variable>
-#include <atomic>
-#include <memory>
 
 namespace Luminumbra {
 
@@ -54,12 +54,13 @@ public:
     void startup(std::size_t worker_count = 0);
     void shutdown();
     void dispatch(Job job, JobPriority priority = JobPriority::Normal);
-    JobHandle dispatch_batch(const std::vector<Job>& jobs, JobPriority priority = JobPriority::Normal);
+    JobHandle dispatch_batch(const std::vector<Job>& jobs,
+                             JobPriority priority = JobPriority::Normal);
     void wait(const JobHandle& handle);
     RuntimeStats get_runtime_stats() const;
 
 private:
-    // T-I4-17-jobsystem-pod-pool: a pooled, allocation-free job slot. The
+    // a pooled, allocation-free job slot. The
     // previous design wrapped every queued job in a SECOND std::function (to
     // attach the completion guard) and stored it in a std::deque-backed
     // std::queue, so each dispatch paid for (a) the wrapper std::function's
@@ -75,23 +76,27 @@ private:
         std::shared_ptr<JobCompletionState> completion;
     };
 
-    // T-I4-17-jobsystem-pod-pool: a contiguous ring buffer of PooledJob slots.
+    // a contiguous ring buffer of PooledJob slots.
     // It grows by doubling (never shrinks) so steady-state dispatch reuses
     // slots without allocating. All access is serialized by JobSystem's
     // m_queue_mutex; the ring itself carries no internal synchronization.
     class PooledQueue {
     public:
         PooledQueue();
-        bool empty() const { return m_size == 0; }
-        std::size_t size() const { return m_size; }
+        bool empty() const {
+            return m_size == 0;
+        }
+        std::size_t size() const {
+            return m_size;
+        }
         // Moves `slot` into the ring, growing capacity if full.
         void push(PooledJob&& slot);
         // Moves the front slot out and advances the head. The vacated slot's
         // Job/shared_ptr are reset so referenced state is released promptly.
         PooledJob pop();
-        // SHIELD-07/OPS-13 (spec 018 FR-D-002): pop the slot `offset` places
+        // pop the slot `offset` places
         // past the head (swap-with-front then pop) — the throttle's service-
-        // order perturbation primitive. offset must be < size().
+        // order perturbation primitive. offset must be < size.
         PooledJob pop_at(std::size_t offset);
 
     private:
@@ -106,16 +111,16 @@ private:
     void worker_loop();
     // Requires m_queue_mutex to be held.
     PooledQueue& queue_for(JobPriority priority);
-    // SHIELD-07/OPS-13 (spec 018 FR-D-002): the fast/slow-job determinism
+    // the fast/slow-job determinism
     // axis. When LUMINUMBRA_JOB_THROTTLE=<seed> is set at startup, workers pop
     // a SplitMix64-selected slot from a small window at the queue head instead
     // of the front — an adversarial, wall-clock-free perturbation of job
-    // SERVICE ORDER (spec 018:359: a naive order-preserving sleep proves
+    // SERVICE ORDER (:359: a naive order-preserving sleep proves
     // nothing). Off by default: one branch on a bool, hash-neutral-off by
     // construction. The determinism matrix asserts sim hashes are INVARIANT
     // under it. Requires m_queue_mutex to be held.
     PooledJob throttled_pop(PooledQueue& queue);
-    // T-I4-17-jobsystem-pod-pool: run a popped slot and complete its batch on
+    // run a popped slot and complete its batch on
     // every exit path. Static (no JobSystem state) but a member so it can touch
     // the private PooledJob type.
     static void run_slot(PooledJob& slot);
@@ -126,7 +131,7 @@ private:
     // Consecutive High jobs served while Normal work waited; guarded by
     // m_queue_mutex.
     std::size_t m_consecutive_high_served = 0;
-    // FR-D-002 throttle state; counter guarded by m_queue_mutex.
+    //  throttle state; counter guarded by m_queue_mutex.
     bool m_throttle_enabled = false;
     std::uint64_t m_throttle_seed = 0;
     std::uint64_t m_throttle_pop_counter = 0;
@@ -134,7 +139,6 @@ private:
     std::condition_variable m_condition;
     std::atomic<bool> m_stop_threads = false;
     bool m_accepting_jobs = false;
-
 };
 
 } // namespace Luminumbra

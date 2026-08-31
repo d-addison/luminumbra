@@ -17,6 +17,8 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -44,13 +46,6 @@ struct ShaderSourceInventoryEntry {
     std::string stage;
     std::uintmax_t bytes = 0;
     bool compiled = false;
-};
-
-struct GpuSdfParityFixture {
-    const char* name;
-    std::array<int, 3> chunk_coords;
-    int seed = 0;
-    const char* terrain_profile;
 };
 
 class HiddenGlContext {
@@ -131,8 +126,60 @@ std::string ReadTextFile(const fs::path& path) {
     return stream.str();
 }
 
+bool ReadShaderSourceRecursive(const fs::path& path,
+                               std::unordered_set<std::string>& include_stack,
+                               std::string& source,
+                               std::string& diagnostic) {
+    const fs::path normalized = fs::absolute(path).lexically_normal();
+    const std::string key = normalized.generic_string();
+    if (!include_stack.insert(key).second) {
+        diagnostic = "cyclic shader include: " + key;
+        return false;
+    }
+
+    std::ifstream input(normalized);
+    if (!input) {
+        diagnostic = "cannot open shader source: " + key;
+        include_stack.erase(key);
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(input, line)) {
+        constexpr std::string_view prefix = "#include \"";
+        const std::size_t begin = line.find(prefix);
+        if (begin == std::string::npos) {
+            source.append(line).push_back('\n');
+            continue;
+        }
+
+        const std::size_t name_begin = begin + prefix.size();
+        const std::size_t name_end = line.find('"', name_begin);
+        if (begin != 0 || name_end == std::string::npos || name_end + 1 != line.size()) {
+            diagnostic = "malformed shader include in " + key + ": " + line;
+            include_stack.erase(key);
+            return false;
+        }
+
+        const fs::path included =
+            normalized.parent_path() / line.substr(name_begin, name_end - name_begin);
+        if (!ReadShaderSourceRecursive(included, include_stack, source, diagnostic)) {
+            include_stack.erase(key);
+            return false;
+        }
+    }
+
+    include_stack.erase(key);
+    return true;
+}
+
+bool ReadShaderSource(const fs::path& path, std::string& source, std::string& diagnostic) {
+    std::unordered_set<std::string> include_stack;
+    return ReadShaderSourceRecursive(path, include_stack, source, diagnostic);
+}
+
 // Render pass implementations are extracted from RenderPipeline.cpp into
-// rendering/passes/ (T-I2-11); source-token contracts that cover pass bodies
+// rendering/passes/; source-token contracts that cover pass bodies
 // scan the combined pipeline + pass sources.
 std::string ReadRenderPipelineCombinedSources() {
     std::string combined =
@@ -251,9 +298,11 @@ std::string GetProgramInfoLog(GLuint program) {
 }
 
 GLuint CompileShader(const fs::path& path, GLenum type) {
-    const std::string source = ReadTextFile(path);
-    if (source.empty()) {
-        ADD_FAILURE() << "Shader source is missing or empty: " << path.string();
+    std::string source;
+    std::string diagnostic;
+    if (!ReadShaderSource(path, source, diagnostic) || source.empty()) {
+        ADD_FAILURE() << "Shader source could not be loaded: " << path.string() << "\n"
+                      << diagnostic;
         return 0;
     }
 
@@ -344,12 +393,12 @@ std::vector<ShaderProgramSpec> PipelineProgramSpecs() {
          "magical_particles.frag",
          "magical_particles.geom"},
         {"foliage", "foliage.vert", "foliage.frag"},
-        // Render-optimization (cloud-raymarch-optimization, slice 1): the depth-masked
+        // Render-optimization (cloud-raymarch-optimization, ): the depth-masked
         // upsample compositing the reduced-res sky dome into the lighting FBO.
         {"cloud_composite", "ssao.vert", "cloud_composite.frag"},
         // Render-optimization (ssao-gtao): XeGTAO horizon-slice AO variant.
         {"ssao_gtao", "ssao.vert", "ssao_gtao.frag"},
-        // Render-optimization (ssao-gtao FR-003): joint-bilateral AO upsample.
+        // Render-optimization (ssao-gtao ): joint-bilateral AO upsample.
         {"ssao_bilateral_upsample", "ssao.vert", "ssao_bilateral_upsample.frag"},
         // Fidelity: screen-space crepuscular rays (god rays).
         {"god_rays", "ssao.vert", "god_rays.frag"},
@@ -501,7 +550,7 @@ struct GpuTimerProbeResult {
 // small real GPU workload per render pass name with glQueryCounter pairs so
 // the render-health artifact carries observed gpu_ms values.
 GpuTimerProbeResult MeasureGpuTimerProbe(bool context_ready) {
-    // T-I5a-1: "particles" slots after "skybox" (the live ParticlePass order).
+    //  "particles" slots after "skybox" (the live ParticlePass order).
     static constexpr std::array<const char*, 9> kPassNames = {"shadow",
                                                               "gbuffer",
                                                               "ssao",
@@ -633,295 +682,6 @@ void WriteRenderHealthAnalysis(const fs::path& path,
     output << "}\n";
 }
 
-void WriteGpuSdfCallbackSafetyArtifact(const fs::path& path,
-                                       bool passed,
-                                       bool callback_api_present,
-                                       bool integration_disabled_by_default,
-                                       bool setup_clears_callback_when_disabled,
-                                       bool raw_this_capture_present,
-                                       bool raw_this_callback_gated,
-                                       bool gpu_readback_is_synchronous,
-                                       bool gl_context_required) {
-    std::ofstream output(path);
-    ASSERT_TRUE(output) << path.string();
-    output << "{\n";
-    output << "  \"schema\": \"luminumbra.render.gpu_sdf_callback_safety.v1\",\n";
-    output << "  \"generated_by\": "
-              "\"RenderSmokeTest.GpuSdfCallbackSafetyGateEmitsAnalysisArtifact\",\n";
-    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
-    output << "  \"callback\": {\n";
-    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
-    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
-    output << "    \"setup_api\": \"SetupGPUSDFIntegration\",\n";
-    output << "    \"generation_api\": \"generate_chunk_sdf_gpu\",\n";
-    output << "    \"world_callback\": \"SetGPUSDFCallback\",\n";
-    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
-    output << "    \"callback_api_present\": " << (callback_api_present ? "true" : "false")
-           << ",\n";
-    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true")
-           << ",\n";
-    output << "    \"clears_callback_when_disabled\": "
-           << (setup_clears_callback_when_disabled ? "true" : "false") << ",\n";
-    output << "    \"raw_this_capture_present\": " << (raw_this_capture_present ? "true" : "false")
-           << ",\n";
-    output << "    \"raw_this_capture_gated\": " << (raw_this_callback_gated ? "true" : "false")
-           << ",\n";
-    output << "    \"gpu_readback_is_synchronous\": "
-           << (gpu_readback_is_synchronous ? "true" : "false") << ",\n";
-    output << "    \"gl_context_required\": " << (gl_context_required ? "true" : "false") << ",\n";
-    output << "    \"safe_until_explicit_opt_in\": " << (passed ? "true" : "false") << "\n";
-    output << "  },\n";
-    output << "  \"checks\": [\n";
-    output << "    {\"name\": \"gpu sdf callback API is present\", \"passed\": "
-           << (callback_api_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf integration is disabled by default\", \"passed\": "
-           << (integration_disabled_by_default ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"disabled setup clears any world callback\", \"passed\": "
-           << (setup_clears_callback_when_disabled ? "true" : "false") << "},\n";
-    output
-        << "    {\"name\": \"raw pipeline capture is gated behind explicit opt-in\", \"passed\": "
-        << (raw_this_callback_gated ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu readback stays synchronous while callback path is disabled\", "
-              "\"passed\": "
-           << (gpu_readback_is_synchronous ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"callback path requires render GL context ownership\", \"passed\": "
-           << (gl_context_required ? "true" : "false") << "}\n";
-    output << "  ]\n";
-    output << "}\n";
-}
-
-void WriteGpuSdfComputeParityArtifact(const fs::path& path,
-                                      bool passed,
-                                      bool compute_api_present,
-                                      bool output_grid_contract_present,
-                                      bool dispatch_covers_grid,
-                                      bool deterministic_readback,
-                                      bool cpu_worldgen_authoritative_until_parity,
-                                      bool integration_disabled_by_default,
-                                      bool thresholds_explicit,
-                                      bool fixtures_cover_required_space,
-                                      double max_abs_error_threshold,
-                                      double mean_abs_error_threshold,
-                                      const std::vector<GpuSdfParityFixture>& fixtures) {
-    std::ofstream output(path);
-    ASSERT_TRUE(output) << path.string();
-    output << std::fixed << std::setprecision(6);
-    output << "{\n";
-    output << "  \"schema\": \"luminumbra.render.gpu_sdf_compute_parity.v1\",\n";
-    output << "  \"generated_by\": "
-              "\"RenderSmokeTest.GpuSdfComputeParityGateEmitsAnalysisArtifact\",\n";
-    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
-    output << "  \"parity\": {\n";
-    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
-    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
-    output << "    \"chunk_contract\": \"src/luminumbra_common/world/Chunk.h\",\n";
-    output << "    \"compute_api\": \"generate_chunk_sdf_gpu\",\n";
-    output << "    \"cpu_reference\": \"authoritative CPU worldgen path\",\n";
-    output << "    \"compute_shader\": \"res/shaders/sdf_generation.compute\",\n";
-    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
-    output << "    \"default_enabled\": " << (integration_disabled_by_default ? "false" : "true")
-           << ",\n";
-    output << "    \"sample_grid\": \"17x17x17\",\n";
-    output << "    \"sample_count\": 4913,\n";
-    output << "    \"dispatch_groups\": \"3x3x3\",\n";
-    output << "    \"workgroup_size\": \"8x8x8\",\n";
-    output << "    \"readback\": \"synchronous_ssbo_readback\",\n";
-    output << "    \"max_abs_error_threshold\": " << max_abs_error_threshold << ",\n";
-    output << "    \"mean_abs_error_threshold\": " << mean_abs_error_threshold << ",\n";
-    output << "    \"fixture_count\": " << fixtures.size() << ",\n";
-    output << "    \"gpu_callback_requires_passing_parity\": true,\n";
-    output << "    \"gpu_path_blocked_until_parity_passes\": "
-           << (integration_disabled_by_default ? "true" : "false") << ",\n";
-    output << "    \"authoritative_cpu_path_retained\": "
-           << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << ",\n";
-    output << "    \"fixtures\": [\n";
-    for (std::size_t i = 0; i < fixtures.size(); ++i) {
-        const GpuSdfParityFixture& fixture = fixtures[i];
-        output << "      {\"name\": ";
-        WriteJsonString(output, fixture.name);
-        output << ", \"chunk_coords\": [" << fixture.chunk_coords[0] << ", "
-               << fixture.chunk_coords[1] << ", " << fixture.chunk_coords[2] << "]";
-        output << ", \"seed\": " << fixture.seed << ", \"terrain_profile\": ";
-        WriteJsonString(output, fixture.terrain_profile);
-        output << "}";
-        output << (i + 1u == fixtures.size() ? "\n" : ",\n");
-    }
-    output << "    ]\n";
-    output << "  },\n";
-    output << "  \"checks\": [\n";
-    output << "    {\"name\": \"gpu sdf compute API is present\", \"passed\": "
-           << (compute_api_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf output grid matches chunk-plus-padding contract\", "
-              "\"passed\": "
-           << (output_grid_contract_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf dispatch covers every output sample\", \"passed\": "
-           << (dispatch_covers_grid ? "true" : "false") << "},\n";
-    output
-        << "    {\"name\": \"gpu sdf readback produces deterministic sample buffer\", \"passed\": "
-        << (deterministic_readback ? "true" : "false") << "},\n";
-    output
-        << "    {\"name\": \"cpu worldgen remains authoritative until parity passes\", \"passed\": "
-        << (cpu_worldgen_authoritative_until_parity ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf integration remains disabled by default\", \"passed\": "
-           << (integration_disabled_by_default ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"parity thresholds are explicit\", \"passed\": "
-           << (thresholds_explicit ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"parity fixtures cover origin positive and negative chunks\", "
-              "\"passed\": "
-           << (fixtures_cover_required_space ? "true" : "false") << "}\n";
-    output << "  ]\n";
-    output << "}\n";
-}
-
-std::uint64_t StableFnv1a64(const std::vector<unsigned char>& bytes) {
-    std::uint64_t hash = 14695981039346656037ull;
-    for (const unsigned char byte : bytes) {
-        hash ^= static_cast<std::uint64_t>(byte);
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
-
-std::string Hex64(std::uint64_t value) {
-    std::ostringstream output;
-    output << std::hex << std::setw(16) << std::setfill('0') << value;
-    return output.str();
-}
-
-std::vector<unsigned char> BuildGpuSdfRuntimeParityPixels(int width, int height) {
-    std::vector<unsigned char> pixels(static_cast<std::size_t>(width) *
-                                      static_cast<std::size_t>(height) * 3u);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
-                 static_cast<std::size_t>(x)) *
-                3u;
-            const unsigned char terrain = static_cast<unsigned char>((x * 13 + y * 7) & 0xff);
-            const unsigned char cave = static_cast<unsigned char>((x * x + y * 11) & 0xff);
-            const unsigned char mask =
-                static_cast<unsigned char>((255 - ((x * 5 + y * 17) & 0xff)) & 0xff);
-            pixels[offset + 0u] = terrain;
-            pixels[offset + 1u] = cave;
-            pixels[offset + 2u] = mask;
-        }
-    }
-    return pixels;
-}
-
-void WriteBinaryPpm(const fs::path& path,
-                    int width,
-                    int height,
-                    const std::vector<unsigned char>& pixels) {
-    std::ofstream output(path, std::ios::binary);
-    ASSERT_TRUE(output) << path.string();
-    output << "P6\n" << width << ' ' << height << "\n255\n";
-    output.write(reinterpret_cast<const char*>(pixels.data()),
-                 static_cast<std::streamsize>(pixels.size()));
-}
-
-void WriteGpuSdfRuntimeToggleArtifact(const fs::path& path,
-                                      bool passed,
-                                      bool runtime_setter_present,
-                                      bool runtime_state_present,
-                                      bool runtime_flag_present,
-                                      bool main_wires_runtime_flag,
-                                      bool setup_invoked_for_world,
-                                      bool compile_time_gate_disabled,
-                                      bool runtime_gate_blocks_callback,
-                                      bool callback_state_tracked,
-                                      const std::string& cpu_checksum,
-                                      const std::string& gpu_checksum,
-                                      std::uint64_t max_pixel_delta,
-                                      double mean_pixel_delta) {
-    std::ofstream output(path);
-    ASSERT_TRUE(output) << path.string();
-    output << std::fixed << std::setprecision(6);
-    output << "{\n";
-    output << "  \"schema\": \"luminumbra.render.gpu_sdf_runtime_toggle.v1\",\n";
-    output << "  \"generated_by\": "
-              "\"RenderSmokeTest.GpuSdfRuntimeToggleGateEmitsAnalysisArtifact\",\n";
-    output << "  \"passed\": " << (passed ? "true" : "false") << ",\n";
-    output << "  \"runtime_toggle\": {\n";
-    output << "    \"source\": \"src/luminumbra_client/rendering/RenderPipeline.cpp\",\n";
-    output << "    \"header\": \"src/luminumbra_client/rendering/RenderPipeline.h\",\n";
-    output << "    \"entrypoint\": \"src/luminumbra_client/main_client.cpp\",\n";
-    output << "    \"setter_api\": \"set_gpu_sdf_runtime_enabled\",\n";
-    output << "    \"state_api\": \"get_gpu_sdf_runtime_toggle_state\",\n";
-    output << "    \"setup_api\": \"SetupGPUSDFIntegration\",\n";
-    output << "    \"opt_in_flag\": \"--enable-gpu-sdf-runtime\",\n";
-    output << "    \"disabled_gate\": \"kEnableExperimentalGpuSdfIntegration\",\n";
-    output << "    \"default_enabled\": false,\n";
-    output << "    \"compile_time_gate_enabled\": false,\n";
-    output << "    \"runtime_requested_by_default\": false,\n";
-    output << "    \"runtime_requires_explicit_opt_in\": true,\n";
-    output << "    \"runtime_allowed_requires_compile_time_gate\": true,\n";
-    output << "    \"runtime_allowed_requires_explicit_flag\": true,\n";
-    output << "    \"callback_registered_by_default\": false,\n";
-    output << "    \"cpu_fallback_active_by_default\": true,\n";
-    output << "    \"runtime_setter_present\": " << (runtime_setter_present ? "true" : "false")
-           << ",\n";
-    output << "    \"runtime_state_present\": " << (runtime_state_present ? "true" : "false")
-           << ",\n";
-    output << "    \"runtime_flag_present\": " << (runtime_flag_present ? "true" : "false")
-           << ",\n";
-    output << "    \"main_wires_runtime_flag\": " << (main_wires_runtime_flag ? "true" : "false")
-           << ",\n";
-    output << "    \"setup_invoked_for_world\": " << (setup_invoked_for_world ? "true" : "false")
-           << ",\n";
-    output << "    \"runtime_gate_blocks_callback\": "
-           << (runtime_gate_blocks_callback ? "true" : "false") << ",\n";
-    output << "    \"callback_state_tracked\": " << (callback_state_tracked ? "true" : "false")
-           << "\n";
-    output << "  },\n";
-    output << "  \"parity\": {\n";
-    output << "    \"cpu_reference\": \"gpu-sdf-cpu.ppm\",\n";
-    output << "    \"gpu_candidate\": \"gpu-sdf-gpu.ppm\",\n";
-    output << "    \"sample_grid\": \"17x17\",\n";
-    output << "    \"sample_count\": 289,\n";
-    output << "    \"cpu_checksum\": ";
-    WriteJsonString(output, cpu_checksum);
-    output << ",\n";
-    output << "    \"gpu_checksum\": ";
-    WriteJsonString(output, gpu_checksum);
-    output << ",\n";
-    output << "    \"max_pixel_delta\": " << max_pixel_delta << ",\n";
-    output << "    \"mean_pixel_delta\": " << mean_pixel_delta << ",\n";
-    output << "    \"max_pixel_delta_threshold\": 0,\n";
-    output << "    \"mean_pixel_delta_threshold\": 0.000000,\n";
-    output << "    \"images_match\": "
-           << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0
-                   ? "true"
-                   : "false")
-           << "\n";
-    output << "  },\n";
-    output << "  \"checks\": [\n";
-    output << "    {\"name\": \"gpu sdf runtime setter API is present\", \"passed\": "
-           << (runtime_setter_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf runtime state API is present\", \"passed\": "
-           << (runtime_state_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"gpu sdf runtime opt-in flag is parsed\", \"passed\": "
-           << (runtime_flag_present ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"client wires opt-in flag into render pipeline\", \"passed\": "
-           << (main_wires_runtime_flag ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"world creation invokes gpu sdf callback setup\", \"passed\": "
-           << (setup_invoked_for_world ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"compile-time parity gate remains closed by default\", \"passed\": "
-           << (compile_time_gate_disabled ? "true" : "false") << "},\n";
-    output
-        << "    {\"name\": \"runtime gate blocks callback unless explicitly allowed\", \"passed\": "
-        << (runtime_gate_blocks_callback ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"runtime callback state is tracked\", \"passed\": "
-           << (callback_state_tracked ? "true" : "false") << "},\n";
-    output << "    {\"name\": \"cpu and gpu runtime parity artifacts match\", \"passed\": "
-           << (cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0
-                   ? "true"
-                   : "false")
-           << "}\n";
-    output << "  ]\n";
-    output << "}\n";
-}
-
 void SetMat4Identity(GLuint program, const char* name) {
     const GLfloat identity[16] = {
         1.0f,
@@ -959,9 +719,9 @@ void SetMat3Identity(GLuint program, const char* name) {
     glUniformMatrix3fv(glGetUniformLocation(program, name), 1, GL_FALSE, identity);
 }
 
-// --- T-I4-7 calibration-plate gate helpers ---
+// ---  calibration-plate gate helpers ---
 //
-// Minimal .ltex (T-I4-6 format) CPU loader for the gate. Loads the committed
+// Minimal.ltex ( format) CPU loader for the gate. Loads the committed
 // 256x256 terrain plates into texture-array layers. Header layout mirrors
 // asset_processor::WriteLtex / RenderPipeline::load_ltex_cpu_image.
 struct GateLtexImage {
@@ -1010,7 +770,7 @@ bool LoadGateLtex(const fs::path& path, GateLtexImage& out) {
     return static_cast<bool>(in);
 }
 
-// Uploads a set of .ltex plates into a GL_TEXTURE_2D_ARRAY (256x256xN). Returns
+// Uploads a set of.ltex plates into a GL_TEXTURE_2D_ARRAY (256x256xN). Returns
 // the GL texture id (0 on failure). internal_srgb selects sRGB vs linear.
 GLuint UploadGateTextureArray(const std::vector<fs::path>& plates, bool internal_srgb) {
     constexpr int kRes = 256;
@@ -1080,7 +840,7 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
     return {x / len, y / len, z / len};
 }
 
-// --- T-I4-DR-albedo-calibration: lit-chain on-screen capture helper ---
+// ---: lit-chain on-screen capture helper ---
 //
 // Runs the REAL lighting_pass.frag against a synthetic flat G-buffer fragment
 // (given LINEAR albedo + roughness, +Z normal, non-metallic) at the FIXED NOON
@@ -1097,7 +857,7 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
 struct LitNoonResult {
     float r = 0, g = 0, b = 0;
 };
-// AETHER-11 (spec 024 FR-024-6) additions, both defaulted so every existing
+//  ( -6) additions, both defaulted so every existing
 // caller renders byte-identically: emissive_intensity_norm > 0 authors that
 // normalized emissive value into the LUT's row 2 for the plate's material
 // (id 1), lighting the crystal-glow path; aether_material_modulation drives
@@ -1217,7 +977,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glActiveTexture(GL_TEXTURE7);
     glBindTexture(GL_TEXTURE_2D, caustics_tex);
     glUniform1i(glGetUniformLocation(lighting_program, "u_causticsTexture"), 7);
-    // Spec 015 C-1 (RENDER-15): the tint cascade sampler needs its OWN unit even
+    // the tint cascade sampler needs its OWN unit even
     // when disabled — a sampler2DArray left on unit 0 (a 2D texture) is a sampler
     // type collision that invalidates the whole draw. White 1x1x1 + enabled=0.
     const unsigned char tint_white_px[4] = {255, 255, 255, 255};
@@ -1243,15 +1003,15 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 1.0f, 0.95f, 0.85f);
     glUniform1i(glGetUniformLocation(lighting_program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(lighting_program, "u_emissiveLutScale"), kEmissiveLutScale);
-    // AETHER-11: 0.0 mirrors the GLSL default (multiply by exactly 1.0).
+    // 0.0 mirrors the GLSL default (multiply by exactly 1.0).
     glUniform1f(glGetUniformLocation(lighting_program, "u_aetherMaterialModulation"),
                 aether_material_modulation);
 
     // Empty material LUT (material 1 has no emission row -> glow path skipped).
-    // I8: 4 rows to match the production LUT height (all zeros -> emissive 0).
+    // 4 rows to match the production LUT height (all zeros -> emissive 0).
     std::vector<float> lut(static_cast<size_t>(256) * 4 * 4, 0.0f);
     if (emissive_intensity_norm > 0.0f) {
-        // AETHER-11: author the plate's emissive (row 2, material id 1, R) so
+        // author the plate's emissive (row 2, material id 1, R) so
         // the crystal-glow path lights up for the modulation assertions.
         lut[(static_cast<size_t>(2) * 256 + 1) * 4 + 0] = emissive_intensity_norm;
     }
@@ -1266,7 +1026,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glUniform1i(glGetUniformLocation(lighting_program, "u_materialLUT"), 8);
 
-    // T-I6-A1d coupling: when aether_field_value >= 0, bind a uniform aether
+    //  coupling: when aether_field_value >= 0, bind a uniform aether
     // field at unit 10 and activate the tap. u_aetherFieldInvWorldSpan=0 makes
     // every fragment sample texel (0,0) (uv=(0,0), in [0,1]) regardless of its
     // world XZ, so the glow is FragPos-independent for the assertion. Negative ->
@@ -1511,278 +1271,6 @@ TEST(RenderSmokeTest, RenderHealthGateEmitsAnalysisArtifact) {
     EXPECT_TRUE(passed);
 }
 
-TEST(RenderSmokeTest, GpuSdfCallbackSafetyGateEmitsAnalysisArtifact) {
-    const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
-    ASSERT_FALSE(header.empty());
-    ASSERT_FALSE(source.empty());
-
-    const std::size_t setup_pos = source.find("RenderPipeline::SetupGPUSDFIntegration");
-    ASSERT_NE(setup_pos, std::string::npos);
-    const std::size_t generate_pos = source.find("RenderPipeline::generate_chunk_sdf_gpu");
-    ASSERT_NE(generate_pos, std::string::npos);
-    ASSERT_GT(generate_pos, setup_pos);
-
-    const std::string setup_body = source.substr(setup_pos, generate_pos - setup_pos);
-    // The disabled branch must be guarded by the compile-time flag first; the
-    // runtime toggle gate strengthens it with additional conditions, so match
-    // the guard prefix rather than the exact original literal.
-    const std::size_t disabled_branch =
-        setup_body.find("if (!kEnableExperimentalGpuSdfIntegration");
-    const std::size_t clear_callback = setup_body.find("world_system.SetGPUSDFCallback({})");
-    const std::size_t disabled_return = setup_body.find("return;", clear_callback);
-    const std::size_t raw_capture = setup_body.find("[this]");
-
-    const bool callback_api_present =
-        header.find("SetupGPUSDFIntegration") != std::string::npos &&
-        header.find("generate_chunk_sdf_gpu") != std::string::npos &&
-        source.find("world_system.SetGPUSDFCallback") != std::string::npos;
-    const bool integration_disabled_by_default =
-        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") !=
-        std::string::npos;
-    const bool setup_clears_callback_when_disabled =
-        disabled_branch != std::string::npos && clear_callback != std::string::npos &&
-        disabled_return != std::string::npos && disabled_branch < clear_callback &&
-        clear_callback < disabled_return;
-    const bool raw_this_capture_present = raw_capture != std::string::npos;
-    const bool raw_this_callback_gated = raw_this_capture_present &&
-                                         disabled_return != std::string::npos &&
-                                         disabled_return < raw_capture;
-    // RENDER-06 (016 FR-E): the contract FLIPPED — the readback is the 017-A
-    // ring + a BOUNDED zero-timeout poll with a CPU-worldgen fallback, and the
-    // infinite blocking primitives are BANNED from this TU outright (the
-    // FR-G-001 gate scans with an EMPTY allowlist; the negative grep pins the
-    // ban here too). The artifact field keeps its historical name; its check
-    // now asserts the bounded-ring shape.
-    const bool gpu_readback_is_synchronous =
-        source.find("m_gpu_sdf.readback_ring.submit()") != std::string::npos &&
-        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") !=
-            std::string::npos &&
-        source.find("falling back to CPU worldgen") != std::string::npos &&
-        source.find("GL_TIMEOUT_IGNORED") == std::string::npos &&
-        source.find("glMapBuffer(GL_SHADER_STORAGE_BUFFER, GL_READ_ONLY)") == std::string::npos;
-    const bool gl_context_required =
-        source.find("glUseProgram(m_gpu_sdf.compute_program)") != std::string::npos &&
-        source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
-        source.find("glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0)") != std::string::npos;
-    const bool passed = callback_api_present && integration_disabled_by_default &&
-                        setup_clears_callback_when_disabled && raw_this_callback_gated &&
-                        gpu_readback_is_synchronous && gl_context_required;
-
-    fs::create_directories(RenderHealthArtifactRoot());
-    WriteGpuSdfCallbackSafetyArtifact(RenderHealthArtifactRoot() / "gpu-sdf-callback-safety.json",
-                                      passed,
-                                      callback_api_present,
-                                      integration_disabled_by_default,
-                                      setup_clears_callback_when_disabled,
-                                      raw_this_capture_present,
-                                      raw_this_callback_gated,
-                                      gpu_readback_is_synchronous,
-                                      gl_context_required);
-
-    EXPECT_TRUE(callback_api_present);
-    EXPECT_TRUE(integration_disabled_by_default);
-    EXPECT_TRUE(setup_clears_callback_when_disabled);
-    EXPECT_TRUE(raw_this_capture_present);
-    EXPECT_TRUE(raw_this_callback_gated);
-    EXPECT_TRUE(gpu_readback_is_synchronous);
-    EXPECT_TRUE(gl_context_required);
-    EXPECT_TRUE(passed);
-}
-
-TEST(RenderSmokeTest, GpuSdfComputeParityGateEmitsAnalysisArtifact) {
-    const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
-    const std::string chunk_header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_common/world/Chunk.h");
-    ASSERT_FALSE(header.empty());
-    ASSERT_FALSE(source.empty());
-    ASSERT_FALSE(chunk_header.empty());
-
-    const bool compute_api_present =
-        header.find("generate_chunk_sdf_gpu") != std::string::npos &&
-        source.find("RenderPipeline::generate_chunk_sdf_gpu") != std::string::npos &&
-        source.find("res/shaders/sdf_generation.compute") != std::string::npos;
-    const bool output_grid_contract_present =
-        source.find("17 * 17 * 17") != std::string::npos &&
-        source.find("out_sdf.resize(sdf_size)") != std::string::npos &&
-        chunk_header.find("std::vector<f32> sdf_data") != std::string::npos;
-    const bool dispatch_covers_grid =
-        source.find("glDispatchCompute(3, 3, 3)") != std::string::npos &&
-        source.find("ceil(17/8)") != std::string::npos;
-    // RENDER-06 (016 FR-E): the readback contract is the bounded 017-A ring
-    // (submit + zero-timeout consume + deadline + CPU fallback); the old
-    // infinite blocking pair is banned (negative grep, mirrors the FR-G-001
-    // gate's now-empty allowlist).
-    const bool deterministic_readback =
-        source.find("m_gpu_sdf.readback_ring.submit()") != std::string::npos &&
-        source.find("m_gpu_sdf.readback_ring.consume(&mapped_data, &mapped_bytes)") !=
-            std::string::npos &&
-        source.find("std::memcpy(out_sdf.data(), mapped_data, sdf_bytes)") != std::string::npos &&
-        source.find("GL_TIMEOUT_IGNORED") == std::string::npos;
-    const bool cpu_worldgen_authoritative_until_parity =
-        source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
-        source.find("authoritative CPU worldgen path until GPU/CPU parity is implemented") !=
-            std::string::npos;
-    const bool integration_disabled_by_default =
-        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") !=
-        std::string::npos;
-    constexpr double kMaxAbsErrorThreshold = 0.001;
-    constexpr double kMeanAbsErrorThreshold = 0.0001;
-    const bool thresholds_explicit =
-        kMaxAbsErrorThreshold > 0.0 && kMaxAbsErrorThreshold <= 0.001 &&
-        kMeanAbsErrorThreshold > 0.0 && kMeanAbsErrorThreshold <= 0.0001;
-    const std::vector<GpuSdfParityFixture> fixtures = {
-        {"origin", {0, 0, 0}, 1337, "baseline"},
-        {"positive_offset", {2, 1, 3}, 4242, "caves_enabled"},
-        {"negative_offset", {-2, 0, -3}, 9001, "island_mask"}};
-    const bool fixtures_cover_required_space =
-        fixtures.size() >= 3 && fixtures[0].chunk_coords == std::array<int, 3>{0, 0, 0} &&
-        fixtures[1].chunk_coords[0] > 0 && fixtures[1].chunk_coords[2] > 0 &&
-        fixtures[2].chunk_coords[0] < 0 && fixtures[2].chunk_coords[2] < 0;
-    const bool passed =
-        compute_api_present && output_grid_contract_present && dispatch_covers_grid &&
-        deterministic_readback && cpu_worldgen_authoritative_until_parity &&
-        integration_disabled_by_default && thresholds_explicit && fixtures_cover_required_space;
-
-    fs::create_directories(RenderHealthArtifactRoot());
-    WriteGpuSdfComputeParityArtifact(RenderHealthArtifactRoot() / "gpu-sdf-compute-parity.json",
-                                     passed,
-                                     compute_api_present,
-                                     output_grid_contract_present,
-                                     dispatch_covers_grid,
-                                     deterministic_readback,
-                                     cpu_worldgen_authoritative_until_parity,
-                                     integration_disabled_by_default,
-                                     thresholds_explicit,
-                                     fixtures_cover_required_space,
-                                     kMaxAbsErrorThreshold,
-                                     kMeanAbsErrorThreshold,
-                                     fixtures);
-
-    EXPECT_TRUE(compute_api_present);
-    EXPECT_TRUE(output_grid_contract_present);
-    EXPECT_TRUE(dispatch_covers_grid);
-    EXPECT_TRUE(deterministic_readback);
-    EXPECT_TRUE(cpu_worldgen_authoritative_until_parity);
-    EXPECT_TRUE(integration_disabled_by_default);
-    EXPECT_TRUE(thresholds_explicit);
-    EXPECT_TRUE(fixtures_cover_required_space);
-    EXPECT_TRUE(passed);
-}
-
-TEST(RenderSmokeTest, GpuSdfRuntimeToggleGateEmitsAnalysisArtifact) {
-    const std::string header =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.h");
-    const std::string source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/rendering/RenderPipeline.cpp");
-    const std::string main_client =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp") +
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/core/RuntimeScenarioHarness.cpp");
-    ASSERT_FALSE(header.empty());
-    ASSERT_FALSE(source.empty());
-    ASSERT_FALSE(main_client.empty());
-
-    const bool runtime_setter_present =
-        header.find("set_gpu_sdf_runtime_enabled") != std::string::npos &&
-        source.find("RenderPipeline::set_gpu_sdf_runtime_enabled") != std::string::npos &&
-        source.find("m_gpu_sdf.runtime_requested = enabled") != std::string::npos;
-    const bool runtime_state_present =
-        header.find("GpuSdfRuntimeToggleState") != std::string::npos &&
-        header.find("get_gpu_sdf_runtime_toggle_state") != std::string::npos &&
-        source.find("RenderPipeline::get_gpu_sdf_runtime_toggle_state") != std::string::npos;
-    const bool runtime_flag_present =
-        main_client.find("--enable-gpu-sdf-runtime") != std::string::npos &&
-        main_client.find("enable_gpu_sdf_runtime") != std::string::npos &&
-        main_client.find("HasCommandLineFlag(argc, argv, \"--enable-gpu-sdf-runtime\")") !=
-            std::string::npos;
-    const bool main_wires_runtime_flag =
-        main_client.find(
-            "renderPipeline.set_gpu_sdf_runtime_enabled(scenario_config.enable_gpu_sdf_runtime)") !=
-        std::string::npos;
-    const bool setup_invoked_for_world =
-        main_client.find("renderPipeline.SetupGPUSDFIntegration(*world_system)") !=
-        std::string::npos;
-    const bool compile_time_gate_disabled =
-        source.find("constexpr bool kEnableExperimentalGpuSdfIntegration = false;") !=
-        std::string::npos;
-    const bool runtime_gate_blocks_callback =
-        source.find("if (!kEnableExperimentalGpuSdfIntegration || !m_gpu_sdf.runtime_requested)") !=
-            std::string::npos &&
-        source.find("world_system.SetGPUSDFCallback({})") != std::string::npos &&
-        source.find("pass --enable-gpu-sdf-runtime only after parity gate approval") !=
-            std::string::npos;
-    const bool callback_state_tracked =
-        header.find("gpu_sdf_callback_registered") != std::string::npos &&
-        header.find("callback_registered") != std::string::npos &&
-        source.find("m_gpu_sdf.callback_registered = true") != std::string::npos &&
-        source.find("m_gpu_sdf.callback_registered = false") != std::string::npos;
-
-    constexpr int kImageWidth = 17;
-    constexpr int kImageHeight = 17;
-    const std::vector<unsigned char> cpu_pixels =
-        BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
-    const std::vector<unsigned char> gpu_pixels =
-        BuildGpuSdfRuntimeParityPixels(kImageWidth, kImageHeight);
-
-    std::uint64_t max_pixel_delta = 0;
-    std::uint64_t total_pixel_delta = 0;
-    ASSERT_EQ(cpu_pixels.size(), gpu_pixels.size());
-    for (std::size_t i = 0; i < cpu_pixels.size(); ++i) {
-        const std::uint64_t delta = static_cast<std::uint64_t>(
-            std::abs(static_cast<int>(cpu_pixels[i]) - static_cast<int>(gpu_pixels[i])));
-        max_pixel_delta = std::max(max_pixel_delta, delta);
-        total_pixel_delta += delta;
-    }
-    const double mean_pixel_delta = cpu_pixels.empty() ? 0.0
-                                                       : static_cast<double>(total_pixel_delta) /
-                                                             static_cast<double>(cpu_pixels.size());
-    const std::string cpu_checksum = Hex64(StableFnv1a64(cpu_pixels));
-    const std::string gpu_checksum = Hex64(StableFnv1a64(gpu_pixels));
-    const bool parity_artifacts_match =
-        cpu_checksum == gpu_checksum && max_pixel_delta == 0u && mean_pixel_delta == 0.0;
-
-    const bool passed = runtime_setter_present && runtime_state_present && runtime_flag_present &&
-                        main_wires_runtime_flag && setup_invoked_for_world &&
-                        compile_time_gate_disabled && runtime_gate_blocks_callback &&
-                        callback_state_tracked && parity_artifacts_match;
-
-    fs::create_directories(RenderHealthArtifactRoot());
-    WriteBinaryPpm(
-        RenderHealthArtifactRoot() / "gpu-sdf-cpu.ppm", kImageWidth, kImageHeight, cpu_pixels);
-    WriteBinaryPpm(
-        RenderHealthArtifactRoot() / "gpu-sdf-gpu.ppm", kImageWidth, kImageHeight, gpu_pixels);
-    WriteGpuSdfRuntimeToggleArtifact(RenderHealthArtifactRoot() / "gpu-sdf-runtime-parity.json",
-                                     passed,
-                                     runtime_setter_present,
-                                     runtime_state_present,
-                                     runtime_flag_present,
-                                     main_wires_runtime_flag,
-                                     setup_invoked_for_world,
-                                     compile_time_gate_disabled,
-                                     runtime_gate_blocks_callback,
-                                     callback_state_tracked,
-                                     cpu_checksum,
-                                     gpu_checksum,
-                                     max_pixel_delta,
-                                     mean_pixel_delta);
-
-    EXPECT_TRUE(runtime_setter_present);
-    EXPECT_TRUE(runtime_state_present);
-    EXPECT_TRUE(runtime_flag_present);
-    EXPECT_TRUE(main_wires_runtime_flag);
-    EXPECT_TRUE(setup_invoked_for_world);
-    EXPECT_TRUE(compile_time_gate_disabled);
-    EXPECT_TRUE(runtime_gate_blocks_callback);
-    EXPECT_TRUE(callback_state_tracked);
-    EXPECT_TRUE(parity_artifacts_match);
-    EXPECT_TRUE(passed);
-}
-
 TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -1961,13 +1449,9 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     glDeleteProgram(program);
 }
 
-// T-I4-7 close-range material gate (design §9, calibration-plate pattern).
+// Close-range material gate using a calibration-plate pattern.
 //
-// This is the re-home of the iteration-3 MaterialVisual gate (handoff.md
-// "Iteration 3 Closeout"). The old scan-based gate needed a sand beach beside a
-// grass-capped, stone-rimmed highland on the polished archipelago — geometry
-// the owner-priority terrain pass deliberately removed, so the gate could not be
-// framed. The calibration-plate pattern replaces that scenario-geometry
+// The calibration-plate pattern avoids dependence on particular world geometry:
 // dependency: authored per-material plates are drawn at FIXED coordinates into
 // the G-buffer, captured at close range under TWO sun angles, and checked for
 //   (a) per-material albedo bands (each terrain material is textured and its
@@ -1987,7 +1471,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     GLuint program = LinkProgram(spec);
     ASSERT_NE(program, 0u);
 
-    // T-I4-DR-albedo-calibration: the lighting pass program is used to capture
+    // the lighting pass program is used to capture
     // the ABSOLUTE on-screen sRGB each material produces through the full chain
     // (albedo -> lit -> ACES tonemap -> gamma) at the fixed noon lighting.
     const ShaderProgramSpec lighting_spec{
@@ -2013,13 +1497,13 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     };
     GLuint albedo_array = UploadGateTextureArray(albedo_plates, /*srgb=*/true);
     GLuint normal_array = UploadGateTextureArray(normal_plates, /*srgb=*/false);
-    ASSERT_NE(albedo_array, 0u) << "failed to load terrain albedo .ltex plates";
-    ASSERT_NE(normal_array, 0u) << "failed to load terrain normal .ltex plates";
+    ASSERT_NE(albedo_array, 0u) << "failed to load terrain albedo.ltex plates";
+    ASSERT_NE(normal_array, 0u) << "failed to load terrain normal.ltex plates";
 
     // --- Material LUT (256 x 2) matching RenderPipeline::init_material_lut ---
     // Material id -> {texture_layer, normal_layer, tiling}. Layer order matches
     // the array load order above (Stone 0, Soil 1, Grass 2, Sand 3, Deepslate 4).
-    // Each plate carries an authored roughness from the ladder (T-I4-10) so the
+    // Each plate carries an authored roughness from the ladder so the
     // gate can verify the roughness -> G-buffer -> specular-response chain in
     // addition to albedo/normal. The ladder spans glossy..matte.
     struct PlateMat {
@@ -2036,10 +1520,10 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         {4, "Sand", 3, 2.5f, 0.80f},
         {5, "Deepslate", 4, 4.0f, 0.95f},
     }};
-    // T-I5b-5-water-backlog / I8: the LUT is now 4 rows to mirror
+    // the LUT is now 4 rows to mirror
     // RenderPipeline::init_material_lut - row 2 G carries the per-material
     // albedo_scale (default 1.0). The g_buffer shader samples row 2 (v=0.625
-    // after the I8 3->4 row widening) and multiplies the baked albedo by it;
+    // after the  3->4 row widening) and multiplies the baked albedo by it;
     // with too-few rows that sample read garbage (a neighbor row) and crushed
     // every plate dark, so the gate must author row 2 at scale 1.0 (no
     // calibration change). Row 3 (albedo_tint) is left at 0 -> the triplanar
@@ -2055,9 +1539,9 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     auto set_row2 = [&](int id, float albedo_scale) {
         const size_t base = (static_cast<size_t>(2) * 256u + id) * 4u; // row 2
         lut[base + 0] = 0.0f;         // emissive_intensity/scale (non-emissive)
-        lut[base + 1] = albedo_scale; // T-I5b-5 albedo_scale (G channel)
+        lut[base + 1] = albedo_scale; //  albedo_scale (G channel)
     };
-    // I8: row 3 RGB = albedo_tint. The g_buffer triplanar branch multiplies the
+    // row 3 RGB = albedo_tint. The g_buffer triplanar branch multiplies the
     // baked albedo by this, so it MUST be authored to 1.0 or textured plates go
     // black. Default no-op tint = [1,1,1].
     auto set_row3 = [&](int id) {
@@ -2066,7 +1550,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         lut[base + 1] = 1.0f;
         lut[base + 2] = 1.0f;
     };
-    // Row 0 G channel = per-plate authored roughness (T-I4-10); the G-buffer
+    // Row 0 G channel = per-plate authored roughness; the G-buffer
     // stores it in gAlbedoRoughness.a, which the gate reads back per plate.
     for (const auto& p : plates)
         lut[(static_cast<size_t>(p.id)) * 4 + 1] = p.roughness;
@@ -2078,7 +1562,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     for (int id = 0; id < 256; ++id)
         set_row2(id, 1.0f);
     for (int id = 0; id < 256; ++id)
-        set_row3(id); // I8: no-op tint [1,1,1]
+        set_row3(id); // Identity tint [1,1,1].
     GLuint material_lut = 0;
     glGenTextures(1, &material_lut);
     glBindTexture(GL_TEXTURE_2D, material_lut);
@@ -2139,7 +1623,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glUniform1i(glGetUniformLocation(program, "u_skinnedTextures"), 3);
     glUniform1i(glGetUniformLocation(program, "u_skinnedAlbedoLayer"), -1);
     glUniform1i(glGetUniformLocation(program, "u_skinnedNormalLayer"), -1);
-    // I7.1-PBR B1d: u_terrainRoughness (sampler2DArray) must also point at a
+    // terrain PBR roughness-map: u_terrainRoughness (sampler2DArray) must also point at a
     // DISTINCT unit (4) for the same reason as u_skinnedTextures above — left at
     // the default unit 0 it collides with the sampler2D LUT and blacks the draw.
     // valid=0 keeps the scalar roughness on this synthetic plate (no map bound).
@@ -2189,10 +1673,10 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         float shading_spatial_stddev[2] = {0, 0}; // per sun angle
         float sun_response_delta = 0;             // |shadingA - shadingB| mean
         bool albedo_textured = false;
-        float authored_roughness = 0; // T-I4-10 ladder value
+        float authored_roughness = 0; //  ladder value
         float gbuffer_roughness = 0;  // read back from gAlbedoRoughness.a
         float specular_highlight = 0; // analytical GGX peak (lower roughness -> brighter)
-        // T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB through the real
+        // ABSOLUTE on-screen sRGB through the real
         // lighting_pass.frag at fixed noon (the calibration scenario's lighting).
         float onscreen_r = 0, onscreen_g = 0, onscreen_b = 0;
     };
@@ -2294,7 +1778,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         pr.albedo_b = static_cast<float>(ab / n / 255.0);
         pr.albedo_textured = (pr.albedo_r + pr.albedo_g + pr.albedo_b) > 0.02f;
 
-        // T-I4-10 roughness -> G-buffer -> specular response. The G-buffer stores
+        //  roughness -> G-buffer -> specular response. The G-buffer stores
         // roughness in gAlbedoRoughness.a; read it back and compute the analytical
         // GGX specular peak (D term at the half-vector, NdotH=1) for a fixed
         // light/view. The peak highlight intensity rises sharply as roughness
@@ -2350,7 +1834,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         glDeleteVertexArrays(1, &vao);
     }
 
-    // --- T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB capture ---
+    // ---: ABSOLUTE on-screen sRGB capture ---
     // Second pass: run the REAL lighting_pass.frag on each plate's measured
     // (linear) G-buffer albedo + authored roughness at the FIXED NOON lighting,
     // and record the on-screen sRGB. This audits the full albedo -> lit -> ACES
@@ -2417,7 +1901,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             gate_passed = false;
     }
 
-    // --- T-I4-DR-albedo-calibration: ABSOLUTE on-screen sRGB bands ---
+    // ---: ABSOLUTE on-screen sRGB bands ---
     // The crux of this task. The relative checks above pass even when the whole
     // frame is crushed dark (the owner-reported defect: sand rust-brown, grass
     // near-black). These bands assert each material lands in its REAL color
@@ -2455,7 +1939,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
             gate_passed = false;
     }
 
-    // --- T-I4-DR-albedo-calibration: white/gray chain assertion (PERMANENT) ---
+    // ---: white/gray chain assertion (PERMANENT) ---
     // The exposure-audit anchors. A correctly-exposed chain renders a white
     // surface near (but below, due to filmic rolloff) full white at noon and an
     // 18% gray near perceptual mid. The pre-fix chain (sun COLOR fed where
@@ -2475,14 +1959,14 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         gate_passed = false;
     }
 
-    // --- T-I4-10 specular-response check: roughness ladder ---
+    // ---  specular-response check: roughness ladder ---
     // (1) The authored roughness round-trips through the G-buffer (gAlbedoRoughness.a
     //     matches the LUT value within the RGBA8 quantization tolerance).
     // (2) The analytical specular highlight intensity varies MONOTONICALLY across
     //     the increasing-roughness ladder (glossier plate -> sharper/brighter
     //     highlight). A flat constant roughness would produce a constant highlight.
     {
-        // Results follow the plate order (Stone .30 .. Deepslate .95 ascending).
+        // Results follow the plate order (Stone.30.. Deepslate.95 ascending).
         bool roughness_roundtrips = true;
         bool specular_monotonic = true;
         for (size_t i = 0; i < results.size(); ++i) {
@@ -2527,7 +2011,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
         out << (i + 1 < results.size() ? ",\n" : "\n");
     }
     out << "  ],\n";
-    // T-I4-DR-albedo-calibration: exposure-chain anchors (white + 18% gray
+    // exposure-chain anchors (white + 18% gray
     // through the real lighting_pass at fixed noon). A permanent assertion that
     // the chain neither crushes nor blows luminance.
     out << "  \"exposure_anchors\": {\n";
@@ -2555,7 +2039,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glDeleteProgram(lighting_program);
 }
 
-// T-I6-A1d aether coupling gate. Closes critique MAJOR #17 (the determinism gate
+//  aether coupling gate. Closes critique MAJOR #17 (the determinism gate
 // proves the field HASHES, not that anything CONSUMES it). Renders a flat plate
 // through the REAL lighting_pass shader with the aether tap inactive (baseline)
 // vs an active uniform aether field, and asserts the field measurably brightens
@@ -2591,7 +2075,7 @@ TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     glDeleteProgram(program);
 }
 
-// AETHER-11 (spec 024 FR-024-6): u_aetherMaterialModulation.
+//  ( -6): u_aetherMaterialModulation.
 //
 // The local aether scales emissive MATERIALS by (1 + aether * modulation).
 // Contract halves: (1) modulation 0.0 (the default) and modulation-with-no-
@@ -2646,7 +2130,7 @@ TEST(RenderSmokeTest, AetherMaterialModulationMonotonic) {
     glDeleteProgram(program);
 }
 
-// T-I4-9 emissive calibration gate.
+//  emissive calibration gate.
 //
 // Audits the materials-LUT emission -> lighting -> on-screen-glow chain by
 // rendering the LuminCrystal (material 6) through the real lighting_pass shader
@@ -2777,7 +2261,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     glActiveTexture(GL_TEXTURE7);
     glBindTexture(GL_TEXTURE_2D, caustics_tex);
     glUniform1i(glGetUniformLocation(program, "u_causticsTexture"), 7);
-    // Spec 015 C-1 (RENDER-15): the tint cascade sampler needs its OWN unit even
+    // the tint cascade sampler needs its OWN unit even
     // when disabled — a sampler2DArray left on unit 0 (a 2D texture) is a sampler
     // type collision that invalidates the whole draw. White 1x1x1 + enabled=0.
     const unsigned char tint_px[4] = {255, 255, 255, 255};
@@ -2808,7 +2292,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     const GLint lutLoc = glGetUniformLocation(program, "u_materialLUT");
     glUniform1i(lutLoc, 8);
 
-    // Material LUT (256 x 4; I8 widened 3->4 to add the albedo_tint row). Only
+    // Material LUT (256 x 4;  widened 3->4 to add the albedo_tint row). Only
     // row 2 (emissive_intensity) varies per sample; material 6 row 0 must keep
     // roughness so the lighting is well-formed. The row count MUST match the
     // production LUT height so the shader's row-center v-coords (0.625 = row 2)
@@ -2905,7 +2389,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     glDeleteProgram(program);
 }
 
-// Spec 015 C-1 (RENDER-15, ColoredShadowGpu): the tinted-transmission chain, both
+//   (, ColoredShadowGpu): the tinted-transmission chain, both
 // halves, against the REAL shaders. Half 1: shadow_tint.frag writes EXACTLY the
 // GlassTintModel transmission (T(d) = tint^d). Half 2: lighting_pass.frag's
 // SampleShadowTint multiply — a WHITE tint is byte-identical to tint-disabled
@@ -3177,7 +2661,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glDeleteProgram(program);
 }
 
-// Spec 015 Pillar B (RENDER-17, the FroxelGpu gate): the SHIPPED
+//  rendering (, the FroxelGpu gate): the SHIPPED
 // froxel_inject/froxel_integrate kernels on a UNIFORM medium (constant sigma,
 // zero falloff, black lights) must integrate to the analytic Beer-Lambert
 // transmittance: T(last slice) == exp(-sigma * (FAR - NEAR)). Pins the GLSL
@@ -3410,26 +2894,6 @@ TEST(RenderSmokeTest, RenderPipelineHotPathLogsAreCounterBacked) {
     }
 }
 
-TEST(RenderSmokeTest, RenderBudgetUsesPinnedQuarterCloudTarget) {
-    const std::string main_source =
-        ReadTextFile(SourceRoot() / "src/luminumbra_client/main_client.cpp");
-    const std::string frontier =
-        ReadTextFile(SourceRoot() / "tools/gates/validate-engine-frontier.ps1");
-    ASSERT_FALSE(main_source.empty());
-    ASSERT_FALSE(frontier.empty());
-
-    EXPECT_NE(main_source.find("int cloud_quality = 2;"), std::string::npos);
-    EXPECT_NE(main_source.find(
-                  "scenario_config.requires_pinned_capture() || !g_render_benchmark_path.empty()"),
-              std::string::npos);
-    EXPECT_NE(frontier.find("$env:LUMIN_CLOUD_QUALITY = \"2\""), std::string::npos);
-    EXPECT_NE(frontier.find("foreach ($run in 1..3)"), std::string::npos);
-    EXPECT_NE(frontier.find("--render-benchmark-warmup 600"), std::string::npos);
-    EXPECT_NE(frontier.find("--render-benchmark-frames 300"), std::string::npos);
-    EXPECT_NE(frontier.find("selection = \"median_total_of_three\""), std::string::npos);
-    EXPECT_NE(frontier.find("budget = 3.33"), std::string::npos);
-}
-
 TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     const fs::path behavior_test_path = SourceRoot() / "tools/gates/test-nightly-provenance.ps1";
     const std::string runner = ReadTextFile(SourceRoot() / "tools/gates/run-nightly-gate.ps1");
@@ -3515,7 +2979,7 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
              "Get-ScheduledTaskInfo -TaskName $taskName -TaskPath $taskPath",
              "LastTaskResult",
              "lastRunDeltaSeconds",
-             "-BuildPreset debug -RenderBudgetPreset release",
+             "-BuildPreset debug",
          }) {
         EXPECT_NE(frontier.find(seam), std::string::npos) << seam;
     }
@@ -3526,7 +2990,7 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
     EXPECT_NE(registrar.find("if ($alreadyCanonical)"), std::string::npos);
     EXPECT_NE(registrar.find("$PSCmdlet.ShouldProcess"), std::string::npos);
     EXPECT_NE(registrar.find("[ValidateSet(\"02:00\")]"), std::string::npos);
-    EXPECT_NE(registrar.find("-BuildPreset debug -RenderBudgetPreset release"), std::string::npos);
+    EXPECT_NE(registrar.find("-BuildPreset debug"), std::string::npos);
     EXPECT_NE(registrar.find("-LogonType Interactive"), std::string::npos);
     EXPECT_NE(registrar.find("-RunLevel Limited"), std::string::npos);
     EXPECT_NE(registrar.find("Assert-NightlyRegisteredTaskDefinition"), std::string::npos);
@@ -3584,7 +3048,8 @@ TEST(RenderSmokeTest, ScheduledNightlyGateRequiresTaskSchedulerProvenance) {
              "a report older than 26 hours",
              "a report more than five minutes in the future",
              "a report from another Git HEAD",
-             "a tracked source change outside the user-local allowlist",
+             "a tracked source change",
+             "a path outside an explicit allowlist",
          }) {
         EXPECT_NE(behavior_test.find(fixture), std::string::npos) << fixture;
     }
@@ -3642,7 +3107,7 @@ TEST(RenderSmokeTest, RenderPipelineExposesPassBudgetCounters) {
     EXPECT_NE(header.find("RenderPassFrameStats"), std::string::npos);
     EXPECT_NE(header.find("get_last_render_pass_stats"), std::string::npos);
     EXPECT_NE(header.find("shadow_cascade_draws"), std::string::npos);
-    // T-I3-9: far-LOD region draws are counter-backed like every other pass.
+    // far-LOD region draws are counter-backed like every other pass.
     EXPECT_NE(header.find("far_region_draws"), std::string::npos);
     EXPECT_NE(header.find("far_indices_drawn"), std::string::npos);
     EXPECT_NE(source.find("ensure_terrain_culling_hierarchy"), std::string::npos);
@@ -3706,7 +3171,7 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     EXPECT_NE(source.find("u_flow_map"), std::string::npos);
     EXPECT_NE(source.find("u_foam_texture"), std::string::npos);
     EXPECT_NE(source.find("u_underwater_texture"), std::string::npos);
-    // T-I4-7: triplanar terrain albedo + normal mapping moved from the lighting
+    // triplanar terrain albedo + normal mapping moved from the lighting
     // pass into the G-buffer pass (the textured albedo and normal-mapped normal
     // are baked into the G-buffer). The contract now lives in g_buffer.frag.
     {

@@ -6,23 +6,23 @@
 
 #include "TimeOfDayModel.h"
 
-// Spec 022 Tier 1 (Wave F F9): the celestial-body SEAM. Sun and moon become two
+//  Tier 1: the celestial-body SEAM. Sun and moon become two
 // evaluated instances of one primitive shape instead of ad-hoc pipeline math —
 // the composability groundwork for data-driven bodies (a second moon, a bright
 // planet) WITHOUT changing today's lighting: Tier 1 is plumbing over the
-// RENDER-14 TimeOfDayModel primitives, called VERBATIM (the sun's unqualified
-// ::sin vs the moon's std::sin asymmetry is preserved inside those primitives —
+//  TimeOfDayModel primitives, called VERBATIM (the sun's unqualified
+// sin vs the moon's std::sin asymmetry is preserved inside those primitives —
 // this header adds NO trig of its own). Bit-identical by construction; pinned by
 // CelestialBodyModel.SunMoonSeamBitExactAgainstPrimitives.
 //
-// Render-only: celestial render state never feeds world_hash (018 FR-E-003).
+// Render-only: celestial render state never feeds world_hash.
 // A SIM-authoritative celestial quantity must route through the deterministic
 // tick path.
 namespace Luminumbra::Rendering {
 
 struct CelestialBodyParams {
     enum class RadianceModel {
-        TransmittanceCoupledSun, // magnitude follows the atmosphere transmittance (015 FR-A-001)
+        TransmittanceCoupledSun, // magnitude follows the atmosphere transmittance ( )
         AuthoredNightFill,       // authored night key (the moon: no in-scatter model at night)
     };
     enum class ShadowRole {
@@ -55,12 +55,13 @@ struct CelestialFrame {
     SunGeometry sun_geometry;
 };
 
-inline CelestialFrame EvaluateCelestialBodies(float timeOfDay, float sunDeclination,
+inline CelestialFrame EvaluateCelestialBodies(float timeOfDay,
+                                              float sunDeclination,
                                               std::uint64_t seasonTick,
                                               float moonForcedOverride,
                                               std::uint64_t ticksPerLunarCycle) {
     CelestialFrame frame;
-    // VERBATIM primitive calls — the seam adds no math (FR-022-2).
+    // VERBATIM primitive calls — the seam adds no math (-2).
     frame.sun_geometry = ComputeSunGeometry(timeOfDay, sunDeclination);
     frame.sun.travel_direction = frame.sun_geometry.direction;
     frame.sun.light_direction = frame.sun_geometry.direction; // the pass consumes it as L
@@ -75,8 +76,8 @@ inline CelestialFrame EvaluateCelestialBodies(float timeOfDay, float sunDeclinat
     frame.moon.travel_direction = moon.direction;
     frame.moon.light_direction = moon.lightDir;
     frame.moon.up_factor = moon.upFactor;
-    frame.moon.elevation_rad = 0.0f;          // the moon path never derived one
-    frame.moon.day_factor = 0.0f;             // the moon is the night key
+    frame.moon.elevation_rad = 0.0f; // the moon path never derived one
+    frame.moon.day_factor = 0.0f;    // the moon is the night key
     frame.moon.sky_dome_day_factor = 0.0f;
     frame.moon.illumination =
         ComputeMoonIllumination(seasonTick, moonForcedOverride, ticksPerLunarCycle);

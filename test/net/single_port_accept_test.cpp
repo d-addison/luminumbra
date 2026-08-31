@@ -1,9 +1,9 @@
-// NET-11: true single-port multi-connection accept (dedicated-server shape).
+// true single-port multi-connection accept (dedicated-server shape).
 //
 // Proves the real dedicated-server accept shape: ONE listen socket (TcpListener) binds a
 // single port and accepts N simultaneous incoming client connections, fanning EACH into
 // its own transport that ReplicationServer::AddClient registers as a DISTINCT client id.
-// This replaces the old "one port per client, one connection per TcpTransport::Listen()"
+// This replaces the old "one port per client, one connection per TcpTransport::Listen"
 // scheme. Headless / loopback only (127.0.0.1); the listener uses an OS-assigned ephemeral
 // port so the test never collides with a fixed port or another test run.
 //
@@ -29,9 +29,12 @@ using namespace Luminumbra::Net;
 
 // Non-blockingly poll one transport for a single framed message, up to a bounded budget
 // (real loopback sockets deliver asynchronously). Returns true and fills `out` on success.
-bool ReceiveFrameWithin(ILockstepTransport& t, std::vector<std::uint8_t>& out, int max_tries = 200) {
+bool ReceiveFrameWithin(ILockstepTransport& t,
+                        std::vector<std::uint8_t>& out,
+                        int max_tries = 200) {
     for (int i = 0; i < max_tries; ++i) {
-        if (t.TryReceiveFrame(out)) return true;
+        if (t.TryReceiveFrame(out))
+            return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     return false;
@@ -40,7 +43,9 @@ bool ReceiveFrameWithin(ILockstepTransport& t, std::vector<std::uint8_t>& out, i
 // A one-byte "hello" frame carrying the client's marker (distinct per client). Sent right
 // after Connect so each accepted server-side transport can be shown to be an independent
 // stream by reading back its client's marker.
-std::vector<std::uint8_t> MarkerFrame(std::uint8_t marker) { return {marker}; }
+std::vector<std::uint8_t> MarkerFrame(std::uint8_t marker) {
+    return {marker};
+}
 
 TEST(SinglePortAccept, AcceptsThreeSimultaneousConnectionsAsDistinctClients) {
     constexpr int kNumClients = 3;
@@ -70,7 +75,8 @@ TEST(SinglePortAccept, AcceptsThreeSimultaneousConnectionsAsDistinctClients) {
     std::uint32_t next_client_id = 1;
     for (int i = 0; i < kNumClients; ++i) {
         std::unique_ptr<TcpTransport> t = listener.AcceptOneBlocking(/*timeout_ms=*/3000);
-        ASSERT_NE(t, nullptr) << "expected to accept connection " << i << " from the single listen socket";
+        ASSERT_NE(t, nullptr) << "expected to accept connection " << i
+                              << " from the single listen socket";
         EXPECT_TRUE(t->IsPeerConnected());
         server.AddClient(next_client_id++, t.get());
         accepted.push_back(std::move(t));
@@ -88,7 +94,8 @@ TEST(SinglePortAccept, AcceptsThreeSimultaneousConnectionsAsDistinctClients) {
     std::set<std::uint8_t> markers_seen;
     for (auto& t : accepted) {
         std::vector<std::uint8_t> frame;
-        ASSERT_TRUE(ReceiveFrameWithin(*t, frame)) << "accepted connection delivered no marker frame";
+        ASSERT_TRUE(ReceiveFrameWithin(*t, frame))
+            << "accepted connection delivered no marker frame";
         ASSERT_EQ(frame.size(), 1u);
         markers_seen.insert(frame[0]);
     }
@@ -96,8 +103,10 @@ TEST(SinglePortAccept, AcceptsThreeSimultaneousConnectionsAsDistinctClients) {
     EXPECT_EQ(markers_seen, expected);
 
     listener.Close();
-    for (auto& c : clients) c->Close();
-    for (auto& t : accepted) t->Close();
+    for (auto& c : clients)
+        c->Close();
+    for (auto& t : accepted)
+        t->Close();
 }
 
 // The non-blocking tick-path API (IConnectionAcceptor::AcceptOne, used through the abstract
@@ -140,8 +149,10 @@ TEST(SinglePortAccept, NonBlockingAcceptOneFansIntoDistinctClients) {
     }
 
     listener.Close();
-    for (auto& c : clients) c->Close();
-    for (auto& t : accepted) t->Close();
+    for (auto& c : clients)
+        c->Close();
+    for (auto& t : accepted)
+        t->Close();
 }
 
 } // namespace

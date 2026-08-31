@@ -1,7 +1,7 @@
 #pragma once
 
-// Track game.light_tools — a PURE, DETERMINISTIC light-QUALITY scorer for the
-// photography game loop (pillar G). Where PhotoScoring grades the COMPOSITION of a
+// game.light_tools: a PURE, DETERMINISTIC light-QUALITY scorer for the
+// photography game loop (photography). Where PhotoScoring grades the COMPOSITION of a
 // shot (thirds, exposure, focus, rarity), this grades the LIGHT itself: how the
 // scene is lit independent of where the subject is framed. Golden-hour warmth, rim/
 // back lighting, soft diffuse light vs harsh direct sun, and scene contrast. The
@@ -9,8 +9,8 @@
 // cloud cover, ambient) and this returns a LightScore the loop can reward.
 //
 // SCOPE. NO render, NO camera, NO GL, NO entt, NO rng, NO wall-clock. It operates on
-// a plain value struct so it can be unit-tested in isolation and later fed by
-// whatever sky/lighting model the game grows. Keeping the rubric here, pure and
+// a plain value struct so it can be unit-tested in isolation and fed by the
+// runtime sky/lighting model. Keeping the rubric here, pure and
 // dependency-free, lets the loop be tuned + reasoned about without dragging in the
 // renderer.
 //
@@ -34,7 +34,7 @@ namespace luminumbra::game {
 
 namespace DM = ::Luminumbra::DeterministicMath;
 
-// Reserved seed-stream offset for the light-tools track (registry: ... photo-scoring+24,
+// Reserved seed-stream offset for the light-tools subsystem (registry: ... photo-scoring+24,
 // weather-events+25, ..., decomposition+27, light-tools+28 — the free slot between
 // decomposition+27 and circadian+29). The scorer is PURE (no rng), so this is recorded for
 // collision-avoidance but intentionally never consumed.
@@ -61,20 +61,20 @@ inline constexpr std::uint64_t kLightToolsSeedOffset = 28ull;
 // ---------------------------------------------------------------------------
 struct LightScene {
     float sun_elevation01 = 0.5f;
-    float sun_azimuth01   = 0.0f;
+    float sun_azimuth01 = 0.0f;
     float subject_facing01 = 0.0f;
-    float cloud_cover01   = 0.0f;
-    float ambient01       = 0.0f;
+    float cloud_cover01 = 0.0f;
+    float ambient01 = 0.0f;
 };
 
 // The graded result. Each axis is clamped [0,1]; total is the weighted sum of the
 // axes, also clamped [0,1].
 struct LightScore {
     float golden_hour = 0.0f;
-    float rim_light   = 0.0f;
-    float softness    = 0.0f;
-    float contrast    = 0.0f;
-    float total       = 0.0f;
+    float rim_light = 0.0f;
+    float softness = 0.0f;
+    float contrast = 0.0f;
+    float total = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -84,8 +84,8 @@ struct LightScore {
 
 // Total-score axis weights (sum to 1.0). Golden hour leads (it is the prize light),
 // rim light and contrast shape it, softness is a portrait-leaning refinement.
-inline constexpr float kwGolden   = 0.36f;
-inline constexpr float kwRim      = 0.26f;
+inline constexpr float kwGolden = 0.36f;
+inline constexpr float kwRim = 0.26f;
 inline constexpr float kwContrast = 0.22f;
 inline constexpr float kwSoftness = 0.16f;
 
@@ -99,7 +99,7 @@ inline constexpr float kGoldenSpan = 0.5f; // elevation at which golden -> 0.
 inline constexpr float kRimLowSpan = 0.6f;
 
 // Softness: clouds diffuse the light. Ambient fill also softens. Their blend.
-inline constexpr float kSoftCloudWeight   = 0.7f;
+inline constexpr float kSoftCloudWeight = 0.7f;
 inline constexpr float kSoftAmbientWeight = 0.3f;
 
 // Contrast rewards CLEAR skies (low cloud) and a LOW sun (long raking shadows); high
@@ -110,8 +110,10 @@ inline constexpr float kContrastSunSpan = 0.5f; // elevation at which the sun te
 // Small pure helpers (float +-*/ + DeterministicMath only — no libm transcendentals).
 // ---------------------------------------------------------------------------
 inline float LightClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -152,7 +154,7 @@ inline float ScoreGoldenHour(const LightScene& s) {
 // ---------------------------------------------------------------------------
 inline float ScoreRimLight(const LightScene& s) {
     const float facing = LightClamp01(s.subject_facing01);
-    const float elev   = LightClamp01(s.sun_elevation01);
+    const float elev = LightClamp01(s.sun_elevation01);
 
     // Low-sun gate: 1 at the horizon, smoothly to 0 by kRimLowSpan elevation.
     const float gate = CosFalloff01(elev / kRimLowSpan);
@@ -168,7 +170,7 @@ inline float ScoreRimLight(const LightScene& s) {
 // the separate axes + weights rather than mixed in here. Returns [0,1].
 // ---------------------------------------------------------------------------
 inline float ScoreSoftness(const LightScene& s) {
-    const float cloud   = LightClamp01(s.cloud_cover01);
+    const float cloud = LightClamp01(s.cloud_cover01);
     const float ambient = LightClamp01(s.ambient01);
     const float soft = kSoftCloudWeight * cloud + kSoftAmbientWeight * ambient;
     return LightClamp01(soft);
@@ -181,11 +183,11 @@ inline float ScoreSoftness(const LightScene& s) {
 // ambient fill. Returns [0,1].
 // ---------------------------------------------------------------------------
 inline float ScoreContrast(const LightScene& s) {
-    const float cloud   = LightClamp01(s.cloud_cover01);
+    const float cloud = LightClamp01(s.cloud_cover01);
     const float ambient = LightClamp01(s.ambient01);
-    const float elev    = LightClamp01(s.sun_elevation01);
+    const float elev = LightClamp01(s.sun_elevation01);
 
-    const float clear   = 1.0f - cloud;                  // clear-sky fraction.
+    const float clear = 1.0f - cloud;                            // clear-sky fraction.
     const float low_sun = CosFalloff01(elev / kContrastSunSpan); // 1 low .. 0 high.
 
     // Directional contrast from a clear sky + low raking sun, dimmed by ambient fill.
@@ -200,14 +202,12 @@ inline float ScoreContrast(const LightScene& s) {
 inline LightScore ScoreLight(const LightScene& scene) {
     LightScore out;
     out.golden_hour = ScoreGoldenHour(scene);
-    out.rim_light   = ScoreRimLight(scene);
-    out.softness    = ScoreSoftness(scene);
-    out.contrast    = ScoreContrast(scene);
+    out.rim_light = ScoreRimLight(scene);
+    out.softness = ScoreSoftness(scene);
+    out.contrast = ScoreContrast(scene);
 
-    out.total = LightClamp01(kwGolden   * out.golden_hour +
-                             kwRim      * out.rim_light +
-                             kwContrast * out.contrast +
-                             kwSoftness * out.softness);
+    out.total = LightClamp01(kwGolden * out.golden_hour + kwRim * out.rim_light +
+                             kwContrast * out.contrast + kwSoftness * out.softness);
     return out;
 }
 

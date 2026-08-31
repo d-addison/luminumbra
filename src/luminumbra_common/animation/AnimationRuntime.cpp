@@ -3,7 +3,7 @@
 #include <cmath>
 #include <cstring>
 
-// Determinism note (G1 gate): this translation unit is compiled with
+// Determinism note ( gate): this translation unit is compiled with
 // -ffp-contract=off (see sources.cmake) so the compiler cannot fuse
 // multiply-add chains differently between debug and release. All math below
 // is plain scalar IEEE-754 float arithmetic.

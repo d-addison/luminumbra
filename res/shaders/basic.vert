@@ -15,7 +15,7 @@ void main()
     // Transform position into world space
     FragPos = vec3(model * vec4(aPos, 1.0));
 
-    // OPTIMIZATION: Use pre-calculated normal matrix, instead of slow inverse()
+    // OPTIMIZATION: Use pre-calculated normal matrix, instead of slow inverse
     Normal = normalMatrix * aNormal;
 
     gl_Position = projection * view * vec4(FragPos, 1.0);

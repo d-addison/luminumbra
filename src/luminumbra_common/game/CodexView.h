@@ -1,6 +1,6 @@
 #pragma once
 
-// Track game.codex_view — the PURE presentation model for the codex browse screen. It
+// game.codex_view: the PURE presentation model for the codex browse screen. It
 // joins the data-driven species registry (every species the world CAN show) with the
 // player's PhotoCodex (what they have discovered + their best shot) into a deterministic,
 // id-sorted list of rows the UI renders. Keeping this pure (no GL, no entt, no rng) means

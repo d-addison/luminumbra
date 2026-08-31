@@ -43,6 +43,25 @@ Dependencies are obtained in one of two ways, noted per entry:
 
 ---
 
+## Redistributed assets
+
+| Asset | Repository path | License |
+| --- | --- | --- |
+| [Ground 048](https://ambientcg.com/view?id=Ground048) | `data/textures/terrain/soil/` | CC0 1.0 |
+| [Grass 003](https://ambientcg.com/view?id=Grass003) | `data/textures/terrain/grass/` | CC0 1.0 |
+| [Rock 028](https://ambientcg.com/view?id=Rock028) | `data/textures/terrain/rock/` | CC0 1.0 |
+| [Ground 087](https://ambientcg.com/view?id=Ground087) | `data/textures/terrain/sand/` | CC0 1.0 |
+| [Gravel 040](https://ambientcg.com/view?id=Gravel040) | `data/textures/terrain/deepslate/` | CC0 1.0 |
+| [Lora](https://github.com/cyrealtype/Lora-Cyrillic) | `data/fonts/Lora/` | SIL Open Font License 1.1 |
+
+Processed `.ltex` files in those terrain directories are derived from the named
+CC0 sources. The Lora license text is retained at `data/fonts/Lora/OFL.txt`.
+Other published runtime data, models, textures, worlds, fixtures, and documentation
+images are first-party files covered by this repository's MIT license, except for
+the public-domain DEM fixture provenance documented alongside those fixtures.
+
+---
+
 ## Notes
 
 **Fetched dependencies are not redistributed by this repository.** CMake downloads

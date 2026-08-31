@@ -25,7 +25,7 @@ std::vector<std::uint32_t> ReplicationServer::PruneDisconnectedClients() {
     for (auto it = m_clients.begin(); it != m_clients.end();) {
         if (it->second.transport && !it->second.transport->IsPeerConnected()) {
             removed.push_back(it->first);
-            // T-I6 polish: PRUNE-INTO-TICK. Enqueue the leaver's avatar id (id ==
+            //  polish: PRUNE-INTO-TICK. Enqueue the leaver's avatar id (id ==
             // client_id) so the very next BroadcastSnapshot folds it into removed_ids
             // and tells surviving clients to despawn the ghost -- in the same tick the
             // disconnect was detected, repeated for unreliable-delivery robustness.
@@ -44,23 +44,24 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
     m_last_broadcast_total_bytes = 0;
     m_last_broadcast_max_client_bytes = 0;
     m_disconnected_this_broadcast.clear();
-    // spec-019 FR-D-003: hopeless clients the policy decided to drop this broadcast. Collected
+    // hopeless clients the policy decided to drop this broadcast. Collected
     // in-loop (so the broadcast iterator stays valid) and erased after the loop.
     std::vector<std::uint32_t> to_disconnect;
 
-    // T-I6 polish: PRUNE-INTO-TICK. Merge the caller's explicit despawns (e.g. a
+    //  polish: PRUNE-INTO-TICK. Merge the caller's explicit despawns (e.g. a
     // spent arrow) with the pending leaver despawns enqueued by
     // PruneDisconnectedClients, deduped + sorted for a deterministic wire order.
     std::vector<std::uint32_t> merged_removed;
     {
         std::set<std::uint32_t> ids(removed_ids.begin(), removed_ids.end());
         for (const auto& [id, count] : m_pending_removed_ids) {
-            if (count > 0) ids.insert(id);
+            if (count > 0)
+                ids.insert(id);
         }
         merged_removed.assign(ids.begin(), ids.end()); // std::set -> sorted ascending
     }
 
-    // T-I6 polish: CHUNK-INDEX AOI. Bucket every entity by its horizontal (X/Z)
+    //  polish: CHUNK-INDEX AOI. Bucket every entity by its horizontal (X/Z)
     // streaming chunk ONCE, so each client's scope is a cheap neighbourhood gather
     // instead of an all-entities distance scan. floor-divide handles negative
     // coordinates so chunk boundaries are stable across the origin.
@@ -72,16 +73,16 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
     if (chunk_aoi) {
         for (const ReplEntityState& e : entities) {
             const std::pair<std::int64_t, std::int64_t> key{
-                chunk_idx(e.px_mm, m_aoi_chunk_size_mm),
-                chunk_idx(e.pz_mm, m_aoi_chunk_size_mm)};
+                chunk_idx(e.px_mm, m_aoi_chunk_size_mm), chunk_idx(e.pz_mm, m_aoi_chunk_size_mm)};
             buckets[key].push_back(&e);
         }
     }
 
     for (auto& [client_id, link] : m_clients) {
-        if (!link.transport) continue;
+        if (!link.transport)
+            continue;
 
-        // spec-019 FR-D-002/003: OUTBOUND BACKPRESSURE POLICY (default-OFF -> this whole block is
+        // OUTBOUND BACKPRESSURE POLICY (default-OFF -> this whole block is
         // skipped and the send path below is byte-identical to the pre-policy code). Assess the
         // client's LIVE queue depth BEFORE producing anything: a backed-up client is escalated
         // (throttle -> keyframe -> disconnect) instead of having another frame piled on. backed_up
@@ -101,15 +102,15 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                 if (link.over_hwm_streak >= kDisconnectDeadlineStreak) {
                     // (3) DISCONNECT the hopeless: never drained past the deadline. Signal the peer
                     // (Close) and mark for server-side removal after the loop. On loopback the
-                    // server's own IsPeerConnected() would stay true, so the POLICY -- not
+                    // server's own IsPeerConnected would stay true, so the POLICY -- not
                     // PruneDisconnectedClients -- owns this drop.
                     link.transport->Close();
                     to_disconnect.push_back(client_id);
                     continue;
                 }
                 if (link.over_hwm_streak == kKeyframeResyncStreak) {
-                    // (2) DROP TO KEYFRAME: discard the piled (undeliverable) delta backlog -- it is
-                    // superseded by a single full resync frame -- and fall through to build that
+                    // (2) DROP TO KEYFRAME: discard the piled (undeliverable) delta backlog -- it
+                    // is superseded by a single full resync frame -- and fall through to build that
                     // frame as a FULL snapshot (force_keyframe below).
                     link.dropped_frames += link.outbound.size();
                     link.outbound.clear();
@@ -120,11 +121,13 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                     // was sent) is deliberate -- SnapshotAge must not climb on frames we withheld.
                     ++link.throttled_frames;
                     while (!link.outbound.empty() &&
-                           link.transport->SendFrame(link.outbound.front(), FrameDelivery::Unreliable)) {
+                           link.transport->SendFrame(link.outbound.front(),
+                                                     FrameDelivery::Unreliable)) {
                         link.outbound.pop_front();
                     }
                     const std::uint32_t d = static_cast<std::uint32_t>(link.outbound.size());
-                    if (d > link.peak_queue_depth) link.peak_queue_depth = d;
+                    if (d > link.peak_queue_depth)
+                        link.peak_queue_depth = d;
                     continue;
                 }
             }
@@ -139,7 +142,10 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         // it is ALWAYS included even if scoping would exclude it.
         const ReplEntityState* center = nullptr;
         for (const ReplEntityState& e : entities) {
-            if (e.entity_id == client_id) { center = &e; break; }
+            if (e.entity_id == client_id) {
+                center = &e;
+                break;
+            }
         }
 
         if (center != nullptr && chunk_aoi) {
@@ -152,18 +158,22 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
             for (int dx = -r; dx <= r; ++dx) {
                 for (int dz = -r; dz <= r; ++dz) {
                     const auto it = buckets.find({ccx + dx, ccz + dz});
-                    if (it == buckets.end()) continue;
-                    for (const ReplEntityState* p : it->second) gathered.push_back(p);
+                    if (it == buckets.end())
+                        continue;
+                    for (const ReplEntityState* p : it->second)
+                        gathered.push_back(p);
                 }
             }
-            std::sort(gathered.begin(), gathered.end(),
+            std::sort(gathered.begin(),
+                      gathered.end(),
                       [](const ReplEntityState* a, const ReplEntityState* b) {
                           return a->entity_id < b->entity_id;
                       });
             snap.entities.reserve(gathered.size());
-            for (const ReplEntityState* p : gathered) snap.entities.push_back(*p);
+            for (const ReplEntityState* p : gathered)
+                snap.entities.push_back(*p);
         } else if (center != nullptr && m_aoi_radius_mm > 0) {
-            // T-I6 P3.2: mm-radius AOI. Box-cull before the squared compare to keep
+            //  mm-radius AOI. Box-cull before the squared compare to keep
             // the int64 distance math overflow-safe at large world coordinates.
             const std::int64_t rr = m_aoi_radius_mm;
             const std::int64_t r2 = rr * rr;
@@ -172,9 +182,8 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
                 const std::int64_t dx = static_cast<std::int64_t>(e.px_mm) - center->px_mm;
                 const std::int64_t dy = static_cast<std::int64_t>(e.py_mm) - center->py_mm;
                 const std::int64_t dz = static_cast<std::int64_t>(e.pz_mm) - center->pz_mm;
-                if (is_self ||
-                    (std::llabs(dx) <= rr && std::llabs(dy) <= rr && std::llabs(dz) <= rr &&
-                     dx * dx + dy * dy + dz * dz <= r2)) {
+                if (is_self || (std::llabs(dx) <= rr && std::llabs(dy) <= rr &&
+                                std::llabs(dz) <= rr && dx * dx + dy * dy + dz * dz <= r2)) {
                     snap.entities.push_back(e);
                 }
             }
@@ -183,15 +192,15 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         }
         snap.removed_ids = merged_removed;
 
-        // T-I6 P3.1: ack-driven delta-vs-acked compression. `snap` is this client's
+        //  ack-driven delta-vs-acked compression. `snap` is this client's
         // FULL post-AOI set at this seq. In delta mode we send only what changed since
         // the baseline the client last ACKed (MakeSnapshotDelta auto-derives removed_ids
         // from the baseline diff, so despawns ride along); the FULL set is retained as
         // the next baseline. With no usable acked baseline yet we send a full snapshot
-        // (delta_from_seq == 0). Off -> wire-identical to P3.0.
+        // (delta_from_seq == 0). Off -> wire-identical to .
         SnapshotMsg outgoing;
         if (force_keyframe) {
-            // FR-D-002: forced FULL keyframe (delta_from_seq==0) resyncs a persistently-behind
+            // forced FULL keyframe (delta_from_seq==0) resyncs a persistently-behind
             // client -- a standalone frame it can apply without any baseline. Retain it as the new
             // delta baseline so normal delta-vs-acked resumes once the client catches up.
             outgoing = snap;
@@ -205,33 +214,36 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
             ++link.forced_keyframes;
         } else if (m_delta) {
             const std::uint32_t acked = link.inbound.acked_snapshot_seq();
-            const auto base_it = (acked != 0) ? link.sent_history.find(acked)
-                                              : link.sent_history.end();
+            const auto base_it =
+                (acked != 0) ? link.sent_history.find(acked) : link.sent_history.end();
             if (base_it != link.sent_history.end()) {
                 outgoing = MakeSnapshotDelta(base_it->second, snap); // header from snap
                 outgoing.delta_from_seq = acked;
             } else {
-                outgoing = snap;            // no baseline the client can apply -> full
+                outgoing = snap; // no baseline the client can apply -> full
                 outgoing.delta_from_seq = 0;
             }
             link.sent_history[snap.snapshot_seq] = snap;
             for (auto it = link.sent_history.begin(); it != link.sent_history.end();) {
-                if (it->first < acked) it = link.sent_history.erase(it); else ++it;
+                if (it->first < acked)
+                    it = link.sent_history.erase(it);
+                else
+                    ++it;
             }
             while (link.sent_history.size() > kServerHistoryCap) {
                 link.sent_history.erase(link.sent_history.begin());
             }
         } else {
-            outgoing = snap;                // P3.0 full-snapshot mode
+            outgoing = snap; //  full-snapshot mode
         }
 
         // State snapshots are UNRELIABLE: a dropped one is superseded by the next
         // (most-recent-wins). Over Steam this maps to k_nSteamNetworkingSend_Unreliable.
-        // spec-019 FR-E: route the produced frame through this client's OUTBOUND queue
+        // route the produced frame through this client's OUTBOUND queue
         // (the backpressure substrate), then flush as far as the transport accepts. A
         // connected loopback/TCP peer accepts immediately, so the queue drains fully and
         // the wire bytes are byte-identical to the prior direct-send path; a would-block /
-        // gone peer leaves frames buffered -> outbound.size() is the live queue-depth
+        // gone peer leaves frames buffered -> outbound.size is the live queue-depth
         // metric. On overflow drop the OLDEST (unreliable / most-recent-wins) and count it.
         std::vector<std::uint8_t> frame = EncodeSnapshot(outgoing);
         m_last_broadcast_total_bytes += frame.size();
@@ -248,7 +260,8 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
             link.outbound.pop_front();
         }
         const std::uint32_t depth = static_cast<std::uint32_t>(link.outbound.size());
-        if (depth > link.peak_queue_depth) link.peak_queue_depth = depth;
+        if (depth > link.peak_queue_depth)
+            link.peak_queue_depth = depth;
     }
 
     // Decay the pending despawns: each was just sent to every surviving client this
@@ -262,10 +275,10 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
         }
     }
 
-    // spec-019 FR-D-003: finalize policy disconnects AFTER the decay pass, so a freshly-dropped
+    // finalize policy disconnects AFTER the decay pass, so a freshly-dropped
     // client's avatar-despawn gets the FULL kRemovalRepeatBroadcasts repeats (not decremented
     // this tick). Removing the client here (not in-loop) kept the broadcast iterator valid; the
-    // caller reads DisconnectedClientsLastBroadcast() to free the player's server-side state.
+    // caller reads DisconnectedClientsLastBroadcast to free the player's server-side state.
     for (std::uint32_t id : to_disconnect) {
         m_pending_removed_ids[id] = kRemovalRepeatBroadcasts;
         m_disconnected_this_broadcast.push_back(id);
@@ -276,17 +289,21 @@ void ReplicationServer::BroadcastSnapshot(std::uint64_t server_tick,
 void ReplicationServer::PumpInbound() {
     for (auto& [client_id, link] : m_clients) {
         (void)client_id;
-        if (!link.transport) continue;
+        if (!link.transport)
+            continue;
         std::vector<std::uint8_t> frame;
         while (link.transport->TryReceiveFrame(frame)) {
             ReplMessageType type;
-            if (!PeekReplMessageType(frame, type)) continue;
+            if (!PeekReplMessageType(frame, type))
+                continue;
             if (type == ReplMessageType::Usercmd) {
                 UsercmdMsg cmd;
-                if (DecodeUsercmd(frame, cmd)) link.inbound.Receive(cmd);
+                if (DecodeUsercmd(frame, cmd))
+                    link.inbound.Receive(cmd);
             } else if (type == ReplMessageType::Ack) {
                 AckMsg ack;
-                if (DecodeAck(frame, ack)) link.inbound.ApplyAck(ack);
+                if (DecodeAck(frame, ack))
+                    link.inbound.ApplyAck(ack);
             }
             // Snapshot frames are server->client only; ignore if echoed back.
         }
@@ -295,7 +312,8 @@ void ReplicationServer::PumpInbound() {
 
 const UsercmdMsg* ReplicationServer::LatestUsercmd(std::uint32_t client_id) const {
     const auto it = m_clients.find(client_id);
-    if (it == m_clients.end() || !it->second.inbound.has_command()) return nullptr;
+    if (it == m_clients.end() || !it->second.inbound.has_command())
+        return nullptr;
     return &it->second.inbound.latest();
 }
 
@@ -304,7 +322,7 @@ std::uint32_t ReplicationServer::AckedSnapshotSeq(std::uint32_t client_id) const
     return it == m_clients.end() ? 0u : it->second.inbound.acked_snapshot_seq();
 }
 
-// spec-019 FR-E: backpressure + snapshot-aging telemetry. All derived from live
+// backpressure + snapshot-aging telemetry. All derived from live
 // transport/ack state -- additive, world_hash-neutral.
 namespace {
 // last_sent_seq (next_snapshot_seq-1) - acked_seq, floored at 0. Shared form so the
@@ -315,7 +333,8 @@ std::uint32_t SeqAge(std::uint32_t next_snapshot_seq, std::uint32_t acked) {
 }
 // Nearest-rank p95 over an unsorted value set (sorts a copy); 0 for an empty set.
 std::uint32_t Percentile95U32(std::vector<std::uint32_t> v) {
-    if (v.empty()) return 0u;
+    if (v.empty())
+        return 0u;
     std::sort(v.begin(), v.end());
     const std::size_t idx = (v.size() - 1) * 95 / 100;
     return v[idx];
@@ -329,7 +348,8 @@ std::uint32_t ReplicationServer::OutboundQueueDepth(std::uint32_t client_id) con
 
 std::uint32_t ReplicationServer::SnapshotAge(std::uint32_t client_id) const {
     const auto it = m_clients.find(client_id);
-    if (it == m_clients.end()) return 0u;
+    if (it == m_clients.end())
+        return 0u;
     return SeqAge(it->second.next_snapshot_seq, it->second.inbound.acked_snapshot_seq());
 }
 
@@ -374,7 +394,8 @@ std::uint32_t ReplicationServer::SnapshotAgeP95() const {
 }
 
 void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
-    if (!m_transport) return;
+    if (!m_transport)
+        return;
     // Usercmds are UNRELIABLE: newest tick wins on the server (UsercmdReceiver),
     // a dropped one is superseded by the next tick's input.
     m_transport->SendFrame(EncodeUsercmd(cmd), FrameDelivery::Unreliable);
@@ -385,8 +406,10 @@ void ReplicationClient::SendUsercmd(const UsercmdMsg& cmd) {
 void SnapshotInterpolator::Push(const SnapshotMsg& snap) {
     // Insert keeping the buffer sorted ascending by server_tick; replace on an
     // equal tick (newest wins for that tick).
-    auto it = std::lower_bound(m_buf.begin(), m_buf.end(), snap.server_tick,
-                               [](const SnapshotMsg& s, std::uint64_t t) { return s.server_tick < t; });
+    auto it = std::lower_bound(
+        m_buf.begin(), m_buf.end(), snap.server_tick, [](const SnapshotMsg& s, std::uint64_t t) {
+            return s.server_tick < t;
+        });
     if (it != m_buf.end() && it->server_tick == snap.server_tick) {
         *it = snap;
     } else {
@@ -399,26 +422,30 @@ void SnapshotInterpolator::Push(const SnapshotMsg& snap) {
 }
 
 std::vector<ReplEntityState> SnapshotInterpolator::Sample(double tick_time) const {
-    if (m_buf.empty()) return {};
+    if (m_buf.empty())
+        return {};
     // Clamp outside the buffered range (no extrapolation).
-    if (tick_time <= static_cast<double>(m_buf.front().server_tick)) return m_buf.front().entities;
-    if (tick_time >= static_cast<double>(m_buf.back().server_tick)) return m_buf.back().entities;
+    if (tick_time <= static_cast<double>(m_buf.front().server_tick))
+        return m_buf.front().entities;
+    if (tick_time >= static_cast<double>(m_buf.back().server_tick))
+        return m_buf.back().entities;
 
     // Find the bracketing pair a.tick <= tick_time < b.tick.
     std::size_t bi = 0;
-    while (bi < m_buf.size() && static_cast<double>(m_buf[bi].server_tick) <= tick_time) ++bi;
+    while (bi < m_buf.size() && static_cast<double>(m_buf[bi].server_tick) <= tick_time)
+        ++bi;
     const SnapshotMsg& a = m_buf[bi - 1];
     const SnapshotMsg& b = m_buf[bi];
     const double span = static_cast<double>(b.server_tick) - static_cast<double>(a.server_tick);
     const double frac = span > 0.0 ? (tick_time - static_cast<double>(a.server_tick)) / span : 0.0;
 
     auto lerp_i32 = [frac](std::int32_t lo, std::int32_t hi) {
-        return static_cast<std::int32_t>(std::llround(static_cast<double>(lo) +
-                                                      frac * (static_cast<double>(hi) - static_cast<double>(lo))));
+        return static_cast<std::int32_t>(std::llround(
+            static_cast<double>(lo) + frac * (static_cast<double>(hi) - static_cast<double>(lo))));
     };
     auto lerp_i16 = [frac](std::int16_t lo, std::int16_t hi) {
-        return static_cast<std::int16_t>(std::llround(static_cast<double>(lo) +
-                                                      frac * (static_cast<double>(hi) - static_cast<double>(lo))));
+        return static_cast<std::int16_t>(std::llround(
+            static_cast<double>(lo) + frac * (static_cast<double>(hi) - static_cast<double>(lo))));
     };
 
     // Lerp entities present in BOTH; pass through entities only in `b` (newer).
@@ -427,7 +454,10 @@ std::vector<ReplEntityState> SnapshotInterpolator::Sample(double tick_time) cons
     for (const ReplEntityState& be : b.entities) {
         const ReplEntityState* ae = nullptr;
         for (const ReplEntityState& cand : a.entities) {
-            if (cand.entity_id == be.entity_id) { ae = &cand; break; }
+            if (cand.entity_id == be.entity_id) {
+                ae = &cand;
+                break;
+            }
         }
         if (ae == nullptr) {
             out.push_back(be);
@@ -446,26 +476,30 @@ std::vector<ReplEntityState> SnapshotInterpolator::Sample(double tick_time) cons
 }
 
 void ReplicationClient::PumpInbound() {
-    if (!m_transport) return;
+    if (!m_transport)
+        return;
     bool got_new_snapshot = false;
     std::vector<std::uint8_t> frame;
     while (m_transport->TryReceiveFrame(frame)) {
         ReplMessageType type;
-        if (!PeekReplMessageType(frame, type)) continue;
+        if (!PeekReplMessageType(frame, type))
+            continue;
         if (type == ReplMessageType::Snapshot) {
-            // T-I6 P3.1: reconstruct the full set. delta_from_seq==0 is a complete
+            //  reconstruct the full set. delta_from_seq==0 is a complete
             // snapshot (use directly); otherwise apply the delta onto the baseline we
             // reconstructed at that seq. A missing baseline (e.g. heavy loss pruned it)
             // means we can't apply this frame -- drop it; the server keeps deltaing
             // against the last-acked baseline, so a later frame re-converges us.
             SnapshotMsg raw;
-            if (!DecodeSnapshot(frame, raw)) continue;
+            if (!DecodeSnapshot(frame, raw))
+                continue;
             SnapshotMsg full;
             if (raw.delta_from_seq == 0) {
                 full = std::move(raw);
             } else {
                 const auto it = m_recon_history.find(raw.delta_from_seq);
-                if (it == m_recon_history.end()) continue;
+                if (it == m_recon_history.end())
+                    continue;
                 full = ApplySnapshotDelta(it->second, raw);
             }
             if (m_receiver.Receive(full)) {

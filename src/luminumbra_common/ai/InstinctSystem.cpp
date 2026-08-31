@@ -4,11 +4,11 @@
 #include <cmath>
 #include <vector>
 
+#include "../components/CoreComponents.h"
+#include "../components/InstinctComponents.h"
 #include "InstinctPlanner.h"
 #include "PerceptionSubstrate.h"
 #include "StimulusChannels.h"
-#include "../components/CoreComponents.h"
-#include "../components/InstinctComponents.h"
 
 namespace luminumbra::ai {
 namespace {
@@ -36,11 +36,10 @@ struct OpportunitySource {
 
 } // namespace
 
-InstinctSystemTickStats RunInstinctSystemOnTick(
-    entt::registry& registry,
-    std::uint64_t tick,
-    const StimulusChannelRegistry* stimulus,
-    bool use_perception_substrate) {
+InstinctSystemTickStats RunInstinctSystemOnTick(entt::registry& registry,
+                                                std::uint64_t tick,
+                                                const StimulusChannelRegistry* stimulus,
+                                                bool use_perception_substrate) {
     using Luminumbra::Components::ActionPlanComponent;
     using Luminumbra::Components::InstinctAgentComponent;
     using Luminumbra::Components::NeedsComponent;
@@ -67,18 +66,18 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
             }
             opportunities.push_back(source);
         }
-        std::stable_sort(opportunities.begin(), opportunities.end(),
+        std::stable_sort(opportunities.begin(),
+                         opportunities.end(),
                          [](const OpportunitySource& lhs, const OpportunitySource& rhs) {
                              return lhs.component->id < rhs.component->id;
                          });
     }
 
-    // INSTINCT-09 (additive, default OFF): build the shared perception substrate
-    // ONCE per tick from the id-sorted opportunities. Each source's ordinal is its
+    // Build the shared perception substrate once per tick from the id-sorted
+    // opportunities. Each source's ordinal is its
     // index in `opportunities`, so a per-agent query returns the perceived set in
     // that same id order — the substrate reproduces the inline gather exactly. The
-    // field is only built when the flag is set, so the default path allocates
-    // nothing new and stays byte-identical.
+    // field is built only when the canonical path is selected.
     PerceptionField perception_field;
     if (use_perception_substrate) {
         std::vector<PerceptionSourceInput> sources;
@@ -108,7 +107,7 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
             need.pressure = ClampUnit(need.pressure + need.growth_per_tick);
         }
 
-        // 1b. T-I5b-2 (E1): ecology stimulus channels. INERT for the canonical
+        // 1b.  : ecology stimulus channels. INERT for the canonical
         // roster -- this block only runs when a stimulus context is supplied AND
         // the creature carries a StimulusSubscriptionComponent (game-data opt-in).
         // For a subscriber, each subscription samples its channel scalar [0, 1]
@@ -178,7 +177,7 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
         };
 
         if (use_perception_substrate) {
-            // INSTINCT-09 additive path: the shared substrate returns the perceived
+            //  additive path: the shared substrate returns the perceived
             // opportunity set (id-ordered, radius-gated) equivalent to the inline
             // scan below. The perceiver has a position only when it carries a
             // TransformComponent, matching the inline `agent_transform != nullptr`
@@ -200,11 +199,15 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
                 const OpportunityComponent& component = *source.component;
                 double distance = 0.0;
                 if (agent_transform != nullptr && source.has_position) {
-                    const double dx = static_cast<double>(agent_transform->position.x) - source.position[0];
-                    const double dy = static_cast<double>(agent_transform->position.y) - source.position[1];
-                    const double dz = static_cast<double>(agent_transform->position.z) - source.position[2];
+                    const double dx =
+                        static_cast<double>(agent_transform->position.x) - source.position[0];
+                    const double dy =
+                        static_cast<double>(agent_transform->position.y) - source.position[1];
+                    const double dz =
+                        static_cast<double>(agent_transform->position.z) - source.position[2];
                     distance = Round4(std::sqrt(dx * dx + dy * dy + dz * dz));
-                    if (component.radius > 0.0f && distance > static_cast<double>(component.radius)) {
+                    if (component.radius > 0.0f &&
+                        distance > static_cast<double>(component.radius)) {
                         continue;
                     }
                 }
@@ -222,8 +225,11 @@ InstinctSystemTickStats RunInstinctSystemOnTick(
         // opportunity entity by id.
         auto& action_plan = registry.emplace_or_replace<ActionPlanComponent>(entity);
         if (agent.current_plan.selected_index >= 0 &&
-            static_cast<std::size_t>(agent.current_plan.selected_index) < agent.current_plan.candidates.size()) {
-            const auto& winner = agent.current_plan.candidates[static_cast<std::size_t>(agent.current_plan.selected_index)];
+            static_cast<std::size_t>(agent.current_plan.selected_index) <
+                agent.current_plan.candidates.size()) {
+            const auto& winner =
+                agent.current_plan
+                    .candidates[static_cast<std::size_t>(agent.current_plan.selected_index)];
             Luminumbra::Components::Action action;
             action.name = winner.action;
             for (std::size_t i = 0; i < request.opportunities.size(); ++i) {

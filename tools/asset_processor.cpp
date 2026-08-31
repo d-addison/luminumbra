@@ -1,13 +1,13 @@
-#include <iostream>
-#include <vector>
-#include <fstream>
-#include <string>
-#include <cmath>
+#include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <cmath>
 #include <cstdint>
-#include <algorithm>
+#include <fstream>
+#include <iostream>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #define CGLTF_IMPLEMENTATION
 #if defined(_MSC_VER)
@@ -60,7 +60,10 @@ using luminumbra::animation::SkinnedVertexData;
 void QuantizeWeights(const float weights[4], uint8_t out[4]) {
     float total = weights[0] + weights[1] + weights[2] + weights[3];
     if (total <= 0.0f) {
-        out[0] = 255; out[1] = 0; out[2] = 0; out[3] = 0;
+        out[0] = 255;
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 0;
         return;
     }
 
@@ -78,7 +81,8 @@ void QuantizeWeights(const float weights[4], uint8_t out[4]) {
     while (deficit > 0) {
         int best = 0;
         for (int i = 1; i < 4; ++i) {
-            if (remainders[i] > remainders[best]) best = i;
+            if (remainders[i] > remainders[best])
+                best = i;
         }
         quantized[best] += 1;
         remainders[best] = -1.0f;
@@ -91,7 +95,8 @@ void QuantizeWeights(const float weights[4], uint8_t out[4]) {
 }
 
 std::string JointName(const cgltf_node* node, size_t fallbackIndex) {
-    if (node->name && node->name[0] != '\0') return node->name;
+    if (node->name && node->name[0] != '\0')
+        return node->name;
     return "joint" + std::to_string(fallbackIndex);
 }
 
@@ -117,24 +122,32 @@ bool WriteAnimationClips(const cgltf_data* data, const std::string& output_path)
 
         for (size_t ch = 0; ch < anim->channels_count; ++ch) {
             const cgltf_animation_channel* channel = &anim->channels[ch];
-            if (!channel->target_node || !channel->sampler) continue;
+            if (!channel->target_node || !channel->sampler)
+                continue;
 
             AnimTargetType targetType;
             uint32_t componentCount;
             switch (channel->target_path) {
                 case cgltf_animation_path_type_translation:
-                    targetType = AnimTargetType::Translation; componentCount = 3; break;
+                    targetType = AnimTargetType::Translation;
+                    componentCount = 3;
+                    break;
                 case cgltf_animation_path_type_rotation:
-                    targetType = AnimTargetType::Rotation; componentCount = 4; break;
+                    targetType = AnimTargetType::Rotation;
+                    componentCount = 4;
+                    break;
                 case cgltf_animation_path_type_scale:
-                    targetType = AnimTargetType::Scale; componentCount = 3; break;
+                    targetType = AnimTargetType::Scale;
+                    componentCount = 3;
+                    break;
                 default:
-                    continue; // morph weights unsupported in v1 .lanim
+                    continue; // morph weights unsupported in v1.lanim
             }
 
             const cgltf_accessor* input = channel->sampler->input;
             const cgltf_accessor* output = channel->sampler->output;
-            if (!input || !output || input->count == 0 || output->count < input->count) continue;
+            if (!input || !output || input->count == 0 || output->count < input->count)
+                continue;
 
             const size_t nodeIndex = static_cast<size_t>(channel->target_node - data->nodes);
             const uint32_t nameHash = HashJointName(JointName(channel->target_node, nodeIndex));
@@ -157,12 +170,13 @@ bool WriteAnimationClips(const cgltf_data* data, const std::string& output_path)
             trackValues.push_back(std::move(values));
         }
 
-        if (trackHeaders.empty()) continue;
+        if (trackHeaders.empty())
+            continue;
         header.trackCount = static_cast<uint32_t>(trackHeaders.size());
 
         const std::string animName = (anim->name && anim->name[0] != '\0')
-            ? std::string(anim->name)
-            : ("anim" + std::to_string(anim_idx));
+                                         ? std::string(anim->name)
+                                         : ("anim" + std::to_string(anim_idx));
         const std::string animPath = stem + "." + animName + ".lanim";
 
         std::ofstream outFile(animPath, std::ios::binary);
@@ -172,7 +186,8 @@ bool WriteAnimationClips(const cgltf_data* data, const std::string& output_path)
         }
         outFile.write(reinterpret_cast<const char*>(&header), sizeof(header));
         for (size_t t = 0; t < trackHeaders.size(); ++t) {
-            outFile.write(reinterpret_cast<const char*>(&trackHeaders[t]), sizeof(LanimTrackHeader));
+            outFile.write(reinterpret_cast<const char*>(&trackHeaders[t]),
+                          sizeof(LanimTrackHeader));
             outFile.write(reinterpret_cast<const char*>(trackTimes[t].data()),
                           static_cast<std::streamsize>(trackTimes[t].size() * sizeof(float)));
             outFile.write(reinterpret_cast<const char*>(trackValues[t].data()),
@@ -187,8 +202,10 @@ bool WriteAnimationClips(const cgltf_data* data, const std::string& output_path)
 }
 
 // Skinned (.lmesh v2 / LMS2) path: preserves joints/weights through the
-// meshoptimizer remap and writes the skeleton block plus sibling .lanim clips.
-void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const std::string& output_path) {
+// meshoptimizer remap and writes the skeleton block plus sibling.lanim clips.
+void process_skinned_gltf(cgltf_data* data,
+                          const std::string& input_path,
+                          const std::string& output_path) {
     const cgltf_skin* skin = &data->skins[0];
     if (skin->joints_count == 0 || skin->joints_count > kMaxJointsPerSkeleton) {
         std::cerr << "Error: Skin in " << input_path << " has " << skin->joints_count
@@ -211,19 +228,23 @@ void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const
         joint.parentIndex = -1;
         if (node->parent) {
             const auto found = jointIndexByNode.find(node->parent);
-            if (found != jointIndexByNode.end()) joint.parentIndex = found->second;
+            if (found != jointIndexByNode.end())
+                joint.parentIndex = found->second;
         }
         if (skin->inverse_bind_matrices) {
             cgltf_accessor_read_float(skin->inverse_bind_matrices, j, joint.inverseBind, 16);
         }
         if (node->has_translation) {
-            for (int c = 0; c < 3; ++c) joint.localTranslation[c] = node->translation[c];
+            for (int c = 0; c < 3; ++c)
+                joint.localTranslation[c] = node->translation[c];
         }
         if (node->has_rotation) {
-            for (int c = 0; c < 4; ++c) joint.localRotation[c] = node->rotation[c];
+            for (int c = 0; c < 4; ++c)
+                joint.localRotation[c] = node->rotation[c];
         }
         if (node->has_scale) {
-            for (int c = 0; c < 3; ++c) joint.localScale[c] = node->scale[c];
+            for (int c = 0; c < 3; ++c)
+                joint.localScale[c] = node->scale[c];
         }
     }
 
@@ -244,17 +265,22 @@ void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const
 
             for (size_t i = 0; i < primitive->attributes_count; ++i) {
                 cgltf_attribute* attr = &primitive->attributes[i];
-                if (attr->type == cgltf_attribute_type_position) pos_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_normal) norm_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_texcoord) uv_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_joints && attr->index == 0) joints_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_weights && attr->index == 0) weights_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_position)
+                    pos_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_normal)
+                    norm_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_texcoord)
+                    uv_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_joints && attr->index == 0)
+                    joints_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_weights && attr->index == 0)
+                    weights_accessor = attr->data;
             }
 
             if (!index_accessor || !pos_accessor || !norm_accessor || !uv_accessor ||
                 !joints_accessor || !weights_accessor) {
-                std::cerr << "Warning: Skipping skinned primitive " << prim_idx << " in mesh " << mesh_idx
-                          << " due to missing attributes." << std::endl;
+                std::cerr << "Warning: Skipping skinned primitive " << prim_idx << " in mesh "
+                          << mesh_idx << " due to missing attributes." << std::endl;
                 continue;
             }
 
@@ -301,26 +327,44 @@ void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const
     // meshoptimizer pipeline with the skinned stride so joints/weights survive
     // the remap untouched.
     std::vector<unsigned int> remap(master_raw_vertices.size());
-    size_t unique_vertex_count = meshopt_generateVertexRemap(
-        remap.data(), master_indices.data(), master_indices.size(),
-        master_raw_vertices.data(), master_raw_vertices.size(), sizeof(SkinnedVertexData));
+    size_t unique_vertex_count = meshopt_generateVertexRemap(remap.data(),
+                                                             master_indices.data(),
+                                                             master_indices.size(),
+                                                             master_raw_vertices.data(),
+                                                             master_raw_vertices.size(),
+                                                             sizeof(SkinnedVertexData));
 
     std::vector<uint32_t> optimized_indices(master_indices.size());
-    meshopt_remapIndexBuffer(optimized_indices.data(), master_indices.data(), master_indices.size(), remap.data());
+    meshopt_remapIndexBuffer(
+        optimized_indices.data(), master_indices.data(), master_indices.size(), remap.data());
 
     std::vector<SkinnedVertexData> optimized_vertices(unique_vertex_count);
-    meshopt_remapVertexBuffer(optimized_vertices.data(), master_raw_vertices.data(),
-                              master_raw_vertices.size(), sizeof(SkinnedVertexData), remap.data());
+    meshopt_remapVertexBuffer(optimized_vertices.data(),
+                              master_raw_vertices.data(),
+                              master_raw_vertices.size(),
+                              sizeof(SkinnedVertexData),
+                              remap.data());
 
-    meshopt_optimizeVertexCache(optimized_indices.data(), optimized_indices.data(),
-                                optimized_indices.size(), unique_vertex_count);
-    meshopt_optimizeOverdraw(optimized_indices.data(), optimized_indices.data(), optimized_indices.size(),
-                             &optimized_vertices[0].pos[0], unique_vertex_count, sizeof(SkinnedVertexData), 1.05f);
-    meshopt_optimizeVertexFetch(optimized_vertices.data(), optimized_indices.data(), optimized_indices.size(),
-                                optimized_vertices.data(), unique_vertex_count, sizeof(SkinnedVertexData));
+    meshopt_optimizeVertexCache(optimized_indices.data(),
+                                optimized_indices.data(),
+                                optimized_indices.size(),
+                                unique_vertex_count);
+    meshopt_optimizeOverdraw(optimized_indices.data(),
+                             optimized_indices.data(),
+                             optimized_indices.size(),
+                             &optimized_vertices[0].pos[0],
+                             unique_vertex_count,
+                             sizeof(SkinnedVertexData),
+                             1.05f);
+    meshopt_optimizeVertexFetch(optimized_vertices.data(),
+                                optimized_indices.data(),
+                                optimized_indices.size(),
+                                optimized_vertices.data(),
+                                unique_vertex_count,
+                                sizeof(SkinnedVertexData));
 
-    float min_ext[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
-    float max_ext[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+    float min_ext[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+    float max_ext[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
     for (const auto& v : optimized_vertices) {
         for (int c = 0; c < 3; ++c) {
             min_ext[c] = std::min(min_ext[c], v.pos[c]);
@@ -355,8 +399,10 @@ void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const
                   static_cast<std::streamsize>(joints.size() * sizeof(Lms2Joint)));
     outFile.close();
 
-    std::cout << "Successfully processed skinned '" << input_path << "' -> '" << output_path << "' (LMS2)" << std::endl;
-    std::cout << "  - Vertices: " << master_raw_vertices.size() << " -> " << unique_vertex_count << std::endl;
+    std::cout << "Successfully processed skinned '" << input_path << "' -> '" << output_path
+              << "' (LMS2)" << std::endl;
+    std::cout << "  - Vertices: " << master_raw_vertices.size() << " -> " << unique_vertex_count
+              << std::endl;
     std::cout << "  - Indices: " << optimized_indices.size() << std::endl;
     std::cout << "  - Joints: " << joints.size() << std::endl;
 
@@ -364,9 +410,9 @@ void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const
 }
 
 // ----------------------------------------------------------------------------
-// Texture import: PNG -> .ltex (T-I4-6)
+// Texture import: PNG -> .ltex
 //
-// .ltex is a minimal, self-describing mip-chained 8-bit texture container. The
+//.ltex is a minimal, self-describing mip-chained 8-bit texture container. The
 // header is written field-by-field (no struct padding) so the on-disk layout
 // is unambiguous and trivially round-trippable:
 //
@@ -376,11 +422,12 @@ void process_skinned_gltf(cgltf_data* data, const std::string& input_path, const
 //   u32 width    (mip 0)
 //   u32 height   (mip 0)
 //   u8  channels (1..4)
-//   <raw mip chain> : for each level, width*height*channels bytes, dimensions
+//   <raw mip chain>: for each level, width*height*channels bytes, dimensions
 //                     halve (floored, min 1) per level, box-filtered from the
 //                     previous level. Layout matches glTexSubImage3D upload.
 //
-// KTX2 is deferred (design-decisions.md §10).
+// The engine's public texture ABI is .ltex; KTX2 is intentionally outside the
+// supported importer and runtime formats.
 // ----------------------------------------------------------------------------
 
 constexpr uint32_t kLtexMagic = 0x5845544C; // 'LTEX' little-endian
@@ -430,8 +477,11 @@ std::vector<LtexMip> BuildMipChain(LtexMip base, uint32_t channels) {
     return chain;
 }
 
-bool WriteLtex(const std::string& output_path, uint32_t width, uint32_t height,
-               uint32_t channels, const std::vector<LtexMip>& mips) {
+bool WriteLtex(const std::string& output_path,
+               uint32_t width,
+               uint32_t height,
+               uint32_t channels,
+               const std::vector<LtexMip>& mips) {
     std::ofstream out(output_path, std::ios::binary);
     if (!out) {
         std::cerr << "Error: Could not open output file " << output_path << std::endl;
@@ -458,32 +508,36 @@ bool WriteLtex(const std::string& output_path, uint32_t width, uint32_t height,
 } // namespace
 
 // Public entry point (also used by the round-trip test, which re-declares this
-// signature). Imports a PNG and writes a box-filter mip-chained .ltex.
+// signature). Imports a PNG and writes a box-filter mip-chained.ltex.
 //
-// target_size (T-I4-7): when > 0 the source is resized to target_size x
+// target_size: when > 0 the source is resized to target_size x
 // target_size (sRGB-correct box/Mitchell resample via stb_image_resize2) before
 // the mip chain is built. Terrain albedo/normal source plates are 2K PBR maps;
-// the committed iteration-4 terrain arrays are 256x256 so the whole terrain set
+// the committed  terrain arrays are 256x256 so the whole terrain set
 // stays well inside the 96 MB residency budget. When target_size == 0 the source
-// is imported at its native size (the T-I4-6 round-trip behaviour, byte-stable).
+// is imported at its native size (the  round-trip behaviour, byte-stable).
 //
-// emit_preview_png (T-I4-7): when true a sibling <stem>.png is written next to
-// the .ltex holding the (possibly resized) mip-0 image, so the downsized terrain
-// plate is committable/reviewable as a PNG alongside the binary .ltex.
-// 4-arg worker (T-I4-7). The 2-arg public overload below preserves the T-I4-6
+// emit_preview_png: when true a sibling <stem>.png is written next to
+// the.ltex holding the (possibly resized) mip-0 image, so the downsized terrain
+// plate is committable/reviewable as a PNG alongside the binary.ltex.
+// 4-arg worker. The 2-arg public overload below preserves the
 // ABI/declaration the round-trip test links against.
-bool process_texture_resized(const std::string& input_path, const std::string& output_path,
-                             uint32_t target_size, bool emit_preview_png) {
+bool process_texture_resized(const std::string& input_path,
+                             const std::string& output_path,
+                             uint32_t target_size,
+                             bool emit_preview_png) {
     int width = 0;
     int height = 0;
     int source_channels = 0;
-    // Do NOT flip: .ltex stores PNG row order; the runtime upload path applies
+    // Do NOT flip:.ltex stores PNG row order; the runtime upload path applies
     // any flip it needs. Force 4 channels (RGBA) for the texture-array path.
     constexpr int kForcedChannels = 4;
     stbi_set_flip_vertically_on_load(false);
-    unsigned char* data = stbi_load(input_path.c_str(), &width, &height, &source_channels, kForcedChannels);
+    unsigned char* data =
+        stbi_load(input_path.c_str(), &width, &height, &source_channels, kForcedChannels);
     if (!data) {
-        std::cerr << "Error: Could not load image: " << input_path << " (" << stbi_failure_reason() << ")" << std::endl;
+        std::cerr << "Error: Could not load image: " << input_path << " (" << stbi_failure_reason()
+                  << ")" << std::endl;
         return false;
     }
     if (width <= 0 || height <= 0) {
@@ -498,10 +552,15 @@ bool process_texture_resized(const std::string& input_path, const std::string& o
     if (target_size > 0 && (static_cast<uint32_t>(width) != target_size ||
                             static_cast<uint32_t>(height) != target_size)) {
         std::vector<uint8_t> resized(static_cast<size_t>(target_size) * target_size * channels);
-        unsigned char* out = stbir_resize_uint8_srgb(
-            data, width, height, 0,
-            resized.data(), static_cast<int>(target_size), static_cast<int>(target_size), 0,
-            STBIR_RGBA);
+        unsigned char* out = stbir_resize_uint8_srgb(data,
+                                                     width,
+                                                     height,
+                                                     0,
+                                                     resized.data(),
+                                                     static_cast<int>(target_size),
+                                                     static_cast<int>(target_size),
+                                                     0,
+                                                     STBIR_RGBA);
         if (!out) {
             std::cerr << "Error: Could not resize image: " << input_path << std::endl;
             stbi_image_free(data);
@@ -521,8 +580,12 @@ bool process_texture_resized(const std::string& input_path, const std::string& o
 
     if (emit_preview_png) {
         const std::string preview = OutputStem(output_path) + ".png";
-        if (!stbi_write_png(preview.c_str(), width, height, static_cast<int>(channels),
-                            base.pixels.data(), width * static_cast<int>(channels))) {
+        if (!stbi_write_png(preview.c_str(),
+                            width,
+                            height,
+                            static_cast<int>(channels),
+                            base.pixels.data(),
+                            width * static_cast<int>(channels))) {
             std::cerr << "Warning: Could not write preview PNG: " << preview << std::endl;
         } else {
             std::cout << "  - Preview PNG: " << preview << std::endl;
@@ -530,31 +593,37 @@ bool process_texture_resized(const std::string& input_path, const std::string& o
     }
 
     const std::vector<LtexMip> mips = BuildMipChain(std::move(base), channels);
-    if (!WriteLtex(output_path, static_cast<uint32_t>(width), static_cast<uint32_t>(height), channels, mips)) {
+    if (!WriteLtex(output_path,
+                   static_cast<uint32_t>(width),
+                   static_cast<uint32_t>(height),
+                   channels,
+                   mips)) {
         return false;
     }
 
-    std::cout << "Successfully processed texture '" << input_path << "' -> '" << output_path << "' (LTEX)" << std::endl;
-    std::cout << "  - Dimensions: " << width << "x" << height << ", channels: " << channels << std::endl;
+    std::cout << "Successfully processed texture '" << input_path << "' -> '" << output_path
+              << "' (LTEX)" << std::endl;
+    std::cout << "  - Dimensions: " << width << "x" << height << ", channels: " << channels
+              << std::endl;
     std::cout << "  - Mip levels: " << mips.size() << std::endl;
     return true;
 }
 
-// T-I4-6 ABI: native-size PNG -> .ltex import. Stable signature the round-trip
+//  ABI: native-size PNG ->.ltex import. Stable signature the round-trip
 // test re-declares and links against.
 bool process_texture(const std::string& input_path, const std::string& output_path) {
     return process_texture_resized(input_path, output_path, 0, false);
 }
 
-// I8: optional triangle budget for the static (.lmesh) path, set by main() from
+// optional triangle budget for the static (.lmesh) path, set by main from
 // --max-tris. A file-static keeps process_gltf's 2-arg signature intact so the
 // asset round-trip tests (which forward-declare process_gltf(string,string)) and
 // the CMake auto-asset rule keep linking unchanged. 0 = no decimation.
 static size_t g_max_tris = 0;
-// I8: when >= 0, export ONLY this global primitive index (counted across all
+// when >= 0, export ONLY this global primitive index (counted across all
 // meshes) instead of merging every primitive. Multi-material assets (e.g. the
 // tree: trunk/branch/leaves, each with its OWN atlas + UV set) are split into
-// one .lmesh per part so each part samples its correct texture via the static-
+// one.lmesh per part so each part samples its correct texture via the static-
 // model UV lane. -1 = merge all (default, unchanged behaviour).
 static int g_only_primitive = -1;
 
@@ -590,8 +659,9 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
     for (size_t mesh_idx = 0; mesh_idx < data->meshes_count; ++mesh_idx) {
         for (size_t prim_idx = 0; prim_idx < data->meshes[mesh_idx].primitives_count; ++prim_idx) {
             ++global_prim_index;
-            // I8: per-part export — skip primitives that aren't the requested one.
-            if (g_only_primitive >= 0 && global_prim_index != g_only_primitive) continue;
+            // per-part export — skip primitives that aren't the requested one.
+            if (g_only_primitive >= 0 && global_prim_index != g_only_primitive)
+                continue;
             cgltf_primitive* primitive = &data->meshes[mesh_idx].primitives[prim_idx];
 
             cgltf_accessor* index_accessor = primitive->indices;
@@ -599,28 +669,35 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
             cgltf_accessor* norm_accessor = nullptr;
             cgltf_accessor* uv_accessor = nullptr;
 
-            // I8: pick the UV SET the base-color texture actually uses (gltf
+            // pick the UV SET the base-color texture actually uses (gltf
             // texCoord index). The tree's branches sample TEXCOORD_1; trunk/leaves
             // sample TEXCOORD_0. Taking "the first texcoord" textures branches with
             // the wrong UVs. Fall back to set 0 when no material/texture.
             int wanted_uv_set = 0;
             if (primitive->material && primitive->material->has_pbr_metallic_roughness) {
-                wanted_uv_set = primitive->material->pbr_metallic_roughness.base_color_texture.texcoord;
+                wanted_uv_set =
+                    primitive->material->pbr_metallic_roughness.base_color_texture.texcoord;
             }
             cgltf_accessor* uv_fallback = nullptr;
             for (size_t i = 0; i < primitive->attributes_count; ++i) {
                 cgltf_attribute* attr = &primitive->attributes[i];
-                if (attr->type == cgltf_attribute_type_position) pos_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_normal) norm_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_position)
+                    pos_accessor = attr->data;
+                if (attr->type == cgltf_attribute_type_normal)
+                    norm_accessor = attr->data;
                 if (attr->type == cgltf_attribute_type_texcoord) {
-                    if (attr->index == wanted_uv_set) uv_accessor = attr->data;
-                    if (!uv_fallback) uv_fallback = attr->data;
+                    if (attr->index == wanted_uv_set)
+                        uv_accessor = attr->data;
+                    if (!uv_fallback)
+                        uv_fallback = attr->data;
                 }
             }
-            if (!uv_accessor) uv_accessor = uv_fallback;
+            if (!uv_accessor)
+                uv_accessor = uv_fallback;
 
             if (!index_accessor || !pos_accessor || !norm_accessor || !uv_accessor) {
-                std::cerr << "Warning: Skipping primitive " << prim_idx << " in mesh " << mesh_idx << " due to missing attributes." << std::endl;
+                std::cerr << "Warning: Skipping primitive " << prim_idx << " in mesh " << mesh_idx
+                          << " due to missing attributes." << std::endl;
                 continue;
             }
 
@@ -660,19 +737,43 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
 
     // Now, run the optimization pipeline on the combined geometry
     std::vector<unsigned int> remap(master_raw_vertices.size());
-    size_t unique_vertex_count = meshopt_generateVertexRemap(remap.data(), master_indices.data(), master_indices.size(), master_raw_vertices.data(), master_raw_vertices.size(), sizeof(Vertex));
+    size_t unique_vertex_count = meshopt_generateVertexRemap(remap.data(),
+                                                             master_indices.data(),
+                                                             master_indices.size(),
+                                                             master_raw_vertices.data(),
+                                                             master_raw_vertices.size(),
+                                                             sizeof(Vertex));
 
     std::vector<uint32_t> optimized_indices(master_indices.size());
-    meshopt_remapIndexBuffer(optimized_indices.data(), master_indices.data(), master_indices.size(), remap.data());
+    meshopt_remapIndexBuffer(
+        optimized_indices.data(), master_indices.data(), master_indices.size(), remap.data());
 
     std::vector<Vertex> optimized_vertices(unique_vertex_count);
-    meshopt_remapVertexBuffer(optimized_vertices.data(), master_raw_vertices.data(), master_raw_vertices.size(), sizeof(Vertex), remap.data());
+    meshopt_remapVertexBuffer(optimized_vertices.data(),
+                              master_raw_vertices.data(),
+                              master_raw_vertices.size(),
+                              sizeof(Vertex),
+                              remap.data());
 
-    meshopt_optimizeVertexCache(optimized_indices.data(), optimized_indices.data(), optimized_indices.size(), unique_vertex_count);
-    meshopt_optimizeOverdraw(optimized_indices.data(), optimized_indices.data(), optimized_indices.size(), &optimized_vertices[0].pos[0], unique_vertex_count, sizeof(Vertex), 1.05f);
-    meshopt_optimizeVertexFetch(optimized_vertices.data(), optimized_indices.data(), optimized_indices.size(), optimized_vertices.data(), unique_vertex_count, sizeof(Vertex));
+    meshopt_optimizeVertexCache(optimized_indices.data(),
+                                optimized_indices.data(),
+                                optimized_indices.size(),
+                                unique_vertex_count);
+    meshopt_optimizeOverdraw(optimized_indices.data(),
+                             optimized_indices.data(),
+                             optimized_indices.size(),
+                             &optimized_vertices[0].pos[0],
+                             unique_vertex_count,
+                             sizeof(Vertex),
+                             1.05f);
+    meshopt_optimizeVertexFetch(optimized_vertices.data(),
+                                optimized_indices.data(),
+                                optimized_indices.size(),
+                                optimized_vertices.data(),
+                                unique_vertex_count,
+                                sizeof(Vertex));
 
-    // I8: optional decimation to a triangle budget (LOD0). Photogrammetry/SpeedTree
+    // optional decimation to a triangle budget (LOD0). Photogrammetry/SpeedTree
     // exports can be millions of tris (tree_small_02 = ~2.06M); at instance scale
     // that is a vertex/overdraw bomb with no LOD. meshopt_simplify collapses toward
     // the target while bounding the geometric error and preserving the UV seams;
@@ -684,25 +785,36 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
         // meshopt_SimplifySparse: the asset may be many DISCONNECTED components
         // (foliage leaf cards). Without it, isolated small cards are collapsed as
         // "small features" and the canopy vanishes; with it, coverage is preserved.
-        const size_t simplified_count = meshopt_simplify(
-            simplified.data(), optimized_indices.data(), optimized_indices.size(),
-            &optimized_vertices[0].pos[0], unique_vertex_count, sizeof(Vertex),
-            target_index_count, /*target_error*/ 0.10f, meshopt_SimplifySparse, &result_error);
+        const size_t simplified_count = meshopt_simplify(simplified.data(),
+                                                         optimized_indices.data(),
+                                                         optimized_indices.size(),
+                                                         &optimized_vertices[0].pos[0],
+                                                         unique_vertex_count,
+                                                         sizeof(Vertex),
+                                                         target_index_count,
+                                                         /*target_error*/ 0.10f,
+                                                         meshopt_SimplifySparse,
+                                                         &result_error);
         simplified.resize(simplified_count);
         optimized_indices.swap(simplified);
-        meshopt_optimizeVertexCache(optimized_indices.data(), optimized_indices.data(),
-            optimized_indices.size(), unique_vertex_count);
-        const size_t new_vertex_count = meshopt_optimizeVertexFetch(
-            optimized_vertices.data(), optimized_indices.data(), optimized_indices.size(),
-            optimized_vertices.data(), unique_vertex_count, sizeof(Vertex));
+        meshopt_optimizeVertexCache(optimized_indices.data(),
+                                    optimized_indices.data(),
+                                    optimized_indices.size(),
+                                    unique_vertex_count);
+        const size_t new_vertex_count = meshopt_optimizeVertexFetch(optimized_vertices.data(),
+                                                                    optimized_indices.data(),
+                                                                    optimized_indices.size(),
+                                                                    optimized_vertices.data(),
+                                                                    unique_vertex_count,
+                                                                    sizeof(Vertex));
         optimized_vertices.resize(new_vertex_count);
         unique_vertex_count = new_vertex_count;
-        std::cout << "  - Simplified to " << (optimized_indices.size() / 3)
-                  << " tris (target " << g_max_tris << ", rel error " << result_error << ")" << std::endl;
+        std::cout << "  - Simplified to " << (optimized_indices.size() / 3) << " tris (target "
+                  << g_max_tris << ", rel error " << result_error << ")" << std::endl;
     }
 
-    float min_ext[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
-    float max_ext[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+    float min_ext[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+    float max_ext[3] = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
 
     for (const auto& v : optimized_vertices) {
         min_ext[0] = std::min(min_ext[0], v.pos[0]);
@@ -737,12 +849,16 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
     memcpy(header.boundingSphere, sphere, sizeof(sphere));
 
     outFile.write(reinterpret_cast<const char*>(&header), sizeof(LMeshHeader));
-    outFile.write(reinterpret_cast<const char*>(optimized_vertices.data()), unique_vertex_count * sizeof(Vertex));
-    outFile.write(reinterpret_cast<const char*>(optimized_indices.data()), optimized_indices.size() * sizeof(uint32_t));
+    outFile.write(reinterpret_cast<const char*>(optimized_vertices.data()),
+                  unique_vertex_count * sizeof(Vertex));
+    outFile.write(reinterpret_cast<const char*>(optimized_indices.data()),
+                  optimized_indices.size() * sizeof(uint32_t));
     outFile.close();
 
-    std::cout << "Successfully processed '" << input_path << "' -> '" << output_path << "'" << std::endl;
-    std::cout << "  - Vertices: " << master_raw_vertices.size() << " -> " << unique_vertex_count << std::endl;
+    std::cout << "Successfully processed '" << input_path << "' -> '" << output_path << "'"
+              << std::endl;
+    std::cout << "  - Vertices: " << master_raw_vertices.size() << " -> " << unique_vertex_count
+              << std::endl;
     std::cout << "  - Indices: " << optimized_indices.size() << std::endl;
 
     cgltf_free(data);
@@ -751,27 +867,35 @@ void process_gltf(const std::string& input_path, const std::string& output_path)
 int main(int argc, char* argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> <output.lmesh|output.ltex> "
-                     "[target_size] [--preview-png] [--max-tris N]" << std::endl;
-        std::cerr << "  --max-tris N : for .lmesh output, decimate the mesh to <= N triangles (LOD0)"
+                     "[target_size] [--preview-png] [--max-tris N]"
                   << std::endl;
-        std::cerr << "  --emit-lods : for .lmesh output, also write coarser <stem>.lod1.lmesh /"
+        std::cerr << "  --max-tris N: for.lmesh output, decimate the mesh to <= N triangles (LOD0)"
+                  << std::endl;
+        std::cerr << "  --emit-lods: for.lmesh output, also write coarser <stem>.lod1.lmesh /"
                      " <stem>.lod2.lmesh distance LODs (render-only; renderer falls back to LOD0"
-                     " if absent)" << std::endl;
-        std::cerr << "  --primitive N : for .lmesh output, export ONLY global primitive N (per-part split"
-                     " of a multi-material asset) using that part's own UV set" << std::endl;
-        std::cerr << "  target_size : for .ltex output, resize the source to N x N before mipping "
-                     "(0 / omitted = native)" << std::endl;
-        std::cerr << "  --preview-png : for .ltex output, also write a sibling <stem>.png of the "
-                     "(resized) mip-0 image" << std::endl;
+                     " if absent)"
+                  << std::endl;
+        std::cerr
+            << "  --primitive N: for.lmesh output, export ONLY global primitive N (per-part split"
+               " of a multi-material asset) using that part's own UV set"
+            << std::endl;
+        std::cerr << "  target_size: for.ltex output, resize the source to N x N before mipping "
+                     "(0 / omitted = native)"
+                  << std::endl;
+        std::cerr << "  --preview-png: for.ltex output, also write a sibling <stem>.png of the "
+                     "(resized) mip-0 image"
+                  << std::endl;
         return 1;
     }
 
     const std::string output_path = argv[2];
     auto ends_with = [](const std::string& s, const std::string& suffix) {
-        if (s.size() < suffix.size()) return false;
-        return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin(),
-                          [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) ==
-                                                      std::tolower(static_cast<unsigned char>(b)); });
+        if (s.size() < suffix.size())
+            return false;
+        return std::equal(suffix.rbegin(), suffix.rend(), s.rbegin(), [](char a, char b) {
+            return std::tolower(static_cast<unsigned char>(a)) ==
+                   std::tolower(static_cast<unsigned char>(b));
+        });
     };
 
     if (ends_with(output_path, ".ltex")) {
@@ -793,11 +917,11 @@ int main(int argc, char* argv[]) {
         return process_texture_resized(argv[1], output_path, target_size, emit_preview_png) ? 0 : 1;
     }
 
-    // I8: optional triangle budget for the static (.lmesh) path. --max-tris N
+    // optional triangle budget for the static (.lmesh) path. --max-tris N
     // decimates the combined mesh to <= N triangles (LOD0). Used to bring
     // photogrammetry/SpeedTree exports down to an instanceable poly count.
     size_t max_tris = 0;
-    // Track-B (roadmap pillar B): --emit-lods also writes coarser LOD variants
+    // tree rendering (tree rendering): --emit-lods also writes coarser LOD variants
     // ("<stem>.lod1.lmesh", "<stem>.lod2.lmesh") next to the LOD0 output by
     // re-running the SAME meshopt decimation path at successively smaller triangle
     // budgets. The renderer (Luminumbra::Rendering::LodMeshPath / SelectTreeLod)
@@ -807,11 +931,19 @@ int main(int argc, char* argv[]) {
     for (int a = 3; a < argc; ++a) {
         const std::string arg = argv[a];
         if (arg == "--max-tris" && a + 1 < argc) {
-            try { max_tris = static_cast<size_t>(std::stoull(argv[++a])); }
-            catch (...) { std::cerr << "Error: --max-tris needs an integer" << std::endl; return 1; }
+            try {
+                max_tris = static_cast<size_t>(std::stoull(argv[++a]));
+            } catch (...) {
+                std::cerr << "Error: --max-tris needs an integer" << std::endl;
+                return 1;
+            }
         } else if (arg == "--primitive" && a + 1 < argc) {
-            try { g_only_primitive = std::stoi(argv[++a]); }
-            catch (...) { std::cerr << "Error: --primitive needs an integer" << std::endl; return 1; }
+            try {
+                g_only_primitive = std::stoi(argv[++a]);
+            } catch (...) {
+                std::cerr << "Error: --primitive needs an integer" << std::endl;
+                return 1;
+            }
         } else if (arg == "--emit-lods") {
             emit_lods = true;
         } else {
@@ -835,13 +967,13 @@ int main(int argc, char* argv[]) {
             stem = stem.substr(0, stem.size() - kExt.size());
         }
         const size_t base_budget = (max_tris > 0) ? max_tris : 20000;
-        const size_t lod_budgets[2] = { base_budget / 2, base_budget / 6 };
+        const size_t lod_budgets[2] = {base_budget / 2, base_budget / 6};
         for (int lod = 1; lod <= 2; ++lod) {
             const size_t budget = lod_budgets[lod - 1];
             g_max_tris = (budget > 0) ? budget : 1;
             const std::string lod_path = stem + ".lod" + std::to_string(lod) + kExt;
-            std::cout << "Emitting LOD" << lod << " (<= " << g_max_tris
-                      << " tris) -> '" << lod_path << "'" << std::endl;
+            std::cout << "Emitting LOD" << lod << " (<= " << g_max_tris << " tris) -> '" << lod_path
+                      << "'" << std::endl;
             process_gltf(argv[1], lod_path);
         }
     }

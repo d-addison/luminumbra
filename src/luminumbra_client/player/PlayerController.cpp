@@ -1,14 +1,18 @@
 #include "PlayerController.h"
-#include "rendering/Camera.h"
-#include "luminumbra_common/systems/PhysicsSystem.h"
-#include "luminumbra_common/core/SystemConfig.h"
 #include "core/Log.h"
+#include "luminumbra_common/core/SystemConfig.h"
+#include "luminumbra_common/systems/PhysicsSystem.h"
+#include "rendering/Camera.h"
 
 namespace Luminumbra::Client {
 
-PlayerController::PlayerController(GLFWwindow* window, Rendering::Camera* camera, Systems::PhysicsSystem* physicsSystem)
-    : m_window(window), m_camera(camera), m_physicsSystem(physicsSystem) {
-    // Seed key bindings from the compiled defaults; ApplyKeyBindings() later overlays config.
+PlayerController::PlayerController(GLFWwindow* window,
+                                   Rendering::Camera* camera,
+                                   Systems::PhysicsSystem* physicsSystem)
+    : m_window(window)
+    , m_camera(camera)
+    , m_physicsSystem(physicsSystem) {
+    // Seed key bindings from the compiled defaults; ApplyKeyBindings later overlays config.
     for (const auto& def : kInputActionDefs) {
         m_keys[static_cast<std::size_t>(def.action)] = def.default_key;
     }
@@ -39,7 +43,10 @@ void PlayerController::RenderDebugUI() {
     ImGui::SetNextWindowBgAlpha(0.65f); // Make the window semi-transparent
 
     // Define window flags for a simple, non-interactive overlay
-    ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+    ImGuiWindowFlags window_flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+        ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
 
     if (ImGui::Begin("Player State", nullptr, window_flags)) {
         // Display Movement Mode
@@ -50,8 +57,11 @@ void PlayerController::RenderDebugUI() {
 
         // Display Position Info
         ImGui::Text("Controller Pos: %.2f, %.2f, %.2f", m_position.x, m_position.y, m_position.z);
-        ImGui::Text("Camera Pos:     %.2f, %.2f, %.2f", m_camera->Position.x, m_camera->Position.y, m_camera->Position.z);
-        
+        ImGui::Text("Camera Pos:     %.2f, %.2f, %.2f",
+                    m_camera->Position.x,
+                    m_camera->Position.y,
+                    m_camera->Position.z);
+
         ImGui::Separator();
 
         // Display Action States
@@ -61,10 +71,10 @@ void PlayerController::RenderDebugUI() {
         // Display mode-specific info
         if (m_mode == MovementMode::Walking) {
             ImGui::Text("Crouching: %s", m_isCrouching ? "Yes" : "No");
-            // For this to work, you may need to add a simple `is_player_on_ground()`
+            // For this to work, you may need to add a simple `is_player_on_ground`
             // function to your PhysicsSystem.
             if (m_physicsSystem) {
-                 ImGui::Text("On Ground: %s", m_physicsSystem->is_player_grounded() ? "Yes" : "No");
+                ImGui::Text("On Ground: %s", m_physicsSystem->is_player_grounded() ? "Yes" : "No");
             }
         } else { // Noclip
             float current_speed = m_noclipBaseSpeed * m_noclipSpeedMultiplier;
@@ -91,10 +101,14 @@ PlayerReplayInputFrame PlayerController::ReadLiveInputFrame() const {
 
     glm::vec3 right = m_camera->Right;
 
-    if (glfwGetKey(m_window, key(InputAction::MoveForward)) == GLFW_PRESS) wishDir += forward;
-    if (glfwGetKey(m_window, key(InputAction::MoveBack)) == GLFW_PRESS) wishDir -= forward;
-    if (glfwGetKey(m_window, key(InputAction::MoveLeft)) == GLFW_PRESS) wishDir -= right;
-    if (glfwGetKey(m_window, key(InputAction::MoveRight)) == GLFW_PRESS) wishDir += right;
+    if (glfwGetKey(m_window, key(InputAction::MoveForward)) == GLFW_PRESS)
+        wishDir += forward;
+    if (glfwGetKey(m_window, key(InputAction::MoveBack)) == GLFW_PRESS)
+        wishDir -= forward;
+    if (glfwGetKey(m_window, key(InputAction::MoveLeft)) == GLFW_PRESS)
+        wishDir -= right;
+    if (glfwGetKey(m_window, key(InputAction::MoveRight)) == GLFW_PRESS)
+        wishDir += right;
 
     if (m_mode == MovementMode::Noclip) {
         if (glfwGetKey(m_window, key(InputAction::NoclipUp)) == GLFW_PRESS) {
@@ -119,7 +133,11 @@ void PlayerController::ApplyReplayInput(float deltaTime, const PlayerReplayInput
     }
 
     if (m_mode == MovementMode::Walking) {
-        UpdateWalking(deltaTime, wishDir, inputFrame.jumpPressed, inputFrame.crouchPressed, inputFrame.sprintHeld);
+        UpdateWalking(deltaTime,
+                      wishDir,
+                      inputFrame.jumpPressed,
+                      inputFrame.crouchPressed,
+                      inputFrame.sprintHeld);
     } else { // Noclip
         UpdateNoclip(deltaTime, wishDir, inputFrame.sprintHeld);
     }
@@ -170,7 +188,7 @@ void PlayerController::ProcessKeyInput(int key, int action) {
             // When exiting noclip, sync the physics body to the camera's position.
             const float standingEyeHeight = m_standingHeight * 0.95f;
             m_position = m_camera->Position - glm::vec3(0.0f, standingEyeHeight, 0.0f);
-            
+
             if (m_physicsSystem) {
                 // If this is the first time entering walking mode, create the physics body.
                 if (!m_hasInitializedPhysicsPlayer) {
@@ -186,14 +204,15 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         }
     }
 
-    // --- Pillar-G photo mode (g-vertical-slice spike) — read-only w.r.t. sim ---
+    // --- photography photo mode (feature) — read-only w.r.t. sim ---
     // Toggle photo mode on/off; while active the shutter + lens nudges are armed.
     // None of these touch the physics body, the registry, or a tick — they only set
     // client-only flags the main loop reads after render.
     if (key == this->key(InputAction::TogglePhotoMode) && action == GLFW_PRESS) {
         m_photoModeActive = !m_photoModeActive;
-        LUMINUMBRA_CORE_INFO(m_photoModeActive ? "Photo mode ON. [/] aperture, -/= focus, Enter to shutter."
-                                               : "Photo mode OFF.");
+        LUMINUMBRA_CORE_INFO(m_photoModeActive
+                                 ? "Photo mode ON. [/] aperture, -/= focus, Enter to shutter."
+                                 : "Photo mode OFF.");
     }
     // Codex screen toggle (client-only overlay): edge-triggered, consumed by the main loop.
     if (key == this->key(InputAction::ToggleCodex) && action == GLFW_PRESS) {
@@ -205,20 +224,31 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         }
         // Lens nudges fire on press AND repeat so holding ramps the value.
         const bool pressed = (action == GLFW_PRESS || action == GLFW_REPEAT);
-        if (pressed && key == this->key(InputAction::LensApertureUp))   m_apertureNudge += 0.3f;
-        if (pressed && key == this->key(InputAction::LensApertureDown)) m_apertureNudge -= 0.3f;
-        if (pressed && key == this->key(InputAction::LensFocusUp))      m_focusNudge += 0.25f;
-        if (pressed && key == this->key(InputAction::LensFocusDown))    m_focusNudge -= 0.25f;
-        // Manual exposure (spec 012): shutter speed + ISO in 1/3-stop steps.
-        if (pressed && key == this->key(InputAction::LensShutterUp))    m_shutterSpeedNudge += 0.333f;
-        if (pressed && key == this->key(InputAction::LensShutterDown))  m_shutterSpeedNudge -= 0.333f;
-        if (pressed && key == this->key(InputAction::LensIsoUp))        m_isoNudge += 0.333f;
-        if (pressed && key == this->key(InputAction::LensIsoDown))      m_isoNudge -= 0.333f;
-        // Spec 013: photo-mode environment scrub. TOD ramps on press+repeat (smooth scrub);
+        if (pressed && key == this->key(InputAction::LensApertureUp))
+            m_apertureNudge += 0.3f;
+        if (pressed && key == this->key(InputAction::LensApertureDown))
+            m_apertureNudge -= 0.3f;
+        if (pressed && key == this->key(InputAction::LensFocusUp))
+            m_focusNudge += 0.25f;
+        if (pressed && key == this->key(InputAction::LensFocusDown))
+            m_focusNudge -= 0.25f;
+        // Manual exposure: shutter speed + ISO in 1/3-stop steps.
+        if (pressed && key == this->key(InputAction::LensShutterUp))
+            m_shutterSpeedNudge += 0.333f;
+        if (pressed && key == this->key(InputAction::LensShutterDown))
+            m_shutterSpeedNudge -= 0.333f;
+        if (pressed && key == this->key(InputAction::LensIsoUp))
+            m_isoNudge += 0.333f;
+        if (pressed && key == this->key(InputAction::LensIsoDown))
+            m_isoNudge -= 0.333f;
+        // photo-mode environment scrub. TOD ramps on press+repeat (smooth scrub);
         // weather cycles once per discrete PRESS (not repeat).
-        if (pressed && key == this->key(InputAction::PhotoTodBack))     m_todNudge -= 0.02f;
-        if (pressed && key == this->key(InputAction::PhotoTodForward))  m_todNudge += 0.02f;
-        if (action == GLFW_PRESS && key == this->key(InputAction::PhotoWeatherCycle)) ++m_weatherCycle;
+        if (pressed && key == this->key(InputAction::PhotoTodBack))
+            m_todNudge -= 0.02f;
+        if (pressed && key == this->key(InputAction::PhotoTodForward))
+            m_todNudge += 0.02f;
+        if (action == GLFW_PRESS && key == this->key(InputAction::PhotoWeatherCycle))
+            ++m_weatherCycle;
     }
 
     // --- Mode-Specific Controls ---
@@ -238,14 +268,18 @@ void PlayerController::ProcessMouseScroll(double yoffset) {
     if (m_mode == MovementMode::Noclip) {
         // Increase or decrease the speed multiplier
         m_noclipSpeedMultiplier += yoffset * 0.25f; // Adjust sensitivity as needed
-        // Clamp the multiplier to a reasonable range to prevent it from becoming zero or excessively fast
+        // Clamp the multiplier to a reasonable range to prevent it from becoming zero or
+        // excessively fast
         m_noclipSpeedMultiplier = glm::clamp(m_noclipSpeedMultiplier, 0.1f, 20.0f);
         LUMINUMBRA_CORE_INFO("Noclip speed multiplier: {:.2f}x", m_noclipSpeedMultiplier);
     }
 }
 
-
-void PlayerController::UpdateWalking(float deltaTime, const glm::vec3& wishDir, bool jumpPressed, bool crouchPressed, bool sprintHeld) {
+void PlayerController::UpdateWalking(float deltaTime,
+                                     const glm::vec3& wishDir,
+                                     bool jumpPressed,
+                                     bool crouchPressed,
+                                     bool sprintHeld) {
     if (!m_physicsSystem) {
         m_velocity = glm::vec3(0.0f);
         return;
@@ -267,7 +301,8 @@ void PlayerController::UpdateWalking(float deltaTime, const glm::vec3& wishDir, 
 
     // Sprinting is only possible when not crouched
     bool is_sprinting = sprintHeld && !m_isCrouching;
-    float current_speed = m_isCrouching ? m_crouchSpeed : (is_sprinting ? m_sprintSpeed : m_walkSpeed);
+    float current_speed =
+        m_isCrouching ? m_crouchSpeed : (is_sprinting ? m_sprintSpeed : m_walkSpeed);
 
     // Let the physics system handle the actual movement
     const glm::vec3 previousPosition = m_position;

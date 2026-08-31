@@ -11,18 +11,18 @@
 namespace Luminumbra::Rendering {
 
 // ===========================================================================
-// T-I5b-4 (W1): waterfall SITE DETECTION. RENDER-SIDE but WORLD-DETERMINISTIC.
+// waterfall SITE DETECTION.  but WORLD-DETERMINISTIC.
 //
-// A waterfall is a rendered phenomenon (no new sim — design-decisions §5): the
-// dressing (the falling sheet shader, the A1 spray particles, the plunge-pool
+// A waterfall is a rendered phenomenon (no new sim — documented design): the
+// dressing (the falling sheet shader, the  spray particles, the plunge-pool
 // foam, the distance-attenuated roar) is render-only and is NEVER hashed. But
 // the SITES the dressing attaches to must be the SAME for every player and
-// every replay (critique F5): detection is a PURE FUNCTION of the generated
-// world data — the iter-4 river course (RiverInfluenceAt) crossed with the
+// every replay (regression review): detection is a PURE FUNCTION of the generated
+// world data — the  river course (RiverInfluenceAt) crossed with the
 // heightfield (GetTerrainHeightAt) — computed once per region and CACHED,
 // independent of camera or frame. The same seed yields byte-identical sites.
 //
-// ONE-WAY RULE (critique F2 / design §9.2): this reads world-gen queries only
+// ONE-WAY RULE (regression review / documented design): this reads world-gen queries only
 // and writes nothing back into any sim/world_hash input. world_hash stays
 // d950a6afc12a5cdc.
 //
@@ -66,7 +66,7 @@ struct WaterfallSite {
 };
 
 // Fixed detection parameters (PINNED — changing these changes the site set and
-// is a deliberate gate re-bless, exactly like the river PV band). Defaults are
+// is a deliberate gate update the baseline, exactly like the river PV band). Defaults are
 // tuned for the shipped mountains preset (rivers enabled, channel carved toward
 // SEA_LEVEL through sloped terrain).
 struct WaterfallDetectParams {
@@ -76,17 +76,18 @@ struct WaterfallDetectParams {
     float max_run = 16.0f;         // longest downstream run scanned for a drop (m)
     float river_threshold = 0.05f; // RiverInfluenceAt above this == on the river course
     float cluster_radius = 24.0f;  // de-dup radius (m): lips within this collapse to one site
-    int   half_extent = 768;       // analysis window half-extent (m) around the origin
-    // --- Lake / tarn OUTLET detection (spec 003 A1.1) ---
+    int half_extent = 768;         // analysis window half-extent (m) around the origin
+    // --- Lake / tarn OUTLET detection ---
     // A perched lake (WaterLevelAt > SEA_LEVEL) that spills over its rim down a
     // slope creates a waterfall at the rim. A lake cell qualifies as an outlet
     // crest when an OUTSIDE neighbour (not itself in the lake) has terrain that
     // falls >= lake_outlet_min_drop below the lake surface within a short
     // downhill run. Tuned so only true rim dropoffs qualify, not gentle shores.
-    float lake_surface_epsilon = 0.25f;   // WaterLevelAt must exceed SEA_LEVEL by this to be "in a lake"
-    float lake_outlet_min_drop = 3.0f;    // min terrain fall below lake surface at the rim (m)
+    float lake_surface_epsilon =
+        0.25f; // WaterLevelAt must exceed SEA_LEVEL by this to be "in a lake"
+    float lake_outlet_min_drop = 3.0f;       // min terrain fall below lake surface at the rim (m)
     float lake_outlet_min_steepness = 0.40f; // min drop/run slope of the rim dropoff
-    float lake_outlet_max_run = 20.0f;    // longest downhill run scanned past the rim (m)
+    float lake_outlet_max_run = 20.0f;       // longest downhill run scanned past the rim (m)
 };
 
 // Stable, hashable key for the per-world site cache: the world seed plus the
@@ -98,17 +99,15 @@ struct WaterfallDetectKey {
     int lattice_step_milli = 0;
     int min_drop_milli = 0;
     int min_steepness_milli = 0;
-    // WATER-11: terraform bed edits advance the sim's water epoch; folding it
+    // terraform bed edits advance the sim's water epoch; folding it
     // here makes a dammed/dug river trigger ONE bounded re-survey (a new cache
     // entry) instead of per-frame re-detection or a stale-forever site set.
     std::uint64_t water_epoch = 0;
 
     bool operator==(const WaterfallDetectKey& o) const {
         return seed == o.seed && half_extent == o.half_extent &&
-               lattice_step_milli == o.lattice_step_milli &&
-               min_drop_milli == o.min_drop_milli &&
-               min_steepness_milli == o.min_steepness_milli &&
-               water_epoch == o.water_epoch;
+               lattice_step_milli == o.lattice_step_milli && min_drop_milli == o.min_drop_milli &&
+               min_steepness_milli == o.min_steepness_milli && water_epoch == o.water_epoch;
     }
 };
 
@@ -116,17 +115,17 @@ struct WaterfallDetectKey {
 // the sites in a STABLE order (sorted by a deterministic spatial key), so two
 // calls on the same world produce byte-identical vectors. No caching here — the
 // raw scan; callers that want caching use WaterfallSiteCache below.
-std::vector<WaterfallSite> DetectWaterfalls(
-    const Luminumbra::Systems::SHIELD_WorldSystem& world,
-    const WaterfallDetectParams& params = {});
+std::vector<WaterfallSite> DetectWaterfalls(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                                            const WaterfallDetectParams& params = {});
 
 // FNV-1a hash of the quantized site fields, order-preserving. The determinism
 // surface the WaterfallVisual gate asserts (same seed -> same hash).
 uint64_t HashWaterfallSites(const std::vector<WaterfallSite>& sites);
 
-// WATER-11: the LIVE upstream water factor for a site, [0,1]. Reads the live
+// the LIVE upstream water factor for a site, [0,1]. Reads the live
 // water surface at the CREST (the render float mirror, one-way derived from the
-// mm truth — legal post-Bump-B): 1 = a healthy sheet (water depth at the crest
+// mm truth — legal after derived-state reclassification): 1 = a healthy sheet (water depth at the
+// crest
 // >= full_depth), 0 = upstream dammed/drained (the sheet extinguishes). Returns
 // 1 (neutral) when the crest's chunk carries no live grid — an UNSTREAMED site
 // is unknown, not extinguished. Pure; render-only.
@@ -135,17 +134,21 @@ float LiveWaterFactorAt(const Luminumbra::Systems::SHIELD_WorldSystem& world,
                         float full_depth = 0.25f);
 
 // Per-world cache: detection is computed once per (seed, window) and reused for
-// every subsequent query (camera/frame independent — critique F5). Render-side,
+// every subsequent query (camera/frame independent — regression review). Render-side,
 // owned by the RenderPipeline; never hashed.
 class WaterfallSiteCache {
 public:
     // Returns the cached site set for `world`, computing+caching it on first use.
-    const std::vector<WaterfallSite>& sites_for(
-        const Luminumbra::Systems::SHIELD_WorldSystem& world,
-        const WaterfallDetectParams& params = {});
+    const std::vector<WaterfallSite>&
+    sites_for(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+              const WaterfallDetectParams& params = {});
 
-    void clear() { m_cache.clear(); }
-    std::size_t cached_world_count() const { return m_cache.size(); }
+    void clear() {
+        m_cache.clear();
+    }
+    std::size_t cached_world_count() const {
+        return m_cache.size();
+    }
 
 private:
     struct KeyHash {
@@ -156,8 +159,7 @@ private:
 
 // Builds the cache key for a world + params (PUBLIC so the gate can assert the
 // key derivation is a pure function of the seed/window).
-WaterfallDetectKey MakeWaterfallDetectKey(
-    const Luminumbra::Systems::SHIELD_WorldSystem& world,
-    const WaterfallDetectParams& params);
+WaterfallDetectKey MakeWaterfallDetectKey(const Luminumbra::Systems::SHIELD_WorldSystem& world,
+                                          const WaterfallDetectParams& params);
 
 } // namespace Luminumbra::Rendering

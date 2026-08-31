@@ -17,12 +17,12 @@ add_library(luminumbra_client STATIC
 target_include_directories(luminumbra_client PUBLIC
     # The client's own root directory
     ${CMAKE_CURRENT_SOURCE_DIR}/luminumbra_client
-    
+
     # The 'src' directory, which is the root for includes like "luminumbra_common/..."
-    ${CMAKE_CURRENT_SOURCE_DIR} 
-    
+    ${CMAKE_CURRENT_SOURCE_DIR}
+
     # vendor root, for single-header vendor libs included as "<lib>/<header>.h"
-    # (e.g. renderdoc/renderdoc_app.h -- the GPU-06 in-app capture API).
+    # (e.g. renderdoc/renderdoc_app.h -- the  in-app capture API).
     ${CMAKE_SOURCE_DIR}/vendor
 )
 
@@ -43,7 +43,7 @@ target_link_libraries(luminumbra_client PUBLIC
     stb_headers
 )
 
-# --- Headless Server Executable (T-I3-12) ---
+# --- Headless Server Executable ---
 # Simulation authority only: links luminumbra_common and NOTHING client-side
 # (no OpenGL, GLFW, miniaudio, imgui, RmlUi). The ServerHeadlessHygiene ctest
 # and the HeadlessServerTick validator mode enforce the include boundary.
@@ -68,7 +68,7 @@ target_link_libraries(luminumbra_server_app PRIVATE
 # First-party hygiene (warnings-as-errors per the build preset).
 luminumbra_configure_first_party_target(luminumbra_server_app)
 
-# T-I6: when the Steamworks transport is built in, the redistributable steam_api64.dll
+# when the Steamworks transport is built in, the redistributable steam_api64.dll
 # must sit next to the server exe at runtime. Copy it post-build.
 if(LUMINUMBRA_ENABLE_STEAM AND WIN32)
     add_custom_command(TARGET luminumbra_server_app POST_BUILD

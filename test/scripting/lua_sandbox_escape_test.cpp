@@ -1,26 +1,12 @@
-// Lua sandbox negative-escape corpus (FR-003 of the second-class adversarial pass).
-//
-// IMPORTANT -- what this test IS and IS NOT:
-//   The Lua "sandbox" is presently a STUB. scripting/LuaState.{h,cpp} holds NO
-//   interpreter (no lua_State, no sol::, no luaL_) -- only a declared API manifest
-//   (scripting/LuaApiManifest.{h,cpp}) that enumerates the surface a future live
-//   interpreter will expose to scripts. There is therefore NO live pcall-the-script
-//   sandbox to escape from yet, and this file makes NO live-sandbox-escape guarantee.
-//
-//   What it DOES assert is a CONTRACT over the declared manifest surface: the
-//   whitelist must expose ONLY the intended module.name entries and MUST NOT carry
-//   any of the escape-shaped surface (filesystem / os / process / raw-global /
-//   loader / debug / network) that an adversarial script would reach for. Each case
-//   below is authored as a {module, name} the manifest must reject; the SAME case
-//   list is structured to graduate UNCHANGED to a live `pcall(load(script))` assertion
-//   the day a real lua_State is wired -- only the execution backend changes, not the
-//   corpus. This pins the surface so a careless manifest edit that adds `io.open`
-//   (or any escape vector) fails CI immediately, long before an interpreter lands.
+// Lua sandbox negative-escape corpus. The manifest assertions pin the declared API,
+// while the live interpreter assertions below prove that standard libraries, dynamic
+// loading, process execution, and nondeterministic random access remain unavailable.
 //
 // Registered into frontier_gates_test (mirrors lua_api_manifest_gate_test.cpp).
 #include "gtest/gtest.h"
 
 #include "scripting/LuaApiManifest.h"
+#include "scripting/LuaState.h"
 
 #include <string>
 #include <vector>
@@ -30,9 +16,12 @@ namespace {
 using Luminumbra::scripting::GetLuaApiManifest;
 using Luminumbra::scripting::LuaApiManifest;
 using Luminumbra::scripting::LuaApiManifestMeetsBaseline;
+using Luminumbra::scripting::LuaState;
 using Luminumbra::scripting::SerializeLuaApiManifestJson;
 
-bool ManifestExposes(const LuaApiManifest& manifest, const std::string& module, const std::string& name) {
+bool ManifestExposes(const LuaApiManifest& manifest,
+                     const std::string& module,
+                     const std::string& name) {
     for (const auto& entry : manifest.entries) {
         if (entry.module == module && entry.name == name) {
             return true;
@@ -51,15 +40,12 @@ bool ManifestExposesModule(const LuaApiManifest& manifest, const std::string& mo
 }
 
 // One adversarial probe: the {module, name} an escaping script would call, plus a
-// human-readable escape class. The expectation is ALWAYS "the manifest must NOT
-// expose this". When a live interpreter lands, `attempt` becomes the script body
-// fed to pcall and the assertion flips to "pcall returns false / the symbol is nil"
-// -- the data does not change.
+// human-readable escape class and executable Lua body.
 struct EscapeCase {
     const char* escape_class;
     const char* module;
     const char* name;
-    const char* attempt; // the live-pcall script body this graduates to
+    const char* attempt;
 };
 
 // The escape corpus: every vector a sandbox MUST deny. Grouped by class so a
@@ -132,11 +118,29 @@ TEST(LuaSandboxEscape, NoEscapeVectorIsExposedByTheManifest) {
     }
 }
 
+TEST(LuaSandboxEscape, LiveInterpreterRejectsEscapeCorpus) {
+    LuaState lua;
+    for (const EscapeCase& c : EscapeCorpus()) {
+        double value = 123.0;
+        EXPECT_FALSE(lua.EvalNumber(c.attempt, value))
+            << "live sandbox executed escape probe [" << c.escape_class << "]: " << c.attempt;
+        EXPECT_DOUBLE_EQ(value, 123.0) << "failed evaluation must not modify its output";
+    }
+}
+
+TEST(LuaSandboxEscape, LiveInterpreterStillExecutesTheSafeBinding) {
+    LuaState lua;
+    double value = -1.0;
+    ASSERT_TRUE(lua.EvalNumber("return world.sample_energy_field(0, 0, 0)", value));
+    EXPECT_DOUBLE_EQ(value, 0.0);
+}
+
 // Whole escape-bearing modules must be absent entirely (io/os/debug/package/socket/
 // http). The intended surface is only core/entity/simulation/time/world.
 TEST(LuaSandboxEscape, NoDangerousModuleIsExposedByTheManifest) {
     const LuaApiManifest& manifest = GetLuaApiManifest();
-    for (const char* dangerous : {"io", "os", "debug", "package", "socket", "http", "ffi", "_G", "_ENV"}) {
+    for (const char* dangerous :
+         {"io", "os", "debug", "package", "socket", "http", "ffi", "_G", "_ENV"}) {
         EXPECT_FALSE(ManifestExposesModule(manifest, dangerous))
             << "dangerous module '" << dangerous << "' is present in the script API manifest";
     }
@@ -166,8 +170,9 @@ TEST(LuaSandboxEscape, EveryExposedModuleIsOnTheIntendedWhitelist) {
                 break;
             }
         }
-        EXPECT_TRUE(ok) << "manifest exposes unexpected module '" << entry.module << "." << entry.name
-                        << "' that is not on the intended whitelist {core,entity,simulation,time,world}";
+        EXPECT_TRUE(ok)
+            << "manifest exposes unexpected module '" << entry.module << "." << entry.name
+            << "' that is not on the intended whitelist {core,entity,simulation,time,world}";
     }
 }
 

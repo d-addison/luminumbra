@@ -1,6 +1,6 @@
 #pragma once
 
-// I9-ECO: herd flocking (boids) for the creature brain. A PURE, libm-free, order-independent
+//  herd flocking (boids) for the creature brain. A PURE, libm-free, order-independent
 // steering helper: given a creature and its same-role neighbours, it returns a steer vector
 // blending COHESION (toward the local group centroid) and SEPARATION (away from neighbours
 // that are too close, stronger the closer they are). The CreatureBrainSystem blends this into
@@ -19,11 +19,11 @@ namespace luminumbra::ai {
 namespace dm = ::Luminumbra::DeterministicMath;
 
 struct FlockParams {
-    float neighbor_radius = 12.0f;    // cohesion + alignment consider same-role neighbours within this
-    float separation_radius = 3.0f;   // separation kicks in below this spacing
-    float cohesion_weight = 0.6f;     // pull toward the group centroid
-    float separation_weight = 1.4f;   // push off crowding (dominates up close)
-    float alignment_weight = 0.0f;    // match the group's mean heading (3rd Reynolds term; 0 = off)
+    float neighbor_radius = 12.0f; // cohesion + alignment consider same-role neighbours within this
+    float separation_radius = 3.0f; // separation kicks in below this spacing
+    float cohesion_weight = 0.6f;   // pull toward the group centroid
+    float separation_weight = 1.4f; // push off crowding (dominates up close)
+    float alignment_weight = 0.0f;  // match the group's mean heading (3rd Reynolds term; 0 = off)
 };
 
 // A steering vector in the XZ plane (NOT normalized; the caller blends + renormalizes).
@@ -45,7 +45,7 @@ struct FlockSteer {
 // fixed point. Scale 2^20 keeps centroid precision (~1e-6 at radius 12) and cannot overflow
 // int64 even at crowded N (max separation term ~1e5 * 2^20 ~ 1e11, * thousands of neighbours
 // stays well under 9.2e18).
-inline constexpr double kFlockFixedScale = 1048576.0;  // 2^20
+inline constexpr double kFlockFixedScale = 1048576.0; // 2^20
 
 inline std::int64_t ToFixed(float v) {
     return static_cast<std::int64_t>(static_cast<double>(v) * kFlockFixedScale +
@@ -61,14 +61,17 @@ inline float FromFixed(std::int64_t v) {
 // `neighbors`, used ONLY for the alignment term when `p.alignment_weight > 0`. Pass nullptr (or
 // leave alignment_weight at 0) to skip alignment entirely — the steer is then byte-identical to the
 // cohesion+separation-only result, so existing callers and goldens are unaffected. Like cohesion,
-// the heading sum is reduced in int64 fixed point so it is order-independent w.r.t. the grid gather.
-inline FlockSteer ComputeFlockSteer(
-    float sx, float sz,
-    const std::vector<std::pair<float, float>>& neighbors,
-    const FlockParams& p = {},
-    const std::vector<std::pair<float, float>>* neighbor_headings = nullptr) {
+// the heading sum is reduced in int64 fixed point so it is order-independent w.r.t. the grid
+// gather.
+inline FlockSteer
+ComputeFlockSteer(float sx,
+                  float sz,
+                  const std::vector<std::pair<float, float>>& neighbors,
+                  const FlockParams& p = {},
+                  const std::vector<std::pair<float, float>>* neighbor_headings = nullptr) {
     FlockSteer steer;
-    if (neighbors.empty()) return steer;
+    if (neighbors.empty())
+        return steer;
 
     const bool do_align = p.alignment_weight > 0.0f && neighbor_headings != nullptr &&
                           neighbor_headings->size() == neighbors.size();
@@ -132,4 +135,4 @@ inline FlockSteer ComputeFlockSteer(
     return steer;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

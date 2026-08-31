@@ -17,7 +17,7 @@ class Camera;
 class Shader;
 
 // ===========================================================================
-// I9-FOLIAGE: render-only PROCEDURAL plant pass (behind render.plant_procgen,
+//  render-only PROCEDURAL plant pass (behind render.plant_procgen,
 // OFF by default). Renders the new PROGRAMMATICALLY/GENETICALLY/ATMOSPHERICALLY
 // grown plants (foliage::GeneratePlant -> TessellatePlant) directly into the
 // deferred G-buffer, instead of relying only on the baked static tree models.
@@ -27,15 +27,15 @@ class Shader;
 // local mesh already TRANSFORMED TO WORLD SPACE at its position. It pushes that
 // buffer (plus a signature) via set_plants; the pass uploads it to a dedicated
 // VAO/VBO/EBO ONCE and re-uploads only when the signature changes (flag toggle /
-// position rebuild). execute() draws it into the SAME G-buffer FBO the static
+// position rebuild). execute draws it into the SAME G-buffer FBO the static
 // meshes write (view position, octahedral view normal, albedo, depth), so the
 // lighting pass shades it like any other solid geometry.
 //
-// RENDER-ONLY: nothing here touches the sim or world_hash. When disabled (or
+// nothing here touches the sim or world_hash. When disabled (or
 // no plants pushed) the pass issues zero GL work, so default behaviour is
 // byte-identical.
 //
-// Spec 016 (016-P3-T14): converted to the RenderContext seam. execute() takes a
+// converted to the RenderContext seam. execute takes a
 // const RenderContext& (screen size + the per-frame time snapshot) instead of a
 // RenderPipeline&, so the pass reaches no pipeline privates and needs no friend.
 // u_time MUST come from ctx.time_seconds (the single per-frame glfwGetTime
@@ -50,7 +50,7 @@ public:
         glm::vec3 pos;
         glm::vec3 normal;
         glm::vec2 uv;
-        glm::vec3 color;  // per-vertex albedo (genetic + seasonal leaf color / bark brown)
+        glm::vec3 color; // per-vertex albedo (genetic + seasonal leaf color / bark brown)
     };
 
     PlantProcgenPass();
@@ -63,18 +63,26 @@ public:
 
     // Replace the combined plant mesh. Re-uploads to the GPU only when
     // `signature` differs from the last upload (cheap no-op otherwise). An empty
-    // mesh clears the pass (subsequent execute() is a no-op).
+    // mesh clears the pass (subsequent execute is a no-op).
     void set_plants(const std::vector<Vertex>& vertices,
                     const std::vector<std::uint32_t>& indices,
                     std::uint64_t signature);
 
-    void set_enabled(bool on) { m_enabled = on; }
-    bool enabled() const { return m_enabled; }
-    std::uint64_t signature() const { return m_signature; }
-    std::size_t index_count() const { return m_index_count; }
+    void set_enabled(bool on) {
+        m_enabled = on;
+    }
+    bool enabled() const {
+        return m_enabled;
+    }
+    std::uint64_t signature() const {
+        return m_signature;
+    }
+    std::size_t index_count() const {
+        return m_index_count;
+    }
 
     // Draws the combined plant mesh into the currently-bound G-buffer FBO. The
-    // caller binds the FBO + sets the viewport (same pattern as the SHIELD-RT
+    // caller binds the FBO + sets the viewport (same pattern as the
     // far-field injection). No-op when disabled, no shader, or no geometry.
     void execute(const RenderContext& ctx, const Camera& camera);
 

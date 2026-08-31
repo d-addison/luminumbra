@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Spec 020 FR-A -- canonical build-root preflight + artifact-provenance manifest.
+      -- canonical build-root preflight + artifact-provenance manifest.
 
 .DESCRIPTION
     Establishes ONE canonical build root per preset (build/$BuildPreset, per
@@ -13,19 +13,19 @@
         (a relocated / copied-from-another-tree cache -- a genuine wrong-tree signal),
       * the required executable is missing under the preset tree,
       * -ExpectExeHash is supplied and the current binary's hash differs
-        (the FR-A-005 stale-run refusal: captured-with-one-binary, gated-against-another),
+        (the  stale-run refusal: captured-with-one-binary, gated-against-another),
       * -ExpectGitSha is supplied and HEAD differs,
       * -Strict is set AND a concurrent root build/CMakeCache.txt exists alongside the
-        preset cache (the full FR-A-002 two-tree refusal).
+        preset cache (the full  two-tree refusal).
 
-    On every run it writes an artifact manifest (FR-A-004 six fields:
+    On every run it writes an artifact manifest (six fields:
     build_preset, git_sha, exe_hash, shader_hash, scenario, timestamp) recording the
     provenance of the binary + shaders that a gate would read, so a downstream gate can
-    compare the manifest against the running binary (FR-A-005) and never bless an image
+    compare the manifest against the running binary () and never bless an image
     produced by a stale build.
 
-    TWO-TREE POLICY (spec 020 OQ-1, owner call). The repo currently carries BOTH a root
-    build/ tree and the preset build/$BuildPreset tree. Per OQ-1 the safest first step is
+    TWO-TREE POLICY ( , owner call). The repo currently carries BOTH a root
+    build/ tree and the preset build/$BuildPreset tree. Per  the safest first step is
     "preflight-refusal + documentation, with physical removal a later cleanup." So the
     concurrent root build/ tree is a WARNING by default (this validator runs clean on the
     current two-tree tree) and becomes a hard FAILURE only under -Strict. Flip the gate to
@@ -36,7 +36,7 @@
 
 .NOTES
     PowerShell 5.1 compatible. Run via the PowerShell tool with C:\msys64\ucrt64\bin
-    prepended (NFR-004). Does NOT modify or rename build/debug -- the engine-frontier gate's
+    prepended (). Does NOT modify or rename build/debug -- the engine-frontier gate's
     build/$BuildPreset path keeps working unchanged.
 #>
 [CmdletBinding()]
@@ -52,7 +52,7 @@ param(
     # test-artifacts/ so it sits beside the other gate artifacts it describes.
     [string]$ManifestOut = "",
 
-    # Opt-in stale-run refusal (FR-A-005): fail if the current binary's SHA256 differs.
+    # Opt-in stale-run refusal: fail if the current binary's SHA256 differs.
     [string]$ExpectExeHash = "",
 
     # Opt-in: fail if HEAD differs from this short/long SHA.
@@ -61,8 +61,9 @@ param(
     # Free-form provenance label for the manifest's scenario field.
     [string]$Scenario = "build-tree-validation",
 
-    # Full FR-A-002 two-tree refusal: with -Strict, a concurrent root build/CMakeCache.txt
-    # is a hard FAIL instead of a warning. Default OFF pending root build/ retirement (OQ-1).
+    # With -Strict, a concurrent root build/CMakeCache.txt is a hard failure
+    # instead of a warning. The frontier gate always enables this; standalone
+    # callers may omit it for diagnostics against older local layouts.
     [switch]$Strict,
 
     # Don't require the executable to exist (manifest still records what is present).
@@ -93,7 +94,7 @@ $treesFound = New-Object System.Collections.Generic.List[string]
 if (Test-Path -LiteralPath $rootCache) { $treesFound.Add("build (root)") }
 if (Test-Path -LiteralPath $presetCache) { $treesFound.Add("build/$BuildPreset") }
 
-# FR-A-001/FR-A-002: the preset tree must be configured.
+# the preset tree must be configured.
 if (-not (Test-Path -LiteralPath $presetCache)) {
     $failures.Add("preset tree not configured: missing $presetCache (run 'cmake --build --preset $BuildPreset' first)")
 }
@@ -113,14 +114,14 @@ else {
     }
 }
 
-# FR-A-002 two-tree refusal: a concurrent root build/ cache alongside the preset cache.
+#  two-tree refusal: a concurrent root build/ cache alongside the preset cache.
 if ((Test-Path -LiteralPath $rootCache) -and (Test-Path -LiteralPath $presetCache)) {
     $msg = "two configured CMake trees present concurrently: root '$rootCache' AND preset '$presetCache' (intended preset: $BuildPreset). A gate could build one and read the other."
     if ($Strict) {
         $failures.Add($msg)
     }
     else {
-        $warnings.Add($msg + " [WARN-only without -Strict; retire the root build/ tree per spec 020 OQ-1, then run -Strict]")
+        $warnings.Add($msg + " [WARN-only without -Strict; retire the root build/ tree per  , then run -Strict]")
     }
 }
 
@@ -182,7 +183,7 @@ if ($ExpectGitSha -and ($gitSha -ne "unknown")) {
     }
 }
 
-# --- emit the manifest (FR-A-004: six provenance fields) ------------------------------
+# --- emit the manifest (: six provenance fields) ------------------------------
 if (-not $ManifestOut) {
     $ManifestOut = Join-Path (Join-Path $presetTree "test-artifacts") "build-tree-manifest.json"
 }

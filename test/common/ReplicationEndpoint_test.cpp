@@ -1,4 +1,4 @@
-// T-I6 P3.1: server/client replication endpoints. Proves the full bidirectional
+//  server/client replication endpoints. Proves the full bidirectional
 // loop over the in-process LoopbackTransport: client usercmd reaches the server
 // (newest-wins), server snapshot reaches the client (most-recent-wins), and the
 // client's ack is reflected back on the server. No sockets (the UDP transport is
@@ -9,8 +9,8 @@
 #include <memory>
 #include <vector>
 
-#include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/LockstepSession.h"
+#include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/net/ReplicationProtocol.h"
 #include "luminumbra_common/world/PlayerAvatar.h"
 
@@ -21,19 +21,27 @@ using namespace Luminumbra::Net;
 ReplEntityState MakeEntity(std::uint32_t id, std::int32_t x, std::int32_t y, std::int32_t z) {
     ReplEntityState e;
     e.entity_id = id;
-    e.px_mm = x; e.py_mm = y; e.pz_mm = z;
+    e.px_mm = x;
+    e.py_mm = y;
+    e.pz_mm = z;
     return e;
 }
 
-// spec-019 FR-E: a transport whose SendFrame ALWAYS reports would-block / gone peer, so
+// a transport whose SendFrame ALWAYS reports would-block / gone peer, so
 // the server's per-client outbound queue accumulates -- exercises the queue-depth + drop
 // metrics deterministically without real sockets. Reports the peer still connected so the
 // server keeps broadcasting to it (a backed-up, not yet pruned, client).
 struct BlockedSendTransport final : ILockstepTransport {
     bool SendFrame(const std::vector<std::uint8_t>&,
-                   FrameDelivery = FrameDelivery::Reliable) override { return false; }
-    bool TryReceiveFrame(std::vector<std::uint8_t>&) override { return false; }
-    [[nodiscard]] bool IsPeerConnected() const override { return true; }
+                   FrameDelivery = FrameDelivery::Reliable) override {
+        return false;
+    }
+    bool TryReceiveFrame(std::vector<std::uint8_t>&) override {
+        return false;
+    }
+    [[nodiscard]] bool IsPeerConnected() const override {
+        return true;
+    }
     void Close() override {}
 };
 
@@ -106,7 +114,9 @@ TEST(ReplicationEndpoint, MultiClientEachGetsOwnSeq) {
     EXPECT_EQ(client_b.snapshot().snapshot_seq, 1u);
 
     // Only client A sends a usercmd -> only A's link reports it.
-    UsercmdMsg cmd; cmd.tick = 7; cmd.player_id = 1;
+    UsercmdMsg cmd;
+    cmd.tick = 7;
+    cmd.player_id = 1;
     client_a.SendUsercmd(cmd);
     server.PumpInbound();
     EXPECT_NE(server.LatestUsercmd(1), nullptr);
@@ -116,17 +126,23 @@ TEST(ReplicationEndpoint, MultiClientEachGetsOwnSeq) {
     EXPECT_EQ(server.client_count(), 1u);
 }
 
-// P3.1b: the avatar -> replication-state bridge, end-to-end over the transport.
+// the avatar -> replication-state bridge, end-to-end over the transport.
 // Server projects its authoritative PlayerAvatars to ReplEntityState, broadcasts;
 // the client receives + the dequantized positions match the server avatars.
 TEST(ReplicationEndpoint, ServerAvatarsReplicateToClient) {
-    using Luminumbra::World::PlayerAvatar;
     using Luminumbra::World::BuildAvatarReplStates;
+    using Luminumbra::World::PlayerAvatar;
 
     std::vector<PlayerAvatar> avatars(3);
-    avatars[0].player_id = 0; avatars[0].position = Luminumbra::Vec3(8.0f, 35.4f, 8.0f);  avatars[0].facing = 0.0f;
-    avatars[1].player_id = 1; avatars[1].position = Luminumbra::Vec3(11.1f, 35.6f, 7.2f); avatars[1].facing = 1.57f;
-    avatars[2].player_id = 2; avatars[2].position = Luminumbra::Vec3(6.4f, 35.2f, 10.8f); avatars[2].facing = -2.3f;
+    avatars[0].player_id = 0;
+    avatars[0].position = Luminumbra::Vec3(8.0f, 35.4f, 8.0f);
+    avatars[0].facing = 0.0f;
+    avatars[1].player_id = 1;
+    avatars[1].position = Luminumbra::Vec3(11.1f, 35.6f, 7.2f);
+    avatars[1].facing = 1.57f;
+    avatars[2].player_id = 2;
+    avatars[2].position = Luminumbra::Vec3(6.4f, 35.2f, 10.8f);
+    avatars[2].facing = -2.3f;
 
     const std::vector<ReplEntityState> states = BuildAvatarReplStates(avatars);
     ASSERT_EQ(states.size(), 3u);
@@ -144,14 +160,18 @@ TEST(ReplicationEndpoint, ServerAvatarsReplicateToClient) {
     for (std::size_t i = 0; i < avatars.size(); ++i) {
         EXPECT_EQ(snap.entities[i].entity_id, avatars[i].player_id);
         // Dequantized client position matches the server avatar within mm tolerance.
-        EXPECT_NEAR(ReplDequantPos(snap.entities[i].px_mm), avatars[i].position.x, 0.001f) << "avatar " << i;
-        EXPECT_NEAR(ReplDequantPos(snap.entities[i].py_mm), avatars[i].position.y, 0.001f) << "avatar " << i;
-        EXPECT_NEAR(ReplDequantPos(snap.entities[i].pz_mm), avatars[i].position.z, 0.001f) << "avatar " << i;
-        EXPECT_NEAR(ReplDequantAngle(snap.entities[i].yaw_mrad), avatars[i].facing, 0.001f) << "avatar " << i;
+        EXPECT_NEAR(ReplDequantPos(snap.entities[i].px_mm), avatars[i].position.x, 0.001f)
+            << "avatar " << i;
+        EXPECT_NEAR(ReplDequantPos(snap.entities[i].py_mm), avatars[i].position.y, 0.001f)
+            << "avatar " << i;
+        EXPECT_NEAR(ReplDequantPos(snap.entities[i].pz_mm), avatars[i].position.z, 0.001f)
+            << "avatar " << i;
+        EXPECT_NEAR(ReplDequantAngle(snap.entities[i].yaw_mrad), avatars[i].facing, 0.001f)
+            << "avatar " << i;
     }
 }
 
-// P3.2: area-of-interest scoping. With a radius set, each client receives only
+//  area-of-interest scoping. With a radius set, each client receives only
 // entities near its OWN avatar (+ always its own), so a crowded world does not
 // broadcast everyone to everyone.
 TEST(ReplicationEndpoint, AoiScopesSnapshotPerClient) {
@@ -168,10 +188,10 @@ TEST(ReplicationEndpoint, AoiScopesSnapshotPerClient) {
     // entity (id 20) sits 2 m from avatar 2.
     server.SetAoiRadiusMm(5000);
     std::vector<ReplEntityState> entities = {
-        MakeEntity(1, 0, 0, 0),            // client 1's avatar
-        MakeEntity(2, 100000, 0, 0),       // client 2's avatar (100 m away)
-        MakeEntity(10, 2000, 0, 0),        // near avatar 1
-        MakeEntity(20, 102000, 0, 0),      // near avatar 2
+        MakeEntity(1, 0, 0, 0),       // client 1's avatar
+        MakeEntity(2, 100000, 0, 0),  // client 2's avatar (100 m away)
+        MakeEntity(10, 2000, 0, 0),   // near avatar 1
+        MakeEntity(20, 102000, 0, 0), // near avatar 2
     };
     server.BroadcastSnapshot(10, entities);
     client_a.PumpInbound();
@@ -179,7 +199,8 @@ TEST(ReplicationEndpoint, AoiScopesSnapshotPerClient) {
 
     auto ids = [](const SnapshotMsg& s) {
         std::vector<std::uint32_t> v;
-        for (const auto& e : s.entities) v.push_back(e.entity_id);
+        for (const auto& e : s.entities)
+            v.push_back(e.entity_id);
         std::sort(v.begin(), v.end());
         return v;
     };
@@ -197,14 +218,16 @@ TEST(ReplicationEndpoint, AoiDisabledByDefaultSendsAll) {
     server.AddClient(1, pair.first.get());
     ReplicationClient client(1, pair.second.get());
     std::vector<ReplEntityState> entities = {
-        MakeEntity(1, 0, 0, 0), MakeEntity(2, 999000, 0, 0), MakeEntity(3, -999000, 0, 0),
+        MakeEntity(1, 0, 0, 0),
+        MakeEntity(2, 999000, 0, 0),
+        MakeEntity(3, -999000, 0, 0),
     };
     server.BroadcastSnapshot(1, entities); // radius 0 -> disabled
     client.PumpInbound();
     EXPECT_EQ(client.snapshot().entities.size(), 3u);
 }
 
-// T-I6 polish: CHUNK-INDEX AOI. With a 16 m chunk and radius 1 chunk, each client
+//  polish: CHUNK-INDEX AOI. With a 16 m chunk and radius 1 chunk, each client
 // sees only entities in the 3x3 chunk neighbourhood of its own avatar's chunk.
 TEST(ReplicationEndpoint, ChunkAoiScopesToNeighbourhood) {
     auto pair_a = MakeLoopbackPair();
@@ -230,7 +253,8 @@ TEST(ReplicationEndpoint, ChunkAoiScopesToNeighbourhood) {
 
     auto ids = [](const SnapshotMsg& s) {
         std::vector<std::uint32_t> v;
-        for (const auto& e : s.entities) v.push_back(e.entity_id);
+        for (const auto& e : s.entities)
+            v.push_back(e.entity_id);
         return v; // chunk-AOI emits sorted by entity_id already
     };
     ASSERT_TRUE(client_a.has_snapshot());
@@ -247,9 +271,9 @@ TEST(ReplicationEndpoint, ChunkAoiRadiusZeroIsOwnChunkOnly) {
     ReplicationClient client(1, pair.second.get());
     server.SetAoiChunkRadius(0, 16000);
     std::vector<ReplEntityState> entities = {
-        MakeEntity(1, 1000, 0, 1000),   // chunk (0,0)
-        MakeEntity(10, 2000, 0, 2000),  // chunk (0,0): same chunk -> in
-        MakeEntity(11, 20000, 0, 0),    // chunk (1,0): adjacent -> out at radius 0
+        MakeEntity(1, 1000, 0, 1000),  // chunk (0,0)
+        MakeEntity(10, 2000, 0, 2000), // chunk (0,0): same chunk -> in
+        MakeEntity(11, 20000, 0, 0),   // chunk (1,0): adjacent -> out at radius 0
     };
     server.BroadcastSnapshot(1, entities);
     client.PumpInbound();
@@ -259,7 +283,7 @@ TEST(ReplicationEndpoint, ChunkAoiRadiusZeroIsOwnChunkOnly) {
     EXPECT_EQ(client.snapshot().entities[1].entity_id, 10u);
 }
 
-// T-I6 SCALE/STRESS: the 20+ player scalability contract. 64 players spread on an
+//  SCALE/STRESS: the 20+ player scalability contract. 64 players spread on an
 // 8x8 grid 100 m apart; with a 16 m chunk + radius 1 (a 48 m neighbourhood) almost
 // no two share a neighbourhood, so chunk-AOI must keep each client's snapshot ~1
 // entity REGARDLESS of population, while a full-set broadcast grows linearly with
@@ -289,8 +313,8 @@ TEST(ReplicationScale, ChunkAoiBoundsPerClientBandwidthAsPlayersScale) {
 
     server.SetAoiChunkRadius(/*disable=*/-1, 0); // full set: each client gets all N
     server.BroadcastSnapshot(2, entities);
-    const std::size_t full_max = server.last_broadcast_total_bytes() == 0 ? 0
-                                  : server.last_broadcast_max_client_bytes();
+    const std::size_t full_max =
+        server.last_broadcast_total_bytes() == 0 ? 0 : server.last_broadcast_max_client_bytes();
     const std::size_t full_total = server.last_broadcast_total_bytes();
 
     // Per-connection AOI bytes are a small fraction of the full-set bytes, and the
@@ -305,7 +329,7 @@ TEST(ReplicationScale, ChunkAoiBoundsPerClientBandwidthAsPlayersScale) {
     EXPECT_EQ(server.last_broadcast_total_bytes(), aoi_total);
 }
 
-// T-I6 polish: PRUNE-INTO-TICK despawn. A disconnect is folded into the very next
+//  polish: PRUNE-INTO-TICK despawn. A disconnect is folded into the very next
 // broadcast's removed_ids for surviving clients, and repeated for robustness.
 TEST(ReplicationLifecycle, PruneFoldsDespawnIntoNextSnapshot) {
     auto pa = MakeLoopbackPair();
@@ -356,11 +380,15 @@ TEST(ReplicationLifecycle, CallerRemovedIdsStillDelivered) {
     EXPECT_NE(std::find(rem.begin(), rem.end(), 2000u), rem.end());
 }
 
-// P3.3: client-side remote-entity interpolation (render-behind lerp).
+//  client-side remote-entity interpolation (render-behind lerp).
 TEST(SnapshotInterpolation, LerpsBetweenSnapshots) {
     SnapshotInterpolator interp;
-    SnapshotMsg s0; s0.server_tick = 0;  s0.entities = {MakeEntity(1, 0, 1000, 0)};
-    SnapshotMsg s1; s1.server_tick = 10; s1.entities = {MakeEntity(1, 1000, 1000, 2000)};
+    SnapshotMsg s0;
+    s0.server_tick = 0;
+    s0.entities = {MakeEntity(1, 0, 1000, 0)};
+    SnapshotMsg s1;
+    s1.server_tick = 10;
+    s1.entities = {MakeEntity(1, 1000, 1000, 2000)};
     interp.Push(s1); // out-of-order push tolerated
     interp.Push(s0);
     EXPECT_EQ(interp.buffered(), 2u);
@@ -379,8 +407,12 @@ TEST(SnapshotInterpolation, LerpsBetweenSnapshots) {
 
 TEST(SnapshotInterpolation, ClampsOutsideRangeNoExtrapolation) {
     SnapshotInterpolator interp;
-    SnapshotMsg s0; s0.server_tick = 10; s0.entities = {MakeEntity(1, 100, 0, 0)};
-    SnapshotMsg s1; s1.server_tick = 20; s1.entities = {MakeEntity(1, 200, 0, 0)};
+    SnapshotMsg s0;
+    s0.server_tick = 10;
+    s0.entities = {MakeEntity(1, 100, 0, 0)};
+    SnapshotMsg s1;
+    s1.server_tick = 20;
+    s1.entities = {MakeEntity(1, 200, 0, 0)};
     interp.Push(s0);
     interp.Push(s1);
     // Before the buffer -> oldest; after -> newest (no extrapolation past 200).
@@ -390,15 +422,21 @@ TEST(SnapshotInterpolation, ClampsOutsideRangeNoExtrapolation) {
 
 TEST(SnapshotInterpolation, NewEntityPassesThroughUntilInBoth) {
     SnapshotInterpolator interp;
-    SnapshotMsg s0; s0.server_tick = 0;  s0.entities = {MakeEntity(1, 0, 0, 0)};
-    SnapshotMsg s1; s1.server_tick = 10; s1.entities = {MakeEntity(1, 1000, 0, 0), MakeEntity(2, 5000, 0, 0)};
+    SnapshotMsg s0;
+    s0.server_tick = 0;
+    s0.entities = {MakeEntity(1, 0, 0, 0)};
+    SnapshotMsg s1;
+    s1.server_tick = 10;
+    s1.entities = {MakeEntity(1, 1000, 0, 0), MakeEntity(2, 5000, 0, 0)};
     interp.Push(s0);
     interp.Push(s1);
     auto mid = interp.Sample(5.0);
     // Entity 1 (in both) is lerped; entity 2 (only in the newer) passes through.
     ASSERT_EQ(mid.size(), 2u);
     const ReplEntityState* e2 = nullptr;
-    for (const auto& e : mid) if (e.entity_id == 2u) e2 = &e;
+    for (const auto& e : mid)
+        if (e.entity_id == 2u)
+            e2 = &e;
     ASSERT_NE(e2, nullptr);
     EXPECT_EQ(e2->px_mm, 5000);
 }
@@ -407,15 +445,17 @@ TEST(SnapshotInterpolation, EmptyAndEviction) {
     SnapshotInterpolator interp(/*max_buffer=*/3);
     EXPECT_TRUE(interp.empty());
     for (std::uint32_t t = 0; t < 6; ++t) {
-        SnapshotMsg s; s.server_tick = t; interp.Push(s);
+        SnapshotMsg s;
+        s.server_tick = t;
+        interp.Push(s);
     }
-    EXPECT_EQ(interp.buffered(), 3u);   // capped
+    EXPECT_EQ(interp.buffered(), 3u);    // capped
     EXPECT_EQ(interp.newest_tick(), 5u); // newest kept
 }
 
-// P3.3: local-player prediction + reconciliation.
+//  local-player prediction + reconciliation.
 TEST(LocalPlayerPrediction, PredictsImmediatelyAndReconciles) {
-    LocalPlayerPredictor pred(/*speed*/4.0f, /*dt*/0.1f); // 0.4 m per full-axis tick
+    LocalPlayerPredictor pred(/*speed*/ 4.0f, /*dt*/ 0.1f); // 0.4 m per full-axis tick
     pred.SetPosition(0.0f, 0.0f, 0.0f);
     pred.RecordInput(1, 1.0f, 0.0f);
     pred.RecordInput(2, 1.0f, 0.0f);
@@ -426,7 +466,7 @@ TEST(LocalPlayerPrediction, PredictsImmediatelyAndReconciles) {
 
     // Server acks tick 1 with the matching authoritative position (0.4). Reconcile
     // drops cmd1, snaps to 0.4, replays cmds 2+3 -> back to 1.2 (server agreed).
-    pred.Reconcile(0.4f, 0.0f, 0.0f, /*acked*/1);
+    pred.Reconcile(0.4f, 0.0f, 0.0f, /*acked*/ 1);
     EXPECT_NEAR(pred.predicted().x, 1.2f, 1e-4f);
     EXPECT_EQ(pred.pending_inputs(), 2u);
 }
@@ -454,7 +494,7 @@ TEST(LocalPlayerPrediction, FullAckClearsBufferAndMatchesAuthoritative) {
     EXPECT_NEAR(pred.predicted().z, 0.4f, 1e-4f);
 }
 
-// P4: persistent-server join/leave lifecycle.
+// persistent-server join/leave lifecycle.
 TEST(ReplicationLifecycle, JoinLeaveDoesNotDisturbSurvivors) {
     auto pa = MakeLoopbackPair();
     auto pb = MakeLoopbackPair();
@@ -471,7 +511,7 @@ TEST(ReplicationLifecycle, JoinLeaveDoesNotDisturbSurvivors) {
 
     // Client 2 LEAVES (its transport end closes).
     pb.second->Close();
-    server.PumpInbound();                       // drain anything pending
+    server.PumpInbound(); // drain anything pending
     auto removed = server.PruneDisconnectedClients();
     ASSERT_EQ(removed.size(), 1u);
     EXPECT_EQ(removed[0], 2u);
@@ -523,7 +563,7 @@ TEST(ReplicationEndpoint, StaleSnapshotDoesNotRegress) {
     EXPECT_EQ(client.snapshot().entities[0].px_mm, 200);
 }
 
-// spec-019 FR-E-002: SNAPSHOT AGING. The per-client snapshot age = how many seqs behind
+// SNAPSHOT AGING. The per-client snapshot age = how many seqs behind
 // the client's last-ACKed baseline is (last_sent_seq - acked_seq). It climbs while a
 // client stops acking and resets to 0 once it catches up -- the falling-behind signal.
 TEST(ReplicationMetrics, SnapshotAgeTracksAckGap) {
@@ -533,8 +573,8 @@ TEST(ReplicationMetrics, SnapshotAgeTracksAckGap) {
     ReplicationClient client(1, pair.second.get());
     std::vector<ReplEntityState> entities = {MakeEntity(1, 0, 0, 0)};
 
-    EXPECT_EQ(server.SnapshotAge(1), 0u);        // nothing sent yet
-    EXPECT_EQ(server.SnapshotAge(999), 0u);      // unknown client -> 0, no crash
+    EXPECT_EQ(server.SnapshotAge(1), 0u);   // nothing sent yet
+    EXPECT_EQ(server.SnapshotAge(999), 0u); // unknown client -> 0, no crash
 
     server.BroadcastSnapshot(10, entities);      // seq 1, unacked
     server.BroadcastSnapshot(20, entities);      // seq 2
@@ -542,13 +582,13 @@ TEST(ReplicationMetrics, SnapshotAgeTracksAckGap) {
     EXPECT_EQ(server.SnapshotAge(1), 3u);        // 3 sent, 0 acked
     EXPECT_EQ(server.OutboundQueueDepth(1), 0u); // connected loopback accepted every send
 
-    client.PumpInbound();                        // applies newest (seq 3), auto-acks 3
-    server.PumpInbound();                        // server folds the ack
+    client.PumpInbound(); // applies newest (seq 3), auto-acks 3
+    server.PumpInbound(); // server folds the ack
     EXPECT_EQ(server.AckedSnapshotSeq(1), 3u);
-    EXPECT_EQ(server.SnapshotAge(1), 0u);        // caught up
+    EXPECT_EQ(server.SnapshotAge(1), 0u); // caught up
 }
 
-// spec-019 FR-E-001: OUTBOUND QUEUE DEPTH + drop counter. A peer that never accepts a
+// OUTBOUND QUEUE DEPTH + drop counter. A peer that never accepts a
 // send backs frames up in the per-client outbound queue; depth (and its high-water) climb,
 // and overflow past the bound drops the oldest frames and counts them.
 TEST(ReplicationMetrics, OutboundQueueDepthGrowsAndDropsUnderBackpressure) {
@@ -558,24 +598,26 @@ TEST(ReplicationMetrics, OutboundQueueDepthGrowsAndDropsUnderBackpressure) {
     std::vector<ReplEntityState> entities = {MakeEntity(1, 0, 0, 0)};
 
     EXPECT_EQ(server.OutboundQueueDepth(1), 0u);
-    for (int i = 1; i <= 3; ++i) server.BroadcastSnapshot(static_cast<std::uint64_t>(i), entities);
-    EXPECT_EQ(server.OutboundQueueDepth(1), 3u);      // nothing flushed -> 3 buffered
+    for (int i = 1; i <= 3; ++i)
+        server.BroadcastSnapshot(static_cast<std::uint64_t>(i), entities);
+    EXPECT_EQ(server.OutboundQueueDepth(1), 3u); // nothing flushed -> 3 buffered
     EXPECT_EQ(server.PeakOutboundQueueDepth(1), 3u);
-    EXPECT_EQ(server.DroppedFrames(1), 0u);           // still under the bound
-    EXPECT_EQ(server.QueueDepthP95(), 3u);            // single client -> its own depth
-    EXPECT_EQ(server.SnapshotAge(1), 3u);             // no acks possible either
-    EXPECT_EQ(server.ThrottledFrames(1), 0u);         // throttle is FR-D; metric present, 0 here
+    EXPECT_EQ(server.DroppedFrames(1), 0u);   // still under the bound
+    EXPECT_EQ(server.QueueDepthP95(), 3u);    // single client -> its own depth
+    EXPECT_EQ(server.SnapshotAge(1), 3u);     // no acks possible either
+    EXPECT_EQ(server.ThrottledFrames(1), 0u); // throttle is; metric present, 0 here
 
     // Push well past the queue bound -> the oldest frames are dropped and counted, depth
     // saturates at the bound rather than growing without limit. The iteration count must
     // exceed ReplicationServer::kOutboundQueueCap (256) for any drop to occur.
-    for (int i = 0; i < 600; ++i) server.BroadcastSnapshot(static_cast<std::uint64_t>(100 + i), entities);
+    for (int i = 0; i < 600; ++i)
+        server.BroadcastSnapshot(static_cast<std::uint64_t>(100 + i), entities);
     EXPECT_GT(server.DroppedFrames(1), 0u);
-    EXPECT_LE(server.OutboundQueueDepth(1), 256u);    // bounded (kOutboundQueueCap)
+    EXPECT_LE(server.OutboundQueueDepth(1), 256u); // bounded (kOutboundQueueCap)
     EXPECT_GE(server.PeakOutboundQueueDepth(1), server.OutboundQueueDepth(1));
 }
 
-// spec-019 FR-E-003 / NFR-005: the SOAK GATE p95. With many clients where most fall
+// the SOAK GATE p95. With many clients where most fall
 // behind, the across-clients p95 snapshot age reflects the laggards -- the number the
 // 32-client soak fails on if it exceeds budget. On loopback every send is accepted, so the
 // queue-depth p95 stays 0 (backpressure shows up only when a transport refuses).
@@ -608,14 +650,14 @@ TEST(ReplicationMetrics, P95AcrossClientsForSoakGate) {
     EXPECT_EQ(server.QueueDepthP95(), 0u);  // loopback accepted everything
 }
 
-// spec-019 FR-D-002/003: OUTBOUND BACKPRESSURE POLICY. With the policy ENABLED, a client whose
+// OUTBOUND BACKPRESSURE POLICY. With the policy ENABLED, a client whose
 // transport never drains is escalated in ORDER -- first THROTTLED (cadence spaced, ThrottledFrames
 // climbs), then dropped to a full KEYFRAME to resync (ForcedKeyframes climbs) instead of piling
 // deltas, then DISCONNECTED once it never drains past the deadline -- while a healthy loopback peer
 // sharing the exact same broadcasts is NEVER throttled or keyframed and keeps receiving snapshots
 // (the byte-identical fast path). Deterministic + headless: the loop advances until each stage is
-// observed rather than asserting fixed broadcast counts, so it survives the NET-07 recalibration of
-// the (placeholder) thresholds -- it proves the SEQUENCE the policy must produce, not the tuning.
+// observed rather than asserting fixed broadcast counts, so it survives the  recalibration of
+// the calibrated thresholds and proves the policy sequence as pressure increases.
 TEST(ReplicationBackpressurePolicy, ThrottleThenKeyframeThenDisconnectWhileHealthyPeerUntouched) {
     auto healthy_pair = MakeLoopbackPair();
     BlockedSendTransport blocked; // never accepts a send -> its queue only ever grows

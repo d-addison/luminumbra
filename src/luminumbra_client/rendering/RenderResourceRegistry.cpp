@@ -1,4 +1,4 @@
-// RENDER-12 / GPU-12 (spec 016 FR-B-001/002/003 — the 014 pilot-gate ownership
+//  /  (  — the rendering pilot-gate ownership
 // leg): the registry's OWNED-resource implementation. All GL object creation,
 // resize (delete + recreate per desc, re-attaching referencing FBOs), and
 // destruction for owned entries lives HERE and nowhere else. Descriptor
@@ -21,24 +21,39 @@ bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
     // post-allocation check reflects THIS allocation only (init runs right
     // after other GL setup that may have left a flag set — otherwise the first
     // create_texture would false-fail on a stale error).
-    while (glGetError() != GL_NO_ERROR) {
-    }
+    while (glGetError() != GL_NO_ERROR) {}
     const GLenum target = desc.layers > 1 ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
     glBindTexture(target, gl_id);
     if (desc.layers > 1) {
-        glTexImage3D(target, 0, static_cast<GLint>(desc.internal_format),
-                     static_cast<GLsizei>(desc.width), static_cast<GLsizei>(desc.height),
-                     static_cast<GLsizei>(desc.layers), 0,
-                     static_cast<GLenum>(desc.format), static_cast<GLenum>(desc.type), nullptr);
+        glTexImage3D(target,
+                     0,
+                     static_cast<GLint>(desc.internal_format),
+                     static_cast<GLsizei>(desc.width),
+                     static_cast<GLsizei>(desc.height),
+                     static_cast<GLsizei>(desc.layers),
+                     0,
+                     static_cast<GLenum>(desc.format),
+                     static_cast<GLenum>(desc.type),
+                     nullptr);
     } else {
-        glTexImage2D(target, 0, static_cast<GLint>(desc.internal_format),
-                     static_cast<GLsizei>(desc.width), static_cast<GLsizei>(desc.height), 0,
-                     static_cast<GLenum>(desc.format), static_cast<GLenum>(desc.type), nullptr);
+        glTexImage2D(target,
+                     0,
+                     static_cast<GLint>(desc.internal_format),
+                     static_cast<GLsizei>(desc.width),
+                     static_cast<GLsizei>(desc.height),
+                     0,
+                     static_cast<GLenum>(desc.format),
+                     static_cast<GLenum>(desc.type),
+                     nullptr);
     }
-    if (desc.min_filter != 0) glTexParameteri(target, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(desc.min_filter));
-    if (desc.mag_filter != 0) glTexParameteri(target, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(desc.mag_filter));
-    if (desc.wrap_s != 0) glTexParameteri(target, GL_TEXTURE_WRAP_S, static_cast<GLint>(desc.wrap_s));
-    if (desc.wrap_t != 0) glTexParameteri(target, GL_TEXTURE_WRAP_T, static_cast<GLint>(desc.wrap_t));
+    if (desc.min_filter != 0)
+        glTexParameteri(target, GL_TEXTURE_MIN_FILTER, static_cast<GLint>(desc.min_filter));
+    if (desc.mag_filter != 0)
+        glTexParameteri(target, GL_TEXTURE_MAG_FILTER, static_cast<GLint>(desc.mag_filter));
+    if (desc.wrap_s != 0)
+        glTexParameteri(target, GL_TEXTURE_WRAP_S, static_cast<GLint>(desc.wrap_s));
+    if (desc.wrap_t != 0)
+        glTexParameteri(target, GL_TEXTURE_WRAP_T, static_cast<GLint>(desc.wrap_t));
     if (desc.depth_compare) {
         glTexParameteri(target, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
         glTexParameteri(target, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
@@ -50,9 +65,10 @@ bool allocate_texture_storage(u32 gl_id, const TextureDesc& desc) {
     return glGetError() == GL_NO_ERROR;
 }
 
-}  // namespace
+} // namespace
 
-TextureHandle RenderResourceRegistry::create_texture(std::string_view name, const TextureDesc& desc) {
+TextureHandle RenderResourceRegistry::create_texture(std::string_view name,
+                                                     const TextureDesc& desc) {
     const std::string key(name);
     if (m_owned_textures.count(key) != 0) {
         LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: owned texture '{}' already exists", key);
@@ -82,26 +98,30 @@ RenderbufferHandle RenderResourceRegistry::create_renderbuffer(std::string_view 
                                                                const RenderbufferDesc& desc) {
     const std::string key(name);
     if (m_owned_renderbuffers.count(key) != 0) {
-        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: owned renderbuffer '{}' already exists", key);
+        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: owned renderbuffer '{}' already exists",
+                              key);
         return RenderbufferHandle{};
     }
     if (desc.width == 0 || desc.height == 0 || desc.internal_format == 0) {
-        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: invalid desc for owned renderbuffer '{}'", key);
+        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: invalid desc for owned renderbuffer '{}'",
+                              key);
         return RenderbufferHandle{};
     }
     // Drain the sticky global GL error flag so the post-allocation check reflects
     // THIS allocation only (see allocate_texture_storage).
-    while (glGetError() != GL_NO_ERROR) {
-    }
+    while (glGetError() != GL_NO_ERROR) {}
     OwnedRenderbuffer owned;
     owned.desc = desc;
     glGenRenderbuffers(1, &owned.gl_id);
     glBindRenderbuffer(GL_RENDERBUFFER, owned.gl_id);
-    glRenderbufferStorage(GL_RENDERBUFFER, static_cast<GLenum>(desc.internal_format),
-                          static_cast<GLsizei>(desc.width), static_cast<GLsizei>(desc.height));
+    glRenderbufferStorage(GL_RENDERBUFFER,
+                          static_cast<GLenum>(desc.internal_format),
+                          static_cast<GLsizei>(desc.width),
+                          static_cast<GLsizei>(desc.height));
     glBindRenderbuffer(GL_RENDERBUFFER, 0);
     if (glGetError() != GL_NO_ERROR) {
-        LUMINUMBRA_CORE_ERROR("RenderResourceRegistry: GL storage allocation failed for renderbuffer '{}'", key);
+        LUMINUMBRA_CORE_ERROR(
+            "RenderResourceRegistry: GL storage allocation failed for renderbuffer '{}'", key);
         glDeleteRenderbuffers(1, &owned.gl_id);
         return RenderbufferHandle{};
     }
@@ -122,19 +142,24 @@ bool RenderResourceRegistry::attach_fbo(OwnedFbo& fbo_entry) {
             const OwnedTexture& tex = tex_it->second;
             if (tex.desc.layers > 1) {
                 // Layered attachment (e.g. the cascaded shadow atlas).
-                glFramebufferTexture(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
-                                     tex.gl_id, 0);
+                glFramebufferTexture(
+                    GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point), tex.gl_id, 0);
             } else {
-                glFramebufferTexture2D(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
-                                       GL_TEXTURE_2D, tex.gl_id, 0);
+                glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                       static_cast<GLenum>(attachment.attachment_point),
+                                       GL_TEXTURE_2D,
+                                       tex.gl_id,
+                                       0);
             }
             continue;
         }
         const auto rb_it = m_owned_renderbuffers.find(attachment.texture_name);
         if (rb_it != m_owned_renderbuffers.end()) {
             // Renderbuffer attachment (e.g. the lighting FBO depth buffer).
-            glFramebufferRenderbuffer(GL_FRAMEBUFFER, static_cast<GLenum>(attachment.attachment_point),
-                                      GL_RENDERBUFFER, rb_it->second.gl_id);
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER,
+                                      static_cast<GLenum>(attachment.attachment_point),
+                                      GL_RENDERBUFFER,
+                                      rb_it->second.gl_id);
             continue;
         }
         LUMINUMBRA_CORE_ERROR(
@@ -242,4 +267,4 @@ void RenderResourceRegistry::destroy_all_owned() {
     m_owned_renderbuffers.clear();
 }
 
-}  // namespace Luminumbra::Rendering
+} // namespace Luminumbra::Rendering

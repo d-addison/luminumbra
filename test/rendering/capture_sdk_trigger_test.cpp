@@ -3,8 +3,8 @@
 #include <filesystem>
 #include <string>
 
-// GPU-14 (spec 021 rank 78): the PIX + Nsight trigger legs under test. Neither
-// SDK is installed on the gate box, so (exactly like GPU-06's RenderDoc double
+// the PIX + Nsight trigger legs under test. Neither
+// SDK is installed on the gate box, so (exactly like 's RenderDoc double
 // in render_capture_test.cpp) these tests inject fake api structs through the
 // production seams and run the EXACT production Begin/End code path against
 // them -- zero skips. The untested remainder is only the real module-detection
@@ -32,8 +32,8 @@ struct FakePixState {
     unsigned long last_flags = 0;
     int last_discard = -1;
     std::wstring last_file;
-    long begin_result = 0;  // S_OK
-    long end_result = 0;    // S_OK
+    long begin_result = 0; // S_OK
+    long end_result = 0;   // S_OK
 };
 
 FakePixState g_fake_pix;
@@ -107,9 +107,9 @@ TEST(RenderCaptureSdkTrigger, PixTriggerLive) {
     EXPECT_EQ(result.backend, "PIX");
     EXPECT_EQ(g_fake_pix.begin_calls, 1);
     EXPECT_EQ(g_fake_pix.end_calls, 1);
-    EXPECT_EQ(g_fake_pix.last_flags, 1ul);   // PIX_CAPTURE_GPU
-    EXPECT_EQ(g_fake_pix.last_discard, 0);   // keep the capture, don't discard
-    // The reported capture file is the sanitized .wpix target handed to Begin
+    EXPECT_EQ(g_fake_pix.last_flags, 1ul); // PIX_CAPTURE_GPU
+    EXPECT_EQ(g_fake_pix.last_discard, 0); // keep the capture, don't discard
+    // The reported capture file is the sanitized.wpix target handed to Begin
     // (PIX reports no path back at End), and the widened filename PIX saw
     // matches it 1:1.
     EXPECT_NE(result.capture_file.find("pix_trigger_live"), std::string::npos)

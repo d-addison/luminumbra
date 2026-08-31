@@ -1,7 +1,7 @@
 #pragma once
 
-// Track-B (roadmap pillar B): per-instance tree LOD mesh selection by camera
-// distance. This is a PURELY RENDER-ONLY, mechanical optimization: distant tree
+// tree rendering (tree rendering): per-instance tree LOD mesh selection by camera
+// distance. This is a PURELY, mechanical optimization: distant tree
 // static-mesh instances draw a coarser LOD variant of the same asset so the far
 // field spends fewer triangles, while the near field is byte-identical to today.
 //
@@ -36,7 +36,7 @@ struct TreeLodConfig {
     // falls back to LOD0 for any LOD whose file is missing).
     bool enabled = true;
     // Near radius around the camera that always renders the full mesh.
-    // FR-C2 (spec 003) note: these thresholds were investigated as a lever but kept at the
+    // note: these thresholds were investigated as a lever but kept at the
     // blessed values. The instanced-foliage G-buffer cost is fill/OVERDRAW-bound, not triangle-
     // bound (measured: cutting forest triangles ~58% via LOD distance changes did NOT move
     // gbuffer ms), and pulling LOD3 inward made it WORSE — the cross-billboards are large flat
@@ -50,7 +50,7 @@ struct TreeLodConfig {
     float lod3Distance = 620.0f;
 };
 
-// Returns the LOD bucket index [0 .. kTreeLodCount-1] for a tree instance at the
+// Returns the LOD bucket index [0.. kTreeLodCount-1] for a tree instance at the
 // given camera distance. Monotonic non-decreasing in distance. Negative or NaN
 // distances clamp to LOD0 (treated as "very near"); the comparisons below make
 // NaN fall through to LOD0 because all `>=` comparisons against NaN are false.
@@ -84,8 +84,8 @@ inline std::string LodMeshPath(std::string_view basePath, int lod) {
     constexpr std::string_view kExt = ".lmesh";
     std::string out(basePath);
     // Insert ".lodN" before the ".lmesh" extension when present; otherwise append.
-    const bool hasExt = out.size() >= kExt.size() &&
-                        std::string_view(out).substr(out.size() - kExt.size()) == kExt;
+    const bool hasExt =
+        out.size() >= kExt.size() && std::string_view(out).substr(out.size() - kExt.size()) == kExt;
     const std::string suffix = ".lod" + std::to_string(lod);
     if (hasExt) {
         out.insert(out.size() - kExt.size(), suffix);

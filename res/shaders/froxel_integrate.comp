@@ -1,11 +1,11 @@
 #version 450 core
-// Spec 015 Pillar B (RENDER-17, Wave F F7): froxel INTEGRATE — per screen column,
+//  froxel volumetrics (,  ): froxel INTEGRATE — per screen column,
 // march the scatter volume front to back accumulating in-scattered radiance and
 // transmittance:
 //   T *= exp(-sigma * dz);  L += T * inscatter * dz
 // writing (rgb = accumulated L up to this slice, a = transmittance T) so the
 // composite samples the volume at the scene depth's slice and gets exactly the
-// media integral in front of that surface (FR-B-002).
+// media integral in front of that surface.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(rgba16f, binding = 0) uniform readonly image3D u_scatter;

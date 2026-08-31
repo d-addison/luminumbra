@@ -1,4 +1,4 @@
-// perf-lane-and-ecology-tick (KDD-6 / FR-004): the EcologyTickPerf gate.
+// perf-lane-and-ecology-tick ( / ): the EcologyTickPerf gate.
 //
 // This is the campaign's first PERF gate over the live ecology tick. Every other
 // ecology test proves correctness/determinism; NONE measures per-tick cost. After
@@ -6,7 +6,7 @@
 // (ai/SpatialGrid.h, commit c48b466) we need a gate that actually EXERCISES the
 // scaling path at N >> the 8-creature gtest roster, or the win is unverified.
 //
-// Design (plan KDD-6):
+// Design (plan ):
 //   * Reuse the PopulatedWorldReplay KINEMATIC roster shape (the same component set
 //     the gate-populated-world-replay roster spawns: predators w/ pack+mortal, prey
 //     w/ genome+alarm+mortal+decay+migratory+territory) so the integration cost is
@@ -80,9 +80,9 @@ fs::path ArtifactRoot() {
 // world ticks).
 void EcologyTick(entt::registry& r, std::uint64_t tick) {
     constexpr float dt = 1.0f / 30.0f;
-    luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt);  // decide + move (bodyless)
-    luminumbra::ai::RunMateSeekingOnTick(r);              // 2e-mate A
-    luminumbra::ai::RunSteeringConsumerOnTick(r);         // 2e-steer
+    luminumbra::ai::RunCreatureBrainSystemOnTick(r, dt); // decide + move (bodyless)
+    luminumbra::ai::RunMateSeekingOnTick(r);             // 2e-mate A
+    luminumbra::ai::RunSteeringConsumerOnTick(r);        // 2e-steer
     luminumbra::ai::RunMatingResolveOnTick(r, tick);     // 2e-mate B
     luminumbra::ai::RunHerdAlarmOnTick(r, dt);
     luminumbra::ai::RunLifespanOnTick(r, tick);
@@ -98,7 +98,7 @@ void EcologyTick(entt::registry& r, std::uint64_t tick) {
 // to keep a roughly uniform areal density (and so the spatial grid sees many
 // occupied cells, which is the case the radius query must handle).
 void SpawnRoster(entt::registry& r, int n) {
-    constexpr float kGoldenAngle = 2.39996323f;  // 137.5 deg, radians
+    constexpr float kGoldenAngle = 2.39996323f; // 137.5 deg, radians
     // Spacing chosen so neighbours sit ~within the flocking neighbour radius (12 m)
     // at the inner ring but the disc stays bounded at N=4000 (sqrt(4000)*k ~ a few
     // hundred metres), i.e. a realistic crowded-but-spread herd, not a point.
@@ -187,8 +187,7 @@ PerfResult MeasureRoster(int n, int ticks) {
         const auto start = std::chrono::steady_clock::now();
         EcologyTick(r, static_cast<std::uint64_t>(t));
         const auto end = std::chrono::steady_clock::now();
-        const double ms =
-            std::chrono::duration<double, std::milli>(end - start).count();
+        const double ms = std::chrono::duration<double, std::milli>(end - start).count();
         samples_ms.push_back(ms);
     }
 
@@ -197,14 +196,14 @@ PerfResult MeasureRoster(int n, int ticks) {
     result.spawned = spawned;
     result.median_ms = Median(samples_ms);
     result.p99_ms = Percentile(samples_ms, 99.0);
-    result.max_ms = samples_ms.empty()
-                        ? 0.0
-                        : *std::max_element(samples_ms.begin(), samples_ms.end());
-    for (double s : samples_ms) result.total_ms += s;
+    result.max_ms =
+        samples_ms.empty() ? 0.0 : *std::max_element(samples_ms.begin(), samples_ms.end());
+    for (double s : samples_ms)
+        result.total_ms += s;
     return result;
 }
 
-// FR-004 / AC-002: N in {256, 1000, 4000}, 300 ticks, report median + p99 ms/tick.
+// N in {256, 1000, 4000}, 300 ticks, report median + p99 ms/tick.
 TEST(EcologyTickPerf, MeasuresMedianAndP99AcrossRosterSizes) {
     constexpr int kTicks = 300;
     const std::vector<int> roster_sizes = {256, 1000, 4000};
@@ -256,11 +255,11 @@ TEST(EcologyTickPerf, MeasuresMedianAndP99AcrossRosterSizes) {
         EXPECT_TRUE(std::isfinite(r.median_ms) && std::isfinite(r.p99_ms))
             << "roster N=" << r.n << " produced a non-finite timing";
         // The gtest itself is NOT the budget gate (budgets live in the
-        // EcologyTickPerf validator against the perf-floor-release.json
+        // EcologyTickPerf validator against the reviewed release summary
         // ecology_tick block, blessed via capture-ecology-tick-budgets.ps1); it
         // only asserts the measurement is well-formed and emits the artifact.
         //
-        // STANDING RULE (spec-021 INSTINCT-15): there is NO ecology budget CAP in
+        // STANDING RULE: there is NO ecology budget CAP in
         // the sim today — the WHOLE creature roster ticks every tick, and these
         // budgets only measure/enforce that full-roster cost. If holding the
         // budget ever requires capping per-tick ecology work, the cap MUST be a
@@ -272,4 +271,4 @@ TEST(EcologyTickPerf, MeasuresMedianAndP99AcrossRosterSizes) {
     }
 }
 
-}  // namespace
+} // namespace

@@ -3,17 +3,17 @@
 #include <algorithm>
 #include <cmath>
 
-// Spec 015 Pillar B (RENDER-17, Wave F F7): the froxel grid model — dimensions and
+//  rendering (,  ): the froxel grid model — dimensions and
 // the exponential depth-slice mapping, shared by the froxel_inject/froxel_integrate
 // compute shaders and the FroxelModel gtests. ONE definition; the shaders mirror
 // these exact expressions (the GLSL constants are pinned by the gtest anchors).
 //
-// Geometry: a view-frustum-aligned 160x90x64 grid (FR-B-001). X/Y tile the screen
+// Geometry: a view-frustum-aligned 160x90x64 grid. X/Y tile the screen
 // uniformly; Z slices distribute EXPONENTIALLY between kNearDepth and kFarDepth so
 // near media (where parallax and lighting detail matter) get fine slices and the
 // far field coarsens — the standard froxel-volumetrics slicing (Frostbite/id).
 //
-// Render-only: never feeds the sim or world_hash (018 FR-E-003).
+// Render-only: never feeds the sim or world_hash.
 namespace Luminumbra::Rendering::Froxel {
 
 inline constexpr int kGridX = 160;
@@ -22,7 +22,7 @@ inline constexpr int kGridZ = 64;
 
 // The participating-media march range in view-space metres. Media beyond
 // kFarDepth is the analytic aerial's domain (the froxel volume COMPOSES with the
-// aerial pass, it does not replace it — FR-B-004).
+// aerial pass, it does not replace it — ).
 inline constexpr float kNearDepth = 0.5f;
 inline constexpr float kFarDepth = 160.0f;
 
@@ -36,9 +36,9 @@ inline float SliceBoundaryDepth(int boundary) {
 
 // The inverse: which slice a view depth lands in, clamped to [0, kGridZ-1].
 inline int DepthToSlice(float view_depth) {
-    if (view_depth <= kNearDepth) return 0;
-    const float t = std::log(view_depth / kNearDepth) /
-                    std::log(kFarDepth / kNearDepth);
+    if (view_depth <= kNearDepth)
+        return 0;
+    const float t = std::log(view_depth / kNearDepth) / std::log(kFarDepth / kNearDepth);
     const int slice = static_cast<int>(t * static_cast<float>(kGridZ));
     return std::clamp(slice, 0, kGridZ - 1);
 }
@@ -47,8 +47,7 @@ inline int DepthToSlice(float view_depth) {
 // what the composite samples in volumetric_lighting.frag.
 inline float DepthToTextureW(float view_depth) {
     const float clamped = std::clamp(view_depth, kNearDepth, kFarDepth);
-    const float t = std::log(clamped / kNearDepth) /
-                    std::log(kFarDepth / kNearDepth);
+    const float t = std::log(clamped / kNearDepth) / std::log(kFarDepth / kNearDepth);
     return std::clamp(t, 0.0f, 1.0f);
 }
 

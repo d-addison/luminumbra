@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../RenderContext.h"
 #include "../FrameBufferObject.h"
+#include "../RenderContext.h"
 
 #include <filesystem>
 #include <memory>
@@ -11,10 +11,10 @@ namespace Luminumbra::Rendering {
 class Shader;
 class RenderResourceRegistry;
 
-// Deferred lighting render pass extracted from RenderPipeline (T-I2-11e).
+// Deferred lighting render pass extracted from RenderPipeline.
 // Owns the lighting FBO (HDR color + opaque color copy + depth renderbuffer)
-// and the lighting shader. Spec 016-P2-T12: routed through the RenderContext
-// seam — execute()/copy/overlay read frame state (g-buffer/shadow/ssao/caustics/
+// and the lighting shader. -T12: routed through the RenderContext
+// seam — execute/copy/overlay read frame state (g-buffer/shadow/ssao/caustics/
 // terrain/aether/light state, screen, the shared quad, stats out-pointer) from
 // the RenderContext instead of RenderPipeline. The shadow-cascade fixup (which
 // mutates the shared ShadowMap private state + calls a pipeline-private) is
@@ -27,9 +27,9 @@ public:
 
     void init_shader(const std::filesystem::path& root_path);
     // Root path retained so the lightning overlay program can be lazily built on
-    // first strike (T-I5a-5).
+    // first strike.
     std::filesystem::path m_root_path;
-    // RENDER-12/GPU-12: the lighting FBO (HDR color attachment + depth
+    // the lighting FBO (HDR color attachment + depth
     // renderbuffer) and the standalone opaque-color copy are REGISTRY-OWNED. The
     // lightning scene-copy scratch (m_lightning_scene_copy) stays pass-owned - it
     // is a lazily-sized strike-only scratch, not created here. The
@@ -41,9 +41,9 @@ public:
     void copy_lighting_color_to_opaque_texture(const RenderContext& ctx);
     void execute(const RenderContext& ctx);
 
-    // T-I5a-5 (B3): full-scene lightning light-pulse + bolt overlay. A strike is a
+    // full-scene lightning light-pulse + bolt overlay. A strike is a
     // deterministic SIM world event (in the `weather` world_hash sub-hash); this is
-    // the one-way (F2) render response. Drawn as a tiny additive full-screen pass
+    // the one-way  render response. Drawn as a tiny additive full-screen pass
     // into the lighting FBO AFTER the skybox/water/particles so the transient flash
     // + the screen-space bolt composite over BOTH the lit terrain and the sky (the
     // main lighting shader only shades G-buffer geometry; the skybox overwrites sky
@@ -51,14 +51,20 @@ public:
     // LightingPass so the lightning injection stays part of the lighting subsystem.
     void execute_lightning_overlay(const RenderContext& ctx);
 
-    FrameBufferObject& lighting_fbo() { return m_lighting_fbo; }
-    const FrameBufferObject& lighting_fbo() const { return m_lighting_fbo; }
-    const std::unique_ptr<Shader>& shader() const { return m_lighting_shader; }
+    FrameBufferObject& lighting_fbo() {
+        return m_lighting_fbo;
+    }
+    const FrameBufferObject& lighting_fbo() const {
+        return m_lighting_fbo;
+    }
+    const std::unique_ptr<Shader>& shader() const {
+        return m_lighting_shader;
+    }
 
 private:
     FrameBufferObject m_lighting_fbo;
     std::unique_ptr<Shader> m_lighting_shader;
-    // T-I5a-5 (B3): the lightning overlay program (full-screen additive). Lazily
+    // the lightning overlay program (full-screen additive). Lazily
     // built on first use so non-lightning frames pay nothing.
     std::unique_ptr<Shader> m_lightning_overlay_shader;
     // Scratch texture holding a copy of the composited scene the overlay reads

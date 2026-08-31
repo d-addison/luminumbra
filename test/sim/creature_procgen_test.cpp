@@ -1,4 +1,4 @@
-// Phase 2 — CreatureProcgen: pure genome -> body-proportion build (the creature analogue
+// CreatureProcgen: pure genome -> body-proportion build (the creature analogue
 // of PlantProcgen). Pins the contract the procedural-creature silhouettes rely on:
 // deterministic, bounded (no degenerate slivers/giants), distinct genes -> distinct
 // builds, and the overall size multiplies every axis. No GL, no rng.
@@ -8,13 +8,16 @@
 
 namespace {
 
-using luminumbra::creature::CreatureBuildGenome;
-using luminumbra::creature::CreatureBuild;
 using luminumbra::creature::ComputeCreatureBuild;
+using luminumbra::creature::CreatureBuild;
+using luminumbra::creature::CreatureBuildGenome;
 
 TEST(CreatureProcgen, DeterministicAndBounded) {
     CreatureBuildGenome g;
-    g.height = 0.7f; g.girth = 0.3f; g.length = 0.9f; g.size = 1.1f;
+    g.height = 0.7f;
+    g.girth = 0.3f;
+    g.length = 0.9f;
+    g.size = 1.1f;
     const CreatureBuild a = ComputeCreatureBuild(g);
     const CreatureBuild b = ComputeCreatureBuild(g);
     EXPECT_FLOAT_EQ(a.scale_x, b.scale_x);
@@ -22,8 +25,16 @@ TEST(CreatureProcgen, DeterministicAndBounded) {
     EXPECT_FLOAT_EQ(a.scale_z, b.scale_z);
 
     // Even at gene extremes the build stays in a sane band (times the size multiplier).
-    CreatureBuildGenome lo; lo.height = 0.0f; lo.girth = 0.0f; lo.length = 0.0f; lo.size = 1.0f;
-    CreatureBuildGenome hi; hi.height = 1.0f; hi.girth = 1.0f; hi.length = 1.0f; hi.size = 1.0f;
+    CreatureBuildGenome lo;
+    lo.height = 0.0f;
+    lo.girth = 0.0f;
+    lo.length = 0.0f;
+    lo.size = 1.0f;
+    CreatureBuildGenome hi;
+    hi.height = 1.0f;
+    hi.girth = 1.0f;
+    hi.length = 1.0f;
+    hi.size = 1.0f;
     const CreatureBuild bl = ComputeCreatureBuild(lo);
     const CreatureBuild bh = ComputeCreatureBuild(hi);
     for (float v : {bl.scale_x, bl.scale_y, bl.scale_z, bh.scale_x, bh.scale_y, bh.scale_z}) {
@@ -37,9 +48,14 @@ TEST(CreatureProcgen, DeterministicAndBounded) {
 }
 
 TEST(CreatureProcgen, AxesAreIndependent) {
-    CreatureBuildGenome base; base.height = 0.5f; base.girth = 0.5f; base.length = 0.5f;
-    CreatureBuildGenome tall = base; tall.height = 1.0f;
-    CreatureBuildGenome wide = base; wide.girth = 1.0f;
+    CreatureBuildGenome base;
+    base.height = 0.5f;
+    base.girth = 0.5f;
+    base.length = 0.5f;
+    CreatureBuildGenome tall = base;
+    tall.height = 1.0f;
+    CreatureBuildGenome wide = base;
+    wide.girth = 1.0f;
 
     const CreatureBuild b0 = ComputeCreatureBuild(base);
     const CreatureBuild bt = ComputeCreatureBuild(tall);
@@ -54,7 +70,10 @@ TEST(CreatureProcgen, AxesAreIndependent) {
 }
 
 TEST(CreatureProcgen, SizeMultipliesEveryAxis) {
-    CreatureBuildGenome g; g.height = 0.5f; g.girth = 0.5f; g.length = 0.5f;
+    CreatureBuildGenome g;
+    g.height = 0.5f;
+    g.girth = 0.5f;
+    g.length = 0.5f;
     g.size = 1.0f;
     const CreatureBuild b1 = ComputeCreatureBuild(g);
     g.size = 2.0f;
@@ -69,4 +88,4 @@ TEST(CreatureProcgen, SizeMultipliesEveryAxis) {
     EXPECT_FLOAT_EQ(b0.scale_x, b1.scale_x);
 }
 
-}  // namespace
+} // namespace

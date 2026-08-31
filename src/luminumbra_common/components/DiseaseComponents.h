@@ -1,6 +1,6 @@
 #pragma once
 
-// sim.disease — the SIMULATION-SIDE plant PEST/BLIGHT state (Track: disease).
+// sim.disease — the SIMULATION-SIDE plant PEST/BLIGHT state .
 //
 // A configurable blight that spreads by PROXIMITY between plants and is gated by
 // each plant's QUALITY/RESISTANCE: a low-resistance neighbour catches it; a tended

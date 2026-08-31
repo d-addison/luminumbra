@@ -15,7 +15,7 @@ std::mutex& init_mutex() {
 }
 
 std::shared_ptr<spdlog::logger> create_default_logger() {
-    // spdlog::get returns the existing logger if a previous Init() registered it,
+    // spdlog::get returns the existing logger if a previous Init registered it,
     // avoiding the "logger with name LUMINUMBRA already exists" re-registration throw.
     if (auto existing = spdlog::get("LUMINUMBRA")) {
         return existing;
@@ -60,8 +60,8 @@ void Log::Init() {
 
 std::shared_ptr<spdlog::logger>& Log::GetCoreLogger() {
     if (!s_CoreLogger) {
-        // Lazy fallback for callers that bypass Init() (test binaries via
-        // gtest_main, ad-hoc tooling). Same configuration as Init() so the
+        // Lazy fallback for callers that bypass Init (test binaries via
+        // gtest_main, ad-hoc tooling). Same configuration as Init so the
         // log output is consistent regardless of how the logger came up.
         std::lock_guard<std::mutex> lock(init_mutex());
         if (!s_CoreLogger) {

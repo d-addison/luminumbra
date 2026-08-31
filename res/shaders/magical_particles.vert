@@ -1,7 +1,7 @@
 #version 450 core
 
 // ===========================================================================
-// T-I5a-1: GPU particle framework vertex stage.
+// GPU particle framework vertex stage.
 //
 // Re-home of the magical_particles billboard onto the instanced, fixed-capacity
 // persistent-mapped pool (ParticlePass). Each particle is drawn as an instanced
@@ -24,7 +24,7 @@ layout (location = 0) in vec3  aPos;
 layout (location = 1) in float aSize;
 layout (location = 2) in vec4  aColor;
 layout (location = 3) in uint  aAtlasLayer;
-// T-I5a-DR-atmospheric-visuals: location 4 is now an snorm8 rotation (angle/pi in
+// location 4 is now an snorm8 rotation (angle/pi in
 // [-1,1]) and location 5 a unorm8 streak aspect (aspect/16 in [0,1]). The streak
 // aspect ELONGATES the velocity-aligned billboard so rain renders as a vertical
 // (wind-sheared) streak instead of a round dot.
@@ -60,19 +60,19 @@ void main() {
     // Quad corner from gl_VertexID for a triangle strip:
     //   0 -> (-1,-1), 1 -> (+1,-1), 2 -> (-1,+1), 3 -> (+1,+1)
     vec2 corner = vec2(
-        (gl_VertexID == 1 || gl_VertexID == 3) ? 1.0 : -1.0,
-        (gl_VertexID == 2 || gl_VertexID == 3) ? 1.0 : -1.0);
+        (gl_VertexID == 1 || gl_VertexID == 3) ? 1.0: -1.0,
+        (gl_VertexID == 2 || gl_VertexID == 3) ? 1.0: -1.0);
 
     // Decode the packed rotation (snorm8 angle/pi) + streak aspect (unorm8).
     float angle = aRotation * PI_PARTICLE;
     float aspect = max(1.0, aStreak * MAX_STREAK_ASPECT);
 
-    // T-I5a-DR-atmospheric-visuals: ELONGATE the local quad along its streak axis
+    // ELONGATE the local quad along its streak axis
     // (local Y) by the aspect, and SLIM it across (local X) so the on-screen area
     // stays modest -- a thin tall streak rather than a fat dot. The subsequent
     // rotation aligns the streak to the screen-projected velocity (set on the CPU
     // as atan2(horiz, vert)), so a wind-slanted velocity renders a slanted streak.
-    float widthScale = (aspect > 1.0) ? (1.0 / sqrt(aspect)) : 1.0;
+    float widthScale = (aspect > 1.0) ? (1.0 / sqrt(aspect)): 1.0;
     vec2 shaped = vec2(corner.x * widthScale, corner.y * aspect);
 
     // Rotate the (elongated) billboard in its own plane.

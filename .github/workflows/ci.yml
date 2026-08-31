@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, devel]
   pull_request:
+    branches: [main, devel]
   workflow_dispatch:
 
 permissions:
@@ -60,6 +61,14 @@ jobs:
             build/release/test-artifacts
           if-no-files-found: warn
           retention-days: 14
+      - name: Validate dormant and enabled Linux packaging
+        if: github.ref_name == 'main' || github.base_ref == 'main'
+        run: |
+          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          test ! -e build/package-off/CPackConfig.cmake
+          cmake -S . -B build/package-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package-linux --target package --parallel 4
 
   windows-msvc:
     name: Windows / MSVC
@@ -97,9 +106,26 @@ jobs:
             build/release/test-artifacts
           if-no-files-found: warn
           retention-days: 14
+      - name: Validate dormant and enabled Windows packaging
+        if: github.ref_name == 'main' || github.base_ref == 'main'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          cmake -S . -B build/package-off -G Ninja -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=OFF
+          if (Test-Path build/package-off/CPackConfig.cmake) { throw 'binary packaging enabled while disabled' }
+          cmake -S . -B build/package-windows -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+          cmake --build build/package-windows --target package --parallel 4
 
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
+    if: github.ref_name == 'main' || github.base_ref == 'main'
     runs-on: windows-2025
     timeout-minutes: 105
     steps:
@@ -176,3 +202,20 @@ jobs:
           echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Check formatting
         run: scripts/lint.sh --format-only --changed-from '${{ steps.format-base.outputs.base }}'
+
+  public-tree:
+    name: Public tree / inventory honesty
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate publishable tree
+        run: |
+          python3 tools/ci/test_validate_public_tree.py
+          python3 tools/ci/test_check_docs.py
+          python3 tools/ci/validate_public_tree.py
+          python3 tools/ci/validate_assets.py --check config/public-asset-inventory.json
+          python3 tools/check_runtime_data_manifest.py
+          python3 tools/config_codegen.py --check
+          python3 tools/config_codegen.py --check-constants

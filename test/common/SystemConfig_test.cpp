@@ -1,7 +1,7 @@
-// §1a SystemConfig substrate — RED-first tests derived from spec
-// Acceptance Criteria AC-SC-001..005.
+//  SystemConfig substrate — contract tests derived from spec
+// Acceptance Criteria ..005.
 // These reference luminumbra::core::SystemConfig, which does not exist yet:
-// the test is expected to FAIL TO COMPILE until SystemConfig.{h,cpp} land (RED).
+// the test keeps the generated schema and runtime registry aligned.
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -9,11 +9,11 @@
 #include <sstream>
 #include <string>
 
-#include <iomanip>
 #include <glm/glm.hpp>
+#include <iomanip>
 
 #include "luminumbra_common/core/SystemConfig.h"
-#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"  // StableChecksum
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h" // StableChecksum
 
 using luminumbra::core::SysKey;
 using luminumbra::core::SysParam;
@@ -21,7 +21,7 @@ using luminumbra::core::SystemConfig;
 
 namespace {
 
-// AC-SC-001 — missing/empty config yields all-defaults, no crash.
+// missing/empty config yields all-defaults, no crash.
 TEST(SystemConfig, DefaultsAllOff) {
     const SystemConfig cfg = SystemConfig::Defaults();
     EXPECT_FALSE(cfg.enabled(SysKey::SimPlantGrowth));
@@ -45,7 +45,7 @@ TEST(SystemConfig, EmptyAndBlankJsonAreDefaults) {
     }
 }
 
-// AC-SC-002 — param parse + defaults round-trip; unknown keys ignored.
+// param parse + defaults round-trip; unknown keys ignored.
 TEST(SystemConfig, RoundTripNamedValuesAndFallbacks) {
     const std::string json = R"({
       "render": {
@@ -79,12 +79,12 @@ TEST(SystemConfig, UnknownKeysIgnoredNoThrow) {
     EXPECT_TRUE(cfg.enabled(SysKey::RenderMoonlight));
 }
 
-// AC-SC-003 — config sub-hash is empty at all-defaults (sub-hash set byte-identical).
+// config sub-hash is empty at all-defaults (sub-hash set byte-identical).
 TEST(SystemConfig, ConfigSubHashEmptyAtDefaults) {
     EXPECT_EQ(SystemConfig::Defaults().ComputeConfigSubHash(), std::string{});
 }
 
-// AC-SC-004 — sim non-default flag/param moves the sub-hash; render flags never do.
+// sim non-default flag/param moves the sub-hash; render flags never do.
 TEST(SystemConfig, RenderFlagDoesNotMoveConfigSubHash) {
     const std::string json = R"({
       "render": { "moonlight": { "enabled": true, "params": { "strength": 9.9 } },
@@ -125,14 +125,15 @@ TEST(SystemConfig, ConfigSubHashIsOrderIndependentAndStable) {
     EXPECT_EQ(ha, hb);
 }
 
-// Spec 020 AC-B-002 / FR-B-005 — the SCHEMA-GENERATED kKeys/kParams registries must produce a
+//   /  — the SCHEMA-GENERATED kKeys/kParams registries must produce a
 // config:v1: serialization that is BYTE-IDENTICAL to the hand-authored contract. We reconstruct
 // the canonical serialization independently here (same prefix, same setprecision(17), same float
-// literals as the schema defaults) and assert ComputeConfigSubHash == StableChecksum(reconstructed).
-// This pins BOTH the serialization format AND each generated default value, so a drift in either
-// (e.g. a regenerated header with a changed default, or a serializer edit) fails this test rather
-// than silently moving an enabled-system hash. Defaults are never exercised by `--smoke` (which
-// enables no sim system → empty hash), so this is the real guard for the schema-codegen migration.
+// literals as the schema defaults) and assert ComputeConfigSubHash ==
+// StableChecksum(reconstructed). This pins BOTH the serialization format AND each generated default
+// value, so a drift in either (e.g. a regenerated header with a changed default, or a serializer
+// edit) fails this test rather than silently moving an enabled-system hash. Defaults are never
+// exercised by `--smoke` (which enables no sim system → empty hash), so this is the real guard for
+// the schema-codegen migration.
 std::string ExpectedSubHash(const std::string& canonical_body) {
     std::ostringstream bytes;
     bytes << "config:v1:" << std::setprecision(17) << canonical_body;
@@ -144,8 +145,8 @@ TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
     {
         std::ostringstream body;
         body << std::setprecision(17) << "plant_growth:en=1;mutation_rate=" << 0.05f << ';';
-        const auto cfg = SystemConfig::FromJsonString(
-            R"({ "sim": { "plant_growth": { "enabled": true } } })");
+        const auto cfg =
+            SystemConfig::FromJsonString(R"({ "sim": { "plant_growth": { "enabled": true } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
     }
     // Sim key with NO owned params still emits the enabled marker and nothing after it.
@@ -157,8 +158,8 @@ TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
     // Sim key owning multiple scalar params: every owned default is emitted in kParams order.
     {
         std::ostringstream body;
-        body << std::setprecision(17) << "foraging:en=1;deposit=" << 1.0f << ";trail_weight="
-             << 8.0f << ";goal_weight=" << 1.0f << ';';
+        body << std::setprecision(17) << "foraging:en=1;deposit=" << 1.0f
+             << ";trail_weight=" << 8.0f << ";goal_weight=" << 1.0f << ';';
         const auto cfg =
             SystemConfig::FromJsonString(R"({ "sim": { "foraging": { "enabled": true } } })");
         EXPECT_EQ(cfg.ComputeConfigSubHash(), ExpectedSubHash(body.str()));
@@ -185,7 +186,7 @@ TEST(SystemConfig, ConfigSubHashByteIdenticalSnapshot) {
     EXPECT_EQ(SystemConfig::Defaults().ComputeConfigSubHash(), std::string{});
 }
 
-// AC-SC-005 — enabled() is a cheap, deterministic hot-path query (structural O(1);
+// enabled is a cheap, deterministic hot-path query (structural O(1);
 // functional smoke that it is side-effect-free and stable across many calls).
 TEST(SystemConfig, EnabledHotPathStable) {
     const SystemConfig cfg =
@@ -199,9 +200,9 @@ TEST(SystemConfig, EnabledHotPathStable) {
     EXPECT_TRUE(cfg.enabled(SysKey::SimErosion));
 }
 
-// ---- Addendum A: user.* settings extension (AC-SC-101..105) ----
+// ---- Addendum A: user.* settings extension (-101..105) ----
 
-// AC-SC-101 — user.video/audio round-trip; unnamed fields keep defaults.
+// -101 — user.video/audio round-trip; unnamed fields keep defaults.
 TEST(SystemConfig, UserVideoAudioRoundTrip) {
     const std::string json = R"({
       "user": {
@@ -220,7 +221,7 @@ TEST(SystemConfig, UserVideoAudioRoundTrip) {
     EXPECT_FLOAT_EQ(u.mouse_sensitivity, 0.22f);
     EXPECT_FLOAT_EQ(u.audio_master, 0.8f);
     EXPECT_FLOAT_EQ(u.audio_music, 0.5f);
-    EXPECT_FLOAT_EQ(u.audio_sfx, 1.0f);  // unnamed -> default
+    EXPECT_FLOAT_EQ(u.audio_sfx, 1.0f); // unnamed -> default
 }
 
 // Owner request 2026-06-18: default look sensitivity is 25% of the prior 0.1, and VSync
@@ -231,7 +232,7 @@ TEST(SystemConfig, UserVideoDefaults) {
     EXPECT_FALSE(u.vsync);
 }
 
-// AC-SC-105 — keybind map resolves action->key; missing action -> fallback.
+// -105 — keybind map resolves action->key; missing action -> fallback.
 TEST(SystemConfig, UserControlsKeybindRoundTrip) {
     const std::string json = R"({
       "user": { "controls": { "Move_Forward": 87, "Jump": 32 } }
@@ -239,10 +240,10 @@ TEST(SystemConfig, UserControlsKeybindRoundTrip) {
     const SystemConfig cfg = SystemConfig::FromJsonString(json);
     EXPECT_EQ(cfg.keybind("Move_Forward", -1), 87);
     EXPECT_EQ(cfg.keybind("Jump", -1), 32);
-    EXPECT_EQ(cfg.keybind("Crouch", 67), 67);  // unbound -> fallback (compiled default)
+    EXPECT_EQ(cfg.keybind("Crouch", 67), 67); // unbound -> fallback (compiled default)
 }
 
-// AC-SC-102 — user.* never moves the config sub-hash.
+// -102 — user.* never moves the config sub-hash.
 TEST(SystemConfig, UserSettingsDoNotHash) {
     const std::string json = R"({
       "user": { "video": { "fov": 120.0, "vsync": false },
@@ -252,12 +253,12 @@ TEST(SystemConfig, UserSettingsDoNotHash) {
     EXPECT_EQ(cfg.ComputeConfigSubHash(), std::string{});
 }
 
-// AC-SC-103 — SaveUserOverlay round-trips and writes ONLY user.* (no sim/render leakage).
+// -103 — SaveUserOverlay round-trips and writes ONLY user.* (no sim/render leakage).
 TEST(SystemConfig, UserOverlaySaveReload) {
     const std::filesystem::path dir =
         std::filesystem::temp_directory_path() / "lumin_systemconfig_test";
     std::error_code rm_ec;
-    std::filesystem::remove_all(dir, rm_ec);  // non-throwing pre-clean
+    std::filesystem::remove_all(dir, rm_ec); // non-throwing pre-clean
     const std::filesystem::path path = dir / "settings.json";
 
     SystemConfig cfg = SystemConfig::FromJsonString(R"({
@@ -284,12 +285,12 @@ TEST(SystemConfig, UserOverlaySaveReload) {
     EXPECT_FLOAT_EQ(reloaded.user().fov, 95.0f);
     EXPECT_EQ(reloaded.user().window_mode, "windowed");
     EXPECT_EQ(reloaded.keybind("Sprint", -1), 340);
-    EXPECT_FALSE(reloaded.enabled(SysKey::SimErosion));  // overlay carries no sim flags
+    EXPECT_FALSE(reloaded.enabled(SysKey::SimErosion)); // overlay carries no sim flags
 
-    std::filesystem::remove_all(dir, rm_ec);  // non-throwing teardown
+    std::filesystem::remove_all(dir, rm_ec); // non-throwing teardown
 }
 
-// AC-SC-104 — overlay merge precedence: user.* from overlay, sim/render from defaults;
+// -104 — overlay merge precedence: user.* from overlay, sim/render from defaults;
 // a sim.* in the overlay is ignored.
 TEST(SystemConfig, OverlayMergePrecedence) {
     SystemConfig cfg = SystemConfig::FromJsonString(R"({
@@ -304,14 +305,14 @@ TEST(SystemConfig, OverlayMergePrecedence) {
       "sim": { "plant_growth": { "enabled": false } },
       "user": { "video": { "fov": 100.0 } }
     })");
-    EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth));  // unchanged by overlay
-    EXPECT_FLOAT_EQ(cfg.user().fov, 100.0f);           // overlay wins for user.*
+    EXPECT_TRUE(cfg.enabled(SysKey::SimPlantGrowth)); // unchanged by overlay
+    EXPECT_FLOAT_EQ(cfg.user().fov, 100.0f);          // overlay wins for user.*
 }
 
 TEST(SystemConfig, MalformedOverlayKeepsSettings) {
     SystemConfig cfg = SystemConfig::FromJsonString(R"({ "user": { "video": { "fov": 60.0 } } })");
     cfg.OverlayUserFromJsonString("}{ not json");
-    EXPECT_FLOAT_EQ(cfg.user().fov, 60.0f);  // unchanged
+    EXPECT_FLOAT_EQ(cfg.user().fov, 60.0f); // unchanged
 }
 
-}  // namespace
+} // namespace

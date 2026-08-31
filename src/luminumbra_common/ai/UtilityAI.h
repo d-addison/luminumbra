@@ -1,6 +1,6 @@
 #pragma once
 
-// I9-ECO: Infinite Axis Utility System (IAUS) — the creature decision ARBITER (the
+//  Infinite Axis Utility System (IAUS) — the creature decision ARBITER (the
 // research-directed move: Utility AI primary, GOAP demoted). An action's score is the
 // product of its CONSIDERATIONS (each a normalized response curve over a game input:
 // hunger, threat distance, stamina, ...) times a weight, with Dave Mark's compensation
@@ -21,34 +21,38 @@ namespace luminumbra::ai {
 // Clamp to [0,1]. NaN-safe: a NaN input floors to 0 (NOT through — both v<0 and v>1 are false
 // for NaN, so the naive form would propagate NaN into UtilityAction::Score and make a NaN-scoring
 // action silently unselectable). The leading !(v>0) catches NaN and negatives in one branch.
-inline float utility_clamp01(float v) { return !(v > 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v); }
+inline float utility_clamp01(float v) {
+    return !(v > 0.0f) ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
 
 // Response curve over a normalized input [0,1] -> [0,1].
 enum class CurveType : std::uint8_t {
-    Linear,      // clamp01(m*(x - c) + b)        — rises with input
-    Quadratic,   // clamp01(m*(x - c)^2 + b)      — U / hump around c (exponent fixed at 2)
-    InvLinear,   // clamp01(m*(c - x) + b)        — falls with input
-    Logistic,    // libm-free smoothstep sigmoid centered at c, width ~1/m
+    Linear,    // clamp01(m*(x - c) + b)        — rises with input
+    Quadratic, // clamp01(m*(x - c)^2 + b)      — U / hump around c (exponent fixed at 2)
+    InvLinear, // clamp01(m*(c - x) + b)        — falls with input
+    Logistic,  // libm-free smoothstep sigmoid centered at c, width ~1/m
 };
 
 struct Consideration {
-    float input = 0.0f;                  // normalized game input [0,1]
+    float input = 0.0f; // normalized game input [0,1]
     CurveType curve = CurveType::Linear;
-    float m = 1.0f, b = 0.0f, c = 0.0f;  // shape params
+    float m = 1.0f, b = 0.0f, c = 0.0f; // shape params
 
     [[nodiscard]] float Evaluate() const {
         const float x = utility_clamp01(input);
         switch (curve) {
-            case CurveType::Linear:    return utility_clamp01(m * (x - c) + b);
-            case CurveType::InvLinear: return utility_clamp01(m * (c - x) + b);
+            case CurveType::Linear:
+                return utility_clamp01(m * (x - c) + b);
+            case CurveType::InvLinear:
+                return utility_clamp01(m * (c - x) + b);
             case CurveType::Quadratic: {
                 const float d = x - c;
                 return utility_clamp01(m * d * d + b);
             }
             case CurveType::Logistic: {
-                const float w = (m <= 0.0f) ? 1.0f : (0.5f / m);     // half-width
+                const float w = (m <= 0.0f) ? 1.0f : (0.5f / m); // half-width
                 const float t = utility_clamp01((x - (c - w)) / (2.0f * w));
-                return utility_clamp01(t * t * (3.0f - 2.0f * t) + b);  // smoothstep
+                return utility_clamp01(t * t * (3.0f - 2.0f * t) + b); // smoothstep
             }
         }
         return 0.0f;
@@ -65,12 +69,13 @@ struct UtilityAction {
     [[nodiscard]] float Score() const {
         const int n = static_cast<int>(considerations.size());
         float score = utility_clamp01(weight);
-        if (n == 0) return score;
+        if (n == 0)
+            return score;
         const float modFactor = 1.0f - (1.0f / static_cast<float>(n));
         for (const Consideration& con : considerations) {
             const float v = utility_clamp01(con.Evaluate());
             const float makeUp = (1.0f - v) * modFactor;
-            score *= utility_clamp01(v + makeUp * v);  // response*(1 + makeUp)
+            score *= utility_clamp01(v + makeUp * v); // response*(1 + makeUp)
         }
         return utility_clamp01(score);
     }
@@ -91,4 +96,4 @@ struct UtilityAction {
     return bestId;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

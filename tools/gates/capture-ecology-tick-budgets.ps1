@@ -7,27 +7,21 @@ param(
     # regression (e.g. an O(N^2) path sneaking back in) without flaking on ordinary
     # run-to-run scheduler noise. budget_median_ms = median(median_ms over runs) * this.
     [double]$HeadroomMultiplier = 1.5,
-    # Without -Bless the block is written status="unblessed" (record-only: the
-    # -Mode EcologyTickPerf gate reports but does not enforce). -Bless writes
-    # status="blessed" -> the median ceilings become enforced on matching-build runs.
+    # -Bless marks the reviewed summary as enforceable. Without it, the capture
+    # remains record-only.
     [switch]$Bless
 )
 
-# Spec-021 INSTINCT-15: capture + (optionally) bless the ECOLOGY-TICK perf budgets.
+# capture + (optionally) bless the ECOLOGY-TICK perf budgets.
 #
 # Runs the EcologyTickPerf gtest (N in {256,1k,4k}, 300 headless ticks per roster,
 # the kinematic PopulatedWorldReplay roster shape) $Runs times, takes the per-N
-# MEDIAN of the run medians, applies the headroom multiplier, and MERGES the result
-# into tools/gates/baselines/perf-floor-release.json as the `ecology_tick`
-# block — WITHOUT touching the frame-ms floor fields (scenarios/status/... are owned
-# by capture-perf-floor.ps1, which symmetrically preserves this block).
-#
-# The ecology block is INDEPENDENTLY blessable: ecology_tick.status gates enforcement
-# in Test-EcologyTickPerf, so these budgets do not wait on the frame-ms floor's
-# target-GPU capture. Validate with:
+# MEDIAN of the run medians, applies the headroom multiplier, and writes the
+# compact reviewed summary at tools/gates/baselines/ecology-tick-release.json.
+# Validate with:
 #   tools/gates/validate-engine-frontier.ps1 -Mode EcologyTickPerf -BuildPreset release
 #
-# STANDING RULE (INSTINCT-15): there is NO ecology budget CAP in the sim — the whole
+# STANDING RULE: there is NO ecology budget CAP in the sim — the whole
 # roster ticks every tick, and these budgets price that full-roster cost. Any future
 # per-tick ecology work cap MUST be a deterministic rotating id-sorted window (the
 # WaterSystem MAX_WATER_SIMS_PER_TICK pattern), NEVER a time-based/adaptive cutoff.
@@ -54,7 +48,7 @@ function Get-Median {
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Push-Location $RepoRoot
 try {
-    $FloorPath = "tools/gates/baselines/perf-floor-release.json"
+    $FloorPath = "tools/gates/baselines/ecology-tick-release.json"
     $Exe = "build/$BuildPreset/bin/ecology_tick_perf_test.exe"
     $ArtifactPath = "build/$BuildPreset/test-artifacts/sim/ecology_tick_perf.json"
 
@@ -131,35 +125,17 @@ try {
             $n, $observedMedian, $observedP99, $budgetBlock["$n"].budget_median_ms)
     }
 
-    $status = if ($Bless) { "blessed" } else { "unblessed" }
-    $ecologyBlock = [ordered]@{
+    $status = if ($Bless) { "reviewed" } else { "observation" }
+    $floor = [ordered]@{
+        schema = "luminumbra.ecology_tick_baseline.v1"
         status = $status
         captured_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         build_mode = $buildMode
         runs = $Runs
         ticks = $ticks
         headroom_multiplier = $HeadroomMultiplier
-        note = "INSTINCT-15: absolute median-ms/tick ceilings for -Mode EcologyTickPerf, per roster size. budget_median_ms = median(per-run median over $Runs runs) * headroom_multiplier; enforced only when status=='blessed' (or the whole floor is blessed) AND the measured build_mode matches. STANDING RULE: no ecology work cap exists in the sim; any future cap must be a deterministic rotating id-sorted window (MAX_WATER_SIMS_PER_TICK pattern), never time-based."
+        note = "Reviewed full-roster median-ms/tick ceilings. Work caps use a deterministic stable-id window, never a wall-clock cutoff."
         budgets = $budgetBlock
-    }
-
-    # MERGE into the existing floor file: every non-ecology field (schema/status/
-    # scenarios/... — the frame-ms floor) is preserved verbatim; only the ecology_tick
-    # block is replaced. A missing floor file gets a minimal unblessed skeleton so the
-    # ecology budgets can exist before the first frame-floor capture.
-    if (Test-Path $FloorPath) {
-        $floor = Get-Content $FloorPath -Raw | ConvertFrom-Json
-        if ($floor.schema -ne "luminumbra.perf_floor.v1") {
-            throw "Unexpected floor schema '$($floor.schema)' in $FloorPath"
-        }
-        $floor | Add-Member -NotePropertyName "ecology_tick" -NotePropertyValue $ecologyBlock -Force
-    } else {
-        $floor = [ordered]@{
-            schema = "luminumbra.perf_floor.v1"
-            status = "unblessed"
-            note = "Skeleton written by capture-ecology-tick-budgets.ps1: the frame-ms floor has not been captured yet (capture-perf-floor.ps1 owns scenarios/status). Only the ecology_tick block below is populated."
-            ecology_tick = $ecologyBlock
-        }
     }
 
     $json = $floor | ConvertTo-Json -Depth 10
@@ -167,9 +143,9 @@ try {
     $outputPath = Join-Path $resolvedDir (Split-Path $FloorPath -Leaf)
     [System.IO.File]::WriteAllText($outputPath, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
 
-    Write-Host "capture-ecology-tick-budgets: wrote $status ecology_tick block ($Runs runs, build_mode '$buildMode', headroom x$HeadroomMultiplier) into $FloorPath"
+    Write-Host "capture-ecology-tick-budgets: wrote $status summary ($Runs runs, build_mode '$buildMode', headroom x$HeadroomMultiplier) into $FloorPath"
     if (-not $Bless) {
-        Write-Host "capture-ecology-tick-budgets: block is UNBLESSED -> -Mode EcologyTickPerf stays record-only. Re-run with -Bless (release build) to enforce the median ceilings."
+        Write-Host "capture-ecology-tick-budgets: observation is record-only. Review it and re-run with -Bless to enforce the median ceilings."
     }
 } finally {
     Pop-Location

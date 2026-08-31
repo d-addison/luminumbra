@@ -1,4 +1,4 @@
-// INSTINCT-09: the shared AI PerceptionField substrate. These tests are the
+// the shared AI PerceptionField substrate. These tests are the
 // proving signal that the spatially-bucketed shared scan returns the SAME
 // neighbour/opportunity set the inline scans produce (determinism + equivalence):
 //   1. Direct: PerceptionField.Query == an independent brute-force reference that
@@ -41,7 +41,9 @@ using Luminumbra::Components::TransformComponent;
 // Deliberately NOT reusing the substrate's own helpers so the distance value and
 // gate are cross-checked, not assumed. `sources` are already in ordinal order.
 
-double RefRound4(double value) { return std::round(value * 10000.0) / 10000.0; }
+double RefRound4(double value) {
+    return std::round(value * 10000.0) / 10000.0;
+}
 
 std::vector<PerceivedSource> BruteForceGather(const PerceptionQueryInput& q,
                                               const std::vector<PerceptionSourceInput>& sources) {
@@ -54,12 +56,12 @@ std::vector<PerceivedSource> BruteForceGather(const PerceptionQueryInput& q,
             const double dz = static_cast<double>(q.z) - static_cast<double>(s.z);
             distance = RefRound4(std::sqrt(dx * dx + dy * dy + dz * dz));
             if (s.radius > 0.0f && distance > static_cast<double>(s.radius)) {
-                continue;  // outside this source's influence radius
+                continue; // outside this source's influence radius
             }
         }
         out.push_back({s.index, distance});
     }
-    return out;  // already ascending-index (sources are in ordinal order)
+    return out; // already ascending-index (sources are in ordinal order)
 }
 
 void ExpectSnapshotEquals(const PerceptionSnapshot& got,
@@ -72,8 +74,8 @@ void ExpectSnapshotEquals(const PerceptionSnapshot& got,
     }
 }
 
-PerceptionSourceInput Src(std::uint32_t index, float x, float y, float z, float radius,
-                          bool has_position = true) {
+PerceptionSourceInput
+Src(std::uint32_t index, float x, float y, float z, float radius, bool has_position = true) {
     PerceptionSourceInput s;
     s.index = index;
     s.x = x;
@@ -109,8 +111,11 @@ struct Lcg {
 
 // ---- Test-registry builders (shared by the flag-on / flag-off comparison) ----
 
-entt::entity AddAgent(entt::registry& r, const std::string& actor, bool with_transform,
-                      float x = 0.0f, float z = 0.0f) {
+entt::entity AddAgent(entt::registry& r,
+                      const std::string& actor,
+                      bool with_transform,
+                      float x = 0.0f,
+                      float z = 0.0f) {
     const auto e = r.create();
     auto& agent = r.emplace<InstinctAgentComponent>(e);
     agent.actor_id = actor;
@@ -124,9 +129,16 @@ entt::entity AddAgent(entt::registry& r, const std::string& actor, bool with_tra
     return e;
 }
 
-entt::entity AddOpportunity(entt::registry& r, const std::string& id, const std::string& need,
-                            float satisfaction, float urgency, bool with_transform, float x,
-                            float y, float z, float radius) {
+entt::entity AddOpportunity(entt::registry& r,
+                            const std::string& id,
+                            const std::string& need,
+                            float satisfaction,
+                            float urgency,
+                            bool with_transform,
+                            float x,
+                            float y,
+                            float z,
+                            float radius) {
     const auto e = r.create();
     auto& opp = r.emplace<OpportunityComponent>(e);
     opp.id = id;
@@ -165,18 +177,18 @@ BuiltWorld BuildWorld(entt::registry& r) {
     return w;
 }
 
-}  // namespace
+} // namespace
 
 TEST(PerceptionSubstrate, MatchesInlineGatherHandBuilt) {
     // Mixed set: two gated (one in range, one out), one ungated positioned, one
     // positionless global, one gated only reachable via the 3-D metric.
     std::vector<PerceptionSourceInput> sources = {
-        Src(0, 3.0f, 0.0f, 4.0f, 10.0f),          // dist 5 <= 10 -> in
-        Src(1, 100.0f, 0.0f, 0.0f, 10.0f),        // dist 100 > 10 -> out
-        Src(2, 500.0f, 0.0f, 0.0f, 0.0f),         // ungated -> always in
-        Src(3, 0.0f, 0.0f, 0.0f, 0.0f, false),    // positionless -> always in, dist 0
-        Src(4, 6.0f, 8.0f, 0.0f, 11.0f),          // 3-D dist 10 <= 11 -> in (XZ dist 6 only)
-        Src(5, 6.0f, 8.0f, 0.0f, 9.0f),           // 3-D dist 10 > 9 -> out (though XZ 6 < 9)
+        Src(0, 3.0f, 0.0f, 4.0f, 10.0f),       // dist 5 <= 10 -> in
+        Src(1, 100.0f, 0.0f, 0.0f, 10.0f),     // dist 100 > 10 -> out
+        Src(2, 500.0f, 0.0f, 0.0f, 0.0f),      // ungated -> always in
+        Src(3, 0.0f, 0.0f, 0.0f, 0.0f, false), // positionless -> always in, dist 0
+        Src(4, 6.0f, 8.0f, 0.0f, 11.0f),       // 3-D dist 10 <= 11 -> in (XZ dist 6 only)
+        Src(5, 6.0f, 8.0f, 0.0f, 9.0f),        // 3-D dist 10 > 9 -> out (though XZ 6 < 9)
     };
 
     PerceptionField field;
@@ -199,7 +211,7 @@ TEST(PerceptionSubstrate, MatchesInlineGatherHandBuilt) {
 TEST(PerceptionSubstrate, PositionlessPerceiverPerceivesEverySource) {
     std::vector<PerceptionSourceInput> sources = {
         Src(0, 3.0f, 0.0f, 4.0f, 1.0f),   // radius 1 would exclude at range...
-        Src(1, 500.0f, 0.0f, 0.0f, 2.0f), // ...but a positionless perceiver skips the gate
+        Src(1, 500.0f, 0.0f, 0.0f, 2.0f), //...but a positionless perceiver skips the gate
         Src(2, 0.0f, 0.0f, 0.0f, 0.0f, false),
     };
     PerceptionField field;
@@ -210,8 +222,9 @@ TEST(PerceptionSubstrate, PositionlessPerceiverPerceivesEverySource) {
     field.Query(q, got);
 
     const std::vector<PerceivedSource> expected = BruteForceGather(q, sources);
-    ASSERT_EQ(expected.size(), 3u);  // all three, all at distance 0
-    for (const auto& p : expected) EXPECT_DOUBLE_EQ(p.distance, 0.0);
+    ASSERT_EQ(expected.size(), 3u); // all three, all at distance 0
+    for (const auto& p : expected)
+        EXPECT_DOUBLE_EQ(p.distance, 0.0);
     ExpectSnapshotEquals(got, expected);
 }
 
@@ -225,11 +238,15 @@ TEST(PerceptionSubstrate, GridPruneMatchesBruteForceRandomized) {
     sources.reserve(kSourceCount);
     for (std::uint32_t i = 0; i < kSourceCount; ++i) {
         const std::uint32_t roll = rng.next() % 10u;
-        const bool positionless = (roll == 0u);           // ~10% global
-        const bool ungated = (roll == 1u || roll == 2u);  // ~20% ungated
+        const bool positionless = (roll == 0u);          // ~10% global
+        const bool ungated = (roll == 1u || roll == 2u); // ~20% ungated
         const float radius = ungated ? 0.0f : rng.range(0.5f, 25.0f);
-        sources.push_back(Src(i, rng.range(-200.0f, 200.0f), rng.range(-5.0f, 5.0f),
-                              rng.range(-200.0f, 200.0f), radius, !positionless));
+        sources.push_back(Src(i,
+                              rng.range(-200.0f, 200.0f),
+                              rng.range(-5.0f, 5.0f),
+                              rng.range(-200.0f, 200.0f),
+                              radius,
+                              !positionless));
     }
 
     PerceptionField field;

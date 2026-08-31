@@ -1,5 +1,5 @@
-// T-I3-7 persistence v2: LMR1 region container round-trip, v1->v2 migration
-// (world-hash equality is the migration gate), .bak retention, and
+//  persistence v2: LMR1 region container round-trip, v1->v2 migration
+// (world-hash equality is the migration gate),.bak retention, and
 // O(edited regions) incremental saves. Container spec:
 // design decisions, section 3.
 #include "gtest/gtest.h"
@@ -38,7 +38,8 @@ std::filesystem::path MakeTempSaveDir(const std::string& tag) {
 }
 
 struct TempSaveDir {
-    explicit TempSaveDir(const std::string& tag) : path(MakeTempSaveDir(tag)) {}
+    explicit TempSaveDir(const std::string& tag)
+        : path(MakeTempSaveDir(tag)) {}
     ~TempSaveDir() {
         std::error_code remove_error;
         std::filesystem::remove_all(path, remove_error);
@@ -47,19 +48,15 @@ struct TempSaveDir {
     std::filesystem::path path;
 };
 
-std::shared_ptr<Chunk> AddFixtureChunk(
-    WorldStreamingState& state,
-    const IVec3& coords,
-    Luminumbra::u32 salt) {
+std::shared_ptr<Chunk>
+AddFixtureChunk(WorldStreamingState& state, const IVec3& coords, Luminumbra::u32 salt) {
     auto chunk = state.get_or_create_chunk(coords);
     chunk->set_state(ChunkState::Ready);
     chunk->sdf_data = {-1.0f - static_cast<float>(salt), -0.5f, 0.75f, 2.0f};
     chunk->heightmap_data = {4.0f + static_cast<float>(salt), 5.25f, 6.5f};
-    chunk->mesh_vertices = {
-        {Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
-        {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u},
-        {Vec3(0.0f, 1.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 3u}
-    };
+    chunk->mesh_vertices = {{Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 1u},
+                            {Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 2u},
+                            {Vec3(0.0f, 1.0f, 1.0f), Vec3(0.0f, 1.0f, 0.0f), salt + 3u}};
     chunk->mesh_indices = {0u, 1u, 2u};
     chunk->water_level_data = {1.0f, 1.5f};
     chunk->water_flow_data = {Vec2(0.125f, -0.25f)};
@@ -91,7 +88,8 @@ std::string ReadFileBytes(const std::filesystem::path& path) {
 bool HasRegionTemporaryFile(const std::filesystem::path& region_path) {
     const std::string prefix = region_path.filename().string() + ".tmp.";
     std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator(region_path.parent_path(), error)) {
+    for (const auto& entry :
+         std::filesystem::directory_iterator(region_path.parent_path(), error)) {
         if (!error && entry.path().filename().string().rfind(prefix, 0) == 0) {
             return true;
         }
@@ -178,10 +176,14 @@ TEST(WorldSaveRegionFormat, RegionAddressingUsesFloorDivision) {
 
 TEST(WorldSaveRegionFormat, ChunkIdDecodeRoundTripsSignedPackedCoordinates) {
     const std::array<IVec3, 8> coordinates{{
-        IVec3(0, 0, 0), IVec3(31, 7, -32), IVec3(-1, -1, -1),
+        IVec3(0, 0, 0),
+        IVec3(31, 7, -32),
+        IVec3(-1, -1, -1),
         IVec3(1048575, 2097151, 1048575),
         IVec3(-1048576, -2097152, -1048576),
-        IVec3(-32, 0, -27), IVec3(32, -9, 5), IVec3(-999, 12345, 777),
+        IVec3(-32, 0, -27),
+        IVec3(32, -9, 5),
+        IVec3(-999, 12345, 777),
     }};
     for (const IVec3& coords : coordinates) {
         const IVec3 decoded = Chunk::decode_id(Chunk::calculate_id(coords));
@@ -207,7 +209,8 @@ TEST(WorldSaveRegionFormat, SaveWritesLmr1RegionFilesAndManifest) {
 
     const std::filesystem::path region_00 = WorldSaveService::region_file_path(save_dir.path, 0, 0);
     const std::filesystem::path region_10 = WorldSaveService::region_file_path(save_dir.path, 1, 0);
-    const std::filesystem::path region_nn = WorldSaveService::region_file_path(save_dir.path, -1, -1);
+    const std::filesystem::path region_nn =
+        WorldSaveService::region_file_path(save_dir.path, -1, -1);
     ASSERT_TRUE(std::filesystem::exists(region_00));
     ASSERT_TRUE(std::filesystem::exists(region_10));
     ASSERT_TRUE(std::filesystem::exists(region_nn));
@@ -242,19 +245,20 @@ TEST(WorldSaveRegionFormat, SaveWritesLmr1RegionFilesAndManifest) {
     // Record ids are sorted ascending within a lod level.
     EXPECT_LT(parsed.records[0].id, parsed.records[1].id);
 
-    const std::filesystem::path manifest_path = WorldSaveService::world_manifest_path(save_dir.path);
+    const std::filesystem::path manifest_path =
+        WorldSaveService::world_manifest_path(save_dir.path);
     ASSERT_TRUE(std::filesystem::exists(manifest_path));
     const std::string manifest = ReadFileBytes(manifest_path);
     EXPECT_NE(manifest.find("luminumbra.persistence.world_manifest.v1"), std::string::npos);
     EXPECT_NE(manifest.find("\"container\": \"LMR1\""), std::string::npos);
-    EXPECT_NE(manifest.find("next_durable_entity_id"), std::string::npos);
+    EXPECT_EQ(manifest.find("next_durable_entity_id"), std::string::npos);
 
     // No legacy v1 snapshot is ever written by the v2 writer.
     EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
 }
 
 TEST(WorldSaveRegionFormat, V1AndV2LoadsOfTheSameWorldHashEqual) {
-    // THE migration gate (design-decisions.md section 3): world_hash is
+    // THE migration gate (the deterministic runtime contract section 3): world_hash is
     // computed over the canonical in-memory snapshot, so loading the same
     // world from a v1 file and from v2 region files must hash equal.
     WorldStreamingState original;
@@ -323,7 +327,8 @@ TEST(WorldSaveRegionFormat, SaveDirtyChunksRewritesOnlyDirtyRegions) {
 
     const std::filesystem::path region_00 = WorldSaveService::region_file_path(save_dir.path, 0, 0);
     const std::filesystem::path region_10 = WorldSaveService::region_file_path(save_dir.path, 1, 0);
-    const std::filesystem::path region_nn = WorldSaveService::region_file_path(save_dir.path, -1, -1);
+    const std::filesystem::path region_nn =
+        WorldSaveService::region_file_path(save_dir.path, -1, -1);
     const std::string region_10_before = ReadFileBytes(region_10);
     const std::string region_nn_before = ReadFileBytes(region_nn);
     const std::string region_00_before = ReadFileBytes(region_00);
@@ -389,7 +394,8 @@ TEST(WorldSaveRegionFormat, IncrementalSavePreservesOnDiskChunksAbsentFromMemory
     EXPECT_EQ(edited->sdf_data[1], 17.5f);
 }
 
-TEST(WorldSaveRegionFormat, InterruptedChunkRewriteLeavesPriorRegionCompleteAndRetryPreservesOtherRecords) {
+TEST(WorldSaveRegionFormat,
+     InterruptedChunkRewriteLeavesPriorRegionCompleteAndRetryPreservesOtherRecords) {
     TempSaveDir save_dir("atomic_chunk_rewrite");
     WorldSaveService service;
 
@@ -408,10 +414,12 @@ TEST(WorldSaveRegionFormat, InterruptedChunkRewriteLeavesPriorRegionCompleteAndR
 
     std::vector<WorldSaveService::ContainerRecord> records_before;
     ASSERT_TRUE(WorldSaveService::read_container_records(region, records_before, &errors));
-    const auto untargeted_before = std::find_if(records_before.begin(), records_before.end(),
-        [id = untargeted->get_id()](const WorldSaveService::ContainerRecord& record) {
-            return record.lod_level == 0u && record.id == id;
-        });
+    const auto untargeted_before =
+        std::find_if(records_before.begin(),
+                     records_before.end(),
+                     [id = untargeted->get_id()](const WorldSaveService::ContainerRecord& record) {
+                         return record.lod_level == 0u && record.id == id;
+                     });
     ASSERT_NE(untargeted_before, records_before.end());
     const std::string untargeted_payload_before = untargeted_before->payload;
     const Luminumbra::u8 untargeted_flags_before = untargeted_before->flags;
@@ -454,10 +462,12 @@ TEST(WorldSaveRegionFormat, InterruptedChunkRewriteLeavesPriorRegionCompleteAndR
 
     std::vector<WorldSaveService::ContainerRecord> records_after;
     ASSERT_TRUE(WorldSaveService::read_container_records(region, records_after, &errors));
-    const auto untargeted_after = std::find_if(records_after.begin(), records_after.end(),
-        [id = untargeted->get_id()](const WorldSaveService::ContainerRecord& record) {
-            return record.lod_level == 0u && record.id == id;
-        });
+    const auto untargeted_after =
+        std::find_if(records_after.begin(),
+                     records_after.end(),
+                     [id = untargeted->get_id()](const WorldSaveService::ContainerRecord& record) {
+                         return record.lod_level == 0u && record.id == id;
+                     });
     ASSERT_NE(untargeted_after, records_after.end());
     EXPECT_EQ(untargeted_after->payload, untargeted_payload_before);
     EXPECT_EQ(untargeted_after->flags, untargeted_flags_before);
@@ -474,7 +484,7 @@ TEST(WorldSaveRegionFormat, InterruptedChunkRewriteLeavesPriorRegionCompleteAndR
 }
 
 TEST(WorldSaveRegionFormat, EmptySdfBandChunksRoundTrip) {
-    // T-I3-1: coarse (step>1) chunks carry empty or face-band-only SDF; the
+    // coarse (step>1) chunks carry empty or face-band-only SDF; the
     // container must persist and restore them without breaking the LOD0
     // promotion contract (heightmap intact, sdf restored verbatim).
     TempSaveDir save_dir("empty_sdf");
@@ -483,7 +493,7 @@ TEST(WorldSaveRegionFormat, EmptySdfBandChunksRoundTrip) {
     WorldStreamingState state;
     auto coarse = state.get_or_create_chunk(IVec3(2, 1, 2));
     coarse->set_state(ChunkState::Ready);
-    coarse->sdf_data.clear(); // empty SDF (T-I3-1 coarse chunk)
+    coarse->sdf_data.clear(); // empty SDF ( coarse chunk)
     coarse->heightmap_data = {20.0f, 20.5f, 21.0f, 21.5f};
     coarse->current_lod.store(2, std::memory_order_release);
     coarse->mark_voxel_data_dirty();
@@ -504,42 +514,12 @@ TEST(WorldSaveRegionFormat, EmptySdfBandChunksRoundTrip) {
     EXPECT_EQ(service.world_hash(restored), service.world_hash(state));
 }
 
-TEST(WorldSaveRegionFormat, ManifestPreservesDurableEntityIdAllocator) {
-    TempSaveDir save_dir("allocator");
-    WorldSaveService service;
-
-    WorldStreamingState state;
-    PopulateMultiRegionWorld(state);
-    std::vector<std::string> errors;
-    ASSERT_TRUE(service.save_world(state, save_dir.path, &errors));
-
-    // Simulate an entity system having advanced the allocator.
-    const std::filesystem::path manifest_path = WorldSaveService::world_manifest_path(save_dir.path);
-    {
-        std::ofstream output(manifest_path, std::ios::binary | std::ios::trunc);
-        output << "{\n"
-                  "    \"schema\": \"luminumbra.persistence.world_manifest.v1\",\n"
-                  "    \"container\": \"LMR1\",\n"
-                  "    \"container_version\": 1,\n"
-                  "    \"next_durable_entity_id\": 4242\n"
-                  "}\n";
-    }
-
-    auto edited = state.find_chunk(IVec3(0, 0, 0));
-    ASSERT_NE(edited, nullptr);
-    edited->mark_voxel_data_dirty();
-    const auto report = service.save_dirty_chunks(state, save_dir.path, &errors);
-    EXPECT_TRUE(report.saved);
-
-    const std::string manifest = ReadFileBytes(manifest_path);
-    EXPECT_NE(manifest.find("\"next_durable_entity_id\": 4242"), std::string::npos);
-}
-
 TEST(WorldSaveRegionFormat, CorruptRegionFileReportsErrors) {
     TempSaveDir save_dir("corrupt");
     WorldSaveService service;
 
-    const std::filesystem::path region_path = WorldSaveService::region_file_path(save_dir.path, 0, 0);
+    const std::filesystem::path region_path =
+        WorldSaveService::region_file_path(save_dir.path, 0, 0);
     std::filesystem::create_directories(region_path.parent_path());
     {
         std::ofstream output(region_path, std::ios::binary | std::ios::trunc);

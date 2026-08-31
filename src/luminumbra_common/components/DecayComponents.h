@@ -1,12 +1,12 @@
 #pragma once
 
-// Track sim.decomposition — DECAY / DECOMPOSITION participant component. Closes the
+// sim.decomposition: DECAY / DECOMPOSITION participant component. Closes the
 // death -> soil cycle: a creature (or any opted-in entity) that is DEAD slowly DECOMPOSES
 // over a fixed number of ticks and RELEASES nutrient as it does so. The orchestrator routes
 // the released nutrient into the soil grid during wiring (this component is sim truth only —
 // it never touches the SoilGrid itself).
 //
-// LOAD-BEARING RULE (mirrors the ecology/foliage/lifespan pillars): this is SIM truth —
+// LOAD-BEARING RULE: this is simulation truth —
 // small, integer/fixed-point, deterministic — never render state. Any carcass-rot geometry
 // is derived elsewhere from `decay_ticks` / `fully_decomposed`.
 //

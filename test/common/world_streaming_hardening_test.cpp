@@ -23,7 +23,7 @@
 // Namespace discipline (the #1 compile bite): WorldStreamingState/Chunk live in
 // CAPITAL-L ::Luminumbra; the persistence helpers in ::Luminumbra::Persistence;
 // structures + far-LOD in ::Luminumbra::World; the world system in
-// ::Luminumbra::Systems. All aliased inside this anonymous namespace below.
+// Luminumbra::Systems. All aliased inside this anonymous namespace below.
 
 #include "gtest/gtest.h"
 
@@ -58,10 +58,10 @@ using Luminumbra::ChunkID;
 using Luminumbra::ChunkSdfProvenance;
 using Luminumbra::ChunkState;
 using Luminumbra::IVec3;
-using Luminumbra::u8;
 using Luminumbra::u16;
 using Luminumbra::u32;
 using Luminumbra::u64;
+using Luminumbra::u8;
 using Luminumbra::Vec2;
 using Luminumbra::Vec3;
 using Luminumbra::VoxelVertex;
@@ -295,8 +295,7 @@ TEST(StreamingHardening, EraseReinsertConvergesToSameHash) {
 TEST(StreamingHardening, SnapshotRoundTripIsByteExact) {
     WorldStreamingState before;
     BuildState(before, ScrambledOrder());
-    const std::string before_json =
-        Persistence::SerializeWorldStreamingStateSnapshotJson(before);
+    const std::string before_json = Persistence::SerializeWorldStreamingStateSnapshotJson(before);
 
     WorldStreamingState after;
     std::vector<std::string> errors;
@@ -305,8 +304,7 @@ TEST(StreamingHardening, SnapshotRoundTripIsByteExact) {
     EXPECT_TRUE(errors.empty());
     EXPECT_EQ(before.size(), after.size());
 
-    const std::string after_json =
-        Persistence::SerializeWorldStreamingStateSnapshotJson(after);
+    const std::string after_json = Persistence::SerializeWorldStreamingStateSnapshotJson(after);
     EXPECT_EQ(before_json, after_json)
         << "snapshot -> load -> snapshot diverged: a persisted field is dropped "
            "or read with the wrong width/sign";
@@ -315,8 +313,7 @@ TEST(StreamingHardening, SnapshotRoundTripIsByteExact) {
 TEST(StreamingHardening, RoundTripPreservesWorldHashAndAllSubHashes) {
     WorldStreamingState before;
     BuildState(before, ForwardOrder());
-    const std::string before_json =
-        Persistence::SerializeWorldStreamingStateSnapshotJson(before);
+    const std::string before_json = Persistence::SerializeWorldStreamingStateSnapshotJson(before);
 
     WorldStreamingState after;
     std::vector<std::string> errors;
@@ -334,8 +331,7 @@ TEST(StreamingHardening, RoundTripPreservesWorldHashAndAllSubHashes) {
 TEST(StreamingHardening, RoundTripPreservesEveryChunkIdentity) {
     WorldStreamingState before;
     BuildState(before, ForwardOrder());
-    const std::string json =
-        Persistence::SerializeWorldStreamingStateSnapshotJson(before);
+    const std::string json = Persistence::SerializeWorldStreamingStateSnapshotJson(before);
 
     WorldStreamingState after;
     std::vector<std::string> errors;
@@ -345,8 +341,8 @@ TEST(StreamingHardening, RoundTripPreservesEveryChunkIdentity) {
         (void)salt;
         const ChunkID id = Chunk::calculate_id(coords);
         EXPECT_TRUE(after.contains_chunk(id))
-            << "chunk id " << id << " from coords (" << coords.x << "," << coords.y
-            << "," << coords.z << ") lost across roundtrip";
+            << "chunk id " << id << " from coords (" << coords.x << "," << coords.y << ","
+            << coords.z << ") lost across roundtrip";
     }
 }
 
@@ -373,13 +369,11 @@ TEST(StreamingHardening, EmptyArrayChunkRoundTripsExactly) {
     chunk->mesh_version.store(0u, std::memory_order_release);
     chunk->max_water_delta_last_tick = 0.0f;
 
-    const std::string before_json =
-        Persistence::SerializeWorldStreamingStateSnapshotJson(before);
+    const std::string before_json = Persistence::SerializeWorldStreamingStateSnapshotJson(before);
     WorldStreamingState after;
     std::vector<std::string> errors;
     ASSERT_TRUE(Persistence::LoadWorldStreamingStateSnapshotJson(before_json, after, errors));
-    EXPECT_EQ(before_json,
-              Persistence::SerializeWorldStreamingStateSnapshotJson(after));
+    EXPECT_EQ(before_json, Persistence::SerializeWorldStreamingStateSnapshotJson(after));
 }
 
 // ===========================================================================
@@ -479,8 +473,8 @@ TEST(StreamingHardening, SitesInAreaMatchesPerCellEnumeration) {
     for (int cz = cmin_z; cz <= cmax_z; ++cz) {
         for (int cx = cmin_x; cx <= cmax_x; ++cx) {
             if (auto s = World::SiteInCell(cairn, kSeed, cx, cz)) {
-                if (s->origin.x >= min_x && s->origin.x < max_x &&
-                    s->origin.z >= min_z && s->origin.z < max_z) {
+                if (s->origin.x >= min_x && s->origin.x < max_x && s->origin.z >= min_z &&
+                    s->origin.z < max_z) {
                     reference.emplace(s->origin.x, s->origin.y, s->origin.z);
                 }
             }
@@ -492,9 +486,8 @@ TEST(StreamingHardening, SitesInAreaMatchesPerCellEnumeration) {
         const auto key = std::make_tuple(s.origin.x, s.origin.y, s.origin.z);
         EXPECT_TRUE(seen.insert(key).second) << "SitesInArea returned a duplicate site";
     }
-    EXPECT_EQ(seen, reference)
-        << "SitesInArea disagrees with the per-cell SiteInCell enumeration "
-           "(a shared/edge cell was double-counted or dropped)";
+    EXPECT_EQ(seen, reference) << "SitesInArea disagrees with the per-cell SiteInCell enumeration "
+                                  "(a shared/edge cell was double-counted or dropped)";
 }
 
 TEST(StreamingHardening, SitesInAreaRespectsHalfOpenBounds) {
@@ -526,8 +519,7 @@ TEST(StreamingHardening, AssembledVoxelsAreByteExactOnRegen) {
         EXPECT_EQ(a[i].position, b[i].position) << "voxel " << i;
         EXPECT_EQ(a[i].material, b[i].material) << "voxel " << i;
     }
-    EXPECT_EQ(World::ComputeAssembledVoxelHash(a),
-              World::ComputeAssembledVoxelHash(b));
+    EXPECT_EQ(World::ComputeAssembledVoxelHash(a), World::ComputeAssembledVoxelHash(b));
 }
 
 // The assembled-voxel hash must be order-independent: it canonicalizes
@@ -581,10 +573,8 @@ TEST(StreamingHardening, LocateNearestMatchesBruteForce) {
     const int near_x = 500, near_z = -300, radius = 2;
     const auto located = World::LocateNearestSite(ruin, kSeed, near_x, near_z, radius);
 
-    const int cx = near_x >= 0 ? near_x / ruin.spacing
-                               : (near_x - ruin.spacing + 1) / ruin.spacing;
-    const int cz = near_z >= 0 ? near_z / ruin.spacing
-                               : (near_z - ruin.spacing + 1) / ruin.spacing;
+    const int cx = near_x >= 0 ? near_x / ruin.spacing : (near_x - ruin.spacing + 1) / ruin.spacing;
+    const int cz = near_z >= 0 ? near_z / ruin.spacing : (near_z - ruin.spacing + 1) / ruin.spacing;
     std::optional<World::StructureSite> best;
     long long best_d2 = -1;
     for (int dz = -radius; dz <= radius; ++dz) {
@@ -618,8 +608,7 @@ TEST(StreamingHardening, HeightQuantizationRoundTripsAtBoundaries) {
     EXPECT_EQ(QuantizeFarLodHeight(kFarLodHeightQuantMin), 0u);
     EXPECT_FLOAT_EQ(DequantizeFarLodHeight(0u), kFarLodHeightQuantMin);
     // The max representable height (header: +2047.9375 m) maps to 65535.
-    const float max_height = kFarLodHeightQuantMin +
-                             65535.0f / kFarLodHeightQuantScale;
+    const float max_height = kFarLodHeightQuantMin + 65535.0f / kFarLodHeightQuantScale;
     EXPECT_EQ(QuantizeFarLodHeight(max_height), 65535u);
     EXPECT_FLOAT_EQ(DequantizeFarLodHeight(65535u), max_height);
     // Out-of-domain heights CLAMP (do not wrap).
@@ -627,8 +616,8 @@ TEST(StreamingHardening, HeightQuantizationRoundTripsAtBoundaries) {
     EXPECT_EQ(QuantizeFarLodHeight(1.0e6f), 65535u);
     // Every quantized step round-trips within half a step.
     for (float h : {-300.0f, -1.25f, 0.0f, 0.0625f, 17.5f, 950.0f}) {
-        EXPECT_NEAR(DequantizeFarLodHeight(QuantizeFarLodHeight(h)), h,
-                    0.5f / kFarLodHeightQuantScale);
+        EXPECT_NEAR(
+            DequantizeFarLodHeight(QuantizeFarLodHeight(h)), h, 0.5f / kFarLodHeightQuantScale);
     }
 }
 
@@ -636,10 +625,9 @@ TEST(StreamingHardening, FarLodSnapshotOwnsBytesAndRejectsStaleLiveData) {
     const TerrainGenParams params = FixtureParams();
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
-    const std::size_t full_lattice =
-        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y + 1) *
-        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1);
+    const std::size_t full_lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                     static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y + 1) *
+                                     static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1);
     chunk->sdf_data.assign(full_lattice, -1.0f);
     chunk->material_data.assign(full_lattice, 7u);
     ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
@@ -703,7 +691,7 @@ TEST(StreamingHardening, ChunkRecordEditedFlagRestoresOnlyDurableAuthority) {
     ASSERT_TRUE(service.load_world(pristine_loaded, pristine_dir.path, errors));
     ASSERT_EQ(pristine_loaded.size(), 1u);
     EXPECT_EQ(pristine_loaded.snapshot_chunks().front()->sdf_provenance(),
-        ChunkSdfProvenance::GeneratedCurrentParams);
+              ChunkSdfProvenance::GeneratedCurrentParams);
     EXPECT_EQ(pristine_loaded.snapshot_chunks().front()->voxel_revision(), 0u);
 
     TempSaveDir edited_dir("edited_provenance");
@@ -719,33 +707,33 @@ TEST(StreamingHardening, ChunkRecordEditedFlagRestoresOnlyDurableAuthority) {
     ASSERT_TRUE(service.load_world(edited_loaded, edited_dir.path, errors));
     ASSERT_EQ(edited_loaded.size(), 1u);
     EXPECT_EQ(edited_loaded.snapshot_chunks().front()->sdf_provenance(),
-        ChunkSdfProvenance::LoadedOrEdited);
+              ChunkSdfProvenance::LoadedOrEdited);
     EXPECT_EQ(edited_loaded.snapshot_chunks().front()->voxel_revision(), 1u);
 }
 
 TEST(StreamingHardening, FarLodSnapshotFiltersAndOrdersNegativeRegionWithHalo) {
     const TerrainGenParams params = FixtureParams();
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
-    const std::size_t full_lattice =
-        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
-        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y + 1) *
-        static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1);
-    const auto adopt = [&](const IVec3& coords, bool material, bool malformed_sdf, bool malformed_material) {
-        auto chunk = std::make_shared<Chunk>(coords);
-        chunk->sdf_data.assign(malformed_sdf ? 3u : full_lattice, static_cast<float>(coords.y));
-        if (material) {
-            chunk->material_data.assign(malformed_material ? 3u : full_lattice,
-                static_cast<u8>(coords.y + 8));
-        }
-        EXPECT_TRUE(world.adopt_streamed_chunk(chunk));
-    };
+    const std::size_t full_lattice = static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_X + 1) *
+                                     static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Y + 1) *
+                                     static_cast<std::size_t>(Luminumbra::CHUNK_SIZE_Z + 1);
+    const auto adopt =
+        [&](const IVec3& coords, bool material, bool malformed_sdf, bool malformed_material) {
+            auto chunk = std::make_shared<Chunk>(coords);
+            chunk->sdf_data.assign(malformed_sdf ? 3u : full_lattice, static_cast<float>(coords.y));
+            if (material) {
+                chunk->material_data.assign(malformed_material ? 3u : full_lattice,
+                                            static_cast<u8>(coords.y + 8));
+            }
+            EXPECT_TRUE(world.adopt_streamed_chunk(chunk));
+        };
     adopt(IVec3(-33, 2, -33), true, false, false); // negative halo
     adopt(IVec3(-32, 1, -32), false, false, false);
     adopt(IVec3(-32, -1, -32), true, false, false);
-    adopt(IVec3(0, 0, 0), true, false, false);       // positive halo
-    adopt(IVec3(1, 0, 0), true, false, false);       // outside halo
-    adopt(IVec3(-31, 0, -31), true, true, false);    // malformed SDF
-    adopt(IVec3(-30, 0, -30), true, false, true);    // malformed material
+    adopt(IVec3(0, 0, 0), true, false, false);    // positive halo
+    adopt(IVec3(1, 0, 0), true, false, false);    // outside halo
+    adopt(IVec3(-31, 0, -31), true, true, false); // malformed SDF
+    adopt(IVec3(-30, 0, -30), true, false, true); // malformed material
 
     const auto snapshot = world.capture_far_lod_sdf_snapshot(-1, -1);
     ASSERT_TRUE(snapshot);
@@ -763,14 +751,18 @@ TEST(StreamingHardening, PristineTileBuildIsDeterministic) {
     const SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     const u64 ph = World::ComputeTerrainParamsHash(params, kSeed);
 
-    const World::FarLodTile a = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 0, ph);
-    const World::FarLodTile b = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 0, ph);
+    const World::FarLodTile a =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 0, ph);
+    const World::FarLodTile b =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 0, ph);
     EXPECT_FALSE(a.edited);
     EXPECT_EQ(World::ComputeFarLodTileHash(a), World::ComputeFarLodTileHash(b));
     // Different region / tier must hash differently.
-    const World::FarLodTile other = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 1, 0, ph);
+    const World::FarLodTile other =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 1, 0, ph);
     EXPECT_NE(World::ComputeFarLodTileHash(a), World::ComputeFarLodTileHash(other));
-    const World::FarLodTile f2 = World::BuildPristineFarLodTile(world, World::FarLodTier::F2, 0, 0, ph);
+    const World::FarLodTile f2 =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F2, 0, 0, ph);
     EXPECT_NE(World::ComputeFarLodTileHash(a), World::ComputeFarLodTileHash(f2));
 }
 
@@ -797,8 +789,10 @@ TEST(StreamingHardening, AdjacentRegionsShareBorderColumnExactly) {
     const SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     const u64 ph = World::ComputeTerrainParamsHash(params, kSeed);
 
-    const World::FarLodTile left = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 0, ph);
-    const World::FarLodTile right = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 1, 0, ph);
+    const World::FarLodTile left =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 0, ph);
+    const World::FarLodTile right =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 1, 0, ph);
     const u32 n = left.samples_per_side;
     ASSERT_EQ(right.samples_per_side, n);
     for (u32 z = 0; z < n; ++z) {
@@ -809,7 +803,8 @@ TEST(StreamingHardening, AdjacentRegionsShareBorderColumnExactly) {
         EXPECT_EQ(left.flags[li], right.flags[ri]) << "row " << z << " flags";
     }
     // ... and across the Z seam too.
-    const World::FarLodTile up = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 1, ph);
+    const World::FarLodTile up =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 0, 1, ph);
     for (u32 x = 0; x < n; ++x) {
         const std::size_t bi = static_cast<std::size_t>(n - 1u) * n + x; // max-Z row of (0,0)
         const std::size_t ti = static_cast<std::size_t>(0) * n + x;      // min-Z row of (0,1)
@@ -825,7 +820,8 @@ TEST(StreamingHardening, TilePersistenceRoundTripsExactly) {
     TempSaveDir dir("tile");
     const World::FarLodStore store(dir.path);
 
-    const World::FarLodTile tile = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, -1, 2, ph);
+    const World::FarLodTile tile =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, -1, 2, ph);
     std::vector<std::string> errors;
     ASSERT_TRUE(store.save_tile(tile, &errors)) << (errors.empty() ? "" : errors.front());
 
@@ -853,7 +849,8 @@ TEST(StreamingHardening, PristineCacheMissesOnParamsMismatch) {
     const World::FarLodStore store(dir.path);
     std::vector<std::string> errors;
 
-    const World::FarLodTile pristine = World::BuildPristineFarLodTile(world, World::FarLodTier::F2, 0, 0, ph);
+    const World::FarLodTile pristine =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F2, 0, 0, ph);
     ASSERT_TRUE(store.save_tile(pristine, &errors));
     World::FarLodTile loaded;
     EXPECT_FALSE(store.load_tile(World::FarLodTier::F2, 0, 0, other, loaded, &errors))
@@ -870,7 +867,8 @@ TEST(StreamingHardening, TileSaveIsIdempotent) {
 
     TempSaveDir dir("idem");
     const World::FarLodStore store(dir.path);
-    const World::FarLodTile tile = World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 2, -3, ph);
+    const World::FarLodTile tile =
+        World::BuildPristineFarLodTile(world, World::FarLodTier::F1, 2, -3, ph);
 
     std::vector<std::string> errors;
     ASSERT_TRUE(store.save_tile(tile, &errors));
@@ -909,8 +907,7 @@ TEST(StreamingHardening, RunEqualsReplayThroughSerializationAndReorder) {
     // "Replay": rebuild the SAME resident set in scrambled order, serialize.
     WorldStreamingState replay;
     BuildState(replay, ScrambledOrder());
-    const std::string replay_json =
-        Persistence::SerializeWorldStreamingStateSnapshotJson(replay);
+    const std::string replay_json = Persistence::SerializeWorldStreamingStateSnapshotJson(replay);
 
     // Run == replay: byte-exact despite the different build order.
     EXPECT_EQ(run_json, replay_json);

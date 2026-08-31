@@ -1,5 +1,4 @@
-// Track game.photo_mode — the pillar-G CAPTURE-LOOP PERF BUDGET (g-vertical-slice
-// spike, spec AC-003 / handoff §2 G-row RED).
+// Photography capture-loop complexity smoke test.
 //
 // This pins the cost of the PER-SHUTTER scoring work — BuildShotInput + the full
 // EvaluateShot/CaptureShot grade over a representative frame — NOT the render. The
@@ -7,12 +6,11 @@
 // vectors, so a generous wall-clock budget guards against an accidental O(N^2) or
 // allocation blowup creeping into the loop later.
 //
-// It is a RED guard, not a benchmark: the budget is pinned with ample headroom and
-// the machine + N are documented so a regression (not a slow CI host) is what trips
-// it. Headless, no GL, no entt: it times only the pure capture flow.
+// This is a generous gross-complexity ceiling, not comparable performance
+// evidence. Release regressions are evaluated by paired base/head observations.
+// Headless, no GL, no entt: it times only the pure capture flow.
 //
-// MACHINE / N. Pinned against a debug build on the dev box (Windows 11, ucrt64
-// toolchain). N = 2000 captures over a 6-subject frame. The pure scoring path runs
+// N = 2000 captures over a 6-subject frame. The pure scoring path runs
 // in well under 1 us/capture in release and a few us in debug; the budget is set to
 // 250 us/capture so even a heavily-loaded debug CI host clears it while a true
 // regression (e.g. a per-capture heap thrash or quadratic blowup) does not.
@@ -26,13 +24,13 @@
 
 namespace {
 
-using luminumbra::game::PhotoSubjectView;
 using luminumbra::game::BuildShotInput;
 using luminumbra::game::CaptureShot;
-using luminumbra::game::ShotInput;
-using luminumbra::game::ShotVerdict;
 using luminumbra::game::LensSettings;
 using luminumbra::game::PhotoCodex;
+using luminumbra::game::PhotoSubjectView;
+using luminumbra::game::ShotInput;
+using luminumbra::game::ShotVerdict;
 
 // A representative 6-subject frame (a few species at varied placement/depth).
 std::vector<PhotoSubjectView> MakePerfFrame() {
@@ -40,12 +38,12 @@ std::vector<PhotoSubjectView> MakePerfFrame() {
     for (int i = 0; i < 6; ++i) {
         PhotoSubjectView v;
         v.ndc_x = -0.5f + 0.2f * static_cast<float>(i);
-        v.ndc_y =  0.4f - 0.15f * static_cast<float>(i);
-        v.size  = 0.5f - 0.05f * static_cast<float>(i);
+        v.ndc_y = 0.4f - 0.15f * static_cast<float>(i);
+        v.size = 0.5f - 0.05f * static_cast<float>(i);
         v.light = 0.6f;
         v.species_id = i % 3;
         v.distance_m = 3.0f + static_cast<float>(i);
-        v.size_m     = 0.5f;
+        v.size_m = 0.5f;
         v.in_frustum = true;
         views.push_back(v);
     }
@@ -55,18 +53,18 @@ std::vector<PhotoSubjectView> MakePerfFrame() {
 LensSettings MakePerfLens() {
     LensSettings lens;
     lens.focal_length_mm = 85.0f;
-    lens.aperture_f      = 2.0f;
+    lens.aperture_f = 2.0f;
     lens.focus_distance_m = 4.0f;
-    lens.iso             = 200.0f;
-    lens.shutter_s       = 0.004f;
+    lens.iso = 200.0f;
+    lens.shutter_s = 0.004f;
     return lens;
 }
 
 // ---------------------------------------------------------------------------
 // Pinned per-capture budget. See the file header for the machine + N rationale.
 // ---------------------------------------------------------------------------
-constexpr int    kPerfCaptures        = 2000;
-constexpr double kBudgetUsPerCapture  = 250.0;  // microseconds, generous RED headroom
+constexpr int kPerfCaptures = 2000;
+constexpr double kBudgetUsPerCapture = 250.0; // generous gross-complexity ceiling
 
 TEST(PhotoModePerf, PerShutterWorkUnderBudget) {
     const std::vector<PhotoSubjectView> views = MakePerfFrame();

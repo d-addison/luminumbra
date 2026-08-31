@@ -1,6 +1,6 @@
 #pragma once
 
-// Track sim.scavenging — SCAVENGERS EAT CARCASSES. Ties death -> food, complementing active
+// sim.scavenging: SCAVENGERS EAT CARCASSES. Ties death -> food, complementing active
 // hunting: predators (and old age / starvation via MortalComponent) make carcasses; this
 // system lets HUNGRY scavengers find the nearest carcass, steer toward it, and FEED when in
 // range — converting a dead body back into sated hunger so the ecology's energy doesn't just
@@ -23,7 +23,7 @@
 // ZERO wish and does NOT feed.
 //
 // DETERMINISM. id-ordered traversal (sort by entt::to_integral). TWO-PHASE so the result is
-// order-INDEPENDENT: phase 1 SNAPSHOTS every carcass's position (a read-only pass); phase 2
+// order-INDEPENDENT:  SNAPSHOTS every carcass's position (a read-only pass);
 // steers/feeds each scavenger against that frozen list. A scavenger is never itself a carcass
 // target (a hungry scavenger is alive, hence excluded from the carcass set), so the two roles
 // don't interfere. Math is DeterministicMath only (Sqrt for distance; +-*/, clamped to
@@ -67,52 +67,61 @@ inline constexpr float kScavengeFeedRadius = 1.5f;
 inline constexpr float kScavengeFeedRate = 0.05f;
 
 struct ScavengingStats {
-    int scavengers = 0;  // creatures carrying a ScavengerComponent that took part
-    int carcasses = 0;   // dead creatures available as food this tick
-    int seeking = 0;     // hungry live scavengers that found a carcass to steer toward
-    int feeding = 0;     // scavengers within feed radius that lowered hunger this tick
+    int scavengers = 0; // creatures carrying a ScavengerComponent that took part
+    int carcasses = 0;  // dead creatures available as food this tick
+    int seeking = 0;    // hungry live scavengers that found a carcass to steer toward
+    int feeding = 0;    // scavengers within feed radius that lowered hunger this tick
 };
 
 [[nodiscard]] inline float ScavengeClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
-// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig sim.scavenging.
+// Full-control tuning (defaults == the k* constants -> byte-identical). From SystemConfig
+// sim.scavenging.
 struct ScavengingTuning {
     float hunger_threshold = kScavengeHungerThreshold;
-    float feed_radius      = kScavengeFeedRadius;
-    float feed_rate        = kScavengeFeedRate;
+    float feed_radius = kScavengeFeedRadius;
+    float feed_rate = kScavengeFeedRate;
 };
 
 // Is this creature a CARCASS (dead body available to scavenge)? eaten prey OR a flagged-dead
 // mortal. `mortal` may be null (creature carries no MortalComponent).
 [[nodiscard]] inline bool ScavengeIsCarcass(const Comp::CreatureComponent& cr,
                                             const Comp::MortalComponent* mortal) {
-    if (cr.eaten) return true;
-    if (mortal != nullptr && mortal->dead != 0) return true;
+    if (cr.eaten)
+        return true;
+    if (mortal != nullptr && mortal->dead != 0)
+        return true;
     return false;
 }
 
 // RunScavengingOnTick: hungry scavengers seek + eat the nearest carcass. id-ordered,
 // two-phase snapshot (order-independent). Returns telemetry; mutates ScavengerComponent
 // .wish_x/z + .feeding and CreatureComponent.hunger on feeding scavengers.
-inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*tick*/,
+inline ScavengingStats RunScavengingOnTick(entt::registry& reg,
+                                           std::uint64_t /*tick*/,
                                            const ScavengingTuning& tuning = {}) {
     ScavengingStats stats;
 
-    // ---- PHASE 1: snapshot every CARCASS position (read-only; order-independent) ----
+    // ---- First pass: snapshot every carcass position. ----
     // Iterate ALL creatures (a carcass need not be a scavenger). MortalComponent is optional,
     // so fetch it via try_get rather than constraining the view.
-    struct Carcass { float x, z; };
+    struct Carcass {
+        float x, z;
+    };
     std::vector<Carcass> carcasses;
     {
         auto cview = reg.view<Comp::CreatureComponent, Comp::TransformComponent>();
         for (auto e : cview) {
             const auto& cr = cview.get<Comp::CreatureComponent>(e);
             const auto* mortal = reg.try_get<Comp::MortalComponent>(e);
-            if (!ScavengeIsCarcass(cr, mortal)) continue;
+            if (!ScavengeIsCarcass(cr, mortal))
+                continue;
             const auto& tf = cview.get<Comp::TransformComponent>(e);
             carcasses.push_back({tf.position.x, tf.position.z});
         }
@@ -120,16 +129,17 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*
     stats.carcasses = static_cast<int>(carcasses.size());
 
     // ---- gather scavengers (id-ordered for deterministic traversal) ----
-    auto sview = reg.view<Comp::ScavengerComponent, Comp::CreatureComponent,
-                          Comp::TransformComponent>();
+    auto sview =
+        reg.view<Comp::ScavengerComponent, Comp::CreatureComponent, Comp::TransformComponent>();
     std::vector<entt::entity> ents(sview.begin(), sview.end());
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    if (ents.empty()) return stats;  // empty roster -> pure no-op.
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
     stats.scavengers = static_cast<int>(ents.size());
 
-    // ---- PHASE 2: steer + feed each scavenger against the frozen carcass list ----
+    // ---- Second pass: steer and feed against the frozen carcass list. ----
     for (auto e : ents) {
         auto& sc = sview.get<Comp::ScavengerComponent>(e);
         auto& cr = sview.get<Comp::CreatureComponent>(e);
@@ -143,9 +153,12 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*
         // A dead scavenger doesn't scavenge; a well-fed one doesn't seek.
         const auto* selfMortal = reg.try_get<Comp::MortalComponent>(e);
         const bool selfDead = ScavengeIsCarcass(cr, selfMortal);
-        if (selfDead) continue;
-        if (cr.hunger <= tuning.hunger_threshold) continue;  // sated enough — ignore food.
-        if (carcasses.empty()) continue;                      // nothing to scavenge.
+        if (selfDead)
+            continue;
+        if (cr.hunger <= tuning.hunger_threshold)
+            continue; // sated enough — ignore food.
+        if (carcasses.empty())
+            continue; // nothing to scavenge.
 
         // Find the NEAREST carcass (deterministic Sqrt distance; first-found wins ties, and
         // the carcass list is built in a fixed order so ties are stable).
@@ -187,4 +200,4 @@ inline ScavengingStats RunScavengingOnTick(entt::registry& reg, std::uint64_t /*
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

@@ -8,11 +8,11 @@
 #include <unordered_map>
 #include <vector>
 
-// Spec 016 (FR-B-001/002/003): the render resource registry.
+// Render resource registry.
 //
 // Owns / tracks render targets by NAME and hands out typed handles. Two entry
 // classes:
-//   * OWNED (RENDER-12/GPU-12, the 014 pilot-gate ownership leg): the registry
+//   * OWNED: the registry
 //     ALLOCATES the GL objects from full-fidelity descriptors, holds their
 //     lifetime (Persistent / History) + layout metadata, drives resize
 //     (delete + recreate per desc, re-attaching any owned FBO that names the
@@ -23,20 +23,17 @@
 // Lookups consult OWNED first, then adopted, so a family migrates to
 // ownership without any pass-side change.
 //
-// Descriptor fidelity: TextureDesc carries RAW GL enums (as u32) for
-// format/filter/wrap/compare state. That is deliberate for the pilot phase —
-// the migrated objects must be PARAMETER-IDENTICAL to the code they replace
-// (the ownership gate is flip-score-0 on same-pose captures, and any
-// enum-translation layer is drift surface). Spec 014's Rhi* type set (GPU-P03)
-// abstracts BENEATH these handles later; the desc's load/store/layout fields
-// are descriptive metadata today and become that layer's inputs.
+// Descriptor fidelity: TextureDesc carries raw GL enums (as u32) for
+// format/filter/wrap/compare state. Migrated objects remain parameter-identical
+// to their direct-GL equivalents, while the RHI backing stays beneath these
+// typed handles. Load/store/layout fields document each resource contract.
 //
-// Strict descriptor/registry layer only (016 OQ-1): no automatic barriers, no
+// Strict descriptor/registry layer only: no automatic barriers and no
 // transient aliasing.
 
 namespace Luminumbra::Rendering {
 
-// 016 FR-B-001: resource lifetime classes. History resources (TAAU history,
+// Resource lifetime classes. History resources (TAAU history,
 // froxel reproject) persist across frames BY DESIGN and must never be treated
 // as transient; resize recreates storage without promising content
 // preservation (matching today's behavior).
@@ -48,53 +45,54 @@ enum class ResourceLifetime : u8 {
 struct TextureDesc {
     u32 width = 0;
     u32 height = 0;
-    u32 layers = 1;            // > 1 => GL_TEXTURE_2D_ARRAY (e.g. the shadow atlas)
-    u32 internal_format = 0;   // raw GL internal format (e.g. GL_RGBA16F)
-    u32 format = 0;            // raw GL pixel format for the (null) upload
-    u32 type = 0;              // raw GL pixel type
-    u32 min_filter = 0;        // raw GL enums; 0 = leave default
+    u32 layers = 1;          // > 1 => GL_TEXTURE_2D_ARRAY (e.g. the shadow atlas)
+    u32 internal_format = 0; // raw GL internal format (e.g. GL_RGBA16F)
+    u32 format = 0;          // raw GL pixel format for the (null) upload
+    u32 type = 0;            // raw GL pixel type
+    u32 min_filter = 0;      // raw GL enums; 0 = leave default
     u32 mag_filter = 0;
     u32 wrap_s = 0;
     u32 wrap_t = 0;
-    bool depth_compare = false;      // GL_COMPARE_REF_TO_TEXTURE (shadow atlas)
+    bool depth_compare = false; // GL_COMPARE_REF_TO_TEXTURE (shadow atlas)
     bool has_border_color = false;
     float border_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     ResourceLifetime lifetime = ResourceLifetime::Persistent;
-    // 016 FR-B-002/003 metadata (descriptive today; the RHI consumes it later).
+    // Descriptive metadata shared with the RHI-backed path.
     // load/store: what a frame does with the contents ("clear", "load", "dont_care").
     const char* load_op = "dont_care";
     const char* store_op = "store";
-    const char* expected_layout = "color_attachment";  // or "depth_attachment", "sampled"
+    const char* expected_layout = "color_attachment"; // or "depth_attachment", "sampled"
     const char* debug_label = nullptr;
 };
 
-// RENDER-12/GPU-12: a registry-owned renderbuffer descriptor (e.g. the lighting
+// A registry-owned renderbuffer descriptor (e.g. the lighting
 // FBO's GL_DEPTH_COMPONENT24 depth attachment). Renderbuffers are non-samplable
 // GPU storage attached via glFramebufferRenderbuffer.
 struct RenderbufferDesc {
     u32 width = 0;
     u32 height = 0;
-    u32 internal_format = 0;   // raw GL internal format (e.g. GL_DEPTH_COMPONENT24)
+    u32 internal_format = 0; // raw GL internal format (e.g. GL_DEPTH_COMPONENT24)
     const char* expected_layout = "depth_attachment";
     const char* debug_label = nullptr;
 };
 
 struct FboAttachment {
-    u32 attachment_point = 0;   // raw GL enum (GL_COLOR_ATTACHMENT0 + i / GL_DEPTH_ATTACHMENT / ...)
-    std::string texture_name;   // an OWNED texture OR renderbuffer name in this registry
-                                // (attach_fbo resolves textures first, then renderbuffers)
+    u32 attachment_point = 0; // raw GL enum (GL_COLOR_ATTACHMENT0 + i / GL_DEPTH_ATTACHMENT /...)
+    std::string texture_name; // an OWNED texture OR renderbuffer name in this registry
+                              // (attach_fbo resolves textures first, then renderbuffers)
 };
 
 struct FboDesc {
     std::vector<FboAttachment> attachments;
-    std::vector<u32> draw_buffers;  // explicit glDrawBuffers order; empty + !no_color = single COLOR0
-    bool no_color = false;          // depth-only FBO (glDrawBuffer(GL_NONE)), e.g. the shadow atlas
+    std::vector<u32>
+        draw_buffers;      // explicit glDrawBuffers order; empty + !no_color = single COLOR0
+    bool no_color = false; // depth-only FBO (glDrawBuffer(GL_NONE)), e.g. the shadow atlas
     const char* debug_label = nullptr;
 };
 
 class RenderResourceRegistry {
 public:
-    // --- OWNED path (RENDER-12/GPU-12) ------------------------------------
+    // --- Owned path ----------------------------------------------------------
     // Allocate a registry-OWNED texture / FBO from a full-fidelity descriptor.
     // Returns an invalid handle on GL failure or name collision with an
     // existing owned entry. Requires a current GL context.
@@ -160,13 +158,15 @@ public:
 
     // Drop per-frame ADOPTED entries only — owned entries persist across frame
     // boundaries by contract (the RegistryOwnershipParity pin).
-    void clear_adopted() { m_fbos.clear(); m_textures.clear(); }
+    void clear_adopted() {
+        m_fbos.clear();
+        m_textures.clear();
+    }
 
 private:
-    // 014 FR-A.2 one-abstraction-two-layers: an owned entry carries its layer-1 GL
+    // An owned entry carries its direct-GL object
     // object (gl_id) AND an optional layer-2 backend backing (rhi_backing). The
-    // backing is null until a pass is first driven through a Diligent device
-    // (GPU-P05); today it is inert, so the GL path is byte-identical. A pass never
+    // backing is null unless a pass is driven through a Diligent device. A pass never
     // sees either field -- only the layer-1 handle -- so it cannot tell GL from RHI.
     struct OwnedTexture {
         u32 gl_id = 0;
@@ -184,10 +184,14 @@ private:
     };
 
     // Disambiguate from the free helpers in RenderResourceHandles.h.
-    static FboHandle adopt_fbo_handle(u32 gl_id) { return FboHandle{gl_id, true}; }
-    static TextureHandle adopt_texture_handle(u32 gl_id) { return TextureHandle{gl_id}; }
+    static FboHandle adopt_fbo_handle(u32 gl_id) {
+        return FboHandle{gl_id, true};
+    }
+    static TextureHandle adopt_texture_handle(u32 gl_id) {
+        return TextureHandle{gl_id};
+    }
 
-    bool attach_fbo(OwnedFbo& fbo_entry);  // (re)binds attachments per desc
+    bool attach_fbo(OwnedFbo& fbo_entry); // (re)binds attachments per desc
 
     std::unordered_map<std::string, FboHandle> m_fbos;
     std::unordered_map<std::string, TextureHandle> m_textures;

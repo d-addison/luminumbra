@@ -1,11 +1,11 @@
 // Generates the small authored test textures committed under
-// data/textures/test/ used by the .ltex round-trip test (T-I4-6).
+// data/textures/test/ used by the.ltex round-trip test.
 //
 // These are deterministic procedural patterns (no external source art). Built
 // and run once to (re)produce the committed PNGs; it is NOT part of the CMake
 // build. To regenerate:
 //   g++ -std=c++17 -I vendor/stb tools/generate_test_textures.cpp -o gen_tex
-//   ./gen_tex
+//./gen_tex
 //
 // Patterns are chosen to exercise distinct mip behaviour: a checkerboard (high
 // frequency -> mips converge to grey), a smooth gradient, and a non-square

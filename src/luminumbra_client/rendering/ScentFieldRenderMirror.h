@@ -2,7 +2,7 @@
 
 // ONE-WAY sim->render snapshot of the ScentField's deposited trail channels
 // (2 = food-trail, 3 = home-trail), for the pheromone ground decal. Written by
-// main_client each frame AFTER the tick completes (a const Sample() read), read only
+// main_client each frame AFTER the tick completes (a const Sample read), read only
 // by GroundDecalPass. The sim NEVER reads this mirror back, so it is determinism-
 // neutral by construction: there is no path from render state into the canonical tick
 // or world_hash.

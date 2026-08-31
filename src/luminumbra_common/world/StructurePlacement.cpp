@@ -23,7 +23,7 @@ void FnvMix(u64& hash, const void* data, std::size_t size) {
     }
 }
 
-template <typename T>
+template<typename T>
 void FnvMixValue(u64& hash, const T& value) {
     FnvMix(hash, &value, sizeof(T));
 }
@@ -33,7 +33,8 @@ void FnvMixValue(u64& hash, const T& value) {
 // container-order or wall-clock dependence - matches the sim determinism rules).
 struct SplitMix64 {
     u64 state;
-    explicit SplitMix64(u64 seed) : state(seed) {}
+    explicit SplitMix64(u64 seed)
+        : state(seed) {}
     u64 next() {
         state += 0x9E3779B97F4A7C15ull;
         u64 z = state;
@@ -98,9 +99,8 @@ IVec3 ParseIVec3(const nlohmann::json& arr, const IVec3& fallback) {
 
 } // namespace
 
-StructureTemplatePool LoadStructureTemplatePool(
-    const std::filesystem::path& type_dir,
-    const std::string& type) {
+StructureTemplatePool LoadStructureTemplatePool(const std::filesystem::path& type_dir,
+                                                const std::string& type) {
     StructureTemplatePool pool;
     pool.type = type;
 
@@ -121,8 +121,10 @@ StructureTemplatePool LoadStructureTemplatePool(
             pool.errors.push_back(std::string("placement.json parse error: ") + e.what());
             return pool;
         }
-        WarnUnknownKeys(data, {"spacing", "separation", "salt", "density", "_comment"},
-                        "placement.json", pool.warnings);
+        WarnUnknownKeys(data,
+                        {"spacing", "separation", "salt", "density", "_comment"},
+                        "placement.json",
+                        pool.warnings);
         pool.spacing = std::max(1, data.value("spacing", pool.spacing));
         pool.separation = std::max(0, data.value("separation", pool.separation));
         pool.salt = data.value("salt", pool.salt);
@@ -150,21 +152,26 @@ StructureTemplatePool LoadStructureTemplatePool(
         try {
             data = nlohmann::json::parse(file);
         } catch (const nlohmann::json::parse_error& e) {
-            pool.errors.push_back(piece_path.filename().string() +
-                                  std::string(" parse error: ") + e.what());
+            pool.errors.push_back(piece_path.filename().string() + std::string(" parse error: ") +
+                                  e.what());
             continue;
         }
-        WarnUnknownKeys(data, {"name", "boxes", "sockets", "_comment"},
-                        piece_path.filename().string(), pool.warnings);
+        WarnUnknownKeys(data,
+                        {"name", "boxes", "sockets", "_comment"},
+                        piece_path.filename().string(),
+                        pool.warnings);
 
         StructurePiece piece;
         piece.name = data.value("name", piece_path.stem().string());
         if (data.contains("boxes") && data["boxes"].is_array()) {
             for (const auto& box_json : data["boxes"]) {
                 StructureBox box;
-                box.min = ParseIVec3(box_json.value("min", nlohmann::json::array()), IVec3(0, 0, 0));
-                box.size = ParseIVec3(box_json.value("size", nlohmann::json::array()), IVec3(1, 1, 1));
-                box.size = IVec3(std::max(1, box.size.x), std::max(1, box.size.y), std::max(1, box.size.z));
+                box.min =
+                    ParseIVec3(box_json.value("min", nlohmann::json::array()), IVec3(0, 0, 0));
+                box.size =
+                    ParseIVec3(box_json.value("size", nlohmann::json::array()), IVec3(1, 1, 1));
+                box.size = IVec3(
+                    std::max(1, box.size.x), std::max(1, box.size.y), std::max(1, box.size.z));
                 box.material = static_cast<u8>(box_json.value("material", 0));
                 piece.boxes.push_back(box);
             }
@@ -189,7 +196,7 @@ StructureTemplatePool LoadStructureTemplatePool(
         pool.errors.push_back("structure type '" + type + "' has no piece templates");
     }
 
-    // FR-B1: conservative X/Z footprint half-extent (metres) of any assembled
+    // conservative X/Z footprint half-extent (metres) of any assembled
     // structure relative to the site origin. Max over every piece of:
     //  - each box's max(|min|, |min + size|) on X and Z, and
     //  - each socket attach position on X and Z (sockets can translate jigsaw
@@ -252,11 +259,8 @@ StructureTemplatePool LoadStructureTemplatePool(
     return pool;
 }
 
-std::optional<StructureSite> SiteInCell(
-    const StructureTemplatePool& pool,
-    int world_seed,
-    int cell_x,
-    int cell_z) {
+std::optional<StructureSite>
+SiteInCell(const StructureTemplatePool& pool, int world_seed, int cell_x, int cell_z) {
     if (!pool.ok()) {
         return std::nullopt;
     }
@@ -279,12 +283,11 @@ std::optional<StructureSite> SiteInCell(
     return site;
 }
 
-std::optional<StructureSite> LocateNearestSite(
-    const StructureTemplatePool& pool,
-    int world_seed,
-    int near_x,
-    int near_z,
-    int search_radius_cells) {
+std::optional<StructureSite> LocateNearestSite(const StructureTemplatePool& pool,
+                                               int world_seed,
+                                               int near_x,
+                                               int near_z,
+                                               int search_radius_cells) {
     if (!pool.ok()) {
         return std::nullopt;
     }
@@ -311,12 +314,7 @@ std::optional<StructureSite> LocateNearestSite(
 }
 
 std::vector<StructureSite> SitesInArea(
-    const StructureTemplatePool& pool,
-    int world_seed,
-    int min_x,
-    int min_z,
-    int max_x,
-    int max_z) {
+    const StructureTemplatePool& pool, int world_seed, int min_x, int min_z, int max_x, int max_z) {
     std::vector<StructureSite> sites;
     if (!pool.ok() || max_x <= min_x || max_z <= min_z) {
         return sites;
@@ -361,9 +359,8 @@ void StampPiece(const StructurePiece& piece,
 
 } // namespace
 
-std::vector<StructureVoxel> AssembleStructure(
-    const StructureTemplatePool& pool,
-    const StructureSite& site) {
+std::vector<StructureVoxel> AssembleStructure(const StructureTemplatePool& pool,
+                                              const StructureSite& site) {
     std::vector<StructureVoxel> voxels;
     if (!pool.ok()) {
         return voxels;
@@ -377,8 +374,8 @@ std::vector<StructureVoxel> AssembleStructure(
 
     // Jigsaw: for each socket on the root, deterministically pick a candidate
     // piece and attach it so the candidate's FIRST socket coincides with the
-    // root socket (the piece is translated; no rotation this iteration - the
-    // socket-joint contract is in place and rotation is a future extension).
+    // root socket. The placement contract is translation-only, so piece
+    // orientation remains exactly as authored.
     for (const StructureSocket& root_socket : root.sockets) {
         // Choose a piece that has at least one socket to join.
         const int candidate_index = rng.next_int(static_cast<int>(pool.pieces.size()));
@@ -406,9 +403,12 @@ u64 ComputeAssembledVoxelHash(const std::vector<StructureVoxel>& voxels) {
     // emission order.
     std::vector<StructureVoxel> sorted = voxels;
     std::sort(sorted.begin(), sorted.end(), [](const StructureVoxel& a, const StructureVoxel& b) {
-        if (a.position.x != b.position.x) return a.position.x < b.position.x;
-        if (a.position.y != b.position.y) return a.position.y < b.position.y;
-        if (a.position.z != b.position.z) return a.position.z < b.position.z;
+        if (a.position.x != b.position.x)
+            return a.position.x < b.position.x;
+        if (a.position.y != b.position.y)
+            return a.position.y < b.position.y;
+        if (a.position.z != b.position.z)
+            return a.position.z < b.position.z;
         return a.material < b.material;
     });
     u64 h = kFnvOffsetBasis;
