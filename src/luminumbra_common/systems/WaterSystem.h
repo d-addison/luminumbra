@@ -167,6 +167,19 @@ public:
         m_boot_paused = on;
     }
 
+    // (water-kernel perf) Per-sub-phase wall timing (ms) from the latest update() —
+    // RUNTIME TELEMETRY ONLY (never hashed, never persisted), the DbgStreamTimings
+    // pattern from SHIELD_WorldSystem. Localizes where the per-tick water budget goes.
+    struct DbgWaterTimings {
+        double init = 0.0;        // adaptive-resize scan/apply + first-time grid seeding
+        double sim = 0.0;         // per-chunk fixed-point kernel (StepChunkWaterFixed)
+        double seam = 0.0;        // cross-chunk owner-edge shared-flux pass
+        double bookkeeping = 0.0; // sources, wake/sleep scans, window selection, mass telemetry
+    };
+    [[nodiscard]] const DbgWaterTimings& dbg_water_timings() const {
+        return m_dbg_water;
+    }
+
     // the rotating sim-window cursor is EVOLUTION-RELEVANT sim state whenever
     // more chunks are awake than MAX_WATER_SIMS_PER_TICK (which 64-chunk window sims
     // first changes subsequent depths). It is persisted with the world (world_info.json
@@ -265,6 +278,7 @@ private:
     std::int64_t m_dbg_last_sink_mm = 0;
     bool m_dbg_mass_ok = true;
     int m_dbg_seam_wet_pairs = 0;
+    DbgWaterTimings m_dbg_water; // sub-phase telemetry (see dbg_water_timings())
 
     std::size_t m_water_sim_cursor = 0;
     //  implementation note: rotating cursor for the per-tick water-grid RESIZE budget (see
