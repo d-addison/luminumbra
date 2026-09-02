@@ -2965,6 +2965,10 @@ static bool WriteCaptureThumbnailTga(const std::filesystem::path& path,
     return static_cast<bool>(out);
 }
 
+// Grandfathered monolith: main() predates the scripts/tidy.sh complexity gate
+// and is tracked for decomposition. New functions must stay under the gate's
+// readability-function-cognitive-complexity threshold.
+// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char* argv[]) {
     Log::Init();
     std::filesystem::path root_dir = ResolveRuntimeRoot(argc > 0 ? argv[0] : nullptr);

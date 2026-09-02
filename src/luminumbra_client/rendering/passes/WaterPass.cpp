@@ -237,7 +237,7 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     for (const auto& item : input.draw_items) {
         m_water_shader->setMat4("u_model", item.model);
         glBindVertexArray(item.vao_id);
-        glDrawElements(GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, 0);
+        glDrawElements(GL_TRIANGLES, item.element_count, GL_UNSIGNED_INT, nullptr);
         stats.water_draws++;
         stats.water_indices += item.element_count;
     }

@@ -215,6 +215,31 @@ jobs:
       - name: Check formatting
         run: scripts/lint.sh --format-only --changed-from '${{ steps.format-base.outputs.base }}'
 
+  tidy:
+    name: Static analysis / clang-tidy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install analysis dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang clang-tidy cmake extra-cmake-modules \
+            libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libwayland-dev \
+            libxkbcommon-dev ninja-build pkg-config wayland-protocols xorg-dev
+      - name: Configure compile database
+        run: |
+          cmake -S . -B build/tidy -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLUMINUMBRA_ENABLE_DILIGENT=OFF \
+            -DLUMINUMBRA_WARNINGS_AS_ERRORS=OFF \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+      - name: Generate vendored headers used by first-party sources
+        run: cmake --build build/tidy --target glad --parallel 4
+      - name: Run blocking clang-tidy gate
+        run: scripts/tidy.sh --build-dir build/tidy --jobs 4
+
   public-tree:
     name: Public tree / inventory honesty
     runs-on: ubuntu-24.04
