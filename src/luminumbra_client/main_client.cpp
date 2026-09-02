@@ -1475,9 +1475,6 @@ void BuildProcgenBushPalette(Luminumbra::Rendering::RenderPipeline& rp) {
 }
 
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
-// UI hot reload: watches data/ui and reloads the active document on.rml/.rcss edits
-// (opt-in via --ui-hot-reload, so the 1s filesystem poll is off during normal/gate runs).
-Luminumbra::Client::UI::UIHotReload g_uiHotReload;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
 // --- Forward Declarations ---
@@ -3508,6 +3505,14 @@ int main(int argc, char* argv[]) {
         dynamic_cast<Luminumbra::Client::MiniaudioManager*>(audioManager.get()));
     envAudio->ConfigureDayNightBeds("ambient_birds", "ambient_night");
 
+    // UI hot reload: watches data/ui and reloads the active document on.rml/.rcss edits
+    // (opt-in via --ui-hot-reload, so the 1s filesystem poll is off during normal/gate runs).
+    // main()-scoped (not a file-scope global) so its destructor — which logs via
+    // LUMINUMBRA_CORE_INFO — runs before static destruction tears down the spdlog
+    // logger; as a global it segfaulted in __run_exit_handlers logging through the
+    // already-destroyed Log::s_CoreLogger.
+    Luminumbra::Client::UI::UIHotReload uiHotReload;
+
     if (!scenario_config.no_ui) {
         g_uiManager = std::make_unique<Luminumbra::Client::Rml_UIManager>(root_path_str);
         g_uiManager->Init(window, audioManager.get());
@@ -3522,10 +3527,10 @@ int main(int argc, char* argv[]) {
         }
         // opt-in UI hot reload: watch data/ui and reload the active document on edits.
         if (HasCommandLineFlag(argc, argv, "--ui-hot-reload")) {
-            g_uiHotReload.SetEnabled(true);
-            g_uiHotReload.WatchDirectory("data/ui", "rml");
-            g_uiHotReload.WatchDirectory("data/ui", "rcss");
-            g_uiHotReload.SetReloadCallback([](const std::string&) {
+            uiHotReload.SetEnabled(true);
+            uiHotReload.WatchDirectory("data/ui", "rml");
+            uiHotReload.WatchDirectory("data/ui", "rcss");
+            uiHotReload.SetReloadCallback([](const std::string&) {
                 if (g_uiManager)
                     g_uiManager->ReloadActiveDocument();
             });
@@ -4720,7 +4725,7 @@ int main(int argc, char* argv[]) {
         if (g_uiManager) {
             g_uiManager->Update();
         }
-        g_uiHotReload.Update(); // No-op unless --ui-hot-reload enabled it; throttled to 1 second.
+        uiHotReload.Update(); // No-op unless --ui-hot-reload enabled it; throttled to 1 second.
 
         GameState currentState = gameStateManager.GetCurrentState();
 
