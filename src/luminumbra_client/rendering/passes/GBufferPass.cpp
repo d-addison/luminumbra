@@ -116,7 +116,7 @@ void GBufferPass::init_instanced_static_mesh(const std::filesystem::path& root_p
     glBindVertexArray(m_impostorVAO);
     glBindBuffer(GL_ARRAY_BUFFER, m_impostorInstanceVBO);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), (void*)0);
+    glVertexAttribPointer(0, 4, GL_FLOAT, GL_FALSE, sizeof(glm::vec4), (void*)nullptr);
     glVertexAttribDivisor(0, 1);
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -764,9 +764,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                         static_cast<GLsizeiptr>(instance_count) * sizeof(glm::vec3),
                         batch.tints.data());
         glEnableVertexAttribArray(7);
-        glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
+        glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)nullptr);
         glVertexAttribDivisor(7, 1);
-        glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0, instance_count);
+        glDrawElementsInstanced(
+            GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr, instance_count);
         glBindVertexArray(0);
     }
 
@@ -937,7 +938,7 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
         glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_jointPaletteSSBO);
 
         glBindVertexArray(mesh->vao);
-        glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, 0);
+        glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
         glBindVertexArray(0);
         stats.skinned_draws++;
         stats.skinned_indices += mesh->indexCount;

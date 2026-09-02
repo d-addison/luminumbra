@@ -1273,6 +1273,25 @@ target_link_libraries(jolt_tunneling_test PRIVATE
     luminumbra_common
 )
 
+# Physics surface queries for audio raycasts: real Jolt surface normals
+# (flat/ramp/from-below opposition flip, dynamic-sphere radial) + the worldgen
+# material seam (SurfaceVertexMaterial vs the legacy Y-band fallback). Drives
+# the real PhysicsSystem + a headless SHIELD_WorldSystem -- no GL needed.
+add_executable(surface_query_test
+    physics/surface_query_test.cpp
+)
+
+target_include_directories(surface_query_test PRIVATE
+../src
+../src/luminumbra_common
+../include
+)
+
+target_link_libraries(surface_query_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # real physics-raycast audio occlusion. Compiles AudioSpatialCluster.cpp
 # directly (now decoupled from miniaudio) + links luminumbra_common for the Jolt
 # PhysicsSystem::calculate_audio_occlusion raycast; no client/GL link needed.
@@ -1436,6 +1455,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     jolt_tunneling_test
+    surface_query_test
     audio_occlusion_test
     audio_prune_guard_test
     audio_volume_readback_test
