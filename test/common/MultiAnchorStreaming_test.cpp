@@ -71,8 +71,18 @@ Vec3 surface_anchor(SHIELD_WorldSystem* world, const Vec3& spawn, float dx, floa
 
 constexpr int kTicks = 96;         // generous: generation is budget-limited per activation
 constexpr int kCoverageRadius = 3; // near-surface disc to probe
-// Far enough that anchor B's disc never overlaps A's render radius (RENDER_DISTANCE is a
-// few hundred metres; 3 km is comfortably beyond).
+// Streaming cap (the WaterDeterminism pattern): each anchor's wanted disc is a
+// 6-chunk (96 m) full-detail disc instead of the ~1,800-column RENDER_DISTANCE
+// fill that dominated every wait_for_streaming_jobs tick. The cap does not
+// weaken either gate: the positive probes read a kCoverageRadius=3 disc, well
+// inside the 6-chunk cap, and the negative gate ("far region NOT resident")
+// only gets STRONGER under a smaller wanted set. Both tests run under the SAME
+// cap, so the A/B contrast (union streams B's disc; single anchor does not)
+// still isolates exactly the multi-anchor union semantics.
+constexpr int kStreamRadiusCap = 6; // chunks (96 m)
+// Far enough that anchor B's disc never overlaps A's wanted/eviction disc under
+// EITHER the production radius (RENDER_DISTANCE is a few hundred metres) or the
+// capped 96 m disc; 3 km is comfortably beyond both.
 constexpr float kFarOffsetM = 3000.0f;
 
 TEST(MultiAnchorStreaming, BothAnchorsStreamTheirNearSurface) {
@@ -86,6 +96,7 @@ TEST(MultiAnchorStreaming, BothAnchorsStreamTheirNearSurface) {
         ASSERT_TRUE(session.CreateWorld("MultiAnchor", "12345", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
         ASSERT_NE(world, nullptr);
+        world->debug_set_streaming_radius_cap(kStreamRadiusCap);
         auto* physics = session.GetPhysicsSystem();
 
         const Vec3 spawn = session.GetMetadata().spawnPoint;
@@ -115,6 +126,7 @@ TEST(MultiAnchorStreaming, SingleAnchorDoesNotStreamTheFarAnchorRegion) {
         ASSERT_TRUE(session.CreateWorld("SingleAnchor", "12345", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
         ASSERT_NE(world, nullptr);
+        world->debug_set_streaming_radius_cap(kStreamRadiusCap);
         auto* physics = session.GetPhysicsSystem();
 
         const Vec3 spawn = session.GetMetadata().spawnPoint;
