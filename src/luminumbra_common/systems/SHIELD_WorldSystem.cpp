@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono> // runtime telemetry ( implementation note): per-sub-phase streaming timing
 #include <cmath>
+#include <cstdlib> // std::llabs (hydro cache eviction distance)
 #include <cstring> // std::memcpy for the deterministic water-state hash
 #include <filesystem>
 #include <limits>
@@ -1233,6 +1234,13 @@ namespace {
 // margin keeps the interior strictly independent of terrain beyond the halo.
 constexpr int kHydroRegionCells = 64;
 constexpr int kHydroHaloMargin = 8;
+// Cap on resident baked regions. Each entry is kHydroRegionCells^2 floats
+// (16 KB), so 2048 regions bound the cache at 32 MB while covering a
+// 32x32-region (~16x16 km) working set — far beyond the far-LOD prefetch
+// reach, so a live session never evicts what it is still reading. Bakes are
+// pure recompute-on-load, so eviction can only cost a re-bake, never change
+// a sampled offset.
+constexpr std::size_t kHydroCacheMaxRegions = 2048;
 
 std::int64_t HydroFloorDiv(std::int64_t a, std::int64_t b) {
     const std::int64_t q = a / b;
@@ -1321,6 +1329,27 @@ float SHIELD_WorldSystem::SampleHydroOffsetMeters(float world_x, float world_z) 
         std::vector<float> baked = bake_region(rx, rz); // outside any lock
         std::unique_lock<std::shared_mutex> wlock(m_hydro_mutex);
         auto it = m_hydro_cache.try_emplace(key, std::move(baked)).first;
+        // Bound the cache: past the cap, evict the region FARTHEST (Chebyshev)
+        // from the one just requested — the just-requested key approximates the
+        // current activity centre, so hot neighbourhoods survive and only stale
+        // far-behind regions fall out. Safe under the exclusive lock: readers
+        // copy a single float under a lock and never retain references. Purely
+        // a cost bound; a re-read of an evicted region re-bakes byte-identically.
+        if (m_hydro_cache.size() > kHydroCacheMaxRegions) {
+            auto victim = m_hydro_cache.end();
+            std::int64_t worst = -1;
+            for (auto cit = m_hydro_cache.begin(); cit != m_hydro_cache.end(); ++cit) {
+                const std::int64_t d = std::max(std::llabs(cit->first.first - key.first),
+                                                std::llabs(cit->first.second - key.second));
+                if (d > worst) {
+                    worst = d;
+                    victim = cit;
+                }
+            }
+            if (victim != m_hydro_cache.end() && victim != it) {
+                m_hydro_cache.erase(victim);
+            }
+        }
         return it->second[local];
     };
 
