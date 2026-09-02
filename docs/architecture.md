@@ -27,9 +27,12 @@ deterministic inputs rather than wall-clock completion order.
 
 The common engine groups functionality by responsibility:
 
-- `shield/` and `world/` own terrain generation, streaming, and spatial data.
-- `systems/`, `simulation/`, `ai/`, `fields/`, and `foliage/` advance world state.
-- `physics/` integrates the physics backend behind engine-owned types.
+- `world/` owns spatial data: chunks, meshing, biome/erosion tables, far-LOD
+  storage, and the `GameSession` lifecycle. Terrain generation and streaming are
+  driven by the SHIELD world system in `systems/`.
+- `systems/`, `simulation/`, `ai/`, `fields/`, and `foliage/` advance world
+  state. `systems/` also integrates the physics backend behind engine-owned
+  types (`PhysicsSystem`) and hosts the water, weather, wind, and aether solvers.
 - `persistence/` and `replay/` encode and verify durable state.
 - `net/` and `network/` contain transport, lockstep, and replication paths.
 - `scripting/` exposes the supported Lua surface.
