@@ -30,6 +30,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "GameMath.h" // luminumbra::game: Clamp01
+
 namespace luminumbra::game {
 
 // ---------------------------------------------------------------------------
@@ -78,14 +80,6 @@ struct CodexEntry {
 // ---------------------------------------------------------------------------
 // Small pure helper — float +-*/ only, no libm.
 // ---------------------------------------------------------------------------
-inline float CodexClamp01(float v) {
-    if (v < 0.0f)
-        return 0.0f;
-    if (v > 1.0f)
-        return 1.0f;
-    return v;
-}
-
 // ---------------------------------------------------------------------------
 // PhotoCodex. The collection. Entries are maintained sorted ascending by
 // species_id so iteration is deterministic and discovered can binary-search.
@@ -154,7 +148,7 @@ public:
         if (total_species <= 0)
             return 0.0f;
         const float frac = static_cast<float>(entries_.size()) / static_cast<float>(total_species);
-        return CodexClamp01(frac);
+        return Clamp01(frac);
     }
 
     // Has the player captured species `species_id` performing brain action `action`?

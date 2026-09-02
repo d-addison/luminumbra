@@ -39,6 +39,8 @@
 #include "PhotoCamera.h" // luminumbra::game:  LensSettings/ComputeDof/SubjectIsolation/ExposureQuality
 #include "PhotoCodex.h" // luminumbra::game:  PhotoCodex::Record
 
+#include "GameMath.h" // luminumbra::game: Clamp01
+
 namespace luminumbra::game {
 
 // ---------------------------------------------------------------------------
@@ -115,17 +117,9 @@ inline constexpr float kStar5 = 0.88f;
 
 // Local clamp (float +-*/ only; mirrors the libraries' helper to avoid pulling one
 // namespace's helper into another).
-inline float SessionClamp01(float v) {
-    if (v < 0.0f)
-        return 0.0f;
-    if (v > 1.0f)
-        return 1.0f;
-    return v;
-}
-
 // Map a [0,1] total to a 0..5 star rating. Monotonic non-decreasing step function.
 inline int StarsForTotal(float total) {
-    const float t = SessionClamp01(total);
+    const float t = Clamp01(total);
     if (t >= kStar5)
         return 5;
     if (t >= kStar4)
@@ -177,16 +171,15 @@ inline ShotVerdict EvaluateShot(const ShotInput& in) {
     // framing judgement with no optical counterpart here). Exposure and
     // focus/isolation fold the optics into the rubric so a great frame ruined by a
     // bad lens (or vice versa) lands in the middle.
-    v.composition = SessionClamp01(rubric.composition);
+    v.composition = Clamp01(rubric.composition);
 
-    v.exposure = SessionClamp01(kExpRubric * SessionClamp01(rubric.lighting) +
-                                kExpOptics * SessionClamp01(exposure_quality));
+    v.exposure =
+        Clamp01(kExpRubric * Clamp01(rubric.lighting) + kExpOptics * Clamp01(exposure_quality));
 
-    v.focus_isolation = SessionClamp01(kFiRubric * SessionClamp01(rubric.focus) +
-                                       kFiOptics * SessionClamp01(isolation));
+    v.focus_isolation = Clamp01(kFiRubric * Clamp01(rubric.focus) + kFiOptics * Clamp01(isolation));
 
-    v.total = SessionClamp01(kVerdictWComposition * v.composition + kVerdictWExposure * v.exposure +
-                             kVerdictWFocusIsolation * v.focus_isolation);
+    v.total = Clamp01(kVerdictWComposition * v.composition + kVerdictWExposure * v.exposure +
+                      kVerdictWFocusIsolation * v.focus_isolation);
 
     v.stars = StarsForTotal(v.total);
     return v;
