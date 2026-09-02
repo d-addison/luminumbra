@@ -111,12 +111,6 @@
 #include <unordered_set>
 #include <vector>
 
-#if defined(_WIN32)
-#include <DbgHelp.h>
-#include <Psapi.h>
-#include <Windows.h>
-#endif
-
 using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
 

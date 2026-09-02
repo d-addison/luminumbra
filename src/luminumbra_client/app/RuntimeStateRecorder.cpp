@@ -20,8 +20,12 @@
 #include <utility>
 
 #if defined(_WIN32)
-#include <Psapi.h>
+// Windows.h must precede Psapi.h (Psapi declares against windef types and does
+// not include them itself). The blank line keeps clang-format from re-sorting
+// the two into alphabetical — and broken — order.
 #include <Windows.h>
+
+#include <Psapi.h>
 #endif
 
 // The recorders sample the live camera for the coverage snapshots. The camera
