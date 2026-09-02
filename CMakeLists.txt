@@ -310,6 +310,11 @@ endforeach()
 # `coverage` preset set LUMINUMBRA_ENABLE_COVERAGE.
 luminumbra_enable_coverage(luminumbra_client)
 luminumbra_enable_frame_pointers(luminumbra_client)
+# The QA harness library carries the RuntimeScenarioHarness TU that used to
+# compile inside luminumbra_client, so it keeps the same coverage-only
+# treatment (same pre-existing-warnings rationale as above).
+luminumbra_enable_coverage(luminumbra_client_qa)
+luminumbra_enable_frame_pointers(luminumbra_client_qa)
 luminumbra_enable_frame_pointers(worldgen_preview_test)
 foreach(PROFILING_TARGET IN ITEMS
   forest_perf_budget_test
