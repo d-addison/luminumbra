@@ -1,11 +1,13 @@
 #include "PhysicsSystem.h"
 #include "../../../include/luminumbra/core/Types.h"
 #include "../world/Chunk.h"
+#include "SHIELD_WorldSystem.h"
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyLock.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
 #include <Jolt/Physics/Collision/CastResult.h>
@@ -626,22 +628,50 @@ PhysicsSystem::AudioRaycastResult PhysicsSystem::audio_raycast(const glm::vec3& 
         JPH::Vec3 hit_pos = ray_start + ray_direction * result.distance;
         result.hit_point = {hit_pos.GetX(), hit_pos.GetY(), hit_pos.GetZ()};
 
-        // RayCastResult doesn't have surface normal - we need to get it differently
-        // For now, use a default upward normal (this should be improved with proper surface
-        // queries)
-        result.surface_normal = glm::vec3(0.0f, 1.0f, 0.0f);
+        // Query the hit body for the real surface normal and its object layer.
+        // Terrain heightfields live on NON_MOVING; dynamic spheres are the only
+        // other bodies (MOVING), so the layer identifies terrain hits.
+        bool terrain_hit = false;
+        JPH::BodyLockRead lock(m_jolt_system->GetBodyLockInterface(), closest_hit.mBodyID);
+        if (lock.Succeeded()) {
+            const JPH::Body& body = lock.GetBody();
+            JPH::Vec3 normal = body.GetWorldSpaceSurfaceNormal(closest_hit.mSubShapeID2, hit_pos);
+            // Opposition invariant: the normal must face AGAINST the incoming
+            // ray (load-bearing for from-below casts, where the heightfield's
+            // up-facing triangle normal points along the ray).
+            if (normal.Dot(ray_direction) > 0.0f) {
+                normal = -normal;
+            }
+            result.surface_normal = {normal.GetX(), normal.GetY(), normal.GetZ()};
+            terrain_hit = body.GetObjectLayer() == Layers::NON_MOVING;
+        }
 
-        // Determine material type based on hit point (simplified - could be enhanced with material
-        // system)
-        if (result.hit_point.y < 10.0f) {
-            result.material_type = 0; // Stone
-            result.material_absorption = 0.15f;
-        } else if (result.hit_point.y < 50.0f) {
-            result.material_type = 1; // Dirt
-            result.material_absorption = 0.25f;
+        if (terrain_hit && m_world_system) {
+            // Terrain hit with the worldgen seam attached: biome-aware surface
+            // material. For a heightfield hit the hit y IS the cached terrain
+            // height, so no shaped-height recompute is needed.
+            const MaterialType material = m_world_system->SurfaceVertexMaterial(
+                result.hit_point.x, result.hit_point.z, result.hit_point.y);
+            result.material_type = static_cast<int>(material);
+            result.material_absorption = get_material_audio_absorption(result.material_type);
+        } else if (m_world_system) {
+            // Non-terrain (dynamic body): no worldgen material applies; classify
+            // as stone.
+            result.material_type = static_cast<int>(MaterialType::Stone);
+            result.material_absorption = get_material_audio_absorption(result.material_type);
         } else {
-            result.material_type = 2; // Grass/vegetation
-            result.material_absorption = 0.4f;
+            // Legacy Y-band classification (no world system attached, e.g.
+            // standalone tests) - byte-identical to the pre-seam behaviour.
+            if (result.hit_point.y < 10.0f) {
+                result.material_type = 0; // Stone
+                result.material_absorption = 0.15f;
+            } else if (result.hit_point.y < 50.0f) {
+                result.material_type = 1; // Dirt
+                result.material_absorption = 0.25f;
+            } else {
+                result.material_type = 2; // Grass/vegetation
+                result.material_absorption = 0.4f;
+            }
         }
     }
 
@@ -732,20 +762,21 @@ std::vector<glm::vec3> PhysicsSystem::calculate_audio_reflection_points(const gl
 }
 
 float PhysicsSystem::get_material_audio_absorption(int material_type) const {
+    // Keyed by static_cast<int>(MaterialType) codes (core/Types.h).
     switch (material_type) {
-        case 0:
+        case static_cast<int>(MaterialType::Stone):
             return 0.15f; // Stone - hard, reflective
-        case 1:
-            return 0.25f; // Dirt - moderate absorption
-        case 2:
+        case static_cast<int>(MaterialType::Soil):
+            return 0.25f; // Soil - moderate absorption
+        case static_cast<int>(MaterialType::Grass):
             return 0.4f; // Grass - soft, absorbing
-        case 3:
+        case static_cast<int>(MaterialType::Sand):
             return 0.6f; // Sand - high absorption
-        case 4:
-            return 0.8f; // Fabric/organic - very absorbing
-        case 5:
-            return 0.05f; // Metal - highly reflective
-        case 6:
+        case static_cast<int>(MaterialType::Deepslate):
+            return 0.1f; // Deepslate - very hard, highly reflective
+        case static_cast<int>(MaterialType::LuminCrystal):
+            return 0.05f; // LuminCrystal - crystalline, highly reflective
+        case static_cast<int>(MaterialType::Water):
             return 0.9f; // Water - high absorption for airborne sound
         default:
             return 0.2f; // Default medium absorption
