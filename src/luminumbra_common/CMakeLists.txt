@@ -128,6 +128,13 @@ if(LUMINUMBRA_ENABLE_STEAM)
     if(WIN32)
         target_link_libraries(luminumbra_common PUBLIC
             "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/win64/steam_api64.lib")
+    elseif(UNIX AND NOT APPLE)
+        # the linux64 redistributable is a shared object; the server loads it from
+        # its own directory at runtime (mirror of the win64 steam_api64.dll copy).
+        target_link_libraries(luminumbra_common PUBLIC
+            "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/linux64/libsteam_api.so")
+    else()
+        message(FATAL_ERROR "LUMINUMBRA_ENABLE_STEAM=ON is wired for Windows and Linux only")
     endif()
     message(STATUS "Steamworks transport ENABLED (SDK: ${LUMINUMBRA_STEAM_SDK_DIR})")
 endif()
@@ -136,23 +143,30 @@ endif()
 # open-source UDP networking, Steam-INDEPENDENT -- so two processes can connect on
 # ONE machine (the Steam SDK can't, one-instance-per-app), which is exactly what
 # local dev/testing needs. OFF by default (FetchContent + a multi-minute GNS build);
-# when ON, fetch GNS master (BCrypt crypto -> no OpenSSL/libsodium dep), link the
-# static lib, and define LUMINUMBRA_ENABLE_GNS so the transport body compiles.
-# Requires protobuf + abseil + protoc on PATH (ucrt64 packages).
+# when ON, fetch a PINNED GNS release, link the static lib, and define
+# LUMINUMBRA_ENABLE_GNS so the transport body compiles. Crypto backend: BCrypt on
+# Windows (no OpenSSL/libsodium dep); GNS's default (OpenSSL) elsewhere.
+# Requires protobuf + abseil + protoc on PATH (ucrt64 packages on Windows;
+# libprotobuf-dev + libssl-dev on Linux).
 option(LUMINUMBRA_ENABLE_GNS "Build the standalone GameNetworkingSockets UDP transport" OFF)
 if(LUMINUMBRA_ENABLE_GNS)
     include(FetchContent)
     set(GAMENETWORKINGSOCKETS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(GAMENETWORKINGSOCKETS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(USE_CRYPTO "BCrypt" CACHE STRING "" FORCE)
+    if(WIN32)
+        # BCrypt is a Windows OS API; forcing it elsewhere breaks the build.
+        set(USE_CRYPTO "BCrypt" CACHE STRING "" FORCE)
+    endif()
     FetchContent_Declare(
         GameNetworkingSockets
         GIT_REPOSITORY https://github.com/ValveSoftware/GameNetworkingSockets.git
-        GIT_TAG master
-        GIT_SHALLOW TRUE
+        # v1.6.0, pinned to the immutable commit (same discipline as the
+        # SHA-pinned GitHub Actions): a moving `master` cannot silently change
+        # what an enabled build links.
+        GIT_TAG 2cb93a06350bb065db53abdb0d87cf297e0bfd34
     )
     FetchContent_MakeAvailable(GameNetworkingSockets)
     target_link_libraries(luminumbra_common PUBLIC GameNetworkingSockets_s)
     target_compile_definitions(luminumbra_common PUBLIC LUMINUMBRA_ENABLE_GNS)
-    message(STATUS "Standalone GameNetworkingSockets transport ENABLED (master, BCrypt)")
+    message(STATUS "Standalone GameNetworkingSockets transport ENABLED (v1.6.0 pinned)")
 endif()
