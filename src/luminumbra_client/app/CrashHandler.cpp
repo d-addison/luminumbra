@@ -17,8 +17,12 @@
 #include <string>
 
 #if defined(_WIN32)
-#include <DbgHelp.h>
+// Windows.h must precede DbgHelp.h (DbgHelp declares against windef types and
+// does not include them itself). The blank line keeps clang-format from
+// re-sorting the two into alphabetical — and broken — order.
 #include <Windows.h>
+
+#include <DbgHelp.h>
 #endif
 
 using namespace Luminumbra::Client::ScenarioHarness;
