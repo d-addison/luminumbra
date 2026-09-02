@@ -1282,7 +1282,10 @@ private:
     // persisted, like wind/aether). `mutable` + a mutex because the height path
     // is queried from multithreaded chunk-gen jobs; the bake is deterministic so
     // a duplicate concurrent bake would be identical, the mutex only guards the
-    // map. Empty/unused when hydro is disabled.
+    // map. Empty/unused when hydro is disabled. BOUNDED: past
+    // kHydroCacheMaxRegions entries the farthest region from the latest request
+    // is evicted (see offset_at), so long exploration cannot grow this without
+    // limit; eviction only ever costs a byte-identical re-bake.
     mutable std::map<std::pair<std::int64_t, std::int64_t>, std::vector<float>> m_hydro_cache;
     // shared_mutex: warm-cache lookups take a SHARED lock (concurrent across the
     // multithreaded chunk-gen jobs); only the one-time per-region bake takes the
