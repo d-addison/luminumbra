@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -46,11 +47,15 @@ using Luminumbra::world::GameSession;
 #endif
 
 // Temp root containing the river-bearing `default` preset + the biome table the rivers need.
+// The root is unique per fixture instance so concurrent common_tests processes never share
+// (or clobber) a directory; each TEST builds ONE instance and reuses it for its A/B runs, so
+// within-run path stability still holds. The destructor removes the tree.
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        root_ = fs::temp_directory_path() / "luminumbra_water_determinism_test";
-        fs::remove_all(root_);
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        root_ = fs::temp_directory_path() /
+                ("luminumbra_water_determinism_test_" + std::to_string(stamp));
         const fs::path src(LUMINUMBRA_SOURCE_ROOT);
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(src / "worlds" / "atlas" / "presets" / "default.json",
