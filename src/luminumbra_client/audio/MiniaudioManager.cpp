@@ -23,7 +23,7 @@ MiniaudioManager::~MiniaudioManager() {
 
 bool MiniaudioManager::Init() {
     m_engine = std::make_unique<ma_engine>();
-    ma_result result = ma_engine_init(NULL, m_engine.get());
+    ma_result result = ma_engine_init(nullptr, m_engine.get());
     if (result != MA_SUCCESS) {
         LUMINUMBRA_CORE_ERROR("Failed to initialize miniaudio engine.");
         m_engine = nullptr;
@@ -321,7 +321,7 @@ bool MiniaudioManager::PlayEvent(const AudioEventID& eventID, AudioEventHandle& 
 
     // Handle-based events are gameplay SFX: attach to the sfx bus.
     if (ma_sound_init_from_file(
-            m_engine.get(), full_path.c_str(), flags, GroupFor(BusId::Sfx), NULL, sound.get()) !=
+            m_engine.get(), full_path.c_str(), flags, GroupFor(BusId::Sfx), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
     }
@@ -396,7 +396,7 @@ bool MiniaudioManager::PlayOneShot2D(const AudioEventID& eventID, BusId bus) {
     const uint32_t flags =
         MA_SOUND_FLAG_DECODE | MA_SOUND_FLAG_NO_PITCH | MA_SOUND_FLAG_NO_SPATIALIZATION;
     if (ma_sound_init_from_file(
-            m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) !=
+            m_engine.get(), full_path.c_str(), flags, GroupFor(bus), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
     }
@@ -428,7 +428,7 @@ bool MiniaudioManager::PlayOneShot(const AudioEventID& eventID,
     // spatial one-shots attach to their routed bus group
     // (default sfx; Events voices sidechain-duck the ambient bus).
     if (ma_sound_init_from_file(
-            m_engine.get(), full_path.c_str(), flags, GroupFor(bus), NULL, sound.get()) !=
+            m_engine.get(), full_path.c_str(), flags, GroupFor(bus), nullptr, sound.get()) !=
         MA_SUCCESS) {
         return false;
     }
@@ -485,7 +485,7 @@ void MiniaudioManager::PlayMusic(const AudioEventID& musicEventID) {
 
     m_currentMusic = std::make_unique<ma_sound>();
     ma_result result = ma_sound_init_from_file(
-        m_engine.get(), full_path.c_str(), flags, NULL, NULL, m_currentMusic.get());
+        m_engine.get(), full_path.c_str(), flags, nullptr, nullptr, m_currentMusic.get());
 
     if (result != MA_SUCCESS) {
         LUMINUMBRA_CORE_ERROR("Failed to init music with ma_sound_init_from_file for '" +
@@ -707,7 +707,7 @@ void MiniaudioManager::SetWindParameters(const glm::vec3& direction, float stren
                                     windPath.c_str(),
                                     MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION,
                                     GroupFor(BusId::Ambient),
-                                    NULL,
+                                    nullptr,
                                     m_windSound.get()) == MA_SUCCESS) {
             ma_sound_set_looping(m_windSound.get(), true);
             ma_sound_set_volume(m_windSound.get(), strength * 0.6f);
@@ -817,7 +817,7 @@ void MiniaudioManager::PlayAmbientLoop(const AudioEventID& eventID,
                                                      full_path.c_str(),
                                                      MA_SOUND_FLAG_DECODE,
                                                      GroupFor(BusId::Ambient),
-                                                     NULL,
+                                                     nullptr,
                                                      sound.get());
     if (amb_rc != MA_SUCCESS) {
         LUMINUMBRA_CORE_WARN("PlayAmbientLoop: failed to load '{}' (ma_result {})",

@@ -126,9 +126,12 @@ void JobSystem::PooledQueue::grow() {
     std::vector<PooledJob> grown;
     grown.resize(new_cap);
     // Re-linearize the live slots [head, head+size) into the front of the new
-    // buffer so head=0 after growth.
-    for (std::size_t i = 0; i < m_size; ++i) {
-        grown[i] = std::move(m_slots[(m_head + i) % old_cap]);
+    // buffer so head=0 after growth. An empty pool holds no live slots, so the
+    // modulo by old_cap only runs when old_cap is non-zero.
+    if (old_cap != 0) {
+        for (std::size_t i = 0; i < m_size; ++i) {
+            grown[i] = std::move(m_slots[(m_head + i) % old_cap]);
+        }
     }
     m_slots = std::move(grown);
     m_head = 0;
