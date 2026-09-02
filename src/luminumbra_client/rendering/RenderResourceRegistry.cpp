@@ -90,7 +90,7 @@ TextureHandle RenderResourceRegistry::create_texture(std::string_view name,
         PassGl::label_gl_object(GL_TEXTURE, owned.gl_id, desc.debug_label);
     }
     const TextureHandle handle{owned.gl_id};
-    m_owned_textures.emplace(key, std::move(owned));
+    m_owned_textures.emplace(key, owned);
     return handle;
 }
 
@@ -129,7 +129,7 @@ RenderbufferHandle RenderResourceRegistry::create_renderbuffer(std::string_view 
         PassGl::label_gl_object(GL_RENDERBUFFER, owned.gl_id, desc.debug_label);
     }
     const RenderbufferHandle handle{owned.gl_id};
-    m_owned_renderbuffers.emplace(key, std::move(owned));
+    m_owned_renderbuffers.emplace(key, owned);
     return handle;
 }
 

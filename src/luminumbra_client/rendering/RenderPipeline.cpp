@@ -2586,7 +2586,7 @@ RenderPipeline::build_chunk_snapshots(const std::vector<Chunk*>& renderable_chun
             snapshot.water_index_count = 0;
         }
 
-        snapshots.push_back(std::move(snapshot));
+        snapshots.push_back(snapshot);
     }
 
     return snapshots;
@@ -4389,7 +4389,7 @@ void RenderPipeline::init_screen_quad() {
     glBindBuffer(GL_ARRAY_BUFFER, m_screen_quad_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)nullptr);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
     glBindVertexArray(0);
@@ -4425,7 +4425,7 @@ void RenderPipeline::init_screen_quad() {
     glBindBuffer(GL_ARRAY_BUFFER, m_glass_quad_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(glassQuad), glassQuad, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)nullptr);
     glBindVertexArray(0);
 }
 

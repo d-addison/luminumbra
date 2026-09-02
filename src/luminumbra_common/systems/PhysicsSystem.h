@@ -26,6 +26,8 @@ class Chunk;
 
 namespace Systems {
 
+class SHIELD_WorldSystem;
+
 struct ChunkCollisionData {
     JPH::BodyID body_id;
 };
@@ -98,13 +100,24 @@ public:
     bool is_avatar_grounded(std::size_t index) const;
 
     // --- Audio-Physics Integration ---
+    // Non-owning world-generation seam for surface-material classification on
+    // terrain raycast hits. Set once at session startup (GameSession creates
+    // physics before the world system and destroys it first, so the pointer
+    // cannot dangle). Null (standalone tests) keeps the legacy Y-band
+    // classification byte-identical.
+    void set_world_system(const SHIELD_WorldSystem* world_system) {
+        m_world_system = world_system;
+    }
+
     struct AudioRaycastResult {
         bool hit = false;
         float distance = 0.0f;
         glm::vec3 hit_point = {0.0f, 0.0f, 0.0f};
         glm::vec3 surface_normal = {0.0f, 1.0f, 0.0f};
         float material_absorption = 0.1f;
-        int material_type = 0; // 0=stone, 1=dirt, 2=grass, etc.
+        // static_cast<int>(MaterialType) codes (core/Types.h) when a world
+        // system is attached; legacy 0=stone/1=dirt/2=grass band codes otherwise.
+        int material_type = 0;
     };
 
     AudioRaycastResult audio_raycast(const glm::vec3& from, const glm::vec3& to) const;
@@ -199,6 +212,11 @@ private:
 
     // Batched physics queries
     BatchedPhysicsQueries m_batched_queries;
+
+    // Non-owning worldgen seam for audio-raycast material classification
+    // (see set_world_system). Null in standalone tests.
+    const SHIELD_WorldSystem* m_world_system = nullptr;
+
     bool m_started = false;
 };
 
