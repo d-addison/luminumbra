@@ -39,6 +39,7 @@
 #include <cstdint>
 
 #include "../core/DeterministicMath.h"
+#include "GameMath.h" // luminumbra::game: Clamp01
 
 namespace luminumbra::game {
 
@@ -107,14 +108,6 @@ inline constexpr float kNoneMood = 0.45f;
 // ---------------------------------------------------------------------------
 // Small pure helpers (float +-*/ only — no libm).
 // ---------------------------------------------------------------------------
-inline float FilterClamp01(float v) {
-    if (v < 0.0f)
-        return 0.0f;
-    if (v > 1.0f)
-        return 1.0f;
-    return v;
-}
-
 inline float Lerp(float a, float b, float t) {
     return a + (b - a) * t;
 }
@@ -130,16 +123,16 @@ inline float Lerp(float a, float b, float t) {
 // low_light scales the whole thing down. Mood = the punch a vivid grade adds, which
 // only lands when there's colour AND light to work with.
 inline FilterScore ScoreVivid(const FilterContext& c) {
-    const float sat = FilterClamp01(c.subject_saturation01);
-    const float dark = FilterClamp01(c.low_light01);
+    const float sat = Clamp01(c.subject_saturation01);
+    const float dark = Clamp01(c.low_light01);
     const float light = 1.0f - dark;
 
     FilterScore s;
     // Suitability: saturation in good light. The (1-dark) factor gates it so a vivid
     // grade in a dark scene scores low even if the subject is nominally colourful.
-    s.suitability = FilterClamp01(sat * Lerp(0.35f, 1.0f, light));
+    s.suitability = Clamp01(sat * Lerp(0.35f, 1.0f, light));
     // Mood: vivid pops when both colour and light are present.
-    s.mood = FilterClamp01(0.5f * sat + 0.5f * (sat * light));
+    s.mood = Clamp01(0.5f * sat + 0.5f * (sat * light));
     return s;
 }
 
@@ -147,14 +140,14 @@ inline FilterScore ScoreVivid(const FilterContext& c) {
 // rewards darkness + contrast and is INDIFFERENT to saturation (it would discard it
 // anyway). Mood is high wherever it fits — noir is an inherently moody look.
 inline FilterScore ScoreNoir(const FilterContext& c) {
-    const float dark = FilterClamp01(c.low_light01);
-    const float contrast = FilterClamp01(c.scene_contrast01);
+    const float dark = Clamp01(c.low_light01);
+    const float contrast = Clamp01(c.scene_contrast01);
 
     FilterScore s;
     // Suitability: the geometric-ish blend of darkness and contrast (both wanted).
-    s.suitability = FilterClamp01(0.55f * dark + 0.45f * contrast);
+    s.suitability = Clamp01(0.55f * dark + 0.45f * contrast);
     // Mood: noir's drama scales with how much shadow + contrast it has to sculpt.
-    s.mood = FilterClamp01(0.5f * dark + 0.5f * contrast + 0.15f * (dark * contrast));
+    s.mood = Clamp01(0.5f * dark + 0.5f * contrast + 0.15f * (dark * contrast));
     return s;
 }
 
@@ -162,36 +155,36 @@ inline FilterScore ScoreNoir(const FilterContext& c) {
 // hour. Suitability rises with scene_warmth01. Mood rewards the cosy lift, with a
 // touch of contrast for shape.
 inline FilterScore ScoreWarm(const FilterContext& c) {
-    const float warmth = FilterClamp01(c.scene_warmth01);
-    const float contrast = FilterClamp01(c.scene_contrast01);
+    const float warmth = Clamp01(c.scene_warmth01);
+    const float contrast = Clamp01(c.scene_contrast01);
 
     FilterScore s;
-    s.suitability = FilterClamp01(warmth);
-    s.mood = FilterClamp01(0.8f * warmth + 0.2f * contrast);
+    s.suitability = Clamp01(warmth);
+    s.mood = Clamp01(0.8f * warmth + 0.2f * contrast);
     return s;
 }
 
 // COOL — COLD/blue scenes. The mirror of Warm: a cool grade on a cold scene reads
 // crisp + wintry. Suitability rises as warmth FALLS (1 - warmth). Mood likewise.
 inline FilterScore ScoreCool(const FilterContext& c) {
-    const float cold = 1.0f - FilterClamp01(c.scene_warmth01);
-    const float contrast = FilterClamp01(c.scene_contrast01);
+    const float cold = 1.0f - Clamp01(c.scene_warmth01);
+    const float contrast = Clamp01(c.scene_contrast01);
 
     FilterScore s;
-    s.suitability = FilterClamp01(cold);
-    s.mood = FilterClamp01(0.8f * cold + 0.2f * contrast);
+    s.suitability = Clamp01(cold);
+    s.mood = Clamp01(0.8f * cold + 0.2f * contrast);
     return s;
 }
 
 // DRAMATIC — HIGH-CONTRAST generally, with a mild lift in low light (drama suits
 // moody frames). Suitability is contrast-led; mood adds the emotional punch.
 inline FilterScore ScoreDramatic(const FilterContext& c) {
-    const float contrast = FilterClamp01(c.scene_contrast01);
-    const float dark = FilterClamp01(c.low_light01);
+    const float contrast = Clamp01(c.scene_contrast01);
+    const float dark = Clamp01(c.low_light01);
 
     FilterScore s;
-    s.suitability = FilterClamp01(0.8f * contrast + 0.2f * dark);
-    s.mood = FilterClamp01(0.7f * contrast + 0.3f * dark);
+    s.suitability = Clamp01(0.8f * contrast + 0.2f * dark);
+    s.mood = Clamp01(0.7f * contrast + 0.3f * dark);
     return s;
 }
 
@@ -231,9 +224,9 @@ inline FilterScore ScoreFilter(PhotoFilter filter, const FilterContext& ctx) {
             s = ScoreNone(ctx);
             break;
     }
-    s.suitability = FilterClamp01(s.suitability);
-    s.mood = FilterClamp01(s.mood);
-    s.total = FilterClamp01(kwSuitability * s.suitability + kwMood * s.mood);
+    s.suitability = Clamp01(s.suitability);
+    s.mood = Clamp01(s.mood);
+    s.total = Clamp01(kwSuitability * s.suitability + kwMood * s.mood);
     return s;
 }
 

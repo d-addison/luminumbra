@@ -29,6 +29,7 @@
 #include <cstdint>
 
 #include "../core/DeterministicMath.h"
+#include "GameMath.h" // luminumbra::game: Clamp01
 
 namespace luminumbra::game {
 
@@ -109,20 +110,12 @@ inline constexpr float kContrastSunSpan = 0.5f; // elevation at which the sun te
 // ---------------------------------------------------------------------------
 // Small pure helpers (float +-*/ + DeterministicMath only — no libm transcendentals).
 // ---------------------------------------------------------------------------
-inline float LightClamp01(float v) {
-    if (v < 0.0f)
-        return 0.0f;
-    if (v > 1.0f)
-        return 1.0f;
-    return v;
-}
-
 // A smooth 0..1 ramp that is 1 at t=0 and 0 at t=1, using the deterministic cosine
 // (half a cosine lobe): r(t) = 0.5*(1 + cos(pi*t)) for t in [0,1]. Monotonically
 // DECREASING in t over [0,1]. Built only from DM::Cos so it stays bit-stable.
 inline float CosFalloff01(float t) {
-    const float tc = LightClamp01(t);
-    return LightClamp01(0.5f * (1.0f + DM::Cos(DM::kPi * tc)));
+    const float tc = Clamp01(t);
+    return Clamp01(0.5f * (1.0f + DM::Cos(DM::kPi * tc)));
 }
 
 // ---------------------------------------------------------------------------
@@ -132,7 +125,7 @@ inline float CosFalloff01(float t) {
 // light-cloud sky at a low sun scores best. Returns [0,1].
 // ---------------------------------------------------------------------------
 inline float ScoreGoldenHour(const LightScene& s) {
-    const float elev = LightClamp01(s.sun_elevation01);
+    const float elev = Clamp01(s.sun_elevation01);
     // Map elevation 0 -> t=0 (full golden) and elevation kGoldenSpan -> t=1 (none),
     // clamped beyond. Cosine falloff gives the smooth golden->harsh ramp.
     const float t = elev / kGoldenSpan;
@@ -140,10 +133,10 @@ inline float ScoreGoldenHour(const LightScene& s) {
 
     // Overcast skies erase the warm directional glow; scale the golden reward down
     // as cloud cover rises (full clear keeps it, full overcast roughly halves it).
-    const float cloud = LightClamp01(s.cloud_cover01);
+    const float cloud = Clamp01(s.cloud_cover01);
     golden = golden * (1.0f - 0.5f * cloud);
 
-    return LightClamp01(golden);
+    return Clamp01(golden);
 }
 
 // ---------------------------------------------------------------------------
@@ -153,13 +146,13 @@ inline float ScoreGoldenHour(const LightScene& s) {
 // faces. So rim = facing * low-sun-gate. Returns [0,1].
 // ---------------------------------------------------------------------------
 inline float ScoreRimLight(const LightScene& s) {
-    const float facing = LightClamp01(s.subject_facing01);
-    const float elev = LightClamp01(s.sun_elevation01);
+    const float facing = Clamp01(s.subject_facing01);
+    const float elev = Clamp01(s.sun_elevation01);
 
     // Low-sun gate: 1 at the horizon, smoothly to 0 by kRimLowSpan elevation.
     const float gate = CosFalloff01(elev / kRimLowSpan);
 
-    return LightClamp01(facing * gate);
+    return Clamp01(facing * gate);
 }
 
 // ---------------------------------------------------------------------------
@@ -170,10 +163,10 @@ inline float ScoreRimLight(const LightScene& s) {
 // the separate axes + weights rather than mixed in here. Returns [0,1].
 // ---------------------------------------------------------------------------
 inline float ScoreSoftness(const LightScene& s) {
-    const float cloud = LightClamp01(s.cloud_cover01);
-    const float ambient = LightClamp01(s.ambient01);
+    const float cloud = Clamp01(s.cloud_cover01);
+    const float ambient = Clamp01(s.ambient01);
     const float soft = kSoftCloudWeight * cloud + kSoftAmbientWeight * ambient;
-    return LightClamp01(soft);
+    return Clamp01(soft);
 }
 
 // ---------------------------------------------------------------------------
@@ -183,16 +176,16 @@ inline float ScoreSoftness(const LightScene& s) {
 // ambient fill. Returns [0,1].
 // ---------------------------------------------------------------------------
 inline float ScoreContrast(const LightScene& s) {
-    const float cloud = LightClamp01(s.cloud_cover01);
-    const float ambient = LightClamp01(s.ambient01);
-    const float elev = LightClamp01(s.sun_elevation01);
+    const float cloud = Clamp01(s.cloud_cover01);
+    const float ambient = Clamp01(s.ambient01);
+    const float elev = Clamp01(s.sun_elevation01);
 
     const float clear = 1.0f - cloud;                            // clear-sky fraction.
     const float low_sun = CosFalloff01(elev / kContrastSunSpan); // 1 low .. 0 high.
 
     // Directional contrast from a clear sky + low raking sun, dimmed by ambient fill.
     const float contrast = clear * low_sun * (1.0f - 0.6f * ambient);
-    return LightClamp01(contrast);
+    return Clamp01(contrast);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,8 +199,8 @@ inline LightScore ScoreLight(const LightScene& scene) {
     out.softness = ScoreSoftness(scene);
     out.contrast = ScoreContrast(scene);
 
-    out.total = LightClamp01(kwGolden * out.golden_hour + kwRim * out.rim_light +
-                             kwContrast * out.contrast + kwSoftness * out.softness);
+    out.total = Clamp01(kwGolden * out.golden_hour + kwRim * out.rim_light +
+                        kwContrast * out.contrast + kwSoftness * out.softness);
     return out;
 }
 
