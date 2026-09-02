@@ -20,6 +20,8 @@ class, and file indexes are the lower-level API reference.
   visual evidence.
 - [SHIELD signed-distance-field contract](shield/sdf-contract.md) defines the
   terrain sampling and meshing invariants.
+- [Known limitations](known-limitations.md) is an honest inventory of the
+  engine's current boundaries.
 
 ## Engine at a glance
 
