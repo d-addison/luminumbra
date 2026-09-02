@@ -1504,14 +1504,11 @@ endif()
 # tools/ci/check_ctest_junit.py, which fails the lane on any skip whose reason is not on
 # that lane's explicit allow-list (see the workflow's --allow-skip-reason-regex).
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
-    if(_lum_gtest_target STREQUAL common_tests)
-        # Individual tests in this aggregate use shared runtime roots and may
-        # create loopback listeners. CTest launches every discovered case as a
-        # separate process, so serialize the aggregate to prevent cross-test
-        # corruption and port contention.
-        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
-            PROPERTIES RESOURCE_LOCK luminumbra_common_runtime)
-    elseif(_lum_gtest_target STREQUAL world_load_bounded_test)
+    # common_tests is parallel-safe by construction: its temp-dir fixtures use
+    # per-instance unique roots and its socket tests bind ephemeral ports
+    # (Listen(0)), so no RESOURCE_LOCK is needed. New tests in the aggregate
+    # must keep it that way.
+    if(_lum_gtest_target STREQUAL world_load_bounded_test)
         # This machine-sensitive latency observation is opt-in. Keep it out of
         # normal correctness lanes; the paired relative workflow is the gate.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120

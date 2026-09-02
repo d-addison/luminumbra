@@ -5,6 +5,7 @@
 // the forwarding overload does not reach.
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -27,11 +28,16 @@ using Luminumbra::world::GameSession;
 #endif
 
 // Temp root containing ONLY the world preset (headless — no res/data assets).
+// The root is unique per fixture instance so concurrent common_tests processes
+// never share (or clobber) a directory; each TEST builds ONE instance and
+// reuses it, so within-run path stability still holds. The destructor removes
+// the tree.
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        root_ = fs::temp_directory_path() / "luminumbra_multi_anchor_test";
-        fs::remove_all(root_);
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        root_ =
+            fs::temp_directory_path() / ("luminumbra_multi_anchor_test_" + std::to_string(stamp));
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
