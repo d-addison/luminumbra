@@ -25,7 +25,6 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/SystemConfig.cpp
 
     # Net
-    ${CMAKE_CURRENT_LIST_DIR}/net/NetworkManager.cpp
     # delay-based lockstep transport (engine-generic; LoopbackTransport
     # for gates/tests, _WIN32-guarded TcpTransport for loopback+LAN).
     ${CMAKE_CURRENT_LIST_DIR}/net/LockstepSession.cpp
@@ -59,7 +58,6 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/simulation/SimulationEventBus.cpp
 
     # Shield
-    ${CMAKE_CURRENT_LIST_DIR}/shield/SHIELDEngine.cpp
 
     # Systems
     ${CMAKE_CURRENT_LIST_DIR}/systems/PhysicsSystem.cpp
