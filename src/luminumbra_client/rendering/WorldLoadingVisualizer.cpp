@@ -45,8 +45,8 @@ void WorldLoadingVisualizer::Startup(const std::filesystem::path& root_path, int
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_cube_ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vec3), (void*)0);
-    
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vec3), (void*)nullptr);
+
     // 2. Create and configure the VBO for instance data
     glGenBuffers(1, &m_instance_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo);
@@ -144,7 +144,7 @@ void WorldLoadingVisualizer::UpdateAndRender(float delta_time, const std::string
     m_shader->setVec3("u_viewPos", m_camera->Position);
 
     glBindVertexArray(m_cube_vao);
-    glDrawElementsInstanced(GL_LINES, 24, GL_UNSIGNED_INT, 0, m_instance_data.size());
+    glDrawElementsInstanced(GL_LINES, 24, GL_UNSIGNED_INT, nullptr, m_instance_data.size());
     glBindVertexArray(0);
 
     glLineWidth(1.0f);

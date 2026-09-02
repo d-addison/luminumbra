@@ -191,7 +191,7 @@ bool Shader::Reload() {
     if (m_id)
         glDeleteProgram(m_id);
     m_id = candidate;
-    m_reflected = std::move(candidate_layout);
+    m_reflected = candidate_layout;
     m_uniformLocationCache.clear();
     m_valid = true;
     LUMINUMBRA_CORE_INFO("[shader-reload] {} reloaded (id {}).", m_debug_name, m_id);
@@ -270,7 +270,7 @@ bool Shader::checkCompileErrors(GLuint shader, const std::string& type) {
             glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
             std::vector<GLchar> info_log(static_cast<size_t>(std::max(log_length, 1)));
             glGetShaderInfoLog(
-                shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
+                shader, static_cast<GLsizei>(info_log.size()), nullptr, info_log.data());
             m_diagnostic = std::string(info_log.data());
             LUMINUMBRA_CORE_ERROR("SHADER_COMPILATION_ERROR of type: {0} ({1})\n{2}",
                                   type,
@@ -284,7 +284,7 @@ bool Shader::checkCompileErrors(GLuint shader, const std::string& type) {
             glGetProgramiv(shader, GL_INFO_LOG_LENGTH, &log_length);
             std::vector<GLchar> info_log(static_cast<size_t>(std::max(log_length, 1)));
             glGetProgramInfoLog(
-                shader, static_cast<GLsizei>(info_log.size()), NULL, info_log.data());
+                shader, static_cast<GLsizei>(info_log.size()), nullptr, info_log.data());
             m_diagnostic = std::string(info_log.data());
             LUMINUMBRA_CORE_ERROR(
                 "PROGRAM_LINKING_ERROR of type: {0} ({1})\n{2}", type, m_debug_name, m_diagnostic);
