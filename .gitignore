@@ -61,6 +61,7 @@ __pycache__/
 
 # --- Local agent/editor state -------------------------------------------
 .claude/settings.local.json
+.claude/worktrees/
 **/.banso/evidence/
 /.banso/
 /.worktrees/
