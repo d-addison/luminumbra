@@ -570,11 +570,50 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
 // cache re-keys) and assert the factor EXTINGUISHES. The whole scenario runs
 // TWICE and must produce identical readings (run==replay for the live-water
 // render response). CPU-only: no GL needed.
+//
+// Streaming is CAPPED (debug_set_streaming_radius_cap, the WaterDeterminism
+// pattern) to a small disc anchored ON a deterministically chosen wet body, so
+// the warmup ticks pay a bounded full-detail fill instead of the full
+// RENDER_DISTANCE fill behind every wait_for_streaming_jobs. The cap does not
+// weaken the gates: every comparison is A/B within/between two identical runs
+// (no golden values), the wet/dammed factors are read at a site inside the
+// capped resident disc, and the non-vacuity guard (found) still proves live
+// water was exercised.
 // ============================================================================
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 
 namespace {
+
+// Capped wanted-set radius: big enough to hold the wet body + the dig site,
+// small enough that the disc fills in a few activation passes.
+constexpr int kStreamRadiusCap = 6; // chunks (96 m)
+
+// Deterministic wet anchor (the WaterDeterminism helper): nearest point to
+// spawn where the PURE worldgen samplers report standing water at init
+// (WaterLevelAt > terrain) — a pure function of seed/preset, independent of
+// streaming/residency, so both runs pick the identical anchor. Square-ring
+// scan outward in 8 m steps to +-192 m; falls back to spawn if everything in
+// range is dry (the found guard below is the tripwire).
+Vec3 FindWetAnchor(const SHIELD_WorldSystem* world, const Vec3& spawn) {
+    constexpr float kStep = 8.0f;
+    constexpr int kMaxRing = 24; // 24 * 8 m = 192 m
+    for (int ring = 0; ring <= kMaxRing; ++ring) {
+        for (int dz = -ring; dz <= ring; ++dz) {
+            for (int dx = -ring; dx <= ring; ++dx) {
+                if (std::max(std::abs(dx), std::abs(dz)) != ring)
+                    continue; // perimeter only — nearest ring first
+                const float x = spawn.x + static_cast<float>(dx) * kStep;
+                const float z = spawn.z + static_cast<float>(dz) * kStep;
+                const float terrain = world->GetTerrainHeightAt(x, z);
+                if (world->WaterLevelAt(x, z) > terrain + 0.25f) {
+                    return Vec3(x, terrain + 2.0f, z);
+                }
+            }
+        }
+    }
+    return Vec3(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+}
 
 struct LiveWaterRun {
     bool found = false;
@@ -596,9 +635,11 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
         session.SetRootPath(root);
         EXPECT_TRUE(session.CreateWorld("WfLive", "777", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
+        world->debug_set_streaming_radius_cap(kStreamRadiusCap);
         auto* physics = session.GetPhysicsSystem();
         const Vec3 spawn = session.GetMetadata().spawnPoint;
-        const Vec3 anchor(spawn.x, world->GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+        // Anchor ON the wet body so the capped 96 m disc carries live water.
+        const Vec3 anchor = FindWetAnchor(world, spawn);
         auto tick = [&] {
             world->update(session.GetRegistry(), {anchor}, physics);
             world->wait_for_streaming_jobs();
@@ -607,11 +648,14 @@ LiveWaterRun RunLiveWaterScenario(const std::string& root) {
             tick();
 
         // Find LIVE standing water on a gridded chunk (the y=0 column probe).
-        float cx = spawn.x, cz = spawn.z;
-        for (int gz = -12; gz <= 12 && !r.found; ++gz) {
-            for (int gx = -12; gx <= 12 && !r.found; ++gx) {
-                const float px = spawn.x + static_cast<float>(gx) * 16.0f;
-                const float pz = spawn.z + static_cast<float>(gz) * 16.0f;
+        // Scan the capped resident disc around the wet anchor: probes beyond
+        // the 6-chunk cap can never be gridded, so +-6 chunks covers exactly
+        // the reachable set.
+        float cx = anchor.x, cz = anchor.z;
+        for (int gz = -6; gz <= 6 && !r.found; ++gz) {
+            for (int gx = -6; gx <= 6 && !r.found; ++gx) {
+                const float px = anchor.x + static_cast<float>(gx) * 16.0f;
+                const float pz = anchor.z + static_cast<float>(gz) * 16.0f;
                 if (!world->debug_water_grid_at(px, pz))
                     continue;
                 if (world->live_water_surface_at(px, pz) >
@@ -667,7 +711,7 @@ TEST(WaterfallLiveWater, DammingUpstreamExtinguishesSiteDeterministically) {
     const LiveWaterRun a = RunLiveWaterScenario(root);
     const LiveWaterRun b = RunLiveWaterScenario(root);
     ASSERT_TRUE(a.found)
-        << "no LIVE standing water on a gridded chunk within 192 m of spawn (vacuous)";
+        << "no LIVE standing water on a gridded chunk within 96 m of the wet anchor (vacuous)";
     EXPECT_GT(a.factor_wet, 0.5f) << "live factor should read WET at live standing water (got "
                                   << a.factor_wet << ")";
     EXPECT_LT(a.factor_dammed, 0.02f)

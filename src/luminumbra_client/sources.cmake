@@ -4,7 +4,7 @@
 
 set(CLIENT_INTERNAL_SOURCES
     # Core
-    ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioConfig.cpp
 
     # Audio
     ${CMAKE_CURRENT_LIST_DIR}/audio/AudioManagerFactory.cpp
@@ -83,6 +83,11 @@ set(CLIENT_INTERNAL_SOURCES
 set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.cpp
     PROPERTIES COMPILE_DEFINITIONS "RMLUI_GL3_CUSTOM_LOADER=<glad/glad.h>")
 
+# QA scenario-harness sources (the luminumbra_client_qa static library).
+set(CLIENT_QA_SOURCES
+    ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
+)
+
 # Third-party implementation sources are owned by their dependency targets.
 set(CLIENT_VENDOR_SOURCES)
 
@@ -95,6 +100,7 @@ set(CLIENT_APP_SOURCES
 # directly.
 set(CLIENT_SOURCES
     ${CLIENT_INTERNAL_SOURCES}
+    ${CLIENT_QA_SOURCES}
     ${CLIENT_VENDOR_SOURCES}
     ${CLIENT_APP_SOURCES}
 )
