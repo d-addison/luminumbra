@@ -8,30 +8,28 @@
 // asserts EXACT float equality; approximation-bearing claims (DM::Cos falloffs,
 // Log2Approx) use a documented tolerance band instead.
 //
-// IMPORTANT COMPILE CONSTRAINT (see BUG: gamelibs_clamp01_odr_collision below):
-// game/PhotoFilters.h and game/DifficultyProfile.h each (re)define a NON-static
-// inline `luminumbra::game::Clamp01(float)` — the SAME unqualified name PhotoCamera.h
-// already defines in the SAME namespace. Two of those headers in one translation
-// unit is a hard C++ redefinition error (an ODR violation), so this file CANNOT
-// include PhotoFilters.h / DifficultyProfile.h alongside the PhotoCamera/PhotoSession
-// core loop. It therefore hardens the maximal CO-COMPILABLE set (PhotoScoring,
-// PhotoCamera, PhotoCodex, SpeciesCodex, LightTools, PhotoSession — the whole core
-// photography loop). Once the ODR collision is fixed (make those Clamp01s file-local
-// / detail-namespaced, or share one helper), PhotoFilters + DifficultyProfile tests
-// can be folded in here.
+// This file compiles the FULL game-library set into one translation unit. That
+// used to be impossible: several game headers carried per-file copies of the same
+// [0,1] clamp under colliding (later, awkwardly renamed) names. The shared helper
+// now lives once in game/GameMath.h, so PhotoFilters + DifficultyProfile are
+// hardened here alongside the PhotoScoring/PhotoCamera/PhotoCodex/SpeciesCodex/
+// LightTools/PhotoSession core loop.
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
-#include "game/LightTools.h"      // luminumbra::game
-#include "game/PhotoCamera.h"     // luminumbra::game
-#include "game/PhotoCodex.h"      // luminumbra::game
-#include "game/PhotoSession.h"    // luminumbra::game
-#include "game/SpeciesCodex.h"    // luminumbra::game
-#include "systems/PhotoScoring.h" // luminumbra::photo
+#include "game/DifficultyProfile.h" // luminumbra::game
+#include "game/LightTools.h"        // luminumbra::game
+#include "game/PhotoCamera.h"       // luminumbra::game
+#include "game/PhotoCodex.h"        // luminumbra::game
+#include "game/PhotoFilters.h"      // luminumbra::game
+#include "game/PhotoSession.h"      // luminumbra::game
+#include "game/SpeciesCodex.h"      // luminumbra::game
+#include "systems/PhotoScoring.h"   // luminumbra::photo
 
 namespace {
 
@@ -709,6 +707,146 @@ TEST(GameLibsHardening, EvaluateShotEmptyFrameIsZeroVerdict) {
         << "empty frame total reached the 1-star threshold via subject-independent "
            "optics: "
         << v.total;
+}
+
+// ---------------------------------------------------------------------------
+// PhotoFilters (game/PhotoFilters.h) — previously blocked from this suite.
+// ---------------------------------------------------------------------------
+
+// Every filter over a coarse sweep of contexts — including out-of-range inputs the
+// boundary clamps must saturate — yields finite fields inside [0,1].
+TEST(GameLibsHardening, FilterScoreBoundedAcrossSweepAndOutOfRange) {
+    const float values[] = {-5.0f, 0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 7.0f};
+    for (int f = 0; f < gm::kPhotoFilterCount; ++f) {
+        for (float w : values)
+            for (float c : values)
+                for (float s : values)
+                    for (float d : values) {
+                        const gm::FilterContext ctx{w, c, s, d};
+                        const gm::FilterScore r =
+                            gm::ScoreFilter(static_cast<gm::PhotoFilter>(f), ctx);
+                        for (float v : {r.suitability, r.mood, r.total}) {
+                            ASSERT_TRUE(std::isfinite(v));
+                            ASSERT_GE(v, 0.0f);
+                            ASSERT_LE(v, 1.0f);
+                        }
+                    }
+    }
+}
+
+// Each stylized filter wins BestFilter on the scene condition it is made for
+// (the header's rubric), and a poorly-matched filter loses to the None baseline.
+TEST(GameLibsHardening, BestFilterMatchesRubricScenes) {
+    // warm golden scene -> Warm
+    EXPECT_EQ(gm::BestFilter({/*warmth*/ 1.0f, 0.3f, 0.4f, 0.2f}), gm::PhotoFilter::Warm);
+    // ice-blue crisp scene -> Cool
+    EXPECT_EQ(gm::BestFilter({0.0f, 0.2f, 0.1f, 0.3f}), gm::PhotoFilter::Cool);
+    // saturated subject in bright light -> Vivid
+    EXPECT_EQ(gm::BestFilter({0.2f, 0.0f, 1.0f, 0.0f}), gm::PhotoFilter::Vivid);
+    // vivid grade in the dark loses to the neutral baseline
+    const gm::FilterContext dark_sat{0.5f, 0.5f, 1.0f, 1.0f};
+    EXPECT_LT(gm::ScoreFilter(gm::PhotoFilter::Vivid, dark_sat).total,
+              gm::ScoreFilter(gm::PhotoFilter::None, dark_sat).total);
+}
+
+// The documented tie-break: BestFilter scans in enum order and a tie keeps the
+// FIRST (lowest enum) filter. A maximally dark high-contrast scene drives both
+// Noir and Dramatic to a saturated total of 1.0; Noir (lower enum) must win.
+TEST(GameLibsHardening, BestFilterTieKeepsLowestEnum) {
+    const gm::FilterContext noir_scene{0.5f, 1.0f, 0.0f, 1.0f};
+    const float noir = gm::ScoreFilter(gm::PhotoFilter::Noir, noir_scene).total;
+    const float dramatic = gm::ScoreFilter(gm::PhotoFilter::Dramatic, noir_scene).total;
+    ASSERT_EQ(noir, dramatic) << "scene no longer produces the documented tie";
+    EXPECT_EQ(gm::BestFilter(noir_scene), gm::PhotoFilter::Noir);
+}
+
+// run==replay purity: two identical sweeps produce bit-identical scores and picks.
+TEST(GameLibsHardening, FilterScoringRunEqualsReplay) {
+    auto sweep = [] {
+        std::vector<float> out;
+        for (float w = 0.0f; w <= 1.0f; w += 0.2f)
+            for (float d = 0.0f; d <= 1.0f; d += 0.2f) {
+                const gm::FilterContext ctx{w, 1.0f - w, 0.5f + 0.4f * (w - d), d};
+                for (int f = 0; f < gm::kPhotoFilterCount; ++f) {
+                    const auto s = gm::ScoreFilter(static_cast<gm::PhotoFilter>(f), ctx);
+                    out.push_back(s.total);
+                }
+                out.push_back(static_cast<float>(gm::BestFilter(ctx)));
+            }
+        return out;
+    };
+    EXPECT_EQ(sweep(), sweep()) << "filter scoring diverged between identical runs";
+}
+
+// ---------------------------------------------------------------------------
+// DifficultyProfile (game/DifficultyProfile.h) — previously blocked from this suite.
+// ---------------------------------------------------------------------------
+
+// Endpoints hit the authored relaxed/harsh bands exactly, and every multiplier
+// stays strictly positive (no 0x knob) across the whole sweep.
+TEST(GameLibsHardening, DifficultyEndpointsExactAndBandsPositive) {
+    const gm::DifficultyParams relax = gm::DifficultyAt(0.0f);
+    EXPECT_FLOAT_EQ(relax.growth_speed, gm::kRelaxGrowth);
+    EXPECT_FLOAT_EQ(relax.mutation_rate, gm::kRelaxMutation);
+    EXPECT_FLOAT_EQ(relax.disease_virulence, gm::kRelaxDisease);
+    EXPECT_FLOAT_EQ(relax.fire_dryness, gm::kRelaxFire);
+    EXPECT_FLOAT_EQ(relax.predator_speed, gm::kRelaxPredator);
+    EXPECT_FLOAT_EQ(relax.forage_richness, gm::kRelaxForage);
+    const gm::DifficultyParams harsh = gm::DifficultyAt(1.0f);
+    EXPECT_FLOAT_EQ(harsh.growth_speed, gm::kHarshGrowth);
+    EXPECT_FLOAT_EQ(harsh.mutation_rate, gm::kHarshMutation);
+    EXPECT_FLOAT_EQ(harsh.disease_virulence, gm::kHarshDisease);
+    EXPECT_FLOAT_EQ(harsh.fire_dryness, gm::kHarshFire);
+    EXPECT_FLOAT_EQ(harsh.predator_speed, gm::kHarshPredator);
+    EXPECT_FLOAT_EQ(harsh.forage_richness, gm::kHarshForage);
+    for (int i = 0; i <= 100; ++i) {
+        const gm::DifficultyParams p = gm::DifficultyAt(0.01f * static_cast<float>(i));
+        for (float v : {p.growth_speed,
+                        p.mutation_rate,
+                        p.disease_virulence,
+                        p.fire_dryness,
+                        p.predator_speed,
+                        p.forage_richness}) {
+            ASSERT_GT(v, 0.0f);
+        }
+    }
+}
+
+// The rubric's monotone directions hold across the sweep: growth/forage fall with
+// difficulty, the hazard knobs rise. Per-step monotone (non-strict, smoothstep has
+// zero slope at the endpoints) and strictly separated end to end.
+TEST(GameLibsHardening, DifficultyMonotonePerFieldAcrossSweep) {
+    gm::DifficultyParams prev = gm::DifficultyAt(0.0f);
+    for (int i = 1; i <= 100; ++i) {
+        const gm::DifficultyParams p = gm::DifficultyAt(0.01f * static_cast<float>(i));
+        ASSERT_LE(p.growth_speed, prev.growth_speed);
+        ASSERT_LE(p.forage_richness, prev.forage_richness);
+        ASSERT_GE(p.mutation_rate, prev.mutation_rate);
+        ASSERT_GE(p.disease_virulence, prev.disease_virulence);
+        ASSERT_GE(p.fire_dryness, prev.fire_dryness);
+        ASSERT_GE(p.predator_speed, prev.predator_speed);
+        prev = p;
+    }
+    EXPECT_LT(gm::DifficultyAt(1.0f).growth_speed, gm::DifficultyAt(0.0f).growth_speed);
+    EXPECT_GT(gm::DifficultyAt(1.0f).predator_speed, gm::DifficultyAt(0.0f).predator_speed);
+}
+
+// Out-of-band inputs saturate to the endpoint bundles bit-exactly (clamped before
+// any curve math), and the named presets match their documented anchors.
+TEST(GameLibsHardening, DifficultySaturatesAndPresetsMatchAnchors) {
+    auto eq = [](const gm::DifficultyParams& a, const gm::DifficultyParams& b) {
+        EXPECT_EQ(a.growth_speed, b.growth_speed);
+        EXPECT_EQ(a.mutation_rate, b.mutation_rate);
+        EXPECT_EQ(a.disease_virulence, b.disease_virulence);
+        EXPECT_EQ(a.fire_dryness, b.fire_dryness);
+        EXPECT_EQ(a.predator_speed, b.predator_speed);
+        EXPECT_EQ(a.forage_richness, b.forage_richness);
+    };
+    eq(gm::DifficultyAt(-3.0f), gm::DifficultyAt(0.0f));
+    eq(gm::DifficultyAt(7.0f), gm::DifficultyAt(1.0f));
+    eq(gm::PeacefulParams(), gm::DifficultyAt(gm::kPeaceful01));
+    eq(gm::NormalParams(), gm::DifficultyAt(gm::kNormal01));
+    eq(gm::HarshParams(), gm::DifficultyAt(gm::kHarsh01));
 }
 
 } // namespace
