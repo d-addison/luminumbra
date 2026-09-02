@@ -1478,11 +1478,11 @@ endif()
 if(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE)
     list(APPEND LUMINUMBRA_GTEST_TARGETS pilot_shader_reflection_test)
 endif()
-# Gate honesty (, ): a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning the
-# headless RmlUi UI suite (which GTEST_SKIPs without a GL context) could go GREEN with zero coverage
-# on a gate runner that lacks GL. These tests assert real behaviour and MUST run, not skip. Promote
-# any "[ SKIPPED ]" line from the UI targets to a ctest FAILURE via FAIL_REGULAR_EXPRESSION. The
-# GL-free cases in these binaries never print SKIPPED, so a fully-GL run stays green.
+# Gate honesty: a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning a suite that
+# skips without a GL context could go GREEN with zero coverage on a gate runner that lacks
+# GL. Skip honesty is NOT enforced here in CMake: CI post-processes the JUnit output with
+# tools/ci/check_ctest_junit.py, which fails the lane on any skip whose reason is not on
+# that lane's explicit allow-list (see the workflow's --allow-skip-reason-regex).
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     if(_lum_gtest_target STREQUAL common_tests)
         # Individual tests in this aggregate use shared runtime roots and may

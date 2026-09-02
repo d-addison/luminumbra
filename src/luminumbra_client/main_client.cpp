@@ -721,9 +721,9 @@ inline float SceneLuminanceFromSunElevation(float sun_elev_rad) {
     const float e = std::sin(sun_elev_rad); // [-1,1], fraction of the way above horizon
     if (e <= 0.0f) {
         // Twilight → night: a small floor that dims toward midnight (e == -1).
-        return luminumbra::game::PhotoModeClamp01(0.06f + 0.10f * (1.0f + e));
+        return luminumbra::game::Clamp01(0.06f + 0.10f * (1.0f + e));
     }
-    return luminumbra::game::PhotoModeClamp01(0.15f + 0.70f * std::pow(e, 0.3f));
+    return luminumbra::game::Clamp01(0.15f + 0.70f * std::pow(e, 0.3f));
 }
 
 // feature: gather the in-frustum creature subjects for a photo-mode
@@ -771,7 +771,7 @@ GatherPhotoSubjects(const entt::registry& reg,
         pv.distance_m = dist > 0.01f ? dist : 0.01f;
         pv.size_m = 1.0f; // ~creature footprint
         // Apparent footprint falls off with distance (a far subject fills less frame).
-        pv.size = luminumbra::game::PhotoModeClamp01(pv.size_m / (pv.distance_m * 0.5f + 1.0f));
+        pv.size = luminumbra::game::Clamp01(pv.size_m / (pv.distance_m * 0.5f + 1.0f));
         //  scene luminance is now driven by the sun (time-of-day), passed in
         // from the render pipeline's sun elevation, so golden hour rewards and night
         // punishes. No per-creature luminance component exists, so all subjects share the

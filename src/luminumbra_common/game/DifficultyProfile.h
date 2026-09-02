@@ -41,6 +41,8 @@
 // Each output is a SMOOTH (libm-free) curve of difficulty01, clamped to a sane band
 // so no system is ever handed a 0x or absurd multiplier.
 
+#include "GameMath.h" // luminumbra::game: Clamp01
+
 namespace luminumbra::game {
 
 // ---------------------------------------------------------------------------
@@ -50,12 +52,12 @@ namespace luminumbra::game {
 // a sane, non-degenerate range across the whole difficulty sweep.
 // ---------------------------------------------------------------------------
 struct DifficultyParams {
-    float growth_speed      = 1.0f; // plant growth rate multiplier
-    float mutation_rate     = 1.0f; // evolution mutation sigma multiplier
+    float growth_speed = 1.0f;      // plant growth rate multiplier
+    float mutation_rate = 1.0f;     // evolution mutation sigma multiplier
     float disease_virulence = 1.0f; // disease spread multiplier
-    float fire_dryness      = 1.0f; // fire ignition-ease multiplier
-    float predator_speed    = 1.0f; // predator move-speed multiplier
-    float forage_richness   = 1.0f; // soil/food abundance multiplier
+    float fire_dryness = 1.0f;      // fire ignition-ease multiplier
+    float predator_speed = 1.0f;    // predator move-speed multiplier
+    float forage_richness = 1.0f;   // soil/food abundance multiplier
 };
 
 // ---------------------------------------------------------------------------
@@ -92,17 +94,11 @@ inline constexpr float kHarshForage = 0.50f;
 // ---------------------------------------------------------------------------
 // Pure float helpers (no libm).
 // ---------------------------------------------------------------------------
-inline float DifficultyClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
-    return v;
-}
-
 // Hermite smoothstep s(t) = t*t*(3 - 2*t) on a clamped t in [0,1]. Pure float
 // arithmetic (no libm). Monotonically increasing on [0,1] with zero slope at both
 // ends, giving a smooth S-curve. s(0)=0, s(1)=1, s strictly increasing in between.
 inline float SmoothStep01(float t) {
-    const float u = DifficultyClamp01(t);
+    const float u = Clamp01(t);
     return u * u * (3.0f - 2.0f * u);
 }
 
@@ -122,14 +118,14 @@ inline float SmoothBand(float a, float b, float t) {
 // than extrapolating to nonsense.
 // ---------------------------------------------------------------------------
 inline DifficultyParams DifficultyAt(float difficulty01) {
-    const float t = DifficultyClamp01(difficulty01);
+    const float t = Clamp01(difficulty01);
     DifficultyParams p;
-    p.growth_speed      = SmoothBand(kRelaxGrowth,   kHarshGrowth,   t);
-    p.mutation_rate     = SmoothBand(kRelaxMutation, kHarshMutation, t);
-    p.disease_virulence = SmoothBand(kRelaxDisease,  kHarshDisease,  t);
-    p.fire_dryness      = SmoothBand(kRelaxFire,     kHarshFire,     t);
-    p.predator_speed    = SmoothBand(kRelaxPredator, kHarshPredator, t);
-    p.forage_richness   = SmoothBand(kRelaxForage,   kHarshForage,   t);
+    p.growth_speed = SmoothBand(kRelaxGrowth, kHarshGrowth, t);
+    p.mutation_rate = SmoothBand(kRelaxMutation, kHarshMutation, t);
+    p.disease_virulence = SmoothBand(kRelaxDisease, kHarshDisease, t);
+    p.fire_dryness = SmoothBand(kRelaxFire, kHarshFire, t);
+    p.predator_speed = SmoothBand(kRelaxPredator, kHarshPredator, t);
+    p.forage_richness = SmoothBand(kRelaxForage, kHarshForage, t);
     return p;
 }
 
@@ -139,14 +135,20 @@ inline DifficultyParams DifficultyAt(float difficulty01) {
 // Normal = the midpoint, Harsh = fully harsh.
 // ---------------------------------------------------------------------------
 inline constexpr float kPeaceful01 = 0.0f;
-inline constexpr float kNormal01   = 0.5f;
-inline constexpr float kHarsh01    = 1.0f;
+inline constexpr float kNormal01 = 0.5f;
+inline constexpr float kHarsh01 = 1.0f;
 
 // The materialized parameter bundles for the named presets, for callers that want
 // the tuning directly without re-deriving it. (DifficultyAt is constexpr-friendly
 // in spirit but inline-only here; these are computed at startup via the function.)
-inline DifficultyParams PeacefulParams() { return DifficultyAt(kPeaceful01); }
-inline DifficultyParams NormalParams()   { return DifficultyAt(kNormal01); }
-inline DifficultyParams HarshParams()    { return DifficultyAt(kHarsh01); }
+inline DifficultyParams PeacefulParams() {
+    return DifficultyAt(kPeaceful01);
+}
+inline DifficultyParams NormalParams() {
+    return DifficultyAt(kNormal01);
+}
+inline DifficultyParams HarshParams() {
+    return DifficultyAt(kHarsh01);
+}
 
 } // namespace luminumbra::game

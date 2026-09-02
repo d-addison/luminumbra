@@ -331,11 +331,11 @@ TEST(SocialHardening, EatenPreyIsInert) {
     EXPECT_GE(stats.updated, 1);
 }
 
-// BUG (double-satiation): two predators BOTH within catch reach of the SAME single prey
-// each sate their hunger from one carcass in one tick — because the catch test reads the
-// PRE-tick snapshot (prey alive for both) while the live `eaten` flag set by the first
-// predator is not re-checked. One prey should feed at most ONE predator per tick.
-// Expected-correct: exactly ONE predator's hunger drops; this test documents that.
+// REGRESSION GUARD (double-satiation, fixed): the catch path chooses its target from
+// the PRE-tick snapshot, so without the live `eaten` re-check (CreatureBrainSystem.h,
+// catch step) two predators in reach of the SAME single prey would both sate from one
+// carcass in one tick. The system now re-checks the live flag; this test keeps that
+// honest — exactly ONE predator's hunger drops.
 TEST(SocialHardening, OnePreyFeedsAtMostOnePredatorPerTick) {
     entt::registry r;
     auto p1 = spawnCreature(r, -1.0f, 0.0f, /*predator=*/true, /*hunger=*/0.95f);

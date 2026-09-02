@@ -23,6 +23,8 @@
 #include "PhotoCodex.h"   // PhotoCodex / CodexEntry
 #include "PhotoSession.h" // StarsForTotal (0..5 from a [0,1] total)
 
+#include "GameMath.h" // luminumbra::game: Clamp01
+
 namespace luminumbra::game {
 
 // What an objective measures. Kept small + explicit so evaluation is a pure switch.
@@ -54,14 +56,6 @@ struct ObjectiveStatus {
 };
 
 // Pure clamp (mirrors the libraries' helper; float +-*/ only).
-inline float ObjectiveClamp01(float v) {
-    if (v < 0.0f)
-        return 0.0f;
-    if (v > 1.0f)
-        return 1.0f;
-    return v;
-}
-
 // Best recorded score for a species, or 0 if undiscovered. Linear scan over the codex's
 // id-sorted entries (small N) — pure, order-stable.
 inline float CodexBestScore(const PhotoCodex& codex, int species_id) {
@@ -80,7 +74,7 @@ inline ObjectiveStatus EvaluateObjective(const Objective& o, const PhotoCodex& c
             const int have = static_cast<int>(codex.species_count());
             const int need = o.target_count > 0 ? o.target_count : 1;
             s.complete = have >= need;
-            s.progress = ObjectiveClamp01(static_cast<float>(have) / static_cast<float>(need));
+            s.progress = Clamp01(static_cast<float>(have) / static_cast<float>(need));
             break;
         }
         case ObjectiveKind::DiscoverSpecies: {
@@ -94,14 +88,14 @@ inline ObjectiveStatus EvaluateObjective(const Objective& o, const PhotoCodex& c
                                   : 0;
             const int need = o.min_stars > 0 ? o.min_stars : 1;
             s.complete = stars >= need;
-            s.progress = ObjectiveClamp01(static_cast<float>(stars) / static_cast<float>(need));
+            s.progress = Clamp01(static_cast<float>(stars) / static_cast<float>(need));
             break;
         }
         case ObjectiveKind::CollectionScore: {
             const float have = codex.total_score();
             const float need = o.min_score > 0.0f ? o.min_score : 1.0f;
             s.complete = have >= need;
-            s.progress = ObjectiveClamp01(have / need);
+            s.progress = Clamp01(have / need);
             break;
         }
         case ObjectiveKind::BehavioralMatch: {
