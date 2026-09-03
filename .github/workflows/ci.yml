@@ -277,29 +277,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang-format
-      - name: Select formatting comparison commit
-        id: format-base
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            base="$PULL_REQUEST_BASE"
-          elif [[ -n "$PUSH_BEFORE" && "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]] &&
-               git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
-            base="$PUSH_BEFORE"
-          elif git rev-parse --verify --quiet origin/main >/dev/null; then
-            base="origin/main"
-          elif git rev-parse --verify --quiet HEAD^ >/dev/null; then
-            base="HEAD^"
-          else
-            base="HEAD"
-          fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Check formatting
-        run: scripts/lint.sh --format-only --changed-from '${{ steps.format-base.outputs.base }}'
+        run: scripts/lint.sh --format-only
 
   tidy:
     name: Static analysis / clang-tidy
