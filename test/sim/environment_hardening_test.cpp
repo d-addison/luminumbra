@@ -50,9 +50,13 @@ namespace Comp = ::Luminumbra::Components;
 // helpers
 // ===========================================================================
 
-entt::entity makeCombustible(entt::registry& r, float x, float z,
-                             Comp::BurnState state, std::uint16_t fuel = 1000,
-                             std::uint16_t moisture = 0, float radius = 2.0f) {
+entt::entity makeCombustible(entt::registry& r,
+                             float x,
+                             float z,
+                             Comp::BurnState state,
+                             std::uint16_t fuel = 1000,
+                             std::uint16_t moisture = 0,
+                             float radius = 2.0f) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = {x, 0.0f, z};
@@ -61,12 +65,13 @@ entt::entity makeCombustible(entt::registry& r, float x, float z,
     cb.moisture_milli = moisture;
     cb.ignition_radius = radius;
     cb.set_state(state);
-    if (state == Comp::BurnState::Burning) cb.burn_ticks_remaining = 5;
+    if (state == Comp::BurnState::Burning)
+        cb.burn_ticks_remaining = 5;
     return e;
 }
 
-entt::entity makeSoilPlant(entt::registry& r, float x, float z,
-                           std::uint8_t stage, std::uint16_t uptake = 1000) {
+entt::entity makeSoilPlant(
+    entt::registry& r, float x, float z, std::uint8_t stage, std::uint16_t uptake = 1000) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = {x, 0.0f, z};
@@ -87,8 +92,8 @@ entt::entity makeWaterSource(entt::registry& r, float x, float z, std::uint16_t 
     return e;
 }
 
-entt::entity makeDiseasePlant(entt::registry& r, float x, float z,
-                              Comp::PlantDiseaseState st, std::uint16_t resistance = 0) {
+entt::entity makeDiseasePlant(
+    entt::registry& r, float x, float z, Comp::PlantDiseaseState st, std::uint16_t resistance = 0) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = {x, 0.0f, z};
@@ -99,14 +104,15 @@ entt::entity makeDiseasePlant(entt::registry& r, float x, float z,
     return e;
 }
 
-entt::entity makePollinator(entt::registry& r, float x, float z, std::uint8_t stage,
-                            float gene0 = 0.5f) {
+entt::entity
+makePollinator(entt::registry& r, float x, float z, std::uint8_t stage, float gene0 = 0.5f) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = {x, 0.0f, z};
     r.emplace<Comp::PollinationTag>(e);
     auto& gen = r.emplace<Comp::PlantGenomeComponent>(e);
-    for (auto& v : gen.genes) v = gene0;
+    for (auto& v : gen.genes)
+        v = gene0;
     auto& g = r.emplace<Comp::PlantGrowthComponent>(e);
     g.stage = stage;
     r.emplace<Comp::PollinationComponent>(e);
@@ -117,14 +123,16 @@ entt::entity makePollinator(entt::registry& r, float x, float z, std::uint8_t st
 std::int64_t soilSum(const luminumbra::foliage::SoilGrid& g) {
     std::int64_t s = 0;
     for (int z = 0; z < g.height(); ++z)
-        for (int x = 0; x < g.width(); ++x) s += g.AtCell(x, z);
+        for (int x = 0; x < g.width(); ++x)
+            s += g.AtCell(x, z);
     return s;
 }
 
 std::int64_t irrigSum(const luminumbra::foliage::IrrigationGrid& g) {
     std::int64_t s = 0;
     for (int z = 0; z < g.height(); ++z)
-        for (int x = 0; x < g.width(); ++x) s += g.AtCell(x, z);
+        for (int x = 0; x < g.width(); ++x)
+            s += g.AtCell(x, z);
     return s;
 }
 
@@ -146,7 +154,7 @@ TEST(FireHardening, RunEqualsReplay) {
     auto build = [](entt::registry& r) {
         makeCombustible(r, 0.0f, 0.0f, Comp::BurnState::Burning);
         makeCombustible(r, 1.0f, 0.0f, Comp::BurnState::Unburnt);
-        makeCombustible(r, 2.0f, 0.0f, Comp::BurnState::Unburnt, /*fuel*/800, /*moist*/200);
+        makeCombustible(r, 2.0f, 0.0f, Comp::BurnState::Unburnt, /*fuel*/ 800, /*moist*/ 200);
         makeCombustible(r, -1.0f, 0.0f, Comp::BurnState::Unburnt);
     };
     entt::registry a, b;
@@ -179,7 +187,7 @@ TEST(FireHardening, DownwindGetsMoreHeatThanUpwind) {
     using luminumbra::sim::FireHeatContribution;
     const float radius = 4.0f;
     const float d = 2.0f;
-    const glm::vec2 wind(3.0f, 0.0f);  // blowing toward +x
+    const glm::vec2 wind(3.0f, 0.0f); // blowing toward +x
     // dir = unit source->candidate.
     const glm::vec2 downwind_dir(1.0f, 0.0f);
     const glm::vec2 upwind_dir(-1.0f, 0.0f);
@@ -210,7 +218,7 @@ TEST(FireHardening, HeatBoundsNonNegativeAndZeroBeyondRadius) {
 TEST(FireHardening, CoincidentSourceNoNaN) {
     entt::registry r;
     makeCombustible(r, 0.0f, 0.0f, Comp::BurnState::Burning);
-    makeCombustible(r, 0.0f, 0.0f, Comp::BurnState::Unburnt);  // exactly on top
+    makeCombustible(r, 0.0f, 0.0f, Comp::BurnState::Unburnt); // exactly on top
     const auto stats = luminumbra::sim::RunFireSpreadOnTick(r, 1, glm::vec2(5.0f, 0.0f));
     // The coincident unburnt cell should ignite from pure base heat (>= resistance).
     EXPECT_GE(stats.ignited, 1);
@@ -223,10 +231,11 @@ TEST(FireHardening, BurnOutTransitionAndInert) {
     auto e = makeCombustible(r, 0.0f, 0.0f, Comp::BurnState::Burning);
     r.get<Comp::CombustibleComponent>(e).burn_ticks_remaining = 3;
     // No unburnt neighbours -> only the burn-down path runs.
-    for (int i = 0; i < 3; ++i) luminumbra::sim::RunFireSpreadOnTick(r, i, glm::vec2(0.0f));
+    for (int i = 0; i < 3; ++i)
+        luminumbra::sim::RunFireSpreadOnTick(r, i, glm::vec2(0.0f));
     const auto& cb = r.get<Comp::CombustibleComponent>(e);
     EXPECT_EQ(cb.state(), Comp::BurnState::Burnt);
-    EXPECT_EQ(cb.fuel_milli, 0);  // fuel consumed
+    EXPECT_EQ(cb.fuel_milli, 0); // fuel consumed
     // Further ticks keep it inert (Burnt never spreads / re-ignites).
     const auto stats = luminumbra::sim::RunFireSpreadOnTick(r, 99, glm::vec2(0.0f));
     EXPECT_EQ(stats.ignited, 0);
@@ -243,14 +252,14 @@ TEST(FireHardening, NoSameTickChainIgnition) {
     makeCombustible(r, 1.0f, 0.0f, Comp::BurnState::Unburnt, 1000, 0, 1.5f);
     makeCombustible(r, 2.0f, 0.0f, Comp::BurnState::Unburnt, 1000, 0, 1.5f);
     const auto stats = luminumbra::sim::RunFireSpreadOnTick(r, 1, glm::vec2(0.0f));
-    EXPECT_EQ(stats.ignited, 1);  // only the middle cell, not the far one this tick
+    EXPECT_EQ(stats.ignited, 1); // only the middle cell, not the far one this tick
 }
 
 // Fuel-exhausted cells cannot ignite (has_fuel gate).
 TEST(FireHardening, ZeroFuelCannotIgnite) {
     entt::registry r;
     makeCombustible(r, 0.0f, 0.0f, Comp::BurnState::Burning);
-    makeCombustible(r, 0.5f, 0.0f, Comp::BurnState::Unburnt, /*fuel*/0);
+    makeCombustible(r, 0.5f, 0.0f, Comp::BurnState::Unburnt, /*fuel*/ 0);
     const auto stats = luminumbra::sim::RunFireSpreadOnTick(r, 1, glm::vec2(0.0f));
     EXPECT_EQ(stats.ignited, 0);
 }
@@ -259,20 +268,20 @@ TEST(FireHardening, ZeroFuelCannotIgnite) {
 // SOIL NUTRIENT
 // ===========================================================================
 
-using luminumbra::foliage::SoilGrid;
-using luminumbra::foliage::RunSoilNutrientOnTick;
 using luminumbra::foliage::kSoilBaseline;
 using luminumbra::foliage::kSoilRegenPerTick;
+using luminumbra::foliage::RunSoilNutrientOnTick;
+using luminumbra::foliage::SoilGrid;
 
 // Gating: empty roster + at-baseline grid -> a TRUE no-op (grid stays at baseline).
 TEST(SoilHardening, EmptyRosterAtBaselineIsNoOp) {
     entt::registry r;
-    SoilGrid g(4, 4);  // starts at baseline
+    SoilGrid g(4, 4); // starts at baseline
     EXPECT_TRUE(g.all_at(kSoilBaseline));
     const auto stats = RunSoilNutrientOnTick(r, g, 0.0f, 0.0f, 1.0f);
     EXPECT_EQ(stats.participants, 0);
     EXPECT_EQ(stats.consumed, 0);
-    EXPECT_TRUE(g.all_at(kSoilBaseline));  // regen cannot push above baseline
+    EXPECT_TRUE(g.all_at(kSoilBaseline)); // regen cannot push above baseline
 }
 
 // Degenerate grid (zero cell_size) -> no-op, no divide-by-zero crash.
@@ -292,7 +301,8 @@ TEST(SoilHardening, CellBoundsNonNegativeAndCapped) {
     for (int i = 0; i < 50; ++i)
         makeSoilPlant(r, 0.2f, 0.2f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 65535);
     SoilGrid g(2, 2);
-    for (int t = 0; t < 50; ++t) RunSoilNutrientOnTick(r, g, 0.0f, 0.0f, 1.0f);
+    for (int t = 0; t < 50; ++t)
+        RunSoilNutrientOnTick(r, g, 0.0f, 0.0f, 1.0f);
     for (int z = 0; z < 2; ++z)
         for (int x = 0; x < 2; ++x) {
             EXPECT_GE(g.AtCell(x, z), 0);
@@ -306,16 +316,20 @@ TEST(SoilHardening, ConsumptionOrderIndependent) {
     auto run = [](bool reversed) {
         entt::registry r;
         // Drain the cell low first so two plants contend for what's left.
-        SoilGrid g(1, 1, /*initial*/ 5);  // only 5 milli available
+        SoilGrid g(1, 1, /*initial*/ 5); // only 5 milli available
         if (!reversed) {
-            makeSoilPlant(r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
-            makeSoilPlant(r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
+            makeSoilPlant(
+                r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
+            makeSoilPlant(
+                r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
         } else {
             // Same two plants, but a throwaway entity bumps ids so order differs.
             auto tmp = r.create();
             r.destroy(tmp);
-            makeSoilPlant(r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
-            makeSoilPlant(r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
+            makeSoilPlant(
+                r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
+            makeSoilPlant(
+                r, 0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 1000);
         }
         const auto stats = RunSoilNutrientOnTick(r, g, 0.0f, 0.0f, 1.0f);
         return stats.consumed;
@@ -342,10 +356,10 @@ TEST(SoilHardening, NutrientAtMatchesConsumedCell) {
 TEST(SoilHardening, NegativeCoordFloorMapping) {
     entt::registry r;
     makeSoilPlant(r, -0.5f, 0.5f, static_cast<std::uint8_t>(Comp::PlantStage::Fruiting), 16000);
-    SoilGrid g(4, 4);  // covers cells [0,3]; cell -1 is outside
+    SoilGrid g(4, 4); // covers cells [0,3]; cell -1 is outside
     const std::int64_t before = soilSum(g);
     const auto stats = RunSoilNutrientOnTick(r, g, 0.0f, 0.0f, 1.0f);
-    EXPECT_EQ(stats.consumed, 0);  // x=-0.5 -> cell -1 -> outside -> no draw
+    EXPECT_EQ(stats.consumed, 0); // x=-0.5 -> cell -1 -> outside -> no draw
     // Only regen happened (grid was at baseline -> stays at baseline).
     EXPECT_EQ(soilSum(g), before);
 }
@@ -354,7 +368,9 @@ TEST(SoilHardening, NegativeCoordFloorMapping) {
 TEST(SoilHardening, RunEqualsReplay) {
     auto build = [](entt::registry& r) {
         for (int i = 0; i < 4; ++i)
-            makeSoilPlant(r, static_cast<float>(i) + 0.5f, 0.5f,
+            makeSoilPlant(r,
+                          static_cast<float>(i) + 0.5f,
+                          0.5f,
                           static_cast<std::uint8_t>(i % Comp::kPlantStageCount),
                           static_cast<std::uint16_t>(1000 + i * 7));
     };
@@ -367,7 +383,8 @@ TEST(SoilHardening, RunEqualsReplay) {
         RunSoilNutrientOnTick(b, gb, 0.0f, 0.0f, 1.0f);
     }
     for (int z = 0; z < 8; ++z)
-        for (int x = 0; x < 8; ++x) EXPECT_EQ(ga.AtCell(x, z), gb.AtCell(x, z));
+        for (int x = 0; x < 8; ++x)
+            EXPECT_EQ(ga.AtCell(x, z), gb.AtCell(x, z));
 }
 
 // ===========================================================================
@@ -375,15 +392,15 @@ TEST(SoilHardening, RunEqualsReplay) {
 // ===========================================================================
 
 using luminumbra::foliage::IrrigationGrid;
-using luminumbra::foliage::RunIrrigationOnTick;
 using luminumbra::foliage::kMoistureBaseline;
-using luminumbra::foliage::kMoistureMax;
 using luminumbra::foliage::kMoistureDrainPerTick;
+using luminumbra::foliage::kMoistureMax;
+using luminumbra::foliage::RunIrrigationOnTick;
 
 // Gating: no sources + at-baseline grid -> true no-op (stays dry).
 TEST(IrrigationHardening, EmptyRosterAtBaselineNoOp) {
     entt::registry r;
-    IrrigationGrid g(4, 4);  // baseline 0
+    IrrigationGrid g(4, 4); // baseline 0
     const auto stats = RunIrrigationOnTick(r, g, 0.0f, 0.0f, 1.0f);
     EXPECT_EQ(stats.sources, 0);
     EXPECT_EQ(stats.deposited, 0);
@@ -398,10 +415,10 @@ TEST(IrrigationHardening, EmptyRosterAtBaselineNoOp) {
 // deposited total (diffusion adds nothing).
 TEST(IrrigationHardening, DiffusionConservesNoCreation) {
     entt::registry r;
-    makeWaterSource(r, 2.5f, 2.5f, 4000);  // strong central deposit
+    makeWaterSource(r, 2.5f, 2.5f, 4000); // strong central deposit
     const int W = 5, H = 5;
     IrrigationGrid g(W, H);
-    const std::int64_t before = irrigSum(g);  // 0 (baseline)
+    const std::int64_t before = irrigSum(g); // 0 (baseline)
     const auto stats = RunIrrigationOnTick(r, g, 0.0f, 0.0f, 1.0f);
     const std::int64_t total = irrigSum(g);
     // Telemetry self-consistency: total == before + deposited - drained.
@@ -410,8 +427,8 @@ TEST(IrrigationHardening, DiffusionConservesNoCreation) {
     // kMoistureDrainPerTick per cell. So the post-tick mass sits in a tight window
     // [deposited - N*drain, deposited]. If diffusion leaked/created mass this fails.
     const std::int64_t N = static_cast<std::int64_t>(W) * H;
-    EXPECT_LE(total, before + stats.deposited);                                   // no creation
-    EXPECT_GE(total, before + stats.deposited - N * kMoistureDrainPerTick);       // only drain removes
+    EXPECT_LE(total, before + stats.deposited);                             // no creation
+    EXPECT_GE(total, before + stats.deposited - N * kMoistureDrainPerTick); // only drain removes
 }
 
 // Diffusion STABILITY: no cell overshoots max, no cell goes negative, no oscillation
@@ -437,7 +454,8 @@ TEST(IrrigationHardening, DiffusionSpreadsToNeighbour) {
     makeWaterSource(r, 5.5f, 5.5f, 4000);
     IrrigationGrid g(12, 12);
     // Run a few ticks so diffusion propagates.
-    for (int t = 0; t < 5; ++t) RunIrrigationOnTick(r, g, 0.0f, 0.0f, 1.0f);
+    for (int t = 0; t < 5; ++t)
+        RunIrrigationOnTick(r, g, 0.0f, 0.0f, 1.0f);
     // Cell (5,5) is the source cell; (6,5) is its neighbour.
     EXPECT_GT(g.AtCell(6, 5), kMoistureBaseline);
 }
@@ -448,11 +466,13 @@ TEST(IrrigationHardening, DrainRelaxesToBaselineNoUndershoot) {
     entt::registry r_src;
     makeWaterSource(r_src, 2.5f, 2.5f, 4000);
     IrrigationGrid g(5, 5);
-    for (int t = 0; t < 10; ++t) RunIrrigationOnTick(r_src, g, 0.0f, 0.0f, 1.0f);
+    for (int t = 0; t < 10; ++t)
+        RunIrrigationOnTick(r_src, g, 0.0f, 0.0f, 1.0f);
     // Now drain with an EMPTY roster (no sources).
     entt::registry empty;
-    for (int t = 0; t < 5000; ++t) RunIrrigationOnTick(empty, g, 0.0f, 0.0f, 1.0f);
-    EXPECT_TRUE(g.all_at(kMoistureBaseline));  // fully drained, never below baseline
+    for (int t = 0; t < 5000; ++t)
+        RunIrrigationOnTick(empty, g, 0.0f, 0.0f, 1.0f);
+    EXPECT_TRUE(g.all_at(kMoistureBaseline)); // fully drained, never below baseline
 }
 
 // Deposit order-independence: two sources on one cell add the same total regardless
@@ -460,7 +480,10 @@ TEST(IrrigationHardening, DrainRelaxesToBaselineNoUndershoot) {
 TEST(IrrigationHardening, DepositOrderIndependent) {
     auto run = [](bool reversed) {
         entt::registry r;
-        if (reversed) { auto t = r.create(); r.destroy(t); }
+        if (reversed) {
+            auto t = r.create();
+            r.destroy(t);
+        }
         makeWaterSource(r, 0.5f, 0.5f, 1000);
         makeWaterSource(r, 0.5f, 0.5f, 1500);
         IrrigationGrid g(3, 3);
@@ -485,7 +508,8 @@ TEST(IrrigationHardening, RunEqualsReplay) {
         RunIrrigationOnTick(b, gb, 0.0f, 0.0f, 1.0f);
     }
     for (int z = 0; z < 8; ++z)
-        for (int x = 0; x < 8; ++x) EXPECT_EQ(ga.AtCell(x, z), gb.AtCell(x, z));
+        for (int x = 0; x < 8; ++x)
+            EXPECT_EQ(ga.AtCell(x, z), gb.AtCell(x, z));
 }
 
 // MoistureAt producer->consumer: the world query reads the cell the source deposited
@@ -502,10 +526,10 @@ TEST(IrrigationHardening, MoistureAtMatchesDepositedCell) {
 // POLLINATION
 // ===========================================================================
 
-using luminumbra::foliage::RunPollinationOnTick;
+using luminumbra::foliage::kPollinationRadius;
 using luminumbra::foliage::PollinateCross;
 using luminumbra::foliage::PollinationEffectiveDistance;
-using luminumbra::foliage::kPollinationRadius;
+using luminumbra::foliage::RunPollinationOnTick;
 
 // Gating: empty roster -> no work, nothing written.
 TEST(PollinationHardening, EmptyRosterNoOp) {
@@ -544,8 +568,8 @@ TEST(PollinationHardening, CrossIsPairSymmetric) {
         gB.genes[i] = 0.8f - 0.03f * static_cast<float>(i);
     }
     const std::uint64_t idA = 7, idB = 42, tick = 123;
-    const auto c1 = PollinateCross(gA, gB, idA, idB, tick);  // A receives from B
-    const auto c2 = PollinateCross(gB, gA, idB, idA, tick);  // B receives from A
+    const auto c1 = PollinateCross(gA, gB, idA, idB, tick); // A receives from B
+    const auto c2 = PollinateCross(gB, gA, idB, idA, tick); // B receives from A
     for (std::size_t i = 0; i < c1.genes.size(); ++i)
         EXPECT_FLOAT_EQ(c1.genes[i], c2.genes[i]) << "gene " << i;
 }
@@ -553,8 +577,10 @@ TEST(PollinationHardening, CrossIsPairSymmetric) {
 // Crossed genes stay within the [0,1] gene bounds (BreedPlants clamps).
 TEST(PollinationHardening, CrossGenesWithinUnitBounds) {
     Comp::PlantGenomeComponent gA, gB;
-    for (auto& v : gA.genes) v = 0.0f;
-    for (auto& v : gB.genes) v = 1.0f;
+    for (auto& v : gA.genes)
+        v = 0.0f;
+    for (auto& v : gB.genes)
+        v = 1.0f;
     const auto c = PollinateCross(gA, gB, 3, 9, 55);
     for (std::size_t i = 0; i < c.genes.size(); ++i) {
         EXPECT_GE(c.genes[i], 0.0f) << "gene " << i;
@@ -567,17 +593,18 @@ TEST(PollinationHardening, CrossGenesWithinUnitBounds) {
 // downwind). Mirror the fire wind contract.
 TEST(PollinationHardening, DownwindReducesEffectiveDistance) {
     const ::Luminumbra::Vec3 donor(0.0f, 0.0f, 0.0f);
-    const ::Luminumbra::Vec3 downwind_r(3.0f, 0.0f, 0.0f);   // +x of donor
-    const ::Luminumbra::Vec3 upwind_r(-3.0f, 0.0f, 0.0f);    // -x of donor
-    const ::Luminumbra::Vec2 wind(2.0f, 0.0f);               // blowing toward +x
+    const ::Luminumbra::Vec3 downwind_r(3.0f, 0.0f, 0.0f); // +x of donor
+    const ::Luminumbra::Vec3 upwind_r(-3.0f, 0.0f, 0.0f);  // -x of donor
+    const ::Luminumbra::Vec2 wind(2.0f, 0.0f);             // blowing toward +x
     const float eff_down = PollinationEffectiveDistance(donor, downwind_r, wind);
     const float eff_up = PollinationEffectiveDistance(donor, upwind_r, wind);
     EXPECT_LT(eff_down, eff_up);
     // Zero wind -> plain Euclidean distance (no bias, equal both sides).
-    const float still_down = PollinationEffectiveDistance(donor, downwind_r, ::Luminumbra::Vec2(0.0f));
+    const float still_down =
+        PollinationEffectiveDistance(donor, downwind_r, ::Luminumbra::Vec2(0.0f));
     const float still_up = PollinationEffectiveDistance(donor, upwind_r, ::Luminumbra::Vec2(0.0f));
     EXPECT_FLOAT_EQ(still_down, still_up);
-    EXPECT_GE(eff_down, 0.0f);  // clamped non-negative
+    EXPECT_GE(eff_down, 0.0f); // clamped non-negative
 }
 
 // run==replay for the full pollination tick (next_genome byte-identical across runs).
@@ -614,9 +641,9 @@ TEST(PollinationHardening, RunEqualsReplay) {
 // PLANT DISEASE
 // ===========================================================================
 
-using luminumbra::foliage::RunPlantDiseaseOnTick;
-using luminumbra::foliage::kSickTicks;
 using luminumbra::foliage::kRecoverResistance;
+using luminumbra::foliage::kSickTicks;
+using luminumbra::foliage::RunPlantDiseaseOnTick;
 
 // Gating: empty roster -> no-op.
 TEST(DiseaseHardening, EmptyRosterNoOp) {
@@ -631,10 +658,11 @@ TEST(DiseaseHardening, EmptyRosterNoOp) {
 TEST(DiseaseHardening, SoleHealthyStaysHealthy) {
     entt::registry r;
     auto e = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy);
-    for (int t = 0; t < 50; ++t) RunPlantDiseaseOnTick(r, t);
+    for (int t = 0; t < 50; ++t)
+        RunPlantDiseaseOnTick(r, t);
     const auto& h = r.get<Comp::PlantHealthComponent>(e);
     EXPECT_EQ(h.state, static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy));
-    EXPECT_EQ(h.infection, 0);  // SatSub floored at 0, no underflow wrap
+    EXPECT_EQ(h.infection, 0); // SatSub floored at 0, no underflow wrap
 }
 
 // Bounds: infection + resistance stay within [0, 1000] (milli-units) under sustained
@@ -646,7 +674,7 @@ TEST(DiseaseHardening, FixedPointBoundsUnderHeavyPressure) {
         const float a = static_cast<float>(i) * 0.7f;
         makeDiseasePlant(r, 0.5f * a, 0.5f, Comp::PlantDiseaseState::Infected);
     }
-    auto target = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/0);
+    auto target = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
     for (int t = 0; t < 200; ++t) {
         RunPlantDiseaseOnTick(r, t);
         const auto& h = r.get<Comp::PlantHealthComponent>(target);
@@ -659,8 +687,9 @@ TEST(DiseaseHardening, FixedPointBoundsUnderHeavyPressure) {
 TEST(DiseaseHardening, FullyResistantNeverInfected) {
     entt::registry r;
     makeDiseasePlant(r, 0.5f, 0.0f, Comp::PlantDiseaseState::Infected);
-    auto target = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/1000);
-    for (int t = 0; t < 100; ++t) RunPlantDiseaseOnTick(r, t);
+    auto target = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 1000);
+    for (int t = 0; t < 100; ++t)
+        RunPlantDiseaseOnTick(r, t);
     EXPECT_EQ(r.get<Comp::PlantHealthComponent>(target).state,
               static_cast<std::uint8_t>(Comp::PlantDiseaseState::Healthy));
 }
@@ -671,19 +700,24 @@ TEST(DiseaseHardening, InfectedResolvesRecoverOrDie) {
     // High-resistance infected, isolated -> recovers at kSickTicks.
     {
         entt::registry r;
-        auto e = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Infected,
+        auto e = makeDiseasePlant(r,
+                                  0.0f,
+                                  0.0f,
+                                  Comp::PlantDiseaseState::Infected,
                                   /*res*/ kRecoverResistance);
-        for (std::uint32_t t = 0; t < kSickTicks; ++t) RunPlantDiseaseOnTick(r, t);
+        for (std::uint32_t t = 0; t < kSickTicks; ++t)
+            RunPlantDiseaseOnTick(r, t);
         const auto& h = r.get<Comp::PlantHealthComponent>(e);
         EXPECT_EQ(h.state, static_cast<std::uint8_t>(Comp::PlantDiseaseState::Recovered));
-        EXPECT_GT(h.resistance, kRecoverResistance);  // acquired immunity raised it
+        EXPECT_GT(h.resistance, kRecoverResistance); // acquired immunity raised it
         EXPECT_EQ(h.infection, 0);
     }
     // Low-resistance infected, isolated -> dies at kSickTicks.
     {
         entt::registry r;
-        auto e = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Infected, /*res*/0);
-        for (std::uint32_t t = 0; t < kSickTicks; ++t) RunPlantDiseaseOnTick(r, t);
+        auto e = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Infected, /*res*/ 0);
+        for (std::uint32_t t = 0; t < kSickTicks; ++t)
+            RunPlantDiseaseOnTick(r, t);
         const auto& h = r.get<Comp::PlantHealthComponent>(e);
         EXPECT_EQ(h.state, static_cast<std::uint8_t>(Comp::PlantDiseaseState::Dead));
     }
@@ -692,10 +726,11 @@ TEST(DiseaseHardening, InfectedResolvesRecoverOrDie) {
 // A Dead plant is a terminal carcass: it neither spreads nor heals nor changes state.
 TEST(DiseaseHardening, DeadPlantInert) {
     entt::registry r;
-    auto dead = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Dead, /*res*/1000);
-    auto healthy = makeDiseasePlant(r, 0.5f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/0);
+    auto dead = makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Dead, /*res*/ 1000);
+    auto healthy = makeDiseasePlant(r, 0.5f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
     const std::uint16_t inf0 = r.get<Comp::PlantHealthComponent>(dead).infection;
-    for (int t = 0; t < 100; ++t) RunPlantDiseaseOnTick(r, t);
+    for (int t = 0; t < 100; ++t)
+        RunPlantDiseaseOnTick(r, t);
     // Dead state unchanged; the dead plant did not infect the adjacent healthy plant.
     EXPECT_EQ(r.get<Comp::PlantHealthComponent>(dead).state,
               static_cast<std::uint8_t>(Comp::PlantDiseaseState::Dead));
@@ -709,11 +744,15 @@ TEST(DiseaseHardening, DeadPlantInert) {
 TEST(DiseaseHardening, SpreadOrderIndependent) {
     auto run = [](bool reversed) {
         entt::registry r;
-        if (reversed) { auto t = r.create(); r.destroy(t); }
+        if (reversed) {
+            auto t = r.create();
+            r.destroy(t);
+        }
         makeDiseasePlant(r, 0.0f, 0.0f, Comp::PlantDiseaseState::Infected);
-        makeDiseasePlant(r, 1.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/0);
-        makeDiseasePlant(r, 2.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/0);
-        for (int t = 0; t < 10; ++t) RunPlantDiseaseOnTick(r, t);
+        makeDiseasePlant(r, 1.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
+        makeDiseasePlant(r, 2.0f, 0.0f, Comp::PlantDiseaseState::Healthy, /*res*/ 0);
+        for (int t = 0; t < 10; ++t)
+            RunPlantDiseaseOnTick(r, t);
         std::vector<std::pair<float, std::uint8_t>> v;
         auto view = r.view<Comp::PlantHealthComponent, Comp::TransformComponent>();
         for (auto e : view) {
@@ -745,8 +784,11 @@ TEST(DiseaseHardening, RunEqualsReplay) {
         auto view = r.view<Comp::PlantHealthComponent, Comp::TransformComponent>();
         for (auto e : view) {
             const auto& h = view.get<Comp::PlantHealthComponent>(e);
-            v.push_back({view.get<Comp::TransformComponent>(e).position.x, h.state, h.infection,
-                         h.resistance, h.infected_ticks});
+            v.push_back({view.get<Comp::TransformComponent>(e).position.x,
+                         h.state,
+                         h.infection,
+                         h.resistance,
+                         h.infected_ticks});
         }
         std::sort(v.begin(), v.end());
         return v;
@@ -758,11 +800,11 @@ TEST(DiseaseHardening, RunEqualsReplay) {
 // WEATHER EVENT SCHEDULER (pure)
 // ===========================================================================
 
-using luminumbra::sim::WeatherEventAt;
-using luminumbra::sim::WeatherEvent;
-using luminumbra::sim::WeatherEventDriver;
-using luminumbra::sim::kWindowTicks;
 using luminumbra::sim::kWeatherEventCount;
+using luminumbra::sim::kWindowTicks;
+using luminumbra::sim::WeatherEvent;
+using luminumbra::sim::WeatherEventAt;
+using luminumbra::sim::WeatherEventDriver;
 
 // Window 0 always starts Clear (the calm premise).
 TEST(WeatherHardening, WindowZeroIsClear) {
@@ -804,10 +846,8 @@ TEST(WeatherHardening, ForbiddenAdjacentTransitions) {
         WeatherEvent prev = WeatherEventAt(0, seed).event;
         for (std::uint64_t w = 1; w < 80; ++w) {
             const WeatherEvent cur = WeatherEventAt(w * kWindowTicks, seed).event;
-            const bool droughtToSnow =
-                prev == WeatherEvent::Drought && cur == WeatherEvent::Snow;
-            const bool snowToDrought =
-                prev == WeatherEvent::Snow && cur == WeatherEvent::Drought;
+            const bool droughtToSnow = prev == WeatherEvent::Drought && cur == WeatherEvent::Snow;
+            const bool snowToDrought = prev == WeatherEvent::Snow && cur == WeatherEvent::Drought;
             EXPECT_FALSE(droughtToSnow) << "seed " << seed << " window " << w;
             EXPECT_FALSE(snowToDrought) << "seed " << seed << " window " << w;
             prev = cur;
@@ -835,8 +875,8 @@ TEST(WeatherHardening, WindowIndexAndEventConstantWithinWindow) {
     for (std::uint64_t off = 0; off < kWindowTicks; off += 101) {
         const auto s = WeatherEventAt(w * kWindowTicks + off, seed);
         EXPECT_EQ(s.window_index, w);
-        EXPECT_EQ(s.event, at_start.event);            // event is window-keyed
-        EXPECT_FLOAT_EQ(s.intensity, at_start.intensity);  // intensity too
+        EXPECT_EQ(s.event, at_start.event);               // event is window-keyed
+        EXPECT_FLOAT_EQ(s.intensity, at_start.intensity); // intensity too
     }
 }
 
@@ -861,7 +901,8 @@ TEST(WeatherHardening, DriverStepMatchesPureQuery) {
     WeatherEventDriver drv(seed);
     // Step across a couple of window boundaries.
     for (std::uint64_t tick = 0; tick <= kWindowTicks * 3; ++tick) {
-        if (tick > 0) drv.Step();
+        if (tick > 0)
+            drv.Step();
         const auto pure = WeatherEventAt(tick, seed);
         ASSERT_EQ(drv.tick(), tick);
         EXPECT_EQ(drv.current().event, pure.event) << "tick " << tick;
@@ -882,4 +923,4 @@ TEST(WeatherHardening, DistinctSeedsDiverge) {
     EXPECT_TRUE(diverged);
 }
 
-}  // namespace
+} // namespace

@@ -38,4 +38,4 @@ struct PackHunterComponent {
     std::uint8_t in_pack = 0;
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

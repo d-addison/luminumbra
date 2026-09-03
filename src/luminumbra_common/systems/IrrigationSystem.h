@@ -46,8 +46,8 @@
 
 #include <entt/entt.hpp>
 
-#include "../components/CoreComponents.h"        // TransformComponent
-#include "../components/IrrigationComponents.h"  // WaterSourceComponent
+#include "../components/CoreComponents.h"       // TransformComponent
+#include "../components/IrrigationComponents.h" // WaterSourceComponent
 
 namespace luminumbra::foliage {
 
@@ -62,10 +62,10 @@ inline constexpr std::uint64_t kIrrigationSeedOffset = 21ull;
 
 // Moisture is stored as fixed-point milli-units (1.0 moisture == 1000 units).
 // Baseline = "dry, undisturbed" soil; everything is clamped to [baseline, max].
-inline constexpr std::int32_t kMoistureUnitScale = 1000;                  // milli-units per 1.0
-inline constexpr std::int32_t kMoistureBaseline  = 0;                     // dry baseline (0.0)
-inline constexpr std::int32_t kMoistureMax       = 4000 * kMoistureUnitScale; // saturation cap (4.0)
-inline constexpr std::int32_t kMoistureDrainPerTick = 6;                  // integer milli-units/tick toward baseline
+inline constexpr std::int32_t kMoistureUnitScale = 1000;                // milli-units per 1.0
+inline constexpr std::int32_t kMoistureBaseline = 0;                    // dry baseline (0.0)
+inline constexpr std::int32_t kMoistureMax = 4000 * kMoistureUnitScale; // saturation cap (4.0)
+inline constexpr std::int32_t kMoistureDrainPerTick = 6; // integer milli-units/tick toward baseline
 
 // Diffusion spread fraction is expressed as a 1/N share of each cell's excess
 // given to EACH in-bounds neighbour. A cell sheds up to (neighbours/N) of its
@@ -79,13 +79,17 @@ inline constexpr std::int32_t kMoistureDiffuseShareDen = 8;
 class IrrigationGrid {
 public:
     IrrigationGrid(int width, int height, std::int32_t initial = kMoistureBaseline)
-        : m_w(width > 0 ? width : 0),
-          m_h(height > 0 ? height : 0),
-          m_cells(static_cast<std::size_t>(m_w) * static_cast<std::size_t>(m_h),
+        : m_w(width > 0 ? width : 0)
+        , m_h(height > 0 ? height : 0)
+        , m_cells(static_cast<std::size_t>(m_w) * static_cast<std::size_t>(m_h),
                   clampLevel(initial)) {}
 
-    [[nodiscard]] int width() const { return m_w; }
-    [[nodiscard]] int height() const { return m_h; }
+    [[nodiscard]] int width() const {
+        return m_w;
+    }
+    [[nodiscard]] int height() const {
+        return m_h;
+    }
 
     [[nodiscard]] bool in_bounds(int cx, int cz) const {
         return cx >= 0 && cz >= 0 && cx < m_w && cz < m_h;
@@ -93,13 +97,15 @@ public:
 
     // Moisture (milli-units) at a CELL index (baseline outside the grid).
     [[nodiscard]] std::int32_t AtCell(int cx, int cz) const {
-        if (!in_bounds(cx, cz)) return kMoistureBaseline;
+        if (!in_bounds(cx, cz))
+            return kMoistureBaseline;
         return m_cells[index(cx, cz)];
     }
 
     // Set a cell directly (clamped to [baseline, max]); used by tests / seeding.
     void SetCell(int cx, int cz, std::int32_t value) {
-        if (!in_bounds(cx, cz)) return;
+        if (!in_bounds(cx, cz))
+            return;
         m_cells[index(cx, cz)] = clampLevel(value);
     }
 
@@ -110,7 +116,9 @@ public:
     }
 
     [[nodiscard]] bool all_at(std::int32_t value) const {
-        for (std::int32_t c : m_cells) if (c != value) return false;
+        for (std::int32_t c : m_cells)
+            if (c != value)
+                return false;
         return true;
     }
 
@@ -123,8 +131,10 @@ private:
                static_cast<std::size_t>(cx);
     }
     static std::int32_t clampLevel(std::int32_t v) {
-        if (v < kMoistureBaseline) return kMoistureBaseline;
-        if (v > kMoistureMax) return kMoistureMax;
+        if (v < kMoistureBaseline)
+            return kMoistureBaseline;
+        if (v > kMoistureMax)
+            return kMoistureMax;
         return v;
     }
 
@@ -137,14 +147,16 @@ private:
 // integer/float-compare (no transcendentals); the cast-to-int truncates toward
 // zero, corrected for negatives so cells tile uniformly across the origin.
 // (Local copy so this header is self-contained — same math as SoilNutrientSystem.)
-inline void IrrigationWorldToCell(float x, float z, float origin_x, float origin_z,
-                                  float cell_size, int& cx, int& cz) {
+inline void IrrigationWorldToCell(
+    float x, float z, float origin_x, float origin_z, float cell_size, int& cx, int& cz) {
     const float fx = (x - origin_x) / cell_size;
     const float fz = (z - origin_z) / cell_size;
     int ix = static_cast<int>(fx);
     int iz = static_cast<int>(fz);
-    if (fx < 0.0f && static_cast<float>(ix) != fx) --ix; // floor for negatives
-    if (fz < 0.0f && static_cast<float>(iz) != fz) --iz;
+    if (fx < 0.0f && static_cast<float>(ix) != fx)
+        --ix; // floor for negatives
+    if (fz < 0.0f && static_cast<float>(iz) != fz)
+        --iz;
     cx = ix;
     cz = iz;
 }
@@ -156,9 +168,9 @@ inline std::int32_t SampleMoistureCell(const IrrigationGrid& g, int cx, int cz) 
 
 // Telemetry / sub-hash for the irrigation tick.
 struct IrrigationStats {
-    int sources = 0;              // WaterSourceComponent entities considered this tick
-    std::int64_t deposited = 0;   // total moisture deposited this tick (milli-units)
-    std::int64_t drained = 0;     // total moisture drained this tick (milli-units)
+    int sources = 0;            // WaterSourceComponent entities considered this tick
+    std::int64_t deposited = 0; // total moisture deposited this tick (milli-units)
+    std::int64_t drained = 0;   // total moisture drained this tick (milli-units)
 };
 
 // Internal: apply the accumulated per-cell deposit, then ONE conservative integer
@@ -175,8 +187,10 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
         std::int32_t v = g.m_cells[i];
         const std::int32_t d = (i < deposit.size()) ? deposit[i] : 0;
         v += d;
-        if (v > kMoistureMax) v = kMoistureMax;
-        if (v < kMoistureBaseline) v = kMoistureBaseline;
+        if (v > kMoistureMax)
+            v = kMoistureMax;
+        if (v < kMoistureBaseline)
+            v = kMoistureBaseline;
         g.m_cells[i] = v;
     }
 
@@ -192,20 +206,23 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
         // Start each cell at its current level; apply only the deltas.
         for (int z = 0; z < H; ++z) {
             for (int x = 0; x < W; ++x) {
-                const std::size_t ci = static_cast<std::size_t>(z) *
-                                       static_cast<std::size_t>(W) + static_cast<std::size_t>(x);
+                const std::size_t ci = static_cast<std::size_t>(z) * static_cast<std::size_t>(W) +
+                                       static_cast<std::size_t>(x);
                 const std::int32_t excess = snapshot[ci] - kMoistureBaseline;
-                if (excess <= 0) continue;
+                if (excess <= 0)
+                    continue;
                 const std::int32_t perNeighbour = excess / kMoistureDiffuseShareDen;
-                if (perNeighbour <= 0) continue;
+                if (perNeighbour <= 0)
+                    continue;
                 // For each in-bounds neighbour, move `perNeighbour` from ci -> nbr.
                 const int nx[4] = {x - 1, x + 1, x, x};
                 const int nz[4] = {z, z, z - 1, z + 1};
                 for (int k = 0; k < 4; ++k) {
-                    if (nx[k] < 0 || nx[k] >= W || nz[k] < 0 || nz[k] >= H) continue;
-                    const std::size_t ni = static_cast<std::size_t>(nz[k]) *
-                                           static_cast<std::size_t>(W) +
-                                           static_cast<std::size_t>(nx[k]);
+                    if (nx[k] < 0 || nx[k] >= W || nz[k] < 0 || nz[k] >= H)
+                        continue;
+                    const std::size_t ni =
+                        static_cast<std::size_t>(nz[k]) * static_cast<std::size_t>(W) +
+                        static_cast<std::size_t>(nx[k]);
                     g.m_cells[ci] -= perNeighbour;
                     g.m_cells[ni] += perNeighbour;
                 }
@@ -213,8 +230,10 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
         }
         // Clamp after the conservative exchange (cannot exceed max via inflow).
         for (std::size_t i = 0; i < N; ++i) {
-            if (g.m_cells[i] > kMoistureMax) g.m_cells[i] = kMoistureMax;
-            if (g.m_cells[i] < kMoistureBaseline) g.m_cells[i] = kMoistureBaseline;
+            if (g.m_cells[i] > kMoistureMax)
+                g.m_cells[i] = kMoistureMax;
+            if (g.m_cells[i] < kMoistureBaseline)
+                g.m_cells[i] = kMoistureBaseline;
         }
     }
 
@@ -223,7 +242,8 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
         std::int32_t v = g.m_cells[i];
         if (v > kMoistureBaseline) {
             v -= kMoistureDrainPerTick;
-            if (v < kMoistureBaseline) v = kMoistureBaseline; // never undershoot baseline
+            if (v < kMoistureBaseline)
+                v = kMoistureBaseline; // never undershoot baseline
         }
         g.m_cells[i] = v;
     }
@@ -233,8 +253,8 @@ inline void ApplyDepositDiffuseDrain(IrrigationGrid& g, const std::vector<std::i
 // state + the grid. Sources (WaterSourceComponent + Transform) are visited in
 // id order, but their deposit is ACCUMULATED per cell (order-independent) then
 // applied with the diffuse + drain passes.
-inline IrrigationStats RunIrrigationOnTick(entt::registry& reg, IrrigationGrid& grid,
-                                           float origin_x, float origin_z, float cell_size) {
+inline IrrigationStats RunIrrigationOnTick(
+    entt::registry& reg, IrrigationGrid& grid, float origin_x, float origin_z, float cell_size) {
     IrrigationStats stats;
     if (cell_size <= 0.0f || grid.width() <= 0 || grid.height() <= 0) {
         return stats; // degenerate grid: nothing to do
@@ -245,15 +265,15 @@ inline IrrigationStats RunIrrigationOnTick(entt::registry& reg, IrrigationGrid& 
 
     // Per-cell deposit (milli-units), summed over all sources on a cell so the
     // outcome is independent of source id order. Sized to the grid.
-    std::vector<std::int32_t> deposit(
-        static_cast<std::size_t>(W) * static_cast<std::size_t>(H), 0);
+    std::vector<std::int32_t> deposit(static_cast<std::size_t>(W) * static_cast<std::size_t>(H), 0);
 
     auto view = reg.view<Comp::WaterSourceComponent, const Comp::TransformComponent>();
 
     // id-ordered traversal (deterministic; the per-cell sum is order-independent,
     // but we sort to keep telemetry + any future per-source bookkeeping stable).
     std::vector<entt::entity> ents;
-    for (auto e : view) ents.push_back(e);
+    for (auto e : view)
+        ents.push_back(e);
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
@@ -261,14 +281,16 @@ inline IrrigationStats RunIrrigationOnTick(entt::registry& reg, IrrigationGrid& 
     for (auto e : ents) {
         ++stats.sources;
         const auto& src = view.get<Comp::WaterSourceComponent>(e);
-        const auto& tf  = view.get<const Comp::TransformComponent>(e);
+        const auto& tf = view.get<const Comp::TransformComponent>(e);
 
         int cx = 0, cz = 0;
         IrrigationWorldToCell(tf.position.x, tf.position.z, origin_x, origin_z, cell_size, cx, cz);
-        if (cx < 0 || cz < 0 || cx >= W || cz >= H) continue; // outside the grid -> no deposit
+        if (cx < 0 || cz < 0 || cx >= W || cz >= H)
+            continue; // outside the grid -> no deposit
 
         const std::int32_t add = static_cast<std::int32_t>(src.output);
-        if (add <= 0) continue;
+        if (add <= 0)
+            continue;
         const std::size_t ci = static_cast<std::size_t>(cz) * static_cast<std::size_t>(W) +
                                static_cast<std::size_t>(cx);
         deposit[ci] += add;
@@ -279,13 +301,15 @@ inline IrrigationStats RunIrrigationOnTick(entt::registry& reg, IrrigationGrid& 
     // drained amount as the post-drain delta (cheap + exact).
     std::int64_t before = 0;
     for (int z = 0; z < H; ++z)
-        for (int x = 0; x < W; ++x) before += grid.AtCell(x, z) - kMoistureBaseline;
+        for (int x = 0; x < W; ++x)
+            before += grid.AtCell(x, z) - kMoistureBaseline;
 
     ApplyDepositDiffuseDrain(grid, deposit);
 
     std::int64_t after = 0;
     for (int z = 0; z < H; ++z)
-        for (int x = 0; x < W; ++x) after += grid.AtCell(x, z) - kMoistureBaseline;
+        for (int x = 0; x < W; ++x)
+            after += grid.AtCell(x, z) - kMoistureBaseline;
 
     // drained = deposited (added this tick) + before - after; non-negative by
     // construction (diffusion conserves; drain only removes).
@@ -297,9 +321,10 @@ inline IrrigationStats RunIrrigationOnTick(entt::registry& reg, IrrigationGrid& 
 // READ query for growth/availability: moisture (milli-units) at a WORLD (x,z).
 // Returns the dry baseline outside the grid. Stable — a pure function of grid
 // state + coords.
-inline std::int32_t MoistureAt(const IrrigationGrid& grid, float x, float z,
-                               float origin_x, float origin_z, float cell_size) {
-    if (cell_size <= 0.0f) return kMoistureBaseline;
+inline std::int32_t MoistureAt(
+    const IrrigationGrid& grid, float x, float z, float origin_x, float origin_z, float cell_size) {
+    if (cell_size <= 0.0f)
+        return kMoistureBaseline;
     int cx = 0, cz = 0;
     IrrigationWorldToCell(x, z, origin_x, origin_z, cell_size, cx, cz);
     return SampleMoistureCell(grid, cx, cz);

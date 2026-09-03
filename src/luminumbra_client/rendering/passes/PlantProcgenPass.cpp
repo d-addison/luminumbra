@@ -32,26 +32,39 @@ void PlantProcgenPass::init_buffers() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
     // Attribute layout mirrors plant_procgen.vert (pos / normal / uv).
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                          reinterpret_cast<void*>(offsetof(Vertex, pos)));
+    glVertexAttribPointer(
+        0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, pos)));
     glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
+    glVertexAttribPointer(1,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(Vertex),
                           reinterpret_cast<void*>(offsetof(Vertex, normal)));
     glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                          reinterpret_cast<void*>(offsetof(Vertex, uv)));
+    glVertexAttribPointer(
+        2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, uv)));
     glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex),
-                          reinterpret_cast<void*>(offsetof(Vertex, color)));
+    glVertexAttribPointer(
+        3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 void PlantProcgenPass::destroy_buffers() {
-    if (m_ebo) { glDeleteBuffers(1, &m_ebo); m_ebo = 0; }
-    if (m_vbo) { glDeleteBuffers(1, &m_vbo); m_vbo = 0; }
-    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
+    if (m_ebo) {
+        glDeleteBuffers(1, &m_ebo);
+        m_ebo = 0;
+    }
+    if (m_vbo) {
+        glDeleteBuffers(1, &m_vbo);
+        m_vbo = 0;
+    }
+    if (m_vao) {
+        glDeleteVertexArrays(1, &m_vao);
+        m_vao = 0;
+    }
     m_vbo_capacity_bytes = 0;
     m_ebo_capacity_bytes = 0;
     m_index_count = 0;
@@ -112,14 +125,14 @@ void PlantProcgenPass::execute(const RenderContext& ctx, const Camera& camera) {
     }
 
     const glm::mat4 view = camera.GetViewMatrix();
-    const glm::mat4 projection = camera.GetProjectionMatrix(
-        static_cast<int>(ctx.screen_width), static_cast<int>(ctx.screen_height));
+    const glm::mat4 projection = camera.GetProjectionMatrix(static_cast<int>(ctx.screen_width),
+                                                            static_cast<int>(ctx.screen_height));
 
     m_shader->use();
     m_shader->setMat4("projection", projection);
     m_shader->setMat4("view", view);
     m_shader->setMat3("u_normalViewMatrix", glm::mat3(view));
-    m_shader->setFloat("u_time", ctx.time_seconds);  // render-only leaf sway
+    m_shader->setFloat("u_time", ctx.time_seconds); // render-only leaf sway
     m_shader->setFloat("u_windStrength", 1.0f);
     // This pass now draws ONLY the gameplay marker octahedra (creatures / foragers /
     // crystals). Make them self-luminous beacons so they read as glowing motes in dark

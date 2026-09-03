@@ -53,6 +53,8 @@ if [[ -n "$changed_from" ]]; then
         case "$relative_path" in
             src/*|include/*|test/*|tools/*)
                 case "$relative_path" in
+                    *.gen.h|*.gen.cpp)
+                        ;;
                     *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx)
                         cpp_files+=("$repo_root/$relative_path")
                         ;;
@@ -65,6 +67,8 @@ if [[ -n "$changed_from" ]]; then
         case "$relative_path" in
             src/*|include/*|test/*|tools/*)
                 case "$relative_path" in
+                    *.gen.h|*.gen.cpp)
+                        ;;
                     *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.hxx)
                         untracked_cpp_files+=("$repo_root/$relative_path")
                         cpp_files+=("$repo_root/$relative_path")
@@ -82,7 +86,9 @@ else
             ! -path '*/vendor/*' \
             ! -path '*/external/*' \
             ! -path '*/build/*' \
-            ! -path '*/out/*'
+            ! -path '*/out/*' \
+            ! -name '*.gen.h' \
+            ! -name '*.gen.cpp'
     )
 fi
 

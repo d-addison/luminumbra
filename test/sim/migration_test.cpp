@@ -19,11 +19,11 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunMigrationOnTick;
-using luminumbra::ai::MigrationStats;
-using luminumbra::ai::MigrationTargetAt;
 using luminumbra::ai::MigrationDriveAt;
+using luminumbra::ai::MigrationStats;
 using luminumbra::ai::MigrationTarget;
+using luminumbra::ai::MigrationTargetAt;
+using luminumbra::ai::RunMigrationOnTick;
 
 // Spawn a creature carrying a MigratoryComponent (the opt-in) at world XZ (x,z).
 entt::entity spawnMigrant(entt::registry& r, float x, float z) {
@@ -81,20 +81,20 @@ TEST(Migration, DriveWrittenToComponentMatchesCurve) {
     entt::registry r;
     auto e = spawnMigrant(r, 0.0f, 0.0f);
 
-    MigrationStats sTrans = RunMigrationOnTick(r, 0.25f);  // a transition
+    MigrationStats sTrans = RunMigrationOnTick(r, 0.25f); // a transition
     EXPECT_FLOAT_EQ(migOf(r, e).drive, MigrationDriveAt(0.25f));
     EXPECT_GT(sTrans.drive, 0.9f);
 
-    MigrationStats sMid = RunMigrationOnTick(r, 0.375f);   // a midpoint
+    MigrationStats sMid = RunMigrationOnTick(r, 0.375f); // a midpoint
     EXPECT_FLOAT_EQ(migOf(r, e).drive, MigrationDriveAt(0.375f));
-    EXPECT_EQ(sMid.drive, 0.0f);  // floored to a clean zero mid-season
+    EXPECT_EQ(sMid.drive, 0.0f); // floored to a clean zero mid-season
 }
 
 // Mid-season (drive 0): the wish is EXACTLY zero (settled, no migratory pull).
 TEST(Migration, MidSeasonWishIsZero) {
     entt::registry r;
-    auto e = spawnMigrant(r, 100.0f, -50.0f);  // away from origin so a nonzero dir is possible
-    RunMigrationOnTick(r, 0.125f);             // a quarter midpoint -> drive 0
+    auto e = spawnMigrant(r, 100.0f, -50.0f); // away from origin so a nonzero dir is possible
+    RunMigrationOnTick(r, 0.125f);            // a quarter midpoint -> drive 0
     EXPECT_EQ(migOf(r, e).wish_x, 0.0f);
     EXPECT_EQ(migOf(r, e).wish_z, 0.0f);
 }
@@ -115,7 +115,7 @@ TEST(Migration, TargetMovesOverYear) {
     EXPECT_TRUE(differs(t0, tQ));
     EXPECT_TRUE(differs(tQ, tH));
     EXPECT_TRUE(differs(tH, t3));
-    EXPECT_TRUE(differs(t0, tH));  // opposite ends of the year-loop are far apart
+    EXPECT_TRUE(differs(t0, tH)); // opposite ends of the year-loop are far apart
 
     // A full year wraps back to the start.
     MigrationTarget tYear = MigrationTargetAt(1.0f);
@@ -129,9 +129,8 @@ TEST(Migration, StatsTargetTracksSeason) {
     spawnMigrant(r, 0.0f, 0.0f);
     MigrationStats sA = RunMigrationOnTick(r, 0.0f);
     MigrationStats sB = RunMigrationOnTick(r, 0.25f);
-    const float moved = std::fabs(sA.target_x - sB.target_x) +
-                        std::fabs(sA.target_z - sB.target_z);
-    EXPECT_GT(moved, 1.0f);  // the target moved between the two seasons.
+    const float moved = std::fabs(sA.target_x - sB.target_x) + std::fabs(sA.target_z - sB.target_z);
+    EXPECT_GT(moved, 1.0f); // the target moved between the two seasons.
 }
 
 // ---- the wish POINTS TOWARD the current target ----
@@ -141,7 +140,7 @@ TEST(Migration, WishPointsTowardTarget) {
     entt::registry r;
     // Place the creature well away from the origin so the direction is unambiguous.
     auto e = spawnMigrant(r, -300.0f, 200.0f);
-    const float season = 0.25f;  // a transition -> strong drive
+    const float season = 0.25f; // a transition -> strong drive
 
     MigrationStats s = RunMigrationOnTick(r, season);
     ASSERT_GT(s.drive, 0.0f);
@@ -167,13 +166,13 @@ TEST(Migration, WishPointsTowardTarget) {
 // Two creatures on OPPOSITE sides of the target wish in OPPOSITE x-directions (each toward it).
 TEST(Migration, WishConvergesFromBothSides) {
     entt::registry r;
-    const MigrationTarget t = MigrationTargetAt(0.0f);  // target near (+R, 0)
-    auto west = spawnMigrant(r, t.x - 200.0f, t.z);     // to the -x side of the target
-    auto east = spawnMigrant(r, t.x + 200.0f, t.z);     // to the +x side of the target
+    const MigrationTarget t = MigrationTargetAt(0.0f); // target near (+R, 0)
+    auto west = spawnMigrant(r, t.x - 200.0f, t.z);    // to the -x side of the target
+    auto east = spawnMigrant(r, t.x + 200.0f, t.z);    // to the +x side of the target
 
     RunMigrationOnTick(r, 0.0f);
-    EXPECT_GT(migOf(r, west).wish_x, 0.0f);  // west creature heads +x toward target
-    EXPECT_LT(migOf(r, east).wish_x, 0.0f);  // east creature heads -x toward target
+    EXPECT_GT(migOf(r, west).wish_x, 0.0f); // west creature heads +x toward target
+    EXPECT_LT(migOf(r, east).wish_x, 0.0f); // east creature heads -x toward target
 }
 
 // ---- determinism: run == replay (bit-for-bit over a full simulated year) ----
@@ -214,13 +213,16 @@ TEST(Migration, RunEqualsReplay) {
 // Order-independence: shuffled creation order yields the same per-creature wish (id-ordered
 // traversal + a target/drive that depend only on the season, not on neighbours).
 TEST(Migration, OrderIndependent) {
-    struct Spec { float x, z; };
+    struct Spec {
+        float x, z;
+    };
     std::vector<Spec> specs = {{0.0f, 0.0f}, {120.0f, -40.0f}, {-250.0f, 310.0f}, {75.5f, 75.5f}};
 
     auto build = [](const std::vector<Spec>& order) {
         entt::registry r;
         std::vector<entt::entity> es;
-        for (const auto& sp : order) es.push_back(spawnMigrant(r, sp.x, sp.z));
+        for (const auto& sp : order)
+            es.push_back(spawnMigrant(r, sp.x, sp.z));
         RunMigrationOnTick(r, 0.25f);
         std::vector<std::pair<std::pair<float, float>, std::pair<float, float>>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
@@ -244,4 +246,4 @@ TEST(Migration, OrderIndependent) {
     }
 }
 
-}  // namespace
+} // namespace

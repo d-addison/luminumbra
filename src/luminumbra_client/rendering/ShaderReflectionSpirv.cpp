@@ -5,18 +5,25 @@
 namespace Luminumbra::Rendering {
 
 GLenum ReflectedImageShapeToGlSampler(const std::string& shape) {
-    if (shape == "texture2D") return GL_SAMPLER_2D;
-    if (shape == "texture2DArray") return GL_SAMPLER_2D_ARRAY;
-    if (shape == "textureCube") return GL_SAMPLER_CUBE;
-    if (shape == "textureCubeArray") return GL_SAMPLER_CUBE_MAP_ARRAY;
-    if (shape == "texture3D") return GL_SAMPLER_3D;
-    if (shape == "texture1D") return GL_SAMPLER_1D;
+    if (shape == "texture2D")
+        return GL_SAMPLER_2D;
+    if (shape == "texture2DArray")
+        return GL_SAMPLER_2D_ARRAY;
+    if (shape == "textureCube")
+        return GL_SAMPLER_CUBE;
+    if (shape == "textureCubeArray")
+        return GL_SAMPLER_CUBE_MAP_ARRAY;
+    if (shape == "texture3D")
+        return GL_SAMPLER_3D;
+    if (shape == "texture1D")
+        return GL_SAMPLER_1D;
     return 0;
 }
 
 ReflectedLayout ReflectSlangReflectionJson(const std::string& json_text) {
     ReflectedLayout layout;
-    const nlohmann::json doc = nlohmann::json::parse(json_text, nullptr, /*allow_exceptions=*/false);
+    const nlohmann::json doc =
+        nlohmann::json::parse(json_text, nullptr, /*allow_exceptions=*/false);
     if (doc.is_discarded() || !doc.is_object() || !doc.contains("parameters")) {
         return layout;
     }
@@ -31,7 +38,8 @@ ReflectedLayout ReflectSlangReflectionJson(const std::string& json_text) {
         if (kind == "resource") {
             // Only sampled textures map to the GL combined-sampler set; structured/RW
             // buffers (shape != texture*) return 0 and are skipped.
-            const GLenum gl_type = ReflectedImageShapeToGlSampler(type.value("baseShape", std::string{}));
+            const GLenum gl_type =
+                ReflectedImageShapeToGlSampler(type.value("baseShape", std::string{}));
             if (gl_type != 0) {
                 ReflectedSampler s;
                 s.name = param.value("name", std::string{});
@@ -56,4 +64,4 @@ ReflectedLayout ReflectSlangReflectionJson(const std::string& json_text) {
     return layout;
 }
 
-}  // namespace Luminumbra::Rendering
+} // namespace Luminumbra::Rendering

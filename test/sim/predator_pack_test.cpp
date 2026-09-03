@@ -20,14 +20,14 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunPredatorPackOnTick;
-using luminumbra::ai::PredatorPackStats;
 using luminumbra::ai::kPackRadius;
+using luminumbra::ai::PredatorPackStats;
+using luminumbra::ai::RunPredatorPackOnTick;
 
 // Spawn a predator carrying a PackHunterComponent (the opt-in). `predator` sets the hunting
 // role (a non-predator tag holder is inert).
-entt::entity spawnPredator(entt::registry& r, float x, float z, bool predator = true,
-                           bool eaten = false) {
+entt::entity
+spawnPredator(entt::registry& r, float x, float z, bool predator = true, bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -88,8 +88,8 @@ TEST(PredatorPack, NonParticipantsIgnored) {
 TEST(PredatorPack, TwoNearbyPredatorsFormPack) {
     entt::registry r;
     auto p0 = spawnPredator(r, 0.0f, 0.0f);
-    auto p1 = spawnPredator(r, 3.0f, 0.0f);  // well within kPackRadius
-    spawnPrey(r, 0.0f, 30.0f);               // a quarry to the north
+    auto p1 = spawnPredator(r, 3.0f, 0.0f); // well within kPackRadius
+    spawnPrey(r, 0.0f, 30.0f);              // a quarry to the north
 
     PredatorPackStats s = RunPredatorPackOnTick(r, 0);
     EXPECT_EQ(s.participants, 2);
@@ -104,7 +104,7 @@ TEST(PredatorPack, PackMatesFlankAtDifferentAngles) {
     entt::registry r;
     auto p0 = spawnPredator(r, -2.0f, 0.0f);
     auto p1 = spawnPredator(r, 2.0f, 0.0f);
-    spawnPrey(r, 0.0f, 30.0f);  // shared quarry ahead
+    spawnPrey(r, 0.0f, 30.0f); // shared quarry ahead
 
     RunPredatorPackOnTick(r, 0);
 
@@ -157,8 +157,8 @@ TEST(PredatorPack, LonePredatorPursuesDirectly) {
     entt::registry r;
     // Single predator; the nearest potential mate is far beyond kPackRadius.
     auto lone = spawnPredator(r, 0.0f, 0.0f);
-    spawnPredator(r, kPackRadius + 50.0f, 0.0f);  // too far to be a pack-mate
-    spawnPrey(r, 0.0f, 10.0f);                    // prey straight north
+    spawnPredator(r, kPackRadius + 50.0f, 0.0f); // too far to be a pack-mate
+    spawnPrey(r, 0.0f, 10.0f);                   // prey straight north
 
     RunPredatorPackOnTick(r, 0);
 
@@ -173,7 +173,7 @@ TEST(PredatorPack, LonePredatorPursuesDirectly) {
 TEST(PredatorPack, NoPreyZeroWish) {
     entt::registry r;
     auto p = spawnPredator(r, 0.0f, 0.0f);
-    spawnPrey(r, 0.0f, 10.0f, /*eaten=*/true);  // only a carcass -> not a valid target
+    spawnPrey(r, 0.0f, 10.0f, /*eaten=*/true); // only a carcass -> not a valid target
 
     RunPredatorPackOnTick(r, 0);
     const auto& pk = packOf(r, p);
@@ -185,7 +185,7 @@ TEST(PredatorPack, NoPreyZeroWish) {
 TEST(PredatorPack, DeadPredatorInert) {
     entt::registry r;
     auto dead = spawnPredator(r, 0.0f, 0.0f, /*predator=*/true, /*eaten=*/true);
-    spawnPredator(r, 2.0f, 0.0f);  // a live ally nearby
+    spawnPredator(r, 2.0f, 0.0f); // a live ally nearby
     spawnPrey(r, 0.0f, 20.0f);
 
     RunPredatorPackOnTick(r, 0);
@@ -198,13 +198,17 @@ TEST(PredatorPack, DeadPredatorInert) {
 // ---- order-independence: shuffled creation order yields the same field ----
 
 TEST(PredatorPack, OrderIndependent) {
-    struct Spec { float x, z; bool predator; bool prey; };
+    struct Spec {
+        float x, z;
+        bool predator;
+        bool prey;
+    };
     std::vector<Spec> specs = {
         {-2.0f, 0.0f, true, false},
         {2.0f, 0.0f, true, false},
         {0.0f, 0.0f, true, false},
-        {0.0f, 30.0f, false, true},   // prey
-        {6.0f, 25.0f, false, true},   // a second prey
+        {0.0f, 30.0f, false, true}, // prey
+        {6.0f, 25.0f, false, true}, // a second prey
     };
 
     auto build = [](const std::vector<Spec>& order) {
@@ -221,10 +225,14 @@ TEST(PredatorPack, OrderIndependent) {
         // Read back predator wishes keyed by geometric position so storage order is irrelevant.
         std::vector<std::tuple<float, float, float, float, int>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
-            if (order[i].prey) continue;
+            if (order[i].prey)
+                continue;
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
             const auto& pk = r.get<Comp::PackHunterComponent>(es[i]);
-            out.push_back({tf.position.x, tf.position.z, pk.coord_x, pk.coord_z,
+            out.push_back({tf.position.x,
+                           tf.position.z,
+                           pk.coord_x,
+                           pk.coord_z,
                            static_cast<int>(pk.in_pack)});
         }
         std::sort(out.begin(), out.end());
@@ -254,7 +262,7 @@ TEST(PredatorPack, RunEqualsReplay) {
         es.push_back(spawnPredator(r, -2.0f, 0.0f));
         es.push_back(spawnPredator(r, 2.0f, 0.0f));
         es.push_back(spawnPredator(r, 0.0f, 5.0f));
-        es.push_back(spawnPredator(r, 100.0f, 100.0f));  // a lone hunter far away
+        es.push_back(spawnPredator(r, 100.0f, 100.0f)); // a lone hunter far away
         auto preyA = spawnPrey(r, 0.0f, 30.0f);
         auto preyB = spawnPrey(r, 105.0f, 90.0f);
         (void)preyA;
@@ -280,4 +288,4 @@ TEST(PredatorPack, RunEqualsReplay) {
     }
 }
 
-}  // namespace
+} // namespace

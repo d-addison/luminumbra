@@ -30,8 +30,8 @@ Vec3 DeterministicAvatarSpawnOffset(std::uint32_t player_id) {
     // DeterministicMath:: (not libm) so the spawn layout is cross-platform
     // bit-stable: this offset feeds avatar position -> the `entities` world_hash.
     const float radius = kSpacingM * DeterministicMath::Sqrt(static_cast<float>(player_id));
-    return Vec3(radius * DeterministicMath::Cos(angle), 0.0f,
-                radius * DeterministicMath::Sin(angle));
+    return Vec3(
+        radius * DeterministicMath::Cos(angle), 0.0f, radius * DeterministicMath::Sin(angle));
 }
 
 Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAvatar>& avatars) {
@@ -51,7 +51,8 @@ Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAv
             {"px_mm", to_mm(a.position.x)},
             {"py_mm", to_mm(a.position.y)},
             {"pz_mm", to_mm(a.position.z)},
-            {"facing_mrad", static_cast<std::int64_t>(std::lround(static_cast<double>(a.facing) * 1000.0))},
+            {"facing_mrad",
+             static_cast<std::int64_t>(std::lround(static_cast<double>(a.facing) * 1000.0))},
             {"vx_mm_s", to_mm(a.velocity.x)},
             {"vy_mm_s", to_mm(a.velocity.y)},
             {"vz_mm_s", to_mm(a.velocity.z)},
@@ -67,7 +68,9 @@ Ecs::EntityRegistrySnapshot BuildAvatarEntitySnapshot(const std::vector<PlayerAv
 
 std::vector<Net::ReplEntityState> BuildEntityReplStates(const entt::registry& registry) {
     std::vector<Net::ReplEntityState> states;
-    auto view = registry.view<const Components::TransformComponent, const Components::ReplicatedComponent>();
+    auto view =
+        registry
+            .view<const Components::TransformComponent, const Components::ReplicatedComponent>();
     for (auto entity : view) {
         const auto& tf = view.get<const Components::TransformComponent>(entity);
         const auto& rep = view.get<const Components::ReplicatedComponent>(entity);
@@ -88,7 +91,8 @@ std::vector<Net::ReplEntityState> BuildEntityReplStates(const entt::registry& re
         states.push_back(s);
     }
     // Stable order by network_id (snapshot determinism / readable diffs).
-    std::sort(states.begin(), states.end(),
+    std::sort(states.begin(),
+              states.end(),
               [](const Net::ReplEntityState& a, const Net::ReplEntityState& b) {
                   return a.entity_id < b.entity_id;
               });

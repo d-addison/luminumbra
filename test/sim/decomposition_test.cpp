@@ -18,15 +18,15 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunDecompositionOnTick;
 using luminumbra::ai::DecompositionStats;
 using luminumbra::ai::kNutrientPerCorpseMilli;
+using luminumbra::ai::RunDecompositionOnTick;
 
 // Spawn a DEAD mortal entity opted into decomposition (no creature).
 entt::entity spawnDeadDecayer(entt::registry& r, std::uint32_t duration) {
     auto e = r.create();
     auto& m = r.emplace<Comp::MortalComponent>(e);
-    m.dead = 1;  // marked dead -> eligible to decay.
+    m.dead = 1; // marked dead -> eligible to decay.
     auto& dc = r.emplace<Comp::DecayComponent>(e);
     dc.decay_duration = duration;
     return e;
@@ -36,7 +36,7 @@ entt::entity spawnDeadDecayer(entt::registry& r, std::uint32_t duration) {
 entt::entity spawnLiveDecayer(entt::registry& r, std::uint32_t duration) {
     auto e = r.create();
     auto& m = r.emplace<Comp::MortalComponent>(e);
-    m.dead = 0;  // alive.
+    m.dead = 0; // alive.
     auto& dc = r.emplace<Comp::DecayComponent>(e);
     dc.decay_duration = duration;
     return e;
@@ -133,7 +133,7 @@ TEST(Decomposition, EatenCreatureDecays) {
     entt::registry r;
     auto e = r.create();
     auto& cr = r.emplace<Comp::CreatureComponent>(e);
-    cr.eaten = true;  // carcass.
+    cr.eaten = true; // carcass.
     auto& dc = r.emplace<Comp::DecayComponent>(e);
     dc.decay_duration = 20;
 
@@ -149,7 +149,7 @@ TEST(Decomposition, Deterministic) {
         entt::registry r;
         spawnDeadDecayer(r, 7);
         spawnDeadDecayer(r, 30);
-        spawnLiveDecayer(r, 30);  // must stay at 0
+        spawnLiveDecayer(r, 30); // must stay at 0
         {
             auto e = r.create();
             auto& cr = r.emplace<Comp::CreatureComponent>(e);
@@ -157,7 +157,8 @@ TEST(Decomposition, Deterministic) {
             auto& dc = r.emplace<Comp::DecayComponent>(e);
             dc.decay_duration = 15;
         }
-        for (std::uint64_t t = 0; t < 40; ++t) RunDecompositionOnTick(r, t);
+        for (std::uint64_t t = 0; t < 40; ++t)
+            RunDecompositionOnTick(r, t);
         std::vector<std::uint32_t> out;
         for (auto e : r.view<Comp::DecayComponent>()) {
             const auto& dc = r.get<Comp::DecayComponent>(e);
@@ -170,4 +171,4 @@ TEST(Decomposition, Deterministic) {
     EXPECT_EQ(run(), run());
 }
 
-}  // namespace
+} // namespace

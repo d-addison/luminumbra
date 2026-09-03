@@ -28,8 +28,8 @@ namespace Luminumbra::Components {
 // farming/quality loop. Kept here, not on the
 // existing PlantGrowthComponent, so the four parallel tracks stay conflict-free.
 struct SoilFeederComponent {
-    std::uint16_t uptake = 1000;     // fixed-point uptake strength (milli-units), default 1.0
-    std::uint32_t absorbed = 0;      // total nutrient drawn so far (milli-units, integer)
+    std::uint16_t uptake = 1000; // fixed-point uptake strength (milli-units), default 1.0
+    std::uint32_t absorbed = 0;  // total nutrient drawn so far (milli-units, integer)
 };
 
 } // namespace Luminumbra::Components

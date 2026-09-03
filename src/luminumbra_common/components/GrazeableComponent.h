@@ -34,7 +34,7 @@ namespace Luminumbra::Components {
 // records the most recent tick a creature fed on this plant (telemetry + lets the
 // regrowth path tell "grazed this tick" from "ungrazed").
 struct GrazeableComponent {
-    float biomass = 1.0f;              // [0,1] standing biomass (1 = full, 0 = bare)
+    float biomass = 1.0f;               // [0,1] standing biomass (1 = full, 0 = bare)
     std::uint32_t last_grazed_tick = 0; // last tick a creature grazed this plant
 };
 

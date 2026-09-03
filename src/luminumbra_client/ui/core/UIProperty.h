@@ -42,10 +42,13 @@ template<typename T>
 class Property {
 public:
     Property() = default;
-    explicit Property(T initial_value) : m_value(std::move(initial_value)) {}
+    explicit Property(T initial_value)
+        : m_value(std::move(initial_value)) {}
 
     // Get current value
-    const T& Get() const { return m_value; }
+    const T& Get() const {
+        return m_value;
+    }
 
     // Set value and notify observers if changed
     void Set(T new_value) {
@@ -68,7 +71,8 @@ public:
     // notification callback: the in-flight notification iterates a snapshot,
     // so removal takes effect from the next Set.
     bool Unsubscribe(SubscriptionToken token) {
-        auto it = std::find_if(m_subscriptions.begin(), m_subscriptions.end(),
+        auto it = std::find_if(m_subscriptions.begin(),
+                               m_subscriptions.end(),
                                [token](const Subscription& s) { return s.token == token; });
         if (it == m_subscriptions.end()) {
             return false;
@@ -78,7 +82,9 @@ public:
     }
 
     // Number of currently registered callbacks.
-    std::size_t SubscriberCount() const { return m_subscriptions.size(); }
+    std::size_t SubscriberCount() const {
+        return m_subscriptions.size();
+    }
 
     // Operator overloads for convenience
     Property& operator=(const T& value) {
@@ -165,7 +171,9 @@ public:
         return *this;
     }
 
-    ~ScopedSubscription() { Reset(); }
+    ~ScopedSubscription() {
+        Reset();
+    }
 
     // Unsubscribe now (idempotent).
     void Reset() {
@@ -175,7 +183,9 @@ public:
         }
     }
 
-    bool Active() const { return static_cast<bool>(m_unsubscribe); }
+    bool Active() const {
+        return static_cast<bool>(m_unsubscribe);
+    }
 
 private:
     std::function<void()> m_unsubscribe;

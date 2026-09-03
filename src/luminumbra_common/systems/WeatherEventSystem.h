@@ -51,20 +51,24 @@ inline constexpr std::uint64_t kWeatherEventSeedOffset = 25ull;
 // The world-level weather event. The enum ORDER is the canonical hash/serialization
 // order; Clear is the calm default (window 0 always starts Clear).
 enum class WeatherEvent : std::uint8_t {
-    Clear   = 0,
-    Storm   = 1,
+    Clear = 0,
+    Storm = 1,
     Drought = 2,
-    Snow    = 3,
+    Snow = 3,
 };
 inline constexpr int kWeatherEventCount = 4;
 
 // Human-readable name (diagnostics / overlays). Pure, no allocation.
 inline const char* WeatherEventName(WeatherEvent e) noexcept {
     switch (e) {
-        case WeatherEvent::Clear:   return "clear";
-        case WeatherEvent::Storm:   return "storm";
-        case WeatherEvent::Drought: return "drought";
-        case WeatherEvent::Snow:    return "snow";
+        case WeatherEvent::Clear:
+            return "clear";
+        case WeatherEvent::Storm:
+            return "storm";
+        case WeatherEvent::Drought:
+            return "drought";
+        case WeatherEvent::Snow:
+            return "snow";
     }
     return "clear";
 }
@@ -72,8 +76,8 @@ inline const char* WeatherEventName(WeatherEvent e) noexcept {
 // The scheduled state for a tick: the current event, its intensity in [0, 1], and
 // the index of the window the tick falls in. POD; carries no engine handles.
 struct WeatherEventState {
-    WeatherEvent  event = WeatherEvent::Clear;
-    float         intensity = 0.0f;
+    WeatherEvent event = WeatherEvent::Clear;
+    float intensity = 0.0f;
     std::uint64_t window_index = 0;
 };
 
@@ -97,27 +101,29 @@ inline constexpr std::uint64_t kWindowTicks = 900ull;
 // ---------------------------------------------------------------------------
 inline constexpr float kTransition[kWeatherEventCount][kWeatherEventCount] = {
     // from Clear   -> Clear Storm Drought Snow
-    {                  0.55f, 0.20f, 0.15f, 0.10f },
+    {0.55f, 0.20f, 0.15f, 0.10f},
     // from Storm   -> Clear Storm Drought Snow
-    {                  0.40f, 0.45f, 0.05f, 0.10f },
+    {0.40f, 0.45f, 0.05f, 0.10f},
     // from Drought -> Clear Storm Drought Snow  (Drought->Snow forbidden)
-    {                  0.35f, 0.10f, 0.55f, 0.00f },
+    {0.35f, 0.10f, 0.55f, 0.00f},
     // from Snow    -> Clear Storm Drought Snow  (Snow->Drought forbidden)
-    {                  0.35f, 0.10f, 0.00f, 0.55f },
+    {0.35f, 0.10f, 0.00f, 0.55f},
 };
 
 // Per-event intensity band [lo, hi] for the seeded per-window intensity draw. Clear
 // is calm/low; Storm and Snow ramp high; Drought sits mid-high (persistent dryness).
 // Both ends are within [0, 1]; the draw is clamped regardless.
-inline constexpr float kIntensityLo[kWeatherEventCount] = { 0.00f, 0.45f, 0.30f, 0.40f };
-inline constexpr float kIntensityHi[kWeatherEventCount] = { 0.20f, 1.00f, 0.85f, 0.95f };
+inline constexpr float kIntensityLo[kWeatherEventCount] = {0.00f, 0.45f, 0.30f, 0.40f};
+inline constexpr float kIntensityHi[kWeatherEventCount] = {0.20f, 1.00f, 0.85f, 0.95f};
 
 // ---------------------------------------------------------------------------
 // Pure helpers.
 // ---------------------------------------------------------------------------
 inline float ClampUnit(float v) noexcept {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -134,10 +140,12 @@ inline WeatherEvent NextEvent(WeatherEvent from, std::uint64_t window_index, std
     const int fi = static_cast<int>(from);
 
     float total = 0.0f;
-    for (int j = 0; j < kWeatherEventCount; ++j) total += kTransition[fi][j];
+    for (int j = 0; j < kWeatherEventCount; ++j)
+        total += kTransition[fi][j];
 
     // total is a PINNED positive constant per row; guard belt-and-suspenders.
-    if (total <= 0.0f) return WeatherEvent::Clear;
+    if (total <= 0.0f)
+        return WeatherEvent::Clear;
 
     Rng::DeterministicRng rng = WindowRng(window_index, seed);
     const float target = rng.next_unit() * total; // [0, total)
@@ -145,11 +153,13 @@ inline WeatherEvent NextEvent(WeatherEvent from, std::uint64_t window_index, std
     float acc = 0.0f;
     for (int j = 0; j < kWeatherEventCount; ++j) {
         acc += kTransition[fi][j];
-        if (target < acc) return static_cast<WeatherEvent>(j);
+        if (target < acc)
+            return static_cast<WeatherEvent>(j);
     }
     // FP edge (target == total - epsilon rounding): fall to the last positive entry.
     for (int j = kWeatherEventCount - 1; j >= 0; --j) {
-        if (kTransition[fi][j] > 0.0f) return static_cast<WeatherEvent>(j);
+        if (kTransition[fi][j] > 0.0f)
+            return static_cast<WeatherEvent>(j);
     }
     return WeatherEvent::Clear;
 }
@@ -160,7 +170,7 @@ inline WeatherEvent NextEvent(WeatherEvent from, std::uint64_t window_index, std
 inline float WindowIntensity(WeatherEvent event, std::uint64_t window_index, std::uint64_t seed) {
     const int ei = static_cast<int>(event);
     Rng::DeterministicRng rng = WindowRng(window_index, seed);
-    rng.next_u64();                 // advance past the slot the event draw consumes
+    rng.next_u64(); // advance past the slot the event draw consumes
     const float u = rng.next_unit();
     const float lo = kIntensityLo[ei];
     const float hi = kIntensityHi[ei];
@@ -184,8 +194,8 @@ inline WeatherEvent EventForWindow(std::uint64_t window_index, std::uint64_t see
 inline WeatherEventState WeatherEventAt(std::uint64_t tick, std::uint64_t seed = 0) {
     WeatherEventState out;
     out.window_index = tick / kWindowTicks;
-    out.event        = EventForWindow(out.window_index, seed);
-    out.intensity    = WindowIntensity(out.event, out.window_index, seed);
+    out.event = EventForWindow(out.window_index, seed);
+    out.intensity = WindowIntensity(out.event, out.window_index, seed);
     return out;
 }
 
@@ -197,7 +207,8 @@ inline WeatherEventState WeatherEventAt(std::uint64_t tick, std::uint64_t seed =
 // ---------------------------------------------------------------------------
 class WeatherEventDriver {
 public:
-    explicit WeatherEventDriver(std::uint64_t seed = 0) : m_seed(seed) {
+    explicit WeatherEventDriver(std::uint64_t seed = 0)
+        : m_seed(seed) {
         m_state = WeatherEventAt(0ull, m_seed);
         m_tick = 0ull;
         m_cached_window = 0ull;
@@ -220,17 +231,25 @@ public:
     }
 
     // Advance exactly one tick forward.
-    void Step() { AdvanceTo(m_tick + 1ull); }
+    void Step() {
+        AdvanceTo(m_tick + 1ull);
+    }
 
-    [[nodiscard]] const WeatherEventState& current() const noexcept { return m_state; }
-    [[nodiscard]] std::uint64_t tick() const noexcept { return m_tick; }
-    [[nodiscard]] std::uint64_t seed() const noexcept { return m_seed; }
+    [[nodiscard]] const WeatherEventState& current() const noexcept {
+        return m_state;
+    }
+    [[nodiscard]] std::uint64_t tick() const noexcept {
+        return m_tick;
+    }
+    [[nodiscard]] std::uint64_t seed() const noexcept {
+        return m_seed;
+    }
 
 private:
-    std::uint64_t      m_seed = 0;
-    std::uint64_t      m_tick = 0;
-    std::uint64_t      m_cached_window = 0;
-    WeatherEventState  m_state;
+    std::uint64_t m_seed = 0;
+    std::uint64_t m_tick = 0;
+    std::uint64_t m_cached_window = 0;
+    WeatherEventState m_state;
 };
 
 } // namespace luminumbra::sim

@@ -6,7 +6,7 @@ namespace Luminumbra::Client::UI {
 void UIStateManager::SetPlayerHealth(int health, int maxHealth) {
     playerHealth.Set(health);
     playerMaxHealth.Set(maxHealth);
-    
+
     if (maxHealth > 0) {
         playerHealthPercent.Set(static_cast<float>(health) / static_cast<float>(maxHealth));
     } else {
@@ -28,7 +28,7 @@ void UIStateManager::ClearNotification() {
 void UIStateManager::NavigateToDocument(const std::string& document) {
     LUMINUMBRA_CORE_INFO("[UI] Navigating to document: {}", document);
     currentUIDocument.Set(document);
-    
+
     // Update game state based on document
     if (document == "main_menu.rml") {
         currentGameState.Set(GameState::MainMenu);
