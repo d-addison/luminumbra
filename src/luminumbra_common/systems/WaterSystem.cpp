@@ -8,10 +8,10 @@
 #include "SHIELD_WorldSystem.h"
 #include "WeatherSystem.h" // Weather-driven per-cell rain.
 #include <algorithm>
+#include <chrono> // (water-kernel perf) sub-phase wall timers — telemetry only, never hashed
 #include <cmath>
 #include <glm/gtx/compatibility.hpp>
 #include <numeric>
-#include <unordered_set> //  implementation note: scope water snapshots to simmed chunks + neighbors
 
 namespace Luminumbra::Systems {
 
@@ -112,10 +112,23 @@ int PositiveMod(int value, int divisor) {
 // water_level_data mirror for the mesher. Accumulates per-tick source/sink mm into out_src/out_sink
 // for the mass-conservation invariant. Everything that feeds the hash is integer + row-major
 // fixed order -> bit-exact host==peer / run==replay.
+// (water-kernel perf) out_depth_before/out_depth_after: in-kernel mass accumulators replacing
+// the two whole-window Σdepth passes update() used to run around the kernel loop. Per chunk they
+// accumulate Σ(depth at kernel entry) — the depth_before snapshot — and Σ(depth at kernel exit),
+// read in the final per-cell pass where both arrays are already hot. These feed ONLY the
+// debug_water_mass_ok bookkeeping (never hashed, never persisted), and integer addition is
+// associative/commutative, so the totals are bit-exact regardless of summation order. The
+// cross-chunk seam pass that runs between the kernels and the old post-pass is a symmetric
+// transfer WITHIN the sim window (A -= q; B += q), so it nets to zero in Σdepth — the
+// kernel-exit total equals the old post-seam total exactly. A chunk that early-returns here
+// contributed equally to both of the old sums (delta zero), and contributes zero to both
+// accumulators — the compared difference is identical.
 void StepChunkWaterFixed(Chunk& c,
                          SHIELD_WorldSystem& shield,
                          std::int64_t& out_src,
                          std::int64_t& out_sink,
+                         std::int64_t& out_depth_before,
+                         std::int64_t& out_depth_after,
                          bool finite_hydrology,
                          std::int32_t rain_mm,
                          std::int32_t evap_mm,
@@ -297,6 +310,8 @@ void StepChunkWaterFixed(Chunk& c,
 
     // --- Sinks (sea/edge) + evaporation + defensive clamp + float render mirror ---
     std::int32_t max_delta = 0;
+    std::int64_t sum_before = 0; // (water-kernel perf) in-kernel mass accumulators (see header
+    std::int64_t sum_after = 0;  // comment) — depth_before[i] is read here anyway for max_delta.
     const bool have_mirror = (static_cast<int>(c.water_level_data.size()) == n);
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x) {
@@ -329,10 +344,14 @@ void StepChunkWaterFixed(Chunk& c,
                 dl = -dl;
             if (dl > max_delta)
                 max_delta = dl;
+            sum_before += depth_before[i];
+            sum_after += depth[i];
             if (have_mirror)
                 c.water_level_data[i] =
                     static_cast<float>(bed[i] + depth[i]) / static_cast<float>(MM_PER_M);
         }
+    out_depth_before += sum_before;
+    out_depth_after += sum_after;
     c.max_water_delta_last_tick = static_cast<float>(max_delta) / static_cast<float>(MM_PER_M);
     if (max_delta > 1) {
         c.water_mesh_dirty_ticks++;
@@ -373,6 +392,16 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
 
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
+    // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
+    // the _dbg_split pattern from SHIELD_WorldSystem::update.
+    m_dbg_water = {};
+    auto dbg_prev = std::chrono::steady_clock::now();
+    auto dbg_split = [&](double& slot) {
+        const auto now = std::chrono::steady_clock::now();
+        slot += std::chrono::duration<double, std::milli>(now - dbg_prev).count();
+        dbg_prev = now;
+    };
+
     m_active_chunks = &active_chunks;
     if (m_active_chunks->empty())
         return;
@@ -383,8 +412,6 @@ void WaterSystem::update(entt::registry& registry,
         return;
 
     // --- ADAPTIVE WATER GRID SYSTEM INTEGRATION ---
-    Vec3 camera_position = get_camera_position(registry);
-
     // Apply adaptive resolution to active water chunks.  implementation note: each resolution
     // change re-samples GetTerrainHeightAt per cell (~30us, up to 1024 cells at Ultra), so a burst
     // of chunks crossing LOD boundaries at once when moving spiked this loop to ~180ms. Collect the
@@ -393,33 +420,54 @@ void WaterSystem::update(entt::registry& registry,
     // caps. Deferred chunks keep their current resolution one more tick and resize over the next
     // few ticks; the selection is timing-independent (id-sorted), so run==replay / host==peer hold
     // (WaterDeterminism gate).
+    //
+    // (water-kernel perf) This scan and the first-time-INIT scan below used to be two separate
+    // full passes over the active-chunk map. Their predicates are disjoint (resize candidates
+    // require has_water_sim==true, init candidates require it false) and the map is not mutated
+    // between the old passes (a resize touches chunk contents, never map membership, and only
+    // chunks already has_water_sim==true), so ONE pass fills both lists with the exact same
+    // membership AND the same capped first-N init selection (same map, same iteration order) —
+    // byte-identical, half the map-walk cost. The old per-chunk camera-distance math is dropped:
+    // CalculateRequiredDetail deterministically ignores its distance/interaction arguments (the
+    // hashed sim grid is camera-independent — see its body), so the computed detail level is
+    // unchanged.
     struct ResizeRequest {
         Chunk* chunk;
         ChunkID id;
         WaterDetailLevel level;
     };
     std::vector<ResizeRequest> resize_requests;
+    // (water-perf-200fps init follow-on) First-time water INIT is the dominant water-frame cost:
+    // per cell it samples the worldgen (WaterLevelAt + GetTerrainHeightAt), time-sliced to
+    // MAX_WATER_INITS_PER_TICK chunks/tick. Collect THIS tick's chunks in the SAME
+    // selection order + cap as before, then SEED THEM IN PARALLEL. Each chunk writes ONLY its own
+    // arrays from read-only worldgen queries — already thread-safe (the streamer generates chunks
+    // on these same workers and terrain is byte-identical run-to-run) — so parallel seeding is
+    // BYTE-IDENTICAL to sequential. run==replay / host==peer hold (validated by --smoke).
+    std::vector<Chunk*> to_init;
+    bool init_cap_reached = false;
     for (const auto& active_chunk : active_chunks) {
         const auto& chunk_ptr = active_chunk.second;
-        if (chunk_ptr && chunk_ptr->has_water_sim.load()) {
-            Vec3 chunk_center =
-                Vec3(chunk_ptr->get_coords()) * Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z) +
-                Vec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z) * 0.5f;
-            float camera_distance = glm::length(camera_position - chunk_center);
-
-            // Check if player is interacting with water in this chunk (simplified check)
-            bool has_player_interaction =
-                camera_distance < 10.0f; // Player very close = likely interacting
-
-            // Calculate required detail level
-            WaterDetailLevel required_detail =
-                CalculateRequiredDetail(*chunk_ptr, camera_distance, has_player_interaction);
-
+        if (!chunk_ptr) {
+            continue;
+        }
+        if (chunk_ptr->has_water_sim.load()) {
+            const WaterDetailLevel required_detail =
+                CalculateRequiredDetail(*chunk_ptr, 0.0f, false);
             // Only the chunks whose grid resolution must actually change are resize candidates
             // (Off is left to the existing path — never disabled here, preserving prior behaviour).
             if (required_detail != WaterDetailLevel::Off &&
                 static_cast<int>(required_detail) != chunk_ptr->current_water_resolution.load()) {
                 resize_requests.push_back({chunk_ptr.get(), chunk_ptr->get_id(), required_detail});
+            }
+        } else if (!init_cap_reached) {
+            //  boot-settle mode: no init cap — seed the ENTIRE pending backlog this
+            // call so the boot settle can reach its fixed point (see SetBootSettleMode).
+            if (!m_boot_settle_mode &&
+                static_cast<int>(to_init.size()) >= MAX_WATER_INITS_PER_TICK) {
+                init_cap_reached = true; // same cap as the old water_inits_this_tick counter
+            } else {
+                to_init.push_back(chunk_ptr.get());
             }
         }
     }
@@ -440,27 +488,6 @@ void WaterSystem::update(entt::registry& registry,
     auto source_view =
         registry
             .view<const Components::TransformComponent, const Components::WaterSourceComponent>();
-
-    // (water-perf-200fps init follow-on) First-time water INIT is the dominant water-frame cost:
-    // per cell it samples the worldgen (WaterLevelAt + GetTerrainHeightAt), time-sliced to
-    // MAX_WATER_INITS_PER_TICK chunks/tick. Collect THIS tick's chunks in the SAME
-    // selection order + cap as before, then SEED THEM IN PARALLEL. Each chunk writes ONLY its own
-    // arrays from read-only worldgen queries — already thread-safe (the streamer generates chunks
-    // on these same workers and terrain is byte-identical run-to-run) — so parallel seeding is
-    // BYTE-IDENTICAL to sequential. run==replay / host==peer hold (validated by --smoke).
-    std::vector<Chunk*> to_init;
-    for (const auto& active_chunk : active_chunks) {
-        const auto& chunk_ptr = active_chunk.second;
-        if (!chunk_ptr || chunk_ptr->has_water_sim.load()) {
-            continue;
-        }
-        //  boot-settle mode: no init cap — seed the ENTIRE pending backlog this
-        // call so the boot settle can reach its fixed point (see SetBootSettleMode).
-        if (!m_boot_settle_mode && static_cast<int>(to_init.size()) >= MAX_WATER_INITS_PER_TICK) {
-            break; // same cap as the old water_inits_this_tick counter
-        }
-        to_init.push_back(chunk_ptr.get());
-    }
 
     // (worst-frame fix) The dominant moving cost is INIT re-sampling worldgen per cell
     // (~16ms/frame, profiled). The terrain half (GetTerrainHeightAt) is BYTE-IDENTICAL to the
@@ -584,6 +611,7 @@ void WaterSystem::update(entt::registry& registry,
             seed_chunk_water(to_init[i], terrain_seed[i]);
         }
     }
+    dbg_split(m_dbg_water.init);
 
     for (auto entity : source_view) {
         auto& transform = source_view.get<const Components::TransformComponent>(entity);
@@ -650,14 +678,35 @@ void WaterSystem::update(entt::registry& registry,
     // resim leg diverged at its first tick on exactly this). Deferred application
     // makes the pass order-independent; a cascade now propagates one neighbour
     // hop per tick, deterministically.
+    // (water-kernel perf) The wake pass and the Step-3 sim-collection pass used to be two
+    // separate full walks over the active-chunk map. They are merged into ONE walk: wake
+    // decisions still read only PRE-PASS sleep flags (every store is deferred to after the
+    // scan, exactly as before, so the two-phase order-independence argument above is intact),
+    // and sim membership is computed from (pre-pass flag, woken-this-pass) — algebraically
+    // identical to the old second pass's post-application read (post_sleep = pre_sleep &&
+    // !woken; nothing else mutates the flag between the old passes). Same map, same iteration
+    // order, no mutation during the scan -> the collected vector is element-for-element
+    // identical (its order is anyway erased by the id-sort below). Halves the map-walk cost.
+    //
+    // when rain is falling, keep EVERY water chunk awake — rain must land on dry, otherwise
+    // sleeping, land so puddles/ponds form in the low spots (sleeping chunks are skipped and
+    // never get rain). Without rain this is the normal "simulate only active chunks" fast path.
+    // weather-driven rain keeps chunks awake the same way (a storm cell may
+    // rain on any chunk even when the uniform rate is zero).
+    const bool rain_active =
+        m_rain_mm_per_tick > 0 || (m_weather_rain != nullptr && m_weather_rain_scale_mm > 0);
     std::vector<Chunk*> chunks_to_wake;
+    std::vector<Chunk*> chunks_to_sim;
+    chunks_to_sim.reserve(m_active_chunks->size());
     for (const auto& active_chunk : *m_active_chunks) {
         const auto& chunk_ptr = active_chunk.second;
         if (!chunk_ptr) {
             continue;
         }
 
-        if (chunk_ptr->is_water_sleeping.load(std::memory_order_relaxed)) {
+        const bool sleeping_pre = chunk_ptr->is_water_sleeping.load(std::memory_order_relaxed);
+        bool woken = false;
+        if (sleeping_pre) {
             IVec3 self_coords = chunk_ptr->get_coords();
             const IVec3 neighbor_offsets[] = {{0, 0, 1}, {0, 0, -1}, {1, 0, 0}, {-1, 0, 0}};
             for (const auto& offset : neighbor_offsets) {
@@ -667,35 +716,17 @@ void WaterSystem::update(entt::registry& registry,
                     !it->second->is_water_sleeping.load(std::memory_order_relaxed)) {
                     // WAKE UP (deferred): a neighbor is active per the pre-pass state.
                     chunks_to_wake.push_back(chunk_ptr.get());
+                    woken = true;
                     break;
                 }
             }
         }
+        if (chunk_ptr->has_water_sim.load() && (rain_active || !sleeping_pre || woken)) {
+            chunks_to_sim.push_back(chunk_ptr.get());
+        }
     }
     for (Chunk* chunk : chunks_to_wake) {
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
-    }
-
-    // --- Step 3: Collect only the active chunks for simulation ---
-    std::vector<Chunk*> chunks_to_sim;
-    chunks_to_sim.reserve(m_active_chunks->size());
-    for (const auto& active_chunk : *m_active_chunks) {
-        const auto& chunk_ptr = active_chunk.second;
-        if (!chunk_ptr) {
-            continue;
-        }
-
-        // when rain is falling, keep EVERY water chunk awake — rain must land on dry, otherwise
-        // sleeping, land so puddles/ponds form in the low spots (sleeping chunks are skipped and
-        // never get rain). Without rain this is the normal "simulate only active chunks" fast path.
-        // weather-driven rain keeps chunks awake the same way (a storm cell may
-        // rain on any chunk even when the uniform rate is zero).
-        const bool rain_active =
-            m_rain_mm_per_tick > 0 || (m_weather_rain != nullptr && m_weather_rain_scale_mm > 0);
-        if (chunk_ptr->has_water_sim.load() &&
-            (rain_active || !chunk_ptr->is_water_sleeping.load(std::memory_order_relaxed))) {
-            chunks_to_sim.push_back(chunk_ptr.get());
-        }
     }
 
     //  implementation note: bound the per-tick sim work to MAX_WATER_SIMS_PER_TICK via a
@@ -733,25 +764,40 @@ void WaterSystem::update(entt::registry& registry,
     std::sort(chunks_to_sim.begin(), chunks_to_sim.end(), [](const Chunk* a, const Chunk* b) {
         return a->get_id() < b->get_id();
     });
-    std::unordered_set<const Chunk*> sim_set(chunks_to_sim.begin(), chunks_to_sim.end());
+    // (water-kernel perf) The seam pass only transfers to a neighbour that is IN the sim
+    // window (both sides must be inside the Σdepth mass sum). The window is id-sorted and
+    // every element came from the active-chunk map (non-null, unique ids), so a binary search
+    // over it is exactly equivalent to the old active-map find + unordered_set membership
+    // check — same pointer or nothing — without building a per-tick unordered_set or hashing
+    // into the big map.
+    auto find_in_window = [&chunks_to_sim](ChunkID id) -> Chunk* {
+        const auto it = std::lower_bound(chunks_to_sim.begin(),
+                                         chunks_to_sim.end(),
+                                         id,
+                                         [](const Chunk* c, ChunkID v) { return c->get_id() < v; });
+        return (it != chunks_to_sim.end() && (*it)->get_id() == id) ? *it : nullptr;
+    };
+    dbg_split(m_dbg_water.bookkeeping);
 
-    std::int64_t depth_before = 0;
-    for (Chunk* chunk : chunks_to_sim) {
-        for (std::int32_t d : chunk->water_depth_mm)
-            depth_before += d;
-    }
+    // (water-kernel perf) The two whole-window Σdepth passes that bracketed this loop are now
+    // in-kernel accumulators (see StepChunkWaterFixed's header comment for the bit-exactness
+    // argument — they feed only the debug mass invariant below, never the hash).
+    std::int64_t depth_before = 0, depth_after = 0;
     std::int64_t src_mm = 0, sink_mm = 0;
     for (Chunk* chunk : chunks_to_sim) {
         StepChunkWaterFixed(*chunk,
                             *m_shield_system,
                             src_mm,
                             sink_mm,
+                            depth_before,
+                            depth_after,
                             m_finite_hydrology,
                             m_rain_mm_per_tick,
                             m_evap_mm_per_tick,
                             m_weather_rain,
                             m_weather_rain_scale_mm);
     }
+    dbg_split(m_dbg_water.sim);
 
     // Cross-chunk owner-edge shared flux. Each chunk OWNS its +X (east) and +Z (north) boundary
     // edges; it reads the neighbour's POST-internal bed+depth, computes the same pipe flux as an
@@ -830,19 +876,13 @@ void WaterSystem::update(entt::registry& registry,
                 }
             }
         };
-        if (auto itE = m_active_chunks->find(Chunk::calculate_id(ac + IVec3(1, 0, 0)));
-            itE != m_active_chunks->end() && itE->second && sim_set.count(itE->second.get()))
-            step_face(itE->second.get(), true);
-        if (auto itN = m_active_chunks->find(Chunk::calculate_id(ac + IVec3(0, 0, 1)));
-            itN != m_active_chunks->end() && itN->second && sim_set.count(itN->second.get()))
-            step_face(itN->second.get(), false);
+        if (Chunk* east = find_in_window(Chunk::calculate_id(ac + IVec3(1, 0, 0))))
+            step_face(east, true);
+        if (Chunk* north = find_in_window(Chunk::calculate_id(ac + IVec3(0, 0, 1))))
+            step_face(north, false);
     }
+    dbg_split(m_dbg_water.seam);
 
-    std::int64_t depth_after = 0;
-    for (Chunk* chunk : chunks_to_sim) {
-        for (std::int32_t d : chunk->water_depth_mm)
-            depth_after += d;
-    }
     m_dbg_last_source_mm = src_mm;
     m_dbg_last_sink_mm = sink_mm;
     m_dbg_mass_ok = ((depth_after - depth_before) == (src_mm - sink_mm));
@@ -865,6 +905,7 @@ void WaterSystem::update(entt::registry& registry,
             chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
         }
     }
+    dbg_split(m_dbg_water.bookkeeping);
 }
 
 f32 WaterSystem::get_water_level_at(float world_x, float world_z) const {
