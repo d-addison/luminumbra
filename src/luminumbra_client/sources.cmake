@@ -96,8 +96,13 @@ set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.
     PROPERTIES COMPILE_DEFINITIONS "RMLUI_GL3_CUSTOM_LOADER=<glad/glad.h>")
 
 # QA scenario-harness sources (the luminumbra_client_qa static library).
+# ScenarioRunner{Drive,Capture}.cpp carry the scenario driving/capture hook
+# bodies moved out of main_client.cpp's frame loop (core/ScenarioRunner.h is
+# the seam main() talks to).
 set(CLIENT_QA_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerCapture.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerDrive.cpp
 )
 
 # Third-party implementation sources are owned by their dependency targets.
@@ -127,5 +132,13 @@ if(MINGW)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+    # The ScenarioRunner TUs inherit the exact EnTT emplace/view instantiations
+    # (skinned-mesh/wildlife/creature-slice scenario code) whose debug template
+    # footprint pushed main_client.cpp over the default COFF section limit, so
+    # they need the same headroom.
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerCapture.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerDrive.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
 endif()
