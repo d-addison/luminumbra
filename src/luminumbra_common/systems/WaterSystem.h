@@ -155,6 +155,30 @@ public:
         m_boot_settle_mode = on;
     }
 
+    // gated High-resolution water (sim.water_high_res). The session owner calls
+    // this ONCE at construction, BEFORE the first update() — never mid-run: the hashed
+    // mm grids are sized by it, the seam pass hard-gates on one uniform resolution, and
+    // the cell-budget window re-derives from it (4096/64 = 64 chunks at Medium 8x8;
+    // 4096/256 = 16 chunks at High 16x16). Default Medium keeps every baseline
+    // byte-identical. Values that do not divide the chunk evenly are rejected (the
+    // seam pass needs cell-for-cell alignment), keeping the current resolution.
+    void SetSimResolution(int cells_per_side);
+    [[nodiscard]] int sim_resolution() const {
+        return m_sim_resolution;
+    }
+
+    // boot-time save-migration pass: resize EVERY loaded water chunk to the session
+    // resolution in one call, bypassing MAX_WATER_RESIZES_PER_TICK (that cap bounds
+    // LIVE frame cost; a loaded world whose saved resolution mismatches the session
+    // flag would otherwise converge at 1 chunk/tick while the seam pass — which
+    // hard-gates on equal resolution — walls off water at every mixed seam). Call at
+    // world load, after chunk adoption and before the first live tick. Deterministic:
+    // each chunk's resample (ResizeSimulationGrid's integer-bilinear mm path) is a
+    // pure function of that chunk's loaded state + worldgen + the target resolution,
+    // so the result is order-independent. Returns the number of chunks resized.
+    std::size_t
+    MigrateChunksToSimResolution(const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks);
+
     //  loaded-boot water pause: a session booted FROM A SAVE must not advance
     // water during Boot at all — the restored state (depths, sleep flags, counters) IS
     // the authoritative mid-flow state, and the water network flows perpetually (wet/dry
@@ -245,6 +269,9 @@ private:
 
     // boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;
+    // The single uniform hashed sim resolution (cells per chunk side). Default Medium
+    // (8x8, 2 m cells) — see SetSimResolution; set once pre-world via sim.water_high_res.
+    int m_sim_resolution = static_cast<int>(WaterDetailLevel::Medium);
     // loaded-boot water pause (see SetBootPaused). update is a no-op while set.
     bool m_boot_paused = false;
 

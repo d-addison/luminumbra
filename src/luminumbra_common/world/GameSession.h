@@ -279,6 +279,17 @@ public:
         m_weatherRainEnabled = enabled;
         m_weatherRainScaleMm = scale_mm;
     }
+    // Opt-in High-resolution water (sim.water_high_res, experimental).
+    // Stored pre-world; applied to the water solver ONCE at CreateWorld/LoadWorld —
+    // immediately after construction, before its first update — because the uniform
+    // hashed grid resolution can never change mid-run (the seam pass hard-gates on
+    // it). Default-OFF = Medium (8x8, 2 m cells) = byte-identical; ON = High (16x16,
+    // 1 m cells; the 4096-cell budget then derives a 16-chunk sim window). A loaded
+    // save whose chunks were written at another resolution migrates in one boot-time
+    // pass (see LoadWorldStateFrom).
+    void SetWaterHighResEnabled(bool enabled) {
+        m_waterHighResEnabled = enabled;
+    }
     // Exposes the deterministic weather-event schedule (Markov epoch windows) on the
     // session behind sim.weather_events (default OFF -> always Clear/0: byte-identical).
     // Pure read: same (tick, world seed + 25) -> same state; a consumer must ALSO be a
@@ -420,6 +431,8 @@ private:
     void SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
     void LoadSpeciesDefinitions();          // fills m_speciesTable (world create + load)
     void ApplyWeatherRainWiring();          // Wires weather to rain when opted in.
+    void ApplyWaterResolutionWiring();      // Raises the water solver to High when opted in.
+    bool m_waterHighResEnabled = false;     // See SetWaterHighResEnabled.
     bool m_weatherRainEnabled = false;      // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
     bool m_weatherEventsEnabled = false;    // See SetWeatherEventsEnabled.
