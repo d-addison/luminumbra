@@ -32,18 +32,18 @@
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/WorldGenViewer.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h" // species id -> display name for the codex/discovery HUD
-#include "luminumbra_common/ai/EcologyTuningConfig.h" //  resolve sim.ecology brain tuning
+#include "luminumbra_common/ai/EcologyTuningConfig.h"     //  resolve sim.ecology brain tuning
 #include "luminumbra_common/ai/SimTuningConfig.h" // full-control: resolve per-system creature tuning
 #include "luminumbra_common/animation/AnimationRuntime.h" // skinned skeleton/clip loaders for ambient wildlife
-#include "luminumbra_common/components/AlarmComponents.h"      // herd-alarm collective flee
-#include "luminumbra_common/components/CircadianComponents.h"  // diurnal/nocturnal sleep clock
+#include "luminumbra_common/components/AlarmComponents.h" // herd-alarm collective flee
+#include "luminumbra_common/components/CircadianComponents.h" // diurnal/nocturnal sleep clock
 #include "luminumbra_common/components/CombustionComponents.h" // sim.fire demo markers
 #include "luminumbra_common/components/CoreComponents.h"
-#include "luminumbra_common/components/CreatureComponents.h"   //  creature markers
-#include "luminumbra_common/components/DecayComponents.h"      // decomposition (carcass fades)
-#include "luminumbra_common/components/ForagingComponents.h"   // ant-trail forager colonies
-#include "luminumbra_common/components/LightingComponents.h"   // lumin-crystal cave point lights
-#include "luminumbra_common/components/MigratoryComponents.h"  // seasonal drive
+#include "luminumbra_common/components/CreatureComponents.h"  //  creature markers
+#include "luminumbra_common/components/DecayComponents.h"     // decomposition (carcass fades)
+#include "luminumbra_common/components/ForagingComponents.h"  // ant-trail forager colonies
+#include "luminumbra_common/components/LightingComponents.h"  // lumin-crystal cave point lights
+#include "luminumbra_common/components/MigratoryComponents.h" // seasonal drive
 #include "luminumbra_common/components/MortalComponents.h"     // lifespan / natural death
 #include "luminumbra_common/components/PackHunterComponents.h" // coordinated pack hunting
 #include "luminumbra_common/components/PlantComponents.h"      //
