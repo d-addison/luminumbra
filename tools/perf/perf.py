@@ -37,6 +37,18 @@ LAYERS = (
     "tooling",
 )
 RENDERERS = ("none", "software-opengl", "opengl", "vulkan", "d3d12", "metal")
+# Opt-in metrics sampled FROM the workload's evidence artifact (one scalar per
+# iteration, summarized exactly like wall_time). Each entry names the JSON path
+# inside the evidence document. Declared per-run via --evidence-metric; they fold
+# into metric_schema (and therefore the comparability key), so base and candidate
+# must request the identical set.
+EVIDENCE_METRICS: dict[str, dict[str, Any]] = {
+    "water_phase_p95_ms": {
+        "unit": "ms",
+        "direction": "lower",
+        "path": ("water_phase_ms", "total", "p95"),
+    },
+}
 BUILD_CONFIGURATION_FIELDS = {
     "build_type",
     "effective_flags_sha256",
@@ -261,6 +273,27 @@ def validate_server_smoke_evidence(path: Path, parameters: dict[str, Any]) -> No
         raise ValueError("server smoke evidence has no stable state hash")
 
 
+def read_evidence_metric(path: Path, name: str) -> float:
+    spec = EVIDENCE_METRICS[name]
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"evidence for metric {name} is missing or invalid: {exc}") from exc
+    value: Any = evidence
+    for key in spec["path"]:
+        if not isinstance(value, dict) or key not in value:
+            raise ValueError(f"evidence metric {name} is missing from the artifact")
+        value = value[key]
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise ValueError(f"evidence metric {name} is not a finite non-negative number")
+    return float(value)
+
+
 def validate_workload_evidence(
     contract: str, path: Path | None, parameters: dict[str, Any]
 ) -> None:
@@ -279,6 +312,9 @@ def run_command(args: argparse.Namespace) -> int:
 
     parameters = parse_parameters(args.parameter)
     build_manifest = load_build_manifest(args.build_manifest)
+    evidence_metrics = sorted(dict.fromkeys(args.evidence_metric or []))
+    if evidence_metrics and args.evidence is None:
+        raise ValueError("evidence metrics require an evidence path")
     if args.mode == "gating":
         if args.samples < MIN_GATING_SAMPLES:
             raise ValueError(f"gating runs require at least {MIN_GATING_SAMPLES} samples")
@@ -327,7 +363,16 @@ def run_command(args: argparse.Namespace) -> int:
         },
         "platform": platform_data,
         "sample_policy": {"warmup": args.warmup, "samples": args.samples},
-        "metric_schema": {"wall_time": {"unit": "ms", "direction": "lower"}},
+        "metric_schema": {
+            "wall_time": {"unit": "ms", "direction": "lower"},
+            **{
+                name: {
+                    "unit": EVIDENCE_METRICS[name]["unit"],
+                    "direction": EVIDENCE_METRICS[name]["direction"],
+                }
+                for name in evidence_metrics
+            },
+        },
         "comparability_key": "pending",
         "metrics": {},
     }
@@ -340,6 +385,7 @@ def run_command(args: argparse.Namespace) -> int:
         return UNEVALUATED
 
     samples: list[float] = []
+    evidence_samples: dict[str, list[float]] = {name: [] for name in evidence_metrics}
     for iteration in range(args.warmup + args.samples):
         if args.evidence is not None:
             args.evidence.unlink(missing_ok=True)
@@ -372,9 +418,22 @@ def run_command(args: argparse.Namespace) -> int:
                 return 1
         if iteration >= args.warmup:
             samples.append(elapsed_ms)
+            for name in evidence_metrics:
+                try:
+                    evidence_samples[name].append(read_evidence_metric(args.evidence, name))
+                except ValueError as exc:
+                    result["reasons"] = [str(exc)]
+                    write_json(args.output, result)
+                    return 1
 
     result["status"] = "evaluated"
     result["metrics"] = {"wall_time": summarize(samples, "ms", "lower")}
+    for name in evidence_metrics:
+        result["metrics"][name] = summarize(
+            evidence_samples[name],
+            EVIDENCE_METRICS[name]["unit"],
+            EVIDENCE_METRICS[name]["direction"],
+        )
     write_json(args.output, result)
     print(f"evaluated {args.workload}: p50={result['metrics']['wall_time']['p50']:.3f} ms")
     return 0
@@ -804,6 +863,13 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--fixture-hash")
     run.add_argument("--evidence-contract", choices=("server-smoke",))
     run.add_argument("--evidence", type=Path)
+    run.add_argument(
+        "--evidence-metric",
+        action="append",
+        default=[],
+        choices=sorted(EVIDENCE_METRICS),
+        help="also sample this scalar from the evidence artifact each iteration",
+    )
     run.add_argument("--warmup", type=int, default=2)
     run.add_argument("--samples", type=int, default=10)
     run.add_argument("--timeout", type=float, default=300.0)

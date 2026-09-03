@@ -86,6 +86,15 @@ struct ServerWorldRunnerConfig {
     // RunFixedTicks — the sequence the debug-vs-release WaterCrossBuild gate
     // compares. Observability only; never feeds world_hash.
     bool water_hash_trace = false;
+    // water-smoke measurement workload: start the streaming anchor at the nearest wet
+    // body (the pure worldgen samplers GetTerrainHeightAt/WaterLevelAt — no residency
+    // needed, identical every run) and walk it +X each tick so water chunks stream, init,
+    // simulate and exchange seam flux throughout the run; accumulate the per-tick water
+    // sub-phase timings and sim-load counters into ServerTickReport::water. The anchor is
+    // a pure function of (seed, preset, tick), so run==replay determinism holds exactly as
+    // in the other smoke lanes. DEFAULT false -> byte-identical to the existing lanes
+    // (no new reads, no anchor change).
+    bool water_smoke = false;
 };
 
 struct ServerTickReport {
@@ -105,6 +114,29 @@ struct ServerTickReport {
     double main_wait_p99_ms = 0.0;
     double main_wait_max_ms = 0.0;
     double main_wait_total_ms = 0.0;
+
+    // water-smoke telemetry (populated only when config.water_smoke; wall-clock +
+    // debug counters, observability only — never feeds world_hash). Percentiles are
+    // over the per-tick samples of WaterSystem::dbg_water_timings().
+    struct WaterPhaseStats {
+        double p50_ms = 0.0;
+        double p95_ms = 0.0;
+        double max_ms = 0.0;
+    };
+    struct WaterTelemetry {
+        bool enabled = false;
+        WaterPhaseStats init;
+        WaterPhaseStats sim;
+        WaterPhaseStats seam;
+        WaterPhaseStats bookkeeping;
+        WaterPhaseStats total; // per-tick sum of the four sub-phases
+        double cells_simmed_per_tick = 0.0;
+        std::uint64_t cells_simmed_total = 0;
+        std::size_t awake_chunks_max = 0;
+        bool mass_ok = true;        // integer mass invariant held on EVERY tick
+        int seam_wet_pairs_max = 0; // cross-chunk continuity non-vacuity (>0 required)
+    };
+    WaterTelemetry water;
 };
 
 class ServerWorldRunner {

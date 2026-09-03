@@ -91,6 +91,10 @@ struct ServerCliOptions {
     // Observability only (the digest mutates nothing); implies --smoke.
     bool availability_trace = false;
     bool water_hash_trace = false; //
+    // water-smoke measurement workload: wet-anchor walk + water sub-phase timing
+    // percentiles and sim-load counters in the smoke artifact (see
+    // ServerWorldRunnerConfig::water_smoke). Observability only; implies --smoke.
+    bool water_smoke = false;
 
     //  --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
@@ -312,6 +316,11 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             // (the WaterCrossBuild gate compares debug vs release sequences).
             options.smoke = true;
             options.water_hash_trace = true;
+        } else if (std::strcmp(arg, "--water-smoke") == 0) {
+            // water-heavy measurement workload: wet-anchor walk + water sub-phase
+            // timings/counters in the artifact (perf lane; observability only).
+            options.smoke = true;
+            options.water_smoke = true;
         } else if (std::strcmp(arg, "--replicate") == 0) {
             options.replicate = true;
         } else if (std::strcmp(arg, "--npcs") == 0) {
@@ -375,6 +384,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.moving_anchor = options.moving;
     config.availability_trace = options.availability_trace;
     config.water_hash_trace = options.water_hash_trace;
+    config.water_smoke = options.water_smoke;
     return config;
 }
 
@@ -582,8 +592,19 @@ int RunSmoke(const ServerCliOptions& options) {
     // the final world_hash matches — chunk stream-in/evict timing varies but settles). The
     // determinism gate is the final world_hash (run==replay in both modes). The trace's purpose
     // is the  before/after diff + surfacing the static-vs-moving residency property.
+    // water-smoke non-vacuity: the workload must have exercised REAL water — the integer
+    // mass invariant held every tick in both runs, cross-chunk seam flux was observed
+    // (wet cell-pairs on both sides of a chunk border), and cells were actually simulated.
+    // A dry spawn region or a broken wet-anchor scan fails the artifact loudly instead of
+    // emitting vacuous timings. Always true outside the --water-smoke lane.
+    const bool water_nonvacuous =
+        !options.water_smoke ||
+        (first.ticks.water.mass_ok && replay.ticks.water.mass_ok &&
+         first.ticks.water.seam_wet_pairs_max > 0 && first.ticks.water.cells_simmed_total > 0);
+
     const bool passed = deterministic && first.ticks.ticks_executed == options.ticks &&
-                        replay.ticks.ticks_executed == options.ticks && first.chunks_streamed > 0;
+                        replay.ticks.ticks_executed == options.ticks && first.chunks_streamed > 0 &&
+                        water_nonvacuous;
 
     nlohmann::json artifact{
         {"schema", kServerTickArtifactSchema},
@@ -641,6 +662,42 @@ int RunSmoke(const ServerCliOptions& options) {
         {"max", first.ticks.main_wait_max_ms},
         {"total", first.ticks.main_wait_total_ms},
     };
+    // water-smoke: water sub-phase timing percentiles + sim-load counters and the
+    // non-vacuity fields. Wall-clock/debug observability — never feeds world_hash.
+    if (options.water_smoke) {
+        const auto phase_json = [](const Luminumbra::Server::ServerTickReport::WaterPhaseStats& p) {
+            return nlohmann::json{{"p50", p.p50_ms}, {"p95", p.p95_ms}, {"max", p.max_ms}};
+        };
+        const auto& w = first.ticks.water;
+        artifact["water_phase_ms"] = {
+            {"init", phase_json(w.init)},
+            {"sim", phase_json(w.sim)},
+            {"seam", phase_json(w.seam)},
+            {"bookkeeping", phase_json(w.bookkeeping)},
+            {"total", phase_json(w.total)},
+        };
+        artifact["water_cells_simmed_per_tick"] = w.cells_simmed_per_tick;
+        artifact["water_cells_simmed_total"] = w.cells_simmed_total;
+        artifact["water_awake_chunks_max"] = w.awake_chunks_max;
+        artifact["water_mass_ok"] = w.mass_ok && replay.ticks.water.mass_ok;
+        artifact["water_seam_wet_pairs_max"] = w.seam_wet_pairs_max;
+        LUMINUMBRA_CORE_INFO(
+            "Water phases: total p50={:.3f}ms p95={:.3f}ms max={:.3f}ms | sim p95={:.3f}ms "
+            "init p95={:.3f}ms seam p95={:.3f}ms book p95={:.3f}ms | cells/tick={:.1f} "
+            "awake_max={} seam_wet_max={} mass_ok={}",
+            w.total.p50_ms,
+            w.total.p95_ms,
+            w.total.max_ms,
+            w.sim.p95_ms,
+            w.init.p95_ms,
+            w.seam.p95_ms,
+            w.bookkeeping.p95_ms,
+            w.cells_simmed_per_tick,
+            w.awake_chunks_max,
+            w.seam_wet_pairs_max,
+            w.mass_ok);
+    }
+
     LUMINUMBRA_CORE_INFO("Main-thread streaming-wait (activation-wait): p50={:.3f}ms p95={:.3f}ms "
                          "p99={:.3f}ms max={:.3f}ms "
                          "total={:.1f}ms over {} ticks",
@@ -3978,7 +4035,8 @@ int main(int argc, char* argv[]) {
     ServerCliOptions options = ParseOptions(argc, argv);
     if (options.parse_error) {
         LUMINUMBRA_CORE_ERROR(
-            "Usage: luminumbra_server_app [--smoke] [--heavy [--heavy-resim <n>]] "
+            "Usage: luminumbra_server_app [--smoke] [--water-smoke] "
+            "[--heavy [--heavy-resim <n>]] "
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "
             "[--lockstep-dump <path>]] "
