@@ -69,6 +69,12 @@
       "json_name": "aether_state"
     },
     {
+      "enum": "SimWaterHighRes",
+      "section": "sim",
+      "residency": "hashed",
+      "json_name": "water_high_res"
+    },
+    {
       "enum": "RenderMoonlight",
       "section": "render",
       "residency": "excluded",

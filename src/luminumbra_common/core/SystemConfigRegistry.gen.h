@@ -11,6 +11,10 @@
 // (ConfigSchema.json) and cannot drift. Regenerate via tools/config_codegen.py
 // --emit; tools/config_codegen.py --check fails CI if this file is stale.
 
+// Codegen owns these bytes: the configure-time drift check enforces
+// byte-freshness against the emitter, so clang-format must not re-wrap
+// the X-macro continuation lines.
+// clang-format off
 // KEY(enum, Section, "json_section", "json_name", residency)
 #define LUMIN_CONFIG_KEY_TABLE(KEY) \
   KEY(SimPlantGrowth, Sim, "sim", "plant_growth", hashed) \
@@ -24,6 +28,7 @@
   KEY(SimHydrologyWeather, Sim, "sim", "hydrology_weather", hashed) \
   KEY(SimWeatherEvents, Sim, "sim", "weather_events", hashed) \
   KEY(SimAetherState, Sim, "sim", "aether_state", hashed) \
+  KEY(SimWaterHighRes, Sim, "sim", "water_high_res", hashed) \
   KEY(RenderMoonlight, Render, "render", "moonlight", excluded) \
   KEY(RenderTreeWind, Render, "render", "tree_wind", excluded) \
   KEY(RenderPlantProcgen, Render, "render", "plant_procgen", excluded) \
@@ -83,4 +88,4 @@
   PARAM(SpawnInitialHunger, RenderCreatureSpawn, "initial_hunger", false, 0.2f, 0.0f, 0.0f, 0.0f) \
   PARAM(ColonyAntCount, RenderForagingColony, "ant_count", false, 24.0f, 0.0f, 0.0f, 0.0f) \
   PARAM(ColonyFoodAmount, RenderForagingColony, "food_amount", false, 1000000.0f, 0.0f, 0.0f, 0.0f)
-
+// clang-format on

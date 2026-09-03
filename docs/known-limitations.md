@@ -10,11 +10,16 @@ and content formats may still change (see the README's project status).
   surface authority only; caves and player voxel edits are not carried at
   distance. The [SHIELD SDF contract](shield/sdf-contract.md) defines the
   exact tier semantics.
-- **Water simulates at 4 m cells.** The live water solver runs a fixed
-  8×8 grid per chunk. Broad bodies, rain, and terraform coupling resolve well;
-  channels narrower than a few cells (a small river's inner bank) are below
-  the solver's spatial resolution. Grid resizes are amortized one chunk per
-  tick, so resolution changes converge over many ticks by design.
+- **Water simulates at 2 m cells by default.** Chunks are 16 m across and the
+  live water solver runs an 8×8 grid per chunk, so each cell is 2 m. Broad
+  bodies, rain, and terraform coupling resolve well; channels narrower than a
+  few cells (a small river's inner bank) are below the solver's spatial
+  resolution. The experimental `sim.water_high_res` flag switches a session to
+  a 16×16 grid (1 m cells) at the cost of a proportionally smaller simulation
+  window; its flow constants are untuned for the finer grid, so surface flow
+  propagates more slowly. Grid resizes are amortized one chunk per tick during live
+  play (world load migrates all chunks at once), so mid-run resolution changes
+  converge over many ticks by design.
 - **Physics surface queries are placeholders.** Raycasts currently report a
   fixed upward surface normal, and surface material classification derives
   from world height bands rather than actual voxel material. Audio

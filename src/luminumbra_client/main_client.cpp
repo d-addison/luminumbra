@@ -1106,6 +1106,10 @@ int main(int argc, char* argv[]) {
     // hash bump on the owner menu).
     gameSession->SetWeatherRainEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
+    // experimental High-resolution water (hashed sim flag; default OFF =
+    // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
+    gameSession->SetWaterHighResEnabled(
+        g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     // opt-in deterministic weather-event epochs (hashed sim flag).
     gameSession->SetWeatherEventsEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimWeatherEvents));
