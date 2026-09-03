@@ -165,7 +165,10 @@ jobs:
     name: Windows / MSYS2 UCRT64
     if: github.ref_name == 'main' || github.base_ref == 'main'
     runs-on: windows-2025
-    timeout-minutes: 135
+    # Measured 40.6 min end to end on the first post-release promotion run
+    # (previously two 135-minute cap kills, before the test streaming caps
+    # and parallel common_tests landed).
+    timeout-minutes: 75
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -193,9 +196,13 @@ jobs:
         run: |
           # UCRT64 is a portability lane, not a machine-speed gate. World
           # generation is materially slower here than on GCC/MSVC runners.
+          # Leash sized from the promotion-run evidence: slowest case 178 s
+          # (RuntimeWorldVisualValidation) -> 360 s keeps 2x runner-variance
+          # headroom while catching the multi-minute stalls the old 720 s
+          # leash was raised to paper over.
           ctest --preset release --no-tests=error -LE manual \
             -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
-            --parallel 4 --timeout 720 --output-junit ctest.junit.xml
+            --parallel 4 --timeout 360 --output-junit ctest.junit.xml
           # As above, accept only the explicit hosted-runner GL degradation;
           # every other skip remains a hard failure.
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700 \
