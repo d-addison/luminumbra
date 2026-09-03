@@ -3,6 +3,13 @@
 # CMakeLists.txt in the tree.
 
 set(CLIENT_INTERNAL_SOURCES
+    # App (pre-main() helpers peeled out of main_client.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/ProcgenPalettes.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/RuntimeRoot.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/RuntimeStateRecorder.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/WindowModeControls.cpp
+
     # Core
     ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioConfig.cpp
 
