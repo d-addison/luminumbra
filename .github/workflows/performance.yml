@@ -222,13 +222,38 @@ jobs:
           python3 head/tools/perf/perf.py combine \
             --runs build/head/server-smoke-run-1.json build/head/server-smoke-run-2.json \
             --output build/head/server-smoke-run.json
+      - name: Detect base perf artifact compatibility
+        id: perf_schema
+        run: |
+          # The evidence-metric capability is folded into the artifact's
+          # comparability key, so a base commit whose perf tooling predates it
+          # produces a key the paired comparison refuses to evaluate. Degrade
+          # that one transitional promotion to a recorded observation; once the
+          # base branch carries the capability the full gate applies again.
+          if git -C base grep -q -e "--evidence-metric" -- tools/perf/perf.py; then
+            echo "compatible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "compatible=false" >> "$GITHUB_OUTPUT"
+            echo "server-smoke: base perf artifact schema predates the evidence-metric capability; observation recorded, no paired verdict." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Compare base and candidate observation
+        if: steps.perf_schema.outputs.compatible == 'true'
         run: |
           python3 head/tools/perf/perf.py compare \
             --base build/base/server-smoke-run.json \
             --candidate build/head/server-smoke-run.json \
             --limit 5 --min-samples 20 \
             --output build/server-smoke-comparison.json
+      - name: Record transitional observation
+        if: steps.perf_schema.outputs.compatible == 'false'
+        run: |
+          # Still write the (unevaluated) comparison document so the evidence
+          # artifact shows exactly why no verdict was produced.
+          python3 head/tools/perf/perf.py compare \
+            --base build/base/server-smoke-run.json \
+            --candidate build/head/server-smoke-run.json \
+            --limit 5 --min-samples 20 \
+            --output build/server-smoke-comparison.json || true
       - name: Detect base water-smoke support
         id: water_base
         run: |
