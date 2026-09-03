@@ -345,6 +345,94 @@ class PerfContractTest(unittest.TestCase):
             self.assertNotIn("hostname", json.dumps(document).lower())
             self.assertEqual(perf.validate_run(document), [])
 
+    def test_evidence_metric_is_sampled_from_the_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run.json"
+            manifest = Path(directory) / "build.json"
+            evidence = Path(directory) / "evidence.json"
+            write_build_manifest(manifest)
+            script = (
+                "import json,sys;"
+                "json.dump({'water_phase_ms':{'total':{'p95':3.5}}},"
+                f"open({str(evidence)!r},'w'))"
+            )
+            status = perf.main(
+                [
+                    "run",
+                    "--workload",
+                    "water-fixture",
+                    "--layer",
+                    "simulation",
+                    "--build-manifest",
+                    str(manifest),
+                    "--commit",
+                    "a" * 40,
+                    "--warmup",
+                    "0",
+                    "--samples",
+                    "2",
+                    "--evidence",
+                    str(evidence),
+                    "--evidence-metric",
+                    "water_phase_p95_ms",
+                    "--output",
+                    str(output),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    script,
+                ]
+            )
+            self.assertEqual(status, 0)
+            document = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(document["status"], "evaluated")
+            metric = document["metrics"]["water_phase_p95_ms"]
+            self.assertEqual(metric["sample_count"], 2)
+            self.assertEqual(metric["p50"], 3.5)
+            self.assertEqual(
+                document["metric_schema"]["water_phase_p95_ms"],
+                {"unit": "ms", "direction": "lower"},
+            )
+            self.assertEqual(perf.validate_run(document), [])
+
+    def test_missing_evidence_metric_fails_the_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "run.json"
+            manifest = Path(directory) / "build.json"
+            evidence = Path(directory) / "evidence.json"
+            write_build_manifest(manifest)
+            script = f"import json;json.dump({{}},open({str(evidence)!r},'w'))"
+            status = perf.main(
+                [
+                    "run",
+                    "--workload",
+                    "water-fixture",
+                    "--layer",
+                    "simulation",
+                    "--build-manifest",
+                    str(manifest),
+                    "--commit",
+                    "a" * 40,
+                    "--warmup",
+                    "0",
+                    "--samples",
+                    "1",
+                    "--evidence",
+                    str(evidence),
+                    "--evidence-metric",
+                    "water_phase_p95_ms",
+                    "--output",
+                    str(output),
+                    "--",
+                    sys.executable,
+                    "-c",
+                    script,
+                ]
+            )
+            self.assertEqual(status, 1)
+            document = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(document["status"], "failed")
+
     def test_gpu_run_without_identity_is_unevaluated(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "run.json"
