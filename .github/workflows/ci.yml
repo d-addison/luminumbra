@@ -167,8 +167,11 @@ jobs:
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
-    # and parallel common_tests landed).
-    timeout-minutes: 75
+    # and parallel common_tests landed). Running the GL suites under
+    # llvmpipe added ~2 min to the MSVC lane; UCRT's slower worldgen and
+    # the Mesa3D download add a few more here, so the cap keeps ~1.9x
+    # headroom over the projected ~45 min.
+    timeout-minutes: 85
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -185,6 +188,40 @@ jobs:
             mingw-w64-ucrt-x86_64-python
             mingw-w64-ucrt-x86_64-python-numpy
             mingw-w64-ucrt-x86_64-python-pillow
+      - name: Stage software OpenGL (Mesa3D llvmpipe)
+        shell: pwsh
+        run: |
+          # Hosted Windows workers expose no GPU-backed GL. Stage the Mesa3D
+          # llvmpipe rasterizer so the GL 4.5 core rendering/UI suites run
+          # here instead of skipping, exactly as on the MSVC lane. The
+          # release-msvc package also serves MinGW-built consumers: the WGL
+          # boundary is the flat stdcall C ABI (the system opengl32.dll that
+          # MinGW apps normally load is itself MSVC-built), and mesa-dist-win
+          # documents its MSVC and MinGW packages as drop-in interchangeable.
+          # Pinning the same artifact as the MSVC lane keeps one version and
+          # one sha256 across both Windows lanes.
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $version = '26.1.7'
+          $sha256 = 'c6e90c3117233b66f7816df05026a5fb0f88eaf7829bd07a1724b981487ec0bb'
+          $archive = "mesa3d-$version-release-msvc.7z"
+          $url = "https://github.com/pal1000/mesa-dist-win/releases/download/$version/$archive"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          Invoke-WebRequest -Uri $url -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "Mesa3D archive sha256 mismatch: expected $sha256, got $actual"
+          }
+          $mesaRoot = Join-Path $env:RUNNER_TEMP 'mesa3d'
+          # opengl32.dll is the WGL loader; libgallium_wgl.dll carries the
+          # llvmpipe driver itself. dxil.dll is only needed for the d3d12
+          # backends, which this lane does not use.
+          7z x $archivePath "-o$mesaRoot" 'x64\opengl32.dll' 'x64\libgallium_wgl.dll' | Out-Null
+          foreach ($dll in 'opengl32.dll', 'libgallium_wgl.dll') {
+            if (-not (Test-Path (Join-Path $mesaRoot 'x64' $dll))) {
+              throw "Mesa3D archive is missing x64/$dll"
+            }
+          }
       - name: Configure
         shell: msys2 {0}
         run: cmake --preset release
@@ -194,19 +231,27 @@ jobs:
       - name: Test
         shell: msys2 {0}
         run: |
+          # Deploy the staged Mesa3D llvmpipe runtime next to the test
+          # executables so glfwCreateWindow gets a GL 4.5 core context.
+          mesa_root="$(cygpath -u "$RUNNER_TEMP")/mesa3d/x64"
+          cp "$mesa_root/opengl32.dll" "$mesa_root/libgallium_wgl.dll" build/release/bin/
+          export GALLIUM_DRIVER=llvmpipe
           # UCRT64 is a portability lane, not a machine-speed gate. World
           # generation is materially slower here than on GCC/MSVC runners.
-          # Leash sized from the promotion-run evidence: slowest case 178 s
-          # (RuntimeWorldVisualValidation) -> 360 s keeps 2x runner-variance
-          # headroom while catching the multi-minute stalls the old 720 s
-          # leash was raised to paper over.
+          # Leash sized from the promotion-run evidence: the slowest cases
+          # (RuntimeWorldVisualValidation) spend 174-178 s in world
+          # generation, and their GL render portions complete in under a
+          # second on the MSVC llvmpipe lane, so the projected worst case
+          # stays near 190 s -> 360 s keeps ~2x runner-variance headroom
+          # while catching the multi-minute stalls the old 720 s leash was
+          # raised to paper over.
           ctest --preset release --no-tests=error -LE manual \
             -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
             --parallel 4 --timeout 360 --output-junit ctest.junit.xml
-          # As above, accept only the explicit hosted-runner GL degradation;
-          # every other skip remains a hard failure.
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700 \
-            --allow-skip-reason-regex '(?:no GL context: )?glfwCreateWindow failed(?: \(no GL 4\.5 context(?: available)?\))?'
+          # With llvmpipe deployed this lane holds the same standard as the
+          # other software-GL lanes: no GL-related skip is acceptable, and
+          # any remaining skip is a hard failure.
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
