@@ -32,9 +32,9 @@ namespace Luminumbra::Components {
 // death flag (0 = alive, 1 = dead) — once set it never clears; the system stops
 // aging a dead entity so its age and death are stable for run==replay.
 struct MortalComponent {
-    std::uint32_t age_ticks = 0;            // ticks lived (monotonic, saturating)
+    std::uint32_t age_ticks = 0;                // ticks lived (monotonic, saturating)
     std::uint32_t lifespan_ticks = 0xFFFFFFFFu; // dies of old age at this age (default: ~never)
-    std::uint8_t  dead = 0;                 // 0 = alive, 1 = dead (latched)
+    std::uint8_t dead = 0;                      // 0 = alive, 1 = dead (latched)
 };
 
 } // namespace Luminumbra::Components

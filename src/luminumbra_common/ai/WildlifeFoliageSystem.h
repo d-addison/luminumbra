@@ -42,10 +42,10 @@
 
 #include <entt/entt.hpp>
 
-#include "../components/CoreComponents.h"        // TransformComponent
-#include "../components/CreatureComponents.h"    // CreatureComponent
-#include "../components/GrazeableComponent.h"    // GrazeableComponent (opt-in)
-#include "../core/DeterministicMath.h"           // Sqrt
+#include "../components/CoreComponents.h"     // TransformComponent
+#include "../components/CreatureComponents.h" // CreatureComponent
+#include "../components/GrazeableComponent.h" // GrazeableComponent (opt-in)
+#include "../core/DeterministicMath.h"        // Sqrt
 
 namespace luminumbra::ai {
 
@@ -59,35 +59,37 @@ inline constexpr std::uint64_t kWildlifeFoliageSeedOffset = 23ull;
 
 // Geometry + rates. All are constant (integer-valued) floats so the per-tick arithmetic
 // is bit-stable. Biomass lives in [0,1].
-inline constexpr float kGrazeRadius      = 3.0f;   // a creature grazes plants within this (m)
-inline constexpr float kGrazeRadiusSq    = kGrazeRadius * kGrazeRadius;
-inline constexpr float kGrazePerCreature = 0.05f;  // biomass removed per grazing creature/tick
-inline constexpr float kRegrowPerTick    = 0.01f;  // biomass regained per tick when ungrazed
-inline constexpr float kFeedPerGraze     = 0.02f;  // hunger reduced on a creature per plant fed
-inline constexpr float kBiomassMin       = 0.0f;
-inline constexpr float kBiomassMax       = 1.0f;
+inline constexpr float kGrazeRadius = 3.0f; // a creature grazes plants within this (m)
+inline constexpr float kGrazeRadiusSq = kGrazeRadius * kGrazeRadius;
+inline constexpr float kGrazePerCreature = 0.05f; // biomass removed per grazing creature/tick
+inline constexpr float kRegrowPerTick = 0.01f;    // biomass regained per tick when ungrazed
+inline constexpr float kFeedPerGraze = 0.02f;     // hunger reduced on a creature per plant fed
+inline constexpr float kBiomassMin = 0.0f;
+inline constexpr float kBiomassMax = 1.0f;
 
 // Full-control tuning: fields default to the constants above, so a default-constructed
 // WildlifeFoliageTuning is byte-identical. Threaded via the optional Run arg; resolved from
 // SystemConfig sim.wildlife_foliage when that system is enabled.
 struct WildlifeFoliageTuning {
-    float graze_radius       = kGrazeRadius;
+    float graze_radius = kGrazeRadius;
     float graze_per_creature = kGrazePerCreature;
-    float regrow_per_tick    = kRegrowPerTick;
-    float feed_per_graze     = kFeedPerGraze;
+    float regrow_per_tick = kRegrowPerTick;
+    float feed_per_graze = kFeedPerGraze;
 };
 
 inline float clampBiomass(float v) {
-    if (v < kBiomassMin) return kBiomassMin;
-    if (v > kBiomassMax) return kBiomassMax;
+    if (v < kBiomassMin)
+        return kBiomassMin;
+    if (v > kBiomassMax)
+        return kBiomassMax;
     return v;
 }
 
 // Telemetry / sub-hash for the wildlife-foliage tick.
 struct WildlifeFoliageStats {
-    int grazers = 0;        // non-predator creatures considered this tick
-    int plants = 0;         // grazeable plants considered this tick
-    int grazed_plants = 0;  // plants that were grazed (had >=1 grazer in range) this tick
+    int grazers = 0;              // non-predator creatures considered this tick
+    int plants = 0;               // grazeable plants considered this tick
+    int grazed_plants = 0;        // plants that were grazed (had >=1 grazer in range) this tick
     float biomass_removed = 0.0f; // total biomass removed by grazing this tick
     float biomass_regrown = 0.0f; // total biomass regrown this tick
 };
@@ -95,13 +97,17 @@ struct WildlifeFoliageStats {
 // Advance the wildlife-foliage coupling by ONE fixed tick. Pure function of registry
 // state. id-ordered; graze pressure is summed per plant (order-independent) and feed is
 // summed per creature, then both are applied in id-ordered passes.
-inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::uint64_t tick,
+inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg,
+                                                     std::uint64_t tick,
                                                      const WildlifeFoliageTuning& tuning = {}) {
     WildlifeFoliageStats stats;
     const float graze_radius_sq = tuning.graze_radius * tuning.graze_radius;
 
     // --- 1. Snapshot NON-PREDATOR creature positions, id-ordered (order-stable). ---
-    struct Grazer { entt::entity e; float x, z; };
+    struct Grazer {
+        entt::entity e;
+        float x, z;
+    };
     std::vector<Grazer> grazers;
     {
         auto cview = reg.view<const Comp::CreatureComponent, const Comp::TransformComponent>();
@@ -112,7 +118,8 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::u
         grazers.reserve(cents.size());
         for (auto e : cents) {
             const auto& cr = cview.get<const Comp::CreatureComponent>(e);
-            if (cr.is_predator || cr.eaten) continue;  // only live herbivores graze
+            if (cr.is_predator || cr.eaten)
+                continue; // only live herbivores graze
             const auto& tf = cview.get<const Comp::TransformComponent>(e);
             grazers.push_back({e, tf.position.x, tf.position.z});
             ++stats.grazers;
@@ -148,7 +155,8 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::u
             const float d2 = dx * dx + dz * dz;
             if (d2 <= graze_radius_sq) {
                 ++n_in_range;
-                if (has_biomass) feed[gi] += tuning.feed_per_graze;  // only a living plant feeds
+                if (has_biomass)
+                    feed[gi] += tuning.feed_per_graze; // only a living plant feeds
             }
         }
 
@@ -176,10 +184,12 @@ inline WildlifeFoliageStats RunWildlifeFoliageOnTick(entt::registry& reg, std::u
     // [0,1] (0 = sated). This only RUNS when grazeable plants exist (feed is otherwise
     // all-zero), preserving the no-op-when-no-plants gate.
     for (std::size_t gi = 0; gi < grazers.size(); ++gi) {
-        if (feed[gi] <= 0.0f) continue;
+        if (feed[gi] <= 0.0f)
+            continue;
         auto& cr = reg.get<Comp::CreatureComponent>(grazers[gi].e);
         float h = cr.hunger - feed[gi];
-        if (h < 0.0f) h = 0.0f;
+        if (h < 0.0f)
+            h = 0.0f;
         cr.hunger = h;
     }
 

@@ -21,10 +21,10 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunScavengingOnTick;
-using luminumbra::ai::ScavengingStats;
 using luminumbra::ai::kScavengeFeedRadius;
 using luminumbra::ai::kScavengeHungerThreshold;
+using luminumbra::ai::RunScavengingOnTick;
+using luminumbra::ai::ScavengingStats;
 
 // Spawn a SCAVENGER: a creature carrying a ScavengerComponent (the opt-in gate). `hunger`
 // seeds its appetite (0 sated .. 1 starving).
@@ -55,9 +55,9 @@ entt::entity spawnCarcassMortal(entt::registry& r, float x, float z) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
-    r.emplace<Comp::CreatureComponent>(e);  // alive flag-wise (eaten==0)...
+    r.emplace<Comp::CreatureComponent>(e); // alive flag-wise (eaten==0)...
     auto& m = r.emplace<Comp::MortalComponent>(e);
-    m.dead = 1;                              // ...but flagged dead -> still a carcass.
+    m.dead = 1; // ...but flagged dead -> still a carcass.
     return e;
 }
 
@@ -84,7 +84,7 @@ TEST(Scavenging, EmptyRosterNoOp) {
 // carcass present, nothing participates.
 TEST(Scavenging, NonParticipantsIgnored) {
     entt::registry r;
-    spawnCarcassEaten(r, 0.0f, 0.0f);  // a carcass, but nobody to eat it.
+    spawnCarcassEaten(r, 0.0f, 0.0f); // a carcass, but nobody to eat it.
     ScavengingStats s = RunScavengingOnTick(r, 0);
     EXPECT_EQ(s.scavengers, 0);
     EXPECT_EQ(s.feeding, 0);
@@ -103,9 +103,9 @@ TEST(Scavenging, HungryScavengerWishPointsToNearestCarcass) {
     EXPECT_EQ(st.feeding, 0);
 
     const auto& sc = scav(r, s);
-    EXPECT_GT(sc.wish_x, 0.0f);                 // steers toward +x carcass.
-    EXPECT_FLOAT_EQ(sc.wish_z, 0.0f);           // no z component for a colinear target.
-    EXPECT_EQ(sc.feeding, 0);                   // not in range yet.
+    EXPECT_GT(sc.wish_x, 0.0f);       // steers toward +x carcass.
+    EXPECT_FLOAT_EQ(sc.wish_z, 0.0f); // no z component for a colinear target.
+    EXPECT_EQ(sc.feeding, 0);         // not in range yet.
     // wish is a unit steer.
     const float mag = sc.wish_x * sc.wish_x + sc.wish_z * sc.wish_z;
     EXPECT_NEAR(mag, 1.0f, 1.0e-4f);
@@ -115,12 +115,12 @@ TEST(Scavenging, HungryScavengerWishPointsToNearestCarcass) {
 TEST(Scavenging, SteersTowardNearestOfTwo) {
     entt::registry r;
     auto s = spawnScavenger(r, 0.0f, 0.0f, 0.9f);
-    spawnCarcassEaten(r, 20.0f, 0.0f);   // far, +x
-    spawnCarcassEaten(r, 0.0f, -8.0f);   // nearer, -z
+    spawnCarcassEaten(r, 20.0f, 0.0f); // far, +x
+    spawnCarcassEaten(r, 0.0f, -8.0f); // nearer, -z
 
     RunScavengingOnTick(r, 0);
     const auto& sc = scav(r, s);
-    EXPECT_LT(sc.wish_z, 0.0f);          // pulled toward the nearer -z carcass.
+    EXPECT_LT(sc.wish_z, 0.0f); // pulled toward the nearer -z carcass.
     EXPECT_NEAR(sc.wish_x, 0.0f, 1.0e-4f);
 }
 
@@ -137,7 +137,7 @@ TEST(Scavenging, ReachingCarcassFeeds) {
     EXPECT_EQ(st.feeding, 1);
 
     EXPECT_EQ(scav(r, s).feeding, 1);
-    EXPECT_LT(hungerOf(r, s), h0);            // ate -> hunger dropped.
+    EXPECT_LT(hungerOf(r, s), h0); // ate -> hunger dropped.
     // On the carcass: holds position (zero wish).
     EXPECT_FLOAT_EQ(scav(r, s).wish_x, 0.0f);
     EXPECT_FLOAT_EQ(scav(r, s).wish_z, 0.0f);
@@ -146,11 +146,12 @@ TEST(Scavenging, ReachingCarcassFeeds) {
 // Feeding lowers hunger but never below 0 (clamped) over repeated ticks.
 TEST(Scavenging, FeedingClampsHungerAtZero) {
     entt::registry r;
-    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.45f);  // just above threshold
-    spawnCarcassEaten(r, 0.0f, 0.0f);                          // right on top
-    for (int i = 0; i < 50; ++i) RunScavengingOnTick(r, static_cast<std::uint64_t>(i));
+    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.45f); // just above threshold
+    spawnCarcassEaten(r, 0.0f, 0.0f);                         // right on top
+    for (int i = 0; i < 50; ++i)
+        RunScavengingOnTick(r, static_cast<std::uint64_t>(i));
     EXPECT_GE(hungerOf(r, s), 0.0f);
-    EXPECT_LE(hungerOf(r, s), kScavengeHungerThreshold);       // ate down to/below threshold.
+    EXPECT_LE(hungerOf(r, s), kScavengeHungerThreshold); // ate down to/below threshold.
 }
 
 // A carcass reached via the MortalComponent.dead path also feeds.
@@ -169,8 +170,8 @@ TEST(Scavenging, MortalDeadCountsAsCarcass) {
 
 TEST(Scavenging, WellFedDoesNotSeek) {
     entt::registry r;
-    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.0f);  // sated
-    spawnCarcassEaten(r, 1.0f, 0.0f);                          // carcass right there
+    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.0f); // sated
+    spawnCarcassEaten(r, 1.0f, 0.0f);                        // carcass right there
 
     const float h0 = hungerOf(r, s);
     ScavengingStats st = RunScavengingOnTick(r, 0);
@@ -179,19 +180,19 @@ TEST(Scavenging, WellFedDoesNotSeek) {
     EXPECT_FLOAT_EQ(scav(r, s).wish_x, 0.0f);
     EXPECT_FLOAT_EQ(scav(r, s).wish_z, 0.0f);
     EXPECT_EQ(scav(r, s).feeding, 0);
-    EXPECT_FLOAT_EQ(hungerOf(r, s), h0);                       // didn't eat.
+    EXPECT_FLOAT_EQ(hungerOf(r, s), h0); // didn't eat.
 }
 
 // ---- no carcasses -> zero wish + no feeding ----
 
 TEST(Scavenging, NoCarcassesZeroWishNoFeeding) {
     entt::registry r;
-    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.9f);  // hungry...
+    auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.9f); // hungry...
     // ...but only LIVE creatures around (no carcass).
     auto live = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(live);
     tf.position = Luminumbra::Vec3(2.0f, 0.0f, 0.0f);
-    r.emplace<Comp::CreatureComponent>(live);  // alive (eaten==0, no mortal)
+    r.emplace<Comp::CreatureComponent>(live); // alive (eaten==0, no mortal)
 
     const float h0 = hungerOf(r, s);
     ScavengingStats st = RunScavengingOnTick(r, 0);
@@ -208,7 +209,7 @@ TEST(Scavenging, NoCarcassesZeroWishNoFeeding) {
 TEST(Scavenging, DeadScavengerDoesNotScavenge) {
     entt::registry r;
     auto s = spawnScavenger(r, 0.0f, 0.0f, /*hunger=*/0.9f);
-    r.get<Comp::CreatureComponent>(s).eaten = true;  // the scavenger itself is now a carcass
+    r.get<Comp::CreatureComponent>(s).eaten = true; // the scavenger itself is now a carcass
     spawnCarcassEaten(r, 5.0f, 0.0f);
 
     const float h0 = hungerOf(r, s);
@@ -223,12 +224,17 @@ TEST(Scavenging, DeadScavengerDoesNotScavenge) {
 // ---- order-independence: shuffled creation order yields the same outcome ----
 
 TEST(Scavenging, OrderIndependent) {
-    struct Spec { float x, z; bool scavenger; float hunger; bool carcass; };
+    struct Spec {
+        float x, z;
+        bool scavenger;
+        float hunger;
+        bool carcass;
+    };
     std::vector<Spec> specs = {
-        {0.0f, 0.0f, true,  0.9f, false},   // hungry scavenger at origin
-        {10.0f, 0.0f, false, 0.0f, true},   // carcass +x
-        {0.0f, 6.0f, false, 0.0f, true},    // nearer carcass +z
-        {-3.0f, -3.0f, true, 0.8f, false},  // another scavenger
+        {0.0f, 0.0f, true, 0.9f, false},   // hungry scavenger at origin
+        {10.0f, 0.0f, false, 0.0f, true},  // carcass +x
+        {0.0f, 6.0f, false, 0.0f, true},   // nearer carcass +z
+        {-3.0f, -3.0f, true, 0.8f, false}, // another scavenger
     };
 
     auto build = [](const std::vector<Spec>& order) {
@@ -241,11 +247,13 @@ TEST(Scavenging, OrderIndependent) {
                 es.push_back(spawnCarcassEaten(r, sp.x, sp.z));
             }
         }
-        for (int t = 0; t < 5; ++t) RunScavengingOnTick(r, static_cast<std::uint64_t>(t));
+        for (int t = 0; t < 5; ++t)
+            RunScavengingOnTick(r, static_cast<std::uint64_t>(t));
         // Read back scavenger results keyed by geometric position (storage order agnostic).
         std::vector<std::pair<std::pair<float, float>, std::pair<float, float>>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
-            if (!order[i].scavenger) continue;
+            if (!order[i].scavenger)
+                continue;
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
             const auto& sc = r.get<Comp::ScavengerComponent>(es[i]);
             out.push_back({{tf.position.x, tf.position.z}, {sc.wish_x, sc.wish_z}});
@@ -300,4 +308,4 @@ TEST(Scavenging, RunEqualsReplay) {
     }
 }
 
-}  // namespace
+} // namespace

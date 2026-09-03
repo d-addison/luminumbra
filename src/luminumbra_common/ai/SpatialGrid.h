@@ -24,7 +24,7 @@ namespace luminumbra::ai {
 // (CreatureBrainSystem) inserts only SAME-ROLE creatures into a per-role grid, so a radius
 // query returns role-matched neighbours directly.
 struct GridPoint {
-    std::uint32_t index = 0;  // caller-side index (e.g. into the snapshot vector)
+    std::uint32_t index = 0; // caller-side index (e.g. into the snapshot vector)
     float x = 0.0f;
     float z = 0.0f;
 };
@@ -37,8 +37,8 @@ struct GridPoint {
 class UniformSpatialGrid {
 public:
     explicit UniformSpatialGrid(float cell_size)
-        : m_cell_size(cell_size > 0.0f ? cell_size : 1.0f),
-          m_inv_cell_size(1.0f / (cell_size > 0.0f ? cell_size : 1.0f)) {}
+        : m_cell_size(cell_size > 0.0f ? cell_size : 1.0f)
+        , m_inv_cell_size(1.0f / (cell_size > 0.0f ? cell_size : 1.0f)) {}
 
     // Build the grid from a span of points in a single pass. Reserving up front keeps the
     // per-tick build allocation-light.
@@ -60,13 +60,16 @@ public:
         for (std::int32_t dz = -1; dz <= 1; ++dz) {
             for (std::int32_t dx = -1; dx <= 1; ++dx) {
                 const auto it = m_buckets.find(CellKey(cx + dx, cz + dz));
-                if (it == m_buckets.end()) continue;
+                if (it == m_buckets.end())
+                    continue;
                 out.insert(out.end(), it->second.begin(), it->second.end());
             }
         }
     }
 
-    [[nodiscard]] float cell_size() const { return m_cell_size; }
+    [[nodiscard]] float cell_size() const {
+        return m_cell_size;
+    }
 
 private:
     // floor(coord / cell_size) as an int32, correct for negative coords (the C++ cast to int
@@ -74,7 +77,8 @@ private:
     [[nodiscard]] std::int32_t CellCoord(float coord) const {
         const float scaled = coord * m_inv_cell_size;
         std::int32_t c = static_cast<std::int32_t>(scaled);
-        if (static_cast<float>(c) > scaled) --c;  // floor for negatives
+        if (static_cast<float>(c) > scaled)
+            --c; // floor for negatives
         return c;
     }
 
@@ -89,4 +93,4 @@ private:
     std::unordered_map<std::int64_t, std::vector<std::uint32_t>> m_buckets;
 };
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

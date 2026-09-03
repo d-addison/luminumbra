@@ -20,9 +20,9 @@ namespace {
 
 namespace Comp = ::Luminumbra::Components;
 namespace dm = ::Luminumbra::DeterministicMath;
+using luminumbra::ai::kTerritoryMaxBias;
 using luminumbra::ai::RunTerritoryOnTick;
 using luminumbra::ai::TerritoryStats;
-using luminumbra::ai::kTerritoryMaxBias;
 
 // Spawn a creature carrying a TerritoryComponent (the opt-in) at (x,z) with the given radius.
 entt::entity spawnTerritorial(entt::registry& r, float x, float z, float radius = 20.0f) {
@@ -98,12 +98,12 @@ TEST(Territory, ClaimsHomeOnFirstTick) {
 TEST(Territory, HomeStaysFixedAfterClaim) {
     entt::registry r;
     auto e = spawnTerritorial(r, 0.0f, 0.0f, 20.0f);
-    RunTerritoryOnTick(r, 0);  // claim home at origin
+    RunTerritoryOnTick(r, 0); // claim home at origin
 
     moveTo(r, e, 100.0f, 100.0f);
     TerritoryStats s = RunTerritoryOnTick(r, 1);
 
-    EXPECT_EQ(s.claimed, 0);  // already established
+    EXPECT_EQ(s.claimed, 0); // already established
     const auto& terr = terrOf(r, e);
     EXPECT_FLOAT_EQ(terr.home_x, 0.0f);
     EXPECT_FLOAT_EQ(terr.home_z, 0.0f);
@@ -115,7 +115,7 @@ TEST(Territory, HomeStaysFixedAfterClaim) {
 TEST(Territory, InsideRadiusZeroBias) {
     entt::registry r;
     auto e = spawnTerritorial(r, 0.0f, 0.0f, 20.0f);
-    RunTerritoryOnTick(r, 0);  // claim home at origin
+    RunTerritoryOnTick(r, 0); // claim home at origin
 
     // Move to (10,0): distance 10 < radius 20 -> inside.
     moveTo(r, e, 10.0f, 0.0f);
@@ -131,14 +131,14 @@ TEST(Territory, InsideRadiusZeroBias) {
 TEST(Territory, OutsideRadiusPointsTowardHome) {
     entt::registry r;
     auto e = spawnTerritorial(r, 0.0f, 0.0f, 20.0f);
-    RunTerritoryOnTick(r, 0);  // claim home at origin
+    RunTerritoryOnTick(r, 0); // claim home at origin
 
-    moveTo(r, e, 30.0f, 0.0f);  // distance 30 > radius 20 -> outside
+    moveTo(r, e, 30.0f, 0.0f); // distance 30 > radius 20 -> outside
     TerritoryStats s = RunTerritoryOnTick(r, 1);
 
     const auto& bias = biasOf(r, e);
-    EXPECT_LT(bias.wish_x, 0.0f);                 // points back toward home (-X)
-    EXPECT_NEAR(bias.wish_z, 0.0f, 1.0e-5f);      // on-axis: no Z pull
+    EXPECT_LT(bias.wish_x, 0.0f);            // points back toward home (-X)
+    EXPECT_NEAR(bias.wish_z, 0.0f, 1.0e-5f); // on-axis: no Z pull
     EXPECT_EQ(s.homing, 1);
 }
 
@@ -148,13 +148,13 @@ TEST(Territory, BiasGrowsWithDistance) {
     entt::registry r;
     auto near = spawnTerritorial(r, 0.0f, 0.0f, 20.0f);
     auto far = spawnTerritorial(r, 0.0f, 0.0f, 20.0f);
-    RunTerritoryOnTick(r, 0);  // both claim home at origin
+    RunTerritoryOnTick(r, 0); // both claim home at origin
 
-    moveTo(r, near, 25.0f, 0.0f);  // overshoot 5
-    moveTo(r, far, 35.0f, 0.0f);   // overshoot 15
+    moveTo(r, near, 25.0f, 0.0f); // overshoot 5
+    moveTo(r, far, 35.0f, 0.0f);  // overshoot 15
     RunTerritoryOnTick(r, 1);
 
-    const float magNear = -biasOf(r, near).wish_x;  // both point -X
+    const float magNear = -biasOf(r, near).wish_x; // both point -X
     const float magFar = -biasOf(r, far).wish_x;
     EXPECT_GT(magNear, 0.0f);
     EXPECT_GT(magFar, magNear);                     // further -> stronger
@@ -167,7 +167,7 @@ TEST(Territory, BiasSaturatesAtCap) {
     auto e = spawnTerritorial(r, 0.0f, 0.0f, 20.0f);
     RunTerritoryOnTick(r, 0);
 
-    moveTo(r, e, 100000.0f, 0.0f);  // absurdly far
+    moveTo(r, e, 100000.0f, 0.0f); // absurdly far
     RunTerritoryOnTick(r, 1);
 
     const auto& bias = biasOf(r, e);
@@ -182,7 +182,7 @@ TEST(Territory, OffAxisPointsTowardHome) {
     auto e = spawnTerritorial(r, 0.0f, 0.0f, 10.0f);
     RunTerritoryOnTick(r, 0);
 
-    moveTo(r, e, 40.0f, 30.0f);  // distance 50 > radius 10
+    moveTo(r, e, 40.0f, 30.0f); // distance 50 > radius 10
     RunTerritoryOnTick(r, 1);
 
     const auto& bias = biasOf(r, e);
@@ -205,7 +205,8 @@ TEST(Territory, RunEqualsReplay) {
     };
     auto drive = [](entt::registry& r) {
         std::vector<entt::entity> ents;
-        for (auto e : r.view<Comp::TerritoryComponent>()) ents.push_back(e);
+        for (auto e : r.view<Comp::TerritoryComponent>())
+            ents.push_back(e);
         std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
@@ -228,12 +229,16 @@ TEST(Territory, RunEqualsReplay) {
     drive(b);
 
     std::vector<entt::entity> ea, eb;
-    for (auto e : a.view<Comp::TerritoryComponent>()) ea.push_back(e);
-    for (auto e : b.view<Comp::TerritoryComponent>()) eb.push_back(e);
-    std::sort(ea.begin(), ea.end(),
-              [](entt::entity x, entt::entity y) { return entt::to_integral(x) < entt::to_integral(y); });
-    std::sort(eb.begin(), eb.end(),
-              [](entt::entity x, entt::entity y) { return entt::to_integral(x) < entt::to_integral(y); });
+    for (auto e : a.view<Comp::TerritoryComponent>())
+        ea.push_back(e);
+    for (auto e : b.view<Comp::TerritoryComponent>())
+        eb.push_back(e);
+    std::sort(ea.begin(), ea.end(), [](entt::entity x, entt::entity y) {
+        return entt::to_integral(x) < entt::to_integral(y);
+    });
+    std::sort(eb.begin(), eb.end(), [](entt::entity x, entt::entity y) {
+        return entt::to_integral(x) < entt::to_integral(y);
+    });
     ASSERT_EQ(ea.size(), eb.size());
 
     for (std::size_t i = 0; i < ea.size(); ++i) {
@@ -263,7 +268,7 @@ TEST(Territory, OrderIndependent) {
 
     // A second creature interleaved should not change the first's computed bias.
     entt::registry r2;
-    auto a = spawnTerritorial(r2, 100.0f, 100.0f, 5.0f);  // claims its own distant home
+    auto a = spawnTerritorial(r2, 100.0f, 100.0f, 5.0f); // claims its own distant home
     auto b = spawnTerritorial(r2, 0.0f, 0.0f, 20.0f);
     RunTerritoryOnTick(r2, 0);
     moveTo(r2, b, 40.0f, 0.0f);
@@ -272,4 +277,4 @@ TEST(Territory, OrderIndependent) {
     EXPECT_FLOAT_EQ(biasOf(r2, b).wish_x, ref_x);
 }
 
-}  // namespace
+} // namespace

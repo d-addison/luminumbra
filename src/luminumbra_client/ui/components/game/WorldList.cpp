@@ -46,18 +46,19 @@ std::string EscapeRml(const std::string& value) {
 
 } // namespace
 
-WorldList::WorldList(const std::string& elementId) : UIComponent(elementId) {
-}
+WorldList::WorldList(const std::string& elementId)
+    : UIComponent(elementId) {}
 
 void WorldList::OnElementSet() {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     // Find child elements
     if (auto* parent = m_element->GetParentNode()) {
         m_loadingElement = parent->GetElementById("loading_worlds");
         m_emptyElement = parent->GetElementById("no_worlds");
     }
-    
+
     m_listContainer = m_element->GetElementById("world_list_items");
     if (!m_listContainer) {
         // Create list container if it doesn't exist
@@ -66,7 +67,7 @@ void WorldList::OnElementSet() {
         m_listContainer->SetId("world_list_items");
         m_element->AppendChild(std::move(listContainer));
     }
-    
+
     UpdateLoadingState();
     UpdateEmptyState();
 }
@@ -92,15 +93,15 @@ void WorldList::AddWorld(const WorldInfo& world) {
 
 void WorldList::RemoveWorld(const std::string& worldId) {
     m_worlds.erase(
-        std::remove_if(m_worlds.begin(), m_worlds.end(),
-            [&worldId](const WorldInfo& world) { return world.id == worldId; }),
-        m_worlds.end()
-    );
-    
+        std::remove_if(m_worlds.begin(),
+                       m_worlds.end(),
+                       [&worldId](const WorldInfo& world) { return world.id == worldId; }),
+        m_worlds.end());
+
     if (m_selectedWorldId == worldId) {
         ClearSelection();
     }
-    
+
     ApplyFilters();
     RebuildList();
     UpdateEmptyState();
@@ -115,9 +116,10 @@ void WorldList::SetLoading(bool loading) {
 }
 
 void WorldList::UpdateWorld(const WorldInfo& world) {
-    auto it = std::find_if(m_worlds.begin(), m_worlds.end(),
-        [&world](const WorldInfo& w) { return w.id == world.id; });
-    
+    auto it = std::find_if(m_worlds.begin(), m_worlds.end(), [&world](const WorldInfo& w) {
+        return w.id == world.id;
+    });
+
     if (it != m_worlds.end()) {
         *it = world;
         ApplyFilters();
@@ -129,24 +131,24 @@ void WorldList::ClearWorlds() {
     m_worlds.clear();
     m_filteredWorlds.clear();
     ClearSelection();
-    
+
     if (m_listContainer) {
         m_listContainer->SetInnerRML("");
         PruneDetachedEventListeners();
     }
-    
+
     UpdateEmptyState();
 }
 
 void WorldList::SelectWorld(const std::string& worldId) {
     if (m_selectedWorldId != worldId) {
         m_selectedWorldId = worldId;
-        
+
         // Update visual selection
         if (m_listContainer) {
             Rml::ElementList items;
             m_listContainer->GetElementsByClassName(items, "list-item");
-            
+
             for (auto* item : items) {
                 std::string itemWorldId = item->GetAttribute<Rml::String>("data-world-id", "");
                 if (itemWorldId == worldId) {
@@ -156,11 +158,12 @@ void WorldList::SelectWorld(const std::string& worldId) {
                 }
             }
         }
-        
+
         // Find selected world and call callback
-        auto it = std::find_if(m_worlds.begin(), m_worlds.end(),
-            [&worldId](const WorldInfo& world) { return world.id == worldId; });
-        
+        auto it = std::find_if(m_worlds.begin(),
+                               m_worlds.end(),
+                               [&worldId](const WorldInfo& world) { return world.id == worldId; });
+
         if (it != m_worlds.end() && m_selectionCallback) {
             m_selectionCallback(*it);
         }
@@ -169,11 +172,11 @@ void WorldList::SelectWorld(const std::string& worldId) {
 
 void WorldList::ClearSelection() {
     m_selectedWorldId.clear();
-    
+
     if (m_listContainer) {
         Rml::ElementList items;
         m_listContainer->GetElementsByClassName(items, "list-item");
-        
+
         for (auto* item : items) {
             item->SetClass("selected", false);
         }
@@ -181,11 +184,13 @@ void WorldList::ClearSelection() {
 }
 
 const WorldInfo* WorldList::GetSelectedWorld() const {
-    if (m_selectedWorldId.empty()) return nullptr;
-    
-    auto it = std::find_if(m_worlds.begin(), m_worlds.end(),
-        [this](const WorldInfo& world) { return world.id == m_selectedWorldId; });
-    
+    if (m_selectedWorldId.empty())
+        return nullptr;
+
+    auto it = std::find_if(m_worlds.begin(), m_worlds.end(), [this](const WorldInfo& world) {
+        return world.id == m_selectedWorldId;
+    });
+
     return (it != m_worlds.end()) ? &(*it) : nullptr;
 }
 
@@ -233,11 +238,11 @@ void WorldList::SetSortBy(SortBy sortBy, bool ascending) {
 void WorldList::BindWorlds(Property<std::vector<WorldInfo>>& worldsProperty) {
     // Set initial worlds
     SetWorlds(worldsProperty.Get());
-    
+
     // Subscribe to changes
-    TrackSubscription(worldsProperty, [this](const std::vector<WorldInfo>& oldWorlds, const std::vector<WorldInfo>& newWorlds) {
-        SetWorlds(newWorlds);
-    });
+    TrackSubscription(worldsProperty,
+                      [this](const std::vector<WorldInfo>& oldWorlds,
+                             const std::vector<WorldInfo>& newWorlds) { SetWorlds(newWorlds); });
 }
 
 void WorldList::BindSelectedWorldId(Property<std::string>& selectedIdProperty) {
@@ -245,30 +250,31 @@ void WorldList::BindSelectedWorldId(Property<std::string>& selectedIdProperty) {
     if (!selectedIdProperty.Get().empty()) {
         SelectWorld(selectedIdProperty.Get());
     }
-    
+
     // Subscribe to property changes
-    TrackSubscription(selectedIdProperty, [this](const std::string& oldId, const std::string& newId) {
-        if (!newId.empty()) {
-            SelectWorld(newId);
-        } else {
-            ClearSelection();
-        }
-    });
-    
+    TrackSubscription(selectedIdProperty,
+                      [this](const std::string& oldId, const std::string& newId) {
+                          if (!newId.empty()) {
+                              SelectWorld(newId);
+                          } else {
+                              ClearSelection();
+                          }
+                      });
+
     // Update property when selection changes
-    SetSelectionCallback([&selectedIdProperty](const WorldInfo& world) {
-        selectedIdProperty.Set(world.id);
-    });
+    SetSelectionCallback(
+        [&selectedIdProperty](const WorldInfo& world) { selectedIdProperty.Set(world.id); });
 }
 
 void WorldList::BindSearchFilter(Property<std::string>& searchProperty) {
     // Set initial filter
     SetSearchFilter(searchProperty.Get());
-    
+
     // Subscribe to changes
-    TrackSubscription(searchProperty, [this](const std::string& oldFilter, const std::string& newFilter) {
-        SetSearchFilter(newFilter);
-    });
+    TrackSubscription(searchProperty,
+                      [this](const std::string& oldFilter, const std::string& newFilter) {
+                          SetSearchFilter(newFilter);
+                      });
 }
 
 void WorldList::BindLoading(Property<bool>& loadingProperty) {
@@ -278,15 +284,16 @@ void WorldList::BindLoading(Property<bool>& loadingProperty) {
 }
 
 void WorldList::RebuildList() {
-    if (!m_listContainer) return;
-    
+    if (!m_listContainer)
+        return;
+
     // Clear existing items
     m_listContainer->SetInnerRML("");
     PruneDetachedEventListeners();
 
     // Hide loading state
     UpdateLoadingState();
-    
+
     // Create elements for filtered worlds
     for (const auto& world : m_filteredWorlds) {
         CreateWorldElement(world);
@@ -295,55 +302,55 @@ void WorldList::RebuildList() {
 
 void WorldList::ApplyFilters() {
     m_filteredWorlds.clear();
-    
+
     for (const auto& world : m_worlds) {
         bool matches = true;
-        
+
         // Apply search filter
         if (!m_searchFilter.empty() && !MatchesSearchFilter(world)) {
             matches = false;
         }
-        
+
         // Apply type filter
         if (!m_typeFilter.empty() && !MatchesTypeFilter(world)) {
             matches = false;
         }
-        
+
         // Apply favorites filter
         if (m_showFavoritesOnly && !MatchesFavoriteFilter(world)) {
             matches = false;
         }
-        
+
         // Apply recent filter
         if (m_showRecentOnly && !MatchesRecentFilter(world)) {
             matches = false;
         }
-        
+
         if (matches) {
             m_filteredWorlds.push_back(world);
         }
     }
-    
+
     // Sort filtered results
     SortWorlds();
 }
 
 void WorldList::SortWorlds() {
-    std::sort(m_filteredWorlds.begin(), m_filteredWorlds.end(),
-        [this](const WorldInfo& a, const WorldInfo& b) {
-            return CompareWorlds(a, b);
-        });
+    std::sort(m_filteredWorlds.begin(),
+              m_filteredWorlds.end(),
+              [this](const WorldInfo& a, const WorldInfo& b) { return CompareWorlds(a, b); });
 }
 
 void WorldList::CreateWorldElement(const WorldInfo& world) {
-    if (!m_listContainer || !m_document) return;
-    
+    if (!m_listContainer || !m_document)
+        return;
+
     // Create main list item
     auto itemHandle = m_document->CreateElement("div");
     Rml::Element* item = itemHandle.get();
     item->SetClass("list-item", true);
     item->SetAttribute("data-world-id", world.id);
-    
+
     // Create world entry content
     std::stringstream content;
     content << "<div class=\"world-entry-header\">";
@@ -356,7 +363,7 @@ void WorldList::CreateWorldElement(const WorldInfo& world) {
             << EscapeRml(world.id) << "\">Delete</button>";
     content << "</div>";
     content << "</div>";
-    
+
     content << "<p class=\"list-item-description\">";
     content << "Type: " << EscapeRml(GetWorldTypeDisplayName(world.type));
     if (!world.seed.empty()) {
@@ -366,13 +373,13 @@ void WorldList::CreateWorldElement(const WorldInfo& world) {
     content << "Last played: " << FormatLastPlayed(world.lastPlayed);
     content << " | " << FormatFileSize(world.fileSize);
     content << "</p>";
-    
+
     content << "<div class=\"world-preview\">";
     content << "<div class=\"world-thumbnail\"></div>";
     content << "</div>";
-    
+
     item->SetInnerRML(content.str());
-    
+
     // Add event handlers
     AddTrackedEventListener(
         item, "click", [this, worldId = world.id](Rml::Event&) { HandleWorldClick(worldId); });
@@ -479,12 +486,12 @@ std::string WorldList::FormatFileSize(size_t bytes) const {
     const char* units[] = {"B", "KB", "MB", "GB"};
     double size = static_cast<double>(bytes);
     int unit = 0;
-    
+
     while (size >= 1024.0 && unit < 3) {
         size /= 1024.0;
         unit++;
     }
-    
+
     std::stringstream ss;
     ss << std::fixed << std::setprecision(1) << size << " " << units[unit];
     return ss.str();
@@ -514,9 +521,8 @@ std::string WorldList::GetWorldTypeDisplayName(const std::string& type) const {
         {"flat_lands", "Flat Plains"},
         {"temperate_forest", "Temperate Forest"},
         {"desert", "Desert Wasteland"},
-        {"frozen", "Frozen Tundra"}
-    };
-    
+        {"frozen", "Frozen Tundra"}};
+
     auto it = typeNames.find(type);
     return (it != typeNames.end()) ? it->second : type;
 }

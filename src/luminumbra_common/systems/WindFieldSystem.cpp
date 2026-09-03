@@ -26,7 +26,7 @@ namespace {
 // coordinate that advances kBaseDriftPerTick metres per tick (a smooth slow
 // crawl through the noise field); the noise frequency below is the low-frequency
 // pin. tick is exact in double up to 2^53 so the coordinate is bit-stable.
-constexpr double kBaseDriftPerTick = 0.05; // noise-space units per tick
+constexpr double kBaseDriftPerTick = 0.05;    // noise-space units per tick
 constexpr float kBaseNoiseFrequency = 0.015f; // low-frequency large-scale swing
 
 // Per-cell spatial variation: a second low-frequency sample over the cell's
@@ -104,15 +104,17 @@ WindLayer WindFieldSystem::LayerForHeight(float world_y) noexcept {
     return WindLayer::High;
 }
 
-void WindFieldSystem::LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const {
+void WindFieldSystem::LocalCell(const Vec3& world_pos,
+                                int& out_lx,
+                                int& out_lz,
+                                bool& in_region) const {
     // World metres -> global cell index (floor division on a positive cell size).
     const float cell = m_grid.cell_size_m();
     const std::int64_t gx = static_cast<std::int64_t>(std::floor(world_pos.x / cell));
     const std::int64_t gz = static_cast<std::int64_t>(std::floor(world_pos.z / cell));
     const std::int64_t lx = gx - m_grid.origin_cell_x();
     const std::int64_t lz = gz - m_grid.origin_cell_z();
-    in_region = lx >= 0 && lz >= 0 &&
-                lx < static_cast<std::int64_t>(m_grid.extent_cells()) &&
+    in_region = lx >= 0 && lz >= 0 && lx < static_cast<std::int64_t>(m_grid.extent_cells()) &&
                 lz < static_cast<std::int64_t>(m_grid.extent_cells());
     out_lx = static_cast<int>(lx);
     out_lz = static_cast<int>(lz);
@@ -136,14 +138,13 @@ void WindFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor) {
     // gently around 1. tick is exact-in-double for the coordinate.
     const double drift = static_cast<double>(tick) * kBaseDriftPerTick;
     // Two distinct probe points in noise space (separated so x/y decorrelate).
-    float base_in_x[2] = {
-        static_cast<float>(drift) * kBaseNoiseFrequency,
-        static_cast<float>(drift + 137.0) * kBaseNoiseFrequency};
-    float base_in_y[2] = {
-        static_cast<float>(0.0) * kBaseNoiseFrequency,
-        static_cast<float>(53.0) * kBaseNoiseFrequency};
+    float base_in_x[2] = {static_cast<float>(drift) * kBaseNoiseFrequency,
+                          static_cast<float>(drift + 137.0) * kBaseNoiseFrequency};
+    float base_in_y[2] = {static_cast<float>(0.0) * kBaseNoiseFrequency,
+                          static_cast<float>(53.0) * kBaseNoiseFrequency};
     float base_out[2] = {0.0f, 0.0f};
-    m_direction_noise->GenPositionArray2D(base_out, 2, base_in_x, base_in_y, 0.0f, 0.0f, m_wind_seed);
+    m_direction_noise->GenPositionArray2D(
+        base_out, 2, base_in_x, base_in_y, 0.0f, 0.0f, m_wind_seed);
 
     // angle in [-pi, pi] from the first sample; second sample modulates speed.
     const float base_angle = base_out[0] * DeterministicMath::kPi;

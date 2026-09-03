@@ -6,9 +6,9 @@
 #include <cstdio>
 #include <vector>
 
-#include "steam/steamnetworkingsockets.h"
 #include "steam/isteamnetworkingsockets.h"
 #include "steam/isteamnetworkingutils.h"
+#include "steam/steamnetworkingsockets.h"
 
 #include "../core/Log.h"
 
@@ -23,7 +23,8 @@ bool g_gns_ready = false;
 } // namespace
 
 bool GnsLink::Init() {
-    if (g_gns_ready) return true;
+    if (g_gns_ready)
+        return true;
     SteamNetworkingErrMsg err{};
     if (!GameNetworkingSockets_Init(nullptr, err)) {
         LUMINUMBRA_CORE_ERROR("GnsLink: GameNetworkingSockets_Init failed: {}", err);
@@ -37,18 +38,24 @@ bool GnsLink::Init() {
 }
 
 void GnsLink::Shutdown() {
-    if (!g_gns_ready) return;
+    if (!g_gns_ready)
+        return;
     GameNetworkingSockets_Kill();
     g_gns_ready = false;
 }
 
-bool GnsLink::initialized() { return g_gns_ready; }
-
-void GnsLink::RunCallbacks() {
-    if (g_gns_ready) SteamNetworkingSockets()->RunCallbacks();
+bool GnsLink::initialized() {
+    return g_gns_ready;
 }
 
-GnsTransport::GnsTransport() { ActiveTransports().push_back(this); }
+void GnsLink::RunCallbacks() {
+    if (g_gns_ready)
+        SteamNetworkingSockets()->RunCallbacks();
+}
+
+GnsTransport::GnsTransport() {
+    ActiveTransports().push_back(this);
+}
 
 GnsTransport::~GnsTransport() {
     Close();
@@ -57,7 +64,8 @@ GnsTransport::~GnsTransport() {
 }
 
 bool GnsTransport::Listen(std::uint16_t port) {
-    if (!g_gns_ready) return false;
+    if (!g_gns_ready)
+        return false;
     m_is_host = true;
     SteamNetworkingIPAddr addr;
     addr.Clear();
@@ -67,7 +75,8 @@ bool GnsTransport::Listen(std::uint16_t port) {
 }
 
 bool GnsTransport::Connect(const std::string& host, std::uint16_t port) {
-    if (!g_gns_ready) return false;
+    if (!g_gns_ready)
+        return false;
     m_is_host = false;
     SteamNetworkingIPAddr addr;
     addr.Clear();
@@ -82,7 +91,8 @@ bool GnsTransport::Connect(const std::string& host, std::uint16_t port) {
 }
 
 void GnsTransport::OnConnStatusChangedStatic(SteamNetConnectionStatusChangedCallback_t* info) {
-    for (GnsTransport* t : ActiveTransports()) t->HandleConnStatusChanged(info);
+    for (GnsTransport* t : ActiveTransports())
+        t->HandleConnStatusChanged(info);
 }
 
 void GnsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChangedCallback_t* info) {
@@ -96,7 +106,8 @@ void GnsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChangedCallba
             }
             break;
         case k_ESteamNetworkingConnectionState_Connected:
-            if (info->m_hConn == m_conn) m_connected = true;
+            if (info->m_hConn == m_conn)
+                m_connected = true;
             break;
         case k_ESteamNetworkingConnectionState_ClosedByPeer:
         case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
@@ -113,17 +124,18 @@ void GnsTransport::HandleConnStatusChanged(SteamNetConnectionStatusChangedCallba
 }
 
 bool GnsTransport::SendFrame(const std::vector<std::uint8_t>& frame, FrameDelivery delivery) {
-    if (!g_gns_ready || m_conn == k_HSteamNetConnection_Invalid) return false;
-    const int flags = (delivery == FrameDelivery::Reliable)
-                          ? k_nSteamNetworkingSend_Reliable
-                          : k_nSteamNetworkingSend_Unreliable;
+    if (!g_gns_ready || m_conn == k_HSteamNetConnection_Invalid)
+        return false;
+    const int flags = (delivery == FrameDelivery::Reliable) ? k_nSteamNetworkingSend_Reliable
+                                                            : k_nSteamNetworkingSend_Unreliable;
     const EResult r = SteamNetworkingSockets()->SendMessageToConnection(
         m_conn, frame.data(), static_cast<std::uint32_t>(frame.size()), flags, nullptr);
     return r == k_EResultOK;
 }
 
 void GnsTransport::DrainInto() {
-    if (!g_gns_ready || m_conn == k_HSteamNetConnection_Invalid) return;
+    if (!g_gns_ready || m_conn == k_HSteamNetConnection_Invalid)
+        return;
     SteamNetworkingMessage_t* msgs[32];
     const int n = SteamNetworkingSockets()->ReceiveMessagesOnConnection(m_conn, msgs, 32);
     for (int i = 0; i < n; ++i) {
@@ -136,13 +148,16 @@ void GnsTransport::DrainInto() {
 
 bool GnsTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     DrainInto();
-    if (m_recv.empty()) return false;
+    if (m_recv.empty())
+        return false;
     out = std::move(m_recv.front());
     m_recv.pop_front();
     return true;
 }
 
-bool GnsTransport::IsPeerConnected() const { return m_connected && !m_closed; }
+bool GnsTransport::IsPeerConnected() const {
+    return m_connected && !m_closed;
+}
 
 void GnsTransport::Close() {
     if (m_conn != k_HSteamNetConnection_Invalid && g_gns_ready) {

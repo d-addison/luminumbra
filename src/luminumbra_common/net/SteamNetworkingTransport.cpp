@@ -7,9 +7,9 @@
 #include <fstream>
 #include <vector>
 
-#include "steam/steam_api.h"
 #include "steam/isteamnetworkingsockets.h"
 #include "steam/isteamnetworkingutils.h"
+#include "steam/steam_api.h"
 
 #include "../core/Log.h"
 
@@ -27,7 +27,8 @@ bool g_steam_ready = false;
 } // namespace
 
 bool SteamLink::Init(std::uint32_t dev_app_id) {
-    if (g_steam_ready) return true;
+    if (g_steam_ready)
+        return true;
     // SteamAPI_Init attaches to the running Steam client for the app id in
     // steam_appid.txt (480 = Spacewar works for dev without a published app).
     {
@@ -39,8 +40,10 @@ bool SteamLink::Init(std::uint32_t dev_app_id) {
     }
     SteamErrMsg err{};
     if (SteamAPI_InitEx(&err) != k_ESteamAPIInitResult_OK) {
-        LUMINUMBRA_CORE_ERROR("SteamLink: SteamAPI_Init failed: {} (is the Steam client running, app id {}?)",
-                              err, dev_app_id);
+        LUMINUMBRA_CORE_ERROR(
+            "SteamLink: SteamAPI_Init failed: {} (is the Steam client running, app id {}?)",
+            err,
+            dev_app_id);
         return false;
     }
     if (SteamNetworkingUtils() == nullptr || SteamNetworkingSockets() == nullptr) {
@@ -59,15 +62,19 @@ bool SteamLink::Init(std::uint32_t dev_app_id) {
 }
 
 void SteamLink::Shutdown() {
-    if (!g_steam_ready) return;
+    if (!g_steam_ready)
+        return;
     SteamAPI_Shutdown();
     g_steam_ready = false;
 }
 
-bool SteamLink::initialized() { return g_steam_ready; }
+bool SteamLink::initialized() {
+    return g_steam_ready;
+}
 
 void SteamLink::RunCallbacks() {
-    if (g_steam_ready) SteamAPI_RunCallbacks();
+    if (g_steam_ready)
+        SteamAPI_RunCallbacks();
 }
 
 SteamNetworkingTransport::SteamNetworkingTransport() {
@@ -81,7 +88,8 @@ SteamNetworkingTransport::~SteamNetworkingTransport() {
 }
 
 bool SteamNetworkingTransport::Listen(std::uint16_t port) {
-    if (!g_steam_ready) return false;
+    if (!g_steam_ready)
+        return false;
     m_is_host = true;
     SteamNetworkingIPAddr addr;
     addr.Clear();
@@ -91,7 +99,8 @@ bool SteamNetworkingTransport::Listen(std::uint16_t port) {
 }
 
 bool SteamNetworkingTransport::Connect(const std::string& host, std::uint16_t port) {
-    if (!g_steam_ready) return false;
+    if (!g_steam_ready)
+        return false;
     m_is_host = false;
     SteamNetworkingIPAddr addr;
     addr.Clear();
@@ -125,7 +134,8 @@ void SteamNetworkingTransport::HandleConnStatusChanged(
             }
             break;
         case k_ESteamNetworkingConnectionState_Connected:
-            if (info->m_hConn == m_conn) m_connected = true;
+            if (info->m_hConn == m_conn)
+                m_connected = true;
             break;
         case k_ESteamNetworkingConnectionState_ClosedByPeer:
         case k_ESteamNetworkingConnectionState_ProblemDetectedLocally:
@@ -143,17 +153,18 @@ void SteamNetworkingTransport::HandleConnStatusChanged(
 
 bool SteamNetworkingTransport::SendFrame(const std::vector<std::uint8_t>& frame,
                                          FrameDelivery delivery) {
-    if (!g_steam_ready || m_conn == k_HSteamNetConnection_Invalid) return false;
-    const int flags = (delivery == FrameDelivery::Reliable)
-                          ? k_nSteamNetworkingSend_Reliable
-                          : k_nSteamNetworkingSend_Unreliable;
+    if (!g_steam_ready || m_conn == k_HSteamNetConnection_Invalid)
+        return false;
+    const int flags = (delivery == FrameDelivery::Reliable) ? k_nSteamNetworkingSend_Reliable
+                                                            : k_nSteamNetworkingSend_Unreliable;
     const EResult r = SteamNetworkingSockets()->SendMessageToConnection(
         m_conn, frame.data(), static_cast<std::uint32_t>(frame.size()), flags, nullptr);
     return r == k_EResultOK;
 }
 
 void SteamNetworkingTransport::DrainInto() {
-    if (!g_steam_ready || m_conn == k_HSteamNetConnection_Invalid) return;
+    if (!g_steam_ready || m_conn == k_HSteamNetConnection_Invalid)
+        return;
     SteamNetworkingMessage_t* msgs[32];
     const int n = SteamNetworkingSockets()->ReceiveMessagesOnConnection(m_conn, msgs, 32);
     for (int i = 0; i < n; ++i) {
@@ -166,7 +177,8 @@ void SteamNetworkingTransport::DrainInto() {
 
 bool SteamNetworkingTransport::TryReceiveFrame(std::vector<std::uint8_t>& out) {
     DrainInto();
-    if (m_recv.empty()) return false;
+    if (m_recv.empty())
+        return false;
     out = std::move(m_recv.front());
     m_recv.pop_front();
     return true;

@@ -18,9 +18,9 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunCircadianOnTick;
-using luminumbra::ai::CircadianStats;
 using luminumbra::ai::CircadianActivity;
+using luminumbra::ai::CircadianStats;
+using luminumbra::ai::RunCircadianOnTick;
 
 // Spawn a creature carrying a CircadianComponent (the opt-in). `nocturnal` sets the phenotype.
 entt::entity spawnCreature(entt::registry& r, bool nocturnal) {
@@ -49,7 +49,7 @@ TEST(Circadian, EmptyRosterNoOp) {
 // of non-participants is a pure no-op.
 TEST(Circadian, NonParticipantsIgnored) {
     entt::registry r;
-    auto e = r.create();  // bare entity, no CircadianComponent
+    auto e = r.create(); // bare entity, no CircadianComponent
     (void)e;
     CircadianStats s = RunCircadianOnTick(r, 0.5f);
     EXPECT_EQ(s.participants, 0);
@@ -61,14 +61,14 @@ TEST(Circadian, DiurnalHighAtNoonLowAtMidnight) {
     entt::registry r;
     auto e = spawnCreature(r, /*nocturnal=*/false);
 
-    RunCircadianOnTick(r, 0.5f);  // noon
+    RunCircadianOnTick(r, 0.5f); // noon
     const float noon = activityOf(r, e);
 
-    RunCircadianOnTick(r, 0.0f);  // midnight
+    RunCircadianOnTick(r, 0.0f); // midnight
     const float midnight = activityOf(r, e);
 
-    EXPECT_GT(noon, 0.99f);        // peaks at noon (~1).
-    EXPECT_LT(midnight, 0.01f);    // bottoms out at midnight (~0).
+    EXPECT_GT(noon, 0.99f);     // peaks at noon (~1).
+    EXPECT_LT(midnight, 0.01f); // bottoms out at midnight (~0).
     EXPECT_GT(noon, midnight);
 }
 
@@ -78,14 +78,14 @@ TEST(Circadian, NocturnalIsInverse) {
     entt::registry r;
     auto e = spawnCreature(r, /*nocturnal=*/true);
 
-    RunCircadianOnTick(r, 0.5f);  // noon
+    RunCircadianOnTick(r, 0.5f); // noon
     const float noon = activityOf(r, e);
 
-    RunCircadianOnTick(r, 0.0f);  // midnight
+    RunCircadianOnTick(r, 0.0f); // midnight
     const float midnight = activityOf(r, e);
 
-    EXPECT_LT(noon, 0.01f);        // nocturnal rests at noon (~0).
-    EXPECT_GT(midnight, 0.99f);    // nocturnal peaks at midnight (~1).
+    EXPECT_LT(noon, 0.01f);     // nocturnal rests at noon (~0).
+    EXPECT_GT(midnight, 0.99f); // nocturnal peaks at midnight (~1).
     EXPECT_GT(midnight, noon);
 }
 
@@ -113,7 +113,7 @@ TEST(Circadian, ActivityInUnitRange) {
     auto night = spawnCreature(r, /*nocturnal=*/true);
 
     for (int i = 0; i <= 200; ++i) {
-        const float t = static_cast<float>(i) / 200.0f;  // sweep 0..1
+        const float t = static_cast<float>(i) / 200.0f; // sweep 0..1
         RunCircadianOnTick(r, t);
         const float a = activityOf(r, day);
         const float b = activityOf(r, night);
@@ -132,7 +132,7 @@ TEST(Circadian, SmoothAndContinuous) {
     float prev = CircadianActivity(0.0f, /*nocturnal=*/false);
     const int N = 1000;
     for (int i = 1; i <= N; ++i) {
-        const float t = static_cast<float>(i) / static_cast<float>(N);  // 1/N .. 1.0
+        const float t = static_cast<float>(i) / static_cast<float>(N); // 1/N .. 1.0
         const float cur = CircadianActivity(t, /*nocturnal=*/false);
         // Max slope of 0.5*(1-cos(2*pi*t)) is pi (~3.1416); over a step of 1/N the change is
         // well under 0.02. A generous bound catches any discontinuity.
@@ -154,7 +154,7 @@ TEST(Circadian, SmoothAndContinuous) {
 TEST(Circadian, DiurnalRisesFromMidnightToNoon) {
     float prev = CircadianActivity(0.0f, false);
     for (int i = 1; i <= 50; ++i) {
-        const float t = 0.5f * static_cast<float>(i) / 50.0f;  // 0 .. 0.5 (midnight -> noon)
+        const float t = 0.5f * static_cast<float>(i) / 50.0f; // 0 .. 0.5 (midnight -> noon)
         const float cur = CircadianActivity(t, false);
         EXPECT_GE(cur, prev - 1e-4f) << "should not decrease before noon, t=" << t;
         prev = cur;
@@ -196,7 +196,7 @@ TEST(Circadian, RunEqualsReplay) {
         es.push_back(spawnCreature(r, true));
         std::vector<float> trace;
         for (int t = 0; t < 120; ++t) {
-            const float tod = static_cast<float>(t) / 120.0f;  // sweep a full day
+            const float tod = static_cast<float>(t) / 120.0f; // sweep a full day
             RunCircadianOnTick(r, tod);
             for (auto e : es) {
                 trace.push_back(r.get<Comp::CircadianComponent>(e).activity);
@@ -214,4 +214,4 @@ TEST(Circadian, RunEqualsReplay) {
     }
 }
 
-}  // namespace
+} // namespace

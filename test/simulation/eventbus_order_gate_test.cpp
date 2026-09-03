@@ -6,18 +6,16 @@
 
 namespace {
 
-int fail(const char* message)
-{
+int fail(const char* message) {
     std::cerr << message << '\n';
     return 1;
 }
 
 } // namespace
 
-int main()
-{
-    using luminumbra::simulation::OrderedEventBus;
+int main() {
     using luminumbra::simulation::describe_event_order;
+    using luminumbra::simulation::OrderedEventBus;
     using luminumbra::simulation::replay_eventbus_order_fixture;
 
     const std::vector<std::string> expected_order = {

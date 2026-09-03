@@ -2,18 +2,15 @@
 
 namespace luminumbra::core {
 
-std::string_view GetEngineVersion() noexcept
-{
+std::string_view GetEngineVersion() noexcept {
     return kEngineVersion;
 }
 
-std::string_view GetEngineGitSha() noexcept
-{
+std::string_view GetEngineGitSha() noexcept {
     return kEngineGitSha;
 }
 
-std::string_view GetEngineVersionString() noexcept
-{
+std::string_view GetEngineVersionString() noexcept {
     return kEngineVersionString;
 }
 

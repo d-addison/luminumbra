@@ -16,11 +16,11 @@ struct StageMeta {
 
 constexpr std::array<StageMeta, kLayerStageCount> kStages = {{
     {LayerStage::BaseTerrain, "base_terrain", "Base Terrain (FBM)"},
-    {LayerStage::Shaping,     "shaping",      "Continental Shaping"},
-    {LayerStage::Hydro,       "hydro",        "Hydraulic / Thermal Erosion"},
-    {LayerStage::Biomes,      "biomes",       "Biomes & Relief"},
-    {LayerStage::Features,    "features",     "Features (caves/rivers/lakes/cliffs)"},
-    {LayerStage::Materials,   "materials",    "Materials (strata/veins)"},
+    {LayerStage::Shaping, "shaping", "Continental Shaping"},
+    {LayerStage::Hydro, "hydro", "Hydraulic / Thermal Erosion"},
+    {LayerStage::Biomes, "biomes", "Biomes & Relief"},
+    {LayerStage::Features, "features", "Features (caves/rivers/lakes/cliffs)"},
+    {LayerStage::Materials, "materials", "Materials (strata/veins)"},
 }};
 
 // A node carrying an absent stage (params null, present=false).
@@ -32,7 +32,7 @@ LayerNode AbsentNode(LayerStage stage) {
     return n;
 }
 
-}  // namespace
+} // namespace
 
 const char* LayerStageId(LayerStage stage) {
     return kStages[static_cast<std::size_t>(stage)].id;
@@ -124,8 +124,8 @@ LayerGraph LayerGraphFromPreset(const nlohmann::json& preset) {
     //     Compile exhaustive: an unknown future key round-trips bit-exactly.
     for (auto it = gp.begin(); it != gp.end(); ++it) {
         const std::string& key = it.key();
-        if (key == "terrain" || key == "biomes" || key == "features" ||
-            key == "materials" || key == "graph") {
+        if (key == "terrain" || key == "biomes" || key == "features" || key == "materials" ||
+            key == "graph") {
             continue;
         }
         graph.passthrough[key] = it.value();
@@ -237,4 +237,4 @@ nlohmann::json& WriteLayerGraph(nlohmann::json& preset, const LayerGraph& graph)
     return preset;
 }
 
-}  // namespace Luminumbra::world
+} // namespace Luminumbra::world

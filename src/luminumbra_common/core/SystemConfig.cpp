@@ -13,19 +13,22 @@
 namespace luminumbra::core {
 namespace {
 
-enum class Section : std::uint8_t { Sim, Render };
+enum class Section : std::uint8_t {
+    Sim,
+    Render
+};
 
 struct KeyMeta {
     SysKey key;
     Section section;
-    const char* json_section;  // "sim" | "render"
-    const char* json_name;     // e.g. "plant_growth"
+    const char* json_section; // "sim" | "render"
+    const char* json_name;    // e.g. "plant_growth"
 };
 
 struct ParamMeta {
     SysParam id;
     SysKey owner;
-    const char* json_name;  // e.g. "mutation_rate"
+    const char* json_name; // e.g. "mutation_rate"
     bool is_vec3;
     float default_scalar;
     glm::vec3 default_vec3;
@@ -39,14 +42,14 @@ struct ParamMeta {
 // edit these tables by hand — edit ConfigSchema.json then `python tools/config_codegen.py
 // --emit src/luminumbra_common/core/SystemConfigRegistry.gen.h`; --check fails CI on drift.
 constexpr KeyMeta kKeys[] = {
-#define LUMIN_CONFIG_EMIT_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY) \
+#define LUMIN_CONFIG_EMIT_KEY(ENUM, SECTION, JSON_SECTION, JSON_NAME, RESIDENCY)                   \
     {SysKey::ENUM, Section::SECTION, JSON_SECTION, JSON_NAME},
     LUMIN_CONFIG_KEY_TABLE(LUMIN_CONFIG_EMIT_KEY)
 #undef LUMIN_CONFIG_EMIT_KEY
 };
 
 constexpr ParamMeta kParams[] = {
-#define LUMIN_CONFIG_EMIT_PARAM(ENUM, OWNER, JSON_NAME, IS_VEC3, SCALAR, VX, VY, VZ) \
+#define LUMIN_CONFIG_EMIT_PARAM(ENUM, OWNER, JSON_NAME, IS_VEC3, SCALAR, VX, VY, VZ)               \
     {SysParam::ENUM, SysKey::OWNER, JSON_NAME, IS_VEC3, SCALAR, glm::vec3(VX, VY, VZ)},
     LUMIN_CONFIG_PARAM_TABLE(LUMIN_CONFIG_EMIT_PARAM)
 #undef LUMIN_CONFIG_EMIT_PARAM
@@ -55,7 +58,8 @@ constexpr ParamMeta kParams[] = {
 // Overlay the `user.*` section of `data` onto `user`, setting only named fields (merge
 // semantics: an absent field keeps its current/default value). render-client-only; never hashed.
 void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
-    if (!data.is_object() || !data.contains("user") || !data["user"].is_object()) return;
+    if (!data.is_object() || !data.contains("user") || !data["user"].is_object())
+        return;
     const nlohmann::json& u = data["user"];
 
     if (u.contains("video") && u["video"].is_object()) {
@@ -64,8 +68,10 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
             user.resolution = v["resolution"].get<std::string>();
         if (v.contains("window_mode") && v["window_mode"].is_string())
             user.window_mode = v["window_mode"].get<std::string>();
-        if (v.contains("vsync") && v["vsync"].is_boolean()) user.vsync = v["vsync"].get<bool>();
-        if (v.contains("fov") && v["fov"].is_number()) user.fov = v["fov"].get<float>();
+        if (v.contains("vsync") && v["vsync"].is_boolean())
+            user.vsync = v["vsync"].get<bool>();
+        if (v.contains("fov") && v["fov"].is_number())
+            user.fov = v["fov"].get<float>();
         if (v.contains("render_scale") && v["render_scale"].is_number())
             user.render_scale = v["render_scale"].get<float>();
         if (v.contains("ui_scale") && v["ui_scale"].is_number())
@@ -75,55 +81,68 @@ void ParseUserSection(const nlohmann::json& data, UserSettings& user) {
     }
     if (u.contains("audio") && u["audio"].is_object()) {
         const nlohmann::json& a = u["audio"];
-        if (a.contains("master") && a["master"].is_number()) user.audio_master = a["master"].get<float>();
-        if (a.contains("sfx") && a["sfx"].is_number()) user.audio_sfx = a["sfx"].get<float>();
-        if (a.contains("music") && a["music"].is_number()) user.audio_music = a["music"].get<float>();
+        if (a.contains("master") && a["master"].is_number())
+            user.audio_master = a["master"].get<float>();
+        if (a.contains("sfx") && a["sfx"].is_number())
+            user.audio_sfx = a["sfx"].get<float>();
+        if (a.contains("music") && a["music"].is_number())
+            user.audio_music = a["music"].get<float>();
     }
     if (u.contains("controls") && u["controls"].is_object()) {
         for (const auto& [action, key] : u["controls"].items()) {
-            if (key.is_number_integer()) user.keybinds[action] = key.get<int>();
+            if (key.is_number_integer())
+                user.keybinds[action] = key.get<int>();
         }
     }
 }
 
-}  // namespace
+} // namespace
 
-SystemConfig SystemConfig::Defaults() { return SystemConfig{}; }
+SystemConfig SystemConfig::Defaults() {
+    return SystemConfig{};
+}
 
 SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
-    SystemConfig cfg;  // start from all-defaults; overlay only what the JSON names
+    SystemConfig cfg; // start from all-defaults; overlay only what the JSON names
 
     nlohmann::json data;
     try {
         data = nlohmann::json::parse(json_text);
     } catch (const nlohmann::json::parse_error&) {
-        return cfg;  // malformed/empty/blank -> defaults (graceful)
+        return cfg; // malformed/empty/blank -> defaults (graceful)
     }
-    if (!data.is_object()) return cfg;
+    if (!data.is_object())
+        return cfg;
 
     for (const auto& key_meta : kKeys) {
-        if (!data.contains(key_meta.json_section)) continue;
+        if (!data.contains(key_meta.json_section))
+            continue;
         const nlohmann::json& section = data[key_meta.json_section];
-        if (!section.is_object() || !section.contains(key_meta.json_name)) continue;
+        if (!section.is_object() || !section.contains(key_meta.json_name))
+            continue;
         const nlohmann::json& entry = section[key_meta.json_name];
-        if (!entry.is_object()) continue;
+        if (!entry.is_object())
+            continue;
 
         if (entry.contains("enabled") && entry["enabled"].is_boolean() &&
             entry["enabled"].get<bool>()) {
             cfg.m_enabled |= (1u << static_cast<unsigned>(key_meta.key));
         }
 
-        if (!entry.contains("params") || !entry["params"].is_object()) continue;
+        if (!entry.contains("params") || !entry["params"].is_object())
+            continue;
         const nlohmann::json& params = entry["params"];
         for (const auto& pm : kParams) {
-            if (pm.owner != key_meta.key) continue;
-            if (!params.contains(pm.json_name)) continue;
+            if (pm.owner != key_meta.key)
+                continue;
+            if (!params.contains(pm.json_name))
+                continue;
             const nlohmann::json& value = params[pm.json_name];
             const std::size_t pi = static_cast<std::size_t>(pm.id);
             if (pm.is_vec3) {
                 if (value.is_array() && value.size() == 3) {
-                    cfg.m_params[pi] = glm::vec3(value[0].get<float>(), value[1].get<float>(),
-                                                 value[2].get<float>());
+                    cfg.m_params[pi] = glm::vec3(
+                        value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
                     cfg.m_param_set |= (1ull << static_cast<unsigned>(pm.id));
                 }
             } else if (value.is_number()) {
@@ -133,13 +152,14 @@ SystemConfig SystemConfig::FromJsonString(const std::string& json_text) {
         }
     }
 
-    ParseUserSection(data, cfg.m_user);  // user.* (client-only, never hashed)
+    ParseUserSection(data, cfg.m_user); // user.* (client-only, never hashed)
     return cfg;
 }
 
 SystemConfig SystemConfig::LoadFromFile(const std::string& path) {
     std::ifstream file(path);
-    if (!file) return SystemConfig{};  // missing/unreadable -> defaults
+    if (!file)
+        return SystemConfig{}; // missing/unreadable -> defaults
     std::ostringstream buffer;
     buffer << file.rdbuf();
     return FromJsonString(buffer.str());
@@ -165,14 +185,17 @@ std::string SystemConfig::ComputeConfigSubHash() const {
     bool any = false;
 
     for (const auto& key_meta : kKeys) {
-        if (key_meta.section != Section::Sim) continue;  // render.* never hashed
-        if (!enabled(key_meta.key)) continue;            // only enabled sim systems affect state
+        if (key_meta.section != Section::Sim)
+            continue; // render.* never hashed
+        if (!enabled(key_meta.key))
+            continue; // only enabled sim systems affect state
         any = true;
         bytes << key_meta.json_name << ":en=1;";
         // Emit every owned param's RESOLVED value (set value or compiled default), in
         // SysParam enum order, so identical configs hash identically regardless of JSON order.
         for (const auto& pm : kParams) {
-            if (pm.owner != key_meta.key) continue;
+            if (pm.owner != key_meta.key)
+                continue;
             const std::size_t pi = static_cast<std::size_t>(pm.id);
             const bool set = (m_param_set >> static_cast<unsigned>(pm.id)) & 1u;
             if (pm.is_vec3) {
@@ -185,7 +208,8 @@ std::string SystemConfig::ComputeConfigSubHash() const {
         }
     }
 
-    if (!any) return {};  // all sim defaults -> byte-identical baseline
+    if (!any)
+        return {}; // all sim defaults -> byte-identical baseline
     return Luminumbra::Persistence::StableChecksum(bytes.str());
 }
 
@@ -199,19 +223,20 @@ void SystemConfig::OverlayUserFromJsonString(const std::string& json_text) {
     try {
         data = nlohmann::json::parse(json_text);
     } catch (const nlohmann::json::parse_error&) {
-        return;  // malformed overlay -> leave settings unchanged
+        return; // malformed overlay -> leave settings unchanged
     }
-    ParseUserSection(data, m_user);  // only user.*; sim/render ignored
+    ParseUserSection(data, m_user); // only user.*; sim/render ignored
 }
 
 SystemConfig SystemConfig::LoadLayered(const std::string& defaults_path,
                                        const std::string& overlay_path) {
-    SystemConfig cfg = LoadFromFile(defaults_path);  // sim/render/user from defaults (missing -> defaults)
+    SystemConfig cfg =
+        LoadFromFile(defaults_path); // sim/render/user from defaults (missing -> defaults)
     std::ifstream overlay(overlay_path);
     if (overlay) {
         std::ostringstream buffer;
         buffer << overlay.rdbuf();
-        cfg.OverlayUserFromJsonString(buffer.str());  // per-user file overrides only user.*
+        cfg.OverlayUserFromJsonString(buffer.str()); // per-user file overrides only user.*
     }
     return cfg;
 }
@@ -234,24 +259,29 @@ bool SystemConfig::SaveUserOverlay(const std::string& path) const {
         {"music", m_user.audio_music},
     };
     nlohmann::json controls = nlohmann::json::object();
-    for (const auto& [action, key] : m_user.keybinds) controls[action] = key;
+    for (const auto& [action, key] : m_user.keybinds)
+        controls[action] = key;
     user["controls"] = controls;
 
     nlohmann::json doc;
-    doc["_comment"] = "Luminumbra per-user settings overlay (user.* only; client-only, never hashed).";
+    doc["_comment"] =
+        "Luminumbra per-user settings overlay (user.* only; client-only, never hashed).";
     doc["user"] = user;
 
     std::error_code ec;
     const std::filesystem::path out(path);
-    if (out.has_parent_path()) std::filesystem::create_directories(out.parent_path(), ec);
+    if (out.has_parent_path())
+        std::filesystem::create_directories(out.parent_path(), ec);
 
     // Atomic-ish write: temp file then rename over the target.
     const std::filesystem::path tmp = out.string() + ".tmp";
     {
         std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file) return false;
+        if (!file)
+            return false;
         file << doc.dump(2) << '\n';
-        if (!file) return false;
+        if (!file)
+            return false;
     }
     std::filesystem::rename(tmp, out, ec);
     if (ec) {
@@ -274,7 +304,7 @@ std::string SystemConfig::DefaultUserOverlayPath() {
         return (std::filesystem::path(*home) / ".config" / "luminumbra" / "settings.json").string();
     }
 #endif
-    return "settings.json";  // last-resort: cwd
+    return "settings.json"; // last-resort: cwd
 }
 
-}  // namespace luminumbra::core
+} // namespace luminumbra::core

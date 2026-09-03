@@ -35,27 +35,29 @@ namespace {
 using Luminumbra::Vec2;
 using Luminumbra::Vec3;
 using Luminumbra::Systems::AetherFieldSystem;
+using Luminumbra::Systems::kAetherCellSizeM;
+using Luminumbra::Systems::kAetherExtentCells;
+using Luminumbra::Systems::kMaxLiveStrikes;
+using Luminumbra::Systems::kMaxStormCells;
+using Luminumbra::Systems::kStrikeIntensityThreshold;
+using Luminumbra::Systems::kWeatherCellSizeM;
+using Luminumbra::Systems::kWeatherExtentCells;
+using Luminumbra::Systems::kWindCellSizeM;
+using Luminumbra::Systems::kWindExtentCells;
+using Luminumbra::Systems::kWindGroundTopM;
+using Luminumbra::Systems::kWindLayerCount;
+using Luminumbra::Systems::kWindMidTopM;
 using Luminumbra::Systems::WeatherCategory;
 using Luminumbra::Systems::WeatherSystem;
 using Luminumbra::Systems::WindFieldSystem;
 using Luminumbra::Systems::WindLayer;
-using Luminumbra::Systems::kWindLayerCount;
-using Luminumbra::Systems::kWindCellSizeM;
-using Luminumbra::Systems::kWindExtentCells;
-using Luminumbra::Systems::kWindGroundTopM;
-using Luminumbra::Systems::kWindMidTopM;
-using Luminumbra::Systems::kAetherCellSizeM;
-using Luminumbra::Systems::kAetherExtentCells;
-using Luminumbra::Systems::kWeatherCellSizeM;
-using Luminumbra::Systems::kWeatherExtentCells;
-using Luminumbra::Systems::kMaxStormCells;
-using Luminumbra::Systems::kMaxLiveStrikes;
-using Luminumbra::Systems::kStrikeIntensityThreshold;
 
 constexpr int kSeed = 424242;
 const Vec3 kAnchor(8.0f, 100.0f, 8.0f);
 
-float Mag(const Vec2& v) { return std::sqrt(v.x * v.x + v.y * v.y); }
+float Mag(const Vec2& v) {
+    return std::sqrt(v.x * v.x + v.y * v.y);
+}
 
 // --------------------------------------------------------------------------
 // WIND: nearest-cell sampling, layer-band threshold edges, out-of-region
@@ -70,8 +72,10 @@ TEST(WindHardening, SampleIsCellConstantWithinACell) {
     wind.Update(60, kAnchor);
     // Two points well inside the anchor cell (cell pitch 24 m): quarter and
     // three-quarter of the cell, same layer.
-    const Vec2 a = wind.SampleWind(Vec3(kAnchor.x + 1.0f, 5.0f, kAnchor.z + 1.0f), WindLayer::Ground);
-    const Vec2 b = wind.SampleWind(Vec3(kAnchor.x + 5.0f, 5.0f, kAnchor.z + 5.0f), WindLayer::Ground);
+    const Vec2 a =
+        wind.SampleWind(Vec3(kAnchor.x + 1.0f, 5.0f, kAnchor.z + 1.0f), WindLayer::Ground);
+    const Vec2 b =
+        wind.SampleWind(Vec3(kAnchor.x + 5.0f, 5.0f, kAnchor.z + 5.0f), WindLayer::Ground);
     EXPECT_FLOAT_EQ(a.x, b.x);
     EXPECT_FLOAT_EQ(a.y, b.y);
 }
@@ -153,7 +157,8 @@ TEST(WindHardening, RegionMembershipEdgeIsExclusiveAtFarExtent) {
     const float first_out_cell_x = (origin_x + static_cast<float>(extent) + 0.5f) * cell;
 
     const Vec2 inside = wind.SampleWind(Vec3(last_in_cell_x, 5.0f, kAnchor.z), WindLayer::Ground);
-    const Vec2 outside = wind.SampleWind(Vec3(first_out_cell_x, 5.0f, kAnchor.z), WindLayer::Ground);
+    const Vec2 outside =
+        wind.SampleWind(Vec3(first_out_cell_x, 5.0f, kAnchor.z), WindLayer::Ground);
 
     const Vec2 base = wind.BaseDirection();
     // The out-of-region sample is exactly base*speed (direction collinear, no jitter).
@@ -291,10 +296,12 @@ TEST(AetherHardening, EveryCellIsNonNegative) {
         for (int lx = 0; lx < extent; ++lx) {
             const float v = grid.cells()[grid.index(lx, lz)];
             ASSERT_TRUE(std::isfinite(v)) << "non-finite aether at (" << lx << "," << lz << ")";
-            if (v < min_v) min_v = v;
+            if (v < min_v)
+                min_v = v;
         }
     }
-    EXPECT_GE(min_v, 0.0f) << "aether field leaked a NEGATIVE cell (emission remap or diffusion bug)";
+    EXPECT_GE(min_v, 0.0f)
+        << "aether field leaked a NEGATIVE cell (emission remap or diffusion bug)";
     // And the convex average can never exceed the [0,1] emission ceiling.
     float max_v = -1.0e30f;
     for (int lz = 0; lz < extent; ++lz) {
@@ -305,7 +312,8 @@ TEST(AetherHardening, EveryCellIsNonNegative) {
     // Convex diffusion of an emission source that is ~[0,1] (FastNoise FBm can
     // marginally overshoot [-1,1], so allow a small slack); a value far above 1
     // would indicate a non-convex blend / unbounded accumulation, not noise slack.
-    EXPECT_LE(max_v, 1.25f) << "aether ran far past the emission ceiling (non-convex blend / unbounded)";
+    EXPECT_LE(max_v, 1.25f)
+        << "aether ran far past the emission ceiling (non-convex blend / unbounded)";
 }
 
 // SampleAether at an exact known grid point (a cell centre) returns the stored
@@ -495,14 +503,18 @@ TEST(WeatherHardening, PrecipAtStormCentreIsFiniteAndClamped) {
     for (std::uint64_t t = 1; t <= 300; ++t) {
         wind.Update(t, kAnchor);
         w.Update(t, kAnchor, &wind);
-        if (w.active_storm_count() > 0) { found_tick = t; break; }
+        if (w.active_storm_count() > 0) {
+            found_tick = t;
+            break;
+        }
     }
     ASSERT_GT(found_tick, 0u) << "no storm spawned to probe (schedule vacuous)";
     const auto& cells = w.StormCells();
     ASSERT_FALSE(cells.empty());
     const Vec2 c = cells.front().center_world; // (x, z) packed in Vec2
     const float p = w.PrecipitationAt(Vec3(c.x, 5.0f, c.y));
-    EXPECT_TRUE(std::isfinite(p)) << "precip at storm centre is non-finite (Sqrt(0) / divide degeneracy)";
+    EXPECT_TRUE(std::isfinite(p))
+        << "precip at storm centre is non-finite (Sqrt(0) / divide degeneracy)";
     EXPECT_GE(p, 0.0f);
     EXPECT_LE(p, 1.0f) << "precip exceeded the [0,1] clamp at the storm centre";
     // SampleAt at the same point is also clamped + finite for storm_intensity.
@@ -590,7 +602,8 @@ TEST(WeatherHardening, GridOriginQuantizedBeforeFirstStorm) {
         a.Update(t, Vec3(8.0f, 100.0f, 8.0f), nullptr);
         b.Update(t, Vec3(20.0f, 100.0f, 20.0f), nullptr); // same 24 m cell
     }
-    EXPECT_EQ(a.active_storm_count(), 0) << "a storm spawned before tick 45 (test assumption broken)";
+    EXPECT_EQ(a.active_storm_count(), 0)
+        << "a storm spawned before tick 45 (test assumption broken)";
     EXPECT_EQ(b.active_storm_count(), 0);
     EXPECT_EQ(a.ComputeWeatherSubHash(), b.ComputeWeatherSubHash())
         << "weather grid bits leaked the raw sub-cell anchor before any storm spawned";
@@ -626,12 +639,12 @@ TEST(WeatherHardening, StrikeScheduleIsCanonicallyOrdered) {
     for (std::size_t i = 1; i < s.size(); ++i) {
         const auto& p = s[i - 1];
         const auto& q = s[i];
-        bool ordered = (p.strike_tick < q.strike_tick) ||
-                       (p.strike_tick == q.strike_tick &&
-                        (p.storm_salt < q.storm_salt ||
-                         (p.storm_salt == q.storm_salt &&
-                          (p.world_x < q.world_x ||
-                           (p.world_x == q.world_x && p.world_z <= q.world_z)))));
+        bool ordered =
+            (p.strike_tick < q.strike_tick) ||
+            (p.strike_tick == q.strike_tick &&
+             (p.storm_salt < q.storm_salt ||
+              (p.storm_salt == q.storm_salt &&
+               (p.world_x < q.world_x || (p.world_x == q.world_x && p.world_z <= q.world_z)))));
         EXPECT_TRUE(ordered) << "strike schedule out of canonical order at index " << i;
     }
 }
@@ -646,8 +659,10 @@ TEST(WeatherHardening, LightningStreamDependsOnSeed) {
     WeatherSystem a(kSeed), b(kSeed + 7);
     std::uint64_t strikes_a = 0;
     for (std::uint64_t t = 1; t <= 300; ++t) {
-        wa.Update(t, kAnchor); a.Update(t, kAnchor, &wa);
-        wb.Update(t, kAnchor); b.Update(t, kAnchor, &wb);
+        wa.Update(t, kAnchor);
+        a.Update(t, kAnchor, &wa);
+        wb.Update(t, kAnchor);
+        b.Update(t, kAnchor, &wb);
         strikes_a += a.StrikesThisTick().size();
     }
     EXPECT_GT(strikes_a, 0u) << "seed A produced no strikes (cannot probe seed sensitivity)";

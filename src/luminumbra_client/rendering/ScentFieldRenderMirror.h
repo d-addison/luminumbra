@@ -12,12 +12,12 @@
 namespace Luminumbra::Rendering {
 
 struct ScentFieldRenderMirror {
-    int   cells = 0;          // grid is cells x cells (128)
-    float cell_size = 1.0f;   // world units per cell
-    float origin_x = 0.0f;    // world X of cell (0,0) corner
-    float origin_z = 0.0f;    // world Z of cell (0,0) corner
-    bool  valid = false;      // false => the decal pass is a no-op this frame
-    bool  any_scent = false;  // false => all-zero field (no trails to draw yet)
+    int cells = 0;          // grid is cells x cells (128)
+    float cell_size = 1.0f; // world units per cell
+    float origin_x = 0.0f;  // world X of cell (0,0) corner
+    float origin_z = 0.0f;  // world Z of cell (0,0) corner
+    bool valid = false;     // false => the decal pass is a no-op this frame
+    bool any_scent = false; // false => all-zero field (no trails to draw yet)
     // Interleaved RG, row-major [(z*cells + x)*2 + {0=food,1=home}] — ready for an
     // RG16F glTexSubImage2D with no further repacking.
     std::vector<float> rg;

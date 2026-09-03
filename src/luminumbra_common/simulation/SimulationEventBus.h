@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -26,7 +26,8 @@ class OrderedEventBus {
 public:
     using Handler = std::function<void(const SimulationEvent&)>;
 
-    std::uint64_t publish(std::uint64_t tick, std::string topic, std::string payload, std::int32_t lane = 0);
+    std::uint64_t
+    publish(std::uint64_t tick, std::string topic, std::string payload, std::int32_t lane = 0);
     std::vector<SimulationEvent> drain(std::uint64_t inclusive_tick);
     void subscribe(Handler handler);
     void clear();

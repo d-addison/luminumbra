@@ -49,14 +49,16 @@ namespace dm = ::Luminumbra::DeterministicMath;
 inline constexpr std::uint64_t kCircadianSeedOffset = 29ull;
 
 struct CircadianStats {
-    int participants = 0;  // creatures carrying a CircadianComponent that took part
-    int diurnal = 0;       // of those, how many are diurnal (nocturnal == 0)
-    int nocturnal = 0;     // of those, how many are nocturnal (nocturnal != 0)
+    int participants = 0; // creatures carrying a CircadianComponent that took part
+    int diurnal = 0;      // of those, how many are diurnal (nocturnal == 0)
+    int nocturnal = 0;    // of those, how many are nocturnal (nocturnal != 0)
 };
 
 [[nodiscard]] inline float CircadianClamp01(float v) {
-    if (v < 0.0f) return 0.0f;
-    if (v > 1.0f) return 1.0f;
+    if (v < 0.0f)
+        return 0.0f;
+    if (v > 1.0f)
+        return 1.0f;
     return v;
 }
 
@@ -64,16 +66,18 @@ struct CircadianStats {
 // [0,1) first (the caller's clock may overshoot at a day boundary), then mapped to an angle
 // and run through DeterministicMath::Cos. Returns activity in [0,1]: diurnal peaks at noon
 // (t=0.5), nocturnal peaks at midnight (t=0). Pure + deterministic; no rng, no libm.
-[[nodiscard]] inline float CircadianActivity(float time_of_day01, bool nocturnal,
-                                             float amplitude = 1.0f) {
+[[nodiscard]] inline float
+CircadianActivity(float time_of_day01, bool nocturnal, float amplitude = 1.0f) {
     // Wrap to [0,1) so a clock that reports e.g. 1.25 or -0.1 still maps onto the day. Done
     // with float +-* and an integer floor so it is bit-stable (no libm fmod).
     float t = time_of_day01;
-    const float floor_t = static_cast<float>(static_cast<std::int64_t>(t)) -
-                          (t < 0.0f ? 1.0f : 0.0f);
-    t = t - floor_t;            // now t in [0,1) (the -1 above handles negatives).
-    if (t >= 1.0f) t -= 1.0f;   // guard the exact-integer edge.
-    if (t < 0.0f) t = 0.0f;     // numerical safety.
+    const float floor_t =
+        static_cast<float>(static_cast<std::int64_t>(t)) - (t < 0.0f ? 1.0f : 0.0f);
+    t = t - floor_t; // now t in [0,1) (the -1 above handles negatives).
+    if (t >= 1.0f)
+        t -= 1.0f; // guard the exact-integer edge.
+    if (t < 0.0f)
+        t = 0.0f; // numerical safety.
 
     // Angle for one full day. cos(2*pi*t): +1 at t=0 (midnight), -1 at t=0.5 (noon).
     const float c = dm::Cos(dm::kTwoPi * t);
@@ -89,8 +93,8 @@ struct CircadianStats {
 // RunCircadianOnTick: write every participating creature's activity from the day clock.
 // id-ordered. `time_of_day01` is the caller-supplied fraction of the day in [0,1] (0/1 =
 // midnight, 0.5 = noon). Returns participation stats. Empty roster -> pure no-op.
-inline CircadianStats RunCircadianOnTick(entt::registry& reg, float time_of_day01,
-                                         float amplitude = 1.0f) {
+inline CircadianStats
+RunCircadianOnTick(entt::registry& reg, float time_of_day01, float amplitude = 1.0f) {
     CircadianStats stats;
 
     auto view = reg.view<Comp::CircadianComponent>();
@@ -102,7 +106,8 @@ inline CircadianStats RunCircadianOnTick(entt::registry& reg, float time_of_day0
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    if (ents.empty()) return stats;  // empty roster -> pure no-op.
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
 
     for (auto e : ents) {
         auto& cc = view.get<Comp::CircadianComponent>(e);
@@ -119,4 +124,4 @@ inline CircadianStats RunCircadianOnTick(entt::registry& reg, float time_of_day0
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

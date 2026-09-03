@@ -35,10 +35,10 @@ namespace Luminumbra::Components {
 // `fully_decomposed` latches to 1 when `decay_ticks` reaches `decay_duration` — once set it
 // never clears and the system stops advancing the entity (stable age/release for run==replay).
 struct DecayComponent {
-    std::uint32_t decay_ticks = 0;        // ticks of decomposition elapsed (saturating)
-    std::uint32_t decay_duration = 900;   // ticks for a full decompose (~30s @ 30Hz)
-    std::uint16_t nutrient_released_milli = 0;  // cumulative nutrient released (milli-units)
-    std::uint8_t  fully_decomposed = 0;   // 0 = decomposing/intact, 1 = finished (latched)
+    std::uint32_t decay_ticks = 0;             // ticks of decomposition elapsed (saturating)
+    std::uint32_t decay_duration = 900;        // ticks for a full decompose (~30s @ 30Hz)
+    std::uint16_t nutrient_released_milli = 0; // cumulative nutrient released (milli-units)
+    std::uint8_t fully_decomposed = 0;         // 0 = decomposing/intact, 1 = finished (latched)
 };
 
 } // namespace Luminumbra::Components

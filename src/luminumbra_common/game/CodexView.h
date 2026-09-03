@@ -18,7 +18,7 @@
 
 #include "../ai/CreatureSpeciesRegistry.h"
 #include "PhotoCodex.h"
-#include "PhotoSession.h"  // StarsForTotal
+#include "PhotoSession.h" // StarsForTotal
 
 namespace luminumbra::game {
 
@@ -26,19 +26,19 @@ namespace luminumbra::game {
 // so) the best-shot star rating + capture count.
 struct CodexRow {
     std::uint16_t species_id = 0;
-    std::string   display_name;
-    bool          discovered = false;
-    int           stars = 0;          // 0..5 from the best recorded shot (0 if locked)
+    std::string display_name;
+    bool discovered = false;
+    int stars = 0; // 0..5 from the best recorded shot (0 if locked)
     std::uint32_t captures = 0;
-    float         rarity = 0.5f;
+    float rarity = 0.5f;
 };
 
 // The whole screen model: every registered species as a row, plus the aggregate counts.
 struct CodexView {
     std::vector<CodexRow> rows;
     std::uint32_t discovered_count = 0;
-    std::size_t   total_species = 0;
-    float         completeness = 0.0f;  // discovered / total, [0,1]
+    std::size_t total_species = 0;
+    float completeness = 0.0f; // discovered / total, [0,1]
 };
 
 // Build the codex view: one row per REGISTERED species (so undiscovered species show as
@@ -68,11 +68,12 @@ inline CodexView BuildCodexView(const luminumbra::ai::CreatureSpeciesRegistry& r
         view.rows.push_back(row);
     }
 
-    std::sort(view.rows.begin(), view.rows.end(),
-              [](const CodexRow& a, const CodexRow& b) { return a.species_id < b.species_id; });
+    std::sort(view.rows.begin(), view.rows.end(), [](const CodexRow& a, const CodexRow& b) {
+        return a.species_id < b.species_id;
+    });
 
     view.completeness = codex.completeness(static_cast<int>(view.total_species));
     return view;
 }
 
-}  // namespace luminumbra::game
+} // namespace luminumbra::game

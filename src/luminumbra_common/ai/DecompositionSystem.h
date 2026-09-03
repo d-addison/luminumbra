@@ -49,19 +49,21 @@ inline constexpr std::uint64_t kDecompositionSeedOffset = 27ull;
 inline constexpr std::uint32_t kNutrientPerCorpseMilli = 1000u;
 
 struct DecompositionStats {
-    int decaying = 0;                       // dead entities that advanced their decay this tick
-    std::uint32_t released_total = 0;       // nutrient released THIS TICK across all corpses (milli)
-    int finished = 0;                       // entities that reached full decomposition this tick
+    int decaying = 0;                 // dead entities that advanced their decay this tick
+    std::uint32_t released_total = 0; // nutrient released THIS TICK across all corpses (milli)
+    int finished = 0;                 // entities that reached full decomposition this tick
 };
 
 // Is this entity dead? Death is marked by MortalComponent.dead, OR (if the entity is a
 // creature) by CreatureComponent.eaten (the carcass seam used by the brain/predation).
 [[nodiscard]] inline bool DecompIsDead(entt::registry& reg, entt::entity e) {
     if (const auto* m = reg.try_get<Comp::MortalComponent>(e)) {
-        if (m->dead != 0) return true;
+        if (m->dead != 0)
+            return true;
     }
     if (const auto* cr = reg.try_get<Comp::CreatureComponent>(e)) {
-        if (cr->eaten) return true;
+        if (cr->eaten)
+            return true;
     }
     return false;
 }
@@ -80,18 +82,21 @@ inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint6
     std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
         return entt::to_integral(a) < entt::to_integral(b);
     });
-    if (ents.empty()) return stats;  // empty roster -> pure no-op.
+    if (ents.empty())
+        return stats; // empty roster -> pure no-op.
 
     for (auto e : ents) {
         auto& dc = view.get<Comp::DecayComponent>(e);
 
         // Already finished: inert and stable (latched) — never advance again.
-        if (dc.fully_decomposed != 0) continue;
+        if (dc.fully_decomposed != 0)
+            continue;
 
         // A degenerate duration is treated as immediate-complete on first dead tick (avoids a
         // divide-by-zero and keeps the contract: a 0-duration corpse releases its full load at
         // once). A live entity still must not advance.
-        if (!DecompIsDead(reg, e)) continue;  // LIVE -> does not decay.
+        if (!DecompIsDead(reg, e))
+            continue; // LIVE -> does not decay.
 
         // The pre-tick cumulative release for this corpse (already accounted in the component).
         const std::uint32_t prev_total = dc.nutrient_released_milli;
@@ -106,13 +111,14 @@ inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint6
         // rises monotonically and lands on kNutrientPerCorpseMilli precisely at decay_duration.
         std::uint32_t new_total;
         if (dc.decay_duration == 0u || dc.decay_ticks >= dc.decay_duration) {
-            new_total = kNutrientPerCorpseMilli;  // finished -> full load.
+            new_total = kNutrientPerCorpseMilli; // finished -> full load.
         } else {
             new_total = static_cast<std::uint32_t>(
                 (static_cast<std::uint64_t>(kNutrientPerCorpseMilli) * dc.decay_ticks) /
                 dc.decay_duration);
         }
-        if (new_total < prev_total) new_total = prev_total;  // clamp monotonic (defensive).
+        if (new_total < prev_total)
+            new_total = prev_total; // clamp monotonic (defensive).
 
         dc.nutrient_released_milli = static_cast<std::uint16_t>(new_total);
         stats.released_total += (new_total - prev_total);
@@ -127,4 +133,4 @@ inline DecompositionStats RunDecompositionOnTick(entt::registry& reg, std::uint6
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

@@ -11,7 +11,7 @@
 
 namespace Luminumbra::Debug {
 
-template <typename... Args>
+template<typename... Args>
 inline void LogCritical(Args&&... args) {
     auto& logger = ::Log::GetCoreLogger();
     if (logger) {
@@ -29,8 +29,9 @@ inline void Break() {
 #endif
 }
 
-template <typename... Args>
-[[noreturn]] inline void AssertFailed(const char* expression, const char* file, int line, Args&&... args) {
+template<typename... Args>
+[[noreturn]] inline void
+AssertFailed(const char* expression, const char* file, int line, Args&&... args) {
     LogCritical("Assertion failed: {0} ({1}:{2})", expression, file, line);
     if constexpr (sizeof...(Args) > 0) {
         LogCritical(std::forward<Args>(args)...);
@@ -41,9 +42,9 @@ template <typename... Args>
 
 } // namespace Luminumbra::Debug
 
-#define LUMINUMBRA_ASSERT(condition, ...) \
-    do { \
-        if (!(condition)) { \
-            ::Luminumbra::Debug::AssertFailed(#condition, __FILE__, __LINE__, ##__VA_ARGS__); \
-        } \
+#define LUMINUMBRA_ASSERT(condition, ...)                                                          \
+    do {                                                                                           \
+        if (!(condition)) {                                                                        \
+            ::Luminumbra::Debug::AssertFailed(#condition, __FILE__, __LINE__, ##__VA_ARGS__);      \
+        }                                                                                          \
     } while (false)

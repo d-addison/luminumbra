@@ -19,11 +19,11 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::foliage::SoilGrid;
-using luminumbra::foliage::RunSoilNutrientOnTick;
-using luminumbra::foliage::NutrientAt;
 using luminumbra::foliage::kSoilBaseline;
 using luminumbra::foliage::kSoilRegenPerTick;
+using luminumbra::foliage::NutrientAt;
+using luminumbra::foliage::RunSoilNutrientOnTick;
+using luminumbra::foliage::SoilGrid;
 
 // Grid anchored at the origin with 1m cells, so world (x,z) maps directly to cell
 // (floor(x), floor(z)). 8x8 covers the test positions.
@@ -32,7 +32,9 @@ constexpr float kOZ = 0.0f;
 constexpr float kCell = 1.0f;
 
 // Spawn a soil-feeding plant at (x,z) at a given growth stage and uptake strength.
-entt::entity spawnPlant(entt::registry& r, float x, float z,
+entt::entity spawnPlant(entt::registry& r,
+                        float x,
+                        float z,
                         std::uint8_t stage = static_cast<std::uint8_t>(Comp::PlantStage::Mature),
                         std::uint16_t uptake = 1000) {
     auto e = r.create();
@@ -190,7 +192,8 @@ TEST(SoilNutrient, FullRecoveryToBaseline) {
     soil.SetCell(0, 0, 0);
     // baseline / regen ticks suffice; add headroom.
     const int ticks = (kSoilBaseline / kSoilRegenPerTick) + 4;
-    for (int t = 0; t < ticks; ++t) RunSoilNutrientOnTick(r, soil, kOX, kOZ, kCell);
+    for (int t = 0; t < ticks; ++t)
+        RunSoilNutrientOnTick(r, soil, kOX, kOZ, kCell);
     EXPECT_EQ(soil.AtCell(0, 0), kSoilBaseline);
 }
 
@@ -230,11 +233,13 @@ TEST(SoilNutrient, SystemDeterministicRunEqualsReplay) {
         for (int t = 0; t < 12; ++t) {
             RunSoilNutrientOnTick(r, soil, kOX, kOZ, kCell);
             for (int z = 0; z < soil.height(); ++z)
-                for (int x = 0; x < soil.width(); ++x) trail.push_back(soil.AtCell(x, z));
+                for (int x = 0; x < soil.width(); ++x)
+                    trail.push_back(soil.AtCell(x, z));
         }
         // Also fold in each plant's accumulated absorption.
         for (auto e : r.view<Comp::SoilFeederComponent>())
-            trail.push_back(static_cast<std::int32_t>(r.get<Comp::SoilFeederComponent>(e).absorbed));
+            trail.push_back(
+                static_cast<std::int32_t>(r.get<Comp::SoilFeederComponent>(e).absorbed));
         return trail;
     };
     EXPECT_EQ(run(), run());

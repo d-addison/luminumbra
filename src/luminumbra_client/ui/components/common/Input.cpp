@@ -5,15 +5,16 @@
 
 namespace Luminumbra::Client::UI {
 
-Input::Input(const std::string& elementId) : UIComponent(elementId) {
-}
+Input::Input(const std::string& elementId)
+    : UIComponent(elementId) {}
 
 void Input::OnElementSet() {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     // Set up event handlers
     OnChange([this](Rml::Event& event) { HandleChange(event); });
-    
+
     // Set up focus/blur handlers
     AddTrackedEventListener(m_element, "focus", [this](Rml::Event& event) { HandleFocus(event); });
     AddTrackedEventListener(m_element, "blur", [this](Rml::Event& event) { HandleBlur(event); });
@@ -57,7 +58,7 @@ void Input::SetValue(const std::string& value) {
             m_element->SetAttribute("value", value);
         }
     }
-    
+
     // Validate new value
     if (!value.empty()) {
         Validate();
@@ -118,17 +119,17 @@ void Input::SetCustomValidator(std::function<bool(const std::string&)> validator
 bool Input::Validate() {
     std::string currentValue = GetValue();
     bool isValid = ValidateInternal(currentValue);
-    
+
     ValidationState newState = isValid ? ValidationState::Valid : ValidationState::Invalid;
     if (m_validationState != newState) {
         m_validationState = newState;
         UpdateValidationState();
-        
+
         if (m_validationHandler) {
             m_validationHandler(isValid);
         }
     }
-    
+
     return isValid;
 }
 
@@ -147,7 +148,8 @@ std::string Input::GetValue() const {
 }
 
 bool Input::IsValid() const {
-    return m_validationState == ValidationState::Valid || m_validationState == ValidationState::None;
+    return m_validationState == ValidationState::Valid ||
+           m_validationState == ValidationState::None;
 }
 
 void Input::SetChangeHandler(ChangeHandler handler) {
@@ -161,26 +163,23 @@ void Input::SetValidationHandler(ValidationHandler handler) {
 void Input::BindValue(Property<std::string>& property) {
     // Set initial value
     SetValue(property.Get());
-    
+
     // Subscribe to property changes
     TrackSubscription(property, [this](const std::string& oldValue, const std::string& newValue) {
         SetValue(newValue);
     });
-    
+
     // Update property when input changes
-    SetChangeHandler([&property](const std::string& newValue) {
-        property.Set(newValue);
-    });
+    SetChangeHandler([&property](const std::string& newValue) { property.Set(newValue); });
 }
 
 void Input::BindEnabled(Property<bool>& property) {
     // Set initial state
     SetEnabled(property.Get());
-    
+
     // Subscribe to changes
-    TrackSubscription(property, [this](const bool& oldValue, const bool& newValue) {
-        SetEnabled(newValue);
-    });
+    TrackSubscription(property,
+                      [this](const bool& oldValue, const bool& newValue) { SetEnabled(newValue); });
 }
 
 void Input::Focus() {
@@ -196,23 +195,24 @@ void Input::Blur() {
 }
 
 void Input::UpdateValidationState() {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     // Remove existing validation classes
     RemoveClass("input-error");
     RemoveClass("input-success");
-    
+
     switch (m_validationState) {
         case ValidationState::Valid:
             AddClass("input-success");
             HideValidationMessage();
             break;
-            
+
         case ValidationState::Invalid:
             AddClass("input-error");
             ShowValidationMessage(m_validationMessage);
             break;
-            
+
         case ValidationState::None:
             HideValidationMessage();
             break;
@@ -220,14 +220,15 @@ void Input::UpdateValidationState() {
 }
 
 void Input::ShowValidationMessage(const std::string& message) {
-    if (!m_element || message.empty()) return;
-    
+    if (!m_element || message.empty())
+        return;
+
     // Look for existing error message element
     Rml::Element* errorElement = nullptr;
     if (auto* parent = m_element->GetParentNode()) {
         errorElement = parent->GetElementById(m_elementId + "_error");
     }
-    
+
     if (!errorElement) {
         // Create error message element
         if (auto* parent = m_element->GetParentNode()) {
@@ -249,8 +250,9 @@ void Input::ShowValidationMessage(const std::string& message) {
 }
 
 void Input::HideValidationMessage() {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     if (auto* parent = m_element->GetParentNode()) {
         if (auto* errorElement = parent->GetElementById(m_elementId + "_error")) {
             errorElement->SetProperty("display", "none");
@@ -264,10 +266,10 @@ void Input::HandleChange(Rml::Event& event) {
                                ? control->GetValue()
                                : event.GetTargetElement()->GetAttribute<Rml::String>("value", "");
     m_value = newValue;
-    
+
     // Validate on change
     Validate();
-    
+
     if (m_changeHandler) {
         m_changeHandler(newValue);
     }
@@ -279,7 +281,7 @@ void Input::HandleFocus(Rml::Event& event) {
 
 void Input::HandleBlur(Rml::Event& event) {
     RemoveClass("focused");
-    
+
     // Validate on blur
     Validate();
 }
@@ -298,31 +300,31 @@ bool Input::ValidateInternal(const std::string& value) {
     if (m_required && value.empty()) {
         return false;
     }
-    
+
     // Skip validation for empty optional fields
     if (!m_required && value.empty()) {
         return true;
     }
-    
+
     // Check custom validator first
     if (m_customValidator && !m_customValidator(value)) {
         return false;
     }
-    
+
     // Check pattern validation
     if (m_patternCompiled) {
         if (!std::regex_match(value, m_compiledPattern)) {
             return false;
         }
     }
-    
+
     // Type-specific validation
     switch (m_type) {
         case Type::Email: {
             std::regex emailPattern(R"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})");
             return std::regex_match(value, emailPattern);
         }
-        
+
         case Type::Number: {
             try {
                 std::stod(value);
@@ -331,7 +333,7 @@ bool Input::ValidateInternal(const std::string& value) {
                 return false;
             }
         }
-        
+
         case Type::Text:
         case Type::Password:
         default:
@@ -345,7 +347,9 @@ void Input::CompileValidationPattern() {
             m_compiledPattern = std::regex(m_validationPattern);
             m_patternCompiled = true;
         } catch (const std::exception& e) {
-            LUMINUMBRA_CORE_ERROR("[UI] Failed to compile validation pattern '{}': {}", m_validationPattern, e.what());
+            LUMINUMBRA_CORE_ERROR("[UI] Failed to compile validation pattern '{}': {}",
+                                  m_validationPattern,
+                                  e.what());
             m_patternCompiled = false;
         }
     }
@@ -353,11 +357,16 @@ void Input::CompileValidationPattern() {
 
 std::string Input::TypeToString(Type type) {
     switch (type) {
-        case Type::Text: return "text";
-        case Type::Number: return "number";
-        case Type::Email: return "email";
-        case Type::Password: return "password";
-        default: return "text";
+        case Type::Text:
+            return "text";
+        case Type::Number:
+            return "number";
+        case Type::Email:
+            return "email";
+        case Type::Password:
+            return "password";
+        default:
+            return "text";
     }
 }
 

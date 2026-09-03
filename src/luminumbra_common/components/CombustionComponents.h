@@ -25,9 +25,9 @@ namespace Luminumbra::Components {
 // Discrete combustion lifecycle. Stored as an integer (uint8) in the component so
 // the sim only ever hashes the index; the renderer picks scorch material / VFX.
 enum class BurnState : std::uint8_t {
-    Unburnt = 0,  // intact fuel; can be ignited by a nearby Burning neighbor
-    Burning = 1,  // actively on fire; spreads to neighbors, counts down burn_ticks
-    Burnt   = 2,  // consumed; inert — neither spreads nor re-ignites
+    Unburnt = 0, // intact fuel; can be ignited by a nearby Burning neighbor
+    Burning = 1, // actively on fire; spreads to neighbors, counts down burn_ticks
+    Burnt = 2,   // consumed; inert — neither spreads nor re-ignites
     Count
 };
 
@@ -37,17 +37,25 @@ enum class BurnState : std::uint8_t {
 // float accumulation enters sim-truth state. burn_state is the BurnState index.
 // burn_ticks_remaining counts down once Burning and, at zero, transitions to Burnt.
 struct CombustibleComponent {
-    std::uint16_t fuel_milli = 1000;       // 0..1000 -> 0.0..1.0 available fuel
-    std::uint16_t moisture_milli = 0;      // 0..1000 -> 0.0..1.0; resists ignition
-    std::uint8_t  burn_state = 0;          // BurnState index (Unburnt/Burning/Burnt)
-    std::uint32_t burn_ticks_remaining = 0;// ticks left while Burning before Burnt
-    float         ignition_radius = 2.0f;  // m; a Burning cell ignites within this
+    std::uint16_t fuel_milli = 1000;        // 0..1000 -> 0.0..1.0 available fuel
+    std::uint16_t moisture_milli = 0;       // 0..1000 -> 0.0..1.0; resists ignition
+    std::uint8_t burn_state = 0;            // BurnState index (Unburnt/Burning/Burnt)
+    std::uint32_t burn_ticks_remaining = 0; // ticks left while Burning before Burnt
+    float ignition_radius = 2.0f;           // m; a Burning cell ignites within this
 
     // --- convenience accessors (do not change the hashed representation) ---
-    BurnState state() const { return static_cast<BurnState>(burn_state); }
-    void set_state(BurnState s) { burn_state = static_cast<std::uint8_t>(s); }
-    float fuel() const { return static_cast<float>(fuel_milli) * 0.001f; }
-    float moisture() const { return static_cast<float>(moisture_milli) * 0.001f; }
+    BurnState state() const {
+        return static_cast<BurnState>(burn_state);
+    }
+    void set_state(BurnState s) {
+        burn_state = static_cast<std::uint8_t>(s);
+    }
+    float fuel() const {
+        return static_cast<float>(fuel_milli) * 0.001f;
+    }
+    float moisture() const {
+        return static_cast<float>(moisture_milli) * 0.001f;
+    }
 };
 
 // Optional explicit ignition source — lets content kick off a fire without first
@@ -56,8 +64,8 @@ struct CombustibleComponent {
 // to the same moisture gate as normal spread) is ignited on the tick. Carrying this
 // is still opt-in; absence costs nothing.
 struct IgnitionSourceComponent {
-    float radius = 3.0f;     // m; ignition reach of this source
-    float intensity = 1.0f;  // 0..1 heat scale (raises the heat delivered to targets)
+    float radius = 3.0f;    // m; ignition reach of this source
+    float intensity = 1.0f; // 0..1 heat scale (raises the heat delivered to targets)
 };
 
 } // namespace Luminumbra::Components

@@ -17,27 +17,33 @@ public:
     };
 
     explicit Panel(const std::string& elementId);
-    
+
     // Configuration
     void SetTitle(const std::string& title);
     void SetStyle(Style style);
     void SetCollapsible(bool collapsible);
     void SetExpanded(bool expanded);
-    
+
     // Content management
     void SetContent(const std::string& content);
     void AppendContent(const std::string& content);
     void ClearContent();
-    
+
     // State
-    bool IsExpanded() const { return m_expanded; }
-    bool IsCollapsible() const { return m_collapsible; }
-    Style GetStyle() const { return m_style; }
-    
+    bool IsExpanded() const {
+        return m_expanded;
+    }
+    bool IsCollapsible() const {
+        return m_collapsible;
+    }
+    Style GetStyle() const {
+        return m_style;
+    }
+
     // Events
     using ToggleHandler = std::function<void(bool)>; // expanded state
     void SetToggleHandler(ToggleHandler handler);
-    
+
     // Data binding
     void BindTitle(Property<std::string>& property);
     void BindExpanded(Property<bool>& property);
@@ -55,14 +61,14 @@ private:
     bool m_expanded = true;
     std::string m_title;
     ToggleHandler m_toggleHandler;
-    
+
     Rml::Element* m_headerElement = nullptr;
     Rml::Element* m_bodyElement = nullptr;
     Rml::Element* m_toggleButton = nullptr;
-    
+
     void HandleToggle();
     void UpdateExpandedState();
-    
+
     static std::string StyleToString(Style style);
 };
 

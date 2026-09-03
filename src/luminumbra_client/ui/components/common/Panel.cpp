@@ -4,11 +4,12 @@
 
 namespace Luminumbra::Client::UI {
 
-Panel::Panel(const std::string& elementId) : UIComponent(elementId) {
-}
+Panel::Panel(const std::string& elementId)
+    : UIComponent(elementId) {}
 
 void Panel::OnElementSet() {
-    if (!m_element) return;
+    if (!m_element)
+        return;
 
     UpdateStyles();
     CreateHeader();
@@ -26,17 +27,17 @@ void Panel::OnElementSet() {
 
 void Panel::SetTitle(const std::string& title) {
     m_title = title;
-    
+
     if (!m_headerElement && !title.empty()) {
         CreateHeader();
     }
-    
+
     if (m_headerElement) {
         if (title.empty()) {
             m_headerElement->SetProperty("display", "none");
         } else {
             m_headerElement->SetProperty("display", "block");
-            
+
             // Find or create title element
             Rml::Element* titleElement = m_headerElement->GetElementById(m_elementId + "_title");
             if (!titleElement) {
@@ -63,13 +64,13 @@ void Panel::SetStyle(Style style) {
 void Panel::SetCollapsible(bool collapsible) {
     if (m_collapsible != collapsible) {
         m_collapsible = collapsible;
-        
+
         if (collapsible && !m_toggleButton) {
             // Create toggle button
             if (!m_headerElement) {
                 CreateHeader();
             }
-            
+
             if (m_headerElement) {
                 auto toggle = m_document->CreateElement("button");
                 m_toggleButton = toggle.get();
@@ -96,7 +97,7 @@ void Panel::SetExpanded(bool expanded) {
     if (m_expanded != expanded) {
         m_expanded = expanded;
         UpdateExpandedState();
-        
+
         if (m_toggleHandler) {
             m_toggleHandler(expanded);
         }
@@ -147,16 +148,13 @@ void Panel::BindTitle(Property<std::string>& property) {
 void Panel::BindExpanded(Property<bool>& property) {
     // Set initial state
     SetExpanded(property.Get());
-    
+
     // Subscribe to property changes
-    TrackSubscription(property, [this](const bool& oldValue, const bool& newValue) {
-        SetExpanded(newValue);
-    });
-    
+    TrackSubscription(
+        property, [this](const bool& oldValue, const bool& newValue) { SetExpanded(newValue); });
+
     // Update property when panel is toggled
-    SetToggleHandler([&property](bool expanded) {
-        property.Set(expanded);
-    });
+    SetToggleHandler([&property](bool expanded) { property.Set(expanded); });
 }
 
 void Panel::BindVisible(Property<bool>& property) {
@@ -164,17 +162,18 @@ void Panel::BindVisible(Property<bool>& property) {
 }
 
 void Panel::UpdateStyles() {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     // Remove existing style classes
     RemoveClass("panel");
     RemoveClass("panel-elevated");
     RemoveClass("panel-bordered");
     RemoveClass("panel-transparent");
-    
+
     // Add base panel class
     AddClass("panel");
-    
+
     // Add style-specific class
     if (m_style != Style::Default) {
         AddClass("panel-" + StyleToString(m_style));
@@ -182,13 +181,14 @@ void Panel::UpdateStyles() {
 }
 
 void Panel::CreateHeader() {
-    if (m_headerElement || !m_element) return;
+    if (m_headerElement || !m_element)
+        return;
 
     auto header = m_document->CreateElement("div");
     m_headerElement = header.get();
     m_headerElement->SetId(m_elementId + "_header");
     m_headerElement->SetClass("panel-header", true);
-    
+
     // Insert header as first child
     if (m_element->GetFirstChild()) {
         m_element->InsertBefore(std::move(header), m_element->GetFirstChild());
@@ -198,7 +198,8 @@ void Panel::CreateHeader() {
 }
 
 void Panel::CreateBody() {
-    if (m_bodyElement || !m_element) return;
+    if (m_bodyElement || !m_element)
+        return;
 
     auto body = m_document->CreateElement("div");
     m_bodyElement = body.get();
@@ -216,11 +217,11 @@ void Panel::UpdateExpandedState() {
     if (m_bodyElement) {
         m_bodyElement->SetProperty("display", m_expanded ? "block" : "none");
     }
-    
+
     if (m_toggleButton) {
         m_toggleButton->SetInnerRML(m_expanded ? "−" : "+");
     }
-    
+
     if (m_element) {
         if (m_expanded) {
             RemoveClass("collapsed");
@@ -234,11 +235,16 @@ void Panel::UpdateExpandedState() {
 
 std::string Panel::StyleToString(Style style) {
     switch (style) {
-        case Style::Default: return "default";
-        case Style::Elevated: return "elevated";
-        case Style::Bordered: return "bordered";
-        case Style::Transparent: return "transparent";
-        default: return "default";
+        case Style::Default:
+            return "default";
+        case Style::Elevated:
+            return "elevated";
+        case Style::Bordered:
+            return "bordered";
+        case Style::Transparent:
+            return "transparent";
+        default:
+            return "default";
     }
 }
 

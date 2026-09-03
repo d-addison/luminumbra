@@ -18,7 +18,8 @@ namespace {
 #endif
 
 std::string SourceRoot() {
-    return std::filesystem::weakly_canonical(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT)).string();
+    return std::filesystem::weakly_canonical(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT))
+        .string();
 }
 
 } // namespace
@@ -151,11 +152,13 @@ TEST(EngineContractsTest, WorldConfigValidationRejectsMissingOrUnsafePresets) {
     ASSERT_TRUE(valid.ok) << (valid.errors.empty() ? "" : valid.errors.front());
     EXPECT_TRUE(std::filesystem::exists(valid.preset_path));
 
-    const auto missing = Luminumbra::world::GameSession::ValidateWorldConfig(SourceRoot(), "missing_contract_test_preset");
+    const auto missing = Luminumbra::world::GameSession::ValidateWorldConfig(
+        SourceRoot(), "missing_contract_test_preset");
     EXPECT_FALSE(missing.ok);
     ASSERT_FALSE(missing.errors.empty());
 
-    const auto unsafe = Luminumbra::world::GameSession::ValidateWorldConfig(SourceRoot(), "../default");
+    const auto unsafe =
+        Luminumbra::world::GameSession::ValidateWorldConfig(SourceRoot(), "../default");
     EXPECT_FALSE(unsafe.ok);
     ASSERT_FALSE(unsafe.errors.empty());
 }

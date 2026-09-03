@@ -33,4 +33,4 @@ struct CircadianComponent {
     float activity = 1.0f;
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

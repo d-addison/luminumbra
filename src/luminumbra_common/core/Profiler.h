@@ -22,25 +22,25 @@
 
 // Frame/tick boundary. In the fixed-tick sim one tick == one frame.
 #define LUMIN_PROFILE_FRAME() FrameMark
-#define LUMIN_PROFILE_FRAME_N(name)    FrameMarkNamed(name)
+#define LUMIN_PROFILE_FRAME_N(name) FrameMarkNamed(name)
 // Scoped CPU zone (RAII -- lives to the end of the enclosing block).
 #define LUMIN_PROFILE_ZONE() ZoneScoped
-#define LUMIN_PROFILE_ZONE_N(name)     ZoneScopedN(name)
+#define LUMIN_PROFILE_ZONE_N(name) ZoneScopedN(name)
 // Named scalar plot (e.g. a per-tick latency in ms).
-#define LUMIN_PROFILE_PLOT(name, val)  TracyPlot(name, val)
+#define LUMIN_PROFILE_PLOT(name, val) TracyPlot(name, val)
 // One-off timeline message.
-#define LUMIN_PROFILE_MSG(txt, size)   TracyMessage(txt, size)
+#define LUMIN_PROFILE_MSG(txt, size) TracyMessage(txt, size)
 // Name the current thread in the profiler.
-#define LUMIN_PROFILE_THREAD(name)     ::tracy::SetThreadName(name)
+#define LUMIN_PROFILE_THREAD(name) ::tracy::SetThreadName(name)
 
 #else
 
 #define LUMIN_PROFILE_FRAME() ((void)0)
-#define LUMIN_PROFILE_FRAME_N(name)    ((void)0)
+#define LUMIN_PROFILE_FRAME_N(name) ((void)0)
 #define LUMIN_PROFILE_ZONE() ((void)0)
-#define LUMIN_PROFILE_ZONE_N(name)     ((void)0)
-#define LUMIN_PROFILE_PLOT(name, val)  ((void)0)
-#define LUMIN_PROFILE_MSG(txt, size)   ((void)0)
-#define LUMIN_PROFILE_THREAD(name)     ((void)0)
+#define LUMIN_PROFILE_ZONE_N(name) ((void)0)
+#define LUMIN_PROFILE_PLOT(name, val) ((void)0)
+#define LUMIN_PROFILE_MSG(txt, size) ((void)0)
+#define LUMIN_PROFILE_THREAD(name) ((void)0)
 
-#endif  // LUMINUMBRA_ENABLE_TRACY
+#endif // LUMINUMBRA_ENABLE_TRACY

@@ -68,21 +68,23 @@ AetherFieldSystem::AetherFieldSystem(int world_seed)
     Update(0, Vec3(0.0f), nullptr);
 }
 
-void AetherFieldSystem::LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz,
+void AetherFieldSystem::LocalCell(const Vec3& world_pos,
+                                  int& out_lx,
+                                  int& out_lz,
                                   bool& in_region) const {
     const float cell = m_grid.cell_size_m();
     const std::int64_t gx = static_cast<std::int64_t>(std::floor(world_pos.x / cell));
     const std::int64_t gz = static_cast<std::int64_t>(std::floor(world_pos.z / cell));
     const std::int64_t lx = gx - m_grid.origin_cell_x();
     const std::int64_t lz = gz - m_grid.origin_cell_z();
-    in_region = lx >= 0 && lz >= 0 &&
-                lx < static_cast<std::int64_t>(m_grid.extent_cells()) &&
+    in_region = lx >= 0 && lz >= 0 && lx < static_cast<std::int64_t>(m_grid.extent_cells()) &&
                 lz < static_cast<std::int64_t>(m_grid.extent_cells());
     out_lx = static_cast<int>(lx);
     out_lz = static_cast<int>(lz);
 }
 
-void AetherFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor,
+void AetherFieldSystem::Update(std::uint64_t tick,
+                               const Vec3& region_anchor,
                                const WindFieldSystem* wind) {
     m_last_tick = tick;
 
@@ -178,10 +180,22 @@ void AetherFieldSystem::Update(std::uint64_t tick, const Vec3& region_anchor,
                 const std::size_t i = m_grid.index(lx, lz);
                 float nsum = 0.0f;
                 int ncount = 0;
-                if (lx > 0)          { nsum += field[m_grid.index(lx - 1, lz)]; ++ncount; }
-                if (lx < extent - 1) { nsum += field[m_grid.index(lx + 1, lz)]; ++ncount; }
-                if (lz > 0)          { nsum += field[m_grid.index(lx, lz - 1)]; ++ncount; }
-                if (lz < extent - 1) { nsum += field[m_grid.index(lx, lz + 1)]; ++ncount; }
+                if (lx > 0) {
+                    nsum += field[m_grid.index(lx - 1, lz)];
+                    ++ncount;
+                }
+                if (lx < extent - 1) {
+                    nsum += field[m_grid.index(lx + 1, lz)];
+                    ++ncount;
+                }
+                if (lz > 0) {
+                    nsum += field[m_grid.index(lx, lz - 1)];
+                    ++ncount;
+                }
+                if (lz < extent - 1) {
+                    nsum += field[m_grid.index(lx, lz + 1)];
+                    ++ncount;
+                }
                 field[i] = (advected[i] + k * nsum) / (1.0f + k * static_cast<float>(ncount));
             }
         }

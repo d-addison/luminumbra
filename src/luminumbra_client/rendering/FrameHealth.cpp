@@ -40,9 +40,11 @@ FrameHealthReport AnalyzeFrameHealth(int width,
     const std::size_t pixel_count =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     if (color_rgb8.size() < pixel_count * 3u) {
-        LUMINUMBRA_CORE_ERROR(
-            "FrameHealth: color buffer too small ({} < {} bytes for {}x{})",
-            color_rgb8.size(), pixel_count * 3u, width, height);
+        LUMINUMBRA_CORE_ERROR("FrameHealth: color buffer too small ({} < {} bytes for {}x{})",
+                              color_rgb8.size(),
+                              pixel_count * 3u,
+                              width,
+                              height);
         return report;
     }
     report.width = width;
@@ -66,14 +68,19 @@ FrameHealthReport AnalyzeFrameHealth(int width,
         const unsigned char r = color_rgb8[p * 3u + 0u];
         const unsigned char g = color_rgb8[p * 3u + 1u];
         const unsigned char b = color_rgb8[p * 3u + 2u];
-        if (r == 0 && g == 0 && b == 0) ++black_px;
-        if (r == 255 && g == 255 && b == 255) ++white_px;
+        if (r == 0 && g == 0 && b == 0)
+            ++black_px;
+        if (r == 255 && g == 255 && b == 255)
+            ++white_px;
         const double luma = LumaOf(r, g, b);
         luma_sum += luma;
-        if (luma > luma_max) luma_max = luma;
+        if (luma > luma_max)
+            luma_max = luma;
         int bi = static_cast<int>(luma * static_cast<double>(buckets));
-        if (bi >= buckets) bi = buckets - 1; // luma==1.0 lands in the last (inclusive) bucket
-        if (bi < 0) bi = 0;
+        if (bi >= buckets)
+            bi = buckets - 1; // luma==1.0 lands in the last (inclusive) bucket
+        if (bi < 0)
+            bi = 0;
         report.histogram[static_cast<std::size_t>(bi)].pixels++;
     }
     const double inv_total = 1.0 / static_cast<double>(pixel_count);
@@ -91,7 +98,8 @@ FrameHealthReport AnalyzeFrameHealth(int width,
         std::uint64_t bad = 0;
         const std::size_t n = pixel_count * 3u;
         for (std::size_t i = 0; i < n; ++i) {
-            if (!std::isfinite(color_rgbf[i])) ++bad;
+            if (!std::isfinite(color_rgbf[i]))
+                ++bad;
         }
         report.nan_inf_count = bad;
     }
@@ -152,13 +160,13 @@ FrameHealthReport AnalyzeFrameHealth(int width,
         const bool nothing_drawn = report.gbuffer_coverage < thresholds.min_expected_coverage;
         if (near_black && (nothing_drawn || dead)) {
             v.likely_black_frame = true;
-            v.reason = nothing_drawn
-                ? "near-zero luminance with near-zero gbuffer coverage (nothing rendered)"
-                : "near-zero luminance and dead max luminance despite gbuffer coverage";
+            v.reason =
+                nothing_drawn
+                    ? "near-zero luminance with near-zero gbuffer coverage (nothing rendered)"
+                    : "near-zero luminance and dead max luminance despite gbuffer coverage";
         }
         // Unlit: plenty of geometry, real albedo, but black result.
-        if (!v.likely_black_frame &&
-            report.gbuffer_coverage >= thresholds.unlit_min_coverage &&
+        if (!v.likely_black_frame && report.gbuffer_coverage >= thresholds.unlit_min_coverage &&
             report.have_albedo &&
             report.albedo_mean_luminance >= thresholds.unlit_min_albedo_luma &&
             mean < thresholds.unlit_max_result_luma) {
@@ -177,17 +185,21 @@ FrameHealthReport AnalyzeFrameHealth(int width,
 
     if (report.white_fraction >= thresholds.blown_white_fraction) {
         v.likely_blown = true;
-        if (v.reason.empty()) v.reason = "majority of frame clipped to pure white (blown/overbright)";
+        if (v.reason.empty())
+            v.reason = "majority of frame clipped to pure white (blown/overbright)";
     }
 
     if (report.nan_inf_count > 0) {
-        if (v.reason.empty()) v.reason = "NaN/inf present in color buffer";
-        else v.reason += "; NaN/inf present in color buffer";
+        if (v.reason.empty())
+            v.reason = "NaN/inf present in color buffer";
+        else
+            v.reason += "; NaN/inf present in color buffer";
     }
 
-    v.anomalous = v.likely_black_frame || v.likely_unlit || v.likely_blown ||
-                  (report.nan_inf_count > 0);
-    if (!v.anomalous && v.reason.empty()) v.reason = "nominal";
+    v.anomalous =
+        v.likely_black_frame || v.likely_unlit || v.likely_blown || (report.nan_inf_count > 0);
+    if (!v.anomalous && v.reason.empty())
+        v.reason = "nominal";
 
     report.ok = true;
     return report;

@@ -19,17 +19,17 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
+using luminumbra::ai::kThirstSeekThreshold;
 using luminumbra::ai::RunThirstOnTick;
 using luminumbra::ai::ThirstStats;
-using luminumbra::ai::kThirstSeekThreshold;
 
 // One fixed sim tick at 30Hz (matches the engine's fixed dt; constants are tuned for it).
 constexpr float kDt = Luminumbra::SECONDS_PER_TICK;
 
 // Spawn a creature carrying a ThirstComponent (the opt-in). `thirst` seeds the state;
 // `eaten` makes it a carcass (neither thirsts nor drinks).
-entt::entity spawnCreature(entt::registry& r, float x, float z, float thirst = 0.0f,
-                           bool eaten = false) {
+entt::entity
+spawnCreature(entt::registry& r, float x, float z, float thirst = 0.0f, bool eaten = false) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position = Luminumbra::Vec3(x, 0.0f, z);
@@ -91,14 +91,15 @@ TEST(Thirst, RisesOverTicks) {
 
     EXPECT_GT(t1, t0);
     EXPECT_GT(t2, t1);
-    EXPECT_LE(t2, 1.0f);  // never exceeds parched.
+    EXPECT_LE(t2, 1.0f); // never exceeds parched.
 }
 
 // Thirst saturates at 1 (clamped) over many ticks.
 TEST(Thirst, SaturatesAtOne) {
     entt::registry r;
     auto e = spawnCreature(r, 0.0f, 0.0f, /*thirst=*/0.95f);
-    for (int i = 0; i < 200; ++i) RunThirstOnTick(r, kDt);
+    for (int i = 0; i < 200; ++i)
+        RunThirstOnTick(r, kDt);
     EXPECT_LE(thirstOf(r, e).thirst, 1.0f);
     EXPECT_GE(thirstOf(r, e).thirst, 0.999f);
 }
@@ -116,9 +117,9 @@ TEST(Thirst, WishPointsTowardNearestHole) {
     const auto& th = thirstOf(r, e);
 
     EXPECT_GE(s.seeking, 1);
-    EXPECT_GT(th.wish_x, 0.0f);                 // points toward +x (the hole).
-    EXPECT_NEAR(th.wish_z, 0.0f, 1.0e-5f);      // no z component for an on-axis hole.
-    EXPECT_EQ(th.drinking, 0);                  // outside the radius: not drinking.
+    EXPECT_GT(th.wish_x, 0.0f);            // points toward +x (the hole).
+    EXPECT_NEAR(th.wish_z, 0.0f, 1.0e-5f); // no z component for an on-axis hole.
+    EXPECT_EQ(th.drinking, 0);             // outside the radius: not drinking.
     // Magnitude scaled by thirst (unit direction * thirst).
     const float mag = std::sqrt(th.wish_x * th.wish_x + th.wish_z * th.wish_z);
     EXPECT_NEAR(mag, th.thirst, 1.0e-5f);
@@ -128,8 +129,8 @@ TEST(Thirst, WishPointsTowardNearestHole) {
 TEST(Thirst, SteersTowardNearerOfTwoHoles) {
     entt::registry r;
     auto e = spawnCreature(r, 0.0f, 0.0f, /*thirst=*/0.9f);
-    spawnHole(r, 30.0f, 0.0f, /*radius=*/4.0f);    // far, +x
-    spawnHole(r, 0.0f, -10.0f, /*radius=*/2.0f);   // nearer, -z
+    spawnHole(r, 30.0f, 0.0f, /*radius=*/4.0f);  // far, +x
+    spawnHole(r, 0.0f, -10.0f, /*radius=*/2.0f); // nearer, -z
 
     RunThirstOnTick(r, kDt);
     const auto& th = thirstOf(r, e);
@@ -141,10 +142,10 @@ TEST(Thirst, SteersTowardNearerOfTwoHoles) {
 // Below the seek threshold the creature does not steer (wish stays zero) even with a hole.
 TEST(Thirst, DoesNotSeekWhenBarelyThirsty) {
     entt::registry r;
-    auto e = spawnCreature(r, 0.0f, 0.0f, /*thirst=*/0.0f);  // essentially quenched
+    auto e = spawnCreature(r, 0.0f, 0.0f, /*thirst=*/0.0f); // essentially quenched
     spawnHole(r, 20.0f, 0.0f, /*radius=*/4.0f);
 
-    RunThirstOnTick(r, kDt);  // one tick: thirst still well below threshold
+    RunThirstOnTick(r, kDt); // one tick: thirst still well below threshold
     const auto& th = thirstOf(r, e);
     ASSERT_LT(th.thirst, kThirstSeekThreshold);
     EXPECT_FLOAT_EQ(th.wish_x, 0.0f);
@@ -165,9 +166,9 @@ TEST(Thirst, DrinksInsideHole) {
 
     EXPECT_EQ(s.drinking, 1);
     EXPECT_EQ(th.drinking, 1);
-    EXPECT_LT(th.thirst, before);          // drinking outpaces the per-tick rise.
-    EXPECT_GE(th.thirst, 0.0f);            // never negative.
-    EXPECT_FLOAT_EQ(th.wish_x, 0.0f);      // arrived: no steering wish while drinking.
+    EXPECT_LT(th.thirst, before);     // drinking outpaces the per-tick rise.
+    EXPECT_GE(th.thirst, 0.0f);       // never negative.
+    EXPECT_FLOAT_EQ(th.wish_x, 0.0f); // arrived: no steering wish while drinking.
     EXPECT_FLOAT_EQ(th.wish_z, 0.0f);
 }
 
@@ -176,7 +177,8 @@ TEST(Thirst, DrinkingQuenchesToZero) {
     entt::registry r;
     auto e = spawnCreature(r, 0.0f, 0.0f, /*thirst=*/1.0f);
     spawnHole(r, 0.0f, 0.0f, /*radius=*/4.0f);
-    for (int i = 0; i < 100; ++i) RunThirstOnTick(r, kDt);
+    for (int i = 0; i < 100; ++i)
+        RunThirstOnTick(r, kDt);
     EXPECT_GE(thirstOf(r, e).thirst, 0.0f);
     EXPECT_LT(thirstOf(r, e).thirst, 0.05f);
 }
@@ -185,14 +187,14 @@ TEST(Thirst, DrinkingQuenchesToZero) {
 
 TEST(Thirst, NoHoleStillThirstyZeroWish) {
     entt::registry r;
-    auto e = spawnCreature(r, 0.0f, 0.0f, /*thirst=*/0.9f);  // very thirsty, no water anywhere
+    auto e = spawnCreature(r, 0.0f, 0.0f, /*thirst=*/0.9f); // very thirsty, no water anywhere
 
     const float before = thirstOf(r, e).thirst;
     RunThirstOnTick(r, kDt);
     const auto& th = thirstOf(r, e);
 
-    EXPECT_GT(th.thirst, before);          // still gets thirstier.
-    EXPECT_FLOAT_EQ(th.wish_x, 0.0f);      // nowhere to go.
+    EXPECT_GT(th.thirst, before);     // still gets thirstier.
+    EXPECT_FLOAT_EQ(th.wish_x, 0.0f); // nowhere to go.
     EXPECT_FLOAT_EQ(th.wish_z, 0.0f);
     EXPECT_EQ(th.drinking, 0);
 }
@@ -208,7 +210,7 @@ TEST(Thirst, CarcassInert) {
     RunThirstOnTick(r, kDt);
     const auto& th = thirstOf(r, e);
 
-    EXPECT_FLOAT_EQ(th.thirst, before);    // thirst unchanged (no rise, no drink).
+    EXPECT_FLOAT_EQ(th.thirst, before); // thirst unchanged (no rise, no drink).
     EXPECT_FLOAT_EQ(th.wish_x, 0.0f);
     EXPECT_FLOAT_EQ(th.wish_z, 0.0f);
     EXPECT_EQ(th.drinking, 0);
@@ -252,7 +254,9 @@ TEST(Thirst, RunEqualsReplay) {
 // ---- order-independence: shuffled creation order yields the same per-creature state ----
 
 TEST(Thirst, OrderIndependent) {
-    struct Spec { float x, z, thirst; };
+    struct Spec {
+        float x, z, thirst;
+    };
     std::vector<Spec> specs = {
         {0.0f, 0.0f, 0.5f},
         {6.0f, 0.0f, 0.6f},
@@ -267,17 +271,17 @@ TEST(Thirst, OrderIndependent) {
             es.push_back(spawnCreature(r, sp.x, sp.z, sp.thirst));
         }
         spawnHole(r, 8.0f, 1.0f, 4.0f);
-        for (int t = 0; t < 10; ++t) RunThirstOnTick(r, kDt);
+        for (int t = 0; t < 10; ++t)
+            RunThirstOnTick(r, kDt);
         std::vector<std::pair<std::pair<float, float>, std::vector<float>>> out;
         for (std::size_t i = 0; i < order.size(); ++i) {
             const auto& tf = r.get<Comp::TransformComponent>(es[i]);
             const auto& th = r.get<Comp::ThirstComponent>(es[i]);
             out.push_back({{tf.position.x, tf.position.z},
-                           {th.thirst, th.wish_x, th.wish_z,
-                            static_cast<float>(th.drinking)}});
+                           {th.thirst, th.wish_x, th.wish_z, static_cast<float>(th.drinking)}});
         }
-        std::sort(out.begin(), out.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::sort(
+            out.begin(), out.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         return out;
     };
 
@@ -295,4 +299,4 @@ TEST(Thirst, OrderIndependent) {
     }
 }
 
-}  // namespace
+} // namespace

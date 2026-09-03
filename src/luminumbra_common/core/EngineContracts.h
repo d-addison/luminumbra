@@ -59,10 +59,18 @@ public:
     bool mark_stopped();
     void mark_failed(std::string reason);
 
-    LifecycleState state() const { return m_state; }
-    bool ready() const { return m_state == LifecycleState::Running; }
-    const std::string& name() const { return m_name; }
-    const std::string& failure_reason() const { return m_failure_reason; }
+    LifecycleState state() const {
+        return m_state;
+    }
+    bool ready() const {
+        return m_state == LifecycleState::Running;
+    }
+    const std::string& name() const {
+        return m_name;
+    }
+    const std::string& failure_reason() const {
+        return m_failure_reason;
+    }
 
 private:
     bool transition(LifecycleState expected, LifecycleState next);
@@ -83,7 +91,9 @@ public:
     void prune_completed();
     void drain(JobSystem& job_system);
     std::size_t outstanding_count() const;
-    const std::string& owner() const { return m_owner; }
+    const std::string& owner() const {
+        return m_owner;
+    }
 
 private:
     std::string m_owner;
@@ -96,7 +106,9 @@ struct ResourceHandle {
     std::uint32_t slot = InvalidSlot;
     std::uint32_t generation = 0;
 
-    bool valid_shape() const { return slot != InvalidSlot && generation != 0; }
+    bool valid_shape() const {
+        return slot != InvalidSlot && generation != 0;
+    }
 };
 
 class ResourceGenerationTable {
@@ -104,7 +116,9 @@ public:
     ResourceHandle create();
     bool destroy(ResourceHandle handle);
     bool is_valid(ResourceHandle handle) const;
-    std::size_t active_count() const { return m_active_count; }
+    std::size_t active_count() const {
+        return m_active_count;
+    }
 
 private:
     struct Slot {

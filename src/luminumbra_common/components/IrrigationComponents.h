@@ -27,7 +27,7 @@ namespace Luminumbra::Components {
 // diffuses + drains that moisture deterministically. Kept here, NOT folded onto
 // an existing component, so the parallel sim tracks stay conflict-free.
 struct WaterSourceComponent {
-    std::uint16_t output = 1000;     // fixed-point per-tick moisture output (milli-units), default 1.0
+    std::uint16_t output = 1000; // fixed-point per-tick moisture output (milli-units), default 1.0
 };
 
 } // namespace Luminumbra::Components

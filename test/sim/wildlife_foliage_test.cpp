@@ -19,10 +19,10 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunWildlifeFoliageOnTick;
-using luminumbra::ai::WildlifeFoliageStats;
 using luminumbra::ai::kGrazeRadius;
 using luminumbra::ai::kRegrowPerTick;
+using luminumbra::ai::RunWildlifeFoliageOnTick;
+using luminumbra::ai::WildlifeFoliageStats;
 
 // Spawn a grazeable plant at (x,z) with a starting biomass.
 entt::entity spawnPlant(entt::registry& r, float x, float z, float biomass = 1.0f) {
@@ -37,8 +37,12 @@ entt::entity spawnPlant(entt::registry& r, float x, float z, float biomass = 1.0
 }
 
 // Spawn a creature (default: a live herbivore = non-predator, not eaten).
-entt::entity spawnCreature(entt::registry& r, float x, float z, bool predator = false,
-                           bool eaten = false, float hunger = 0.5f) {
+entt::entity spawnCreature(entt::registry& r,
+                           float x,
+                           float z,
+                           bool predator = false,
+                           bool eaten = false,
+                           float hunger = 0.5f) {
     auto e = r.create();
     auto& tf = r.emplace<Comp::TransformComponent>(e);
     tf.position.x = x;
@@ -130,7 +134,7 @@ TEST(WildlifeFoliage, DistantPlantUntouched) {
 TEST(WildlifeFoliage, PredatorsAndEatenDoNotGraze) {
     entt::registry r;
     auto plant = spawnPlant(r, 0.0f, 0.0f, 0.5f);
-    spawnCreature(r, 0.1f, 0.0f, /*predator=*/true);                 // predator: no graze
+    spawnCreature(r, 0.1f, 0.0f, /*predator=*/true);                  // predator: no graze
     spawnCreature(r, 0.1f, 0.1f, /*predator=*/false, /*eaten=*/true); // carcass: no graze
 
     const float before = r.get<Comp::GrazeableComponent>(plant).biomass;
@@ -164,7 +168,8 @@ TEST(WildlifeFoliage, GrazingClampsAtZero) {
     entt::registry r;
     auto plant = spawnPlant(r, 0.0f, 0.0f, 0.1f);
     // A herd on top of the plant grazes harder than the biomass available.
-    for (int i = 0; i < 10; ++i) spawnCreature(r, 0.0f, 0.0f);
+    for (int i = 0; i < 10; ++i)
+        spawnCreature(r, 0.0f, 0.0f);
     RunWildlifeFoliageOnTick(r, 1);
     EXPECT_GE(r.get<Comp::GrazeableComponent>(plant).biomass, 0.0f)
         << "biomass is clamped at zero, never negative";

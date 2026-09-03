@@ -1,9 +1,9 @@
 #pragma once
 
+#include "core/Log.h" // Your spdlog wrapper
 #include <RmlUi/Core.h>
 #include <glad/glad.h>
 #include <string>
-#include "core/Log.h" // Your spdlog wrapper
 
 namespace Luminumbra::Client {
 
@@ -40,15 +40,20 @@ public:
     void SetViewport(int width, int height);
 
     // Virtual functions required by Rml::RenderInterface
-    Rml::CompiledGeometryHandle CompileGeometry(Rml::Span<const Rml::Vertex> vertices, Rml::Span<const int> indices) override;
-    void RenderGeometry(Rml::CompiledGeometryHandle geometry, Rml::Vector2f translation, Rml::TextureHandle texture) override;
+    Rml::CompiledGeometryHandle CompileGeometry(Rml::Span<const Rml::Vertex> vertices,
+                                                Rml::Span<const int> indices) override;
+    void RenderGeometry(Rml::CompiledGeometryHandle geometry,
+                        Rml::Vector2f translation,
+                        Rml::TextureHandle texture) override;
     void ReleaseGeometry(Rml::CompiledGeometryHandle geometry) override;
 
     void EnableScissorRegion(bool enable) override;
     void SetScissorRegion(Rml::Rectanglei region) override;
 
-    Rml::TextureHandle LoadTexture(Rml::Vector2i& texture_dimensions, const Rml::String& source) override;
-    Rml::TextureHandle GenerateTexture(Rml::Span<const Rml::byte> source, Rml::Vector2i source_dimensions) override;
+    Rml::TextureHandle LoadTexture(Rml::Vector2i& texture_dimensions,
+                                   const Rml::String& source) override;
+    Rml::TextureHandle GenerateTexture(Rml::Span<const Rml::byte> source,
+                                       Rml::Vector2i source_dimensions) override;
     void ReleaseTexture(Rml::TextureHandle texture_handle) override;
 
 private:

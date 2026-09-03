@@ -17,7 +17,8 @@ float Lerp(float a, float b, float u) {
 }
 
 void LerpVec3(const float a[3], const float b[3], float u, float out[3]) {
-    for (int c = 0; c < 3; ++c) out[c] = Lerp(a[c], b[c], u);
+    for (int c = 0; c < 3; ++c)
+        out[c] = Lerp(a[c], b[c], u);
 }
 
 // Neighborhood-corrected normalized lerp (shortest arc), scalar math only.
@@ -26,15 +27,20 @@ void NlerpQuat(const float a[4], const float b[4], float u, float out[4]) {
     const float sign = (dot < 0.0f) ? -1.0f : 1.0f;
 
     float blended[4];
-    for (int c = 0; c < 4; ++c) blended[c] = Lerp(a[c], sign * b[c], u);
+    for (int c = 0; c < 4; ++c)
+        blended[c] = Lerp(a[c], sign * b[c], u);
 
     const float lengthSq = blended[0] * blended[0] + blended[1] * blended[1] +
                            blended[2] * blended[2] + blended[3] * blended[3];
     if (lengthSq > 0.0f) {
         const float invLength = 1.0f / std::sqrt(lengthSq);
-        for (int c = 0; c < 4; ++c) out[c] = blended[c] * invLength;
+        for (int c = 0; c < 4; ++c)
+            out[c] = blended[c] * invLength;
     } else {
-        out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.0f; out[3] = 1.0f;
+        out[0] = 0.0f;
+        out[1] = 0.0f;
+        out[2] = 0.0f;
+        out[3] = 1.0f;
     }
 }
 
@@ -92,20 +98,24 @@ void MatrixMultiply(const float a[16], const float b[16], float out[16]) {
 void SampleTrack(const ClipTrack& track, float time, float* out) {
     const size_t keyCount = track.times.size();
     const uint32_t comps = track.componentCount;
-    if (keyCount == 0) return;
+    if (keyCount == 0)
+        return;
 
     if (time <= track.times.front() || keyCount == 1) {
-        for (uint32_t c = 0; c < comps; ++c) out[c] = track.values[c];
+        for (uint32_t c = 0; c < comps; ++c)
+            out[c] = track.values[c];
         return;
     }
     if (time >= track.times.back()) {
         const size_t base = (keyCount - 1) * comps;
-        for (uint32_t c = 0; c < comps; ++c) out[c] = track.values[base + c];
+        for (uint32_t c = 0; c < comps; ++c)
+            out[c] = track.values[base + c];
         return;
     }
 
     size_t next = 1;
-    while (next < keyCount - 1 && track.times[next] <= time) ++next;
+    while (next < keyCount - 1 && track.times[next] <= time)
+        ++next;
     const size_t prev = next - 1;
 
     const float t0 = track.times[prev];
@@ -124,7 +134,8 @@ void SampleTrack(const ClipTrack& track, float time, float* out) {
 
 int32_t FindJointIndex(const Skeleton& skeleton, uint32_t nameHash) {
     for (size_t j = 0; j < skeleton.joints.size(); ++j) {
-        if (skeleton.joints[j].nameHash == nameHash) return static_cast<int32_t>(j);
+        if (skeleton.joints[j].nameHash == nameHash)
+            return static_cast<int32_t>(j);
     }
     return -1;
 }
@@ -140,7 +151,8 @@ Skeleton BuildSkeleton(const SkinnedMeshAsset& asset) {
         dst.nameHash = src.nameHash;
         dst.parentIndex = src.parentIndex;
         std::memcpy(dst.inverseBind, src.inverseBind, sizeof(dst.inverseBind));
-        std::memcpy(dst.bindPose.translation, src.localTranslation, sizeof(dst.bindPose.translation));
+        std::memcpy(
+            dst.bindPose.translation, src.localTranslation, sizeof(dst.bindPose.translation));
         std::memcpy(dst.bindPose.rotation, src.localRotation, sizeof(dst.bindPose.rotation));
         std::memcpy(dst.bindPose.scale, src.localScale, sizeof(dst.bindPose.scale));
     }
@@ -176,12 +188,15 @@ Pose SamplePose(const Skeleton& skeleton, const AnimationClip& clip, float time)
     Pose pose = MakeBindPose(skeleton);
 
     float clamped = time;
-    if (clamped < 0.0f) clamped = 0.0f;
-    if (clamped > clip.duration) clamped = clip.duration;
+    if (clamped < 0.0f)
+        clamped = 0.0f;
+    if (clamped > clip.duration)
+        clamped = clip.duration;
 
     for (const ClipTrack& track : clip.tracks) {
         const int32_t jointIndex = FindJointIndex(skeleton, track.jointNameHash);
-        if (jointIndex < 0) continue;
+        if (jointIndex < 0)
+            continue;
 
         JointPose& joint = pose.joints[static_cast<size_t>(jointIndex)];
         switch (track.targetType) {
@@ -204,14 +219,16 @@ Pose BlendPoses(const Pose& a, const Pose& b, float alpha) {
     const size_t count = (a.joints.size() < b.joints.size()) ? a.joints.size() : b.joints.size();
     out.joints.resize(count);
     for (size_t j = 0; j < count; ++j) {
-        LerpVec3(a.joints[j].translation, b.joints[j].translation, alpha, out.joints[j].translation);
+        LerpVec3(
+            a.joints[j].translation, b.joints[j].translation, alpha, out.joints[j].translation);
         NlerpQuat(a.joints[j].rotation, b.joints[j].rotation, alpha, out.joints[j].rotation);
         LerpVec3(a.joints[j].scale, b.joints[j].scale, alpha, out.joints[j].scale);
     }
     return out;
 }
 
-void ComputeJointPalette(const Skeleton& skeleton, const Pose& pose,
+void ComputeJointPalette(const Skeleton& skeleton,
+                         const Pose& pose,
                          std::vector<float>& outPalette) {
     const size_t jointCount = skeleton.joints.size();
     outPalette.assign(jointCount * 16, 0.0f);
@@ -259,7 +276,8 @@ void SamplePosesOnTick(entt::registry& registry, double fixed_dt) {
     const auto view = registry.view<AnimationPlayerComponent>();
     for (const entt::entity entity : view) {
         AnimationPlayerComponent& player = view.get<AnimationPlayerComponent>(entity);
-        if (!player.skeleton || !player.clip) continue;
+        if (!player.skeleton || !player.clip)
+            continue;
 
         player.time += fixed_dt;
         if (player.looping && player.clip->duration > 0.0f) {

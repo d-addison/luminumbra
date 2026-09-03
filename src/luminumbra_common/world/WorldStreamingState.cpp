@@ -104,7 +104,8 @@ std::vector<ChunkID> WorldStreamingState::dirty_chunk_ids() const {
     return ids;
 }
 
-std::vector<WorldStreamingState::ChunkPtr> WorldStreamingState::snapshot_chunks_with_state(ChunkState state) const {
+std::vector<WorldStreamingState::ChunkPtr>
+WorldStreamingState::snapshot_chunks_with_state(ChunkState state) const {
     std::shared_lock<std::shared_mutex> lock(m_chunks_mutex);
     std::vector<ChunkPtr> chunks;
 

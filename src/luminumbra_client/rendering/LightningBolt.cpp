@@ -29,8 +29,11 @@ float SignedFloat(std::uint64_t key) {
 
 } // namespace
 
-LightningBoltGeometry BuildLightningBolt(float ground_x, float ground_y, float ground_z,
-                                         float magnitude, std::uint64_t strike_seed,
+LightningBoltGeometry BuildLightningBolt(float ground_x,
+                                         float ground_y,
+                                         float ground_z,
+                                         float magnitude,
+                                         std::uint64_t strike_seed,
                                          const LightningBoltParams& params) {
     LightningBoltGeometry bolt;
     bolt.ground_point = glm::vec3(ground_x, ground_y, ground_z);

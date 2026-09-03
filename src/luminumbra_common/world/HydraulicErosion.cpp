@@ -19,7 +19,7 @@ void BakeHydraulicErosion(const std::vector<float>& heights,
     assert(static_cast<std::size_t>(m) * static_cast<std::size_t>(m) == heights.size());
 
     const std::size_t cells = static_cast<std::size_t>(m) * static_cast<std::size_t>(m);
-    std::vector<float> h = heights;                 // working (eroded) height, padded
+    std::vector<float> h = heights; // working (eroded) height, padded
     std::vector<float> water(cells, 0.0f);
     std::vector<float> sediment(cells, 0.0f);
     std::vector<float> surf(cells, 0.0f);
@@ -28,7 +28,8 @@ void BakeHydraulicErosion(const std::vector<float>& heights,
     std::vector<float> dh(cells, 0.0f);
 
     auto idx = [m](int x, int z) -> std::size_t {
-        return static_cast<std::size_t>(z) * static_cast<std::size_t>(m) + static_cast<std::size_t>(x);
+        return static_cast<std::size_t>(z) * static_cast<std::size_t>(m) +
+               static_cast<std::size_t>(x);
     };
     const int dx[4] = {-1, 1, 0, 0};
     const int dz[4] = {0, 0, -1, 1};
@@ -83,17 +84,17 @@ void BakeHydraulicErosion(const std::vector<float>& heights,
                     continue;
                 }
                 const std::size_t nb = idx(x + dx[best], z + dz[best]);
-                const float diff = surf[c] - surf[nb]; // > 0 by construction
+                const float diff = surf[c] - surf[nb];                    // > 0 by construction
                 const float flow = (diff * 0.5f < w) ? (diff * 0.5f) : w; // stable, <= w
                 const float capacity = p.sediment_capacity * diff * flow;
                 float carried = sediment[c];
                 if (carried < capacity) {
                     const float erode = p.solubility * (capacity - carried);
-                    dh[c] -= erode;   // incise the source
+                    dh[c] -= erode; // incise the source
                     carried += erode;
                 } else {
                     const float drop = p.deposition * (carried - capacity);
-                    dh[c] += drop;    // deposit at the source
+                    dh[c] += drop; // deposit at the source
                     carried -= drop;
                 }
                 const float frac = flow / w; // (0, 1]
@@ -116,9 +117,12 @@ void BakeHydraulicErosion(const std::vector<float>& heights,
         for (int x = 0; x < n; ++x) {
             const std::size_t src = idx(x + halo, z + halo);
             float off = h[src] - heights[src];
-            if (off > p.max_offset) off = p.max_offset;
-            if (off < -p.max_offset) off = -p.max_offset;
-            out_offset[static_cast<std::size_t>(z) * static_cast<std::size_t>(n) + static_cast<std::size_t>(x)] = off;
+            if (off > p.max_offset)
+                off = p.max_offset;
+            if (off < -p.max_offset)
+                off = -p.max_offset;
+            out_offset[static_cast<std::size_t>(z) * static_cast<std::size_t>(n) +
+                       static_cast<std::size_t>(x)] = off;
         }
     }
 }

@@ -17,10 +17,14 @@ namespace {
 void DirToYawPitch(const glm::vec3& dir_in, float& yaw_deg, float& pitch_deg) {
     glm::vec3 dir = dir_in;
     const float len = glm::length(dir);
-    if (len < 1e-6f) { yaw_deg = 0.0f; pitch_deg = 0.0f; return; }
+    if (len < 1e-6f) {
+        yaw_deg = 0.0f;
+        pitch_deg = 0.0f;
+        return;
+    }
     dir /= len;
     pitch_deg = glm::degrees(std::asin(std::clamp(dir.y, -1.0f, 1.0f)));
-    yaw_deg   = glm::degrees(std::atan2(dir.z, dir.x));
+    yaw_deg = glm::degrees(std::atan2(dir.z, dir.x));
     // Mirror the engine's pitch clamp so the chosen pose is reachable / stable.
     pitch_deg = std::clamp(pitch_deg, -89.0f, 89.0f);
 }
@@ -45,11 +49,14 @@ inline bool IsSolid(const Systems::SHIELD_WorldSystem& world, const glm::vec3& p
 // `max_dist`. Returns the cave-air run length before solid (or max_dist if it never
 // hits solid within budget). Fixed iteration order => deterministic.
 float AirRunLength(const Systems::SHIELD_WorldSystem& world,
-                   const glm::vec3& start, const glm::vec3& dir,
-                   float step, float max_dist) {
+                   const glm::vec3& start,
+                   const glm::vec3& dir,
+                   float step,
+                   float max_dist) {
     float d = step;
     for (; d <= max_dist; d += step) {
-        if (IsSolid(world, start + dir * d)) return d - step;
+        if (IsSolid(world, start + dir * d))
+            return d - step;
     }
     return max_dist;
 }
@@ -68,15 +75,15 @@ DebugCamPose FrameFeature(const glm::vec3& feature_world_pos,
     // Auto-fit distance: pull back enough that a sphere of `feature_radius` fits in a
     // ~50deg vertical FOV with margin, with a sane floor for tiny features.
     const float r = std::max(feature_radius, 1.0f);
-    const float fit = r / std::tan(glm::radians(25.0f));        // half-FOV ~25deg
+    const float fit = r / std::tan(glm::radians(25.0f)); // half-FOV ~25deg
     float distance = std::max(fit * 1.6f, r + 4.0f) * std::max(distance_scale, 0.05f);
 
     // Place the camera on a ring around the feature, raised by the down-pitch angle.
-    const float az    = glm::radians(azimuth_deg);
+    const float az = glm::radians(azimuth_deg);
     const float pitch = glm::radians(std::clamp(pitch_down_deg, -89.0f, 89.0f));
     const glm::vec3 offset{
         std::cos(az) * std::cos(pitch),
-        std::sin(pitch),                 // +pitch_down => camera ABOVE the feature
+        std::sin(pitch), // +pitch_down => camera ABOVE the feature
         std::sin(az) * std::cos(pitch),
     };
     pose.pos = feature_world_pos + offset * distance;
@@ -87,33 +94,37 @@ DebugCamPose FrameFeature(const glm::vec3& feature_world_pos,
 }
 
 // ----------------------------------------------------------------------------
-std::optional<DebugCamPose>
-FindEnclosedCave(const Systems::SHIELD_WorldSystem& world,
-                 const glm::vec3& near_world,
-                 float search_radius_m) {
+std::optional<DebugCamPose> FindEnclosedCave(const Systems::SHIELD_WorldSystem& world,
+                                             const glm::vec3& near_world,
+                                             float search_radius_m) {
     // Deterministic lattice: fixed horizontal ring radii x fixed azimuths, and at each
     // column a fixed downward column of probe depths. Same world => same first/best hit.
-    constexpr float kHStep        = 4.0f;    // ring radius increment (m)
-    constexpr int   kAzCount      = 16;      // azimuth samples per ring
-    constexpr float kColTop       = 6.0f;    // start probing this far ABOVE surface
-    constexpr float kColBottom    = -64.0f;  // ...down to this far below surface
-    constexpr float kColStep      = 2.0f;    // vertical probe spacing (m)
-    constexpr float kRoofProbeM   = 8.0f;    // solid must exist within this overhead
-    constexpr float kRoofStep     = 1.0f;
-    constexpr float kFloorProbeM  = 8.0f;    // solid floor within this drop
-    constexpr float kMinCavityM   = 4.0f;    // a usable void must be at least this wide
-    constexpr float kHorizStep    = 1.0f;    // horizontal march resolution
+    constexpr float kHStep = 4.0f;       // ring radius increment (m)
+    constexpr int kAzCount = 16;         // azimuth samples per ring
+    constexpr float kColTop = 6.0f;      // start probing this far ABOVE surface
+    constexpr float kColBottom = -64.0f; // ...down to this far below surface
+    constexpr float kColStep = 2.0f;     // vertical probe spacing (m)
+    constexpr float kRoofProbeM = 8.0f;  // solid must exist within this overhead
+    constexpr float kRoofStep = 1.0f;
+    constexpr float kFloorProbeM = 8.0f; // solid floor within this drop
+    constexpr float kMinCavityM = 4.0f;  // a usable void must be at least this wide
+    constexpr float kHorizStep = 1.0f;   // horizontal march resolution
 
     // 8 cardinal/diagonal horizontal directions to test for an opening (deterministic).
     constexpr int kDirN = 8;
     const glm::vec3 hdirs[kDirN] = {
-        { 1, 0, 0}, { 0, 0, 1}, {-1, 0, 0}, { 0, 0,-1},
-        { 0.70710678f, 0, 0.70710678f}, {-0.70710678f, 0, 0.70710678f},
-        { 0.70710678f, 0,-0.70710678f}, {-0.70710678f, 0,-0.70710678f},
+        {1, 0, 0},
+        {0, 0, 1},
+        {-1, 0, 0},
+        {0, 0, -1},
+        {0.70710678f, 0, 0.70710678f},
+        {-0.70710678f, 0, 0.70710678f},
+        {0.70710678f, 0, -0.70710678f},
+        {-0.70710678f, 0, -0.70710678f},
     };
 
-    bool      have_best = false;
-    float     best_cavity = kMinCavityM;     // maximize the clear horizontal run
+    bool have_best = false;
+    float best_cavity = kMinCavityM; // maximize the clear horizontal run
     glm::vec3 best_air{0.0f};
     glm::vec3 best_dir{1, 0, 0};
 
@@ -129,39 +140,52 @@ FindEnclosedCave(const Systems::SHIELD_WorldSystem& world,
             // Walk DOWN the column looking for the first qualifying enclosed air pocket.
             for (float dy = kColTop; dy >= kColBottom; dy -= kColStep) {
                 const glm::vec3 p{wx, surf + dy, wz};
-                if (!IsAir(world, p)) continue;
+                if (!IsAir(world, p))
+                    continue;
 
                 // ROOF: solid overhead within kRoofProbeM (rejects open sky / surface dips).
                 bool roofed = false;
                 for (float up = kRoofStep; up <= kRoofProbeM; up += kRoofStep) {
-                    if (IsSolid(world, p + glm::vec3(0, up, 0))) { roofed = true; break; }
+                    if (IsSolid(world, p + glm::vec3(0, up, 0))) {
+                        roofed = true;
+                        break;
+                    }
                 }
-                if (!roofed) continue;
+                if (!roofed)
+                    continue;
 
                 // FLOOR: solid below within a short drop (so it's a room, not a thin gap
                 // and the camera has ground beneath it).
                 bool floored = false;
                 for (float dn = kColStep; dn <= kFloorProbeM; dn += kRoofStep) {
-                    if (IsSolid(world, p - glm::vec3(0, dn, 0))) { floored = true; break; }
+                    if (IsSolid(world, p - glm::vec3(0, dn, 0))) {
+                        floored = true;
+                        break;
+                    }
                 }
-                if (!floored) continue;
+                if (!floored)
+                    continue;
 
                 // OPENING: find the horizontal direction with the LONGEST clear cave-air
                 // run (that's the axis we want to look down — the cavity).
-                float    pocket_best = 0.0f;
+                float pocket_best = 0.0f;
                 glm::vec3 pocket_dir = hdirs[0];
                 for (int di = 0; di < kDirN; ++di) {
-                    const float run = AirRunLength(world, p, hdirs[di], kHorizStep,
-                                                   std::max(kMinCavityM * 3.0f, 24.0f));
-                    if (run > pocket_best) { pocket_best = run; pocket_dir = hdirs[di]; }
+                    const float run = AirRunLength(
+                        world, p, hdirs[di], kHorizStep, std::max(kMinCavityM * 3.0f, 24.0f));
+                    if (run > pocket_best) {
+                        pocket_best = run;
+                        pocket_dir = hdirs[di];
+                    }
                 }
-                if (pocket_best < kMinCavityM) continue; // sliver, not a room
+                if (pocket_best < kMinCavityM)
+                    continue; // sliver, not a room
 
                 if (pocket_best > best_cavity) {
-                    have_best   = true;
+                    have_best = true;
                     best_cavity = pocket_best;
-                    best_air    = p;
-                    best_dir    = pocket_dir;
+                    best_air = p;
+                    best_dir = pocket_dir;
                 }
                 // One qualifying pocket per column is enough; move outward.
                 break;
@@ -169,10 +193,12 @@ FindEnclosedCave(const Systems::SHIELD_WorldSystem& world,
         }
         // Early-out: once we've found a generously large cavity, stop expanding (keeps the
         // scan bounded AND deterministic — the first ring that yields a big room wins).
-        if (have_best && best_cavity >= 16.0f) break;
+        if (have_best && best_cavity >= 16.0f)
+            break;
     }
 
-    if (!have_best) return std::nullopt;
+    if (!have_best)
+        return std::nullopt;
 
     // Place the camera a little back from the air sample, biased toward the opening's
     // ENTRANCE so it looks INTO the void (not at the wall behind it). Step back along
@@ -180,24 +206,25 @@ FindEnclosedCave(const Systems::SHIELD_WorldSystem& world,
     const float back = std::min(best_cavity * 0.5f, 6.0f);
     glm::vec3 cam = best_air - best_dir * back + glm::vec3(0.0f, 1.6f, 0.0f);
     // Guard: if that nudge pushed the camera into solid, fall back to the air sample.
-    if (IsSolid(world, cam)) cam = best_air + glm::vec3(0.0f, 1.0f, 0.0f);
+    if (IsSolid(world, cam))
+        cam = best_air + glm::vec3(0.0f, 1.0f, 0.0f);
 
     const glm::vec3 look_target = best_air + best_dir * std::min(best_cavity, 12.0f);
 
     DebugCamPose pose;
-    pose.pos    = cam;
+    pose.pos = cam;
     pose.target = look_target;
     DirToYawPitch(look_target - cam, pose.yaw, pose.pitch);
     return pose;
 }
 
 // ----------------------------------------------------------------------------
-std::optional<DebugCamPose>
-FindDoline(const Systems::SHIELD_WorldSystem& world,
-           const glm::vec3& near_world,
-           float search_radius_m) {
+std::optional<DebugCamPose> FindDoline(const Systems::SHIELD_WorldSystem& world,
+                                       const glm::vec3& near_world,
+                                       float search_radius_m) {
     const auto sb = world.FindLargestSurfaceBreak(near_world.x, near_world.z, search_radius_m);
-    if (!sb.found) return std::nullopt;
+    if (!sb.found)
+        return std::nullopt;
 
     // The funnel mouth: surface height at the doline centre, looking down into the shaft.
     const float surf = world.GetTerrainHeightAt(sb.x, sb.z);

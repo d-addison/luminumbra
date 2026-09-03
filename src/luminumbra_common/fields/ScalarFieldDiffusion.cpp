@@ -14,8 +14,7 @@ namespace {
 constexpr double kConservationTolerance = 1.0e-9;
 constexpr double kMaximumStableRate = 0.25;
 
-[[nodiscard]] double clamp_unit(double value) noexcept
-{
+[[nodiscard]] double clamp_unit(double value) noexcept {
     if (value < 0.0) {
         return 0.0;
     }
@@ -25,48 +24,42 @@ constexpr double kMaximumStableRate = 0.25;
     return value;
 }
 
-[[nodiscard]] bool finite(double value) noexcept
-{
+[[nodiscard]] bool finite(double value) noexcept {
     return std::isfinite(value);
 }
 
 } // namespace
 
-ScalarFieldDiffusion::ScalarFieldDiffusion(
-    const std::size_t width,
-    const std::size_t height,
-    const double baseline_energy)
+ScalarFieldDiffusion::ScalarFieldDiffusion(const std::size_t width,
+                                           const std::size_t height,
+                                           const double baseline_energy)
     : width_(width)
     , height_(height)
     , energy_(width * height, baseline_energy)
     , permeability_(width * height, 1.0)
-    , sealed_(width * height, 0)
-{
+    , sealed_(width * height, 0) {
     if (width == 0 || height == 0) {
         throw std::invalid_argument("scalar diffusion field dimensions must be non-zero");
     }
     if (!finite(baseline_energy) || baseline_energy < 0.0) {
-        throw std::invalid_argument("scalar diffusion baseline energy must be finite and non-negative");
+        throw std::invalid_argument(
+            "scalar diffusion baseline energy must be finite and non-negative");
     }
 }
 
-std::size_t ScalarFieldDiffusion::width() const noexcept
-{
+std::size_t ScalarFieldDiffusion::width() const noexcept {
     return width_;
 }
 
-std::size_t ScalarFieldDiffusion::height() const noexcept
-{
+std::size_t ScalarFieldDiffusion::height() const noexcept {
     return height_;
 }
 
-double ScalarFieldDiffusion::at(const std::size_t x, const std::size_t y) const
-{
+double ScalarFieldDiffusion::at(const std::size_t x, const std::size_t y) const {
     return energy_.at(index(x, y));
 }
 
-double ScalarFieldDiffusion::total_energy() const noexcept
-{
+double ScalarFieldDiffusion::total_energy() const noexcept {
     double total = 0.0;
     for (const double value : energy_) {
         total += value;
@@ -74,8 +67,7 @@ double ScalarFieldDiffusion::total_energy() const noexcept
     return total;
 }
 
-double ScalarFieldDiffusion::maximum_cell_energy() const noexcept
-{
+double ScalarFieldDiffusion::maximum_cell_energy() const noexcept {
     double maximum = 0.0;
     for (const double value : energy_) {
         maximum = std::max(maximum, value);
@@ -83,49 +75,44 @@ double ScalarFieldDiffusion::maximum_cell_energy() const noexcept
     return maximum;
 }
 
-const std::vector<double>& ScalarFieldDiffusion::values() const noexcept
-{
+const std::vector<double>& ScalarFieldDiffusion::values() const noexcept {
     return energy_;
 }
 
-void ScalarFieldDiffusion::set(const std::size_t x, const std::size_t y, const double energy)
-{
+void ScalarFieldDiffusion::set(const std::size_t x, const std::size_t y, const double energy) {
     if (!finite(energy) || energy < 0.0) {
         throw std::invalid_argument("scalar field cell energy must be finite and non-negative");
     }
     energy_.at(index(x, y)) = energy;
 }
 
-void ScalarFieldDiffusion::add_impulse(const std::size_t x, const std::size_t y, const double energy)
-{
+void ScalarFieldDiffusion::add_impulse(const std::size_t x,
+                                       const std::size_t y,
+                                       const double energy) {
     if (!finite(energy) || energy < 0.0) {
         throw std::invalid_argument("scalar field impulse energy must be finite and non-negative");
     }
     energy_.at(index(x, y)) += energy;
 }
 
-void ScalarFieldDiffusion::set_permeability(
-    const std::size_t x,
-    const std::size_t y,
-    const double permeability)
-{
+void ScalarFieldDiffusion::set_permeability(const std::size_t x,
+                                            const std::size_t y,
+                                            const double permeability) {
     if (!finite(permeability)) {
         throw std::invalid_argument("scalar field permeability must be finite");
     }
     permeability_.at(index(x, y)) = clamp_unit(permeability);
 }
 
-void ScalarFieldDiffusion::seal(const std::size_t x, const std::size_t y, const bool sealed)
-{
+void ScalarFieldDiffusion::seal(const std::size_t x, const std::size_t y, const bool sealed) {
     sealed_.at(index(x, y)) = sealed ? 1 : 0;
 }
 
-ScalarDiffusionReport ScalarFieldDiffusion::diffuse(
-    const std::size_t iterations,
-    const double diffusion_rate)
-{
+ScalarDiffusionReport ScalarFieldDiffusion::diffuse(const std::size_t iterations,
+                                                    const double diffusion_rate) {
     if (!finite(diffusion_rate) || diffusion_rate <= 0.0 || diffusion_rate > kMaximumStableRate) {
-        throw std::invalid_argument("scalar diffusion rate must be finite and in the stable range (0, 0.25]");
+        throw std::invalid_argument(
+            "scalar diffusion rate must be finite and in the stable range (0, 0.25]");
     }
 
     ScalarDiffusionReport report;
@@ -182,26 +169,24 @@ ScalarDiffusionReport ScalarFieldDiffusion::diffuse(
     return report;
 }
 
-std::size_t ScalarFieldDiffusion::index(const std::size_t x, const std::size_t y) const
-{
+std::size_t ScalarFieldDiffusion::index(const std::size_t x, const std::size_t y) const {
     if (x >= width_ || y >= height_) {
         throw std::out_of_range("scalar field coordinate out of range");
     }
     return y * width_ + x;
 }
 
-bool ScalarFieldDiffusion::can_exchange(const std::size_t lhs, const std::size_t rhs) const noexcept
-{
+bool ScalarFieldDiffusion::can_exchange(const std::size_t lhs,
+                                        const std::size_t rhs) const noexcept {
     return sealed_[lhs] == 0 && sealed_[rhs] == 0 && edge_conductance(lhs, rhs) > 0.0;
 }
 
-double ScalarFieldDiffusion::edge_conductance(const std::size_t lhs, const std::size_t rhs) const noexcept
-{
+double ScalarFieldDiffusion::edge_conductance(const std::size_t lhs,
+                                              const std::size_t rhs) const noexcept {
     return std::min(permeability_[lhs], permeability_[rhs]);
 }
 
-ScalarDiffusionReport RunScalarDiffusionFixture()
-{
+ScalarDiffusionReport RunScalarDiffusionFixture() {
     ScalarFieldDiffusion field(5, 5, 0.0);
     field.add_impulse(2, 2, 16.0);
     field.add_impulse(1, 2, 2.0);
@@ -217,8 +202,7 @@ ScalarDiffusionReport RunScalarDiffusionFixture()
     return field.diffuse(10, 0.125);
 }
 
-bool ScalarDiffusionMeetsGate(const ScalarDiffusionReport& report) noexcept
-{
+bool ScalarDiffusionMeetsGate(const ScalarDiffusionReport& report) noexcept {
     if (report.schema != kScalarDiffusionSchema) {
         return false;
     }
@@ -250,11 +234,9 @@ bool ScalarDiffusionMeetsGate(const ScalarDiffusionReport& report) noexcept
     return true;
 }
 
-std::string SerializeScalarDiffusionReportJson(
-    const ScalarDiffusionReport& report,
-    const std::string& source_path,
-    const std::string& header_path)
-{
+std::string SerializeScalarDiffusionReportJson(const ScalarDiffusionReport& report,
+                                               const std::string& source_path,
+                                               const std::string& header_path) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(10);
     out << "{\n";

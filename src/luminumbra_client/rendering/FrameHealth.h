@@ -41,8 +41,8 @@ namespace Luminumbra::Rendering {
 
 // One bucket of the coarse luminance histogram. Buckets are uniform over [0,1].
 struct LumaHistogramBucket {
-    double lo = 0.0;   // inclusive lower luma bound
-    double hi = 0.0;   // exclusive upper luma bound (the last bucket is inclusive)
+    double lo = 0.0; // inclusive lower luma bound
+    double hi = 0.0; // exclusive upper luma bound (the last bucket is inclusive)
     std::uint64_t pixels = 0;
     double fraction = 0.0; // pixels / total_pixels
 };
@@ -68,10 +68,10 @@ struct FrameHealthReport {
     double white_fraction = 0.0;     // fraction of fully-white/blown (r==g==b==255) pixels
     std::uint64_t nan_inf_count = 0; // count of NaN/inf channels (0 unless a float source given)
 
-    bool have_coverage = false;      // a G-buffer position readback was supplied
-    double gbuffer_coverage = 0.0;   // fraction of non-empty position pixels (not-sky)
+    bool have_coverage = false;    // a G-buffer position readback was supplied
+    double gbuffer_coverage = 0.0; // fraction of non-empty position pixels (not-sky)
 
-    bool have_albedo = false;        // a G-buffer albedo readback was supplied
+    bool have_albedo = false;           // a G-buffer albedo readback was supplied
     double albedo_mean_luminance = 0.0; // mean albedo luma over COVERED pixels [0,1]
 
     std::vector<LumaHistogramBucket> histogram; // coarse luma histogram (default 8 buckets)
@@ -99,7 +99,7 @@ struct FrameHealthThresholds {
     // near-black while the ALBEDO carries real color (so it is a LIGHTING failure,
     // not a legitimately black surface). Requires the albedo readback.
     double unlit_min_coverage = 0.20;
-    double unlit_min_albedo_luma = 0.05; // surfaces have real base color...
+    double unlit_min_albedo_luma = 0.05;  // surfaces have real base color...
     double unlit_max_result_luma = 0.012; // ...but the lit frame is black
 
     // blown: too much of the frame is fully clipped to white.

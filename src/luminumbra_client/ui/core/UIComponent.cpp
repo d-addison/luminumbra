@@ -6,8 +6,8 @@
 
 namespace Luminumbra::Client::UI {
 
-UIComponent::UIComponent(const std::string& elementId) : m_elementId(elementId) {
-}
+UIComponent::UIComponent(const std::string& elementId)
+    : m_elementId(elementId) {}
 
 UIComponent::~UIComponent() {
     // Unsubscribe all property subscriptions even if Destroy was never
@@ -37,19 +37,22 @@ void UIComponent::Destroy() {
 }
 
 void UIComponent::OnClick(ClickCallback callback) {
-    if (!m_element || !callback) return;
+    if (!m_element || !callback)
+        return;
 
     AddTrackedEventListener(m_element, "click", std::move(callback));
 }
 
 void UIComponent::OnChange(ChangeCallback callback) {
-    if (!m_element || !callback) return;
+    if (!m_element || !callback)
+        return;
 
     AddTrackedEventListener(m_element, "change", std::move(callback));
 }
 
 void UIComponent::OnHover(std::function<void(bool)> callback) {
-    if (!m_element || !callback) return;
+    if (!m_element || !callback)
+        return;
 
     AddTrackedEventListener(m_element, "mouseenter", [callback](Rml::Event&) { callback(true); });
     AddTrackedEventListener(m_element, "mouseleave", [callback](Rml::Event&) { callback(false); });
@@ -88,8 +91,11 @@ std::string UIComponent::GetAttribute(const std::string& name) const {
     return m_element ? m_element->GetAttribute<Rml::String>(name, "") : std::string{};
 }
 
-void UIComponent::AnimateProperty(const std::string& property, const std::string& targetValue, float duration) {
-    if (!m_element) return;
+void UIComponent::AnimateProperty(const std::string& property,
+                                  const std::string& targetValue,
+                                  float duration) {
+    if (!m_element)
+        return;
 
     Rml::PropertyDictionary properties;
     const Rml::PropertyId id = Rml::StyleSheetSpecification::GetPropertyId(property);

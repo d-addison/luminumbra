@@ -3,10 +3,10 @@
 #include "UIProperty.h"
 #include "UIStateManager.h"
 #include <RmlUi/Core.h>
-#include <string>
-#include <unordered_map>
 #include <functional>
 #include <memory>
+#include <string>
+#include <unordered_map>
 
 namespace Luminumbra::Client::UI {
 
@@ -46,24 +46,30 @@ public:
     // Unsubscribes all tracked property subscriptions so a destroyed
     // component never receives further property notifications (UAF guard).
     virtual ~UIComponent();
-    
+
     // Component lifecycle
     virtual void Initialize(Rml::ElementDocument* document);
     virtual void Update(float deltaTime) {}
     virtual void Destroy();
-    
+
     // Element access
-    Rml::Element* GetElement() const { return m_element; }
-    const std::string& GetElementId() const { return m_elementId; }
-    bool IsValid() const { return m_element != nullptr; }
-    
+    Rml::Element* GetElement() const {
+        return m_element;
+    }
+    const std::string& GetElementId() const {
+        return m_elementId;
+    }
+    bool IsValid() const {
+        return m_element != nullptr;
+    }
+
     // Data binding methods
     template<typename T>
     void BindProperty(const std::string& attribute, Property<T>& property);
-    
+
     template<typename T>
     void BindText(Property<T>& property);
-    
+
     template<typename T>
     void BindValue(Property<T>& property);
 
@@ -73,23 +79,24 @@ public:
     // Event handling
     using ClickCallback = std::function<void(Rml::Event&)>;
     using ChangeCallback = std::function<void(Rml::Event&)>;
-    
+
     void OnClick(ClickCallback callback);
     void OnChange(ChangeCallback callback);
     void OnHover(std::function<void(bool)> callback); // true = enter, false = leave
-    
+
     // CSS class management
     void AddClass(const std::string& className);
     void RemoveClass(const std::string& className);
     void ToggleClass(const std::string& className);
     bool HasClass(const std::string& className) const;
-    
+
     // Attribute management
     void SetAttribute(const std::string& name, const std::string& value);
     std::string GetAttribute(const std::string& name) const;
-    
+
     // Animation support
-    void AnimateProperty(const std::string& property, const std::string& targetValue, float duration);
+    void
+    AnimateProperty(const std::string& property, const std::string& targetValue, float duration);
     void FadeIn(float duration = 0.3f);
     void FadeOut(float duration = 0.3f);
 
@@ -138,15 +145,16 @@ protected:
 // Template implementations
 template<typename T>
 void UIComponent::BindProperty(const std::string& attribute, Property<T>& property) {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     // Set initial value
     if constexpr (std::is_arithmetic_v<T>) {
         m_element->SetAttribute(attribute, std::to_string(property.Get()));
     } else {
         m_element->SetAttribute(attribute, property.Get());
     }
-    
+
     // Subscribe to changes
     auto binding = [this, attribute](const T& oldValue, const T& newValue) {
         if (m_element) {
@@ -157,21 +165,22 @@ void UIComponent::BindProperty(const std::string& attribute, Property<T>& proper
             }
         }
     };
-    
+
     TrackSubscription(property, std::move(binding));
 }
 
 template<typename T>
 void UIComponent::BindText(Property<T>& property) {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     // Set initial text
     if constexpr (std::is_arithmetic_v<T>) {
         m_element->SetInnerRML(std::to_string(property.Get()));
     } else {
         m_element->SetInnerRML(property.Get());
     }
-    
+
     // Subscribe to changes
     auto binding = [this](const T& oldValue, const T& newValue) {
         if (m_element) {
@@ -182,21 +191,22 @@ void UIComponent::BindText(Property<T>& property) {
             }
         }
     };
-    
+
     TrackSubscription(property, std::move(binding));
 }
 
 template<typename T>
 void UIComponent::BindValue(Property<T>& property) {
-    if (!m_element) return;
-    
+    if (!m_element)
+        return;
+
     // Set initial value
     if constexpr (std::is_arithmetic_v<T>) {
         m_element->SetAttribute("value", std::to_string(property.Get()));
     } else {
         m_element->SetAttribute("value", property.Get());
     }
-    
+
     // Subscribe to property changes
     auto propertyBinding = [this](const T& oldValue, const T& newValue) {
         if (m_element) {
@@ -207,7 +217,7 @@ void UIComponent::BindValue(Property<T>& property) {
             }
         }
     };
-    
+
     TrackSubscription(property, std::move(propertyBinding));
 
     // Subscribe to element changes
@@ -224,14 +234,15 @@ void UIComponent::BindValue(Property<T>& property) {
 
 template<typename T, typename Predicate>
 void UIComponent::BindVisibility(Property<T>& property, Predicate&& visibilityFunc) {
-    if (!m_element) return;
+    if (!m_element)
+        return;
 
     std::function<bool(const T&)> predicate(std::forward<Predicate>(visibilityFunc));
 
     // Set initial visibility
     bool visible = predicate(property.Get());
     m_element->SetProperty("display", visible ? "block" : "none");
-    
+
     // Subscribe to changes
     auto binding = [this, predicate = std::move(predicate)](const T& oldValue, const T& newValue) {
         if (m_element) {

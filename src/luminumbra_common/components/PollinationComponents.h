@@ -23,7 +23,7 @@
 
 #include <cstdint>
 
-#include "PlantComponents.h"  // PlantGenomeComponent (the heritable unit we mix)
+#include "PlantComponents.h" // PlantGenomeComponent (the heritable unit we mix)
 
 namespace Luminumbra::Components {
 
@@ -38,10 +38,10 @@ struct PollinationTag {};
 // recent tick this plant was pollinated (telemetry / replay aid). All state is a
 // pure deterministic function of the participating plants + the tick.
 struct PollinationComponent {
-    bool                  pollinated = false;       // has a donor reached it yet?
-    std::uint64_t         last_pollen_tick = 0;     // tick of the most recent cross
-    std::uint32_t         crosses = 0;              // how many times pollinated (telemetry)
-    PlantGenomeComponent  next_genome{};            // mixed genome for the next generation
+    bool pollinated = false;            // has a donor reached it yet?
+    std::uint64_t last_pollen_tick = 0; // tick of the most recent cross
+    std::uint32_t crosses = 0;          // how many times pollinated (telemetry)
+    PlantGenomeComponent next_genome{}; // mixed genome for the next generation
 };
 
 } // namespace Luminumbra::Components

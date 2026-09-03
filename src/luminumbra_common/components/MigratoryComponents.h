@@ -28,4 +28,4 @@ struct MigratoryComponent {
     float wish_z = 0.0f;
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

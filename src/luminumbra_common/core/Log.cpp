@@ -1,8 +1,8 @@
 #include "Log.h"
-#include <spdlog/sinks/basic_file_sink.h>
 #include <chrono>
 #include <filesystem>
 #include <mutex>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <vector>
 
 std::shared_ptr<spdlog::logger> Log::s_CoreLogger;
@@ -33,11 +33,11 @@ std::shared_ptr<spdlog::logger> create_default_logger() {
     try {
         std::error_code ec;
         std::filesystem::create_directories("logs", ec);
-        auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/luminumbra.log", /*truncate*/ true);
+        auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>("logs/luminumbra.log",
+                                                                        /*truncate*/ true);
         file->set_pattern("[%Y-%m-%d %T.%e] [%-8l] %v");
         sinks.push_back(file);
-    } catch (...) {
-    }
+    } catch (...) {}
 
     auto logger = std::make_shared<spdlog::logger>("LUMINUMBRA", sinks.begin(), sinks.end());
     logger->set_level(spdlog::level::trace);
