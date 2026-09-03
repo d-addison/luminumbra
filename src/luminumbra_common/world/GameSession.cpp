@@ -185,6 +185,20 @@ void GameSession::ApplyWeatherRainWiring() {
     }
 }
 
+// apply the session water-sim resolution when the owner opted in
+// (sim.water_high_res -> SetWaterHighResEnabled). Called from BOTH CreateWorld and
+// LoadWorld immediately after the water system is constructed and linked — before its
+// first update, because the uniform hashed grid resolution can never change mid-run.
+// Default-OFF never calls the setter: the solver keeps its Medium default, byte-identical.
+void GameSession::ApplyWaterResolutionWiring() {
+    if (!m_worldSystem || !m_waterHighResEnabled) {
+        return;
+    }
+    m_worldSystem->SetWaterSimResolution(static_cast<int>(Systems::WaterDetailLevel::High));
+    LUMINUMBRA_CORE_INFO(
+        "High-resolution water WIRED (16x16 grid, 1 m cells; 16-chunk sim window)");
+}
+
 void GameSession::LoadSpeciesDefinitions() {
     m_speciesTable = std::make_unique<luminumbra::ai::CreatureSpeciesRegistry>();
     const fs::path dir = RuntimeRoot(m_rootPath) / "data" / "common" / "creatures" / "species";
@@ -883,6 +897,10 @@ bool GameSession::CreateWorld(const std::string& name,
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
     LUMINUMBRA_CORE_INFO("World and water systems linked.");
 
+    // sim.water_high_res: raise the solver to High BEFORE any chunk seeds
+    // (default-OFF = untouched Medium = byte-identical).
+    ApplyWaterResolutionWiring();
+
     // 4.  : the deterministic wind field. Pure function of the world
     //    seed (uses seed+11 for its base-direction noise); updated per tick.
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
@@ -1023,6 +1041,11 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_physicsSystem->set_world_system(m_worldSystem.get());
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
+
+    // sim.water_high_res: raise the solver to High BEFORE any chunk is adopted
+    // or seeded (default-OFF = untouched Medium = byte-identical). A loaded save
+    // at another resolution migrates in LoadWorldStateFrom's boot pass.
+    ApplyWaterResolutionWiring();
 
     // the wind field is a pure function of the world seed, so a
     // loaded world reconstructs the identical field (the heavy-oracle/replay
@@ -1329,6 +1352,26 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
 
         if (m_worldSystem->adopt_streamed_chunk(chunk)) {
             ++adopted;
+        }
+    }
+
+    // boot-time water-resolution migration: a save written at another
+    // sim resolution (sim.water_high_res flipped between sessions) must converge
+    // BEFORE the first live tick. Left to the live path it would resize at
+    // MAX_WATER_RESIZES_PER_TICK=1 while the seam pass — which hard-gates on equal
+    // resolution — walls off water at every mixed seam for thousands of ticks. One
+    // uncapped pass here (the boot-settle cap-lifting idea applied to resizes) is
+    // deterministic: each chunk's integer-bilinear mm resample is a pure function of
+    // its loaded state + worldgen + the session resolution. Matching saves resize
+    // nothing — the default path stays byte-identical.
+    {
+        const std::size_t migrated = m_worldSystem->MigrateWaterSimResolution();
+        if (migrated > 0) {
+            LUMINUMBRA_CORE_INFO(
+                "Water-resolution migration: {} loaded chunks resized to {}x{} before first tick",
+                migrated,
+                m_worldSystem->debug_water_sim_resolution(),
+                m_worldSystem->debug_water_sim_resolution());
         }
     }
 

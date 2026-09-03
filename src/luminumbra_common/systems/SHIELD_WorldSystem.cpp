@@ -4189,6 +4189,38 @@ void SHIELD_WorldSystem::SetWaterBootPaused(bool on) {
         m_water_system->SetBootPaused(on);
 }
 
+// session water-sim resolution passthrough (sim.water_high_res; set once pre-tick).
+void SHIELD_WorldSystem::SetWaterSimResolution(int cells_per_side) {
+    if (m_water_system)
+        m_water_system->SetSimResolution(cells_per_side);
+}
+
+// boot-time save-migration passthrough over the loaded chunk map (see
+// WaterSystem::MigrateChunksToSimResolution).
+std::size_t SHIELD_WorldSystem::MigrateWaterSimResolution() {
+    return m_water_system ? m_water_system->MigrateChunksToSimResolution(m_streaming_state.chunks)
+                          : 0u;
+}
+
+int SHIELD_WorldSystem::debug_water_sim_resolution() const {
+    return m_water_system ? m_water_system->sim_resolution() : 0;
+}
+
+std::size_t SHIELD_WorldSystem::debug_water_chunks_off_resolution() const {
+    if (!m_water_system)
+        return 0u;
+    const int session_res = m_water_system->sim_resolution();
+    std::size_t off = 0;
+    for (const auto& [id, c] : m_streaming_state.chunks) {
+        (void)id;
+        if (c && c->has_water_sim.load(std::memory_order_relaxed) &&
+            c->current_water_resolution.load(std::memory_order_relaxed) != session_res) {
+            ++off;
+        }
+    }
+    return off;
+}
+
 // rotating sim-window cursor persistence seam (see WaterSystem accessors).
 std::size_t SHIELD_WorldSystem::GetWaterSimWindowCursor() const {
     return m_water_system ? m_water_system->GetSimWindowCursor() : 0u;
