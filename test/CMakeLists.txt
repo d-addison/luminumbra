@@ -303,6 +303,23 @@ target_link_libraries(forest_perf_budget_test PRIVATE
     luminumbra_common
 )
 
+# GL-free regression coverage for the foliage surface-grid cache prune: the
+# helper is a free template in FoliagePass.h precisely so it can be exercised
+# without a GL context.
+add_executable(foliage_cache_prune_test
+    rendering/foliage_cache_prune_test.cpp
+)
+
+target_include_directories(foliage_cache_prune_test PRIVATE
+../src
+../src/luminumbra_client
+)
+
+target_link_libraries(foliage_cache_prune_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
 )
@@ -1432,6 +1449,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     environmental_audio_model_test
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
+    foliage_cache_prune_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test
@@ -1501,8 +1519,8 @@ endif()
 # Gate honesty: a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning a suite that
 # skips without a GL context could go GREEN with zero coverage on a gate runner that lacks
 # GL. Skip honesty is NOT enforced here in CMake: CI post-processes the JUnit output with
-# tools/ci/check_ctest_junit.py, which fails the lane on any skip whose reason is not on
-# that lane's explicit allow-list (see the workflow's --allow-skip-reason-regex).
+# tools/ci/check_ctest_junit.py, which fails the lane on any skipped or disabled test not
+# present in the script's hard-coded ALLOWED_SKIPS set.
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     # common_tests is parallel-safe by construction: its temp-dir fixtures use
     # per-instance unique roots and its socket tests bind ephemeral ports
