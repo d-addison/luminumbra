@@ -22,11 +22,11 @@ namespace {
 
 namespace Comp = ::Luminumbra::Components;
 using luminumbra::foliage::IrrigationGrid;
-using luminumbra::foliage::RunIrrigationOnTick;
-using luminumbra::foliage::MoistureAt;
 using luminumbra::foliage::kMoistureBaseline;
-using luminumbra::foliage::kMoistureMax;
 using luminumbra::foliage::kMoistureDrainPerTick;
+using luminumbra::foliage::kMoistureMax;
+using luminumbra::foliage::MoistureAt;
+using luminumbra::foliage::RunIrrigationOnTick;
 
 // Grid anchored at the origin with 1m cells, so world (x,z) maps directly to cell
 // (floor(x), floor(z)).
@@ -137,7 +137,8 @@ TEST(Irrigation, MoistureDiffusesToNeighbours) {
 
     // A neighbour starts dry; after a few ticks the spreading wets it.
     EXPECT_EQ(MoistureAt(grid, 5.0f, 4.0f, kOX, kOZ, kCell), kMoistureBaseline);
-    for (int t = 0; t < 4; ++t) RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
+    for (int t = 0; t < 4; ++t)
+        RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
 
     EXPECT_GT(MoistureAt(grid, 5.0f, 4.0f, kOX, kOZ, kCell), kMoistureBaseline)
         << "moisture migrated from the source cell into an adjacent cell";
@@ -171,7 +172,8 @@ TEST(Irrigation, FullDryDownToBaseline) {
     grid.Reset(1500);
     // drain step per tick + diffusion redistribution; plenty of headroom.
     const int ticks = (1500 / kMoistureDrainPerTick) + 16;
-    for (int t = 0; t < ticks; ++t) RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
+    for (int t = 0; t < ticks; ++t)
+        RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
     EXPECT_TRUE(grid.all_at(kMoistureBaseline))
         << "with no source, every cell drains fully to the dry baseline";
 }
@@ -182,7 +184,8 @@ TEST(Irrigation, MoistureAtIsStableAndBounded) {
     entt::registry r;
     IrrigationGrid grid(8, 8);
     spawnSource(r, 4.0f, 4.0f, 3000);
-    for (int t = 0; t < 6; ++t) RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
+    for (int t = 0; t < 6; ++t)
+        RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
 
     // Repeated queries return the same value (pure read, no mutation).
     const std::int32_t a = MoistureAt(grid, 4.0f, 4.0f, kOX, kOZ, kCell);
@@ -204,7 +207,8 @@ TEST(Irrigation, BoundedUnderSustainedInput) {
     entt::registry r;
     IrrigationGrid grid(1, 1);
     spawnSource(r, 0.0f, 0.0f, std::numeric_limits<std::uint16_t>::max());
-    for (int t = 0; t < 100; ++t) RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
+    for (int t = 0; t < 100; ++t)
+        RunIrrigationOnTick(r, grid, kOX, kOZ, kCell);
     EXPECT_EQ(grid.AtCell(0, 0), kMoistureMax - kMoistureDrainPerTick)
         << "each sustained deposit saturates before the fixed drain step";
 }
@@ -224,7 +228,8 @@ TEST(Irrigation, SystemDeterministicRunEqualsReplay) {
             trail.push_back(static_cast<std::int32_t>(st.deposited));
             trail.push_back(static_cast<std::int32_t>(st.drained));
             for (int z = 0; z < grid.height(); ++z)
-                for (int x = 0; x < grid.width(); ++x) trail.push_back(grid.AtCell(x, z));
+                for (int x = 0; x < grid.width(); ++x)
+                    trail.push_back(grid.AtCell(x, z));
         }
         return trail;
     };

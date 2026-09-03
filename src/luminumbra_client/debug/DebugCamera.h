@@ -42,8 +42,8 @@ namespace Luminumbra::Debug {
 //   g_fixed_cam_pos = pose.pos; g_fixed_cam_yaw = pose.yaw; g_fixed_cam_pitch = pose.pitch;
 struct DebugCamPose {
     glm::vec3 pos{0.0f};
-    float     yaw   = 0.0f;   // degrees, engine Camera convention
-    float     pitch = 0.0f;   // degrees, engine Camera convention
+    float yaw = 0.0f;   // degrees, engine Camera convention
+    float pitch = 0.0f; // degrees, engine Camera convention
     // The world point the camera is aimed at (the feature). Handy for logging / a
     // secondary "look target" if the caller drives a look-at camera instead.
     glm::vec3 target{0.0f};
@@ -60,9 +60,9 @@ struct DebugCamPose {
 // ---------------------------------------------------------------------------
 DebugCamPose FrameFeature(const glm::vec3& feature_world_pos,
                           float feature_radius,
-                          float azimuth_deg     = 135.0f,
-                          float pitch_down_deg  = 18.0f,
-                          float distance_scale  = 1.0f);
+                          float azimuth_deg = 135.0f,
+                          float pitch_down_deg = 18.0f,
+                          float distance_scale = 1.0f);
 
 // ---------------------------------------------------------------------------
 // (a) FindEnclosedCave — locate a real, roofed cave-air pocket near `near_world`
@@ -85,19 +85,17 @@ DebugCamPose FrameFeature(const glm::vec3& feature_world_pos,
 // Returns nullopt when caves are disabled / none qualifies in range. Render-only:
 // every call is a pure read of the deterministic SDF.
 // ---------------------------------------------------------------------------
-std::optional<DebugCamPose>
-FindEnclosedCave(const Systems::SHIELD_WorldSystem& world,
-                 const glm::vec3& near_world,
-                 float search_radius_m = 256.0f);
+std::optional<DebugCamPose> FindEnclosedCave(const Systems::SHIELD_WorldSystem& world,
+                                             const glm::vec3& near_world,
+                                             float search_radius_m = 256.0f);
 
 // ---------------------------------------------------------------------------
 // (c) FindDoline — reuse the engine's deterministic surface-break (doline / cenote)
 // locator and frame a camera looking DOWN into the cave mouth. Returns nullopt when
 // surface breaks are disabled or none are in range. Pure read.
 // ---------------------------------------------------------------------------
-std::optional<DebugCamPose>
-FindDoline(const Systems::SHIELD_WorldSystem& world,
-           const glm::vec3& near_world,
-           float search_radius_m = 500.0f);
+std::optional<DebugCamPose> FindDoline(const Systems::SHIELD_WorldSystem& world,
+                                       const glm::vec3& near_world,
+                                       float search_radius_m = 500.0f);
 
 } // namespace Luminumbra::Debug

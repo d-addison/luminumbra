@@ -18,7 +18,7 @@ public:
         Danger,
         Warning
     };
-    
+
     enum class Size {
         Small,
         Normal,
@@ -26,27 +26,33 @@ public:
     };
 
     explicit Button(const std::string& elementId);
-    
+
     // Configuration
     void SetText(const std::string& text);
     void SetStyle(Style style);
     void SetSize(Size size);
     void SetEnabled(bool enabled);
     void SetIcon(const std::string& iconPath);
-    
+
     // State
-    bool IsEnabled() const { return m_enabled; }
-    Style GetStyle() const { return m_style; }
-    Size GetSize() const { return m_size; }
-    
+    bool IsEnabled() const {
+        return m_enabled;
+    }
+    Style GetStyle() const {
+        return m_style;
+    }
+    Size GetSize() const {
+        return m_size;
+    }
+
     // Events
     using ClickHandler = std::function<void()>;
     void SetClickHandler(ClickHandler handler);
-    
+
     // Data binding
     void BindEnabled(Property<bool>& property);
     void BindText(Property<std::string>& property);
-    
+
     // Animation
     void PlayClickAnimation();
     void SetLoadingState(bool loading);
@@ -64,10 +70,10 @@ private:
     std::string m_text;
     std::string m_iconPath;
     ClickHandler m_clickHandler;
-    
+
     void HandleClick(Rml::Event& event);
     void HandleHover(bool isHovering);
-    
+
     static std::string StyleToString(Style style);
     static std::string SizeToString(Size size);
 };

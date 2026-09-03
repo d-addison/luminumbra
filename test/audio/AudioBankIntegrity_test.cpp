@@ -101,10 +101,11 @@ TEST(AudioBankIntegrity, LoadedBanksAreOggFree) {
             for (const auto& file : def.at("files")) {
                 fs::path asset(file.get<std::string>());
                 std::string ext = asset.extension().string();
-                for (char& c : ext) c = static_cast<char>(std::tolower(c));
+                for (char& c : ext)
+                    c = static_cast<char>(std::tolower(c));
                 EXPECT_TRUE(ext == ".mp3" || ext == ".wav")
-                    << bank.string() << " event '" << id << "' file '"
-                    << asset.string() << "' has extension '" << ext
+                    << bank.string() << " event '" << id << "' file '" << asset.string()
+                    << "' has extension '" << ext
                     << "' — this miniaudio build decodes only mp3/wav (ogg is "
                        "MA_INVALID_FILE -> silent)";
             }
@@ -126,9 +127,11 @@ TEST(AudioBankIntegrity, ClientEventLiteralsResolveInLoadedBanks) {
     std::vector<std::string> unresolved;
     for (const auto& entry :
          fs::recursive_directory_iterator(kRoot / "src" / "luminumbra_client")) {
-        if (!entry.is_regular_file()) continue;
+        if (!entry.is_regular_file())
+            continue;
         const std::string ext = entry.path().extension().string();
-        if (ext != ".cpp" && ext != ".h" && ext != ".hpp") continue;
+        if (ext != ".cpp" && ext != ".h" && ext != ".hpp")
+            continue;
 
         std::ifstream input(entry.path());
         std::string line;
@@ -140,17 +143,20 @@ TEST(AudioBankIntegrity, ClientEventLiteralsResolveInLoadedBanks) {
                 line.resize(comment);
             }
             std::smatch call;
-            if (!std::regex_search(line, call, kCallRe)) continue;
+            if (!std::regex_search(line, call, kCallRe))
+                continue;
             // Every plausible event-id literal in the call's argument tail.
             const std::string tail = call.suffix().str();
             for (auto it = std::sregex_iterator(tail.begin(), tail.end(), kLiteralRe);
-                 it != std::sregex_iterator(); ++it) {
+                 it != std::sregex_iterator();
+                 ++it) {
                 const std::string id = (*it)[1].str();
-                if (!LooksLikeEventId(id)) continue;
+                if (!LooksLikeEventId(id))
+                    continue;
                 ++literals_checked;
                 if (events.count(id) == 0u) {
-                    unresolved.push_back(id + " (" + entry.path().filename().string() +
-                                         ":" + std::to_string(line_no) + ")");
+                    unresolved.push_back(id + " (" + entry.path().filename().string() + ":" +
+                                         std::to_string(line_no) + ")");
                 }
             }
         }
@@ -161,10 +167,10 @@ TEST(AudioBankIntegrity, ClientEventLiteralsResolveInLoadedBanks) {
         << "the call-site scan found suspiciously few event literals — scanner broken?";
     EXPECT_TRUE(unresolved.empty())
         << unresolved.size() << " event literal(s) do not resolve in the loaded banks "
-        << "(they fail SILENTLY at runtime): "
-        << [&unresolved] {
+        << "(they fail SILENTLY at runtime): " << [&unresolved] {
                std::string joined;
-               for (const auto& u : unresolved) joined += "\n  " + u;
+               for (const auto& u : unresolved)
+                   joined += "\n  " + u;
                return joined;
            }();
 }
@@ -178,9 +184,11 @@ TEST(AudioBankIntegrity, EverySpeciesHasACallEvent) {
     ASSERT_TRUE(fs::exists(species_dir)) << species_dir.string();
     std::size_t species_checked = 0;
     for (const auto& entry : fs::directory_iterator(species_dir)) {
-        if (entry.path().extension() != ".json") continue;
+        if (entry.path().extension() != ".json")
+            continue;
         const nlohmann::json j = LoadJson(entry.path());
-        if (!j.contains("id")) continue;
+        if (!j.contains("id"))
+            continue;
         const std::string call_event = "creature_" + j.at("id").get<std::string>() + "_call";
         EXPECT_EQ(events.count(call_event), 1u)
             << entry.path().filename().string() << " has no '" << call_event
@@ -201,14 +209,15 @@ TEST(AudioBankIntegrity, CoreWorldStateEventsResolve) {
              "creature_drink",
              "creature_colony",
          }) {
-        if (loaded.count(id) == 0u) unresolved.push_back(id);
+        if (loaded.count(id) == 0u)
+            unresolved.push_back(id);
     }
 
     EXPECT_TRUE(unresolved.empty())
-        << "core world-state event ids are absent from loaded banks: "
-        << [&unresolved] {
+        << "core world-state event ids are absent from loaded banks: " << [&unresolved] {
                std::string joined;
-               for (const auto& id : unresolved) joined += "\n  " + id;
+               for (const auto& id : unresolved)
+                   joined += "\n  " + id;
                return joined;
            }();
 }

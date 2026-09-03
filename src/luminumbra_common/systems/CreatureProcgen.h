@@ -24,10 +24,10 @@ namespace luminumbra::creature {
 // Normalized [0,1] build genes (0.5 == average). Each maps to one body-proportion axis;
 // `size` is the overall scale multiplier (e.g. from CreatureGenomeComponent.size_scale).
 struct CreatureBuildGenome {
-    float height = 0.5f;  // 0 short .. 1 tall      (Y)
-    float girth  = 0.5f;  // 0 lean .. 1 stocky     (X / width)
-    float length = 0.5f;  // 0 compact .. 1 long    (Z)
-    float size   = 1.0f;  // overall uniform multiplier (>0)
+    float height = 0.5f; // 0 short .. 1 tall      (Y)
+    float girth = 0.5f;  // 0 lean .. 1 stocky     (X / width)
+    float length = 0.5f; // 0 compact .. 1 long    (Z)
+    float size = 1.0f;   // overall uniform multiplier (>0)
 };
 
 // The resulting render BUILD: a non-uniform scale to apply to TransformComponent.scale.
@@ -38,7 +38,9 @@ struct CreatureBuild {
     float scale_z = 1.0f;
 };
 
-inline float CBClamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+inline float CBClamp(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
 
 // Map a [0,1] gene to a proportion factor in [lo,hi] (a gene of 0.5 lands near the
 // midpoint, i.e. roughly 1.0 for symmetric spans). Pure, float-only.
@@ -47,7 +49,7 @@ inline float CBProportion(float gene, float lo, float hi) {
 }
 
 // Bounded proportion spans (around 1.0) so silhouettes vary clearly but never degenerate.
-inline constexpr float kBuildGirthLo  = 0.78f, kBuildGirthHi  = 1.28f;
+inline constexpr float kBuildGirthLo = 0.78f, kBuildGirthHi = 1.28f;
 inline constexpr float kBuildHeightLo = 0.80f, kBuildHeightHi = 1.35f;
 inline constexpr float kBuildLengthLo = 0.82f, kBuildLengthHi = 1.30f;
 
@@ -56,10 +58,10 @@ inline constexpr float kBuildLengthLo = 0.82f, kBuildLengthHi = 1.30f;
 inline CreatureBuild ComputeCreatureBuild(const CreatureBuildGenome& g) {
     CreatureBuild b;
     const float s = g.size <= 0.0f ? 1.0f : g.size;
-    b.scale_x = CBProportion(g.girth,  kBuildGirthLo,  kBuildGirthHi)  * s;
+    b.scale_x = CBProportion(g.girth, kBuildGirthLo, kBuildGirthHi) * s;
     b.scale_y = CBProportion(g.height, kBuildHeightLo, kBuildHeightHi) * s;
     b.scale_z = CBProportion(g.length, kBuildLengthLo, kBuildLengthHi) * s;
     return b;
 }
 
-}  // namespace luminumbra::creature
+} // namespace luminumbra::creature

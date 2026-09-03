@@ -12,7 +12,8 @@ enum class GameState {
 
 class GameStateManager {
 public:
-    GameStateManager() : currentState(GameState::SPLASH) {}
+    GameStateManager()
+        : currentState(GameState::SPLASH) {}
 
     GameState GetCurrentState() const {
         return currentState;

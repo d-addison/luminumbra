@@ -15,12 +15,11 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::ai::RunLifespanOnTick;
 using luminumbra::ai::LifespanStats;
+using luminumbra::ai::RunLifespanOnTick;
 
 // Spawn a bare mortal entity (no creature). `lifespan` controls old-age death.
-entt::entity spawnMortal(entt::registry& r, std::uint32_t lifespan,
-                         std::uint32_t age = 0) {
+entt::entity spawnMortal(entt::registry& r, std::uint32_t lifespan, std::uint32_t age = 0) {
     auto e = r.create();
     auto& m = r.emplace<Comp::MortalComponent>(e);
     m.lifespan_ticks = lifespan;
@@ -29,8 +28,7 @@ entt::entity spawnMortal(entt::registry& r, std::uint32_t lifespan,
 }
 
 // Spawn a mortal creature so starvation (hunger) can also kill it.
-entt::entity spawnMortalCreature(entt::registry& r, std::uint32_t lifespan,
-                                 float hunger) {
+entt::entity spawnMortalCreature(entt::registry& r, std::uint32_t lifespan, float hunger) {
     auto e = r.create();
     auto& m = r.emplace<Comp::MortalComponent>(e);
     m.lifespan_ticks = lifespan;
@@ -61,7 +59,8 @@ TEST(Lifespan, PastLifespanDies) {
 TEST(Lifespan, YoungSurvives) {
     entt::registry r;
     const entt::entity e = spawnMortal(r, /*lifespan*/ 1000, /*age*/ 0);
-    for (int i = 0; i < 100; ++i) RunLifespanOnTick(r, static_cast<std::uint64_t>(i));
+    for (int i = 0; i < 100; ++i)
+        RunLifespanOnTick(r, static_cast<std::uint64_t>(i));
     EXPECT_EQ(r.get<Comp::MortalComponent>(e).dead, 0u);
     EXPECT_EQ(r.get<Comp::MortalComponent>(e).age_ticks, 100u);
 }
@@ -81,7 +80,8 @@ TEST(Lifespan, StarvationKills) {
 TEST(Lifespan, WellFedCreatureSurvives) {
     entt::registry r;
     const entt::entity e = spawnMortalCreature(r, /*lifespan*/ 0xFFFFFFFFu, /*hunger*/ 0.5f);
-    for (int i = 0; i < 50; ++i) RunLifespanOnTick(r, static_cast<std::uint64_t>(i));
+    for (int i = 0; i < 50; ++i)
+        RunLifespanOnTick(r, static_cast<std::uint64_t>(i));
     EXPECT_EQ(r.get<Comp::MortalComponent>(e).dead, 0u);
     EXPECT_FALSE(r.get<Comp::CreatureComponent>(e).eaten);
 }
@@ -106,7 +106,7 @@ TEST(Lifespan, AgingMonotonicThenLatches) {
 // A dead entity is never "aged" again (stats.aged excludes it).
 TEST(Lifespan, DeadEntityNotAged) {
     entt::registry r;
-    spawnMortal(r, /*lifespan*/ 1, /*age*/ 0);  // dies on tick 1 (age 1 >= 1)
+    spawnMortal(r, /*lifespan*/ 1, /*age*/ 0); // dies on tick 1 (age 1 >= 1)
     const LifespanStats first = RunLifespanOnTick(r, 1);
     EXPECT_EQ(first.aged, 1);
     EXPECT_EQ(first.died, 1);
@@ -121,9 +121,10 @@ TEST(Lifespan, Deterministic) {
         entt::registry r;
         spawnMortal(r, 7, 0);
         spawnMortal(r, 50, 10);
-        spawnMortalCreature(r, 0xFFFFFFFFu, 1.0f);  // starves immediately
-        spawnMortalCreature(r, 1000, 0.2f);          // long-lived, well-fed
-        for (std::uint64_t t = 0; t < 60; ++t) RunLifespanOnTick(r, t);
+        spawnMortalCreature(r, 0xFFFFFFFFu, 1.0f); // starves immediately
+        spawnMortalCreature(r, 1000, 0.2f);        // long-lived, well-fed
+        for (std::uint64_t t = 0; t < 60; ++t)
+            RunLifespanOnTick(r, t);
         std::vector<std::uint32_t> out;
         for (auto e : r.view<Comp::MortalComponent>()) {
             const auto& m = r.get<Comp::MortalComponent>(e);
@@ -135,4 +136,4 @@ TEST(Lifespan, Deterministic) {
     EXPECT_EQ(run(), run());
 }
 
-}  // namespace
+} // namespace

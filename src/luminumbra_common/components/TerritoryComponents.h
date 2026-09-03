@@ -25,10 +25,10 @@ namespace Luminumbra::Components {
 // system stamps home_{x,z} from the creature's current TransformComponent position and sets
 // established=1; thereafter home stays fixed and defines the centre of the home range.
 struct TerritoryComponent {
-    float home_x = 0.0f;       // world-X of the claimed home (valid once established==1)
-    float home_z = 0.0f;       // world-Z of the claimed home (valid once established==1)
-    float radius = 20.0f;      // home-range radius (world units); homing is 0 inside this
-    std::uint8_t established = 0;  // 0 = home not yet claimed; 1 = claimed (home_{x,z} valid)
+    float home_x = 0.0f;          // world-X of the claimed home (valid once established==1)
+    float home_z = 0.0f;          // world-Z of the claimed home (valid once established==1)
+    float radius = 20.0f;         // home-range radius (world units); homing is 0 inside this
+    std::uint8_t established = 0; // 0 = home not yet claimed; 1 = claimed (home_{x,z} valid)
 };
 
 // Output of the territory system: the per-tick HOMING wish bias the orchestrator blends into
@@ -37,8 +37,8 @@ struct TerritoryComponent {
 // system creates/updates this component on every participating creature; defaults are a no-op
 // (zero bias) so a creature whose system has not yet run does not perturb movement.
 struct TerritoryBiasComponent {
-    float wish_x = 0.0f;  // homing bias toward home, X component (m/s-scaled steer)
-    float wish_z = 0.0f;  // homing bias toward home, Z component (m/s-scaled steer)
+    float wish_x = 0.0f; // homing bias toward home, X component (m/s-scaled steer)
+    float wish_z = 0.0f; // homing bias toward home, Z component (m/s-scaled steer)
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

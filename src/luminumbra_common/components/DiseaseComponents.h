@@ -28,10 +28,10 @@ namespace Luminumbra::Components {
 
 // Disease lifecycle. Stored as an integer so it hashes/replays trivially.
 enum class PlantDiseaseState : std::uint8_t {
-    Healthy = 0,   // no active infection
-    Infected,      // carrying + spreading the blight
-    Recovered,     // beat the infection (raised resistance, immune-ish)
-    Dead,          // succumbed (terminal)
+    Healthy = 0, // no active infection
+    Infected,    // carrying + spreading the blight
+    Recovered,   // beat the infection (raised resistance, immune-ish)
+    Dead,        // succumbed (terminal)
     Count
 };
 inline constexpr std::uint8_t kPlantDiseaseStateCount =

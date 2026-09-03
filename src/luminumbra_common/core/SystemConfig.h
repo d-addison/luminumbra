@@ -21,7 +21,7 @@
 
 #include <glm/glm.hpp>
 
-#include "SystemConfigRegistry.gen.h"  // X-macro registry GENERATED from ConfigSchema.json
+#include "SystemConfigRegistry.gen.h" // X-macro registry GENERATED from ConfigSchema.json
 
 namespace luminumbra::core {
 
@@ -31,12 +31,12 @@ struct UserSettings {
     // video
     std::string resolution;                 // "" = native/default; else "WxH"
     std::string window_mode = "borderless"; // windowed | borderless | fullscreen
-    bool vsync = false;                      // default OFF: preserve today's uncapped 300fps target
+    bool vsync = false;                     // default OFF: preserve today's uncapped 300fps target
     float fov = 45.0f;
     float render_scale = 1.0f;
-    float ui_scale = 1.0f;  // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.
-                            // Lets players scale the HUD up on big/4K/ultrawide displays.
-    float mouse_sensitivity = 0.025f;  // 25% of the prior 0.1 default (owner request 2026-06-18)
+    float ui_scale = 1.0f; // HUD/UI density-independent-pixel ratio (0.5..2.5); 1.0 = native px.
+                           // Lets players scale the HUD up on big/4K/ultrawide displays.
+    float mouse_sensitivity = 0.025f; // 25% of the prior 0.1 default (owner request 2026-06-18)
     // audio (0..1)
     float audio_master = 1.0f;
     float audio_sfx = 1.0f;
@@ -93,8 +93,12 @@ public:
     [[nodiscard]] std::string ComputeConfigSubHash() const;
 
     // ---- user.* player settings (client-only, never hashed) ----
-    [[nodiscard]] const UserSettings& user() const { return m_user; }
-    [[nodiscard]] UserSettings& user() { return m_user; }
+    [[nodiscard]] const UserSettings& user() const {
+        return m_user;
+    }
+    [[nodiscard]] UserSettings& user() {
+        return m_user;
+    }
     // Resolved keybind: the overlay's binding for `action`, else `fallback` (e.g. a client
     // compiled default). Keeps core engine-generic (no InputAction enum dependency here).
     [[nodiscard]] int keybind(const std::string& action, int fallback) const;
@@ -118,10 +122,10 @@ public:
 private:
     static constexpr std::size_t kParamCount = static_cast<std::size_t>(SysParam::Count);
 
-    std::uint32_t m_enabled = 0;                       // packed flag bitset (<=32 keys)
-    std::uint64_t m_param_set = 0;                     // which params were explicitly set (<=64 params)
-    std::array<glm::vec3, kParamCount> m_params{};     // scalar params live in .x
-    UserSettings m_user{};                             // client-only; never hashed
+    std::uint32_t m_enabled = 0;                   // packed flag bitset (<=32 keys)
+    std::uint64_t m_param_set = 0;                 // which params were explicitly set (<=64 params)
+    std::array<glm::vec3, kParamCount> m_params{}; // scalar params live in .x
+    UserSettings m_user{};                         // client-only; never hashed
 };
 
-}  // namespace luminumbra::core
+} // namespace luminumbra::core

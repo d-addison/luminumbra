@@ -6,10 +6,9 @@
 namespace luminumbra::core {
 
 SimulationClock::SimulationClock(double tick_rate_hz, std::uint32_t max_catch_up_ticks)
-    : tick_rate_hz_(tick_rate_hz > 0.0 ? tick_rate_hz : kCanonicalTickRateHz),
-      fixed_dt_(1.0 / (tick_rate_hz > 0.0 ? tick_rate_hz : kCanonicalTickRateHz)),
-      max_catch_up_ticks_(max_catch_up_ticks > 0 ? max_catch_up_ticks : 1) {
-}
+    : tick_rate_hz_(tick_rate_hz > 0.0 ? tick_rate_hz : kCanonicalTickRateHz)
+    , fixed_dt_(1.0 / (tick_rate_hz > 0.0 ? tick_rate_hz : kCanonicalTickRateHz))
+    , max_catch_up_ticks_(max_catch_up_ticks > 0 ? max_catch_up_ticks : 1) {}
 
 std::uint32_t SimulationClock::advance(double frame_dt) {
     if (frame_dt > 0.0 && std::isfinite(frame_dt)) {
@@ -17,8 +16,8 @@ std::uint32_t SimulationClock::advance(double frame_dt) {
     }
 
     const auto ticks_possible = static_cast<std::uint64_t>(std::floor(accumulator_ / fixed_dt_));
-    const auto ticks_executed = static_cast<std::uint32_t>(
-        std::min<std::uint64_t>(ticks_possible, max_catch_up_ticks_));
+    const auto ticks_executed =
+        static_cast<std::uint32_t>(std::min<std::uint64_t>(ticks_possible, max_catch_up_ticks_));
 
     accumulator_ -= static_cast<double>(ticks_executed) * fixed_dt_;
     if (ticks_possible > ticks_executed) {
