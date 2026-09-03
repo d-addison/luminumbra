@@ -59,7 +59,7 @@
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h" // Aether-field sampling.
 #include "luminumbra_common/systems/CreatureProcgen.h" // genome -> body-proportion build (procedural silhouette)
-#include "luminumbra_common/systems/FarmingSystem.h" //  MakePlantFromSpecies + SpeciesRegistry
+#include "luminumbra_common/systems/FarmingSystem.h"   //  MakePlantFromSpecies + SpeciesRegistry
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h" //  phenotype/genome
 #include "luminumbra_common/systems/PlantProcgen.h"      //  procedural plant geometry (render-only)
