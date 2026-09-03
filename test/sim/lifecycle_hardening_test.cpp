@@ -9,9 +9,10 @@
 //
 // Probes: determinism (run==replay byte-exact), gating no-ops, output bounds / no NaN on
 // degenerate input, order-independence, producer->consumer unit/magnitude contracts,
-// population boundedness, and exact threshold/boundary behaviour. Tests that document a
-// suspected bug are marked `// BUG:` and assert the EXPECTED-CORRECT behaviour (they may
-// fail against current code until the orchestrator fixes the system).
+// population boundedness, and exact threshold/boundary behaviour. A test documenting a
+// suspected bug is marked `// BUG:` and asserts the EXPECTED-CORRECT behaviour (it may
+// fail until the system is fixed); once the fix lands the marker becomes a
+// REGRESSION GUARD note. No live BUG markers remain in this file today.
 //
 // Determinism: only the systems' own seeded/integer paths are exercised; NO wall-clock,
 // NO std::random. run==replay asserts EXACT float equality (systems are -ffp-contract=off).
@@ -914,12 +915,11 @@ TEST(WildlifeHardening, FeedLowersHungerClampedAtZero) {
     EXPECT_LE(h, 1.0f);
 }
 
-// --- BUG: a herbivore must NOT be fed by a BARE (biomass == 0) plant. Feed should be
-//     gated on biomass actually grazed/removed; otherwise a creature parked on a
-//     trampled-to-the-ground patch keeps eating from nothing (energy from nowhere).
-//     EXPECTED-CORRECT: standing on a fully-bare plant with no other food leaves hunger
-//     UNCHANGED. (Currently feed is added per in-range plant regardless of biomass.) ---
-TEST(WildlifeHardening, BarePlantDoesNotFeed) { // BUG: BarePlantDoesNotFeed
+// --- REGRESSION GUARD (bare-plant feeding, fixed): a herbivore must NOT be fed by a
+//     BARE (biomass == 0) plant — energy from nowhere. WildlifeFoliageSystem now gates
+//     feed accrual on `has_biomass`; this test keeps that honest: standing on a
+//     fully-bare plant with no other food leaves hunger UNCHANGED. ---
+TEST(WildlifeHardening, BarePlantDoesNotFeed) {
     entt::registry r;
     auto c = spawnHerbivore(r, 0.0f, 0.0f, /*hunger=*/0.5f);
     spawnGrazePlant(r, 0.0f, 0.0f, /*biomass=*/0.0f); // bare ground, nothing to eat

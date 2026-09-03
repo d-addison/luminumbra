@@ -4,6 +4,7 @@
 // must succeed in a root containing nothing but the world preset.
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -37,12 +38,16 @@ fs::path SourcePresetPath() {
 }
 
 // Temp root containing ONLY worlds/atlas/presets/default.json — no res/ or
-// data/ client assets anywhere.
+// data/ client assets anywhere. The root is unique per fixture instance so
+// concurrent common_tests processes never share (or clobber) a directory; each
+// TEST builds ONE instance and reuses it, so within-run path stability still
+// holds. The destructor removes the tree.
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        root_ = fs::temp_directory_path() / "luminumbra_headless_world_test";
-        fs::remove_all(root_);
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        root_ =
+            fs::temp_directory_path() / ("luminumbra_headless_world_test_" + std::to_string(stamp));
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(SourcePresetPath(), root_ / "worlds" / "atlas" / "presets" / "default.json");
     }

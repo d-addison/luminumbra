@@ -43,6 +43,28 @@ target_link_libraries(luminumbra_client PUBLIC
     stb_headers
 )
 
+# --- Client QA Library (RuntimeScenarioHarness) ---
+# The QA scenario harness (the gate/scenario driver behind
+# `luminumbra_client_app --scenario <name>`) lives in its own static library so
+# interactive-client code and QA-harness code stop sharing one target. It links
+# luminumbra_client PUBLIC for the include dirs + engine/render dependencies.
+# The dependency is mutual: the harness drives RenderPipeline/GameSession from
+# luminumbra_client, while luminumbra_client TUs (SceneSurvey.cpp,
+# WorldgenPreview.cpp) call harness-defined helpers (WritePixelBufferPpm,
+# FoliageSurfaceQuery). Declaring the cycle on both targets makes CMake repeat
+# the static archives on consumer link lines, so every existing consumer of
+# luminumbra_client keeps linking unchanged.
+add_library(luminumbra_client_qa STATIC
+    ${CLIENT_QA_SOURCES}
+)
+
+target_link_libraries(luminumbra_client_qa PUBLIC
+    luminumbra_client
+)
+target_link_libraries(luminumbra_client PUBLIC
+    luminumbra_client_qa
+)
+
 # --- Headless Server Executable ---
 # Simulation authority only: links luminumbra_common and NOTHING client-side
 # (no OpenGL, GLFW, miniaudio, imgui, RmlUi). The ServerHeadlessHygiene ctest
@@ -76,6 +98,15 @@ if(LUMINUMBRA_ENABLE_STEAM AND WIN32)
             "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/win64/steam_api64.dll"
             "$<TARGET_FILE_DIR:luminumbra_server_app>/steam_api64.dll"
         COMMENT "Copying steam_api64.dll next to luminumbra_server_app")
+elseif(LUMINUMBRA_ENABLE_STEAM AND UNIX AND NOT APPLE)
+    # mirror of the win64 copy: the linux64 redistributable is a shared object the
+    # loader must find next to the exe (the link references the SDK path, the
+    # runtime should not).
+    add_custom_command(TARGET luminumbra_server_app POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${LUMINUMBRA_STEAM_SDK_DIR}/redistributable_bin/linux64/libsteam_api.so"
+            "$<TARGET_FILE_DIR:luminumbra_server_app>/libsteam_api.so"
+        COMMENT "Copying libsteam_api.so next to luminumbra_server_app")
 endif()
 
 # --- Client Executable ---
@@ -84,6 +115,7 @@ add_executable(luminumbra_client_app
 )
 
 target_link_libraries(luminumbra_client_app PRIVATE
+    luminumbra_client_qa
     luminumbra_client
 )
 

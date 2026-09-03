@@ -60,11 +60,16 @@ std::uint64_t HashVec(const std::vector<T>& v) {
 }
 
 // Temp root containing ONLY the world preset (headless — no res/data assets).
+// The root is unique per fixture instance so concurrent common_tests processes
+// never share (or clobber) a directory; each TEST builds ONE instance and
+// reuses it, so within-run path stability still holds. The destructor removes
+// the tree.
 class HeadlessRoot {
 public:
     HeadlessRoot() {
-        root_ = fs::temp_directory_path() / "luminumbra_promotion_decoupling_test";
-        fs::remove_all(root_);
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        root_ = fs::temp_directory_path() /
+                ("luminumbra_promotion_decoupling_test_" + std::to_string(stamp));
         fs::create_directories(root_ / "worlds" / "atlas" / "presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds" / "atlas" / "presets" /
                           "default.json",
@@ -82,6 +87,18 @@ private:
     fs::path root_;
 };
 
+// Streaming cap (the WaterDeterminism pattern), sized for THIS test's input: it
+// must find a Ready chunk that is coarse-meshed (current_lod > 0, surface-band
+// only) to promote, and the LOD0 band reaches 192 m = 12 chunks — a cap at or
+// below 12 would leave the whole resident disc full-detail and starve the scan.
+// 16 keeps a 4-ring coarse annulus (rings 13..16, the LOD1 band) inside the
+// capped disc while shedding the RENDER_DISTANCE far fill that dominated every
+// wait_for_streaming_jobs tick. No assertion weakens: the byte oracle hashes
+// are computed against a same-run pure regeneration of whichever chunk is
+// picked (no golden constants), and the decoupling/no-mutation pins are
+// properties of that one chunk's publish path, not of the resident set.
+constexpr int kStreamRadiusCap = 16; // chunks (256 m): LOD0 band + coarse ring
+
 TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -93,6 +110,7 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
         ASSERT_TRUE(session.CreateWorld("PromotionDecoupling", "12345", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
         ASSERT_NE(world, nullptr);
+        world->debug_set_streaming_radius_cap(kStreamRadiusCap);
         auto* physics = session.GetPhysicsSystem();
         auto& registry = session.GetRegistry();
 

@@ -1273,6 +1273,25 @@ target_link_libraries(jolt_tunneling_test PRIVATE
     luminumbra_common
 )
 
+# Physics surface queries for audio raycasts: real Jolt surface normals
+# (flat/ramp/from-below opposition flip, dynamic-sphere radial) + the worldgen
+# material seam (SurfaceVertexMaterial vs the legacy Y-band fallback). Drives
+# the real PhysicsSystem + a headless SHIELD_WorldSystem -- no GL needed.
+add_executable(surface_query_test
+    physics/surface_query_test.cpp
+)
+
+target_include_directories(surface_query_test PRIVATE
+../src
+../src/luminumbra_common
+../include
+)
+
+target_link_libraries(surface_query_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 # real physics-raycast audio occlusion. Compiles AudioSpatialCluster.cpp
 # directly (now decoupled from miniaudio) + links luminumbra_common for the Jolt
 # PhysicsSystem::calculate_audio_occlusion raycast; no client/GL link needed.
@@ -1436,6 +1455,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     runtime_world_visual_validation_test
     frontier_gates_test
     jolt_tunneling_test
+    surface_query_test
     audio_occlusion_test
     audio_prune_guard_test
     audio_volume_readback_test
@@ -1478,20 +1498,17 @@ endif()
 if(LUMINUMBRA_PILOT_SHADER_TEST_AVAILABLE)
     list(APPEND LUMINUMBRA_GTEST_TARGETS pilot_shader_reflection_test)
 endif()
-# Gate honesty (, ): a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning the
-# headless RmlUi UI suite (which GTEST_SKIPs without a GL context) could go GREEN with zero coverage
-# on a gate runner that lacks GL. These tests assert real behaviour and MUST run, not skip. Promote
-# any "[ SKIPPED ]" line from the UI targets to a ctest FAILURE via FAIL_REGULAR_EXPRESSION. The
-# GL-free cases in these binaries never print SKIPPED, so a fully-GL run stays green.
+# Gate honesty: a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning a suite that
+# skips without a GL context could go GREEN with zero coverage on a gate runner that lacks
+# GL. Skip honesty is NOT enforced here in CMake: CI post-processes the JUnit output with
+# tools/ci/check_ctest_junit.py, which fails the lane on any skip whose reason is not on
+# that lane's explicit allow-list (see the workflow's --allow-skip-reason-regex).
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
-    if(_lum_gtest_target STREQUAL common_tests)
-        # Individual tests in this aggregate use shared runtime roots and may
-        # create loopback listeners. CTest launches every discovered case as a
-        # separate process, so serialize the aggregate to prevent cross-test
-        # corruption and port contention.
-        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
-            PROPERTIES RESOURCE_LOCK luminumbra_common_runtime)
-    elseif(_lum_gtest_target STREQUAL world_load_bounded_test)
+    # common_tests is parallel-safe by construction: its temp-dir fixtures use
+    # per-instance unique roots and its socket tests bind ephemeral ports
+    # (Listen(0)), so no RESOURCE_LOCK is needed. New tests in the aggregate
+    # must keep it that way.
+    if(_lum_gtest_target STREQUAL world_load_bounded_test)
         # This machine-sensitive latency observation is opt-in. Keep it out of
         # normal correctness lanes; the paired relative workflow is the gate.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120

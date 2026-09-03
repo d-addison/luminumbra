@@ -869,6 +869,10 @@ bool GameSession::CreateWorld(const std::string& name,
     // 1. Create the World System
     m_worldSystem =
         std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    // Worldgen seam for audio-raycast surface materials (non-owning; physics
+    // is destroyed before the world system by member order, so the pointer
+    // cannot dangle).
+    m_physicsSystem->set_world_system(m_worldSystem.get());
     LUMINUMBRA_CORE_INFO("World system initialized for seed {}.", world_seed);
 
     // 2. Create the Water System
@@ -1013,6 +1017,10 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     m_worldSystem =
         std::make_unique<Systems::SHIELD_WorldSystem>(m_jobSystem, nullptr, params, world_seed);
+    // Worldgen seam for audio-raycast surface materials (non-owning; physics
+    // is destroyed before the world system by member order, so the pointer
+    // cannot dangle).
+    m_physicsSystem->set_world_system(m_worldSystem.get());
     m_waterSystem = std::make_unique<Systems::WaterSystem>(m_jobSystem, m_worldSystem.get());
     m_worldSystem->SetWaterSystem(m_waterSystem.get());
 

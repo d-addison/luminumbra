@@ -41,6 +41,8 @@
 #include "PhotoCamera.h"             // luminumbra::game: LensSettings
 #include "PhotoSession.h" // luminumbra::game: ShotInput/ShotVerdict/EvaluateShot/CommitShot
 
+#include "GameMath.h" // luminumbra::game: Clamp01
+
 namespace luminumbra::game {
 
 // ---------------------------------------------------------------------------
@@ -82,14 +84,6 @@ struct PhotoSubjectView {
 // Small pure clamp helper (float +-*/ only — no libm). Local copy so this header
 // does not pull one namespace's helper into another.
 // ---------------------------------------------------------------------------
-inline float PhotoModeClamp01(float v) {
-    if (v < 0.0f)
-        return 0.0f;
-    if (v > 1.0f)
-        return 1.0f;
-    return v;
-}
-
 // ---------------------------------------------------------------------------
 // BuildShotInput. PURE: assemble the existing ShotInput from a frame's worth of
 // subject views + the active lens + the scene luminance.
@@ -113,9 +107,9 @@ inline ShotInput BuildShotInput(const std::vector<PhotoSubjectView>& views,
                                 const ObservationMetadata& observation = {}) {
     ShotInput in;
     in.lens = lens;
-    in.scene_luminance = PhotoModeClamp01(scene_luminance);
-    in.composition.exposure = PhotoModeClamp01(frame_exposure);
-    in.composition.focus = PhotoModeClamp01(frame_focus);
+    in.scene_luminance = Clamp01(scene_luminance);
+    in.composition.exposure = Clamp01(frame_exposure);
+    in.composition.focus = Clamp01(frame_focus);
     // Annotation: carry the caller's context (time_of_day) and stamp the light from the
     // scene luminance the shot was built with. The principal subject's behaviour is filled
     // below once the main subject is resolved.
@@ -136,8 +130,8 @@ inline ShotInput BuildShotInput(const std::vector<PhotoSubjectView>& views,
         ::luminumbra::photo::PhotoSubject s;
         s.ndc_x = view.ndc_x;
         s.ndc_y = view.ndc_y;
-        s.size = PhotoModeClamp01(view.size);
-        s.light = PhotoModeClamp01(view.light);
+        s.size = Clamp01(view.size);
+        s.light = Clamp01(view.light);
         s.species_id = view.species_id;
 
         // The just-pushed subject is index (size) BEFORE the push.
