@@ -15,9 +15,15 @@ and content formats may still change (see the README's project status).
   bodies, rain, and terraform coupling resolve well; channels narrower than a
   few cells (a small river's inner bank) are below the solver's spatial
   resolution. The experimental `sim.water_high_res` flag switches a session to
-  a 16×16 grid (1 m cells) at the cost of a proportionally smaller simulation
-  window; its flow constants are untuned for the finer grid, so surface flow
-  propagates more slowly. Grid resizes are amortized one chunk per tick during live
+  a 16×16 grid (1 m cells). Its per-edge flow constants are resolution-scaled
+  (derivation in `WaterSystem.cpp`), so per simulated step High reproduces
+  Medium's physics — a dug pit gains the same physical volume per unit of
+  simulated-chunk-time, within a tested band. The flag remains experimental
+  because the fixed per-tick cell budget still sims each High chunk about 4×
+  less often when many chunks are awake (a 16-chunk window instead of 64), so
+  wall-clock settling and filling lag behind Medium until a budget/scheduling
+  decision raises or redistributes that budget; first-time grid seeding is also
+  ~4× costlier per chunk. Grid resizes are amortized one chunk per tick during live
   play (world load migrates all chunks at once), so mid-run resolution changes
   converge over many ticks by design.
 - **Physics surface queries are placeholders.** Raycasts currently report a
