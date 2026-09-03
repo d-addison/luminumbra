@@ -1501,8 +1501,8 @@ endif()
 # Gate honesty: a GTEST_SKIP exits 0, so ctest counts it as PASS — meaning a suite that
 # skips without a GL context could go GREEN with zero coverage on a gate runner that lacks
 # GL. Skip honesty is NOT enforced here in CMake: CI post-processes the JUnit output with
-# tools/ci/check_ctest_junit.py, which fails the lane on any skip whose reason is not on
-# that lane's explicit allow-list (see the workflow's --allow-skip-reason-regex).
+# tools/ci/check_ctest_junit.py, which fails the lane on any skipped or disabled test not
+# present in the script's hard-coded ALLOWED_SKIPS set.
 foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     # common_tests is parallel-safe by construction: its temp-dir fixtures use
     # per-instance unique roots and its socket tests bind ephemeral ports

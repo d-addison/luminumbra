@@ -2,7 +2,7 @@
 
 An honest inventory of the engine's current boundaries. Each item is a real,
 verifiable property of the source tree today, not a roadmap promise. Interfaces
-and content formats may still change (see the README's project status).
+and content formats may still change.
 
 ## Simulation and world
 
@@ -35,9 +35,11 @@ and content formats may still change (see the README's project status).
 ## Networking
 
 - **TCP lockstep loopback is the exercised transport.** The GameNetworkingSockets
-  and Steam transport implementations require external SDKs and build flags
-  that are not yet wired as first-class CMake options, and no over-the-wire
-  multi-client test runs in CI (a manual soak test exists).
+  and Steam transport implementations are available through the
+  `LUMINUMBRA_ENABLE_GNS` and `LUMINUMBRA_ENABLE_STEAM` CMake options. Their SDK
+  inputs are owner-provided and not redistributed; no CI job compiles either
+  transport, and no over-the-wire multi-client test runs in CI (a manual soak
+  test exists).
 
 ## Client and audio
 
@@ -50,10 +52,10 @@ and content formats may still change (see the README's project status).
 
 ## Testing and CI
 
-- **Windows CI lanes run without a GL context.** Rendering, UI, and
-  GPU-dependent suites skip on the hosted Windows runners under an explicit,
-  audited allow-list (`tools/ci/check_ctest_junit.py` fails the lane on any
-  skip reason outside it). Software-GL rendering coverage runs on Linux.
+- **Windows CI uses a software GL context.** Both hosted Windows lanes stage
+  Mesa3D llvmpipe before running the rendering, UI, and GPU-dependent suites.
+  `tools/ci/check_ctest_junit.py` makes any GL-related skip a hard failure, so
+  software-GL rendering coverage runs on Windows as well as Linux.
 - **Engine performance measurement blocks merges on Linux only.** Windows and
   macOS currently exercise the portable runner contract; see
   [performance measurement](performance.md) for the gate's design.
