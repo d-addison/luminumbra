@@ -810,4 +810,135 @@ TEST(WaterDeterminism, WaterResolutionMigrationConvergesAtLoadBothWays) {
     }
 }
 
+// PHYSICAL COMPARABILITY of the gated High resolution. The per-edge flow constants are
+// resolution-scaled (WaterSystem.cpp's derivation: K_ACCEL ∝ res^2, MIN_FLOW_MM ∝ 1/res,
+// FRICTION per-tick so unchanged), so per unit of SIMULATED-chunk-time High must reproduce
+// Medium's physics: a pit dug beside a settled water body fills with the same physical volume,
+// and a dam raised under it displaces the same physical volume out of the edit disc.
+//
+// The comparison horizon is 4x Medium's tick count: under the fixed 4096-cell budget the High
+// window is 16 chunks vs Medium's 64, so with the same awake set each High chunk sims 1/4 as
+// often — 4*T wall ticks is the equal-sim-work horizon. That cadence divide is the budget's
+// domain (deliberately not folded into the constants), which is also why the wall-clock
+// half-fill bound below carries k = 8 = 4 (cadence) x 2 (safety), not a tuned physics margin.
+//
+// Bands (calibrated on this workload, ratios High(4T)/Medium(T) of area-normalized volumes):
+//   pit fill  [0.85, 1.30] — measured 0.97-1.04 tuned; the pre-scaling constants measured
+//     0.67-0.76, so the lower bound cleanly rejects a regression to unscaled constants while
+//     leaving ~15-30% for discretization differences (the 1 m grid resolves the pit rim and
+//     the seeded shoreline differently — exact equality is impossible across cell sizes).
+//   dam displacement [0.50, 1.50] — measured 0.83-0.90 tuned; unscaled constants measured
+//     -0.17 (the response was slower than the river inflow, so volume ROSE) — sign and
+//     magnitude both separate sharply.
+// All-integer sim, one seed, capped streaming disc -> deterministic and bounded.
+constexpr int kCompareSettleTicks = 80;
+constexpr int kCompareMedTicks = 128;
+constexpr int kCompareCadence = 4; // derived window ratio: (4096/64) / (4096/256)
+constexpr float kCompareEditRadiusM = 12.0f;
+constexpr float kCompareProbeRadiusM = 14.0f;
+
+struct PhysicsCompareResult {
+    std::int64_t fill_at_probe = 0; // area-normalized volume delta at the probe tick (mm*m^2)
+    int half_reach_tick = -1;       // first tick |fill| >= |target| (only when target != 0)
+    bool mass_ok = true;
+};
+
+PhysicsCompareResult run_bed_edit_compare(const std::string& root,
+                                          bool high_res,
+                                          std::int32_t delta_mm,
+                                          int probe_ticks,
+                                          int max_ticks,
+                                          std::int64_t target_fill) {
+    JobSystem jobs;
+    jobs.startup();
+    PhysicsCompareResult r;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        session.SetWaterHighResEnabled(high_res);
+        EXPECT_TRUE(session.CreateWorld("PhysCompare", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        world->debug_set_streaming_radius_cap(kStreamRadiusCap);
+        auto* physics = session.GetPhysicsSystem();
+        const Vec3 anchor = find_wet_anchor(world, session.GetMetadata().spawnPoint);
+        auto tick = [&] {
+            world->update(session.GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+            if (!world->debug_water_mass_ok())
+                r.mass_ok = false;
+        };
+        for (int t = 0; t < kCompareSettleTicks; ++t)
+            tick();
+        // Σdepth_mm is per CELL, so the same physical volume sums 4x higher on the 4x-denser
+        // grid; scale by the cell area (2 m cells -> 4 m^2, 1 m cells -> 1 m^2) to compare
+        // both resolutions in one mm*m^2 unit. Integer at every step.
+        const int res = world->debug_water_sim_resolution();
+        const std::int64_t cell_area = static_cast<std::int64_t>(16 / res) * (16 / res);
+        world->EditTerrainBed(anchor, delta_mm, kCompareEditRadiusM);
+        const std::int64_t v0 =
+            world->debug_water_volume_near(anchor, kCompareProbeRadiusM) * cell_area;
+        for (int t = 0; t < max_ticks; ++t) {
+            tick();
+            const std::int64_t fill =
+                world->debug_water_volume_near(anchor, kCompareProbeRadiusM) * cell_area - v0;
+            if (t + 1 == probe_ticks)
+                r.fill_at_probe = fill;
+            if (r.half_reach_tick < 0 && target_fill != 0 &&
+                ((target_fill > 0 && fill >= target_fill) ||
+                 (target_fill < 0 && fill <= target_fill)))
+                r.half_reach_tick = t + 1;
+            if (t + 1 >= probe_ticks && (target_fill == 0 || r.half_reach_tick >= 0))
+                break; // both samples collected — bounded early exit
+        }
+    }
+    jobs.shutdown();
+    return r;
+}
+
+TEST(WaterDeterminism, HighResWaterMatchesMediumPhysicsPerSimPass) {
+    const HeadlessRoot root;
+    const int probe_high = kCompareCadence * kCompareMedTicks; // equal-sim-work horizon
+    const int max_high = 2 * probe_high;                       // k = 8 x Medium's tick count
+
+    // PIT: dig the bed 4 m down beside the settled body; water must flow in.
+    const PhysicsCompareResult pit_med = run_bed_edit_compare(
+        root.root_string(), false, -4000, kCompareMedTicks, kCompareMedTicks, 0);
+    ASSERT_GT(pit_med.fill_at_probe, 0)
+        << "the Medium pit never gained water — the comparability probe is vacuous";
+    const PhysicsCompareResult pit_high = run_bed_edit_compare(
+        root.root_string(), true, -4000, probe_high, max_high, pit_med.fill_at_probe / 2);
+    EXPECT_TRUE(pit_med.mass_ok && pit_high.mass_ok) << "mass invariant violated while probing";
+    EXPECT_GE(pit_high.fill_at_probe * 100, pit_med.fill_at_probe * 85)
+        << "High pit fill after 4x the ticks is under 0.85x Medium's (" << pit_high.fill_at_probe
+        << " vs " << pit_med.fill_at_probe
+        << " mm*m^2) — the resolution-scaled constants regressed (unscaled measures ~0.7x)";
+    EXPECT_LE(pit_high.fill_at_probe * 100, pit_med.fill_at_probe * 130)
+        << "High pit fill after 4x the ticks exceeds 1.30x Medium's (" << pit_high.fill_at_probe
+        << " vs " << pit_med.fill_at_probe << " mm*m^2) — High moves water too fast";
+    EXPECT_GT(pit_high.half_reach_tick, 0)
+        << "High never reached half of Medium's pit fill within 8x Medium's tick count "
+           "(4x is the budget cadence divide, 2x is safety) — settle/fill is stalled, "
+           "not merely cadence-lagged";
+
+    // DAM: raise the bed 4 m under the settled body; water must be displaced OUT of the disc.
+    const PhysicsCompareResult dam_med = run_bed_edit_compare(
+        root.root_string(), false, +4000, kCompareMedTicks, kCompareMedTicks, 0);
+    ASSERT_LT(dam_med.fill_at_probe, 0)
+        << "the Medium dam displaced no water — the comparability probe is vacuous";
+    const PhysicsCompareResult dam_high =
+        run_bed_edit_compare(root.root_string(), true, +4000, probe_high, probe_high, 0);
+    EXPECT_TRUE(dam_med.mass_ok && dam_high.mass_ok) << "mass invariant violated while probing";
+    EXPECT_LT(dam_high.fill_at_probe, 0)
+        << "the High dam did not displace water out of the edit disc at the equal-sim-work "
+           "horizon — with unscaled constants the response is slower than the river inflow "
+           "and the volume RISES; the scaling is not being applied";
+    EXPECT_LE(dam_high.fill_at_probe * 100, dam_med.fill_at_probe * 50)
+        << "High displaced under 0.50x Medium's volume (" << dam_high.fill_at_probe << " vs "
+        << dam_med.fill_at_probe << " mm*m^2)";
+    EXPECT_GE(dam_high.fill_at_probe * 100, dam_med.fill_at_probe * 150)
+        << "High displaced over 1.50x Medium's volume (" << dam_high.fill_at_probe << " vs "
+        << dam_med.fill_at_probe << " mm*m^2)";
+}
+
 } // namespace
