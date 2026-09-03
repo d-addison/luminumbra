@@ -3,8 +3,13 @@
 # CMakeLists.txt in the tree.
 
 set(CLIENT_INTERNAL_SOURCES
-    # App (pre-main() helpers peeled out of main_client.cpp)
+    # App (pre-main() helpers + frame-loop regions peeled out of main_client.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/app/CaveFlourishes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/DebugOverlays.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/InputCallbacks.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/MenuScreens.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/ProcgenPalettes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/RuntimeRoot.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/RuntimeStateRecorder.cpp
