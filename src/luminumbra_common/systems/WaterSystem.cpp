@@ -27,13 +27,18 @@ constexpr int WATER_MESH_DIRTY_TICK_INTERVAL =
 // cap is a DETERMINISTIC count (same active-chunk iteration order on host==peer), and each chunk's
 // init result is order-independent (pure worldgen samples), so run==replay / host==peer hold.
 constexpr int MAX_WATER_INITS_PER_TICK = 6;
-//  implementation note: cap how many active water chunks are SIMULATED per tick. The sim dispatches
+//  implementation note: cap how much active water is SIMULATED per tick. The sim dispatches
 // the woken chunks to workers then m_job_system->waits on completion (+ snapshot/integrate
 // copies), all O(chunks_to_sim); moving into water-heavy terrain woke hundreds at once -> ~450ms
 // main-thread block. We simulate a deterministic ROTATING window (sorted by chunk id, advanced each
 // tick) so the per-tick work is bounded and every chunk still sims over a few ticks. Deterministic
 // guarded by the WaterDeterminism live-water gate.
-constexpr std::size_t MAX_WATER_SIMS_PER_TICK = 64;
+//  the budget is expressed in CELLS, not chunks, because per-tick sim cost scales with
+// cell count (the kernel is O(resolution^2) per chunk). At the uniform Medium resolution every
+// chunk is 64 cells, so 4096 cells == the historical 64-chunk window EXACTLY — the derived
+// window length, cursor evolution and hash trajectory are unchanged. A future higher uniform
+// resolution automatically shrinks the chunk window to keep per-tick cell work constant.
+constexpr std::size_t MAX_WATER_CELLS_PER_TICK = 4096;
 //  implementation note: cap how many water chunks RESIZE their sim grid per tick. Each resize
 //  re-samples
 // GetTerrainHeightAt per cell (~30us, up to 1024 at Ultra), so a burst of LOD-boundary crossings
@@ -70,6 +75,16 @@ constexpr int WATER_SIM_RESOLUTION = static_cast<int>(WaterDetailLevel::Medium);
 // Perf: High (16) was ~4x and spiked the moving water phase to ~130ms; Medium is ~4x cheaper (~32ms
 // worst) and still uniform+deterministic. Cross-chunk flux REQUIRES a uniform resolution (boundary
 // cells must align). A mixed-resolution variant would require explicit seam resampling.
+
+// Per-tick rotating sim-window length in CHUNKS, derived from the cell budget at the single
+// uniform sim resolution. Medium (8x8 = 64 cells/chunk) -> 4096/64 = 64 chunks, identical to the
+// historical fixed 64-chunk window, so the persisted waterSimCursor semantics and the hashed
+// trajectory are untouched; only a resolution change re-derives it.
+constexpr std::size_t WATER_CELLS_PER_CHUNK =
+    static_cast<std::size_t>(WATER_SIM_RESOLUTION) * static_cast<std::size_t>(WATER_SIM_RESOLUTION);
+constexpr std::size_t WATER_SIM_WINDOW_CHUNKS =
+    std::max<std::size_t>(std::size_t{1}, MAX_WATER_CELLS_PER_TICK / WATER_CELLS_PER_CHUNK);
+static_assert(WATER_CELLS_PER_CHUNK > 0, "water sim resolution must be positive");
 
 namespace {
 
@@ -729,31 +744,35 @@ void WaterSystem::update(entt::registry& registry,
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
     }
 
-    //  implementation note: bound the per-tick sim work to MAX_WATER_SIMS_PER_TICK via a
-    //  DETERMINISTIC
-    // rotating window. Sort by chunk id (order independent of the unordered_map's iteration), then
+    //  implementation note: bound the per-tick sim work to the MAX_WATER_CELLS_PER_TICK cell
+    //  budget via a DETERMINISTIC
+    // rotating window of WATER_SIM_WINDOW_CHUNKS chunks (budget / cells-per-chunk at the uniform
+    // resolution). Sort by chunk id (order independent of the unordered_map's iteration), then
     // take a window starting at m_water_sim_cursor and advance it — so over a few ticks every
     // active chunk sims, but no single tick blocks on hundreds of chunks. The un-simulated chunks
-    // stay awake and are picked up by the rotation next tick. Cursor evolution is a pure function
+    // stay awake and are picked up by the rotation next tick. The cursor stays in CHUNK-INDEX
+    // space (persisted as world_info.json waterSimCursor) and its evolution is a pure function
     // of the active-set size sequence -> run==replay / host==peer identical (verified by the
     // WaterDeterminism gate).
     //  boot-settle mode: no rotating window — sim EVERY awake chunk each call so
     // ticks_below_threshold advances every settle iteration and the sleep threshold (120
     // calm ticks) is reachable within a bounded settle (see SetBootSettleMode).
-    if (!m_boot_settle_mode && chunks_to_sim.size() > MAX_WATER_SIMS_PER_TICK) {
+    m_dbg_awake_water_chunks = chunks_to_sim.size();
+    if (!m_boot_settle_mode && chunks_to_sim.size() > WATER_SIM_WINDOW_CHUNKS) {
         std::sort(chunks_to_sim.begin(), chunks_to_sim.end(), [](const Chunk* a, const Chunk* b) {
             return a->get_id() < b->get_id();
         });
         const std::size_t total = chunks_to_sim.size();
         m_water_sim_cursor %= total;
         std::vector<Chunk*> window;
-        window.reserve(MAX_WATER_SIMS_PER_TICK);
-        for (std::size_t i = 0; i < MAX_WATER_SIMS_PER_TICK; ++i) {
+        window.reserve(WATER_SIM_WINDOW_CHUNKS);
+        for (std::size_t i = 0; i < WATER_SIM_WINDOW_CHUNKS; ++i) {
             window.push_back(chunks_to_sim[(m_water_sim_cursor + i) % total]);
         }
-        m_water_sim_cursor = (m_water_sim_cursor + MAX_WATER_SIMS_PER_TICK) % total;
+        m_water_sim_cursor = (m_water_sim_cursor + WATER_SIM_WINDOW_CHUNKS) % total;
         chunks_to_sim.swap(window);
     }
+    m_dbg_cells_simmed = chunks_to_sim.size() * WATER_CELLS_PER_CHUNK;
 
     // --- Step 4:  — INTEGER virtual-pipes. Per chunk: internal-edge flux + sources/sinks
     // (StepChunkWaterFixed). Then a CROSS-CHUNK owner-edge shared-flux pass so rivers/lakes are
