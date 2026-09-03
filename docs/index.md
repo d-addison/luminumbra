@@ -47,6 +47,10 @@ ctest --preset debug -LE manual --no-tests=error --output-on-failure
 The resulting programs are under `build/debug/bin/`:
 
 - `luminumbra_client_app` runs the graphical client;
+- `luminumbra_client_qa_app` runs the same client with the QA scenario harness
+  compiled in — the gate scripts' `--scenario <name>` capture/validation runs
+  target this binary (the shipping client refuses `--scenario` with exit
+  code 6);
 - `luminumbra_server_app` runs a headless authoritative world; and
 - `asset_processor` converts authored model inputs to runtime data.
 
@@ -58,6 +62,6 @@ build/debug/bin/luminumbra_client_app --no-audio
 build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90
 ```
 
-Luminumbra 0.1.0 is an early source release. The repository builds an engine and
+Luminumbra 0.2.0 is an early source release. The repository builds an engine and
 its applications together; it does not yet promise a stable installed SDK or
 ABI for third-party applications.

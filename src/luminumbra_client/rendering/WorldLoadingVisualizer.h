@@ -34,7 +34,14 @@ public:
     void UpdateChunkState(const IVec3& chunk_coords, ChunkLoadVisualState state);
     void EndVisualization();
 
-    void UpdateAndRender(float delta_time, const std::string& status_text, float progress);
+    // dispatched_chunks / total_chunks feed the "Chunks Dispatched" readout;
+    // they were previously reached via an extern seam into main_client.cpp's
+    // globals and now arrive as parameters from the loading-state context.
+    void UpdateAndRender(float delta_time,
+                         const std::string& status_text,
+                         float progress,
+                         int dispatched_chunks,
+                         std::size_t total_chunks);
 
 private:
     std::unique_ptr<Rendering::Shader> m_shader;

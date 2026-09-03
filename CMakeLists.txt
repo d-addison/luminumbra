@@ -1,6 +1,6 @@
 # CMakeLists.txt
 cmake_minimum_required(VERSION 3.20)
-project(Luminumbra VERSION 0.1.0 LANGUAGES C CXX)
+project(Luminumbra VERSION 0.2.0 LANGUAGES C CXX)
 
 include(CTest)
 
@@ -261,10 +261,12 @@ add_dependencies(process_assets copy_data)
 # Add the main game source code subdirectory
 add_subdirectory(src)
 
-target_compile_definitions(luminumbra_client_app PRIVATE
-    LUMINUMBRA_BUILD_DATA_DIR="${DATA_OUTPUT_DIR}"
-    LUMINUMBRA_SOURCE_DATA_DIR="${DATA_SOURCE_DIR}"
-)
+foreach(CLIENT_EXE_TARGET IN ITEMS luminumbra_client_app luminumbra_client_qa_app)
+  target_compile_definitions(${CLIENT_EXE_TARGET} PRIVATE
+      LUMINUMBRA_BUILD_DATA_DIR="${DATA_OUTPUT_DIR}"
+      LUMINUMBRA_SOURCE_DATA_DIR="${DATA_SOURCE_DIR}"
+  )
+endforeach()
 
 target_include_directories(luminumbra_common PUBLIC
     "${LUMINUMBRA_ENGINE_VERSION_INCLUDE_DIR}"
@@ -281,6 +283,7 @@ luminumbra_pin_fp_determinism(luminumbra_server_app)
 # Make the main game executable depend on the asset processing target.
 # This ensures all assets are processed *before* the game is linked.
 add_dependencies(luminumbra_client_app process_assets)
+add_dependencies(luminumbra_client_qa_app process_assets)
 
 # Tests are enabled by default for development presets and can be omitted from
 # packaging-only builds with -DBUILD_TESTING=OFF.
@@ -292,6 +295,7 @@ foreach(FIRST_PARTY_TARGET IN ITEMS
   asset_processor
   luminumbra_common
   luminumbra_client_app
+  luminumbra_client_qa_app
   world_generation_test
   worldgen_layer_snapshot_test
   render_smoke_test

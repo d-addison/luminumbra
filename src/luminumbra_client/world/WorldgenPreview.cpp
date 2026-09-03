@@ -8,12 +8,12 @@
 #include <nlohmann/json.hpp>
 
 #include "core/Log.h"
-#include "core/RuntimeScenarioHarness.h" // ScenarioHarness::FoliageScatterContext / FoliageSurfaceQuery
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h" // Luminumbra::Chunk (renderable chunk coords)
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 #include "rendering/Camera.h"
+#include "rendering/FoliageSurface.h" // Rendering::FoliageScatterContext / FoliageSurfaceQuery
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/ParticlePass.h" // preview precipitation particles
 
@@ -431,9 +431,9 @@ void WorldgenPreview::rebuild_foliage_if_needed(Rendering::RenderPipeline& pipel
     // No wind in the static diorama (the shader still animates sway via u_time);
     // pass the live world as the surface-query context (height/slope/moisture).
     foliage->set_wind(glm::vec2(0.0f, 0.0f));
-    ScenarioHarness::FoliageScatterContext ctx{m_world.get()};
+    Rendering::FoliageScatterContext ctx{m_world.get()};
     foliage->rebuild_instances(m_foliage_scatter,
-                               &ScenarioHarness::FoliageSurfaceQuery,
+                               &Rendering::FoliageSurfaceQuery,
                                &ctx,
                                glm::vec3(kCenterX, kCenterY, kCenterZ));
 

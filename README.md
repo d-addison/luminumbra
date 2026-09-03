@@ -9,7 +9,7 @@ Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
 deterministic fixed-tick simulation, procedural terrain, entity-component systems,
 networking, and a GPU-driven client renderer.
 
-This is an owner-maintained hobby project. Version 0.1.0 is the first public
+This is an owner-maintained hobby project. Version 0.2.0 is an early public
 source release; interfaces and content formats may still change between releases.
 
 ![Luminumbra main menu](docs/assets/screenshots/main-menu.png)
@@ -33,6 +33,8 @@ All generated files stay under `build/<preset>/`.
 The primary executables are written to `build/<preset>/bin/`:
 
 - `luminumbra_client_app` runs the graphical client.
+- `luminumbra_client_qa_app` is the QA build of the client with the scenario
+  harness compiled in; the `tools/gates` scenario runs use it.
 - `luminumbra_server_app` runs the headless simulation server.
 - `asset_processor` converts authored models into the runtime mesh format.
 

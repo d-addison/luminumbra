@@ -1,8 +1,8 @@
 #include "SceneSurvey.h"
 
-#include "../core/RuntimeScenarioHarness.h" // Luminumbra::Client::ScenarioHarness::WritePixelBufferPpm
 #include "Camera.h"
 #include "FrameScan.h"
+#include "PixelIo.h"
 #include "RenderPipeline.h"
 #include "WaterfallDetect.h"
 #include "core/Log.h"
@@ -292,8 +292,7 @@ void RunSceneSurvey(GLFWwindow* window,
         glReadBuffer(GL_BACK);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, fbw, fbh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-        Luminumbra::Client::ScenarioHarness::WritePixelBufferPpm(
-            out_dir / (t.label + ".ppm"), fbw, fbh, px);
+        Luminumbra::Rendering::WritePixelBufferPpm(out_dir / (t.label + ".ppm"), fbw, fbh, px);
 
         LUMINUMBRA_CORE_INFO(
             "SceneSurvey captured '{}' cam=({:.0f},{:.0f},{:.0f}) yaw={:.0f} pitch={:.0f}",

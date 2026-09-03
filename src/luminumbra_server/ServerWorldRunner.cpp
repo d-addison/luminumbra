@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/Profiler.h"
+#include "luminumbra_common/core/SystemConfig.h" // sim.water_high_res (host==peer)
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -30,6 +32,7 @@
 #include "luminumbra_common/systems/FarmingSystem.h"
 #include "luminumbra_common/systems/PhysicsSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h" // water-smoke telemetry reads
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
@@ -38,6 +41,34 @@
 namespace Luminumbra::Server {
 
 namespace {
+
+// water-smoke: deterministic wet anchor — the nearest point to spawn where the PURE
+// worldgen samplers say standing water exists (WaterLevelAt > terrain): sea or a lake
+// basin. Pure functions of seed/preset, independent of chunk residency, so it is
+// identical in every run and callable before any chunk streams. Square-ring scan
+// outward in 8 m steps to +-192 m, first hit wins; falls back to spawn if everything
+// in range is dry (the artifact's non-vacuity fields are the tripwire). Mirrors the
+// WaterDeterminism gate's find_wet_anchor so the workload provably starts wet.
+Vec3 FindWetAnchor(const Systems::SHIELD_WorldSystem& world, const Vec3& spawn) {
+    constexpr float kStep = 8.0f;
+    constexpr int kMaxRing = 24; // 24 * 8 m = 192 m
+    for (int ring = 0; ring <= kMaxRing; ++ring) {
+        for (int dz = -ring; dz <= ring; ++dz) {
+            for (int dx = -ring; dx <= ring; ++dx) {
+                if (std::max(std::abs(dx), std::abs(dz)) != ring) {
+                    continue; // perimeter only — nearest ring first
+                }
+                const float x = spawn.x + static_cast<float>(dx) * kStep;
+                const float z = spawn.z + static_cast<float>(dz) * kStep;
+                const float terrain = world.GetTerrainHeightAt(x, z);
+                if (world.WaterLevelAt(x, z) > terrain + 0.25f) {
+                    return Vec3(x, terrain + 2.0f, z);
+                }
+            }
+        }
+    }
+    return Vec3(spawn.x, world.GetTerrainHeightAt(spawn.x, spawn.z) + 2.0f, spawn.z);
+}
 
 //   world_hash hash revision: the wind sub-hash from the session's wind
 // field, or empty when no wind field exists (defensive; the headless runner
@@ -255,6 +286,24 @@ bool ServerWorldRunner::Boot() {
     m_session = std::make_unique<world::GameSession>();
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
+    // host==peer: the headless host must run the SAME water-sim resolution the
+    // client derives from data/common/systems.json — sim.water_high_res is baked into
+    // the hashed mm grids, so a mismatched host could never agree with its peers.
+    // Resolved against the runner root with a CWD-relative fallback (the client's
+    // load path); a missing file is all-defaults = Medium = byte-identical.
+    {
+        namespace fsys = std::filesystem;
+        const fsys::path root =
+            m_config.root_path.empty() ? fsys::path(".") : fsys::path(m_config.root_path);
+        fsys::path systems_json = root / "data" / "common" / "systems.json";
+        std::error_code systems_ec;
+        if (!fsys::exists(systems_json, systems_ec)) {
+            systems_json = fsys::path("data") / "common" / "systems.json";
+        }
+        const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+        m_session->SetWaterHighResEnabled(
+            sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
+    }
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
@@ -572,6 +621,22 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
     std::vector<double> wait_samples;
     wait_samples.reserve(static_cast<std::size_t>(tick_count));
 
+    // water-smoke: wet walk start (pure worldgen samplers; see FindWetAnchor) and
+    // per-tick water sub-phase samples (ms). Empty vectors when the lane is off.
+    Vec3 water_walk_start = spawn_anchor;
+    std::vector<double> water_init_samples, water_sim_samples, water_seam_samples,
+        water_book_samples, water_total_samples;
+    if (m_config.water_smoke) {
+        report.water.enabled = true;
+        water_walk_start = FindWetAnchor(*world_system, spawn_anchor);
+        const auto n = static_cast<std::size_t>(tick_count);
+        water_init_samples.reserve(n);
+        water_sim_samples.reserve(n);
+        water_seam_samples.reserve(n);
+        water_book_samples.reserve(n);
+        water_total_samples.reserve(n);
+    }
+
     const auto wall_start = std::chrono::steady_clock::now();
     while (report.ticks_executed < tick_count) {
         LUMIN_PROFILE_ZONE_N("server_tick"); // no-op unless LUMINUMBRA_ENABLE_TRACY
@@ -610,7 +675,14 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // single spawn anchor via the Vec3 overload (byte-identical to zero-avatar).
         if (m_avatars.empty()) {
             Vec3 anchor = spawn_anchor;
-            if (m_config.moving_anchor) {
+            if (m_config.water_smoke) {
+                // water-smoke walk: +X 2 m/tick from the wet anchor, so the run keeps
+                // streaming fresh columns THROUGH/along the wet body — first-time grid
+                // inits, the rotating sim window, and cross-chunk seam flux all engage
+                // every activation. Pure fn of the tick -> run==replay holds.
+                const float d = 2.0f * static_cast<float>(report.ticks_executed);
+                anchor = Vec3(water_walk_start.x + d, water_walk_start.y, water_walk_start.z);
+            } else if (m_config.moving_anchor) {
                 // B' harness: walk the streaming anchor +X/+Z each tick so chunks stream IN ahead
                 // and OUT behind during the run. ~0.5 m/tick -> ~45 m over 90 ticks (~3 chunks).
                 // Pure fn of the tick -> both --smoke runs drift identically; any run!=replay is
@@ -627,6 +699,25 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 anchors.push_back(a.position);
             }
             world_system->update(m_session->GetRegistry(), anchors, physics_system);
+        }
+        // water-smoke: sample the water sub-phase timings + sim-load counters the
+        // update above just produced. Const reads of never-hashed telemetry (the same
+        // read class as the availability digest) — hash-neutral, off by default.
+        if (m_config.water_smoke) {
+            if (const Systems::WaterSystem* water = m_session->GetWaterSystem()) {
+                const auto& wt = water->dbg_water_timings();
+                water_init_samples.push_back(wt.init);
+                water_sim_samples.push_back(wt.sim);
+                water_seam_samples.push_back(wt.seam);
+                water_book_samples.push_back(wt.bookkeeping);
+                water_total_samples.push_back(wt.init + wt.sim + wt.seam + wt.bookkeeping);
+                report.water.cells_simmed_total += water->dbg_cells_simmed();
+                report.water.awake_chunks_max =
+                    std::max(report.water.awake_chunks_max, water->dbg_awake_water_chunks());
+                report.water.mass_ok = report.water.mass_ok && water->dbg_mass_ok();
+                report.water.seam_wet_pairs_max =
+                    std::max(report.water.seam_wet_pairs_max, water->dbg_seam_wet_pairs());
+            }
         }
         //  5b (activation queue ): THE SWAP. The per-tick full barrier
         // is replaced by tick-keyed activation — publish exactly the batches
@@ -700,6 +791,40 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         report.main_wait_p95_ms = pct(0.95);
         report.main_wait_p99_ms = pct(0.99);
         report.main_wait_max_ms = wait_samples.back();
+    }
+
+    // water-smoke: summarize the per-tick sub-phase samples (same nearest-rank
+    // percentile convention as main_wait above).
+    if (m_config.water_smoke) {
+        const auto summarize_phase = [](std::vector<double>& samples,
+                                        ServerTickReport::WaterPhaseStats& out) {
+            if (samples.empty()) {
+                return;
+            }
+            std::sort(samples.begin(), samples.end());
+            const auto pct = [&samples](double p) {
+                const std::size_t n = samples.size();
+                std::size_t idx = static_cast<std::size_t>(std::ceil(p * static_cast<double>(n)));
+                if (idx > 0)
+                    --idx;
+                if (idx >= n)
+                    idx = n - 1;
+                return samples[idx];
+            };
+            out.p50_ms = pct(0.50);
+            out.p95_ms = pct(0.95);
+            out.max_ms = samples.back();
+        };
+        summarize_phase(water_init_samples, report.water.init);
+        summarize_phase(water_sim_samples, report.water.sim);
+        summarize_phase(water_seam_samples, report.water.seam);
+        summarize_phase(water_book_samples, report.water.bookkeeping);
+        summarize_phase(water_total_samples, report.water.total);
+        if (report.ticks_executed > 0) {
+            report.water.cells_simmed_per_tick =
+                static_cast<double>(report.water.cells_simmed_total) /
+                static_cast<double>(report.ticks_executed);
+        }
     }
 
     //  shadow (activation queue step 2, ): the activation-latency

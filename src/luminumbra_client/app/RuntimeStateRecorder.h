@@ -6,8 +6,10 @@
 // the timed scenario gates poll, and the per-frame / boot-window metrics
 // recorders that feed the runtime-frames and runtime-boot artifacts.
 
-#include "core/RuntimeScenarioHarness.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h" // nested RuntimeChunkStats / coverage stats
+#include "rendering/RenderPipeline.h" // nested MeshUpload/RenderPass/RuntimeRender stats
 
 #include "nlohmann/json.hpp"
 

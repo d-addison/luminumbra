@@ -3,8 +3,13 @@
 # CMakeLists.txt in the tree.
 
 set(CLIENT_INTERNAL_SOURCES
-    # App (pre-main() helpers peeled out of main_client.cpp)
+    # App (pre-main() helpers + frame-loop regions peeled out of main_client.cpp)
+    ${CMAKE_CURRENT_LIST_DIR}/app/CaveFlourishes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/DebugOverlays.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/InputCallbacks.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/MenuScreens.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/ProcgenPalettes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/RuntimeRoot.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/RuntimeStateRecorder.cpp
@@ -32,10 +37,12 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FoliageSurface.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameScan.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameHealth.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/GlDebugOutput.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ImpostorBake.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/PixelIo.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/SceneSurvey.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/LightningBolt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Mesh.cpp
@@ -91,8 +98,13 @@ set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.
     PROPERTIES COMPILE_DEFINITIONS "RMLUI_GL3_CUSTOM_LOADER=<glad/glad.h>")
 
 # QA scenario-harness sources (the luminumbra_client_qa static library).
+# ScenarioRunner{Drive,Capture}.cpp carry the scenario driving/capture hook
+# bodies moved out of main_client.cpp's frame loop (core/ScenarioRunner.h is
+# the seam main() talks to).
 set(CLIENT_QA_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerCapture.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerDrive.cpp
 )
 
 # Third-party implementation sources are owned by their dependency targets.
@@ -117,10 +129,22 @@ set(CLIENT_SOURCES
 # on MinGW; -mbig-obj lifts it (same pattern googletest/nlohmann use).
 # main_client.cpp is a large monolith that likewise overflows once it gains more
 # EnTT emplace/view instantiations (relocation truncated to fit IMAGE_REL_AMD64_ADDR32NB);
-# give it the same treatment so the app TU keeps room to grow.
+# give it the same treatment so the app TU keeps room to grow. The QA-binary
+# split moved the harness/runner bodies out of this TU, but it still carries
+# ~40 registry emplace/view sites of its own and is now compiled into BOTH
+# client executables, so the flag stays until a UCRT64 CI run proves the debug
+# object fits without it (this host cannot exercise MinGW).
 if(MINGW)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+    # The ScenarioRunner TUs inherit the exact EnTT emplace/view instantiations
+    # (skinned-mesh/wildlife/creature-slice scenario code) whose debug template
+    # footprint pushed main_client.cpp over the default COFF section limit, so
+    # they need the same headroom.
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerCapture.cpp
+        PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerDrive.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
 endif()

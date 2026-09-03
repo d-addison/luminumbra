@@ -37,6 +37,8 @@
     "hydrology_weather": { "enabled": false },
     "_weather_events_comment": "Deterministic Markov weather-event epochs are exposed through GameSession::CurrentWeatherEvent. OFF -> always Clear/0 (byte-identical); consumers must also be participants.",
     "weather_events": { "enabled": false },
+    "_water_high_res_comment": "EXPERIMENTAL High-resolution water: 16x16 (1 m) cells per chunk instead of the Medium 8x8 (2 m) default; the 4096-cell budget then sims 16 chunks/tick instead of 64. Flow constants are resolution-scaled, so physics per simulated step matches Medium; the smaller sim window still makes settling lag ~4x wall-clock when many chunks are awake. The resolution is baked into the hashed mm grids, so every peer must match; a save at another resolution migrates in one pass at load. Activation deliberately changes the world hash.",
+    "water_high_res": { "enabled": false },
     "_aether_state_comment": "The stateful energy-field layer uses world-anchored sparse pages and an integer kernel; its sub-hash is folded into the aether hash slot. OFF -> no allocation, no tick work, zero hash bytes, and byte-identical saves. Activation deliberately changes the world hash.",
     "aether_state": { "enabled": false }
   },

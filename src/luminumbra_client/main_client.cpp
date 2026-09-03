@@ -7,7 +7,13 @@
 #include <glad/glad.h>
 
 #include "WorldDressing.h" // background world-dressing placement computation
+#include "app/CaveFlourishes.h"
+#include "app/ClientAppContext.h"
 #include "app/CrashHandler.h"
+#include "app/DebugOverlays.h"
+#include "app/FrameAudio.h"
+#include "app/InputCallbacks.h"
+#include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
@@ -19,9 +25,11 @@
 #include "audio/NullAudioManager.h"
 #include "core/Debug.h"
 #include "core/GameState.h"
+#include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
-#include "core/RuntimeScenarioHarness.h"
+#include "core/RuntimeScenarioConfig.h"
+#include "core/ScenarioRunner.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/WorldGenViewer.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h" // species id -> display name for the codex/discovery HUD
@@ -67,11 +75,13 @@
 #include "rendering/Camera.h"
 #include "rendering/ExposureModel.h" //  rendering: lens EV -> render exposure multiplier
 #include "rendering/FarLodSystem.h"
+#include "rendering/FoliageSurface.h" // Rendering::FoliageScatterContext / FoliageSurfaceQuery
 #include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
 #include "rendering/GlDebugOutput.h" // KHR_debug callback + debug groups/labels (env-gated LUMIN_GL_DEBUG)
 #include "rendering/ImpostorBake.h"  //  far-field tree impostor atlas bake (render-only)
 #include "rendering/LightningBolt.h" // Deterministic bolt geometry.
+#include "rendering/PixelIo.h"       // Rendering::WritePixelBufferPpm (capture artifact writer)
 #include "rendering/RenderPipeline.h"
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/ScentFieldRenderMirror.h" // one-way scent snapshot for the ground decal
@@ -113,73 +123,23 @@
 
 using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
+using Luminumbra::Rendering::WritePixelBufferPpm;
 
 // --- Global Pointers ---
 std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
 std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
 
-// feature: client-only photo-mode state + progression codex. NOT sim
-// state — neither participates in any baseline NetworkStateHash (PhotoCodex.h
-// documents this), so photo mode is a pure read-mostly observer. The lens is nudged
-// by the PlayerController's aperture/focus inputs; the codex keeps the best score per
-// species across the session.
-luminumbra::game::PhotoModeState g_photoMode;
-static bool g_photoModeUiShown = false; //  photo_mode.rml vs hud.rml is the active in-game overlay
-luminumbra::game::PhotoCodex g_photoCodex;
-// Data-driven creature species metadata (display names + rarity) the codex/discovery HUD
-// resolve a captured species_id against. Loaded once from data/common/creatures/species
-// after the runtime root is known; client-only, never hashed.
-luminumbra::ai::CreatureSpeciesRegistry g_creatureSpecies;
-// Progression goals surfaced on the in-game HUD. Initialised lazily once in-game with the
-// default world's first creature so the starter chain is always achievable. Client-only,
-// never hashed. g_objHudSig caches the last-rendered tracker text so the DOM is only
-// touched when the current objective / progress actually changes.
-luminumbra::game::ObjectiveSet g_objectives;
-bool g_objectivesInit = false;
-std::string g_objHudSig;
-//  farming HUD signature — caches the last-rendered seed/harvest
-// inventory + facing-crop text so the DOM is only touched when it actually changes.
-// Client-only, never hashed (reads sim state, never mutates it).
-std::string g_farmHudSig;
-// Creature codex browse overlay (client-only). g_codexOpen toggles via the ToggleCodex
-// key; g_codexSig throttles re-population so rows are rebuilt only when discovery changes.
-bool g_codexOpen = false;
-std::string g_codexSig;
+// The frame loop's non-scenario state clusters (HUD, overlays, capture modes,
+// menu backdrop, loading, mouse-look, frame audio), grouped into ONE
+// file-scope context (app/ClientAppContext.h) with the same static-lifetime
+// semantics the individual globals had; the extracted frame helpers take it
+// by reference instead of reaching for externs.
+ClientAppContext g_app;
+
 // Single client config: defaults (data/common/systems.json) overlaid by the writable
 // per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
 // never hashed. Loaded once at startup, before window creation.
 luminumbra::core::SystemConfig g_systemConfig;
-// Settings menu  — frees the cursor so the ImGui panel is clickable. While
-// g_rebindCaptureAction >= 0 the next key press is captured as that action's binding.
-bool g_show_settings = false;
-bool g_paused = false;            //  in-game pause overlay active
-bool g_show_gpu_profiler = false; // Live per-pass GPU profiler overlay.
-//  (live shader authoring):  = reload-all next frame (GL-thread safe);
-//  = the dev shader panel; the watcher is the opt-in once/sec mtime poll.
-bool g_show_shader_panel = false;
-bool g_request_shader_reload = false;
-bool g_shader_auto_reload = false;
-double g_shader_watch_last_poll = 0.0;
-std::unordered_map<std::string, std::filesystem::file_time_type> g_shader_watch_mtimes;
-// --debug-glass-pane stages three stained-glass panes
-// near spawn so the colored-shadow AC captures have a subject. Render-only.
-bool g_debug_glass_panes = false;
-bool g_glass_panes_spawned = false;
-// --auto-exposure-metered opts the GPU metering servo in.
-bool g_auto_exposure_metered = false;
-// ->: thunder cues queued by the live lightning
-// consumer (strike sim tick + distance + magnitude); the audio tick drains them
-// with the physical sound delay (distance / 343 m/s). Client-only, never sim.
-struct PendingThunder {
-    std::uint64_t strike_tick = 0;
-    double fired_at_seconds = 0.0; // wall clock when the bolt rendered
-    float distance_m = 0.0f;
-    float magnitude = 0.0f;
-};
-std::vector<PendingThunder> g_pendingThunder;
-//  rendering: --volumetric-quality N (0 analytic-only default).
-int g_volumetric_quality = 0;
-int g_rebindCaptureAction = -1;
 
 // Short human label for a GLFW key code (for the settings controls list). Printable keys use
 // glfwGetKeyName; special keys are named explicitly.
@@ -238,158 +198,6 @@ static std::string KeyDisplayLabel(int key) {
     }
     return "?";
 }
-// host_timescale-style engine time control (Source/GMod-like). 1.0 = real time, 0 = paused,
-// <1 slow-mo, >1 fast-forward. Render/client playback rate: scales how many FIXED 30 Hz sim
-// ticks run per real frame, NOT the tick dt — so determinism + run==replay hold (tick sequence
-// unchanged; per-tick world_hash unchanged). Leveraged by the timelapse capture.
-float g_timeScale = 1.0f;
-// --timelapse capture: dump a frame sequence of the LIVE loaded world while sim-time (and,
-// optionally, the day clock) fast-forward, for tools/timelapse.py. 0 = off. Run with
-// --no-ui for a clean capture. Normal per-frame ticking is paused; the capture loop owns
-// advancement (g_timelapse_ticks fixed ticks per captured frame).
-int g_timelapse_frames = 0;
-// Render-optimization (render-optimization-index ): --render-benchmark <path>.
-// Boots auto-world, lets it settle, then averages the per-pass GPU timers
-// (RenderPassFrameStats *_gpu_ms) over g_render_benchmark_frames in-world frames and
-// writes a JSON report (per-pass avg ms + total + cloud_quality) before exiting. The
-// repeatable, fixed-scenario capture the release per-pass budget RED gate consumes
-// (no human in-world). Empty path = off. Pair with --auto-create-world --auto-enter-world.
-std::string g_render_benchmark_path;
-// runtime telemetry ( implementation note): --play-paths runs a scenario's scripted camera but with
-// the NORMAL-PLAY render/streaming paths (foliage GPU readback OFF, scatter cache ON) instead of
-// the gate-mode paths a scenario normally forces. Lets a headless moving scenario profile what the
-// player actually experiences (the gate-mode foliage readback/cache-disable hugely inflate cost).
-bool g_play_paths = false;
-// runtime telemetry ( implementation note): --profile-fly <seconds> drives the player FORWARD at a
-// constant noclip speed in NORMAL-PLAY mode (no scenario, no gate-mode) so the SLOWFRAME logger
-// captures a representative moving cost without the time-based scenario camera's
-// teleport-under-load feedback. Pair with --auto-create-world --auto-enter-world --no-audio. 0 =
-// off.
-double g_profile_fly_seconds = 0.0;
-int g_render_benchmark_frames = 120; // measured frames (after warm-up)
-int g_render_benchmark_warmup = 60;  // frames discarded before measuring (stream/settle)
-//  optional PPM screenshot of the forest-DENSE budget pose,
-// dumped on the final measured frame (verifies the pose is actually dense +
-// supplies the owner's before/after PNGs). Empty = off.
-std::string g_render_benchmark_screenshot;
-int g_timelapse_ticks = 60; // sim ticks advanced between captured frames (2 s at 30 Hz)
-float g_timelapse_daystep =
-    0.0f; // time-of-day advance per frame [0,1] (shade/sky drift); 0 = leave
-int g_timelapse_captured = 0;
-int g_timelapse_settle = 0;
-bool g_timelapse_dig = false; // progressively carve a trench mid-capture (terraform demo)
-bool g_timelapse_drain =
-    false; //  money shot: anchor on a real river/lake, breach the bank, drain it
-bool g_timelapse_rain = false; // finite hydrology — rain fills the land, then drain stays drained
-int g_timelapse_rain_mm = 18;  // rain rate (mm/tick) for the rain demo
-struct TimelapseDrainState {
-    bool init = false;
-    Luminumbra::Vec3 P{0.0f, 0.0f, 0.0f};
-    float dhx = 0.0f, dhz = 1.0f;
-    float surf = 0.0f;
-};
-TimelapseDrainState g_drain_state;
-float g_timelapse_tod = 0.0f; // starting time-of-day (0 = noon/brightest; drifts by daystep)
-std::filesystem::path g_timelapse_dir;
-static constexpr int kTimelapseSettleFrames = 45; // let the world stream/settle before frame 0
-// Fixed camera-pose override (--cam-pos x,y,z [--cam-yaw d] [--cam-pitch d]): pins
-// g_camera every frame for reproducible/controllable screenshots + benchmarks. Keep
-// the position within the streamed area (near spawn) so chunks are resident.
-static int g_debug_view_mode = 0; // render-only G-buffer debug overlay:
-                                  // 0=off,1=albedo,2=normal,3=depth,4=material,5=position ( cycles)
-std::string
-    g_debug_goto; // --debug-goto cave|doline|spawn: deterministically frame a feature for capture
-bool g_fixed_cam = false;
-glm::vec3 g_fixed_cam_pos(0.0f);
-float g_fixed_cam_yaw = 0.0f;
-float g_fixed_cam_pitch = 0.0f;
-// --scene-config <json>: declaratively COMPOSE a scene (camera+fov, time-of-day,
-// weather, clouds, fog) to match a reference image, render a settled frame, and
-// screenshot it. The reference-driven fidelity loop: compose -> render -> compare.
-// Reuses the fixed-cam + timelapse single-frame capture; these add atmosphere.
-bool g_scene_active = false;
-std::filesystem::path g_scene_dir;  // output dir for the scene screenshot
-std::filesystem::path g_scene_shot; // full screenshot path (.ppm)
-float g_scene_fov = 0.0f;           // 0 = leave camera default
-int g_scene_weather = 0;            // 0 none, 1 rain, 2 snow, 3 fog, 4 storm
-float g_scene_weather_intensity = 0.0f;
-bool g_scene_clouds = false; // push a cloud state
-float g_scene_cloud_coverage = 0.45f;
-float g_scene_cloud_biome = 0.0f;
-float g_scene_cloud_plane = 900.0f;
-bool g_scene_cloud_shadow = false;
-float g_scene_cloud_shadow_strength = 0.0f;
-//  rendering: scene-config "moon" -> lunar illumination [0,1] (1 full moon,
-// ~0 new moon). <0 = leave the automatic tick-derived lunar cycle. For night-mode captures.
-float g_scene_moon = -1.0f;
-// framescan: --frame-scan <out.json> boots the auto-world, pins a FIXED forest-dense
-// camera pose + near-noon time-of-day (reproducible), lets the world settle, then
-// reads back the settled frame's G-buffer material-id attachment + back color buffer
-// and writes a per-material coverage/luminance + water + foliage JSON report, then
-// exits.: the scan issues no draws and never touches sim/world_hash, so
-// running it twice on the same world produces an IDENTICAL report. Pair with
-// --auto-create-world --auto-enter-world. Empty = off.
-std::string g_frame_scan_path;
-bool g_frame_scan_active = false;
-int g_frame_scan_settle = 0;
-bool g_render_parity_active = false;
-std::filesystem::path g_render_parity_dir;
-std::string g_render_parity_pass = "frame";
-static constexpr int kFrameScanSettleFrames = 90; // let chunks stream + atmosphere settle
-// Watchdog: a headless auto-capture must NEVER hang. If the world hasn't reached
-// IN_GAME and completed the scan within this many render-loop frames (boot + stream +
-// settle is normally ~500-700), abort with a clear error instead of looping forever.
-static constexpr int kFrameScanWatchdogFrames = 4000;
-// DIAGNOSTIC-only: LUMIN_FRAME_SCAN_SETTLE overrides the settle so a headless capture
-// can wait for the world to FULLY stream/bake (default preserves the deterministic 90
-// the gates rely on; the 4000-frame watchdog leaves ample headroom).
-int g_frame_scan_settle_target = kFrameScanSettleFrames;
-int g_frame_scan_watchdog = 0;
-// --bake-tree-impostor <out.ppm>:  far-field impostor atlas bake. Renders the static tree parts
-// from the hemi-octahedral view directions into an atlas (+ coverage JSON) and exits. Needs only GL
-// + the tree meshes (no world), so it runs on the first render-loop frame. Render-only.
-std::string g_bake_impostor_path;
-bool g_bake_impostor_done = false;
-// --survey <dir>: autonomous tour — discover POIs (waterfall/cliff/grass/lake) in the generated
-// world, teleport+stream+settle at each, write a screenshot + frame-scan per POI. Empty = off.
-std::string g_survey_dir;
-bool g_survey_active = false;
-int g_survey_settle = 0;
-// --ui-screenshot <screen>: the UI fidelity gate. Force the menu state, load <screen>.rml,
-// let layout/fonts settle, then capture the back buffer (which holds the UI over the menu
-// backdrop) and exit. Drives the reference-driven compose->render->compare loop for the UI,
-// mirroring --scene-config for the 3D scene. Output is PPM (converted to PNG by the harness
-// script for critique). Optional --ui-fixtures seeds deterministic list/gallery/settings data.
-std::string g_ui_screenshot_screen;    // "" = inactive; else the CURRENT screen being captured
-std::vector<std::string> g_ui_screens; // batch list (one window pop captures them all in sequence)
-std::size_t g_ui_screen_index = 0;     // which screen in g_ui_screens is being captured
-std::filesystem::path g_ui_screenshot_dir; // output dir; each screen -> ui-<screen>.ppm
-bool g_ui_fixtures = false;                // seed deterministic UI fixture data
-// the  one-time world-entry flourishes (doline
-// locate + the 25-anchor enclosed-cave crystal scan + the hero call) cost
-// minutes of full-SDF probing in a debug build (est. 10-25 s release) and used
-// to run INLINE on the frame-2 main thread — the world-entry stall. They now
-// run as a batch of BACKGROUND JobSystem jobs (pure deterministic SDF reads,
-// the same sampling meshing workers already do concurrently); the main thread
-// polls the handle and creates the point-light entities when the batch lands.
-// TEARDOWN CONTRACT: the jobs hold a raw SHIELD_WorldSystem* — every world
-// transition (CreateWorld / session reset) MUST DrainBackgroundWorldScan first.
-struct BackgroundWorldScan {
-    const void* world = nullptr; // identity guard: consume only for the world scanned
-    Luminumbra::Systems::SHIELD_WorldSystem::SurfaceBreakInfo doline;
-    float doline_surface_h = 0.0f;
-    std::optional<Luminumbra::Debug::DebugCamPose> hero;
-    std::array<std::optional<glm::vec3>, 25> anchor_caves; // one slot per anchor (disjoint writes)
-};
-static std::shared_ptr<BackgroundWorldScan> s_backgroundWorldScan; // null = idle/consumed
-static Luminumbra::JobHandle s_backgroundWorldScanHandle;
-static void DrainBackgroundWorldScan(Luminumbra::JobSystem& jobs) {
-    if (s_backgroundWorldScanHandle.counter) {
-        jobs.wait(s_backgroundWorldScanHandle);
-    }
-    s_backgroundWorldScanHandle = {};
-    s_backgroundWorldScan.reset();
-}
 // the one-time world-entry DRESSING bring-up (the
 // tree/rock/bush scatter + the ambient-wildlife spawn) cost ~30 s of main-thread
 // placement loops in a debug build on the first IN_GAME frame. The placement
@@ -424,135 +232,11 @@ static void DrainWorldDressing(Luminumbra::JobSystem& jobs) {
     s_worldDressingHandle = {};
     s_worldDressing.reset();
 }
-int g_ui_screenshot_settle = 0; // frames waited before capture of the current screen
-// HEADLESS PREVIEW-DIORAMA CAPTURE (--preview-live): for the world_creation screen, the
-// live WorldgenPreview diorama (candidate world + far field + precipitation) builds on a
-// BACKGROUND worker thread, so the fixed 30-frame settle above captures a black backdrop
-// before the world is ready (render_to_backbuffer returns false until world_ready). When
-// g_ui_preview_live is set, the world_creation capture instead WAITS (bounded, wall-clock
-// timeout) for worldgenPreview->world_ready + a few post-ready settle frames so the
-// terrain/far-field/atmosphere (and, with --preview-weather rain, falling precipitation)
-// are actually drawn before the backbuffer is read. Render-only; server --smoke unaffected.
-bool g_ui_preview_live = false;   // wait for the live diorama before capturing world_creation
-std::string g_ui_preview_weather; // optional forced weather chip (e.g. "rain") so precip spawns
-int g_ui_preview_settle_after_ready =
-    0; // post-world_ready settle frames accrued (far-LOD/foliage/particles)
-// live scenic menu backdrop: a golden-hour world rendered behind the menus (matching the
-// references). Stood up at boot while staying in MAIN_MENU; the menu render branch draws it
-// under the transparent UI with a slow auto-orbit. Replaced cleanly when a real world loads.
-bool g_menu_backdrop_active = false;
-float g_menu_backdrop_yaw = 30.0f; // orbit accumulator (degrees)
-//  scroll-wheel accumulator for the create-world preview diorama.
-// GLFW scroll is event-driven (no poll API), so the menu scroll callback accrues
-// the wheel delta here and the preview block consumes it each frame to drive
-// WorldgenPreview::zoom when the cursor is over the #preview_pane rect.
-double g_menu_scroll_accum = 0.0;
-// thumbnail generation: capture N clean (no-UI) backdrop frames at varied yaw/time-of-day
-// in one window session, for use as world-select + gallery photo thumbnails. --ui-thumbs N.
-int g_ui_thumbs = 0;                   // 0 = off; else number of thumbnails to capture
-std::filesystem::path g_ui_thumbs_dir; // output dir; each -> thumb_<i>.ppm
-int g_ui_thumbs_index = 0;
-int g_ui_thumbs_settle = 0;
-bool g_timelapse_grow = false; // grow the procgen plants sapling->tree over the capture
-bool g_timelapse_simgrow =
-    false; // seed SIM PlantTag plants + grow them via the real growth tick ( bridge)
-bool g_timelapse_season = false;    // drift summer->autumn leaf color over the capture
-bool g_timelapse_creatures = false; // spawn predators/prey + render markers (ecology demo)
-bool g_timelapse_living = false;    // capture the LIVING WORLD (ambient creatures + forager colony)
-                                 // during a timelapse, so the scent trail / rest poses are showable
-bool g_timelapse_calm = false; // calm (no-predator) grazing herd -> reproduction/evolution demo
-bool g_timelapse_fire = false; // ignite a patch of combustible foliage -> sim.fire spread demo
 
 // Bundled procgen plant/scatter render state (app/ProcgenPalettes.h): scatter
 // instances, cached bakes, palette counts. Owned here; passed by reference into
 // the bake/palette helpers. Render-only decoration, never hashed.
 ProcgenPlantState g_procgen;
-//  player farming state. The controller holds the seed/harvest inventory; the
-// species registry is loaded once for player seeding. Interactive-only (never touched by gates).
-luminumbra::foliage::FarmingController g_farming;
-luminumbra::foliage::SpeciesRegistry g_farmSpecies;
-bool g_farmSpeciesLoaded = false;
-// Player-selected species to plant (index into g_farmSpecies.all; V cycles it). So FarmPlant
-// isn't hard-coded to wheat — the player picks oak/wheat/etc. from the data-driven registry.
-int g_farmSelectedSpecies = 0;
-
-//  map the sun's elevation (radians, >0 above horizon) to a photographic
-// scene luminance [0,1] for photo scoring. Night (sun below horizon) is dark (~0.06);
-// low/golden-hour sun lands near the ideal (~0.5-0.7); midday is bright but not blown
-// (~0.85). CLIENT render-derived feedback ONLY — never sim / world_hash — so libm
-// (std::sin/std::pow) is fine here (unlike the pure photo headers, which stay libm-free).
-inline float SceneLuminanceFromSunElevation(float sun_elev_rad) {
-    const float e = std::sin(sun_elev_rad); // [-1,1], fraction of the way above horizon
-    if (e <= 0.0f) {
-        // Twilight → night: a small floor that dims toward midnight (e == -1).
-        return luminumbra::game::Clamp01(0.06f + 0.10f * (1.0f + e));
-    }
-    return luminumbra::game::Clamp01(0.15f + 0.70f * std::pow(e, 0.3f));
-}
-
-// feature: gather the in-frustum creature subjects for a photo-mode
-// CAPTURE. STRICTLY a read-only observer — it takes a CONST registry + CONST camera,
-// projects each creature's world position into NDC via the camera's view*proj, and
-// derives a deterministic species/luminance proxy (: no luminance component to
-// read, so a constant scene-luminance + the predator-role species proxy; no new sim
-// component). It mutates NOTHING, so it cannot perturb world_hash (the sim-isolation
-// gate test pins this on the pure path).
-std::vector<luminumbra::game::PhotoSubjectView>
-GatherPhotoSubjects(const entt::registry& reg,
-                    const Luminumbra::Rendering::Camera& camera,
-                    int width,
-                    int height,
-                    float scene_luminance = 0.6f) {
-    std::vector<luminumbra::game::PhotoSubjectView> views;
-    if (width <= 0 || height <= 0)
-        return views;
-
-    const glm::mat4 proj = glm::perspective(glm::radians(camera.Zoom),
-                                            static_cast<float>(width) / static_cast<float>(height),
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
-    const glm::mat4 view_proj = proj * camera.GetViewMatrix();
-
-    auto cr_view = reg.view<const Luminumbra::Components::CreatureComponent,
-                            const Luminumbra::Components::TransformComponent>();
-    for (const entt::entity e : cr_view) {
-        const auto& tf = cr_view.get<const Luminumbra::Components::TransformComponent>(e);
-        const auto& cr = cr_view.get<const Luminumbra::Components::CreatureComponent>(e);
-
-        const glm::vec3 world(tf.position.x, tf.position.y, tf.position.z);
-        const glm::vec4 clip = view_proj * glm::vec4(world, 1.0f);
-
-        luminumbra::game::PhotoSubjectView pv;
-        pv.in_frustum = (clip.w > 0.0f);
-        if (pv.in_frustum) {
-            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
-            pv.in_frustum = (ndc.x >= -1.0f && ndc.x <= 1.0f && ndc.y >= -1.0f && ndc.y <= 1.0f);
-            pv.ndc_x = ndc.x;
-            pv.ndc_y = ndc.y;
-        }
-        const glm::vec3 cam_to = world - camera.Position;
-        const float dist = glm::length(cam_to);
-        pv.distance_m = dist > 0.01f ? dist : 0.01f;
-        pv.size_m = 1.0f; // ~creature footprint
-        // Apparent footprint falls off with distance (a far subject fills less frame).
-        pv.size = luminumbra::game::Clamp01(pv.size_m / (pv.distance_m * 0.5f + 1.0f));
-        //  scene luminance is now driven by the sun (time-of-day), passed in
-        // from the render pipeline's sun elevation, so golden hour rewards and night
-        // punishes. No per-creature luminance component exists, so all subjects share the
-        // scene's light this frame (a far better proxy than the old hardcoded 0.6).
-        pv.light = scene_luminance;
-        // Real per-creature species identity (set at spawn from the archetype) keys the
-        // codex; fall back to the predator/prey role proxy only for unspecified (0)
-        // creatures so the codex can fill with actual species rather than two buckets.
-        pv.species_id =
-            cr.species_id != 0 ? static_cast<int>(cr.species_id) : (cr.is_predator ? 1 : 2);
-        //  carry the subject's current behaviour so the principal subject's
-        // action reaches the capture's ObservationMetadata (behaviour objectives).
-        pv.subject_action = cr.last_action;
-        views.push_back(pv);
-    }
-    return views;
-}
 
 //  give any creature that still lacks a Jolt body (e.g. an offspring just born in the
 // sim) a deterministic avatar character so the GameSession physics bridge drives it and it
@@ -582,39 +266,6 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
 std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
 std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
 
-// --- Forward Declarations ---
-void framebuffer_size_callback(GLFWwindow* window, int width, int height);
-void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods);
-void mouse_callback(GLFWwindow* window, double xpos, double ypos);
-void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
-//  menu-state scroll callback — forwards to RmlUi (so menu lists
-// still scroll) AND accrues the wheel delta into g_menu_scroll_accum so the
-// create-world preview block can zoom the diorama when the cursor is over the pane.
-void menu_scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
-void GLAPIENTRY GLDebugMessageCallback(GLenum source,
-                                       GLenum type,
-                                       GLuint id,
-                                       GLenum severity,
-                                       GLsizei length,
-                                       const GLchar* message,
-                                       const void* userParam);
-void GLFWErrorCallback(int error, const char* description);
-void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState);
-void SetGamePaused(GLFWwindow* window, bool paused);
-
-// --- Global State ---
-float lastX = 1280 / 2.0f;
-float lastY = 720 / 2.0f;
-bool firstMouse = true;
-bool show_worldgen_viewer = false;
-bool wireframe_mode = false;
-bool g_world_render_data_initialized = false;
-bool g_imgui_enabled = true;
-
-std::vector<Luminumbra::IVec3> g_initial_chunks_to_load;
-int g_generation_dispatch_index = 0;
-Luminumbra::JobHandle g_world_gen_handle;
-
 // --- Window-mode runtime state ---
 WindowState g_windowState;
 
@@ -624,6 +275,14 @@ WindowState g_windowState;
 constexpr double kResizeDebounceSeconds = 0.12;
 
 using Luminumbra::Client::ScenarioHarness::WindowMode;
+
+// Exit code for a `--scenario` request against a binary compiled WITHOUT the
+// QA harness (the shipping luminumbra_client_app). Distinct from the scenario
+// exit codes the harness itself uses (2 = scenario failed, 3 = memory
+// watermark exceeded, 4 = readiness timeout, 5 = window closed before the
+// timed run completed) so a gate script pointed at the wrong binary fails
+// loudly and unambiguously. Scenario runs belong to luminumbra_client_qa_app.
+constexpr int kExitScenarioUnavailable = 6;
 
 // Grandfathered monolith: main() predates the scripts/tidy.sh complexity gate
 // and is tracked for decomposition. New functions must stay under the gate's
@@ -636,9 +295,24 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
     RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+#if !defined(LUMINUMBRA_QA_RUNNER)
+    // The shipping client does not compile the QA scenario harness (no
+    // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
+    // window/GL work, with the dedicated availability exit code.
+    if (scenario_config.active()) {
+        LUMINUMBRA_CORE_ERROR("--scenario '{}' requested but this binary was built without the QA "
+                              "scenario harness. Use luminumbra_client_qa_app for scenario runs.",
+                              scenario_config.scenario);
+        std::fprintf(stderr,
+                     "error: --scenario is not available in luminumbra_client_app; "
+                     "use luminumbra_client_qa_app (exit %d)\n",
+                     kExitScenarioUnavailable);
+        return kExitScenarioUnavailable;
+    }
+#endif
     RuntimeStateRecorder runtime_state_recorder(scenario_config);
     InstallRuntimeCrashHandler(runtime_state_recorder);
-    g_imgui_enabled = !scenario_config.no_ui;
+    g_app.overlay.imgui_enabled = !scenario_config.no_ui;
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
     if (scenario_config.forced_crash()) {
@@ -664,59 +338,61 @@ int main(int argc, char* argv[]) {
     // off).
     if (const std::string dv = GetCommandLineOption(argc, argv, "--debug-view", ""); !dv.empty()) {
         if (dv == "albedo")
-            g_debug_view_mode = 1;
+            g_app.overlay.debug_view_mode = 1;
         else if (dv == "normal")
-            g_debug_view_mode = 2;
+            g_app.overlay.debug_view_mode = 2;
         else if (dv == "depth")
-            g_debug_view_mode = 3;
+            g_app.overlay.debug_view_mode = 3;
         else if (dv == "material")
-            g_debug_view_mode = 4;
+            g_app.overlay.debug_view_mode = 4;
         else if (dv == "position")
-            g_debug_view_mode = 5;
+            g_app.overlay.debug_view_mode = 5;
     }
-    g_render_benchmark_path = GetCommandLineOption(argc, argv, "--render-benchmark", "");
+    g_app.capture.render_benchmark_path =
+        GetCommandLineOption(argc, argv, "--render-benchmark", "");
     // --debug-goto cave|doline|spawn: after the world loads, deterministically locate the
     // feature + set the fixed camera to frame it (pair with --auto-create-world/--timelapse).
-    g_debug_goto = GetCommandLineOption(argc, argv, "--debug-goto", "");
-    g_play_paths = HasCommandLineFlag(
+    g_app.capture.debug_goto = GetCommandLineOption(argc, argv, "--debug-goto", "");
+    g_app.capture.play_paths = HasCommandLineFlag(
         argc,
         argv,
         "--play-paths"); // runtime telemetry: normal-play paths under a scripted scenario camera
     // stage the stained-glass capture subject near spawn.
-    g_debug_glass_panes = HasCommandLineFlag(argc, argv, "--debug-glass-pane");
+    g_app.overlay.debug_glass_panes = HasCommandLineFlag(argc, argv, "--debug-glass-pane");
     // Opt-in GPU auto-exposure metering for capture diagnostics; the analytic
     // exposure curve remains the shipped gameplay default.
-    g_auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
+    g_app.overlay.auto_exposure_metered = HasCommandLineFlag(argc, argv, "--auto-exposure-metered");
     //  rendering (,  ): opt-in froxel volumetrics tier.
-    g_volumetric_quality = std::stoi(GetCommandLineOption(argc, argv, "--volumetric-quality", "0"));
-    g_profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
+    g_app.overlay.volumetric_quality =
+        std::stoi(GetCommandLineOption(argc, argv, "--volumetric-quality", "0"));
+    g_app.capture.profile_fly_seconds = static_cast<double>(GetCommandLineIntOption(
         argc, argv, "--profile-fly", 0)); // runtime telemetry: constant-speed eye-level moving
                                           // profiler (normal-play, self-exits)
-    g_render_benchmark_frames =
+    g_app.capture.render_benchmark_frames =
         GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
-    g_render_benchmark_warmup =
+    g_app.capture.render_benchmark_warmup =
         GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
-    g_render_benchmark_screenshot =
+    g_app.capture.render_benchmark_screenshot =
         GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "");
     {
         const std::string cp = GetCommandLineOption(argc, argv, "--cam-pos", "");
         if (!cp.empty()) {
             float x = 0, y = 0, z = 0;
             if (std::sscanf(cp.c_str(), "%f,%f,%f", &x, &y, &z) == 3) {
-                g_fixed_cam_pos = glm::vec3(x, y, z);
-                g_fixed_cam = true;
+                g_app.capture.fixed_cam_pos = glm::vec3(x, y, z);
+                g_app.capture.fixed_cam = true;
             }
         }
         const std::string cy = GetCommandLineOption(argc, argv, "--cam-yaw", "");
         if (!cy.empty()) {
             try {
-                g_fixed_cam_yaw = std::stof(cy);
+                g_app.capture.fixed_cam_yaw = std::stof(cy);
             } catch (...) {}
         }
         const std::string cpi = GetCommandLineOption(argc, argv, "--cam-pitch", "");
         if (!cpi.empty()) {
             try {
-                g_fixed_cam_pitch = std::stof(cpi);
+                g_app.capture.fixed_cam_pitch = std::stof(cpi);
             } catch (...) {}
         }
     }
@@ -727,63 +403,64 @@ int main(int argc, char* argv[]) {
             std::ifstream f(sc);
             nlohmann::json j;
             f >> j;
-            g_scene_active = true;
+            g_app.capture.scene_active = true;
             if (j.contains("camera")) {
                 const auto& c = j["camera"];
                 if (c.contains("pos") && c["pos"].size() == 3) {
-                    g_fixed_cam_pos = glm::vec3(c["pos"][0].get<float>(),
-                                                c["pos"][1].get<float>(),
-                                                c["pos"][2].get<float>());
-                    g_fixed_cam = true;
+                    g_app.capture.fixed_cam_pos = glm::vec3(c["pos"][0].get<float>(),
+                                                            c["pos"][1].get<float>(),
+                                                            c["pos"][2].get<float>());
+                    g_app.capture.fixed_cam = true;
                 }
                 if (c.contains("yaw"))
-                    g_fixed_cam_yaw = c["yaw"].get<float>();
+                    g_app.capture.fixed_cam_yaw = c["yaw"].get<float>();
                 if (c.contains("pitch"))
-                    g_fixed_cam_pitch = c["pitch"].get<float>();
+                    g_app.capture.fixed_cam_pitch = c["pitch"].get<float>();
                 if (c.contains("fov"))
-                    g_scene_fov = c["fov"].get<float>();
+                    g_app.capture.scene_fov = c["fov"].get<float>();
             }
             if (j.contains("time_of_day"))
-                g_timelapse_tod = j["time_of_day"].get<float>();
+                g_app.capture.timelapse_tod = j["time_of_day"].get<float>();
             if (j.contains("moon"))
-                g_scene_moon = j["moon"].get<float>(); // rendering: night-mode capture
+                g_app.capture.scene_moon = j["moon"].get<float>(); // rendering: night-mode capture
             if (j.contains("weather")) {
                 const auto& w = j["weather"];
                 const std::string t = w.value("type", "none");
-                g_scene_weather = (t == "rain")    ? 1
-                                  : (t == "snow")  ? 2
-                                  : (t == "fog")   ? 3
-                                  : (t == "storm") ? 4
-                                                   : 0;
-                g_scene_weather_intensity = w.value("intensity", 0.0f);
+                g_app.capture.scene_weather = (t == "rain")    ? 1
+                                              : (t == "snow")  ? 2
+                                              : (t == "fog")   ? 3
+                                              : (t == "storm") ? 4
+                                                               : 0;
+                g_app.capture.scene_weather_intensity = w.value("intensity", 0.0f);
             }
             if (j.contains("clouds")) {
                 const auto& cl = j["clouds"];
-                g_scene_clouds = true;
-                g_scene_cloud_coverage = cl.value("coverage", 0.45f);
-                g_scene_cloud_biome = cl.value("biome_variation", 0.0f);
-                g_scene_cloud_plane = cl.value("plane_height", 900.0f);
-                g_scene_cloud_shadow = cl.value("shadow", false);
-                g_scene_cloud_shadow_strength = cl.value("shadow_strength", 0.0f);
+                g_app.capture.scene_clouds = true;
+                g_app.capture.scene_cloud_coverage = cl.value("coverage", 0.45f);
+                g_app.capture.scene_cloud_biome = cl.value("biome_variation", 0.0f);
+                g_app.capture.scene_cloud_plane = cl.value("plane_height", 900.0f);
+                g_app.capture.scene_cloud_shadow = cl.value("shadow", false);
+                g_app.capture.scene_cloud_shadow_strength = cl.value("shadow_strength", 0.0f);
             }
             // Drive the single-frame capture through the timelapse path.
             const std::string shot = j.value("screenshot", std::string("build/captures/scene.ppm"));
             std::filesystem::path shotPath(shot);
             shotPath.replace_extension(".ppm"); // WritePixelBufferPpm writes PPM
-            g_scene_shot = shotPath;
-            g_scene_dir =
+            g_app.capture.scene_shot = shotPath;
+            g_app.capture.scene_dir =
                 shotPath.has_parent_path() ? shotPath.parent_path() : std::filesystem::path(".");
-            // Scene capture is self-contained (handled at the render site, own g_scene_dir
-            // so the later --timelapse-dir default can't clobber it). tod applied per-frame.
+            // Scene capture is self-contained (handled at the render site, own
+            // g_app.capture.scene_dir so the later --timelapse-dir default can't clobber it). tod
+            // applied per-frame.
             std::error_code _sc_ec;
-            std::filesystem::create_directories(g_scene_dir, _sc_ec);
+            std::filesystem::create_directories(g_app.capture.scene_dir, _sc_ec);
             LUMINUMBRA_CORE_INFO(
                 "Scene-config loaded: {} (tod {:.3f}, weather {}, clouds {}) -> {}",
                 sc,
-                g_timelapse_tod,
-                g_scene_weather,
-                g_scene_clouds,
-                g_timelapse_dir.string());
+                g_app.capture.timelapse_tod,
+                g_app.capture.scene_weather,
+                g_app.capture.scene_clouds,
+                g_app.capture.timelapse_dir.string());
         } catch (const std::exception& e) {
             LUMINUMBRA_CORE_ERROR("Scene-config parse failed: {}", e.what());
         }
@@ -793,8 +470,8 @@ int main(int argc, char* argv[]) {
     // benchmark uses so the scan is reproducible + stresses real coverage, then write
     // the what's-in-frame report and exit. Render-only (no draws, no world_hash).
     if (const std::string fs = GetCommandLineOption(argc, argv, "--frame-scan", ""); !fs.empty()) {
-        g_frame_scan_active = true;
-        g_frame_scan_path = fs;
+        g_app.capture.frame_scan_active = true;
+        g_app.capture.frame_scan_path = fs;
         // Self-sufficient: --frame-scan IMPLIES the auto-world boot it needs (it must reach IN_GAME
         // for the settle/capture to run). Without this, omitting
         // --auto-create-world/--auto-enter-world left the client looping in the menu forever. A
@@ -803,7 +480,7 @@ int main(int argc, char* argv[]) {
         scenario_config.auto_enter_world = true;
         LUMINUMBRA_CORE_INFO(
             "Frame-scan armed -> {} (auto-world implied, fixed pose, settle {} frames)",
-            g_frame_scan_path,
+            g_app.capture.frame_scan_path,
             kFrameScanSettleFrames);
     }
     // --render-parity-frame <dir>. Same boot/settle, then the in-process
@@ -811,72 +488,75 @@ int main(int argc, char* argv[]) {
     // FLIP in-process, demand exactly 0.0 (the  migration gate).
     if (const std::string rp = GetCommandLineOption(argc, argv, "--render-parity-frame", "");
         !rp.empty()) {
-        g_render_parity_active = true;
-        g_render_parity_dir = std::filesystem::path(rp);
-        g_render_parity_pass = "frame";
-        g_frame_scan_active = true;
-        g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
+        g_app.capture.render_parity_active = true;
+        g_app.capture.render_parity_dir = std::filesystem::path(rp);
+        g_app.capture.render_parity_pass = "frame";
+        g_app.capture.frame_scan_active = true;
+        g_app.capture.frame_scan_path =
+            (g_app.capture.render_parity_dir / "parity_scan.json").string();
         scenario_config.auto_create_world = true;
         scenario_config.auto_enter_world = true;
         LUMINUMBRA_CORE_INFO(
             "Render-parity (whole-frame) armed -> {} (auto-world implied, settle {} frames)",
-            g_render_parity_dir.string(),
+            g_app.capture.render_parity_dir.string(),
             kFrameScanSettleFrames);
     }
     // native scale-1 reference vs exact scale-1 seam and the
     // scale-0.67 upscaled output, all in one process/context to avoid capture noise.
     if (const std::string rp = GetCommandLineOption(argc, argv, "--upscale-seam-parity", "");
         !rp.empty()) {
-        g_render_parity_active = true;
-        g_render_parity_dir = std::filesystem::path(rp);
-        g_render_parity_pass = "upscale_seam";
-        g_frame_scan_active = true;
-        g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
+        g_app.capture.render_parity_active = true;
+        g_app.capture.render_parity_dir = std::filesystem::path(rp);
+        g_app.capture.render_parity_pass = "upscale_seam";
+        g_app.capture.frame_scan_active = true;
+        g_app.capture.frame_scan_path =
+            (g_app.capture.render_parity_dir / "parity_scan.json").string();
         scenario_config.auto_create_world = true;
         scenario_config.auto_enter_world = true;
         LUMINUMBRA_CORE_INFO(
             "Upscale-seam parity armed -> {} (auto-world implied, settle {} frames)",
-            g_render_parity_dir.string(),
+            g_app.capture.render_parity_dir.string(),
             kFrameScanSettleFrames);
     }
-    // DIAGNOSTIC-only settle override (see g_frame_scan_settle_target): let a fully-loaded
-    // capture wait past the gate's 90-frame default. Gates never set this env.
+    // DIAGNOSTIC-only settle override (see g_app.capture.frame_scan_settle_target): let a
+    // fully-loaded capture wait past the gate's 90-frame default. Gates never set this env.
     if (const auto settle_env = Luminumbra::Core::ReadEnvironment("LUMIN_FRAME_SCAN_SETTLE")) {
         const int v = std::atoi(settle_env->c_str());
         if (v > 0)
-            g_frame_scan_settle_target = v;
+            g_app.capture.frame_scan_settle_target = v;
     }
     // -T02: --render-parity-ssao <dir>. Same boot/settle, captures the
     // SSAO ctx-mapping + seam-determinism parity gate.
     if (const std::string rp = GetCommandLineOption(argc, argv, "--render-parity-ssao", "");
         !rp.empty()) {
-        g_render_parity_active = true;
-        g_render_parity_dir = std::filesystem::path(rp);
-        g_render_parity_pass = "ssao";
-        g_frame_scan_active = true;
-        g_frame_scan_path = (g_render_parity_dir / "parity_scan.json").string();
+        g_app.capture.render_parity_active = true;
+        g_app.capture.render_parity_dir = std::filesystem::path(rp);
+        g_app.capture.render_parity_pass = "ssao";
+        g_app.capture.frame_scan_active = true;
+        g_app.capture.frame_scan_path =
+            (g_app.capture.render_parity_dir / "parity_scan.json").string();
         scenario_config.auto_create_world = true;
         scenario_config.auto_enter_world = true;
         LUMINUMBRA_CORE_INFO(
             "Render-parity (SSAO) armed -> {} (auto-world implied, settle {} frames)",
-            g_render_parity_dir.string(),
+            g_app.capture.render_parity_dir.string(),
             kFrameScanSettleFrames);
     }
     // --bake-tree-impostor <out.ppm>: bake the far-field tree impostor atlas (no world needed).
     if (const std::string bp = GetCommandLineOption(argc, argv, "--bake-tree-impostor", "");
         !bp.empty()) {
-        g_bake_impostor_path = bp;
+        g_app.capture.bake_impostor_path = bp;
         LUMINUMBRA_CORE_INFO("Impostor-bake armed -> {} (GL atlas bake on first frame, then exit)",
                              bp);
     }
     // --survey <dir>: autonomous POI tour + per-scene screenshot/frame-scan. Pair with
     // --auto-create-world --auto-enter-world --no-audio.
     if (const std::string sv = GetCommandLineOption(argc, argv, "--survey", ""); !sv.empty()) {
-        g_survey_active = true;
-        g_survey_dir = sv;
+        g_app.capture.survey_active = true;
+        g_app.capture.survey_dir = sv;
         LUMINUMBRA_CORE_INFO(
             "Scene survey armed -> {} (auto-world; tours waterfall/cliff/grass/lake)",
-            g_survey_dir);
+            g_app.capture.survey_dir);
     }
 
     // --ui-screenshot <screen> [--ui-screenshot-out <path>] [--ui-fixtures]: capture a single
@@ -891,97 +571,101 @@ int main(int argc, char* argv[]) {
             const std::string name =
                 uss.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
             if (!name.empty())
-                g_ui_screens.push_back(name);
+                g_app.capture.ui_screens.push_back(name);
             if (comma == std::string::npos)
                 break;
             start = comma + 1;
         }
-        g_ui_fixtures = HasCommandLineFlag(argc, argv, "--ui-fixtures");
-        g_ui_screenshot_dir =
+        g_app.capture.ui_fixtures = HasCommandLineFlag(argc, argv, "--ui-fixtures");
+        g_app.capture.ui_screenshot_dir =
             GetCommandLineOption(argc, argv, "--ui-screenshot-dir", "build/captures/ui");
         std::error_code _ui_ec;
-        std::filesystem::create_directories(g_ui_screenshot_dir, _ui_ec);
-        if (!g_ui_screens.empty())
-            g_ui_screenshot_screen = g_ui_screens.front();
+        std::filesystem::create_directories(g_app.capture.ui_screenshot_dir, _ui_ec);
+        if (!g_app.capture.ui_screens.empty())
+            g_app.capture.ui_screenshot_screen = g_app.capture.ui_screens.front();
         // --preview-live [--preview-weather rain]: for the world_creation screen, wait for the
         // live diorama (async candidate-world build + far field + precipitation) before capturing,
         // so the create-world UI redesign, the centre-anchored far field, and the preview rain are
         // VISUALLY CAPTURABLE headlessly (the default fixed-settle path captures a black backdrop
         // because the world is still building). Bounded by a wall-clock timeout (never hangs).
-        g_ui_preview_live = HasCommandLineFlag(argc, argv, "--preview-live");
-        g_ui_preview_weather = GetCommandLineOption(argc, argv, "--preview-weather", "");
+        g_app.capture.ui_preview_live = HasCommandLineFlag(argc, argv, "--preview-live");
+        g_app.capture.ui_preview_weather =
+            GetCommandLineOption(argc, argv, "--preview-weather", "");
         LUMINUMBRA_CORE_INFO("UI screenshot mode: {} screen(s), fixtures={}, preview_live={}, "
                              "preview_weather='{}' -> {}/ui-*.ppm",
-                             g_ui_screens.size(),
-                             g_ui_fixtures,
-                             g_ui_preview_live,
-                             g_ui_preview_weather,
-                             g_ui_screenshot_dir.string());
+                             g_app.capture.ui_screens.size(),
+                             g_app.capture.ui_fixtures,
+                             g_app.capture.ui_preview_live,
+                             g_app.capture.ui_preview_weather,
+                             g_app.capture.ui_screenshot_dir.string());
     }
 
     // --ui-thumbs N [--ui-thumbs-dir d]: capture N clean landscape thumbnails from the menu
     // backdrop world (varied yaw + time-of-day), one window session. For world/gallery tiles.
     if (const int n = GetCommandLineIntOption(argc, argv, "--ui-thumbs", 0); n > 0) {
-        g_ui_thumbs = n;
-        g_ui_thumbs_dir = GetCommandLineOption(argc, argv, "--ui-thumbs-dir", "data/ui/thumbs");
+        g_app.capture.ui_thumbs = n;
+        g_app.capture.ui_thumbs_dir =
+            GetCommandLineOption(argc, argv, "--ui-thumbs-dir", "data/ui/thumbs");
         std::error_code _t_ec;
-        std::filesystem::create_directories(g_ui_thumbs_dir, _t_ec);
+        std::filesystem::create_directories(g_app.capture.ui_thumbs_dir, _t_ec);
         LUMINUMBRA_CORE_INFO("UI thumbnail mode: {} thumbs -> {}/thumb_*.ppm",
-                             g_ui_thumbs,
-                             g_ui_thumbs_dir.string());
+                             g_app.capture.ui_thumbs,
+                             g_app.capture.ui_thumbs_dir.string());
     }
 
     // --timelapse capture mode. Single-player; pair with
     // --auto-create-world --auto-enter-world (and --no-ui for a clean frame).
-    g_timelapse_frames = GetCommandLineIntOption(argc, argv, "--timelapse-frames", 0);
-    g_timelapse_ticks = GetCommandLineIntOption(argc, argv, "--timelapse-ticks", 60);
-    g_timelapse_grow = HasCommandLineFlag(argc, argv, "--timelapse-grow");
-    if (g_timelapse_grow)
+    g_app.capture.timelapse_frames = GetCommandLineIntOption(argc, argv, "--timelapse-frames", 0);
+    g_app.capture.timelapse_ticks = GetCommandLineIntOption(argc, argv, "--timelapse-ticks", 60);
+    g_app.capture.timelapse_grow = HasCommandLineFlag(argc, argv, "--timelapse-grow");
+    if (g_app.capture.timelapse_grow)
         g_procgen.stageF = 0.0f; // start as seeds; grow sapling->tree over the capture
-    g_timelapse_simgrow = HasCommandLineFlag(argc, argv, "--timelapse-simgrow");
-    g_timelapse_season = HasCommandLineFlag(argc, argv, "--timelapse-season");
-    if (g_timelapse_season)
+    g_app.capture.timelapse_simgrow = HasCommandLineFlag(argc, argv, "--timelapse-simgrow");
+    g_app.capture.timelapse_season = HasCommandLineFlag(argc, argv, "--timelapse-season");
+    if (g_app.capture.timelapse_season)
         g_procgen.season = 0.0f; // start summer-green; drift to autumn over the capture
-    g_timelapse_creatures = HasCommandLineFlag(argc, argv, "--timelapse-creatures");
-    g_timelapse_living = HasCommandLineFlag(argc, argv, "--timelapse-living");
-    g_timelapse_calm = HasCommandLineFlag(argc, argv, "--timelapse-calm");
-    if (g_timelapse_calm)
-        g_timelapse_creatures = true; // calm mode is a creature scenario
-    g_timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
-    g_timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
-    g_timelapse_drain = HasCommandLineFlag(argc, argv, "--timelapse-drain");
-    g_timelapse_rain = HasCommandLineFlag(argc, argv, "--timelapse-rain");
-    g_timelapse_rain_mm = GetCommandLineIntOption(argc, argv, "--timelapse-rain-mm", 18);
+    g_app.capture.timelapse_creatures = HasCommandLineFlag(argc, argv, "--timelapse-creatures");
+    g_app.capture.timelapse_living = HasCommandLineFlag(argc, argv, "--timelapse-living");
+    g_app.capture.timelapse_calm = HasCommandLineFlag(argc, argv, "--timelapse-calm");
+    if (g_app.capture.timelapse_calm)
+        g_app.capture.timelapse_creatures = true; // calm mode is a creature scenario
+    g_app.capture.timelapse_fire = HasCommandLineFlag(argc, argv, "--timelapse-fire");
+    g_app.capture.timelapse_dig = HasCommandLineFlag(argc, argv, "--timelapse-dig");
+    g_app.capture.timelapse_drain = HasCommandLineFlag(argc, argv, "--timelapse-drain");
+    g_app.capture.timelapse_rain = HasCommandLineFlag(argc, argv, "--timelapse-rain");
+    g_app.capture.timelapse_rain_mm =
+        GetCommandLineIntOption(argc, argv, "--timelapse-rain-mm", 18);
     {
         const std::string ds = GetCommandLineOption(argc, argv, "--timelapse-daystep", "");
         if (!ds.empty()) {
             try {
-                g_timelapse_daystep = std::stof(ds);
+                g_app.capture.timelapse_daystep = std::stof(ds);
             } catch (...) {}
         }
         const std::string t0 = GetCommandLineOption(argc, argv, "--timelapse-tod", "");
         if (!t0.empty()) {
             try {
-                g_timelapse_tod = std::stof(t0);
+                g_app.capture.timelapse_tod = std::stof(t0);
             } catch (...) {}
         }
         const std::string td = GetCommandLineOption(argc, argv, "--timelapse-dir", "");
-        g_timelapse_dir = !td.empty() ? std::filesystem::path(td)
-                                      : (!scenario_config.artifact_dir.empty()
-                                             ? scenario_config.artifact_dir / "timelapse"
-                                             : std::filesystem::path("timelapse"));
+        g_app.capture.timelapse_dir = !td.empty()
+                                          ? std::filesystem::path(td)
+                                          : (!scenario_config.artifact_dir.empty()
+                                                 ? scenario_config.artifact_dir / "timelapse"
+                                                 : std::filesystem::path("timelapse"));
     }
-    if (g_timelapse_frames > 0) {
+    if (g_app.capture.timelapse_frames > 0) {
         std::error_code _tl_ec;
-        std::filesystem::create_directories(g_timelapse_dir, _tl_ec);
-        // NOTE: keep g_timeScale = 1 so the player physics + collision settle each frame (a
-        // frozen physics step makes the avatar fall through the streaming-in ground). The
+        std::filesystem::create_directories(g_app.capture.timelapse_dir, _tl_ec);
+        // NOTE: keep g_app.capture.timeScale = 1 so the player physics + collision settle each
+        // frame (a frozen physics step makes the avatar fall through the streaming-in ground). The
         // capture loop adds EXTRA sim ticks for the fast-forward; the player stays grounded.
         LUMINUMBRA_CORE_INFO("Timelapse: {} frames, {} ticks/frame, daystep {:.4f} -> {}",
-                             g_timelapse_frames,
-                             g_timelapse_ticks,
-                             g_timelapse_daystep,
-                             g_timelapse_dir.string());
+                             g_app.capture.timelapse_frames,
+                             g_app.capture.timelapse_ticks,
+                             g_app.capture.timelapse_daystep,
+                             g_app.capture.timelapse_dir.string());
     }
     RuntimeScenarioFrameRecorder lod_ground_frame_recorder(scenario_config.lod_ground_smoke(),
                                                            scenario_config.coverage_radius,
@@ -1007,7 +691,7 @@ int main(int argc, char* argv[]) {
     // though it does not use a RuntimeScenarioHarness scenario, otherwise a
     // decorated 3840x1600 window yields a 3840x1581 framebuffer on this host.
     const bool capture_pinned =
-        scenario_config.requires_pinned_capture() || !g_render_benchmark_path.empty();
+        scenario_config.requires_pinned_capture() || !g_app.capture.render_benchmark_path.empty();
     g_windowState.capture_pinned = capture_pinned;
     g_windowState.mode = scenario_config.window_mode;
 
@@ -1068,14 +752,15 @@ int main(int argc, char* argv[]) {
     // frames, which downclocks it and inflates every per-pass GPU timer, making the budget gate
     // unreproducible. The fixed-scenario budget must measure the saturated/boosted GPU state.
     glfwSwapInterval(
-        (!g_render_benchmark_path.empty() || g_systemConfig.user().vsync == false) ? 0 : 1);
+        (!g_app.capture.render_benchmark_path.empty() || g_systemConfig.user().vsync == false) ? 0
+                                                                                               : 1);
 
     // [[maybe_unused]]: LUMINUMBRA_ASSERT compiles out in release builds, which
     // compile with warnings as errors.
     [[maybe_unused]] const int status = gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
     LUMINUMBRA_ASSERT(status, "Failed to initialize GLAD!");
 
-    if (g_imgui_enabled) {
+    if (g_app.overlay.imgui_enabled) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGui::StyleColorsDark();
@@ -1106,6 +791,10 @@ int main(int argc, char* argv[]) {
     // hash bump on the owner menu).
     gameSession->SetWeatherRainEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
+    // experimental High-resolution water (hashed sim flag; default OFF =
+    // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
+    gameSession->SetWaterHighResEnabled(
+        g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     // opt-in deterministic weather-event epochs (hashed sim flag).
     gameSession->SetWeatherEventsEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimWeatherEvents));
@@ -1130,7 +819,8 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> species_errors;
         const std::filesystem::path species_dir =
             std::filesystem::path(root_path_str) / "data" / "common" / "creatures" / "species";
-        const std::size_t loaded = g_creatureSpecies.LoadFromDirectory(species_dir, species_errors);
+        const std::size_t loaded =
+            g_app.hud.creatureSpecies.LoadFromDirectory(species_dir, species_errors);
         LUMINUMBRA_CORE_INFO("Loaded {} creature species from {}", loaded, species_dir.string());
         for (const std::string& e : species_errors)
             LUMINUMBRA_CORE_WARN("creature species: {}", e);
@@ -1183,7 +873,7 @@ int main(int argc, char* argv[]) {
         // deterministic committed fixture data so --ui-screenshot output is
         // reproducible on any checkout (the live gallery is empty until a player
         // presses the shutter). Gallery today; extend per-screen as fixtures grow.
-        if (g_ui_fixtures) {
+        if (g_app.capture.ui_fixtures) {
             g_uiManager->SetGalleryCaptureSource(root_dir / "data" / "ui" / "fixtures" / "captures",
                                                  "fixtures/captures/");
             LUMINUMBRA_CORE_INFO("UI fixtures: gallery sourcing data/ui/fixtures/captures");
@@ -1249,7 +939,7 @@ int main(int argc, char* argv[]) {
         }
         audioManager->Shutdown();
         jobSystem.shutdown();
-        if (g_imgui_enabled) {
+        if (g_app.overlay.imgui_enabled) {
             ImGui_ImplOpenGL3_Shutdown();
             ImGui_ImplGlfw_Shutdown();
             ImGui::DestroyContext();
@@ -1280,7 +970,17 @@ int main(int argc, char* argv[]) {
             skinned_albedo_layer,
             skinned_normal_layer);
     }
-    glfwSetWindowUserPointer(window, &renderPipeline);
+    // The GLFW callbacks (app/InputCallbacks.cpp) reach their state through
+    // the window user pointer: the app context plus the core singletons that
+    // stayed file-scope globals. Set once here, at window setup.
+    InputCallbackBindings inputCallbackBindings;
+    inputCallbackBindings.app = &g_app;
+    inputCallbackBindings.systemConfig = &g_systemConfig;
+    inputCallbackBindings.windowState = &g_windowState;
+    inputCallbackBindings.camera = &g_camera;
+    inputCallbackBindings.playerController = &g_playerController;
+    inputCallbackBindings.uiManager = &g_uiManager;
+    glfwSetWindowUserPointer(window, &inputCallbackBindings);
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
     // Apply the requested interactive window mode now that the GL context and
@@ -1309,10 +1009,6 @@ int main(int argc, char* argv[]) {
     bool scenario_failed = false;
     std::string scenario_failure_reason;
     bool scenario_ready = false;
-    bool scenario_timed_run_complete = false;
-    //  the world_visual_sweep runs its whole capture matrix
-    // synchronously in one pass once the world is ready, so it self-completes.
-    bool world_visual_sweep_done = false;
     uint64_t scenario_frame_count = 0;
     std::chrono::steady_clock::time_point scenario_play_started_at{};
     RuntimeReadinessReport last_readiness_report;
@@ -1392,7 +1088,7 @@ int main(int argc, char* argv[]) {
         if (gameSession->CreateWorld(name, seed, worldType, customPtr)) {
             // A real world replaces the  menu-backdrop world; stop the menu-branch from
             // rendering with the (now game-owned) camera/world.
-            g_menu_backdrop_active = false;
+            g_app.menu.menu_backdrop_active = false;
             if (auto* world_system = gameSession->GetWorldSystem()) {
                 // bake the live waterfall dressing once for this
                 // world. Detection is a pure function of the generated world
@@ -1440,10 +1136,10 @@ int main(int argc, char* argv[]) {
                     window, g_camera.get(), gameSession->GetPhysicsSystem());
                 g_playerController->ApplyKeyBindings(
                     g_systemConfig); // user.controls.* (rebindable)
-                if (g_world_render_data_initialized) {
+                if (g_app.loading.world_render_data_initialized) {
                     renderPipeline.clear_all_chunk_data();
                 }
-                g_world_render_data_initialized = true;
+                g_app.loading.world_render_data_initialized = true;
                 SetGameState(window, gameStateManager, GameState::IN_GAME);
                 last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
                 if (!horizon_ready || !last_readiness_report.ready) {
@@ -1488,14 +1184,15 @@ int main(int argc, char* argv[]) {
             // Use the actual spawn position for initial chunk loading
             Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
             if (runtime_boot_recorder.enabled()) {
-                g_initial_chunks_to_load.clear();
+                g_app.loading.initial_chunks_to_load.clear();
             } else {
-                g_initial_chunks_to_load = world_system->GetInitialChunkLoadList(spawn_pos);
+                g_app.loading.initial_chunks_to_load =
+                    world_system->GetInitialChunkLoadList(spawn_pos);
             }
 
-            g_generation_dispatch_index = 0;
+            g_app.loading.generation_dispatch_index = 0;
             if (g_loading_visualizer) {
-                g_loading_visualizer->BeginVisualization(g_initial_chunks_to_load);
+                g_loading_visualizer->BeginVisualization(g_app.loading.initial_chunks_to_load);
             }
 
         } else {
@@ -1813,7 +1510,7 @@ int main(int argc, char* argv[]) {
         sb.BeginRebind = [](const std::string& action) {
             for (std::size_t i = 0; i < Luminumbra::Client::kInputActionDefs.size(); ++i) {
                 if (action == Luminumbra::Client::kInputActionDefs[i].name) {
-                    g_rebindCaptureAction = static_cast<int>(i);
+                    g_app.hud.rebindCaptureAction = static_cast<int>(i);
                     return;
                 }
             }
@@ -1851,9 +1548,9 @@ int main(int argc, char* argv[]) {
     audioManager->PlayMusic("music_main_menu");
     if (g_uiManager) {
         // --ui-screenshot: open the requested screen directly in menu state instead of the menu.
-        const std::string boot_doc = g_ui_screenshot_screen.empty()
+        const std::string boot_doc = g_app.capture.ui_screenshot_screen.empty()
                                          ? std::string("main_menu.rml")
-                                         : (g_ui_screenshot_screen + ".rml");
+                                         : (g_app.capture.ui_screenshot_screen + ".rml");
         g_uiManager->RequestLoadDocument(boot_doc);
     }
 
@@ -1891,14 +1588,14 @@ int main(int argc, char* argv[]) {
     }
 
     std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;
-    if (g_imgui_enabled) {
+    if (g_app.overlay.imgui_enabled) {
         worldGenViewer = std::make_unique<Luminumbra::Client::WorldGenViewer>();
         //  --worldgen-graph turns on the constrained layer-graph
         // authoring panel inside the inspector (a flagged INTERNAL dev tool, NOT
         // the shipping RmlUi create surface) and opens the inspector at boot.
         if (HasCommandLineFlag(argc, argv, "--worldgen-graph")) {
             worldGenViewer->SetGraphEnabled(true);
-            show_worldgen_viewer = true;
+            g_app.overlay.show_worldgen_viewer = true;
             LUMINUMBRA_CORE_INFO("--worldgen-graph: constrained layer-graph authoring panel "
                                  "enabled ( toggles the inspector)");
         }
@@ -1911,11 +1608,9 @@ int main(int argc, char* argv[]) {
     // #preview_pane screen rect under the transparent create panel. Built lazily
     // on first create-world activation so a headless/automated run pays nothing.
     auto worldgenPreview = std::make_unique<Luminumbra::Client::WorldgenPreview>();
-    // Last candidate signature so we only re-derive + push params when the form
-    // actually changed (the controller then debounces the rebuild).
-    std::string worldgenPreviewLastSig;
-    bool worldgenPreviewDragging = false;
-    double worldgenPreviewLastCursorX = 0.0, worldgenPreviewLastCursorY = 0.0;
+    // Preview orbit/drag bookkeeping consumed by the menu-branch renderer
+    // (app/MenuScreens.cpp).
+    MenuPreviewState menuPreviewState;
 
     if (runtime_boot_recorder.enabled() &&
         gameStateManager.GetCurrentState() == GameState::IN_GAME) {
@@ -1947,7 +1642,7 @@ int main(int argc, char* argv[]) {
                                             *gameSession->GetWorldSystem(),
                                             *g_camera,
                                             capture_delta_time,
-                                            wireframe_mode);
+                                            g_app.overlay.wireframe_mode);
                 runtime_boot_recorder.record_frame(capture_delta_time, renderPipeline);
                 glfwSwapBuffers(window);
             }
@@ -1968,10 +1663,10 @@ int main(int argc, char* argv[]) {
     // already shows terrain. Skipped for automated runs that drive their own world (scenario,
     // auto-create, boot-metrics, timelapse, render-benchmark) and via --no-menu-backdrop.
     {
-        const bool drives_own_world = scenario_config.active() ||
-                                      HasCommandLineFlag(argc, argv, "--auto-create-world") ||
-                                      runtime_boot_recorder.enabled() || g_timelapse_frames > 0 ||
-                                      !g_render_benchmark_path.empty();
+        const bool drives_own_world =
+            scenario_config.active() || HasCommandLineFlag(argc, argv, "--auto-create-world") ||
+            runtime_boot_recorder.enabled() || g_app.capture.timelapse_frames > 0 ||
+            !g_app.capture.render_benchmark_path.empty();
         const bool want_backdrop = !drives_own_world &&
                                    !HasCommandLineFlag(argc, argv, "--no-menu-backdrop") &&
                                    gameStateManager.GetCurrentState() == GameState::MAIN_MENU;
@@ -2006,8 +1701,8 @@ int main(int argc, char* argv[]) {
                     cs.coverage_amount = 0.6f;
                     cs.plane_height = 900.0f;
                     renderPipeline.set_cloud_state(cs);
-                    g_world_render_data_initialized = true;
-                    g_menu_backdrop_active = true;
+                    g_app.loading.world_render_data_initialized = true;
+                    g_app.menu.menu_backdrop_active = true;
                     LUMINUMBRA_CORE_INFO("Menu backdrop world ready (golden-hour mountain vista).");
                 }
             }
@@ -2016,240 +1711,40 @@ int main(int argc, char* argv[]) {
 
     int exit_code = 0;
     float lastFrame = 0.0f;
-    auto scenario_started_at = std::chrono::steady_clock::now();
-    auto last_runtime_state_write = std::chrono::steady_clock::now();
-    std::array<bool, 3> lod_ground_screenshots_written{false, false, false};
-    std::vector<std::string> lod_ground_screenshot_files;
-    std::vector<LodGroundVisualCapture> lod_ground_visual_captures;
-    WaterVisualCameraTarget water_visual_target;
-    bool water_visual_target_initialized = false;
-    bool water_visual_capture_written = false;
-    std::vector<WaterCausticsSample> water_caustics_samples;
-    std::vector<unsigned char> water_caustics_previous_texels;
-    double water_caustics_next_sample_seconds = 0.0;
-    ScreenshotPixelStats water_visual_pixel_stats;
-    WaterRegionPatch water_shallow_patch;
-    WaterRegionPatch water_deep_patch;
-    WaterRegionPatch water_foam_patch;
-    bool water_reflection_capture_written = false;
-    // Projects a world point into capture pixel coordinates using the same
-    // projection the render pipeline builds. Returns false when the point is
-    // behind the camera or too close to the frame edge for a full patch.
-    const auto project_world_to_capture = [](const Luminumbra::Rendering::Camera& camera,
-                                             const Luminumbra::Vec3& world,
-                                             int width,
-                                             int height,
-                                             int margin,
-                                             int& out_x,
-                                             int& out_y_from_top) -> bool {
-        if (width <= 0 || height <= 0) {
-            return false;
-        }
-        const glm::mat4 projection =
-            glm::perspective(glm::radians(camera.Zoom),
-                             static_cast<float>(width) / static_cast<float>(height),
-                             camera.GetNearPlane(),
-                             camera.GetFarPlane());
-        const glm::vec4 clip = projection * camera.GetViewMatrix() * glm::vec4(world, 1.0f);
-        if (clip.w <= 0.0f) {
-            return false;
-        }
-        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
-        const int x = static_cast<int>((ndc.x * 0.5f + 0.5f) * static_cast<float>(width));
-        const int y_from_bottom =
-            static_cast<int>((ndc.y * 0.5f + 0.5f) * static_cast<float>(height));
-        const int y_from_top = height - 1 - y_from_bottom;
-        if (x < margin || x >= width - margin || y_from_top < margin ||
-            y_from_top >= height - margin) {
-            return false;
-        }
-        out_x = x;
-        out_y_from_top = y_from_top;
-        return true;
-    };
-    WaterVisualCameraTarget material_visual_target;
-    bool material_visual_target_initialized = false;
-    bool material_visual_capture_written = false;
-    bool skybox_visual_capture_written = false;
-    bool weather_baseline_capture_written = false;
-    bool weather_visual_capture_written = false;
-    WeatherPixelStats weather_baseline_stats;
-    // lightning strike-frame state. During the weather phase a
-    // deterministically scheduled strike fires; the harness captures a NEIGHBOUR
-    // (pre-strike) frame and the STRIKE frame so the gate can assert the full-scene
-    // luminance PULSE (frame-mean spike) + BOLT pixels. Render-only response to the
-    // SIM strike event (one-way, ); the visual gate does NOT depend on audio .
-    bool lightning_neighbor_captured = false;
-    bool lightning_strike_capture_written = false;
-    Luminumbra::Client::ScenarioHarness::StrikePixelStats lightning_neighbor_stats;
-    int lightning_sim_strikes_scheduled = 0;
-    //  cloud-shadow scenario state. Two terrain ROI captures (t0/t1) as the
-    // cloud-shadow edge drifts, a sky capture for cloud presence, and a clouds-off
-    // lighting-pass GPU timing captured before enabling the shadow (budget check).
-    bool cloud_shadow_t0_written = false;
-    bool cloud_shadow_done = false;
-    double cloud_shadow_terrain_luma_t0 = 0.0;
-    double cloud_shadow_scroll_t0 = 0.0;
-    double cloud_shadow_lighting_ms_off = 0.0;
-    bool cloud_shadow_lighting_off_sampled = false;
-    //  particle determinism scenario state.
-    bool particle_emitter_spawned = false;
-    bool particle_determinism_capture_written = false;
-    // foliage instancing scenario state. The run loads the scatter
-    // set once, builds the deterministic per-chunk scatter over the visible live
-    // ring each frame (sampling the  wind field at the camera), runs a CALM
-    // phase (zero wind -> no sway) then a WINDY phase (strong wind -> sway), and
-    // captures + snapshots the instance set for the FoliageInstancing gate.
-    bool foliage_scatter_loaded = false;
-    bool foliage_capture_written = false;
-    double foliage_calm_max_sway = 0.0;
-    bool foliage_calm_sampled = false;
-    // precipitation scenario state. The run spawns the rain emitter
-    // (driven by the replicated weather state) and captures TWO frames -- a CALM
-    // phase (no wind) and a WINDY phase (wind-advected slant) -- so the gate can
-    // assert precip particles are present AND that they slant with wind.
-    bool precip_emitter_spawned = false;
-    //  id of the camera-tracked rain emitter (so it can
-    // be re-centered on the live camera every frame -> rain falls past the viewer).
-    uint32_t precip_rain_emitter_id = Luminumbra::Rendering::ParticlePass::kInvalidEmitter;
-    bool precip_calm_capture_written = false;
-    bool precip_windy_capture_written = false;
-    //  atmospheric MOTION capture. Env-gated
-    // (LUMINUMBRA_ATMOS_MOTION_CAPTURE=1) on top of the precipitation_smoke
-    // scenario. Runs a continuous STORM (heavy rain + drifting clouds + periodic
-    // lightning) and dumps ~90 consecutive frames as motion/frame_%03d.ppm so the
-    // moving clip (GIF/MP4) can be judged IN MOTION (a single still is not enough).
-    // Render-only: never touches sim/world_hash.
-    const bool atmos_motion_capture = [] {
-        const auto value = Luminumbra::Core::ReadEnvironment("LUMINUMBRA_ATMOS_MOTION_CAPTURE");
-        return value && !value->empty() && value->front() != '0';
-    }();
-    int atmos_motion_frame_index = 0;
-    //  capture 240 frames. At the honest 1/60 s stride
-    // (every render frame) that is ~4 s of real-time storm replayed at 60 fps --
-    // long enough to show several lightning strikes and continuous falling rain.
-    constexpr int kAtmosMotionFrameCount = 240;
-    //  HONEST motion. The clip captures the REAL
-    // precip_rain.json (no demo emitter), so the capture cadence must match how the
-    // rain actually looks at runtime: sample every render frame (~60 fps -> ~16.7 ms
-    // step) rather than the old 45 ms stride that exaggerated the per-frame fall and
-    // misrepresented the true on-screen motion. Replayed at 60 fps the assembled
-    // clip is a faithful 1:1 recording of the shipping rain. 90 frames ~= 1.5 s.
-    double atmos_motion_last_capture_s = -1.0;
-    constexpr double kAtmosMotionFrameIntervalS = 1.0 / 60.0;
-    PrecipPixelStats precip_calm_stats;
-    Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats precip_calm_render_pass;
-    // 6 season-sweep windows (summer noon/dusk/night, winter
-    // noon/dusk/night).
-    std::array<bool, 6> timeofday_season_captures_written{false, false, false, false, false, false};
-    //  settle bookkeeping. The per-frame pin can JUMP the
-    // sun a long arc between captures (noon -> dusk -> night); the sun-view sky LUT
-    // refreshes lazily, so the dome luminance needs a few frames at the new pin
-    // before it reflects the new phase. Count consecutive frames the current
-    // pending capture has been pinned and only WRITE once it has settled, so the
-    // captured dome luminance is the labelled phase's, not a stale prior phase's.
-    int timeofday_pending_pin = -1;      // capture index currently pinned
-    int timeofday_pin_settle_frames = 0; // consecutive frames at that pin
-    std::vector<TimeOfDayPhaseCapture> timeofday_phase_captures;
-    EmissiveMaterialTarget timeofday_emissive_target;
-    bool timeofday_emissive_target_initialized = false;
-    bool timeofday_emissive_capture_written = false;
-    TimeOfDayPixelStats timeofday_emissive_stats;
-    bool timeofday_analysis_final = false;
-    LodBoundaryTransitionRecorder lod_boundary_transition_recorder;
-    LodSeamArrivalRecorder lod_seam_arrival_recorder;
-    std::array<bool, 4> lod_seam_screenshots_written{false, false, false, false};
-    std::vector<LodGroundVisualCapture> lod_seam_visual_captures;
-    bool persistence_phase_attempted = false;
-    std::vector<PlayerViewStation> player_view_stations;
-    std::vector<bool> player_view_captures_written;
-    std::vector<PlayerViewStationCapture> player_view_station_captures;
-    bool player_view_sky_enforced = true;
-    // farlod_horizon_smoke: phase A (far-LOD disabled) measures the
-    // honest in-run gbuffer GPU baseline, phase B enables far-LOD and sweeps
-    // the stations across the live/far boundary.
-    constexpr double kFarLodHorizonPhaseSplit = 0.30;
-    std::vector<FarLodHorizonStation> farlod_horizon_stations;
-    std::vector<bool> farlod_horizon_captures_written;
-    std::vector<FarLodHorizonStationCapture> farlod_horizon_station_captures;
-    bool farlod_horizon_sky_enforced = true;
-    std::vector<double> farlod_baseline_gbuffer_samples;
-    std::vector<double> farlod_far_gbuffer_samples;
-    // each station's far-OFF above-horizon sliver
-    // baseline, captured PAIRED with its far-ON capture in phase B (an extra
-    // far-disabled render at the same camera, same frame). Thin LIVE
-    // mountain/island peak/ridge silhouettes (and diagonal live-geometry slivers)
-    // are legitimate geometry that classify as slivers in BOTH renders; the gated
-    // far-ATTRIBUTABLE sliver re-analyzes the far-ON frame with the far-OFF frame's
-    // intrusion pixels cancelled per-pixel in a 3x3 neighborhood, so they cancel
-    // pixel-for-pixel and only a genuine far-render streak (present only when far
-    // is on) survives. This vector retains the raw far-OFF measurement as
-    // telemetry only. Indexed by station; -1 = not yet captured.
-    std::vector<int> farlod_horizon_far_off_sliver_px;
-    // station the camera was applied to this frame;
-    // the post-render capture targets exactly this station so the analyzed back
-    // buffer always matches the camera that rendered it.
-    std::size_t farlod_horizon_applied_station = 0;
-    // skinned_mesh_visual_smoke: rig spawned once after readiness;
-    // captures at two clip times prove the skinned stage renders and animates.
-    SkinnedMeshVisualTarget skinned_mesh_visual_target;
-    bool skinned_mesh_spawn_attempted = false;
-    bool skinned_mesh_capture_a_written = false;
-    bool skinned_mesh_analysis_written = false;
-    //  video proof: showcase frame-sequence dump (avatars>=2 only).
-    int showcase_video_frame = 0;
-    double showcase_video_last_s = -1.0;
-    //  cinematic: the wildlife camera is FIXED, so the heavy per-frame
-    // horizon-radius EnsureSurfaceReadyNear (which keeps render at ~0.6 fps and
-    // starves the 120-frame capture) is amortized -- the scene region is streamed
-    // once in setup, then refreshed only every Nth frame.
-    int wildlife_stream_tick = 0;
-    //   integration: drives the showcase render avatars from the replication
-    // pipeline when --replicated is set (network-driven view).
-    Luminumbra::Client::ScenarioHarness::ReplicatedAvatarDemo replicated_demo;
-    bool replicated_demo_setup = false;
-    double replicated_avatar_render_seconds = 0.0;
-    bool remote_avatar_render_artifact_written = false;
-    //  cinematic wildlife scene state. Entity[0]=animal, [1]=human (grovestriders);
-    // a separate arrow render entity. FSM: 0 seek-water, 1 arrow-in-flight, 2 flee.
-    bool wildlife_setup = false;
-    int wildlife_phase = 0;
-    glm::vec3 wildlife_water{0.0f};  // water-edge target the animal walks to
-    glm::vec3 wildlife_animal{0.0f}; // animal world position (kinematic)
-    glm::vec3 wildlife_human{0.0f};  // human (shooter) position
-    glm::vec3 wildlife_flee_dir{0.0f};
-    glm::vec3 wildlife_arrow_pos{0.0f};
-    glm::vec3 wildlife_arrow_vel{0.0f};
-    Luminumbra::EntityID wildlife_arrow_entity{entt::null};
-    SkinnedMeshVisualCapture skinned_mesh_capture_a;
-    std::vector<unsigned char> skinned_mesh_pixels_a;
-    // creature_slice_smoke: data-driven creature game slice. The
-    // stimulus appears at 55% progress; captures at 45% and 85%.
-    CreatureSliceScene creature_slice_scene;
-    bool creature_slice_spawn_attempted = false;
-    bool creature_slice_before_written = false;
-    bool creature_slice_analysis_written = false;
-    CreatureSliceCapture creature_slice_before;
-    // window_mode_stress_smoke: scripted resize cycle
-    // exercised once after readiness. Each step drives RenderPipeline::on_resize
-    // (windowed->borderless->resolutions->fullscreen->restore-pinned) and
-    // records the resize-generation delta + GL error count; the final pinned
-    // step is captured as a Smoke-equivalent screenshot.
-    std::vector<WindowModeStressStep> window_mode_stress_steps;
-    std::size_t window_mode_stress_step_index = 0;
-    bool window_mode_stress_complete = false;
-    bool window_mode_stress_analysis_written = false;
-    WindowModeStressCapture window_mode_stress_capture;
-    // networked_session_smoke: the client renders a SERVER-OWNED world
-    // streamed over the lockstep transport. The driver owns the host authority +
-    // both LockstepSession ends (LoopbackTransport, no sockets); per agreed tick
-    // both worlds step one fixed sim tick from the SAME spawn anchor and exchange
-    // hashes (the desync oracle). Camera LOOK is applied render-side each frame
-    // and is NEVER sent through the session, so look latency is zero (research
-    // worldgen-lockstep-sdfrt.md Area 2 takeaway 2).
-    NetworkedSessionDriver networked_session_driver;
-    bool networked_session_begun = false;
-    bool networked_session_done = false;
+    // Scenario driving/capture seam (core/ScenarioRunner.h): the runner is
+    // created ONLY for `--scenario` runs (scenario_config.active()); a null
+    // runner leaves the frame loop on exactly the non-scenario branches it
+    // always took. The context is a narrow view of the frame-loop state the
+    // moved scenario blocks already read/wrote.
+    ScenarioFrameContext scenario_frame_context{window,
+                                                root_dir,
+                                                root_path_str,
+                                                scenario_config,
+                                                runtime_state_recorder,
+                                                lod_ground_frame_recorder,
+                                                jobSystem,
+                                                gameSession,
+                                                renderPipeline,
+                                                g_camera,
+                                                g_app,
+                                                scenario_world_type,
+                                                scenario_failed,
+                                                scenario_failure_reason,
+                                                scenario_ready,
+                                                scenario_frame_count,
+                                                scenario_play_started_at,
+                                                last_readiness_report,
+                                                exit_code};
+#if defined(LUMINUMBRA_QA_RUNNER)
+    const std::unique_ptr<ScenarioRunner> scenario_runner =
+        scenario_config.active() ? CreateScenarioRunner(scenario_frame_context) : nullptr;
+#else
+    // Shipping build: no harness linked; the guard at the top of main() already
+    // rejected any --scenario request, so the runner is permanently null and
+    // the frame loop takes only its non-scenario branches.
+    const std::unique_ptr<ScenarioRunner> scenario_runner;
+    (void)scenario_frame_context;
+#endif
     //  honest CPU-vs-GPU attribution for --render-benchmark.
     // wall = max(CPU_submit, GPU_work) + present. NVML is loaded lazily on the
     // first measured frame (optional / guarded).
@@ -2258,20 +1753,13 @@ int main(int argc, char* argv[]) {
     bool g_rb_nvml_ok = false;
     std::chrono::steady_clock::time_point g_rb_frame_start{};
     std::chrono::steady_clock::time_point g_rb_before_swap{};
-    const auto median_of = [](std::vector<double> samples) -> double {
-        if (samples.empty()) {
-            return 0.0;
-        }
-        std::sort(samples.begin(), samples.end());
-        return samples[(samples.size() - 1) / 2];
-    };
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
         deltaTime = std::min(deltaTime, 1.0f / 20.0f);
         //  CPU-submit clock starts at frame top when benchmarking.
-        const bool g_rb_active = !g_render_benchmark_path.empty();
+        const bool g_rb_active = !g_app.capture.render_benchmark_path.empty();
         if (g_rb_active)
             g_rb_frame_start = std::chrono::steady_clock::now();
         // runtime telemetry ( implementation note): always-on frame wall to localize
@@ -2291,6 +1779,9 @@ int main(int argc, char* argv[]) {
         // Declared at loop scope (not inside the case) so the case labels below
         // don't "jump over" an initialized local (ill-formed in a switch).
         std::chrono::steady_clock::time_point _rb_sim_t0{}, _rb_stream_t0{};
+        // Same jump-over-init rule: how the scenario runner drove (or fell
+        // through) the IN_GAME case this frame.
+        ScenarioRunner::InGameDrive scenario_drive = ScenarioRunner::InGameDrive::kFallThrough;
 
         if (scenario_failed) {
             exit_code = 2;
@@ -2315,24 +1806,11 @@ int main(int argc, char* argv[]) {
             glfwSetWindowShouldClose(window, true);
         }
 
-        if (scenario_config.active() && !scenario_ready && !scenario_failed) {
-            const auto readiness_wait_seconds =
-                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
-                                                                 scenario_started_at)
-                    .count();
-            if (readiness_wait_seconds >= scenario_config.readiness_timeout_seconds) {
-                last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
-                scenario_failed = true;
-                scenario_failure_reason = "world_readiness_timeout";
-                exit_code = 4;
-                runtime_state_recorder.capture("world_readiness_timeout",
-                                               &jobSystem,
-                                               gameSession.get(),
-                                               &renderPipeline,
-                                               scenario_frame_count,
-                                               last_readiness_report);
-                glfwSetWindowShouldClose(window, true);
-            }
+        // Scenario loop-top watchdog (world-readiness timeout -> exit 4);
+        // a no-op without a runner, exactly like the moved block was
+        // without an active scenario.
+        if (scenario_runner) {
+            scenario_runner->onLoopTop();
         }
 
         const auto _rb_poll_t0 = std::chrono::steady_clock::now(); // always-on (runtime telemetry)
@@ -2345,17 +1823,17 @@ int main(int argc, char* argv[]) {
         // octahedral atlas bake ONCE here (independent of game state), write the atlas + coverage
         // JSON, then exit. Placed at the loop top so it can't be skipped by a state-gated render
         // branch.
-        if (!g_bake_impostor_path.empty() && !g_bake_impostor_done) {
-            g_bake_impostor_done = true;
+        if (!g_app.capture.bake_impostor_path.empty() && !g_app.capture.bake_impostor_done) {
+            g_app.capture.bake_impostor_done = true;
             Luminumbra::Rendering::OctaImpostorGrid bakeGrid;
             bakeGrid.gridResolution = 12; // 12x12 = 144 views for smoother runtime view blending
             const Luminumbra::Rendering::ImpostorBakeResult br =
                 Luminumbra::Rendering::BakeTreeImpostorAtlas(
-                    g_bake_impostor_path, root_dir.string(), renderPipeline, bakeGrid);
+                    g_app.capture.bake_impostor_path, root_dir.string(), renderPipeline, bakeGrid);
             if (br.ok) {
                 LUMINUMBRA_CORE_INFO(
                     "Impostor atlas baked -> {} ({}x{} px): mean coverage {:.3f}, min tile {:.3f}",
-                    g_bake_impostor_path,
+                    g_app.capture.bake_impostor_path,
                     br.atlas_size,
                     br.atlas_size,
                     br.mean_coverage,
@@ -2392,640 +1870,30 @@ int main(int argc, char* argv[]) {
 
         GameState currentState = gameStateManager.GetCurrentState();
 
-        // 3D audio LISTENER follows the player so footsteps / ambient bed / creature sounds
-        // spatialize correctly (without this the listener sits at the origin and positional audio
-        // is near-silent).
-        if (currentState == GameState::IN_GAME && audioManager && g_camera) {
-            audioManager->SetListenerTransform(g_camera->Position, g_camera->Front, g_camera->Up);
-            // point the audio-occlusion raycaster at the LIVE physics world so
-            // geometry between a sound and the listener muffles it (real raycasts, not the
-            // distance-only fallback). Re-set each frame -> correct across world (re)load/unload;
-            // nullptr when there is no physics -> occlusion falls back to distance-only.
-            if (auto* mam =
-                    dynamic_cast<Luminumbra::Client::MiniaudioManager*>(audioManager.get())) {
-                mam->SetPhysicsSystem(gameSession ? gameSession->GetPhysicsSystem() : nullptr);
-            }
-            // feed the sun elevation (sin; the sun vector points AWAY from
-            // the sun — same convention as the dawn/dusk cues below) + tick the
-            // day/night bed crossfade (internally throttled to 10 Hz).
-            envAudio->SetSunElevation(-renderPipeline.sun_direction().y);
-            envAudio->Update(g_camera->Position, static_cast<float>(deltaTime));
-        }
-        // Player FOOTSTEPS (interactive audio): when the player walks, play a footstep keyed to the
-        // surface material under them (stone vs grass/soil/etc.), at a distance-based cadence so it
-        // tracks speed. Render/audio-only; live play only (never in scenario captures, so
-        // determinism and the visual gates are untouched). Stride length / speed gates are tunable
-        // by ear.
-        if (currentState == GameState::IN_GAME && audioManager && g_camera && !g_paused &&
-            !scenario_config.active() && gameSession && gameSession->GetWorldSystem()) {
-            static glm::vec3 s_footLastPos = g_camera->Position;
-            static float s_footDist = 0.0f;
-            const glm::vec3 fp = g_camera->Position;
-            const float fdx = fp.x - s_footLastPos.x, fdz = fp.z - s_footLastPos.z;
-            const float fhoriz = std::sqrt(fdx * fdx + fdz * fdz);
-            s_footLastPos = fp;
-            const float fspeed = deltaTime > 0.0f ? fhoriz / static_cast<float>(deltaTime) : 0.0f;
-            if (fspeed < 0.8f || fspeed > 25.0f) {
-                s_footDist = 0.0f; // standing still, or a teleport/respawn jump -> reset
-            } else {
-                s_footDist += fhoriz;
-                if (s_footDist >= 1.9f) { // stride length (m)
-                    s_footDist = 0.0f;
-                    auto* fws = gameSession->GetWorldSystem();
-                    const float fth = fws->GetTerrainHeightAt(fp.x, fp.z);
-                    // Material-based footstep: the surface under the player picks the sound.
-                    const char* fev = "footstep_grass";
-                    switch (fws->SurfaceVertexMaterial(fp.x, fp.z, fth)) {
-                        case Luminumbra::MaterialType::Stone:
-                        case Luminumbra::MaterialType::Deepslate:
-                            fev = "footstep_stone";
-                            break;
-                        case Luminumbra::MaterialType::Soil:
-                            fev = "footstep_soil";
-                            break;
-                        case Luminumbra::MaterialType::Sand:
-                            fev = "footstep_sand";
-                            break;
-                        case Luminumbra::MaterialType::Water:
-                            fev = "footstep_water";
-                            break;
-                        case Luminumbra::MaterialType::LuminCrystal:
-                            fev = "footstep_crystal";
-                            break;
-                        case Luminumbra::MaterialType::Grass:
-                        default:
-                            fev = "footstep_grass";
-                            break;
-                    }
-                    audioManager->PlayOneShot(fev, glm::vec3(fp.x, fth, fp.z));
-                }
-            }
-        }
-
-        // LIVING-WORLD AUDIO: weather-reactive RAIN + occasional CREATURE CALLS. Periodic in live
-        // play; render/audio-only (reads sim state, never mutates -> determinism + gates
-        // untouched).
-        if (currentState == GameState::IN_GAME && audioManager && g_camera && !g_paused &&
-            !scenario_config.active() && gameSession) {
-            static float s_envTimer = 0.0f, s_callTimer = 0.0f, s_sleepTimer = 0.0f;
-            static float s_feedTimer = 0.0f, s_colonyTimer = 0.0f;
-            static bool s_rainOn = false, s_waterOn = false;
-            s_envTimer += static_cast<float>(deltaTime);
-            s_callTimer += static_cast<float>(deltaTime);
-            s_sleepTimer += static_cast<float>(deltaTime);
-            s_feedTimer += static_cast<float>(deltaTime);
-            s_colonyTimer += static_cast<float>(deltaTime);
-            const glm::vec3 pc = g_camera->Position;
-            if (s_envTimer >= 0.5f) {
-                s_envTimer = 0.0f;
-                // Rain: tie ambient_rain to the live weather precipitation at the player
-                // (hysteresis so it doesn't flutter at a storm-cell edge). Same field the foliage
-                // growth reads.
-                if (auto* weather = gameSession->GetWeatherSystem()) {
-                    const float precip =
-                        weather->PrecipitationAt(Luminumbra::Vec3(pc.x, pc.y, pc.z));
-                    if (!s_rainOn && precip > 0.18f) {
-                        audioManager->PlayAmbientLoop("ambient_rain", pc, 1.0e6f);
-                        s_rainOn = true;
-                    } else if (s_rainOn && precip < 0.08f) {
-                        audioManager->StopAmbientLoop("ambient_rain");
-                        s_rainOn = false;
-                    }
-                    // thunder now follows the SIM strike schedule when
-                    // the live-weather bridge is on — each queued strike cue fires after
-                    // its physical sound delay (distance / 343 m/s), volume by
-                    // magnitude/distance. The legacy flat 22 s timer remains ONLY as the
-                    // fallback when the bridge is off (no schedule consumer running).
-                    if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
-                        const double now_s = glfwGetTime();
-                        for (auto it = g_pendingThunder.begin(); it != g_pendingThunder.end();) {
-                            const double delay_s = it->distance_m / 343.0; // speed of sound
-                            if (now_s - it->fired_at_seconds >= delay_s) {
-                                audioManager->PlayOneShot2D("thunder",
-                                                            Luminumbra::Client::BusId::Events);
-                                it = g_pendingThunder.erase(it);
-                            } else {
-                                ++it;
-                            }
-                        }
-                    } else {
-                        static float s_thunderTimer = 0.0f;
-                        if (precip > 0.40f) {
-                            s_thunderTimer += 0.5f; // this branch runs once per 0.5 s tick above
-                            if (s_thunderTimer >= 22.0f) {
-                                s_thunderTimer = 0.0f;
-                                audioManager->PlayOneShot2D("thunder",
-                                                            Luminumbra::Client::BusId::Events);
-                            }
-                        } else {
-                            s_thunderTimer = 0.0f;
-                        }
-                    }
-                }
-                // Water: a gentle stream bed when standing water is within ~14 m (a ring probe of
-                // the water surface vs terrain). Fades in/out as you approach / leave a river or
-                // lake.
-                if (auto* ws2 = gameSession->GetWorldSystem()) {
-                    static const float off[5][2] = {{0, 0}, {14, 0}, {-14, 0}, {0, 14}, {0, -14}};
-                    bool nearWater = false;
-                    for (const auto& o : off) {
-                        const float wx = pc.x + o[0], wz = pc.z + o[1];
-                        if (ws2->WaterLevelAt(wx, wz) > ws2->GetTerrainHeightAt(wx, wz) + 0.4f) {
-                            nearWater = true;
-                            break;
-                        }
-                    }
-                    if (nearWater && !s_waterOn) {
-                        audioManager->PlayAmbientLoop("ambient_stream", pc, 1.0e6f);
-                        s_waterOn = true;
-                    } else if (!nearWater && s_waterOn) {
-                        audioManager->StopAmbientLoop("ambient_stream");
-                        s_waterOn = false;
-                    }
-                    // waterfall ROAR — the nearest DETECTED waterfall
-                    // site within earshot drives a positional ambient loop through the
-                    // previously never-called ComputeWaterfallRoar. The
-                    // detector's cached sites are the SAME set the render sheets use, so
-                    // what you hear is what you see. Pure reads; client-only.
-                    {
-                        static bool s_roarOn = false;
-                        const auto& falls = renderPipeline.waterfall_sites(*ws2);
-                        const Luminumbra::Rendering::WaterfallSite* best = nullptr;
-                        float best_d2 = 400.0f * 400.0f;
-                        for (const auto& site : falls) {
-                            const glm::vec3 d = site.crest - pc;
-                            const float d2 = glm::dot(d, d);
-                            if (d2 < best_d2) {
-                                best_d2 = d2;
-                                best = &site;
-                            }
-                        }
-                        if (best != nullptr) {
-                            const auto roar =
-                                Luminumbra::Client::AudioPropagationSystem::ComputeWaterfallRoar(
-                                    best->crest, best->drop_height, pc);
-                            if (roar.audible) {
-                                if (!s_roarOn) {
-                                    audioManager->PlayAmbientLoop(
-                                        "waterfall_roar", best->crest, 400.0f);
-                                    s_roarOn = true;
-                                }
-                                audioManager->SetAmbientVolume("waterfall_roar", roar.volume);
-                            } else if (s_roarOn) {
-                                audioManager->StopAmbientLoop("waterfall_roar");
-                                s_roarOn = false;
-                            }
-                        } else if (s_roarOn) {
-                            audioManager->StopAmbientLoop("waterfall_roar");
-                            s_roarOn = false;
-                        }
-                    }
-                }
-                // Wind GUSTS: the wind bed never stops, but its volume breathes with the live
-                // wind-field magnitude so a gust is actually felt (calm still whispers).
-                if (auto* weather2 = gameSession->GetWeatherSystem()) {
-                    const auto wsmp = weather2->SampleAt(Luminumbra::Vec3(pc.x, pc.y, pc.z));
-                    const float windMag =
-                        std::sqrt(wsmp.wind.x * wsmp.wind.x + wsmp.wind.y * wsmp.wind.y);
-                    const float swell = 0.5f + std::min(windMag / 6.0f, 1.0f) * 1.1f; // [0.5.. 1.6]
-                    audioManager->SetAmbientVolume("ambient_wind", swell);
-                }
-                // biome reverb base (idempotent), then the weather reverb
-                // shift — order matters: UpdateAtmosphere layers on the last base.
-                if (auto* wsr = gameSession->GetWorldSystem()) {
-                    const auto& br = wsr->BiomeReverbAt(pc.x, pc.z);
-                    envAudio->ApplyBiomeReverb(br.preset, br.wet, br.dry, br.decay);
-                }
-                if (auto* weather3 = gameSession->GetWeatherSystem()) {
-                    const auto smp = weather3->SampleAt(Luminumbra::Vec3(pc.x, pc.y, pc.z));
-                    // WeatherSample.wind is a Vec2 in the world XZ plane:.y -> z.
-                    envAudio->UpdateAtmosphere(glm::vec3(smp.wind.x, 0.0f, smp.wind.y),
-                                               smp.precip_intensity,
-                                               smp.storm_intensity);
-                }
-            }
-            // Occasional call from the nearest LIVE creature (<50 m) so the world has voices.
-            if (s_callTimer >= 11.0f) {
-                s_callTimer = 0.0f;
-                const auto& reg = gameSession->GetRegistry();
-                auto cview = reg.view<const Luminumbra::Components::CreatureComponent,
-                                      const Luminumbra::Components::TransformComponent>();
-                entt::entity best = entt::null;
-                float bestD = 50.0f * 50.0f;
-                glm::vec3 bestPos(0.0f);
-                std::uint16_t bestSpecies = 0;
-                for (auto e : cview) {
-                    const auto& cc = cview.get<const Luminumbra::Components::CreatureComponent>(e);
-                    if (cc.eaten)
-                        continue;
-                    const auto& tf = cview.get<const Luminumbra::Components::TransformComponent>(e);
-                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
-                    const float d2 = dx * dx + dz * dz;
-                    if (d2 < bestD) {
-                        bestD = d2;
-                        best = e;
-                        bestSpecies = cc.species_id;
-                        bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z);
-                    }
-                }
-                if (best != entt::null) {
-                    // Per-species voice: map the species id -> "creature_<id>_call". Every species
-                    // has a call event in the bank; an unspecified/legacy id falls back to
-                    // grovestrider.
-                    std::string ev = "creature_grovestrider_call";
-                    for (const auto& sp : g_creatureSpecies.all()) {
-                        if (sp.species_id() == bestSpecies) {
-                            ev = "creature_" + sp.id + "_call";
-                            break;
-                        }
-                    }
-                    audioManager->PlayOneShot(ev, bestPos);
-                } else {
-                    s_callTimer = 8.0f; // nobody near -> check again soon
-                }
-            }
-            // a soft sleeping breath from the nearest SLEEPING creature (<18 m) every
-            // ~6 s, so a creature bedded down for the night reads as alive, not frozen. last_action
-            // == Sleep (CreatureAction::Sleep = 5). Render-only; one breath at a time stays subtle.
-            if (s_sleepTimer >= 6.0f) {
-                s_sleepTimer = 0.0f;
-                const auto& reg = gameSession->GetRegistry();
-                auto sview = reg.view<const Luminumbra::Components::CreatureComponent,
-                                      const Luminumbra::Components::TransformComponent>();
-                entt::entity best = entt::null;
-                float bestD = 18.0f * 18.0f;
-                glm::vec3 bestPos(0.0f);
-                for (auto e : sview) {
-                    const auto& cc = sview.get<const Luminumbra::Components::CreatureComponent>(e);
-                    if (cc.eaten || cc.last_action != 5 /* CreatureAction::Sleep */)
-                        continue;
-                    const auto& tf = sview.get<const Luminumbra::Components::TransformComponent>(e);
-                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
-                    const float d2 = dx * dx + dz * dz;
-                    if (d2 < bestD) {
-                        bestD = d2;
-                        best = e;
-                        bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z);
-                    }
-                }
-                if (best != entt::null)
-                    audioManager->PlayOneShot("creature_sleep", bestPos);
-                else
-                    s_sleepTimer = 4.0f; // none asleep nearby -> re-check sooner
-            }
-            // per-action audio: the nearest GRAZING creature (<20 m) emits a
-            // soft feed/chew every ~5 s (a drink/sip instead if it is feeding right at the water's
-            // edge). last_action == Graze (CreatureAction::Graze = 1). Render-only.
-            if (s_feedTimer >= 5.0f) {
-                s_feedTimer = 0.0f;
-                const auto& reg = gameSession->GetRegistry();
-                auto* ws3 = gameSession->GetWorldSystem();
-                auto gview = reg.view<const Luminumbra::Components::CreatureComponent,
-                                      const Luminumbra::Components::TransformComponent>();
-                entt::entity best = entt::null;
-                float bestD = 20.0f * 20.0f;
-                glm::vec3 bestPos(0.0f);
-                for (auto e : gview) {
-                    const auto& cc = gview.get<const Luminumbra::Components::CreatureComponent>(e);
-                    if (cc.eaten || cc.last_action != 1 /* CreatureAction::Graze */)
-                        continue;
-                    const auto& tf = gview.get<const Luminumbra::Components::TransformComponent>(e);
-                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
-                    const float d2 = dx * dx + dz * dz;
-                    if (d2 < bestD) {
-                        bestD = d2;
-                        best = e;
-                        bestPos = glm::vec3(tf.position.x, tf.position.y, tf.position.z);
-                    }
-                }
-                if (best != entt::null) {
-                    // Drinking proxy: if the grazer is at the water's edge, it sips instead of
-                    // chews.
-                    const bool atWater =
-                        ws3 && ws3->WaterLevelAt(bestPos.x, bestPos.z) >
-                                   ws3->GetTerrainHeightAt(bestPos.x, bestPos.z) + 0.2f;
-                    audioManager->PlayOneShot(atWater ? "creature_drink" : "creature_feed",
-                                              bestPos);
-                } else {
-                    s_feedTimer = 3.0f; // nobody grazing nearby -> re-check sooner
-                }
-            }
-            // colony bed: a faint chitter from the nearest forager NEST (<25 m)
-            // every ~5 s, so an active ant colony reads as alive. Keyed on the colony's shared home
-            // cell (every ForagerComponent carries it). Render-only.
-            if (s_colonyTimer >= 5.0f) {
-                s_colonyTimer = 0.0f;
-                const auto& reg = gameSession->GetRegistry();
-                auto* ws4 = gameSession->GetWorldSystem();
-                auto nview = reg.view<const Luminumbra::Components::ForagerComponent>();
-                bool haveNest = false;
-                glm::vec3 nestPos(0.0f);
-                float bestD = 25.0f * 25.0f;
-                for (auto e : nview) {
-                    const auto& fg = nview.get<const Luminumbra::Components::ForagerComponent>(e);
-                    const float wx = gameSession->ScentCellToWorldX(fg.home_x);
-                    const float wz = gameSession->ScentCellToWorldZ(fg.home_z);
-                    const float dx = wx - pc.x, dz = wz - pc.z;
-                    const float d2 = dx * dx + dz * dz;
-                    if (d2 < bestD) {
-                        bestD = d2;
-                        haveNest = true;
-                        const float wy = (ws4 ? ws4->GetTerrainHeightAt(wx, wz) : 0.0f) + 0.3f;
-                        nestPos = glm::vec3(wx, wy, wz);
-                    }
-                }
-                if (haveNest)
-                    audioManager->PlayOneShot("creature_colony", nestPos);
-                else
-                    s_colonyTimer = 3.0f;
-            }
-            // Creature LOCOMOTION sound: grounded creatures near the player tick a soft footfall
-            // as they travel (stride-accumulated from real movement, so cadence tracks speed);
-            // fliers (corvid/heron/finch/moth) get wingbeats at a longer interval; the small
-            // skink gets a light skitter. Render-only.
-            {
-                static std::unordered_set<std::uint16_t> s_fliers, s_light;
-                if (s_fliers.empty()) {
-                    for (const char* f :
-                         {"ashen_corvid", "dusk_heron", "glimmer_finch", "lumen_moth"})
-                        s_fliers.insert(Luminumbra::Components::CreatureSpeciesId16(f));
-                    s_light.insert(Luminumbra::Components::CreatureSpeciesId16("ember_skink"));
-                }
-                static std::unordered_map<std::uint32_t, std::pair<glm::vec2, float>> s_stride;
-                if (s_stride.size() > 512)
-                    s_stride.clear(); // bound: render-only bookkeeping
-                const auto& reg = gameSession->GetRegistry();
-                auto fview = reg.view<const Luminumbra::Components::CreatureComponent,
-                                      const Luminumbra::Components::TransformComponent>();
-                for (auto e : fview) {
-                    const auto& cc = fview.get<const Luminumbra::Components::CreatureComponent>(e);
-                    if (cc.eaten)
-                        continue;
-                    const auto& tf = fview.get<const Luminumbra::Components::TransformComponent>(e);
-                    const float dx = tf.position.x - pc.x, dz = tf.position.z - pc.z;
-                    if (dx * dx + dz * dz > 35.0f * 35.0f)
-                        continue; // only the audible ones
-                    // Pick the gait sound + stride length by species class.
-                    const char* gait = "creature_grovestrider_footstep";
-                    float kStride = 1.7f;
-                    if (s_fliers.count(cc.species_id)) {
-                        gait = "creature_wingbeat";
-                        kStride = 3.0f;
-                    } else if (s_light.count(cc.species_id)) {
-                        gait = "creature_footstep_light";
-                        kStride = 1.0f;
-                    }
-                    const glm::vec2 cur(tf.position.x, tf.position.z);
-                    const auto key = static_cast<std::uint32_t>(entt::to_integral(e));
-                    auto it = s_stride.find(key);
-                    if (it == s_stride.end()) {
-                        s_stride.emplace(key, std::make_pair(cur, 0.0f));
-                        continue;
-                    }
-                    const float moved = glm::distance(cur, it->second.first);
-                    it->second.first = cur;
-                    if (moved > 5.0f)
-                        continue; // ignore teleport-sized jumps (re-anchor/respawn)
-                    it->second.second += moved;
-                    if (it->second.second >= kStride) {
-                        it->second.second -= kStride;
-                        audioManager->PlayOneShot(
-                            gait, glm::vec3(tf.position.x, tf.position.y, tf.position.z));
-                    }
-                }
-            }
-            // Day/night: a soft cue as the sun crosses the horizon — brightening at dawn, settling
-            // at dusk. Sun elevation = -sun_direction.y (the vector points away from the sun).
-            // The state only flips once clearly past the horizon, so it fires once per transition.
-            {
-                static int s_sunUp = -1; // -1 uninit, 0 below horizon, 1 above
-                const float elev = -renderPipeline.sun_direction().y;
-                const int up = elev > 0.0f ? 1 : 0;
-                if (s_sunUp == -1) {
-                    s_sunUp = up;
-                } else if (up != s_sunUp) {
-                    if (up == 1 && elev > 0.03f) {
-                        audioManager->PlayOneShot2D("time_dawn", Luminumbra::Client::BusId::Events);
-                        audioManager->PlayMusic("music_exploration");
-                        s_sunUp = 1;
-                    } else if (up == 0 && elev < -0.03f) {
-                        audioManager->PlayOneShot2D("time_dusk", Luminumbra::Client::BusId::Events);
-                        audioManager->PlayMusic("music_dusk");
-                        s_sunUp = 0;
-                    }
-                }
-            }
-        }
+        // Frame audio — 3D listener, player footsteps, and the living-world
+        // rain/creature-call region (app/FrameAudio.cpp).
+        UpdateFrameAudio(g_app,
+                         currentState,
+                         deltaTime,
+                         audioManager.get(),
+                         envAudio.get(),
+                         g_camera.get(),
+                         g_systemConfig,
+                         gameSession.get(),
+                         renderPipeline,
+                         scenario_config);
 
         // mirror each forager's authoritative grid cell -> a world transform so the
         // colony has live positions, and a 10 s delivery-count heartbeat proving the double-bridge
         // actually forages in the live world (deliveries accrue => ants are completing trips).
-        if (currentState == GameState::IN_GAME && !g_paused && !scenario_config.active() &&
+        if (currentState == GameState::IN_GAME && !g_app.hud.paused && !scenario_config.active() &&
             gameSession) {
             auto& freg = gameSession->GetRegistry();
             auto* fws = gameSession->GetWorldSystem();
-            // headless automation skips the  one-time
-            // flourishes entirely — captures want the world + shaders, not spelunking
-            // cues (and the crystal point lights would move visual baselines).
-            // --debug-goto cave still lights its framed cave (below).
-            const bool headless_automation = g_frame_scan_active || g_scene_active ||
-                                             g_play_paths || !g_render_benchmark_path.empty() ||
-                                             !g_survey_dir.empty() || g_timelapse_frames > 0;
-            // dispatch the  scans (doline locate + 25
-            // cave anchors + hero call) as ONE background job batch instead of the
-            // old frame-2 inline walk (6m25s main-thread in debug, est. 10-25 s
-            // release). Pure deterministic SDF reads — the same sampling the meshing
-            // workers already run concurrently. Process-once, matching the old
-            // statics' behavior. Every world transition drains the handle first
-            // (DrainBackgroundWorldScan), so the raw fws capture can never dangle.
-            static bool s_backgroundWorldScanDispatched = false;
-            if (!s_backgroundWorldScanDispatched && fws && !headless_automation) {
-                s_backgroundWorldScanDispatched = true;
-                auto scan = std::make_shared<BackgroundWorldScan>();
-                scan->world = fws;
-                const auto& sp = gameSession->GetMetadata().spawnPoint;
-                const glm::vec3 spawn(sp.x, sp.y, sp.z);
-                std::vector<Luminumbra::Job> scan_jobs;
-                scan_jobs.reserve(26);
-                // Job 0: doline locate + the hero enclosed-cave call.
-                scan_jobs.emplace_back([scan, fws, spawn]() {
-                    scan->doline = fws->FindLargestSurfaceBreak(spawn.x, spawn.z, 500.0f);
-                    if (scan->doline.found) {
-                        scan->doline_surface_h =
-                            fws->GetTerrainHeightAt(scan->doline.x, scan->doline.z);
-                    }
-                    scan->hero = Luminumbra::Debug::FindEnclosedCave(*fws, spawn, 256.0f);
-                });
-                // Jobs 1..25: one enclosed-cave anchor each (disjoint result slots, no
-                // locking; dedup happens at consume time in the ORIGINAL scan order so
-                // crystal placement stays byte-identical to the old sequential walk).
-                for (int gz = -2; gz <= 2; ++gz) {
-                    for (int gx = -2; gx <= 2; ++gx) {
-                        constexpr float kAnchorStep = 120.0f;   // metres between anchors
-                        constexpr float kSearchRadius = 140.0f; // per-anchor search
-                        const std::size_t slot = static_cast<std::size_t>((gz + 2) * 5 + (gx + 2));
-                        const glm::vec3 anchorW(spawn.x + static_cast<float>(gx) * kAnchorStep,
-                                                spawn.y,
-                                                spawn.z + static_cast<float>(gz) * kAnchorStep);
-                        scan_jobs.emplace_back([scan, fws, anchorW, slot]() {
-                            if (auto cave = Luminumbra::Debug::FindEnclosedCave(
-                                    *fws, anchorW, kSearchRadius)) {
-                                scan->anchor_caves[slot] = cave->target;
-                            }
-                        });
-                    }
-                }
-                s_backgroundWorldScanHandle = jobSystem.dispatch_batch(scan_jobs);
-                s_backgroundWorldScan = std::move(scan);
-                LUMINUMBRA_CORE_INFO(
-                    " world scan dispatched to background jobs (doline + 25 cave anchors + hero)");
-            }
-
-            // Debug suite: --debug-goto cave|doline|spawn — deterministically frame a feature so
-            // captures (--timelapse/--frame-scan) can SEE it (the gap that blocked cave shots).
-            // Sets the fixed camera; the streaming anchor follows it (far-camera bug already
-            // fixed).
-            static bool s_debugGotoDone = false;
-            if (!s_debugGotoDone && fws && !g_debug_goto.empty()) {
-                s_debugGotoDone = true;
-                const auto& dsp = gameSession->GetMetadata().spawnPoint;
-                const glm::vec3 dnear(dsp.x, dsp.y, dsp.z);
-                std::optional<Luminumbra::Debug::DebugCamPose> pose;
-                if (g_debug_goto == "cave")
-                    pose = Luminumbra::Debug::FindEnclosedCave(*fws, dnear, 256.0f);
-                else if (g_debug_goto == "doline")
-                    pose = Luminumbra::Debug::FindDoline(*fws, dnear, 500.0f);
-                else if (g_debug_goto == "spawn")
-                    pose = Luminumbra::Debug::FrameFeature(dnear, 24.0f);
-                if (pose) {
-                    g_fixed_cam_pos = pose->pos;
-                    g_fixed_cam_yaw = pose->yaw;
-                    g_fixed_cam_pitch = pose->pitch;
-                    g_fixed_cam = true;
-                    if (g_camera) {
-                        g_camera->Position = pose->pos;
-                        g_camera->Yaw = pose->yaw;
-                        g_camera->Pitch = pose->pitch;
-                        g_camera->updateCameraVectors();
-                    }
-                    // The crystal scatter is skipped under headless automation, so a
-                    // captured cave would be pitch-black: light the framed cave from the pose we
-                    // already computed (no second FindEnclosedCave walk).
-                    if (g_debug_goto == "cave" && headless_automation) {
-                        const auto ce = freg.create();
-                        auto& ctf = freg.emplace<Luminumbra::Components::TransformComponent>(ce);
-                        ctf.position =
-                            Luminumbra::Vec3(pose->target.x, pose->target.y, pose->target.z);
-                        auto& cpl = freg.emplace<Luminumbra::Components::PointLightComponent>(ce);
-                        cpl.color = Luminumbra::Vec3(0.55f, 0.85f, 1.0f);
-                        cpl.intensity = 6.0f; // hero crystal (mirrors the interactive one)
-                        cpl.radius = 40.0f;
-                        LUMINUMBRA_CORE_INFO(
-                            "--debug-goto cave: hero crystal lit at the framed cave (headless)");
-                    }
-                    LUMINUMBRA_CORE_INFO(
-                        "--debug-goto {}: framed ({:.1f},{:.1f},{:.1f}) yaw {:.0f} pitch {:.0f}",
-                        g_debug_goto,
-                        pose->pos.x,
-                        pose->pos.y,
-                        pose->pos.z,
-                        pose->yaw,
-                        pose->pitch);
-                } else {
-                    LUMINUMBRA_CORE_WARN("--debug-goto {}: no '{}' feature found near spawn",
-                                         g_debug_goto,
-                                         g_debug_goto);
-                }
-            }
-
-            // LUMIN CRYSTALS — emissive point lights that light dark caves (so you can
-            // see + photograph underground without sunlight) and double as photo subjects.
-            // consume the background scan when the batch lands (non-blocking
-            // poll of the JobHandle counter). Dedup runs here in the ORIGINAL sequential
-            // anchor order with the same 16-cap, so placement is byte-identical to the
-            // old inline walk. Client-only point lights (never hashed) — no re-pin.
-            if (s_backgroundWorldScan && s_backgroundWorldScan->world == fws &&
-                (!s_backgroundWorldScanHandle.counter ||
-                 s_backgroundWorldScanHandle.counter->load(std::memory_order_acquire) <= 0)) {
-                const BackgroundWorldScan& scan = *s_backgroundWorldScan;
-                //  the doline cave-mouth aim cue.
-                if (scan.doline.found) {
-                    LUMINUMBRA_CORE_INFO(
-                        "Largest doline near spawn: world ({:.1f}, {:.1f}, {:.1f}) "
-                        "radius={:.1f}m depth={:.1f}m shaft={}",
-                        scan.doline.x,
-                        scan.doline_surface_h,
-                        scan.doline.z,
-                        scan.doline.radius,
-                        scan.doline.depth,
-                        scan.doline.shaft ? 1 : 0);
-                } else {
-                    LUMINUMBRA_CORE_INFO(
-                        "No doline found within 500m of spawn (surface breaks off or sparse).");
-                }
-                // Crystal scatter: the roof-checked enclosed caverns found near each anchor
-                // (cave bug B fix preserved — no floating crystals in open dips).
-                constexpr float kMinSepSq = 20.0f * 20.0f; // de-dup nearby hits
-                int placed = 0;
-                float firstX = 0.0f, firstY = 0.0f, firstZ = 0.0f;
-                std::vector<glm::vec3> caveCenters;
-                for (const auto& maybe_cave : scan.anchor_caves) {
-                    if (placed >= 16)
-                        break;
-                    if (!maybe_cave)
-                        continue;
-                    const glm::vec3 c = *maybe_cave; // interior void point of the cavern
-                    bool dup = false;
-                    for (const glm::vec3& prev : caveCenters) {
-                        const glm::vec3 d = prev - c;
-                        if (glm::dot(d, d) < kMinSepSq) {
-                            dup = true;
-                            break;
-                        }
-                    }
-                    if (dup)
-                        continue;
-                    caveCenters.push_back(c);
-                    const auto e = freg.create();
-                    auto& tf = freg.emplace<Luminumbra::Components::TransformComponent>(e);
-                    tf.position = Luminumbra::Vec3(c.x, c.y + 0.6f, c.z);
-                    auto& pl = freg.emplace<Luminumbra::Components::PointLightComponent>(e);
-                    pl.color = Luminumbra::Vec3(0.45f, 0.78f, 1.0f); // cyan lumin glow
-                    pl.intensity = 4.5f;
-                    pl.radius = 24.0f;
-                    if (placed == 0) {
-                        firstX = c.x;
-                        firstY = c.y;
-                        firstZ = c.z;
-                    }
-                    ++placed;
-                }
-                LUMINUMBRA_CORE_INFO(
-                    "Lumin crystals: placed {} enclosed-cave glow point-lights near spawn; "
-                    "first at world ({:.1f}, {:.1f}, {:.1f})",
-                    placed,
-                    firstX,
-                    firstY,
-                    firstZ);
-                // Hero crystal in the located enclosed cave (aligns with --debug-goto cave).
-                if (scan.hero) {
-                    const auto ce = freg.create();
-                    auto& ctf = freg.emplace<Luminumbra::Components::TransformComponent>(ce);
-                    ctf.position = Luminumbra::Vec3(
-                        scan.hero->target.x, scan.hero->target.y, scan.hero->target.z);
-                    auto& cpl = freg.emplace<Luminumbra::Components::PointLightComponent>(ce);
-                    cpl.color = Luminumbra::Vec3(0.55f, 0.85f, 1.0f);
-                    cpl.intensity = 6.0f; // hero crystal in the located enclosed cave
-                    cpl.radius = 40.0f;
-                    LUMINUMBRA_CORE_INFO(
-                        "Lumin crystal: hero light in enclosed cave at ({:.1f}, {:.1f}, {:.1f})",
-                        scan.hero->target.x,
-                        scan.hero->target.y,
-                        scan.hero->target.z);
-                }
-                s_backgroundWorldScan.reset();
-                s_backgroundWorldScanHandle = {};
-            }
+            // One-time world-entry flourishes: the background doline/cave scan,
+            // --debug-goto framing, and the lumin-crystal consume
+            // (app/CaveFlourishes.cpp).
+            UpdateCaveFlourishes(g_app, jobSystem, *gameSession, g_camera.get());
 
             auto fgview = freg.view<Luminumbra::Components::ForagerComponent,
                                     Luminumbra::Components::TransformComponent>();
@@ -3125,7 +1993,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (g_imgui_enabled) {
+        if (g_app.overlay.imgui_enabled) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
@@ -3135,20 +2003,21 @@ int main(int argc, char* argv[]) {
             case GameState::WORLD_LOADING: {
                 const int JOBS_PER_FRAME = 512;
                 if (runtime_boot_recorder.enabled()) {
-                    g_generation_dispatch_index = static_cast<int>(g_initial_chunks_to_load.size());
+                    g_app.loading.generation_dispatch_index =
+                        static_cast<int>(g_app.loading.initial_chunks_to_load.size());
                 }
 
-                if (static_cast<size_t>(g_generation_dispatch_index) <
-                    g_initial_chunks_to_load.size()) {
+                if (static_cast<size_t>(g_app.loading.generation_dispatch_index) <
+                    g_app.loading.initial_chunks_to_load.size()) {
                     std::vector<Luminumbra::IVec3> batch_to_generate;
-                    const int batch_start_index = g_generation_dispatch_index;
+                    const int batch_start_index = g_app.loading.generation_dispatch_index;
                     while (static_cast<size_t>(batch_start_index +
                                                static_cast<int>(batch_to_generate.size())) <
-                               g_initial_chunks_to_load.size() &&
+                               g_app.loading.initial_chunks_to_load.size() &&
                            static_cast<int>(batch_to_generate.size()) < JOBS_PER_FRAME) {
                         batch_to_generate.push_back(
-                            g_initial_chunks_to_load[batch_start_index +
-                                                     static_cast<int>(batch_to_generate.size())]);
+                            g_app.loading.initial_chunks_to_load
+                                [batch_start_index + static_cast<int>(batch_to_generate.size())]);
                     }
                     if (!batch_to_generate.empty()) {
                         Luminumbra::JobHandle handle =
@@ -3159,26 +2028,30 @@ int main(int argc, char* argv[]) {
                                 g_loading_visualizer->UpdateChunkState(
                                     coords, Luminumbra::Client::ChunkLoadVisualState::DISPATCHED);
                             }
-                            g_generation_dispatch_index +=
+                            g_app.loading.generation_dispatch_index +=
                                 static_cast<int>(batch_to_generate.size());
                         }
                     }
                 }
 
-                float progress = g_initial_chunks_to_load.empty()
+                float progress = g_app.loading.initial_chunks_to_load.empty()
                                      ? 1.0f
-                                     : static_cast<float>(g_generation_dispatch_index) /
-                                           g_initial_chunks_to_load.size();
+                                     : static_cast<float>(g_app.loading.generation_dispatch_index) /
+                                           g_app.loading.initial_chunks_to_load.size();
 
                 glClearColor(0.01f, 0.02f, 0.05f, 1.0f); // Dark blue background
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
                 if (g_loading_visualizer) {
                     g_loading_visualizer->UpdateAndRender(
-                        deltaTime, "CONSTRUCTING WORLD GEOMETRY...", progress);
+                        deltaTime,
+                        "CONSTRUCTING WORLD GEOMETRY...",
+                        progress,
+                        g_app.loading.generation_dispatch_index,
+                        g_app.loading.initial_chunks_to_load.size());
                 }
 
-                if (static_cast<size_t>(g_generation_dispatch_index) >=
-                    g_initial_chunks_to_load.size()) {
+                if (static_cast<size_t>(g_app.loading.generation_dispatch_index) >=
+                    g_app.loading.initial_chunks_to_load.size()) {
                     if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
                         gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
                             gameSession->GetMetadata().spawnPoint,
@@ -3192,10 +2065,10 @@ int main(int argc, char* argv[]) {
                     g_camera->MouseSensitivity =
                         g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
                     g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
-                    if (g_world_render_data_initialized) {
+                    if (g_app.loading.world_render_data_initialized) {
                         renderPipeline.clear_all_chunk_data();
                     }
-                    g_world_render_data_initialized = true;
+                    g_app.loading.world_render_data_initialized = true;
 
                     audioManager->StopMusic();
                     audioManager->PlayOneShot2D(
@@ -3266,1128 +2139,26 @@ int main(int argc, char* argv[]) {
             }
 
             case GameState::IN_GAME:
-                // persistence runtime roundtrip phases run once on
-                // the first ready frame and exit cleanly; the streaming
-                // update is skipped so the hashed/saved chunk set is exactly
-                // the deterministic post-readiness world.
-                if (scenario_config.persistence_roundtrip_smoke() && scenario_ready &&
-                    !persistence_phase_attempted) {
-                    persistence_phase_attempted = true;
-                    PersistenceRoundtripPhaseResult phase_result;
-                    if (scenario_config.persistence_phase == "load") {
-                        phase_result =
-                            RunPersistenceRoundtripLoadPhase(scenario_config, gameSession.get());
-                    } else {
-                        phase_result =
-                            RunPersistenceRoundtripSavePhase(scenario_config, gameSession.get());
-                    }
-                    if (!phase_result.passed) {
-                        scenario_failed = true;
-                        scenario_failure_reason =
-                            "persistence_phase_" + phase_result.failure_reason;
-                        runtime_state_recorder.capture(scenario_failure_reason,
-                                                       &jobSystem,
-                                                       gameSession.get(),
-                                                       &renderPipeline,
-                                                       scenario_frame_count,
-                                                       last_readiness_report);
-                    }
-                    glfwSetWindowShouldClose(window, true);
+                // Scenario driving (the persistence phase + the per-scenario
+                // camera/scene drivers) runs behind the ScenarioRunner seam.
+                // kBreakCase preserves the persistence phase's original
+                // `break;` out of this case; kHandled skips the non-scenario
+                // branches below exactly like the original else-if chain did.
+                scenario_drive = scenario_runner ? scenario_runner->onGameStateInGame(deltaTime)
+                                                 : ScenarioRunner::InGameDrive::kFallThrough;
+                if (scenario_drive == ScenarioRunner::InGameDrive::kBreakCase) {
                     break;
                 }
-                if (scenario_config.lod_ground_smoke() && scenario_ready && g_camera) {
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    ApplyLodGroundCameraPath(
-                        scenario_config, gameSession.get(), g_camera.get(), elapsed_play_seconds);
-                    // the engine no longer synchronously
-                    // catches the near field up on a camera discontinuity (that
-                    // hook caused an 11x chunk_churn PerfRegression). The
-                    // LodGround camera sweeps in wall-clock-driven jumps that can
-                    // outrun the async, throttled activation/meshing path, so the
-                    // exact frame the coverage gate samples could show a near-field
-                    // dip. Pull the destination near surface band ready
-                    // synchronously right after moving the camera and before this
-                    // frame renders, so every captured frame is fully renderable
-                    // (49/49). EnsureSurfaceReadyNear only (re)builds chunks not
-                    // already Ready at the required LOD, so steady-state frames
-                    // (camera already settled) pay nothing.
-                    if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                        gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                            g_camera->Position, gameSession->GetPhysicsSystem(), 4, 1);
-                    }
-                } else if (scenario_config.water_visual_smoke() && scenario_ready && g_camera) {
-                    if (!water_visual_target_initialized || !water_visual_target.found) {
-                        water_visual_target = FindWaterVisualCameraTarget(gameSession.get());
-                        water_visual_target_initialized = water_visual_target.found;
-                    }
-                    // top-down framing for the main capture and the
-                    // caustics samples (first 60% of the run), then the
-                    // grazing open-water framing for the reflection capture.
-                    const double water_elapsed_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double water_duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    if (water_elapsed_seconds / water_duration < 0.60) {
-                        ApplyWaterVisualCamera(g_camera.get(), water_visual_target);
-                    } else {
-                        ApplyWaterReflectionCamera(g_camera.get(), water_visual_target);
-                    }
-                } else if (scenario_config.material_visual_smoke() && scenario_ready && g_camera) {
-                    if (!material_visual_target_initialized || !material_visual_target.found) {
-                        material_visual_target = FindMaterialVisualCameraTarget(gameSession.get());
-                        material_visual_target_initialized = material_visual_target.found;
-                    }
-                    ApplyWaterVisualCamera(g_camera.get(), material_visual_target);
-                } else if (scenario_config.skybox_visual_smoke() && scenario_ready && g_camera) {
-                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
-                } else if (scenario_config.weather_visual_smoke() && scenario_ready && g_camera) {
-                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
-                    // SIM-DRIVEN weather overlay (one-way, ). First
-                    // half of the run captures the CLEAR-SKY control (premise guard
-                    // this is the dedicated weather scenario with a clear-sky
-                    // control phase); the weather phase at the midpoint pushes a
-                    // render state derived from the REPLICATED WeatherSystem state
-                    // sampled at the camera -- the overlay uniforms come from sim
-                    // precipitation / storm / advected wind, not the debug mapping.
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    const bool weather_phase = (elapsed_play_seconds / duration) >= 0.5;
-                    const auto* weather = gameSession->GetWeatherSystem();
-                    Luminumbra::Rendering::WeatherRenderState wstate;
-                    if (weather_phase && weather) {
-                        const Luminumbra::Vec3 cam(
-                            g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                        const auto sample = weather->SampleAt(cam);
-                        // Sim precipitation drives the overlay. In this dedicated
-                        // scenario we floor rain to a strong, deterministic value
-                        // at capture so the gate's clear-vs-weather luma drop +
-                        // streak gradient measure a stable overlay (premise guard:
-                        // storms run ONLY here). The wind direction/strength + the
-                        // storm intensity are taken straight from sim state.
-                        const float precip = std::max(sample.precip_intensity, 1.0f);
-                        wstate.rain_intensity = precip;
-                        wstate.snow_intensity =
-                            (sample.category == Luminumbra::Systems::WeatherCategory::Snow)
-                                ? sample.precip_intensity
-                                : 0.0f;
-                        wstate.fog_density =
-                            (sample.category == Luminumbra::Systems::WeatherCategory::Fog) ? 0.4f
-                                                                                           : 0.1f;
-                        wstate.storm_intensity = std::max(sample.storm_intensity, 0.4f);
-                        wstate.wetness = precip;
-                        const float wlen = std::sqrt(sample.wind.x * sample.wind.x +
-                                                     sample.wind.y * sample.wind.y);
-                        if (wlen > 1e-4f) {
-                            wstate.wind_direction =
-                                glm::vec3(sample.wind.x / wlen, 0.0f, sample.wind.y / wlen);
-                            wstate.wind_strength = std::clamp(wlen / 13.0f, 0.0f, 1.0f);
-                        }
-                        renderPipeline.set_weather_state(wstate);
-                    } else {
-                        // Clear-sky control: a driven CLEAR state (overlay off).
-                        renderPipeline.set_weather_state(wstate);
-                    }
-
-                    // LIGHTNING. The SIM strike schedule is a pure
-                    // function of (seed+13, storm state, tick); we read its count for
-                    // the gate's sim-scheduled assertion. For a REPRODUCIBLE capture
-                    // (the render loop is wall-clock paced, so we cannot rely on a sim
-                    // strike landing exactly on the capture frame), the strike FRAME
-                    // is driven deterministically here in this dedicated scenario: a
-                    // fixed-position strike in front of the camera fires in a narrow
-                    // progress window, building the SAME deterministic bolt the sim
-                    // event would. One-way : we READ sim strike state + drive the
-                    // render pulse/bolt; we write NOTHING back into the sim.
-                    if (weather && weather->live_strike_count() > lightning_sim_strikes_scheduled) {
-                        lightning_sim_strikes_scheduled = weather->live_strike_count();
-                    }
-                    Luminumbra::Rendering::LightningRenderState lstate;
-                    const bool strike_window = weather_phase &&
-                                               (elapsed_play_seconds / duration) >= 0.80 &&
-                                               (elapsed_play_seconds / duration) < 0.84;
-                    if (strike_window && g_camera) {
-                        lstate.active = true;
-                        // The overlay adds to the already-tonemapped [0,1] scene, so
-                        // a modest pulse is a clear full-scene flash without a total
-                        // white-out (the gate needs a frame-mean spike >= 0.04).
-                        //  a STORM/overcast strike.
-                        // The pulse is the readable scene flash; the bolt is a
-                        // THIN jagged forked filament (width/glow below, the
-                        // overlay shader splits these into a hot core + glow halo
-                        // so the bolt no longer reads as a fat opaque white worm).
-                        lstate.pulse_intensity = 0.16f; // 1-to-few-frame flash lift
-                        lstate.bolt_width_ndc = 0.010f; // thin bright core ribbon
-                        lstate.bolt_glow_ndc = 0.034f;  // surrounding glow halo
-                        // Deterministic strike terminus on the horizon ahead of the
-                        // camera. The bolt descends from a cloud-base height down to
-                        // this point; placing the terminus ~220 m ahead at the camera's
-                        // EYE level (not far below) keeps the whole descending channel
-                        // inside the upper-frame sky where the skybox-visual camera
-                        // looks, so the bolt is on-screen. Seeded from a fixed salt so
-                        // the captured bolt is byte-reproducible.
-                        const glm::vec3 fwd =
-                            glm::normalize(glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
-                        const glm::vec3 strike_ground = g_camera->Position + fwd * 220.0f;
-                        const Luminumbra::Rendering::LightningBoltGeometry bolt =
-                            Luminumbra::Rendering::BuildLightningBolt(
-                                strike_ground.x,
-                                strike_ground.y,
-                                strike_ground.z,
-                                /*magnitude=*/0.9f,
-                                /*strike_seed=*/0x5A5A1357ull);
-                        // SCREEN-ANCHORED bolt projection. The bolt's WORLD shape (the
-                        // seeded midpoint-displacement channel + branches) is mapped
-                        // into a guaranteed-on-screen NDC path: the channel's normalized
-                        // HEIGHT drives NDC.y from the upper sky (+0.92) down to just
-                        // above the horizon (-0.12), and its lateral displacement from
-                        // the straight cloud->ground line drives NDC.x around a fixed
-                        // screen column. This keeps the bolt a reproducible, clearly
-                        // visible vertical streak regardless of the camera pitch (the
-                        // skybox-visual framing) while preserving the seeded jaggedness.
-                        // Render-only capture aid : pure function of the strike.
-                        const glm::vec3 top = bolt.main_channel.front();
-                        const glm::vec3 bottom = bolt.main_channel.back();
-                        const float span_y = std::max(1e-3f, top.y - bottom.y);
-                        const float kBoltColumnNdcX = 0.06f; // centred column
-                        const float kBoltTopNdcY = 0.92f;
-                        const float kBoltBotNdcY = -0.12f;
-                        //  amplify the seeded lateral
-                        // displacement into NDC so the descending channel reads as
-                        // a JAGGED zig-zag instead of a near-straight thick bar --
-                        // but keep it predominantly VERTICAL (the descent spans the
-                        // full frame height while the jag stays a modest sideways
-                        // wobble), so the bolt reads as a tall jagged filament, not
-                        // a horizontal scribble. The shader keeps the stroke thin.
-                        const float kLateralToNdc = 1.0f / 150.0f; // modest jagged wobble
-                        const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
-                            const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
-                            const float ndc_y = kBoltBotNdcY + (kBoltTopNdcY - kBoltBotNdcY) * hf;
-                            // Lateral offset from the straight descent line (interpolated
-                            // X/Z between top and bottom at this height fraction).
-                            const float base_x = bottom.x + (top.x - bottom.x) * hf;
-                            const float base_z = bottom.z + (top.z - bottom.z) * hf;
-                            const float lateral = (wp.x - base_x) + (wp.z - base_z);
-                            // Clamp the lateral excursion so the jag stays a modest
-                            // sideways wobble around the fixed column -- the descent
-                            // (full frame height) dominates, so the bolt reads as a
-                            // TALL jagged filament rather than a horizontal scribble.
-                            const float ndc_x = kBoltColumnNdcX +
-                                                std::clamp(lateral * kLateralToNdc, -0.22f, 0.22f);
-                            return glm::vec2(ndc_x, ndc_y);
-                        };
-                        const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
-                            if (!lstate.bolt_points_ndc.empty()) {
-                                lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f); // pen-up
-                            }
-                            for (const glm::vec3& wp : stroke) {
-                                lstate.bolt_points_ndc.push_back(map_point(wp));
-                            }
-                        };
-                        push_stroke(bolt.main_channel);
-                        for (const auto& br : bolt.branches) {
-                            push_stroke(br);
-                        }
-                        // Strike point NDC for the radial flash centre (the terminus).
-                        lstate.strike_ndc = glm::vec2(kBoltColumnNdcX, kBoltBotNdcY);
-                    }
-                    renderPipeline.set_lightning_state(lstate);
-                } else if (scenario_config.cloud_shadow_smoke() && scenario_ready && g_camera) {
-                    // partly-cloudy cast-shadow scenario. Fixed noon
-                    // camera framing lit terrain in the lower frame (strong sun ->
-                    // strong cast shadow). Enable the wind-advected cloud layer +
-                    // its projected cast shadow at a PARTLY-CLOUDY coverage (NOT
-                    // overcast -- premise guard ). A strong, fixed wind drifts the
-                    // coverage field across the run so a shadow edge crawls over the
-                    // fixed terrain ROI between the two captures. Render-only :
-                    // the cloud state never feeds back into the sim.
-                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                    Luminumbra::Rendering::WeatherRenderState wstate;
-                    // Strong, deterministic wind so the cloud sheet drifts visibly
-                    // across the ROI in the run window (one-way: this is the render
-                    // wind the cloud scroll consumes; it is not written to the sim).
-                    wstate.wind_direction = glm::vec3(1.0f, 0.0f, 0.0f);
-                    wstate.wind_strength = 1.0f;
-                    renderPipeline.set_weather_state(wstate);
-                    Luminumbra::Rendering::CloudRenderState cstate;
-                    cstate.enabled = true;
-                    // Cast shadow is OFF for the first ~15% so a clouds-off lighting
-                    // GPU baseline can be sampled, then ON for the rest (the added
-                    // per-fragment sample cost = on - off, bounded by the budget).
-                    cstate.shadow_enabled = progress >= 0.15;
-                    cstate.coverage_amount = 0.5f; // partly cloudy (not overcast)
-                    cstate.biome_variation = 0.0f;
-                    cstate.plane_height = 900.0f;
-                    cstate.shadow_strength = 0.8f;
-                    renderPipeline.set_cloud_state(cstate);
-                } else if (scenario_config.particle_emitter_determinism_smoke() && scenario_ready &&
-                           g_camera) {
-                    //  fixed skybox-style camera; spawn the fixture
-                    // emitter ONCE in front of the camera so particles render.
-                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
-                    if (!particle_emitter_spawned) {
-                        if (auto* particles = renderPipeline.particles()) {
-                            const glm::vec3 spawn_origin =
-                                g_camera->Position + g_camera->Front * 8.0f;
-                            particles->add_emitter(root_dir /
-                                                       "data/common/particles/fixture_sparkle.json",
-                                                   spawn_origin);
-                            particle_emitter_spawned = true;
-                        }
-                    }
-                } else if (scenario_config.foliage_visual_smoke() && scenario_ready && g_camera) {
-                    // instanced foliage scatter. Fixed noon framing of
-                    // lit ground. Load the scatter set once, then each frame build the
-                    // deterministic per-chunk scatter over the visible live ring,
-                    // sampling the  wind field at the camera for the sway bridge
-                    // (one-way, ). A CALM phase (zero wind) then a WINDY phase
-                    // (strong wind) so the gate can isolate the wind-sway response.
-                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
-                    auto* foliage = renderPipeline.foliage();
-                    auto* world_system = gameSession->GetWorldSystem();
-                    if (foliage != nullptr && world_system != nullptr) {
-                        if (!foliage_scatter_loaded) {
-                            foliage->load_scatter_set(root_dir /
-                                                      "data/common/foliage/scatter_set.json");
-                            // Fade band INSIDE the live ring (radius_4 gate footprint
-                            // ~ a few chunks). Pin the fade end well within the visible
-                            // ring so the gate can assert "no foliage beyond the ring".
-                            foliage->set_fade_distances(60.0f, 96.0f);
-                            // #1b-lush (render-only): per-preset showcase density.
-                            // Default 1.0 == biome-tracked density (byte-identical to
-                            // the FoliageInstancing-gated path); a preset can raise it
-                            // for near-continuous turf WITHOUT touching biome data.
-                            foliage->set_density_scale(scenario_config.foliage_density_scale);
-                            foliage_scatter_loaded = true;
-                        }
-                        const double elapsed_play_seconds =
-                            std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                          scenario_play_started_at)
-                                .count();
-                        const double duration =
-                            static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                        const double progress =
-                            std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                        const bool windy_phase = progress >= 0.5;
-
-                        // Wind bridge (one-way): sample the  wind field at the camera.
-                        // CALM phase forces zero wind so the sway delta isolates wind.
-                        glm::vec2 wind_xz(0.0f, 0.0f);
-                        if (windy_phase) {
-                            const Luminumbra::Vec3 cam(
-                                g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                            if (auto* wind = gameSession->GetWindFieldSystem()) {
-                                const Luminumbra::Vec2 w = wind->SampleWind(cam);
-                                wind_xz = glm::vec2(w.x, w.y);
-                            }
-                            // Floor the windy-phase wind to a strong deterministic value
-                            // so the sway delta is unambiguous even if the field is calm.
-                            if (glm::length(wind_xz) < 4.0f) {
-                                wind_xz = glm::vec2(6.0f, 0.0f);
-                            }
-                        }
-                        foliage->set_wind(wind_xz);
-
-                        // Build the per-chunk scatter inputs from the visible chunks.
-                        Luminumbra::Client::ScenarioHarness::FoliageScatterContext ctx{
-                            world_system};
-                        std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> chunk_scatter;
-                        const auto& renderable = world_system->get_renderable_chunks();
-                        chunk_scatter.reserve(renderable.size());
-                        for (const Luminumbra::Chunk* chunk : renderable) {
-                            if (chunk == nullptr) {
-                                continue;
-                            }
-                            const Luminumbra::IVec3 c = chunk->get_coords();
-                            // Only ground-level chunks (the column the surface sits in)
-                            // contribute scatter; skip clearly sub-surface / sky chunks.
-                            const float origin_x =
-                                static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
-                            const float origin_z =
-                                static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
-                            const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
-                            const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
-                            const float surf_h =
-                                world_system->GetTerrainHeightAt(center_x, center_z);
-                            // The chunk that straddles the surface column.
-                            const float chunk_y0 =
-                                static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
-                            if (surf_h < chunk_y0 ||
-                                surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
-                                continue;
-                            }
-                            const Luminumbra::u8 biome_id =
-                                world_system->BiomeIdAt(center_x, center_z);
-                            const float density =
-                                world_system->biomes_enabled()
-                                    ? world_system->biome_table().vegetation_for(biome_id).density
-                                    : 0.3f; // default temperate density when biomes are off
-                            Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
-                            cs.chunk_xz = glm::ivec2(c.x, c.z);
-                            cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
-                            cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
-                            cs.biome_id = biome_id;
-                            cs.density = density;
-                            chunk_scatter.push_back(cs);
-                        }
-                        foliage->rebuild_instances(
-                            chunk_scatter,
-                            &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
-                            &ctx,
-                            g_camera->Position);
-                    }
-                } else if (scenario_config.precipitation_smoke() && scenario_ready && g_camera) {
-                    // RAIN through the  particle framework, driven
-                    // by the REPLICATED weather state at the camera and WIND-ADVECTED
-                    // by the  wind field. Two phases at the SAME framing: a CALM
-                    // phase (zero wind -> vertical fall) then a WINDY phase (strong
-                    // horizontal wind -> diagonal slant). ONE-WAY : we READ
-                    // weather/wind and write nothing back to sim/world_hash.
-                    ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                    const bool windy_phase = progress >= 0.5;
-
-                    auto* particles = renderPipeline.particles();
-                    if (particles != nullptr && !precip_emitter_spawned) {
-                        // Spawn the rain field above + around the camera so the
-                        // falling column fills the frame, plus the splash template.
-                        const glm::vec3 field_origin(
-                            g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                        //  UNIFIED. The motion clip now shows
-                        // the EXACT same precip_rain.json that ships in real gameplay
-                        // (no demo-only emitter). What the owner watches == what ships.
-                        // Honest fall is achieved by sampling the capture every render
-                        // frame (see kAtmosMotionFrameIntervalS below) instead of a
-                        // long interval that misrepresented 60 fps motion.
-                        precip_rain_emitter_id = particles->add_emitter(
-                            root_dir / "data/common/particles/precip_rain.json", field_origin);
-                        particles->add_splash_emitter(root_dir /
-                                                      "data/common/particles/precip_splash.json");
-                        precip_emitter_spawned = true;
-                    }
-
-                    //  CAMERA-RELATIVE rain. The scenario
-                    // calls ApplySkyboxVisualCamera every frame, so the camera MOVES
-                    // through the world. Previously the rain column was spawned ONCE
-                    // at a FIXED world point, so as the camera advanced the fixed
-                    // column drifted across the view -- reading as rain "floating
-                    // toward" the viewer instead of falling. RE-CENTER the emitter's
-                    // spawn box on the LIVE camera position every frame (the authored
-                    // [0,22,0] height offset is re-applied inside set_emitter_origin),
-                    // so new drops always spawn AROUND/ABOVE the viewer and fall
-                    // straight DOWN past it regardless of camera motion. In-flight
-                    // drops keep their own trajectories. Render-only -> world_hash
-                    // is untouched (the emitter origin is render state, not sim).
-                    if (particles != nullptr &&
-                        precip_rain_emitter_id !=
-                            Luminumbra::Rendering::ParticlePass::kInvalidEmitter) {
-                        const glm::vec3 cam_anchor(
-                            g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                        particles->set_emitter_origin(precip_rain_emitter_id, cam_anchor);
-                    }
-
-                    // Overcast/wet backdrop from the replicated weather state (the
-                    // same one-way overlay the WeatherVisual gate exercises) so the
-                    // rain reads against a darkened sky.
-                    const auto* weather = gameSession->GetWeatherSystem();
-                    Luminumbra::Rendering::WeatherRenderState wstate;
-                    const Luminumbra::Vec3 cam(
-                        g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                    float sampled_wind_len = 0.0f;
-                    glm::vec3 sampled_wind_dir(1.0f, 0.0f, 0.0f);
-                    if (weather != nullptr) {
-                        const auto sample = weather->SampleAt(cam);
-                        wstate.rain_intensity = std::max(sample.precip_intensity, 1.0f);
-                        wstate.storm_intensity = std::max(sample.storm_intensity, 0.4f);
-                        wstate.wetness = wstate.rain_intensity;
-                        wstate.fog_density = 0.1f;
-                        sampled_wind_len = std::sqrt(sample.wind.x * sample.wind.x +
-                                                     sample.wind.y * sample.wind.y);
-                        if (sampled_wind_len > 1e-4f) {
-                            sampled_wind_dir = glm::vec3(sample.wind.x / sampled_wind_len,
-                                                         0.0f,
-                                                         sample.wind.y / sampled_wind_len);
-                            wstate.wind_direction = sampled_wind_dir;
-                            wstate.wind_strength = std::clamp(sampled_wind_len / 13.0f, 0.0f, 1.0f);
-                        }
-                    } else {
-                        wstate.rain_intensity = 1.0f;
-                        wstate.wetness = 1.0f;
-                    }
-                    //  in the motion clip push a
-                    // FULL storm (high storm intensity -> the overlay darkens the
-                    // dome to overcast) so the rain reads as bright streaks over a
-                    // dark sky and the lightning has contrast. This override is
-                    // gated on the env flag so the dedicated Precipitation gate's
-                    // calm/windy captures (which assert a specific overcast luma
-                    // drop) keep their tuned storm_intensity unchanged.
-                    if (atmos_motion_capture) {
-                        wstate.storm_intensity = 0.92f;
-                        wstate.fog_density = 0.18f;
-                    }
-                    renderPipeline.set_weather_state(wstate);
-
-                    // WIND-ADVECTION push (render-only). Calm phase: zero wind so
-                    // rain falls straight down. Windy phase: a strong horizontal
-                    // wind aligned with the camera-right axis so the slant is
-                    // unambiguous in screen space and clearly diagonal. The wind
-                    // DIRECTION comes from the replicated  field when available;
-                    // its MAGNITUDE is floored to a strong, deterministic value in
-                    // this dedicated scenario (premise guard: storms run only here).
-                    if (particles != nullptr) {
-                        if (windy_phase) {
-                            glm::vec3 wind_dir = sampled_wind_dir;
-                            // Bias the slant onto the camera-right axis so the
-                            // 2D analyzer measures a clean horizontal lean.
-                            const glm::vec3 right = glm::normalize(g_camera->Right);
-                            if (glm::length(wind_dir) < 1e-3f) {
-                                wind_dir = right;
-                            } else {
-                                wind_dir = glm::normalize(wind_dir + right);
-                            }
-                            //  the storm-rain rework added hard
-                            // VELOCITY-ALIGNED streak elongation, which inverted this
-                            // gate's gradient metric: a thin VERTICAL streak maximizes
-                            // the h/v slant_ratio and any lean LOWERS it, so a large
-                            // windy lean drove the windy slant_ratio BELOW calm (gain
-                            // collapsed to ~0.7-1.1, under the 1.2 floor). The fix is
-                            // in ParticlePass: the streak length now RAMPS with the
-                            // wind (calm = short droplet, windy = long hard streak), so
-                            // the windy capture reads a much higher anisotropy. Here we
-                            // keep the windy wind MODEST so the lean stays small (the
-                            // long windy streaks stay vertical-dominant -> high ratio)
-                            // while still visibly slanting the rain. Together: windy
-                            // slant clears calm by a wide margin (gain ~1.7x), and the
-                            // rain still reads as a natural wind-driven storm, not an
-                            // absurd horizontal blast. Render-only .
-                            const float wind_speed = 3.5f; // storm gust (modest screen-space lean)
-                            particles->set_wind(wind_dir * wind_speed);
-                        } else {
-                            particles->set_wind(glm::vec3(0.0f));
-                        }
-                    }
-
-                    //  continuous STORM driving for
-                    // the motion clip. Overrides the calm/windy split with a steady
-                    // moderate cross-wind (so rain reads as wind-sheared streaks
-                    // falling past the camera), a drifting overcast cloud sheet, and
-                    // a PERIODIC lightning strike so the moving clip shows a storm
-                    // flash. All render-only : nothing is written back to sim.
-                    if (atmos_motion_capture) {
-                        // Steady cross-wind: a constant breeze on the camera-right
-                        // axis gives every frame the same gentle shear so the falling
-                        // rain reads as rain (not floating dots) and slants slightly.
-                        //  the wind must NOT push rain along
-                        // the camera FORWARD axis -- any toward/away-camera drift makes
-                        // the streaks read as "floating toward us" instead of falling
-                        // straight past the viewer. Keep the shear PURELY in the screen
-                        // plane (camera-right only) and STRIP any forward (depth)
-                        // component, so every streak stays in the view plane and falls
-                        // vertically past the camera. (The old `+ vec3(0,0,1.5)` was a
-                        // WORLD-Z push whose camera-forward projection caused exactly
-                        // the toward-camera float the owner flagged.)
-                        if (particles != nullptr) {
-                            const glm::vec3 right = glm::normalize(g_camera->Right);
-                            const glm::vec3 fwd = glm::normalize(g_camera->Front);
-                            glm::vec3 wind = right * 6.0f;
-                            // Project out any forward (depth) component defensively so
-                            // there is zero toward/away-camera motion in the streaks.
-                            wind -= fwd * glm::dot(wind, fwd);
-                            particles->set_wind(wind);
-                        }
-                        // Drifting overcast cloud sheet (dims the storm dome too).
-                        Luminumbra::Rendering::CloudRenderState cstate;
-                        cstate.enabled = true;
-                        cstate.shadow_enabled = true;
-                        cstate.coverage_amount = 0.85f; // heavy overcast
-                        cstate.biome_variation = 0.0f;
-                        cstate.plane_height = 900.0f;
-                        cstate.shadow_strength = 0.6f;
-                        cstate.scroll_offset =
-                            glm::vec2(static_cast<float>(elapsed_play_seconds) * 22.0f,
-                                      static_cast<float>(elapsed_play_seconds) * 6.0f);
-                        renderPipeline.set_cloud_state(cstate);
-
-                        // Periodic lightning: fire a deterministic forked bolt in a
-                        // short window roughly every ~1.6 s of wall-clock so the clip
-                        // contains a few strikes. The bolt + full-scene flash use the
-                        // same screen-anchored projection as the WeatherVisual gate.
-                        const double strike_cycle = std::fmod(elapsed_play_seconds, 1.6);
-                        const bool strike_now =
-                            strike_cycle < 0.16; // ~10% duty -> a few-frame flash
-                        Luminumbra::Rendering::LightningRenderState lstate;
-                        if (strike_now) {
-                            lstate.active = true;
-                            // Strong full-scene flash so the strike briefly LIGHTS
-                            // the dark storm scene (the readable signature of a
-                            // strike in motion), with a thin bright forked core +
-                            // soft glow halo so the bolt is a filament, not a worm.
-                            lstate.pulse_intensity = 0.38f; // brighter scene flash
-                            lstate.bolt_width_ndc = 0.006f; // thin bright core
-                            lstate.bolt_glow_ndc = 0.024f;  // tight glow halo
-                            const glm::vec3 fwd = glm::normalize(
-                                glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
-                            //  TOUCHDOWN. Strike a real ground
-                            // point ahead of the camera: terrain height at (x,z) is the
-                            // bolt's true bottom, so the channel spans cloud->terrain and
-                            // ends ON the ground (no floating mid-air bolt).
-                            const glm::vec3 strike_xz = g_camera->Position + fwd * 160.0f;
-                            const float ground_y =
-                                gameSession->GetWorldSystem()->GetTerrainHeightAt(strike_xz.x,
-                                                                                  strike_xz.z);
-                            const glm::vec3 strike_ground(strike_xz.x, ground_y, strike_xz.z);
-                            // Vary the strike seed per cycle so successive bolts differ.
-                            const uint64_t cycle_index =
-                                static_cast<uint64_t>(elapsed_play_seconds / 1.6);
-                            const Luminumbra::Rendering::LightningBoltGeometry bolt =
-                                Luminumbra::Rendering::BuildLightningBolt(
-                                    strike_ground.x,
-                                    strike_ground.y,
-                                    strike_ground.z,
-                                    /*magnitude=*/0.9f,
-                                    /*strike_seed=*/0x5A5A1357ull + cycle_index * 0x9E3779B1ull);
-                            // PROJECT the real bolt through the actual render camera so
-                            // the bolt spans the frame from the cloud base down to the
-                            // projected terrain terminus -- it visibly TOUCHES DOWN.
-                            int mvw = 0, mvh = 0;
-                            glfwGetFramebufferSize(window, &mvw, &mvh);
-                            const glm::mat4 proj =
-                                glm::perspective(glm::radians(g_camera->Zoom),
-                                                 static_cast<float>(std::max(1, mvw)) /
-                                                     static_cast<float>(std::max(1, mvh)),
-                                                 g_camera->GetNearPlane(),
-                                                 g_camera->GetFarPlane());
-                            const glm::mat4 viewproj = proj * g_camera->GetViewMatrix();
-                            const glm::vec3 top = bolt.main_channel.front();
-                            const glm::vec3 bottom = bolt.main_channel.back();
-                            const float span_y = std::max(1e-3f, top.y - bottom.y);
-                            // Project the straight cloud->ground baseline endpoints; the
-                            // bolt's jagged points are laid along the screen line between
-                            // these, with the seeded lateral wobble added as a MODEST
-                            // sideways jag (kept small so the bolt stays a tall, thin,
-                            // mostly-vertical filament -- not a horizontal scribble).
-                            const auto project = [&](const glm::vec3& wp, bool& ok) -> glm::vec2 {
-                                const glm::vec4 clip = viewproj * glm::vec4(wp, 1.0f);
-                                ok = clip.w > 1e-4f;
-                                if (!ok)
-                                    return glm::vec2(0.0f);
-                                return glm::vec2(clip.x / clip.w, clip.y / clip.w);
-                            };
-                            bool top_ok = false, bot_ok = false;
-                            glm::vec2 top_ndc = project(top, top_ok);
-                            glm::vec2 bot_ndc = project(bottom, bot_ok);
-                            // Anchor the bolt TOP just BELOW the top edge so the dark
-                            // storm cloud deck (painted from this anchor upward) is
-                            // visible ABOVE the bolt origin and the bolt clearly emerges
-                            // from the cloud base. BOTTOM goes onto the projected ground
-                            // point, clamped just inside the bottom edge so the touchdown
-                            // is visible even when the upward-tilted camera projects the
-                            // ground low.
-                            top_ndc.y = top_ok ? std::min(top_ndc.y, 0.74f) : 0.74f;
-                            const float kGroundNdcY =
-                                bot_ok ? std::clamp(bot_ndc.y, -0.96f, -0.55f) : -0.92f;
-                            const float kColumnNdcX =
-                                bot_ok ? std::clamp(bot_ndc.x, -0.6f, 0.6f) : 0.0f;
-                            const float kLateralToNdc = 1.0f / 260.0f; // modest jag
-                            const auto map_point = [&](const glm::vec3& wp) -> glm::vec2 {
-                                const float hf = std::clamp((wp.y - bottom.y) / span_y, 0.0f, 1.0f);
-                                const float ndc_y = kGroundNdcY + (top_ndc.y - kGroundNdcY) * hf;
-                                const float base_x = bottom.x + (top.x - bottom.x) * hf;
-                                const float base_z = bottom.z + (top.z - bottom.z) * hf;
-                                const float lateral = (wp.x - base_x) + (wp.z - base_z);
-                                const float ndc_x =
-                                    kColumnNdcX +
-                                    std::clamp(lateral * kLateralToNdc, -0.14f, 0.14f);
-                                return glm::vec2(ndc_x, ndc_y);
-                            };
-                            const auto push_stroke = [&](const std::vector<glm::vec3>& stroke) {
-                                if (!lstate.bolt_points_ndc.empty()) {
-                                    lstate.bolt_points_ndc.emplace_back(-3.0f, -3.0f);
-                                }
-                                for (const glm::vec3& wp : stroke) {
-                                    lstate.bolt_points_ndc.push_back(map_point(wp));
-                                }
-                            };
-                            push_stroke(bolt.main_channel);
-                            for (const auto& br : bolt.branches) {
-                                push_stroke(br);
-                            }
-                            lstate.strike_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
-                            // Ground-impact bloom at the touchdown point.
-                            lstate.ground_ndc = glm::vec2(kColumnNdcX, kGroundNdcY);
-                            lstate.ground_flash = 0.55f;
-                            //  anchor a DARK STORM CLOUD at the
-                            // bolt TOP so the bolt visibly EMERGES from a cloud (not thin
-                            // air). The cloud base sits at the bolt-top NDC and the
-                            // overlay paints a billowing dark deck across the upper frame
-                            // around this column; the flash lights it from within.
-                            lstate.cloud_anchor_ndc = glm::vec2(kColumnNdcX, top_ndc.y);
-                            lstate.cloud_darkness = 0.85f;
-                        }
-                        renderPipeline.set_lightning_state(lstate);
-                    }
-                } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready && g_camera) {
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                    // Discovery reruns while meshes stream in (the first
-                    // frames only carry a fraction of the surface meshes);
-                    // it freezes once found or once the SUMMER night phase nears
-                    // so the emissive camera target stays stable. : the
-                    // summer half ends at progress 0.5, so freeze discovery before
-                    // its night/emissive window (~0.45-0.5).
-                    if (!timeofday_emissive_target.found && progress < 0.43 &&
-                        (!timeofday_emissive_target_initialized ||
-                         (scenario_frame_count % 120) == 0)) {
-                        timeofday_emissive_target_initialized = true;
-                        timeofday_emissive_target =
-                            FindEmissiveMaterialTarget(gameSession.get(), root_dir);
-                    }
-                    if (timeofday_emissive_target.found && progress >= 0.44 && progress < 0.5) {
-                        // End of the SUMMER half: aim at the discovered surface
-                        // emissive material for the dedicated night-emissive
-                        // capture (the existing emissive night check, unchanged).
-                        g_camera->Position =
-                            timeofday_emissive_target.position + Luminumbra::Vec3(8.0f, 6.0f, 8.0f);
-                        g_camera->Zoom = 60.0f;
-                        AimCameraAt(g_camera.get(), timeofday_emissive_target.position);
-                    } else {
-                        // Fixed framing across all phases (both seasons) so the
-                        // luminance/palette comparison measures lighting, not
-                        // framing.
-                        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.04f);
-                    }
-                } else if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready &&
-                           g_camera) {
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    ApplyLodBoundaryOscillationCamera(
-                        gameSession.get(), g_camera.get(), elapsed_play_seconds);
-                } else if (scenario_config.lod_seam_arrival_smoke() && scenario_ready && g_camera) {
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    ApplyLodSeamArrivalCamera(
-                        scenario_config, gameSession.get(), g_camera.get(), elapsed_play_seconds);
-                } else if (scenario_config.player_view_smoke() && scenario_ready && g_camera) {
-                    // eye-level 360-degree sweep. Stations are built
-                    // once after readiness (the peak station scans the loaded
-                    // span field); each station holds its window so streaming
-                    // and uploads settle before the capture at 70% progress.
-                    if (player_view_stations.empty()) {
-                        player_view_stations =
-                            BuildPlayerViewStations(gameSession.get(), scenario_world_type);
-                        player_view_captures_written.assign(player_view_stations.size(), false);
-                        player_view_sky_enforced =
-                            !PlayerViewSeaWaterInNearField(gameSession.get());
-                    }
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    // Warmup lead before station 0: the post-readiness LOD0
-                    // promotion of the near ring is still draining during the
-                    // first seconds; stations divide the remaining time.
-                    const double warmup_seconds = std::min(8.0, duration * 0.2);
-                    const double effective_seconds =
-                        std::max(0.0, elapsed_play_seconds - warmup_seconds);
-                    const double progress = std::clamp(
-                        effective_seconds / std::max(1.0, duration - warmup_seconds), 0.0, 0.999);
-                    const std::size_t wall_clock_index =
-                        std::min(player_view_stations.size() - 1u,
-                                 static_cast<std::size_t>(
-                                     progress * static_cast<double>(player_view_stations.size())));
-                    // Hitch tolerance (mirrors the capture branch): hold the
-                    // camera on the first un-captured station so a passed-over
-                    // station is framed when its catch-up capture fires.
-                    std::size_t first_unwritten = 0;
-                    while (first_unwritten < player_view_captures_written.size() &&
-                           player_view_captures_written[first_unwritten]) {
-                        ++first_unwritten;
-                    }
-                    const std::size_t station_index =
-                        first_unwritten >= player_view_stations.size()
-                            ? wall_clock_index
-                            : std::min(wall_clock_index, first_unwritten);
-                    ApplyPlayerViewCamera(
-                        gameSession.get(), g_camera.get(), player_view_stations[station_index]);
-                } else if (scenario_config.farlod_horizon_smoke() && scenario_ready && g_camera) {
-                    // phase A holds station 0
-                    // with far-LOD DISABLED (the in-run gbuffer GPU baseline); phase
-                    // B enables far-LOD and sweeps the stations. The per-station
-                    // far-OFF sliver baseline is captured PAIRED with the far-ON
-                    // capture in phase B (an extra far-disabled render at the exact
-                    // same camera the same frame), so the diagonal live-geometry
-                    // streaks are pixel-aligned and the far-attributable analysis
-                    // cancels them per-pixel (3x3 neighborhood mask) cleanly.
-                    if (farlod_horizon_stations.empty()) {
-                        farlod_horizon_stations = BuildFarLodHorizonStations();
-                        farlod_horizon_captures_written.assign(farlod_horizon_stations.size(),
-                                                               false);
-                        farlod_horizon_far_off_sliver_px.assign(farlod_horizon_stations.size(), -1);
-                        farlod_horizon_sky_enforced =
-                            !PlayerViewSeaWaterInNearField(gameSession.get());
-                    }
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 0.999);
-                    if (auto* farlod = renderPipeline.farlod()) {
-                        farlod->set_enabled(progress >= kFarLodHorizonPhaseSplit);
-                    }
-                    const std::size_t station_count = farlod_horizon_stations.size();
-                    std::size_t station_index = 0;
-                    if (progress >= kFarLodHorizonPhaseSplit) {
-                        const double sweep = (progress - kFarLodHorizonPhaseSplit) /
-                                             (1.0 - kFarLodHorizonPhaseSplit);
-                        const std::size_t time_based_index = std::min(
-                            station_count - 1u,
-                            static_cast<std::size_t>(sweep * static_cast<double>(station_count)));
-                        // on slow debug runs the
-                        // time-based sweep outruns the expensive captures (each
-                        // capture renders a paired far-OFF frame and analyzes two
-                        // back buffers, ~1 fps), so wall-clock stations get skipped.
-                        // Hold the camera on the first un-captured station so the
-                        // sweep cannot advance past it - mirrors the player_view
-                        // catch-up clamp above.
-                        std::size_t first_unwritten = 0;
-                        while (first_unwritten < farlod_horizon_captures_written.size() &&
-                               farlod_horizon_captures_written[first_unwritten]) {
-                            ++first_unwritten;
-                        }
-                        station_index = first_unwritten >= station_count
-                                            ? time_based_index
-                                            : std::min(time_based_index, first_unwritten);
-                    }
-                    farlod_horizon_applied_station = station_index;
-                    ApplyFarLodHorizonCamera(
-                        gameSession.get(), g_camera.get(), farlod_horizon_stations[station_index]);
-                } else if (scenario_config.skinned_mesh_visual_smoke() && scenario_ready &&
-                           g_camera) {
-                    // spawn the rigged test mesh once, then hold the
-                    // fixed framing for both captures.
-                    if (!skinned_mesh_spawn_attempted) {
-                        skinned_mesh_spawn_attempted = true;
-                        skinned_mesh_visual_target =
-                            SpawnSkinnedMeshVisualEntity(gameSession.get(),
-                                                         scenario_config.artifact_dir,
-                                                         root_dir,
-                                                         std::max(1, scenario_config.avatars));
-                    }
-                    //  cinematic: position the animal + human near a water edge and
-                    // frame a wide side shot. Reuses the 2-grovestrider spawn (entity[0]
-                    // = animal, [1] = human) + a separate arrow prop. Overrides the
-                    // target camera/focus so the existing aim code frames the scene.
-                    if (scenario_config.wildlife && !wildlife_setup &&
-                        skinned_mesh_visual_target.spawned &&
-                        skinned_mesh_visual_target.all_entities.size() >= 2) {
-                        auto& reg = gameSession->GetRegistry();
-                        auto* ws = gameSession->GetWorldSystem();
-                        const Luminumbra::Vec3 spawn = gameSession->GetMetadata().spawnPoint;
-                        // GetTerrainHeightAt is a PURE function (valid anywhere, no streaming
-                        // needed), so scan a wide grid around spawn for the nearest real
-                        // SHORELINE: a beach cell (terrain just above sea level) with a water
-                        // neighbour (terrain below sea level). The archipelago basin around
-                        // spawn is often open ocean with no beach for hundreds of metres, so a
-                        // local gradient march fails -- a wide scan reliably finds an island edge.
-                        auto terr = [&](float x, float z) {
-                            return ws ? ws->GetTerrainHeightAt(x, z) : 0.0f;
-                        };
-                        glm::vec3 shore(spawn.x, 0.0f, spawn.z);
-                        glm::vec3 toLand(1.0f, 0.0f, 0.0f); // from water toward land (unit)
-                        bool found = false;
-                        {
-                            constexpr float kBeachLo = 0.4f; // m above sea level
-                            constexpr float kBeachHi = 5.0f;
-                            constexpr float kWaterDepth =
-                                0.5f; // neighbour must be this far below sea
-                            const float step = 16.0f;
-                            const float reach = 1600.0f;
-                            const float probe = 16.0f;
-                            float best_d2 = 1e18f;
-                            const glm::vec2 dirs[4] = {
-                                {probe, 0}, {-probe, 0}, {0, probe}, {0, -probe}};
-                            for (float dz = -reach; dz <= reach; dz += step) {
-                                for (float dx = -reach; dx <= reach; dx += step) {
-                                    const float x = spawn.x + dx, z = spawn.z + dz;
-                                    const float h = terr(x, z);
-                                    if (h < Luminumbra::SEA_LEVEL + kBeachLo ||
-                                        h > Luminumbra::SEA_LEVEL + kBeachHi)
-                                        continue;
-                                    glm::vec3 wdir(0.0f);
-                                    bool has_water = false;
-                                    for (const auto& d : dirs) {
-                                        if (terr(x + d.x, z + d.y) <
-                                            Luminumbra::SEA_LEVEL - kWaterDepth) {
-                                            wdir = glm::vec3(d.x, 0.0f, d.y);
-                                            has_water = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!has_water)
-                                        continue;
-                                    const float d2 = dx * dx + dz * dz;
-                                    if (d2 < best_d2) {
-                                        best_d2 = d2;
-                                        shore = glm::vec3(x, h, z);
-                                        toLand = -glm::normalize(
-                                            wdir); // water->land = away from water neighbour
-                                        found = true;
-                                    }
-                                }
-                            }
-                        }
-                        const float shore_dist =
-                            std::sqrt((shore.x - spawn.x) * (shore.x - spawn.x) +
-                                      (shore.z - spawn.z) * (shore.z - spawn.z));
-                        LUMINUMBRA_CORE_INFO("wildlife: shoreline found={} at ({:.0f},{:.0f}) terr "
-                                             "{:.1f} (dist {:.0f}m from spawn)",
-                                             found,
-                                             shore.x,
-                                             shore.z,
-                                             shore.y,
-                                             shore_dist);
-                        const glm::vec3 side(-toLand.z, 0.0f, toLand.x);
-                        // The water's edge the animal walks to is just seaward of the shore;
-                        // it starts a few metres up the dry shore and approaches the waterline.
-                        wildlife_water =
-                            glm::vec3(shore.x, Luminumbra::SEA_LEVEL, shore.z) - toLand * 2.0f;
-                        wildlife_water.y = Luminumbra::SEA_LEVEL;
-                        wildlife_animal = shore + toLand * 8.0f; // up the dry shore
-                        wildlife_animal.y = terr(wildlife_animal.x, wildlife_animal.z);
-                        wildlife_human =
-                            wildlife_animal + toLand * 7.0f + side * 6.0f; // further inland + aside
-                        wildlife_human.y = terr(wildlife_human.x, wildlife_human.z);
-                        reg.get<Luminumbra::Components::TransformComponent>(
-                               skinned_mesh_visual_target.all_entities[0])
-                            .position = wildlife_animal;
-                        reg.get<Luminumbra::Components::TransformComponent>(
-                               skinned_mesh_visual_target.all_entities[1])
-                            .position = wildlife_human;
-                        // Arrow prop (a small glowing bloom mesh), parked out of view until fired.
-                        wildlife_arrow_entity = reg.create();
-                        reg.emplace<Luminumbra::Components::TransformComponent>(
-                               wildlife_arrow_entity)
-                            .position = glm::vec3(0.0f, -1000.0f, 0.0f);
-                        auto& am = reg.emplace<Luminumbra::Components::StaticMeshComponent>(
-                            wildlife_arrow_entity);
-                        am.meshPath = "data/models/props/glow_bloom/glow_bloom.lmesh";
-                        am.materialId = 4;
-                        // Wide side shot: camera off to the side of the animal->water line,
-                        // elevated, looking at the midpoint where the action unfolds.
-                        const glm::vec3 mid = (wildlife_animal + wildlife_water) * 0.5f;
-                        skinned_mesh_visual_target.camera_position =
-                            mid + side * 22.0f + glm::vec3(0.0f, 9.0f, 0.0f);
-                        skinned_mesh_visual_target.focus = mid + glm::vec3(0.0f, 1.0f, 0.0f);
-                        // The shoreline can be hundreds of metres from spawn; stream the scene
-                        // region in now so terrain + water are meshed before the first capture.
-                        if (ws && gameSession->GetPhysicsSystem()) {
-                            ws->EnsureSurfaceReadyNear(Luminumbra::Vec3(mid.x, mid.y, mid.z),
-                                                       gameSession->GetPhysicsSystem(),
-                                                       scenario_config.horizon_radius,
-                                                       scenario_config.collision_radius);
-                        }
-                        wildlife_setup = true;
-                        LUMINUMBRA_CORE_INFO("wildlife: water-edge ({:.1f},{:.1f}), animal "
-                                             "({:.1f},{:.1f}) terr {:.1f}, human ({:.1f},{:.1f}){}",
-                                             wildlife_water.x,
-                                             wildlife_water.z,
-                                             wildlife_animal.x,
-                                             wildlife_animal.z,
-                                             wildlife_animal.y,
-                                             wildlife_human.x,
-                                             wildlife_human.z,
-                                             found ? "" : " [no shoreline found - dry fallback]");
-                    }
-                    ApplySkinnedMeshVisualCamera(g_camera.get(), skinned_mesh_visual_target);
-                    if (scenario_config.replicated && scenario_config.avatars >= 2 &&
-                        skinned_mesh_visual_target.spawned) {
-                        if (!replicated_demo_setup) {
-                            replicated_demo.Setup(skinned_mesh_visual_target.spawn_positions);
-                            replicated_demo_setup = true;
-                        }
-                        auto* world_sys = gameSession->GetWorldSystem();
-                        const double replicated_dt =
-                            deltaTime > 0.0f
-                                ? static_cast<double>(std::min(deltaTime, 1.0f / 20.0f))
-                                : (1.0 / 60.0);
-                        const auto positions = replicated_demo.Update(replicated_dt, world_sys);
-                        auto& reg = gameSession->GetRegistry();
-                        bool applied_remote_pose = false;
-                        for (std::size_t i = 0;
-                             i < skinned_mesh_visual_target.all_entities.size() &&
-                             i < positions.size();
-                             ++i) {
-                            const auto ent = skinned_mesh_visual_target.all_entities[i];
-                            if (reg.valid(ent) &&
-                                reg.all_of<Luminumbra::Components::TransformComponent>(ent)) {
-                                reg.get<Luminumbra::Components::TransformComponent>(ent).position =
-                                    positions[i];
-                                applied_remote_pose = true;
-                            }
-                        }
-                        if (applied_remote_pose) {
-                            replicated_avatar_render_seconds += replicated_dt;
-                        }
-                    }
-                    //  video: for the SHOWCASE row (avatars>=2), synchronously
-                    // pull the surface around the camera fully ready each frame (same
-                    // pattern as LodGround) so the world is PROPERLY LOADED before any
-                    // frame is captured -- no streaming/meshing pop-in in the clip.
-                    if (scenario_config.avatars >= 2 && gameSession->GetWorldSystem() &&
-                        gameSession->GetPhysicsSystem()) {
-                        // Fixed-camera wildlife scene: stream once (setup) then refresh
-                        // every 30th frame so the 120-frame clip captures at full rate.
-                        // The walking-row showcase moves the camera, so it streams each frame.
-                        const bool skip =
-                            scenario_config.wildlife && (wildlife_stream_tick++ % 30 != 0);
-                        if (!skip) {
-                            gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                                g_camera->Position,
-                                gameSession->GetPhysicsSystem(),
-                                scenario_config.horizon_radius,
-                                scenario_config.collision_radius);
-                        }
-                    }
-                } else if (scenario_config.creature_slice_smoke() && scenario_ready && g_camera) {
-                    // spawn the creature scene once, hold the fixed
-                    // photographic framing, run the game glue every frame and
-                    // bring in the light stimulus at 55% progress.
-                    if (!creature_slice_spawn_attempted) {
-                        creature_slice_spawn_attempted = true;
-                        creature_slice_scene = SpawnCreatureSliceScene(
-                            gameSession.get(), root_dir, scenario_config.creature_archetype);
-                    }
-                    const double elapsed_play_seconds =
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                      scenario_play_started_at)
-                            .count();
-                    const double duration =
-                        static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                    const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                    if (progress >= 0.55 && creature_slice_scene.spawned &&
-                        !creature_slice_scene.stimulus_spawned) {
-                        SpawnCreatureSliceStimulus(gameSession.get(), creature_slice_scene);
-                    }
-                    UpdateCreatureSliceScene(
-                        gameSession.get(), creature_slice_scene, static_cast<double>(deltaTime));
-                    ApplyCreatureSliceCamera(
-                        gameSession.get(), g_camera.get(), creature_slice_scene);
-                } else if (scenario_config.networked_session_smoke() && scenario_ready &&
-                           g_camera) {
-                    // the client renders a SERVER-OWNED world over the
-                    // lockstep transport. The driver owns the host authority world
-                    // + both LockstepSession ends; per agreed tick it steps BOTH
-                    // worlds (the client world is THIS gameSession, stepped via the
-                    // driver's apply_and_step hook from the spawn anchor) and
-                    // exchanges hashes. The client's WORLD-AFFECTING input set
-                    // (empty today) round-trips through LockstepSession::*Input.
-                    if (!networked_session_begun) {
-                        networked_session_begun = true;
-                        NetworkedSessionDriver::Config net_cfg;
-                        net_cfg.seed = 424242;
-                        net_cfg.preset = scenario_world_type;
-                        net_cfg.budget_ticks = 90;
-                        net_cfg.hash_cadence_ticks = 30;
-                        net_cfg.root_path = root_path_str;
-                        net_cfg.surface_radius = scenario_config.horizon_radius;
-                        net_cfg.collision_radius = scenario_config.collision_radius;
-                        if (!networked_session_driver.Begin(gameSession.get(), net_cfg)) {
-                            scenario_failed = true;
-                            scenario_failure_reason = "networked_session_begin_failed_" +
-                                                      networked_session_driver.failure_reason();
-                        }
-                    }
-                    if (networked_session_begun && !networked_session_done && !scenario_failed) {
-                        // Drive the lockstep session to COMPLETION here (bounded by
-                        // the budget): each agreed tick quiesces both worlds' streaming
-                        // jobs, which is expensive in a debug build, so spreading it
-                        // across rendered frames would blow the run window. The world
-                        // is server-owned and stepped through the driver's
-                        // apply_and_step hook; the render frame BELOW then draws the
-                        // settled server-owned world (proving the client is
-                        // render-capable, unlike the headless server). One agreed tick
-                        // is stepped before the first render so the loop is observable.
-                        bool live = networked_session_driver.StepAgreedTick();
-                        while (live) {
-                            live = networked_session_driver.StepAgreedTick();
-                        }
-                        if (!live) {
-                            networked_session_done = true;
-                            networked_session_driver.Disconnect();
-                            const double net_seconds =
-                                std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                              scenario_play_started_at)
-                                    .count();
-                            const bool net_passed = networked_session_driver.WriteArtifact(
-                                scenario_config.artifact_dir, net_seconds);
-                            if (!net_passed) {
-                                scenario_failed = true;
-                                scenario_failure_reason =
-                                    networked_session_driver.failure_reason().empty()
-                                        ? std::string("networked_session_not_in_sync")
-                                        : ("networked_session_" +
-                                           networked_session_driver.failure_reason());
-                            }
-                            scenario_timed_run_complete = true;
-                            glfwSetWindowShouldClose(window, true);
-                        }
-                    }
-                    // Camera LOOK is: a fixed eye-level framing applied
-                    // locally each frame, NEVER round-tripped through the session, so
-                    // look latency is zero (research worldgen-lockstep-sdfrt.md Area 2
-                    // takeaway 2). It reads the spawn anchor the driver streams the
-                    // world around, but does NOT influence the hashed world step.
-                    {
-                        const Luminumbra::Vec3 anchor =
-                            networked_session_driver.ClientStreamingAnchor();
-                        g_camera->Position = glm::vec3(anchor.x, anchor.y + 1.8f, anchor.z);
-                        g_camera->Yaw = 0.0f;
-                        g_camera->Pitch = 0.0f;
-                        g_camera->updateCameraVectors();
-                    }
-                } else if (g_profile_fly_seconds > 0.0 && g_playerController && g_camera) {
+                if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
+                    g_app.capture.profile_fly_seconds > 0.0 && g_playerController && g_camera) {
                     // runtime telemetry (--profile-fly): drive the player FORWARD at a constant
                     // noclip speed in normal-play mode so the SLOWFRAME logger captures a
                     // representative MOVING cost without the time-based scenario camera's
                     // teleport-under-load feedback. deltaTime is clamped (<=50ms) so per-frame
                     // movement stays bounded even on a slow frame → no teleport/active-set
                     // explosion. A slow yaw drift sweeps varied terrain (rivers/biomes). Self-exits
-                    // after g_profile_fly_seconds. UpdateNoclip directly advances position
-                    // (bypasses physics); streaming anchor = GetPosition follows.
+                    // after g_app.capture.profile_fly_seconds. UpdateNoclip directly advances
+                    // position (bypasses physics); streaming anchor = GetPosition follows.
                     static double s_profile_start = glfwGetTime();
                     const double elapsed = glfwGetTime() - s_profile_start;
                     g_camera->Yaw =
@@ -4398,49 +2169,53 @@ int main(int argc, char* argv[]) {
                     if (glm::length(fwd) > 1e-4f)
                         fwd = glm::normalize(fwd);
                     g_playerController->ProfileDriveNoclip(deltaTime, fwd);
-                    if (elapsed > g_profile_fly_seconds)
+                    if (elapsed > g_app.capture.profile_fly_seconds)
                         glfwSetWindowShouldClose(window, true);
-                } else if (g_playerController && !g_show_settings) {
+                } else if (scenario_drive == ScenarioRunner::InGameDrive::kFallThrough &&
+                           g_playerController && !g_app.hud.show_settings) {
                     g_playerController->Update(deltaTime); // movement paused while the menu is open
                 }
-                if (g_timelapse_frames > 0 && g_camera && gameSession) {
+                if (g_app.capture.timelapse_frames > 0 && g_camera && gameSession) {
                     // FIXED timelapse camera: elevated, looking down at the grove around spawn.
                     // NOT tied to the (settling) player physics, so it can never fall through the
                     // world -- and it frames the plants instead of whatever the avatar sees.
                     const auto sp = gameSession->GetMetadata().spawnPoint;
                     // Growth captures frame a tighter view of the hero cluster in front; otherwise
                     // an elevated look over the grove.
-                    const bool showcase =
-                        g_timelapse_grow || g_timelapse_season || g_timelapse_simgrow;
+                    const bool showcase = g_app.capture.timelapse_grow ||
+                                          g_app.capture.timelapse_season ||
+                                          g_app.capture.timelapse_simgrow;
                     // Ecology demo: a HIGH, wide, near-top-down look over the whole field so
                     // the herd scattering away from the predator (and the predator weaving
                     // toward the nearest prey) reads as clear motion across the ground, and
                     // nobody runs out of frame as they spread.
                     const glm::vec3 camPos =
-                        g_timelapse_rain
+                        g_app.capture.timelapse_rain
                             ? glm::vec3(sp.x + 2.0f,
                                         sp.y + 16.0f,
                                         sp.z + 26.0f) // elevated overlook for rain pooling
-                        : g_timelapse_dig
+                        : g_app.capture.timelapse_dig
                             ? glm::vec3(sp.x + 10.0f,
                                         sp.y + 6.0f,
                                         sp.z + 10.0f) // close, low 3/4 look at the crater
-                        : g_timelapse_fire
+                        : g_app.capture.timelapse_fire
                             ? glm::vec3(
                                   sp.x, sp.y + 34.0f, sp.z + 36.0f) // high look over the burn patch
-                        : g_timelapse_creatures ? glm::vec3(sp.x, sp.y + 30.0f, sp.z + 30.0f)
-                        : showcase              ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
-                                                : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
+                        : g_app.capture.timelapse_creatures
+                            ? glm::vec3(sp.x, sp.y + 30.0f, sp.z + 30.0f)
+                        : showcase ? glm::vec3(sp.x, sp.y + 4.0f, sp.z + 22.0f)
+                                   : glm::vec3(sp.x, sp.y + 7.0f, sp.z + 20.0f);
                     const glm::vec3 target =
-                        g_timelapse_rain ? glm::vec3(sp.x,
-                                                     sp.y - 2.0f,
-                                                     sp.z) // look down over the filling valley
-                        : g_timelapse_dig
+                        g_app.capture.timelapse_rain
+                            ? glm::vec3(sp.x,
+                                        sp.y - 2.0f,
+                                        sp.z) // look down over the filling valley
+                        : g_app.capture.timelapse_dig
                             ? glm::vec3(sp.x, sp.y - 3.0f, sp.z) // the deepening crater at spawn
-                        : g_timelapse_fire      ? glm::vec3(sp.x, sp.y, sp.z)
-                        : g_timelapse_creatures ? glm::vec3(sp.x, sp.y, sp.z - 8.0f)
-                        : showcase              ? glm::vec3(sp.x, sp.y + 3.0f, sp.z + 10.0f)
-                                                : glm::vec3(sp.x, sp.y + 2.0f, sp.z);
+                        : g_app.capture.timelapse_fire      ? glm::vec3(sp.x, sp.y, sp.z)
+                        : g_app.capture.timelapse_creatures ? glm::vec3(sp.x, sp.y, sp.z - 8.0f)
+                        : showcase ? glm::vec3(sp.x, sp.y + 3.0f, sp.z + 10.0f)
+                                   : glm::vec3(sp.x, sp.y + 2.0f, sp.z);
                     const glm::vec3 d = glm::normalize(target - camPos);
                     g_camera->Position = camPos;
                     g_camera->Yaw = glm::degrees(std::atan2(d.z, d.x));
@@ -4451,21 +2226,22 @@ int main(int argc, char* argv[]) {
                 // the deepest real water cell and frame it from a low side vantage looking toward
                 // the bank we'll breach. Computed once; the carve happens in the capture/advance
                 // block.
-                if (g_timelapse_drain && g_camera && gameSession && gameSession->GetWorldSystem() &&
-                    g_timelapse_settle >= kTimelapseSettleFrames) {
+                if (g_app.capture.timelapse_drain && g_camera && gameSession &&
+                    gameSession->GetWorldSystem() &&
+                    g_app.capture.timelapse_settle >= kTimelapseSettleFrames) {
                     auto* ws = gameSession->GetWorldSystem();
-                    if (!g_drain_state.init) {
+                    if (!g_app.capture.drain_state.init) {
                         // Anchor on a real SHORELINE — deep water beside a tall DRY bank — so
                         // cutting the bank floods the dry side (verified by the rising
                         // inland-volume probe below).
                         Luminumbra::Vec3 wp;
                         float tlx = 0.0f, tlz = 1.0f, wsurf = 0.0f, bank = 0.0f;
                         if (ws->debug_find_shoreline(wp, tlx, tlz, wsurf, bank)) {
-                            g_drain_state.P = wp;
-                            g_drain_state.dhx = tlx;
-                            g_drain_state.dhz = tlz;
-                            g_drain_state.surf = wsurf;
-                            g_drain_state.init = true;
+                            g_app.capture.drain_state.P = wp;
+                            g_app.capture.drain_state.dhx = tlx;
+                            g_app.capture.drain_state.dhz = tlz;
+                            g_app.capture.drain_state.surf = wsurf;
+                            g_app.capture.drain_state.init = true;
                             LUMINUMBRA_CORE_INFO(
                                 "Timelapse-drain: shoreline at ({:.1f},{:.1f},{:.1f}), surf {:.1f} "
                                 "m, dry bank {:.1f} m, toward-land ({:.2f},{:.2f})",
@@ -4478,10 +2254,12 @@ int main(int argc, char* argv[]) {
                                 tlz);
                         }
                     }
-                    if (g_drain_state.init) {
-                        const glm::vec3 P(g_drain_state.P.x, g_drain_state.P.y, g_drain_state.P.z);
-                        const glm::vec3 dh =
-                            glm::normalize(glm::vec3(g_drain_state.dhx, 0.0f, g_drain_state.dhz));
+                    if (g_app.capture.drain_state.init) {
+                        const glm::vec3 P(g_app.capture.drain_state.P.x,
+                                          g_app.capture.drain_state.P.y,
+                                          g_app.capture.drain_state.P.z);
+                        const glm::vec3 dh = glm::normalize(glm::vec3(
+                            g_app.capture.drain_state.dhx, 0.0f, g_app.capture.drain_state.dhz));
                         const glm::vec3 side(-dh.z, 0.0f, dh.x);
                         // Frame the BASIN itself (3 m onto the bank), close + low, looking slightly
                         // down so the advancing waterline against the green slope is the clear
@@ -4501,16 +2279,18 @@ int main(int argc, char* argv[]) {
                 //  valley
                 // floor (where rainfall collects), deepen it into a clear closed basin, and frame
                 // it.
-                if (g_timelapse_rain && g_camera && gameSession && gameSession->GetWorldSystem() &&
-                    g_timelapse_settle >= kTimelapseSettleFrames) {
+                if (g_app.capture.timelapse_rain && g_camera && gameSession &&
+                    gameSession->GetWorldSystem() &&
+                    g_app.capture.timelapse_settle >= kTimelapseSettleFrames) {
                     auto* ws = gameSession->GetWorldSystem();
-                    if (!g_drain_state.init) {
-                        ws->SetWaterHydrology(/*finite=*/true, g_timelapse_rain_mm, /*evap=*/0);
+                    if (!g_app.capture.drain_state.init) {
+                        ws->SetWaterHydrology(
+                            /*finite=*/true, g_app.capture.timelapse_rain_mm, /*evap=*/0);
                         Luminumbra::Vec3 vp;
                         float bed = 0.0f;
                         if (ws->debug_lowest_land_pos(vp, bed)) {
-                            g_drain_state.P = vp;
-                            g_drain_state.init = true;
+                            g_app.capture.drain_state.P = vp;
+                            g_app.capture.drain_state.init = true;
                             // Deep bowl (5 m): water collects BELOW the grass line so it reads as a
                             // clear pool rather than a thin sheet hidden under grass cards; hard
                             // rain fills it high.
@@ -4524,8 +2304,10 @@ int main(int argc, char* argv[]) {
                                                  bed);
                         }
                     }
-                    if (g_drain_state.init) {
-                        const glm::vec3 P(g_drain_state.P.x, g_drain_state.P.y, g_drain_state.P.z);
+                    if (g_app.capture.drain_state.init) {
+                        const glm::vec3 P(g_app.capture.drain_state.P.x,
+                                          g_app.capture.drain_state.P.y,
+                                          g_app.capture.drain_state.P.z);
                         const glm::vec3 camPosR = P + glm::vec3(11.0f, 9.0f, 11.0f);
                         const glm::vec3 dd =
                             glm::normalize((P - glm::vec3(0.0f, 1.0f, 0.0f)) - camPosR);
@@ -4536,7 +2318,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 if (auto* physics = gameSession->GetPhysicsSystem())
-                    physics->update(deltaTime * g_timeScale);
+                    physics->update(deltaTime * g_app.capture.timeScale);
                 // fixed 30 Hz simulation tick (SimulationClock +
                 // OrderedEventBus drain) hosted by GameSession. Render,
                 // physics, and scenario paths above remain variable-dt.
@@ -4547,18 +2329,18 @@ int main(int argc, char* argv[]) {
                 // host, and camera-anchored streaming would diverge the hashed world.
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
-                    if (g_timeScale == 1.0f) {
+                    if (g_app.capture.timeScale == 1.0f) {
                         gameSession->TickSimulation(static_cast<double>(
                             deltaTime)); // byte-identical default (gates run here)
-                    } else if (g_timeScale > 0.0f) {
+                    } else if (g_app.capture.timeScale > 0.0f) {
                         // host_timescale: run the sim faster/slower. Chunk into <=4-tick steps so a
                         // high scale isn't dropped by the catch-up clamp, capped per frame to keep
                         // spiral protection. Determinism holds (fixed dt per tick).
-                        double simDt =
-                            static_cast<double>(deltaTime) * static_cast<double>(g_timeScale);
+                        double simDt = static_cast<double>(deltaTime) *
+                                       static_cast<double>(g_app.capture.timeScale);
                         const double kFourTicks = (1.0 / 30.0) * 4.0;
-                        const int budget =
-                            static_cast<int>(std::ceil(4.0 * static_cast<double>(g_timeScale)));
+                        const int budget = static_cast<int>(
+                            std::ceil(4.0 * static_cast<double>(g_app.capture.timeScale)));
                         int ran = 0;
                         while (simDt > 1e-9 && ran < budget) {
                             const double step = std::min(simDt, kFourTicks);
@@ -4568,7 +2350,8 @@ int main(int argc, char* argv[]) {
                                 break; // accumulator < 1 tick this frame
                             ran += static_cast<int>(t);
                         }
-                    } // g_timeScale == 0 -> paused (no sim ticks; render/streaming continue)
+                    } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
+                      // continue)
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //
@@ -4578,24 +2361,25 @@ int main(int argc, char* argv[]) {
                         // whenever a fixed/scenario camera drives the view — otherwise a --cam-pos
                         // far from spawn streams chunks around the player at spawn and the camera
                         // sees an unloaded, unlit void (the "far-camera renders black" bug).
-                        // g_fixed_cam covers the capture/showcase path; the scenario smokes keep
-                        // their existing behaviour.
+                        // g_app.capture.fixed_cam covers the capture/showcase path; the scenario
+                        // smokes keep their existing behaviour.
                         const bool cam_anchored =
-                            (g_fixed_cam || ((scenario_config.lod_ground_smoke() ||
-                                              scenario_config.water_visual_smoke() ||
-                                              scenario_config.material_visual_smoke() ||
-                                              scenario_config.skybox_visual_smoke() ||
-                                              scenario_config.weather_visual_smoke() ||
-                                              scenario_config.cloud_shadow_smoke() ||
-                                              scenario_config.precipitation_smoke() ||
-                                              scenario_config.timeofday_sweep_smoke() ||
-                                              scenario_config.lod_boundary_oscillation_smoke() ||
-                                              scenario_config.lod_seam_arrival_smoke() ||
-                                              scenario_config.player_view_smoke() ||
-                                              scenario_config.farlod_horizon_smoke() ||
-                                              scenario_config.skinned_mesh_visual_smoke() ||
-                                              scenario_config.creature_slice_smoke()) &&
-                                             scenario_ready)) &&
+                            (g_app.capture.fixed_cam ||
+                             ((scenario_config.lod_ground_smoke() ||
+                               scenario_config.water_visual_smoke() ||
+                               scenario_config.material_visual_smoke() ||
+                               scenario_config.skybox_visual_smoke() ||
+                               scenario_config.weather_visual_smoke() ||
+                               scenario_config.cloud_shadow_smoke() ||
+                               scenario_config.precipitation_smoke() ||
+                               scenario_config.timeofday_sweep_smoke() ||
+                               scenario_config.lod_boundary_oscillation_smoke() ||
+                               scenario_config.lod_seam_arrival_smoke() ||
+                               scenario_config.player_view_smoke() ||
+                               scenario_config.farlod_horizon_smoke() ||
+                               scenario_config.skinned_mesh_visual_smoke() ||
+                               scenario_config.creature_slice_smoke()) &&
+                              scenario_ready)) &&
                             g_camera;
                         const Luminumbra::Vec3 streaming_position =
                             cam_anchored
@@ -4674,8 +2458,8 @@ int main(int argc, char* argv[]) {
                         // world_hash is the server's and is unaffected. Skipped in
                         // capture/scenario modes (they own their own creature handling).
                         const bool interactive_play =
-                            !scenario_config.active() && !g_timelapse_creatures &&
-                            (g_timelapse_frames == 0 || g_timelapse_living);
+                            !scenario_config.active() && !g_app.capture.timelapse_creatures &&
+                            (g_app.capture.timelapse_frames == 0 || g_app.capture.timelapse_living);
                         auto pending = std::make_shared<WorldDressingPending>();
                         pending->world = ws;
                         pending->sun_toward = sunToward;
@@ -4684,12 +2468,14 @@ int main(int argc, char* argv[]) {
                         // capture right after scenario_ready), so they compute + consume
                         // synchronously — the placements are byte-identical either way.
                         pending->synchronous =
-                            scenario_config.active() || g_frame_scan_active || g_scene_active ||
-                            g_play_paths || !g_render_benchmark_path.empty() ||
-                            !g_survey_dir.empty() || g_timelapse_frames > 0 || g_ui_thumbs > 0;
+                            scenario_config.active() || g_app.capture.frame_scan_active ||
+                            g_app.capture.scene_active || g_app.capture.play_paths ||
+                            !g_app.capture.render_benchmark_path.empty() ||
+                            !g_app.capture.survey_dir.empty() ||
+                            g_app.capture.timelapse_frames > 0 || g_app.capture.ui_thumbs > 0;
                         // One-time skinned rig load (file IO — never the slow part). The
                         // wildlife placements are only computed when the rig is usable.
-                        if (interactive_play && g_creatureSpecies.size() > 0) {
+                        if (interactive_play && g_app.hud.creatureSpecies.size() > 0) {
                             anim::SkinnedMeshAsset masset;
                             anim::AnimClipAsset iclip;
                             const std::filesystem::path gmesh =
@@ -4763,10 +2549,11 @@ int main(int argc, char* argv[]) {
                             // inhabit the local biome (generalists included); fall back
                             // to the full roster if the biome lists none.
                             const luminumbra::ai::CreatureSpecies* sp_sel =
-                                g_creatureSpecies.SelectForBiome(biome, pick);
+                                g_app.hud.creatureSpecies.SelectForBiome(biome, pick);
                             if (!sp_sel)
-                                return static_cast<int>(pick % g_creatureSpecies.size());
-                            return static_cast<int>(sp_sel - g_creatureSpecies.all().data());
+                                return static_cast<int>(pick % g_app.hud.creatureSpecies.size());
+                            return static_cast<int>(sp_sel -
+                                                    g_app.hud.creatureSpecies.all().data());
                         };
                         if (pending->synchronous) {
                             pending->result =
@@ -4929,7 +2716,7 @@ int main(int argc, char* argv[]) {
                                         .radius = 6.0f;
                                     continue;
                                 }
-                                const auto& roster = g_creatureSpecies.all();
+                                const auto& roster = g_app.hud.creatureSpecies.all();
                                 if (c.species_index < 0 ||
                                     static_cast<std::size_t>(c.species_index) >= roster.size())
                                     continue; // defensive: the roster never changes mid-session
@@ -5121,7 +2908,8 @@ int main(int argc, char* argv[]) {
                             // the fixed grow-mode camera, so the foreground is dominated by plants
                             // visibly growing (the scattered grove alone reads as distant
                             // background).
-                            if ((g_timelapse_grow || g_timelapse_season) && procgenPlants) {
+                            if ((g_app.capture.timelapse_grow || g_app.capture.timelapse_season) &&
+                                procgenPlants) {
                                 const glm::vec3 heroOffsets[] = {{-5.0f, 0.0f, 9.0f},
                                                                  {0.0f, 0.0f, 12.0f},
                                                                  {5.0f, 0.0f, 8.0f},
@@ -5147,7 +2935,7 @@ int main(int argc, char* argv[]) {
                             // PlantGrowthSystem advances them Seed->Fruiting each tick and
                             // BakeSimPlants renders their TRUE stage. Under time-scale they visibly
                             // grow on capture.
-                            if (g_timelapse_simgrow) {
+                            if (g_app.capture.timelapse_simgrow) {
                                 luminumbra::foliage::SpeciesRegistry species;
                                 std::vector<std::string> sperr;
                                 species.LoadFromDirectory(root_dir / "data/common/foliage/species",
@@ -5213,7 +3001,7 @@ int main(int argc, char* argv[]) {
                             // hunts toward, prey flee away — and render them as moving octahedron
                             // markers via the procgen pass (baked per-frame in the loop).
                             // Render/demo-only spawn.
-                            if (g_timelapse_creatures) {
+                            if (g_app.capture.timelapse_creatures) {
                                 // TRUE PHYSICS: each creature gets a deterministic Jolt avatar body
                                 // (CreaturePhysicsComponent). Spawn a little ABOVE the terrain so
                                 // it drops and settles on the surface; the brain's wish velocity
@@ -5264,7 +3052,7 @@ int main(int argc, char* argv[]) {
                                         // Calm (evolution) demo: start the founders WELL-FED + near
                                         // maturity so they court early and generations appear
                                         // within the clip (markers are tinted by generation).
-                                        if (g_timelapse_calm) {
+                                        if (g_app.capture.timelapse_calm) {
                                             cr.hunger = 0.05f;
                                             cr.stamina = 1.0f;
                                             gn.age_ticks =
@@ -5276,7 +3064,7 @@ int main(int argc, char* argv[]) {
                                     // (DecompositionSystem) -- so the population self-bounds (birth
                                     // -> life -> death -> decay) instead of growing without limit.
                                     // Seeded lifespan per creature.
-                                    if (g_timelapse_calm) {
+                                    if (g_app.capture.timelapse_calm) {
                                         auto& mort =
                                             reg.emplace<Luminumbra::Components::MortalComponent>(e);
                                         const std::uint32_t jit =
@@ -5297,7 +3085,7 @@ int main(int argc, char* argv[]) {
                                                                                               idx);
                                     }
                                 };
-                                if (g_timelapse_calm) {
+                                if (g_app.capture.timelapse_calm) {
                                     // Calm grazing herd, NO predator: prey graze (hunger falls),
                                     // stay healthy, and reproduce over generations -> a visible
                                     // population-growth / trait-drift evolution demo.
@@ -5329,7 +3117,7 @@ int main(int argc, char* argv[]) {
                             // -> orange
                             // -> charcoal); BakeCombustibleMarkers visualizes the deterministic
                             // state.
-                            if (g_timelapse_fire) {
+                            if (g_app.capture.timelapse_fire) {
                                 const int N = 24;
                                 const float sp = 2.0f;
                                 const float x0 = anchor.x - N * sp * 0.5f,
@@ -5367,76 +3155,10 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-                //  run the entire deterministic capture matrix
-                // (times-of-day x angles x weather x season) in ONE synchronous pass
-                // once the world is ready, then self-complete. The render_and_read
-                // hook owns render_frame + present + glReadPixels so the harness stays
-                // GL-context-free.: drives the existing one-way bridges,
-                // never writes world_hash.
-                if (scenario_config.world_visual_sweep() && scenario_ready &&
-                    !world_visual_sweep_done && gameSession->GetWorldSystem() && g_camera) {
-                    int sweep_fb_w = 0, sweep_fb_h = 0;
-                    glfwGetFramebufferSize(window, &sweep_fb_w, &sweep_fb_h);
-                    Luminumbra::Client::ScenarioHarness::WorldVisualSweepDeps deps;
-                    deps.game_session = gameSession.get();
-                    deps.pipeline = &renderPipeline;
-                    deps.camera = g_camera.get();
-                    deps.root_dir = root_dir;
-                    deps.artifact_dir = scenario_config.artifact_dir;
-                    // Winter is the second season pass; gate it behind the env flag
-                    // so the standing gate (summer-only, 48 cells) stays fast while a
-                    // manual LUMINUMBRA_VISUAL_SWEEP_WINTER=1 run captures both seasons.
-                    {
-                        const auto winter =
-                            Luminumbra::Core::ReadEnvironment("LUMINUMBRA_VISUAL_SWEEP_WINTER");
-                        deps.include_winter = winter && !winter->empty() && winter->front() != '0';
-                    }
-                    // The anchor position is FIXED across the whole matrix (only the
-                    // camera orientation changes per cell), so the world only needs to
-                    // stream ONCE. We stream for a bounded warmup, then skip the
-                    // expensive per-frame world update and just re-render — the same
-                    // settled geometry is reused for every subsequent cell.
-                    int sweep_stream_frames = 0;
-                    deps.render_and_read =
-                        [&, sweep_stream_frames](std::vector<unsigned char>& out_pixels,
-                                                 int& w,
-                                                 int& h) mutable -> bool {
-                        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-                        if (sweep_stream_frames < 24) {
-                            gameSession->GetWorldSystem()->update(
-                                gameSession->GetRegistry(),
-                                Luminumbra::Vec3(g_camera->Position),
-                                gameSession->GetPhysicsSystem());
-                            ++sweep_stream_frames;
-                        }
-                        renderPipeline.render_frame(gameSession->GetRegistry(),
-                                                    *gameSession->GetWorldSystem(),
-                                                    *g_camera,
-                                                    1.0f / 60.0f,
-                                                    wireframe_mode);
-                        glfwGetFramebufferSize(window, &w, &h);
-                        if (w <= 0 || h <= 0) {
-                            return false;
-                        }
-                        out_pixels.assign(
-                            static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u, 0u);
-                        glReadBuffer(GL_BACK);
-                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                        // glReadPixels itself synchronizes; no explicit glFinish needed.
-                        glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, out_pixels.data());
-                        glfwSwapBuffers(window);
-                        glfwPollEvents();
-                        return true;
-                    };
-                    const bool sweep_passed =
-                        Luminumbra::Client::ScenarioHarness::RunWorldVisualSweep(deps);
-                    world_visual_sweep_done = true;
-                    if (!sweep_passed) {
-                        scenario_failed = true;
-                        scenario_failure_reason = "world_visual_sweep_presence_failed";
-                    }
-                    scenario_timed_run_complete = true;
-                    glfwSetWindowShouldClose(window, true);
+                // world_visual_sweep: the synchronous capture matrix runs at
+                // this exact point, before the per-frame render below.
+                if (scenario_runner) {
+                    scenario_runner->onPreRenderWorldSweep();
                 }
                 if (gameSession->GetWorldSystem() && g_camera) {
                     // Live play runs on the
@@ -5543,10 +3265,10 @@ int main(int argc, char* argv[]) {
                                     s_live_bolt.strike_ndc = project(ground);
                                     s_bolt_frames_left = 3; // a few frames of flash
                                     //  hook: queue the physically-delayed thunder cue.
-                                    g_pendingThunder.push_back({strike.strike_tick,
-                                                                glfwGetTime(),
-                                                                dist,
-                                                                strike.magnitude});
+                                    g_app.audio.pendingThunder.push_back({strike.strike_tick,
+                                                                          glfwGetTime(),
+                                                                          dist,
+                                                                          strike.magnitude});
                                 }
                                 if (s_bolt_frames_left > 0) {
                                     renderPipeline.set_lightning_state(s_live_bolt);
@@ -5594,83 +3316,16 @@ int main(int argc, char* argv[]) {
                             }
                         }
                     }
-                    if (scenario_config.lod_ground_smoke() ||
-                        scenario_config.water_visual_smoke() ||
-                        scenario_config.material_visual_smoke() ||
-                        scenario_config.skybox_visual_smoke() ||
-                        scenario_config.weather_visual_smoke() ||
-                        scenario_config.cloud_shadow_smoke() ||
-                        scenario_config.precipitation_smoke() ||
-                        scenario_config.lod_seam_arrival_smoke() ||
-                        scenario_config.player_view_smoke() ||
-                        scenario_config.farlod_horizon_smoke() ||
-                        scenario_config.skinned_mesh_visual_smoke() ||
-                        scenario_config.creature_slice_smoke()) {
-                        // time_of_day 0 is noon (sun elevation = cos(2*pi*t));
-                        // 0.04 keeps the sun near its zenith for stable captures.
-                        renderPipeline.set_time_of_day(0.04f);
-                    } else if (scenario_config.timeofday_sweep_smoke() && scenario_ready) {
-                        // SEASON SWEEP. The run is split into two
-                        // season halves (summer then winter); each half replays
-                        // the noon/dusk/night phase windows. Both the time-of-day
-                        // AND the tick-derived season are re-pinned every frame so
-                        // update_time_of_day cannot drift either between settle
-                        // frames. set_season_tick feeds the authoritative-tick-
-                        // style integer the season is a PURE FUNCTION of (no
-                        // wall-clock for the season itself).
-                        const double elapsed_play_seconds =
-                            std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                          scenario_play_started_at)
-                                .count();
-                        const double duration =
-                            static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                        const double sweep_progress =
-                            std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                        //  pin the sun to the PENDING CAPTURE's
-                        // phase, NOT to SeasonSweepAt(progress). The capture writer is
-                        // throttled to one screenshot per frame; under a sim hitch the
-                        // progress could advance past the dusk window into night before
-                        // the dusk capture actually wrote, so SeasonSweepAt(progress)
-                        // rendered a NIGHT sun while the writer labelled it "dusk" (the
-                        // regression: summer dusk recorded the night elevation, sky lum
-                        // 35 < night 37, collapsing dusk>night). Driving the sun from the
-                        // first not-yet-written plan whose threshold has passed guarantees
-                        // the rendered sun matches the labelled phase the writer grabs.
-                        int pending_capture = -1;
-                        for (int i = 0; i < kTimeOfDaySweepCaptureCount; ++i) {
-                            if (!timeofday_season_captures_written[static_cast<std::size_t>(i)] &&
-                                sweep_progress >= TimeOfDaySweepCapturePlanAt(i).threshold) {
-                                pending_capture = i;
-                                break;
-                            }
-                        }
-                        if (pending_capture >= 0) {
-                            const TimeOfDaySweepCapturePlan& plan =
-                                TimeOfDaySweepCapturePlanAt(pending_capture);
-                            renderPipeline.set_season_tick(SeasonSweepTick(plan.season_index));
-                            renderPipeline.set_time_of_day(plan.phase_time);
-                            // Track settle frames at this pin so the capture below only
-                            // writes once the lazily-refreshed sky dome has caught up.
-                            if (pending_capture == timeofday_pending_pin) {
-                                ++timeofday_pin_settle_frames;
-                            } else {
-                                timeofday_pending_pin = pending_capture;
-                                timeofday_pin_settle_frames = 0;
-                            }
-                        } else {
-                            timeofday_pending_pin = -1;
-                            timeofday_pin_settle_frames = 0;
-                            // No capture pending for this progress (settle/idle frames
-                            // before the first threshold, or after the last write):
-                            // fall back to the smooth sweep position.
-                            const SeasonSweepPoint season_point = SeasonSweepAt(sweep_progress);
-                            renderPipeline.set_season_tick(season_point.season_tick);
-                            renderPipeline.set_time_of_day(season_point.time_of_day);
-                        }
+                    // Scenario capture render pins (fixed time-of-day for the
+                    // visual smokes; the season sweep's pin schedule) run at
+                    // this exact point so they override the live-tick
+                    // defaults above by frame order.
+                    if (scenario_runner) {
+                        scenario_runner->onPreRenderCapturePins();
                     }
                     //  re-bake the creature markers from the live (just-ticked) positions
                     // so the ecology timelapse shows them actually moving each frame.
-                    if (g_timelapse_creatures) {
+                    if (g_app.capture.timelapse_creatures) {
                         // Newborn offspring start bodyless; give them avatar bodies so they
                         // collide with the terrain (no more walking through mountains), then
                         // bake markers from the physics-resolved positions.
@@ -5680,38 +3335,39 @@ int main(int argc, char* argv[]) {
                                             gameSession->GetRegistry(),
                                             gameSession.get());
                     }
-                    if (g_timelapse_fire) {
+                    if (g_app.capture.timelapse_fire) {
                         BakeCombustibleMarkers(renderPipeline.plant_procgen(),
                                                gameSession->GetRegistry(),
                                                gameSession->GetWorldSystem());
                     }
-                    if (g_fixed_cam && g_camera) {
-                        g_camera->Position = g_fixed_cam_pos;
-                        g_camera->Yaw = g_fixed_cam_yaw;
-                        g_camera->Pitch = g_fixed_cam_pitch;
+                    if (g_app.capture.fixed_cam && g_camera) {
+                        g_camera->Position = g_app.capture.fixed_cam_pos;
+                        g_camera->Yaw = g_app.capture.fixed_cam_yaw;
+                        g_camera->Pitch = g_app.capture.fixed_cam_pitch;
                         g_camera->updateCameraVectors();
                     }
-                    if (g_scene_active) {
-                        if (g_scene_fov > 0.0f && g_camera)
-                            g_camera->Zoom = g_scene_fov;
-                        renderPipeline.set_time_of_day(g_timelapse_tod);
-                        if (g_scene_moon >= 0.0f)
-                            renderPipeline.set_moon_illumination(g_scene_moon); // rendering
+                    if (g_app.capture.scene_active) {
+                        if (g_app.capture.scene_fov > 0.0f && g_camera)
+                            g_camera->Zoom = g_app.capture.scene_fov;
+                        renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);
+                        if (g_app.capture.scene_moon >= 0.0f)
+                            renderPipeline.set_moon_illumination(
+                                g_app.capture.scene_moon); // rendering
                         using WT = Luminumbra::Rendering::WeatherType;
-                        const WT wt = (g_scene_weather == 1)   ? WT::Rain
-                                      : (g_scene_weather == 2) ? WT::Snow
-                                      : (g_scene_weather == 3) ? WT::Fog
-                                      : (g_scene_weather == 4) ? WT::Storm
-                                                               : WT::None;
-                        renderPipeline.set_weather(wt, g_scene_weather_intensity);
-                        if (g_scene_clouds) {
+                        const WT wt = (g_app.capture.scene_weather == 1)   ? WT::Rain
+                                      : (g_app.capture.scene_weather == 2) ? WT::Snow
+                                      : (g_app.capture.scene_weather == 3) ? WT::Fog
+                                      : (g_app.capture.scene_weather == 4) ? WT::Storm
+                                                                           : WT::None;
+                        renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);
+                        if (g_app.capture.scene_clouds) {
                             Luminumbra::Rendering::CloudRenderState cs;
                             cs.enabled = true;
-                            cs.shadow_enabled = g_scene_cloud_shadow;
-                            cs.coverage_amount = g_scene_cloud_coverage;
-                            cs.biome_variation = g_scene_cloud_biome;
-                            cs.plane_height = g_scene_cloud_plane;
-                            cs.shadow_strength = g_scene_cloud_shadow_strength;
+                            cs.shadow_enabled = g_app.capture.scene_cloud_shadow;
+                            cs.coverage_amount = g_app.capture.scene_cloud_coverage;
+                            cs.biome_variation = g_app.capture.scene_cloud_biome;
+                            cs.plane_height = g_app.capture.scene_cloud_plane;
+                            cs.shadow_strength = g_app.capture.scene_cloud_shadow_strength;
                             renderPipeline.set_cloud_state(cs);
                         }
                     }
@@ -5744,7 +3400,7 @@ int main(int argc, char* argv[]) {
                             // (every gate, incl. FoliageInstancing's foliage_visual_smoke)
                             // KEEPS the readback so instance_hash/coverage stay exact.
                             foliage->set_readback_enabled(scenario_config.active() &&
-                                                          !g_play_paths);
+                                                          !g_app.capture.play_paths);
                             glm::vec2 wind_xz(0.0f, 0.0f);
                             if (auto* wind = gameSession->GetWindFieldSystem()) {
                                 const Luminumbra::Vec2 w =
@@ -5754,8 +3410,7 @@ int main(int argc, char* argv[]) {
                                 wind_xz = glm::vec2(w.x, w.y);
                             }
                             foliage->set_wind(wind_xz);
-                            Luminumbra::Client::ScenarioHarness::FoliageScatterContext fol_ctx{
-                                fol_ws};
+                            Luminumbra::Rendering::FoliageScatterContext fol_ctx{fol_ws};
                             const auto _rb_scatter_t0 =
                                 std::chrono::steady_clock::now(); // Scatter-build timing.
                             // the scatter build (a GetTerrainHeightAt + BiomeIdAt per
@@ -5786,7 +3441,7 @@ int main(int argc, char* argv[]) {
                                       << 42));
                             }
                             const bool scatter_rebuild =
-                                (scenario_config.active() && !g_play_paths) ||
+                                (scenario_config.active() && !g_app.capture.play_paths) ||
                                 scatter_sig != s_cached_scatter_sig;
                             if (scatter_rebuild) {
                                 //  implementation note: each per-chunk ChunkScatter
@@ -5877,11 +3532,10 @@ int main(int argc, char* argv[]) {
                                                 std::chrono::steady_clock::now() - _rb_scatter_t0)
                                                 .count();                             //
                             const auto _rb_fol_t0 = std::chrono::steady_clock::now(); //
-                            foliage->rebuild_instances(
-                                chunk_scatter,
-                                &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
-                                &fol_ctx,
-                                g_camera->Position);
+                            foliage->rebuild_instances(chunk_scatter,
+                                                       &Luminumbra::Rendering::FoliageSurfaceQuery,
+                                                       &fol_ctx,
+                                                       g_camera->Position);
                             rb_foliage_ms = std::chrono::duration<double, std::milli>(
                                                 std::chrono::steady_clock::now() - _rb_fol_t0)
                                                 .count(); //
@@ -5926,13 +3580,14 @@ int main(int argc, char* argv[]) {
                     const auto _rb_rcall_t0 =
                         std::chrono::steady_clock::now(); // always-on (runtime telemetry)
                     renderPipeline.set_debug_view(
-                        g_debug_view_mode); // render-only; 0 = byte-identical default ( /
-                                            // --debug-view)
+                        g_app.overlay
+                            .debug_view_mode); // render-only; 0 = byte-identical default ( /
+                                               // --debug-view)
                     renderPipeline.render_frame(gameSession->GetRegistry(),
                                                 *gameSession->GetWorldSystem(),
                                                 *g_camera,
                                                 deltaTime,
-                                                wireframe_mode);
+                                                g_app.overlay.wireframe_mode);
                     rb_render_call_ms = std::chrono::duration<double, std::milli>(
                                             std::chrono::steady_clock::now() - _rb_rcall_t0)
                                             .count();
@@ -5940,7 +3595,7 @@ int main(int argc, char* argv[]) {
                     // --scene-config: self-contained capture. Settle a few frames (world
                     // stream + atmosphere), then read the clean back buffer (BEFORE any UI
                     // overlay this frame) and write the screenshot, then close.
-                    if (g_scene_active) {
+                    if (g_app.capture.scene_active) {
                         static int s_scene_settle = 0;
                         if (s_scene_settle < 55) {
                             ++s_scene_settle;
@@ -5953,9 +3608,9 @@ int main(int argc, char* argv[]) {
                                 glReadBuffer(GL_BACK);
                                 glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                 glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                                WritePixelBufferPpm(g_scene_shot, vw, vh, px);
+                                WritePixelBufferPpm(g_app.capture.scene_shot, vw, vh, px);
                                 LUMINUMBRA_CORE_INFO("Scene capture written -> {} ({}x{})",
-                                                     g_scene_shot.string(),
+                                                     g_app.capture.scene_shot.string(),
                                                      vw,
                                                      vh);
                             }
@@ -5967,19 +3622,19 @@ int main(int argc, char* argv[]) {
                     // discover + capture a waterfall / cliff / grass field / lake (teleport +
                     // stream
                     // + settle + screenshot + frame-scan per POI), then exit..
-                    if (g_survey_active && currentState == GameState::IN_GAME && gameSession &&
-                        gameSession->GetWorldSystem() && g_camera) {
-                        if (g_survey_settle < 45) {
-                            ++g_survey_settle;
+                    if (g_app.capture.survey_active && currentState == GameState::IN_GAME &&
+                        gameSession && gameSession->GetWorldSystem() && g_camera) {
+                        if (g_app.capture.survey_settle < 45) {
+                            ++g_app.capture.survey_settle;
                         } else {
                             Luminumbra::Rendering::RunSceneSurvey(
                                 window,
                                 *gameSession,
                                 renderPipeline,
                                 *g_camera,
-                                std::filesystem::path(g_survey_dir),
+                                std::filesystem::path(g_app.capture.survey_dir),
                                 root_dir / "data/common/materials.json",
-                                wireframe_mode);
+                                g_app.overlay.wireframe_mode);
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
                     }
@@ -5994,7 +3649,8 @@ int main(int argc, char* argv[]) {
                     // Watchdog (runs EVERY frame while scanning, regardless of game state): if the
                     // world never reaches IN_GAME + settles within the deadline, abort cleanly so a
                     // headless capture can never hang the whole run (e.g. a wedged loading screen).
-                    if (g_frame_scan_active && ++g_frame_scan_watchdog > kFrameScanWatchdogFrames) {
+                    if (g_app.capture.frame_scan_active &&
+                        ++g_app.capture.frame_scan_watchdog > kFrameScanWatchdogFrames) {
                         LUMINUMBRA_CORE_ERROR("Frame-scan watchdog: did not settle within {} "
                                               "frames (state={}). Aborting "
                                               "without a report.",
@@ -6002,7 +3658,8 @@ int main(int argc, char* argv[]) {
                                               static_cast<int>(currentState));
                         glfwSetWindowShouldClose(window, GLFW_TRUE);
                     }
-                    if (g_frame_scan_active && currentState == GameState::IN_GAME && gameSession) {
+                    if (g_app.capture.frame_scan_active && currentState == GameState::IN_GAME &&
+                        gameSession) {
                         if (g_camera) {
                             // Eye-level ground-inspection pose: low + a gentle down-pitch so the
                             // near-field grass/rock/terrain fill the lower frame (card shape +
@@ -6014,31 +3671,34 @@ int main(int argc, char* argv[]) {
                             g_camera->updateCameraVectors();
                         }
                         renderPipeline.set_time_of_day(0.04f); // fixed near-noon (lit terrain)
-                        if (g_frame_scan_settle < g_frame_scan_settle_target) {
-                            ++g_frame_scan_settle; // let chunks stream + atmosphere settle
+                        if (g_app.capture.frame_scan_settle <
+                            g_app.capture.frame_scan_settle_target) {
+                            ++g_app.capture
+                                  .frame_scan_settle; // let chunks stream + atmosphere settle
                         } else {
-                            if (g_render_parity_active) {
+                            if (g_app.capture.render_parity_active) {
                                 bool parity_ok = false;
-                                if (g_render_parity_pass == "ssao" && g_camera)
+                                if (g_app.capture.render_parity_pass == "ssao" && g_camera)
                                     parity_ok = renderPipeline.capture_ssao_parity(
-                                        g_render_parity_dir, *g_camera);
-                                else if (g_render_parity_pass == "upscale_seam" && g_camera)
+                                        g_app.capture.render_parity_dir, *g_camera);
+                                else if (g_app.capture.render_parity_pass == "upscale_seam" &&
+                                         g_camera)
                                     parity_ok = renderPipeline.capture_upscale_seam_parity(
-                                        *g_camera, g_render_parity_dir);
-                                else if (g_render_parity_pass == "frame" && g_camera)
+                                        *g_camera, g_app.capture.render_parity_dir);
+                                else if (g_app.capture.render_parity_pass == "frame" && g_camera)
                                     // whole-frame A/B — dispatch the settled
                                     // prepared frame twice, in-process FLIP must be 0.0.
                                     parity_ok = renderPipeline.capture_frame_parity(
-                                        *g_camera, g_render_parity_dir);
+                                        *g_camera, g_app.capture.render_parity_dir);
                                 else
                                     parity_ok = false;
                                 if (parity_ok)
                                     LUMINUMBRA_CORE_INFO("{} parity captured -> {}",
-                                                         g_render_parity_pass,
-                                                         g_render_parity_dir.string());
+                                                         g_app.capture.render_parity_pass,
+                                                         g_app.capture.render_parity_dir.string());
                                 else
                                     LUMINUMBRA_CORE_ERROR("{} parity capture FAILED",
-                                                          g_render_parity_pass);
+                                                          g_app.capture.render_parity_pass);
                             }
                             int vw = 0, vh = 0;
                             glfwGetFramebufferSize(window, &vw, &vh);
@@ -6048,12 +3708,13 @@ int main(int argc, char* argv[]) {
                                                                  vh,
                                                                  root_dir /
                                                                      "data/common/materials.json");
-                            if (rep.ok && Luminumbra::Rendering::WriteFrameScanReport(
-                                              rep, std::filesystem::path(g_frame_scan_path))) {
+                            if (rep.ok &&
+                                Luminumbra::Rendering::WriteFrameScanReport(
+                                    rep, std::filesystem::path(g_app.capture.frame_scan_path))) {
                                 LUMINUMBRA_CORE_INFO(
                                     "Frame-scan written -> {} ({}x{}): {} materials, water "
                                     "{:.1f}%, foliage {} inst, mean luma {:.3f}",
-                                    g_frame_scan_path,
+                                    g_app.capture.frame_scan_path,
                                     rep.width,
                                     rep.height,
                                     rep.materials.size(),
@@ -6070,7 +3731,7 @@ int main(int argc, char* argv[]) {
                                     glReadBuffer(GL_BACK);
                                     glPixelStorei(GL_PACK_ALIGNMENT, 1);
                                     glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                                    std::filesystem::path img(g_frame_scan_path);
+                                    std::filesystem::path img(g_app.capture.frame_scan_path);
                                     img.replace_extension(".ppm");
                                     WritePixelBufferPpm(img, vw, vh, px);
                                     LUMINUMBRA_CORE_INFO("Frame-scan image -> {}", img.string());
@@ -6107,7 +3768,7 @@ int main(int argc, char* argv[]) {
                                     const auto health = Luminumbra::Rendering::AnalyzeFrameHealth(
                                         vw, vh, px, pos_rgb16f, albedo_rgb8);
                                     {
-                                        std::filesystem::path hp(g_frame_scan_path);
+                                        std::filesystem::path hp(g_app.capture.frame_scan_path);
                                         hp.replace_extension(".health.json");
                                         std::ofstream hf(hp, std::ios::binary | std::ios::trunc);
                                         if (hf) {
@@ -6133,7 +3794,8 @@ int main(int argc, char* argv[]) {
                                     }
                                 }
                             } else {
-                                LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}", g_frame_scan_path);
+                                LUMINUMBRA_CORE_ERROR("Frame-scan failed -> {}",
+                                                      g_app.capture.frame_scan_path);
                             }
                             glfwSetWindowShouldClose(window, GLFW_TRUE);
                         }
@@ -6146,26 +3808,27 @@ int main(int argc, char* argv[]) {
                     // scenario/gate runs, so determinism is unaffected (gates never press these
                     // keys).
                     if (g_playerController && currentState == GameState::IN_GAME &&
-                        !scenario_config.active() && !g_paused && gameSession && g_camera) {
-                        if (!g_farmSpeciesLoaded) {
+                        !scenario_config.active() && !g_app.hud.paused && gameSession && g_camera) {
+                        if (!g_app.hud.farmSpeciesLoaded) {
                             std::vector<std::string> ferr;
-                            g_farmSpecies.LoadFromDirectory(
+                            g_app.hud.farmSpecies.LoadFromDirectory(
                                 root_dir / "data/common/foliage/species", ferr);
-                            g_farmSpeciesLoaded = true;
+                            g_app.hud.farmSpeciesLoaded = true;
                         }
                         static bool s_fp = false, s_fw = false, s_ff = false, s_fh = false,
                                     s_fv = false;
                         // V cycles the selected species to plant (data-driven; oak/wheat/...).
                         {
                             const bool fv_now = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
-                            const std::size_t n = g_farmSpecies.all().size();
+                            const std::size_t n = g_app.hud.farmSpecies.all().size();
                             if (fv_now && !s_fv && n > 0) {
-                                g_farmSelectedSpecies =
-                                    (g_farmSelectedSpecies + 1) % static_cast<int>(n);
+                                g_app.hud.farmSelectedSpecies =
+                                    (g_app.hud.farmSelectedSpecies + 1) % static_cast<int>(n);
                                 if (audioManager)
                                     audioManager->PlayOneShot2D("ui_button_click");
-                                LUMINUMBRA_CORE_INFO("Farm: selected species '{}'",
-                                                     g_farmSpecies.all()[g_farmSelectedSpecies].id);
+                                LUMINUMBRA_CORE_INFO(
+                                    "Farm: selected species '{}'",
+                                    g_app.hud.farmSpecies.all()[g_app.hud.farmSelectedSpecies].id);
                             }
                             s_fv = fv_now;
                         }
@@ -6188,10 +3851,11 @@ int main(int argc, char* argv[]) {
                         const std::uint64_t ftick = gameSession->GetSimulationTickCount();
                         using IA = Luminumbra::Client::InputAction;
                         if (farmEdge(IA::FarmPlant, s_fp)) {
-                            const auto& species = g_farmSpecies.all();
+                            const auto& species = g_app.hud.farmSpecies.all();
                             if (!species.empty()) {
                                 const luminumbra::foliage::SpeciesTemplate& tmpl =
-                                    species[static_cast<std::size_t>(g_farmSelectedSpecies) %
+                                    species[static_cast<std::size_t>(
+                                                g_app.hud.farmSelectedSpecies) %
                                             species.size()];
                                 auto frng = luminumbra::core::DeterministicRng::seeded(
                                     luminumbra::foliage::kPlantSeedOffset,
@@ -6200,13 +3864,14 @@ int main(int argc, char* argv[]) {
                                     static_cast<std::uint64_t>(
                                         static_cast<std::int64_t>(aimXZ.z * 8.0f)) ^
                                         ftick);
-                                if (g_farming.Seed(freg, aim, tmpl, frng, ftick) != entt::null) {
+                                if (g_app.hud.farming.Seed(freg, aim, tmpl, frng, ftick) !=
+                                    entt::null) {
                                     if (audioManager)
                                         audioManager->PlayOneShot("farm_plant",
                                                                   glm::vec3(aim.x, aim.y, aim.z));
                                     LUMINUMBRA_CORE_INFO("Farm: planted {} ({} seeds left)",
                                                          tmpl.id,
-                                                         g_farming.seeds);
+                                                         g_app.hud.farming.seeds);
                                 }
                             }
                         }
@@ -6232,15 +3897,15 @@ int main(int argc, char* argv[]) {
                         };
                         const glm::vec3 aimSnd(aim.x, aim.y, aim.z);
                         if (farmEdge(IA::FarmWater, s_fw)) {
-                            if (g_farming.Water(freg, fpick()) && audioManager)
+                            if (g_app.hud.farming.Water(freg, fpick()) && audioManager)
                                 audioManager->PlayOneShot("farm_water", aimSnd);
                         }
                         if (farmEdge(IA::FarmFertilize, s_ff)) {
-                            if (g_farming.Fertilize(freg, fpick()) && audioManager)
+                            if (g_app.hud.farming.Fertilize(freg, fpick()) && audioManager)
                                 audioManager->PlayOneShot("farm_fertilize", aimSnd);
                         }
                         if (farmEdge(IA::FarmHarvest, s_fh)) {
-                            const auto hr = g_farming.Harvest(freg, fpick());
+                            const auto hr = g_app.hud.farming.Harvest(freg, fpick());
                             if (hr.harvestable) {
                                 if (audioManager)
                                     audioManager->PlayOneShot("farm_harvest", aimSnd);
@@ -6248,7 +3913,7 @@ int main(int argc, char* argv[]) {
                                     "Farm: harvested yield {:.2f} (+{} seeds, {} total)",
                                     hr.yield,
                                     hr.seeds,
-                                    g_farming.harvests);
+                                    g_app.hud.farming.harvests);
                             }
                         }
                         // A promotion suppressed a scatter instance -> rebuild the scatter cache so
@@ -6267,7 +3932,7 @@ int main(int argc, char* argv[]) {
                     // Interactive-only guard keeps it out of scenario/gate runs, so determinism is
                     // unaffected (gates never press R/T).
                     if (g_playerController && currentState == GameState::IN_GAME &&
-                        !scenario_config.active() && !g_paused && gameSession && g_camera &&
+                        !scenario_config.active() && !g_app.hud.paused && gameSession && g_camera &&
                         gameSession->GetWorldSystem()) {
                         static bool s_dig = false, s_fill = false;
                         const bool dig_now = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
@@ -6342,2690 +4007,27 @@ int main(int argc, char* argv[]) {
                         }
                     }
 
-                    // --- feature: photo-mode capture loop ---
-                    // Runs AFTER render_frame, on the RENDER side, against a CONST
-                    // registry: it reads camera + creature state, scores via the landed
-                    // PhotoSession scorers, and on shutter persists a PPM + verdict
-                    // sidecar into photos/. It NEVER ticks the sim or mutates the
-                    // registry, so determinism cannot regress (the sim-isolation gate
-                    // test pins the pure path). The interactive-only guard keeps it out
-                    // of the automated scenario/gate runs.
-                    if (g_playerController && currentState == GameState::IN_GAME &&
-                        !scenario_config.active() && !g_paused) {
-                        g_photoMode.active = g_playerController->photo_mode_active();
+                    // Photo-mode capture loop + codex/objectives/farming HUD
+                    // (app/DebugOverlays.cpp). Render-side, read-only observer.
+                    UpdatePhotoModeAndHud(g_app,
+                                          currentState,
+                                          window,
+                                          root_path_str,
+                                          g_playerController.get(),
+                                          g_camera.get(),
+                                          g_uiManager.get(),
+                                          audioManager.get(),
+                                          gameSession.get(),
+                                          renderPipeline,
+                                          scenario_config);
 
-                        // Codex browse overlay (client-only). Its toggle takes precedence
-                        // over the HUD/viewfinder swap below and cannot open while the
-                        // viewfinder is active. Closing it resyncs the hud-swap state.
-                        if (g_playerController->consume_codex_toggle() && !g_photoMode.active) {
-                            g_codexOpen = !g_codexOpen;
-                            if (audioManager)
-                                audioManager->PlayOneShot2D(g_codexOpen ? "ui_codex_open"
-                                                                        : "ui_codex_close");
-                            if (g_uiManager) {
-                                g_uiManager->RequestLoadDocument(g_codexOpen ? "codex.rml"
-                                                                             : "hud.rml");
-                                g_photoModeUiShown = false;
-                                g_codexSig.clear(); // force a repopulate on next open
-                            }
-                        }
-
-                        //  swap the in-game overlay between the HUD and the photo-mode viewfinder
-                        // when photo mode toggles (the capture loop + lens nudges below already
-                        // exist).
-                        if (!g_codexOpen && g_uiManager) {
-                            if (g_photoMode.active && !g_photoModeUiShown) {
-                                g_uiManager->RequestLoadDocument("photo_mode.rml");
-                                g_photoModeUiShown = true;
-                            } else if (!g_photoMode.active && g_photoModeUiShown) {
-                                g_uiManager->RequestLoadDocument("hud.rml");
-                                g_photoModeUiShown = false;
-                            }
-                        }
-
-                        // While the codex is open, populate it from the live codex+registry
-                        // (throttled by g_codexSig: only rebuild rows when discovery state
-                        // changes). Skips the HUD objective update below.
-                        if (g_codexOpen && g_uiManager && g_uiManager->GetContext()) {
-                            if (auto* doc = g_uiManager->GetContext()->GetDocument("codex")) {
-                                const luminumbra::game::CodexView cv =
-                                    luminumbra::game::BuildCodexView(g_creatureSpecies,
-                                                                     g_photoCodex);
-                                const int pct = static_cast<int>(cv.completeness * 100.0f + 0.5f);
-                                std::string sig = std::to_string(cv.discovered_count) + "/" +
-                                                  std::to_string(cv.total_species) + "|" +
-                                                  std::to_string(pct);
-                                if (sig != g_codexSig) {
-                                    g_codexSig = sig;
-                                    if (auto* h = doc->GetElementById("codex_completion")) {
-                                        h->SetInnerRML(std::to_string(cv.discovered_count) + " / " +
-                                                       std::to_string(cv.total_species) +
-                                                       " discovered \xC2\xB7 " +
-                                                       std::to_string(pct) + "%");
-                                    }
-                                    if (auto* list = doc->GetElementById("codex_list")) {
-                                        std::string rows_rml;
-                                        for (const auto& r : cv.rows) {
-                                            std::string stars;
-                                            for (int s = 0; s < 5; ++s)
-                                                stars +=
-                                                    (s < r.stars) ? "\xE2\x98\x85" : "\xE2\x98\x86";
-                                            const std::string cls = r.discovered
-                                                                        ? "codex-row codex-found"
-                                                                        : "codex-row codex-locked";
-                                            const std::string name =
-                                                r.discovered ? r.display_name : "? ? ?";
-                                            rows_rml += "<div class=\"" + cls +
-                                                        "\">"
-                                                        "<span class=\"codex-name\">" +
-                                                        name +
-                                                        "</span>"
-                                                        "<span class=\"codex-stars\">" +
-                                                        stars +
-                                                        "</span>"
-                                                        "</div>";
-                                        }
-                                        list->SetInnerRML(rows_rml);
-                                    }
-                                }
-                            }
-                        }
-
-                        //  lazily build the starter objective chain keyed on the
-                        // default world's first creature, then surface the current goal +
-                        // progress on the HUD. Throttled by g_objHudSig so the DOM is only
-                        // written when the current objective or its progress changes.
-                        if (!g_objectivesInit) {
-                            g_objectives = luminumbra::game::DefaultObjectives(static_cast<int>(
-                                Luminumbra::Components::CreatureSpeciesId16("grovestrider")));
-                            g_objectivesInit = true;
-                        }
-                        if (!g_codexOpen && !g_photoMode.active && g_uiManager &&
-                            g_uiManager->GetContext()) {
-                            if (auto* hud = g_uiManager->GetContext()->GetDocument("hud")) {
-                                const luminumbra::game::Objective* cur =
-                                    g_objectives.next_incomplete(g_photoCodex);
-                                const std::uint32_t done =
-                                    g_objectives.completed_count(g_photoCodex);
-                                // Everything maps to sound: a newly-completed goal rings the
-                                // success chime once (edge-triggered on the completed count).
-                                static std::uint32_t s_objDoneLast = 0;
-                                if (done > s_objDoneLast && audioManager)
-                                    audioManager->PlayOneShot2D("objective_complete",
-                                                                Luminumbra::Client::BusId::Events);
-                                s_objDoneLast = done;
-                                std::string title = "All goals complete";
-                                float progress = 1.0f;
-                                if (cur) {
-                                    title = cur->title;
-                                    progress =
-                                        luminumbra::game::EvaluateObjective(*cur, g_photoCodex)
-                                            .progress;
-                                }
-                                const int pct = static_cast<int>(progress * 100.0f + 0.5f);
-                                // Onboarding hint shows until the first capture lands a species.
-                                const bool show_tutorial = g_photoCodex.species_count() == 0;
-                                std::string sig = std::to_string(done) + "/" +
-                                                  std::to_string(g_objectives.size()) + "|" +
-                                                  title + "|" + std::to_string(pct) + "|" +
-                                                  (show_tutorial ? "t1" : "t0");
-                                if (sig != g_objHudSig) {
-                                    g_objHudSig = sig;
-                                    if (auto* e = hud->GetElementById("obj_title"))
-                                        e->SetInnerRML(title);
-                                    if (auto* e = hud->GetElementById("obj_progress"))
-                                        e->SetInnerRML(std::to_string(pct) + "%");
-                                    if (auto* e = hud->GetElementById("obj_count"))
-                                        e->SetInnerRML(std::to_string(done) + " / " +
-                                                       std::to_string(g_objectives.size()) +
-                                                       " goals");
-                                    if (auto* e = hud->GetElementById("tutorial_hint"))
-                                        e->SetClass("hidden", !show_tutorial);
-                                }
-                            }
-                        }
-                        //  farming HUD — seed/harvest inventory + the crop the
-                        // player is facing (stage + quality + a harvest hint). Shown once the
-                        // player is near a crop or has farmed, so it never clutters a non-farming
-                        // session. Signature-gated like the objective tracker; render-only (reads
-                        // sim state).
-                        if (!g_codexOpen && !g_photoMode.active && g_uiManager &&
-                            g_uiManager->GetContext() && gameSession && g_camera) {
-                            if (auto* hud = g_uiManager->GetContext()->GetDocument("hud")) {
-                                namespace FC = Luminumbra::Components;
-                                const auto& freg = gameSession->GetRegistry();
-                                const glm::vec3 ffwd = glm::normalize(
-                                    glm::vec3(g_camera->Front.x, 0.0f, g_camera->Front.z));
-                                const glm::vec3 aimXZ = glm::vec3(g_camera->Position) + ffwd * 3.0f;
-                                const Luminumbra::Vec3 aimv(aimXZ.x, g_camera->Position.y, aimXZ.z);
-                                const entt::entity crop =
-                                    luminumbra::foliage::FarmingController::NearestPlant(
-                                        freg, aimv, 3.0f);
-                                // Show once farming is in play: a crop in reach, a seed spent /
-                                // harvest made, or the player has cycled the species picker (so
-                                // it's discoverable).
-                                const bool farmed = g_farming.seeds != 5 || g_farming.harvests > 0;
-                                const bool show =
-                                    (crop != entt::null) || farmed || g_farmSelectedSpecies != 0;
-                                std::string cropText = "no crop in reach";
-                                if (crop != entt::null &&
-                                    freg.all_of<FC::PlantGrowthComponent>(crop)) {
-                                    const auto& g = freg.get<FC::PlantGrowthComponent>(crop);
-                                    static const char* kStage[] = {"seed",
-                                                                   "sprout",
-                                                                   "juvenile",
-                                                                   "mature",
-                                                                   "flowering",
-                                                                   "fruiting"};
-                                    const int s = g.stage < 6 ? static_cast<int>(g.stage) : 5;
-                                    // Optional species name (reverse-map the stable id; default
-                                    // "crop").
-                                    std::string sname = "crop";
-                                    if (g_farmSpeciesLoaded) {
-                                        for (const auto& t : g_farmSpecies.all())
-                                            if (luminumbra::foliage::SpeciesId16(t.id) ==
-                                                g.species_id) {
-                                                sname = t.id;
-                                                break;
-                                            }
-                                    }
-                                    cropText = sname + " - " + kStage[s] + " - quality " +
-                                               std::to_string(static_cast<int>(g.quality));
-                                    if (g.stage >=
-                                        static_cast<std::uint8_t>(FC::PlantStage::Mature))
-                                        cropText += " - ready (J)";
-                                }
-                                // Selected planting species (V cycles it) shown so the player knows
-                                // what F plants.
-                                std::string selName = "wheat";
-                                if (g_farmSpeciesLoaded && !g_farmSpecies.all().empty())
-                                    selName =
-                                        g_farmSpecies
-                                            .all()[static_cast<std::size_t>(g_farmSelectedSpecies) %
-                                                   g_farmSpecies.all().size()]
-                                            .id;
-                                const std::string inv =
-                                    selName + " - " + std::to_string(g_farming.seeds) +
-                                    " seeds - " + std::to_string(g_farming.harvests) + " harvested";
-                                const std::string sig = (show ? "1" : "0") + inv + "|" + cropText;
-                                if (sig != g_farmHudSig) {
-                                    g_farmHudSig = sig;
-                                    if (auto* e = hud->GetElementById("farming_panel"))
-                                        e->SetClass("hidden", !show);
-                                    if (auto* e = hud->GetElementById("farm_inv"))
-                                        e->SetInnerRML(inv);
-                                    if (auto* e = hud->GetElementById("farm_crop"))
-                                        e->SetInnerRML(cropText);
-                                }
-                            }
-                        }
-                        // photo-mode ENVIRONMENT scrub state (time-of-day + weather).
-                        // Render-only overrides of the visual day clock + weather overlay; they
-                        // NEVER touch the sim clock or WeatherSystem (world_hash unaffected).
-                        static bool s_photoEnvEngaged = false;
-                        static float s_photoTod = 0.5f;
-                        static int s_photoWeatherIdx = 0;
-                        static bool s_photoWeatherActive = false;
-                        if (!g_photoMode.active && s_photoEnvEngaged) {
-                            // Left photo mode: release the day-clock hold (live clock resumes); the
-                            // per-frame sim weather push restores driven weather next frame.
-                            s_photoEnvEngaged = false;
-                            s_photoWeatherActive = false;
-                            renderPipeline.set_time_of_day_hold(false);
-                            //  rendering: drop the manual exposure override so
-                            // the automatic time-of-day exposure curve resumes.
-                            renderPipeline.set_exposure_override(-1.0f);
-                        }
-                        if (g_photoMode.active) {
-                            // Apply lens nudges (aperture stops + focus metres), clamped
-                            // to sane photographic ranges.
-                            g_photoMode.lens.aperture_f +=
-                                g_playerController->consume_aperture_nudge();
-                            if (g_photoMode.lens.aperture_f < 1.0f)
-                                g_photoMode.lens.aperture_f = 1.0f;
-                            if (g_photoMode.lens.aperture_f > 32.0f)
-                                g_photoMode.lens.aperture_f = 32.0f;
-                            g_photoMode.lens.focus_distance_m +=
-                                g_playerController->consume_focus_nudge();
-                            if (g_photoMode.lens.focus_distance_m < 0.2f)
-                                g_photoMode.lens.focus_distance_m = 0.2f;
-                            if (g_photoMode.lens.focus_distance_m > 200.0f)
-                                g_photoMode.lens.focus_distance_m = 200.0f;
-
-                            //  manual exposure — shutter speed + ISO nudges
-                            // applied multiplicatively in stops. + shutter stop = FASTER
-                            // (less light, shorter time); + ISO stop = higher sensitivity.
-                            const float shutter_stops =
-                                g_playerController->consume_shutter_speed_nudge();
-                            if (shutter_stops != 0.0f) {
-                                g_photoMode.lens.shutter_s *= std::pow(2.0f, -shutter_stops);
-                                if (g_photoMode.lens.shutter_s < 1.0f / 4000.0f)
-                                    g_photoMode.lens.shutter_s = 1.0f / 4000.0f;
-                                if (g_photoMode.lens.shutter_s > 30.0f)
-                                    g_photoMode.lens.shutter_s = 30.0f;
-                            }
-                            const float iso_stops = g_playerController->consume_iso_nudge();
-                            if (iso_stops != 0.0f) {
-                                g_photoMode.lens.iso *= std::pow(2.0f, iso_stops);
-                                if (g_photoMode.lens.iso < 50.0f)
-                                    g_photoMode.lens.iso = 50.0f;
-                                if (g_photoMode.lens.iso > 25600.0f)
-                                    g_photoMode.lens.iso = 25600.0f;
-                            }
-
-                            //  rendering ( /  ): the lens now drives
-                            // the RENDER exposure. Map the (just-nudged) lens EV to an exposure
-                            // multiplier and push it; it OVERRIDES the analytic TOD exposure curve
-                            // so stopping down darkens and opening up brightens the frame —
-                            // the photographer exposes for the light. Render-only; never
-                            // world_hash.
-                            renderPipeline.set_exposure_override(
-                                Luminumbra::Rendering::ManualExposureMultiplier(g_photoMode.lens));
-
-                            //  /0.2: TIME-OF-DAY scrub (K/L) + WEATHER cycle (T).
-                            // On entry, seed the scrub from the live clock and HOLD it (so the
-                            // per-frame auto-advance stops); each frame push the scrubbed values to
-                            // the render pipeline. Render-only — the sim is never touched.
-                            if (!s_photoEnvEngaged) {
-                                s_photoEnvEngaged = true;
-                                s_photoTod = renderPipeline.get_time_of_day();
-                                renderPipeline.set_time_of_day_hold(true);
-                            }
-                            s_photoTod += g_playerController->consume_tod_nudge();
-                            s_photoTod -= std::floor(s_photoTod); // wrap to [0,1)
-                            renderPipeline.set_time_of_day(s_photoTod);
-                            if (const int wc = g_playerController->consume_weather_cycle();
-                                wc != 0) {
-                                s_photoWeatherActive = true;
-                                s_photoWeatherIdx = (((s_photoWeatherIdx + wc) % 5) + 5) % 5;
-                            }
-                            if (s_photoWeatherActive) {
-                                using WT = Luminumbra::Rendering::WeatherType;
-                                static const WT kW[5] = {
-                                    WT::None, WT::Fog, WT::Rain, WT::Snow, WT::Storm};
-                                renderPipeline.set_weather(kW[s_photoWeatherIdx],
-                                                           s_photoWeatherIdx == 0 ? 0.0f : 0.7f);
-                            }
-
-                            //  live-bind the viewfinder readouts to the current lens.
-                            if (g_uiManager && g_uiManager->GetContext()) {
-                                if (auto* doc =
-                                        g_uiManager->GetContext()->GetDocument("photo_mode")) {
-                                    char rbuf[24];
-                                    if (auto* e = doc->GetElementById("ro_aperture")) {
-                                        std::snprintf(rbuf,
-                                                      sizeof(rbuf),
-                                                      "f/%.1f",
-                                                      g_photoMode.lens.aperture_f);
-                                        e->SetInnerRML(rbuf);
-                                    }
-                                    if (auto* e = doc->GetElementById("ro_focus")) {
-                                        std::snprintf(rbuf,
-                                                      sizeof(rbuf),
-                                                      "%.1fm",
-                                                      g_photoMode.lens.focus_distance_m);
-                                        e->SetInnerRML(rbuf);
-                                    }
-                                    //  shutter + ISO + a live EV meter so the
-                                    // player sees whether they are exposing for the light.
-                                    if (auto* e = doc->GetElementById("ro_shutter")) {
-                                        const float ss = g_photoMode.lens.shutter_s;
-                                        if (ss >= 1.0f)
-                                            std::snprintf(rbuf, sizeof(rbuf), "%.1fs", ss);
-                                        else
-                                            std::snprintf(rbuf,
-                                                          sizeof(rbuf),
-                                                          "1/%d",
-                                                          static_cast<int>(1.0f / ss + 0.5f));
-                                        e->SetInnerRML(rbuf);
-                                    }
-                                    if (auto* e = doc->GetElementById("ro_iso")) {
-                                        std::snprintf(
-                                            rbuf,
-                                            sizeof(rbuf),
-                                            "ISO %d",
-                                            static_cast<int>(g_photoMode.lens.iso + 0.5f));
-                                        e->SetInnerRML(rbuf);
-                                    }
-                                    if (auto* e = doc->GetElementById("ro_ev")) {
-                                        const float live_lum = SceneLuminanceFromSunElevation(
-                                            renderPipeline.get_sun_elevation_rad());
-                                        const float lens_ev =
-                                            luminumbra::game::ExposureValue(g_photoMode.lens);
-                                        const float target_ev =
-                                            6.0f +
-                                            live_lum * 9.0f; // kSceneEvMin + lum*kSceneEvSpan
-                                        const float d =
-                                            lens_ev -
-                                            target_ev; // + = under (dark), - = over (blown)
-                                        const char* tag = (d > 0.5f)    ? " dark"
-                                                          : (d < -0.5f) ? " bright"
-                                                                        : " ok";
-                                        std::snprintf(rbuf, sizeof(rbuf), "%+.1f EV%s", d, tag);
-                                        e->SetInnerRML(rbuf);
-                                    }
-                                    // time-of-day phase (golden-hour cue for the photographer)
-                                    // + the active weather preset.
-                                    if (auto* e = doc->GetElementById("ro_tod")) {
-                                        const float elev = renderPipeline.get_sun_elevation_rad();
-                                        const char* ph = (elev > 0.6f)     ? "midday"
-                                                         : (elev > 0.12f)  ? "day"
-                                                         : (elev > -0.08f) ? "golden"
-                                                                           : "night";
-                                        e->SetInnerRML(ph);
-                                    }
-                                    if (auto* e = doc->GetElementById("ro_weather")) {
-                                        static const char* kWN[5] = {
-                                            "clear", "fog", "rain", "snow", "storm"};
-                                        e->SetInnerRML(s_photoWeatherActive ? kWN[s_photoWeatherIdx]
-                                                                            : "live");
-                                    }
-                                }
-                            }
-
-                            if (g_playerController->consume_shutter_request()) {
-                                // The core action gets its sound: a soft camera shutter on every
-                                // capture.
-                                if (audioManager)
-                                    audioManager->PlayOneShot2D("camera_shutter");
-                                int cap_w = 0, cap_h = 0;
-                                glfwGetFramebufferSize(window, &cap_w, &cap_h);
-                                //  scene luminance follows the sun so the
-                                // player must expose for the light (golden hour rewards,
-                                // night punishes). Render-derived; never feeds world_hash.
-                                const float scene_lum = SceneLuminanceFromSunElevation(
-                                    renderPipeline.get_sun_elevation_rad());
-                                // Build the shot from the live frame (CONST registry read).
-                                const std::vector<luminumbra::game::PhotoSubjectView> subjects =
-                                    GatherPhotoSubjects(gameSession->GetRegistry(),
-                                                        *g_camera,
-                                                        cap_w,
-                                                        cap_h,
-                                                        scene_lum);
-                                //  stamp the capture's time-of-day; BuildShotInput
-                                // fills the principal subject's behaviour + scene luminance.
-                                luminumbra::game::ObservationMetadata obs;
-                                obs.time_of_day = renderPipeline.get_time_of_day();
-                                const luminumbra::game::ShotInput shot =
-                                    luminumbra::game::BuildShotInput(
-                                        subjects, g_photoMode.lens, scene_lum, 0.5f, 1.0f, obs);
-                                // Was this species already in the codex BEFORE the capture? A
-                                // subject-bearing shot of a never-seen species is a DISCOVERY.
-                                const bool had_subject = !shot.composition.subjects.empty();
-                                const bool was_known =
-                                    had_subject && g_photoCodex.discovered(shot.main_species_id);
-                                const luminumbra::game::ShotVerdict verdict =
-                                    luminumbra::game::CaptureShot(g_photoCodex, shot);
-                                g_photoMode.last_total = verdict.total;
-                                g_photoMode.last_stars = verdict.stars;
-                                ++g_photoMode.captures;
-
-                                const bool is_discovery = had_subject && !was_known;
-                                const std::string species_name =
-                                    had_subject
-                                        ? g_creatureSpecies.DisplayName(
-                                              static_cast<std::uint16_t>(shot.main_species_id))
-                                        : std::string("no subject");
-
-                                //  reveal the star-verdict panel on the overlay (filled to
-                                //  last_stars). name the subject + flag a first-time DISCOVERY so
-                                //  the codex
-                                // fill is felt at the moment of capture.
-                                if (g_uiManager && g_uiManager->GetContext()) {
-                                    if (auto* doc =
-                                            g_uiManager->GetContext()->GetDocument("photo_mode")) {
-                                        if (auto* panel = doc->GetElementById("verdict-panel"))
-                                            panel->SetClass("hidden", false);
-                                        if (auto* heading =
-                                                doc->GetElementById("verdict_heading")) {
-                                            heading->SetInnerRML(had_subject ? species_name
-                                                                             : "captured");
-                                        }
-                                        if (auto* note = doc->GetElementById("verdict_note")) {
-                                            if (is_discovery) {
-                                                note->SetInnerRML(
-                                                    "New species discovered! \xE2\x98\x85 " +
-                                                    std::to_string(g_photoCodex.species_count()) +
-                                                    " in codex");
-                                                note->SetClass("verdict-discovery", true);
-                                            } else if (had_subject) {
-                                                note->SetInnerRML(
-                                                    "Codex updated \xC2\xB7 best shot kept");
-                                                note->SetClass("verdict-discovery", false);
-                                            } else {
-                                                note->SetInnerRML("no subject in frame");
-                                                note->SetClass("verdict-discovery", false);
-                                            }
-                                        }
-                                        if (auto* st = doc->GetElementById("verdict_stars")) {
-                                            std::string stars_rml;
-                                            for (int si = 0; si < 5; ++si) {
-                                                stars_rml +=
-                                                    (si < g_photoMode.last_stars)
-                                                        ? "<span class=\"verdict-star "
-                                                          "verdict-star-on\">\xE2\x98\x85</span>"
-                                                        : "<span "
-                                                          "class=\"verdict-star\">\xE2\x98\x85</"
-                                                          "span>";
-                                            }
-                                            st->SetInnerRML(stars_rml);
-                                        }
-                                    }
-                                }
-
-                                // Everything maps to sound: a first-time codex fill rings the
-                                // discovery chime at the moment of capture (2D, UI-felt).
-                                if (is_discovery && audioManager)
-                                    audioManager->PlayOneShot2D("discovery",
-                                                                Luminumbra::Client::BusId::Events);
-
-                                // Persist the framebuffer (PPM) + a verdict sidecar.
-                                std::error_code _photo_ec;
-                                const std::filesystem::path photo_dir =
-                                    std::filesystem::path(root_path_str) / "photos";
-                                std::filesystem::create_directories(photo_dir, _photo_ec);
-                                const std::string stamp =
-                                    "photo-" + std::to_string(g_photoMode.captures);
-                                if (cap_w > 0 && cap_h > 0) {
-                                    std::vector<unsigned char> px(static_cast<std::size_t>(cap_w) *
-                                                                  static_cast<std::size_t>(cap_h) *
-                                                                  3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(
-                                        0, 0, cap_w, cap_h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                                    WritePixelBufferPpm(
-                                        photo_dir / (stamp + ".ppm"), cap_w, cap_h, px);
-                                    // Also drop a small TGA thumbnail where the gallery can load it
-                                    // (RmlUi decodes TGA only). The gallery enumerates these on
-                                    // open.
-                                    WriteCaptureThumbnailTga(
-                                        std::filesystem::path(root_path_str) / "data" / "ui" /
-                                            "captures" /
-                                            ("cap_" + std::to_string(g_photoMode.captures) +
-                                             ".tga"),
-                                        cap_w,
-                                        cap_h,
-                                        px,
-                                        512);
-                                }
-                                luminumbra::game::PhotoSidecar side;
-                                side.stamp = stamp;
-                                side.verdict = verdict;
-                                side.species_id = shot.main_species_id;
-                                side.lens = g_photoMode.lens;
-                                side.observation = shot.observation; // behaviour/time/light context
-                                std::ofstream sidecar(photo_dir / (stamp + ".photo.json"),
-                                                      std::ios::binary | std::ios::trunc);
-                                if (sidecar) {
-                                    const std::string json =
-                                        luminumbra::game::SerializePhotoSidecar(side);
-                                    sidecar.write(json.data(),
-                                                  static_cast<std::streamsize>(json.size()));
-                                }
-                                LUMINUMBRA_CORE_INFO(
-                                    "Photo captured: {} stars (total {}), saved {}",
-                                    verdict.stars,
-                                    verdict.total,
-                                    stamp);
-                            }
-                        }
-                    }
-
-                    if (scenario_config.active() && currentState == GameState::IN_GAME) {
-                        ++scenario_frame_count;
-                        const auto now = std::chrono::steady_clock::now();
-                        // window_mode_stress_smoke: drive
-                        // one resize-chain step per frame after readiness. The
-                        // window itself stays pinned/hidden (capture protection),
-                        // but on_resize reallocates the non-pinned targets through
-                        // exactly the runtime resize path. We measure the resize
-                        // generation + GL errors AFTER this frame's render so the
-                        // PREVIOUS step's new targets have been drawn into once.
-                        if (scenario_config.window_mode_stress_smoke() && scenario_ready &&
-                            !window_mode_stress_complete) {
-                            if (window_mode_stress_steps.empty()) {
-                                window_mode_stress_steps = BuildWindowModeStressSequence();
-                            }
-                            // Finalize the step applied on the previous frame
-                            // (its targets were just rendered into this frame).
-                            if (window_mode_stress_step_index > 0) {
-                                WindowModeStressStep& done =
-                                    window_mode_stress_steps[window_mode_stress_step_index - 1];
-                                done.resize_generation_after = renderPipeline.resize_generation();
-                                done.gl_errors_after = CurrentGLDebugRuntimeStats().errors;
-                                done.targets_width_after =
-                                    static_cast<int>(renderPipeline.screen_width());
-                                done.targets_height_after =
-                                    static_cast<int>(renderPipeline.screen_height());
-                            }
-                            if (window_mode_stress_step_index < window_mode_stress_steps.size()) {
-                                WindowModeStressStep& step =
-                                    window_mode_stress_steps[window_mode_stress_step_index];
-                                step.resize_generation_before = renderPipeline.resize_generation();
-                                step.size_changed =
-                                    static_cast<int>(renderPipeline.screen_width()) != step.width ||
-                                    static_cast<int>(renderPipeline.screen_height()) != step.height;
-                                renderPipeline.on_resize(static_cast<unsigned int>(step.width),
-                                                         static_cast<unsigned int>(step.height));
-                                ++window_mode_stress_step_index;
-                            } else {
-                                // All steps applied + finalized: capture the
-                                // restored pinned-size frame (Smoke-equivalent).
-                                // Targets are 1280x720; render one clean frame
-                                // into the default framebuffer for the readback.
-                                window_mode_stress_capture.width =
-                                    static_cast<int>(renderPipeline.screen_width());
-                                window_mode_stress_capture.height =
-                                    static_cast<int>(renderPipeline.screen_height());
-                                window_mode_stress_capture.file = "window-mode-stress-final.ppm";
-                                ScreenshotPixelStats final_stats;
-                                if (WriteBackbufferPpm(scenario_config.artifact_dir /
-                                                           window_mode_stress_capture.file,
-                                                       window_mode_stress_capture.width,
-                                                       window_mode_stress_capture.height,
-                                                       &final_stats)) {
-                                    window_mode_stress_capture.pixels = final_stats;
-                                }
-                                window_mode_stress_complete = true;
-                            }
-                        }
-                        if (lod_ground_frame_recorder.enabled()) {
-                            lod_ground_frame_recorder.record_frame(
-                                deltaTime, gameSession.get(), renderPipeline, scenario_frame_count);
-                        }
-                        if (scenario_config.lod_boundary_oscillation_smoke() && scenario_ready) {
-                            lod_boundary_transition_recorder.record_frame(
-                                gameSession->GetWorldSystem());
-                        }
-                        if (scenario_config.lod_seam_arrival_smoke() && scenario_ready) {
-                            lod_seam_arrival_recorder.record_frame(gameSession->GetWorldSystem());
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const std::array<double, 4> thresholds{0.25, 0.50, 0.75, 0.95};
-                            const std::array<const char*, 4> names{"p25", "p50", "p75", "p95"};
-                            for (std::size_t i = 0; i < thresholds.size(); ++i) {
-                                if (lod_seam_screenshots_written[i] || progress < thresholds[i]) {
-                                    continue;
-                                }
-                                lod_seam_screenshots_written[i] = true;
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                const std::string relative_path =
-                                    std::string("screenshots/lod-seam-") + names[i] + ".ppm";
-                                LodHolePixelStats hole_stats;
-                                if (WriteBackbufferPpm(scenario_config.artifact_dir / relative_path,
-                                                       screenshot_width,
-                                                       screenshot_height,
-                                                       nullptr,
-                                                       &hole_stats)) {
-                                    lod_seam_visual_captures.push_back(
-                                        {names[i], relative_path, hole_stats});
-                                    WriteLodSeamArrivalAnalysis(scenario_config.artifact_dir,
-                                                                elapsed_play_seconds,
-                                                                lod_seam_visual_captures,
-                                                                lod_seam_arrival_recorder);
-                                }
-                            }
-                        }
-                        if (scenario_config.lod_ground_smoke() && scenario_ready) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const std::array<double, 3> thresholds{0.15, 0.55, 0.95};
-                            const std::array<const char*, 3> names{"start", "mid", "end"};
-                            for (std::size_t i = 0; i < thresholds.size(); ++i) {
-                                if (lod_ground_screenshots_written[i] || progress < thresholds[i]) {
-                                    continue;
-                                }
-                                lod_ground_screenshots_written[i] = true;
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                const std::string relative_path =
-                                    std::string("screenshots/lod-ground-") + names[i] + ".ppm";
-                                LodHolePixelStats hole_stats;
-                                if (WriteBackbufferPpm(scenario_config.artifact_dir / relative_path,
-                                                       screenshot_width,
-                                                       screenshot_height,
-                                                       nullptr,
-                                                       &hole_stats)) {
-                                    lod_ground_screenshot_files.push_back(relative_path);
-                                    lod_ground_visual_captures.push_back(
-                                        {names[i], relative_path, hole_stats});
-                                    WriteLodGroundScreenshotIndex(scenario_config.artifact_dir,
-                                                                  lod_ground_screenshot_files);
-                                    WriteLodGroundVisualAnalysis(scenario_config.artifact_dir,
-                                                                 lod_ground_visual_captures);
-                                }
-                            }
-                        }
-                        if (scenario_config.water_visual_smoke() && scenario_ready &&
-                            !water_reflection_capture_written) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            // sample the ROI water luminance roughly once a
-                            // second while the top-down framing is active; the analysis
-                            // requires temporal variance across these samples (animated
-                            // caustics, not a static tint).
-                            if (!water_visual_capture_written &&
-                                render_pass_stats.water_draws > 0 && water_visual_target.found &&
-                                elapsed_play_seconds >= water_caustics_next_sample_seconds) {
-                                int sample_width = 0;
-                                int sample_height = 0;
-                                glfwGetFramebufferSize(window, &sample_width, &sample_height);
-                                WaterCausticsSample caustics_sample =
-                                    SampleBackbufferWaterLuminance(
-                                        sample_width, sample_height, elapsed_play_seconds);
-                                caustics_sample.texture_mean_abs_delta = SampleCausticsTextureDelta(
-                                    renderPipeline.water_caustics_texture(),
-                                    water_caustics_previous_texels);
-                                water_caustics_samples.push_back(caustics_sample);
-                                water_caustics_next_sample_seconds = elapsed_play_seconds + 1.0;
-                            }
-                            // Main capture (top-down framing) at 50% progress.
-                            if (!water_visual_capture_written && progress >= 0.50 &&
-                                progress < 0.60 && render_pass_stats.water_draws > 0 &&
-                                water_visual_target.found && water_caustics_samples.size() >= 2) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-
-                                    if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                "screenshots/water-visual.ppm",
-                                                            screenshot_width,
-                                                            screenshot_height,
-                                                            frame_pixels)) {
-                                        water_visual_capture_written = true;
-                                        water_visual_pixel_stats = AnalyzeScreenshotPixels(
-                                            frame_pixels, screenshot_width, screenshot_height);
-
-                                        // depth tint gradient + shoreline foam
-                                        // probes around the projected shallow/deep points.
-                                        constexpr int kWaterPatchRadius = 10;
-                                        int patch_x = 0;
-                                        int patch_y = 0;
-                                        if (water_visual_target.shallow_point_found && g_camera &&
-                                            project_world_to_capture(
-                                                *g_camera,
-                                                water_visual_target.shallow_point,
-                                                screenshot_width,
-                                                screenshot_height,
-                                                kWaterPatchRadius,
-                                                patch_x,
-                                                patch_y)) {
-                                            water_shallow_patch =
-                                                AnalyzeWaterRegionPatch(frame_pixels,
-                                                                        screenshot_width,
-                                                                        screenshot_height,
-                                                                        patch_x,
-                                                                        patch_y,
-                                                                        kWaterPatchRadius);
-                                        }
-                                        if (water_visual_target.deep_point_found && g_camera &&
-                                            project_world_to_capture(*g_camera,
-                                                                     water_visual_target.deep_point,
-                                                                     screenshot_width,
-                                                                     screenshot_height,
-                                                                     kWaterPatchRadius,
-                                                                     patch_x,
-                                                                     patch_y)) {
-                                            water_deep_patch =
-                                                AnalyzeWaterRegionPatch(frame_pixels,
-                                                                        screenshot_width,
-                                                                        screenshot_height,
-                                                                        patch_x,
-                                                                        patch_y,
-                                                                        kWaterPatchRadius);
-                                        }
-                                        // Wider patch for the foam band: the projected
-                                        // point sits mid-band, the extra radius tolerates
-                                        // the heightfield-vs-mesh shoreline offset.
-                                        constexpr int kFoamPatchRadius = 16;
-                                        if (water_visual_target.foam_point_found && g_camera &&
-                                            project_world_to_capture(*g_camera,
-                                                                     water_visual_target.foam_point,
-                                                                     screenshot_width,
-                                                                     screenshot_height,
-                                                                     kFoamPatchRadius,
-                                                                     patch_x,
-                                                                     patch_y)) {
-                                            water_foam_patch =
-                                                AnalyzeWaterRegionPatch(frame_pixels,
-                                                                        screenshot_width,
-                                                                        screenshot_height,
-                                                                        patch_x,
-                                                                        patch_y,
-                                                                        kFoamPatchRadius);
-                                        }
-                                    }
-                                }
-                            }
-                            // Reflection capture (grazing open-water framing, )
-                            // at 85% progress; writes the combined analysis artifact.
-                            if (water_visual_capture_written && progress >= 0.85 &&
-                                render_pass_stats.water_draws > 0 && water_visual_target.found) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-
-                                    // Correlate the reflective upper water band against the
-                                    // same sky reference the water shader uses for SSR
-                                    // misses. The scenario pins time_of_day at 0.04 (sun
-                                    // near zenith), so the sun intensity is 1.0.
-                                    const WaterReflectionStats reflection_stats =
-                                        AnalyzeWaterReflection(
-                                            frame_pixels,
-                                            screenshot_width,
-                                            screenshot_height,
-                                            Luminumbra::Rendering::WaterPass::
-                                                approximate_sky_reflection_color(1.0f));
-                                    const std::string reflection_path =
-                                        "screenshots/water-reflection.ppm";
-                                    if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                reflection_path,
-                                                            screenshot_width,
-                                                            screenshot_height,
-                                                            frame_pixels)) {
-                                        water_reflection_capture_written = true;
-                                        WriteWaterVisualAnalysis(
-                                            scenario_config.artifact_dir,
-                                            "screenshots/water-visual.ppm",
-                                            reflection_path,
-                                            water_visual_target,
-                                            water_visual_pixel_stats,
-                                            render_pass_stats,
-                                            renderPipeline.get_last_mesh_upload_stats(),
-                                            water_caustics_samples,
-                                            reflection_stats,
-                                            water_shallow_patch,
-                                            water_deep_patch,
-                                            water_foam_patch);
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.material_visual_smoke() && scenario_ready &&
-                            !material_visual_capture_written) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            if (progress >= 0.50 && render_pass_stats.terrain_draws > 0 &&
-                                material_visual_target.found) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-
-                                    const std::string screenshot_path =
-                                        "screenshots/material-visual.ppm";
-                                    const std::string heatmap_path =
-                                        "screenshots/material-id-heatmap.ppm";
-                                    const MaterialPixelStats material_stats = AnalyzeMaterialPixels(
-                                        frame_pixels, screenshot_width, screenshot_height);
-                                    const std::vector<unsigned char> heatmap_pixels =
-                                        BuildMaterialHeatmap(
-                                            frame_pixels, screenshot_width, screenshot_height);
-                                    const bool wrote_screenshot = WritePixelBufferPpm(
-                                        scenario_config.artifact_dir / screenshot_path,
-                                        screenshot_width,
-                                        screenshot_height,
-                                        frame_pixels);
-                                    const bool wrote_heatmap = WritePixelBufferPpm(
-                                        scenario_config.artifact_dir / heatmap_path,
-                                        screenshot_width,
-                                        screenshot_height,
-                                        heatmap_pixels);
-                                    if (wrote_screenshot && wrote_heatmap) {
-                                        material_visual_capture_written = true;
-                                        WriteMaterialVisualAnalysis(scenario_config.artifact_dir,
-                                                                    screenshot_path,
-                                                                    heatmap_path,
-                                                                    material_visual_target,
-                                                                    material_stats,
-                                                                    render_pass_stats);
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.skybox_visual_smoke() && scenario_ready &&
-                            !skybox_visual_capture_written) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            if (progress >= 0.50 && render_pass_stats.skybox_draws > 0) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-
-                                    double sun_screen_x = 0.0;
-                                    double sun_screen_y = 0.0;
-                                    const bool sun_on_screen =
-                                        ProjectDirectionToScreen(*g_camera,
-                                                                 screenshot_width,
-                                                                 screenshot_height,
-                                                                 TowardSunDirection(0.04f),
-                                                                 sun_screen_x,
-                                                                 sun_screen_y);
-                                    const SkyboxPixelStats skybox_stats =
-                                        AnalyzeSkyboxPixels(frame_pixels,
-                                                            screenshot_width,
-                                                            screenshot_height,
-                                                            sun_screen_x,
-                                                            sun_screen_y,
-                                                            sun_on_screen);
-                                    const std::string screenshot_path =
-                                        "screenshots/skybox-visual.ppm";
-                                    if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                screenshot_path,
-                                                            screenshot_width,
-                                                            screenshot_height,
-                                                            frame_pixels)) {
-                                        skybox_visual_capture_written = true;
-                                        WriteSkyboxVisualAnalysis(scenario_config.artifact_dir,
-                                                                  screenshot_path,
-                                                                  skybox_stats,
-                                                                  sun_screen_x,
-                                                                  sun_screen_y,
-                                                                  sun_on_screen,
-                                                                  render_pass_stats);
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.weather_visual_smoke() && scenario_ready &&
-                            !weather_visual_capture_written) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            const bool capture_baseline = !weather_baseline_capture_written &&
-                                                          progress >= 0.35 && progress < 0.5;
-                            const bool capture_weather =
-                                weather_baseline_capture_written && progress >= 0.85;
-                            if ((capture_baseline || capture_weather) &&
-                                render_pass_stats.skybox_draws > 0) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-                                    const WeatherPixelStats stats = AnalyzeWeatherPixels(
-                                        frame_pixels, screenshot_width, screenshot_height);
-                                    if (capture_baseline) {
-                                        const std::string baseline_path =
-                                            "screenshots/weather-baseline.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    baseline_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            weather_baseline_capture_written = true;
-                                            weather_baseline_stats = stats;
-                                        }
-                                    } else {
-                                        const std::string weather_path =
-                                            "screenshots/weather-visual.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    weather_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            weather_visual_capture_written = true;
-                                            WriteWeatherVisualAnalysis(
-                                                scenario_config.artifact_dir,
-                                                "screenshots/weather-baseline.ppm",
-                                                weather_path,
-                                                weather_baseline_stats,
-                                                stats,
-                                                "rain",
-                                                1.0f,
-                                                render_pass_stats);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // lightning strike-frame capture. NEIGHBOUR
-                        // (pre-strike, lightning off) just before the strike window,
-                        // then the STRIKE frame inside it (pulse active). The gate
-                        // asserts the frame-mean luminance PULSE delta + BOLT pixels.
-                        if (scenario_config.weather_visual_smoke() && scenario_ready &&
-                            !lightning_strike_capture_written) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            const auto& lit_state = renderPipeline.get_lightning_state();
-                            // Neighbour: a pre-strike frame (lightning provably OFF).
-                            const bool capture_neighbor = !lightning_neighbor_captured &&
-                                                          progress >= 0.76 && progress < 0.80 &&
-                                                          !lit_state.active;
-                            // Strike: a frame inside the window where the pulse is ON.
-                            const bool capture_strike = lightning_neighbor_captured &&
-                                                        lit_state.active &&
-                                                        lit_state.pulse_intensity > 0.0f &&
-                                                        progress >= 0.80 && progress < 0.84;
-                            if ((capture_neighbor || capture_strike) &&
-                                render_pass_stats.lighting_draws > 0) {
-                                int sw = 0, sh = 0;
-                                glfwGetFramebufferSize(window, &sw, &sh);
-                                if (sw > 0 && sh > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(sw) *
-                                        static_cast<std::size_t>(sh) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 sw,
-                                                 sh,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-                                    const auto stats =
-                                        Luminumbra::Client::ScenarioHarness::AnalyzeStrikePixels(
-                                            frame_pixels, sw, sh);
-                                    if (capture_neighbor) {
-                                        const std::string neighbor_path =
-                                            "screenshots/lightning-neighbor.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    neighbor_path,
-                                                                sw,
-                                                                sh,
-                                                                frame_pixels)) {
-                                            lightning_neighbor_captured = true;
-                                            lightning_neighbor_stats = stats;
-                                        }
-                                    } else {
-                                        const std::string strike_path =
-                                            "screenshots/lightning-strike.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    strike_path,
-                                                                sw,
-                                                                sh,
-                                                                frame_pixels)) {
-                                            lightning_strike_capture_written = true;
-                                            Luminumbra::Client::ScenarioHarness::
-                                                WriteStrikeVisualAnalysis(
-                                                    scenario_config.artifact_dir,
-                                                    "screenshots/lightning-neighbor.ppm",
-                                                    strike_path,
-                                                    lightning_neighbor_stats,
-                                                    stats,
-                                                    lightning_sim_strikes_scheduled,
-                                                    render_pass_stats.lightning_pulse_gpu_ms,
-                                                    render_pass_stats);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.cloud_shadow_smoke() && scenario_ready &&
-                            !cloud_shadow_done) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            const auto& cloud_state = renderPipeline.get_cloud_state();
-                            // Sample the clouds-OFF lighting GPU baseline during the
-                            // shadow-off warmup window (the camera branch keeps the
-                            // cast shadow off until progress >= 0.15).
-                            if (!cloud_shadow_lighting_off_sampled && progress >= 0.10 &&
-                                progress < 0.15 && render_pass_stats.lighting_draws > 0 &&
-                                render_pass_stats.lighting_gpu_ms > 0.0) {
-                                cloud_shadow_lighting_ms_off = render_pass_stats.lighting_gpu_ms;
-                                cloud_shadow_lighting_off_sampled = true;
-                            }
-                            // Two terrain-ROI captures with the cast shadow ON, far
-                            // enough apart that the wind has drifted a shadow edge
-                            // across the fixed ROI (t0 ~45%, t1 ~92%).
-                            const bool capture_t0 =
-                                !cloud_shadow_t0_written && progress >= 0.45 && progress < 0.55;
-                            const bool capture_t1 = cloud_shadow_t0_written && progress >= 0.90;
-                            if ((capture_t0 || capture_t1) && render_pass_stats.skybox_draws > 0) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-                                    const Luminumbra::Client::ScenarioHarness::CloudShadowPixelStats
-                                        stats = Luminumbra::Client::ScenarioHarness::
-                                            AnalyzeCloudShadowPixels(
-                                                frame_pixels, screenshot_width, screenshot_height);
-                                    if (capture_t0) {
-                                        const std::string t0_path =
-                                            "screenshots/cloud-shadow-t0.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    t0_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            cloud_shadow_t0_written = true;
-                                            cloud_shadow_terrain_luma_t0 =
-                                                stats.terrain_roi_mean_luminance;
-                                            cloud_shadow_scroll_t0 =
-                                                static_cast<double>(cloud_state.scroll_offset.x);
-                                        }
-                                    } else {
-                                        const std::string t1_path =
-                                            "screenshots/cloud-shadow-t1.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    t1_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            Luminumbra::Client::ScenarioHarness::CloudShadowResult
-                                                result;
-                                            result.terrain_roi_luminance_t0 =
-                                                cloud_shadow_terrain_luma_t0;
-                                            result.terrain_roi_luminance_t1 =
-                                                stats.terrain_roi_mean_luminance;
-                                            result.terrain_roi_luminance_delta =
-                                                std::abs(result.terrain_roi_luminance_t1 -
-                                                         result.terrain_roi_luminance_t0);
-                                            result.sky_mean_luminance = stats.sky_mean_luminance;
-                                            result.sky_horizontal_gradient_mean =
-                                                stats.sky_horizontal_gradient_mean;
-                                            result.cloud_layer_present =
-                                                stats.sky_horizontal_gradient_mean > 0.0;
-                                            result.lighting_gpu_ms_clouds_off =
-                                                cloud_shadow_lighting_ms_off;
-                                            result.lighting_gpu_ms_clouds_on =
-                                                render_pass_stats.cloud_shadow_gpu_ms;
-                                            result.cloud_shadow_added_ms =
-                                                std::max(0.0,
-                                                         result.lighting_gpu_ms_clouds_on -
-                                                             result.lighting_gpu_ms_clouds_off);
-                                            result.gpu_timers_supported =
-                                                render_pass_stats.gpu_timers_supported &&
-                                                cloud_shadow_lighting_off_sampled &&
-                                                render_pass_stats.cloud_shadow_gpu_ms > 0.0;
-                                            result.coverage_amount = cloud_state.coverage_amount;
-                                            result.shadow_strength = cloud_state.shadow_strength;
-                                            result.scroll_offset_t0 = cloud_shadow_scroll_t0;
-                                            result.scroll_offset_t1 =
-                                                static_cast<double>(cloud_state.scroll_offset.x);
-                                            Luminumbra::Client::ScenarioHarness::
-                                                WriteCloudShadowAnalysis(
-                                                    scenario_config.artifact_dir,
-                                                    "screenshots/cloud-shadow-t0.ppm",
-                                                    t1_path,
-                                                    t1_path,
-                                                    result,
-                                                    render_pass_stats);
-                                            cloud_shadow_done = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.particle_emitter_determinism_smoke() &&
-                            scenario_ready && !particle_determinism_capture_written) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            // Capture once particles are visibly rendering (the
-                            // pass reports draws) and late enough that the GPU
-                            // timer ring has resolved a real sample.
-                            if (progress >= 0.5 && render_pass_stats.particle_draws > 0) {
-                                auto* particles = renderPipeline.particles();
-                                if (particles != nullptr) {
-                                    // --- DETERMINISM ASSERTION (regression review) ---
-                                    // Rebuild the sim-deterministic emitter
-                                    // DESCRIPTOR SET from identical world state
-                                    // twice; the descriptor bytes must be
-                                    // byte-equal across runs. Per-particle motion
-                                    // is render-only and is NOT snapshotted here.
-                                    std::uint64_t world_seed = 0;
-                                    if (auto* ws = gameSession->GetWorldSystem()) {
-                                        world_seed = static_cast<std::uint64_t>(
-                                            static_cast<std::uint32_t>(ws->get_seed()));
-                                    }
-                                    const std::uint64_t world_tick =
-                                        gameSession->GetSimulationTickCount();
-
-                                    particles->rebuild_emitter_descriptors(world_seed, world_tick);
-                                    const auto descriptors_a = particles->emitter_descriptors();
-                                    const std::uint64_t hash_a =
-                                        particles->emitter_descriptor_hash();
-
-                                    particles->rebuild_emitter_descriptors(world_seed, world_tick);
-                                    const auto descriptors_b = particles->emitter_descriptors();
-                                    const std::uint64_t hash_b =
-                                        particles->emitter_descriptor_hash();
-
-                                    const bool byte_equal =
-                                        descriptors_a.size() == descriptors_b.size() &&
-                                        std::memcmp(descriptors_a.data(),
-                                                    descriptors_b.data(),
-                                                    descriptors_a.size() *
-                                                        sizeof(Luminumbra::Rendering::ParticlePass::
-                                                                   EmitterDescriptor)) == 0;
-
-                                    Luminumbra::Client::ScenarioHarness::ParticleDeterminismResult
-                                        result;
-                                    result.world_seed = world_seed;
-                                    result.world_tick = world_tick;
-                                    result.descriptor_hash_run_a = hash_a;
-                                    result.descriptor_hash_run_b = hash_b;
-                                    result.descriptor_count = descriptors_a.size();
-                                    result.byte_equal = byte_equal && hash_a == hash_b;
-                                    result.particle_pass_gpu_ms = render_pass_stats.particle_gpu_ms;
-                                    result.particles_drawn = render_pass_stats.particles_drawn;
-
-                                    int screenshot_width = 0;
-                                    int screenshot_height = 0;
-                                    glfwGetFramebufferSize(
-                                        window, &screenshot_width, &screenshot_height);
-                                    if (screenshot_width > 0 && screenshot_height > 0) {
-                                        std::vector<unsigned char> frame_pixels(
-                                            static_cast<std::size_t>(screenshot_width) *
-                                            static_cast<std::size_t>(screenshot_height) * 3u);
-                                        glReadBuffer(GL_BACK);
-                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                        glReadPixels(0,
-                                                     0,
-                                                     screenshot_width,
-                                                     screenshot_height,
-                                                     GL_RGB,
-                                                     GL_UNSIGNED_BYTE,
-                                                     frame_pixels.data());
-                                        const std::string screenshot_path =
-                                            "screenshots/particle-determinism.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    screenshot_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            particle_determinism_capture_written = true;
-                                            WriteParticleEmitterDeterminismAnalysis(
-                                                scenario_config.artifact_dir,
-                                                screenshot_path,
-                                                result,
-                                                render_pass_stats);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        //  dump consecutive STORM
-                        // frames for the motion clip. Once the rain pass is drawing,
-                        // write one frame per iteration as motion/frame_%03d.ppm until
-                        // kAtmosMotionFrameCount frames are captured.
-                        if (atmos_motion_capture && scenario_config.precipitation_smoke() &&
-                            scenario_ready && atmos_motion_frame_index < kAtmosMotionFrameCount) {
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            const double motion_now_s =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const bool motion_interval_elapsed =
-                                atmos_motion_last_capture_s < 0.0 ||
-                                (motion_now_s - atmos_motion_last_capture_s) >=
-                                    kAtmosMotionFrameIntervalS;
-                            if (render_pass_stats.particle_draws > 0 && motion_interval_elapsed) {
-                                int mw = 0;
-                                int mh = 0;
-                                glfwGetFramebufferSize(window, &mw, &mh);
-                                if (mw > 0 && mh > 0) {
-                                    std::vector<unsigned char> mpx(static_cast<std::size_t>(mw) *
-                                                                   static_cast<std::size_t>(mh) *
-                                                                   3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(
-                                        0, 0, mw, mh, GL_RGB, GL_UNSIGNED_BYTE, mpx.data());
-                                    char name[32];
-                                    std::snprintf(name,
-                                                  sizeof(name),
-                                                  "motion/frame_%03d.ppm",
-                                                  atmos_motion_frame_index);
-                                    if (WritePixelBufferPpm(
-                                            scenario_config.artifact_dir / name, mw, mh, mpx)) {
-                                        ++atmos_motion_frame_index;
-                                        atmos_motion_last_capture_s = motion_now_s;
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.foliage_visual_smoke() && scenario_ready &&
-                            !foliage_capture_written) {
-                            // record the CALM-phase max sway (~0) during
-                            // the first half, then at the late WINDY phase snapshot the
-                            // instance set, assert determinism (two rebuilds byte-equal),
-                            // measure coverage density / distance-fade / wind-sway, and
-                            // write the FoliageInstancing analysis + a render capture.
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            auto* foliage = renderPipeline.foliage();
-                            // Sample the calm-phase max sway (zero wind) once mid-first-half.
-                            if (foliage != nullptr && !foliage_calm_sampled && progress >= 0.30 &&
-                                progress < 0.45 && render_pass_stats.foliage_draws > 0) {
-                                foliage_calm_max_sway =
-                                    static_cast<double>(foliage->max_sway_displacement());
-                                foliage_calm_sampled = true;
-                            }
-                            if (foliage != nullptr && progress >= 0.85 &&
-                                foliage->readback_enabled() &&
-                                render_pass_stats.foliage_draws > 0 &&
-                                render_pass_stats.foliage_instances_drawn > 0) {
-                                // The placement hash is a pure function of the chunk
-                                // inputs; the instance-set hash from the just-built
-                                // frame is the determinism surface. Snapshot it twice
-                                // off the SAME live instance set (already rebuilt this
-                                // frame) -- byte-equal by construction; the run==run
-                                // assertion documents the surface.
-                                const std::uint64_t hash_a = foliage->instance_hash();
-                                const std::uint64_t hash_b = foliage->instance_hash();
-
-                                std::uint64_t world_seed = 0;
-                                Luminumbra::u8 probe_biome = 255;
-                                double biome_density = 0.0;
-                                if (auto* ws = gameSession->GetWorldSystem()) {
-                                    world_seed = static_cast<std::uint64_t>(
-                                        static_cast<std::uint32_t>(ws->get_seed()));
-                                    // Biome density at the camera column (the scatter's
-                                    // dominant local biome) for the coverage band check.
-                                    const Luminumbra::Vec3 cam(g_camera->Position.x,
-                                                               g_camera->Position.y,
-                                                               g_camera->Position.z);
-                                    probe_biome = ws->BiomeIdAt(cam.x, cam.z);
-                                    biome_density =
-                                        ws->biomes_enabled()
-                                            ? ws->biome_table().vegetation_for(probe_biome).density
-                                            : 0.3;
-                                }
-
-                                Luminumbra::Client::ScenarioHarness::FoliageInstancingResult result;
-                                result.world_seed = world_seed;
-                                result.instance_hash_run_a = hash_a;
-                                result.instance_hash_run_b = hash_b;
-                                result.hash_byte_equal = (hash_a == hash_b);
-                                result.instances_total = foliage->instances().size();
-                                const float ring_radius = foliage->fade_end_m();
-                                result.live_ring_radius_m = ring_radius;
-                                result.fade_start_m = foliage->fade_start_m();
-                                result.fade_end_m = foliage->fade_end_m();
-                                result.instances_within_ring =
-                                    foliage->instances_within(g_camera->Position, ring_radius);
-                                result.instances_beyond_fade =
-                                    foliage->instances_beyond(g_camera->Position, ring_radius);
-                                // Measured density: live in-ring instances normalized by
-                                // a nominal full-cover count (so it tracks biome_density
-                                // on the same [0,1] scale; banded loosely since scatter
-                                // also depends on slope/moisture + the visible footprint).
-                                //  (defect 2): the candidate
-                                // budget per chunk was raised 256 -> 2048 to make the
-                                // ground read as real grass cover, so the in-ring instance
-                                // COUNT scales up proportionally. Re-bless the normalizer
-                                // (nominal full-cover count) to the new ~8x denser scatter
-                                // so measured_density still lands on the biome [0,1] scale,
-                                // and keep the loose band. DELIBERATE update the baseline (logged).
-                                //  update the baseline (2026-06-21): the prior 32768 under-shot —
-                                // the dense flat_lands scatter emits ~70k in-ring instances, so
-                                // measured saturated at 1.0 (gate off-band 1.0 vs biome 0.3).
-                                // Calibrate so measured ~= biome_density for the real ~70k
-                                // scatter (70000 / 0.3); the loose 0.6 band absorbs run-to-run
-                                // chunk-churn variance (scatter can ~2.9x before the band edge).
-                                //  update the baseline (2026-07-02): the #1b-lush density default
-                                // (FoliagePass m_density_scale 1.35) + the 48/92 m carpet fade
-                                // deliberately SATURATE the 262144 instance budget in flat_lands —
-                                // measured in-ring == kMaxInstances on the first green run after
-                                // the defoliation fix. Calibrate so measured ~= biome_density (0.3)
-                                // at saturation (262144 / 0.3); the gate separately asserts a hard
-                                // in-ring FLOOR so decimation-class regressions stay RED.
-                                const double nominal_full = 873813.0;
-                                result.measured_density =
-                                    std::clamp(static_cast<double>(result.instances_within_ring) /
-                                                   nominal_full,
-                                               0.0,
-                                               1.0);
-                                result.biome_density = biome_density;
-                                result.biome_density_band = 0.6; // loose band (footprint-dependent)
-                                result.calm_max_sway = foliage_calm_max_sway;
-                                result.windy_max_sway =
-                                    static_cast<double>(foliage->max_sway_displacement());
-                                result.sway_responds = result.windy_max_sway > result.calm_max_sway;
-                                result.foliage_gpu_ms = render_pass_stats.foliage_gpu_ms;
-                                result.foliage_budget_ms = 0.6;
-                                result.gpu_timers_supported =
-                                    render_pass_stats.gpu_timers_supported &&
-                                    render_pass_stats.foliage_gpu_ms > 0.0;
-                                result.foliage_draws = render_pass_stats.foliage_draws;
-                                result.foliage_instances_drawn =
-                                    render_pass_stats.foliage_instances_drawn;
-
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-                                    const std::string screenshot_path =
-                                        "screenshots/foliage-instancing.ppm";
-                                    if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                screenshot_path,
-                                                            screenshot_width,
-                                                            screenshot_height,
-                                                            frame_pixels)) {
-                                        foliage_capture_written = true;
-                                        Luminumbra::Client::ScenarioHarness::
-                                            WriteFoliageInstancingAnalysis(
-                                                scenario_config.artifact_dir,
-                                                screenshot_path,
-                                                result,
-                                                render_pass_stats);
-                                    }
-                                }
-                            }
-                            // never end a gate run SILENT. If the analysis was not
-                            // written by the tail of the run, write an explicit REFUSAL analysis
-                            // naming why — a readback-disabled run must fail loudly (its instance
-                            // probes are vacuous: play mode publishes the kMaxInstances marker),
-                            // and a zero-instance scatter must fail as EMPTY (the defoliation
-                            // class), not as a mysteriously missing artifact.
-                            if (!foliage_capture_written && progress >= 0.97) {
-                                foliage_capture_written = true;
-                                std::string refusal_reason;
-                                if (foliage == nullptr) {
-                                    refusal_reason = "foliage pass unavailable in this run";
-                                } else if (!foliage->readback_enabled()) {
-                                    refusal_reason =
-                                        "readback-disabled: instance probes are vacuous (play-mode "
-                                        "kMaxInstances marker); run the gate scenario with "
-                                        "readback enabled";
-                                } else if (render_pass_stats.foliage_draws <= 0) {
-                                    refusal_reason = "no foliage draws reached the render pass";
-                                } else {
-                                    refusal_reason = "scatter emitted zero instances "
-                                                     "(defoliation-class regression)";
-                                }
-                                const nlohmann::json refusal = {
-                                    {"schema", "luminumbra.foliage_instancing.v1"},
-                                    {"passed", false},
-                                    {"refusal", refusal_reason},
-                                    {"render_pass",
-                                     {{"foliage_draws", render_pass_stats.foliage_draws},
-                                      {"foliage_instances_drawn",
-                                       render_pass_stats.foliage_instances_drawn}}}};
-                                std::ofstream refusal_out(scenario_config.artifact_dir /
-                                                          "foliage-instancing-analysis.json");
-                                refusal_out << std::setw(2) << refusal << '\n';
-                                LUMINUMBRA_CORE_ERROR(
-                                    "FoliageInstancing: REFUSAL analysis written ({})",
-                                    refusal_reason);
-                            }
-                        }
-                        if (scenario_config.precipitation_smoke() && scenario_ready &&
-                            !precip_windy_capture_written) {
-                            // capture a CALM rain frame (first half,
-                            // zero wind -> vertical fall) and a WINDY rain frame
-                            // (second half, wind-advected slant). The analysis on
-                            // the windy capture asserts precip particles are present
-                            // in both AND that the streaks slant with wind.
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            // Capture once rain is visibly rendering (the pass
-                            // reports draws). Calm: late in the first half so the
-                            // field has filled and settled to a steady vertical
-                            // fall. Windy: late in the second half so the slant has
-                            // fully developed after the wind switch at progress 0.5.
-                            const bool capture_calm = !precip_calm_capture_written &&
-                                                      progress >= 0.35 && progress < 0.5 &&
-                                                      render_pass_stats.particle_draws > 0;
-                            const bool capture_windy = precip_calm_capture_written &&
-                                                       progress >= 0.9 &&
-                                                       render_pass_stats.particle_draws > 0;
-                            if (capture_calm || capture_windy) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-                                    const PrecipPixelStats stats = AnalyzePrecipPixels(
-                                        frame_pixels, screenshot_width, screenshot_height);
-                                    if (capture_calm) {
-                                        const std::string calm_path = "screenshots/precip-calm.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    calm_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            precip_calm_capture_written = true;
-                                            precip_calm_stats = stats;
-                                            precip_calm_render_pass = render_pass_stats;
-                                        }
-                                    } else {
-                                        const std::string windy_path =
-                                            "screenshots/precip-windy.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    windy_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            precip_windy_capture_written = true;
-                                            WritePrecipitationAnalysis(
-                                                scenario_config.artifact_dir,
-                                                "screenshots/precip-calm.ppm",
-                                                windy_path,
-                                                precip_calm_stats,
-                                                stats,
-                                                "rain",
-                                                0.0,
-                                                3.5,
-                                                precip_calm_render_pass,
-                                                render_pass_stats);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.timeofday_sweep_smoke() && scenario_ready &&
-                            !timeofday_analysis_final) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            // SEASON SWEEP capture. SIX windows = two
-                            // season halves (summer then winter), each replaying
-                            // noon/dusk/night. Captures land late in each window so
-                            // the pinned time-of-day + tick-derived season have
-                            // settle frames. Summer (season 0) OWNS the canonical
-                            // timeofday-{noon,dusk,night}.ppm files + the existing
-                            // ordering/hue-band/emissive assertions (unchanged);
-                            // winter (season 1) adds the per-season comparison set.
-                            //  the capture plan now comes from
-                            // the SHARED TimeOfDaySweepCapturePlanAt accessor, the SAME
-                            // table the per-frame sun PIN selects from, so the rendered
-                            // sun and the labelled capture can never disagree.
-                            using SeasonCapturePlan = TimeOfDaySweepCapturePlan;
-                            int capture_index = -1;
-                            for (int i = 0; i < kTimeOfDaySweepCaptureCount; ++i) {
-                                if (!timeofday_season_captures_written[static_cast<std::size_t>(
-                                        i)] &&
-                                    progress >= TimeOfDaySweepCapturePlanAt(i).threshold) {
-                                    capture_index = i;
-                                    break;
-                                }
-                            }
-                            // The emissive capture follows the SUMMER night (season 0,
-                            // index 2) so the existing emissive night check is unchanged;
-                            // it fires once that night is in and the camera has settled.
-                            const bool capture_emissive = timeofday_season_captures_written[2] &&
-                                                          timeofday_emissive_target.found &&
-                                                          !timeofday_emissive_capture_written &&
-                                                          progress >= 0.45 && progress < 0.5;
-                            //  the pinned-phase capture must
-                            // wait for the sky dome to settle at the new sun pin (the
-                            // sun-view LUT refreshes lazily, so the first frame after a
-                            // long sun jump still carries the prior phase's dome). Require
-                            // a handful of consecutive settle frames at this exact pin.
-                            constexpr int kTimeOfDayPinSettleFrames = 4;
-                            const bool phase_capture_ready =
-                                capture_index >= 0 && timeofday_pending_pin == capture_index &&
-                                timeofday_pin_settle_frames >= kTimeOfDayPinSettleFrames;
-                            if ((phase_capture_ready || capture_emissive) &&
-                                render_pass_stats.skybox_draws > 0) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-                                    const TimeOfDayPixelStats stats = AnalyzeTimeOfDayPixels(
-                                        frame_pixels, screenshot_width, screenshot_height);
-                                    if (phase_capture_ready) {
-                                        const SeasonCapturePlan& plan =
-                                            TimeOfDaySweepCapturePlanAt(capture_index);
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    plan.file,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            timeofday_season_captures_written
-                                                [static_cast<std::size_t>(capture_index)] = true;
-                                            TimeOfDayPhaseCapture cap;
-                                            cap.name = plan.phase_name;
-                                            cap.time_of_day = plan.phase_time;
-                                            cap.file = plan.file;
-                                            cap.stats = stats;
-                                            cap.season_label = plan.season_label;
-                                            cap.season_index = plan.season_index;
-                                            cap.season_phase = renderPipeline.get_season_phase();
-                                            cap.sun_elevation_rad =
-                                                renderPipeline.get_sun_elevation_rad();
-                                            cap.season_sun_declination_rad =
-                                                renderPipeline.get_season_sun_declination();
-                                            cap.season_tick = renderPipeline.get_season_tick();
-                                            timeofday_phase_captures.push_back(cap);
-                                        }
-                                    } else {
-                                        const std::string emissive_path =
-                                            "screenshots/timeofday-night-emissive.ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    emissive_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            timeofday_emissive_capture_written = true;
-                                            timeofday_emissive_stats = stats;
-                                        }
-                                    }
-                                    const bool all_six = timeofday_season_captures_written[0] &&
-                                                         timeofday_season_captures_written[1] &&
-                                                         timeofday_season_captures_written[2] &&
-                                                         timeofday_season_captures_written[3] &&
-                                                         timeofday_season_captures_written[4] &&
-                                                         timeofday_season_captures_written[5];
-                                    if (all_six) {
-                                        // Final once the optional emissive capture is in
-                                        // (or no surface emissive target exists).
-                                        timeofday_analysis_final =
-                                            !timeofday_emissive_target.found ||
-                                            timeofday_emissive_capture_written;
-                                        WriteTimeOfDaySweepAnalysis(
-                                            scenario_config.artifact_dir,
-                                            timeofday_phase_captures,
-                                            timeofday_emissive_target,
-                                            timeofday_emissive_capture_written,
-                                            "screenshots/timeofday-night-emissive.ppm",
-                                            timeofday_emissive_stats,
-                                            render_pass_stats);
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.player_view_smoke() && scenario_ready &&
-                            !player_view_stations.empty() && g_camera) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            // Mirror the camera branch's warmup-adjusted schedule.
-                            const double warmup_seconds = std::min(8.0, duration * 0.2);
-                            const double effective_seconds =
-                                std::max(0.0, elapsed_play_seconds - warmup_seconds);
-                            const double progress = std::clamp(
-                                effective_seconds / std::max(1.0, duration - warmup_seconds),
-                                0.0,
-                                0.999);
-                            const std::size_t station_count = player_view_stations.size();
-                            const std::size_t wall_clock_index =
-                                std::min(station_count - 1u,
-                                         static_cast<std::size_t>(
-                                             progress * static_cast<double>(station_count)));
-                            // Hitch tolerance: the sweep may not advance past the
-                            // first un-captured station — a frame hitch that jumps
-                            // a whole window otherwise orphans that station's
-                            // capture (observed: yaw_030 skipped on heavier
-                            // generation). A passed-over station captures
-                            // immediately (progress treated as 1.0 = max settle).
-                            std::size_t first_unwritten = 0;
-                            while (first_unwritten < player_view_captures_written.size() &&
-                                   player_view_captures_written[first_unwritten]) {
-                                ++first_unwritten;
-                            }
-                            const std::size_t station_index =
-                                first_unwritten >= station_count
-                                    ? wall_clock_index
-                                    : std::min(wall_clock_index, first_unwritten);
-                            const double station_progress =
-                                wall_clock_index > station_index
-                                    ? 1.0
-                                    : progress * static_cast<double>(station_count) -
-                                          static_cast<double>(station_index);
-                            if (!player_view_captures_written[station_index] &&
-                                station_progress >= 0.7) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-
-                                    // Horizon row: project the camera's horizontal
-                                    // forward direction (the eye-level horizon) into
-                                    // the frame; everything below it must be geometry.
-                                    glm::vec3 horizontal_forward = g_camera->Front;
-                                    horizontal_forward.y = 0.0f;
-                                    int horizon_row_from_top = screenshot_height / 2;
-                                    if (glm::dot(horizontal_forward, horizontal_forward) >
-                                        1.0e-6f) {
-                                        horizontal_forward = glm::normalize(horizontal_forward);
-                                        double horizon_x_norm = 0.0;
-                                        double horizon_y_norm = 0.0;
-                                        if (ProjectDirectionToScreen(*g_camera,
-                                                                     screenshot_width,
-                                                                     screenshot_height,
-                                                                     horizontal_forward,
-                                                                     horizon_x_norm,
-                                                                     horizon_y_norm)) {
-                                            horizon_row_from_top = static_cast<int>(
-                                                horizon_y_norm * screenshot_height);
-                                        } else {
-                                            // Horizon outside the frame: pitched far up
-                                            // (all sky legitimate, ROI empty) or far down
-                                            // (all terrain, full-frame ROI).
-                                            horizon_row_from_top =
-                                                g_camera->Pitch > 0.0f ? screenshot_height : 0;
-                                        }
-                                    }
-
-                                    PlayerViewStationCapture capture;
-                                    capture.station = player_view_stations[station_index];
-                                    capture.station.yaw_degrees = g_camera->Yaw;
-                                    capture.station.pitch_degrees = g_camera->Pitch;
-                                    capture.sky = AnalyzePlayerViewPixels(frame_pixels,
-                                                                          screenshot_width,
-                                                                          screenshot_height,
-                                                                          horizon_row_from_top);
-                                    capture.holes = AnalyzeLodHolePixels(
-                                        frame_pixels, screenshot_width, screenshot_height);
-                                    capture.coverage =
-                                        gameSession->GetWorldSystem()
-                                            ->get_frustum_surface_coverage_stats(
-                                                g_camera->Position,
-                                                ExtractCameraFrustumPlanes(
-                                                    *g_camera, screenshot_width, screenshot_height),
-                                                192.0f);
-
-                                    const std::string relative_path =
-                                        "screenshots/player-view-" +
-                                        player_view_stations[station_index].name + ".ppm";
-                                    if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                relative_path,
-                                                            screenshot_width,
-                                                            screenshot_height,
-                                                            frame_pixels)) {
-                                        capture.file = relative_path;
-                                        player_view_station_captures.push_back(capture);
-                                        player_view_captures_written[station_index] = true;
-                                        WritePlayerViewAnalysis(scenario_config.artifact_dir,
-                                                                scenario_world_type,
-                                                                elapsed_play_seconds,
-                                                                player_view_station_captures,
-                                                                station_count,
-                                                                gameSession->GetWorldSystem()
-                                                                    ->get_runtime_chunk_stats(),
-                                                                player_view_sky_enforced);
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.farlod_horizon_smoke() && scenario_ready &&
-                            !farlod_horizon_stations.empty() && g_camera) {
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 0.999);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-
-                            // gbuffer GPU samples: phase-A tail = far-disabled
-                            // baseline; run tail = far-enabled comparison.
-                            if (render_pass_stats.gpu_timers_supported &&
-                                render_pass_stats.gbuffer_gpu_ms > 0.0) {
-                                if (progress >= 0.15 && progress < kFarLodHorizonPhaseSplit) {
-                                    farlod_baseline_gbuffer_samples.push_back(
-                                        render_pass_stats.gbuffer_gpu_ms);
-                                } else if (progress >= 0.85) {
-                                    farlod_far_gbuffer_samples.push_back(
-                                        render_pass_stats.gbuffer_gpu_ms);
-                                }
-                            }
-
-                            if (progress >= kFarLodHorizonPhaseSplit) {
-                                const double sweep = (progress - kFarLodHorizonPhaseSplit) /
-                                                     (1.0 - kFarLodHorizonPhaseSplit);
-                                const std::size_t station_count = farlod_horizon_stations.size();
-                                const std::size_t time_station_index =
-                                    std::min(station_count - 1u,
-                                             static_cast<std::size_t>(
-                                                 sweep * static_cast<double>(station_count)));
-                                // capture the station the
-                                // rendered back buffer actually shows (the camera-apply
-                                // clamp), not the bare time index. station_progress is
-                                // only meaningful when station_index == time_station_index.
-                                const std::size_t station_index = farlod_horizon_applied_station;
-                                const double station_progress =
-                                    sweep * static_cast<double>(station_count) -
-                                    static_cast<double>(station_index);
-                                // when behind schedule the
-                                // settle wait is skipped - the stations are yaw rotations
-                                // of an already-settled world (and at ~1 fps a full second
-                                // of simulation precedes each frame), so capture
-                                // immediately to catch up; when on schedule, keep the 0.7
-                                // settle gate.
-                                const bool behind_schedule = station_index < time_station_index;
-                                if (station_index < farlod_horizon_captures_written.size() &&
-                                    !farlod_horizon_captures_written[station_index] &&
-                                    (behind_schedule || station_progress >= 0.7)) {
-                                    int screenshot_width = 0;
-                                    int screenshot_height = 0;
-                                    glfwGetFramebufferSize(
-                                        window, &screenshot_width, &screenshot_height);
-                                    if (screenshot_width > 0 && screenshot_height > 0) {
-                                        std::vector<unsigned char> frame_pixels(
-                                            static_cast<std::size_t>(screenshot_width) *
-                                            static_cast<std::size_t>(screenshot_height) * 3u);
-                                        glReadBuffer(GL_BACK);
-                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                        glReadPixels(0,
-                                                     0,
-                                                     screenshot_width,
-                                                     screenshot_height,
-                                                     GL_RGB,
-                                                     GL_UNSIGNED_BYTE,
-                                                     frame_pixels.data());
-
-                                        // Eye-level horizon row (same construction
-                                        // as the player-view gate).
-                                        glm::vec3 horizontal_forward = g_camera->Front;
-                                        horizontal_forward.y = 0.0f;
-                                        int horizon_row_from_top = screenshot_height / 2;
-                                        if (glm::dot(horizontal_forward, horizontal_forward) >
-                                            1.0e-6f) {
-                                            horizontal_forward = glm::normalize(horizontal_forward);
-                                            double horizon_x_norm = 0.0;
-                                            double horizon_y_norm = 0.0;
-                                            if (ProjectDirectionToScreen(*g_camera,
-                                                                         screenshot_width,
-                                                                         screenshot_height,
-                                                                         horizontal_forward,
-                                                                         horizon_x_norm,
-                                                                         horizon_y_norm)) {
-                                                horizon_row_from_top = static_cast<int>(
-                                                    horizon_y_norm * screenshot_height);
-                                            } else {
-                                                horizon_row_from_top =
-                                                    g_camera->Pitch > 0.0f ? screenshot_height : 0;
-                                            }
-                                        }
-
-                                        FarLodHorizonStationCapture capture;
-                                        capture.station = farlod_horizon_stations[station_index];
-                                        //  record the resolved eye world position so the
-                                        // analysis can confirm all stations share one XZ (constant
-                                        // ring).
-                                        capture.camera_world_x = g_camera->Position.x;
-                                        capture.camera_world_y = g_camera->Position.y;
-                                        capture.camera_world_z = g_camera->Position.z;
-                                        capture.sky = AnalyzePlayerViewPixels(frame_pixels,
-                                                                              screenshot_width,
-                                                                              screenshot_height,
-                                                                              horizon_row_from_top);
-                                        int band_top = 0;
-                                        int band_bottom = 0;
-                                        if (ComputeFarLodBoundaryBandRows(gameSession.get(),
-                                                                          *g_camera,
-                                                                          screenshot_width,
-                                                                          screenshot_height,
-                                                                          128.0f,
-                                                                          384.0f,
-                                                                          horizon_row_from_top,
-                                                                          band_top,
-                                                                          band_bottom)) {
-                                            capture.boundary =
-                                                AnalyzeFarLodBoundaryBand(frame_pixels,
-                                                                          screenshot_width,
-                                                                          screenshot_height,
-                                                                          band_top,
-                                                                          band_bottom);
-                                            // re-derived far-water
-                                            // coverage + sun-bright sand-flat coverage in the band.
-                                            std::uint64_t band_water_px = 0;
-                                            std::uint64_t band_total_px = 0;
-                                            std::uint64_t band_sand_flat_px = 0;
-                                            AnalyzeFarLodBoundaryBandWater(frame_pixels,
-                                                                           screenshot_width,
-                                                                           screenshot_height,
-                                                                           band_top,
-                                                                           band_bottom,
-                                                                           band_water_px,
-                                                                           band_total_px,
-                                                                           &band_sand_flat_px);
-                                            capture.boundary_band_water_pixels = band_water_px;
-                                            capture.boundary_band_water_ratio =
-                                                band_total_px > 0
-                                                    ? static_cast<double>(band_water_px) /
-                                                          static_cast<double>(band_total_px)
-                                                    : 0.0;
-                                            capture.boundary_band_sand_flat_pixels =
-                                                band_sand_flat_px;
-                                            capture.boundary_band_sand_flat_ratio =
-                                                band_total_px > 0
-                                                    ? static_cast<double>(band_sand_flat_px) /
-                                                          static_cast<double>(band_total_px)
-                                                    : 0.0;
-                                        }
-                                        // above-horizon thin-sliver scan (far ON).
-                                        capture.sky_sliver =
-                                            AnalyzeFarLodHorizonSkySliver(frame_pixels,
-                                                                          screenshot_width,
-                                                                          screenshot_height,
-                                                                          horizon_row_from_top);
-                                        // snapshot the far-LOD
-                                        // scheduler stats for the ON frame BEFORE the paired
-                                        // far-OFF render below - that render updates
-                                        // farlod->stats to the disabled frame (no wanted/
-                                        // resident regions, zero draws), which is not the
-                                        // state this capture asserts on.
-                                        if (const auto* farlod = renderPipeline.farlod()) {
-                                            const auto& farlod_stats = farlod->stats();
-                                            capture.regions_wanted = farlod_stats.regions_wanted;
-                                            capture.regions_resident =
-                                                farlod_stats.regions_resident;
-                                            capture.regions_missing = farlod_stats.regions_missing;
-                                            capture.resident_bytes = farlod_stats.resident_bytes;
-                                            capture.region_draws = farlod_stats.region_draws;
-                                            capture.far_indices_drawn = farlod_stats.indices_drawn;
-                                            // far water sheet draw counts.
-                                            capture.water_sheet_draws =
-                                                farlod_stats.water_sheet_draws;
-                                            capture.water_sheet_indices =
-                                                farlod_stats.water_sheet_indices;
-                                            //  far-LOD scheduler diagnostics at capture time.
-                                            capture.builds_dispatched =
-                                                farlod_stats.builds_dispatched;
-                                            capture.builds_integrated_ok =
-                                                farlod_stats.builds_integrated_ok;
-                                            capture.builds_integrated_failed =
-                                                farlod_stats.builds_integrated_failed;
-                                            capture.builds_failed_total =
-                                                farlod_stats.builds_failed_total;
-                                            capture.builds_completed_total =
-                                                farlod_stats.builds_completed_total;
-                                            capture.evictions_this_frame =
-                                                farlod_stats.evictions_this_frame;
-                                            capture.evictions_total = farlod_stats.evictions_total;
-                                            capture.pending_depth = farlod_stats.pending_depth;
-                                        }
-                                        // PAIRED far-OFF
-                                        // baseline at the EXACT same camera/frame. The
-                                        // current back buffer was rendered far-ON; render
-                                        // one more frame with far-LOD disabled, read its
-                                        // pixels, then restore far-ON. Both buffers are
-                                        // pixel-aligned (identical view, identical live
-                                        // geometry), so the far-attributable sliver is the
-                                        // far-ON frame re-analyzed with the far-OFF frame's
-                                        // intrusion pixels cancelled PER PIXEL within a 3x3
-                                        // neighborhood: pixel-aligned LIVE peak/ridge
-                                        // silhouettes and diagonal live-geometry slivers
-                                        // drop out and only a genuine far-render streak
-                                        // (present only with far on) survives. (A scalar
-                                        // on-minus-off max diff cannot do this: a detached
-                                        // live streak and the legitimate far-LOD horizon
-                                        // silhouette fuse into one far-ON-only span.)
-                                        int far_off_sliver_px = -1;
-                                        if (auto* farlod = renderPipeline.farlod()) {
-                                            const bool was_enabled = farlod->enabled();
-                                            farlod->set_enabled(false);
-                                            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-                                            renderPipeline.render_frame(
-                                                gameSession->GetRegistry(),
-                                                *gameSession->GetWorldSystem(),
-                                                *g_camera,
-                                                deltaTime,
-                                                wireframe_mode);
-                                            std::vector<unsigned char> off_pixels(
-                                                static_cast<std::size_t>(screenshot_width) *
-                                                static_cast<std::size_t>(screenshot_height) * 3u);
-                                            glReadBuffer(GL_BACK);
-                                            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                            glReadPixels(0,
-                                                         0,
-                                                         screenshot_width,
-                                                         screenshot_height,
-                                                         GL_RGB,
-                                                         GL_UNSIGNED_BYTE,
-                                                         off_pixels.data());
-                                            const auto off_sliver =
-                                                AnalyzeFarLodHorizonSkySliver(off_pixels,
-                                                                              screenshot_width,
-                                                                              screenshot_height,
-                                                                              horizon_row_from_top);
-                                            far_off_sliver_px = off_sliver.tallest_sliver_px;
-                                            farlod->set_enabled(was_enabled);
-                                            // Masked far-attributable analysis of the ON
-                                            // frame, cancelling the paired far-OFF intrusion
-                                            // pixels in a 3x3 neighborhood.
-                                            const auto attributable_sliver =
-                                                AnalyzeFarLodHorizonSkySliver(frame_pixels,
-                                                                              screenshot_width,
-                                                                              screenshot_height,
-                                                                              horizon_row_from_top,
-                                                                              &off_pixels);
-                                            capture.far_attributable_sliver_px =
-                                                attributable_sliver.tallest_sliver_px;
-                                        } else {
-                                            // No far-OFF sample available: fall back to the
-                                            // raw far-ON sliver (conservative - never under-
-                                            // reports an attributable streak).
-                                            capture.far_attributable_sliver_px =
-                                                capture.sky_sliver.tallest_sliver_px;
-                                        }
-                                        if (station_index <
-                                            farlod_horizon_far_off_sliver_px.size()) {
-                                            farlod_horizon_far_off_sliver_px[station_index] =
-                                                far_off_sliver_px;
-                                        }
-                                        capture.far_off_sliver_px = far_off_sliver_px;
-
-                                        const std::string relative_path =
-                                            "screenshots/farlod-horizon-" +
-                                            farlod_horizon_stations[station_index].name + ".ppm";
-                                        if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                    relative_path,
-                                                                screenshot_width,
-                                                                screenshot_height,
-                                                                frame_pixels)) {
-                                            capture.file = relative_path;
-                                            farlod_horizon_station_captures.push_back(capture);
-                                            farlod_horizon_captures_written[station_index] = true;
-                                            WriteFarLodHorizonAnalysis(
-                                                scenario_config.artifact_dir,
-                                                scenario_world_type,
-                                                elapsed_play_seconds,
-                                                farlod_horizon_station_captures,
-                                                farlod_horizon_stations.size(),
-                                                median_of(farlod_baseline_gbuffer_samples),
-                                                median_of(farlod_far_gbuffer_samples),
-                                                render_pass_stats.gpu_timers_supported,
-                                                farlod_horizon_sky_enforced);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.skinned_mesh_visual_smoke() && scenario_ready &&
-                            !skinned_mesh_analysis_written && skinned_mesh_visual_target.spawned) {
-                            // capture A at 50% progress, capture B at
-                            // 85%; the two clip times must differ visibly in
-                            // the rig ROI.
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            const bool want_capture_a =
-                                !skinned_mesh_capture_a_written && progress >= 0.50;
-                            const bool want_capture_b =
-                                skinned_mesh_capture_a_written && progress >= 0.85;
-                            if (want_capture_a || want_capture_b) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    std::vector<unsigned char> frame_pixels(
-                                        static_cast<std::size_t>(screenshot_width) *
-                                        static_cast<std::size_t>(screenshot_height) * 3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(0,
-                                                 0,
-                                                 screenshot_width,
-                                                 screenshot_height,
-                                                 GL_RGB,
-                                                 GL_UNSIGNED_BYTE,
-                                                 frame_pixels.data());
-
-                                    SkinnedMeshVisualCapture capture;
-                                    capture.elapsed_seconds = elapsed_play_seconds;
-                                    capture.animation_time_seconds = SkinnedMeshVisualAnimationTime(
-                                        gameSession.get(), skinned_mesh_visual_target);
-                                    capture.skinned_draws = render_pass_stats.skinned_draws;
-                                    capture.skinned_indices_drawn =
-                                        render_pass_stats.skinned_indices_drawn;
-                                    const std::string relative_path =
-                                        want_capture_a ? "screenshots/skinned-mesh-a.ppm"
-                                                       : "screenshots/skinned-mesh-b.ppm";
-                                    if (WritePixelBufferPpm(scenario_config.artifact_dir /
-                                                                relative_path,
-                                                            screenshot_width,
-                                                            screenshot_height,
-                                                            frame_pixels)) {
-                                        capture.file = relative_path;
-                                        if (want_capture_a) {
-                                            skinned_mesh_capture_a = capture;
-                                            skinned_mesh_pixels_a = std::move(frame_pixels);
-                                            skinned_mesh_capture_a_written = true;
-                                        } else {
-                                            const SkinnedMeshDiffStats diff =
-                                                AnalyzeSkinnedMeshCaptures(skinned_mesh_pixels_a,
-                                                                           frame_pixels,
-                                                                           screenshot_width,
-                                                                           screenshot_height);
-                                            WriteSkinnedMeshVisualAnalysis(
-                                                scenario_config.artifact_dir,
-                                                skinned_mesh_visual_target,
-                                                skinned_mesh_capture_a,
-                                                capture,
-                                                diff);
-                                            skinned_mesh_analysis_written = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.skinned_mesh_visual_smoke() &&
-                            scenario_config.replicated && scenario_config.avatars >= 2 &&
-                            scenario_ready && skinned_mesh_visual_target.spawned &&
-                            replicated_demo.ready() &&
-                            replicated_avatar_render_seconds >= (2.0 / 15.0) &&
-                            !remote_avatar_render_artifact_written) {
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            if (render_pass_stats.skinned_draws >=
-                                skinned_mesh_visual_target.all_entities.size()) {
-                                const auto clamp_to_u32 = [](std::size_t value) -> std::uint32_t {
-                                    return static_cast<std::uint32_t>(std::min<std::size_t>(
-                                        value,
-                                        static_cast<std::size_t>(
-                                            std::numeric_limits<std::uint32_t>::max())));
-                                };
-                                const std::uint32_t local_client_id = 1u;
-                                const std::uint32_t snapshot_count =
-                                    clamp_to_u32(static_cast<std::size_t>(std::max(
-                                        1.0, std::floor(replicated_avatar_render_seconds * 15.0))));
-                                std::vector<luminumbra::network::NetworkRemoteAvatarRenderPose>
-                                    poses;
-                                poses.reserve(skinned_mesh_visual_target.all_entities.size());
-                                auto& reg = gameSession->GetRegistry();
-                                for (std::size_t i = 0;
-                                     i < skinned_mesh_visual_target.all_entities.size();
-                                     ++i) {
-                                    const std::uint32_t client_id = clamp_to_u32(i + 1u);
-                                    luminumbra::network::NetworkRemoteAvatarRenderPose pose;
-                                    pose.clientId = client_id;
-                                    pose.serverTick = snapshot_count;
-                                    pose.snapshotSequence = pose.serverTick;
-                                    pose.remote = client_id != local_client_id;
-                                    pose.interpolated = pose.remote;
-                                    const auto ent = skinned_mesh_visual_target.all_entities[i];
-                                    if (reg.valid(ent) &&
-                                        reg.all_of<Luminumbra::Components::TransformComponent>(
-                                            ent)) {
-                                        pose.rendered = true;
-                                        const auto& tf =
-                                            reg.get<Luminumbra::Components::TransformComponent>(
-                                                ent);
-                                        pose.positionXMm = static_cast<int>(std::lround(
-                                            static_cast<double>(tf.position.x) * 1000.0));
-                                        pose.positionYMm = static_cast<int>(std::lround(
-                                            static_cast<double>(tf.position.y) * 1000.0));
-                                        pose.positionZMm = static_cast<int>(std::lround(
-                                            static_cast<double>(tf.position.z) * 1000.0));
-                                    }
-                                    poses.push_back(pose);
-                                }
-                                const auto report =
-                                    luminumbra::network::BuildNetworkRemoteAvatarRenderReport(
-                                        local_client_id,
-                                        poses,
-                                        clamp_to_u32(static_cast<std::size_t>(
-                                            std::max(2, scenario_config.avatars))),
-                                        snapshot_count,
-                                        clamp_to_u32(std::min<std::size_t>(
-                                            skinned_mesh_visual_target.all_entities.size(),
-                                            render_pass_stats.skinned_draws)),
-                                        clamp_to_u32(render_pass_stats.skinned_draws),
-                                        clamp_to_u32(render_pass_stats.skinned_indices_drawn));
-                                remote_avatar_render_artifact_written =
-                                    luminumbra::network::WriteNetworkRemoteAvatarRenderArtifact(
-                                        (scenario_config.artifact_dir / "remote-avatar-render.json")
-                                            .string(),
-                                        report);
-                                if (!remote_avatar_render_artifact_written) {
-                                    scenario_failed = true;
-                                    scenario_failure_reason =
-                                        "remote_avatar_render_artifact_failed";
-                                }
-                            }
-                        }
-                        //  video proof: when the avatar SHOWCASE row is up
-                        // (avatars>=2), walk the avatars laterally and dump a frame
-                        // sequence (motion/frame_%03d.ppm) for an ffmpeg clip. Gated on
-                        // avatars>=2 so the single-rig gate run never dumps frames.
-                        if (scenario_config.skinned_mesh_visual_smoke() &&
-                            scenario_config.avatars >= 2 && scenario_ready &&
-                            skinned_mesh_visual_target.spawned && showcase_video_frame < 120) {
-                            const double vnow =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            // WARM-UP: don't capture the first ~3 s -- let async far-LOD,
-                            // meshing and aerial-perspective settle so the world is fully
-                            // loaded in every captured frame (owner: proper loading before
-                            // capture). The per-frame EnsureSurfaceReadyNear above pulls the
-                            // near/mid surface ready; this covers the async far field.
-                            constexpr double kShowcaseWarmupS = 3.0;
-                            const bool warmed_up = vnow >= kShowcaseWarmupS;
-                            const bool interval_ok = showcase_video_last_s < 0.0 ||
-                                                     (vnow - showcase_video_last_s) >= 0.05;
-                            if (warmed_up && interval_ok) {
-                                auto& reg = gameSession->GetRegistry();
-                                auto* world_sys = gameSession->GetWorldSystem();
-                                if (scenario_config.wildlife && wildlife_setup) {
-                                    // Cinematic FSM on CAPTURE-relative time T (frames dumped *
-                                    // 0.05 s): 0..~2.3 s animal walks to water; ~2.5 s human
-                                    // shoots; arrow arcs ~1 s; on landing the splash SCARES the
-                                    // animal -> it flees.
-                                    const float T =
-                                        static_cast<float>(showcase_video_frame) * 0.05f;
-                                    const float dt = 0.05f;
-                                    const auto e_animal =
-                                        skinned_mesh_visual_target.all_entities[0];
-                                    const auto e_human = skinned_mesh_visual_target.all_entities[1];
-                                    auto ground = [&](glm::vec3 p) {
-                                        if (world_sys)
-                                            p.y = world_sys->GetTerrainHeightAt(p.x, p.z);
-                                        return p;
-                                    };
-                                    auto set_tf = [&](Luminumbra::EntityID e,
-                                                      const glm::vec3& p,
-                                                      const glm::vec3& dir) {
-                                        if (!reg.valid(e) ||
-                                            !reg.all_of<Luminumbra::Components::TransformComponent>(
-                                                e))
-                                            return;
-                                        auto& tf =
-                                            reg.get<Luminumbra::Components::TransformComponent>(e);
-                                        tf.position = p;
-                                        const glm::vec3 d(dir.x, 0.0f, dir.z);
-                                        if (glm::length(d) > 0.01f)
-                                            tf.rotation = glm::angleAxis(std::atan2(d.x, d.z),
-                                                                         glm::vec3(0, 1, 0));
-                                    };
-                                    glm::vec3 to_water = wildlife_water - wildlife_animal;
-                                    to_water.y = 0.0f;
-                                    const glm::vec3 seek_dir = glm::length(to_water) > 0.01f
-                                                                   ? glm::normalize(to_water)
-                                                                   : glm::vec3(1, 0, 0);
-                                    if (wildlife_phase == 0) { // SEEK water
-                                        if (glm::length(to_water) > 2.5f)
-                                            wildlife_animal += seek_dir * 3.0f * dt;
-                                        wildlife_animal = ground(wildlife_animal);
-                                        set_tf(e_animal, wildlife_animal, seek_dir);
-                                        if (T >= 2.5f) { // human looses the arrow toward a spot
-                                                         // beside the animal
-                                            const glm::vec3 perp(-seek_dir.z, 0.0f, seek_dir.x);
-                                            const glm::vec3 target =
-                                                wildlife_animal + perp * 2.0f; // BESIDE, not at
-                                            wildlife_arrow_pos =
-                                                wildlife_human + glm::vec3(0.0f, 1.3f, 0.0f);
-                                            glm::vec3 ah = target - wildlife_arrow_pos;
-                                            ah.y = 0.0f;
-                                            const glm::vec3 adir = glm::length(ah) > 0.01f
-                                                                       ? glm::normalize(ah)
-                                                                       : seek_dir;
-                                            wildlife_arrow_vel =
-                                                adir * 13.0f + glm::vec3(0.0f, 4.5f, 0.0f);
-                                            set_tf(e_human,
-                                                   wildlife_human,
-                                                   adir); // human faces the shot
-                                            wildlife_phase = 1;
-                                        }
-                                    } else if (wildlife_phase == 1) { // ARROW in flight
-                                        wildlife_arrow_vel.y -= 9.81f * dt;
-                                        wildlife_arrow_pos += wildlife_arrow_vel * dt;
-                                        const float terr =
-                                            world_sys
-                                                ? world_sys->GetTerrainHeightAt(
-                                                      wildlife_arrow_pos.x, wildlife_arrow_pos.z)
-                                                : wildlife_arrow_pos.y;
-                                        set_tf(wildlife_arrow_entity,
-                                               wildlife_arrow_pos,
-                                               wildlife_arrow_vel);
-                                        if (wildlife_arrow_pos.y <=
-                                            terr) { // THWACK beside the animal -> scare
-                                            wildlife_arrow_pos.y = terr;
-                                            set_tf(wildlife_arrow_entity,
-                                                   wildlife_arrow_pos,
-                                                   glm::vec3(0, 0, 1));
-                                            glm::vec3 away = wildlife_animal - wildlife_arrow_pos;
-                                            away.y = 0.0f;
-                                            wildlife_flee_dir = glm::length(away) > 0.01f
-                                                                    ? glm::normalize(away)
-                                                                    : -seek_dir;
-                                            wildlife_phase = 2;
-                                        }
-                                        set_tf(e_animal,
-                                               wildlife_animal,
-                                               seek_dir); // animal still drinking
-                                    } else {              // FLEE
-                                        wildlife_animal +=
-                                            wildlife_flee_dir * 6.0f * dt; // bolts away, faster
-                                        wildlife_animal = ground(wildlife_animal);
-                                        set_tf(e_animal, wildlife_animal, wildlife_flee_dir);
-                                    }
-                                } else if (scenario_config.replicated) {
-                                    // Network-driven poses are applied before render so
-                                    // this readback observes the frame drawn from the
-                                    // replicated snapshot/interpolation path.
-                                } else {
-                                    // Walk every avatar gently TOWARD the camera (+Z) so the row
-                                    // strolls forward and stays framed (idle clip still plays).
-                                    // These are render-only entities (no physics body), so
-                                    // RE-GROUND Y to the terrain at each new XZ every step --
-                                    // otherwise they sink into / float over rising/falling ground
-                                    // (owner: avatars sinking into the ground on the mountains
-                                    // preset).
-                                    auto view =
-                                        reg.view<Luminumbra::Components::TransformComponent,
-                                                 Luminumbra::Components::SkinnedMeshComponent>();
-                                    const float step_m = 0.05f; // ~1 m/s at 20 dumps/s
-                                    for (auto e : view) {
-                                        auto& pos =
-                                            view.get<Luminumbra::Components::TransformComponent>(e)
-                                                .position;
-                                        pos.z += step_m;
-                                        if (world_sys)
-                                            pos.y = world_sys->GetTerrainHeightAt(pos.x, pos.z);
-                                    }
-                                }
-                                int vw = 0, vh = 0;
-                                glfwGetFramebufferSize(window, &vw, &vh);
-                                if (vw > 0 && vh > 0) {
-                                    std::vector<unsigned char> vpx(static_cast<std::size_t>(vw) *
-                                                                   static_cast<std::size_t>(vh) *
-                                                                   3u);
-                                    glReadBuffer(GL_BACK);
-                                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                    glReadPixels(
-                                        0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, vpx.data());
-                                    char vname[40];
-                                    std::snprintf(vname,
-                                                  sizeof(vname),
-                                                  "motion/frame_%03d.ppm",
-                                                  showcase_video_frame);
-                                    if (WritePixelBufferPpm(
-                                            scenario_config.artifact_dir / vname, vw, vh, vpx)) {
-                                        ++showcase_video_frame;
-                                        showcase_video_last_s = vnow;
-                                    }
-                                }
-                            }
-                        }
-                        if (scenario_config.creature_slice_smoke() && scenario_ready &&
-                            !creature_slice_analysis_written && creature_slice_scene.spawned) {
-                            // planner state + screenshot before the
-                            // stimulus (45%) and after it (85%).
-                            const double elapsed_play_seconds =
-                                std::chrono::duration<double>(now - scenario_play_started_at)
-                                    .count();
-                            const double duration =
-                                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-                            const double progress =
-                                std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-                            const auto& render_pass_stats =
-                                renderPipeline.get_last_render_pass_stats();
-                            const bool want_before = !creature_slice_before_written &&
-                                                     progress >= 0.45 && progress < 0.55;
-                            const bool want_after = creature_slice_before_written &&
-                                                    creature_slice_scene.stimulus_spawned &&
-                                                    progress >= 0.85;
-                            if (want_before || want_after) {
-                                int screenshot_width = 0;
-                                int screenshot_height = 0;
-                                glfwGetFramebufferSize(
-                                    window, &screenshot_width, &screenshot_height);
-                                if (screenshot_width > 0 && screenshot_height > 0) {
-                                    CreatureSliceCapture capture;
-                                    capture.elapsed_seconds = elapsed_play_seconds;
-                                    capture.plan = ProbeCreatureSlicePlan(gameSession.get(),
-                                                                          creature_slice_scene);
-                                    capture.skinned_draws = render_pass_stats.skinned_draws;
-                                    capture.skinned_indices_drawn =
-                                        render_pass_stats.skinned_indices_drawn;
-                                    //  composition: read the backbuffer,
-                                    // project the (live) creature position to
-                                    // screen, and measure sky_ratio + the
-                                    // creature-vs-terrain color delta so a
-                                    // visually broken-but-functional frame fails.
-                                    {
-                                        std::vector<unsigned char> comp_pixels(
-                                            static_cast<std::size_t>(screenshot_width) *
-                                            static_cast<std::size_t>(screenshot_height) * 3u);
-                                        glReadBuffer(GL_BACK);
-                                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                                        glReadPixels(0,
-                                                     0,
-                                                     screenshot_width,
-                                                     screenshot_height,
-                                                     GL_RGB,
-                                                     GL_UNSIGNED_BYTE,
-                                                     comp_pixels.data());
-                                        Luminumbra::Vec3 creature_world =
-                                            creature_slice_scene.creature_position;
-                                        if (gameSession->GetRegistry().valid(
-                                                creature_slice_scene.creature)) {
-                                            if (const auto* tf =
-                                                    gameSession->GetRegistry()
-                                                        .try_get<const Luminumbra::Components::
-                                                                     TransformComponent>(
-                                                            creature_slice_scene.creature)) {
-                                                creature_world = tf->position;
-                                            }
-                                        }
-                                        const glm::mat4 view = g_camera->GetViewMatrix();
-                                        const glm::mat4 proj = g_camera->GetProjectionMatrix(
-                                            screenshot_width, screenshot_height);
-                                        const glm::vec4 clip =
-                                            proj * view *
-                                            glm::vec4(creature_world.x,
-                                                      creature_world.y +
-                                                          1.0f, // body center, above feet
-                                                      creature_world.z,
-                                                      1.0f);
-                                        int sx = -1, sy = -1;
-                                        if (clip.w > 0.0f) {
-                                            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
-                                            sx = static_cast<int>(
-                                                (ndc.x * 0.5f + 0.5f) *
-                                                static_cast<float>(screenshot_width));
-                                            sy = static_cast<int>(
-                                                (1.0f - (ndc.y * 0.5f + 0.5f)) *
-                                                static_cast<float>(screenshot_height));
-                                        }
-                                        // project the emissive glow_bloom stimulus prop too so
-                                        // the glow-halo (bright core -> falloff ring) can be
-                                        // measured.
-                                        int stim_x = -1, stim_y = -1;
-                                        if (creature_slice_scene.stimulus_spawned) {
-                                            const Luminumbra::Vec3 sp =
-                                                creature_slice_scene.stimulus_position;
-                                            const glm::vec4 sclip =
-                                                proj * view *
-                                                glm::vec4(sp.x, sp.y + 0.5f, sp.z, 1.0f);
-                                            if (sclip.w > 0.0f) {
-                                                const glm::vec3 sndc = glm::vec3(sclip) / sclip.w;
-                                                stim_x = static_cast<int>(
-                                                    (sndc.x * 0.5f + 0.5f) *
-                                                    static_cast<float>(screenshot_width));
-                                                stim_y = static_cast<int>(
-                                                    (1.0f - (sndc.y * 0.5f + 0.5f)) *
-                                                    static_cast<float>(screenshot_height));
-                                            }
-                                        }
-                                        capture.composition =
-                                            AnalyzeCreatureSliceComposition(comp_pixels,
-                                                                            screenshot_width,
-                                                                            screenshot_height,
-                                                                            sx,
-                                                                            sy,
-                                                                            stim_x,
-                                                                            stim_y);
-                                    }
-                                    const std::string relative_path =
-                                        want_before ? "screenshots/creature-slice-before.ppm"
-                                                    : "screenshots/creature-slice-after.ppm";
-                                    if (WriteBackbufferPpm(scenario_config.artifact_dir /
-                                                               relative_path,
-                                                           screenshot_width,
-                                                           screenshot_height)) {
-                                        capture.file = relative_path;
-                                        if (want_before) {
-                                            creature_slice_before = capture;
-                                            creature_slice_before_written = true;
-                                        } else {
-                                            WriteCreatureSliceAnalysis(scenario_config.artifact_dir,
-                                                                       creature_slice_scene,
-                                                                       creature_slice_before,
-                                                                       capture);
-                                            creature_slice_analysis_written = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (now - last_runtime_state_write >= std::chrono::seconds(1)) {
-                            last_readiness_report =
-                                EvaluateReadiness(scenario_config, gameSession.get());
-                            runtime_state_recorder.capture("running",
-                                                           &jobSystem,
-                                                           gameSession.get(),
-                                                           &renderPipeline,
-                                                           scenario_frame_count,
-                                                           last_readiness_report);
-                            last_runtime_state_write = now;
-                        }
-                        if (scenario_ready && scenario_config.timed_run_seconds > 0) {
-                            const auto elapsed_play_seconds =
-                                std::chrono::duration_cast<std::chrono::seconds>(
-                                    now - scenario_play_started_at)
-                                    .count();
-                            if (elapsed_play_seconds >= scenario_config.timed_run_seconds &&
-                                scenario_frame_count > 0) {
-                                last_readiness_report =
-                                    EvaluateReadiness(scenario_config, gameSession.get());
-                                if (scenario_config.skinned_mesh_visual_smoke() &&
-                                    scenario_config.replicated && scenario_config.avatars >= 2 &&
-                                    !remote_avatar_render_artifact_written) {
-                                    scenario_failed = true;
-                                    scenario_failure_reason =
-                                        "remote_avatar_render_artifact_missing";
-                                    runtime_state_recorder.capture(scenario_failure_reason,
-                                                                   &jobSystem,
-                                                                   gameSession.get(),
-                                                                   &renderPipeline,
-                                                                   scenario_frame_count,
-                                                                   last_readiness_report);
-                                } else {
-                                    runtime_state_recorder.capture("timed_run_complete",
-                                                                   &jobSystem,
-                                                                   gameSession.get(),
-                                                                   &renderPipeline,
-                                                                   scenario_frame_count,
-                                                                   last_readiness_report);
-                                    scenario_timed_run_complete = true;
-                                }
-                                glfwSetWindowShouldClose(window, true);
-                            }
-                        }
+                    // Per-scenario capture/pixel-analysis of the just-rendered
+                    // back buffer, plus the periodic runtime-state write and
+                    // the timed-run completion check. The runner exists iff
+                    // scenario_config.active(), preserving the original guard
+                    // at this exact position (currentState is IN_GAME here).
+                    if (scenario_runner) {
+                        scenario_runner->onPostRenderCapture(deltaTime);
                     }
                     if (runtime_boot_recorder.enabled()) {
                         runtime_boot_recorder.record_frame(deltaTime, renderPipeline);
@@ -9039,775 +4041,48 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-            } else if (g_ui_thumbs > 0 && g_menu_backdrop_active && g_camera && gameSession &&
-                       gameSession->GetWorldSystem() && g_ui_thumbs_index < g_ui_thumbs) {
-                // capture N clean landscape thumbnails (no UI) at varied yaw + time-of-day.
-                const float yaw = 40.0f + static_cast<float>(g_ui_thumbs_index) * 47.0f;
-                const float tod = 0.16f + 0.025f * static_cast<float>(g_ui_thumbs_index % 5);
-                g_camera->Yaw = yaw;
-                g_camera->Pitch = -14.0f; // look down to frame the lit landscape, not just sky
-                g_camera->updateCameraVectors();
-                renderPipeline.set_time_of_day(tod);
-                renderPipeline.render_frame(gameSession->GetRegistry(),
-                                            *gameSession->GetWorldSystem(),
-                                            *g_camera,
-                                            deltaTime,
-                                            wireframe_mode);
-                if (g_ui_thumbs_settle < 28) {
-                    ++g_ui_thumbs_settle;
-                } else {
-                    int vw = 0, vh = 0;
-                    glfwGetFramebufferSize(window, &vw, &vh);
-                    if (vw > 0 && vh > 0) {
-                        std::vector<unsigned char> px(static_cast<std::size_t>(vw) *
-                                                      static_cast<std::size_t>(vh) * 3u);
-                        glReadBuffer(GL_BACK);
-                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                        glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                        const std::filesystem::path shot =
-                            g_ui_thumbs_dir /
-                            ("thumb_" + std::to_string(g_ui_thumbs_index) + ".ppm");
-                        WritePixelBufferPpm(shot, vw, vh, px);
-                        LUMINUMBRA_CORE_INFO(
-                            "UI thumb written -> {} ({}x{})", shot.string(), vw, vh);
-                    }
-                    ++g_ui_thumbs_index;
-                    g_ui_thumbs_settle = 0;
-                    if (g_ui_thumbs_index >= g_ui_thumbs)
-                        glfwSetWindowShouldClose(window, GLFW_TRUE);
-                }
-            } else { // Main Menu, etc.
-                //  is the create-world live preview active this frame?
-                // (world_creation.rml loaded + #preview_pane present + sized). When it
-                // is, the candidate world IS the backdrop — we render ONE world (the
-                // candidate, full-screen) and SUPPRESS the separate menu-vista backdrop,
-                // so the create screen pays for a single render with no FBO/resize churn.
-                Luminumbra::Client::Rml_UIManager::PreviewState pv;
-                bool previewActive = false;
-                if (g_uiManager && worldgenPreview) {
-                    pv = g_uiManager->GetWorldCreationPreviewState();
-                    previewActive = pv.active; // full-screen diorama; no bounded pane rect
-                }
-
-                // render the live scenic world behind the menu, with a slow auto-orbit, at
-                // golden hour. The menu UI bodies are transparent (game_theme.rcss) so the world
-                // shows through. render_frame draws to the back buffer BEFORE the UI pass.
-                // Suppressed while the create-world preview owns the world render.
-                if (!previewActive && g_menu_backdrop_active && g_camera && gameSession &&
-                    gameSession->GetWorldSystem()) {
-                    // Gentle yaw oscillation around the lit-valley heading (95°) for a living, slow
-                    // parallax that never rotates away into dark/back-lit terrain.
-                    g_menu_backdrop_yaw += deltaTime; // phase accumulator (seconds)
-                    g_camera->Yaw = 95.0f + 6.0f * std::sin(g_menu_backdrop_yaw * 0.12f);
-                    g_camera->updateCameraVectors();
-                    renderPipeline.set_time_of_day(0.24f); // dusk golden hour (matches dusk.json)
-                    renderPipeline.render_frame(gameSession->GetRegistry(),
-                                                *gameSession->GetWorldSystem(),
-                                                *g_camera,
-                                                deltaTime,
-                                                wireframe_mode);
-                }
-
-                //  LIVE WORLD-PREVIEW DIORAMA. When the create-world
-                // screen is up, feed the candidate params/weather/tod and render the
-                // candidate world FULL-SCREEN to the backbuffer (the "framed hole" the
-                // create panel frames). The menu UI bodies are transparent so the world
-                // shows through; the #preview_pane frames the primary viewing area.
-                // Mouse drag/scroll over the pane orbits/zooms the turntable camera.
-                if (g_uiManager && worldgenPreview) {
-                    if (previewActive) {
-                        worldgenPreview->set_active(true);
-
-                        // Re-derive the candidate world ONLY when the form changed.
-                        // BuildCustomPreset diffs the form against the base preset;
-                        // we hand the resolved JSON + data root to the in-memory
-                        // loader seam so biome/structure tables resolve correctly.
-                        std::string sig = pv.worldType;
-                        for (const auto& p : pv.params) {
-                            sig += '|';
-                            sig += p.path;
-                            sig += '=';
-                            sig += p.value;
-                        }
-                        int seedVal = 4242;
-                        if (sig != worldgenPreviewLastSig) {
-                            worldgenPreviewLastSig = sig;
-                            // prove a knob/param drag actually drives a
-                            // diorama rebuild — one line per resolved candidate sig so
-                            // a dragged knob is visibly firing the host rebuild branch.
-                            LUMINUMBRA_CORE_INFO("Worldgen preview rebuild: sig={}", sig);
-                            try {
-                                const std::filesystem::path base_path =
-                                    std::filesystem::path(root_path_str) / "worlds" / "atlas" /
-                                    "presets" / (pv.worldType + ".json");
-                                std::ifstream in(base_path);
-                                if (in) {
-                                    nlohmann::json base;
-                                    in >> base;
-                                    //  resolve the live diorama through
-                                    // the engine KnobLayer when the form carries knobs
-                                    // (knobs -> response curves + overlay overrides), so
-                                    // sliding a knob regenerates the preview.
-                                    bool hasKnobs = false;
-                                    for (const auto& p : pv.params)
-                                        if (p.type == "knob" || p.path.rfind("knob.", 0) == 0) {
-                                            hasKnobs = true;
-                                            break;
-                                        }
-                                    nlohmann::json resolved =
-                                        hasKnobs
-                                            ? Luminumbra::Client::BuildKnobResolvedPreset(base,
-                                                                                          pv.params)
-                                                  .json
-                                            : Luminumbra::Client::BuildCustomPreset(base, pv.params)
-                                                  .json;
-                                    const std::filesystem::path data_root =
-                                        std::filesystem::path(root_path_str) / "data";
-                                    worldgenPreview->set_candidate(resolved, data_root, seedVal);
-                                }
-                            } catch (const std::exception& e) {
-                                LUMINUMBRA_CORE_WARN("Preview candidate build failed: {}",
-                                                     e.what());
-                            }
-                        }
-
-                        // Live look controls.
-                        using PW = Luminumbra::Client::WorldgenPreview::Weather;
-                        // Headless capture (--preview-weather) can force a weather chip so the
-                        // diorama spawns precipitation even though no UI pill was clicked; falls
-                        // back to the DOM-selected pill for the interactive create screen.
-                        const std::string weatherSel =
-                            (g_ui_preview_live && !g_ui_preview_weather.empty())
-                                ? g_ui_preview_weather
-                                : pv.weather;
-                        PW w = PW::Clear;
-                        if (weatherSel == "rain")
-                            w = PW::Rain;
-                        else if (weatherSel == "snow")
-                            w = PW::Snow;
-                        else if (weatherSel == "fog")
-                            w = PW::Fog;
-                        else if (weatherSel == "storm")
-                            w = PW::Storm;
-                        worldgenPreview->set_weather(w);
-                        worldgenPreview->set_time_of_day(pv.tod);
-                        if (g_uiManager->ConsumeWorldCreationResetView())
-                            worldgenPreview->reset_view();
-
-                        // Orbit/zoom when the cursor is over the WORLD backdrop, i.e.
-                        // not over the create panel or a control. RmlUi reports the
-                        // hovered element; the bare backdrop is the document body
-                        // (id "world_creation"), so a null/body hover == over the world.
-                        double cx = 0.0, cy = 0.0;
-                        glfwGetCursorPos(window, &cx, &cy);
-                        const bool lmb =
-                            glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-                        Rml::Element* hover = g_uiManager->GetContext()
-                                                  ? g_uiManager->GetContext()->GetHoverElement()
-                                                  : nullptr;
-                        const bool overWorld =
-                            (hover == nullptr) || (hover->GetId() == "world_creation");
-                        if (lmb && overWorld && !worldgenPreviewDragging) {
-                            worldgenPreviewDragging = true;
-                            worldgenPreviewLastCursorX = cx;
-                            worldgenPreviewLastCursorY = cy;
-                        } else if (!lmb) {
-                            worldgenPreviewDragging = false;
-                        }
-                        if (worldgenPreviewDragging) {
-                            const float dx = static_cast<float>(cx - worldgenPreviewLastCursorX);
-                            const float dy = static_cast<float>(cy - worldgenPreviewLastCursorY);
-                            worldgenPreviewLastCursorX = cx;
-                            worldgenPreviewLastCursorY = cy;
-                            // Drag right -> spin right; drag down -> tilt down.
-                            worldgenPreview->orbit(dx * 0.35f, -dy * 0.35f);
-                        }
-
-                        // Scroll wheel over the world zooms the diorama in/out. The
-                        // menu scroll callback accrues the delta; consume + reset it
-                        // here (only applied when the cursor is over the world).
-                        if (overWorld && g_menu_scroll_accum != 0.0) {
-                            worldgenPreview->zoom(static_cast<float>(g_menu_scroll_accum));
-                        }
-                        g_menu_scroll_accum = 0.0;
-
-                        // Debounced rebuild, then render the candidate world FULL-SCREEN
-                        // to the backbuffer (no offscreen FBO, no per-frame pipeline
-                        // resize). render_frame clears + fills the backbuffer; the UI
-                        // pass draws the frosted frame/vignette on top.
-                        worldgenPreview->tick(deltaTime);
-                        worldgenPreview->render_to_backbuffer(renderPipeline, deltaTime);
-                    } else {
-                        worldgenPreview->set_active(false);
-                        worldgenPreview->clear_precipitation(
-                            renderPipeline); // no lingering preview rain
-                        worldgenPreviewLastSig.clear();
-                        worldgenPreviewDragging = false;
-                        g_menu_scroll_accum = 0.0; // drop stale wheel deltas from other menus
-                    }
-                }
-
-                if (g_uiManager) {
-                    g_uiManager->Render();
-                }
-                // --ui-screenshot: settle layout/fonts/textures, capture the back buffer (now
-                // holding the UI over the menu backdrop), then advance to the next batched screen
-                // (one window session captures them all). Mirrors --scene-config.
-                if (!g_ui_screens.empty() && g_ui_screen_index < g_ui_screens.size()) {
-                    // HEADLESS PREVIEW-DIORAMA CAPTURE: for world_creation under --preview-live,
-                    // the live diorama builds on a background worker, so the fixed 30-frame settle
-                    // would capture a black backdrop before world_ready. Instead, wait (bounded
-                    // by a wall-clock timeout so we never hang) for the candidate world to build +
-                    // a short post-ready settle (far-LOD/foliage/precipitation drawn), THEN
-                    // capture.
-                    static std::chrono::steady_clock::time_point s_preview_wait_start{};
-                    static bool s_preview_wait_armed = false;
-                    const bool preview_live_screen =
-                        g_ui_preview_live && g_ui_screens[g_ui_screen_index] == "world_creation";
-                    bool ready_to_capture = false;
-                    if (preview_live_screen) {
-                        if (!s_preview_wait_armed) {
-                            s_preview_wait_armed = true;
-                            s_preview_wait_start = std::chrono::steady_clock::now();
-                            g_ui_preview_settle_after_ready = 0;
-                        }
-                        const bool world_ready = worldgenPreview && worldgenPreview->world_ready();
-                        if (world_ready)
-                            ++g_ui_preview_settle_after_ready;
-                        const double waited_s =
-                            std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                          s_preview_wait_start)
-                                .count();
-                        constexpr double kPreviewTimeoutSeconds =
-                            45.0; // hard bound -> never hangs headlessly
-                        constexpr int kPreviewSettleAfterReady =
-                            40; // post-ready frames for far-LOD/foliage/particles
-                        const bool settled = world_ready && g_ui_preview_settle_after_ready >=
-                                                                kPreviewSettleAfterReady;
-                        const bool timed_out = waited_s >= kPreviewTimeoutSeconds;
-                        ready_to_capture = settled || timed_out;
-                        if (ready_to_capture) {
-                            // One-line, self-diagnosing readiness report so a black/timed-out
-                            // capture tells us WHICH failure happened (no rebuild signal vs build
-                            // failed vs world built but render black) in a single run.
-                            LUMINUMBRA_CORE_INFO(
-                                "Preview-live capture gate: world_ready={} settle_after_ready={} "
-                                "waited={:.1f}s timed_out={} "
-                                "build_failed={} last_error='{}'",
-                                world_ready,
-                                g_ui_preview_settle_after_ready,
-                                waited_s,
-                                timed_out,
-                                worldgenPreview ? worldgenPreview->last_build_failed() : true,
-                                worldgenPreview ? worldgenPreview->last_error()
-                                                : std::string("<null preview>"));
-                        }
-                    } else if (g_ui_screenshot_settle < 30) {
-                        ++g_ui_screenshot_settle;
-                    } else {
-                        ready_to_capture = true;
-                    }
-                    if (ready_to_capture) {
-                        s_preview_wait_armed = false; // re-arm for the next screen (batched runs)
-                        int vw = 0, vh = 0;
-                        glfwGetFramebufferSize(window, &vw, &vh);
-                        if (vw > 0 && vh > 0) {
-                            std::vector<unsigned char> px(static_cast<std::size_t>(vw) *
-                                                          static_cast<std::size_t>(vh) * 3u);
-                            glReadBuffer(GL_BACK);
-                            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                            glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                            const std::filesystem::path shot =
-                                g_ui_screenshot_dir /
-                                ("ui-" + g_ui_screens[g_ui_screen_index] + ".ppm");
-                            WritePixelBufferPpm(shot, vw, vh, px);
-                            LUMINUMBRA_CORE_INFO(
-                                "UI screenshot written -> {} ({}x{})", shot.string(), vw, vh);
-                        }
-                        // Advance to the next screen, or finish.
-                        ++g_ui_screen_index;
-                        if (g_ui_screen_index < g_ui_screens.size()) {
-                            g_ui_screenshot_screen = g_ui_screens[g_ui_screen_index];
-                            g_ui_screenshot_settle = 0;
-                            if (g_uiManager)
-                                g_uiManager->RequestLoadDocument(g_ui_screens[g_ui_screen_index] +
-                                                                 ".rml");
-                        } else {
-                            glfwSetWindowShouldClose(window, GLFW_TRUE);
-                        }
-                    }
-                }
+            } else {
+                // Menu-branch rendering: thumbs capture, menu backdrop,
+                // create-world preview diorama, UI pass, and the
+                // --ui-screenshot batch (app/MenuScreens.cpp).
+                RenderMenuScreens(g_app,
+                                  window,
+                                  deltaTime,
+                                  root_path_str,
+                                  g_camera.get(),
+                                  gameSession.get(),
+                                  renderPipeline,
+                                  g_uiManager.get(),
+                                  worldgenPreview.get(),
+                                  menuPreviewState);
             }
         }
 
         if (currentState == GameState::IN_GAME) {
-            //  Minecraft-style floating ID nameplates above each creature's head. Projects
-            // the world position to screen via the camera and draws a label (id + sex + generation)
-            // into the ImGui foreground list, so it shows in the live view AND in the demo capture
-            // (this runs even during the timelapse, unlike the gated debug windows below).
-            if (g_imgui_enabled && g_timelapse_creatures && g_camera && gameSession) {
-                int fbw = 0, fbh = 0;
-                glfwGetFramebufferSize(window, &fbw, &fbh);
-                if (fbw > 0 && fbh > 0) {
-                    const float aspect = static_cast<float>(fbw) / static_cast<float>(fbh);
-                    const glm::mat4 vp =
-                        glm::perspective(glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
-                        g_camera->GetViewMatrix();
-                    auto* dl = ImGui::GetForegroundDrawList();
-                    auto& reg = gameSession->GetRegistry();
-                    auto view = reg.view<const Luminumbra::Components::CreatureComponent,
-                                         const Luminumbra::Components::TransformComponent>();
-                    for (auto e : view) {
-                        const auto& cr =
-                            view.get<const Luminumbra::Components::CreatureComponent>(e);
-                        const auto& tf =
-                            view.get<const Luminumbra::Components::TransformComponent>(e);
-                        const glm::vec4 clip =
-                            vp *
-                            glm::vec4(tf.position.x, tf.position.y + 2.4f, tf.position.z, 1.0f);
-                        if (clip.w <= 0.05f)
-                            continue; // behind the camera
-                        const float sx = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(fbw);
-                        const float sy =
-                            (1.0f - (clip.y / clip.w * 0.5f + 0.5f)) * static_cast<float>(fbh);
-                        char label[48];
-                        const unsigned idx = static_cast<unsigned>(entt::to_entity(e));
-                        if (cr.eaten) {
-                            std::snprintf(label, sizeof(label), "#%u dead", idx);
-                        } else if (cr.is_predator) {
-                            std::snprintf(label, sizeof(label), "#%u PRED", idx);
-                        } else if (const auto* gn =
-                                       reg.try_get<Luminumbra::Components::CreatureGenomeComponent>(
-                                           e)) {
-                            std::snprintf(label,
-                                          sizeof(label),
-                                          "#%u %c g%u",
-                                          idx,
-                                          gn->female ? 'F' : 'M',
-                                          gn->generation);
-                        } else {
-                            std::snprintf(label, sizeof(label), "#%u", idx);
-                        }
-                        const ImVec2 sz = ImGui::CalcTextSize(label);
-                        const ImVec2 at(sx - sz.x * 0.5f, sy - sz.y);
-                        dl->AddText(ImVec2(at.x + 1.0f, at.y + 1.0f),
-                                    IM_COL32(0, 0, 0, 200),
-                                    label); // shadow
-                        dl->AddText(at, IM_COL32(255, 255, 255, 235), label);
-                    }
-                }
-            }
-            if (g_imgui_enabled && g_playerController && g_timelapse_frames == 0) {
-                g_playerController->RenderDebugUI();
-            }
-            // Always-on time-scale indicator (when not real-time) so slow-mo / fast-forward
-            // / pause is obvious at a glance.
-            if (g_imgui_enabled && g_timeScale != 1.0f && g_timelapse_frames == 0) {
-                ImGui::SetNextWindowPos(ImVec2(10.0f, 60.0f), ImGuiCond_Always);
-                ImGui::SetNextWindowBgAlpha(0.5f);
-                if (ImGui::Begin("##timescale",
-                                 nullptr,
-                                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-                                     ImGuiWindowFlags_NoMove)) {
-                    if (g_timeScale == 0.0f)
-                        ImGui::Text("|| PAUSED  (\\ to resume)");
-                    else
-                        ImGui::Text("TIME  x%.2f", g_timeScale);
-                }
-                ImGui::End();
-            }
-            //  minimal crop HUD — seed/harvest inventory + the farming verb hints.
-            if (g_imgui_enabled && currentState == GameState::IN_GAME &&
-                !scenario_config.active() && g_timelapse_frames == 0) {
-                ImGui::SetNextWindowPos(ImVec2(10.0f, 92.0f), ImGuiCond_Always);
-                ImGui::SetNextWindowBgAlpha(0.45f);
-                if (ImGui::Begin("##farmhud",
-                                 nullptr,
-                                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs |
-                                     ImGuiWindowFlags_NoMove)) {
-                    ImGui::Text("FARM  seeds:%d  harvests:%d  yield:%.1f",
-                                g_farming.seeds,
-                                g_farming.harvests,
-                                g_farming.total_yield);
-                    ImGui::TextDisabled("F plant   G water   H fertilize   J harvest");
-                }
-                ImGui::End();
-            }
-            // Live GPU profiler : per-pass GPU-ms + draw/instance counts read from the render
-            // pipeline's GL_TIMESTAMP timer ring (render-side only; never hashed). The first real
-            // interactive readout for the engine optimization pass.
-            if (g_imgui_enabled && g_show_gpu_profiler && currentState == GameState::IN_GAME &&
-                g_timelapse_frames == 0) {
-                const auto& gp = renderPipeline.get_last_render_pass_stats();
-                ImGui::SetNextWindowPos(ImVec2(10.0f, 120.0f), ImGuiCond_FirstUseEver);
-                ImGui::SetNextWindowBgAlpha(0.85f);
-                if (ImGui::Begin(
-                        "GPU Profiler ", &g_show_gpu_profiler, ImGuiWindowFlags_AlwaysAutoResize)) {
-                    const double total_ms = gp.shadow_gpu_ms + gp.gbuffer_gpu_ms + gp.ssao_gpu_ms +
-                                            gp.ssao_blur_gpu_ms + gp.lighting_gpu_ms +
-                                            gp.water_gpu_ms + gp.skybox_gpu_ms +
-                                            gp.particle_gpu_ms + gp.foliage_gpu_ms +
-                                            gp.aerial_gpu_ms + gp.final_blit_gpu_ms;
-                    if (!gp.gpu_timers_supported) {
-                        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
-                                           "GPU timers unsupported on this context");
-                    }
-                    const ImVec4 over(1.0f, 0.45f, 0.45f, 1.0f);
-                    const ImVec4 okc(0.70f, 0.85f, 0.70f, 1.0f);
-                    ImGui::TextColored(total_ms > 3.333 ? over : okc,
-                                       "GPU frame total: %6.3f ms   (budget 3.333 ms @ 300fps)",
-                                       total_ms);
-                    const double ui_ms = g_uiManager ? g_uiManager->GetLastUiFrameMs() : 0.0;
-                    ImGui::Text("UI submit (CPU): %6.3f ms", ui_ms);
-                    ImGui::Separator();
-                    auto row = [&](const char* name, double ms) {
-                        ImGui::TextColored(ms > 1.0 ? over : okc, "  %-11s %7.3f ms", name, ms);
-                    };
-                    row("gbuffer", gp.gbuffer_gpu_ms);
-                    row("shadow", gp.shadow_gpu_ms);
-                    row("lighting", gp.lighting_gpu_ms);
-                    row("foliage", gp.foliage_gpu_ms);
-                    row("particle", gp.particle_gpu_ms);
-                    row("water", gp.water_gpu_ms);
-                    row("ssao", gp.ssao_gpu_ms + gp.ssao_blur_gpu_ms);
-                    row("aerial", gp.aerial_gpu_ms);
-                    row("skybox", gp.skybox_gpu_ms);
-                    row("final_blit", gp.final_blit_gpu_ms);
-                    ImGui::Separator();
-                    ImGui::Text("terrain: %5zu draws  %5zu chunks  %7zu tris",
-                                gp.terrain_draws,
-                                gp.terrain_visible_chunks,
-                                gp.terrain_indices_drawn / 3);
-                    ImGui::Text("far-LOD: %5zu draws  %7zu tris",
-                                gp.far_region_draws,
-                                gp.far_indices_drawn / 3);
-                    ImGui::Text("foliage: %5zu draws  %7zu instances",
-                                gp.foliage_draws,
-                                gp.foliage_instances_drawn);
-                    ImGui::Text("particle: %5zu draws  %7zu instances",
-                                gp.particle_draws,
-                                gp.particles_drawn);
-                    ImGui::Text("shadow: %5zu draws", gp.shadow_draws);
-                    ImGui::Text("water: %5zu draws", gp.water_draws);
-                }
-                ImGui::End();
-            }
-            // --debug-glass-pane — stage three stained-glass
-            // panes on the terrain near spawn (one-time). Render-only capture subject.
-            if (g_debug_glass_panes && !g_glass_panes_spawned &&
-                currentState == GameState::IN_GAME && gameSession) {
-                if (auto* gws = gameSession->GetWorldSystem()) {
-                    g_glass_panes_spawned = true;
-                    std::vector<Luminumbra::Rendering::GlassPaneItem> panes;
-                    const glm::vec3 pane_tints[3] = {
-                        {0.95f, 0.25f, 0.25f}, {0.25f, 0.85f, 0.35f}, {0.30f, 0.45f, 0.95f}};
-                    for (int pi = 0; pi < 3; ++pi) {
-                        const float px = 12.0f + 5.0f * static_cast<float>(pi);
-                        const float pz = 14.0f;
-                        const float py = gws->GetTerrainHeightAt(px, pz);
-                        Luminumbra::Rendering::GlassPaneItem pane;
-                        glm::mat4 pm(1.0f);
-                        pm = glm::translate(pm, glm::vec3(px, py, pz));
-                        // Lean the panes back ~50 deg so the near-noon sun projects a
-                        // real footprint (a vertical pane under an overhead sun casts
-                        // only a sliver - the first capture attempt's lesson).
-                        pm = glm::rotate(pm, glm::radians(-50.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-                        pm = glm::scale(pm, glm::vec3(4.0f, 5.0f, 1.0f)); // 4 m wide, 5 m tall
-                        pane.model = pm;
-                        pane.tint = pane_tints[pi];
-                        pane.thickness = 1.0f;
-                        panes.push_back(pane);
-                    }
-                    renderPipeline.set_glass_panes(std::move(panes));
-                    LUMINUMBRA_CORE_INFO(
-                        "Debug glass panes staged (3 stained-glass tints) near spawn");
-                }
-            }
+            // Floating creature ID nameplates for the ecology demo capture
+            // (app/DebugOverlays.cpp).
+            DrawCreatureNameplates(g_app, window, g_camera.get(), gameSession.get());
+            // Player debug UI, time-scale indicator, and the minimal crop HUD
+            // (app/DebugOverlays.cpp).
+            DrawFrameStatusOverlays(g_app, currentState, scenario_config, g_playerController.get());
+            // Live per-pass GPU profiler overlay (app/DebugOverlays.cpp).
+            DrawGpuProfilerOverlay(g_app, currentState, renderPipeline, g_uiManager.get());
+            // --debug-glass-pane one-time capture subject (app/DebugOverlays.cpp).
+            SpawnDebugGlassPanes(g_app, currentState, gameSession.get(), renderPipeline);
             // push the metering opt-in (idempotent per frame).
-            renderPipeline.set_auto_exposure_metered(g_auto_exposure_metered);
+            renderPipeline.set_auto_exposure_metered(g_app.overlay.auto_exposure_metered);
             //  rendering: push the volumetrics tier.
-            renderPipeline.set_volumetric_quality(g_volumetric_quality);
-            // live shader authoring (crawl  + walk: watcher + panel ).
-            // Render-only end to end: shaders/uniforms never feed the sim or world_hash.
-            if (currentState == GameState::IN_GAME && g_timelapse_frames == 0) {
-                // Crawl: reload-all requested by  (executed here, on the GL thread).
-                if (g_request_shader_reload) {
-                    g_request_shader_reload = false;
-                    renderPipeline.reload_all_shaders();
-                }
-                // Walk (-3): opt-in once/sec mtime poll over the roster's source
-                // files; a changed file triggers that shader's rollback-safe Reload.
-                if (g_shader_auto_reload) {
-                    const double watch_now = glfwGetTime();
-                    if (watch_now - g_shader_watch_last_poll >= 1.0) {
-                        g_shader_watch_last_poll = watch_now;
-                        renderPipeline.enumerate_shaders([&](const char* sh_name,
-                                                             Luminumbra::Rendering::Shader* sh) {
-                            if (!sh)
-                                return;
-                            bool changed = false;
-                            for (const std::string& p : {sh->VertexPath(), sh->FragmentPath()}) {
-                                if (p.empty())
-                                    continue;
-                                std::error_code ec;
-                                const auto t = std::filesystem::last_write_time(p, ec);
-                                if (ec)
-                                    continue;
-                                auto it = g_shader_watch_mtimes.find(p);
-                                if (it != g_shader_watch_mtimes.end() && it->second != t) {
-                                    changed = true;
-                                }
-                                g_shader_watch_mtimes[p] = t;
-                            }
-                            if (changed) {
-                                LUMINUMBRA_CORE_INFO(
-                                    "Shader source changed on disk -> reloading {}", sh_name);
-                                sh->Reload();
-                            }
-                        });
-                    }
-                }
-                // Walk (-4): the dev shader panel — roster status, per-shader
-                // reload, and LIVE uniform editing via glProgramUniform (GL 4.5 DSA).
-                // Honesty note (-5): passes re-set most uniforms per draw; an
-                // edit persists only for uniforms a pass never sets (u_dev_*).
-                if (g_imgui_enabled && g_show_shader_panel) {
-                    ImGui::SetNextWindowPos(ImVec2(10.0f, 420.0f), ImGuiCond_FirstUseEver);
-                    ImGui::SetNextWindowSize(ImVec2(440.0f, 520.0f), ImGuiCond_FirstUseEver);
-                    if (ImGui::Begin("Shaders ", &g_show_shader_panel)) {
-                        ImGui::TextWrapped(
-                            "Live shader authoring (): edit res/shaders/ in any editor, "
-                            "reload hot-swaps rollback-safe. Uniform edits persist only for "
-                            "uniforms a pass does not re-set per frame (u_dev_* convention).");
-                        if (ImGui::Button("Reload All "))
-                            g_request_shader_reload = true;
-                        ImGui::SameLine();
-                        ImGui::Checkbox("Auto-reload on file change", &g_shader_auto_reload);
-                        ImGui::Separator();
-                        renderPipeline.enumerate_shaders([&](const char* sh_name,
-                                                             Luminumbra::Rendering::Shader* sh) {
-                            if (!sh)
-                                return;
-                            ImGui::PushID(sh_name);
-                            if (ImGui::CollapsingHeader(sh_name)) {
-                                const bool sh_ok = sh->IsValid();
-                                ImGui::TextColored(sh_ok ? ImVec4(0.70f, 0.85f, 0.70f, 1.0f)
-                                                         : ImVec4(1.0f, 0.45f, 0.45f, 1.0f),
-                                                   sh_ok ? "valid"
-                                                         : "INVALID (prior program kept)");
-                                if (!sh->Diagnostic().empty()) {
-                                    ImGui::TextWrapped("%s", sh->Diagnostic().c_str());
-                                }
-                                if (ImGui::Button("Reload"))
-                                    sh->Reload();
-                                const GLuint prog = sh->Id();
-                                GLint uniform_count = 0;
-                                glGetProgramiv(prog, GL_ACTIVE_UNIFORMS, &uniform_count);
-                                for (GLint u = 0; u < uniform_count; ++u) {
-                                    char uname[128];
-                                    GLsizei ulen = 0;
-                                    GLint usize = 0;
-                                    GLenum utype = 0;
-                                    glGetActiveUniform(prog,
-                                                       static_cast<GLuint>(u),
-                                                       sizeof(uname),
-                                                       &ulen,
-                                                       &usize,
-                                                       &utype,
-                                                       uname);
-                                    if (usize != 1)
-                                        continue; // arrays: not editable here
-                                    const GLint loc = glGetUniformLocation(prog, uname);
-                                    if (loc < 0)
-                                        continue;
-                                    ImGui::PushID(u);
-                                    const bool looks_color = std::string_view(uname).find("olor") !=
-                                                             std::string_view::npos;
-                                    switch (utype) {
-                                        case GL_FLOAT: {
-                                            float v = 0.0f;
-                                            glGetUniformfv(prog, loc, &v);
-                                            if (ImGui::DragFloat(uname, &v, 0.01f))
-                                                glProgramUniform1f(prog, loc, v);
-                                            break;
-                                        }
-                                        case GL_FLOAT_VEC2: {
-                                            float v[2] = {};
-                                            glGetUniformfv(prog, loc, v);
-                                            if (ImGui::DragFloat2(uname, v, 0.01f))
-                                                glProgramUniform2fv(prog, loc, 1, v);
-                                            break;
-                                        }
-                                        case GL_FLOAT_VEC3: {
-                                            float v[3] = {};
-                                            glGetUniformfv(prog, loc, v);
-                                            const bool edited =
-                                                looks_color
-                                                    ? ImGui::ColorEdit3(
-                                                          uname, v, ImGuiColorEditFlags_Float)
-                                                    : ImGui::DragFloat3(uname, v, 0.01f);
-                                            if (edited)
-                                                glProgramUniform3fv(prog, loc, 1, v);
-                                            break;
-                                        }
-                                        case GL_FLOAT_VEC4: {
-                                            float v[4] = {};
-                                            glGetUniformfv(prog, loc, v);
-                                            const bool edited =
-                                                looks_color
-                                                    ? ImGui::ColorEdit4(
-                                                          uname, v, ImGuiColorEditFlags_Float)
-                                                    : ImGui::DragFloat4(uname, v, 0.01f);
-                                            if (edited)
-                                                glProgramUniform4fv(prog, loc, 1, v);
-                                            break;
-                                        }
-                                        case GL_INT: {
-                                            GLint v = 0;
-                                            glGetUniformiv(prog, loc, &v);
-                                            if (ImGui::DragInt(uname, &v))
-                                                glProgramUniform1i(prog, loc, v);
-                                            break;
-                                        }
-                                        case GL_BOOL: {
-                                            GLint v = 0;
-                                            glGetUniformiv(prog, loc, &v);
-                                            bool b = v != 0;
-                                            if (ImGui::Checkbox(uname, &b))
-                                                glProgramUniform1i(prog, loc, b ? 1 : 0);
-                                            break;
-                                        }
-                                        default:
-                                            break; // samplers/matrices: display-only, skip
-                                    }
-                                    ImGui::PopID();
-                                }
-                            }
-                            ImGui::PopID();
-                        });
-                    }
-                    ImGui::End();
-                }
-            }
-            // Settings menu ( to toggle; frees the cursor). Render-only; user.* is never
-            // hashed. Changes apply live and "Save" persists them to the per-user overlay.
-            // The polished RML settings screen (settings.rml) is the follow-on.
-            if (g_imgui_enabled && g_show_settings && g_camera && g_timelapse_frames == 0) {
-                ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
-                if (ImGui::Begin("Settings ")) {
-                    luminumbra::core::UserSettings& us = g_systemConfig.user();
-                    if (ImGui::SliderFloat(
-                            "Look sensitivity", &us.mouse_sensitivity, 0.01f, 1.0f, "%.3f")) {
-                        g_camera->MouseSensitivity = us.mouse_sensitivity; // applied live
-                    }
-                    if (ImGui::SliderFloat("FOV", &us.fov, 30.0f, 110.0f, "%.0f deg")) {
-                        g_camera->Zoom = us.fov;
-                    }
-                    if (ImGui::Checkbox("VSync", &us.vsync)) {
-                        glfwSwapInterval(us.vsync ? 1 : 0);
-                    }
-                    ImGui::Separator();
-                    ImGui::SliderFloat("Time scale", &g_timeScale, 0.0f, 8.0f, "%.2fx");
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("1x"))
-                        g_timeScale = 1.0f;
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton(g_timeScale == 0.0f ? "Resume" : "Pause"))
-                        g_timeScale = (g_timeScale == 0.0f) ? 1.0f : 0.0f;
-                    ImGui::TextDisabled("engine time: [ slower   ] faster   \\ reset");
-                    ImGui::Separator();
-                    {
-                        // Window mode — applied live via ApplyWindowMode (no-op on capture-pinned
-                        // runs).
-                        const char* modes[] = {"windowed", "borderless", "fullscreen"};
-                        int cur = 1; // default borderless
-                        for (int i = 0; i < 3; ++i)
-                            if (us.window_mode == modes[i])
-                                cur = i;
-                        if (ImGui::Combo("Window mode", &cur, modes, 3)) {
-                            us.window_mode = modes[cur];
-                            const WindowMode m =
-                                ParseWindowMode(us.window_mode, g_windowState.mode);
-                            ApplyWindowMode(window, g_windowState, m);
-                        }
-                    }
-                    {
-                        // Resolution — applied live in windowed mode (borderless/fullscreen use
-                        // the monitor's resolution); suppressed on capture-pinned gate runs.
-                        const char* resos[] = {"1280x720",
-                                               "1920x1080",
-                                               "2560x1440",
-                                               "3440x1440",
-                                               "3840x1600",
-                                               "3840x2160"};
-                        int rcur = -1;
-                        for (int i = 0; i < 6; ++i)
-                            if (us.resolution == resos[i])
-                                rcur = i;
-                        if (ImGui::Combo("Resolution", &rcur, resos, 6) && rcur >= 0) {
-                            us.resolution = resos[rcur];
-                            const std::string& r = us.resolution;
-                            const auto xp = r.find('x');
-                            if (xp != std::string::npos) {
-                                const int rw = std::atoi(r.substr(0, xp).c_str());
-                                const int rh = std::atoi(r.substr(xp + 1).c_str());
-                                if (rw > 0 && rh > 0) {
-                                    g_windowState.windowedWidth = rw;
-                                    g_windowState.windowedHeight = rh;
-                                    if (us.window_mode == "windowed" &&
-                                        !g_windowState.capture_pinned)
-                                        glfwSetWindowSize(window, rw, rh);
-                                }
-                            }
-                        }
-                    }
-                    if (ImGui::SliderFloat("Master volume", &us.audio_master, 0.0f, 1.0f, "%.2f")) {
-                        if (audioManager)
-                            audioManager->SetMasterVolume(us.audio_master); // applied live
-                    }
-                    if (ImGui::SliderFloat("Music volume", &us.audio_music, 0.0f, 1.0f, "%.2f")) {
-                        if (audioManager)
-                            audioManager->SetMusicVolume(
-                                us.audio_music); // applied live (music bus)
-                    }
-                    if (ImGui::SliderFloat("SFX volume", &us.audio_sfx, 0.0f, 1.0f, "%.2f")) {
-                        if (audioManager)
-                            audioManager->SetSfxVolume(us.audio_sfx); // applied live (sfx bus)
-                    }
-                    if (ImGui::CollapsingHeader("Controls (keyboard)")) {
-                        for (const auto& def : Luminumbra::Client::kInputActionDefs) {
-                            const int idx = static_cast<int>(def.action);
-                            const int kc = g_systemConfig.keybind(def.name, def.default_key);
-                            const char* kn = glfwGetKeyName(kc, 0);
-                            char btn[48];
-                            if (g_rebindCaptureAction == idx)
-                                std::snprintf(btn, sizeof(btn), "press a key...##%s", def.name);
-                            else if (kn)
-                                std::snprintf(btn, sizeof(btn), "%s##%s", kn, def.name);
-                            else
-                                std::snprintf(btn, sizeof(btn), "key %d##%s", kc, def.name);
-                            ImGui::Text("%-12s", def.name);
-                            ImGui::SameLine(150);
-                            if (ImGui::Button(btn))
-                                g_rebindCaptureAction = idx;
-                        }
-                        ImGui::TextDisabled("click a binding, then press a key (Esc cancels)");
-                    }
-                    if (ImGui::Button("Save settings")) {
-                        const std::string path =
-                            luminumbra::core::SystemConfig::DefaultUserOverlayPath();
-                        const bool ok = g_systemConfig.SaveUserOverlay(path);
-                        LUMINUMBRA_CORE_INFO(
-                            "Settings {} ({})", ok ? "saved" : "save FAILED", path);
-                    }
-                    ImGui::TextDisabled("user.* — client-only, never hashed");
-                }
-                ImGui::End();
-            }
-            if (g_imgui_enabled && show_worldgen_viewer && worldGenViewer) {
-                worldGenViewer->UpdateAndRender(show_worldgen_viewer,
+            renderPipeline.set_volumetric_quality(g_app.overlay.volumetric_quality);
+            // Live shader authoring: reload requests, the opt-in mtime watcher,
+            // and the dev shader panel (app/DebugOverlays.cpp).
+            UpdateShaderTools(g_app, currentState, renderPipeline);
+            // Settings menu (app/DebugOverlays.cpp). Render-only; user.* is
+            // never hashed.
+            DrawSettingsWindow(
+                g_app, window, g_camera.get(), audioManager.get(), g_systemConfig, g_windowState);
+            if (g_app.overlay.imgui_enabled && g_app.overlay.show_worldgen_viewer &&
+                worldGenViewer) {
+                worldGenViewer->UpdateAndRender(g_app.overlay.show_worldgen_viewer,
                                                 gameSession->GetWorldSystem());
             }
         }
@@ -9820,7 +4095,7 @@ int main(int argc, char* argv[]) {
             g_uiManager->Render();
         }
 
-        if (g_imgui_enabled) {
+        if (g_app.overlay.imgui_enabled) {
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
@@ -9839,7 +4114,8 @@ int main(int argc, char* argv[]) {
         // GPU-timer averaging + the honest CPU-submit/present/NVML accounting run
         // AFTER glfwSwapBuffers (see the post-swap block) so present + wall-clock
         // are measured, not just the GPU per-pass timer sum.
-        if (!g_render_benchmark_path.empty() && currentState == GameState::IN_GAME && gameSession) {
+        if (!g_app.capture.render_benchmark_path.empty() && currentState == GameState::IN_GAME &&
+            gameSession) {
             if (g_camera) {
                 g_camera->Position = glm::vec3(8.0f, 56.0f, 8.0f);
                 g_camera->Yaw = 35.0f;
@@ -9851,10 +4127,12 @@ int main(int argc, char* argv[]) {
 
         // --timelapse: dump the rendered frame, then fast-forward sim-time (+ the day clock)
         // for the next one. Pair with --no-ui so no overlay is baked into the frame.
-        if (g_timelapse_frames > 0 && currentState == GameState::IN_GAME && gameSession) {
-            if (g_timelapse_settle < kTimelapseSettleFrames) {
-                renderPipeline.set_time_of_day(g_timelapse_tod); // settle at the start time-of-day
-                ++g_timelapse_settle; // let the world stream/settle before frame 0
+        if (g_app.capture.timelapse_frames > 0 && currentState == GameState::IN_GAME &&
+            gameSession) {
+            if (g_app.capture.timelapse_settle < kTimelapseSettleFrames) {
+                renderPipeline.set_time_of_day(
+                    g_app.capture.timelapse_tod); // settle at the start time-of-day
+                ++g_app.capture.timelapse_settle; // let the world stream/settle before frame 0
             } else {
                 int vw = 0, vh = 0;
                 glfwGetFramebufferSize(window, &vw, &vh);
@@ -9865,25 +4143,26 @@ int main(int argc, char* argv[]) {
                     glPixelStorei(GL_PACK_ALIGNMENT, 1);
                     glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
                     char nm[32];
-                    std::snprintf(nm, sizeof(nm), "frame_%04d.ppm", g_timelapse_captured);
-                    if (WritePixelBufferPpm(g_timelapse_dir / nm, vw, vh, px))
-                        ++g_timelapse_captured;
+                    std::snprintf(
+                        nm, sizeof(nm), "frame_%04d.ppm", g_app.capture.timelapse_captured);
+                    if (WritePixelBufferPpm(g_app.capture.timelapse_dir / nm, vw, vh, px))
+                        ++g_app.capture.timelapse_captured;
                 }
-                if (g_timelapse_captured >= g_timelapse_frames) {
+                if (g_app.capture.timelapse_captured >= g_app.capture.timelapse_frames) {
                     LUMINUMBRA_CORE_INFO("Timelapse: captured {} frames -> {}",
-                                         g_timelapse_captured,
-                                         g_timelapse_dir.string());
+                                         g_app.capture.timelapse_captured,
+                                         g_app.capture.timelapse_dir.string());
                     glfwSetWindowShouldClose(window, GLFW_TRUE);
                 } else {
                     //  terraform demo: from the 3rd captured frame, carve a trench that
                     // marches from +Z toward spawn (one sphere/frame), then let the fast-forward
                     // ticks below drain/redirect any water into the freshly-cut channel. Carve
                     // BEFORE the ticks so the water responds within this same frame's advance.
-                    if (g_timelapse_dig && g_timelapse_captured >= 2 &&
+                    if (g_app.capture.timelapse_dig && g_app.capture.timelapse_captured >= 2 &&
                         gameSession->GetWorldSystem()) {
                         const auto sp = gameSession->GetMetadata().spawnPoint;
-                        const int dig_i =
-                            g_timelapse_captured - 2; // 0,1,2,... after a 2-frame establishing hold
+                        const int dig_i = g_app.capture.timelapse_captured -
+                                          2; // 0,1,2,... after a 2-frame establishing hold
                         const float surf =
                             gameSession->GetWorldSystem()->GetTerrainHeightAt(sp.x, sp.z);
                         // DEEPEN a crater at spawn: drop the sphere center ~1 m/frame so the pit
@@ -9903,37 +4182,43 @@ int main(int argc, char* argv[]) {
                     // channel below the waterline so the body drains through it. The fast-forward
                     // ticks below let the solver push water out each frame; the level visibly
                     // drops.
-                    if (g_timelapse_drain && g_drain_state.init && gameSession->GetWorldSystem()) {
+                    if (g_app.capture.timelapse_drain && g_app.capture.drain_state.init &&
+                        gameSession->GetWorldSystem()) {
                         auto* wsd = gameSession->GetWorldSystem();
                         wsd->debug_force_water_remesh(); // smooth per-frame surface
                         // GROUND TRUTH: water volume in a disc over the INLAND target region (where
                         // the channel is cut). If the water really floods into the new cut, this
                         // RISES from ~0.
-                        const Luminumbra::Vec3 inland(g_drain_state.P.x + g_drain_state.dhx * 6.0f,
-                                                      g_drain_state.P.y,
-                                                      g_drain_state.P.z + g_drain_state.dhz * 6.0f);
+                        const Luminumbra::Vec3 inland(
+                            g_app.capture.drain_state.P.x + g_app.capture.drain_state.dhx * 6.0f,
+                            g_app.capture.drain_state.P.y,
+                            g_app.capture.drain_state.P.z + g_app.capture.drain_state.dhz * 6.0f);
                         const std::int64_t vol = wsd->debug_water_volume_near(inland, 10.0f);
                         LUMINUMBRA_CORE_INFO(
                             "Timelapse-drain[f{}]: inland water volume (Sum depth) = {} mm-cells",
-                            g_timelapse_captured,
+                            g_app.capture.timelapse_captured,
                             vol);
                         // Three acts: A) hold on the dry bank, B) carve a contained MODERATE-depth
                         // basin into it (touching the sea so it floods), C) STOP carving and hold
                         // while the sea fills the basin up to its level on camera. Moderate depth
                         // so it fills in-window.
-                        const int holdN = std::max(6, g_timelapse_frames / 5); // Act A end
+                        const int holdN =
+                            std::max(6, g_app.capture.timelapse_frames / 5); // Act A end
                         const int carveN =
-                            holdN + std::max(10, g_timelapse_frames / 3); // Act B end
-                        if (g_timelapse_captured >= holdN && g_timelapse_captured < carveN) {
-                            const int k = g_timelapse_captured - holdN;
+                            holdN + std::max(10, g_app.capture.timelapse_frames / 3); // Act B end
+                        if (g_app.capture.timelapse_captured >= holdN &&
+                            g_app.capture.timelapse_captured < carveN) {
+                            const int k = g_app.capture.timelapse_captured - holdN;
                             // Bowl 3 m onto the bank, always touching the sea; WIDEN it (fixed 2 m
                             // depth) so a pool grows into the green bank and stays IN FRAME.
-                            const float cx = g_drain_state.P.x + g_drain_state.dhx * 3.0f;
-                            const float cz = g_drain_state.P.z + g_drain_state.dhz * 3.0f;
+                            const float cx = g_app.capture.drain_state.P.x +
+                                             g_app.capture.drain_state.dhx * 3.0f;
+                            const float cz = g_app.capture.drain_state.P.z +
+                                             g_app.capture.drain_state.dhz * 3.0f;
                             const float radius =
                                 3.0f + 0.34f * static_cast<float>(k); // 3 -> ~11 m wide
-                            const float floor_y =
-                                g_drain_state.surf - 1.5f; // shallow+wide -> fills fast, spreads
+                            const float floor_y = g_app.capture.drain_state.surf -
+                                                  1.5f; // shallow+wide -> fills fast, spreads
                             const int n = gameSession->GetWorldSystem()->EditTerrainVoxel(
                                 Luminumbra::Vec3(cx, floor_y, cz),
                                 radius,
@@ -9954,45 +4239,49 @@ int main(int argc, char* argv[]) {
                     // land fills from rainfall — water collects in the low spots. Act 2 turns rain
                     // OFF and evaporation ON: the water does NOT refill (finite) and slowly
                     // recedes. The volume trace tells the story.
-                    if (g_timelapse_rain && g_drain_state.init && gameSession->GetWorldSystem()) {
+                    if (g_app.capture.timelapse_rain && g_app.capture.drain_state.init &&
+                        gameSession->GetWorldSystem()) {
                         auto* wsr = gameSession->GetWorldSystem();
                         wsr->debug_force_water_remesh();
                         const int rainOff =
-                            (g_timelapse_frames * 3) / 5; // Act 1 rains, Act 2 dries
-                        if (g_timelapse_captured == rainOff) {
+                            (g_app.capture.timelapse_frames * 3) / 5; // Act 1 rains, Act 2 dries
+                        if (g_app.capture.timelapse_captured == rainOff) {
                             wsr->SetWaterHydrology(/*finite=*/true, /*rain=*/0, /*evap=*/2);
                             LUMINUMBRA_CORE_INFO("Timelapse-rain: rain OFF + evaporation ON — "
                                                  "water is finite, it recedes (no refill)");
                         }
                         const std::int64_t vol =
-                            wsr->debug_water_volume_near(g_drain_state.P, 14.0f);
+                            wsr->debug_water_volume_near(g_app.capture.drain_state.P, 14.0f);
                         LUMINUMBRA_CORE_INFO(
                             "Timelapse-rain[f{}]: basin vol = {}, LAND water = {} mm-cells",
-                            g_timelapse_captured,
+                            g_app.capture.timelapse_captured,
                             vol,
                             wsr->debug_land_water_volume_mm());
                     }
                     // Fast-forward the SIM (weather/wind/creatures/plants) by K EXTRA fixed
                     // ticks for the next frame (on top of the normal per-frame tick). Physics
                     // runs normally each frame so the player stays grounded.
-                    for (int i = 0; i < g_timelapse_ticks; ++i)
+                    for (int i = 0; i < g_app.capture.timelapse_ticks; ++i)
                         gameSession->TickSimulation(1.0 / 30.0);
-                    if (g_timelapse_daystep > 0.0f) { // drift the sun/sky for shade-over-time
-                        g_timelapse_tod += g_timelapse_daystep;
-                        if (g_timelapse_tod >= 1.0f)
-                            g_timelapse_tod -= 1.0f;
-                        renderPipeline.set_time_of_day(g_timelapse_tod);
+                    if (g_app.capture.timelapse_daystep >
+                        0.0f) { // drift the sun/sky for shade-over-time
+                        g_app.capture.timelapse_tod += g_app.capture.timelapse_daystep;
+                        if (g_app.capture.timelapse_tod >= 1.0f)
+                            g_app.capture.timelapse_tod -= 1.0f;
+                        renderPipeline.set_time_of_day(g_app.capture.timelapse_tod);
                     }
-                    if (g_timelapse_season) { // drift summer -> autumn leaf color across the
-                                              // capture
-                        g_procgen.season = static_cast<float>(g_timelapse_captured) /
-                                           static_cast<float>(std::max(1, g_timelapse_frames - 1));
+                    if (g_app.capture.timelapse_season) { // drift summer -> autumn leaf color
+                                                          // across the capture
+                        g_procgen.season =
+                            static_cast<float>(g_app.capture.timelapse_captured) /
+                            static_cast<float>(std::max(1, g_app.capture.timelapse_frames - 1));
                     }
-                    if (g_timelapse_grow || g_timelapse_season) { // re-bake on stage/season change
-                        if (g_timelapse_grow) {
+                    if (g_app.capture.timelapse_grow ||
+                        g_app.capture.timelapse_season) { // re-bake on stage/season change
+                        if (g_app.capture.timelapse_grow) {
                             g_procgen.stageF =
-                                5.0f * static_cast<float>(g_timelapse_captured) /
-                                static_cast<float>(std::max(1, g_timelapse_frames - 1));
+                                5.0f * static_cast<float>(g_app.capture.timelapse_captured) /
+                                static_cast<float>(std::max(1, g_app.capture.timelapse_frames - 1));
                         }
                         BakeProcgenPlants(
                             g_procgen, renderPipeline.plant_procgen(), g_procgen.stageF);
@@ -10000,7 +4289,7 @@ int main(int argc, char* argv[]) {
                     //  re-bake LIVE sim plants each captured frame so the timelapse
                     // shows their REAL growth (the session tick advanced PlantGrowthSystem since
                     // the last bake). Visual-only; sim/world_hash untouched.
-                    if (g_timelapse_simgrow && gameSession) {
+                    if (g_app.capture.timelapse_simgrow && gameSession) {
                         RebakeAllPlants(g_procgen,
                                         renderPipeline.plant_procgen(),
                                         gameSession->GetRegistry(),
@@ -10097,9 +4386,9 @@ int main(int argc, char* argv[]) {
                           rb_scatter = 0; //  unattributed-CPU localization
             static bool rb_nv_ever = false;
 
-            if (rb_warm < g_render_benchmark_warmup) {
+            if (rb_warm < g_app.capture.render_benchmark_warmup) {
                 ++rb_warm;
-            } else if (rb_count < g_render_benchmark_frames) {
+            } else if (rb_count < g_app.capture.render_benchmark_frames) {
                 rb_shadow += s.shadow_gpu_ms;
                 rb_gbuffer += s.gbuffer_gpu_ms;
                 rb_ssao += s.ssao_gpu_ms;
@@ -10141,8 +4430,8 @@ int main(int argc, char* argv[]) {
                 // Dump the forest-dense pose on the LAST measured frame (verifies
                 // density + supplies before/after PNGs). The back buffer was just
                 // swapped to front, so read GL_FRONT.
-                if (rb_count == g_render_benchmark_frames &&
-                    !g_render_benchmark_screenshot.empty()) {
+                if (rb_count == g_app.capture.render_benchmark_frames &&
+                    !g_app.capture.render_benchmark_screenshot.empty()) {
                     int vw = 0, vh = 0;
                     glfwGetFramebufferSize(window, &vw, &vh);
                     if (vw > 0 && vh > 0) {
@@ -10152,9 +4441,12 @@ int main(int argc, char* argv[]) {
                         glPixelStorei(GL_PACK_ALIGNMENT, 1);
                         glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
                         WritePixelBufferPpm(
-                            std::filesystem::path(g_render_benchmark_screenshot), vw, vh, px);
+                            std::filesystem::path(g_app.capture.render_benchmark_screenshot),
+                            vw,
+                            vh,
+                            px);
                         LUMINUMBRA_CORE_INFO("Render benchmark screenshot -> {} ({}x{})",
-                                             g_render_benchmark_screenshot,
+                                             g_app.capture.render_benchmark_screenshot,
                                              vw,
                                              vh);
                     }
@@ -10168,7 +4460,7 @@ int main(int argc, char* argv[]) {
                 nlohmann::json j;
                 j["schema"] = "luminumbra.render_benchmark.v2";
                 j["frames"] = rb_count;
-                j["warmup_frames"] = g_render_benchmark_warmup;
+                j["warmup_frames"] = g_app.capture.render_benchmark_warmup;
                 j["width"] = renderPipeline.screen_width();
                 j["height"] = renderPipeline.screen_height();
                 j["render_scale"] = renderPipeline.render_scale();
@@ -10219,7 +4511,7 @@ int main(int argc, char* argv[]) {
                 // CPU submit dominates the GPU pass-timer sum.
                 j["bound"] = (cpu > gpu_sum * 1.1) ? "cpu" : "gpu_or_present";
                 std::error_code _rb_ec;
-                const std::filesystem::path rb_path(g_render_benchmark_path);
+                const std::filesystem::path rb_path(g_app.capture.render_benchmark_path);
                 if (rb_path.has_parent_path())
                     std::filesystem::create_directories(rb_path.parent_path(), _rb_ec);
                 std::ofstream out(rb_path);
@@ -10230,7 +4522,7 @@ int main(int argc, char* argv[]) {
                                      "present {:.3f} ms | gpu_pass_sum {:.3f} ms | power {:.0f} W "
                                      "| clock {:.0f} MHz | bound={}",
                                      rb_count,
-                                     g_render_benchmark_path,
+                                     g_app.capture.render_benchmark_path,
                                      wall,
                                      wall > 0.0 ? 1000.0 / wall : 0.0,
                                      cpu,
@@ -10275,90 +4567,17 @@ int main(int argc, char* argv[]) {
                         std::max(0.0, cpu - _known));
                 }
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
-                rb_count = g_render_benchmark_frames + 1; // latch: stop re-dumping
+                rb_count = g_app.capture.render_benchmark_frames + 1; // latch: stop re-dumping
             }
         }
     }
     g_rb_nvml.shutdown(); //  release NVML if it was loaded
 
-    if (scenario_config.active() && scenario_config.timed_run_seconds > 0 && scenario_ready &&
-        !scenario_timed_run_complete && !scenario_failed) {
-        const auto elapsed_play_seconds =
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() -
-                                                             scenario_play_started_at)
-                .count();
-        if (elapsed_play_seconds < scenario_config.timed_run_seconds) {
-            scenario_failed = true;
-            scenario_failure_reason = "window_closed_before_timed_run_complete";
-            exit_code = 5;
-            last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
-            runtime_state_recorder.capture("window_closed_before_timed_run_complete",
-                                           &jobSystem,
-                                           gameSession.get(),
-                                           &renderPipeline,
-                                           scenario_frame_count,
-                                           last_readiness_report);
-        }
-    }
-
-    if (scenario_failed && exit_code == 0) {
-        exit_code = 2;
-    }
-    if (scenario_config.active()) {
-        const std::string shutdown_phase =
-            scenario_failed ? ("scenario_failed_" + scenario_failure_reason) : "shutdown_begin";
-        runtime_state_recorder.capture(shutdown_phase,
-                                       &jobSystem,
-                                       gameSession.get(),
-                                       &renderPipeline,
-                                       scenario_frame_count,
-                                       last_readiness_report);
-    }
-    if (lod_ground_frame_recorder.enabled()) {
-        lod_ground_frame_recorder.write_artifacts();
-        if (!lod_ground_screenshot_files.empty()) {
-            WriteLodGroundScreenshotIndex(scenario_config.artifact_dir,
-                                          lod_ground_screenshot_files);
-            WriteLodGroundVisualAnalysis(scenario_config.artifact_dir, lod_ground_visual_captures);
-        }
-    }
-    if (scenario_config.active()) {
-        if (auto* world_system = gameSession->GetWorldSystem()) {
-            const double scenario_play_seconds =
-                scenario_ready ? std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                               scenario_play_started_at)
-                                     .count()
-                               : 0.0;
-            WriteStreamingTelemetry(scenario_config.artifact_dir,
-                                    scenario_config.scenario,
-                                    scenario_play_seconds,
-                                    world_system->get_streaming_telemetry_stats());
-            if (scenario_config.lod_boundary_oscillation_smoke()) {
-                WriteLodBoundaryOscillationAnalysis(scenario_config.artifact_dir,
-                                                    scenario_play_seconds,
-                                                    LodBoundaryDistance(world_system),
-                                                    lod_boundary_transition_recorder);
-            }
-            if (scenario_config.lod_seam_arrival_smoke()) {
-                WriteLodSeamArrivalAnalysis(scenario_config.artifact_dir,
-                                            scenario_play_seconds,
-                                            lod_seam_visual_captures,
-                                            lod_seam_arrival_recorder);
-            }
-        }
-        if (scenario_config.window_mode_stress_smoke() && !window_mode_stress_analysis_written) {
-            const double scenario_play_seconds =
-                scenario_ready ? std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                               scenario_play_started_at)
-                                     .count()
-                               : 0.0;
-            WriteWindowModeStressAnalysis(scenario_config.artifact_dir,
-                                          scenario_play_seconds,
-                                          scenario_config.window_mode,
-                                          window_mode_stress_steps,
-                                          window_mode_stress_capture);
-            window_mode_stress_analysis_written = true;
-        }
+    // Scenario shutdown artifacts (the incomplete-timed-run failure path,
+    // streaming telemetry, the recorder analyses) — every block in the hook
+    // was already a no-op without an active scenario.
+    if (scenario_runner) {
+        scenario_runner->onShutdown();
     }
 
     std::vector<std::string> shutdown_milestones;
@@ -10400,7 +4619,7 @@ int main(int argc, char* argv[]) {
     mark_shutdown("audio_shutdown");
     renderPipeline.shutdown();
     mark_shutdown("renderer_shutdown");
-    if (g_imgui_enabled) {
+    if (g_app.overlay.imgui_enabled) {
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -10423,262 +4642,4 @@ int main(int argc, char* argv[]) {
     glfwDestroyWindow(window);
     glfwTerminate();
     return exit_code;
-}
-
-void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods) {
-    // Rebind capture: while waiting for a key for some action, the next key press becomes
-    // its binding (Escape cancels). Intercept first so any key — even F-keys — can be bound.
-    if (g_rebindCaptureAction >= 0 && action == GLFW_PRESS) {
-        if (key != GLFW_KEY_ESCAPE &&
-            g_rebindCaptureAction < static_cast<int>(Luminumbra::Client::kInputActionCount)) {
-            const char* name = Luminumbra::Client::kInputActionDefs[g_rebindCaptureAction].name;
-            g_systemConfig.user().keybinds[name] = key;
-            if (g_playerController)
-                g_playerController->ApplyKeyBindings(g_systemConfig);
-        }
-        g_rebindCaptureAction = -1;
-        return;
-    }
-    // Escape: toggle the in-game pause overlay (only in a world, and not while the  panel is up).
-    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS && g_playerController && !g_show_settings) {
-        SetGamePaused(window, !g_paused);
-        return;
-    }
-    // toggle the live per-pass GPU profiler overlay.
-    if (key == GLFW_KEY_F3 && action == GLFW_PRESS) {
-        g_show_gpu_profiler = !g_show_gpu_profiler;
-        return;
-    }
-    // crawl — hot-reload every live shader from res/shaders/ next
-    // frame (rollback-safe per shader; a broken edit keeps the prior program).
-    if (key == GLFW_KEY_F5 && action == GLFW_PRESS) {
-        g_request_shader_reload = true;
-        return;
-    }
-    // walk — the dev shader panel (per-shader reload, auto-reload
-    // watcher toggle, live uniform editing).
-    if (key == GLFW_KEY_F10 && action == GLFW_PRESS) {
-        g_show_shader_panel = !g_show_shader_panel;
-        if (g_show_shader_panel) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        } else if (g_playerController) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        }
-        return;
-    }
-    // cycle the render-only G-buffer debug view (off -> albedo -> normal -> depth ->
-    // material -> position -> off). Diagnostic only; never affects sim/world_hash. The main
-    // loop pushes g_debug_view_mode into the pipeline each frame.
-    if (key == GLFW_KEY_F6 && action == GLFW_PRESS) {
-        g_debug_view_mode = (g_debug_view_mode + 1) % 6; // 0..5
-        return;
-    }
-    // toggle the settings menu and free/restore the cursor so the panel is usable.
-    if (key == GLFW_KEY_F8 && action == GLFW_PRESS) {
-        g_show_settings = !g_show_settings;
-        g_rebindCaptureAction = -1;
-        if (g_show_settings) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        } else if (g_playerController) { // in a world -> resume mouse-look
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            firstMouse = true; // avoid a camera jump when mouse-look resumes
-        }
-        return;
-    }
-    // Engine time scale (host_timescale-style): [ slower, ] faster, \ reset to 1x.
-    if (action == GLFW_PRESS && (key == GLFW_KEY_LEFT_BRACKET || key == GLFW_KEY_RIGHT_BRACKET ||
-                                 key == GLFW_KEY_BACKSLASH)) {
-        if (key == GLFW_KEY_LEFT_BRACKET)
-            g_timeScale = (g_timeScale <= 0.125f) ? 0.0f : g_timeScale * 0.5f; //...down to pause
-        else if (key == GLFW_KEY_RIGHT_BRACKET)
-            g_timeScale = (g_timeScale < 0.125f) ? 0.125f : std::min(g_timeScale * 2.0f, 16.0f);
-        else
-            g_timeScale = 1.0f; // reset
-        LUMINUMBRA_CORE_INFO("Engine time scale: {:.3f}x", g_timeScale);
-        return;
-    }
-    if (key == GLFW_KEY_F7 && action == GLFW_PRESS) {
-        show_worldgen_viewer = !show_worldgen_viewer;
-        if (show_worldgen_viewer) {
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        }
-        return;
-    }
-    // Alt+Enter: runtime windowed <-> borderless toggle.
-    if (key == GLFW_KEY_ENTER && action == GLFW_PRESS && (mods & GLFW_MOD_ALT)) {
-        ToggleWindowedBorderless(window, g_windowState);
-        return;
-    }
-    if (key == GLFW_KEY_F11 && action == GLFW_PRESS) {
-        ToggleFullscreen(window, g_windowState);
-        return;
-    }
-    if (key == GLFW_KEY_F9 && action == GLFW_PRESS) {
-        wireframe_mode = !wireframe_mode;
-        return;
-    }
-
-    if (g_playerController) {
-        g_playerController->ProcessKeyInput(key, action);
-    }
-
-    if (g_imgui_enabled && ImGui::GetCurrentContext()) {
-        ImGuiIO& io = ImGui::GetIO();
-        if (io.WantCaptureKeyboard) {
-            return;
-        }
-    }
-
-    // Always give RmlUi a chance to process key events.
-    if (g_uiManager) {
-        g_uiManager->KeyCallback(window, key, scancode, action, mods);
-        // If RmlUi has a focused input element, it should consume the event.
-        if (g_uiManager->GetContext() && g_uiManager->GetContext()->GetFocusElement()) {
-            return;
-        }
-    }
-}
-
-void SetGameState(GLFWwindow* window, GameStateManager& gameStateManager, GameState newState) {
-    gameStateManager.SetState(newState);
-    bool cursorDisabled = (newState == GameState::IN_GAME);
-
-    if (cursorDisabled) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        // Set game-related callbacks
-        glfwSetCursorPosCallback(window, mouse_callback);
-        glfwSetScrollCallback(window, scroll_callback);
-        // Mouse buttons could be set here for game actions if needed
-        glfwSetMouseButtonCallback(window, nullptr);
-        firstMouse = true;
-    } else {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        if (g_uiManager) {
-            // Set UI-related callbacks
-            glfwSetCursorPosCallback(window, Luminumbra::Client::Rml_UIManager::CursorPosCallback);
-            glfwSetScrollCallback(window,
-                                  menu_scroll_callback); // RmlUi + create-world preview zoom
-            glfwSetMouseButtonCallback(window,
-                                       Luminumbra::Client::Rml_UIManager::MouseButtonCallback);
-        } else {
-            glfwSetCursorPosCallback(window, nullptr);
-            glfwSetScrollCallback(window, nullptr);
-            glfwSetMouseButtonCallback(window, nullptr);
-        }
-    }
-}
-
-void SetGamePaused(GLFWwindow* window, bool paused) {
-    g_paused = paused;
-    if (paused) {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-        if (g_uiManager) {
-            glfwSetCursorPosCallback(window, Luminumbra::Client::Rml_UIManager::CursorPosCallback);
-            glfwSetMouseButtonCallback(window,
-                                       Luminumbra::Client::Rml_UIManager::MouseButtonCallback);
-            glfwSetScrollCallback(window, Luminumbra::Client::Rml_UIManager::ScrollCallback);
-            g_uiManager->RequestLoadDocument("pause.rml");
-        }
-    } else {
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        glfwSetCursorPosCallback(window, mouse_callback);
-        glfwSetScrollCallback(window, scroll_callback);
-        glfwSetMouseButtonCallback(window, nullptr);
-        firstMouse = true;
-        g_photoModeUiShown = false; // re-sync the in-game overlay next frame
-        if (g_uiManager)
-            g_uiManager->RequestLoadDocument("hud.rml");
-    }
-}
-
-void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
-    (void)window;
-    if (g_show_settings || g_paused)
-        return; // settings/pause open (cursor freed) -> don't swing the camera
-    if (firstMouse) {
-        lastX = (float)xpos;
-        lastY = (float)ypos;
-        firstMouse = false;
-    }
-    float xoffset = (float)xpos - lastX;
-    float yoffset = lastY - (float)ypos;
-    lastX = (float)xpos;
-    lastY = (float)ypos;
-    if (g_camera)
-        g_camera->ProcessMouseMovement(xoffset, yoffset);
-}
-
-void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
-    (void)window;
-    (void)xoffset;
-    const bool imgui_wants_mouse =
-        g_imgui_enabled && ImGui::GetCurrentContext() && ImGui::GetIO().WantCaptureMouse;
-    if (imgui_wants_mouse ||
-        (g_uiManager && g_uiManager->GetContext()->GetHoverElement() != nullptr)) {
-        return;
-    }
-    if (g_camera)
-        g_camera->ProcessMouseScroll((float)yoffset);
-    if (g_playerController)
-        g_playerController->ProcessMouseScroll(yoffset);
-}
-
-void menu_scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
-    // Keep RmlUi's scroll behaviour for menu lists/galleries...
-    Luminumbra::Client::Rml_UIManager::ScrollCallback(window, xoffset, yoffset);
-    //...and accrue the vertical wheel delta for the create-world preview zoom.
-    // The preview block consumes + resets this each frame (only when over the pane).
-    g_menu_scroll_accum += yoffset;
-}
-
-void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
-    (void)window;
-    if (width <= 0 || height <= 0)
-        return; // minimized window: ignore
-    // Capture-pinned (scenario) runs must never resize their targets; the gate
-    // depends on a fixed 1280x720 framebuffer.
-    if (g_windowState.capture_pinned)
-        return;
-    // Debounce: record the pending size and let the main loop coalesce a burst
-    // of drag events into one RenderPipeline::on_resize after the size settles.
-    g_windowState.pending_width = width;
-    g_windowState.pending_height = height;
-    g_windowState.pending_since_seconds = glfwGetTime();
-    g_windowState.resize_pending = true;
-}
-
-void GLFWErrorCallback(int error, const char* description) {
-    LUMINUMBRA_CORE_ERROR("GLFW Error ({0}): {1}", error, description);
-}
-
-void GLAPIENTRY GLDebugMessageCallback(GLenum source,
-                                       GLenum type,
-                                       GLuint id,
-                                       GLenum severity,
-                                       GLsizei length,
-                                       const GLchar* message,
-                                       const void* userParam) {
-    (void)source;
-    (void)length;
-    (void)userParam;
-    if (id == 131169 || id == 131185 || id == 131218 || id == 131204)
-        return;
-    g_gl_debug_message_count.fetch_add(1, std::memory_order_relaxed);
-    const bool is_error = type == GL_DEBUG_TYPE_ERROR || severity == GL_DEBUG_SEVERITY_HIGH;
-    if (is_error) {
-        g_gl_debug_error_count.fetch_add(1, std::memory_order_relaxed);
-        LUMINUMBRA_CORE_ERROR("OpenGL: {0}", message);
-        return;
-    }
-
-    switch (severity) {
-        case GL_DEBUG_SEVERITY_NOTIFICATION:
-            g_gl_debug_notification_count.fetch_add(1, std::memory_order_relaxed);
-            LUMINUMBRA_CORE_TRACE("OpenGL: {0}", message);
-            break;
-        default:
-            g_gl_debug_warning_count.fetch_add(1, std::memory_order_relaxed);
-            LUMINUMBRA_CORE_WARN("OpenGL: {0}", message);
-            break;
-    }
 }

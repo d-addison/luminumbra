@@ -4,6 +4,8 @@
 #include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "nlohmann/json.hpp"
+#include "rendering/FoliageSurface.h"
+#include "rendering/PixelIo.h"
 #include "rendering/RenderPipeline.h"
 #include "rendering/passes/FoliagePass.h"
 #include <atomic>
@@ -24,19 +26,14 @@ class Camera;
 
 namespace Luminumbra::Client::ScenarioHarness {
 
-extern std::atomic<uint64_t> g_gl_debug_message_count;
-extern std::atomic<uint64_t> g_gl_debug_error_count;
-extern std::atomic<uint64_t> g_gl_debug_warning_count;
-extern std::atomic<uint64_t> g_gl_debug_notification_count;
-
-struct GLDebugRuntimeStats {
-    uint64_t messages = 0;
-    uint64_t errors = 0;
-    uint64_t warnings = 0;
-    uint64_t notifications = 0;
-};
-
-GLDebugRuntimeStats CurrentGLDebugRuntimeStats();
+// Helpers that moved DOWN into luminumbra_client (the shipping client uses
+// them too, so they cannot live in the QA library): the GL debug counters +
+// GLDebugRuntimeStats now come from core/RuntimeScenarioConfig.h; the pixel
+// writer and the foliage surface query are re-exported here so the many
+// existing ScenarioHarness call sites keep compiling.
+using Luminumbra::Rendering::FoliageScatterContext;
+using Luminumbra::Rendering::FoliageSurfaceQuery;
+using Luminumbra::Rendering::WritePixelBufferPpm;
 
 void ApplyLodGroundCameraPath(const RuntimeScenarioConfig& config,
                               Luminumbra::world::GameSession* game_session,
@@ -528,17 +525,8 @@ void WriteWaterfallVisualAnalysis(const std::filesystem::path& artifact_dir,
                                   const std::string& waterfall_screenshot,
                                   const WaterfallVisualResult& result);
 
-// Surface-query context + callback the FoliagePass uses to resolve, at a world
-// (x,z), the terrain surface height + a slope estimate + a moisture estimate.
-// All values are PURE functions of the world generator (seed, params) — no RNG,
-// no sim writes. The slope is derived from finite-difference height samples; the
-// moisture from the biome humidity proxy (the biome density already encodes it,
-// so a mild render-side modulation suffices). The query skips underwater columns.
-struct FoliageScatterContext {
-    Luminumbra::Systems::SHIELD_WorldSystem* world_system = nullptr;
-};
-Luminumbra::Rendering::FoliagePass::SurfaceSample
-FoliageSurfaceQuery(void* ctx, float world_x, float world_z);
+// (The FoliagePass surface-query context/callback moved to
+// rendering/FoliageSurface.h — re-exported at the top of this header.)
 
 // --- Precipitation visual + wind-slant smoke ( / ) ---
 // Rain is rendered through the  particle framework, spawned by the REPLICATED
@@ -752,11 +740,6 @@ bool WriteBackbufferPpm(const std::filesystem::path& path,
                         int height,
                         ScreenshotPixelStats* out_stats = nullptr,
                         LodHolePixelStats* out_lod_hole_stats = nullptr);
-
-bool WritePixelBufferPpm(const std::filesystem::path& path,
-                         int width,
-                         int height,
-                         const std::vector<unsigned char>& pixels);
 
 std::vector<unsigned char>
 BuildMaterialHeatmap(const std::vector<unsigned char>& pixels, int width, int height);

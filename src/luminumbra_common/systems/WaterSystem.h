@@ -144,7 +144,7 @@ public:
     //  boot-settle mode. The per-tick init/sim caps exist to bound LIVE-play frame
     // cost; during the server BOOT water settle they make the fixed point unreachable:
     // init drains at MAX_WATER_INITS_PER_TICK=6 while the calm check exits early
-    // (fresh-seeded chunks read asleep), and the MAX_WATER_SIMS_PER_TICK=64 rotating window
+    // (fresh-seeded chunks read asleep), and the cell-budget rotating window (64 chunks at Medium)
     // advances each awake chunk's ticks_below_threshold only once per rotation — with ~2900
     // awake chunks that is one sleep-counter step per ~45 ticks, x120 needed, >> any sane
     // settle cap (measured: the loaded heavy-oracle session exits its 400-cap with ALL 5433
@@ -154,6 +154,30 @@ public:
     void SetBootSettleMode(bool on) {
         m_boot_settle_mode = on;
     }
+
+    // gated High-resolution water (sim.water_high_res). The session owner calls
+    // this ONCE at construction, BEFORE the first update() — never mid-run: the hashed
+    // mm grids are sized by it, the seam pass hard-gates on one uniform resolution, and
+    // the cell-budget window re-derives from it (4096/64 = 64 chunks at Medium 8x8;
+    // 4096/256 = 16 chunks at High 16x16). Default Medium keeps every baseline
+    // byte-identical. Values that do not divide the chunk evenly are rejected (the
+    // seam pass needs cell-for-cell alignment), keeping the current resolution.
+    void SetSimResolution(int cells_per_side);
+    [[nodiscard]] int sim_resolution() const {
+        return m_sim_resolution;
+    }
+
+    // boot-time save-migration pass: resize EVERY loaded water chunk to the session
+    // resolution in one call, bypassing MAX_WATER_RESIZES_PER_TICK (that cap bounds
+    // LIVE frame cost; a loaded world whose saved resolution mismatches the session
+    // flag would otherwise converge at 1 chunk/tick while the seam pass — which
+    // hard-gates on equal resolution — walls off water at every mixed seam). Call at
+    // world load, after chunk adoption and before the first live tick. Deterministic:
+    // each chunk's resample (ResizeSimulationGrid's integer-bilinear mm path) is a
+    // pure function of that chunk's loaded state + worldgen + the target resolution,
+    // so the result is order-independent. Returns the number of chunks resized.
+    std::size_t
+    MigrateChunksToSimResolution(const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks);
 
     //  loaded-boot water pause: a session booted FROM A SAVE must not advance
     // water during Boot at all — the restored state (depths, sleep flags, counters) IS
@@ -181,8 +205,10 @@ public:
     }
 
     // the rotating sim-window cursor is EVOLUTION-RELEVANT sim state whenever
-    // more chunks are awake than MAX_WATER_SIMS_PER_TICK (which 64-chunk window sims
-    // first changes subsequent depths). It is persisted with the world (world_info.json
+    // more chunks are awake than the derived sim window (which window sims
+    // first changes subsequent depths). It stays in CHUNK-INDEX space — the per-tick window
+    // length is derived from the MAX_WATER_CELLS_PER_TICK budget, a constant 64 chunks at the
+    // uniform Medium resolution. It is persisted with the world (world_info.json
     // waterSimCursor) and restored on load so a loaded session resimulates the exact
     // same windows the original would from the same state. Not itself hashed.
     [[nodiscard]] std::size_t GetSimWindowCursor() const {
@@ -243,12 +269,15 @@ private:
 
     // boot-settle mode (see SetBootSettleMode). Lifts the init/sim caps during Boot.
     bool m_boot_settle_mode = false;
+    // The single uniform hashed sim resolution (cells per chunk side). Default Medium
+    // (8x8, 2 m cells) — see SetSimResolution; set once pre-world via sim.water_high_res.
+    int m_sim_resolution = static_cast<int>(WaterDetailLevel::Medium);
     // loaded-boot water pause (see SetBootPaused). update is a no-op while set.
     bool m_boot_paused = false;
 
     //  implementation note (streaming-burst amortization): rotating cursor for the per-tick
     //  water-sim
-    // budget. When more chunks are active than MAX_WATER_SIMS_PER_TICK, we sim a DETERMINISTIC
+    // budget. When more cells are active than MAX_WATER_CELLS_PER_TICK, we sim a DETERMINISTIC
     // window (sorted by chunk id) and rotate it each tick so every chunk sims over a few ticks
     // instead of all-at-once (which blocked the main thread ~450ms on m_job_system->wait when
     // moving into water). Deterministic (no job-timing dependence) — guarded by the
@@ -272,13 +301,24 @@ public:
     [[nodiscard]] int dbg_seam_wet_pairs() const {
         return m_dbg_seam_wet_pairs;
     }
+    //  per-tick sim-load telemetry (never hashed, never persisted): chunks that were
+    // awake/eligible before the rotating window was applied, and cells actually simulated
+    // by the window this tick (chunks-in-window x cells-per-chunk at the uniform resolution).
+    [[nodiscard]] std::size_t dbg_awake_water_chunks() const {
+        return m_dbg_awake_water_chunks;
+    }
+    [[nodiscard]] std::size_t dbg_cells_simmed() const {
+        return m_dbg_cells_simmed;
+    }
 
 private:
     std::int64_t m_dbg_last_source_mm = 0;
     std::int64_t m_dbg_last_sink_mm = 0;
     bool m_dbg_mass_ok = true;
     int m_dbg_seam_wet_pairs = 0;
-    DbgWaterTimings m_dbg_water; // sub-phase telemetry (see dbg_water_timings())
+    std::size_t m_dbg_awake_water_chunks = 0; // see dbg_awake_water_chunks()
+    std::size_t m_dbg_cells_simmed = 0;       // see dbg_cells_simmed()
+    DbgWaterTimings m_dbg_water;              // sub-phase telemetry (see dbg_water_timings())
 
     std::size_t m_water_sim_cursor = 0;
     //  implementation note: rotating cursor for the per-tick water-grid RESIZE budget (see

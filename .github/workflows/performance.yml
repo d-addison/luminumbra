@@ -94,7 +94,7 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
       github.event.before != '0000000000000000000000000000000000000000')
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Check out candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -222,18 +222,149 @@ jobs:
           python3 head/tools/perf/perf.py combine \
             --runs build/head/server-smoke-run-1.json build/head/server-smoke-run-2.json \
             --output build/head/server-smoke-run.json
+      - name: Detect base perf artifact compatibility
+        id: perf_schema
+        run: |
+          # The evidence-metric capability is folded into the artifact's
+          # comparability key, so a base commit whose perf tooling predates it
+          # produces a key the paired comparison refuses to evaluate. Degrade
+          # that one transitional promotion to a recorded observation; once the
+          # base branch carries the capability the full gate applies again.
+          if git -C base grep -q -e "--evidence-metric" -- tools/perf/perf.py; then
+            echo "compatible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "compatible=false" >> "$GITHUB_OUTPUT"
+            echo "server-smoke: base perf artifact schema predates the evidence-metric capability; observation recorded, no paired verdict." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Compare base and candidate observation
+        if: steps.perf_schema.outputs.compatible == 'true'
         run: |
           python3 head/tools/perf/perf.py compare \
             --base build/base/server-smoke-run.json \
             --candidate build/head/server-smoke-run.json \
             --limit 5 --min-samples 20 \
             --output build/server-smoke-comparison.json
+      - name: Record transitional observation
+        if: steps.perf_schema.outputs.compatible == 'false'
+        run: |
+          # Still write the (unevaluated) comparison document so the evidence
+          # artifact shows exactly why no verdict was produced.
+          python3 head/tools/perf/perf.py compare \
+            --base build/base/server-smoke-run.json \
+            --candidate build/head/server-smoke-run.json \
+            --limit 5 --min-samples 20 \
+            --output build/server-smoke-comparison.json || true
+      - name: Detect base water-smoke support
+        id: water_base
+        run: |
+          if git -C base grep -q -e "--water-smoke" -- src/luminumbra_server/main_server.cpp; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "water-smoke: base commit predates the workload; head-only observation, no paired verdict." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Measure water base / first batch
+        if: steps.water_base.outputs.supported == 'true'
+        run: |
+          BASE_FIXTURE=$(git -C base rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload water-smoke --workload-version 1 --layer simulation \
+            --preset perf --build-manifest build/base/performance-build.json \
+            --commit "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 300 \
+            --parameter ticks=300 --parameter surface_radius=2 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/base/water-smoke-evidence-1.json \
+            --evidence-metric water_phase_p95_ms \
+            --output build/base/water-smoke-run-1.json -- \
+            cmake -E chdir base ../build/base/bin/luminumbra_server_app \
+              --water-smoke --preset default \
+              --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
+              --artifact ../build/base/water-smoke-evidence-1.json
+      - name: Measure water candidate / first batch
+        run: |
+          HEAD_FIXTURE=$(git -C head rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload water-smoke --workload-version 1 --layer simulation \
+            --preset perf --build-manifest build/head/performance-build.json \
+            --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 300 \
+            --parameter ticks=300 --parameter surface_radius=2 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/head/water-smoke-evidence-1.json \
+            --evidence-metric water_phase_p95_ms \
+            --output build/head/water-smoke-run-1.json -- \
+            cmake -E chdir head ../build/head/bin/luminumbra_server_app \
+              --water-smoke --preset default \
+              --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
+              --artifact ../build/head/water-smoke-evidence-1.json
+      - name: Measure water candidate / second batch
+        run: |
+          HEAD_FIXTURE=$(git -C head rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload water-smoke --workload-version 1 --layer simulation \
+            --preset perf --build-manifest build/head/performance-build.json \
+            --commit "${{ github.event.pull_request.head.sha || github.sha }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 300 \
+            --parameter ticks=300 --parameter surface_radius=2 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$HEAD_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/head/water-smoke-evidence-2.json \
+            --evidence-metric water_phase_p95_ms \
+            --output build/head/water-smoke-run-2.json -- \
+            cmake -E chdir head ../build/head/bin/luminumbra_server_app \
+              --water-smoke --preset default \
+              --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
+              --artifact ../build/head/water-smoke-evidence-2.json
+      - name: Measure water base / second batch
+        if: steps.water_base.outputs.supported == 'true'
+        run: |
+          BASE_FIXTURE=$(git -C base rev-parse HEAD:data)
+          python3 head/tools/perf/perf.py run \
+            --workload water-smoke --workload-version 1 --layer simulation \
+            --preset perf --build-manifest build/base/performance-build.json \
+            --commit "${{ github.event.pull_request.base.sha || github.event.before }}" \
+            --mode observation --warmup 1 --samples 10 --timeout 300 \
+            --parameter ticks=300 --parameter surface_radius=2 \
+            --parameter collision_radius=1 --parameter seed=1337 \
+            --parameter world_preset=default --fixture-hash "$BASE_FIXTURE" \
+            --evidence-contract server-smoke --evidence build/base/water-smoke-evidence-2.json \
+            --evidence-metric water_phase_p95_ms \
+            --output build/base/water-smoke-run-2.json -- \
+            cmake -E chdir base ../build/base/bin/luminumbra_server_app \
+              --water-smoke --preset default \
+              --seed 1337 --ticks 300 --radius 2 --collision-radius 1 \
+              --artifact ../build/base/water-smoke-evidence-2.json
+      - name: Combine water interleaved batches
+        run: |
+          python3 head/tools/perf/perf.py combine \
+            --runs build/head/water-smoke-run-1.json build/head/water-smoke-run-2.json \
+            --output build/head/water-smoke-run.json
+          if [ "${{ steps.water_base.outputs.supported }}" = "true" ]; then
+            python3 head/tools/perf/perf.py combine \
+              --runs build/base/water-smoke-run-1.json build/base/water-smoke-run-2.json \
+              --output build/base/water-smoke-run.json
+          fi
+      - name: Compare water base and candidate observation
+        if: steps.water_base.outputs.supported == 'true'
+        run: |
+          python3 head/tools/perf/perf.py compare \
+            --base build/base/water-smoke-run.json \
+            --candidate build/head/water-smoke-run.json \
+            --limit 5 --min-samples 20 \
+            --output build/water-smoke-comparison.json
       - name: Publish comparison summary
         if: always()
         run: |
           test -f build/server-smoke-comparison.json
           cat build/server-smoke-comparison.json >> "$GITHUB_STEP_SUMMARY"
+          if [ -f build/water-smoke-comparison.json ]; then
+            cat build/water-smoke-comparison.json >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f build/head/water-smoke-run.json ]; then
+            echo "water-smoke: head-only observation artifact recorded (no paired comparison)." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Upload paired evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -248,4 +379,19 @@ jobs:
             build/head/server-smoke-evidence-*.json
             build/server-smoke-comparison.json
           if-no-files-found: error
+          retention-days: 30
+      - name: Upload water paired evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: water-smoke-comparison-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            build/base/water-smoke-run.json
+            build/base/water-smoke-run-*.json
+            build/base/water-smoke-evidence-*.json
+            build/head/water-smoke-run.json
+            build/head/water-smoke-run-*.json
+            build/head/water-smoke-evidence-*.json
+            build/water-smoke-comparison.json
+          if-no-files-found: warn
           retention-days: 30

@@ -27,13 +27,18 @@ constexpr int WATER_MESH_DIRTY_TICK_INTERVAL =
 // cap is a DETERMINISTIC count (same active-chunk iteration order on host==peer), and each chunk's
 // init result is order-independent (pure worldgen samples), so run==replay / host==peer hold.
 constexpr int MAX_WATER_INITS_PER_TICK = 6;
-//  implementation note: cap how many active water chunks are SIMULATED per tick. The sim dispatches
+//  implementation note: cap how much active water is SIMULATED per tick. The sim dispatches
 // the woken chunks to workers then m_job_system->waits on completion (+ snapshot/integrate
 // copies), all O(chunks_to_sim); moving into water-heavy terrain woke hundreds at once -> ~450ms
 // main-thread block. We simulate a deterministic ROTATING window (sorted by chunk id, advanced each
 // tick) so the per-tick work is bounded and every chunk still sims over a few ticks. Deterministic
 // guarded by the WaterDeterminism live-water gate.
-constexpr std::size_t MAX_WATER_SIMS_PER_TICK = 64;
+//  the budget is expressed in CELLS, not chunks, because per-tick sim cost scales with
+// cell count (the kernel is O(resolution^2) per chunk). At the uniform Medium resolution every
+// chunk is 64 cells, so 4096 cells == the historical 64-chunk window EXACTLY — the derived
+// window length, cursor evolution and hash trajectory are unchanged. A future higher uniform
+// resolution automatically shrinks the chunk window to keep per-tick cell work constant.
+constexpr std::size_t MAX_WATER_CELLS_PER_TICK = 4096;
 //  implementation note: cap how many water chunks RESIZE their sim grid per tick. Each resize
 //  re-samples
 // GetTerrainHeightAt per cell (~30us, up to 1024 at Ultra), so a burst of LOD-boundary crossings
@@ -56,6 +61,62 @@ constexpr int FLOW_SHIFT = 12;
 constexpr std::int64_t
     FRICTION_NUM = 200,
     FRICTION_SHIFT = 8; // q = (q*200)>>8 ~ 0.78 (strong damping -> stable, modest steady flow)
+
+// --- resolution scaling of the per-edge flow constants (derived, not tuned) -----------------
+// MIN_FLOW_MM and K_ACCEL above are CALIBRATED AT MEDIUM (8x8 -> cell size L = 2 m). Depth and
+// flux are stored PER CELL AREA (mm of depth over one cell), so every depth-per-area input —
+// rain, evaporation, the river discharge, the sub-mm film cull — is resolution-invariant by
+// construction: 1 mm of depth is 1 mm of depth over whatever area the cell covers, and the
+// symmetric apply (A -= q; B += q) moves q mm between two EQUAL-AREA cells, i.e. the same
+// physical volume at any resolution. Only the per-EDGE dynamics see the cell size:
+//
+//  K_ACCEL — the pipe gain k = K_ACCEL / 2^FLOW_SHIFT sets the discrete surface celerity.
+//    Linearizing the update (q += k*dSurf; depth -= div q) gives depth_tt = k*lap(depth) on
+//    the CELL lattice: a disturbance propagates ~sqrt(k) cells/tick = sqrt(k)*L metres/tick.
+//    Halving L halves the physical propagation speed unless k scales by (L_medium/L)^2, i.e.
+//    k ∝ res^2. The Mei virtual-pipes view agrees: the volume-flux gain is g*A_pipe/L_pipe
+//    per unit dSurf; with the pipe cross-section ∝ cell width and the pipe length = L, the
+//    DEPTH-flux gain (volume gain / cell area) goes as 1/L^2. The same scaling preserves the
+//    slope-driven steady discharge: q_ss = k*f/(1-f)*dSurf with dSurf across one cell ∝
+//    slope*L, so the volume flux per metre of front, q_ss*L, goes as k*L^2 — invariant
+//    exactly when k ∝ 1/L^2. High (1 m cells): 4x Medium's K_ACCEL.
+//  FRICTION — a per-TICK multiplicative damping (q *= 200/256 each tick) discretizing
+//    dq/dt = -gamma*q in TIME only; the tick length does not change with resolution, so the
+//    factor is resolution-INDEPENDENT and stays as calibrated.
+//  MIN_FLOW_MM — the anti-jitter cutoff thresholds dSurf, a surface-height DIFFERENCE across
+//    ONE CELL: the physical slope it suppresses is MIN_FLOW_MM / L. Left at 2 mm it would cut
+//    off a 2x steeper gradient at 1 m cells — proportionally more flow killed near
+//    equilibrium (lumpier pools, stalled spreading; measured as the seam_wet drop in the
+//    water-smoke workload). Scaling ∝ L (2 mm at 2 m -> 1 mm at 1 m) suppresses the same
+//    physical slope and the same limit-cycle amplitude in depth units.
+//  Stability — the scaled gain at High is k = 1024/4096 = 1/4; the symplectic-Euler pipe
+//    lattice is stable for k <= 1/2 (2D 5-point operator, spectral bound k*8 <= 4, undamped)
+//    and the 0.78 friction factor adds margin. int64 headroom: |K_ACCEL_scaled*dSurf| stays
+//    orders of magnitude under 2^63 and the existing +-2e9 flux clamp still fits int32.
+//
+// Deliberately NOT compensated here: the fixed MAX_WATER_CELLS_PER_TICK budget sims a High
+// chunk ~4x less often than a Medium one whenever more chunks are awake than the derived
+// window (16 vs 64), so WALL-CLOCK settle/fill still lags by the cadence ratio. That divide
+// belongs to the budget/scheduler, not to these constants — inflating k to hide it would
+// change the physics per simulated step instead of the schedule, and break the invariance
+// derived above.
+constexpr int FLOW_CALIBRATION_RES = static_cast<int>(WaterDetailLevel::Medium); // 8 -> 2 m
+constexpr std::int64_t KAccelForResolution(int res) {
+    const std::int64_t r = res;
+    const std::int64_t m = FLOW_CALIBRATION_RES;
+    return (K_ACCEL * r * r) / (m * m); // k ∝ 1/L^2 == res^2 (exact at every legal res)
+}
+constexpr std::int32_t MinFlowForResolution(int res) {
+    const auto scaled = static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(MIN_FLOW_MM) * FLOW_CALIBRATION_RES) / res); // ∝ L == 1/res
+    return scaled > 1 ? scaled : 1; // integer mm domain: never below the 1 mm quantum
+}
+// The Medium default must be BYTE-IDENTICAL to the historical constants, and High carries the
+// derived x4 / x1/2 exactly.
+static_assert(KAccelForResolution(static_cast<int>(WaterDetailLevel::Medium)) == K_ACCEL);
+static_assert(MinFlowForResolution(static_cast<int>(WaterDetailLevel::Medium)) == MIN_FLOW_MM);
+static_assert(KAccelForResolution(static_cast<int>(WaterDetailLevel::High)) == 4 * K_ACCEL);
+static_assert(MinFlowForResolution(static_cast<int>(WaterDetailLevel::High)) == 1);
 constexpr std::int32_t RIVER_DISCHARGE_MM = 24; // mm/tick injected at a river-channel source cell
 constexpr float RIVER_SOURCE_THRESHOLD = 0.45f; // RiverInfluenceAt >= this => source cell
 constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (deterministic)
@@ -63,15 +124,28 @@ constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (dete
 //  the HASHED water-sim grid runs at ONE FIXED resolution for ALL simulated chunks,
 // a DETERMINISTIC function of worldgen only (NOT camera distance). This is required for (a)
 // host==peer — a camera-driven resolution made the hashed mm state differ per peer — and (b)
-// cross-chunk flux, which needs neighbour chunks' boundary cells to align cell-for-cell. High (16
-// -> 2m cells) resolves a river channel. Visual mesh LOD, if wanted, stays a separate  concern.
-// Tunable here.
-constexpr int WATER_SIM_RESOLUTION = static_cast<int>(WaterDetailLevel::Medium); // 8x8 (4m cells).
+// cross-chunk flux, which needs neighbour chunks' boundary cells to align cell-for-cell.
+// Chunks are 16 m across, so Medium (8x8) is 2 m cells and High (16x16 -> 1 m cells)
+// resolves a river channel. Visual mesh LOD, if wanted, stays a separate  concern.
+// The resolution lives in m_sim_resolution (default Medium); sim.water_high_res
+// raises a session to High ONCE at construction via SetSimResolution — never mid-run.
 // Perf: High (16) was ~4x and spiked the moving water phase to ~130ms; Medium is ~4x cheaper (~32ms
 // worst) and still uniform+deterministic. Cross-chunk flux REQUIRES a uniform resolution (boundary
 // cells must align). A mixed-resolution variant would require explicit seam resampling.
 
+// Per-tick rotating sim-window length in CHUNKS, derived from the cell budget at the single
+// uniform sim resolution. Medium (8x8 = 64 cells/chunk) -> 4096/64 = 64 chunks, identical to the
+// historical fixed 64-chunk window, so the persisted waterSimCursor semantics and the hashed
+// trajectory are untouched; only a resolution change re-derives it (High: 4096/256 = 16 chunks).
+// Derived at runtime from m_sim_resolution in update() — at the Medium default the
+// values (64 cells/chunk, 64-chunk window) and arithmetic are identical to the old
+// constexpr pair, so the default trajectory is byte-identical.
+
 namespace {
+
+constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
+    return std::max<std::size_t>(std::size_t{1}, MAX_WATER_CELLS_PER_TICK / cells_per_chunk);
+}
 
 int GetWaterResolution(const Chunk& chunk) {
     return chunk.current_water_resolution.load(std::memory_order_relaxed);
@@ -227,11 +301,15 @@ void StepChunkWaterFixed(Chunk& c,
     surf.resize(n);
     for (int i = 0; i < n; ++i)
         surf[i] = static_cast<std::int64_t>(bed[i]) + depth[i];
+    // Per-edge constants at THIS chunk's resolution (see the resolution-scaling block above).
+    // At the Medium default these are the exact historical integers -> byte-identical.
+    const std::int64_t k_accel = KAccelForResolution(res);
+    const std::int32_t min_flow_mm = MinFlowForResolution(res);
     auto compute_edge = [&](int i, int j, int eidx) {
         const std::int64_t dSurf = surf[i] - surf[j];
-        std::int64_t q = static_cast<std::int64_t>(flux[eidx]) + ((K_ACCEL * dSurf) >> FLOW_SHIFT);
+        std::int64_t q = static_cast<std::int64_t>(flux[eidx]) + ((k_accel * dSurf) >> FLOW_SHIFT);
         q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
-        if (dSurf < MIN_FLOW_MM && dSurf > -MIN_FLOW_MM)
+        if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
             q = 0;
         if (q > 2000000000LL)
             q = 2000000000LL;
@@ -500,11 +578,21 @@ void WaterSystem::update(entt::registry& registry,
     // read. When shaping is disabled, workers fall back to the analytic sampler, preserving
     // identical water-bed values.
     const int hm_stride = CHUNK_SIZE_X + 1; // heightmap is (CHUNK_SIZE_X+1)^2, x-fastest
-    const bool reuse_heightmap = m_shield_system->get_params().shaping_enabled;
+    // The heightmap-node reuse below requires each water-cell CENTRE to land on an
+    // integer heightmap node: centre = step*x + step/2 with step = CHUNK_SIZE_X /
+    // resolution, so step must divide evenly AND be even (Medium: step 2 -> node
+    // 2x+1, the historical fast path). At High (step 1) centres sit on half-metre
+    // positions with no node — every chunk takes the pure-sampler fallback, which
+    // yields the SAME bits (the parity-gate argument below), just slower.
+    const int hm_step = (m_sim_resolution > 0 && CHUNK_SIZE_X % m_sim_resolution == 0)
+                            ? CHUNK_SIZE_X / m_sim_resolution
+                            : 0;
+    const bool reuse_heightmap =
+        m_shield_system->get_params().shaping_enabled && hm_step > 0 && hm_step % 2 == 0;
     std::vector<std::vector<float>> terrain_seed(
         to_init.size()); // [i] empty => worker samples the sampler
     if (reuse_heightmap) {
-        const int res = WATER_SIM_RESOLUTION;
+        const int res = m_sim_resolution;
         for (std::size_t i = 0; i < to_init.size(); ++i) {
             const Chunk* cp = to_init[i];
             // DETERMINISM (cold-first-run fix): reuse the heightmap ONLY at the finest LOD
@@ -524,11 +612,12 @@ void WaterSystem::update(entt::registry& registry,
             terrain_seed[i].resize(static_cast<std::size_t>(res) * res);
             for (int z = 0; z < res; ++z) {
                 for (int x = 0; x < res; ++x) {
-                    // Water cell centre is chunk-local (2x+1, 2z+1) — an integer heightmap node,
-                    // and heightmap[node] == GetTerrainHeightAt(node) to the BIT (parity gate) ->
-                    // byte-exact.
+                    // Water cell centre is chunk-local (step*x + step/2, step*z + step/2) — an
+                    // integer heightmap node (2x+1 at Medium's step 2), and heightmap[node] ==
+                    // GetTerrainHeightAt(node) to the BIT (parity gate) -> byte-exact.
                     terrain_seed[i][static_cast<std::size_t>(z) * res + x] =
-                        cp->heightmap_data[(2 * x + 1) + (2 * z + 1) * hm_stride];
+                        cp->heightmap_data[(hm_step * x + hm_step / 2) +
+                                           (hm_step * z + hm_step / 2) * hm_stride];
                 }
             }
         }
@@ -537,7 +626,7 @@ void WaterSystem::update(entt::registry& registry,
     auto seed_chunk_water = [this](Chunk* cp, const std::vector<float>& terrain) {
         //  init directly at the fixed camera-independent sim resolution (no later
         // camera-driven resize -> the hashed grid is uniform + stable on every peer).
-        const int initial_resolution = WATER_SIM_RESOLUTION;
+        const int initial_resolution = m_sim_resolution;
         cp->current_water_resolution.store(initial_resolution);
         const size_t sim_size = static_cast<size_t>(initial_resolution) * initial_resolution;
         cp->water_level_data.assign(sim_size, SEA_LEVEL);
@@ -729,31 +818,37 @@ void WaterSystem::update(entt::registry& registry,
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
     }
 
-    //  implementation note: bound the per-tick sim work to MAX_WATER_SIMS_PER_TICK via a
-    //  DETERMINISTIC
-    // rotating window. Sort by chunk id (order independent of the unordered_map's iteration), then
+    //  implementation note: bound the per-tick sim work to the MAX_WATER_CELLS_PER_TICK cell
+    //  budget via a DETERMINISTIC
+    // rotating window of WATER_SIM_WINDOW_CHUNKS chunks (budget / cells-per-chunk at the uniform
+    // resolution). Sort by chunk id (order independent of the unordered_map's iteration), then
     // take a window starting at m_water_sim_cursor and advance it — so over a few ticks every
     // active chunk sims, but no single tick blocks on hundreds of chunks. The un-simulated chunks
-    // stay awake and are picked up by the rotation next tick. Cursor evolution is a pure function
+    // stay awake and are picked up by the rotation next tick. The cursor stays in CHUNK-INDEX
+    // space (persisted as world_info.json waterSimCursor) and its evolution is a pure function
     // of the active-set size sequence -> run==replay / host==peer identical (verified by the
     // WaterDeterminism gate).
     //  boot-settle mode: no rotating window — sim EVERY awake chunk each call so
     // ticks_below_threshold advances every settle iteration and the sleep threshold (120
     // calm ticks) is reachable within a bounded settle (see SetBootSettleMode).
-    if (!m_boot_settle_mode && chunks_to_sim.size() > MAX_WATER_SIMS_PER_TICK) {
+    const std::size_t water_cells_per_chunk = GetWaterCellCount(m_sim_resolution);
+    const std::size_t water_sim_window_chunks = DeriveSimWindowChunks(water_cells_per_chunk);
+    m_dbg_awake_water_chunks = chunks_to_sim.size();
+    if (!m_boot_settle_mode && chunks_to_sim.size() > water_sim_window_chunks) {
         std::sort(chunks_to_sim.begin(), chunks_to_sim.end(), [](const Chunk* a, const Chunk* b) {
             return a->get_id() < b->get_id();
         });
         const std::size_t total = chunks_to_sim.size();
         m_water_sim_cursor %= total;
         std::vector<Chunk*> window;
-        window.reserve(MAX_WATER_SIMS_PER_TICK);
-        for (std::size_t i = 0; i < MAX_WATER_SIMS_PER_TICK; ++i) {
+        window.reserve(water_sim_window_chunks);
+        for (std::size_t i = 0; i < water_sim_window_chunks; ++i) {
             window.push_back(chunks_to_sim[(m_water_sim_cursor + i) % total]);
         }
-        m_water_sim_cursor = (m_water_sim_cursor + MAX_WATER_SIMS_PER_TICK) % total;
+        m_water_sim_cursor = (m_water_sim_cursor + water_sim_window_chunks) % total;
         chunks_to_sim.swap(window);
     }
+    m_dbg_cells_simmed = chunks_to_sim.size() * water_cells_per_chunk;
 
     // --- Step 4:  — INTEGER virtual-pipes. Per chunk: internal-edge flux + sources/sinks
     // (StepChunkWaterFixed). Then a CROSS-CHUNK owner-edge shared-flux pass so rivers/lakes are
@@ -819,6 +914,11 @@ void WaterSystem::update(entt::registry& registry,
             continue;
         const IVec3 ac = A->get_coords();
         const bool have_mirror_A = (static_cast<int>(A->water_level_data.size()) == nA);
+        // Seam edges use the same resolution-scaled constants as internal edges (the seam
+        // pass hard-gates on equal resolution, so A's res is the pair's res). Byte-identical
+        // integers at the Medium default.
+        const std::int64_t k_accel = KAccelForResolution(res);
+        const std::int32_t min_flow_mm = MinFlowForResolution(res);
         auto step_face = [&](Chunk* B, bool isX) {
             if (GetWaterResolution(*B) != res)
                 return; // uniform-res only -> cells align cell-for-cell
@@ -842,9 +942,9 @@ void WaterSystem::update(entt::registry& registry,
                     static_cast<std::int64_t>(B->water_bed_mm[bi]) + B->water_depth_mm[bi];
                 const std::int64_t dSurf = surfA - surfB;
                 std::int64_t q = static_cast<std::int64_t>(A->water_edge_flux[slot]) +
-                                 ((K_ACCEL * dSurf) >> FLOW_SHIFT);
+                                 ((k_accel * dSurf) >> FLOW_SHIFT);
                 q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
-                if (dSurf < MIN_FLOW_MM && dSurf > -MIN_FLOW_MM)
+                if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
                     q = 0;
                 if (q > 2000000000LL)
                     q = 2000000000LL;
@@ -1144,14 +1244,47 @@ WaterDetailLevel WaterSystem::CalculateRequiredDetail(const Chunk& chunk,
                                                       float camera_distance,
                                                       bool has_player_interaction) {
     //  the HASHED sim grid is CAMERA-INDEPENDENT — every simulated water chunk runs at
-    // the single fixed WATER_SIM_RESOLUTION. A camera-driven resolution made the hashed mm water
-    // state differ per peer (host!=peer) and misaligned cross-chunk boundary cells. Uniform
-    // resolution is required so neighbour chunks exchange flux cell-for-cell. (Visual mesh LOD, if
-    // ever wanted, is a separate render-only concern — it must NOT drive this hashed grid.)
+    // the single fixed session resolution (m_sim_resolution). A camera-driven resolution made the
+    // hashed mm water state differ per peer (host!=peer) and misaligned cross-chunk boundary cells.
+    // Uniform resolution is required so neighbour chunks exchange flux cell-for-cell. (Visual mesh
+    // LOD, if ever wanted, is a separate render-only concern — it must NOT drive this hashed grid.)
     (void)chunk;
     (void)camera_distance;
     (void)has_player_interaction;
-    return static_cast<WaterDetailLevel>(WATER_SIM_RESOLUTION);
+    return static_cast<WaterDetailLevel>(m_sim_resolution);
+}
+
+void WaterSystem::SetSimResolution(int cells_per_side) {
+    // One uniform grid for the whole session: the resolution must divide the chunk so
+    // seam cells align cell-for-cell (see SetSimResolution's header contract). Reject
+    // anything else and keep the current resolution — the caller wires this once from
+    // sim.water_high_res before the first update, so a rejected value simply leaves
+    // the byte-identical Medium default in place.
+    if (cells_per_side <= 1 || CHUNK_SIZE_X % cells_per_side != 0 ||
+        CHUNK_SIZE_Z % cells_per_side != 0) {
+        return;
+    }
+    m_sim_resolution = cells_per_side;
+}
+
+std::size_t WaterSystem::MigrateChunksToSimResolution(
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& chunks) {
+    const auto target_level = static_cast<WaterDetailLevel>(m_sim_resolution);
+    std::size_t migrated = 0;
+    for (const auto& entry : chunks) {
+        Chunk* cp = entry.second.get();
+        // Only chunks that already carry live water sim state migrate — resizing a
+        // chunk without one would fabricate water where the session never seeded it.
+        if (cp == nullptr || !cp->has_water_sim.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        if (cp->current_water_resolution.load(std::memory_order_relaxed) == m_sim_resolution) {
+            continue;
+        }
+        ResizeSimulationGrid(*cp, target_level);
+        ++migrated;
+    }
+    return migrated;
 }
 
 void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level) {
@@ -1254,9 +1387,10 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     // depth_mm (1/256 fixed-point weights — pure integer, no float on the sim-truth path); the
     // float surface mirror then regenerates FROM mm (one-way), replacing the old
     // interpolate-float-then-lround feedback. Flux reset. Deterministic.
-    // NOTE: water resolution is camera-driven, so the hashed mm state is camera-dependent — fine
-    // for single-player/run==replay, but TRUE host==peer needs a camera-independent sim resolution
-    // (decouple sim grid from visual LOD) —  NFR-DET /  architectural implementation note.
+    // The resolution is camera-INDEPENDENT (see CalculateRequiredDetail): resizes fire
+    // only when a chunk's stored resolution disagrees with the session's — i.e. the
+    // boot-time save migration (MigrateChunksToSimResolution) and the capped live
+    // convergence path for chunks adopted mid-run.
     chunk.water_depth_mm.assign(new_sim_size, 0);
     chunk.water_bed_mm.assign(new_sim_size, 0);
     chunk.water_edge_flux.assign(2 * new_sim_size, 0);

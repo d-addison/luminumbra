@@ -744,6 +744,19 @@ public:
     // WaterSystem::SetBootPaused.
     void SetWaterBootPaused(bool on);
 
+    // session water-sim resolution passthrough (sim.water_high_res): the owner sets it
+    // ONCE, before the first update — see WaterSystem::SetSimResolution.
+    void SetWaterSimResolution(int cells_per_side);
+    // boot-time save migration: resize every loaded water chunk to the session
+    // resolution in ONE pass, before the first live tick (see
+    // WaterSystem::MigrateChunksToSimResolution). Returns chunks resized.
+    std::size_t MigrateWaterSimResolution();
+    // debug/test: the session water-sim resolution (0 when no water system), and the
+    // count of loaded water chunks whose stored resolution differs from the session's
+    // (0 after a converged migration — mixed resolutions wall off the seam pass).
+    [[nodiscard]] int debug_water_sim_resolution() const;
+    [[nodiscard]] std::size_t debug_water_chunks_off_resolution() const;
+
     // the rotating water sim-window cursor: evolution-relevant sim state,
     // persisted with the world and restored on load. See WaterSystem::GetSimWindowCursor.
     [[nodiscard]] std::size_t GetWaterSimWindowCursor() const;
