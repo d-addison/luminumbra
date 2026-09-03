@@ -61,6 +61,62 @@ constexpr int FLOW_SHIFT = 12;
 constexpr std::int64_t
     FRICTION_NUM = 200,
     FRICTION_SHIFT = 8; // q = (q*200)>>8 ~ 0.78 (strong damping -> stable, modest steady flow)
+
+// --- resolution scaling of the per-edge flow constants (derived, not tuned) -----------------
+// MIN_FLOW_MM and K_ACCEL above are CALIBRATED AT MEDIUM (8x8 -> cell size L = 2 m). Depth and
+// flux are stored PER CELL AREA (mm of depth over one cell), so every depth-per-area input —
+// rain, evaporation, the river discharge, the sub-mm film cull — is resolution-invariant by
+// construction: 1 mm of depth is 1 mm of depth over whatever area the cell covers, and the
+// symmetric apply (A -= q; B += q) moves q mm between two EQUAL-AREA cells, i.e. the same
+// physical volume at any resolution. Only the per-EDGE dynamics see the cell size:
+//
+//  K_ACCEL — the pipe gain k = K_ACCEL / 2^FLOW_SHIFT sets the discrete surface celerity.
+//    Linearizing the update (q += k*dSurf; depth -= div q) gives depth_tt = k*lap(depth) on
+//    the CELL lattice: a disturbance propagates ~sqrt(k) cells/tick = sqrt(k)*L metres/tick.
+//    Halving L halves the physical propagation speed unless k scales by (L_medium/L)^2, i.e.
+//    k ∝ res^2. The Mei virtual-pipes view agrees: the volume-flux gain is g*A_pipe/L_pipe
+//    per unit dSurf; with the pipe cross-section ∝ cell width and the pipe length = L, the
+//    DEPTH-flux gain (volume gain / cell area) goes as 1/L^2. The same scaling preserves the
+//    slope-driven steady discharge: q_ss = k*f/(1-f)*dSurf with dSurf across one cell ∝
+//    slope*L, so the volume flux per metre of front, q_ss*L, goes as k*L^2 — invariant
+//    exactly when k ∝ 1/L^2. High (1 m cells): 4x Medium's K_ACCEL.
+//  FRICTION — a per-TICK multiplicative damping (q *= 200/256 each tick) discretizing
+//    dq/dt = -gamma*q in TIME only; the tick length does not change with resolution, so the
+//    factor is resolution-INDEPENDENT and stays as calibrated.
+//  MIN_FLOW_MM — the anti-jitter cutoff thresholds dSurf, a surface-height DIFFERENCE across
+//    ONE CELL: the physical slope it suppresses is MIN_FLOW_MM / L. Left at 2 mm it would cut
+//    off a 2x steeper gradient at 1 m cells — proportionally more flow killed near
+//    equilibrium (lumpier pools, stalled spreading; measured as the seam_wet drop in the
+//    water-smoke workload). Scaling ∝ L (2 mm at 2 m -> 1 mm at 1 m) suppresses the same
+//    physical slope and the same limit-cycle amplitude in depth units.
+//  Stability — the scaled gain at High is k = 1024/4096 = 1/4; the symplectic-Euler pipe
+//    lattice is stable for k <= 1/2 (2D 5-point operator, spectral bound k*8 <= 4, undamped)
+//    and the 0.78 friction factor adds margin. int64 headroom: |K_ACCEL_scaled*dSurf| stays
+//    orders of magnitude under 2^63 and the existing +-2e9 flux clamp still fits int32.
+//
+// Deliberately NOT compensated here: the fixed MAX_WATER_CELLS_PER_TICK budget sims a High
+// chunk ~4x less often than a Medium one whenever more chunks are awake than the derived
+// window (16 vs 64), so WALL-CLOCK settle/fill still lags by the cadence ratio. That divide
+// belongs to the budget/scheduler, not to these constants — inflating k to hide it would
+// change the physics per simulated step instead of the schedule, and break the invariance
+// derived above.
+constexpr int FLOW_CALIBRATION_RES = static_cast<int>(WaterDetailLevel::Medium); // 8 -> 2 m
+constexpr std::int64_t KAccelForResolution(int res) {
+    const std::int64_t r = res;
+    const std::int64_t m = FLOW_CALIBRATION_RES;
+    return (K_ACCEL * r * r) / (m * m); // k ∝ 1/L^2 == res^2 (exact at every legal res)
+}
+constexpr std::int32_t MinFlowForResolution(int res) {
+    const auto scaled = static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(MIN_FLOW_MM) * FLOW_CALIBRATION_RES) / res); // ∝ L == 1/res
+    return scaled > 1 ? scaled : 1; // integer mm domain: never below the 1 mm quantum
+}
+// The Medium default must be BYTE-IDENTICAL to the historical constants, and High carries the
+// derived x4 / x1/2 exactly.
+static_assert(KAccelForResolution(static_cast<int>(WaterDetailLevel::Medium)) == K_ACCEL);
+static_assert(MinFlowForResolution(static_cast<int>(WaterDetailLevel::Medium)) == MIN_FLOW_MM);
+static_assert(KAccelForResolution(static_cast<int>(WaterDetailLevel::High)) == 4 * K_ACCEL);
+static_assert(MinFlowForResolution(static_cast<int>(WaterDetailLevel::High)) == 1);
 constexpr std::int32_t RIVER_DISCHARGE_MM = 24; // mm/tick injected at a river-channel source cell
 constexpr float RIVER_SOURCE_THRESHOLD = 0.45f; // RiverInfluenceAt >= this => source cell
 constexpr std::int32_t EVAP_MM = 1; // cull <1mm films on non-source cells (deterministic)
@@ -245,11 +301,15 @@ void StepChunkWaterFixed(Chunk& c,
     surf.resize(n);
     for (int i = 0; i < n; ++i)
         surf[i] = static_cast<std::int64_t>(bed[i]) + depth[i];
+    // Per-edge constants at THIS chunk's resolution (see the resolution-scaling block above).
+    // At the Medium default these are the exact historical integers -> byte-identical.
+    const std::int64_t k_accel = KAccelForResolution(res);
+    const std::int32_t min_flow_mm = MinFlowForResolution(res);
     auto compute_edge = [&](int i, int j, int eidx) {
         const std::int64_t dSurf = surf[i] - surf[j];
-        std::int64_t q = static_cast<std::int64_t>(flux[eidx]) + ((K_ACCEL * dSurf) >> FLOW_SHIFT);
+        std::int64_t q = static_cast<std::int64_t>(flux[eidx]) + ((k_accel * dSurf) >> FLOW_SHIFT);
         q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
-        if (dSurf < MIN_FLOW_MM && dSurf > -MIN_FLOW_MM)
+        if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
             q = 0;
         if (q > 2000000000LL)
             q = 2000000000LL;
@@ -854,6 +914,11 @@ void WaterSystem::update(entt::registry& registry,
             continue;
         const IVec3 ac = A->get_coords();
         const bool have_mirror_A = (static_cast<int>(A->water_level_data.size()) == nA);
+        // Seam edges use the same resolution-scaled constants as internal edges (the seam
+        // pass hard-gates on equal resolution, so A's res is the pair's res). Byte-identical
+        // integers at the Medium default.
+        const std::int64_t k_accel = KAccelForResolution(res);
+        const std::int32_t min_flow_mm = MinFlowForResolution(res);
         auto step_face = [&](Chunk* B, bool isX) {
             if (GetWaterResolution(*B) != res)
                 return; // uniform-res only -> cells align cell-for-cell
@@ -877,9 +942,9 @@ void WaterSystem::update(entt::registry& registry,
                     static_cast<std::int64_t>(B->water_bed_mm[bi]) + B->water_depth_mm[bi];
                 const std::int64_t dSurf = surfA - surfB;
                 std::int64_t q = static_cast<std::int64_t>(A->water_edge_flux[slot]) +
-                                 ((K_ACCEL * dSurf) >> FLOW_SHIFT);
+                                 ((k_accel * dSurf) >> FLOW_SHIFT);
                 q = (q * FRICTION_NUM) >> FRICTION_SHIFT;
-                if (dSurf < MIN_FLOW_MM && dSurf > -MIN_FLOW_MM)
+                if (dSurf < min_flow_mm && dSurf > -min_flow_mm)
                     q = 0;
                 if (q > 2000000000LL)
                     q = 2000000000LL;
