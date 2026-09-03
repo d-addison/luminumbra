@@ -303,6 +303,72 @@ target_link_libraries(forest_perf_budget_test PRIVATE
     luminumbra_common
 )
 
+# GL-free regression coverage for the foliage surface-grid cache prune. Generate
+# the tiny source in the build tree so the production helper remains directly
+# testable while this scoped change stays within the assigned source files.
+set(FOLIAGE_CACHE_PRUNE_TEST_SOURCE
+    "${CMAKE_CURRENT_BINARY_DIR}/foliage_cache_prune_test.cpp")
+file(GENERATE OUTPUT "${FOLIAGE_CACHE_PRUNE_TEST_SOURCE}" CONTENT [=[
+#include "luminumbra_client/rendering/passes/FoliagePass.h"
+
+#include <gtest/gtest.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <unordered_map>
+#include <vector>
+
+namespace {
+
+struct TestChunk {
+    std::int32_t x;
+    std::int32_t z;
+};
+
+TEST(FoliageCachePruneTest, RetainsExactlyLiveEntriesAndComputesEachChunkKeyOnce) {
+    using Luminumbra::Rendering::detail::pack_foliage_chunk_key;
+    using Luminumbra::Rendering::detail::prune_foliage_cache;
+
+    const auto retained_a = pack_foliage_chunk_key(7, -3);
+    const auto retained_b = pack_foliage_chunk_key(-11, 29);
+    const auto removed_a = pack_foliage_chunk_key(8, -3);
+    const auto removed_b = pack_foliage_chunk_key(-11, 30);
+    std::unordered_map<std::uint64_t, int> cache{
+        {retained_a, 101}, {retained_b, 202}, {removed_a, 303}, {removed_b, 404}};
+    const std::vector<TestChunk> chunks{{7, -3}, {-11, 29}};
+    std::size_t key_computations = 0;
+
+    prune_foliage_cache(cache, chunks, [&](const TestChunk& chunk) {
+        ++key_computations;
+        return pack_foliage_chunk_key(chunk.x, chunk.z);
+    });
+
+    EXPECT_EQ(key_computations, chunks.size());
+    ASSERT_EQ(cache.size(), 2u);
+    EXPECT_EQ(cache.at(retained_a), 101);
+    EXPECT_EQ(cache.at(retained_b), 202);
+    EXPECT_EQ(cache.count(removed_a), 0u);
+    EXPECT_EQ(cache.count(removed_b), 0u);
+}
+
+} // namespace
+]=])
+set_source_files_properties("${FOLIAGE_CACHE_PRUNE_TEST_SOURCE}" PROPERTIES GENERATED TRUE)
+
+add_executable(foliage_cache_prune_test
+    "${FOLIAGE_CACHE_PRUNE_TEST_SOURCE}"
+)
+
+target_include_directories(foliage_cache_prune_test PRIVATE
+../src
+../src/luminumbra_client
+)
+
+target_link_libraries(foliage_cache_prune_test PRIVATE
+    gtest_main
+    luminumbra_common
+)
+
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
 )
@@ -1432,6 +1498,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     environmental_audio_model_test
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
+    foliage_cache_prune_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test
