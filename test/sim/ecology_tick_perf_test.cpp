@@ -264,7 +264,7 @@ TEST(EcologyTickPerf, MeasuresMedianAndP99AcrossRosterSizes) {
         // budgets only measure/enforce that full-roster cost. If holding the
         // budget ever requires capping per-tick ecology work, the cap MUST be a
         // deterministic rotating id-sorted window (the WaterSystem
-        // MAX_WATER_SIMS_PER_TICK pattern: sort by stable id, advance a persisted
+        // MAX_WATER_CELLS_PER_TICK pattern: sort by stable id, advance a persisted
         // cursor by the window size each tick), NEVER a time-based/adaptive
         // cutoff — wall-clock caps make the processed set machine-dependent and
         // break run==replay and host==peer.
