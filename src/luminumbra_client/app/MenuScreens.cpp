@@ -5,11 +5,12 @@
 #include "app/MenuScreens.h"
 
 #include "core/Log.h"
-#include "core/RuntimeScenarioHarness.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "nlohmann/json.hpp"
 #include "rendering/Camera.h"
+#include "rendering/PixelIo.h"
 #include "rendering/RenderPipeline.h"
 #include "ui/Rml_UIManager.h"
 #include "world/WorldgenOverride.h"
@@ -24,6 +25,7 @@
 namespace Luminumbra::Client::App {
 
 using namespace Luminumbra::Client::ScenarioHarness;
+using Luminumbra::Rendering::WritePixelBufferPpm;
 
 // The body below is the frame loop's menu branch, moved verbatim; only the
 // former globals now come in through the context and parameters.

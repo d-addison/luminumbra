@@ -45,24 +45,21 @@ target_link_libraries(luminumbra_client PUBLIC
 
 # --- Client QA Library (RuntimeScenarioHarness) ---
 # The QA scenario harness (the gate/scenario driver behind
-# `luminumbra_client_app --scenario <name>`) lives in its own static library so
-# interactive-client code and QA-harness code stop sharing one target. It links
-# luminumbra_client PUBLIC for the include dirs + engine/render dependencies.
-# The dependency is mutual: the harness drives RenderPipeline/GameSession from
-# luminumbra_client, while luminumbra_client TUs (SceneSurvey.cpp,
-# WorldgenPreview.cpp) call harness-defined helpers (WritePixelBufferPpm,
-# FoliageSurfaceQuery). Declaring the cycle on both targets makes CMake repeat
-# the static archives on consumer link lines, so every existing consumer of
-# luminumbra_client keeps linking unchanged.
+# `luminumbra_client_qa_app --scenario <name>`) lives in its own static library
+# so interactive-client code and QA-harness code stop sharing one target. It
+# links luminumbra_client PUBLIC for the include dirs + engine/render
+# dependencies. The dependency is strictly one-way: the harness drives
+# RenderPipeline/GameSession from luminumbra_client, while the helpers the
+# client once pulled back out of the harness (WritePixelBufferPpm,
+# FoliageSurfaceQuery, the GL debug counters) now live in luminumbra_client
+# itself (rendering/PixelIo, rendering/FoliageSurface,
+# core/RuntimeScenarioConfig), so no client TU references a harness symbol.
 add_library(luminumbra_client_qa STATIC
     ${CLIENT_QA_SOURCES}
 )
 
 target_link_libraries(luminumbra_client_qa PUBLIC
     luminumbra_client
-)
-target_link_libraries(luminumbra_client PUBLIC
-    luminumbra_client_qa
 )
 
 # --- Headless Server Executable ---
@@ -109,23 +106,46 @@ elseif(LUMINUMBRA_ENABLE_STEAM AND UNIX AND NOT APPLE)
         COMMENT "Copying libsteam_api.so next to luminumbra_server_app")
 endif()
 
-# --- Client Executable ---
+# --- Client Executables ---
+# Two binaries share the main_client.cpp entry TU:
+#   luminumbra_client_app     - the shipping interactive client. Links ONLY
+#                               luminumbra_client (no QA harness in the image);
+#                               `--scenario` exits with the documented
+#                               availability error (exit code 6).
+#   luminumbra_client_qa_app  - the QA/gate binary. Compiles the same TU with
+#                               LUMINUMBRA_QA_RUNNER=1 (enables the
+#                               CreateScenarioRunner call) and links the
+#                               harness. tools/gates scenario runs target this.
 add_executable(luminumbra_client_app
     ${CLIENT_APP_SOURCES}
 )
 
 target_link_libraries(luminumbra_client_app PRIVATE
+    luminumbra_client
+)
+
+add_executable(luminumbra_client_qa_app
+    ${CLIENT_APP_SOURCES}
+)
+
+target_compile_definitions(luminumbra_client_qa_app PRIVATE
+    LUMINUMBRA_QA_RUNNER=1
+)
+
+target_link_libraries(luminumbra_client_qa_app PRIVATE
     luminumbra_client_qa
     luminumbra_client
 )
 
-# Link OpenGL
-if(WIN32)
-    target_link_libraries(luminumbra_client_app PRIVATE opengl32 DbgHelp Psapi)
-elseif(APPLE)
-    find_package(OpenGL REQUIRED)
-    target_link_libraries(luminumbra_client_app PRIVATE ${OPENGL_LIBRARIES})
-else()
-    find_package(OpenGL REQUIRED)
-    target_link_libraries(luminumbra_client_app PRIVATE OpenGL::GL)
-endif()
+# Link OpenGL (both client executables)
+foreach(CLIENT_EXE_TARGET IN ITEMS luminumbra_client_app luminumbra_client_qa_app)
+    if(WIN32)
+        target_link_libraries(${CLIENT_EXE_TARGET} PRIVATE opengl32 DbgHelp Psapi)
+    elseif(APPLE)
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(${CLIENT_EXE_TARGET} PRIVATE ${OPENGL_LIBRARIES})
+    else()
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(${CLIENT_EXE_TARGET} PRIVATE OpenGL::GL)
+    endif()
+endforeach()

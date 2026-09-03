@@ -5,7 +5,7 @@
 #include "app/InputCallbacks.h"
 
 #include "core/Log.h"
-#include "core/RuntimeScenarioHarness.h" // GL debug counters + window-mode helpers
+#include "core/RuntimeScenarioConfig.h" // GL debug counters + window-mode helpers
 #include "luminumbra_common/core/SystemConfig.h"
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"

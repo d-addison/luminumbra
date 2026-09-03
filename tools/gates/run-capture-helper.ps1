@@ -11,7 +11,9 @@ $ErrorActionPreference = "Stop"
 
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $outputPath = Join-Path $OutputDir "capture_profiler_helper.json"
-$clientExe = "build/$BuildPreset/bin/luminumbra_client_app.exe"
+# Scenario captures run through the QA client binary (the shipping
+# luminumbra_client_app has no scenario harness and refuses --scenario).
+$clientExe = "build/$BuildPreset/bin/luminumbra_client_qa_app.exe"
 
 function Find-Tool {
     param([string]$Name)
