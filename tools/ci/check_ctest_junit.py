@@ -12,7 +12,6 @@ from pathlib import Path
 
 ALLOWED_SKIPS = {
     "AudioBankIntegrity.LoadedBankFilesExistOnDisk",
-    "JobSystemPoolTest.DispatchThroughputBenchmark",
 }
 
 
