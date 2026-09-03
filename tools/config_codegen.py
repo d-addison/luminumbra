@@ -194,6 +194,10 @@ def emit_header(schema: dict) -> str:
     lines.append("// (ConfigSchema.json) and cannot drift. Regenerate via tools/config_codegen.py")
     lines.append("// --emit; tools/config_codegen.py --check fails CI if this file is stale.")
     lines.append("")
+    lines.append("// Codegen owns these bytes: the configure-time drift check enforces")
+    lines.append("// byte-freshness against the emitter, so clang-format must not re-wrap")
+    lines.append("// the X-macro continuation lines.")
+    lines.append("// clang-format off")
     lines.append("// KEY(enum, Section, \"json_section\", \"json_name\", residency)")
     lines.append("#define LUMIN_CONFIG_KEY_TABLE(KEY) \\")
     for i, k in enumerate(keys):
@@ -218,7 +222,7 @@ def emit_header(schema: dict) -> str:
             f'  PARAM({p["enum"]}, {p["owner"]}, "{p["json_name"]}", {is_vec3}, '
             f"{scalar}, {_fmt_float(vx)}, {_fmt_float(vy)}, {_fmt_float(vz)}){cont}"
         )
-    lines.append("")
+    lines.append("// clang-format on")
     return "\n".join(lines)
 
 

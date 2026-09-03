@@ -29,6 +29,7 @@
 
 #include "luminumbra_common/components/CoreComponents.h" // water-source: TransformComponent
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/core/SystemConfig.h"    // sim.water_high_res gate
 #include "luminumbra_common/core/WaterComponents.h" // water-source: WaterSourceComponent
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -121,7 +122,8 @@ std::vector<std::uint64_t> run_water_sequence(const std::string& root,
                                               int ticks,
                                               std::size_t& water_chunks_out,
                                               std::int64_t& max_depth_out,
-                                              int& max_seam_wet_out) {
+                                              int& max_seam_wet_out,
+                                              bool high_res = false) {
     JobSystem jobs;
     jobs.startup();
     std::vector<std::uint64_t> hashes;
@@ -130,6 +132,10 @@ std::vector<std::uint64_t> run_water_sequence(const std::string& root,
         GameSession session;
         session.SetJobSystem(&jobs);
         session.SetRootPath(root);
+        // High-resolution water must be REQUESTED pre-world (the session wires it at
+        // create, mirroring the sim.water_high_res production path). Default false is
+        // a stored no-op — the historical scenarios are untouched.
+        session.SetWaterHighResEnabled(high_res);
         EXPECT_TRUE(session.CreateWorld("WaterDet", "777", "default"));
         SHIELD_WorldSystem* world = session.GetWorldSystem();
         EXPECT_NE(world, nullptr);
@@ -631,6 +637,177 @@ TEST(WaterDeterminism, FiniteHydrologyRainFillsLandDeterministically) {
         << "rain did NOT add water on land (rain=" << rain_a.land_water
         << " vs dry=" << dry.land_water
         << ") — the rainfall input is not accumulating in the terrain";
+}
+
+// gated High-resolution water (sim.water_high_res). With the flag ON the session
+// runs the 16x16 (1 m cell) grid: A/B determinism, the mass invariant and the
+// non-vacuity guards must all hold exactly as at Medium, the hashed state must
+// actually differ from a Medium run (the flag is not a no-op), and the config
+// sub-hash must move off the all-defaults baseline — the same contract every
+// hashed sim flag carries (see sim.hydrology_weather's wiring comment).
+constexpr int kHighResTicks = 32;
+
+TEST(WaterDeterminism, HighResWaterFlagIsDeterministicAndMovesConfigSubHash) {
+    // Config plumbing: all-defaults hashes to the empty baseline; enabling
+    // sim.water_high_res must move the sub-hash (a deliberate hash bump).
+    const auto defaults = luminumbra::core::SystemConfig::Defaults();
+    EXPECT_TRUE(defaults.ComputeConfigSubHash().empty());
+    const auto cfg = luminumbra::core::SystemConfig::FromJsonString(
+        R"({ "sim": { "water_high_res": { "enabled": true } } })");
+    ASSERT_TRUE(cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
+    EXPECT_FALSE(cfg.ComputeConfigSubHash().empty())
+        << "sim.water_high_res is enabled but contributes no config sub-hash bytes";
+    EXPECT_NE(cfg.ComputeConfigSubHash(), defaults.ComputeConfigSubHash());
+
+    const HeadlessRoot root;
+    std::size_t water_chunks_a = 0, water_chunks_b = 0, water_chunks_med = 0;
+    std::int64_t max_depth_a = 0, max_depth_b = 0, max_depth_med = 0;
+    int seam_wet_a = 0, seam_wet_b = 0, seam_wet_med = 0;
+    const auto seq_a = run_water_sequence(root.root_string(),
+                                          kHighResTicks,
+                                          water_chunks_a,
+                                          max_depth_a,
+                                          seam_wet_a,
+                                          /*high_res=*/true);
+    const auto seq_b = run_water_sequence(root.root_string(),
+                                          kHighResTicks,
+                                          water_chunks_b,
+                                          max_depth_b,
+                                          seam_wet_b,
+                                          /*high_res=*/true);
+    const auto seq_med = run_water_sequence(
+        root.root_string(), kHighResTicks, water_chunks_med, max_depth_med, seam_wet_med);
+
+    ASSERT_GT(water_chunks_a, 0u) << "no water chunks were simulated at High — vacuous";
+    ASSERT_EQ(seq_a.size(), seq_b.size());
+    EXPECT_EQ(seq_a, seq_b) << "High-resolution water diverged between two identical runs — "
+                               "NON-DETERMINISTIC (would desync host==peer)";
+    EXPECT_GT(max_depth_a, 0) << "no cell ever held depth > 0 at High — water never filled";
+    EXPECT_EQ(max_depth_a, max_depth_b);
+    EXPECT_GT(seam_wet_a, 0) << "no chunk-seam ever had water on both sides at High — "
+                                "cross-chunk flux not flowing on the 16x16 grid";
+    EXPECT_EQ(seam_wet_a, seam_wet_b);
+    // The flag must CHANGE the hashed water state (the 16x16 mm arrays cannot hash
+    // like the 8x8 ones once any water chunk exists).
+    ASSERT_EQ(seq_a.size(), seq_med.size());
+    EXPECT_NE(seq_a.back(), seq_med.back())
+        << "High-resolution water hashed identically to Medium — the flag did nothing";
+}
+
+// SAVE MIGRATION. current_water_resolution is persisted per chunk; a session whose
+// sim.water_high_res flag mismatches the loaded chunks must converge in ONE boot-time
+// pass (LoadWorldStateFrom -> MigrateWaterSimResolution) — left to the live path it
+// would resize at 1 chunk/tick while the seam pass (which hard-gates on equal
+// resolution) walls off water at every mixed seam. Proven both directions:
+// Medium save -> High session and High save -> Medium session.
+struct MigrationLoadResult {
+    std::size_t adopted = 0;
+    std::size_t off_res_after_load = 0; // must be 0 BEFORE the first tick
+    int session_res = 0;
+    std::size_t water_chunks = 0;
+    std::int64_t max_depth = 0;
+    int seam_wet_max = 0;
+    bool mass_ok = true;
+};
+
+// Create a world, settle water at the wet anchor, make one voxel edit (arming the
+// full-snapshot save path), and persist the streamed state into save_dir.
+void save_world_with_water(const std::string& root, const fs::path& save_dir, bool high_res) {
+    JobSystem jobs;
+    jobs.startup();
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        session.SetWaterHighResEnabled(high_res);
+        ASSERT_TRUE(session.CreateWorld("MigrationSave", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        world->debug_set_streaming_radius_cap(kStreamRadiusCap);
+        auto* physics = session.GetPhysicsSystem();
+        const Vec3 anchor = find_wet_anchor(world, session.GetMetadata().spawnPoint);
+        for (int t = 0; t < 48; ++t) {
+            world->update(session.GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+        }
+        // The incremental save contract writes nothing for a never-edited world; one
+        // real voxel edit arms the full snapshot (the PlayerVoxelDig pattern).
+        const Vec3 dig_center(
+            anchor.x, world->GetTerrainHeightAt(anchor.x, anchor.z) - 2.0f, anchor.z);
+        ASSERT_GT(world->EditTerrainVoxel(dig_center, 4.0f, /*fill=*/false, physics), 0);
+        for (int t = 0; t < 8; ++t) {
+            world->update(session.GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+        }
+        ASSERT_TRUE(session.SaveWorldStateTo(save_dir));
+    }
+    jobs.shutdown();
+}
+
+// Load save_dir into a fresh session with the given flag, capture the migration
+// convergence BEFORE the first tick, then tick and collect the water guards.
+MigrationLoadResult
+load_world_and_probe(const std::string& root, const fs::path& save_dir, bool high_res) {
+    JobSystem jobs;
+    jobs.startup();
+    MigrationLoadResult r;
+    {
+        GameSession session;
+        session.SetJobSystem(&jobs);
+        session.SetRootPath(root);
+        session.SetWaterHighResEnabled(high_res);
+        EXPECT_TRUE(session.CreateWorld("MigrationLoad", "777", "default"));
+        SHIELD_WorldSystem* world = session.GetWorldSystem();
+        world->debug_set_streaming_radius_cap(kStreamRadiusCap);
+        EXPECT_TRUE(session.LoadWorldStateFrom(save_dir));
+        r.adopted = session.GetLastLoadedChunkCount();
+        // The boot migration must have converged BEFORE the first live tick: no
+        // loaded water chunk may still carry a mismatched resolution (a mismatch
+        // would silence the seam pass — a water wall).
+        r.off_res_after_load = world->debug_water_chunks_off_resolution();
+        r.session_res = world->debug_water_sim_resolution();
+        auto* physics = session.GetPhysicsSystem();
+        const Vec3 anchor = find_wet_anchor(world, session.GetMetadata().spawnPoint);
+        for (int t = 0; t < 16; ++t) {
+            world->update(session.GetRegistry(), {anchor}, physics);
+            world->wait_for_streaming_jobs();
+            if (!world->debug_water_mass_ok())
+                r.mass_ok = false;
+            r.seam_wet_max = std::max(r.seam_wet_max, world->debug_water_seam_wet_pairs());
+        }
+        r.water_chunks = world->debug_water_state_hash().water_chunks;
+        r.max_depth = world->debug_max_water_depth_mm();
+    }
+    jobs.shutdown();
+    return r;
+}
+
+TEST(WaterDeterminism, WaterResolutionMigrationConvergesAtLoadBothWays) {
+    const HeadlessRoot root;
+    const fs::path save_med = fs::path(root.root_string()) / "save_medium";
+    const fs::path save_high = fs::path(root.root_string()) / "save_high";
+    save_world_with_water(root.root_string(), save_med, /*high_res=*/false);
+    save_world_with_water(root.root_string(), save_high, /*high_res=*/true);
+
+    const MigrationLoadResult up =
+        load_world_and_probe(root.root_string(), save_med, /*high_res=*/true);
+    const MigrationLoadResult down =
+        load_world_and_probe(root.root_string(), save_high, /*high_res=*/false);
+
+    for (const auto* r : {&up, &down}) {
+        const bool is_up = (r == &up);
+        SCOPED_TRACE(is_up ? "Medium save -> High session" : "High save -> Medium session");
+        ASSERT_GT(r->adopted, 0u) << "no chunks were adopted from the save — vacuous";
+        EXPECT_EQ(r->session_res, is_up ? 16 : 8);
+        EXPECT_EQ(r->off_res_after_load, 0u)
+            << "loaded water chunks still carry the saved resolution after LoadWorldStateFrom "
+               "— the boot migration did not converge before the first tick (water walls)";
+        EXPECT_TRUE(r->mass_ok) << "mass invariant violated while ticking the migrated world";
+        EXPECT_GT(r->water_chunks, 0u);
+        EXPECT_GT(r->max_depth, 0) << "the migrated world lost its water";
+        EXPECT_GT(r->seam_wet_max, 0)
+            << "no wet chunk-seam after migration — cross-chunk flux is walled off "
+               "(resolution mismatch would look exactly like this)";
+    }
 }
 
 } // namespace

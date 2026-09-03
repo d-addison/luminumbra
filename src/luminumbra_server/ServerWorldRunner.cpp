@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
@@ -23,6 +24,7 @@
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/core/Profiler.h"
+#include "luminumbra_common/core/SystemConfig.h" // sim.water_high_res (host==peer)
 #include "luminumbra_common/ecs/EntitySnapshot.h"
 #include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
@@ -284,6 +286,24 @@ bool ServerWorldRunner::Boot() {
     m_session = std::make_unique<world::GameSession>();
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
+    // host==peer: the headless host must run the SAME water-sim resolution the
+    // client derives from data/common/systems.json — sim.water_high_res is baked into
+    // the hashed mm grids, so a mismatched host could never agree with its peers.
+    // Resolved against the runner root with a CWD-relative fallback (the client's
+    // load path); a missing file is all-defaults = Medium = byte-identical.
+    {
+        namespace fsys = std::filesystem;
+        const fsys::path root =
+            m_config.root_path.empty() ? fsys::path(".") : fsys::path(m_config.root_path);
+        fsys::path systems_json = root / "data" / "common" / "systems.json";
+        std::error_code systems_ec;
+        if (!fsys::exists(systems_json, systems_ec)) {
+            systems_json = fsys::path("data") / "common" / "systems.json";
+        }
+        const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+        m_session->SetWaterHighResEnabled(
+            sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
+    }
     // A headless host has no client asset manifest; simulation assets alone are
     // validated and every voxel field uses the authoritative CPU generator.
 
