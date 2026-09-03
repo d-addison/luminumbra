@@ -21,7 +21,7 @@ inline constexpr float kMoonlightStrength = 0.0f;
 inline constexpr float kMoonlightColorR = 0.6f;
 inline constexpr float kMoonlightColorG = 0.7f;
 inline constexpr float kMoonlightColorB = 1.0f;
-inline constexpr glm::vec3 kMoonlightColor =
-    glm::vec3(kMoonlightColorR, kMoonlightColorG, kMoonlightColorB);
+inline constexpr glm::vec3 kMoonlightColor = glm::vec3(kMoonlightColorR, kMoonlightColorG, kMoonlightColorB);
 
-} // namespace luminumbra::core::config_constants
+}  // namespace luminumbra::core::config_constants
+
