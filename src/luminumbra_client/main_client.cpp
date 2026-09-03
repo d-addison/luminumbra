@@ -25,9 +25,10 @@
 #include "audio/NullAudioManager.h"
 #include "core/Debug.h"
 #include "core/GameState.h"
+#include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
 #include "core/Log.h"
 #include "core/NvmlSampler.h" //  optional GPU power/clock sampling
-#include "core/RuntimeScenarioHarness.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "core/ScenarioRunner.h"
 #include "debug/DebugCamera.h" // deterministic feature locator (--debug-goto cave|doline)
 #include "debug/WorldGenViewer.h"
@@ -74,11 +75,13 @@
 #include "rendering/Camera.h"
 #include "rendering/ExposureModel.h" //  rendering: lens EV -> render exposure multiplier
 #include "rendering/FarLodSystem.h"
+#include "rendering/FoliageSurface.h" // Rendering::FoliageScatterContext / FoliageSurfaceQuery
 #include "rendering/FrameHealth.h" // auto frame-health anomaly verdict (black/unlit/blown), render-only
 #include "rendering/FrameScan.h" // framescan: deterministic what's-in-frame scan tool (render-only)
 #include "rendering/GlDebugOutput.h" // KHR_debug callback + debug groups/labels (env-gated LUMIN_GL_DEBUG)
 #include "rendering/ImpostorBake.h"  //  far-field tree impostor atlas bake (render-only)
 #include "rendering/LightningBolt.h" // Deterministic bolt geometry.
+#include "rendering/PixelIo.h"       // Rendering::WritePixelBufferPpm (capture artifact writer)
 #include "rendering/RenderPipeline.h"
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/ScentFieldRenderMirror.h" // one-way scent snapshot for the ground decal
@@ -120,6 +123,7 @@
 
 using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
+using Luminumbra::Rendering::WritePixelBufferPpm;
 
 // --- Global Pointers ---
 std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
@@ -272,6 +276,14 @@ constexpr double kResizeDebounceSeconds = 0.12;
 
 using Luminumbra::Client::ScenarioHarness::WindowMode;
 
+// Exit code for a `--scenario` request against a binary compiled WITHOUT the
+// QA harness (the shipping luminumbra_client_app). Distinct from the scenario
+// exit codes the harness itself uses (2 = scenario failed, 3 = memory
+// watermark exceeded, 4 = readiness timeout, 5 = window closed before the
+// timed run completed) so a gate script pointed at the wrong binary fails
+// loudly and unambiguously. Scenario runs belong to luminumbra_client_qa_app.
+constexpr int kExitScenarioUnavailable = 6;
+
 // Grandfathered monolith: main() predates the scripts/tidy.sh complexity gate
 // and is tracked for decomposition. New functions must stay under the gate's
 // readability-function-cognitive-complexity threshold.
@@ -283,6 +295,21 @@ int main(int argc, char* argv[]) {
     LUMINUMBRA_CORE_INFO("Runtime root: {}", root_path_str);
 
     RuntimeScenarioConfig scenario_config = ParseRuntimeScenarioConfig(argc, argv, root_dir);
+#if !defined(LUMINUMBRA_QA_RUNNER)
+    // The shipping client does not compile the QA scenario harness (no
+    // CreateScenarioRunner is linked). Refuse `--scenario` up front, before any
+    // window/GL work, with the dedicated availability exit code.
+    if (scenario_config.active()) {
+        LUMINUMBRA_CORE_ERROR("--scenario '{}' requested but this binary was built without the QA "
+                              "scenario harness. Use luminumbra_client_qa_app for scenario runs.",
+                              scenario_config.scenario);
+        std::fprintf(stderr,
+                     "error: --scenario is not available in luminumbra_client_app; "
+                     "use luminumbra_client_qa_app (exit %d)\n",
+                     kExitScenarioUnavailable);
+        return kExitScenarioUnavailable;
+    }
+#endif
     RuntimeStateRecorder runtime_state_recorder(scenario_config);
     InstallRuntimeCrashHandler(runtime_state_recorder);
     g_app.overlay.imgui_enabled = !scenario_config.no_ui;
@@ -1708,8 +1735,16 @@ int main(int argc, char* argv[]) {
                                                 scenario_play_started_at,
                                                 last_readiness_report,
                                                 exit_code};
+#if defined(LUMINUMBRA_QA_RUNNER)
     const std::unique_ptr<ScenarioRunner> scenario_runner =
         scenario_config.active() ? CreateScenarioRunner(scenario_frame_context) : nullptr;
+#else
+    // Shipping build: no harness linked; the guard at the top of main() already
+    // rejected any --scenario request, so the runner is permanently null and
+    // the frame loop takes only its non-scenario branches.
+    const std::unique_ptr<ScenarioRunner> scenario_runner;
+    (void)scenario_frame_context;
+#endif
     //  honest CPU-vs-GPU attribution for --render-benchmark.
     // wall = max(CPU_submit, GPU_work) + present. NVML is loaded lazily on the
     // first measured frame (optional / guarded).
@@ -3375,8 +3410,7 @@ int main(int argc, char* argv[]) {
                                 wind_xz = glm::vec2(w.x, w.y);
                             }
                             foliage->set_wind(wind_xz);
-                            Luminumbra::Client::ScenarioHarness::FoliageScatterContext fol_ctx{
-                                fol_ws};
+                            Luminumbra::Rendering::FoliageScatterContext fol_ctx{fol_ws};
                             const auto _rb_scatter_t0 =
                                 std::chrono::steady_clock::now(); // Scatter-build timing.
                             // the scatter build (a GetTerrainHeightAt + BiomeIdAt per
@@ -3498,11 +3532,10 @@ int main(int argc, char* argv[]) {
                                                 std::chrono::steady_clock::now() - _rb_scatter_t0)
                                                 .count();                             //
                             const auto _rb_fol_t0 = std::chrono::steady_clock::now(); //
-                            foliage->rebuild_instances(
-                                chunk_scatter,
-                                &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
-                                &fol_ctx,
-                                g_camera->Position);
+                            foliage->rebuild_instances(chunk_scatter,
+                                                       &Luminumbra::Rendering::FoliageSurfaceQuery,
+                                                       &fol_ctx,
+                                                       g_camera->Position);
                             rb_foliage_ms = std::chrono::duration<double, std::milli>(
                                                 std::chrono::steady_clock::now() - _rb_fol_t0)
                                                 .count(); //

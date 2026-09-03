@@ -168,9 +168,12 @@ function Invoke-Checked {
 }
 
 function Get-ClientExe {
-    $exe = "build/$BuildPreset/bin/luminumbra_client_app.exe"
+    # Scenario/gate runs target the QA client binary: the shipping
+    # luminumbra_client_app no longer compiles the scenario harness and exits
+    # with code 6 on any --scenario request.
+    $exe = "build/$BuildPreset/bin/luminumbra_client_qa_app.exe"
     if (-not (Test-Path $exe)) {
-        throw "Missing client executable. Run -Mode Build first: $exe"
+        throw "Missing QA client executable. Run -Mode Build first: $exe"
     }
     return $exe
 }
@@ -6087,9 +6090,9 @@ function Get-GitSha {
 
 function Resolve-GatedExe {
     # The binary the gate is exercising, resolved from the SAME build/$BuildPreset root the
-    # gate built. Prefer the client (visual/perf gates) then the server (headless).
+    # gate built. Prefer the QA client (visual/perf gates) then the server (headless).
     $candidates = @(
-        "build/$BuildPreset/bin/luminumbra_client_app.exe",
+        "build/$BuildPreset/bin/luminumbra_client_qa_app.exe",
         "build/$BuildPreset/bin/luminumbra_server_app.exe"
     )
     foreach ($c in $candidates) {
@@ -6149,7 +6152,7 @@ function Resolve-GatedExeOrNull {
     # present under build/$BuildPreset/bin. Lets the provenance binding degrade gracefully
     # (warn + skip) for committed-artifact gate runs that have no built exe to bind to.
     foreach ($c in @(
-        "build/$BuildPreset/bin/luminumbra_client_app.exe",
+        "build/$BuildPreset/bin/luminumbra_client_qa_app.exe",
         "build/$BuildPreset/bin/luminumbra_server_app.exe"
     )) {
         if (Test-Path -LiteralPath $c) { return $c }

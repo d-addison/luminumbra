@@ -9,6 +9,18 @@
 
 namespace Luminumbra::Client::ScenarioHarness {
 
+std::atomic<uint64_t> g_gl_debug_message_count{0};
+std::atomic<uint64_t> g_gl_debug_error_count{0};
+std::atomic<uint64_t> g_gl_debug_warning_count{0};
+std::atomic<uint64_t> g_gl_debug_notification_count{0};
+
+GLDebugRuntimeStats CurrentGLDebugRuntimeStats() {
+    return {g_gl_debug_message_count.load(std::memory_order_relaxed),
+            g_gl_debug_error_count.load(std::memory_order_relaxed),
+            g_gl_debug_warning_count.load(std::memory_order_relaxed),
+            g_gl_debug_notification_count.load(std::memory_order_relaxed)};
+}
+
 bool HasCommandLineFlag(int argc, char* argv[], const std::string& flag) {
     for (int i = 1; i < argc; ++i) {
         if (argv[i] == flag) {

@@ -46,7 +46,7 @@
 
 // the FoliagePass ChunkScatter record is stored as a cached member so
 // the preview scatters vegetation exactly like the real world path. The shared
-// surface-query context/callback (ScenarioHarness::FoliageScatterContext /
+// surface-query context/callback (Rendering::FoliageScatterContext /
 // FoliageSurfaceQuery) are only used in the.cpp, so that header is included there.
 #include "rendering/passes/FoliagePass.h" // Rendering::FoliagePass::ChunkScatter
 

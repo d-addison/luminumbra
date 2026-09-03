@@ -44,9 +44,9 @@ param(
     # Canonical preset whose tree (build/$BuildPreset) is the single source of truth.
     [string]$BuildPreset = "debug",
 
-    # Executable whose provenance the manifest records / verifies. Defaults to the client
+    # Executable whose provenance the manifest records / verifies. Defaults to the QA client
     # exe the engine-frontier gate resolves (validate-engine-frontier.ps1 Get-ClientExe).
-    [string]$ExeName = "luminumbra_client_app.exe",
+    [string]$ExeName = "luminumbra_client_qa_app.exe",
 
     # Where to write the provenance manifest. Defaults under the preset tree's
     # test-artifacts/ so it sits beside the other gate artifacts it describes.

@@ -50,18 +50,6 @@
 
 namespace Luminumbra::Client::ScenarioHarness {
 
-std::atomic<uint64_t> g_gl_debug_message_count{0};
-std::atomic<uint64_t> g_gl_debug_error_count{0};
-std::atomic<uint64_t> g_gl_debug_warning_count{0};
-std::atomic<uint64_t> g_gl_debug_notification_count{0};
-
-GLDebugRuntimeStats CurrentGLDebugRuntimeStats() {
-    return {g_gl_debug_message_count.load(std::memory_order_relaxed),
-            g_gl_debug_error_count.load(std::memory_order_relaxed),
-            g_gl_debug_warning_count.load(std::memory_order_relaxed),
-            g_gl_debug_notification_count.load(std::memory_order_relaxed)};
-}
-
 double SmoothStep01(double value) {
     const double t = std::clamp(value, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
@@ -1713,54 +1701,8 @@ void WriteParticleEmitterDeterminismAnalysis(
 }
 
 // --- Foliage instancing smoke ( / ) ---
-
-Luminumbra::Rendering::FoliagePass::SurfaceSample
-FoliageSurfaceQuery(void* ctx, float world_x, float world_z) {
-    Luminumbra::Rendering::FoliagePass::SurfaceSample s;
-    auto* fctx = static_cast<FoliageScatterContext*>(ctx);
-    if (fctx == nullptr || fctx->world_system == nullptr) {
-        s.valid = false;
-        return s;
-    }
-    Luminumbra::Systems::SHIELD_WorldSystem* ws = fctx->world_system;
-    const float h = ws->GetTerrainHeightAt(world_x, world_z);
-    s.height = h;
-    // Underwater columns carry no ground-cover foliage.
-    if (h <= Luminumbra::SEA_LEVEL) {
-        s.valid = false;
-        return s;
-    }
-    // ROOFED-CAVE REJECT (cave bug A): GetTerrainHeightAt is the ANALYTIC heightmap
-    // surface and ignores the cave SDF. Where a cavern roof rises above that surface,
-    // the heightmap point sits INSIDE a roofed air pocket, so grass cards were being
-    // planted on ledges deep in cave chambers (green albedo patches underground). Only
-    // OPEN-SKY columns should grow ground cover: probe straight up from the surface and
-    // reject if SOLID terrain lies within a short overhead span. DENSITY CONVENTION
-    // ( root cause — this probe shipped INVERTED and rejected every open-sky
-    // column, defoliating the world): worldgen density = (y - height) + cave carve, so
-    // SOLID = density < 0 and air = >= 0 (the mesher's solid corner is val < iso 0).
-    // Pure read of the deterministic SDF — render-only, never hashed.
-    {
-        constexpr float kRoofProbeM = 6.0f; // solid this far overhead == roofed
-        constexpr float kRoofStep = 1.0f;
-        for (float up = kRoofStep; up <= kRoofProbeM; up += kRoofStep) {
-            if (ws->get_density_at(Luminumbra::Vec3(world_x, h + up, world_z)) < 0.0f) {
-                s.valid = false; // a roof overhead -> underground, no sky-lit grass
-                return s;
-            }
-        }
-    }
-    // Slope from a 1 m central finite difference of the shaped height (pure).
-    const float hx = ws->GetTerrainHeightAt(world_x + 1.0f, world_z);
-    const float hz = ws->GetTerrainHeightAt(world_x, world_z + 1.0f);
-    const float grad = std::sqrt((hx - h) * (hx - h) + (hz - h) * (hz - h));
-    s.slope = std::clamp(grad, 0.0f, 1.0f); // 1 m rise over 1 m == slope 1
-    // Moisture proxy: the biome density already encodes it; modulate mildly by a
-    // height-band proxy (lower/flatter ground reads wetter). Render-only.
-    s.moisture = std::clamp(1.0f - s.slope, 0.0f, 1.0f);
-    s.valid = true;
-    return s;
-}
+// (FoliageSurfaceQuery itself moved to rendering/FoliageSurface.cpp — the
+// shipping client's in-game scatter and the worldgen preview share it.)
 
 void WriteFoliageInstancingAnalysis(
     const std::filesystem::path& artifact_dir,
@@ -3768,38 +3710,8 @@ AnalyzeMaterialPixels(const std::vector<unsigned char>& pixels, int width, int h
     return stats;
 }
 
-bool WritePixelBufferPpm(const std::filesystem::path& path,
-                         int width,
-                         int height,
-                         const std::vector<unsigned char>& pixels) {
-    if (width <= 0 || height <= 0) {
-        return false;
-    }
-
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    if (ec) {
-        LUMINUMBRA_CORE_ERROR("Failed to create screenshot directory '{}': {}",
-                              path.parent_path().string(),
-                              ec.message());
-        return false;
-    }
-
-    std::ofstream output(path, std::ios::binary);
-    if (!output) {
-        LUMINUMBRA_CORE_ERROR("Failed to write screenshot artifact: {}", path.string());
-        return false;
-    }
-
-    output << "P6\n" << width << ' ' << height << "\n255\n";
-    const std::size_t row_stride = static_cast<std::size_t>(width) * 3u;
-    for (int row = height - 1; row >= 0; --row) {
-        const std::size_t offset = static_cast<std::size_t>(row) * row_stride;
-        output.write(reinterpret_cast<const char*>(pixels.data() + offset),
-                     static_cast<std::streamsize>(row_stride));
-    }
-    return true;
-}
+// (WritePixelBufferPpm moved to rendering/PixelIo.cpp — every capture path in
+// the shipping client shares it, not just the harness.)
 
 // Heatmap legend: sand -> gold, grass -> green, grey fallback -> magenta (the
 // failure being gated must be unmissable), water -> blue, stone (rim sub-ROI
@@ -7975,7 +7887,7 @@ bool NetworkedSessionDriver::WriteArtifact(const std::filesystem::path& artifact
 
     nlohmann::json artifact{
         {"schema", "luminumbra.networked_session.v1"},
-        {"generated_by", "luminumbra_client_app --scenario networked_session_smoke ()"},
+        {"generated_by", "luminumbra_client_qa_app --scenario networked_session_smoke ()"},
         {"preset", m_impl->config.preset},
         {"seed", std::to_string(m_impl->config.seed)},
         {"tick_rate_hz", 30.0},

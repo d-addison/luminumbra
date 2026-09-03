@@ -6,7 +6,7 @@
 
 #include "audio/IAudioManager.h"
 #include "core/Log.h"
-#include "core/RuntimeScenarioHarness.h"
+#include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/CreatureComponents.h"
 #include "luminumbra_common/components/PlantComponents.h"
@@ -17,6 +17,7 @@
 #include "player/PlayerController.h"
 #include "rendering/Camera.h"
 #include "rendering/ExposureModel.h"
+#include "rendering/PixelIo.h"
 #include "rendering/RenderPipeline.h"
 #include "rendering/Shader.h"
 #include "ui/Rml_UIManager.h"
@@ -36,6 +37,7 @@
 namespace Luminumbra::Client::App {
 
 using namespace Luminumbra::Client::ScenarioHarness;
+using Luminumbra::Rendering::WritePixelBufferPpm;
 
 namespace {
 

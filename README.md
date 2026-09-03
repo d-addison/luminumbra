@@ -33,6 +33,8 @@ All generated files stay under `build/<preset>/`.
 The primary executables are written to `build/<preset>/bin/`:
 
 - `luminumbra_client_app` runs the graphical client.
+- `luminumbra_client_qa_app` is the QA build of the client with the scenario
+  harness compiled in; the `tools/gates` scenario runs use it.
 - `luminumbra_server_app` runs the headless simulation server.
 - `asset_processor` converts authored models into the runtime mesh format.
 

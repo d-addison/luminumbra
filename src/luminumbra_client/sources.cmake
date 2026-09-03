@@ -37,10 +37,12 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/AsyncReadbackRing.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/CaptureHooks.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FarLodSystem.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/FoliageSurface.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameScan.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/FrameHealth.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/GlDebugOutput.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ImpostorBake.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/PixelIo.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/SceneSurvey.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/LightningBolt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Mesh.cpp
@@ -127,7 +129,11 @@ set(CLIENT_SOURCES
 # on MinGW; -mbig-obj lifts it (same pattern googletest/nlohmann use).
 # main_client.cpp is a large monolith that likewise overflows once it gains more
 # EnTT emplace/view instantiations (relocation truncated to fit IMAGE_REL_AMD64_ADDR32NB);
-# give it the same treatment so the app TU keeps room to grow.
+# give it the same treatment so the app TU keeps room to grow. The QA-binary
+# split moved the harness/runner bodies out of this TU, but it still carries
+# ~40 registry emplace/view sites of its own and is now compiled into BOTH
+# client executables, so the flag stays until a UCRT64 CI run proves the debug
+# object fits without it (this host cannot exercise MinGW).
 if(MINGW)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")

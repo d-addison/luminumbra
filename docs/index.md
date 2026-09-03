@@ -47,6 +47,10 @@ ctest --preset debug -LE manual --no-tests=error --output-on-failure
 The resulting programs are under `build/debug/bin/`:
 
 - `luminumbra_client_app` runs the graphical client;
+- `luminumbra_client_qa_app` runs the same client with the QA scenario harness
+  compiled in — the gate scripts' `--scenario <name>` capture/validation runs
+  target this binary (the shipping client refuses `--scenario` with exit
+  code 6);
 - `luminumbra_server_app` runs a headless authoritative world; and
 - `asset_processor` converts authored model inputs to runtime data.
 

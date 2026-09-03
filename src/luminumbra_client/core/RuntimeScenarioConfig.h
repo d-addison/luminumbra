@@ -3,6 +3,7 @@
 #include "../../../include/luminumbra/core/Types.h"
 #include "core/CaptureScale.h"
 #include "nlohmann/json.hpp"
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -227,5 +228,24 @@ CapturePinMetadata(WindowMode active_window_mode, int capture_width, int capture
 
 nlohmann::json Vec3ToJson(const Luminumbra::Vec3& value);
 nlohmann::json IVec3ToJson(const Luminumbra::IVec3& value);
+
+// --- GL debug-output runtime counters ---
+// Cumulative KHR_debug message counters since boot. Incremented by the app's
+// GL debug callback (app/InputCallbacks.cpp), read by the runtime-state
+// recorder's health snapshots and by every QA analysis writer. Client-lib
+// telemetry (not harness code): the shipping client records these too.
+extern std::atomic<uint64_t> g_gl_debug_message_count;
+extern std::atomic<uint64_t> g_gl_debug_error_count;
+extern std::atomic<uint64_t> g_gl_debug_warning_count;
+extern std::atomic<uint64_t> g_gl_debug_notification_count;
+
+struct GLDebugRuntimeStats {
+    uint64_t messages = 0;
+    uint64_t errors = 0;
+    uint64_t warnings = 0;
+    uint64_t notifications = 0;
+};
+
+GLDebugRuntimeStats CurrentGLDebugRuntimeStats();
 
 } // namespace Luminumbra::Client::ScenarioHarness
