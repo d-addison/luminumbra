@@ -765,10 +765,9 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     // cap.
     m_foliage_build_backlog = deferred_any;
     if (m_surf_grid_cache.size() > 768) {
-        detail::prune_foliage_cache(
-            m_surf_grid_cache, chunks, [](const ChunkScatter& chunk) {
-                return detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
-            });
+        detail::prune_foliage_cache(m_surf_grid_cache, chunks, [](const ChunkScatter& chunk) {
+            return detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
+        });
     }
 
     const int chunk_count = static_cast<int>(chunk_params.size());

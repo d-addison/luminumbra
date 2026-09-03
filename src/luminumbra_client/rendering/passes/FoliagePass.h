@@ -18,13 +18,12 @@ namespace Luminumbra::Rendering {
 
 namespace detail {
 
-inline constexpr std::uint64_t pack_foliage_chunk_key(std::int32_t chunk_x,
-                                                       std::int32_t chunk_z) {
+inline constexpr std::uint64_t pack_foliage_chunk_key(std::int32_t chunk_x, std::int32_t chunk_z) {
     return static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk_x)) |
            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk_z)) << 32);
 }
 
-template <typename Cache, typename Chunks, typename KeyFn>
+template<typename Cache, typename Chunks, typename KeyFn>
 void prune_foliage_cache(Cache& cache, const Chunks& chunks, KeyFn key_fn) {
     std::unordered_set<std::uint64_t> live_keys;
     live_keys.reserve(chunks.size());
