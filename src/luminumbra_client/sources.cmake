@@ -54,7 +54,9 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderReflection.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/PassShaderLayouts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ChunkGeometryPool.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GBufferPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/HierarchicalCuller.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LightingPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShadowPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SkyboxPass.cpp
