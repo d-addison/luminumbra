@@ -14,18 +14,25 @@ and content formats may still change.
   live water solver runs an 8×8 grid per chunk, so each cell is 2 m. Broad
   bodies, rain, and terraform coupling resolve well; channels narrower than a
   few cells (a small river's inner bank) are below the solver's spatial
-  resolution. The experimental `sim.water_high_res` flag switches a session to
-  a 16×16 grid (1 m cells). Its per-edge flow constants are resolution-scaled
-  (derivation in `WaterSystem.cpp`), so per simulated step High reproduces
-  Medium's physics — a dug pit gains the same physical volume per unit of
-  simulated-chunk-time, within a tested band. The flag remains experimental
-  because the fixed per-tick cell budget still sims each High chunk about 4×
-  less often when many chunks are awake (a 16-chunk window instead of 64), so
-  wall-clock settling and filling lag behind Medium until a budget/scheduling
-  decision raises or redistributes that budget; first-time grid seeding is also
-  ~4× costlier per chunk. Grid resizes are amortized one chunk per tick during live
-  play (world load migrates all chunks at once), so mid-run resolution changes
-  converge over many ticks by design.
+  resolution. The `sim.water_high_res` flag switches a session to a 16×16 grid
+  (1 m cells). Its per-edge flow constants are resolution-scaled (derivation in
+  `WaterSystem.cpp`), so per simulated step High reproduces Medium's physics — a
+  dug pit gains the same physical volume per unit of simulated-chunk-time, within
+  a tested band.
+
+  The per-tick budget is expressed in cells rather than chunks, so a higher
+  resolution shrinks the chunk window (16 instead of 64) to hold per-tick work
+  constant. Chunks carrying active edge flux are scheduled ahead of the rotating
+  cursor, so active flow fronts advance every tick at either resolution while the
+  cursor's share keeps every awake chunk starvation-free; Medium's rotating window
+  is unchanged byte-for-byte. What High still costs: first-time grid seeding is
+  ~4× more expensive per chunk, and steady-state solver time is a few percent
+  higher. Grid resizes are amortized one chunk per tick during live play (world
+  load migrates all chunks at once), so mid-run resolution changes converge over
+  many ticks by design.
+
+  The resolution is baked into the hashed water grids, so every peer in a session
+  must match and enabling the flag deliberately changes the world hash.
 - **Physics surface queries are placeholders.** Raycasts currently report a
   fixed upward surface normal, and surface material classification derives
   from world height bands rather than actual voxel material. Audio
