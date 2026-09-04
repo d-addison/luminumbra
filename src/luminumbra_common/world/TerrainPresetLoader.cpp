@@ -199,6 +199,23 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                                                   const std::string& provenance) {
     TerrainPresetLoadResult result;
 
+    if (!data.contains("schema_rev") || !data["schema_rev"].is_number_integer()) {
+        const std::string found =
+            data.contains("schema_rev") ? data["schema_rev"].dump() : "<missing>";
+        result.errors.push_back("world preset schema revision mismatch: expected " +
+                                std::to_string(kTerrainPresetSchemaRevision) + ", found " + found +
+                                ": " + provenance);
+        return result;
+    }
+
+    const std::int64_t schema_revision = data["schema_rev"].get<std::int64_t>();
+    if (schema_revision != kTerrainPresetSchemaRevision) {
+        result.errors.push_back("world preset schema revision mismatch: expected " +
+                                std::to_string(kTerrainPresetSchemaRevision) + ", found " +
+                                std::to_string(schema_revision) + ": " + provenance);
+        return result;
+    }
+
     if (!JsonHasObject(data, "generation_params")) {
         result.errors.push_back("world preset is missing object generation_params: " + provenance);
         return result;

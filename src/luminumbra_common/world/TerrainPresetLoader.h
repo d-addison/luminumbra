@@ -13,6 +13,7 @@
 // Unknown keys produce LUMINUMBRA_CORE_WARN warnings.
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -22,6 +23,8 @@
 #include "../systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
 
 namespace Luminumbra::world {
+
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 5;
 
 // generation_params.terrain.shaping — reserved keys pinned by
 // (spline points
