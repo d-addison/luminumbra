@@ -41,7 +41,6 @@ jobs:
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset debug-asan --no-tests=error -LE manual \
-              -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
               --parallel 2 --timeout 300 --output-junit ctest.junit.xml
           python3 tools/ci/check_ctest_junit.py build/debug-asan/ctest.junit.xml --minimum-tests 1700
       - name: Upload sanitizer evidence

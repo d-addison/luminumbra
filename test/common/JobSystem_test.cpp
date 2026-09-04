@@ -7,7 +7,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
-#include <cstdio>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -484,41 +483,6 @@ TEST(JobSystemPoolTest, DispatchAfterShutdownRejectsWithoutHang) {
     EXPECT_EQ(ran.load(std::memory_order_acquire), 0);
 }
 
-// PERF micro-benchmark, DISABLED by default (run
-// with --gtest_also_run_disabled_tests). Measures empty-job dispatch_batch +
-// wait throughput so the pooled-slot win can be reported without update the baseline
-// any baseline. Reports to stdout; asserts nothing timing-dependent.
-TEST(JobSystemPoolTest, DISABLED_DispatchThroughputBenchmark) {
-    if (std::thread::hardware_concurrency() == 0) {
-        GTEST_SKIP() << "JobSystem cannot start workers when hardware_concurrency is zero.";
-    }
-
-    constexpr int kTotal = 100000;
-    constexpr int kBatch = 1000;
-    constexpr int kBatches = kTotal / kBatch;
-
-    RunningJobSystem system;
-    std::atomic<long long> ran{0};
-
-    const auto start = std::chrono::steady_clock::now();
-    for (int b = 0; b < kBatches; ++b) {
-        std::vector<Luminumbra::Job> jobs;
-        jobs.reserve(kBatch);
-        for (int i = 0; i < kBatch; ++i) {
-            jobs.emplace_back([&ran]() { ran.fetch_add(1, std::memory_order_relaxed); });
-        }
-        system.job_system.wait(system.job_system.dispatch_batch(jobs));
-    }
-    const auto end = std::chrono::steady_clock::now();
-
-    const double seconds = std::chrono::duration<double>(end - start).count();
-    const double per_job_ns = (seconds * 1e9) / static_cast<double>(kTotal);
-    std::printf("[PERF] dispatch_batch+wait: %d jobs in %.4f s = %.1f ns/job (%.0f jobs/s)\n",
-                kTotal,
-                seconds,
-                per_job_ns,
-                static_cast<double>(kTotal) / seconds);
-    EXPECT_EQ(ran.load(std::memory_order_acquire), static_cast<long long>(kTotal));
-}
-
 } // namespace
+
+#include "jobsystem_throughput_test.cpp"
