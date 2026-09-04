@@ -67,7 +67,7 @@ size_t RmlFileInterface::Tell(Rml::FileHandle file) {
 
 // --- RmlRenderer Implementation ---
 namespace {
-const char* vertex_shader_gl = R"(
+const char* const vertex_shader_gl = R"(
         #version 330 core
         uniform mat4 projection; 
         uniform mat4 translation;
@@ -85,7 +85,7 @@ const char* vertex_shader_gl = R"(
             gl_Position = projection * translation * vec4(inPosition, 0.0, 1.0);
         }
     )";
-const char* fragment_shader_gl = R"(
+const char* const fragment_shader_gl = R"(
         #version 330 core
         uniform sampler2D uTexture;
 

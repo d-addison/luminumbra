@@ -107,28 +107,37 @@ public:
 };
 
 namespace {
-std::mutex g_jolt_runtime_mutex;
-std::size_t g_jolt_runtime_users = 0;
-bool g_owns_jolt_factory = false;
+struct JoltRuntimeState {
+    std::mutex mutex;
+    std::size_t users = 0;
+    bool owns_factory = false;
+};
+
+JoltRuntimeState& GetJoltRuntimeState() {
+    static JoltRuntimeState state;
+    return state;
+}
 
 void AcquireJoltRuntime() {
-    std::lock_guard lock(g_jolt_runtime_mutex);
-    if (g_jolt_runtime_users == 0 && Factory::sInstance == nullptr) {
+    auto& state = GetJoltRuntimeState();
+    std::lock_guard lock(state.mutex);
+    if (state.users == 0 && Factory::sInstance == nullptr) {
         RegisterDefaultAllocator();
         Factory::sInstance = new Factory();
         RegisterTypes();
-        g_owns_jolt_factory = true;
+        state.owns_factory = true;
     }
-    ++g_jolt_runtime_users;
+    ++state.users;
 }
 
 void ReleaseJoltRuntime() {
-    std::lock_guard lock(g_jolt_runtime_mutex);
-    if (--g_jolt_runtime_users == 0 && g_owns_jolt_factory) {
+    auto& state = GetJoltRuntimeState();
+    std::lock_guard lock(state.mutex);
+    if (--state.users == 0 && state.owns_factory) {
         UnregisterTypes();
         delete Factory::sInstance;
         Factory::sInstance = nullptr;
-        g_owns_jolt_factory = false;
+        state.owns_factory = false;
     }
 }
 } // namespace

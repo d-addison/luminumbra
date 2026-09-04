@@ -36,22 +36,25 @@ struct FakePixState {
     long end_result = 0;   // S_OK
 };
 
-FakePixState g_fake_pix;
+FakePixState& FakePix() {
+    static FakePixState state;
+    return state;
+}
 
 long FakePixBeginCapture(unsigned long flags,
                          const Luminumbra::Rendering::PixCaptureParameters* params) {
-    ++g_fake_pix.begin_calls;
-    g_fake_pix.last_flags = flags;
+    ++FakePix().begin_calls;
+    FakePix().last_flags = flags;
     if (params != nullptr && params->gpu_capture_file_name != nullptr) {
-        g_fake_pix.last_file = params->gpu_capture_file_name;
+        FakePix().last_file = params->gpu_capture_file_name;
     }
-    return g_fake_pix.begin_result;
+    return FakePix().begin_result;
 }
 
 long FakePixEndCapture(int discard) {
-    ++g_fake_pix.end_calls;
-    g_fake_pix.last_discard = discard;
-    return g_fake_pix.end_result;
+    ++FakePix().end_calls;
+    FakePix().last_discard = discard;
+    return FakePix().end_result;
 }
 
 // --- Nsight double: the header's NsightCaptureApi bracket shape (1 == ok). ---
@@ -63,23 +66,26 @@ struct FakeNsightState {
     unsigned int end_result = 1u;
 };
 
-FakeNsightState g_fake_nsight;
+FakeNsightState& FakeNsight() {
+    static FakeNsightState state;
+    return state;
+}
 
 unsigned int FakeNsightBeginCapture() {
-    ++g_fake_nsight.begin_calls;
-    return g_fake_nsight.begin_result;
+    ++FakeNsight().begin_calls;
+    return FakeNsight().begin_result;
 }
 
 unsigned int FakeNsightEndCapture() {
-    ++g_fake_nsight.end_calls;
-    return g_fake_nsight.end_result;
+    ++FakeNsight().end_calls;
+    return FakeNsight().end_result;
 }
 
 } // namespace
 
 TEST(RenderCaptureSdkTrigger, PixTriggerLive) {
     namespace R = Luminumbra::Rendering;
-    g_fake_pix = FakePixState{};
+    FakePix() = FakePixState{};
     R::PixCaptureApi fake;
     fake.BeginCapture = &FakePixBeginCapture;
     fake.EndCapture = &FakePixEndCapture;
@@ -105,23 +111,23 @@ TEST(RenderCaptureSdkTrigger, PixTriggerLive) {
     EXPECT_EQ(began_backend, "PIX");
     EXPECT_TRUE(result.capture_started);
     EXPECT_EQ(result.backend, "PIX");
-    EXPECT_EQ(g_fake_pix.begin_calls, 1);
-    EXPECT_EQ(g_fake_pix.end_calls, 1);
-    EXPECT_EQ(g_fake_pix.last_flags, 1ul); // PIX_CAPTURE_GPU
-    EXPECT_EQ(g_fake_pix.last_discard, 0); // keep the capture, don't discard
+    EXPECT_EQ(FakePix().begin_calls, 1);
+    EXPECT_EQ(FakePix().end_calls, 1);
+    EXPECT_EQ(FakePix().last_flags, 1ul); // PIX_CAPTURE_GPU
+    EXPECT_EQ(FakePix().last_discard, 0); // keep the capture, don't discard
     // The reported capture file is the sanitized.wpix target handed to Begin
     // (PIX reports no path back at End), and the widened filename PIX saw
     // matches it 1:1.
     EXPECT_NE(result.capture_file.find("pix_trigger_live"), std::string::npos)
         << result.capture_file;
     EXPECT_NE(result.capture_file.find(".wpix"), std::string::npos) << result.capture_file;
-    EXPECT_EQ(g_fake_pix.last_file,
+    EXPECT_EQ(FakePix().last_file,
               std::wstring(result.capture_file.begin(), result.capture_file.end()));
 }
 
 TEST(RenderCaptureSdkTrigger, NsightTriggerLive) {
     namespace R = Luminumbra::Rendering;
-    g_fake_nsight = FakeNsightState{};
+    FakeNsight() = FakeNsightState{};
     R::NsightCaptureApi fake;
     fake.BeginCapture = &FakeNsightBeginCapture;
     fake.EndCapture = &FakeNsightEndCapture;
@@ -144,8 +150,8 @@ TEST(RenderCaptureSdkTrigger, NsightTriggerLive) {
     EXPECT_EQ(began_backend, "Nsight");
     EXPECT_TRUE(result.capture_started);
     EXPECT_EQ(result.backend, "Nsight");
-    EXPECT_EQ(g_fake_nsight.begin_calls, 1);
-    EXPECT_EQ(g_fake_nsight.end_calls, 1);
+    EXPECT_EQ(FakeNsight().begin_calls, 1);
+    EXPECT_EQ(FakeNsight().end_calls, 1);
     // Nsight owns its capture output location; no path is reported back.
     EXPECT_TRUE(result.capture_file.empty()) << result.capture_file;
 }

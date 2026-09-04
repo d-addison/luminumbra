@@ -64,6 +64,9 @@ gate_checks+=",readability-function-cognitive-complexity"
 # cppcoreguidelines-avoid-non-const-global-variables everywhere else.
 tracked_global_tus=(
     "src/luminumbra_client/main_client.cpp"
+    # Runtime-scenario state ownership is tracked by the planned harness decomposition.
+    "src/luminumbra_client/core/RuntimeScenarioHarness.cpp"
+    "src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
     "src/luminumbra_common/net/GnsTransport.cpp"
 )
 tracked_global_gate_checks="$gate_checks,-cppcoreguidelines-avoid-non-const-global-variables"

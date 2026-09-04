@@ -41,6 +41,8 @@ std::string sanitize_scenario_name(std::string name) {
 //  test seam (see detail::SetRenderDocApiForTesting): when set, this fake
 // RENDERDOC_API_1_x_x* is used instead of the real load, so the exact production
 // Begin/End path runs against a double without a real RenderDoc DLL.
+// The C-style callback seam must retain the injected API across independent Begin/End calls.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 void* g_injected_renderdoc_api = nullptr;
 
 // Load the RenderDoc in-app API from the ALREADY-injected module only. We never
@@ -93,7 +95,11 @@ RENDERDOC_API_1_6_0* get_renderdoc_api() {
 
 //  test seams (see detail::SetPixApiForTesting / SetNsightApiForTesting):
 // same shape as the RenderDoc seam above.
+// The C-style callback seam must retain the injected API across independent Begin/End calls.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 void* g_injected_pix_api = nullptr;
+// The C-style callback seam must retain the injected API across independent Begin/End calls.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 void* g_injected_nsight_api = nullptr;
 
 // Resolve the PIX programmatic-capture entry points from the ALREADY-injected

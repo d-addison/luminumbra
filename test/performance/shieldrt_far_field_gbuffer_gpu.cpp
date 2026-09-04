@@ -172,7 +172,7 @@ GLuint CompileRenderProgram(const char* vs, const char* fs_src, std::string& err
 }
 
 // Fullscreen triangle (no VBO).
-const char* kFullscreenVert = R"GLSL(
+const char* const kFullscreenVert = R"GLSL(
 #version 450 core
 void main() {
     vec2 p = vec2((gl_VertexID == 1) ? 3.0: -1.0, (gl_VertexID == 2) ? 3.0: -1.0);
@@ -184,7 +184,7 @@ void main() {
 // inverse view-projection, marches the heightfield with the inc1 overshoot-free
 // hierarchical DDA, and on a hit writes the deferred G-buffer + gl_FragDepth;
 // on a miss discards. Same MRT layout/encoding as res/shaders/g_buffer.frag.
-const char* kFarFieldGbufferFrag = R"GLSL(
+const char* const kFarFieldGbufferFrag = R"GLSL(
 #version 450 core
 
 layout(location = 0) out vec3 gPosition;        // view-space position

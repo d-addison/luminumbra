@@ -692,20 +692,23 @@ struct FakeRenderDocState {
     std::uint32_t num_captures = 0;
 };
 
-FakeRenderDocState g_fake_rd;
+FakeRenderDocState& FakeRenderDoc() {
+    static FakeRenderDocState state;
+    return state;
+}
 
 void RENDERDOC_CC FakeSetCaptureFilePathTemplate(const char* pathtemplate) {
-    g_fake_rd.path_template = (pathtemplate != nullptr) ? pathtemplate : "";
+    FakeRenderDoc().path_template = (pathtemplate != nullptr) ? pathtemplate : "";
 }
 
 void RENDERDOC_CC FakeStartFrameCapture(RENDERDOC_DevicePointer, RENDERDOC_WindowHandle) {
-    ++g_fake_rd.start_calls;
+    ++FakeRenderDoc().start_calls;
 }
 
 std::uint32_t RENDERDOC_CC FakeEndFrameCapture(RENDERDOC_DevicePointer, RENDERDOC_WindowHandle) {
-    ++g_fake_rd.end_calls;
-    std::string path =
-        g_fake_rd.path_template.empty() ? std::string("capture") : g_fake_rd.path_template;
+    ++FakeRenderDoc().end_calls;
+    std::string path = FakeRenderDoc().path_template.empty() ? std::string("capture")
+                                                             : FakeRenderDoc().path_template;
     path += "_frame0.rdc";
     // Write an explicit test-double artifact so file discovery and lifecycle handling run
     // against the filesystem without representing it as a real RenderDoc capture.
@@ -714,23 +717,23 @@ std::uint32_t RENDERDOC_CC FakeEndFrameCapture(RENDERDOC_DevicePointer, RENDERDO
     std::ofstream out(path, std::ios::binary);
     out << "LUMINUMBRA_RENDERDOC_TEST_DOUBLE";
     out.close();
-    g_fake_rd.last_capture_path = path;
-    ++g_fake_rd.num_captures;
+    FakeRenderDoc().last_capture_path = path;
+    ++FakeRenderDoc().num_captures;
     return 1u;
 }
 
 std::uint32_t RENDERDOC_CC FakeGetNumCaptures() {
-    return g_fake_rd.num_captures;
+    return FakeRenderDoc().num_captures;
 }
 
 std::uint32_t RENDERDOC_CC FakeGetCapture(std::uint32_t idx,
                                           char* filename,
                                           std::uint32_t* pathlength,
                                           std::uint64_t* timestamp) {
-    if (idx >= g_fake_rd.num_captures) {
+    if (idx >= FakeRenderDoc().num_captures) {
         return 0u;
     }
-    const std::string& p = g_fake_rd.last_capture_path;
+    const std::string& p = FakeRenderDoc().last_capture_path;
     if (pathlength != nullptr) {
         *pathlength =
             static_cast<std::uint32_t>(p.size() + 1u); // include the null, RenderDoc's convention
@@ -759,7 +762,7 @@ RENDERDOC_API_1_6_0 MakeFakeRenderDocApi() {
 
 TEST(RenderCaptureSdkTrigger, LiveCaptureViaInjectedApi) {
     namespace R = Luminumbra::Rendering;
-    g_fake_rd = FakeRenderDocState{};
+    FakeRenderDoc() = FakeRenderDocState{};
     RENDERDOC_API_1_6_0 fake = MakeFakeRenderDocApi();
     R::detail::SetRenderDocApiForTesting(&fake);
 
@@ -787,10 +790,10 @@ TEST(RenderCaptureSdkTrigger, LiveCaptureViaInjectedApi) {
     EXPECT_EQ(result.backend, "RenderDoc");
     EXPECT_FALSE(result.capture_file.empty());
     EXPECT_TRUE(fs::exists(result.capture_file)) << result.capture_file;
-    EXPECT_EQ(g_fake_rd.start_calls, 1);
-    EXPECT_EQ(g_fake_rd.end_calls, 1);
-    EXPECT_NE(g_fake_rd.path_template.find("sdk_trigger_live"), std::string::npos)
-        << g_fake_rd.path_template;
+    EXPECT_EQ(FakeRenderDoc().start_calls, 1);
+    EXPECT_EQ(FakeRenderDoc().end_calls, 1);
+    EXPECT_NE(FakeRenderDoc().path_template.find("sdk_trigger_live"), std::string::npos)
+        << FakeRenderDoc().path_template;
 }
 
 TEST(RenderCaptureSdkTrigger, MarkerOnlyFallbackWhenNoSdk) {

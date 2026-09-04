@@ -70,7 +70,7 @@ TerrainGenParams LoadPresetParams(const fs::path& path) {
 
 // Build level 0 of the max-mip from the base heightfield: each cell = max of its
 // 2x2 corner samples. Base is (n x n) row-major; output is ((n-1) x (n-1)).
-const char* kMaxMipLevel0Compute = R"GLSL(
+const char* const kMaxMipLevel0Compute = R"GLSL(
 #version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) readonly  buffer Base { float base[]; };
@@ -92,7 +92,7 @@ void main() {
 // Coarsen one level: out[(fine+1)/2]^2, each coarse cell = max over the (up to
 // 2x2) fine cells it covers. Matches the CPU scatter (nz = cz/2, coarse =
 // (cells+1)/2) as a gather.
-const char* kMaxMipReduceCompute = R"GLSL(
+const char* const kMaxMipReduceCompute = R"GLSL(
 #version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(std430, binding = 0) readonly  buffer In  { float fin[]; };
