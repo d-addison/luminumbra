@@ -88,8 +88,12 @@ jobs:
 
   server-smoke-comparison:
     name: Server smoke observation / base versus head
+    # Run on devel PRs so the water verdict is available before promotion to
+    # main. The water lane reuses this job's paired builds, and the combined
+    # server/water workload remains bounded by the existing 90-minute timeout.
     if: >-
-      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'pull_request' &&
+      (github.base_ref == 'main' || github.base_ref == 'devel')) ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
       github.event.before != '0000000000000000000000000000000000000000')
     runs-on: ubuntu-24.04
@@ -260,7 +264,7 @@ jobs:
             echo "supported=true" >> "$GITHUB_OUTPUT"
           else
             echo "supported=false" >> "$GITHUB_OUTPUT"
-            echo "water-smoke: base commit predates the workload; head-only observation, no paired verdict." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Water smoke gate degraded::Base commit predates --water-smoke; the head observation will be recorded, but no paired verdict can be produced."
           fi
       - name: Measure water base / first batch
         if: steps.water_base.outputs.supported == 'true'
@@ -362,7 +366,11 @@ jobs:
           if [ -f build/water-smoke-comparison.json ]; then
             cat build/water-smoke-comparison.json >> "$GITHUB_STEP_SUMMARY"
           elif [ -f build/head/water-smoke-run.json ]; then
-            echo "water-smoke: head-only observation artifact recorded (no paired comparison)." >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "## ⚠️ Water smoke gate: DEGRADED — NO PAIRED VERDICT"
+              echo
+              echo "**Status: degraded (not a pass).** The base commit predates \`--water-smoke\`; a head-only observation artifact was recorded, so no paired comparison verdict is available."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
       - name: Upload paired evidence
         if: always()
@@ -392,5 +400,5 @@ jobs:
             build/head/water-smoke-run-*.json
             build/head/water-smoke-evidence-*.json
             build/water-smoke-comparison.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
