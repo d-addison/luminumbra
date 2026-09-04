@@ -122,6 +122,44 @@ jobs:
           subprocess.run([*syntax_command, "-fsyntax-only"], cwd=entry["directory"], check=True)
           PY
 
+  diligent-rhi:
+    name: Diligent RHI / software GL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
+            xauth xorg-dev xvfb
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
+          restore-keys: diligent-rhi-linux-x64-gcc-ccache-
+      - name: Configure with Diligent RHI
+        run: |
+          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLUMINUMBRA_ENABLE_DILIGENT=ON
+      - name: Build with Diligent RHI
+        run: cmake --build --preset release --parallel 4
+      - name: Test Diligent RHI with software GL
+        run: |
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset release --no-tests=error \
+              -R '^rhi_device_bringup_test$' --parallel 1 --timeout 180 \
+              --output-on-failure
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset release --no-tests=error \
+              -R '^rhi_pilot_flip_test$' --parallel 1 --timeout 180 \
+              --output-on-failure
+
   windows-msvc:
     name: Windows / MSVC
     runs-on: windows-2025
