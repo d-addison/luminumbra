@@ -84,6 +84,41 @@ policy. Base and candidate results with different keys are reported as
 unevaluated rather than compared. The key is recomputed during validation rather
 than trusted from the file.
 
+### Re-baselining after a deliberate fixture change
+
+Refusing to compare across a changed key is correct: if the workload's inputs
+moved, base and candidate did not measure the same thing. But a fixture
+sometimes has to change for a real reason, and every comparison against the old
+base is then unevaluated, so the required check can never pass on its own.
+
+The escape hatch is a tracked declaration at
+`tools/perf/baselines/rebaseline.json`:
+
+```json
+{
+  "schema": "luminumbra.performance_rebaseline.v1",
+  "retired_comparability_key": "<64 hex characters>",
+  "replacement_comparability_key": "<64 hex characters>",
+  "reason": "why the fixture had to change"
+}
+```
+
+It is deliberately narrow. It waives the comparability mismatch and nothing
+else: a comparison that does evaluate and finds a regression still fails, and no
+environment variable, workflow input or pull-request label can trigger a waiver,
+because none of those leave evidence in the repository. It is also single-use —
+both keys must match the transition exactly, so once the stored base advances
+past the retired key the declaration stops applying and cannot quietly disarm
+the gate for some later change. A declaration that matches nothing is recorded
+in the comparison document as unapplied rather than silently dropped; a
+malformed one is an error, not an ignored file.
+
+A waived comparison reports verdict `rebaseline`, carries the reason, and is
+visible in the uploaded evidence artifact, so it never reads as a clean pass.
+
+Review it as you would the fixture change itself: confirm both keys, confirm the
+justification, and delete the declaration once the base has moved past it.
+
 Thresholds are added only after at least 20 clean paired runs on the intended
 runner class. The committed policy uses relative base/head comparisons so machine
 speed is not mistaken for an engine regression. No check may silently manufacture
