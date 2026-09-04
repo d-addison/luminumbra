@@ -54,6 +54,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderReflection.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/PassShaderLayouts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/AerialPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ChunkGeometryPool.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GBufferPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/HierarchicalCuller.cpp
@@ -64,8 +65,10 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FoliagePass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/PlantProcgenPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GroundDecalPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GodRaysPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/DebugViewPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SsaoPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/TaauPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterPass.cpp
 
     # World (client-side)

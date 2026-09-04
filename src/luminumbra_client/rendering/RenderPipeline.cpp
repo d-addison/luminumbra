@@ -19,10 +19,12 @@
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "passes/AerialPass.h"
 #include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/FinalBlitPass.h" // -T01: FinalBlit on the RenderContext seam
 #include "passes/FoliagePass.h"
 #include "passes/GBufferPass.h"
+#include "passes/GodRaysPass.h"
 #include "passes/GroundDecalPass.h" // render-only pheromone ground decal (flag-gated)
 #include "passes/LightingPass.h"
 #include "passes/ParticlePass.h"
@@ -31,6 +33,7 @@
 #include "passes/ShadowPass.h"
 #include "passes/SkyboxPass.h"
 #include "passes/SsaoPass.h"
+#include "passes/TaauPass.h"
 #include "passes/WaterPass.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
@@ -255,7 +258,10 @@ RenderPipeline::RenderPipeline()
     , m_plant_procgen_pass(std::make_unique<PlantProcgenPass>())
     , m_ground_decal_pass(std::make_unique<GroundDecalPass>())
     , m_debug_view_pass(std::make_unique<DebugViewPass>())
-    , m_final_blit_pass(std::make_unique<FinalBlitPass>()) {}
+    , m_final_blit_pass(std::make_unique<FinalBlitPass>())
+    , m_aerial_pass(std::make_unique<AerialPass>())
+    , m_god_rays_pass(std::make_unique<GodRaysPass>())
+    , m_taau_pass(std::make_unique<TaauPass>()) {}
 
 // forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
@@ -316,9 +322,10 @@ bool RenderPipeline::startup(u32 screen_width,
         m_shadow_pass->init_shadow_map(m_render_registry);
         m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
         init_screen_quad();
-        init_taau(screen_width,
-                  screen_height); // OUTPUT res: TAAU history/backbuffer stay at output
-        init_halfres_cloud();     // no-op unless cloud quality was set > 0 before startup
+        m_taau_pass->init(m_render_registry,
+                          screen_width,
+                          screen_height); // OUTPUT res: TAAU history/backbuffer stay at output
+        init_halfres_cloud();             // no-op unless cloud quality was set > 0 before startup
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers();      //  persistent-mapped instance pool
         m_foliage_pass->init_buffers();       //  persistent-mapped scatter pool
@@ -1252,9 +1259,9 @@ void RenderPipeline::enumerate_shaders(
     if (m_foliage_pass) {
         visit("foliage", m_foliage_pass->shader().get());
     } //
-    visit("aerial_perspective", m_aerial_shader.get()); //
+    visit("aerial_perspective", m_aerial_pass->shader().get()); //
     // the pipeline-owned post shaders, previously UNMONITORED by health.
-    visit("god_rays", m_god_rays_shader.get());
+    visit("god_rays", m_god_rays_pass->shader().get());
     visit("cloud_composite", m_cloud_composite_shader.get());
     visit("waterfall", m_waterfall_shader.get());
     // the WBOIT glass chain (lazy — null until glass
@@ -3152,8 +3159,9 @@ void RenderPipeline::execute_stage_aerial(const Camera& camera) {
     record_frame_stage("aerial");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
         RenderContext aerial_ctx = make_aerial_context(camera);
+        m_aerial_pass->set_froxel_input(m_volumetric_quality, m_froxel_integrated_tex);
         begin_gpu_pass_timer(GpuTimerPass::Aerial);
-        execute_aerial_pass(aerial_ctx);
+        m_aerial_pass->execute(aerial_ctx);
         end_gpu_pass_timer(GpuTimerPass::Aerial);
         glBindVertexArray(0);
     }
@@ -3166,7 +3174,7 @@ void RenderPipeline::execute_stage_god_rays(const Camera& camera) {
     {
         record_frame_stage("god_rays");
         RenderContext godray_ctx = make_god_rays_context(camera);
-        execute_god_rays(godray_ctx);
+        m_god_rays_pass->execute(godray_ctx);
     }
 }
 
@@ -3208,7 +3216,7 @@ void RenderPipeline::execute_stage_taau_resolve(const Camera& camera) {
     record_frame_stage("taau_resolve");
     if (m_taau_enabled) {
         RenderContext taau_ctx = make_taau_context();
-        execute_taau_resolve(taau_ctx);
+        m_taau_pass->execute(taau_ctx);
     }
 }
 
@@ -3462,10 +3470,11 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
     m_ssao_pass->destroy_ssao(m_render_registry);
     m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
-    destroy_taau();
-    init_taau(new_width,
-              new_height); // OUTPUT res: TAAU history invalidated on resize, stays output
-    init_halfres_cloud();  // re-size the reduced-res sky-dome target (no-op at quality 0)
+    m_taau_pass->destroy(m_render_registry);
+    m_taau_pass->init(m_render_registry,
+                      new_width,
+                      new_height); // OUTPUT res: TAAU history invalidated on resize, stays output
+    init_halfres_cloud();          // re-size the reduced-res sky-dome target (no-op at quality 0)
     m_frustumCache.valid = false;
     ++m_resize_generation;
     LUMINUMBRA_CORE_INFO("RenderPipeline resized targets to {}x{} (resize generation {})",
@@ -3500,7 +3509,7 @@ void RenderPipeline::set_render_scale(float scale) {
     // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
     // vectors / reprojection no longer match. Invalidate it so the next resolve restarts fresh
     // instead of blending the previous scale's history (Codex review, runtime scale-change).
-    m_taau_history_valid = false;
+    m_taau_pass->invalidate_history();
     m_frustumCache.valid = false;
     ++m_resize_generation;
     LUMINUMBRA_CORE_INFO("RenderPipeline render_scale -> {} (internal {}x{})",
@@ -3572,14 +3581,7 @@ void RenderPipeline::init_shaders() {
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
-    //  analytic aerial-perspective term wiring the dormant
-    // volumetric_lighting.frag as a fullscreen pass over the lit scene. Reuses
-    // the SSAO fullscreen-quad vertex stage.
-    m_aerial_shader = std::make_unique<Shader>(
-        (m_root_path / "res/shaders/ssao.vert").string().c_str(),
-        (m_root_path / "res/shaders/volumetric_lighting.frag").string().c_str());
-    label_gl_object(
-        GL_PROGRAM, m_aerial_shader ? m_aerial_shader->Id() : 0u, "shader.aerial_perspective");
+    m_aerial_pass->init_shader(m_root_path);
     // the waterfall falling-sheet shader. Drawn over detected
     // waterfall sites (waterfall_sites) on a world-deterministic site; the
     // dressing is render-only and never hashed. Reuses the basic vertex stage
@@ -3598,17 +3600,8 @@ void RenderPipeline::init_shaders() {
     label_gl_object(GL_PROGRAM,
                     m_cloud_composite_shader ? m_cloud_composite_shader->Id() : 0u,
                     "shader.cloud_composite");
-    // Screen-space crepuscular rays.
-    m_god_rays_shader =
-        std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(),
-                                 (m_root_path / "res/shaders/god_rays.frag").string().c_str());
-    label_gl_object(
-        GL_PROGRAM, m_god_rays_shader ? m_god_rays_shader->Id() : 0u, "shader.god_rays");
-    //  TAAU resolve. Reuses the SSAO fullscreen-quad vertex stage.
-    m_taau_shader =
-        std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(),
-                                 (m_root_path / "res/shaders/taau_resolve.frag").string().c_str());
-    label_gl_object(GL_PROGRAM, m_taau_shader ? m_taau_shader->Id() : 0u, "shader.taau_resolve");
+    m_god_rays_pass->init_shader(m_root_path);
+    m_taau_pass->init_shader(m_root_path);
 }
 
 void RenderPipeline::init_sky_lut() {
@@ -3683,79 +3676,6 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
     return ctx;
 }
 
-void RenderPipeline::execute_aerial_pass(const RenderContext& ctx) {
-    //  analytic aerial-perspective in-scatter composited OVER the lit
-    // scene in the lighting FBO. Reads the SAME sky-view/transmittance LUTs the
-    // dome uses (coherent palette). A no-op if the LUT/shader are unavailable.
-    // Only the shader stays a member; all frame state comes from ctx.
-    if (!m_aerial_shader || !m_aerial_shader->IsValid() || !ctx.sky_lut_ready ||
-        ctx.screen_quad_vao == 0) {
-        return;
-    }
-    const GLuint lit_fbo = ctx.lit_scene.id;
-    if (!lit_fbo) {
-        return;
-    }
-    const Camera& camera = *ctx.camera;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // aerial into internal lit FBO
-    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
-    glDisable(GL_DEPTH_TEST);
-    const GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    m_aerial_shader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, ctx.sky_view_lut.id);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, ctx.transmittance_lut.id);
-    m_aerial_shader->setInt("gDepth", 0);
-    m_aerial_shader->setInt("u_skyViewLut", 1);
-    m_aerial_shader->setInt("u_transmittanceLut", 2);
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                            (float)ctx.screen_width / (float)ctx.screen_height,
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
-    m_aerial_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_aerial_shader->setMat4("u_inverseProjection", glm::inverse(projection));
-    m_aerial_shader->setVec3("u_viewPos", camera.Position);
-    // Toward-sun direction (sun-disc convention), matching the sky-view LUT frame.
-    m_aerial_shader->setVec3("u_sunDirection", -ctx.sun.direction);
-    const float sun_up = glm::dot(ctx.sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
-    m_aerial_shader->setFloat("u_sunCosZenith", sun_up);
-    m_aerial_shader->setFloat("u_skyDayFactor", ctx.sky_day_factor);
-    m_aerial_shader->setFloat("u_underwater", ctx.underwater_factor);
-    m_aerial_shader->setFloat("u_aerialDensity", ctx.aerial_density);
-    m_aerial_shader->setFloat("u_aerialMaxDistance", ctx.aerial_max_distance);
-    m_aerial_shader->setFloat("u_inscatterStrength", ctx.inscatter_strength);
-    m_aerial_shader->setFloat("u_atmosphereWarmth", ctx.atmosphere_warmth);
-    //  rendering: compose the integrated froxel volume
-    // ( — extends the analytic term, never replaces it). Mode 0 (the
-    // default) skips the sampling entirely: byte-identical to pre-froxel.
-    const bool froxel_on = m_volumetric_quality > 0 && m_froxel_integrated_tex != 0;
-    m_aerial_shader->setInt("u_volumetricMode", froxel_on ? 1 : 0);
-    glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_3D, froxel_on ? m_froxel_integrated_tex : 0u);
-    m_aerial_shader->setInt("u_froxelIntegrated", 3);
-
-    glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    if (!blend_was_enabled) {
-        glDisable(GL_BLEND);
-    }
-    if (depth_was_enabled) {
-        glEnable(GL_DEPTH_TEST);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
 // the god-rays pass contract — the lit-scene target + its post-sky
 // opaque snapshot, plus the Group J sun-screen projection COMPUTED here (identical math
 // to the retired inline block) so execute_god_rays reads only ctx. Render-only.
@@ -3801,45 +3721,6 @@ RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
     ctx.sun_uv_x = sun_uv.x;
     ctx.sun_uv_y = sun_uv.y;
     return ctx;
-}
-
-void RenderPipeline::execute_god_rays(const RenderContext& ctx) {
-    // Screen-space crepuscular rays: additive shafts fanning from the sun around
-    // occluders. Only when the sun is above the horizon and on screen (zero cost
-    // otherwise). Only the shader stays a member; all frame state comes from ctx.
-    if (!m_god_rays_shader || !m_god_rays_shader->IsValid() || ctx.screen_quad_vao == 0) {
-        return;
-    }
-    const float sun_visible = ctx.sun_visible;
-    const glm::vec2 sun_uv(ctx.sun_uv_x, ctx.sun_uv_y);
-    const GLuint lit_fbo = ctx.lit_scene.id;
-    const GLuint opaque_tex = ctx.opaque_scene.id;
-    if (sun_visible > 0.002f && lit_fbo && opaque_tex) {
-        glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-        glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // god-rays into internal lit FBO
-        const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
-        glDisable(GL_DEPTH_TEST);
-        const GLboolean blend_was = glIsEnabled(GL_BLEND);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_ONE, GL_ONE); // additive
-        m_god_rays_shader->use();
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, opaque_tex);
-        m_god_rays_shader->setInt("u_scene", 0);
-        m_god_rays_shader->setVec2("u_sunUV", sun_uv);
-        m_god_rays_shader->setFloat("u_sunVisible", sun_visible);
-        m_god_rays_shader->setFloat("u_strength", 0.85f);
-        glBindVertexArray(ctx.screen_quad_vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        glBindVertexArray(0);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        if (!blend_was)
-            glDisable(GL_BLEND);
-        if (depth_was)
-            glEnable(GL_DEPTH_TEST);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    }
 }
 
 // --- Render-optimization: reduced-res sky-dome (cloud-raymarch-optimization, ) ---
@@ -3980,54 +3861,6 @@ void RenderPipeline::init_screen_quad() {
 
 // ---  TAAU resolve (render.taau, default OFF) ---
 
-void RenderPipeline::init_taau(u32 width, u32 height) {
-    if (width == 0 || height == 0)
-        return;
-    glGenFramebuffers(1, &m_taau_fbo);
-    label_gl_object(GL_FRAMEBUFFER, m_taau_fbo, "taau.fbo");
-    // the ping-pong resolved-color history textures are
-    // registry-owned with History lifetime (they persist across frames by design;
-    // resize recreates them without content preservation, matching the
-    // "history invalidated on resize"). The FBO stays PASS-OWNED: it is a transient
-    // container whose color attachment is the write-side history, bound per frame in
-    // execute_taau_resolve - not a fixed-layout render target the registry can own.
-    // The desc reproduces the retired glTexImage2D/glTexParameter calls exactly
-    // (RGBA16F, LINEAR, CLAMP_TO_EDGE).
-    for (int i = 0; i < 2; ++i) {
-        TextureDesc history;
-        history.width = width;
-        history.height = height;
-        history.internal_format = GL_RGBA16F;
-        history.format = GL_RGBA;
-        history.type = GL_FLOAT;
-        history.min_filter = GL_LINEAR;
-        history.mag_filter = GL_LINEAR;
-        history.wrap_s = GL_CLAMP_TO_EDGE;
-        history.wrap_t = GL_CLAMP_TO_EDGE;
-        history.lifetime = ResourceLifetime::History;
-        history.expected_layout = "color_attachment";
-        history.debug_label = "taau.history";
-        m_taau_history[i] =
-            m_render_registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history)
-                .id;
-    }
-    m_taau_history_write = 0;
-    m_taau_history_valid = false; // no usable history until the first resolve fills it
-}
-
-void RenderPipeline::destroy_taau() {
-    if (m_taau_fbo) {
-        glDeleteFramebuffers(1, &m_taau_fbo);
-        m_taau_fbo = 0;
-    }
-    // The history textures are registry-owned.
-    m_render_registry.destroy_owned("taau_history_0");
-    m_render_registry.destroy_owned("taau_history_1");
-    m_taau_history[0] = 0;
-    m_taau_history[1] = 0;
-    m_taau_history_valid = false;
-}
-
 // the TAAU resolve pass contract — the lit-scene color source +
 // its FBO (blit target) and the gbuffer motion vectors. The TAAU shader, ping-pong
 // history textures (registry-owned per ), FBO, and write-index/valid flags
@@ -4046,79 +3879,6 @@ RenderContext RenderPipeline::make_taau_context() {
     ctx.motion_vectors = m_render_registry.adopt_texture(
         "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
     return ctx;
-}
-
-void RenderPipeline::execute_taau_resolve(const RenderContext& ctx) {
-    if (!m_taau_shader || !m_taau_shader->IsValid() || m_taau_fbo == 0 ||
-        ctx.screen_quad_vao == 0 || ctx.screen_width == 0 || ctx.screen_height == 0) {
-        return;
-    }
-    const int wr = m_taau_history_write;
-    const int rd = 1 - wr;
-    const GLuint lit_color = ctx.lit_scene_color.id;
-    const GLuint lit_fbo = ctx.lit_scene.id;
-
-    // Resolve current (lit HDR) + motion-reprojected history -> history[wr].
-    glBindFramebuffer(GL_FRAMEBUFFER, m_taau_fbo);
-    glFramebufferTexture2D(
-        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_taau_history[wr], 0);
-    const GLenum draw0[1] = {GL_COLOR_ATTACHMENT0};
-    glDrawBuffers(1, draw0);
-    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
-
-    const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
-    glDisable(GL_DEPTH_TEST);
-    const GLboolean blend_was = glIsEnabled(GL_BLEND);
-    glDisable(GL_BLEND);
-
-    m_taau_shader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, lit_color);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_taau_history[rd]);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, ctx.motion_vectors.id);
-    m_taau_shader->setInt("u_current", 0);
-    m_taau_shader->setInt("u_history", 1);
-    m_taau_shader->setInt("u_motion", 2);
-    m_taau_shader->setVec2(
-        "u_texel",
-        glm::vec2(1.0f / (float)ctx.internal_w(),
-                  1.0f / (float)ctx.internal_h())); // neighborhood steps by internal texels
-                                                    // (u_current is internal-sized)
-    m_taau_shader->setFloat("u_blend", 0.9f);
-    m_taau_shader->setFloat("u_sharpness", 0.4f); // recover TAA temporal-blur softness
-    m_taau_shader->setInt("u_history_valid", m_taau_history_valid ? 1 : 0);
-
-    glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    // Copy the resolved result back into the lighting color so the final blit shows it; keep
-    // history[wr] for next frame's reprojection.
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_taau_fbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lit_fbo);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glBlitFramebuffer(0,
-                      0,
-                      ctx.screen_width,
-                      ctx.screen_height,
-                      0,
-                      0,
-                      ctx.screen_width,
-                      ctx.screen_height,
-                      GL_COLOR_BUFFER_BIT,
-                      GL_NEAREST);
-
-    if (depth_was)
-        glEnable(GL_DEPTH_TEST);
-    if (blend_was)
-        glEnable(GL_BLEND);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glActiveTexture(GL_TEXTURE0);
-    m_taau_history_write = rd; // ping-pong
-    m_taau_history_valid = true;
 }
 
 // --- CLEANUP ---
@@ -4286,8 +4046,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_debug_view_pass) {
         m_debug_view_pass->reset_shader();
     } // render-only debug view
-    m_aerial_shader.reset();    //  aerial-perspective fullscreen shader
-    m_waterfall_shader.reset(); //  waterfall falling-sheet shader
+    m_aerial_pass->reset_shader(); //  aerial-perspective fullscreen shader
+    m_waterfall_shader.reset();    //  waterfall falling-sheet shader
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();

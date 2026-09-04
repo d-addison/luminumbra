@@ -55,6 +55,9 @@ class FarLodSystem;
 class GroundDecalPass;
 class DebugViewPass;
 class FinalBlitPass;
+class AerialPass;
+class GodRaysPass;
+class TaauPass;
 struct ScentFieldRenderMirror;
 } // namespace Luminumbra::Rendering
 
@@ -1205,6 +1208,12 @@ private:
     std::unique_ptr<DebugViewPass>
         m_debug_view_pass; // render-only G-buffer debug overlay (default-OFF)
     std::unique_ptr<FinalBlitPass> m_final_blit_pass; // -T01: first pass on the RenderContext seam
+    // The aerial/god-rays/TAAU post-passes take a RenderContext& (frame state
+    // from ctx; only the pass-owned shaders + TAAU history stay members) so
+    // they sit on the same seam as the other pass classes.
+    std::unique_ptr<AerialPass> m_aerial_pass;
+    std::unique_ptr<GodRaysPass> m_god_rays_pass;
+    std::unique_ptr<TaauPass> m_taau_pass;
     RenderResourceRegistry m_render_registry; // typed render-resource handles (adopt/lookup)
     Client::ScenarioHarness::IsolationConfig m_isolation_config; //  (default {All,Scene} = no-op)
     WaterfallSiteCache m_waterfall_sites;                        //  (render-only, cached)
@@ -1213,25 +1222,18 @@ private:
     // startup and the sky-view LUT refreshed when the sun moves; the skybox pass
     // samples the sky-view LUT, the lighting pass + aerial pass read the SAME
     // transmittance/multi-scatter pair (coherent sun/sky/ambient/fog palette).
-    // m_aerial_shader is the analytic aerial-perspective fullscreen term wiring
+    // The aerial pass is the analytic aerial-perspective fullscreen term wiring
     // the previously dormant volumetric_lighting.frag. Render-only (documented design).
     SkyAtmosphereLut m_sky_lut;
-    std::unique_ptr<Shader> m_aerial_shader;
     //  TAAU resolve (render.taau, default OFF). Motion-reprojected temporal AA over the lit HDR
     // color with a 3x3 neighborhood-clamp anti-ghost; ping-pong history. Flag OFF -> the pass never
     // runs and the lighting color blits through unchanged (byte-identical default render).
-    std::unique_ptr<Shader> m_taau_shader;
-    GLuint m_taau_fbo = 0;
-    GLuint m_taau_history[2] = {0u, 0u}; // RGBA16F resolved-color history (ping-pong)
-    int m_taau_history_write = 0;
-    bool m_taau_history_valid = false;
     bool m_taau_enabled = false;
     glm::vec2 m_taau_jitter_ndc =
         glm::vec2(0.0f);        // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
     unsigned m_taau_frame = 0u; // Halton sequence index
     // Screen-space crepuscular rays (god rays). Additive pass over the lit scene when
     // the sun is above the horizon + on screen. Render-only.
-    std::unique_ptr<Shader> m_god_rays_shader;
     // the animated falling-sheet shader (waterfall.frag) the live
     // pipeline draws over detected waterfall sites. Render-only dressing.
     std::unique_ptr<Shader> m_waterfall_shader;
@@ -1250,15 +1252,7 @@ private:
     // into m_skyAmbientColor so lighting/ambient share the LUT transmittance.
     glm::vec3 m_skyScatterAmbient{0.0f};
     void init_sky_lut();
-    // the inline aerial/god-rays/TAAU post-passes now take a
-    // RenderContext& (frame state from ctx; only the pass-owned shaders + TAAU
-    // history stay members) so they sit on the same seam the pass classes do.
-    void execute_aerial_pass(const RenderContext& ctx);
-    void execute_god_rays(const RenderContext& ctx);
-    void init_taau(u32 width, u32 height); //  TAAU history/FBO
-    void destroy_taau();
-    void execute_taau_resolve(
-        const RenderContext& ctx); // motion-reprojected temporal resolve (flag-gated)
+
 public:
     const SkyAtmosphereLut& sky_lut() const {
         return m_sky_lut;
