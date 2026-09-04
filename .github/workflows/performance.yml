@@ -59,7 +59,6 @@ jobs:
       - name: Build measurement target
         run: cmake --build --preset perf --target worldgen_preview_test --parallel 4
       - name: Measure preview frame
-        continue-on-error: true
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset perf --no-tests=error \

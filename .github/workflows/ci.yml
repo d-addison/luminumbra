@@ -47,7 +47,6 @@ jobs:
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
-              -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
               --parallel 4 --timeout 180 --output-junit ctest.junit.xml
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
       - name: Upload test evidence
@@ -127,7 +126,6 @@ jobs:
             -Destination build/release/bin
           $env:GALLIUM_DRIVER = 'llvmpipe'
           ctest --preset release --no-tests=error -LE manual `
-            -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' `
             --parallel 4 --timeout 180 --output-junit ctest.junit.xml
           # With llvmpipe deployed this lane holds the same standard as the
           # Linux software-GL lane: no GL-related skip is acceptable, and any
@@ -246,7 +244,6 @@ jobs:
           # while catching the multi-minute stalls the old 720 s leash was
           # raised to paper over.
           ctest --preset release --no-tests=error -LE manual \
-            -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
             --parallel 4 --timeout 360 --output-junit ctest.junit.xml
           # With llvmpipe deployed this lane holds the same standard as the
           # other software-GL lanes: no GL-related skip is acceptable, and
