@@ -18,6 +18,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "synthetic_bank_fixture.h"
+
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -41,6 +43,15 @@ const std::vector<fs::path> kLoadedBanks = {
     fs::path("data") / "audio" / "sfx_main.bank.json",
     fs::path("data") / "audio" / "music.bank.json",
 };
+
+const fs::path& IntegrityBankRoot() {
+    if (fs::is_directory(kRoot / "assets" / "audio")) {
+        return kRoot;
+    }
+
+    static const luminumbra::test::SyntheticBankFixture fixture(kRoot, kLoadedBanks);
+    return fixture.root();
+}
 
 nlohmann::json LoadJson(const fs::path& path) {
     std::ifstream input(path);
@@ -71,13 +82,10 @@ bool LooksLikeEventId(const std::string& s) {
 } // namespace
 
 TEST(AudioBankIntegrity, LoadedBankFilesExistOnDisk) {
-    const fs::path audio_root = kRoot / "assets" / "audio";
-    if (!fs::exists(audio_root)) {
-        GTEST_SKIP() << "audio binaries are intentionally external to the repository";
-    }
+    const fs::path& bank_root = IntegrityBankRoot();
 
     for (const fs::path& bank : kLoadedBanks) {
-        const fs::path bank_path = kRoot / bank;
+        const fs::path bank_path = bank_root / bank;
         ASSERT_TRUE(fs::exists(bank_path)) << bank_path.string();
         const nlohmann::json j = LoadJson(bank_path);
         for (const auto& [id, def] : j.at("events").items()) {
@@ -85,7 +93,7 @@ TEST(AudioBankIntegrity, LoadedBankFilesExistOnDisk) {
             ASSERT_TRUE(files.is_array() && !files.empty())
                 << bank.string() << " event '" << id << "' has no files";
             for (const auto& file : files) {
-                const fs::path asset = kRoot / file.get<std::string>();
+                const fs::path asset = bank_root / file.get<std::string>();
                 EXPECT_TRUE(fs::exists(asset))
                     << bank.string() << " event '" << id
                     << "' references a missing asset: " << asset.string();
