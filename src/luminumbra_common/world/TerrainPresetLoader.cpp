@@ -199,6 +199,29 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                                                   const std::string& provenance) {
     TerrainPresetLoadResult result;
 
+    // schema_rev is validated when declared, not required. Every preset under
+    // worlds/atlas/presets/ carries it, but in-memory fixtures construct minimal
+    // param blocks for unrelated assertions and have never had to declare it.
+    // Requiring it would be a new contract, which is a bigger change than this
+    // guard is for.
+    if (data.contains("schema_rev") && !data["schema_rev"].is_number_integer()) {
+        result.errors.push_back("world preset schema_rev must be an integer: found " +
+                                data["schema_rev"].dump() + ": " + provenance);
+        return result;
+    }
+
+    const std::int64_t schema_revision = data.contains("schema_rev")
+                                             ? data["schema_rev"].get<std::int64_t>()
+                                             : kTerrainPresetSchemaRevision;
+    if (schema_revision < kMinTerrainPresetSchemaRevision ||
+        schema_revision > kTerrainPresetSchemaRevision) {
+        result.errors.push_back("world preset schema revision out of range: supported " +
+                                std::to_string(kMinTerrainPresetSchemaRevision) + ".." +
+                                std::to_string(kTerrainPresetSchemaRevision) + ", found " +
+                                std::to_string(schema_revision) + ": " + provenance);
+        return result;
+    }
+
     if (!JsonHasObject(data, "generation_params")) {
         result.errors.push_back("world preset is missing object generation_params: " + provenance);
         return result;

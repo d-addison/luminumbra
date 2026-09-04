@@ -10,9 +10,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
-ALLOWED_SKIPS = {
-    "AudioBankIntegrity.LoadedBankFilesExistOnDisk",
-}
+# Empty by design. Every test that used to be allow-listed here now genuinely
+# runs: the JobSystem throughput benchmark was re-enabled as a real test, and
+# AudioBankIntegrity gained a generated fixture so it no longer skips when the
+# external sound banks are absent. A skip reaching this gate is now always a
+# problem worth failing the lane over.
+ALLOWED_SKIPS: set[str] = set()
 
 
 def skip_reasons(case: ET.Element) -> list[str]:

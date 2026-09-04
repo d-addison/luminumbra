@@ -13,6 +13,7 @@
 // Unknown keys produce LUMINUMBRA_CORE_WARN warnings.
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -22,6 +23,23 @@
 #include "../systems/SHIELD_WorldSystem.h" // Systems::TerrainGenParams
 
 namespace Luminumbra::world {
+
+// The revision authored presets are written against today.
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 5;
+
+// The oldest revision still readable. This is not 5 because the shipped preset
+// set is not uniform: worlds/atlas/presets/archipelago.json is still authored at
+// revision 2, and it is pinned there deliberately —
+// WorldGenLayerSnapshotTest.CurrentShippedArchipelagoPresetHeightHash locks its
+// generated height hash, so re-authoring it at 5 would change the terrain that
+// preset produces for every existing world using it.
+//
+// Accepting a documented range still catches what this guard exists to catch: a
+// preset declaring a revision that does not exist (a typo, or content authored
+// against a future schema) is rejected, whereas before ANY value was accepted so
+// long as the key was present. Narrowing this to a single revision requires
+// migrating archipelago first and taking the hash bump deliberately.
+inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 2;
 
 // generation_params.terrain.shaping — reserved keys pinned by
 // (spline points

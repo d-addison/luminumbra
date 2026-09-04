@@ -104,6 +104,7 @@ add_executable(common_tests
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
     audio/AudioBankIntegrity_test.cpp
+    audio/synthetic_bank_fixture.h
     common/ActivationQueueSemantics_test.cpp
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
