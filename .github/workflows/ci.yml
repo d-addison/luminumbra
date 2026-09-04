@@ -47,9 +47,12 @@ jobs:
         run: |
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
-              -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
               --parallel 4 --timeout 180 --output-junit ctest.junit.xml
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      - name: Test over-the-wire networking
+        run: |
+          ctest --preset release --no-tests=error -R '^NetSoak$' \
+            --parallel 1 --output-junit netsoak.junit.xml
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -57,6 +60,7 @@ jobs:
           name: linux-gcc-test-evidence-${{ github.sha }}
           path: |
             build/release/ctest.junit.xml
+            build/release/netsoak.junit.xml
             build/release/Testing/Temporary
             build/release/test-artifacts
           if-no-files-found: warn
@@ -69,6 +73,54 @@ jobs:
           cmake -S . -B build/package-linux -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-linux --target package --parallel 4
+
+  gns-compile-probe:
+    name: GNS transport / compile probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install configure and GNS dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake extra-cmake-modules libabsl-dev \
+            libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libprotobuf-dev \
+            libssl-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
+            protobuf-compiler wayland-protocols xorg-dev
+      - name: Configure GNS compile command
+        run: |
+          cmake -S . -B build/gns-probe -G Ninja \
+            -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
+      - name: Syntax-check GNS transport body
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import shlex
+          import subprocess
+
+          database = json.loads(pathlib.Path("build/gns-probe/compile_commands.json").read_text())
+          commands = [entry for entry in database if pathlib.Path(entry["file"]).name == "GnsTransport.cpp"]
+          if len(commands) != 1:
+              raise SystemExit(f"expected one GnsTransport.cpp compile command, found {len(commands)}")
+
+          entry = commands[0]
+          command = entry.get("arguments") or shlex.split(entry["command"])
+          syntax_command = []
+          skip_next = False
+          for argument in command:
+              if skip_next:
+                  skip_next = False
+              elif argument == "-o":
+                  skip_next = True
+              elif argument != "-c":
+                  syntax_command.append(argument)
+          subprocess.run([*syntax_command, "-fsyntax-only"], cwd=entry["directory"], check=True)
+          PY
 
   windows-msvc:
     name: Windows / MSVC
@@ -127,7 +179,6 @@ jobs:
             -Destination build/release/bin
           $env:GALLIUM_DRIVER = 'llvmpipe'
           ctest --preset release --no-tests=error -LE manual `
-            -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' `
             --parallel 4 --timeout 180 --output-junit ctest.junit.xml
           # With llvmpipe deployed this lane holds the same standard as the
           # Linux software-GL lane: no GL-related skip is acceptable, and any
@@ -246,7 +297,6 @@ jobs:
           # while catching the multi-minute stalls the old 720 s leash was
           # raised to paper over.
           ctest --preset release --no-tests=error -LE manual \
-            -E '^WorldgenPreviewTest\.PerFrameRenderProducesComparableObservation$' \
             --parallel 4 --timeout 360 --output-junit ctest.junit.xml
           # With llvmpipe deployed this lane holds the same standard as the
           # other software-GL lanes: no GL-related skip is acceptable, and
@@ -277,34 +327,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang-format
-      - name: Select formatting comparison commit
-        id: format-base
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-        run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            base="$PULL_REQUEST_BASE"
-          elif [[ -n "$PUSH_BEFORE" && "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]] &&
-               git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
-            base="$PUSH_BEFORE"
-          elif git rev-parse --verify --quiet origin/main >/dev/null; then
-            base="origin/main"
-          elif git rev-parse --verify --quiet HEAD^ >/dev/null; then
-            base="HEAD^"
-          else
-            base="HEAD"
-          fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Check formatting
-        run: scripts/lint.sh --format-only --changed-from '${{ steps.format-base.outputs.base }}'
+        run: scripts/lint.sh --format-only
 
   tidy:
     name: Static analysis / clang-tidy
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The gate analyses 351 translation units across src/ and test/, and since it
+    # gained a real HeaderFilterRegex it also analyses first-party headers on every
+    # one of them. That is a large multiple of the src/-only, headers-excluded scope
+    # this job was originally sized for, and it overran the previous 30-minute limit
+    # on a hosted runner at --jobs 4. Sized like the other heavy lanes (Linux 60,
+    # UCRT64 85, MSVC 90) rather than trimmed back to fit.
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

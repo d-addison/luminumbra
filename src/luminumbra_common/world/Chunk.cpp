@@ -4,10 +4,9 @@
 namespace Luminumbra {
 
 Chunk::Chunk(const IVec3& coords)
-    : m_coords(coords),
-      m_id(calculate_id(coords)),
-      m_state(ChunkState::Unloaded) {
-}
+    : m_coords(coords)
+    , m_id(calculate_id(coords))
+    , m_state(ChunkState::Unloaded) {}
 
 bool Chunk::is_valid_state_transition(ChunkState from, ChunkState to) {
     if (from == to) {
@@ -51,7 +50,7 @@ ChunkID Chunk::calculate_id(const IVec3& coords) {
     // coordinates in a massive range, roughly:
     // X/Z: [-1,048,576 to +1,048,575]
     // Y:   [-2,097,152 to +2,097,151]
-    
+
     // Define masks for the number of bits allocated to each component.
     constexpr u64 X_BITS = 21;
     constexpr u64 Z_BITS = 21;
@@ -84,10 +83,9 @@ IVec3 Chunk::decode_id(ChunkID id) {
         const u64 sign = 1ULL << (bits - 1u);
         return static_cast<i32>(static_cast<i64>((value ^ sign) - sign));
     };
-    return IVec3(
-        sign_extend(id & X_MASK, X_BITS),
-        sign_extend((id >> (X_BITS + Z_BITS)) & Y_MASK, Y_BITS),
-        sign_extend((id >> X_BITS) & Z_MASK, Z_BITS));
+    return IVec3(sign_extend(id & X_MASK, X_BITS),
+                 sign_extend((id >> (X_BITS + Z_BITS)) & Y_MASK, Y_BITS),
+                 sign_extend((id >> X_BITS) & Z_MASK, Z_BITS));
 }
 
 } // namespace Luminumbra

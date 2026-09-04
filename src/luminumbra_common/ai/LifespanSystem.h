@@ -41,8 +41,8 @@
 
 #include <entt/entt.hpp>
 
-#include "../components/CreatureComponents.h"  // CreatureComponent (starvation + carcass seam)
-#include "../components/MortalComponents.h"     // MortalComponent (the opt-in)
+#include "../components/CreatureComponents.h" // CreatureComponent (starvation + carcass seam)
+#include "../components/MortalComponents.h"   // MortalComponent (the opt-in)
 
 namespace luminumbra::ai {
 
@@ -59,8 +59,8 @@ inline constexpr float kStarvationHunger = 1.0f;
 
 // Telemetry / sub-hash for the lifespan tick.
 struct LifespanStats {
-    int aged = 0;  // mortal entities advanced this tick (alive before the step)
-    int died = 0;  // entities newly MARKED dead this tick (old age OR starvation)
+    int aged = 0; // mortal entities advanced this tick (alive before the step)
+    int died = 0; // entities newly MARKED dead this tick (old age OR starvation)
 };
 
 // Advance the lifespan of every opted-in entity by ONE fixed tick. Pure function
@@ -121,4 +121,4 @@ inline LifespanStats RunLifespanOnTick(entt::registry& reg, std::uint64_t /*tick
     return stats;
 }
 
-}  // namespace luminumbra::ai
+} // namespace luminumbra::ai

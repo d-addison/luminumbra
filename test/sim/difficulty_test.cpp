@@ -12,26 +12,26 @@
 
 namespace {
 
-using luminumbra::game::DifficultyParams;
 using luminumbra::game::DifficultyAt;
-using luminumbra::game::PeacefulParams;
-using luminumbra::game::NormalParams;
+using luminumbra::game::DifficultyParams;
 using luminumbra::game::HarshParams;
-using luminumbra::game::kPeaceful01;
-using luminumbra::game::kNormal01;
 using luminumbra::game::kHarsh01;
-using luminumbra::game::kRelaxGrowth;
-using luminumbra::game::kHarshGrowth;
-using luminumbra::game::kRelaxMutation;
-using luminumbra::game::kHarshMutation;
-using luminumbra::game::kRelaxDisease;
 using luminumbra::game::kHarshDisease;
-using luminumbra::game::kRelaxFire;
 using luminumbra::game::kHarshFire;
-using luminumbra::game::kRelaxPredator;
-using luminumbra::game::kHarshPredator;
-using luminumbra::game::kRelaxForage;
 using luminumbra::game::kHarshForage;
+using luminumbra::game::kHarshGrowth;
+using luminumbra::game::kHarshMutation;
+using luminumbra::game::kHarshPredator;
+using luminumbra::game::kNormal01;
+using luminumbra::game::kPeaceful01;
+using luminumbra::game::kRelaxDisease;
+using luminumbra::game::kRelaxFire;
+using luminumbra::game::kRelaxForage;
+using luminumbra::game::kRelaxGrowth;
+using luminumbra::game::kRelaxMutation;
+using luminumbra::game::kRelaxPredator;
+using luminumbra::game::NormalParams;
+using luminumbra::game::PeacefulParams;
 
 // ---- endpoints hit the authored relaxed / harsh bands exactly ----
 
@@ -39,24 +39,24 @@ using luminumbra::game::kHarshForage;
 // gentle mutation, mild disease, damp fire, slow predators, rich forage.
 TEST(Difficulty, ZeroIsRelaxedBand) {
     const DifficultyParams p = DifficultyAt(0.0f);
-    EXPECT_FLOAT_EQ(p.growth_speed,      kRelaxGrowth);
-    EXPECT_FLOAT_EQ(p.mutation_rate,     kRelaxMutation);
+    EXPECT_FLOAT_EQ(p.growth_speed, kRelaxGrowth);
+    EXPECT_FLOAT_EQ(p.mutation_rate, kRelaxMutation);
     EXPECT_FLOAT_EQ(p.disease_virulence, kRelaxDisease);
-    EXPECT_FLOAT_EQ(p.fire_dryness,      kRelaxFire);
-    EXPECT_FLOAT_EQ(p.predator_speed,    kRelaxPredator);
-    EXPECT_FLOAT_EQ(p.forage_richness,   kRelaxForage);
+    EXPECT_FLOAT_EQ(p.fire_dryness, kRelaxFire);
+    EXPECT_FLOAT_EQ(p.predator_speed, kRelaxPredator);
+    EXPECT_FLOAT_EQ(p.forage_richness, kRelaxForage);
 }
 
 // At difficulty01 = 1 every parameter equals its HARSH band endpoint: slow growth,
 // volatile mutation, virulent disease, dry fire, fast predators, scarce forage.
 TEST(Difficulty, OneIsHarshBand) {
     const DifficultyParams p = DifficultyAt(1.0f);
-    EXPECT_FLOAT_EQ(p.growth_speed,      kHarshGrowth);
-    EXPECT_FLOAT_EQ(p.mutation_rate,     kHarshMutation);
+    EXPECT_FLOAT_EQ(p.growth_speed, kHarshGrowth);
+    EXPECT_FLOAT_EQ(p.mutation_rate, kHarshMutation);
     EXPECT_FLOAT_EQ(p.disease_virulence, kHarshDisease);
-    EXPECT_FLOAT_EQ(p.fire_dryness,      kHarshFire);
-    EXPECT_FLOAT_EQ(p.predator_speed,    kHarshPredator);
-    EXPECT_FLOAT_EQ(p.forage_richness,   kHarshForage);
+    EXPECT_FLOAT_EQ(p.fire_dryness, kHarshFire);
+    EXPECT_FLOAT_EQ(p.predator_speed, kHarshPredator);
+    EXPECT_FLOAT_EQ(p.forage_richness, kHarshForage);
 }
 
 // ---- rubric direction: harder really IS harder ----
@@ -67,12 +67,12 @@ TEST(Difficulty, HarshIsHarderThanRelaxed) {
     const DifficultyParams lo = DifficultyAt(0.0f);
     const DifficultyParams hi = DifficultyAt(1.0f);
     // Danger increases.
-    EXPECT_GT(hi.mutation_rate,     lo.mutation_rate);
+    EXPECT_GT(hi.mutation_rate, lo.mutation_rate);
     EXPECT_GT(hi.disease_virulence, lo.disease_virulence);
-    EXPECT_GT(hi.fire_dryness,      lo.fire_dryness);
-    EXPECT_GT(hi.predator_speed,    lo.predator_speed);
+    EXPECT_GT(hi.fire_dryness, lo.fire_dryness);
+    EXPECT_GT(hi.predator_speed, lo.predator_speed);
     // Comfort decreases.
-    EXPECT_LT(hi.growth_speed,    lo.growth_speed);
+    EXPECT_LT(hi.growth_speed, lo.growth_speed);
     EXPECT_LT(hi.forage_richness, lo.forage_richness);
 }
 
@@ -88,12 +88,12 @@ TEST(Difficulty, EachParamIsMonotonic) {
         const float t = static_cast<float>(i) / static_cast<float>(N);
         const DifficultyParams cur = DifficultyAt(t);
         // Danger knobs: non-decreasing.
-        EXPECT_GE(cur.mutation_rate,     prev.mutation_rate)     << "i=" << i;
+        EXPECT_GE(cur.mutation_rate, prev.mutation_rate) << "i=" << i;
         EXPECT_GE(cur.disease_virulence, prev.disease_virulence) << "i=" << i;
-        EXPECT_GE(cur.fire_dryness,      prev.fire_dryness)      << "i=" << i;
-        EXPECT_GE(cur.predator_speed,    prev.predator_speed)    << "i=" << i;
+        EXPECT_GE(cur.fire_dryness, prev.fire_dryness) << "i=" << i;
+        EXPECT_GE(cur.predator_speed, prev.predator_speed) << "i=" << i;
         // Comfort knobs: non-increasing.
-        EXPECT_LE(cur.growth_speed,    prev.growth_speed)    << "i=" << i;
+        EXPECT_LE(cur.growth_speed, prev.growth_speed) << "i=" << i;
         EXPECT_LE(cur.forage_richness, prev.forage_richness) << "i=" << i;
         prev = cur;
     }
@@ -107,10 +107,10 @@ TEST(Difficulty, OutOfBandInputsSaturate) {
     const DifficultyParams below = DifficultyAt(-5.0f);
     const DifficultyParams above = DifficultyAt(3.0f);
     const DifficultyParams relaxed = DifficultyAt(0.0f);
-    const DifficultyParams harsh   = DifficultyAt(1.0f);
-    EXPECT_FLOAT_EQ(below.growth_speed,    relaxed.growth_speed);
+    const DifficultyParams harsh = DifficultyAt(1.0f);
+    EXPECT_FLOAT_EQ(below.growth_speed, relaxed.growth_speed);
     EXPECT_FLOAT_EQ(below.disease_virulence, relaxed.disease_virulence);
-    EXPECT_FLOAT_EQ(above.growth_speed,    harsh.growth_speed);
+    EXPECT_FLOAT_EQ(above.growth_speed, harsh.growth_speed);
     EXPECT_FLOAT_EQ(above.disease_virulence, harsh.disease_virulence);
 }
 
@@ -121,8 +121,12 @@ TEST(Difficulty, MultipliersStayInSaneBands) {
     for (int i = 0; i <= N; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(N);
         const DifficultyParams p = DifficultyAt(t);
-        for (float v : {p.growth_speed, p.mutation_rate, p.disease_virulence,
-                        p.fire_dryness, p.predator_speed, p.forage_richness}) {
+        for (float v : {p.growth_speed,
+                        p.mutation_rate,
+                        p.disease_virulence,
+                        p.fire_dryness,
+                        p.predator_speed,
+                        p.forage_richness}) {
             EXPECT_GT(v, 0.0f) << "t=" << t; // strictly positive
             EXPECT_LE(v, 3.0f) << "t=" << t; // never absurd
         }
@@ -135,16 +139,16 @@ TEST(Difficulty, MultipliersStayInSaneBands) {
 // the two on every parameter (the midpoint of the sweep).
 TEST(Difficulty, PresetsMatchExpectedBands) {
     const DifficultyParams peaceful = PeacefulParams();
-    const DifficultyParams normal   = NormalParams();
-    const DifficultyParams harsh    = HarshParams();
+    const DifficultyParams normal = NormalParams();
+    const DifficultyParams harsh = HarshParams();
 
     // Presets equal DifficultyAt at their anchor points.
     EXPECT_FLOAT_EQ(peaceful.disease_virulence, DifficultyAt(kPeaceful01).disease_virulence);
-    EXPECT_FLOAT_EQ(harsh.disease_virulence,    DifficultyAt(kHarsh01).disease_virulence);
+    EXPECT_FLOAT_EQ(harsh.disease_virulence, DifficultyAt(kHarsh01).disease_virulence);
 
     // Peaceful is the relaxed band; Harsh is the harsh band.
     EXPECT_FLOAT_EQ(peaceful.disease_virulence, kRelaxDisease);
-    EXPECT_FLOAT_EQ(harsh.disease_virulence,    kHarshDisease);
+    EXPECT_FLOAT_EQ(harsh.disease_virulence, kHarshDisease);
 
     // Normal sits strictly between on a danger knob and a comfort knob.
     EXPECT_GT(normal.disease_virulence, peaceful.disease_virulence);
@@ -163,12 +167,12 @@ TEST(Difficulty, RunEqualsReplay) {
     for (float d : probes) {
         const DifficultyParams a = DifficultyAt(d);
         const DifficultyParams b = DifficultyAt(d);
-        EXPECT_EQ(a.growth_speed,      b.growth_speed);
-        EXPECT_EQ(a.mutation_rate,     b.mutation_rate);
+        EXPECT_EQ(a.growth_speed, b.growth_speed);
+        EXPECT_EQ(a.mutation_rate, b.mutation_rate);
         EXPECT_EQ(a.disease_virulence, b.disease_virulence);
-        EXPECT_EQ(a.fire_dryness,      b.fire_dryness);
-        EXPECT_EQ(a.predator_speed,    b.predator_speed);
-        EXPECT_EQ(a.forage_richness,   b.forage_richness);
+        EXPECT_EQ(a.fire_dryness, b.fire_dryness);
+        EXPECT_EQ(a.predator_speed, b.predator_speed);
+        EXPECT_EQ(a.forage_richness, b.forage_richness);
     }
 }
 

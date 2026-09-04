@@ -13,10 +13,20 @@ namespace {
 // from a non-render thread on async (non-SYNCHRONOUS) contexts; we force
 // SYNCHRONOUS so in practice it is the render thread, but the atomics keep the
 // telemetry race-free regardless and cost nothing on the hot path.
+// The driver callback and installer run independently, so state must survive both call stacks.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<bool> g_installed{false};
+// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<unsigned long long> g_total{0};
+// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<unsigned long long> g_errors{0};
+// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<unsigned long long> g_warnings{0};
+// Driver callbacks update process-lifetime telemetry read outside any one callback invocation.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<unsigned long long> g_notifications{0};
 
 const char* source_str(GLenum source) {

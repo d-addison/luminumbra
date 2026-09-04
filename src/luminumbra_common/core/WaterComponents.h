@@ -32,7 +32,8 @@ struct WaterInteractorComponent {
 
     /**
      * @brief The velocity of the water at the entity's position.
-     * This value is calculated and updated by the WaterSystem each tick and can be used to apply a drag/push force.
+     * This value is calculated and updated by the WaterSystem each tick and can be used to apply a
+     * drag/push force.
      */
     Vec3 fluid_velocity_at_pos{0.0f};
 };

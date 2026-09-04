@@ -143,18 +143,21 @@ private:
     std::size_t m_offset = 0;   // bump cursor; Reset() rewinds to 0
 };
 
-// Per-worker meshing arena. thread_local => one arena per JobSystem worker,
-// never shared across concurrently running meshing jobs.
-thread_local MeshArena t_mesh_arena;
+// Per-worker meshing arena: one arena per JobSystem worker, never shared across
+// concurrently running meshing jobs.
+MeshArena& ThreadMeshArena() {
+    thread_local MeshArena arena;
+    return arena;
+}
 
 // RAII guard: reset the worker arena at job entry so each meshing job starts
 // from a clean bump cursor while reusing the high-water-mark storage.
 struct MeshArenaScope {
     MeshArenaScope() noexcept {
-        t_mesh_arena.Reset();
+        ThreadMeshArena().Reset();
     }
     ~MeshArenaScope() noexcept {
-        t_mesh_arena.Reset();
+        ThreadMeshArena().Reset();
     }
     MeshArenaScope(const MeshArenaScope&) = delete;
     MeshArenaScope& operator=(const MeshArenaScope&) = delete;
@@ -172,7 +175,7 @@ struct ArenaSpan {
     std::size_t offset = 0;
     std::size_t count = 0;
     T* data() const noexcept {
-        return count == 0 ? nullptr : reinterpret_cast<T*>(t_mesh_arena.base() + offset);
+        return count == 0 ? nullptr : reinterpret_cast<T*>(ThreadMeshArena().base() + offset);
     }
     std::size_t size() const noexcept {
         return count;
@@ -184,7 +187,7 @@ struct ArenaSpan {
 
 template<typename T>
 ArenaSpan<T> ArenaAlloc(std::size_t count, const T& init) {
-    return ArenaSpan<T>{t_mesh_arena.Allocate<T>(count, init), count};
+    return ArenaSpan<T>{ThreadMeshArena().Allocate<T>(count, init), count};
 }
 // ===================== END  MESHING ARENA =====================
 
@@ -249,7 +252,10 @@ struct AtomicTerrainMeshBuildStats {
     std::atomic<std::uint64_t> elapsed_us{0};
 };
 
-AtomicTerrainMeshBuildStats g_terrain_mesh_build_stats;
+AtomicTerrainMeshBuildStats& TerrainMeshBuildStatsStorage() {
+    static AtomicTerrainMeshBuildStats stats;
+    return stats;
+}
 
 void RecordTerrainMeshBuildStats(int step,
                                  std::size_t cells_visited,
@@ -257,20 +263,21 @@ void RecordTerrainMeshBuildStats(int step,
                                  std::size_t vertices,
                                  std::size_t indices,
                                  std::uint64_t elapsed_us) {
-    g_terrain_mesh_build_stats.jobs.fetch_add(1, std::memory_order_relaxed);
+    auto& stats = TerrainMeshBuildStatsStorage();
+    stats.jobs.fetch_add(1, std::memory_order_relaxed);
     if (step <= 1) {
-        g_terrain_mesh_build_stats.step1_jobs.fetch_add(1, std::memory_order_relaxed);
+        stats.step1_jobs.fetch_add(1, std::memory_order_relaxed);
     } else if (step == 2) {
-        g_terrain_mesh_build_stats.step2_jobs.fetch_add(1, std::memory_order_relaxed);
+        stats.step2_jobs.fetch_add(1, std::memory_order_relaxed);
     } else {
-        g_terrain_mesh_build_stats.step4_jobs.fetch_add(1, std::memory_order_relaxed);
+        stats.step4_jobs.fetch_add(1, std::memory_order_relaxed);
     }
-    g_terrain_mesh_build_stats.cells_visited.fetch_add(cells_visited, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.active_cells.fetch_add(active_cells, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.vertices.fetch_add(vertices, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.indices.fetch_add(indices, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.triangles.fetch_add(indices / 3u, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
+    stats.cells_visited.fetch_add(cells_visited, std::memory_order_relaxed);
+    stats.active_cells.fetch_add(active_cells, std::memory_order_relaxed);
+    stats.vertices.fetch_add(vertices, std::memory_order_relaxed);
+    stats.indices.fetch_add(indices, std::memory_order_relaxed);
+    stats.triangles.fetch_add(indices / 3u, std::memory_order_relaxed);
+    stats.elapsed_us.fetch_add(elapsed_us, std::memory_order_relaxed);
 }
 
 constexpr float kBoundaryEpsilon = 1.0e-4f;
@@ -1621,30 +1628,32 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
 }
 
 void ResetTerrainMeshBuildStats() {
-    g_terrain_mesh_build_stats.jobs.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.step1_jobs.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.step2_jobs.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.step4_jobs.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.cells_visited.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.active_cells.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.vertices.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.indices.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.triangles.store(0, std::memory_order_relaxed);
-    g_terrain_mesh_build_stats.elapsed_us.store(0, std::memory_order_relaxed);
+    auto& atomic_stats = TerrainMeshBuildStatsStorage();
+    atomic_stats.jobs.store(0, std::memory_order_relaxed);
+    atomic_stats.step1_jobs.store(0, std::memory_order_relaxed);
+    atomic_stats.step2_jobs.store(0, std::memory_order_relaxed);
+    atomic_stats.step4_jobs.store(0, std::memory_order_relaxed);
+    atomic_stats.cells_visited.store(0, std::memory_order_relaxed);
+    atomic_stats.active_cells.store(0, std::memory_order_relaxed);
+    atomic_stats.vertices.store(0, std::memory_order_relaxed);
+    atomic_stats.indices.store(0, std::memory_order_relaxed);
+    atomic_stats.triangles.store(0, std::memory_order_relaxed);
+    atomic_stats.elapsed_us.store(0, std::memory_order_relaxed);
 }
 
 TerrainMeshBuildStats GetTerrainMeshBuildStats() {
+    const auto& atomic_stats = TerrainMeshBuildStatsStorage();
     TerrainMeshBuildStats stats;
-    stats.jobs = g_terrain_mesh_build_stats.jobs.load(std::memory_order_relaxed);
-    stats.step1_jobs = g_terrain_mesh_build_stats.step1_jobs.load(std::memory_order_relaxed);
-    stats.step2_jobs = g_terrain_mesh_build_stats.step2_jobs.load(std::memory_order_relaxed);
-    stats.step4_jobs = g_terrain_mesh_build_stats.step4_jobs.load(std::memory_order_relaxed);
-    stats.cells_visited = g_terrain_mesh_build_stats.cells_visited.load(std::memory_order_relaxed);
-    stats.active_cells = g_terrain_mesh_build_stats.active_cells.load(std::memory_order_relaxed);
-    stats.vertices = g_terrain_mesh_build_stats.vertices.load(std::memory_order_relaxed);
-    stats.indices = g_terrain_mesh_build_stats.indices.load(std::memory_order_relaxed);
-    stats.triangles = g_terrain_mesh_build_stats.triangles.load(std::memory_order_relaxed);
-    stats.elapsed_us = g_terrain_mesh_build_stats.elapsed_us.load(std::memory_order_relaxed);
+    stats.jobs = atomic_stats.jobs.load(std::memory_order_relaxed);
+    stats.step1_jobs = atomic_stats.step1_jobs.load(std::memory_order_relaxed);
+    stats.step2_jobs = atomic_stats.step2_jobs.load(std::memory_order_relaxed);
+    stats.step4_jobs = atomic_stats.step4_jobs.load(std::memory_order_relaxed);
+    stats.cells_visited = atomic_stats.cells_visited.load(std::memory_order_relaxed);
+    stats.active_cells = atomic_stats.active_cells.load(std::memory_order_relaxed);
+    stats.vertices = atomic_stats.vertices.load(std::memory_order_relaxed);
+    stats.indices = atomic_stats.indices.load(std::memory_order_relaxed);
+    stats.triangles = atomic_stats.triangles.load(std::memory_order_relaxed);
+    stats.elapsed_us = atomic_stats.elapsed_us.load(std::memory_order_relaxed);
     return stats;
 }
 

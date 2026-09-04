@@ -25,7 +25,9 @@ using DState = Comp::PlantDiseaseState;
 
 // Spawn a plant participant (PlantTag + PlantHealthComponent + Transform) at a
 // position with a given health state, infection, and resistance (fixed-point).
-entt::entity spawnPlant(entt::registry& r, float x, float z,
+entt::entity spawnPlant(entt::registry& r,
+                        float x,
+                        float z,
                         DState state = DState::Healthy,
                         std::uint16_t infection = 0,
                         std::uint16_t resistance = 0) {
@@ -127,7 +129,11 @@ TEST(PlantDisease, OutOfRangePlantIsNotInfected) {
 // been sick past the resolution window.
 TEST(PlantDisease, LowResistanceInfectedDies) {
     entt::registry r;
-    auto sick = spawnPlant(r, 0.0f, 0.0f, DState::Infected, /*infection*/ 600,
+    auto sick = spawnPlant(r,
+                           0.0f,
+                           0.0f,
+                           DState::Infected,
+                           /*infection*/ 600,
                            /*resistance*/ 0); // below kRecoverResistance
 
     for (int t = 1; t <= 120; ++t) {
@@ -141,7 +147,11 @@ TEST(PlantDisease, LowResistanceInfectedDies) {
 // resistance (acquired immunity).
 TEST(PlantDisease, HighResistanceInfectedRecoversAndGainsResistance) {
     entt::registry r;
-    auto sick = spawnPlant(r, 0.0f, 0.0f, DState::Infected, /*infection*/ 600,
+    auto sick = spawnPlant(r,
+                           0.0f,
+                           0.0f,
+                           DState::Infected,
+                           /*infection*/ 600,
                            /*resistance*/ 600); // at/above kRecoverResistance
     const std::uint16_t before = r.get<Comp::PlantHealthComponent>(sick).resistance;
 
@@ -173,7 +183,8 @@ TEST(PlantDisease, RunEqualsReplay) {
 
         // Read out every plant's full health state in id order.
         std::vector<entt::entity> ents;
-        for (auto e : r.view<Comp::PlantHealthComponent>()) ents.push_back(e);
+        for (auto e : r.view<Comp::PlantHealthComponent>())
+            ents.push_back(e);
         std::sort(ents.begin(), ents.end(), [](entt::entity a, entt::entity b) {
             return entt::to_integral(a) < entt::to_integral(b);
         });
@@ -215,4 +226,4 @@ TEST(PlantDisease, OrderIndependentSpread) {
     EXPECT_EQ(scenario(true), scenario(false));
 }
 
-}  // namespace
+} // namespace

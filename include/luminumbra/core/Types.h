@@ -16,11 +16,11 @@ using TextureID = uint32_t;
 using SoundID = uint32_t;
 
 // --- Numeric Types ---
-using i8  = int8_t;
+using i8 = int8_t;
 using i16 = int16_t;
 using i32 = int32_t;
 using i64 = int64_t;
-using u8  = uint8_t;
+using u8 = uint8_t;
 using u16 = uint16_t;
 using u32 = uint32_t;
 using u64 = uint64_t;
@@ -60,14 +60,14 @@ constexpr f32 NEAR_FIELD_DISTANCE = 256.0f;
 constexpr f32 FAR_FIELD_DISTANCE = 8192.0f;
 
 enum class MaterialType : u32 {
-    Air         = 0,
-    Stone       = 1,
-    Soil        = 2,
-    Grass       = 3,
-    Sand        = 4,
-    Deepslate   = 5,
+    Air = 0,
+    Stone = 1,
+    Soil = 2,
+    Grass = 3,
+    Sand = 4,
+    Deepslate = 5,
     LuminCrystal = 6,
-    Water       = 7
+    Water = 7
 };
 
 } // namespace Luminumbra

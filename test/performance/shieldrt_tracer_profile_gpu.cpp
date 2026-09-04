@@ -145,7 +145,7 @@ FlatSdfChain FlattenSdfChain(const SdfMipChain& c) {
 }
 
 // Heightfield max-mip march compute kernel (GPU port of MarchHeightfield).
-const char* kHeightfieldMarchCompute = R"GLSL(
+const char* const kHeightfieldMarchCompute = R"GLSL(
 #version 450 core
 layout(local_size_x = 64) in;
 
@@ -245,7 +245,7 @@ void main() {
 // SDF sphere-trace compute kernel (GPU port of SphereTrace, pure tracer: the
 // CPU spike's truth-clearance overshoot instrumentation is correctness tooling,
 // not tracer work, so it is excluded here for an honest wall-clock comparison).
-const char* kSdfSphereTraceCompute = R"GLSL(
+const char* const kSdfSphereTraceCompute = R"GLSL(
 #version 450 core
 layout(local_size_x = 64) in;
 

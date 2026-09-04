@@ -71,8 +71,8 @@ entt::entity MakeSniffer(entt::registry& r, float x, float z, float sign, int ch
     return e;
 }
 
-entt::entity MakePerceiver(entt::registry& r, float x, float z, float fx, float fz,
-                           std::uint32_t faction = 1) {
+entt::entity
+MakePerceiver(entt::registry& r, float x, float z, float fx, float fz, std::uint32_t faction = 1) {
     const auto e = r.create();
     r.emplace<TransformComponent>(e).position = Luminumbra::Vec3(x, 0.0f, z);
     auto& p = r.emplace<PerceptionComponent>(e);
@@ -85,8 +85,8 @@ entt::entity MakePerceiver(entt::registry& r, float x, float z, float fx, float 
     return e;
 }
 
-entt::entity MakeSensable(entt::registry& r, float x, float z, std::uint32_t faction, float loud,
-                          float pitch) {
+entt::entity
+MakeSensable(entt::registry& r, float x, float z, std::uint32_t faction, float loud, float pitch) {
     const auto e = r.create();
     r.emplace<TransformComponent>(e).position = Luminumbra::Vec3(x, 0.0f, z);
     auto& s = r.emplace<SensableComponent>(e);
@@ -102,7 +102,8 @@ std::vector<double> FlattenField(const ScentField& f) {
     out.reserve(static_cast<std::size_t>(f.channels()) * f.width() * f.height());
     for (int c = 0; c < f.channels(); ++c)
         for (int z = 0; z < f.height(); ++z)
-            for (int x = 0; x < f.width(); ++x) out.push_back(f.Sample(c, x, z));
+            for (int x = 0; x < f.width(); ++x)
+                out.push_back(f.Sample(c, x, z));
     return out;
 }
 
@@ -231,7 +232,8 @@ TEST(ScentFieldHardening, GradientSteerFloorEdgeIsInclusiveAtFloor) {
     EXPECT_GT(dx, 0.0f);
     // A floor a hair ABOVE the magnitude rejects.
     float dx2 = 5.0f, dz2 = 5.0f;
-    const float conf2 = f.GradientSteer(0, 4, 5, 1.0f, std::nextafter(exact, 1e30f), 1.0f, dx2, dz2);
+    const float conf2 =
+        f.GradientSteer(0, 4, 5, 1.0f, std::nextafter(exact, 1e30f), 1.0f, dx2, dz2);
     EXPECT_FLOAT_EQ(conf2, 0.0f);
     EXPECT_FLOAT_EQ(dx2, 0.0f);
     EXPECT_FLOAT_EQ(dz2, 0.0f);
@@ -286,7 +288,8 @@ TEST(ScentFieldHardening, FieldSequenceIsByteExactAcrossRuns) {
     const auto a = run();
     const auto b = run();
     ASSERT_EQ(a.size(), b.size());
-    for (std::size_t i = 0; i < a.size(); ++i) EXPECT_EQ(a[i], b[i]) << "cell " << i;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        EXPECT_EQ(a[i], b[i]) << "cell " << i;
 }
 
 // Diffusion must be order-INDEPENDENT of how deposits were laid: depositing A then
@@ -305,7 +308,8 @@ TEST(ScentFieldHardening, DepositOrderDoesNotChangeField) {
     }
     const auto a = FlattenField(f1);
     const auto b = FlattenField(f2);
-    for (std::size_t i = 0; i < a.size(); ++i) EXPECT_EQ(a[i], b[i]) << "cell " << i;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        EXPECT_EQ(a[i], b[i]) << "cell " << i;
 }
 
 // Evaporation = 1.0 fully clears every cell after a single step (keep = 0). Edge
@@ -340,7 +344,8 @@ TEST(ScentFieldHardening, StepNeverIncreasesTotalScent) {
     auto total = [&]() {
         double s = 0.0;
         for (int z = 0; z < 10; ++z)
-            for (int x = 0; x < 10; ++x) s += f.Sample(0, x, z);
+            for (int x = 0; x < 10; ++x)
+                s += f.Sample(0, x, z);
         return s;
     };
     double prev = total();
@@ -363,7 +368,8 @@ TEST(ScentFieldHardening, ChannelsStayIsolatedThroughStep) {
     }
     double ch1 = 0.0;
     for (int z = 0; z < 8; ++z)
-        for (int x = 0; x < 8; ++x) ch1 += f.Sample(1, x, z);
+        for (int x = 0; x < 8; ++x)
+            ch1 += f.Sample(1, x, z);
     EXPECT_DOUBLE_EQ(ch1, 0.0);
 }
 
@@ -380,7 +386,7 @@ TEST(ScentDepositHardening, NegativeWorldCoordFloorsOutOfBoundsNoOp) {
     entt::registry r;
     MakeEmitter(r, -0.5f, 5.0f, 0, 10.0f); // floors to cell x = -1 -> OOB
     const auto stats = RunScentDepositOnTick(r, f, 0.0f, 0.0f, 1.0f);
-    EXPECT_EQ(stats.emitters, 1u); // it was considered an emitter...
+    EXPECT_EQ(stats.emitters, 1u);            // it was considered an emitter...
     EXPECT_DOUBLE_EQ(f.Sample(0, 0, 0), 0.0); // ...but did NOT smear into cell 0
 }
 
@@ -447,12 +453,14 @@ TEST(ScentDepositHardening, ProducerIsRunReplayExact) {
         MakeEmitter(r, 3.5f, 4.5f, 0, 12.0f);
         MakeEmitter(r, 18.2f, 9.1f, 1, 6.0f);
         MakeEmitter(r, 7.0f, 7.0f, 0, 4.0f);
-        for (int i = 0; i < 4; ++i) RunScentDepositOnTick(r, f, 0.0f, 0.0f, 1.5f);
+        for (int i = 0; i < 4; ++i)
+            RunScentDepositOnTick(r, f, 0.0f, 0.0f, 1.5f);
         return FlattenField(f);
     };
     const auto a = run();
     const auto b = run();
-    for (std::size_t i = 0; i < a.size(); ++i) EXPECT_EQ(a[i], b[i]) << "cell " << i;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        EXPECT_EQ(a[i], b[i]) << "cell " << i;
 }
 
 // ===========================================================================
@@ -603,11 +611,11 @@ TEST(ScentSteeringHardening, ConsumerIsRunReplayExact) {
 TEST(PerceptionHardening, VisionConeHalfFovInsideVsOutside) {
     const float cos_half = 0.5f; // half-FOV 60deg (120deg total)
     const float in = 59.0f * 0.017453292519943295f;
-    EXPECT_TRUE(InVisionCone(0, 0, 1, 0, cos_half, 30.0f, std::cos(in) * 10.0f,
-                             std::sin(in) * 10.0f));
+    EXPECT_TRUE(
+        InVisionCone(0, 0, 1, 0, cos_half, 30.0f, std::cos(in) * 10.0f, std::sin(in) * 10.0f));
     const float out = 61.0f * 0.017453292519943295f;
-    EXPECT_FALSE(InVisionCone(0, 0, 1, 0, cos_half, 30.0f, std::cos(out) * 10.0f,
-                              std::sin(out) * 10.0f));
+    EXPECT_FALSE(
+        InVisionCone(0, 0, 1, 0, cos_half, 30.0f, std::cos(out) * 10.0f, std::sin(out) * 10.0f));
 }
 
 // Dead-ahead boundary: a target straight along the facing axis has dot == dist
@@ -632,7 +640,7 @@ TEST(PerceptionHardening, VisionConeRejectsTargetBeyondHalfAngle) {
 // behind. cos_half = 1 is a blind-ahead-only ray: a target off-axis is rejected.
 TEST(PerceptionHardening, VisionConeFullAndDegenerateAngleExtremes) {
     EXPECT_TRUE(InVisionCone(0, 0, 1, 0, /*cos_half=*/-1.0f, 30.0f, -10.0f, 0.0f)); // behind, 360
-    EXPECT_TRUE(InVisionCone(0, 0, 1, 0, 1.0f, 30.0f, 10.0f, 0.0f));  // dead ahead, ray
+    EXPECT_TRUE(InVisionCone(0, 0, 1, 0, 1.0f, 30.0f, 10.0f, 0.0f));   // dead ahead, ray
     EXPECT_FALSE(InVisionCone(0, 0, 1, 0, 1.0f, 30.0f, 10.0f, 0.01f)); // a hair off-axis, ray
 }
 
@@ -645,7 +653,7 @@ TEST(PerceptionHardening, VisionConeCoincidentTargetAlwaysVisible) {
 // Range edge: the cone uses dist2 > range*range (strict). A target EXACTLY at
 // range is still in range; just beyond is out.
 TEST(PerceptionHardening, VisionConeRangeBoundary) {
-    EXPECT_TRUE(InVisionCone(0, 0, 1, 0, -1.0f, 10.0f, 10.0f, 0.0f));  // exactly at range
+    EXPECT_TRUE(InVisionCone(0, 0, 1, 0, -1.0f, 10.0f, 10.0f, 0.0f));    // exactly at range
     EXPECT_FALSE(InVisionCone(0, 0, 1, 0, -1.0f, 10.0f, 10.001f, 0.0f)); // just beyond
 }
 
@@ -658,8 +666,8 @@ TEST(PerceptionHardening, VisionConeRangeBoundary) {
 TEST(PerceptionHardening, PerceivedLoudnessRangeEdge) {
     EXPECT_FLOAT_EQ(PerceivedLoudness(24.0f, 1.0f, 24.0f), 0.0f); // exactly at range -> 0
     EXPECT_GT(PerceivedLoudness(23.99f, 1.0f, 24.0f), 0.0f);
-    EXPECT_FLOAT_EQ(PerceivedLoudness(5.0f, 1.0f, 0.0f), 0.0f);   // no range -> silent
-    EXPECT_FLOAT_EQ(PerceivedLoudness(5.0f, 0.0f, 24.0f), 0.0f);  // silent source
+    EXPECT_FLOAT_EQ(PerceivedLoudness(5.0f, 1.0f, 0.0f), 0.0f);  // no range -> silent
+    EXPECT_FLOAT_EQ(PerceivedLoudness(5.0f, 0.0f, 24.0f), 0.0f); // silent source
 }
 
 // PitchSensitivity triangular falloff: 1 at the peak, linearly to 0 at +/-
@@ -668,12 +676,12 @@ TEST(PerceptionHardening, PitchSensitivityTriangleEdges) {
     HearingProfile ear;
     ear.peak_pitch = 0.5f;
     ear.bandwidth = 0.25f;
-    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.5f), 1.0f);          // at peak
-    EXPECT_NEAR(PitchSensitivity(ear, 0.625f), 0.5f, 1e-5f);     // halfway out
-    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.75f), 0.0f);        // at band edge -> 0
-    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.9f), 0.0f);         // beyond band -> 0
-    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.25f), 0.0f);       // lower band edge -> 0
-    EXPECT_NEAR(PitchSensitivity(ear, 0.375f), 0.5f, 1e-5f);   // halfway out, lower side
+    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.5f), 1.0f);      // at peak
+    EXPECT_NEAR(PitchSensitivity(ear, 0.625f), 0.5f, 1e-5f); // halfway out
+    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.75f), 0.0f);     // at band edge -> 0
+    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.9f), 0.0f);      // beyond band -> 0
+    EXPECT_FLOAT_EQ(PitchSensitivity(ear, 0.25f), 0.0f);     // lower band edge -> 0
+    EXPECT_NEAR(PitchSensitivity(ear, 0.375f), 0.5f, 1e-5f); // halfway out, lower side
 }
 
 // bandwidth <= 0 is a degenerate "only the exact peak is audible" ear: the peak
@@ -734,7 +742,8 @@ TEST(PerceptionSystemHardening, SameFactionNeverSensed) {
     entt::registry r;
     const auto p = MakePerceiver(r, 0, 0, 1, 0, /*faction=*/3);
     MakeSensable(r, 5.0f, 0.0f, /*faction=*/3, /*loud=*/1.0f, /*pitch=*/0.5f);
-    for (int i = 0; i < 40; ++i) RunPerceptionSystemOnTick(r, kDt);
+    for (int i = 0; i < 40; ++i)
+        RunPerceptionSystemOnTick(r, kDt);
     const auto& aw = r.get<AwarenessComponent>(p).awareness;
     EXPECT_EQ(aw.state, AwarenessState::Unaware);
     EXPECT_FALSE(aw.has_last_known);
@@ -753,7 +762,8 @@ TEST(PerceptionSystemHardening, PerceiverDoesNotSenseItself) {
     s.noise_pitch = 0.5f;
     auto& ear = r.get<PerceptionComponent>(p).ear;
     ear.range = 30.0f;
-    for (int i = 0; i < 40; ++i) RunPerceptionSystemOnTick(r, kDt);
+    for (int i = 0; i < 40; ++i)
+        RunPerceptionSystemOnTick(r, kDt);
     EXPECT_EQ(r.get<AwarenessComponent>(p).awareness.state, AwarenessState::Unaware);
 }
 
@@ -764,7 +774,8 @@ TEST(PerceptionSystemHardening, LastKnownIsWorldPositionOfTarget) {
     entt::registry r;
     const auto p = MakePerceiver(r, 2, 1, 1, 0, /*faction=*/1); // observer not at origin
     MakeSensable(r, 10.0f, 4.0f, /*faction=*/2, /*loud=*/0.0f, /*pitch=*/0.5f); // visible ahead
-    for (int i = 0; i < 60; ++i) RunPerceptionSystemOnTick(r, kDt);
+    for (int i = 0; i < 60; ++i)
+        RunPerceptionSystemOnTick(r, kDt);
     const auto& aw = r.get<AwarenessComponent>(p).awareness;
     ASSERT_TRUE(aw.has_last_known);
     EXPECT_FLOAT_EQ(aw.last_known_x, 10.0f); // world X of the TARGET, not the delta
@@ -777,8 +788,10 @@ TEST(PerceptionSystemHardening, StrongestTargetIsChosen) {
     entt::registry r;
     const auto p = MakePerceiver(r, 0, 0, 1, 0, /*faction=*/1);
     MakeSensable(r, 25.0f, 0.0f, /*faction=*/2, /*loud=*/0.0f, /*pitch=*/0.5f); // far, weak vision
-    MakeSensable(r, 5.0f, 0.0f, /*faction=*/2, /*loud=*/0.0f, /*pitch=*/0.5f);  // near, strong vision
-    for (int i = 0; i < 40; ++i) RunPerceptionSystemOnTick(r, kDt);
+    MakeSensable(
+        r, 5.0f, 0.0f, /*faction=*/2, /*loud=*/0.0f, /*pitch=*/0.5f); // near, strong vision
+    for (int i = 0; i < 40; ++i)
+        RunPerceptionSystemOnTick(r, kDt);
     const auto& aw = r.get<AwarenessComponent>(p).awareness;
     ASSERT_TRUE(aw.has_last_known);
     EXPECT_FLOAT_EQ(aw.last_known_x, 5.0f); // the nearer (stronger) target
@@ -790,10 +803,12 @@ TEST(PerceptionSystemHardening, AwarenessDecaysAndForgetsAfterTargetGone) {
     entt::registry r;
     const auto p = MakePerceiver(r, 0, 0, 1, 0, /*faction=*/1);
     const auto prey = MakeSensable(r, 5.0f, 0.0f, /*faction=*/2, /*loud=*/0.0f, /*pitch=*/0.5f);
-    for (int i = 0; i < 40; ++i) RunPerceptionSystemOnTick(r, kDt);
+    for (int i = 0; i < 40; ++i)
+        RunPerceptionSystemOnTick(r, kDt);
     ASSERT_TRUE(r.get<AwarenessComponent>(p).awareness.has_last_known);
     r.destroy(prey); // target gone
-    for (int i = 0; i < 400; ++i) RunPerceptionSystemOnTick(r, kDt);
+    for (int i = 0; i < 400; ++i)
+        RunPerceptionSystemOnTick(r, kDt);
     const auto& aw = r.get<AwarenessComponent>(p).awareness;
     EXPECT_EQ(aw.state, AwarenessState::Unaware);
     EXPECT_FALSE(aw.has_last_known); // memory cleared on full forget
@@ -815,7 +830,8 @@ TEST(PerceptionSystemHardening, PerceiverResultIsSpawnOrderIndependent) {
         }
         auto& ear = r.get<PerceptionComponent>(p).ear;
         ear.range = 30.0f;
-        for (int i = 0; i < 30; ++i) RunPerceptionSystemOnTick(r, kDt);
+        for (int i = 0; i < 30; ++i)
+            RunPerceptionSystemOnTick(r, kDt);
         return r.get<AwarenessComponent>(p).awareness.meter;
     };
     EXPECT_EQ(meterFor(true), meterFor(false));
@@ -834,7 +850,8 @@ TEST(PerceptionSystemHardening, PopulatedRosterIsRunReplayExact) {
         MakeSensable(r, 6.0f, 1.0f, /*faction=*/2, /*loud=*/0.6f, /*pitch=*/0.5f);
         MakeSensable(r, -3.0f, 7.0f, /*faction=*/2, /*loud=*/0.3f, /*pitch=*/0.4f);
         MakeSensable(r, 10.0f, -1.0f, /*faction=*/2, /*loud=*/0.9f, /*pitch=*/0.6f);
-        for (int i = 0; i < 50; ++i) RunPerceptionSystemOnTick(r, kDt);
+        for (int i = 0; i < 50; ++i)
+            RunPerceptionSystemOnTick(r, kDt);
         std::vector<float> out;
         for (auto e : percs) {
             const auto& aw = r.get<AwarenessComponent>(e).awareness;
@@ -847,7 +864,8 @@ TEST(PerceptionSystemHardening, PopulatedRosterIsRunReplayExact) {
     const auto a = run();
     const auto b = run();
     ASSERT_EQ(a.size(), b.size());
-    for (std::size_t i = 0; i < a.size(); ++i) EXPECT_FLOAT_EQ(a[i], b[i]) << "slot " << i;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        EXPECT_FLOAT_EQ(a[i], b[i]) << "slot " << i;
 }
 
 // A target precisely on top of the perceiver (coincident) is visible via the
@@ -857,7 +875,8 @@ TEST(PerceptionSystemHardening, CoincidentTargetDrivesAwarenessNoNaN) {
     entt::registry r;
     const auto p = MakePerceiver(r, 3, 3, 1, 0, /*faction=*/1);
     MakeSensable(r, 3.0f, 3.0f, /*faction=*/2, /*loud=*/0.0f, /*pitch=*/0.5f); // exactly on top
-    for (int i = 0; i < 30; ++i) RunPerceptionSystemOnTick(r, kDt);
+    for (int i = 0; i < 30; ++i)
+        RunPerceptionSystemOnTick(r, kDt);
     const auto& aw = r.get<AwarenessComponent>(p).awareness;
     EXPECT_FALSE(std::isnan(aw.meter));
     EXPECT_GT(aw.meter, 0.0f); // coincident -> vision clarity ~1 -> awareness rises

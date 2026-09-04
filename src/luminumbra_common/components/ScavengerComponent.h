@@ -32,9 +32,9 @@ namespace Luminumbra::Components {
 // `feeding` latches to 1 on any tick the scavenger is within feed radius of a carcass and
 // is actively lowering its hunger (telemetry / feeding-pose cue); 0 otherwise.
 struct ScavengerComponent {
-    float wish_x = 0.0f;       // desired x steer toward nearest carcass (0 = none)
-    float wish_z = 0.0f;       // desired z steer toward nearest carcass (0 = none)
-    std::uint8_t feeding = 0;  // 1 = feeding on a carcass this tick, 0 = not
+    float wish_x = 0.0f;      // desired x steer toward nearest carcass (0 = none)
+    float wish_z = 0.0f;      // desired z steer toward nearest carcass (0 = none)
+    std::uint8_t feeding = 0; // 1 = feeding on a carcass this tick, 0 = not
 };
 
-}  // namespace Luminumbra::Components
+} // namespace Luminumbra::Components

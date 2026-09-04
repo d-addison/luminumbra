@@ -18,7 +18,7 @@ namespace F = luminumbra::foliage;
 namespace C = ::Luminumbra::Components;
 using luminumbra::core::DeterministicRng;
 
-const char* kWheat = R"({
+const char* const kWheat = R"({
   "id": "wheat", "render_archetype": "grass_crop", "perennial": false, "lifespan_ticks": 900,
   "genes": { "GrowthRate": [0.6, 0.9], "MaxScale": [0.15, 0.35], "Yield": [0.55, 0.90] }
 })";

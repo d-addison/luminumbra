@@ -1,7 +1,7 @@
 #include "UIHotReload.h"
 #include "core/Log.h"
-#include <filesystem>
 #include <algorithm>
+#include <filesystem>
 
 namespace Luminumbra::Client::UI {
 
@@ -18,14 +18,14 @@ void UIHotReload::WatchFile(const std::string& filePath) {
         LUMINUMBRA_CORE_WARN("[UI HotReload] File does not exist: {}", filePath);
         return;
     }
-    
+
     WatchedFile watchedFile;
     watchedFile.path = filePath;
     watchedFile.lastWriteTime = GetFileWriteTime(filePath);
     watchedFile.isDirectory = false;
-    
+
     m_watchedFiles[filePath] = watchedFile;
-    
+
     LUMINUMBRA_CORE_INFO("[UI HotReload] Watching file: {}", filePath);
 }
 
@@ -34,20 +34,21 @@ void UIHotReload::WatchDirectory(const std::string& directoryPath, const std::st
         LUMINUMBRA_CORE_WARN("[UI HotReload] Directory does not exist: {}", directoryPath);
         return;
     }
-    
+
     WatchedFile watchedDir;
     watchedDir.path = directoryPath;
     watchedDir.lastWriteTime = GetFileWriteTime(directoryPath);
     watchedDir.isDirectory = true;
     watchedDir.extension = extension;
-    
+
     m_watchedFiles[directoryPath] = watchedDir;
-    
+
     // Also watch existing files in the directory
     ScanDirectory(directoryPath, extension);
-    
-    LUMINUMBRA_CORE_INFO("[UI HotReload] Watching directory: {} (extension: {})", 
-                          directoryPath, extension.empty() ? "*" : extension);
+
+    LUMINUMBRA_CORE_INFO("[UI HotReload] Watching directory: {} (extension: {})",
+                         directoryPath,
+                         extension.empty() ? "*" : extension);
 }
 
 void UIHotReload::StopWatching(const std::string& path) {
@@ -67,17 +68,17 @@ void UIHotReload::Update() {
     if (!m_enabled || m_watchedFiles.empty()) {
         return;
     }
-    
+
     auto now = std::chrono::steady_clock::now();
     if (now - m_lastCheck < CHECK_INTERVAL) {
         return;
     }
-    
+
     m_lastCheck = now;
-    
+
     // Check all watched files/directories
     std::vector<std::string> changedFiles;
-    
+
     for (auto& [path, watchedFile] : m_watchedFiles) {
         if (CheckFileChanged(watchedFile)) {
             if (watchedFile.isDirectory) {
@@ -89,7 +90,7 @@ void UIHotReload::Update() {
             }
         }
     }
-    
+
     // Trigger reloads for changed files
     for (const auto& filePath : changedFiles) {
         TriggerReload(filePath);
@@ -114,14 +115,14 @@ bool UIHotReload::CheckFileChanged(WatchedFile& watchedFile) {
     if (!FileExists(watchedFile.path)) {
         return false;
     }
-    
+
     auto currentWriteTime = GetFileWriteTime(watchedFile.path);
-    
+
     if (currentWriteTime != watchedFile.lastWriteTime) {
         watchedFile.lastWriteTime = currentWriteTime;
         return true;
     }
-    
+
     return false;
 }
 
@@ -130,7 +131,7 @@ void UIHotReload::ScanDirectory(const std::string& directoryPath, const std::str
         for (const auto& entry : std::filesystem::recursive_directory_iterator(directoryPath)) {
             if (entry.is_regular_file()) {
                 std::string filePath = entry.path().string();
-                
+
                 // Filter by extension if specified
                 if (!extension.empty()) {
                     std::string fileExt = entry.path().extension().string();
@@ -138,7 +139,7 @@ void UIHotReload::ScanDirectory(const std::string& directoryPath, const std::str
                         continue;
                     }
                 }
-                
+
                 // Check if we're already watching this file individually
                 auto it = m_watchedFiles.find(filePath);
                 if (it == m_watchedFiles.end()) {
@@ -147,7 +148,7 @@ void UIHotReload::ScanDirectory(const std::string& directoryPath, const std::str
                     watchedFile.path = filePath;
                     watchedFile.lastWriteTime = GetFileWriteTime(filePath);
                     watchedFile.isDirectory = false;
-                    
+
                     m_watchedFiles[filePath] = watchedFile;
                 } else {
                     // Check if existing watched file changed
@@ -158,7 +159,8 @@ void UIHotReload::ScanDirectory(const std::string& directoryPath, const std::str
             }
         }
     } catch (const std::filesystem::filesystem_error& e) {
-        LUMINUMBRA_CORE_ERROR("[UI HotReload] Error scanning directory {}: {}", directoryPath, e.what());
+        LUMINUMBRA_CORE_ERROR(
+            "[UI HotReload] Error scanning directory {}: {}", directoryPath, e.what());
     }
 }
 

@@ -1,8 +1,8 @@
 #include "NetworkStateHash.h"
 
 #include "NetworkLoopbackAuthority.h"
-#include "persistence/WorldPersistenceRoundtrip.h"
 #include "ecs/EntitySnapshot.h"
+#include "persistence/WorldPersistenceRoundtrip.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -26,8 +26,7 @@ constexpr const char* kHashAlgorithm = "fnv1a_64_canonical_state_string";
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
 constexpr std::uint64_t kFnvPrime = 1099511628211ull;
 
-std::uint64_t Fnv1a64(const std::string& value)
-{
+std::uint64_t Fnv1a64(const std::string& value) {
     std::uint64_t hash = kFnvOffset;
     for (const unsigned char byte : value) {
         hash ^= byte;
@@ -36,15 +35,13 @@ std::uint64_t Fnv1a64(const std::string& value)
     return hash;
 }
 
-std::string Hex64(const std::uint64_t value)
-{
+std::string Hex64(const std::uint64_t value) {
     std::ostringstream out;
     out << std::hex << std::setfill('0') << std::setw(16) << value;
     return out.str();
 }
 
-const char* BoolLiteral(const bool value)
-{
+const char* BoolLiteral(const bool value) {
     return value ? "true" : "false";
 }
 
@@ -52,17 +49,13 @@ const char* BoolLiteral(const bool value)
 // authoritative server decision stream, suffixed with the durable entity ids
 // (already sorted ascending by the entity snapshot order contract) and the
 // stable world hash from the persistence gate.
-std::string CanonicalStateString(
-    const NetworkLoopbackState& state,
-    const std::vector<std::string>& durableEntityIds,
-    const std::string& worldHash)
-{
+std::string CanonicalStateString(const NetworkLoopbackState& state,
+                                 const std::vector<std::string>& durableEntityIds,
+                                 const std::string& worldHash) {
     std::ostringstream out;
     out << "authoritative_revision=" << state.authoritativeRevision
-        << "|position_x_mm=" << state.positionXMm
-        << "|position_y_mm=" << state.positionYMm
-        << "|tick=" << state.tick
-        << "|entities=";
+        << "|position_x_mm=" << state.positionXMm << "|position_y_mm=" << state.positionYMm
+        << "|tick=" << state.tick << "|entities=";
     for (std::size_t i = 0; i < durableEntityIds.size(); ++i) {
         if (i != 0u) {
             out << ',';
@@ -78,11 +71,9 @@ struct ReplayTrace {
     std::string finalStateHash;
 };
 
-ReplayTrace BuildReplayTrace(
-    const NetworkLoopbackConvergenceReport& loopback,
-    const std::vector<std::string>& durableEntityIds,
-    const std::string& worldHash)
-{
+ReplayTrace BuildReplayTrace(const NetworkLoopbackConvergenceReport& loopback,
+                             const std::vector<std::string>& durableEntityIds,
+                             const std::string& worldHash) {
     ReplayTrace trace;
     std::uint64_t chained = kFnvOffset;
     for (const NetworkLoopbackDecision& decision : loopback.decisions) {
@@ -94,7 +85,8 @@ ReplayTrace BuildReplayTrace(
         tick.authoritativeRevision = decision.authoritativeState.authoritativeRevision;
         tick.positionXMm = decision.authoritativeState.positionXMm;
         tick.positionYMm = decision.authoritativeState.positionYMm;
-        tick.canonicalState = CanonicalStateString(decision.authoritativeState, durableEntityIds, worldHash);
+        tick.canonicalState =
+            CanonicalStateString(decision.authoritativeState, durableEntityIds, worldHash);
         const std::uint64_t tick_hash = Fnv1a64(tick.canonicalState);
         tick.stateHash = Hex64(tick_hash);
         chained ^= tick_hash;
@@ -107,10 +99,9 @@ ReplayTrace BuildReplayTrace(
 
 } // namespace
 
-NetworkStateHashReport BuildNetworkStateHashFixture(
-    const Luminumbra::Ecs::EntityRegistrySnapshot& entities_fixture,
-    const std::string& buildPreset)
-{
+NetworkStateHashReport
+BuildNetworkStateHashFixture(const Luminumbra::Ecs::EntityRegistrySnapshot& entities_fixture,
+                             const std::string& buildPreset) {
     NetworkStateHashReport report;
     report.schema = kSchema;
     report.buildPreset = buildPreset;
@@ -133,11 +124,14 @@ NetworkStateHashReport BuildNetworkStateHashFixture(
         report.durableEntityIds.push_back(std::to_string(entity.entity_id));
     }
 
-    const NetworkLoopbackConvergenceReport loopback = BuildNetworkLoopbackConvergenceFixture(buildPreset);
+    const NetworkLoopbackConvergenceReport loopback =
+        BuildNetworkLoopbackConvergenceFixture(buildPreset);
     const ReplayTrace first = BuildReplayTrace(loopback, report.durableEntityIds, report.worldHash);
 
-    const NetworkLoopbackConvergenceReport replayed_loopback = BuildNetworkLoopbackConvergenceFixture(buildPreset);
-    const ReplayTrace second = BuildReplayTrace(replayed_loopback, report.durableEntityIds, report.worldHash);
+    const NetworkLoopbackConvergenceReport replayed_loopback =
+        BuildNetworkLoopbackConvergenceFixture(buildPreset);
+    const ReplayTrace second =
+        BuildReplayTrace(replayed_loopback, report.durableEntityIds, report.worldHash);
 
     report.ticks = first.ticks;
     report.tickCount = static_cast<std::uint32_t>(first.ticks.size());
@@ -146,44 +140,47 @@ NetworkStateHashReport BuildNetworkStateHashFixture(
 
     report.deterministicReplay =
         first.ticks.size() == second.ticks.size() &&
-        std::equal(
-            first.ticks.begin(), first.ticks.end(), second.ticks.begin(),
-            [](const NetworkStateHashTick& lhs, const NetworkStateHashTick& rhs) {
-                return lhs.stateHash == rhs.stateHash && lhs.tick == rhs.tick;
-            }) &&
+        std::equal(first.ticks.begin(),
+                   first.ticks.end(),
+                   second.ticks.begin(),
+                   [](const NetworkStateHashTick& lhs, const NetworkStateHashTick& rhs) {
+                       return lhs.stateHash == rhs.stateHash && lhs.tick == rhs.tick;
+                   }) &&
         first.finalStateHash == second.finalStateHash;
 
-    report.monotonicTicks = std::is_sorted(
-        report.ticks.begin(), report.ticks.end(),
-        [](const NetworkStateHashTick& lhs, const NetworkStateHashTick& rhs) {
-            return lhs.tick < rhs.tick;
-        });
+    report.monotonicTicks =
+        std::is_sorted(report.ticks.begin(),
+                       report.ticks.end(),
+                       [](const NetworkStateHashTick& lhs, const NetworkStateHashTick& rhs) {
+                           return lhs.tick < rhs.tick;
+                       });
 
     const bool world_hash_present = world_hash.passed && !report.worldHash.empty();
     const bool entities_present = !report.durableEntityIds.empty();
     const bool loopback_baseline = NetworkLoopbackAuthorityMeetsBaseline(loopback);
     const bool ticks_present = report.tickCount >= 5u;
-    const bool hashes_present = std::all_of(
-        report.ticks.begin(), report.ticks.end(),
-        [](const NetworkStateHashTick& tick) { return tick.stateHash.size() == 16u; });
+    const bool hashes_present =
+        std::all_of(report.ticks.begin(), report.ticks.end(), [](const NetworkStateHashTick& tick) {
+            return tick.stateHash.size() == 16u;
+        });
 
     report.checks = {
         {"world hash from persistence gate is stable and present", world_hash_present},
         {"durable entity ids come from the sorted entity snapshot", entities_present},
         {"loopback authority fixture meets its baseline", loopback_baseline},
-        {"every accepted authoritative tick produces a state hash", ticks_present && hashes_present},
+        {"every accepted authoritative tick produces a state hash",
+         ticks_present && hashes_present},
         {"per-tick hashes are identical across a full replay", report.deterministicReplay},
         {"authoritative ticks hash in ascending tick order", report.monotonicTicks},
     };
 
-    report.passed = std::all_of(
-        report.checks.begin(), report.checks.end(),
-        [](const NetworkStateHashCheck& check) { return check.passed; });
+    report.passed = std::all_of(report.checks.begin(),
+                                report.checks.end(),
+                                [](const NetworkStateHashCheck& check) { return check.passed; });
     return report;
 }
 
-std::string SerializeNetworkStateHashJson(const NetworkStateHashReport& report)
-{
+std::string SerializeNetworkStateHashJson(const NetworkStateHashReport& report) {
     std::ostringstream out;
     out << "{\n";
     out << "  \"schema\": \"" << report.schema << "\",\n";
@@ -222,15 +219,15 @@ std::string SerializeNetworkStateHashJson(const NetworkStateHashReport& report)
         out << "    {\"tick\": " << tick.tick
             << ", \"authoritative_revision\": " << tick.authoritativeRevision
             << ", \"position_x_mm\": " << tick.positionXMm
-            << ", \"position_y_mm\": " << tick.positionYMm
-            << ", \"state_hash\": \"" << tick.stateHash << "\"}";
+            << ", \"position_y_mm\": " << tick.positionYMm << ", \"state_hash\": \""
+            << tick.stateHash << "\"}";
         out << (i + 1u < report.ticks.size() ? ",\n" : "\n");
     }
     out << "  ],\n";
     out << "  \"checks\": [\n";
     for (std::size_t i = 0; i < report.checks.size(); ++i) {
-        out << "    {\"name\": \"" << report.checks[i].name << "\", \"passed\": "
-            << BoolLiteral(report.checks[i].passed) << "}";
+        out << "    {\"name\": \"" << report.checks[i].name
+            << "\", \"passed\": " << BoolLiteral(report.checks[i].passed) << "}";
         out << (i + 1u < report.checks.size() ? ",\n" : "\n");
     }
     out << "  ]\n";
@@ -238,23 +235,15 @@ std::string SerializeNetworkStateHashJson(const NetworkStateHashReport& report)
     return out.str();
 }
 
-bool NetworkStateHashMeetsBaseline(const NetworkStateHashReport& report)
-{
-    return report.passed &&
-        report.schema == kSchema &&
-        report.deterministicReplay &&
-        report.monotonicTicks &&
-        report.tickCount >= 5u &&
-        !report.worldHash.empty() &&
-        !report.durableEntityIds.empty() &&
-        report.finalStateHash == report.replayFinalStateHash;
+bool NetworkStateHashMeetsBaseline(const NetworkStateHashReport& report) {
+    return report.passed && report.schema == kSchema && report.deterministicReplay &&
+           report.monotonicTicks && report.tickCount >= 5u && !report.worldHash.empty() &&
+           !report.durableEntityIds.empty() && report.finalStateHash == report.replayFinalStateHash;
 }
 
-bool WriteNetworkStateHashArtifact(
-    const std::string& path,
-    const Luminumbra::Ecs::EntityRegistrySnapshot& entities,
-    const std::string& buildPreset)
-{
+bool WriteNetworkStateHashArtifact(const std::string& path,
+                                   const Luminumbra::Ecs::EntityRegistrySnapshot& entities,
+                                   const std::string& buildPreset) {
     const NetworkStateHashReport report = BuildNetworkStateHashFixture(entities, buildPreset);
     const std::filesystem::path output_path(path);
     std::error_code ec;

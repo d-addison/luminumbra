@@ -20,20 +20,23 @@
 namespace {
 
 namespace Comp = ::Luminumbra::Components;
-using luminumbra::foliage::RunPollinationOnTick;
 using luminumbra::foliage::PollinateCross;
 using luminumbra::foliage::PollinationStats;
+using luminumbra::foliage::RunPollinationOnTick;
 
 // A genome whose genes are all the same constant — easy to reason about blends.
 Comp::PlantGenomeComponent uniformGenome(float v) {
     Comp::PlantGenomeComponent g;
-    for (auto& gene : g.genes) gene = v;
+    for (auto& gene : g.genes)
+        gene = v;
     return g;
 }
 
 // Spawn a pollination participant at (x,z). `stage` decides whether it can DONATE
 // pollen (Flowering/Fruiting) — receivers can be any stage. Returns the entity.
-entt::entity spawnPlant(entt::registry& r, float x, float z,
+entt::entity spawnPlant(entt::registry& r,
+                        float x,
+                        float z,
                         const Comp::PlantGenomeComponent& genome,
                         Comp::PlantStage stage) {
     auto e = r.create();
@@ -51,7 +54,10 @@ entt::entity spawnPlant(entt::registry& r, float x, float z,
 
 int plantCount(entt::registry& r) {
     int n = 0;
-    for (auto e : r.view<Comp::PlantGenomeComponent>()) { (void)e; ++n; }
+    for (auto e : r.view<Comp::PlantGenomeComponent>()) {
+        (void)e;
+        ++n;
+    }
     return n;
 }
 
@@ -78,7 +84,7 @@ TEST(Pollination, UntaggedPlantIgnored) {
         r.emplace<Comp::PlantGenomeComponent>(e, uniformGenome(0.5f));
         auto& gr = r.emplace<Comp::PlantGrowthComponent>(e);
         gr.stage = static_cast<std::uint8_t>(Comp::PlantStage::Flowering);
-        r.emplace<Comp::PollinationComponent>(e);  // has result slot but no tag
+        r.emplace<Comp::PollinationComponent>(e); // has result slot but no tag
     };
     mk(0.0f);
     mk(1.0f);
@@ -112,8 +118,10 @@ TEST(Pollination, NeighbourCrossProducesMix) {
     for (float g : pc.next_genome.genes) {
         EXPECT_GE(g, 0.0f);
         EXPECT_LE(g, 1.0f);
-        if (g != lo) differs_from_lo = true;
-        if (g != hi) differs_from_hi = true;
+        if (g != lo)
+            differs_from_lo = true;
+        if (g != hi)
+            differs_from_hi = true;
     }
     EXPECT_TRUE(differs_from_lo) << "mix must not equal the receiver parent exactly";
     EXPECT_TRUE(differs_from_hi) << "mix must not equal the donor parent exactly";
@@ -209,8 +217,10 @@ TEST(Pollination, RunEqualsReplay) {
         const auto& g1 = r.get<Comp::PollinationComponent>(rcv1).next_genome;
         const auto& g2 = r.get<Comp::PollinationComponent>(rcv2).next_genome;
         std::vector<float> out;
-        for (float g : g1.genes) out.push_back(g);
-        for (float g : g2.genes) out.push_back(g);
+        for (float g : g1.genes)
+            out.push_back(g);
+        for (float g : g2.genes)
+            out.push_back(g);
         return out;
     };
     EXPECT_EQ(run(), run());
@@ -257,10 +267,10 @@ TEST(Pollination, WindExtendsDownwindReach) {
         }
         return RunPollinationOnTick(reg, /*tick*/ 4, wind).crossed;
     };
-    EXPECT_EQ(crossedWith(::Luminumbra::Vec2(0.0f, 0.0f)), 0)  // still air: out of reach
+    EXPECT_EQ(crossedWith(::Luminumbra::Vec2(0.0f, 0.0f)), 0) // still air: out of reach
         << "6.5m apart exceeds the still-air pollination radius";
-    EXPECT_EQ(crossedWith(::Luminumbra::Vec2(1.0f, 0.0f)), 1)  // downwind: in reach
+    EXPECT_EQ(crossedWith(::Luminumbra::Vec2(1.0f, 0.0f)), 1) // downwind: in reach
         << "downwind pollen should reach further";
 }
 
-}  // namespace
+} // namespace

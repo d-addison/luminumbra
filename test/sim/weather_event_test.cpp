@@ -13,13 +13,13 @@
 
 namespace {
 
+using luminumbra::sim::kWeatherEventCount;
+using luminumbra::sim::kWindowTicks;
 using luminumbra::sim::WeatherEvent;
-using luminumbra::sim::WeatherEventState;
 using luminumbra::sim::WeatherEventAt;
 using luminumbra::sim::WeatherEventDriver;
 using luminumbra::sim::WeatherEventName;
-using luminumbra::sim::kWindowTicks;
-using luminumbra::sim::kWeatherEventCount;
+using luminumbra::sim::WeatherEventState;
 
 // ---- determinism: same (tick, seed) -> same state ----
 
@@ -114,8 +114,10 @@ TEST(WeatherEvents, RunEqualsReplayOverManyTicks) {
     std::vector<WeatherEventState> run2;
     run1.reserve(6000);
     run2.reserve(6000);
-    for (std::uint64_t t = 0; t < 6000ull; ++t) run1.push_back(WeatherEventAt(t, seed));
-    for (std::uint64_t t = 0; t < 6000ull; ++t) run2.push_back(WeatherEventAt(t, seed));
+    for (std::uint64_t t = 0; t < 6000ull; ++t)
+        run1.push_back(WeatherEventAt(t, seed));
+    for (std::uint64_t t = 0; t < 6000ull; ++t)
+        run2.push_back(WeatherEventAt(t, seed));
     ASSERT_EQ(run1.size(), run2.size());
     for (std::size_t i = 0; i < run1.size(); ++i) {
         EXPECT_EQ(run1[i].event, run2[i].event) << "tick " << i;
@@ -133,7 +135,8 @@ TEST(WeatherEvents, DifferentSeedsDiverge) {
     for (std::uint64_t w = 0; w < 500ull && !diverged; ++w) {
         const WeatherEvent a = WeatherEventAt(w * kWindowTicks, 1ull).event;
         const WeatherEvent b = WeatherEventAt(w * kWindowTicks, 2ull).event;
-        if (a != b) diverged = true;
+        if (a != b)
+            diverged = true;
     }
     EXPECT_TRUE(diverged);
 }

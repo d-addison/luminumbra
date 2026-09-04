@@ -90,8 +90,6 @@ TEXT_EXCLUDED_PREFIXES = ("vendor/",)
 # contain the tokens they recognize. Paths are exact so this cannot mask another
 # first-party file.
 TEXT_EXCLUDED_FILES = {
-    "tools/cgltf.h",
-    "tools/cgltf_write.h",
     "tools/ci/validate_public_tree.py",
     "tools/ci/test_validate_public_tree.py",
 }

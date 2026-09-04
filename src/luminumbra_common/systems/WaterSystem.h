@@ -22,6 +22,30 @@ struct TransformComponent;
 
 namespace Luminumbra::Systems {
 
+namespace WaterScheduling {
+
+// Integer-only scheduler input. Activity is derived from persisted water edge flux, and chunk ids
+// are unique. Keeping the selection kernel independent of Chunk makes its cadence contract directly
+// testable without constructing a streaming world.
+struct Candidate {
+    ChunkID id;
+    std::uint64_t activity;
+};
+
+struct Selection {
+    std::vector<ChunkID> chunk_ids;
+    std::size_t next_cursor = 0;
+};
+
+// Select at most window_chunks candidates. Half the budget may favour non-zero activity; the
+// remainder is filled by the persisted round-robin cursor so calm chunks cannot starve. Priority
+// is totally ordered by (activity descending, chunk id ascending).
+Selection SelectPriorityWindow(std::vector<Candidate> candidates,
+                               std::size_t window_chunks,
+                               std::size_t cursor);
+
+} // namespace WaterScheduling
+
 // Adaptive water grid resolution levels
 enum class WaterDetailLevel {
     Off = 0,    // No simulation
@@ -204,13 +228,11 @@ public:
         return m_dbg_water;
     }
 
-    // the rotating sim-window cursor is EVOLUTION-RELEVANT sim state whenever
-    // more chunks are awake than the derived sim window (which window sims
-    // first changes subsequent depths). It stays in CHUNK-INDEX space — the per-tick window
-    // length is derived from the MAX_WATER_CELLS_PER_TICK budget, a constant 64 chunks at the
-    // uniform Medium resolution. It is persisted with the world (world_info.json
-    // waterSimCursor) and restored on load so a loaded session resimulates the exact
-    // same windows the original would from the same state. Not itself hashed.
+    // The sim-window cursor is EVOLUTION-RELEVANT state whenever more chunks are awake than the
+    // derived window. At Medium it retains the historical flat rotation byte-for-byte. At High it
+    // drives the fair-share portion of the deterministic activity-priority budget. It stays in
+    // sorted CHUNK-INDEX space and is persisted as world_info.json waterSimCursor, so a loaded
+    // session resumes the same selection sequence from the same water state. Not itself hashed.
     [[nodiscard]] std::size_t GetSimWindowCursor() const {
         return m_water_sim_cursor;
     }
@@ -275,13 +297,10 @@ private:
     // loaded-boot water pause (see SetBootPaused). update is a no-op while set.
     bool m_boot_paused = false;
 
-    //  implementation note (streaming-burst amortization): rotating cursor for the per-tick
-    //  water-sim
-    // budget. When more cells are active than MAX_WATER_CELLS_PER_TICK, we sim a DETERMINISTIC
-    // window (sorted by chunk id) and rotate it each tick so every chunk sims over a few ticks
-    // instead of all-at-once (which blocked the main thread ~450ms on m_job_system->wait when
-    // moving into water). Deterministic (no job-timing dependence) — guarded by the
-    // WaterDeterminism live-water gate.
+    // Deterministic per-tick water-sim budget cursor. Medium uses the historical flat rotating
+    // window. Higher resolutions reserve a fair-share slice selected by this cursor while the
+    // remaining budget favours chunks with persisted non-zero integer edge flux. This keeps an
+    // active flow front advancing every wall tick without starving calm chunks.
     //  mass-conservation telemetry: last tick's total source/sink (mm) and whether the
     // integer mass invariant held (Σdepth change == Σsource − Σsink). Render/debug only — not
     // hashed.
@@ -321,6 +340,10 @@ private:
     DbgWaterTimings m_dbg_water;              // sub-phase telemetry (see dbg_water_timings())
 
     std::size_t m_water_sim_cursor = 0;
+    // Derived acceleration structure only: entries are reconstructed from persisted integer water
+    // arrays on first use and refreshed after every selected simulation pass. Point lookups never
+    // contribute container iteration order to scheduling.
+    std::unordered_map<ChunkID, std::uint64_t> m_water_activity_cache;
     //  implementation note: rotating cursor for the per-tick water-grid RESIZE budget (see
     // MAX_WATER_RESIZES_PER_TICK). Same deterministic-window amortization as m_water_sim_cursor.
     std::size_t m_water_resize_cursor = 0;

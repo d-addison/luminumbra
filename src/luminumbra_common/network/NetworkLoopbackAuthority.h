@@ -183,86 +183,72 @@ struct NetworkRemoteAvatarRenderReport {
     std::vector<NetworkRemoteAvatarRenderCheck> checks;
 };
 
-NetworkLoopbackConvergenceReport BuildNetworkLoopbackConvergenceFixture(
-    const std::string& buildPreset = "debug");
+NetworkLoopbackConvergenceReport
+BuildNetworkLoopbackConvergenceFixture(const std::string& buildPreset = "debug");
 
-std::string SerializeNetworkLoopbackConvergenceJson(
-    const NetworkLoopbackConvergenceReport& report);
+std::string SerializeNetworkLoopbackConvergenceJson(const NetworkLoopbackConvergenceReport& report);
 
-bool NetworkLoopbackAuthorityMeetsBaseline(
-    const NetworkLoopbackConvergenceReport& report);
+bool NetworkLoopbackAuthorityMeetsBaseline(const NetworkLoopbackConvergenceReport& report);
 
-bool WriteNetworkLoopbackConvergenceArtifact(
-    const std::string& path,
-    const std::string& buildPreset = "debug");
+bool WriteNetworkLoopbackConvergenceArtifact(const std::string& path,
+                                             const std::string& buildPreset = "debug");
 
-bool TryNetworkMultiClientAcceptPortForClient(
-    std::uint16_t basePort,
-    std::uint32_t clientId,
-    std::uint16_t& outPort);
+bool TryNetworkMultiClientAcceptPortForClient(std::uint16_t basePort,
+                                              std::uint32_t clientId,
+                                              std::uint16_t& outPort);
 
-NetworkMultiClientAcceptReport BuildNetworkMultiClientAcceptFixture(
-    std::uint32_t expectedClientCount = 2,
-    std::uint16_t basePort = 27015);
+NetworkMultiClientAcceptReport
+BuildNetworkMultiClientAcceptFixture(std::uint32_t expectedClientCount = 2,
+                                     std::uint16_t basePort = 27015);
 
-std::string SerializeNetworkMultiClientAcceptJson(
-    const NetworkMultiClientAcceptReport& report);
+std::string SerializeNetworkMultiClientAcceptJson(const NetworkMultiClientAcceptReport& report);
 
-bool NetworkMultiClientAcceptMeetsBaseline(
-    const NetworkMultiClientAcceptReport& report);
+bool NetworkMultiClientAcceptMeetsBaseline(const NetworkMultiClientAcceptReport& report);
 
-bool WriteNetworkMultiClientAcceptArtifact(
-    const std::string& path,
-    std::uint32_t expectedClientCount = 2,
-    std::uint16_t basePort = 27015);
+bool WriteNetworkMultiClientAcceptArtifact(const std::string& path,
+                                           std::uint32_t expectedClientCount = 2,
+                                           std::uint16_t basePort = 27015);
 
-NetworkRuntimeJoinLeaveReport BuildNetworkRuntimeJoinLeaveFixture(
-    std::uint32_t expectedClientCount = 2,
-    std::uint16_t basePort = 27015,
-    std::uint32_t ticksExecuted = 12);
+NetworkRuntimeJoinLeaveReport
+BuildNetworkRuntimeJoinLeaveFixture(std::uint32_t expectedClientCount = 2,
+                                    std::uint16_t basePort = 27015,
+                                    std::uint32_t ticksExecuted = 12);
 
-std::string SerializeNetworkRuntimeJoinLeaveJson(
-    const NetworkRuntimeJoinLeaveReport& report);
+std::string SerializeNetworkRuntimeJoinLeaveJson(const NetworkRuntimeJoinLeaveReport& report);
 
-bool NetworkRuntimeJoinLeaveMeetsBaseline(
-    const NetworkRuntimeJoinLeaveReport& report);
+bool NetworkRuntimeJoinLeaveMeetsBaseline(const NetworkRuntimeJoinLeaveReport& report);
 
-bool WriteNetworkRuntimeJoinLeaveArtifact(
-    const std::string& path,
-    std::uint32_t expectedClientCount = 2,
-    std::uint16_t basePort = 27015,
-    std::uint32_t ticksExecuted = 12);
+bool WriteNetworkRuntimeJoinLeaveArtifact(const std::string& path,
+                                          std::uint32_t expectedClientCount = 2,
+                                          std::uint16_t basePort = 27015,
+                                          std::uint32_t ticksExecuted = 12);
 
-NetworkRemoteAvatarRenderReport BuildNetworkRemoteAvatarRenderReport(
-    std::uint32_t localClientId,
-    const std::vector<NetworkRemoteAvatarRenderPose>& poses,
-    std::uint32_t expectedAvatarCount,
-    std::uint32_t snapshotFrameCount,
-    std::uint32_t renderedAvatarCount,
-    std::uint32_t skinnedDraws,
-    std::uint32_t skinnedIndicesDrawn);
+NetworkRemoteAvatarRenderReport
+BuildNetworkRemoteAvatarRenderReport(std::uint32_t localClientId,
+                                     const std::vector<NetworkRemoteAvatarRenderPose>& poses,
+                                     std::uint32_t expectedAvatarCount,
+                                     std::uint32_t snapshotFrameCount,
+                                     std::uint32_t renderedAvatarCount,
+                                     std::uint32_t skinnedDraws,
+                                     std::uint32_t skinnedIndicesDrawn);
 
-NetworkRemoteAvatarRenderReport BuildNetworkRemoteAvatarRenderFixture(
-    std::uint32_t expectedAvatarCount = 3,
-    std::uint32_t renderedAvatarCount = 3,
-    std::uint32_t skinnedDraws = 3,
-    std::uint32_t skinnedIndicesDrawn = 900);
+NetworkRemoteAvatarRenderReport
+BuildNetworkRemoteAvatarRenderFixture(std::uint32_t expectedAvatarCount = 3,
+                                      std::uint32_t renderedAvatarCount = 3,
+                                      std::uint32_t skinnedDraws = 3,
+                                      std::uint32_t skinnedIndicesDrawn = 900);
 
-std::string SerializeNetworkRemoteAvatarRenderJson(
-    const NetworkRemoteAvatarRenderReport& report);
+std::string SerializeNetworkRemoteAvatarRenderJson(const NetworkRemoteAvatarRenderReport& report);
 
-bool NetworkRemoteAvatarRenderMeetsBaseline(
-    const NetworkRemoteAvatarRenderReport& report);
+bool NetworkRemoteAvatarRenderMeetsBaseline(const NetworkRemoteAvatarRenderReport& report);
 
-bool WriteNetworkRemoteAvatarRenderArtifact(
-    const std::string& path,
-    const NetworkRemoteAvatarRenderReport& report);
+bool WriteNetworkRemoteAvatarRenderArtifact(const std::string& path,
+                                            const NetworkRemoteAvatarRenderReport& report);
 
-bool WriteNetworkRemoteAvatarRenderFixtureArtifact(
-    const std::string& path,
-    std::uint32_t expectedAvatarCount = 3,
-    std::uint32_t renderedAvatarCount = 3,
-    std::uint32_t skinnedDraws = 3,
-    std::uint32_t skinnedIndicesDrawn = 900);
+bool WriteNetworkRemoteAvatarRenderFixtureArtifact(const std::string& path,
+                                                   std::uint32_t expectedAvatarCount = 3,
+                                                   std::uint32_t renderedAvatarCount = 3,
+                                                   std::uint32_t skinnedDraws = 3,
+                                                   std::uint32_t skinnedIndicesDrawn = 900);
 
 } // namespace luminumbra::network

@@ -695,6 +695,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     std::vector<glm::vec4> surf_grid; // (height, moisture, slope, valid) per grid vert
     chunk_params.reserve(chunks.size());
     const int gv = kSurfaceGridVerts;
+    surf_grid.reserve(chunks.size() * static_cast<std::size_t>(gv) * static_cast<std::size_t>(gv));
 
     //  implementation note: the per-chunk surface grid is the expensive part (kSurfaceGridVerts^2
     // GetTerrainHeightAt calls) and is CAMERA-INDEPENDENT (pure function of chunk_xz + static
@@ -720,8 +721,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         }
 
         const std::uint64_t key =
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.x))) |
-            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.y)) << 32);
+            detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
         const std::vector<glm::vec4>* gridp = nullptr;
         auto git = m_surf_grid_cache.find(key);
         if (git != m_surf_grid_cache.end()) {
@@ -765,19 +765,9 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     // cap.
     m_foliage_build_backlog = deferred_any;
     if (m_surf_grid_cache.size() > 768) {
-        for (auto it = m_surf_grid_cache.begin(); it != m_surf_grid_cache.end();) {
-            bool live = false;
-            for (const ChunkScatter& c : chunks) {
-                const std::uint64_t k =
-                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.x))) |
-                    (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.y)) << 32);
-                if (k == it->first) {
-                    live = true;
-                    break;
-                }
-            }
-            it = live ? std::next(it) : m_surf_grid_cache.erase(it);
-        }
+        detail::prune_foliage_cache(m_surf_grid_cache, chunks, [](const ChunkScatter& chunk) {
+            return detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
+        });
     }
 
     const int chunk_count = static_cast<int>(chunk_params.size());

@@ -54,7 +54,9 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderReflection.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/PassShaderLayouts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ChunkGeometryPool.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GBufferPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/HierarchicalCuller.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LightingPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShadowPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SkyboxPass.cpp
@@ -103,6 +105,29 @@ set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/ui/gl3/RmlUi_Renderer_GL3.
 # the seam main() talks to).
 set(CLIENT_QA_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/AtmosphereAudio.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/CloudShadow.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/CreatureSliceSmoke.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/FarLodHorizonSmoke.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/FoliageInstancing.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/LightningStrike.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/LodGround.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/MaterialLodAnalysis.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/MaterialVisual.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/NetworkedSessionDriver.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/ParticleEmitterDeterminism.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/PersistenceRoundtrip.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/PlayerViewSmoke.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/Precipitation.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkinnedMeshVisualSmoke.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkyboxVisual.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/StreamingLodBoundary.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/TimeOfDaySeasonSweep.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/WaterfallVisual.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/WaterVisual.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/WeatherVisual.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/WindowModeStressSmoke.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/WorldVisualSweep.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerCapture.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/ScenarioRunnerDrive.cpp
 )

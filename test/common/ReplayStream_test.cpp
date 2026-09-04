@@ -78,6 +78,8 @@ TEST_F(ReplayStreamTest, HeaderRoundtrip) {
 
     const auto contents = replay::ReadReplay(m_path);
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     EXPECT_FALSE(contents->truncated);
     EXPECT_TRUE(contents->trailer_present);
 
@@ -120,6 +122,8 @@ TEST_F(ReplayStreamTest, RecordAppendReadIdentity) {
 
     const auto contents = replay::ReadReplay(m_path);
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     EXPECT_FALSE(contents->truncated);
     EXPECT_TRUE(contents->trailer_present);
     EXPECT_EQ(contents->tick_count, 30u);
@@ -171,6 +175,8 @@ TEST_F(ReplayStreamTest, TruncationDetected) {
     {
         const auto whole = replay::ReadReplay(m_path);
         ASSERT_TRUE(whole.has_value());
+        if (!whole.has_value())
+            return;
         EXPECT_FALSE(whole->truncated);
         EXPECT_TRUE(whole->trailer_present);
     }
@@ -193,6 +199,8 @@ TEST_F(ReplayStreamTest, TruncationDetected) {
     const auto truncated = replay::ReadReplay(m_path);
     // The header still parses, so we get contents -- but it must be flagged.
     ASSERT_TRUE(truncated.has_value());
+    if (!truncated.has_value())
+        return;
     EXPECT_TRUE(truncated->truncated);
     EXPECT_FALSE(truncated->trailer_present);
 }
@@ -230,6 +238,8 @@ TEST_F(ReplayStreamTest, CheckpointEncodeDecodeMultiple) {
 
     const auto contents = replay::ReadReplay(m_path);
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     EXPECT_FALSE(contents->truncated);
     EXPECT_EQ(contents->tick_count, 90u);
     EXPECT_EQ(contents->inputs.size(), 90u);

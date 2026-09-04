@@ -9,11 +9,38 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <glm/glm.hpp>
 
 namespace Luminumbra::Rendering {
+
+namespace detail {
+
+inline constexpr std::uint64_t pack_foliage_chunk_key(std::int32_t chunk_x, std::int32_t chunk_z) {
+    return static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk_x)) |
+           (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk_z)) << 32);
+}
+
+template<typename Cache, typename Chunks, typename KeyFn>
+void prune_foliage_cache(Cache& cache, const Chunks& chunks, KeyFn key_fn) {
+    std::unordered_set<std::uint64_t> live_keys;
+    live_keys.reserve(chunks.size());
+    for (const auto& chunk : chunks) {
+        live_keys.insert(key_fn(chunk));
+    }
+
+    for (auto it = cache.begin(); it != cache.end();) {
+        if (live_keys.find(it->first) == live_keys.end()) {
+            it = cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+} // namespace detail
 
 class Camera;
 class Shader;

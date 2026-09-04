@@ -31,15 +31,15 @@
 #include <memory>
 #include <vector>
 
-#include "entt/entt.hpp"
 #include "FastNoise/FastNoise.h"
 #include "core/JobSystem.h"
+#include "entt/entt.hpp"
 #include "world/Chunk.h"
 
 #include "systems/SHIELD_WorldSystem.h"
 
-#include "world/MarchingCubes.h"
 #include "systems/WaterSystem.h"
+#include "world/MarchingCubes.h"
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
@@ -130,7 +130,8 @@ TEST_F(WorldgenHardeningTest, SeedPurity_TwoWorldsSameChunkByteIdentical) {
     ASSERT_EQ(a.sdf_data.size(), b.sdf_data.size());
     EXPECT_EQ(a.sdf_data, b.sdf_data) << "SDF field drifted between identically-seeded worlds";
     ASSERT_EQ(a.heightmap_data.size(), b.heightmap_data.size());
-    EXPECT_EQ(a.heightmap_data, b.heightmap_data) << "heightmap drifted between identically-seeded worlds";
+    EXPECT_EQ(a.heightmap_data, b.heightmap_data)
+        << "heightmap drifted between identically-seeded worlds";
 }
 
 // Re-generating the SAME chunk object's coord through the SAME world twice must be
@@ -202,7 +203,8 @@ TEST_F(WorldgenHardeningTest, SeedPurity_InterleavedNeighboursDoNotPerturb) {
 
     Chunk after(target);
     world.GenerateChunkData(after);
-    EXPECT_EQ(baseline.sdf_data, after.sdf_data) << "target chunk perturbed by neighbour generation";
+    EXPECT_EQ(baseline.sdf_data, after.sdf_data)
+        << "target chunk perturbed by neighbour generation";
     EXPECT_EQ(baseline.heightmap_data, after.heightmap_data);
 }
 
@@ -221,7 +223,8 @@ TEST_F(WorldgenHardeningTest, SeedPurity_SeedSwitchIsReversible) {
     world.set_seed(kSeed);
     Chunk restored({1, 0, 1});
     world.GenerateChunkData(restored);
-    EXPECT_EQ(original.sdf_data, restored.sdf_data) << "seed switch+restore did not reproduce original field";
+    EXPECT_EQ(original.sdf_data, restored.sdf_data)
+        << "seed switch+restore did not reproduce original field";
     EXPECT_EQ(original.heightmap_data, restored.heightmap_data);
 }
 
@@ -302,8 +305,7 @@ TEST_F(WorldgenHardeningTest, Seam_SharedXBoundaryPlaneMatches) {
         for (int y = 0; y < kSizeY; ++y) {
             float lv = left.sdf_data[SdfIdx(CHUNK_SIZE_X, y, z)];
             float rv = right.sdf_data[SdfIdx(0, y, z)];
-            EXPECT_FLOAT_EQ(lv, rv)
-                << "X-seam mismatch at boundary y=" << y << " z=" << z;
+            EXPECT_FLOAT_EQ(lv, rv) << "X-seam mismatch at boundary y=" << y << " z=" << z;
         }
     }
 }
@@ -320,8 +322,7 @@ TEST_F(WorldgenHardeningTest, Seam_SharedZBoundaryPlaneMatches) {
         for (int y = 0; y < kSizeY; ++y) {
             float nv = near.sdf_data[SdfIdx(x, y, CHUNK_SIZE_Z)];
             float fv = far.sdf_data[SdfIdx(x, y, 0)];
-            EXPECT_FLOAT_EQ(nv, fv)
-                << "Z-seam mismatch at boundary x=" << x << " y=" << y;
+            EXPECT_FLOAT_EQ(nv, fv) << "Z-seam mismatch at boundary x=" << x << " y=" << y;
         }
     }
 }
@@ -338,8 +339,7 @@ TEST_F(WorldgenHardeningTest, Seam_SharedYBoundaryPlaneMatches) {
         for (int x = 0; x < kSizeX; ++x) {
             float lv = lower.sdf_data[SdfIdx(x, CHUNK_SIZE_Y, z)];
             float uv = upper.sdf_data[SdfIdx(x, 0, z)];
-            EXPECT_FLOAT_EQ(lv, uv)
-                << "Y-seam mismatch at boundary x=" << x << " z=" << z;
+            EXPECT_FLOAT_EQ(lv, uv) << "Y-seam mismatch at boundary x=" << x << " z=" << z;
         }
     }
 }
@@ -460,7 +460,8 @@ TEST_F(WorldgenHardeningTest, River_CarveChangesTerrainSomewhere) {
     for (float x = -1024.0f; x <= 1024.0f; x += 4.0f) {
         for (float z = -1024.0f; z <= 1024.0f; z += 4.0f) {
             float influence = world_on.RiverInfluenceAt(x, z);
-            if (influence > 0.0f) any_carve = true;
+            if (influence > 0.0f)
+                any_carve = true;
             // Where the river carve is strong, the carved terrain must be no higher
             // than the un-carved terrain (the channel lowers, never raises, ground).
             if (influence > 0.5f) {
@@ -671,9 +672,11 @@ TEST_F(WorldgenHardeningTest, Mesh_NormalsAreFiniteUnitVectors) {
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     ASSERT_FALSE(chunk.mesh_vertices.empty());
     for (const auto& v : chunk.mesh_vertices) {
-        EXPECT_TRUE(std::isfinite(v.normal.x) && std::isfinite(v.normal.y) && std::isfinite(v.normal.z))
+        EXPECT_TRUE(std::isfinite(v.normal.x) && std::isfinite(v.normal.y) &&
+                    std::isfinite(v.normal.z))
             << "non-finite normal";
-        float len = std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z);
+        float len =
+            std::sqrt(v.normal.x * v.normal.x + v.normal.y * v.normal.y + v.normal.z * v.normal.z);
         EXPECT_NEAR(len, 1.0f, 1e-3f) << "normal is not unit length (len=" << len << ")";
     }
 }
@@ -747,7 +750,11 @@ TEST_F(WorldgenHardeningTest, Degenerate_AllAirChunkEmptyMesh) {
     world.GenerateChunkData(chunk);
     // Every SDF sample should be positive (air): no isosurface, hence no mesh.
     bool any_solid = false;
-    for (float d : chunk.sdf_data) if (d <= 0.0f) { any_solid = true; break; }
+    for (float d : chunk.sdf_data)
+        if (d <= 0.0f) {
+            any_solid = true;
+            break;
+        }
     EXPECT_FALSE(any_solid) << "all-air chunk unexpectedly contains solid samples";
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     EXPECT_TRUE(chunk.mesh_vertices.empty()) << "all-air chunk produced stray vertices";
@@ -764,7 +771,11 @@ TEST_F(WorldgenHardeningTest, Degenerate_AllSolidChunkNoInteriorSurface) {
     Chunk chunk({0, 0, 0});
     world.GenerateChunkData(chunk);
     bool any_air = false;
-    for (float d : chunk.sdf_data) if (d > 0.0f) { any_air = true; break; }
+    for (float d : chunk.sdf_data)
+        if (d > 0.0f) {
+            any_air = true;
+            break;
+        }
     EXPECT_FALSE(any_air) << "all-solid chunk unexpectedly contains air samples";
     World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     // A fully-solid SDF has no zero-crossing, so marching cubes emits nothing.
@@ -778,7 +789,8 @@ TEST_F(WorldgenHardeningTest, Degenerate_CoarseGenerationLeavesSdfEmpty) {
     Chunk chunk({0, 0, 0});
     world.GenerateChunkData(chunk, /*target_step=*/4);
     EXPECT_TRUE(chunk.sdf_data.empty()) << "coarse (step>1) generation should skip the SDF";
-    EXPECT_FALSE(chunk.heightmap_data.empty()) << "coarse generation must still produce the heightmap";
+    EXPECT_FALSE(chunk.heightmap_data.empty())
+        << "coarse generation must still produce the heightmap";
     // The coarse heightmap must still match the analytic height (seam authority).
     const IVec3 base{0, 0, 0};
     for (int z = 0; z < kSizeZ; ++z) {
@@ -847,9 +859,11 @@ TEST_F(WorldgenHardeningTest, Flat_DensitySignMonotoneInY) {
     SHIELD_WorldSystem world(nullptr, nullptr, params_flat, kSeed);
     const float surf = params_flat.height_offset;
     for (float below = surf - 1.0f; below >= surf - 6.0f; below -= 1.0f) {
-        EXPECT_LT(world.get_density_at({8.0f, below, 8.0f}), 0.0f) << "expected solid below surface at y=" << below;
+        EXPECT_LT(world.get_density_at({8.0f, below, 8.0f}), 0.0f)
+            << "expected solid below surface at y=" << below;
     }
     for (float above = surf + 1.0f; above <= surf + 6.0f; above += 1.0f) {
-        EXPECT_GT(world.get_density_at({8.0f, above, 8.0f}), 0.0f) << "expected air above surface at y=" << above;
+        EXPECT_GT(world.get_density_at({8.0f, above, 8.0f}), 0.0f)
+            << "expected air above surface at y=" << above;
     }
 }

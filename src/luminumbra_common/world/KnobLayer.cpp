@@ -25,12 +25,15 @@ namespace {
 // the flag governs ramp in alongside it.
 // ------------------------------------------------------------------------
 
-struct SplinePoint { float knob; float value; };
+struct SplinePoint {
+    float knob;
+    float value;
+};
 
 struct KnobNumericMap {
     Knob knob;
-    const char* path;     // dotted generation_params key
-    const char* type;     // "float" | "int"
+    const char* path;                // dotted generation_params key
+    const char* type;                // "float" | "int"
     std::vector<SplinePoint> spline; // knob in [0,1] ascending; value monotone
 };
 
@@ -50,9 +53,12 @@ struct KnobFlagMap {
 // Monotone piecewise-linear evaluation with endpoint clamping. `spline` is
 // ascending in .knob.
 float EvalSpline(const std::vector<SplinePoint>& s, float t) {
-    if (s.empty()) return 0.0f;
-    if (t <= s.front().knob) return s.front().value;
-    if (t >= s.back().knob) return s.back().value;
+    if (s.empty())
+        return 0.0f;
+    if (t <= s.front().knob)
+        return s.front().value;
+    if (t >= s.back().knob)
+        return s.back().value;
     for (std::size_t i = 1; i < s.size(); ++i) {
         if (t <= s[i].knob) {
             const float t0 = s[i - 1].knob, t1 = s[i].knob;
@@ -70,46 +76,73 @@ float EvalSpline(const std::vector<SplinePoint>& s, float t) {
 const std::vector<KnobNumericMap>& NumericMaps() {
     static const std::vector<KnobNumericMap> maps = {
         // --- Mountainousness: overall elevation + peak height. ---
-        {Knob::Mountainousness, "terrain.base_amplitude", "float",
-            {{0.0f, 18.0f}, {0.5f, 60.0f}, {0.8f, 130.0f}, {1.0f, 180.0f}}},
-        {Knob::Mountainousness, "terrain.shaping.peaks_amplitude", "float",
-            {{0.0f, 10.0f}, {0.5f, 52.0f}, {1.0f, 140.0f}}},
-        {Knob::Mountainousness, "terrain.height_offset", "float",
-            {{0.0f, -10.0f}, {0.5f, 10.0f}, {1.0f, 55.0f}}},
+        {Knob::Mountainousness,
+         "terrain.base_amplitude",
+         "float",
+         {{0.0f, 18.0f}, {0.5f, 60.0f}, {0.8f, 130.0f}, {1.0f, 180.0f}}},
+        {Knob::Mountainousness,
+         "terrain.shaping.peaks_amplitude",
+         "float",
+         {{0.0f, 10.0f}, {0.5f, 52.0f}, {1.0f, 140.0f}}},
+        {Knob::Mountainousness,
+         "terrain.height_offset",
+         "float",
+         {{0.0f, -10.0f}, {0.5f, 10.0f}, {1.0f, 55.0f}}},
 
         // --- Ruggedness: detail roughness. ---
-        {Knob::Ruggedness, "terrain.octaves", "int",
-            {{0.0f, 3.0f}, {0.5f, 5.0f}, {1.0f, 8.0f}}},
-        {Knob::Ruggedness, "terrain.persistence", "float",
-            {{0.0f, 0.35f}, {0.5f, 0.5f}, {1.0f, 0.7f}}},
-        {Knob::Ruggedness, "terrain.shaping.domain_warp_amplitude", "float",
-            {{0.0f, 6.0f}, {0.5f, 20.0f}, {1.0f, 55.0f}}},
+        {Knob::Ruggedness, "terrain.octaves", "int", {{0.0f, 3.0f}, {0.5f, 5.0f}, {1.0f, 8.0f}}},
+        {Knob::Ruggedness,
+         "terrain.persistence",
+         "float",
+         {{0.0f, 0.35f}, {0.5f, 0.5f}, {1.0f, 0.7f}}},
+        {Knob::Ruggedness,
+         "terrain.shaping.domain_warp_amplitude",
+         "float",
+         {{0.0f, 6.0f}, {0.5f, 20.0f}, {1.0f, 55.0f}}},
 
         // --- Wetness: river + lake depth. ---
-        {Knob::Wetness, "features.river_depth", "float",
-            {{0.0f, 1.0f}, {0.5f, 4.0f}, {1.0f, 16.0f}}},
-        {Knob::Wetness, "features.lake_depth", "float",
-            {{0.0f, 1.0f}, {0.5f, 6.0f}, {1.0f, 18.0f}}},
+        {Knob::Wetness,
+         "features.river_depth",
+         "float",
+         {{0.0f, 1.0f}, {0.5f, 4.0f}, {1.0f, 16.0f}}},
+        {Knob::Wetness,
+         "features.lake_depth",
+         "float",
+         {{0.0f, 1.0f}, {0.5f, 6.0f}, {1.0f, 18.0f}}},
 
         // --- Erosion / age: hydraulic+thermal smoothing. ---
-        {Knob::Erosion, "terrain.hydro.iterations", "int",
-            {{0.0f, 0.0f}, {0.5f, 9.0f}, {1.0f, 20.0f}}},
-        {Knob::Erosion, "terrain.hydro.thermal_rate", "float",
-            {{0.0f, 0.05f}, {0.5f, 0.3f}, {1.0f, 0.9f}}},
+        {Knob::Erosion,
+         "terrain.hydro.iterations",
+         "int",
+         {{0.0f, 0.0f}, {0.5f, 9.0f}, {1.0f, 20.0f}}},
+        {Knob::Erosion,
+         "terrain.hydro.thermal_rate",
+         "float",
+         {{0.0f, 0.05f}, {0.5f, 0.3f}, {1.0f, 0.9f}}},
 
         // --- Climate: biome spread + per-biome relief. ---
-        {Knob::Climate, "biomes.temperature_frequency", "float",
-            {{0.0f, 0.0015f}, {0.5f, 0.003f}, {1.0f, 0.009f}}},
-        {Knob::Climate, "biomes.humidity_frequency", "float",
-            {{0.0f, 0.0015f}, {0.5f, 0.004f}, {1.0f, 0.009f}}},
-        {Knob::Climate, "biomes.relief_strength", "float",
-            {{0.0f, 0.1f}, {0.5f, 0.45f}, {1.0f, 0.95f}}},
+        {Knob::Climate,
+         "biomes.temperature_frequency",
+         "float",
+         {{0.0f, 0.0015f}, {0.5f, 0.003f}, {1.0f, 0.009f}}},
+        {Knob::Climate,
+         "biomes.humidity_frequency",
+         "float",
+         {{0.0f, 0.0015f}, {0.5f, 0.004f}, {1.0f, 0.009f}}},
+        {Knob::Climate,
+         "biomes.relief_strength",
+         "float",
+         {{0.0f, 0.1f}, {0.5f, 0.45f}, {1.0f, 0.95f}}},
 
         // --- Feature density: cliff prominence + cave density. ---
-        {Knob::FeatureDensity, "features.cliff_step", "float",
-            {{0.0f, 3.0f}, {0.5f, 11.0f}, {1.0f, 28.0f}}},
-        {Knob::FeatureDensity, "features.cave_frequency", "float",
-            {{0.0f, 0.008f}, {0.5f, 0.03f}, {1.0f, 0.048f}}},
+        {Knob::FeatureDensity,
+         "features.cliff_step",
+         "float",
+         {{0.0f, 3.0f}, {0.5f, 11.0f}, {1.0f, 28.0f}}},
+        {Knob::FeatureDensity,
+         "features.cave_frequency",
+         "float",
+         {{0.0f, 0.008f}, {0.5f, 0.03f}, {1.0f, 0.048f}}},
     };
     return maps;
 }
@@ -133,7 +166,8 @@ const std::vector<KnobFlagMap>& FlagMaps() {
 
 nlohmann::json::json_pointer GenPtr(const std::string& dotted) {
     std::string ptr = "/generation_params/";
-    for (char ch : dotted) ptr += (ch == '.') ? '/' : ch;
+    for (char ch : dotted)
+        ptr += (ch == '.') ? '/' : ch;
     return nlohmann::json::json_pointer(ptr);
 }
 
@@ -145,13 +179,17 @@ bool ParseFloat(const std::string& s, float& out) {
 bool ParseInt(const std::string& s, long long& out) {
     const char* b = s.c_str();
     auto [p, ec] = std::from_chars(b, b + s.size(), out);
-    if (ec == std::errc()) return true;
+    if (ec == std::errc())
+        return true;
     float f = 0.0f;
-    if (ParseFloat(s, f)) { out = static_cast<long long>(f); return true; }
+    if (ParseFloat(s, f)) {
+        out = static_cast<long long>(f);
+        return true;
+    }
     return false;
 }
 
-}  // namespace
+} // namespace
 
 KnobVector NeutralKnobVector() {
     KnobVector v{};
@@ -161,32 +199,49 @@ KnobVector NeutralKnobVector() {
 
 const char* KnobId(Knob k) {
     switch (k) {
-        case Knob::Mountainousness: return "mountainousness";
-        case Knob::Ruggedness:      return "ruggedness";
-        case Knob::Wetness:         return "wetness";
-        case Knob::Erosion:         return "erosion";
-        case Knob::Climate:         return "climate";
-        case Knob::FeatureDensity:  return "feature_density";
-        default:                    return "";
+        case Knob::Mountainousness:
+            return "mountainousness";
+        case Knob::Ruggedness:
+            return "ruggedness";
+        case Knob::Wetness:
+            return "wetness";
+        case Knob::Erosion:
+            return "erosion";
+        case Knob::Climate:
+            return "climate";
+        case Knob::FeatureDensity:
+            return "feature_density";
+        default:
+            return "";
     }
 }
 
 const char* KnobLabel(Knob k) {
     switch (k) {
-        case Knob::Mountainousness: return "mountainousness";
-        case Knob::Ruggedness:      return "ruggedness";
-        case Knob::Wetness:         return "wetness";
-        case Knob::Erosion:         return "erosion / age";
-        case Knob::Climate:         return "climate";
-        case Knob::FeatureDensity:  return "feature density";
-        default:                    return "";
+        case Knob::Mountainousness:
+            return "mountainousness";
+        case Knob::Ruggedness:
+            return "ruggedness";
+        case Knob::Wetness:
+            return "wetness";
+        case Knob::Erosion:
+            return "erosion / age";
+        case Knob::Climate:
+            return "climate";
+        case Knob::FeatureDensity:
+            return "feature density";
+        default:
+            return "";
     }
 }
 
 bool KnobFromId(const std::string& id, Knob& out) {
     for (std::size_t i = 0; i < kKnobCount; ++i) {
         const Knob k = static_cast<Knob>(i);
-        if (id == KnobId(k)) { out = k; return true; }
+        if (id == KnobId(k)) {
+            out = k;
+            return true;
+        }
     }
     return false;
 }
@@ -221,7 +276,8 @@ const std::vector<ParamDescriptor>& ParamDescriptors() {
 
 const ParamDescriptor* FindParamDescriptor(const std::string& path) {
     for (const ParamDescriptor& d : ParamDescriptors())
-        if (d.path == path) return &d;
+        if (d.path == path)
+            return &d;
     return nullptr;
 }
 
@@ -241,9 +297,12 @@ bool ValidateKnobEndpoints(std::vector<std::string>& errors) {
         // range; the midpoint (neutral) must equal the param default.
         bool ascending = true, monotone_up = true, monotone_down = true;
         for (std::size_t i = 1; i < m.spline.size(); ++i) {
-            if (m.spline[i].knob < m.spline[i - 1].knob) ascending = false;
-            if (m.spline[i].value < m.spline[i - 1].value) monotone_up = false;
-            if (m.spline[i].value > m.spline[i - 1].value) monotone_down = false;
+            if (m.spline[i].knob < m.spline[i - 1].knob)
+                ascending = false;
+            if (m.spline[i].value < m.spline[i - 1].value)
+                monotone_up = false;
+            if (m.spline[i].value > m.spline[i - 1].value)
+                monotone_down = false;
         }
         if (!ascending)
             errors.push_back(std::string("knob spline '") + m.path + "' domain not ascending");
@@ -255,15 +314,16 @@ bool ValidateKnobEndpoints(std::vector<std::string>& errors) {
             if (p.value < d->min_value - 1e-4 || p.value > d->max_value + 1e-4) {
                 errors.push_back(std::string("knob spline '") + m.path + "' value " +
                                  std::to_string(p.value) + " outside [" +
-                                 std::to_string(d->min_value) + "," +
-                                 std::to_string(d->max_value) + "]");
+                                 std::to_string(d->min_value) + "," + std::to_string(d->max_value) +
+                                 "]");
             }
         }
         const float neutral = EvalSpline(m.spline, 0.5f);
-        if (std::fabs(neutral - static_cast<float>(d->default_value)) > 1e-3 * std::max(1.0f, std::fabs(static_cast<float>(d->default_value)))) {
+        if (std::fabs(neutral - static_cast<float>(d->default_value)) >
+            1e-3 * std::max(1.0f, std::fabs(static_cast<float>(d->default_value)))) {
             errors.push_back(std::string("knob spline '") + m.path +
-                             "' neutral(0.5)=" + std::to_string(neutral) +
-                             " != default " + std::to_string(d->default_value));
+                             "' neutral(0.5)=" + std::to_string(neutral) + " != default " +
+                             std::to_string(d->default_value));
         }
     }
     return errors.size() == before;
@@ -294,9 +354,8 @@ nlohmann::json ApplyKnobLayer(const nlohmann::json& base, const KnobVector& knob
         } else {
             // Deadband: inherit the baseline's authored flag (default false if the
             // baseline didn't set it) so a neutral knob never flips a feature.
-            const bool inherited = out.contains(jp) && out.at(jp).is_boolean()
-                                       ? out.at(jp).get<bool>()
-                                       : false;
+            const bool inherited =
+                out.contains(jp) && out.at(jp).is_boolean() ? out.at(jp).get<bool>() : false;
             out[jp] = inherited;
         }
     }
@@ -309,16 +368,19 @@ static void OverlayOverrides(nlohmann::json& preset, const std::vector<KnobOverr
     if (!preset.contains("generation_params") || !preset["generation_params"].is_object())
         preset["generation_params"] = nlohmann::json::object();
     for (const KnobOverride& o : overrides) {
-        if (o.path.empty()) continue;
+        if (o.path.empty())
+            continue;
         const auto jp = GenPtr(o.path);
         if (o.type == "bool") {
             preset[jp] = (o.value == "true" || o.value == "1");
         } else if (o.type == "int") {
             long long v = 0;
-            if (ParseInt(o.value, v)) preset[jp] = v;
+            if (ParseInt(o.value, v))
+                preset[jp] = v;
         } else {
             float v = 0.0f;
-            if (ParseFloat(o.value, v)) preset[jp] = v;
+            if (ParseFloat(o.value, v))
+                preset[jp] = v;
         }
     }
 }
@@ -335,7 +397,8 @@ KnobLayerData ReadKnobLayer(const nlohmann::json& preset) {
     KnobLayerData data;
     data.knobs = NeutralKnobVector();
     const auto klp = nlohmann::json::json_pointer("/generation_params/knob_layer");
-    if (!preset.contains(klp) || !preset.at(klp).is_object()) return data;
+    if (!preset.contains(klp) || !preset.at(klp).is_object())
+        return data;
     const nlohmann::json& kl = preset.at(klp);
     data.present = true;
 
@@ -353,7 +416,8 @@ KnobLayerData ReadKnobLayer(const nlohmann::json& preset) {
     }
     if (kl.contains("overrides") && kl["overrides"].is_array()) {
         for (const auto& o : kl["overrides"]) {
-            if (!o.is_object() || !o.contains("path")) continue;
+            if (!o.is_object() || !o.contains("path"))
+                continue;
             KnobOverride ov;
             ov.path = o.value("path", std::string());
             ov.value = o.value("value", std::string());
@@ -400,4 +464,4 @@ nlohmann::json& WriteKnobLayer(nlohmann::json& preset,
     return preset;
 }
 
-}  // namespace Luminumbra::world
+} // namespace Luminumbra::world

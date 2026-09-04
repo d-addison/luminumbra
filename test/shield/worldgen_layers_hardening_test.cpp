@@ -697,6 +697,9 @@ TEST(WorldgenHardening, StructureSiteIsPureFunctionOfCell) {
             const auto b = World::SiteInCell(pool, kSeed, cx, cz);
             ASSERT_EQ(a.has_value(), b.has_value());
             if (a) {
+                ASSERT_TRUE(b.has_value());
+                if (!b.has_value())
+                    return;
                 EXPECT_EQ(a->origin, b->origin);
                 EXPECT_EQ(a->site_seed, b->site_seed);
             }
@@ -716,6 +719,8 @@ TEST(WorldgenHardening, StructureSiteOriginStaysInsideItsCell) {
         for (int cx = -2; cx <= 2; ++cx) {
             const auto site = World::SiteInCell(pool, kSeed, cx, cz);
             ASSERT_TRUE(site.has_value()) << "density 1.0 should always host a site";
+            if (!site.has_value())
+                return;
             const int lo_x = cx * pool.spacing;
             const int hi_x = (cx + 1) * pool.spacing;
             const int lo_z = cz * pool.spacing;
@@ -740,6 +745,8 @@ TEST(WorldgenHardening, StructureSiteStaysInCellWhenSeparationCrowdsSpacing) {
     for (int cx = -2; cx <= 2; ++cx) {
         const auto site = World::SiteInCell(pool, kSeed, cx, 0);
         ASSERT_TRUE(site.has_value());
+        if (!site.has_value())
+            return;
         const int lo_x = cx * pool.spacing;
         const int hi_x = (cx + 1) * pool.spacing;
         EXPECT_GE(site->origin.x, lo_x);
@@ -845,6 +852,9 @@ TEST(WorldgenHardening, LocateNearestSiteIsDeterministicAndSymmetric) {
             const auto b = World::LocateNearestSite(pool, kSeed, x, z, 2);
             ASSERT_EQ(a.has_value(), b.has_value());
             if (a) {
+                ASSERT_TRUE(b.has_value());
+                if (!b.has_value())
+                    return;
                 EXPECT_EQ(a->origin, b->origin);
                 EXPECT_EQ(a->site_seed, b->site_seed);
             }
@@ -859,6 +869,8 @@ TEST(WorldgenHardening, AssembledStructureIsPureFunctionOfSiteSeed) {
     const World::StructureTemplatePool pool = MakePool("tower", 0x1234u, 64, 8, 1.0f);
     const auto site = World::SiteInCell(pool, kSeed, 1, 1);
     ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
 
     const std::vector<World::StructureVoxel> v1 = World::AssembleStructure(pool, *site);
     const std::vector<World::StructureVoxel> v2 = World::AssembleStructure(pool, *site);
@@ -879,6 +891,8 @@ TEST(WorldgenHardening, SeamStraddlingAssemblyAgreesFromBothSides) {
     const World::StructureTemplatePool pool = MakePool("tower", 0x1234u, 64, 8, 1.0f);
     const auto site = World::SiteInCell(pool, kSeed, 0, 0);
     ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
 
     // Query the nearest site from a point just LEFT and just RIGHT of the site
     // origin; both must resolve to the same site, and assembly must match.
@@ -888,6 +902,8 @@ TEST(WorldgenHardening, SeamStraddlingAssemblyAgreesFromBothSides) {
         World::LocateNearestSite(pool, kSeed, site->origin.x + 4, site->origin.z, 2);
     ASSERT_TRUE(from_left.has_value());
     ASSERT_TRUE(from_right.has_value());
+    if (!from_left.has_value() || !from_right.has_value())
+        return;
     EXPECT_EQ(from_left->origin, from_right->origin)
         << "the same structure resolves to different sites from the two sides of the seam";
     EXPECT_EQ(from_left->site_seed, from_right->site_seed);
@@ -903,6 +919,8 @@ TEST(WorldgenHardening, AssembledVoxelHashIsOrderIndependent) {
     const World::StructureTemplatePool pool = MakePool("tower", 0x1234u, 64, 8, 1.0f);
     const auto site = World::SiteInCell(pool, kSeed, 2, 0);
     ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
     std::vector<World::StructureVoxel> voxels = World::AssembleStructure(pool, *site);
     ASSERT_FALSE(voxels.empty());
     std::vector<World::StructureVoxel> reversed(voxels.rbegin(), voxels.rend());
