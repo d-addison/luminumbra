@@ -342,6 +342,293 @@ CrossRegionBuildResult BuildCrossRegionBoundary(FarLodTier tier,
     return result;
 }
 
+constexpr u8 kLegacyHaloMaterial = 83u;
+constexpr u8 kLegacyHaloSupersededFaceMaterial = 84u;
+constexpr u8 kLegacyHaloSdfMaterial = 231u;
+constexpr float kLegacyHaloHeight = 18.0f;
+constexpr float kLegacyHaloSupersededFaceHeight = 26.0f;
+constexpr int kLegacyHaloProbeWorldX = 520;
+constexpr int kLegacyHaloProbeWorldZ = 88;
+
+void VerifyLegacyHaloReplay(const std::filesystem::path& save_path,
+                            const TerrainGenParams& params,
+                            FarLodTier tier,
+                            bool home_first,
+                            u64 params_hash,
+                            std::size_t probe_index,
+                            std::size_t face_index) {
+    SHIELD_WorldSystem replay_world(nullptr, nullptr, params, 1337);
+    const auto replay_home_snapshot = replay_world.capture_far_lod_sdf_snapshot(0, 0);
+    const auto replay_target_snapshot = replay_world.capture_far_lod_sdf_snapshot(1, 0);
+    ASSERT_TRUE(replay_home_snapshot);
+    ASSERT_TRUE(replay_target_snapshot);
+    FarLodWorkerBuildOutcome replay_home;
+    FarLodWorkerBuildOutcome replay_target;
+    const auto build_replay_home = [&]() -> bool {
+        replay_home =
+            BuildFarLodWorkerTile(replay_world, *replay_home_snapshot, tier, 0, 0, save_path);
+        return replay_home.ok;
+    };
+    const auto build_replay_target = [&]() -> bool {
+        replay_target =
+            BuildFarLodWorkerTile(replay_world, *replay_target_snapshot, tier, 1, 0, save_path);
+        return replay_target.ok;
+    };
+    if (home_first) {
+        ASSERT_TRUE(build_replay_home()) << replay_home.error;
+        ASSERT_TRUE(build_replay_target()) << replay_target.error;
+    } else {
+        ASSERT_TRUE(build_replay_target()) << replay_target.error;
+        ASSERT_TRUE(build_replay_home()) << replay_home.error;
+    }
+    EXPECT_EQ(CountIndexedWorldVertex(replay_home.mesh,
+                                      0,
+                                      0,
+                                      static_cast<float>(kFarLodRegionSizeMeters),
+                                      kLegacyHaloSupersededFaceHeight,
+                                      static_cast<float>(kLegacyHaloProbeWorldZ),
+                                      kLegacyHaloSupersededFaceMaterial),
+              0u);
+    EXPECT_EQ(CountIndexedWorldPosition(replay_home.mesh,
+                                        0,
+                                        0,
+                                        static_cast<float>(kFarLodRegionSizeMeters),
+                                        kLegacyHaloSupersededFaceHeight,
+                                        static_cast<float>(kLegacyHaloProbeWorldZ)),
+              0u);
+    EXPECT_GT(CountIndexedWorldVertex(replay_target.mesh,
+                                      1,
+                                      0,
+                                      static_cast<float>(kLegacyHaloProbeWorldX),
+                                      kLegacyHaloHeight,
+                                      static_cast<float>(kLegacyHaloProbeWorldZ),
+                                      kLegacyHaloMaterial),
+              0u);
+    EXPECT_EQ(replay_target.tile.flags[face_index] & kFarLodSampleFlagEdited, 0u);
+    const auto replay_home_segments = SharedPlaneSegments(
+        replay_home.mesh, 0, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
+    const auto replay_target_segments = SharedPlaneSegments(
+        replay_target.mesh, 1, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
+    ASSERT_FALSE(replay_home_segments.empty());
+    EXPECT_EQ(replay_home_segments, replay_target_segments);
+    EXPECT_TRUE(PlaneSegmentsContainHeight(replay_home_segments, 7.0f));
+
+    // Persisting the promoted target may retain height-only metadata, but all
+    // synthesized 3D support remains transient.
+    std::vector<std::string> errors;
+    ASSERT_TRUE(FarLodStore(save_path).save_tile(replay_target.tile, &errors));
+    FarLodTile persisted_promoted_target;
+    errors.clear();
+    ASSERT_TRUE(FarLodStore(save_path).load_tile(
+        tier, 1, 0, params_hash, persisted_promoted_target, &errors));
+    EXPECT_TRUE(persisted_promoted_target.sdf_bricks.empty());
+    EXPECT_TRUE(persisted_promoted_target.sdf_density_q.empty());
+    EXPECT_TRUE(persisted_promoted_target.sdf_material.empty());
+    EXPECT_EQ(persisted_promoted_target.flags[probe_index] & kFarLodSampleFlagEdited,
+              kFarLodSampleFlagEdited);
+    EXPECT_EQ(persisted_promoted_target.flags[face_index] & kFarLodSampleFlagEdited, 0u);
+}
+
+void VerifyLegacyHaloSupersession(SHIELD_WorldSystem& world,
+                                  const std::filesystem::path& save_path,
+                                  FarLodTier tier,
+                                  u64 params_hash,
+                                  std::size_t probe_index,
+                                  std::size_t face_index) {
+    // A real chunk-32 SDF is the exact supersession path for the (520,88)
+    // witness. Its x=0 face agrees with chunk 31; the interior surface at x=520
+    // is deliberately different and replaces legacy.
+    auto replacement = std::make_shared<Chunk>(IVec3(32, 0, 5));
+    world.GenerateChunkData(*replacement, 1);
+    ASSERT_TRUE(SetBoundaryRampedAuthority(*replacement, 7.0f, 11.0f, kLegacyHaloSdfMaterial));
+    ASSERT_TRUE(world.adopt_streamed_chunk(replacement));
+    const auto replacement_snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
+    ASSERT_TRUE(replacement_snapshot);
+    const auto superseded =
+        BuildFarLodWorkerTile(world, *replacement_snapshot, tier, 1, 0, save_path);
+    ASSERT_TRUE(superseded.ok) << superseded.error;
+    EXPECT_EQ(superseded.tile.flags[probe_index] & kFarLodSampleFlagEdited, 0u);
+    EXPECT_EQ(CountIndexedWorldVertex(superseded.mesh,
+                                      1,
+                                      0,
+                                      static_cast<float>(kLegacyHaloProbeWorldX),
+                                      kLegacyHaloHeight,
+                                      static_cast<float>(kLegacyHaloProbeWorldZ),
+                                      kLegacyHaloMaterial),
+              0u);
+    EXPECT_EQ(CountIndexedWorldPosition(superseded.mesh,
+                                        1,
+                                        0,
+                                        static_cast<float>(kLegacyHaloProbeWorldX),
+                                        kLegacyHaloHeight,
+                                        static_cast<float>(kLegacyHaloProbeWorldZ)),
+              0u)
+        << "real chunk 32 must remove the old height for every material";
+    EXPECT_GT(CountIndexedWorldVertex(superseded.mesh,
+                                      1,
+                                      0,
+                                      static_cast<float>(kLegacyHaloProbeWorldX),
+                                      11.0f,
+                                      static_cast<float>(kLegacyHaloProbeWorldZ),
+                                      kLegacyHaloSdfMaterial),
+              0u);
+
+    std::vector<std::string> errors;
+    ASSERT_TRUE(FarLodStore(save_path).save_tile(superseded.tile, &errors));
+    FarLodTile persisted_superseded_target;
+    errors.clear();
+    ASSERT_TRUE(FarLodStore(save_path).load_tile(
+        tier, 1, 0, params_hash, persisted_superseded_target, &errors));
+    ASSERT_EQ(persisted_superseded_target.sdf_bricks.size(), 1u);
+    EXPECT_EQ(persisted_superseded_target.sdf_bricks.front().local_chunk_x, 0u);
+    EXPECT_EQ(persisted_superseded_target.sdf_bricks.front().source_kind,
+              FarLodBrickSourceKind::Authoritative);
+    EXPECT_EQ(persisted_superseded_target.flags[probe_index] & kFarLodSampleFlagEdited, 0u);
+    EXPECT_EQ(persisted_superseded_target.flags[face_index] & kFarLodSampleFlagEdited, 0u);
+    EXPECT_FALSE(persisted_superseded_target.legacy_surface_authority);
+    EXPECT_EQ(persisted_superseded_target.sdf_density_q.size(), FarLodSdfBrickSampleCount(tier));
+    EXPECT_EQ(persisted_superseded_target.sdf_material.size(), FarLodSdfBrickSampleCount(tier));
+}
+
+void VerifyLegacyHaloScenario(FarLodTier tier, bool home_first) {
+    const TerrainGenParams params = FlatParams();
+    TempSaveDir save;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    const int step = FarLodSampleStepMeters(tier);
+    const u64 params_hash = ComputeTerrainParamsHash(params, 1337);
+
+    // The region-1 sample at (520,88) belongs to chunk 32 and must survive
+    // beside real chunk 31. The region-min sample at x=512 is also stored in
+    // region 1, but is chunk 31's max face and must be superseded by that real
+    // brick regardless of record load order.
+    FarLodTile legacy = BuildPristineFarLodTile(world, tier, 1, 0, params_hash);
+    legacy.edited = true;
+    legacy.legacy_surface_authority = true;
+    const auto set_legacy = [&](int world_x, int world_z, float height, u8 material, u8 flags) {
+        const std::size_t x = static_cast<std::size_t>((world_x - kFarLodRegionSizeMeters) / step);
+        const std::size_t z = static_cast<std::size_t>(world_z / step);
+        const std::size_t index = x + z * legacy.samples_per_side;
+        legacy.height_q[index] = QuantizeFarLodHeight(height);
+        legacy.material[index] = material;
+        legacy.flags[index] = flags;
+        return index;
+    };
+    const std::size_t probe_index = set_legacy(kLegacyHaloProbeWorldX,
+                                               kLegacyHaloProbeWorldZ,
+                                               kLegacyHaloHeight,
+                                               kLegacyHaloMaterial,
+                                               kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
+    const std::size_t face_index = set_legacy(kFarLodRegionSizeMeters,
+                                              kLegacyHaloProbeWorldZ,
+                                              kLegacyHaloSupersededFaceHeight,
+                                              kLegacyHaloSupersededFaceMaterial,
+                                              kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
+    std::vector<std::string> errors;
+    ASSERT_TRUE(FarLodStore(save.path).save_tile(legacy, &errors));
+
+    auto authority = std::make_shared<Chunk>(IVec3(31, 0, 5));
+    world.GenerateChunkData(*authority, 1);
+    ASSERT_TRUE(SetPlanarAuthority(*authority, 7.0f, kLegacyHaloSdfMaterial));
+    ASSERT_TRUE(world.adopt_streamed_chunk(authority));
+    const auto home_snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
+    const auto target_snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
+    ASSERT_TRUE(home_snapshot);
+    ASSERT_TRUE(target_snapshot);
+
+    FarLodWorkerBuildOutcome home;
+    FarLodWorkerBuildOutcome target;
+    const auto build_home = [&]() -> bool {
+        home = BuildFarLodWorkerTile(world, *home_snapshot, tier, 0, 0, save.path);
+        if (!home.ok)
+            return false;
+        errors.clear();
+        return FarLodStore(save.path).save_tile(home.tile, &errors);
+    };
+    const auto build_target = [&]() -> bool {
+        target = BuildFarLodWorkerTile(world, *target_snapshot, tier, 1, 0, save.path);
+        return target.ok;
+    };
+    if (home_first) {
+        ASSERT_TRUE(build_home()) << (home.error.empty()
+                                          ? (errors.empty() ? "home save failed" : errors.front())
+                                          : home.error);
+        ASSERT_TRUE(build_target()) << target.error;
+    } else {
+        ASSERT_TRUE(build_target()) << target.error;
+        ASSERT_TRUE(build_home()) << (home.error.empty()
+                                          ? (errors.empty() ? "home save failed" : errors.front())
+                                          : home.error);
+    }
+
+    ASSERT_EQ(home.tile.sdf_bricks.size(), 1u);
+    EXPECT_EQ(home.tile.sdf_bricks.front().local_chunk_x, 31u);
+    EXPECT_TRUE(target.tile.sdf_bricks.empty())
+        << "foreign chunk 31 must remain transient in region 1";
+    EXPECT_GT(CountIndexedWorldVertex(target.mesh,
+                                      1,
+                                      0,
+                                      static_cast<float>(kLegacyHaloProbeWorldX),
+                                      kLegacyHaloHeight,
+                                      static_cast<float>(kLegacyHaloProbeWorldZ),
+                                      kLegacyHaloMaterial),
+              0u)
+        << "the exact legacy witness must be referenced by an index";
+    EXPECT_EQ(CountIndexedWorldVertex(target.mesh,
+                                      1,
+                                      0,
+                                      static_cast<float>(kFarLodRegionSizeMeters),
+                                      kLegacyHaloSupersededFaceHeight,
+                                      static_cast<float>(kLegacyHaloProbeWorldZ),
+                                      kLegacyHaloSupersededFaceMaterial),
+              0u);
+    EXPECT_EQ(CountIndexedWorldPosition(target.mesh,
+                                        1,
+                                        0,
+                                        static_cast<float>(kFarLodRegionSizeMeters),
+                                        kLegacyHaloSupersededFaceHeight,
+                                        static_cast<float>(kLegacyHaloProbeWorldZ)),
+              0u)
+        << "supersession must remove the legacy plane independent of material";
+    EXPECT_GT(CountIndexedWorldVertex(target.mesh,
+                                      1,
+                                      0,
+                                      static_cast<float>(kFarLodRegionSizeMeters),
+                                      7.0f,
+                                      static_cast<float>(kLegacyHaloProbeWorldZ),
+                                      kLegacyHaloSdfMaterial),
+              0u);
+    EXPECT_EQ(target.tile.flags[probe_index] & (kFarLodSampleFlagEdited | kFarLodSampleFlagWater),
+              kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
+    EXPECT_EQ(target.tile.flags[face_index] & kFarLodSampleFlagEdited, 0u);
+
+    const auto home_segments = SharedPlaneSegments(
+        home.mesh, 0, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
+    const auto target_segments = SharedPlaneSegments(
+        target.mesh, 1, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
+    ASSERT_FALSE(home_segments.empty());
+    EXPECT_EQ(home_segments, target_segments);
+    EXPECT_TRUE(PlaneSegmentsContainHeight(home_segments, 7.0f));
+
+    FarLodTile persisted_home;
+    errors.clear();
+    ASSERT_TRUE(FarLodStore(save.path).load_tile(tier, 0, 0, params_hash, persisted_home, &errors));
+    ASSERT_EQ(persisted_home.sdf_bricks.size(), 1u);
+    FarLodTile persisted_target;
+    errors.clear();
+    ASSERT_TRUE(
+        FarLodStore(save.path).load_tile(tier, 1, 0, params_hash, persisted_target, &errors));
+    EXPECT_TRUE(persisted_target.sdf_bricks.empty());
+    EXPECT_EQ(persisted_target.height_q[probe_index], QuantizeFarLodHeight(kLegacyHaloHeight));
+
+    // Replay with no streamed chunks: region 0 loads its persisted authority
+    // before the later region-1 legacy record. The final merge sweep must still
+    // erase x=512 while retaining x=520.
+    ASSERT_NO_FATAL_FAILURE(VerifyLegacyHaloReplay(
+        save.path, params, tier, home_first, params_hash, probe_index, face_index));
+    ASSERT_NO_FATAL_FAILURE(
+        VerifyLegacyHaloSupersession(world, save.path, tier, params_hash, probe_index, face_index));
+}
+
 } // namespace
 
 TEST(FarLodWorker, ZeroAuthorityMatchesPristinePath) {
@@ -970,294 +1257,14 @@ TEST(FarLodWorker, FullSdfBoundaryAuthoritySupersedesLegacyNeighborMaterial) {
 }
 
 TEST(FarLodWorker, LegacyHaloUsesIndexedGeometryAndFinalAuthorityPrecedence) {
-    constexpr u8 kLegacyMaterial = 83u;
-    constexpr u8 kSupersededFaceMaterial = 84u;
-    constexpr u8 kSdfMaterial = 231u;
-    constexpr float kLegacyHeight = 18.0f;
-    constexpr float kSupersededFaceHeight = 26.0f;
-    constexpr int kProbeWorldX = 520;
-    constexpr int kProbeWorldZ = 88;
-    const TerrainGenParams params = FlatParams();
-
     for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
         for (const bool home_first : {true, false}) {
             SCOPED_TRACE(::testing::Message()
                          << "tier=" << static_cast<int>(tier) << " home_first=" << home_first);
-            TempSaveDir save;
-            SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
-            const int step = FarLodSampleStepMeters(tier);
-            const u64 params_hash = ComputeTerrainParamsHash(params, 1337);
-
-            // The region-1 sample at (520,88) belongs to chunk 32 and must
-            // survive beside real chunk 31. The region-min sample at x=512 is
-            // also stored in region 1, but is chunk 31's max face and must be
-            // superseded by that real brick regardless of record load order.
-            FarLodTile legacy = BuildPristineFarLodTile(world, tier, 1, 0, params_hash);
-            legacy.edited = true;
-            legacy.legacy_surface_authority = true;
-            const auto set_legacy =
-                [&](int world_x, int world_z, float height, u8 material, u8 flags) {
-                    const std::size_t x =
-                        static_cast<std::size_t>((world_x - kFarLodRegionSizeMeters) / step);
-                    const std::size_t z = static_cast<std::size_t>(world_z / step);
-                    const std::size_t index = x + z * legacy.samples_per_side;
-                    legacy.height_q[index] = QuantizeFarLodHeight(height);
-                    legacy.material[index] = material;
-                    legacy.flags[index] = flags;
-                    return index;
-                };
-            const std::size_t probe_index =
-                set_legacy(kProbeWorldX,
-                           kProbeWorldZ,
-                           kLegacyHeight,
-                           kLegacyMaterial,
-                           kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
-            const std::size_t face_index =
-                set_legacy(kFarLodRegionSizeMeters,
-                           kProbeWorldZ,
-                           kSupersededFaceHeight,
-                           kSupersededFaceMaterial,
-                           kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
-            std::vector<std::string> errors;
-            ASSERT_TRUE(FarLodStore(save.path).save_tile(legacy, &errors));
-
-            auto authority = std::make_shared<Chunk>(IVec3(31, 0, 5));
-            world.GenerateChunkData(*authority, 1);
-            ASSERT_TRUE(SetPlanarAuthority(*authority, 7.0f, kSdfMaterial));
-            ASSERT_TRUE(world.adopt_streamed_chunk(authority));
-            const auto home_snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
-            const auto target_snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
-            ASSERT_TRUE(home_snapshot);
-            ASSERT_TRUE(target_snapshot);
-
-            FarLodWorkerBuildOutcome home;
-            FarLodWorkerBuildOutcome target;
-            const auto build_home = [&]() -> bool {
-                home = BuildFarLodWorkerTile(world, *home_snapshot, tier, 0, 0, save.path);
-                if (!home.ok)
-                    return false;
-                errors.clear();
-                return FarLodStore(save.path).save_tile(home.tile, &errors);
-            };
-            const auto build_target = [&]() -> bool {
-                target = BuildFarLodWorkerTile(world, *target_snapshot, tier, 1, 0, save.path);
-                return target.ok;
-            };
-            if (home_first) {
-                ASSERT_TRUE(build_home())
-                    << (home.error.empty() ? (errors.empty() ? "home save failed" : errors.front())
-                                           : home.error);
-                ASSERT_TRUE(build_target()) << target.error;
-            } else {
-                ASSERT_TRUE(build_target()) << target.error;
-                ASSERT_TRUE(build_home())
-                    << (home.error.empty() ? (errors.empty() ? "home save failed" : errors.front())
-                                           : home.error);
-            }
-
-            ASSERT_EQ(home.tile.sdf_bricks.size(), 1u);
-            EXPECT_EQ(home.tile.sdf_bricks.front().local_chunk_x, 31u);
-            EXPECT_TRUE(target.tile.sdf_bricks.empty())
-                << "foreign chunk 31 must remain transient in region 1";
-            EXPECT_GT(CountIndexedWorldVertex(target.mesh,
-                                              1,
-                                              0,
-                                              static_cast<float>(kProbeWorldX),
-                                              kLegacyHeight,
-                                              static_cast<float>(kProbeWorldZ),
-                                              kLegacyMaterial),
-                      0u)
-                << "the exact legacy witness must be referenced by an index";
-            EXPECT_EQ(CountIndexedWorldVertex(target.mesh,
-                                              1,
-                                              0,
-                                              static_cast<float>(kFarLodRegionSizeMeters),
-                                              kSupersededFaceHeight,
-                                              static_cast<float>(kProbeWorldZ),
-                                              kSupersededFaceMaterial),
-                      0u);
-            EXPECT_EQ(CountIndexedWorldPosition(target.mesh,
-                                                1,
-                                                0,
-                                                static_cast<float>(kFarLodRegionSizeMeters),
-                                                kSupersededFaceHeight,
-                                                static_cast<float>(kProbeWorldZ)),
-                      0u)
-                << "supersession must remove the legacy plane independent of material";
-            EXPECT_GT(CountIndexedWorldVertex(target.mesh,
-                                              1,
-                                              0,
-                                              static_cast<float>(kFarLodRegionSizeMeters),
-                                              7.0f,
-                                              static_cast<float>(kProbeWorldZ),
-                                              kSdfMaterial),
-                      0u);
-            EXPECT_EQ(target.tile.flags[probe_index] &
-                          (kFarLodSampleFlagEdited | kFarLodSampleFlagWater),
-                      kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
-            EXPECT_EQ(target.tile.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-
-            const auto home_segments = SharedPlaneSegments(
-                home.mesh, 0, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
-            const auto target_segments = SharedPlaneSegments(
-                target.mesh, 1, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
-            ASSERT_FALSE(home_segments.empty());
-            EXPECT_EQ(home_segments, target_segments);
-            EXPECT_TRUE(PlaneSegmentsContainHeight(home_segments, 7.0f));
-
-            FarLodTile persisted_home;
-            errors.clear();
-            ASSERT_TRUE(
-                FarLodStore(save.path).load_tile(tier, 0, 0, params_hash, persisted_home, &errors));
-            ASSERT_EQ(persisted_home.sdf_bricks.size(), 1u);
-            FarLodTile persisted_target;
-            errors.clear();
-            ASSERT_TRUE(FarLodStore(save.path).load_tile(
-                tier, 1, 0, params_hash, persisted_target, &errors));
-            EXPECT_TRUE(persisted_target.sdf_bricks.empty());
-            EXPECT_EQ(persisted_target.height_q[probe_index], QuantizeFarLodHeight(kLegacyHeight));
-
-            // Replay with no streamed chunks: region 0 loads its persisted
-            // authority before the later region-1 legacy record. The final
-            // merge sweep must still erase x=512 while retaining x=520.
-            SHIELD_WorldSystem replay_world(nullptr, nullptr, params, 1337);
-            const auto replay_home_snapshot = replay_world.capture_far_lod_sdf_snapshot(0, 0);
-            const auto replay_target_snapshot = replay_world.capture_far_lod_sdf_snapshot(1, 0);
-            ASSERT_TRUE(replay_home_snapshot);
-            ASSERT_TRUE(replay_target_snapshot);
-            FarLodWorkerBuildOutcome replay_home;
-            FarLodWorkerBuildOutcome replay_target;
-            const auto build_replay_home = [&]() -> bool {
-                replay_home = BuildFarLodWorkerTile(
-                    replay_world, *replay_home_snapshot, tier, 0, 0, save.path);
-                return replay_home.ok;
-            };
-            const auto build_replay_target = [&]() -> bool {
-                replay_target = BuildFarLodWorkerTile(
-                    replay_world, *replay_target_snapshot, tier, 1, 0, save.path);
-                return replay_target.ok;
-            };
-            if (home_first) {
-                ASSERT_TRUE(build_replay_home()) << replay_home.error;
-                ASSERT_TRUE(build_replay_target()) << replay_target.error;
-            } else {
-                ASSERT_TRUE(build_replay_target()) << replay_target.error;
-                ASSERT_TRUE(build_replay_home()) << replay_home.error;
-            }
-            EXPECT_EQ(CountIndexedWorldVertex(replay_home.mesh,
-                                              0,
-                                              0,
-                                              static_cast<float>(kFarLodRegionSizeMeters),
-                                              kSupersededFaceHeight,
-                                              static_cast<float>(kProbeWorldZ),
-                                              kSupersededFaceMaterial),
-                      0u);
-            EXPECT_EQ(CountIndexedWorldPosition(replay_home.mesh,
-                                                0,
-                                                0,
-                                                static_cast<float>(kFarLodRegionSizeMeters),
-                                                kSupersededFaceHeight,
-                                                static_cast<float>(kProbeWorldZ)),
-                      0u);
-            EXPECT_GT(CountIndexedWorldVertex(replay_target.mesh,
-                                              1,
-                                              0,
-                                              static_cast<float>(kProbeWorldX),
-                                              kLegacyHeight,
-                                              static_cast<float>(kProbeWorldZ),
-                                              kLegacyMaterial),
-                      0u);
-            EXPECT_EQ(replay_target.tile.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-            const auto replay_home_segments =
-                SharedPlaneSegments(replay_home.mesh,
-                                    0,
-                                    0,
-                                    SharedPlaneAxis::X,
-                                    static_cast<float>(kFarLodRegionSizeMeters));
-            const auto replay_target_segments =
-                SharedPlaneSegments(replay_target.mesh,
-                                    1,
-                                    0,
-                                    SharedPlaneAxis::X,
-                                    static_cast<float>(kFarLodRegionSizeMeters));
-            ASSERT_FALSE(replay_home_segments.empty());
-            EXPECT_EQ(replay_home_segments, replay_target_segments);
-            EXPECT_TRUE(PlaneSegmentsContainHeight(replay_home_segments, 7.0f));
-
-            // Persisting the promoted target may retain height-only metadata,
-            // but all synthesized 3D support remains transient.
-            errors.clear();
-            ASSERT_TRUE(FarLodStore(save.path).save_tile(replay_target.tile, &errors));
-            FarLodTile persisted_promoted_target;
-            errors.clear();
-            ASSERT_TRUE(FarLodStore(save.path).load_tile(
-                tier, 1, 0, params_hash, persisted_promoted_target, &errors));
-            EXPECT_TRUE(persisted_promoted_target.sdf_bricks.empty());
-            EXPECT_TRUE(persisted_promoted_target.sdf_density_q.empty());
-            EXPECT_TRUE(persisted_promoted_target.sdf_material.empty());
-            EXPECT_EQ(persisted_promoted_target.flags[probe_index] & kFarLodSampleFlagEdited,
-                      kFarLodSampleFlagEdited);
-            EXPECT_EQ(persisted_promoted_target.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-
-            // A real chunk-32 SDF is the exact supersession path for the
-            // (520,88) witness. Its x=0 face agrees with chunk 31; the interior
-            // surface at x=520 is deliberately different and replaces legacy.
-            auto replacement = std::make_shared<Chunk>(IVec3(32, 0, 5));
-            world.GenerateChunkData(*replacement, 1);
-            ASSERT_TRUE(SetBoundaryRampedAuthority(*replacement, 7.0f, 11.0f, kSdfMaterial));
-            ASSERT_TRUE(world.adopt_streamed_chunk(replacement));
-            const auto replacement_snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
-            ASSERT_TRUE(replacement_snapshot);
-            const auto superseded =
-                BuildFarLodWorkerTile(world, *replacement_snapshot, tier, 1, 0, save.path);
-            ASSERT_TRUE(superseded.ok) << superseded.error;
-            EXPECT_EQ(superseded.tile.flags[probe_index] & kFarLodSampleFlagEdited, 0u);
-            EXPECT_EQ(CountIndexedWorldVertex(superseded.mesh,
-                                              1,
-                                              0,
-                                              static_cast<float>(kProbeWorldX),
-                                              kLegacyHeight,
-                                              static_cast<float>(kProbeWorldZ),
-                                              kLegacyMaterial),
-                      0u);
-            EXPECT_EQ(CountIndexedWorldPosition(superseded.mesh,
-                                                1,
-                                                0,
-                                                static_cast<float>(kProbeWorldX),
-                                                kLegacyHeight,
-                                                static_cast<float>(kProbeWorldZ)),
-                      0u)
-                << "real chunk 32 must remove the old height for every material";
-            EXPECT_GT(CountIndexedWorldVertex(superseded.mesh,
-                                              1,
-                                              0,
-                                              static_cast<float>(kProbeWorldX),
-                                              11.0f,
-                                              static_cast<float>(kProbeWorldZ),
-                                              kSdfMaterial),
-                      0u);
-
-            errors.clear();
-            ASSERT_TRUE(FarLodStore(save.path).save_tile(superseded.tile, &errors));
-            FarLodTile persisted_superseded_target;
-            errors.clear();
-            ASSERT_TRUE(FarLodStore(save.path).load_tile(
-                tier, 1, 0, params_hash, persisted_superseded_target, &errors));
-            ASSERT_EQ(persisted_superseded_target.sdf_bricks.size(), 1u);
-            EXPECT_EQ(persisted_superseded_target.sdf_bricks.front().local_chunk_x, 0u);
-            EXPECT_EQ(persisted_superseded_target.sdf_bricks.front().source_kind,
-                      FarLodBrickSourceKind::Authoritative);
-            EXPECT_EQ(persisted_superseded_target.flags[probe_index] & kFarLodSampleFlagEdited, 0u);
-            EXPECT_EQ(persisted_superseded_target.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-            EXPECT_FALSE(persisted_superseded_target.legacy_surface_authority);
-            EXPECT_EQ(persisted_superseded_target.sdf_density_q.size(),
-                      FarLodSdfBrickSampleCount(tier));
-            EXPECT_EQ(persisted_superseded_target.sdf_material.size(),
-                      FarLodSdfBrickSampleCount(tier));
+            ASSERT_NO_FATAL_FAILURE(VerifyLegacyHaloScenario(tier, home_first));
         }
     }
 }
-
 TEST(FarLodWorker, ForeignLegacyMaxFaceAppliesExactSavedWaterBit) {
     constexpr u8 kLegacyMaterial = 83u;
     constexpr u8 kSdfMaterial = 231u;

@@ -59,7 +59,13 @@ namespace {
 
 // Stable storage for the creature's runtime skeleton + clips (the scenario
 // spawns one creature once); keyed by clip name from the archetype data.
+// AnimationPlayerComponent holds raw pointers into these, so they must outlive
+// the spawned creature and must not move. FindCreatureClip also hands out
+// pointers into the map's nodes. Static storage is the requirement, not a
+// convenience.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 anim::Skeleton g_creature_skeleton;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::map<std::string, anim::AnimationClip> g_creature_clips;
 
 const anim::AnimationClip* FindCreatureClip(const std::string& name) {

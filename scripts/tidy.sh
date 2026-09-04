@@ -55,7 +55,21 @@ gate_checks+=",clang-analyzer-core*"
 gate_checks+=",modernize-use-nullptr"
 gate_checks+=",performance-for-range-copy"
 gate_checks+=",performance-move-const-arg"
+gate_checks+=",performance-unnecessary-value-param"
+gate_checks+=",cppcoreguidelines-avoid-non-const-global-variables"
 gate_checks+=",readability-function-cognitive-complexity"
+
+# The non-const globals in these translation units are already tracked for
+# decomposition. Keep every other blocking check enabled there while enforcing
+# cppcoreguidelines-avoid-non-const-global-variables everywhere else.
+tracked_global_tus=(
+    "src/luminumbra_client/main_client.cpp"
+    # Runtime-scenario state ownership is tracked by the planned harness decomposition.
+    "src/luminumbra_client/core/RuntimeScenarioHarness.cpp"
+    "src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
+    "src/luminumbra_common/net/GnsTransport.cpp"
+)
+tracked_global_gate_checks="$gate_checks,-cppcoreguidelines-avoid-non-const-global-variables"
 
 # Threshold 250 is the smallest round value that grandfathers every existing
 # function (current worst first-party function scores 243; main_client.cpp's
@@ -63,7 +77,18 @@ gate_checks+=",readability-function-cognitive-complexity"
 gate_config='{
   "Checks": "'"$gate_checks"'",
   "WarningsAsErrors": "*",
-  "HeaderFilterRegex": "",
+  "HeaderFilterRegex": "^(src|include|test)/",
+  "FormatStyle": "file",
+  "CheckOptions": [
+    {"key": "readability-function-cognitive-complexity.Threshold", "value": "250"},
+    {"key": "modernize-use-nullptr.NullMacros", "value": "NULL"}
+  ]
+}'
+
+tracked_global_gate_config='{
+  "Checks": "'"$tracked_global_gate_checks"'",
+  "WarningsAsErrors": "*",
+  "HeaderFilterRegex": "^(src|include|test)/",
   "FormatStyle": "file",
   "CheckOptions": [
     {"key": "readability-function-cognitive-complexity.Threshold", "value": "250"},
@@ -105,14 +130,15 @@ for entry in json.load(open(sys.argv[1])):
     sys.stdout.write(entry["file"] + "\0")
 ' "$compile_db")
 
-# First-party translation units live under src/. The RmlUi GL3 backend is
-# vendored upstream code carried in-tree and is excluded from the gate.
+# First-party translation units live under src/ and test/. The RmlUi GL3
+# backend is vendored upstream code carried in-tree and is excluded from the
+# gate.
 is_first_party_tu() {
     case "$1" in
         src/luminumbra_client/ui/gl3/*)
             return 1
             ;;
-        src/*.c|src/*.cc|src/*.cpp|src/*.cxx)
+        src/*.c|src/*.cc|src/*.cpp|src/*.cxx|test/*.c|test/*.cc|test/*.cpp|test/*.cxx)
             return 0
             ;;
     esac
@@ -131,14 +157,14 @@ if [[ -n "$changed_from" ]]; then
             [[ -n "${compile_db_files[$repo_root/$relative_path]:-}" ]]; then
             tidy_files+=("$repo_root/$relative_path")
         fi
-    done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR -z "$changed_from" -- src)
+    done < <(git -C "$repo_root" diff --name-only --diff-filter=ACMR -z "$changed_from" -- src test)
 
     while IFS= read -r -d '' relative_path; do
         if is_first_party_tu "$relative_path" &&
             [[ -n "${compile_db_files[$repo_root/$relative_path]:-}" ]]; then
             tidy_files+=("$repo_root/$relative_path")
         fi
-    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- src)
+    done < <(git -C "$repo_root" ls-files --others --exclude-standard -z -- src test)
 else
     while IFS= read -r -d '' absolute_path; do
         if is_first_party_tu "${absolute_path#"$repo_root/"}"; then
@@ -158,14 +184,43 @@ fi
 
 echo "clang-tidy gate: ${#tidy_files[@]} translation unit(s), $jobs job(s), binary $clang_tidy"
 
+regular_tidy_files=()
+tracked_global_tidy_files=()
+for tidy_file in "${tidy_files[@]}"; do
+    relative_path="${tidy_file#"$repo_root/"}"
+    is_tracked_global_tu=false
+    for tracked_global_tu in "${tracked_global_tus[@]}"; do
+        if [[ "$relative_path" == "$tracked_global_tu" ]]; then
+            is_tracked_global_tu=true
+            break
+        fi
+    done
+    if [[ "$is_tracked_global_tu" == true ]]; then
+        tracked_global_tidy_files+=("$tidy_file")
+    else
+        regular_tidy_files+=("$tidy_file")
+    fi
+done
+
+run_tidy_batch() {
+    local config="$1"
+    shift
+    if [[ "$#" -eq 0 ]]; then
+        return 0
+    fi
+    printf '%s\0' "$@" |
+        xargs -0 -n 4 -P "$jobs" \
+            "$clang_tidy" -p "$repo_root/$build_dir" -quiet --config="$config"
+}
+
 set +e
-printf '%s\0' "${tidy_files[@]}" |
-    xargs -0 -n 4 -P "$jobs" \
-        "$clang_tidy" -p "$repo_root/$build_dir" -quiet --config="$gate_config"
+run_tidy_batch "$gate_config" "${regular_tidy_files[@]}"
 tidy_status=$?
+run_tidy_batch "$tracked_global_gate_config" "${tracked_global_tidy_files[@]}"
+tracked_global_tidy_status=$?
 set -e
 
-if [[ "$tidy_status" -ne 0 ]]; then
+if [[ "$tidy_status" -ne 0 || "$tracked_global_tidy_status" -ne 0 ]]; then
     echo "clang-tidy gate failed (status $tidy_status). Fix the diagnostics above; the checks in scripts/tidy.sh are blocking." >&2
     exit 1
 fi

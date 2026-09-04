@@ -54,8 +54,13 @@ void UIComponent::OnHover(std::function<void(bool)> callback) {
     if (!m_element || !callback)
         return;
 
-    AddTrackedEventListener(m_element, "mouseenter", [callback](Rml::Event&) { callback(true); });
-    AddTrackedEventListener(m_element, "mouseleave", [callback](Rml::Event&) { callback(false); });
+    auto mouseleave_callback = callback;
+    AddTrackedEventListener(
+        m_element, "mouseenter", [callback = std::move(callback)](Rml::Event&) { callback(true); });
+    AddTrackedEventListener(
+        m_element, "mouseleave", [callback = std::move(mouseleave_callback)](Rml::Event&) {
+            callback(false);
+        });
 }
 
 void UIComponent::AddClass(const std::string& className) {

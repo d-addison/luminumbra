@@ -17,12 +17,12 @@ namespace {
 using luminumbra::ai::CreatureSpeciesRegistry;
 namespace Components = Luminumbra::Components;
 
-const char* kGrovestrider = R"({
+const char* const kGrovestrider = R"({
   "id": "grovestrider", "display_name": "Grovestrider",
   "predator": false, "rarity": 0.35, "base_color": [0.36, 0.42, 0.30]
 })";
 
-const char* kStalker = R"({
+const char* const kStalker = R"({
   "id": "ridgeback_stalker", "display_name": "Ridgeback Stalker", "predator": true
 })";
 

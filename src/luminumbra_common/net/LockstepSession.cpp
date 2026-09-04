@@ -927,7 +927,7 @@ void TcpListener::Close() {
 LockstepSession::LockstepSession(LockstepConfig config,
                                  ILockstepTransport* transport,
                                  LockstepHooks hooks)
-    : m_config(config)
+    : m_config(std::move(config))
     , m_transport(transport)
     , m_hooks(hooks) {
     m_horizon = std::max(m_config.horizon_min, m_config.horizon_start);

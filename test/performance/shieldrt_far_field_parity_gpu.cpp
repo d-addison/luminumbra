@@ -136,7 +136,7 @@ FlatMaxMip FlattenMaxMip(const HeightMaxMip& mip) {
 // skipped; on a skip it climbs a level for bigger empty-space jumps. If it is not
 // safely above, it descends a level; at the finest level a remaining cross is
 // resolved by bisection between the cell-entry and cell-exit t.
-const char* kHeightfieldMarchDepthCompute = R"GLSL(
+const char* const kHeightfieldMarchDepthCompute = R"GLSL(
 #version 450 core
 layout(local_size_x = 64) in;
 

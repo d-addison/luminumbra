@@ -32,8 +32,11 @@ namespace Luminumbra::Client::App {
 namespace {
 
 // The recorder the installed unhandled-exception filter reports through.
-// TU-local: set once by InstallRuntimeCrashHandler.
-RuntimeStateRecorder* g_runtime_state_recorder = nullptr;
+// Set once by InstallRuntimeCrashHandler and retained for the callback lifetime.
+RuntimeStateRecorder*& RuntimeStateRecorderSlot() {
+    static RuntimeStateRecorder* recorder = nullptr;
+    return recorder;
+}
 
 } // namespace
 
@@ -229,14 +232,14 @@ LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) 
     if (auto& lg = Log::GetCoreLogger())
         lg->flush();
 
-    const std::filesystem::path crash_dir = g_runtime_state_recorder
-                                                ? g_runtime_state_recorder->crash_dir()
-                                                : std::filesystem::path("crashes");
+    RuntimeStateRecorder* recorder = RuntimeStateRecorderSlot();
+    const std::filesystem::path crash_dir =
+        recorder ? recorder->crash_dir() : std::filesystem::path("crashes");
     WriteCrashStackTrace(exception_info, crash_dir);
 
-    if (g_runtime_state_recorder) {
-        g_runtime_state_recorder->mark_unhandled_exception(exception_code);
-        WriteMiniDump(exception_info, g_runtime_state_recorder->crash_dir());
+    if (recorder) {
+        recorder->mark_unhandled_exception(exception_code);
+        WriteMiniDump(exception_info, recorder->crash_dir());
     }
     if (auto& lg = Log::GetCoreLogger())
         lg->flush();
@@ -246,12 +249,12 @@ LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) 
 } // namespace
 
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
-    g_runtime_state_recorder = &recorder;
+    RuntimeStateRecorderSlot() = &recorder;
     SetUnhandledExceptionFilter(RuntimeUnhandledExceptionFilter);
 }
 #else
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
-    g_runtime_state_recorder = &recorder;
+    RuntimeStateRecorderSlot() = &recorder;
 }
 #endif
 

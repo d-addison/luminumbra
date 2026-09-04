@@ -35,14 +35,23 @@ struct BackgroundWorldScan {
     std::optional<Luminumbra::Debug::DebugCamPose> hero;
     std::array<std::optional<glm::vec3>, 25> anchor_caves; // one slot per anchor (disjoint writes)
 };
-static std::shared_ptr<BackgroundWorldScan> s_backgroundWorldScan; // null = idle/consumed
-static Luminumbra::JobHandle s_backgroundWorldScanHandle;
+struct BackgroundWorldScanState {
+    std::shared_ptr<BackgroundWorldScan> scan; // null = idle/consumed
+    Luminumbra::JobHandle handle;
+};
+
+BackgroundWorldScanState& GetBackgroundWorldScanState() {
+    static BackgroundWorldScanState state;
+    return state;
+}
+
 void DrainBackgroundWorldScan(Luminumbra::JobSystem& jobs) {
-    if (s_backgroundWorldScanHandle.counter) {
-        jobs.wait(s_backgroundWorldScanHandle);
+    auto& state = GetBackgroundWorldScanState();
+    if (state.handle.counter) {
+        jobs.wait(state.handle);
     }
-    s_backgroundWorldScanHandle = {};
-    s_backgroundWorldScan.reset();
+    state.handle = {};
+    state.scan.reset();
 }
 
 // The body below is the frame loop's flourish region, moved verbatim; only
@@ -53,6 +62,7 @@ void UpdateCaveFlourishes(ClientAppContext& app,
                           Luminumbra::Rendering::Camera* camera) {
     auto& freg = gameSession.GetRegistry();
     auto* fws = gameSession.GetWorldSystem();
+    auto& background_scan = GetBackgroundWorldScanState();
     // headless automation skips the  one-time
     // flourishes entirely — captures want the world + shaders, not spelunking
     // cues (and the crystal point lights would move visual baselines).
@@ -104,8 +114,8 @@ void UpdateCaveFlourishes(ClientAppContext& app,
                 });
             }
         }
-        s_backgroundWorldScanHandle = jobSystem.dispatch_batch(scan_jobs);
-        s_backgroundWorldScan = std::move(scan);
+        background_scan.handle = jobSystem.dispatch_batch(scan_jobs);
+        background_scan.scan = std::move(scan);
         LUMINUMBRA_CORE_INFO(
             " world scan dispatched to background jobs (doline + 25 cave anchors + hero)");
     }
@@ -172,10 +182,10 @@ void UpdateCaveFlourishes(ClientAppContext& app,
     // poll of the JobHandle counter). Dedup runs here in the ORIGINAL sequential
     // anchor order with the same 16-cap, so placement is byte-identical to the
     // old inline walk. Client-only point lights (never hashed) — no re-pin.
-    if (s_backgroundWorldScan && s_backgroundWorldScan->world == fws &&
-        (!s_backgroundWorldScanHandle.counter ||
-         s_backgroundWorldScanHandle.counter->load(std::memory_order_acquire) <= 0)) {
-        const BackgroundWorldScan& scan = *s_backgroundWorldScan;
+    if (background_scan.scan && background_scan.scan->world == fws &&
+        (!background_scan.handle.counter ||
+         background_scan.handle.counter->load(std::memory_order_acquire) <= 0)) {
+        const BackgroundWorldScan& scan = *background_scan.scan;
         //  the doline cave-mouth aim cue.
         if (scan.doline.found) {
             LUMINUMBRA_CORE_INFO("Largest doline near spawn: world ({:.1f}, {:.1f}, {:.1f}) "
@@ -253,8 +263,8 @@ void UpdateCaveFlourishes(ClientAppContext& app,
                 hero.target.y,
                 hero.target.z);
         }
-        s_backgroundWorldScan.reset();
-        s_backgroundWorldScanHandle = {};
+        background_scan.scan.reset();
+        background_scan.handle = {};
     }
 }
 

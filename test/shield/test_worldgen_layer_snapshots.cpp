@@ -2788,7 +2788,7 @@ std::string LandscapeClassFor(const std::string& preset) {
 // The alpine reference is loaded directly for the mountains slope-steepness
 // check (its peaks must reach real alpine slope), independent of the
 // hypsometric class mapping above.
-const char* kMountainsSlopeRefClass = "alpine";
+const char* const kMountainsSlopeRefClass = "alpine";
 
 } // namespace
 

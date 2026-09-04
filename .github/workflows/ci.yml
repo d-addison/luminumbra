@@ -333,7 +333,13 @@ jobs:
   tidy:
     name: Static analysis / clang-tidy
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The gate analyses 351 translation units across src/ and test/, and since it
+    # gained a real HeaderFilterRegex it also analyses first-party headers on every
+    # one of them. That is a large multiple of the src/-only, headers-excluded scope
+    # this job was originally sized for, and it overran the previous 30-minute limit
+    # on a hosted runner at --jobs 4. Sized like the other heavy lanes (Linux 60,
+    # UCRT64 85, MSVC 90) rather than trimmed back to fit.
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

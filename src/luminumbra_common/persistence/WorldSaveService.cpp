@@ -57,8 +57,15 @@ constexpr std::size_t kRecordHeaderSize = 18;
 constexpr std::uint8_t kRecordFlagEdited = 0x01;
 constexpr std::uint8_t kRecordFlagWaterPresent = 0x02;
 
-std::atomic<std::uint64_t> g_region_temp_sequence{0};
-std::atomic<bool> g_interrupt_before_region_replace_for_testing{false};
+std::atomic<std::uint64_t>& RegionTempSequence() {
+    static std::atomic<std::uint64_t> sequence{0};
+    return sequence;
+}
+
+std::atomic<bool>& InterruptBeforeRegionReplaceForTesting() {
+    static std::atomic<bool> interrupt{false};
+    return interrupt;
+}
 
 // One record of an LMR1 region file kept in its on-disk (compressed) form so
 // untouched records survive a merge byte-for-byte without a decode pass.
@@ -127,7 +134,7 @@ std::uint64_t CurrentProcessIdValue() {
 
 std::filesystem::path NextRegionTempPath(const std::filesystem::path& destination) {
     const std::uint64_t sequence =
-        g_region_temp_sequence.fetch_add(1u, std::memory_order_relaxed) + 1u;
+        RegionTempSequence().fetch_add(1u, std::memory_order_relaxed) + 1u;
     std::filesystem::path temp = destination;
     temp += ".tmp." + std::to_string(CurrentProcessIdValue()) + "." + std::to_string(sequence);
     return temp;
@@ -531,7 +538,7 @@ bool WriteRegionFile(const std::filesystem::path& path,
 
     // Test-only crash seam: at this point the replacement bytes are complete
     // and durable, while the prior live LMR1 file has not been touched.
-    if (g_interrupt_before_region_replace_for_testing.exchange(false, std::memory_order_acq_rel)) {
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
         RemoveTemporaryFile(temp_path);
         AddError(errors,
                  "region replacement interrupted by test seam before replacing: " + path.string());
@@ -888,7 +895,7 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
 }
 
 void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enabled) {
-    g_interrupt_before_region_replace_for_testing.store(enabled, std::memory_order_release);
+    InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
 }
 
 bool WorldSaveService::save_world(const WorldStreamingState& state,
