@@ -151,13 +151,16 @@ jobs:
         run: cmake --build --preset release --parallel 4
       - name: Test Diligent RHI with software GL
         run: |
+          # gtest_discover_tests registers ctest names as Suite.Test, NOT the CMake
+          # target name, so a target-name regex matches nothing and --no-tests=error
+          # then fails the lane while the backend is perfectly healthy.
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error \
-              -R '^rhi_device_bringup_test$' --parallel 1 --timeout 180 \
+              -R '^RhiDeviceBringupGpu\.' --parallel 1 --timeout 180 \
               --output-on-failure
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error \
-              -R '^rhi_pilot_flip_test$' --parallel 1 --timeout 180 \
+              -R '^RhiPilotParityGpu\.' --parallel 1 --timeout 180 \
               --output-on-failure
 
   windows-msvc:
