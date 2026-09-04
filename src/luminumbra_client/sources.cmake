@@ -152,17 +152,15 @@ set(CLIENT_SOURCES
 # RuntimeScenarioHarness.cpp instantiates enough EnTT storage
 # templates (debug, no inlining) to overflow the default COFF section limit
 # on MinGW; -mbig-obj lifts it (same pattern googletest/nlohmann use).
-# main_client.cpp is a large monolith that likewise overflows once it gains more
-# EnTT emplace/view instantiations (relocation truncated to fit IMAGE_REL_AMD64_ADDR32NB);
-# give it the same treatment so the app TU keeps room to grow. The QA-binary
-# split moved the harness/runner bodies out of this TU, but it still carries
-# ~40 registry emplace/view sites of its own and is now compiled into BOTH
-# client executables, so the flag stays until a UCRT64 CI run proves the debug
-# object fits without it (this host cannot exercise MinGW).
+# main_client.cpp used to need the same treatment, and the flag was held there
+# pending a UCRT64 run to prove the debug object fits without it. This pull
+# request is that run: main_client.cpp is now 4,645 lines (down from 13,005) with
+# the harness, runner and scenario bodies moved out, so the entry is removed and
+# the Windows UCRT64 lane decides. If that lane goes red with a relocation
+# truncated to fit IMAGE_REL_AMD64_ADDR32NB, the answer is that the flag is still
+# required and the entry comes back with this comment updated to say so.
 if(MINGW)
     set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/core/RuntimeScenarioHarness.cpp
-        PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
-    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/main_client.cpp
         PROPERTIES COMPILE_OPTIONS "-Wa,-mbig-obj")
     # The ScenarioRunner TUs inherit the exact EnTT emplace/view instantiations
     # (skinned-mesh/wildlife/creature-slice scenario code) whose debug template
