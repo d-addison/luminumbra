@@ -27,6 +27,9 @@
 #include "rendering/LightningBolt.h"
 #include "rendering/passes/FoliagePass.h"
 #include "rendering/passes/ParticlePass.h"
+#if defined(LUMINUMBRA_SYNTHETIC_MESH_FIXTURE)
+#include "rendering/synthetic_mesh_fixture.h"
+#endif
 // lockstep transport seam (engine-generic; ILockstepTransport +
 // LoopbackTransport + LockstepSession). Named SendFrame/TryReceiveFrame to dodge
 // the <windows.h> SendMessage macro (see LockstepSession.h note).
@@ -46,10 +49,31 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 
 namespace Luminumbra::Client::ScenarioHarness {
+
+#if defined(LUMINUMBRA_SYNTHETIC_MESH_FIXTURE)
+namespace {
+
+// The renderer bakes tree impostors during startup, before ScenarioRunner is
+// constructed. A QA-library static therefore installs the temporary runtime
+// overlay before main() resolves its runtime root. Real asset checkouts remain
+// untouched because SyntheticMeshFixture is inactive when every payload exists.
+const std::unique_ptr<luminumbra::test::SyntheticMeshFixture> kSyntheticFoliageAssets = [] {
+    try {
+        return std::make_unique<luminumbra::test::SyntheticMeshFixture>(LUMINUMBRA_SOURCE_ROOT);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "Synthetic foliage fixture setup failed: %s\n", error.what());
+        return std::unique_ptr<luminumbra::test::SyntheticMeshFixture>{};
+    }
+}();
+
+} // namespace
+#endif
 
 // --- Foliage instancing smoke ( / ) ---
 // (FoliageSurfaceQuery itself moved to rendering/FoliageSurface.cpp — the
