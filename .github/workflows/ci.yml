@@ -74,6 +74,54 @@ jobs:
             -DBUILD_TESTING=OFF -DENABLE_BINARY_RELEASES=ON -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
           cmake --build build/package-linux --target package --parallel 4
 
+  gns-compile-probe:
+    name: GNS transport / compile probe
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install configure and GNS dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake extra-cmake-modules libabsl-dev \
+            libfreetype6-dev libgl1-mesa-dev libglu1-mesa-dev libprotobuf-dev \
+            libssl-dev libwayland-dev libxkbcommon-dev ninja-build pkg-config \
+            protobuf-compiler wayland-protocols xorg-dev
+      - name: Configure GNS compile command
+        run: |
+          cmake -S . -B build/gns-probe -G Ninja \
+            -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
+      - name: Syntax-check GNS transport body
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import shlex
+          import subprocess
+
+          database = json.loads(pathlib.Path("build/gns-probe/compile_commands.json").read_text())
+          commands = [entry for entry in database if pathlib.Path(entry["file"]).name == "GnsTransport.cpp"]
+          if len(commands) != 1:
+              raise SystemExit(f"expected one GnsTransport.cpp compile command, found {len(commands)}")
+
+          entry = commands[0]
+          command = entry.get("arguments") or shlex.split(entry["command"])
+          syntax_command = []
+          skip_next = False
+          for argument in command:
+              if skip_next:
+                  skip_next = False
+              elif argument == "-o":
+                  skip_next = True
+              elif argument != "-c":
+                  syntax_command.append(argument)
+          subprocess.run([*syntax_command, "-fsyntax-only"], cwd=entry["directory"], check=True)
+          PY
+
   windows-msvc:
     name: Windows / MSVC
     runs-on: windows-2025
