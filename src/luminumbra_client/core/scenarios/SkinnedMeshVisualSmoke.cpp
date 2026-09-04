@@ -59,7 +59,12 @@ namespace anim = luminumbra::animation;
 
 // Stable storage for the runtime skeleton/clip the spawned entity's
 // AnimationPlayerComponent points at (the scenario spawns exactly once).
+// AnimationPlayerComponent holds raw pointers into these, so they must outlive
+// the spawned entity and must not move. Static storage is the requirement, not
+// a convenience.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 anim::Skeleton g_skinned_test_skeleton;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 anim::AnimationClip g_skinned_test_clip;
 
 // Appends an axis-aligned box (24 vertices, 36 indices, per-face normals)
