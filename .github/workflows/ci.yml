@@ -49,6 +49,10 @@ jobs:
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
               --parallel 4 --timeout 180 --output-junit ctest.junit.xml
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      - name: Test over-the-wire networking
+        run: |
+          ctest --preset release --no-tests=error -R '^NetSoak$' \
+            --parallel 1 --output-junit netsoak.junit.xml
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -56,6 +60,7 @@ jobs:
           name: linux-gcc-test-evidence-${{ github.sha }}
           path: |
             build/release/ctest.junit.xml
+            build/release/netsoak.junit.xml
             build/release/Testing/Temporary
             build/release/test-artifacts
           if-no-files-found: warn
