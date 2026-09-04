@@ -33,6 +33,7 @@ Dependencies are obtained in one of two ways, noted per entry:
 | [SOIL2](https://github.com/SpartanJ/SOIL2) | Image loading and OpenGL textures | Public domain |
 | [miniaudio](https://github.com/mackron/miniaudio) | Audio playback and mixing | MIT or public domain |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) | Mesh optimization | MIT |
+| [GameNetworkingSockets](https://github.com/ValveSoftware/GameNetworkingSockets) | UDP networking transport (optional, `LUMINUMBRA_ENABLE_GNS`) | BSD-3-Clause |
 | [Lua](https://github.com/lua/lua) | Runtime scripting language | MIT |
 | [sol2](https://github.com/ThePhD/sol2) | C++ binding layer for Lua | MIT |
 | [spdlog](https://github.com/gabime/spdlog) | Logging | MIT |

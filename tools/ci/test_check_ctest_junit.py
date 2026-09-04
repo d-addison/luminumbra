@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import importlib.util
-import re
 import sys
 import unittest
 import xml.etree.ElementTree as ET
@@ -26,12 +25,6 @@ def skipped_case(name: str, reason: str | None) -> ET.Element:
 
 
 class CTestSkipAuditTests(unittest.TestCase):
-    def setUp(self):
-        self.context_pattern = re.compile(
-            r"(?:no GL context: )?glfwCreateWindow failed"
-            r"(?: \(no GL 4\.5 context(?: available)?\))?"
-        )
-
     def test_rejects_audio_skip_now_that_a_fixture_exists(self):
         # This skip used to be allow-listed because the sound banks are external
         # to the repository. AudioBankIntegrity now generates its payloads at test
@@ -40,32 +33,18 @@ class CTestSkipAuditTests(unittest.TestCase):
             "AudioBankIntegrity.LoadedBankFilesExistOnDisk",
             "audio binaries are intentionally external to the repository",
         )
-        self.assertFalse(MODULE.skip_is_allowed(case, []))
+        self.assertFalse(MODULE.skip_is_allowed(case))
 
     def test_allow_list_is_empty(self):
         # Every previously allow-listed test now genuinely runs. Guard against a
         # skip quietly being re-admitted here without justification.
         self.assertEqual(MODULE.ALLOWED_SKIPS, set())
 
-    def test_accepts_observed_explicit_context_reasons(self):
-        reasons = (
-            "glfwCreateWindow failed",
-            "no GL context: glfwCreateWindow failed",
-            "glfwCreateWindow failed (no GL 4.5 context)",
-            "glfwCreateWindow failed (no GL 4.5 context available)",
-            "no GL context: glfwCreateWindow failed (no GL 4.5 context available)",
-        )
-        for reason in reasons:
-            with self.subTest(reason=reason):
-                case = skipped_case("RenderSmokeTest.Draws", reason)
-                self.assertTrue(MODULE.skip_is_allowed(case, [self.context_pattern]))
-                self.assertFalse(MODULE.skip_is_allowed(case, []))
-
-    def test_rejects_unrelated_or_missing_reason(self):
-        unrelated = skipped_case("RenderSmokeTest.Draws", "shader compile failed")
+    def test_rejects_skip_regardless_of_reason(self):
+        explicit = skipped_case("RenderSmokeTest.Draws", "glfwCreateWindow failed")
         missing = skipped_case("RenderSmokeTest.Draws", None)
-        self.assertFalse(MODULE.skip_is_allowed(unrelated, [self.context_pattern]))
-        self.assertFalse(MODULE.skip_is_allowed(missing, [self.context_pattern]))
+        self.assertFalse(MODULE.skip_is_allowed(explicit))
+        self.assertFalse(MODULE.skip_is_allowed(missing))
 
 
 if __name__ == "__main__":
