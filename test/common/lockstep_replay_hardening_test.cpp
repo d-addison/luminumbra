@@ -479,6 +479,8 @@ TEST(ReplayRoundtripHardening, CheckpointHashSequenceIsByteExact) {
 
     const auto contents = replay::ReadReplay(path.string());
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     EXPECT_FALSE(contents->truncated);
     ASSERT_EQ(contents->checkpoints.size(), live_cps.size());
     for (std::size_t i = 0; i < live_cps.size(); ++i) {
@@ -551,6 +553,8 @@ TEST(ReplayRoundtripHardening, ReReadIsRepeatable) {
     const auto b = replay::ReadReplay(path.string());
     ASSERT_TRUE(a.has_value());
     ASSERT_TRUE(b.has_value());
+    if (!a.has_value() || !b.has_value())
+        return;
     ASSERT_EQ(a->inputs.size(), b->inputs.size());
     for (std::size_t i = 0; i < a->inputs.size(); ++i) {
         EXPECT_EQ(a->inputs[i].tick, b->inputs[i].tick);
@@ -573,6 +577,8 @@ TEST(ReplayRoundtripHardening, EmptyStreamFinalizesAndReads) {
     }
     const auto contents = replay::ReadReplay(path.string());
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     EXPECT_FALSE(contents->truncated);
     EXPECT_TRUE(contents->trailer_present);
     EXPECT_EQ(contents->tick_count, 0u);
@@ -603,6 +609,8 @@ TEST(ReplayRoundtripHardening, MaxTickRoundtrips) {
     }
     const auto contents = replay::ReadReplay(path.string());
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     ASSERT_EQ(contents->inputs.size(), 1u);
     EXPECT_EQ(contents->inputs[0].tick, kMax);
     ASSERT_EQ(contents->checkpoints.size(), 1u);
@@ -628,6 +636,8 @@ TEST(ReplayRoundtripHardening, BlobContainingTrailerMagicIsNotMisread) {
     }
     const auto contents = replay::ReadReplay(path.string());
     ASSERT_TRUE(contents.has_value());
+    if (!contents.has_value())
+        return;
     EXPECT_FALSE(contents->truncated);
     ASSERT_EQ(contents->inputs.size(), 2u);
     EXPECT_EQ(contents->inputs[0].inputs, trailer_bytes);

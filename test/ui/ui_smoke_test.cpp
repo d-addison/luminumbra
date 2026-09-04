@@ -606,6 +606,8 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
     form_fields_checked += 3;
     ClickAndUpdate(ui, world_creation->GetElementById("create_btn"));
     ASSERT_TRUE(created_world.has_value());
+    if (!created_world.has_value())
+        return;
     EXPECT_EQ(created_world->name, "Interaction Test World");
     EXPECT_EQ(created_world->seed, "424242");
     EXPECT_EQ(created_world->type, "mountains");
@@ -633,6 +635,8 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
     EXPECT_FALSE(load_selected->HasAttribute("disabled"));
     ClickAndUpdate(ui, load_selected);
     ASSERT_TRUE(loaded_world_id.has_value());
+    if (!loaded_world_id.has_value())
+        return;
     EXPECT_EQ(*loaded_world_id, expected_world_id);
 
     ClickAndUpdate(ui, world_selection->GetElementById("back_btn"));
@@ -986,6 +990,9 @@ TEST(UiSmokeTest, RedesignedControlsAreFunctional) {
     dynamic_cast<Rml::ElementFormControl*>(amp)->SetValue("123");
     ClickAndUpdate(ui, wc->GetElementById("create_btn"));
     ASSERT_TRUE(created_params.has_value());
+    ASSERT_TRUE(created_type.has_value());
+    if (!created_params.has_value() || !created_type.has_value())
+        return;
     EXPECT_EQ(*created_type, "mountains");
     bool found = false;
     for (const auto& p : *created_params) {
@@ -1043,6 +1050,8 @@ TEST(UiSmokeTest, SaveAndListUserPresetsAreFunctional) {
     SetControlValue(wc, "save_preset_name", "Test Type");
     ClickAndUpdate(ui, wc->GetElementById("save_preset_btn"));
     ASSERT_TRUE(saved.has_value());
+    if (!saved.has_value())
+        return;
     EXPECT_EQ(saved->name, "Test Type");
     EXPECT_EQ(saved->base, "default");
     EXPECT_GT(saved->count, 20u) << "the full customize param set must be handed to the saver";
@@ -1646,6 +1655,8 @@ TEST(UiSmokeTest, SemanticKnobsSeedDriveCallbackAndPreview) {
     dynamic_cast<Rml::ElementFormControl*>(mountains)->SetValue("0.9");
     ClickAndUpdate(ui, wc->GetElementById("create_btn"));
     ASSERT_TRUE(created_params.has_value());
+    if (!created_params.has_value())
+        return;
     bool found_mtn = false, found_wet = false;
     for (const auto& p : *created_params) {
         if (p.path == "knob.mountainousness") {

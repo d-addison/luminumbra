@@ -293,6 +293,8 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
         ASSERT_FALSE(a.Status().dump_path.empty());
         const auto contents = replay::ReadReplay(a.Status().dump_path);
         ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value())
+            return;
         EXPECT_FALSE(contents->truncated);
         EXPECT_FALSE(contents->checkpoints.empty());
     }
@@ -302,6 +304,8 @@ TEST(LockstepSessionTest, DesyncDetectedAndDumpEmitted) {
         ASSERT_FALSE(b.Status().dump_path.empty());
         const auto contents = replay::ReadReplay(b.Status().dump_path);
         ASSERT_TRUE(contents.has_value());
+        if (!contents.has_value())
+            return;
         EXPECT_FALSE(contents->truncated);
     }
 

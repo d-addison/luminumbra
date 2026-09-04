@@ -119,6 +119,8 @@ TEST(StructureStampingTest, MaterialDataDeterministic) {
     ASSERT_TRUE(cairn.ok());
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value()) << "no interior cairn site found in scan window";
+    if (!site.has_value())
+        return;
 
     const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
                                                    static_cast<float>(site->origin.z));
@@ -170,6 +172,8 @@ TEST(StructureStampingTest, CairnStoneVoxelsAppearInChunk) {
     ASSERT_TRUE(cairn.ok());
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
 
     const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
                                                    static_cast<float>(site->origin.z));
@@ -232,6 +236,8 @@ TEST(StructureStampingTest, MiningClearsStructureVoxel) {
     ASSERT_TRUE(cairn.ok());
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
 
     const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
                                                    static_cast<float>(site->origin.z));
@@ -274,6 +280,8 @@ TEST(StructureStampingTest, PersistenceRoundtripPreservesMaterialData) {
     ASSERT_TRUE(cairn.ok());
     auto site = FindInteriorCairnSite(cairn);
     ASSERT_TRUE(site.has_value());
+    if (!site.has_value())
+        return;
 
     const float surface = world.GetTerrainHeightAt(static_cast<float>(site->origin.x),
                                                    static_cast<float>(site->origin.z));
