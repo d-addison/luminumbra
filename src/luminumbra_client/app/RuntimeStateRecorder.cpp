@@ -28,11 +28,6 @@
 #include <Psapi.h>
 #endif
 
-// The recorders sample the live camera for the coverage snapshots. The camera
-// is still owned by main_client.cpp as a global; referenced here via extern
-// until a later decomposition step passes it in explicitly.
-extern std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
-
 using namespace Luminumbra::Client::ScenarioHarness;
 
 namespace Luminumbra::Client::App {
@@ -119,8 +114,10 @@ bool MemoryWatermarkExceeded(const RuntimeScenarioConfig& config,
     return measured_bytes > config.memory_watermark_mb * 1024ull * 1024ull;
 }
 
-RuntimeStateRecorder::RuntimeStateRecorder(RuntimeScenarioConfig config)
+RuntimeStateRecorder::RuntimeStateRecorder(RuntimeScenarioConfig config,
+                                           std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
     : m_config(std::move(config))
+    , g_camera(g_camera)
     , m_started_at(std::chrono::steady_clock::now()) {
     std::error_code ec;
     std::filesystem::create_directories(m_config.artifact_dir, ec);
@@ -470,12 +467,15 @@ void RuntimeStateRecorder::write_last_known() const {
     output << std::setw(2) << m_last_known << '\n';
 }
 
-RuntimeScenarioFrameRecorder::RuntimeScenarioFrameRecorder(bool enabled,
-                                                           int coverage_radius,
-                                                           std::filesystem::path output_dir)
+RuntimeScenarioFrameRecorder::RuntimeScenarioFrameRecorder(
+    bool enabled,
+    int coverage_radius,
+    std::filesystem::path output_dir,
+    std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera)
     : m_enabled(enabled)
     , m_coverage_radius(std::max(0, coverage_radius))
     , m_output_dir(std::move(output_dir))
+    , g_camera(g_camera)
     , m_started_at(std::chrono::steady_clock::now()) {}
 
 bool RuntimeScenarioFrameRecorder::enabled() const {

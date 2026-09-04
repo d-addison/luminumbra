@@ -310,7 +310,7 @@ int main(int argc, char* argv[]) {
         return kExitScenarioUnavailable;
     }
 #endif
-    RuntimeStateRecorder runtime_state_recorder(scenario_config);
+    RuntimeStateRecorder runtime_state_recorder(scenario_config, g_camera);
     InstallRuntimeCrashHandler(runtime_state_recorder);
     g_app.overlay.imgui_enabled = !scenario_config.no_ui;
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
@@ -669,7 +669,8 @@ int main(int argc, char* argv[]) {
     }
     RuntimeScenarioFrameRecorder lod_ground_frame_recorder(scenario_config.lod_ground_smoke(),
                                                            scenario_config.coverage_radius,
-                                                           scenario_config.artifact_dir);
+                                                           scenario_config.artifact_dir,
+                                                           g_camera);
 
     glfwSetErrorCallback(GLFWErrorCallback);
     if (!glfwInit()) {
