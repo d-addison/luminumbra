@@ -132,11 +132,17 @@ jobs:
       - name: Install build and test dependencies
         run: |
           sudo apt-get update
+          # mesa-vulkan-drivers supplies lavapipe, Mesa's software Vulkan driver.
+          # A hosted runner has no GPU and ships no Vulkan ICD at all, so without
+          # it vkCreateInstance fails outright and the Vulkan half of this lane
+          # can only ever report a null device. Discovery finds the ICD on its
+          # own; the file name carries an architecture suffix on some Mesa
+          # releases and not others, so do not pin a path to it.
           sudo apt-get install -y --no-install-recommends \
             build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
             libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
-            ninja-build pkg-config python3-numpy python3-pil wayland-protocols \
-            xauth xorg-dev xvfb
+            mesa-vulkan-drivers ninja-build pkg-config python3-numpy \
+            python3-pil wayland-protocols xauth xorg-dev xvfb
       - name: Restore compiler cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
