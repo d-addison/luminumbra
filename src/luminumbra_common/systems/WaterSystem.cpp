@@ -30,14 +30,17 @@ constexpr int MAX_WATER_INITS_PER_TICK = 6;
 //  implementation note: cap how much active water is SIMULATED per tick. The sim dispatches
 // the woken chunks to workers then m_job_system->waits on completion (+ snapshot/integrate
 // copies), all O(chunks_to_sim); moving into water-heavy terrain woke hundreds at once -> ~450ms
-// main-thread block. We simulate a deterministic ROTATING window (sorted by chunk id, advanced each
-// tick) so the per-tick work is bounded and every chunk still sims over a few ticks. Deterministic
-// guarded by the WaterDeterminism live-water gate.
+// main-thread block. Medium retains the deterministic ROTATING window byte-for-byte. Higher
+// resolutions spend most of the same cell budget on chunks carrying active integer edge flux and
+// reserve the rest for cursor-driven rotation, so active flow fronts advance every wall tick while
+// every awake chunk remains starvation-free. Deterministic selection is guarded by the
+// WaterDeterminism live-water gate.
 //  the budget is expressed in CELLS, not chunks, because per-tick sim cost scales with
 // cell count (the kernel is O(resolution^2) per chunk). At the uniform Medium resolution every
 // chunk is 64 cells, so 4096 cells == the historical 64-chunk window EXACTLY — the derived
 // window length, cursor evolution and hash trajectory are unchanged. A future higher uniform
-// resolution automatically shrinks the chunk window to keep per-tick cell work constant.
+// resolution automatically shrinks the chunk window to keep per-tick cell work constant; the
+// activity-priority split compensates cadence without changing per-sim-pass physics.
 constexpr std::size_t MAX_WATER_CELLS_PER_TICK = 4096;
 //  implementation note: cap how many water chunks RESIZE their sim grid per tick. Each resize
 //  re-samples
@@ -94,12 +97,9 @@ constexpr std::int64_t
 //    and the 0.78 friction factor adds margin. int64 headroom: |K_ACCEL_scaled*dSurf| stays
 //    orders of magnitude under 2^63 and the existing +-2e9 flux clamp still fits int32.
 //
-// Deliberately NOT compensated here: the fixed MAX_WATER_CELLS_PER_TICK budget sims a High
-// chunk ~4x less often than a Medium one whenever more chunks are awake than the derived
-// window (16 vs 64), so WALL-CLOCK settle/fill still lags by the cadence ratio. That divide
-// belongs to the budget/scheduler, not to these constants — inflating k to hide it would
-// change the physics per simulated step instead of the schedule, and break the invariance
-// derived above.
+// Cadence is deliberately NOT compensated in these constants. The scheduler handles the smaller
+// High window by prioritizing chunks with active persisted integer flux; inflating k here would
+// change the physics per simulated step instead of the schedule and break the invariance above.
 constexpr int FLOW_CALIBRATION_RES = static_cast<int>(WaterDetailLevel::Medium); // 8 -> 2 m
 constexpr std::int64_t KAccelForResolution(int res) {
     const std::int64_t r = res;
@@ -145,6 +145,48 @@ namespace {
 
 constexpr std::size_t DeriveSimWindowChunks(std::size_t cells_per_chunk) {
     return std::max<std::size_t>(std::size_t{1}, MAX_WATER_CELLS_PER_TICK / cells_per_chunk);
+}
+
+std::uint64_t WaterActivityScore(const Chunk& chunk) {
+    std::uint64_t activity = 0;
+    const int resolution = chunk.current_water_resolution.load(std::memory_order_relaxed);
+    const std::size_t cells =
+        static_cast<std::size_t>(resolution) * static_cast<std::size_t>(resolution);
+    if (resolution <= 1 || chunk.water_depth_mm.size() != cells ||
+        chunk.water_bed_mm.size() != cells || chunk.water_edge_flux.size() != 2 * cells) {
+        return activity;
+    }
+
+    auto magnitude = [](std::int64_t value) {
+        return static_cast<std::uint64_t>(value < 0 ? -value : value);
+    };
+    auto score_edge = [&](std::size_t from, std::size_t to, std::size_t edge) {
+        const std::int64_t flux = chunk.water_edge_flux[edge];
+        // Ignore a dry terrain slope with no moving water. A wet surface gradient is potential
+        // flow (including a just-dug pit whose old flux is still zero); non-zero flux remains
+        // active while momentum is settling.
+        if (chunk.water_depth_mm[from] == 0 && chunk.water_depth_mm[to] == 0 && flux == 0) {
+            return;
+        }
+        const std::int64_t from_surface =
+            static_cast<std::int64_t>(chunk.water_bed_mm[from]) + chunk.water_depth_mm[from];
+        const std::int64_t to_surface =
+            static_cast<std::int64_t>(chunk.water_bed_mm[to]) + chunk.water_depth_mm[to];
+        activity = std::max(activity, magnitude(from_surface - to_surface));
+        activity = std::max(activity, magnitude(flux));
+    };
+    for (int z = 0; z < resolution; ++z) {
+        for (int x = 0; x < resolution; ++x) {
+            const std::size_t cell = static_cast<std::size_t>(z * resolution + x);
+            if (x + 1 < resolution) {
+                score_edge(cell, cell + 1, 2 * cell);
+            }
+            if (z + 1 < resolution) {
+                score_edge(cell, cell + static_cast<std::size_t>(resolution), 2 * cell + 1);
+            }
+        }
+    }
+    return activity;
 }
 
 int GetWaterResolution(const Chunk& chunk) {
@@ -442,6 +484,69 @@ void StepChunkWaterFixed(Chunk& c,
 
 } // namespace
 
+WaterScheduling::Selection WaterScheduling::SelectPriorityWindow(std::vector<Candidate> candidates,
+                                                                 std::size_t window_chunks,
+                                                                 std::size_t cursor) {
+    Selection result;
+    if (candidates.empty() || window_chunks == 0) {
+        return result;
+    }
+
+    const auto id_less = [](const Candidate& a, const Candidate& b) {
+        return a.id < b.id;
+    };
+    if (!std::is_sorted(candidates.begin(), candidates.end(), id_less)) {
+        std::sort(candidates.begin(), candidates.end(), id_less);
+    }
+    const std::size_t total = candidates.size();
+    cursor %= total;
+    if (total <= window_chunks) {
+        result.chunk_ids.reserve(total);
+        for (const Candidate& candidate : candidates) {
+            result.chunk_ids.push_back(candidate.id);
+        }
+        result.next_cursor = cursor;
+        return result;
+    }
+
+    const std::size_t priority_limit = window_chunks / 2;
+    std::vector<std::size_t> priority_order(total);
+    std::iota(priority_order.begin(), priority_order.end(), std::size_t{0});
+    const auto priority_less = [&candidates](std::size_t lhs, std::size_t rhs) {
+        const Candidate& a = candidates[lhs];
+        const Candidate& b = candidates[rhs];
+        if (a.activity != b.activity) {
+            return a.activity > b.activity;
+        }
+        return a.id < b.id;
+    };
+    const auto priority_end = priority_order.begin() + static_cast<std::ptrdiff_t>(priority_limit);
+    std::partial_sort(priority_order.begin(), priority_end, priority_order.end(), priority_less);
+
+    std::vector<bool> selected(total, false);
+    result.chunk_ids.reserve(window_chunks);
+    for (auto it = priority_order.begin(); it != priority_end; ++it) {
+        const std::size_t index = *it;
+        if (candidates[index].activity == 0) {
+            break;
+        }
+        selected[index] = true;
+        result.chunk_ids.push_back(candidates[index].id);
+    }
+
+    std::size_t visited = 0;
+    while (result.chunk_ids.size() < window_chunks && visited < total) {
+        const std::size_t index = (cursor + visited) % total;
+        ++visited;
+        if (!selected[index]) {
+            selected[index] = true;
+            result.chunk_ids.push_back(candidates[index].id);
+        }
+    }
+    result.next_cursor = (cursor + visited) % total;
+    return result;
+}
+
 WaterSystem::WaterSystem(JobSystem* job_system, SHIELD_WorldSystem* shield_system)
     : m_job_system(job_system)
     , m_shield_system(shield_system) {}
@@ -667,6 +772,7 @@ void WaterSystem::update(entt::registry& registry,
             }
         }
         cp->has_water_sim.store(true);
+        m_water_activity_cache.erase(cp->get_id());
         cp->water_mesh_generated.store(false);
         cp->water_mesh_dirty_ticks = 0;
     };
@@ -753,6 +859,7 @@ void WaterSystem::update(entt::registry& registry,
                 }
                 // WAKE UP: An internal event occurred in this chunk.
                 chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                m_water_activity_cache.erase(chunk.get_id());
             }
         }
     }
@@ -818,16 +925,12 @@ void WaterSystem::update(entt::registry& registry,
         chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
     }
 
-    //  implementation note: bound the per-tick sim work to the MAX_WATER_CELLS_PER_TICK cell
-    //  budget via a DETERMINISTIC
-    // rotating window of WATER_SIM_WINDOW_CHUNKS chunks (budget / cells-per-chunk at the uniform
-    // resolution). Sort by chunk id (order independent of the unordered_map's iteration), then
-    // take a window starting at m_water_sim_cursor and advance it — so over a few ticks every
-    // active chunk sims, but no single tick blocks on hundreds of chunks. The un-simulated chunks
-    // stay awake and are picked up by the rotation next tick. The cursor stays in CHUNK-INDEX
-    // space (persisted as world_info.json waterSimCursor) and its evolution is a pure function
-    // of the active-set size sequence -> run==replay / host==peer identical (verified by the
-    // WaterDeterminism gate).
+    // Bound per-tick work to MAX_WATER_CELLS_PER_TICK. Medium retains its historical flat rotating
+    // window exactly, preserving the default-off hash trajectory. At higher resolutions, rank by
+    // persisted integer water activity (descending, chunk-id tie-break), reserve half the chunk
+    // slots for the persisted cursor, and spend the remainder on active flow. Thus active flow
+    // fronts keep Medium-like wall-clock cadence while every awake chunk remains starvation-free.
+    // No wall clock, float score, unordered iteration order, or job timing feeds selection.
     //  boot-settle mode: no rotating window — sim EVERY awake chunk each call so
     // ticks_below_threshold advances every settle iteration and the sleep threshold (120
     // calm ticks) is reachable within a bounded settle (see SetBootSettleMode).
@@ -842,10 +945,85 @@ void WaterSystem::update(entt::registry& registry,
         m_water_sim_cursor %= total;
         std::vector<Chunk*> window;
         window.reserve(water_sim_window_chunks);
-        for (std::size_t i = 0; i < water_sim_window_chunks; ++i) {
-            window.push_back(chunks_to_sim[(m_water_sim_cursor + i) % total]);
+        if (m_sim_resolution == static_cast<int>(WaterDetailLevel::Medium)) {
+            for (std::size_t i = 0; i < water_sim_window_chunks; ++i) {
+                window.push_back(chunks_to_sim[(m_water_sim_cursor + i) % total]);
+            }
+            m_water_sim_cursor = (m_water_sim_cursor + water_sim_window_chunks) % total;
+        } else {
+            std::vector<WaterScheduling::Candidate> candidates;
+            candidates.reserve(total);
+            for (const Chunk* chunk : chunks_to_sim) {
+                const ChunkID id = chunk->get_id();
+                auto activity = m_water_activity_cache.find(id);
+                if (activity == m_water_activity_cache.end()) {
+                    activity = m_water_activity_cache.emplace(id, WaterActivityScore(*chunk)).first;
+                }
+                candidates.push_back({id, activity->second});
+            }
+            // A cross-chunk flow step needs both sides of a seam in the selected window. Find the
+            // bounded set of strongest seeds first, then spread only those scores to their four
+            // resident neighbours. This budgets active fronts as connected patches without an
+            // all-candidate neighbour expansion every tick.
+            const std::size_t seed_limit = water_sim_window_chunks / 2;
+            std::vector<WaterScheduling::Candidate> seeds;
+            seeds.reserve(seed_limit);
+            const auto stronger = [](const WaterScheduling::Candidate& a,
+                                     const WaterScheduling::Candidate& b) {
+                if (a.activity != b.activity) {
+                    return a.activity > b.activity;
+                }
+                return a.id < b.id;
+            };
+            for (const WaterScheduling::Candidate& candidate : candidates) {
+                if (candidate.activity == 0) {
+                    continue;
+                }
+                const auto position =
+                    std::lower_bound(seeds.begin(), seeds.end(), candidate, stronger);
+                seeds.insert(position, candidate);
+                if (seeds.size() > seed_limit) {
+                    seeds.pop_back();
+                }
+            }
+            constexpr IVec3 neighbor_offsets[] = {{0, 0, 1}, {0, 0, -1}, {1, 0, 0}, {-1, 0, 0}};
+            for (const WaterScheduling::Candidate& seed : seeds) {
+                const auto seed_chunk = std::lower_bound(
+                    chunks_to_sim.begin(),
+                    chunks_to_sim.end(),
+                    seed.id,
+                    [](const Chunk* chunk, ChunkID value) { return chunk->get_id() < value; });
+                if (seed_chunk == chunks_to_sim.end() || (*seed_chunk)->get_id() != seed.id) {
+                    continue;
+                }
+                const IVec3 coords = (*seed_chunk)->get_coords();
+                for (const IVec3& offset : neighbor_offsets) {
+                    const ChunkID neighbor_id = Chunk::calculate_id(coords + offset);
+                    const auto it =
+                        std::lower_bound(candidates.begin(),
+                                         candidates.end(),
+                                         neighbor_id,
+                                         [](const WaterScheduling::Candidate& candidate,
+                                            ChunkID value) { return candidate.id < value; });
+                    if (it != candidates.end() && it->id == neighbor_id) {
+                        it->activity = std::max(it->activity, seed.activity);
+                    }
+                }
+            }
+            const WaterScheduling::Selection selection = WaterScheduling::SelectPriorityWindow(
+                std::move(candidates), water_sim_window_chunks, m_water_sim_cursor);
+            for (const ChunkID id : selection.chunk_ids) {
+                const auto it = std::lower_bound(
+                    chunks_to_sim.begin(),
+                    chunks_to_sim.end(),
+                    id,
+                    [](const Chunk* chunk, ChunkID value) { return chunk->get_id() < value; });
+                if (it != chunks_to_sim.end() && (*it)->get_id() == id) {
+                    window.push_back(*it);
+                }
+            }
+            m_water_sim_cursor = selection.next_cursor;
         }
-        m_water_sim_cursor = (m_water_sim_cursor + water_sim_window_chunks) % total;
         chunks_to_sim.swap(window);
     }
     m_dbg_cells_simmed = chunks_to_sim.size() * water_cells_per_chunk;
@@ -1003,6 +1181,9 @@ void WaterSystem::update(entt::registry& registry,
             // STAY AWAKE: Chunk is active, reset its calm counter.
             chunk->ticks_below_threshold = 0;
             chunk->is_water_sleeping.store(false, std::memory_order_relaxed);
+        }
+        if (m_sim_resolution != static_cast<int>(WaterDetailLevel::Medium)) {
+            m_water_activity_cache[chunk->get_id()] = WaterActivityScore(*chunk);
         }
     }
     dbg_split(m_dbg_water.bookkeeping);
@@ -1181,6 +1362,7 @@ void WaterSystem::apply_displacement(const Vec3& world_pos, f32 volume) {
                     }
                     // WAKE UP: An external event disturbed this chunk.
                     target_chunk.is_water_sleeping.store(false, std::memory_order_relaxed);
+                    m_water_activity_cache.erase(target_chunk.get_id());
                 }
             }
         }
@@ -1228,6 +1410,7 @@ int WaterSystem::EditTerrainBed(const Vec3& world_pos, std::int32_t delta_mm, fl
             c.is_water_sleeping.store(false, std::memory_order_relaxed);
             c.water_mesh_generated.store(false);
             c.water_mesh_dirty_ticks = 0;
+            m_water_activity_cache.erase(c.get_id());
         }
     }
     // a bed edit that touched cells advances the WATER EPOCH so the
@@ -1294,6 +1477,8 @@ void WaterSystem::ResizeSimulationGrid(Chunk& chunk, WaterDetailLevel new_level)
     if (new_resolution == current_resolution) {
         return; // No change needed
     }
+
+    m_water_activity_cache.erase(chunk.get_id());
 
     if (new_resolution <= 0) { // Disable simulation
         chunk.water_level_data.clear();
