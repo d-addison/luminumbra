@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <cstdio>
-#include <fstream>
 #include <vector>
 
 #include "steam/isteamnetworkingsockets.h"
@@ -29,15 +28,9 @@ bool g_steam_ready = false;
 bool SteamLink::Init(std::uint32_t dev_app_id) {
     if (g_steam_ready)
         return true;
-    // SteamAPI_Init attaches to the running Steam client for the app id in
-    // steam_appid.txt (480 = Spacewar works for dev without a published app).
-    {
-        std::ifstream existing("steam_appid.txt");
-        if (!existing.good()) {
-            std::ofstream out("steam_appid.txt");
-            out << dev_app_id << "\n";
-        }
-    }
+    // Developers without a published app id may explicitly provide steam_appid.txt
+    // (for example, with Spacewar id 480). Never create it here: shipping it or
+    // writing it automatically would bypass Steam's ownership check.
     SteamErrMsg err{};
     if (SteamAPI_InitEx(&err) != k_ESteamAPIInitResult_OK) {
         LUMINUMBRA_CORE_ERROR(
