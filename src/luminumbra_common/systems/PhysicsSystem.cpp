@@ -791,7 +791,7 @@ int PhysicsSystem::BatchedPhysicsQueries::QueueRaycast(
     std::function<void(const AudioRaycastResult&)> callback,
     float priority) {
     int query_id = m_next_query_id++;
-    m_queued_queries.push_back({from, to, callback, query_id, priority});
+    m_queued_queries.push_back({from, to, std::move(callback), query_id, priority});
     return query_id;
 }
 

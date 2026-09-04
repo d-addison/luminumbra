@@ -486,7 +486,7 @@ float AudioSpatialCluster::CalculateOcclusion(const glm::vec3& source_pos,
 
 void AudioSpatialCluster::SetPhysicsRaycastCallback(
     std::function<bool(const glm::vec3&, const glm::vec3&, float&)> callback) {
-    m_raycast_callback = callback;
+    m_raycast_callback = std::move(callback);
 }
 
 } // namespace Luminumbra::Client
