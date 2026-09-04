@@ -29,27 +29,74 @@ bool Contains(const std::vector<std::string>& messages, const std::string& text)
     return false;
 }
 
+bool Accepts(std::int64_t revision, const char* provenance) {
+    const auto result =
+        Luminumbra::world::LoadTerrainPresetFromJson(ValidPreset(revision), {}, provenance);
+    return result.ok && result.errors.empty();
+}
+
 } // namespace
 
 int main() {
+    using Luminumbra::world::kMinTerrainPresetSchemaRevision;
     using Luminumbra::world::kTerrainPresetSchemaRevision;
     using Luminumbra::world::LoadTerrainPresetFromJson;
 
-    const auto accepted =
-        LoadTerrainPresetFromJson(ValidPreset(kTerrainPresetSchemaRevision), {}, "accepted");
-    if (!accepted.ok || !accepted.errors.empty()) {
+    // The revision presets are authored against today.
+    if (!Accepts(kTerrainPresetSchemaRevision, "current")) {
         std::cerr << "current preset schema revision was rejected\n";
         return 1;
     }
 
-    constexpr std::int64_t kRejectedRevision = kTerrainPresetSchemaRevision - 1;
-    const auto rejected = LoadTerrainPresetFromJson(ValidPreset(kRejectedRevision), {}, "rejected");
-    if (rejected.ok ||
-        !Contains(rejected.errors, "expected " + std::to_string(kTerrainPresetSchemaRevision)) ||
-        !Contains(rejected.errors, "found " + std::to_string(kRejectedRevision))) {
-        std::cerr << "mismatched preset schema revision was not rejected with expected and found "
-                     "revisions\n";
+    // The oldest supported revision must still load: worlds/atlas/presets/archipelago.json
+    // is authored at it, pinned there by a hash-locked worldgen snapshot test.
+    if (!Accepts(kMinTerrainPresetSchemaRevision, "oldest-supported")) {
+        std::cerr << "oldest supported preset schema revision was rejected\n";
         return 1;
+    }
+
+    // Below the supported floor: content older than anything the loader understands.
+    {
+        constexpr std::int64_t kTooOld = kMinTerrainPresetSchemaRevision - 1;
+        const auto rejected = LoadTerrainPresetFromJson(ValidPreset(kTooOld), {}, "too-old");
+        if (rejected.ok || !Contains(rejected.errors, "found " + std::to_string(kTooOld))) {
+            std::cerr << "a revision below the supported floor was not rejected\n";
+            return 1;
+        }
+    }
+
+    // Above the current revision: a typo, or content authored against a future schema.
+    // This is the case the guard exists for - before it, any integer was accepted.
+    {
+        constexpr std::int64_t kTooNew = kTerrainPresetSchemaRevision + 1;
+        const auto rejected = LoadTerrainPresetFromJson(ValidPreset(kTooNew), {}, "too-new");
+        if (rejected.ok || !Contains(rejected.errors, "found " + std::to_string(kTooNew))) {
+            std::cerr << "a revision above the current schema was not rejected\n";
+            return 1;
+        }
+    }
+
+    // A missing key is accepted: schema_rev is validated when declared, not required.
+    // Requiring it would be a new contract on every in-memory fixture.
+    {
+        nlohmann::json missing = ValidPreset(kTerrainPresetSchemaRevision);
+        missing.erase("schema_rev");
+        const auto accepted = LoadTerrainPresetFromJson(missing, {}, "missing");
+        if (!accepted.ok || !accepted.errors.empty()) {
+            std::cerr << "a preset without schema_rev should still load\n";
+            return 1;
+        }
+    }
+
+    // A non-integer schema_rev is rejected.
+    {
+        nlohmann::json bad = ValidPreset(kTerrainPresetSchemaRevision);
+        bad["schema_rev"] = "five";
+        const auto rejected = LoadTerrainPresetFromJson(bad, {}, "non-integer");
+        if (rejected.ok || !Contains(rejected.errors, "must be an integer")) {
+            std::cerr << "a non-integer schema_rev was not rejected\n";
+            return 1;
+        }
     }
 
     return 0;
