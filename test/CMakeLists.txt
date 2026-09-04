@@ -1548,10 +1548,11 @@ set_tests_properties(ForestPerfBudget PROPERTIES
     LABELS "manual;perf;budget"
     TIMEOUT 300)
 
-# over-the-wire N=32 replication soak (real TCP loopback, 32 client threads,
-# ~10s wall-clock, freezes net_soak.v1). MANUAL-tier — excluded from the default gtest
-# lane (never gate the default lane on socket/wall-clock timing).
-#   run: ctest -L manual -R NetSoak --output-on-failure
+# Over-the-wire N=32 replication soak (real TCP loopback, 32 client threads,
+# ~10s wall-clock, freezes net_soak.v1). Keep the manual label so this remains
+# excluded from the parallel default suite; Linux CI gates it explicitly by name
+# in a serial step.
+#   run: ctest -R NetSoak --output-on-failure
 add_executable(net_soak_over_the_wire_test
     net/net_soak_over_the_wire_test.cpp
 )
@@ -1565,7 +1566,10 @@ target_link_libraries(net_soak_over_the_wire_test PRIVATE
     gtest_main
     luminumbra_common)
 add_test(NAME NetSoak COMMAND net_soak_over_the_wire_test)
-set_tests_properties(NetSoak PROPERTIES LABELS "manual;net;soak" TIMEOUT 120)
+set_tests_properties(NetSoak PROPERTIES
+    LABELS "manual;net;soak"
+    TIMEOUT 120
+    RUN_SERIAL TRUE)
 
 # register the spike benchmark under the "manual" label. It is
 # evidence-only (not a required gate) and its Debug runtime (~25s, and can exceed
