@@ -16,8 +16,13 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
+
+namespace Luminumbra::Rendering {
+class Camera;
+}
 
 namespace Luminumbra::world {
 class GameSession;
@@ -55,7 +60,8 @@ bool MemoryWatermarkExceeded(const RuntimeScenarioConfig& config,
 
 class RuntimeStateRecorder {
 public:
-    explicit RuntimeStateRecorder(RuntimeScenarioConfig config);
+    RuntimeStateRecorder(RuntimeScenarioConfig config,
+                         std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera);
 
     const std::filesystem::path& artifact_dir() const;
     const std::filesystem::path& crash_dir() const;
@@ -101,6 +107,7 @@ private:
     void write_last_known() const;
 
     RuntimeScenarioConfig m_config;
+    std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera;
     std::chrono::steady_clock::time_point m_started_at{};
     nlohmann::json m_last_known = {{"schema", "luminumbra.runtime_state.v1"},
                                    {"phase", "not_started"},
@@ -139,7 +146,8 @@ class RuntimeScenarioFrameRecorder {
 public:
     RuntimeScenarioFrameRecorder(bool enabled,
                                  int coverage_radius,
-                                 std::filesystem::path output_dir);
+                                 std::filesystem::path output_dir,
+                                 std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera);
 
     bool enabled() const;
 
@@ -157,6 +165,7 @@ private:
     bool m_enabled = false;
     int m_coverage_radius = 0;
     std::filesystem::path m_output_dir;
+    std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera;
     std::chrono::steady_clock::time_point m_started_at{};
     std::vector<RuntimeScenarioFrameSample> m_samples;
 };
