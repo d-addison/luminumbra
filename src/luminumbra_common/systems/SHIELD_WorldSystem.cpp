@@ -1527,6 +1527,14 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp,
                                               float effective_cap,
                                               float feature_carve,
                                               const float* precomputed_cheese) const {
+    // All three noise terms are multiplied by zero above the surface cap.
+    // Preserve the analytic surface-break carve, but avoid sampling fields that
+    // cannot affect this density. This keeps the noise-router result bit-identical.
+    if (cave_surface_blend(terrain_density, effective_cap) == 0.0f) {
+        if (feature_carve <= 0.0f)
+            return terrain_density;
+        return exp_smax(terrain_density, -feature_carve, m_params.carve_smoothness);
+    }
     // Cheese BODY field shared by scalar and batch samplers.
     // The hot batched-chunk path passes its precomputed batch value to skip a re-sample.
     const float cheese = precomputed_cheese
