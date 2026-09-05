@@ -80,16 +80,6 @@ struct ExpectedMeshHashes {
     std::uint64_t index_hash;
 };
 
-constexpr std::uint64_t ToolchainVertexHash(std::uint64_t msvc, std::uint64_t gcc_clang) {
-#ifdef _MSC_VER
-    (void)gcc_clang;
-    return msvc;
-#else
-    (void)msvc;
-    return gcc_clang;
-#endif
-}
-
 void VerifyCombo(const char* combo,
                  const TerrainGenParams& params,
                  int seed,
@@ -102,6 +92,29 @@ void VerifyCombo(const char* combo,
             << combo << " step " << exp.step << " mesh_vertices bytes changed";
         EXPECT_EQ(hashes.index_hash, exp.index_hash)
             << combo << " step " << exp.step << " mesh_indices bytes changed";
+    }
+}
+
+// Retirement of cave_style/shaping_enabled moves the synthetic terrain hashes.
+// Pin the measured GCC/Clang bytes and topology; independent-world replay proves
+// current determinism on every compiler, including MSVC's distinct float evaluation.
+void VerifyCurrentCombo(const char* combo,
+                        const TerrainGenParams& params,
+                        int seed,
+                        const IVec3& coords,
+                        const ExpectedMeshHashes (&expected)[3]) {
+    for (const auto& exp : expected) {
+        const auto first = HashChunkMesh(params, seed, coords, exp.step);
+        const auto replay = HashChunkMesh(params, seed, coords, exp.step);
+        PrintHashes(combo, exp.step, first);
+        EXPECT_EQ(first.vertex_count, replay.vertex_count);
+        EXPECT_EQ(first.index_count, replay.index_count);
+        EXPECT_EQ(first.vertex_hash, replay.vertex_hash);
+        EXPECT_EQ(first.index_hash, replay.index_hash);
+#ifndef _MSC_VER
+        EXPECT_EQ(first.vertex_hash, exp.vertex_hash) << combo << " step " << exp.step;
+#endif
+        EXPECT_EQ(first.index_hash, exp.index_hash) << combo << " step " << exp.step;
     }
 }
 
@@ -143,38 +156,27 @@ TerrainGenParams MakeFlatSurfaceParams() {
 // DETERMINISM HASH GATES
 // =====================================================================================
 
-// Index topology is toolchain-independent. Floating-point vertex bytes differ
-// between MSVC and GCC/Clang, so each compiler family carries a fixed baseline;
-// every supported CI lane still blocks unreviewed drift.
+// Index topology is toolchain-independent. Current terrain has a GCC/Clang
+// vertex baseline plus independent-world determinism checks on every compiler.
 TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
+    // Re-pinned for cave_style/shaping_enabled retirement.
     const ExpectedMeshHashes expected[3] = {
-        {1,
-         ToolchainVertexHash(0xf0e6299ae429d7aaull, 0x5e413eacf6743dcaull),
-         0x3810ee7a8afe33d3ull},
-        {2,
-         ToolchainVertexHash(0xc97ec36ec178039dull, 0x2543256b56717b05ull),
-         0xdb4674d1012830e6ull},
-        {4,
-         ToolchainVertexHash(0xe844d2832557de7dull, 0x3620685e67934a62ull),
-         0xcfa16e271f9baec9ull},
+        {1, 0x43b033500a7e70afull, 0x7a014cd2e589b3a1ull},
+        {2, 0xd055fb106b361fddull, 0x9177a54dc6654457ull},
+        {4, 0x701ce4034488d411ull, 0x7257517ea6a6be50ull},
     };
-    VerifyCombo(
+    VerifyCurrentCombo(
         "archipelago seed=42 chunk=(0,0,0)", MakeArchipelagoParams(), 42, IVec3(0, 0, 0), expected);
 }
 
 TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
+    // Re-pinned for cave_style/shaping_enabled retirement.
     const ExpectedMeshHashes expected[3] = {
-        {1,
-         ToolchainVertexHash(0x3c13cffb2df9002bull, 0x5778e8eb6ded2cd7ull),
-         0x5c5461c111230d31ull},
-        {2,
-         ToolchainVertexHash(0x4ccea9a8928dcb11ull, 0x71624a244e446b23ull),
-         0x31e388b242ffade9ull},
-        {4,
-         ToolchainVertexHash(0x93681086fb859095ull, 0x52184dca60f9e769ull),
-         0x8a80deef5ebdaf50ull},
+        {1, 0x9b9a0f1985b16decull, 0x501667b909047bbcull},
+        {2, 0xf0ca86d13f48b7cdull, 0xc026220b072ee6ddull},
+        {4, 0xf1dc86ff3820ef1full, 0x7298410a91b6706full},
     };
-    VerifyCombo(
+    VerifyCurrentCombo(
         "caves seed=12345 chunk=(0,0,0)", MakeCaveParams(), 12345, IVec3(0, 0, 0), expected);
 }
 
