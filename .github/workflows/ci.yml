@@ -77,7 +77,10 @@ jobs:
   gns-compile-probe:
     name: GNS transport / compile probe
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Building GameNetworkingSockets from source (FetchContent + protobuf
+    # codegen) is several minutes on top of the project build, well past the
+    # 15 minutes a syntax-only probe needed.
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,32 +98,21 @@ jobs:
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
-      - name: Syntax-check GNS transport body
+      - name: Build the shared sockets transport against GNS
         run: |
-          python3 - <<'PY'
-          import json
-          import pathlib
-          import shlex
-          import subprocess
-
-          database = json.loads(pathlib.Path("build/gns-probe/compile_commands.json").read_text())
-          commands = [entry for entry in database if pathlib.Path(entry["file"]).name == "GnsTransport.cpp"]
-          if len(commands) != 1:
-              raise SystemExit(f"expected one GnsTransport.cpp compile command, found {len(commands)}")
-
-          entry = commands[0]
-          command = entry.get("arguments") or shlex.split(entry["command"])
-          syntax_command = []
-          skip_next = False
-          for argument in command:
-              if skip_next:
-                  skip_next = False
-              elif argument == "-o":
-                  skip_next = True
-              elif argument != "-c":
-                  syntax_command.append(argument)
-          subprocess.run([*syntax_command, "-fsyntax-only"], cwd=entry["directory"], check=True)
-          PY
+          # Upgraded from a -fsyntax-only probe of one file to a real build.
+          # SteamNetworkingTransport and GnsTransport now share NetSocketsTransport,
+          # because GameNetworkingSockets is Valve's open-source implementation of
+          # the same ISteamNetworkingSockets interface that the Steamworks SDK
+          # exposes. The Steam SDK is owner-provided and cannot be fetched here, so
+          # building the GNS side is the only way to get real compile coverage of
+          # the socket logic the Steam transport also runs. A syntax check could
+          # not catch a link-level or template-instantiation break; this can.
+          cmake --build build/gns-probe --target luminumbra_common --parallel 4
+          # Fail loudly if the shared body was not actually part of that build,
+          # so this job cannot silently degrade back into proving nothing.
+          find build/gns-probe -name 'NetSocketsTransport.cpp.o' -print -quit \
+            | grep -q . || { echo "NetSocketsTransport.cpp was not compiled"; exit 1; }
 
   diligent-rhi:
     name: Diligent RHI / software GL

@@ -15,11 +15,10 @@
 #ifdef LUMINUMBRA_ENABLE_GNS
 
 #include <cstdint>
-#include <deque>
 #include <string>
 #include <vector>
 
-#include "steam/steamnetworkingtypes.h"
+#include "NetSocketsTransport.h"
 
 namespace Luminumbra::Net {
 
@@ -33,7 +32,7 @@ public:
     static void RunCallbacks();
 };
 
-class GnsTransport final : public ILockstepTransport {
+class GnsTransport final : public NetSocketsTransport {
 public:
     GnsTransport();
     ~GnsTransport() override;
@@ -51,17 +50,6 @@ public:
     void Close() override;
 
     static void OnConnStatusChangedStatic(SteamNetConnectionStatusChangedCallback_t* info);
-
-private:
-    void HandleConnStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
-    void DrainInto();
-
-    HSteamListenSocket m_listen = 0;
-    HSteamNetConnection m_conn = 0;
-    bool m_connected = false;
-    bool m_closed = false;
-    bool m_is_host = false;
-    std::deque<std::vector<std::uint8_t>> m_recv;
 };
 
 } // namespace Luminumbra::Net
