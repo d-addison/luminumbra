@@ -116,6 +116,10 @@ void main() {
     float bend = cornerY * cornerY; // 0 at base, 1 at tip
     float osc = sin(u_time * u_swaySpeed + aPhase);
     vec2 windDisp = aSway * u_swayAmplitude * swayScale * bend * (0.6 + 0.4 * osc);
+    // Wind is a field velocity, not a blade-size multiplier. Bound displacement
+    // by this blade's height so short ground cover cannot stretch into long spikes.
+    float maxBend = max(aSize.y, 0.0) * 0.45;
+    windDisp *= min(1.0, maxBend / max(length(windDisp), 0.0001));
     local.x += windDisp.x;
     local.z += windDisp.y;
 

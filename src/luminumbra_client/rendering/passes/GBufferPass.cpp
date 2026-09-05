@@ -690,6 +690,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         batch.mats.push_back(cp.model);
         batch.tints.push_back(cp.tint);
     }
+    const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
     for (const auto& kv : m_visibleGroups) {
         const InstanceBatchCached& batch = kv.second;
         if (!batch.active)
@@ -699,6 +700,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
         if (!mesh || matrices.empty())
             continue;
         m_instanced_static_mesh_shader->setInt("u_materialId", static_cast<int>(batch.materialId));
+        bool two_sided = false;
         //  static-model UV texture lane: if this mesh has registered bark/leaf
         // textures, bind the static-model array to unit 3 and set its albedo/normal
         // layers (+ alpha-test) so g_buffer.frag's UV branch samples the model's own
@@ -712,6 +714,7 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 m_instanced_static_mesh_shader->setInt("u_skinnedAlbedoLayer", smt->albedoLayer);
                 m_instanced_static_mesh_shader->setInt("u_skinnedNormalLayer", smt->normalLayer);
                 m_instanced_static_mesh_shader->setInt("u_alphaTest", smt->alphaTest ? 1 : 0);
+                two_sided = smt->alphaTest;
                 // textured tree parts sway in the wind (rigid props stay at 0).
                 m_instanced_static_mesh_shader->setFloat("u_windStrength", 1.0f);
                 m_instanced_static_mesh_shader->setInt("u_forceFlat", 0);
@@ -727,20 +730,22 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
                 // key suffix so only procgen leaves flutter.
                 const bool isLeaf = batch.basePath.size() >= 5 &&
                                     batch.basePath.rfind("_leaf") == batch.basePath.size() - 5;
+                m_instanced_static_mesh_shader->setInt("u_alphaTest", isLeaf ? 2 : 0);
+                two_sided = isLeaf;
                 m_instanced_static_mesh_shader->setFloat("u_windStrength", isLeaf ? 0.85f : 0.0f);
-                // procgen FOLIAGE cards (leaves + bushes, no texture lane) take the flat
-                // path at DISTANCE (LOD1+) — there the world-projected grass triplanar (6-9
-                // texture-array samples/fragment) is invisible on a fluttering card but was a top
-                // G-buffer cost under forest overdraw, and the per-instance green tint carries the
-                // colour. The NEAR band (LOD0, the group drawn from the un-suffixed base mesh)
-                // KEEPS the full triplanar so foreground foliage the player reads up close is
-                // unchanged. Bark/trunk always keep triplanar (read as wood bark texture).
+                // Leaves use the dedicated cutout material at every LOD. Other
+                // foliage retains its existing distant flat-material optimization;
+                // near bushes, bark, and rigid props keep terrain texturing.
                 const bool isBush = batch.basePath.find("procgen://bush_") != std::string::npos;
                 const bool isFarLod = batch.drawPath.find(".lod") != std::string::npos;
                 m_instanced_static_mesh_shader->setInt("u_forceFlat",
                                                        ((isLeaf || isBush) && isFarLod) ? 1 : 0);
             }
         }
+        if (two_sided || !cull_was_enabled)
+            glDisable(GL_CULL_FACE);
+        else
+            glEnable(GL_CULL_FACE);
         // clamp to the VBO capacity so an oversized group can't overrun the
         // buffer (glBufferSubData does not resize). Trees cap well under this.
         const GLsizei instance_count = static_cast<GLsizei>(std::min<std::size_t>(
@@ -770,6 +775,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
             GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr, instance_count);
         glBindVertexArray(0);
     }
+    if (cull_was_enabled)
+        glEnable(GL_CULL_FACE);
+    else
+        glDisable(GL_CULL_FACE);
 
     //  far-field tree impostors: one camera-facing billboard per collected far tree, sampling the
     // octahedral atlas into the same G-buffer attachments. ONE instanced draw + one shared atlas

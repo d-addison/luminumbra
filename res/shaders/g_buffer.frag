@@ -70,7 +70,7 @@ uniform int u_skinnedNormalLayer = -1;
 // renders exactly as authored; only multiplies the skinned albedo sample below, so no
 // other (terrain/static) path is affected.
 uniform vec3 u_albedo_tint = vec3(1.0);
-uniform int u_alphaTest = 0; // 1 = luma-keyed cutout (tree leaves), 0 = opaque.
+uniform int u_alphaTest = 0; // 0 opaque, 1 texture-luma cutout, 2 procedural leaf silhouette.
 
 // macro ROCK-on-steep-faces overlay is a TERRAIN-only macro-variation
 // (natural cliffs read as scree). It costs vnoise + up to 3 extra triplanar samples per
@@ -236,6 +236,14 @@ float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale)
 
 void main()
 {
+    // Public procedural trees have no leaf-card texture. Give their cards an
+    // explicit silhouette instead of drawing opaque rectangular terrain patches.
+    bool proceduralLeaf = u_alphaTest == 2;
+    if (proceduralLeaf) {
+        vec2 leaf = fs_in.UV * 2.0 - 1.0;
+        leaf.x *= 1.0 + 0.10 * sin(fs_in.UV.y * 22.0);
+        if (dot(leaf, leaf) > 1.0) discard;
+    }
     if (fs_in.MaterialID == 7u) { // Water
         discard;
     }
@@ -311,7 +319,15 @@ void main()
     // untextured ids keep their flat base color and geometric normal.
     vec3 worldN = normalize(fs_in.WorldNormal);
     bool textured = false;
-    if (u_skinnedAlbedoLayer >= 0) {
+    if (proceduralLeaf) {
+        // The same leaf reflectance at every mesh LOD avoids a bright green
+        // distance band. Keep ground textures and their normal maps off leaves.
+        albedo = vec3(0.10, 0.24, 0.045);
+        roughness = 0.85;
+        metallic = 0.0;
+        if (!gl_FrontFacing) worldN = -worldN;
+        textured = true; // rotate the two-sided world normal into view space below
+    } else if (u_skinnedAlbedoLayer >= 0) {
         // UV-mapped skinned/creature texturing. Samples the skinned
         // texture array by the mesh UVs; optionally perturbs the normal by a
         // tangent-derivative-free approximation (UV-space normal map, applied in

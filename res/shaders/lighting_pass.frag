@@ -475,7 +475,8 @@ void main() {
 
     // --- LIGHTING CALCULATION ---
     vec3 Lo = vec3(0.0);
-    vec3 L_sun = normalize(u_sun.direction);
+    // The input is the ray-travel direction; the BRDF needs surface-to-light.
+    vec3 L_sun = normalize(-u_sun.direction);
     float shadow = CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
     // Convert the authored sun COLOR into surface IRRADIANCE (x PI) so the
     // diffuse 1/PI division round-trips albedo faithfully (exposure-audit root
@@ -504,16 +505,9 @@ void main() {
     float sunLum = max(u_sun.color.r, max(u_sun.color.g, u_sun.color.b));
     float nightFactor = 1.0 - smoothstep(0.0, 0.06, sunLum); // ~0 day -> ~1 night
     if (nightFactor > 0.001) {
-        // The lighting pass uses u_sun.direction directly as the toward-light
-        // vector L. The moon's TRAVEL direction is -u_sun.direction (anti-sun),
-        // so its toward-light vector is +u_sun.direction — i.e. the same form the
-        // sun uses, which correctly lights the up-facing terrain at night.
-        // moon-shadows: the moon is now a REAL directional key that CASTS shadows,
-        // not just a flat fill. L_moon is the uploaded toward-light dir (anti-sun,
-        // overhead at midnight) — at night get_light_space_matrices builds the
-        // shadow cascade from this SAME direction, so CalculateShadow(...,L_moon)
-        // gives genuine moon cast/received shadows. Render-only.
-        vec3 L_moon = normalize(u_moonDir);
+        // MoonGeometry supplies a ray-travel direction too. Use its opposite for
+        // lighting, matching foliage and the cascade camera convention.
+        vec3 L_moon = normalize(-u_moonDir);
         float NdotL_moon = max(dot(Normal, L_moon), 0.0);
         // Cast-shadow term from the (now moon-keyed) cascade. Moonlight is dim, so
         // a touch of softening: lift the floor a hair to avoid harsh black edges /
@@ -652,7 +646,10 @@ void main() {
                 vec3 pole = pol >= 0.0 ? u_aetherPolarityColorPos: u_aetherPolarityColorNeg;
                 glowColor = mix(glowColor, pole, abs(pol));
             }
-            aetherGlow = aether * glowColor * u_aetherGlowIntensity;
+            // Ordinary terrain and trees do not emit. Applying this field to every
+            // surface washes the streamed region white/cyan and hides its materials.
+            float response = clamp(emissiveIntensity, 0.0, 1.0);
+            aetherGlow = aether * glowColor * u_aetherGlowIntensity * response;
         }
     }
 
@@ -757,7 +754,15 @@ void main() {
     // and apply a subtle sun warmth tint. Applied in tonemapped [0,1] space.
     float gradeLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(gradeLuma), color, u_saturation);
-    color = clamp((color - 0.5) * u_contrast + 0.5, 0.0, 1.0);
+    // Contrast must preserve black and retain shaded material detail. Subtracting
+    // a fixed offset per channel crushed foliage to black and left blue fringes.
+    // Apply an endpoint-preserving curve to luminance, then scale RGB together.
+    float y = clamp(gradeLuma, 0.0, 1.0);
+    float contrast = max(u_contrast, 0.01);
+    float toe = min(y, 1.0 - y);
+    float curvedToe = toe / (contrast + (1.0 - contrast) * 2.0 * toe);
+    float gradedY = y < 0.5 ? curvedToe : 1.0 - curvedToe;
+    color = clamp(color * (gradedY / max(y, 0.000001)), 0.0, 1.0);
     // Cinematic split-tone: cool shadows -> warm highlights, blended by luma.
     float toneT = smoothstep(0.12, 0.88, gradeLuma);
     vec3 splitTint = mix(u_shadowTint, u_highlightTint, toneT);

@@ -191,6 +191,14 @@ camera reprojection and instanced foliage wind-sway motion to TAAU. Previous
 rigid-object transforms and previous skinned bone poses remain missing.
 Far-tree impostors are enabled at startup by default when atlas baking succeeds.
 
+Directional-light inputs describe ray travel; surface lighting uses their
+opposite. Each shadow cascade clears its own depth layer every frame. Aether
+enhances authored emissive materials without making ordinary ground emit light.
+The contrast curve preserves black and shaded material differences. Public
+procedural tree leaves use a two-sided cutout with consistent reflectance across
+mesh LODs. Ground-cover sizes in `data/common/foliage/scatter_set.json` are metres
+before 20% variation; grass is 12–20 cm tall, with wind bend bounded by blade height.
+
 ### UI, audio, and optional data
 
 RmlUi documents and engine-owned component/listener lifetimes form the UI layer.

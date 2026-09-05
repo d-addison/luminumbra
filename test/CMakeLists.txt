@@ -468,6 +468,8 @@ add_executable(pass_context_test
     rendering/pass_context_test.cpp
 ../src/luminumbra_client/rendering/passes/DebugViewPass.cpp
 ../src/luminumbra_client/rendering/passes/GroundDecalPass.cpp
+../src/luminumbra_client/rendering/passes/ShadowPass.cpp
+../src/luminumbra_client/rendering/RenderResourceRegistry.cpp
 ../src/luminumbra_client/rendering/Shader.cpp
 ../src/luminumbra_client/rendering/ShaderReflection.cpp
 ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
@@ -1559,6 +1561,13 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         # normal correctness lanes; the paired relative workflow is the gate.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES LABELS manual TIMEOUT 3600 RUN_SERIAL TRUE)
+    elseif(_lum_gtest_target STREQUAL initial_world_loading_perf_test)
+        # These measurements already run a four-thread JobSystem. Sharing the
+        # runner with software GL and other world builds measures contention;
+        # UCRT64 exceeded the unchanged 120-second horizon-preparation bound.
+        # Keep every case in the required suite and give its measurement the CPU.
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES RUN_SERIAL TRUE)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RESOURCE_LOCK luminumbra_gl_context)
