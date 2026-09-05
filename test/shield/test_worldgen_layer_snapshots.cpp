@@ -134,15 +134,12 @@ TerrainGenParams TerrainLayerParams() {
     params.persistence = 0.5f;
     params.lacunarity = 2.1f;
     params.height_offset = 10.0f;
-    params.caves_enabled = false;
-    params.island_mask_enabled = false;
     params.island_mask_frequency = 0.075f;
     return params;
 }
 
 TerrainGenParams CaveLayerParams() {
     TerrainGenParams params = TerrainLayerParams();
-    params.caves_enabled = true;
     params.cave_frequency = 0.15f;
     params.cave_threshold = 0.55f;
     params.cave_carve_value = 5.0f;
@@ -154,8 +151,6 @@ TerrainGenParams WaterLayerParams() {
     params.base_frequency = 0.02f;
     params.base_amplitude = 1.0f;
     params.height_offset = -4.0f;
-    params.caves_enabled = false;
-    params.island_mask_enabled = false;
     return params;
 }
 
@@ -622,18 +617,13 @@ TEST(WorldGenLayerSnapshotTest, ExportsLayerMetricsAndImages) {
     fs::create_directories(root);
 
     TerrainGenParams terrain = TerrainLayerParams();
-    TerrainGenParams island = terrain;
-    island.island_mask_enabled = true;
-
     TerrainGenParams caves = CaveLayerParams();
-    caves.island_mask_enabled = true;
 
-    const LayerSnapshot base_snapshot = GenerateSnapshot("01_base_terrain", terrain, 1, false);
-    const LayerSnapshot island_snapshot = GenerateSnapshot("02_island_mask", island, 1, false);
+    const LayerSnapshot base_snapshot = GenerateSnapshot("01_modern_terrain", terrain, 1, false);
     const LayerSnapshot cave_surface_snapshot =
         GenerateSnapshot("03_caves_surface", caves, 1, false);
-    const LayerSnapshot island_deep_snapshot =
-        GenerateSnapshot("03a_island_deep", island, 1, false, kCaveChunkCoords);
+    const LayerSnapshot base_deep_snapshot =
+        GenerateSnapshot("03a_modern_deep", terrain, 1, false, kCaveChunkCoords);
     const LayerSnapshot cave_deep_snapshot =
         GenerateSnapshot("03b_caves_deep", caves, 1, false, kCaveChunkCoords);
     const LayerSnapshot cave_lod_snapshot = GenerateSnapshot("04_caves_lod4", caves, 4, false);
@@ -642,17 +632,15 @@ TEST(WorldGenLayerSnapshotTest, ExportsLayerMetricsAndImages) {
 
     const std::vector<LayerSnapshot> snapshots{
         base_snapshot,
-        island_snapshot,
         cave_surface_snapshot,
-        island_deep_snapshot,
+        base_deep_snapshot,
         cave_deep_snapshot,
         cave_lod_snapshot,
         water_snapshot,
     };
 
-    const LayerDelta island_delta = CalculateDelta(base_snapshot, island_snapshot);
-    const LayerDelta cave_delta = CalculateDelta(island_deep_snapshot, cave_deep_snapshot);
-    const std::vector<LayerDelta> deltas{island_delta, cave_delta};
+    const LayerDelta cave_delta = CalculateDelta(base_deep_snapshot, cave_deep_snapshot);
+    const std::vector<LayerDelta> deltas{cave_delta};
 
     for (const LayerSnapshot& snapshot : snapshots) {
         WriteSnapshotImages(root, snapshot);
@@ -668,19 +656,15 @@ TEST(WorldGenLayerSnapshotTest, ExportsLayerMetricsAndImages) {
     EXPECT_EQ(base_snapshot.mesh.bad_vertex_normals, 0u);
     EXPECT_LT(base_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
 
-    EXPECT_GT(island_delta.changed_height_samples, 0u);
-    EXPECT_GT(island_delta.mean_abs_height_delta, 0.001);
-    EXPECT_LT(island_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
-
     EXPECT_GT(cave_delta.changed_sdf_samples, 0u);
     EXPECT_GT(cave_delta.sdf_sign_flips, 0u);
     EXPECT_GT(cave_deep_snapshot.mesh.vertices, 0u);
     EXPECT_EQ(cave_deep_snapshot.mesh.invalid_indices, 0u);
     EXPECT_EQ(cave_deep_snapshot.mesh.degenerate_triangles, 0u);
     EXPECT_EQ(cave_deep_snapshot.mesh.bad_vertex_normals, 0u);
-    EXPECT_NE(cave_deep_snapshot.mesh.vertices, island_deep_snapshot.mesh.vertices);
+    EXPECT_NE(cave_deep_snapshot.mesh.vertices, base_deep_snapshot.mesh.vertices);
     EXPECT_LT(cave_deep_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
-    EXPECT_LT(island_deep_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
+    EXPECT_LT(base_deep_snapshot.sampled_layers.max_sdf_sample_error, 1.0e-4f);
 
     EXPECT_GT(cave_surface_snapshot.mesh.vertices, 0u);
     EXPECT_EQ(cave_surface_snapshot.mesh.invalid_indices, 0u);
@@ -708,7 +692,6 @@ TEST(WorldGenLayerSnapshotTest, GeneratedSpawnCollisionPreventsFallThrough) {
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = 20.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.02f;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
@@ -751,10 +734,6 @@ TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = 2.0f; // low -> basins dip below sea level (real lake water)
-    params.caves_enabled = true;
-    params.shaping_enabled = true;     // builds the continentalness generator lakes require
-    params.island_mask_enabled = true; // archipelago
-    params.lakes_enabled = true;       // the lakes toggle the user set
     params.lake_depth = 6.0f;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed); // preview: NULL job system
@@ -783,7 +762,6 @@ TEST(WorldGenLayerSnapshotTest, SpawnCollisionBootstrapPreparesWalkingStart) {
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = 20.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.02f;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
@@ -819,7 +797,6 @@ TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborho
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = 20.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.02f;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
@@ -899,7 +876,6 @@ TEST(WorldGenLayerSnapshotTest, SpawnReadyNeighborhoodMeshesBroadSurfaceArea) {
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = 20.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.02f;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
@@ -938,7 +914,6 @@ TEST(WorldGenLayerSnapshotTest, LodRemeshKeepsPreviousMeshRenderableWhilePending
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = 20.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.02f;
 
     Luminumbra::JobSystem jobs;
@@ -1024,7 +999,6 @@ TEST(WorldGenLayerSnapshotTest, ExplicitEnsureSurfaceReadyNearMakesTeleportNearF
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = 20.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.02f;
 
     Luminumbra::JobSystem jobs;
@@ -1083,7 +1057,6 @@ TEST(WorldGenLayerSnapshotTest, VerticalUnloadExemptsColumnSurfaceSpanChunks) {
     params.base_frequency = 0.01f;
     params.base_amplitude = 0.0f;  // flat world...
     params.height_offset = 200.0f; //... with its surface in chunk-Y 12
-    params.caves_enabled = false;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
 
@@ -1123,7 +1096,6 @@ TEST(WorldGenLayerSnapshotTest, MountainsSurfaceSpanWantedSetStaysUnderChunkBudg
     params.persistence = 0.65f;
     params.lacunarity = 2.2f;
     params.height_offset = 20.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.03f;
 
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
@@ -1221,12 +1193,6 @@ std::uint64_t HashTerrainHeightGrid(const SHIELD_WorldSystem& world) {
     return hash;
 }
 
-struct LegacyPresetHeightFixture {
-    const char* name;
-    TerrainGenParams params;
-    std::uint64_t expected_hash;
-};
-
 constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gcc_clang) {
 #ifdef _MSC_VER
     (void)gcc_clang;
@@ -1237,126 +1203,26 @@ constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gc
 #endif
 }
 
-// Frozen copies of the five shipped presets' terrain params as of the commit
-// BEFORE  (shaping defaults off). These fixtures deliberately do NOT
-// load the preset JSON files: shipped presets may later opt into shaping
-//, but legacy params must keep producing bit-identical heights
-// forever. The expected hashes were captured by running this exact grid hash
-// against the pre-shaping GetTerrainHeightAt implementation.
-std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
-    std::vector<LegacyPresetHeightFixture> fixtures;
-
-    TerrainGenParams default_params;
-    default_params.base_frequency = 0.01f;
-    default_params.base_amplitude = 12.0f;
-    default_params.octaves = 4;
-    default_params.persistence = 0.5f;
-    default_params.lacunarity = 2.0f;
-    default_params.height_offset = 20.0f;
-    default_params.caves_enabled = true;
-    default_params.cave_frequency = 0.02f;
-    fixtures.push_back({"default",
-                        default_params,
-                        ToolchainHeightHash(0xabc65d0aa0350cebull, 0x1be02aac5ca74d60ull)});
-
-    TerrainGenParams flat_params;
-    flat_params.base_frequency = 0.02f;
-    flat_params.base_amplitude = 10.0f;
-    flat_params.octaves = 2;
-    flat_params.persistence = 0.3f;
-    flat_params.lacunarity = 2.0f;
-    flat_params.height_offset = 5.0f;
-    flat_params.caves_enabled = false;
-    flat_params.cave_frequency = 0.0f;
-    fixtures.push_back({"flat_lands",
-                        flat_params,
-                        ToolchainHeightHash(0x5c5975fed81dfd26ull, 0xd3f8cb61b8f85576ull)});
-
-    TerrainGenParams mountains_params;
-    mountains_params.base_frequency = 0.008f;
-    mountains_params.base_amplitude = 120.0f;
-    mountains_params.octaves = 6;
-    mountains_params.persistence = 0.65f;
-    mountains_params.lacunarity = 2.2f;
-    mountains_params.height_offset = 20.0f;
-    mountains_params.caves_enabled = true;
-    mountains_params.cave_frequency = 0.03f;
-    fixtures.push_back({"mountains",
-                        mountains_params,
-                        ToolchainHeightHash(0xd5bd8812a5013e9cull, 0xec0cbc88ac710c4bull)});
-
-    TerrainGenParams archipelago_params;
-    archipelago_params.base_frequency = 0.009f;
-    archipelago_params.base_amplitude = 110.0f;
-    archipelago_params.octaves = 6;
-    archipelago_params.persistence = 0.55f;
-    archipelago_params.lacunarity = 2.2f;
-    archipelago_params.height_offset = -20.0f;
-    archipelago_params.island_mask_enabled = true;
-    archipelago_params.island_mask_frequency = 0.004f;
-    archipelago_params.caves_enabled = true;
-    archipelago_params.cave_frequency = 0.03f;
-    fixtures.push_back({"archipelago",
-                        archipelago_params,
-                        ToolchainHeightHash(0xa3a51481233d998cull, 0xb17c0effd27aa30full)});
-
-    TerrainGenParams forest_params;
-    forest_params.base_frequency = 0.008f;
-    forest_params.base_amplitude = 50.0f;
-    forest_params.octaves = 6;
-    forest_params.persistence = 0.5f;
-    forest_params.lacunarity = 2.1f;
-    forest_params.height_offset = 32.0f;
-    forest_params.caves_enabled = true;
-    forest_params.cave_frequency = 0.025f;
-    fixtures.push_back({"temperate_forest",
-                        forest_params,
-                        ToolchainHeightHash(0x7cdbfe2d641162f3ull, 0xf04d73a238d3b456ull)});
-
-    return fixtures;
-}
-
 } // namespace
 
-//  zero-hash-drift proof: legacy params (shaping_enabled == false, the
-// default) must produce heights bit-identical to the pre-shaping
-// implementation. Hashes captured pre-change; any drift here is a
-// review-blocking defect, never a update the baseline.
-TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) {
-    for (const LegacyPresetHeightFixture& fixture : LegacyPresetHeightFixtures()) {
-        SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
-        const std::uint64_t hash = HashTerrainHeightGrid(world);
-        std::cout << "[ LEGACYHEIGHT ] " << fixture.name << " seed=" << kSeed << " hash=0x"
-                  << std::hex << std::setfill('0') << std::setw(16) << hash << std::dec
-                  << std::setfill(' ') << std::endl;
-        EXPECT_EQ(hash, fixture.expected_hash)
-            << fixture.name << ": legacy (shaping-off) terrain heights drifted from the "
-            << "pre-shaping implementation - this is a hard determinism break";
-    }
-}
-
-//  slice polish: CURRENT shipped-preset terrain hash. Unlike the
-// legacy fixture above (frozen pre-shaping params, must NEVER change), this
-// gate loads the LIVE preset JSON through the canonical loader and hashes the
+// Current shipped-preset terrain hash. This gate loads the LIVE preset JSON through the canonical
+// loader and hashes the
 // resulting GetTerrainHeightAt grid. It catches accidental drift in a shipped
 // preset's generated terrain AND forces any deliberate preset edit to bump the
 // expected hash in the same commit (documented in the commit message).
 //
-// The archipelago hash was bumped deliberately in  when the schema_rev
-// 2 `shaping` block was added (spiky-blade shores -> rolling shores / walkable
-// interiors). The pre-shaping archipelago hash (0xc075cf55c182393c) is frozen
-// forever in the LEGACY fixture above as the default-off shaping proof.
+// The archipelago hash was bumped deliberately when schema_rev 2 added shaping
+// (spiky-blade shores -> rolling shores / walkable interiors), when hydraulic relief was added,
+// and now for the v0.3 world-format break that makes the modern pipeline unconditional.
 TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/archipelago.json";
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.shaping_enabled)
-        << "archipelago.json must carry an enabled shaping block ()";
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     const std::uint64_t hash = HashTerrainHeightGrid(world);
     std::cout << "[ CURRENTHASH ] archipelago seed=" << kSeed << " hash=0x" << std::hex
               << std::setfill('0') << std::setw(16) << hash << std::dec << std::setfill(' ')
               << std::endl;
-    // DELIBERATE BUMP ( slice polish). Before (legacy, shaping-off):
+    // DELIBERATE BUMP (slice polish). Before (pre-shaping):
     // 0xc075cf55c182393c. After (schema_rev 2 shaping): 0x940d621a2e3c0436.
     //  DELIBERATE BUMP: GENTLE hydraulic relief enabled on the
     // archipelago preset (the player walks the eroded surface). Tuned subtle
@@ -1364,6 +1230,8 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     // self-affine gates below still pass (land_h_p95 7.85>6; spectral beta 2.70 in
     // [1.8,3]). 0x940d621a2e3c0436 -> 0xf26e830fb364b045. Visual-QA clean
     // (WorldVisualSweep 0 flags); FarLodHorizon/PlayerView/WaterfallVisual pass.
+    // v0.3 removes the feature gates and always runs shaping, island masking, biome relief,
+    // cliffs, rivers, lakes, surface breaks, and hydraulic relief.
     constexpr std::uint64_t kArchipelagoShapedHash =
         ToolchainHeightHash(0x1bc4be90440f9130ull, 0xd28a6e2408dd073full);
     EXPECT_EQ(hash, kArchipelagoShapedHash)
@@ -1384,9 +1252,7 @@ TerrainGenParams ShapingTestParams() {
     params.persistence = 0.55f;
     params.lacunarity = 2.1f;
     params.height_offset = 12.0f;
-    params.caves_enabled = true;
     params.cave_frequency = 0.03f;
-    params.shaping_enabled = true;
     params.continentalness_frequency = 0.0008f;
     params.erosion_frequency = 0.0015f;
     params.peaks_frequency = 0.004f;
@@ -1455,37 +1321,23 @@ TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
     }
 }
 
-// hydraulic relief (decision a). With hydro enabled the baked erosion
-// offset must (1) actually shift terrain height vs the hydro-off world, (2) be
-// deterministic across two worlds, and (3) keep the chunk-batch heightmap path
+// Hydraulic relief must be deterministic across two worlds and keep the chunk-batch heightmap path
 // BYTE-IDENTICAL to the scalar GetTerrainHeightAt (both add the same offset).
 // This is the integration gate; the kernel itself is covered by the hydraulic erosion kernel unit
 // tests (determinism + halo-independence).
-TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndKeepsBatchParity) {
-    TerrainGenParams off_params = ShapingTestParams();
-    TerrainGenParams on_params = ShapingTestParams();
-    on_params.hydro_enabled = true;
+TEST(WorldGenLayerSnapshotTest, HydraulicReliefIsDeterministicAndKeepsBatchParity) {
+    const TerrainGenParams params = ShapingTestParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+    SHIELD_WorldSystem world2(nullptr, nullptr, params, kSeed);
 
-    SHIELD_WorldSystem off(nullptr, nullptr, off_params, kSeed);
-    SHIELD_WorldSystem on(nullptr, nullptr, on_params, kSeed);
-    SHIELD_WorldSystem on2(nullptr, nullptr, on_params, kSeed);
-
-    bool any_diff = false;
     for (int z = -150; z <= 150; z += 13) {
         for (int x = -150; x <= 150; x += 17) {
             const float wx = static_cast<float>(x) + 0.3f;
             const float wz = static_cast<float>(z) - 0.2f;
-            const float h_off = off.GetTerrainHeightAt(wx, wz);
-            const float h_on = on.GetTerrainHeightAt(wx, wz);
-            const float h_on2 = on2.GetTerrainHeightAt(wx, wz);
-            EXPECT_EQ(h_on, h_on2)
+            EXPECT_EQ(world.GetTerrainHeightAt(wx, wz), world2.GetTerrainHeightAt(wx, wz))
                 << "hydro height non-deterministic at (" << wx << ", " << wz << ")";
-            const float d = (h_on > h_off) ? (h_on - h_off) : (h_off - h_on);
-            if (d > 1.0e-3f)
-                any_diff = true;
         }
     }
-    EXPECT_TRUE(any_diff) << "hydraulic relief had no effect on terrain height";
 
     // Position-array batch (ComputeShapedHeightsAtPositions, used for runtime
     // surface-spans) must include the hydro offset too -> byte-identical to the
@@ -1499,9 +1351,9 @@ TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndK
             }
         }
         std::vector<float> batch(pxs.size(), 0.0f);
-        on.ComputeShapedHeightsAtPositions(pxs.data(), pzs.data(), pxs.size(), batch.data());
+        world.ComputeShapedHeightsAtPositions(pxs.data(), pzs.data(), pxs.size(), batch.data());
         for (std::size_t i = 0; i < pxs.size(); ++i) {
-            EXPECT_EQ(batch[i], on.GetTerrainHeightAt(pxs[i], pzs[i]))
+            EXPECT_EQ(batch[i], world.GetTerrainHeightAt(pxs[i], pzs[i]))
                 << "position-array batch diverged from scalar (hydro) at (" << pxs[i] << ", "
                 << pzs[i] << ")";
         }
@@ -1513,14 +1365,14 @@ TEST(WorldGenLayerSnapshotTest, HydraulicReliefShiftsHeightDeterministicallyAndK
     for (const IVec3& c : coords) {
         const IVec3 base_pos = c * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
         Chunk chunk(c);
-        on.GenerateChunkData(chunk, 1);
+        world.GenerateChunkData(chunk, 1);
         for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
             for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
                 const float wx = static_cast<float>(base_pos.x + x);
                 const float wz = static_cast<float>(base_pos.z + z);
                 const std::size_t i =
                     static_cast<std::size_t>(x) + static_cast<std::size_t>(z) * (CHUNK_SIZE_X + 1);
-                EXPECT_EQ(chunk.heightmap_data[i], on.GetTerrainHeightAt(wx, wz))
+                EXPECT_EQ(chunk.heightmap_data[i], world.GetTerrainHeightAt(wx, wz))
                     << "hydro batch/scalar parity broke at (" << wx << ", " << wz << ")";
             }
         }
@@ -1603,7 +1455,6 @@ TEST(WorldGenLayerSnapshotTest, BatchedVertexMaterialsMatchPerVertexClassificati
     // Biome-enabled path: synthetic shaped params pointed at the shipped table.
     {
         TerrainGenParams biome_params = ShapingTestParams();
-        biome_params.biomes_enabled = true;
         biome_params.biome_table_path = (SourceRoot() / "data" / "common" / "biomes.json").string();
         biome_params.temperature_frequency = 0.003f;
         biome_params.humidity_frequency = 0.004f;
@@ -1661,7 +1512,6 @@ fs::path BiomeTablePath() {
 // preset, so the legacy fixtures stay frozen.
 TerrainGenParams BiomeEnabledParams() {
     TerrainGenParams params = ShapingTestParams();
-    params.biomes_enabled = true;
     params.biome_table_path = BiomeTablePath().string();
     params.temperature_frequency = 0.003f;
     params.humidity_frequency = 0.004f;
@@ -1768,29 +1618,23 @@ TEST(WorldGenLayerSnapshotTest, BiomeIdIsDeterministicAndCoversMultipleBiomes) {
     EXPECT_GE(distinct_biomes.size(), 2u) << "the seed window must span >= 2 biomes";
 }
 
-TEST(WorldGenLayerSnapshotTest, BiomesDisabledIsByteZeroDrift) {
-    // A preset without the biomes opt-in: BiomeIdAt is always kNoBiome and the
-    // generated chunk bytes are bit-identical to a world that never knew about
-    // biomes (the new biome plumbing is inert when disabled).
-    const TerrainGenParams legacy = ShapingTestParams();
-    SHIELD_WorldSystem world(nullptr, nullptr, legacy, kSeed);
+TEST(WorldGenLayerSnapshotTest, MissingBiomeTableUsesDeterministicSingleMaterialFallback) {
+    const TerrainGenParams params = ShapingTestParams();
+    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     EXPECT_FALSE(world.biomes_enabled());
     EXPECT_EQ(world.BiomeIdAt(8.0f, 8.0f), Luminumbra::World::kNoBiome);
     EXPECT_EQ(world.BiomeIdAt(200.0f, -160.0f), Luminumbra::World::kNoBiome);
 
-    Chunk legacy_chunk(kChunkCoords);
-    world.GenerateChunkData(legacy_chunk);
-    EXPECT_GT(legacy_chunk.heightmap_data.size(), 0u);
+    Chunk chunk(kChunkCoords);
+    world.GenerateChunkData(chunk);
+    EXPECT_GT(chunk.heightmap_data.size(), 0u);
 
-    // The shaped-determinism fixture above already pins these exact bytes for
-    // the same params/seed; re-running here proves the biome code added no
-    // drift to the disabled path.
-    SHIELD_WorldSystem reference(nullptr, nullptr, legacy, kSeed);
+    SHIELD_WorldSystem reference(nullptr, nullptr, params, kSeed);
     Chunk reference_chunk(kChunkCoords);
     reference.GenerateChunkData(reference_chunk);
-    EXPECT_EQ(legacy_chunk.sdf_data, reference_chunk.sdf_data);
-    EXPECT_EQ(legacy_chunk.heightmap_data, reference_chunk.heightmap_data);
-    EXPECT_EQ(legacy_chunk.mesh_vertices.size(), reference_chunk.mesh_vertices.size());
+    EXPECT_EQ(chunk.sdf_data, reference_chunk.sdf_data);
+    EXPECT_EQ(chunk.heightmap_data, reference_chunk.heightmap_data);
+    EXPECT_EQ(chunk.mesh_vertices.size(), reference_chunk.mesh_vertices.size());
 }
 
 //  BiomeCoverage source: a CPU atlas sweep over the shipped mountains
@@ -1803,8 +1647,6 @@ TEST(WorldGenLayerSnapshotTest, MountainsBiomeCoverageAtlas) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/mountains.json";
     ASSERT_TRUE(fs::exists(preset)) << preset.string();
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.biomes_enabled) << "mountains must opt into biomes ()";
-
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     ASSERT_TRUE(world.biomes_enabled());
     const auto& table = world.biome_table();
@@ -1936,8 +1778,6 @@ TEST(WorldGenLayerSnapshotTest, MountainsRiverPresenceAtlas) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/mountains.json";
     ASSERT_TRUE(fs::exists(preset)) << preset.string();
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.rivers_enabled) << "mountains must opt into rivers ()";
-
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
 
     // 256 x 256 m window at 4 m spacing centered on the origin (the river

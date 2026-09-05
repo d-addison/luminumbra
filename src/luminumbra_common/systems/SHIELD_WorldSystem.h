@@ -39,23 +39,20 @@ struct TerrainGenParams {
     float lacunarity = 2.0f;
     float height_offset = 0.0f;
 
-    bool caves_enabled = true;
     float cave_frequency = 0.02f;
     float cave_threshold = 0.7f;
     float cave_carve_value = 2.0f;
-    // cave STYLE. 0 = legacy single 3D-Perlin BODY threshold (cheese-only,
-    // byte-identical to all pre-existing worlds). 1 = noise-router (Minecraft-1.18-style):
-    // the legacy cheese rooms PLUS spaghetti winding tunnels carved at the zero-crossing
+    // Minecraft-1.18-style noise router: cheese rooms plus spaghetti winding tunnels
+    // carved at the zero-crossing
     // EDGE of a second Perlin (abs(noise) < thickness => air) so caves become connected
-    // networks, not isolated bubbles. Opt-in per preset; legacy stays byte-identical.
-    int cave_style = 0;
+    // networks, not isolated bubbles.
     float spaghetti_frequency = 0.04f; // tunnel noise scale (higher = tighter winding)
     float spaghetti_thickness = 0.08f; // |noise| < this carves a tunnel (wider = fatter)
     float worley_frequency = 0.016f;   // CHEESE cavern cell scale (lower = bigger rooms)
     float worley_threshold =
         0.62f; // / < this => open room (cell interior); higher = more/bigger caverns
 
-    // ---  surface-breaking caves / sinkholes / cave-mouths (default-off) ---
+    // ---  surface-breaking caves / sinkholes / cave-mouths ---
     // Makes the 18 m surface cap (kCaveSurfaceCapDepth) a PER-COLUMN field so the
     // EXISTING cave noise reaches the surface ONLY inside hashed feature
     // footprints, plus a bounded analytic sinkhole carve. Placement is a pure
@@ -64,31 +61,23 @@ struct TerrainGenParams {
     // (hard max / exp-smin) so chunk seams and the SIMD/scalar paths cannot
     // diverge. The carve is VISUAL/terrain-field only (the integer sim reads the
     // resulting density classification, never the float carve math), same rule as
-    // procedural trees. When surface_breaks_enabled == false every path takes the
-    // ORIGINAL float-op sequence (sample_surface_breaks returns {18,0} and the
-    // helpers fall through), so the output is byte-identical -> world_hash
-    // unchanged. World_hash-affecting when enabled -> deliberate re-pin.
+    // procedural trees.
     //   feature_cell_size  -- doline cell grid pitch (~128 m); a 3x3 neighbor scan
     //                         suffices because max_feature_radius < feature_cell_size.
     //   max_feature_radius -- finite support clamp on a feature's surface footprint.
     //   carve_smoothness   -- exp-smin k for the cone/capsule lip (0 => hard max).
     //   entrance_min_cap   -- floor the per-column cap drops to inside a feature
     //                         (0 => cave noise fully exposed; small positive keeps a thin lip).
-    bool surface_breaks_enabled = false;
     float surface_break_density = 0.0f; // Bernoulli accept prob per doline cell
     float feature_cell_size = 128.0f;   // doline cell pitch (m)
     float max_feature_radius = 60.0f;   // MUST be < feature_cell_size (asserted)
     float carve_smoothness = 0.0f;      // exp-smin k (0 => hard max)
     float entrance_min_cap = 0.0f;      // metres the cap floors to inside a feature
 
-    bool island_mask_enabled = false;
     float island_mask_frequency = 0.004f;
 
-    // ---  terrain shaping (default-off) ---
-    // With shaping_enabled == false every height path is bit-identical to the
-    // pre-shaping implementation (legacy regression hashes in
-    // test_worldgen_layer_snapshots.cpp prove it). When enabled, three 2D
-    // control channels modulate the base FBM detail channel:
+    // ---  terrain shaping ---
+    // Three 2D control channels modulate the base FBM detail channel:
     //   continentalness (m_seed + 3) -> continental_spline -> base elevation
     //   erosion         (m_seed + 4) -> erosion_spline     -> amplitude mult
     //   peaks/valleys   (m_seed + 5) -> peaks_spline       -> ridge term
@@ -98,7 +87,6 @@ struct TerrainGenParams {
     // Splines are monotone piecewise-linear [input, output] control points
     // evaluated with plain lerp + endpoint clamping (no smoothstep, so the
     // scalar and batch paths cannot diverge).
-    bool shaping_enabled = false;
     float continentalness_frequency = 0.0008f;
     float erosion_frequency = 0.0015f;
     float peaks_frequency = 0.004f;
@@ -109,39 +97,31 @@ struct TerrainGenParams {
     std::vector<std::array<float, 2>> erosion_spline;
     std::vector<std::array<float, 2>> peaks_spline;
 
-    // ---  biome selection (default-off) ---
-    // Biomes are opt-in via the preset block "biomes": {"table": "..."}. When
-    // biomes_enabled is false the world system never builds the temperature
-    // (+8) / humidity (+9) climate noises and never loads a biome table, so
-    // every height AND material path is bit-identical to the pre-biome
-    // implementation (the worldgen snapshot/hash fixtures prove byte-zero
-    // drift). biome_table_path is relative to data/ (e.g. "common/biomes.json").
+    // ---  biome selection ---
+    // biome_table_path is relative to data/ (e.g. "common/biomes.json").
     //  mixes the loaded table's content hash into ComputeTerrainParamsHash
     // so pristine far-LOD tiles self-invalidate on a table content change.
-    bool biomes_enabled = false;
     std::string biome_table_path;
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
-    // Per-biome morphology: when enabled, the peaks/ridge term is scaled
+    // Per-biome morphology: the peaks/ridge term is scaled
     // by the (continuous) temperature field — cold/alpine ground gets taller, more
     // rugged peaks; warm lowlands stay gentler — so biomes differ in SHAPE, not
     // just material. Smooth (climate noise is continuous) so there are no seams,
     // and it only touches the ridge term (base relief unchanged) to keep the
-    // hypsometric/spectral realism gate in band. Disabled -> byte-zero drift.
-    bool biome_relief_enabled = false;
+    // hypsometric/spectral realism gate in band.
     float biome_relief_strength = 0.45f; // ridge scale span: warm *(1-s).. cold *(1+s)
 
     // Cliffs / escarpments: in cliff-zones (a smooth noise mask, seed
     // +12) the shaped height snaps toward flat benches with steep risers, so the
     // marching-cubes surface forms mesa/canyon cliff faces. Pure heightfield ->
     // no holes / floating geometry, fully deterministic. Blended by the mask so
-    // cliff zones sit naturally amid normal foothills. Disabled -> byte-zero drift.
-    bool cliffs_enabled = false;
+    // cliff zones sit naturally amid normal foothills.
     float cliff_frequency = 0.0011f; // cliff-zone mask feature scale
     float cliff_threshold = 0.4f; // mask value above which terracing engages (matches default.json)
     float cliff_step = 11.0f;     // metres per bench (cliff face height)
 
-    // ---  PV-band rivers (default-off) ---
+    // ---  PV-band rivers ---
     // Chunk-local river carve on the +10 ridged noise (seed registry). The
     // folded PV value PV = 1 - |3*|r| - 2| (Minecraft 1.18 weirdness->PV) of
     // the +10 noise selects the rivers where it falls in the VALLEYS band
@@ -150,9 +130,7 @@ struct TerrainGenParams {
     // SEA_LEVEL so the EXISTING global water plane fills the channel (no
     // WaterSystem changes; regression review). Bank material is the biome filler.
     // Applied inside ComputeShapedHeight so near chunks AND far tiles agree at
-    // the seam. With rivers_enabled false the height path is bit-identical to
-    // pre-river generation (byte-zero drift).
-    bool rivers_enabled = false;
+    // the seam.
     float river_frequency = 0.0016f;
     float river_pv_min = -1.0f;    // valleys band lower edge (folded PV)
     float river_pv_max = -0.85f;   // valleys band upper edge (folded PV)
@@ -165,42 +143,35 @@ struct TerrainGenParams {
     // tarns, valley pools), held by its higher rim. WaterLevelAt returns that local
     // surface for the water mesh + the WaterSystem rest level (which pins the lake
     // so the flow sim can't drain it). Sea-level oceans still form wherever the
-    // continental base dips below SEA_LEVEL. Disabled -> byte-zero drift.
-    bool lakes_enabled = false;
+    // continental base dips below SEA_LEVEL.
     float lake_frequency = 0.0009f; // ~1100 m feature scale
     float lake_threshold = 0.52f;   // lake field value above which a lake forms (moderate)
     float lake_depth = 5.0f;        // metres the basin floor sits below the lake surface
     float lake_max_carve = 22.0f;   // clamp on terrain lowered into the basin
     float lake_bank_offset = 2.0f;  // lake surface sits this far below the local land level (banks)
     // fnv1a64 of the canonicalized biome table content, stamped by the world
-    // system when it loads the table (0 when biomes are disabled or the table
-    // failed to load). ComputeTerrainParamsHash mixes this in so pristine
+    // system when it loads the table (0 when the table failed to load).
+    // ComputeTerrainParamsHash mixes this in so pristine
     // far-LOD tiles self-invalidate when the table content changes even though
     // the path is unchanged.
     u64 biome_table_content_hash = 0;
-    // structures. When enabled, the world system places jigsaw
+    // structures. The world system places jigsaw
     // structures (data/common/structures/<type>/) through the normal edit path
     // during chunk generation. structures_content_hash is the fnv1a64 of the
-    // loaded template pools' content; ComputeTerrainParamsHash mixes it in (only
-    // when enabled) so pristine far tiles self-invalidate on a template change.
-    // Disabled (the default preset) => byte-zero drift, identical hashes.
-    bool structures_enabled = false;
+    // loaded template pools' content; ComputeTerrainParamsHash mixes it in so
+    // pristine far tiles self-invalidate on a template change.
     u64 structures_content_hash = 0;
     // Absolute path to data/common/structures (resolved by the preset loader,
-    // mirrors biome_table_path). The world system loads every <type>/ pool here
-    // when structures_enabled.
+    // mirrors biome_table_path). The world system loads every <type>/ pool here.
     std::string structures_data_dir;
 
-    // hydraulic/thermal RELIEF. When enabled, a deterministic per-region
+    // hydraulic/thermal RELIEF. A deterministic per-region
     // erosion bake (HydraulicErosion) carves drainage/talus into the analytic
     // surface; ComputeShapedHeightSample adds the baked offset so EVERY height
     // consumer (collision/spawn/water/far-LOD/mesh) sees the eroded surface
     // (decision a). Distinct from the analytic `erosion` CONTROL noise (seed +4,
     // erosion_spline) which only modulates amplitude -- this is an absolute
-    // height offset in metres. Disabled (the default preset) => byte-zero drift,
-    // identical hashes (ComputeShapedHeightSample/Grid skip the lookup, marker
-    // 0x06 is not mixed). World_hash-affecting when enabled -> deliberate bump.
-    bool hydro_enabled = false;
+    // height offset in metres.
     int hydro_iterations = 24;       // erosion sweeps (also the halo cell radius)
     float hydro_cell_size_m = 8.0f;  // erosion grid resolution (coarse macro relief)
     float hydro_talus_height = 1.2f; // thermal stable per-cell delta (m, at cell size)
@@ -441,8 +412,7 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
-    // the single cave-carve composition point. Samples the cheese BODY noise
-    // (byte-identical to the legacy path) and, in noise-router style (cave_style==1), adds
+    // the single cave-carve composition point. Samples the cheese BODY noise and adds
     // spaghetti EDGE tunnels, composed via the existing order-free smax. Called identically
     // by every density site (mesh / collision / query) so they cannot disagree.
     float EvaluateCaveDensity(const Vec3& world_pos,
@@ -482,9 +452,9 @@ public:
     WorldGenLayerSample SampleWorldGenLayers(const Vec3& world_pos) const;
 
     // ---  biome selection ---
-    // Whether biomes are active (preset opted in AND the table loaded).
+    // Whether the biome table loaded successfully.
     bool biomes_enabled() const {
-        return m_biomes_enabled;
+        return !m_biome_table.empty();
     }
     const World::BiomeTable& biome_table() const {
         return m_biome_table;
@@ -492,7 +462,7 @@ public:
 
     // ---  structures ---
     bool structures_enabled() const {
-        return m_structures_enabled;
+        return !m_structure_pools.empty();
     }
     const std::vector<World::StructureTemplatePool>& structure_pools() const {
         return m_structure_pools;
@@ -508,12 +478,12 @@ public:
     // (seed, params): samples the five climate dimensions (continentalness,
     // erosion, peaks/valleys reuse the +3/+4/+5 shaping noises; temperature
     // +8, humidity +9) and resolves the first matching biome row. Returns
-    // kNoBiome (255) when biomes are disabled or no row matches, so callers
-    // fall back to the legacy single-material classifier.
+    // kNoBiome (255) when the table is unavailable or no row matches, so callers
+    // fall back to the default single-material classifier.
     u8 BiomeIdAt(float world_x, float world_z) const;
 
     // environmental-audio reverb profile for the biome at a column.
-    // Returns the active biome's reverb when biomes are enabled, else the
+    // Returns the active biome's reverb when a biome matches, else the
     // default profile. Pure function of (seed, params, table).
     const World::BiomeReverb& BiomeReverbAt(float world_x, float world_z) const;
 
@@ -524,10 +494,8 @@ public:
     //   depth < 1 m (top)   -> palette.top
     //   depth < 5 m (filler)-> palette.filler
     //   deeper (depth)      -> palette.depth
-    // With biome_id == kNoBiome (biomes disabled or unmatched) this reproduces
-    // the legacy Sand/Grass/Soil/Stone classifier BIT-FOR-BIT, so disabled
-    // worlds keep byte-zero drift. The plains palette maps to exactly the
-    // legacy materials, so a plains column is also unchanged.
+    // With biome_id == kNoBiome (table unavailable or unmatched), this uses the
+    // default Sand/Grass/Soil/Stone classifier.
     // river_bank: when true, an above-water surface skin that would be
     // the biome `top` is laid as the biome `filler` instead - the exposed muddy
     // bank along a carved river channel.
@@ -557,9 +525,7 @@ public:
     // GenSingle2D scalar helper on this build, proven by the parity gate),
     // collapsing the per-vertex ComputeShapedHeightSample + ComputeClimateSample
     // cost (~30 us each scalar) into one batched pass. The cave channel and the
-    // final band selection stay per-vertex (cheap). positions are in WORLD
-    // space. With shaping disabled this falls back to per-vertex classification
-    // so legacy worlds are byte-unchanged.
+    // final band selection stay per-vertex (cheap). positions are in WORLD space.
     void
     ClassifyVertexMaterials(const Vec3* positions, std::size_t count, u32* out_materials) const;
 
@@ -1131,12 +1097,8 @@ private:
     // GenerateChunkData full + step>1 batch loops, and the column-span cache
     // through GetTerrainHeightAt) derives its height from this helper so the
     // scalar and batch paths cannot diverge. All noise reads use GenSingle2D
-    // (never batch SIMD Gen* grids) when shaping is enabled, making the batch
-    // heightmap bytes EXACTLY equal to the scalar value at the same world
-    // coordinate. With shaping disabled the helper reproduces the legacy
-    // float-op sequence bit-for-bit, while GenerateChunkData keeps its
-    // GenUniformGrid2D fast path (legacy heights/hashes untouched, covered by
-    // the existing max_sdf_sample_error < 1e-4 snapshot gate).
+    // (never batch SIMD Gen* grids), making the batch heightmap bytes EXACTLY
+    // equal to the scalar value at the same world coordinate.
     struct ShapedHeightSample {
         float base_noise = 0.0f;        // detail FBM (at warped coords when shaping)
         float pre_island_height = 0.0f; // combined height before the island mask
@@ -1160,12 +1122,11 @@ private:
     // GenSingle2D scalar helper on this build (proven by the batch-vs-scalar
     // parity gtest, which now also exercises the SIMD path). The slow per-column
     // GenSingle2D loop cost ~26 us/column; the batched path is ~2 us/column.
-    // Only valid when m_params.shaping_enabled; callers gate on that.
     void ComputeShapedHeightGrid(int base_x, int base_z, int size_x, int size_z, float* out) const;
 
     // hydraulic/thermal relief (decision a). The analytic height is
     // computed by...Impl(apply_hydro=false); ComputeShapedHeightSample adds the
-    // baked offset when hydro_enabled, so every consumer walks the eroded
+    // baked offset, so every consumer walks the eroded
     // surface. SampleHydroOffsetMeters baked per kHydroRegionMeters region
     // (deterministic, cached, recompute-on-load); the bake samples the NO-hydro
     // height (apply_hydro=false) to avoid recursion. World_hash-affecting when
@@ -1178,8 +1139,7 @@ private:
     // lookup. continentalness/erosion/peaks_valleys REUSE the +3/+4/+5 shaping
     // control noises (sampled at the unwarped column, exactly as
     // ComputeShapedHeightSample reads them) so terrain and biomes agree;
-    // temperature/humidity are the new +8/+9 climate noises. Only meaningful
-    // when m_biomes_enabled.
+    // temperature/humidity are the new +8/+9 climate noises.
     struct ClimateSample {
         float continentalness = 0.0f;
         float erosion = 0.0f;
@@ -1230,8 +1190,6 @@ private:
     // already carved) and the analytic sinkhole carve (>=0) at world_pos. All four
     // CPU cave call sites route through this so the float-op sequence is
     // byte-identical across paths and chunk seams (absolute world coords only).
-    // Returns {kCaveSurfaceCapDepth, 0} when surface_breaks_enabled is false (the
-    // disabled path stays byte-identical to the pre-A3 implementation).
     struct SurfaceBreakSample {
         float effective_cap;
         float carve;
@@ -1254,29 +1212,25 @@ private:
     // Noise states for procedural generation
     FastNoise::SmartNode<FastNoise::Generator> m_terrain_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_cave_generator;
-    FastNoise::SmartNode<FastNoise::Generator>
-        m_spaghetti_generator; // noise-router tunnels, built when cave_style == 1
-    FastNoise::SmartNode<FastNoise::Generator>
-        m_worley_generator; // Worley cheese caverns, built when cave_style == 1
+    FastNoise::SmartNode<FastNoise::Generator> m_spaghetti_generator;
+    FastNoise::SmartNode<FastNoise::Generator> m_worley_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_island_mask_generator;
-    //  shaping control noises (only built when shaping_enabled; seed
-    // offsets +3/+4/+5 for continentalness/erosion/peaks, the single warp
+    //  shaping control noises (seed offsets +3/+4/+5 for
+    // continentalness/erosion/peaks, the single warp
     // simplex is sampled with seeds +6 and +7 for the X/Z warp channels).
     FastNoise::SmartNode<FastNoise::Generator> m_continentalness_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_erosion_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_peaks_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_warp_generator;
     //  climate noises (seed registry: +8 temperature, +9 humidity).
-    // Only built when biomes are enabled; legacy worlds never construct them.
     FastNoise::SmartNode<FastNoise::Generator> m_temperature_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_humidity_generator;
-    //  river noise (seed registry: +10). Only built when rivers enabled.
+    //  river noise (seed registry: +10).
     FastNoise::SmartNode<FastNoise::Generator> m_river_generator;
 
     //  biome table (game data). Loaded from m_params.biome_table_path on
-    // (re)init when biomes are enabled; empty/disabled otherwise.
+    // (re)init from the configured biome table.
     World::BiomeTable m_biome_table;
-    bool m_biomes_enabled = false;
 
     //  structure template pools (game data). Loaded from
     // m_params.structures_data_dir when structures are enabled; the combined
@@ -1284,7 +1238,6 @@ private:
     // cache key tracks template changes. Public accessors expose the deterministic
     // placement query so callers (and gates) can locate sites.
     std::vector<World::StructureTemplatePool> m_structure_pools;
-    bool m_structures_enabled = false;
 
     WaterSystem* m_water_system;
 
