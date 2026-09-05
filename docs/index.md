@@ -62,6 +62,6 @@ build/debug/bin/luminumbra_client_app --no-audio
 build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90
 ```
 
-Luminumbra 0.2.0 is an early source release. The repository builds an engine and
+Luminumbra 0.2.1 is an early source release. The repository builds an engine and
 its applications together; it does not yet promise a stable installed SDK or
 ABI for third-party applications.
