@@ -12,13 +12,13 @@
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
 #include "StaticModelTex.h"         // StaticModelTex hoisted to namespace scope
 #include "TerrainSubmit.h"          // SubmitTerrainChunksFn + TerrainSubmitStats
-#include "WaterfallDetect.h"        //  world-deterministic waterfall sites
 #include "core/AssetManager.h"
 #include "core/IsolationConfig.h" // isolation/layer render mode (backdrop + spawn-suppression)
 #include "luminumbra_common/components/LightingComponents.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "passes/ChunkGeometryPool.h"
 #include "passes/SsaoData.h" // SSAOData (extracted; still read here for stats)
+#include "passes/WaterfallPass.h"
 #include <array>
 #include <filesystem>
 #include <glad/glad.h>
@@ -55,6 +55,12 @@ class FarLodSystem;
 class GroundDecalPass;
 class DebugViewPass;
 class FinalBlitPass;
+class AerialPass;
+class GodRaysPass;
+class TaauPass;
+class GlassOitPass;
+class FroxelPass;
+class LuminanceMeterPass;
 struct ScentFieldRenderMirror;
 } // namespace Luminumbra::Rendering
 
@@ -828,16 +834,16 @@ public:
     // cached site set for `world`, detecting on first use.
     const std::vector<WaterfallSite>& waterfall_sites(const Systems::SHIELD_WorldSystem& world,
                                                       const WaterfallDetectParams& params = {}) {
-        return m_waterfall_sites.sites_for(world, params);
+        return m_waterfall_pass->waterfall_sites(world, params);
     }
     WaterfallSiteCache& waterfall_cache() {
-        return m_waterfall_sites;
+        return m_waterfall_pass->waterfall_cache();
     }
 
     // build the live waterfall DRESSING for `world` (call once
     // after the world is entered). Queries waterfall_sites(world), bakes one
-    // vertical world-space quad per site into m_waterfall_vao/_vbo (drawn by the
-    // falling-sheet shader in render_frame), records the per-site crest/foot Y
+    // vertical world-space quad per site into the pass-owned VAO/VBO (drawn by
+    // the falling-sheet shader in render_frame), records the per-site crest/foot Y
     // for the shader's height-down-the-fall normalization, and emits an  spray
     // emitter at each plunge foot (capped to bound particle cost).
     // dressing on a world-deterministic site set — never hashed (one-way).
@@ -914,6 +920,10 @@ private:
     RenderContext make_aerial_context(const Camera& camera);
     RenderContext make_god_rays_context(const Camera& camera);
     RenderContext make_taau_context();
+    RenderContext make_glass_oit_context(const Camera& camera);
+    RenderContext make_froxel_context(const Camera& camera);
+    RenderContext make_waterfall_context(const Camera& camera);
+    RenderContext make_luminance_meter_context();
 
     std::vector<ChunkMeshSnapshot>
     build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
@@ -1205,60 +1215,42 @@ private:
     std::unique_ptr<DebugViewPass>
         m_debug_view_pass; // render-only G-buffer debug overlay (default-OFF)
     std::unique_ptr<FinalBlitPass> m_final_blit_pass; // -T01: first pass on the RenderContext seam
+    // The aerial/god-rays/TAAU post-passes take a RenderContext& (frame state
+    // from ctx; only the pass-owned shaders + TAAU history stay members) so
+    // they sit on the same seam as the other pass classes.
+    std::unique_ptr<AerialPass> m_aerial_pass;
+    std::unique_ptr<GodRaysPass> m_god_rays_pass;
+    std::unique_ptr<TaauPass> m_taau_pass;
+    std::unique_ptr<GlassOitPass> m_glass_oit_pass;
+    std::unique_ptr<FroxelPass> m_froxel_pass;
+    std::unique_ptr<WaterfallPass> m_waterfall_pass;
+    std::unique_ptr<LuminanceMeterPass> m_luminance_meter_pass;
     RenderResourceRegistry m_render_registry; // typed render-resource handles (adopt/lookup)
     Client::ScenarioHarness::IsolationConfig m_isolation_config; //  (default {All,Scene} = no-op)
-    WaterfallSiteCache m_waterfall_sites;                        //  (render-only, cached)
 
     //  Hillaire 2020 atmospheric scattering. The LUTs are built once at
     // startup and the sky-view LUT refreshed when the sun moves; the skybox pass
     // samples the sky-view LUT, the lighting pass + aerial pass read the SAME
     // transmittance/multi-scatter pair (coherent sun/sky/ambient/fog palette).
-    // m_aerial_shader is the analytic aerial-perspective fullscreen term wiring
+    // The aerial pass is the analytic aerial-perspective fullscreen term wiring
     // the previously dormant volumetric_lighting.frag. Render-only (documented design).
     SkyAtmosphereLut m_sky_lut;
-    std::unique_ptr<Shader> m_aerial_shader;
     //  TAAU resolve (render.taau, default OFF). Motion-reprojected temporal AA over the lit HDR
     // color with a 3x3 neighborhood-clamp anti-ghost; ping-pong history. Flag OFF -> the pass never
     // runs and the lighting color blits through unchanged (byte-identical default render).
-    std::unique_ptr<Shader> m_taau_shader;
-    GLuint m_taau_fbo = 0;
-    GLuint m_taau_history[2] = {0u, 0u}; // RGBA16F resolved-color history (ping-pong)
-    int m_taau_history_write = 0;
-    bool m_taau_history_valid = false;
     bool m_taau_enabled = false;
     glm::vec2 m_taau_jitter_ndc =
         glm::vec2(0.0f);        // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
     unsigned m_taau_frame = 0u; // Halton sequence index
     // Screen-space crepuscular rays (god rays). Additive pass over the lit scene when
     // the sun is above the horizon + on screen. Render-only.
-    std::unique_ptr<Shader> m_god_rays_shader;
-    // the animated falling-sheet shader (waterfall.frag) the live
-    // pipeline draws over detected waterfall sites. Render-only dressing.
-    std::unique_ptr<Shader> m_waterfall_shader;
-    // baked waterfall sheet geometry. One vertical world-space quad
-    // (6 verts, interleaved pos+normal) per detected site, all packed into one
-    // VBO; m_waterfall_sheet_sites keeps the per-site crest/foot Y the shader needs
-    // to normalize height-down-the-fall (drawn as 6-vert sub-ranges). Built once by
-    // prepare_waterfalls; render-only, never hashed. Released in cleanup_gpu_resources.
-    GLuint m_waterfall_vao = 0;
-    GLuint m_waterfall_vbo = 0;
-    std::vector<WaterfallSite> m_waterfall_sheet_sites;
-    bool m_waterfall_geometry_built = false;
     double m_sky_full_precompute_ms = 0.0;
     double m_sky_view_refresh_ms = 0.0; // last sky-view refresh cost (0 = none this frame)
     // Sky-derived scattering ambient (the sky-view hemisphere integral); folded
     // into m_skyAmbientColor so lighting/ambient share the LUT transmittance.
     glm::vec3 m_skyScatterAmbient{0.0f};
     void init_sky_lut();
-    // the inline aerial/god-rays/TAAU post-passes now take a
-    // RenderContext& (frame state from ctx; only the pass-owned shaders + TAAU
-    // history stay members) so they sit on the same seam the pass classes do.
-    void execute_aerial_pass(const RenderContext& ctx);
-    void execute_god_rays(const RenderContext& ctx);
-    void init_taau(u32 width, u32 height); //  TAAU history/FBO
-    void destroy_taau();
-    void execute_taau_resolve(
-        const RenderContext& ctx); // motion-reprojected temporal resolve (flag-gated)
+
 public:
     const SkyAtmosphereLut& sky_lut() const {
         return m_sky_lut;
@@ -1338,38 +1330,16 @@ private:
     u32 m_glass_quad_vao = 0;
     u32 m_glass_quad_vbo = 0;
 
-    // the GPU auto-exposure meter — a 1-workgroup compute
-    // reduce of lighting.color into a 1-float SSBO, ring-copied out and consumed
-    // by the damped servo in prepare_frame (stale-safe, never blocks). Lazy-init
-    // inside the stage; torn down in cleanup_gpu_resources.
+    // The GPU auto-exposure meter pass owns its 1-workgroup compute reduction,
+    // 1-float SSBO, and readback ring. Pipeline state retains only the enable
+    // switch and damped exposure servo consumed by lighting.
     bool m_auto_exposure_metered = false;
     float m_metered_exposure = 1.0f;
     bool m_metered_valid = false;
-    u32 m_lum_reduce_program = 0;
-    u32 m_lum_reduce_ssbo = 0;
-    AsyncReadbackRing m_exposure_ring;
 
-    //  rendering (,  ): the froxel volumetrics chain —
-    // inject (media density + in-scatter per froxel, sampling the shadow depth
-    // AND the  tint cascade for colored shafts) then integrate (front-to-back
-    // per column). Lazy-init in the stages; torn down in cleanup_gpu_resources.
-    // Quality 0 (default) is a zero-GL no-op through both stages.
+    // Froxel quality remains pipeline orchestration state; the pass owns both
+    // compute programs and volumes and reads this value through RenderContext.
     int m_volumetric_quality = 0;
-    u32 m_froxel_inject_program = 0;
-    u32 m_froxel_integrate_program = 0;
-    u32 m_froxel_scatter_tex = 0;    // rgba16f 160x90x64: rgb in-scatter, a sigma
-    u32 m_froxel_integrated_tex = 0; // rgba16f 160x90x64: rgb accumulated L, a T
-
-    //   (,  ): the WBOIT glass chain — panes
-    // accumulate weighted premultiplied color (accum) + coverage product
-    // (reveal), depth-tested against the SHARED lighting depth (write off);
-    // the resolve composites the weighted average over the lit scene. Empty
-    // glass list = both stages are zero-GL no-ops. Lazy-init in the accum stage.
-    std::unique_ptr<Shader> m_glass_oit_shader;
-    std::unique_ptr<Shader> m_glass_oit_resolve_shader;
-    u32 m_oit_fbo = 0;
-    u32 m_oit_accum_tex = 0;  // RGBA16F: rgb = sum(w*a*c), a = sum(w*a)
-    u32 m_oit_reveal_tex = 0; // R16F: product of (1 - a_i)
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array. Same layer order as the

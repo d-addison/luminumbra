@@ -3,7 +3,6 @@
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "ExposureModel.h"      //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
-#include "FroxelGrid.h"    //  rendering: the froxel grid model
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
 #include "Mesh.h"
@@ -19,19 +18,26 @@
 #include "luminumbra_common/core/Environment.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "passes/AerialPass.h"
 #include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/FinalBlitPass.h" // -T01: FinalBlit on the RenderContext seam
 #include "passes/FoliagePass.h"
+#include "passes/FroxelPass.h"
 #include "passes/GBufferPass.h"
+#include "passes/GlassOitPass.h"
+#include "passes/GodRaysPass.h"
 #include "passes/GroundDecalPass.h" // render-only pheromone ground decal (flag-gated)
 #include "passes/LightingPass.h"
+#include "passes/LuminanceMeterPass.h"
 #include "passes/ParticlePass.h"
 #include "passes/PassGlHelpers.h"    // Push and pop debug-group markers.
 #include "passes/PlantProcgenPass.h" //  render-only procedural plants (flag-gated)
 #include "passes/ShadowPass.h"
 #include "passes/SkyboxPass.h"
 #include "passes/SsaoPass.h"
+#include "passes/TaauPass.h"
 #include "passes/WaterPass.h"
+#include "passes/WaterfallPass.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 #include <GLFW/glfw3.h>
@@ -94,9 +100,6 @@ AABBFrustumCulled(const glm::vec3& minp, const glm::vec3& maxp, const glm::vec4 
 } // namespace
 
 namespace Luminumbra::Rendering {
-
-// Forward declaration, reused by the luminance meter below.
-GLuint create_compute_program(const char* compute_source);
 
 namespace {
 
@@ -255,7 +258,14 @@ RenderPipeline::RenderPipeline()
     , m_plant_procgen_pass(std::make_unique<PlantProcgenPass>())
     , m_ground_decal_pass(std::make_unique<GroundDecalPass>())
     , m_debug_view_pass(std::make_unique<DebugViewPass>())
-    , m_final_blit_pass(std::make_unique<FinalBlitPass>()) {}
+    , m_final_blit_pass(std::make_unique<FinalBlitPass>())
+    , m_aerial_pass(std::make_unique<AerialPass>())
+    , m_god_rays_pass(std::make_unique<GodRaysPass>())
+    , m_taau_pass(std::make_unique<TaauPass>())
+    , m_glass_oit_pass(std::make_unique<GlassOitPass>())
+    , m_froxel_pass(std::make_unique<FroxelPass>())
+    , m_waterfall_pass(std::make_unique<WaterfallPass>())
+    , m_luminance_meter_pass(std::make_unique<LuminanceMeterPass>()) {}
 
 // forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
@@ -316,9 +326,10 @@ bool RenderPipeline::startup(u32 screen_width,
         m_shadow_pass->init_shadow_map(m_render_registry);
         m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
         init_screen_quad();
-        init_taau(screen_width,
-                  screen_height); // OUTPUT res: TAAU history/backbuffer stay at output
-        init_halfres_cloud();     // no-op unless cloud quality was set > 0 before startup
+        m_taau_pass->init(m_render_registry,
+                          screen_width,
+                          screen_height); // OUTPUT res: TAAU history/backbuffer stay at output
+        init_halfres_cloud();             // no-op unless cloud quality was set > 0 before startup
         m_skybox_pass->init_geometry();
         m_particle_pass->init_buffers();      //  persistent-mapped instance pool
         m_foliage_pass->init_buffers();       //  persistent-mapped scatter pool
@@ -983,6 +994,89 @@ RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     return ctx;
 }
 
+// The glass-OIT pass contract: the prepared view/projection, camera, output and
+// internal extents, shared pane/fullscreen geometry, opaque color, lit-scene
+// resolve target, and registry-owned lighting depth attachment. The OIT MRT and
+// its accumulation textures remain pass-owned and therefore do not enter ctx.
+RenderContext RenderPipeline::make_glass_oit_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.view = m_frame_prepared.view;
+    ctx.projection = m_frame_prepared.projection;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;
+    ctx.internal_height = m_internal_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lighting_fbo.fbo_id);
+    ctx.opaque_scene =
+        m_render_registry.adopt_texture("opaque_scene", lighting_fbo.opaque_color_texture);
+    // Registry-owned renderbuffer handle; the extracted body deliberately keeps
+    // the existing attachment call byte-for-byte rather than changing GL behavior.
+    ctx.lit_scene_depth = RenderbufferHandle{lighting_fbo.depth_texture};
+    return ctx;
+}
+
+// The froxel pass contract: quality, camera/output extent, sun and ambient
+// lighting, plus the registry-owned shadow depth/tint arrays and the cascade
+// matrices/splits. Both froxel volumes remain pass-owned and stay out of ctx.
+RenderContext RenderPipeline::make_froxel_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.volumetric_quality = m_volumetric_quality;
+    ctx.sun = m_sun;
+    ctx.sky_ambient_color = m_skyAmbientColor;
+    const ShadowMap& shadow_map = m_shadow_pass->shadow_map();
+    ctx.shadow_depth_array =
+        m_render_registry.adopt_texture("shadow_depth_array", shadow_map.depth_texture_array);
+    ctx.shadow_tint_array = m_render_registry.adopt_texture("shadow_tint_cascades",
+                                                            m_shadow_pass->tint_texture_array());
+    if (shadow_map.cascade_splits.size() >= 5) {
+        ctx.cascade_splits = glm::vec4(shadow_map.cascade_splits[1],
+                                       shadow_map.cascade_splits[2],
+                                       shadow_map.cascade_splits[3],
+                                       shadow_map.cascade_splits[4]);
+    }
+    ctx.light_space_matrices = &shadow_map.light_space_matrices;
+    return ctx;
+}
+
+// The waterfall pass contract: prepared camera matrices/time, sun lighting,
+// internal lit-scene target, and the one-way live-water world mirror. The
+// shader, site cache, and baked geometry remain pass-owned and stay out of ctx.
+RenderContext RenderPipeline::make_waterfall_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.view = m_frame_prepared.view;
+    ctx.projection = m_frame_prepared.projection;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;
+    ctx.internal_height = m_internal_height;
+    ctx.registry = &m_render_registry;
+    ctx.time_seconds = m_wall_clock_time;
+    ctx.sun = m_sun;
+    ctx.world_system = m_frame_prepared.world_system;
+    ctx.lit_scene =
+        m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    return ctx;
+}
+
+// The luminance-meter pass contract: the resolved lighting color texture. The
+// reduction program, SSBO, and asynchronous readback ring remain pass-owned.
+RenderContext RenderPipeline::make_luminance_meter_context() {
+    RenderContext ctx;
+    ctx.registry = &m_render_registry;
+    ctx.lit_scene_color = m_render_registry.adopt_texture(
+        "lit_scene_color", m_lighting_pass->lighting_fbo().color_texture);
+    return ctx;
+}
+
 // build the GBuffer pass contract — frame state only; the
 // live-terrain submit callback, far-LOD, root path, static-model UV lane and
 // tree-impostor bundle travel through GBufferPassInput (built at the call site).
@@ -1252,18 +1346,18 @@ void RenderPipeline::enumerate_shaders(
     if (m_foliage_pass) {
         visit("foliage", m_foliage_pass->shader().get());
     } //
-    visit("aerial_perspective", m_aerial_shader.get()); //
+    visit("aerial_perspective", m_aerial_pass->shader().get()); //
     // the pipeline-owned post shaders, previously UNMONITORED by health.
-    visit("god_rays", m_god_rays_shader.get());
+    visit("god_rays", m_god_rays_pass->shader().get());
     visit("cloud_composite", m_cloud_composite_shader.get());
-    visit("waterfall", m_waterfall_shader.get());
+    visit("waterfall", m_waterfall_pass->shader().get());
     // the WBOIT glass chain (lazy — null until glass
     // first appears; health reports "not initialized", which is accurate).
-    if (m_glass_oit_shader) {
-        visit("glass_oit", m_glass_oit_shader.get());
+    if (m_glass_oit_pass->accum_shader()) {
+        visit("glass_oit", m_glass_oit_pass->accum_shader().get());
     }
-    if (m_glass_oit_resolve_shader) {
-        visit("glass_oit_resolve", m_glass_oit_resolve_shader.get());
+    if (m_glass_oit_pass->resolve_shader()) {
+        visit("glass_oit_resolve", m_glass_oit_pass->resolve_shader().get());
     }
 }
 
@@ -2239,10 +2333,10 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // blocks; a stale N-frame-old value is the contract) and advance the damped
     // exposure servo toward the mid-grey key. Flag OFF -> the analytic
     // AutoExposureForElevation curve stays the auto source.
-    if (m_auto_exposure_metered && m_exposure_ring.initialized()) {
+    if (m_auto_exposure_metered && m_luminance_meter_pass->initialized()) {
         const void* p = nullptr;
         std::size_t n = 0;
-        if (m_exposure_ring.consume(&p, &n) && n >= sizeof(float)) {
+        if (m_luminance_meter_pass->consume(&p, &n) && n >= sizeof(float)) {
             constexpr float kMeterKey = 0.18f;         // mid-grey target
             constexpr float kMeterMinExposure = 0.25f; // stop clamps (servo bounds)
             constexpr float kMeterMaxExposure = 4.0f;
@@ -2758,241 +2852,29 @@ void RenderPipeline::execute_stage_water(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
-    const glm::mat4& projection = m_frame_prepared.projection;
-    const glm::mat4& view = m_frame_prepared.view;
-    // 7-W. WATERFALL SHEETS (, ): the animated falling-sheet veil drawn
-    // over each detected waterfall site. Render-only dressing on a world-
-    // deterministic site set (never hashed). Drawn after water, into the lit FBO,
-    // as a translucent double-sided veil (depth-test on, depth-write off, blend on
-    // so it layers over the scene + each other). A no-op (zero draws) when no
-    // sites were baked, so existing visual gates stay byte-stable.
     record_frame_stage("waterfall");
-    if (m_waterfall_geometry_built && m_waterfall_vao != 0 && !m_waterfall_sheet_sites.empty() &&
-        m_waterfall_shader && m_waterfall_shader->IsValid()) {
-        glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-        glViewport(0, 0, m_internal_width, m_internal_height); // into internal lighting FBO
-
-        // Save GL state we toggle so it is restored exactly afterwards.
-        const GLboolean blend_was = glIsEnabled(GL_BLEND);
-        const GLboolean cull_was = glIsEnabled(GL_CULL_FACE);
-        const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
-        const GLboolean poly_off_was = glIsEnabled(GL_POLYGON_OFFSET_FILL);
-
-        m_waterfall_shader->use();
-        m_waterfall_shader->setMat4("model", glm::mat4(1.0f));
-        m_waterfall_shader->setMat4("view", view);
-        m_waterfall_shader->setMat4("projection", projection);
-        m_waterfall_shader->setMat3("normalMatrix", glm::mat3(1.0f));
-        // the per-frame wall-clock SNAPSHOT (prepare_frame), not a live
-        // glfwGetTime read — dispatch must be bit-idempotent per prepared frame
-        // (sub-µs sway phase shift; render-only).
-        m_waterfall_shader->setFloat("u_time", m_wall_clock_time);
-        m_waterfall_shader->setVec3("u_camera_pos", camera.Position);
-        const glm::vec3 sun_color =
-            (m_sun.color != glm::vec3(0.0f)) ? m_sun.color : glm::vec3(1.0f);
-        m_waterfall_shader->setVec3("u_sun_color", sun_color);
-        // Scene-light the waterfall (bright-waterfall fix): drive u_scene_light from the
-        // sun-up factor with a small night floor so the cascade is LIT by the scene and
-        // darkens at dusk/night instead of emitting near-white.  (the standalone
-        // WaterfallVisual gate never sets this uniform -> it keeps the shader default 1.0).
-        const float waterfall_scene_lit = 0.10f + 0.90f * glm::clamp(m_sun.intensity, 0.0f, 1.0f);
-        m_waterfall_shader->setVec3("u_scene_light", glm::vec3(waterfall_scene_lit));
-
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glEnable(GL_DEPTH_TEST); // self-sufficient: don't rely on the water pass leaving it on
-        glDepthMask(GL_FALSE);   // translucent veil: don't occlude
-        glDisable(GL_CULL_FACE); // double-sided sheet
-        // The sheet hugs the cliff face the river carved (same surface WaterPass/terrain
-        // draws), so pull it slightly toward the camera in depth to avoid z-fighting /
-        // being hidden behind the toe of the drop.
-        glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(-1.0f, -1.0f);
-
-        glBindVertexArray(m_waterfall_vao);
-        for (std::size_t i = 0; i < m_waterfall_sheet_sites.size(); ++i) {
-            const WaterfallSite& s = m_waterfall_sheet_sites[i];
-            //  ( T.1): the LIVE upstream water scales the sheet —
-            // a dammed/drained crest extinguishes its fall. Reads the live float
-            // mirror (one-way from mm, legal after derived-state reclassification); stable within
-            // the frame (the sim ticks outside render_frame), so dispatch stays bit-idempotent.
-            // Unstreamed crests read neutral 1.0.
-            float live = 1.0f;
-            if (m_frame_prepared.world_system != nullptr) {
-                live = Rendering::LiveWaterFactorAt(*m_frame_prepared.world_system, s);
-            }
-            if (live < 0.02f) {
-                continue; // extinguished: no sheet, no plunge pool
-            }
-            m_waterfall_shader->setFloat("u_live_factor", live);
-            m_waterfall_shader->setFloat("u_crest_y", s.crest.y);
-            m_waterfall_shader->setFloat("u_foot_y", s.foot.y);
-            // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
-            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
-        }
-        glBindVertexArray(0);
-
-        // Restore GL state: depth writes on, cull/blend/depth-test/poly-offset as they were.
-        glDepthMask(GL_TRUE);
-        glPolygonOffset(0.0f, 0.0f);
-        if (poly_off_was)
-            glEnable(GL_POLYGON_OFFSET_FILL);
-        else
-            glDisable(GL_POLYGON_OFFSET_FILL);
-        if (depth_was)
-            glEnable(GL_DEPTH_TEST);
-        else
-            glDisable(GL_DEPTH_TEST);
-        if (cull_was)
-            glEnable(GL_CULL_FACE);
-        else
-            glDisable(GL_CULL_FACE);
-        if (blend_was)
-            glEnable(GL_BLEND);
-        else
-            glDisable(GL_BLEND);
-    }
+    const RenderContext ctx = make_waterfall_context(camera);
+    m_waterfall_pass->execute(ctx);
 }
 
 void RenderPipeline::execute_stage_glass_oit_accum(const Camera& camera) {
-    // WBOIT accumulation — each visible pane writes its
-    // depth-weighted premultiplied color into accum (blend ONE/ONE) and its
-    // coverage into reveal (ZERO/ONE_MINUS_SRC_ALPHA -> the (1-a) product),
-    // depth-TESTED against the SHARED lighting depth (write off). Empty glass
-    // list = zero GL work (the trace slot still records).
     record_frame_stage("glass_oit_accum");
-    if (m_glass_pane_items.empty() || m_glass_quad_vao == 0) {
-        return;
-    }
-    if (!m_glass_oit_shader) {
-        // Lazy init: shaders + the accum/reveal MRT FBO sharing the lighting depth.
-        m_glass_oit_shader =
-            std::make_unique<Shader>((m_root_path / "res/shaders/glass_oit.vert").string().c_str(),
-                                     (m_root_path / "res/shaders/glass_oit.frag").string().c_str());
-        label_gl_object(
-            GL_PROGRAM, m_glass_oit_shader ? m_glass_oit_shader->Id() : 0u, "shader.glass_oit");
-        m_glass_oit_resolve_shader = std::make_unique<Shader>(
-            (m_root_path / "res/shaders/volumetric_lighting.vert").string().c_str(),
-            (m_root_path / "res/shaders/glass_oit_resolve.frag").string().c_str());
-        label_gl_object(GL_PROGRAM,
-                        m_glass_oit_resolve_shader ? m_glass_oit_resolve_shader->Id() : 0u,
-                        "shader.glass_oit_resolve");
-
-        auto make_target = [&](GLenum ifmt, const char* name) {
-            GLuint t = 0;
-            glGenTextures(1, &t);
-            glBindTexture(GL_TEXTURE_2D, t);
-            glTexStorage2D(GL_TEXTURE_2D,
-                           1,
-                           ifmt,
-                           m_internal_width,
-                           m_internal_height); // match internal lighting depth
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            label_gl_object(GL_TEXTURE, t, name);
-            return t;
-        };
-        m_oit_accum_tex = make_target(GL_RGBA16F, "oit.accum");
-        m_oit_reveal_tex = make_target(GL_R16F, "oit.reveal");
-        glGenFramebuffers(1, &m_oit_fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, m_oit_fbo);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_oit_accum_tex, 0);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_oit_reveal_tex, 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER,
-                               GL_DEPTH_ATTACHMENT,
-                               GL_TEXTURE_2D,
-                               m_lighting_pass->lighting_fbo().depth_texture,
-                               0);
-        label_gl_object(GL_FRAMEBUFFER, m_oit_fbo, "oit.fbo");
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            LUMINUMBRA_CORE_ERROR("glass_oit: MRT FBO incomplete; OIT disabled");
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            glDeleteFramebuffers(1, &m_oit_fbo);
-            m_oit_fbo = 0;
-            return;
-        }
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    }
-    if (m_oit_fbo == 0 || !m_glass_oit_shader->IsValid()) {
-        return;
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, m_oit_fbo);
-    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, bufs);
-    glViewport(0, 0, m_internal_width, m_internal_height); // OIT composites into internal scene
-    const GLfloat clear_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_reveal[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    glClearBufferfv(GL_COLOR, 0, clear_accum);
-    glClearBufferfv(GL_COLOR, 1, clear_reveal);
-
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
-    glDepthMask(GL_FALSE);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunci(0, GL_ONE, GL_ONE);
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
-
-    m_glass_oit_shader->use();
-    m_glass_oit_shader->setMat4("u_view", m_frame_prepared.view);
-    m_glass_oit_shader->setMat4("u_projection", m_frame_prepared.projection);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().opaque_color_texture);
-    m_glass_oit_shader->setInt("u_opaqueScene", 0);
-    m_glass_oit_shader->setVec2(
-        "u_screenSize",
-        glm::vec2(static_cast<float>(m_screen_width), static_cast<float>(m_screen_height)));
-    m_glass_oit_shader->setVec3("u_cameraPos", camera.Position);
-    m_glass_oit_shader->setFloat("u_refractionStrength", 0.35f);
-    glBindVertexArray(m_glass_quad_vao);
-    for (const GlassPaneItem& pane : m_glass_pane_items) {
-        m_glass_oit_shader->setMat4("u_model", pane.model);
-        m_glass_oit_shader->setVec3("u_tint", pane.tint);
-        m_glass_oit_shader->setFloat("u_thickness", pane.thickness);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-    }
-    glBindVertexArray(0);
-
-    // Restore the default blend state (per-buffer funcs revert to the global).
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_BLEND);
-    glEnable(GL_CULL_FACE);
-    glDepthMask(GL_TRUE);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    RenderContext ctx = make_glass_oit_context(camera);
+    GlassOitPassInput input;
+    input.glass_items = &m_glass_pane_items;
+    input.glass_vao = m_glass_quad_vao;
+    input.root_path = m_root_path;
+    m_glass_oit_pass->execute_accum(ctx, input);
 }
 
 void RenderPipeline::execute_stage_glass_oit_resolve(const Camera& camera) {
-    (void)camera;
-    // the WBOIT resolve — the weighted-average glass
-    // color composited over the lit scene with coverage = 1 - reveal. Runs
-    // BEFORE the weather snapshot so god-rays/weather observe resolved glass.
     record_frame_stage("glass_oit_resolve");
-    if (m_glass_pane_items.empty() || m_oit_fbo == 0 || !m_glass_oit_resolve_shader ||
-        !m_glass_oit_resolve_shader->IsValid() || m_screen_quad_vao == 0) {
-        return;
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    glViewport(0, 0, m_internal_width, m_internal_height); // into internal lighting FBO
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    m_glass_oit_resolve_shader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_oit_accum_tex);
-    m_glass_oit_resolve_shader->setInt("u_accum", 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_oit_reveal_tex);
-    m_glass_oit_resolve_shader->setInt("u_reveal", 1);
-    glBindVertexArray(m_screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-    glDisable(GL_BLEND);
-    glEnable(GL_DEPTH_TEST);
-    glActiveTexture(GL_TEXTURE0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    RenderContext ctx = make_glass_oit_context(camera);
+    GlassOitPassInput input;
+    input.glass_items = &m_glass_pane_items;
+    input.glass_vao = m_glass_quad_vao;
+    input.root_path = m_root_path;
+    m_glass_oit_pass->execute_resolve(ctx, input);
 }
 
 void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera) {
@@ -3026,122 +2908,17 @@ void RenderPipeline::execute_stage_weather_overlay(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_froxel_inject(const Camera& camera) {
-    //  rendering: per-froxel media density + in-scatter into
-    // the scatter volume, sampling the shadow depth AND the  tint cascade so
-    // stained glass throws COLORED shafts. Quality 0 = zero-GL no-op.
     record_frame_stage("froxel_inject");
-    if (m_volumetric_quality <= 0) {
-        return;
+    RenderContext ctx = make_froxel_context(camera);
+    if (!m_froxel_pass->execute_inject(ctx, m_root_path)) {
+        m_volumetric_quality = 0;
     }
-    if (m_froxel_inject_program == 0) {
-        // Lazy init: both kernels + both 3D volumes, together.
-        auto load_comp = [&](const char* rel) -> GLuint {
-            std::ifstream file(std::filesystem::path(m_root_path) / rel);
-            if (!file) {
-                LUMINUMBRA_CORE_ERROR("froxel: missing {}", rel);
-                return 0;
-            }
-            std::stringstream source;
-            source << file.rdbuf();
-            return create_compute_program(source.str().c_str());
-        };
-        m_froxel_inject_program = load_comp("res/shaders/froxel_inject.comp");
-        m_froxel_integrate_program = load_comp("res/shaders/froxel_integrate.comp");
-        if (m_froxel_inject_program == 0 || m_froxel_integrate_program == 0) {
-            LUMINUMBRA_CORE_ERROR("froxel: kernel compile failed; volumetrics disabled");
-            m_volumetric_quality = 0;
-            return;
-        }
-        label_gl_object(GL_PROGRAM, m_froxel_inject_program, "shader.froxel_inject");
-        label_gl_object(GL_PROGRAM, m_froxel_integrate_program, "shader.froxel_integrate");
-        auto make_volume = [&](const char* label) -> GLuint {
-            GLuint t = 0;
-            glGenTextures(1, &t);
-            glBindTexture(GL_TEXTURE_3D, t);
-            glTexStorage3D(
-                GL_TEXTURE_3D, 1, GL_RGBA16F, Froxel::kGridX, Froxel::kGridY, Froxel::kGridZ);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-            label_gl_object(GL_TEXTURE, t, label);
-            glBindTexture(GL_TEXTURE_3D, 0);
-            return t;
-        };
-        m_froxel_scatter_tex = make_volume("froxel.scatter");
-        m_froxel_integrated_tex = make_volume("froxel.integrated");
-    }
-
-    const ShadowMap& sm = m_shadow_pass->shadow_map();
-    glm::vec4 splits(0.0f);
-    if (sm.cascade_splits.size() >= 5) {
-        splits = glm::vec4(
-            sm.cascade_splits[1], sm.cascade_splits[2], sm.cascade_splits[3], sm.cascade_splits[4]);
-    }
-
-    glUseProgram(m_froxel_inject_program);
-    glBindImageTexture(0, m_froxel_scatter_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, sm.depth_texture_array);
-    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowCascades"), 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_pass->tint_texture_array());
-    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowTintCascades"), 1);
-    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowTintEnabled"),
-                m_shadow_pass->tint_texture_array() != 0 ? 1 : 0);
-    for (int i = 0; i < 4 && i < static_cast<int>(sm.light_space_matrices.size()); ++i) {
-        const std::string name = "u_lightSpaceMatrices[" + std::to_string(i) + "]";
-        glUniformMatrix4fv(glGetUniformLocation(m_froxel_inject_program, name.c_str()),
-                           1,
-                           GL_FALSE,
-                           &sm.light_space_matrices[i][0][0]);
-    }
-    glUniform4fv(glGetUniformLocation(m_froxel_inject_program, "u_cascadeSplits"), 1, &splits[0]);
-    const glm::mat4 inv_view = glm::inverse(camera.GetViewMatrix());
-    glUniformMatrix4fv(glGetUniformLocation(m_froxel_inject_program, "u_inverseView"),
-                       1,
-                       GL_FALSE,
-                       &inv_view[0][0]);
-    glUniform3fv(
-        glGetUniformLocation(m_froxel_inject_program, "u_cameraPos"), 1, &camera.Position[0]);
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_tanHalfFovY"),
-                std::tan(glm::radians(camera.Zoom) * 0.5f));
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_aspect"),
-                static_cast<float>(m_screen_width) / static_cast<float>(m_screen_height));
-    // Toward-sun (sun-disc convention — matches the aerial pass's u_sunDirection).
-    const glm::vec3 toward_sun = -m_sun.direction;
-    glUniform3fv(
-        glGetUniformLocation(m_froxel_inject_program, "u_sunDirection"), 1, &toward_sun[0]);
-    glUniform3fv(glGetUniformLocation(m_froxel_inject_program, "u_sunColor"), 1, &m_sun.color[0]);
-    glUniform3fv(
-        glGetUniformLocation(m_froxel_inject_program, "u_ambientColor"), 1, &m_skyAmbientColor[0]);
-    // v1 media tuning (checkpoint-ratified): a gentle ground-hugging haze layer.
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_baseDensity"), 0.012f);
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_baseHeight"), 40.0f);
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_densityFalloff"), 0.05f);
-
-    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, Froxel::kGridZ);
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
-    glUseProgram(0);
-    glActiveTexture(GL_TEXTURE0);
 }
 
 void RenderPipeline::execute_stage_froxel_integrate(const Camera& camera) {
-    (void)camera;
-    //  rendering: front-to-back march of the scatter volume —
-    // per-column accumulated in-scatter L + transmittance T.
     record_frame_stage("froxel_integrate");
-    if (m_volumetric_quality <= 0 || m_froxel_integrate_program == 0) {
-        return;
-    }
-    glUseProgram(m_froxel_integrate_program);
-    glBindImageTexture(0, m_froxel_scatter_tex, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA16F);
-    glBindImageTexture(1, m_froxel_integrated_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, 1);
-    // The aerial composite samples the integrated volume as a texture.
-    glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
-    glUseProgram(0);
+    RenderContext ctx = make_froxel_context(camera);
+    m_froxel_pass->execute_integrate(ctx);
 }
 
 void RenderPipeline::execute_stage_aerial(const Camera& camera) {
@@ -3152,8 +2929,9 @@ void RenderPipeline::execute_stage_aerial(const Camera& camera) {
     record_frame_stage("aerial");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
         RenderContext aerial_ctx = make_aerial_context(camera);
+        m_aerial_pass->set_froxel_input(m_volumetric_quality, m_froxel_pass->integrated_texture());
         begin_gpu_pass_timer(GpuTimerPass::Aerial);
-        execute_aerial_pass(aerial_ctx);
+        m_aerial_pass->execute(aerial_ctx);
         end_gpu_pass_timer(GpuTimerPass::Aerial);
         glBindVertexArray(0);
     }
@@ -3166,7 +2944,7 @@ void RenderPipeline::execute_stage_god_rays(const Camera& camera) {
     {
         record_frame_stage("god_rays");
         RenderContext godray_ctx = make_god_rays_context(camera);
-        execute_god_rays(godray_ctx);
+        m_god_rays_pass->execute(godray_ctx);
     }
 }
 
@@ -3208,7 +2986,7 @@ void RenderPipeline::execute_stage_taau_resolve(const Camera& camera) {
     record_frame_stage("taau_resolve");
     if (m_taau_enabled) {
         RenderContext taau_ctx = make_taau_context();
-        execute_taau_resolve(taau_ctx);
+        m_taau_pass->execute(taau_ctx);
     }
 }
 
@@ -3225,43 +3003,9 @@ void RenderPipeline::execute_stage_luminance_meter(const Camera& camera) {
     if (!m_auto_exposure_metered) {
         return;
     }
-    if (m_lum_reduce_program == 0) {
-        // Lazy init: compile the reduce kernel + the 1-float SSBO on first use.
-        std::ifstream file(std::filesystem::path(m_root_path) /
-                           "res/shaders/luminance_reduce.comp");
-        if (!file) {
-            LUMINUMBRA_CORE_ERROR("luminance_meter: missing res/shaders/luminance_reduce.comp");
-            m_auto_exposure_metered = false;
-            return;
-        }
-        std::stringstream source;
-        source << file.rdbuf();
-        m_lum_reduce_program = create_compute_program(source.str().c_str());
-        if (m_lum_reduce_program == 0) {
-            LUMINUMBRA_CORE_ERROR("luminance_meter: compute compile failed; metering disabled");
-            m_auto_exposure_metered = false;
-            return;
-        }
-        label_gl_object(GL_PROGRAM, m_lum_reduce_program, "shader.luminance_reduce");
-        glGenBuffers(1, &m_lum_reduce_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lum_reduce_ssbo);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float), nullptr, GL_DYNAMIC_COPY);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        label_gl_object(GL_BUFFER, m_lum_reduce_ssbo, "luminance_reduce.ssbo");
-    }
-    glUseProgram(m_lum_reduce_program);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().color_texture);
-    glUniform1i(glGetUniformLocation(m_lum_reduce_program, "u_scene"), 0);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_lum_reduce_ssbo);
-    glDispatchCompute(1, 1, 1);
-    // The ring's GPU->GPU copy must observe the SSBO write.
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
-    glUseProgram(0);
-    if (m_exposure_ring.ensure(sizeof(float), 3) && m_exposure_ring.begin()) {
-        m_exposure_ring.copy_region(m_lum_reduce_ssbo, 0, 0, sizeof(float));
-        m_exposure_ring.submit();
+    const RenderContext ctx = make_luminance_meter_context();
+    if (!m_luminance_meter_pass->execute(ctx, m_root_path)) {
+        m_auto_exposure_metered = false;
     }
 }
 
@@ -3462,10 +3206,11 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
     m_ssao_pass->destroy_ssao(m_render_registry);
     m_ssao_pass->init_ssao(m_render_registry, m_internal_width, m_internal_height);
-    destroy_taau();
-    init_taau(new_width,
-              new_height); // OUTPUT res: TAAU history invalidated on resize, stays output
-    init_halfres_cloud();  // re-size the reduced-res sky-dome target (no-op at quality 0)
+    m_taau_pass->destroy(m_render_registry);
+    m_taau_pass->init(m_render_registry,
+                      new_width,
+                      new_height); // OUTPUT res: TAAU history invalidated on resize, stays output
+    init_halfres_cloud();          // re-size the reduced-res sky-dome target (no-op at quality 0)
     m_frustumCache.valid = false;
     ++m_resize_generation;
     LUMINUMBRA_CORE_INFO("RenderPipeline resized targets to {}x{} (resize generation {})",
@@ -3500,7 +3245,7 @@ void RenderPipeline::set_render_scale(float scale) {
     // CONTENT is now stale -- it was resolved at the previous internal scale, so its motion
     // vectors / reprojection no longer match. Invalidate it so the next resolve restarts fresh
     // instead of blending the previous scale's history (Codex review, runtime scale-change).
-    m_taau_history_valid = false;
+    m_taau_pass->invalidate_history();
     m_frustumCache.valid = false;
     ++m_resize_generation;
     LUMINUMBRA_CORE_INFO("RenderPipeline render_scale -> {} (internal {}x{})",
@@ -3572,23 +3317,8 @@ void RenderPipeline::init_shaders() {
     m_shadow_pass->init_shader(m_root_path);
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
-    //  analytic aerial-perspective term wiring the dormant
-    // volumetric_lighting.frag as a fullscreen pass over the lit scene. Reuses
-    // the SSAO fullscreen-quad vertex stage.
-    m_aerial_shader = std::make_unique<Shader>(
-        (m_root_path / "res/shaders/ssao.vert").string().c_str(),
-        (m_root_path / "res/shaders/volumetric_lighting.frag").string().c_str());
-    label_gl_object(
-        GL_PROGRAM, m_aerial_shader ? m_aerial_shader->Id() : 0u, "shader.aerial_perspective");
-    // the waterfall falling-sheet shader. Drawn over detected
-    // waterfall sites (waterfall_sites) on a world-deterministic site; the
-    // dressing is render-only and never hashed. Reuses the basic vertex stage
-    // (world-position + normal varyings) the sheet quad is built with.
-    m_waterfall_shader =
-        std::make_unique<Shader>((m_root_path / "res/shaders/basic.vert").string().c_str(),
-                                 (m_root_path / "res/shaders/waterfall.frag").string().c_str());
-    label_gl_object(
-        GL_PROGRAM, m_waterfall_shader ? m_waterfall_shader->Id() : 0u, "shader.waterfall");
+    m_aerial_pass->init_shader(m_root_path);
+    m_waterfall_pass->init_shader(m_root_path);
     // Render-optimization (cloud-raymarch-optimization, ): the depth-masked
     // upsample that composites the reduced-res sky dome into the lighting FBO.
     // Reuses the SSAO fullscreen-quad vertex stage. Only used when cloud quality > 0.
@@ -3598,17 +3328,8 @@ void RenderPipeline::init_shaders() {
     label_gl_object(GL_PROGRAM,
                     m_cloud_composite_shader ? m_cloud_composite_shader->Id() : 0u,
                     "shader.cloud_composite");
-    // Screen-space crepuscular rays.
-    m_god_rays_shader =
-        std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(),
-                                 (m_root_path / "res/shaders/god_rays.frag").string().c_str());
-    label_gl_object(
-        GL_PROGRAM, m_god_rays_shader ? m_god_rays_shader->Id() : 0u, "shader.god_rays");
-    //  TAAU resolve. Reuses the SSAO fullscreen-quad vertex stage.
-    m_taau_shader =
-        std::make_unique<Shader>((m_root_path / "res/shaders/ssao.vert").string().c_str(),
-                                 (m_root_path / "res/shaders/taau_resolve.frag").string().c_str());
-    label_gl_object(GL_PROGRAM, m_taau_shader ? m_taau_shader->Id() : 0u, "shader.taau_resolve");
+    m_god_rays_pass->init_shader(m_root_path);
+    m_taau_pass->init_shader(m_root_path);
 }
 
 void RenderPipeline::init_sky_lut() {
@@ -3683,79 +3404,6 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
     return ctx;
 }
 
-void RenderPipeline::execute_aerial_pass(const RenderContext& ctx) {
-    //  analytic aerial-perspective in-scatter composited OVER the lit
-    // scene in the lighting FBO. Reads the SAME sky-view/transmittance LUTs the
-    // dome uses (coherent palette). A no-op if the LUT/shader are unavailable.
-    // Only the shader stays a member; all frame state comes from ctx.
-    if (!m_aerial_shader || !m_aerial_shader->IsValid() || !ctx.sky_lut_ready ||
-        ctx.screen_quad_vao == 0) {
-        return;
-    }
-    const GLuint lit_fbo = ctx.lit_scene.id;
-    if (!lit_fbo) {
-        return;
-    }
-    const Camera& camera = *ctx.camera;
-
-    glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-    glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // aerial into internal lit FBO
-    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
-    glDisable(GL_DEPTH_TEST);
-    const GLboolean blend_was_enabled = glIsEnabled(GL_BLEND);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    m_aerial_shader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, ctx.sky_view_lut.id);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, ctx.transmittance_lut.id);
-    m_aerial_shader->setInt("gDepth", 0);
-    m_aerial_shader->setInt("u_skyViewLut", 1);
-    m_aerial_shader->setInt("u_transmittanceLut", 2);
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                            (float)ctx.screen_width / (float)ctx.screen_height,
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
-    m_aerial_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
-    m_aerial_shader->setMat4("u_inverseProjection", glm::inverse(projection));
-    m_aerial_shader->setVec3("u_viewPos", camera.Position);
-    // Toward-sun direction (sun-disc convention), matching the sky-view LUT frame.
-    m_aerial_shader->setVec3("u_sunDirection", -ctx.sun.direction);
-    const float sun_up = glm::dot(ctx.sun.direction, glm::vec3(0.0f, -1.0f, 0.0f));
-    m_aerial_shader->setFloat("u_sunCosZenith", sun_up);
-    m_aerial_shader->setFloat("u_skyDayFactor", ctx.sky_day_factor);
-    m_aerial_shader->setFloat("u_underwater", ctx.underwater_factor);
-    m_aerial_shader->setFloat("u_aerialDensity", ctx.aerial_density);
-    m_aerial_shader->setFloat("u_aerialMaxDistance", ctx.aerial_max_distance);
-    m_aerial_shader->setFloat("u_inscatterStrength", ctx.inscatter_strength);
-    m_aerial_shader->setFloat("u_atmosphereWarmth", ctx.atmosphere_warmth);
-    //  rendering: compose the integrated froxel volume
-    // ( — extends the analytic term, never replaces it). Mode 0 (the
-    // default) skips the sampling entirely: byte-identical to pre-froxel.
-    const bool froxel_on = m_volumetric_quality > 0 && m_froxel_integrated_tex != 0;
-    m_aerial_shader->setInt("u_volumetricMode", froxel_on ? 1 : 0);
-    glActiveTexture(GL_TEXTURE3);
-    glBindTexture(GL_TEXTURE_3D, froxel_on ? m_froxel_integrated_tex : 0u);
-    m_aerial_shader->setInt("u_froxelIntegrated", 3);
-
-    glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    if (!blend_was_enabled) {
-        glDisable(GL_BLEND);
-    }
-    if (depth_was_enabled) {
-        glEnable(GL_DEPTH_TEST);
-    }
-    glActiveTexture(GL_TEXTURE0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
 // the god-rays pass contract — the lit-scene target + its post-sky
 // opaque snapshot, plus the Group J sun-screen projection COMPUTED here (identical math
 // to the retired inline block) so execute_god_rays reads only ctx. Render-only.
@@ -3801,45 +3449,6 @@ RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
     ctx.sun_uv_x = sun_uv.x;
     ctx.sun_uv_y = sun_uv.y;
     return ctx;
-}
-
-void RenderPipeline::execute_god_rays(const RenderContext& ctx) {
-    // Screen-space crepuscular rays: additive shafts fanning from the sun around
-    // occluders. Only when the sun is above the horizon and on screen (zero cost
-    // otherwise). Only the shader stays a member; all frame state comes from ctx.
-    if (!m_god_rays_shader || !m_god_rays_shader->IsValid() || ctx.screen_quad_vao == 0) {
-        return;
-    }
-    const float sun_visible = ctx.sun_visible;
-    const glm::vec2 sun_uv(ctx.sun_uv_x, ctx.sun_uv_y);
-    const GLuint lit_fbo = ctx.lit_scene.id;
-    const GLuint opaque_tex = ctx.opaque_scene.id;
-    if (sun_visible > 0.002f && lit_fbo && opaque_tex) {
-        glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
-        glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // god-rays into internal lit FBO
-        const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
-        glDisable(GL_DEPTH_TEST);
-        const GLboolean blend_was = glIsEnabled(GL_BLEND);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_ONE, GL_ONE); // additive
-        m_god_rays_shader->use();
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, opaque_tex);
-        m_god_rays_shader->setInt("u_scene", 0);
-        m_god_rays_shader->setVec2("u_sunUV", sun_uv);
-        m_god_rays_shader->setFloat("u_sunVisible", sun_visible);
-        m_god_rays_shader->setFloat("u_strength", 0.85f);
-        glBindVertexArray(ctx.screen_quad_vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        glBindVertexArray(0);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, 0);
-        if (!blend_was)
-            glDisable(GL_BLEND);
-        if (depth_was)
-            glEnable(GL_DEPTH_TEST);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    }
 }
 
 // --- Render-optimization: reduced-res sky-dome (cloud-raymarch-optimization, ) ---
@@ -3980,54 +3589,6 @@ void RenderPipeline::init_screen_quad() {
 
 // ---  TAAU resolve (render.taau, default OFF) ---
 
-void RenderPipeline::init_taau(u32 width, u32 height) {
-    if (width == 0 || height == 0)
-        return;
-    glGenFramebuffers(1, &m_taau_fbo);
-    label_gl_object(GL_FRAMEBUFFER, m_taau_fbo, "taau.fbo");
-    // the ping-pong resolved-color history textures are
-    // registry-owned with History lifetime (they persist across frames by design;
-    // resize recreates them without content preservation, matching the
-    // "history invalidated on resize"). The FBO stays PASS-OWNED: it is a transient
-    // container whose color attachment is the write-side history, bound per frame in
-    // execute_taau_resolve - not a fixed-layout render target the registry can own.
-    // The desc reproduces the retired glTexImage2D/glTexParameter calls exactly
-    // (RGBA16F, LINEAR, CLAMP_TO_EDGE).
-    for (int i = 0; i < 2; ++i) {
-        TextureDesc history;
-        history.width = width;
-        history.height = height;
-        history.internal_format = GL_RGBA16F;
-        history.format = GL_RGBA;
-        history.type = GL_FLOAT;
-        history.min_filter = GL_LINEAR;
-        history.mag_filter = GL_LINEAR;
-        history.wrap_s = GL_CLAMP_TO_EDGE;
-        history.wrap_t = GL_CLAMP_TO_EDGE;
-        history.lifetime = ResourceLifetime::History;
-        history.expected_layout = "color_attachment";
-        history.debug_label = "taau.history";
-        m_taau_history[i] =
-            m_render_registry.create_texture(i == 0 ? "taau_history_0" : "taau_history_1", history)
-                .id;
-    }
-    m_taau_history_write = 0;
-    m_taau_history_valid = false; // no usable history until the first resolve fills it
-}
-
-void RenderPipeline::destroy_taau() {
-    if (m_taau_fbo) {
-        glDeleteFramebuffers(1, &m_taau_fbo);
-        m_taau_fbo = 0;
-    }
-    // The history textures are registry-owned.
-    m_render_registry.destroy_owned("taau_history_0");
-    m_render_registry.destroy_owned("taau_history_1");
-    m_taau_history[0] = 0;
-    m_taau_history[1] = 0;
-    m_taau_history_valid = false;
-}
-
 // the TAAU resolve pass contract — the lit-scene color source +
 // its FBO (blit target) and the gbuffer motion vectors. The TAAU shader, ping-pong
 // history textures (registry-owned per ), FBO, and write-index/valid flags
@@ -4046,79 +3607,6 @@ RenderContext RenderPipeline::make_taau_context() {
     ctx.motion_vectors = m_render_registry.adopt_texture(
         "motion_vectors", m_gbuffer_pass->gbuffer().motion_vector_texture);
     return ctx;
-}
-
-void RenderPipeline::execute_taau_resolve(const RenderContext& ctx) {
-    if (!m_taau_shader || !m_taau_shader->IsValid() || m_taau_fbo == 0 ||
-        ctx.screen_quad_vao == 0 || ctx.screen_width == 0 || ctx.screen_height == 0) {
-        return;
-    }
-    const int wr = m_taau_history_write;
-    const int rd = 1 - wr;
-    const GLuint lit_color = ctx.lit_scene_color.id;
-    const GLuint lit_fbo = ctx.lit_scene.id;
-
-    // Resolve current (lit HDR) + motion-reprojected history -> history[wr].
-    glBindFramebuffer(GL_FRAMEBUFFER, m_taau_fbo);
-    glFramebufferTexture2D(
-        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_taau_history[wr], 0);
-    const GLenum draw0[1] = {GL_COLOR_ATTACHMENT0};
-    glDrawBuffers(1, draw0);
-    glViewport(0, 0, ctx.screen_width, ctx.screen_height);
-
-    const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
-    glDisable(GL_DEPTH_TEST);
-    const GLboolean blend_was = glIsEnabled(GL_BLEND);
-    glDisable(GL_BLEND);
-
-    m_taau_shader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, lit_color);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_taau_history[rd]);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, ctx.motion_vectors.id);
-    m_taau_shader->setInt("u_current", 0);
-    m_taau_shader->setInt("u_history", 1);
-    m_taau_shader->setInt("u_motion", 2);
-    m_taau_shader->setVec2(
-        "u_texel",
-        glm::vec2(1.0f / (float)ctx.internal_w(),
-                  1.0f / (float)ctx.internal_h())); // neighborhood steps by internal texels
-                                                    // (u_current is internal-sized)
-    m_taau_shader->setFloat("u_blend", 0.9f);
-    m_taau_shader->setFloat("u_sharpness", 0.4f); // recover TAA temporal-blur softness
-    m_taau_shader->setInt("u_history_valid", m_taau_history_valid ? 1 : 0);
-
-    glBindVertexArray(ctx.screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    // Copy the resolved result back into the lighting color so the final blit shows it; keep
-    // history[wr] for next frame's reprojection.
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_taau_fbo);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lit_fbo);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
-    glBlitFramebuffer(0,
-                      0,
-                      ctx.screen_width,
-                      ctx.screen_height,
-                      0,
-                      0,
-                      ctx.screen_width,
-                      ctx.screen_height,
-                      GL_COLOR_BUFFER_BIT,
-                      GL_NEAREST);
-
-    if (depth_was)
-        glEnable(GL_DEPTH_TEST);
-    if (blend_was)
-        glEnable(GL_BLEND);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glActiveTexture(GL_TEXTURE0);
-    m_taau_history_write = rd; // ping-pong
-    m_taau_history_valid = true;
 }
 
 // --- CLEANUP ---
@@ -4172,60 +3660,13 @@ void RenderPipeline::cleanup_gpu_resources() {
         glDeleteBuffers(1, &m_glass_quad_vbo);
         m_glass_quad_vbo = 0;
     }
-    // the auto-exposure meter kernel + SSBO + readback ring.
-    if (m_lum_reduce_program) {
-        glDeleteProgram(m_lum_reduce_program);
-        m_lum_reduce_program = 0;
-    }
-    if (m_lum_reduce_ssbo) {
-        glDeleteBuffers(1, &m_lum_reduce_ssbo);
-        m_lum_reduce_ssbo = 0;
-    }
-    m_exposure_ring.shutdown();
+    m_luminance_meter_pass->destroy();
     m_metered_valid = false;
-    //  rendering: the froxel kernels + volumes.
-    if (m_froxel_inject_program) {
-        glDeleteProgram(m_froxel_inject_program);
-        m_froxel_inject_program = 0;
-    }
-    if (m_froxel_integrate_program) {
-        glDeleteProgram(m_froxel_integrate_program);
-        m_froxel_integrate_program = 0;
-    }
-    if (m_froxel_scatter_tex) {
-        glDeleteTextures(1, &m_froxel_scatter_tex);
-        m_froxel_scatter_tex = 0;
-    }
-    if (m_froxel_integrated_tex) {
-        glDeleteTextures(1, &m_froxel_integrated_tex);
-        m_froxel_integrated_tex = 0;
-    }
-    // the WBOIT glass chain.
-    m_glass_oit_shader.reset();
-    m_glass_oit_resolve_shader.reset();
-    if (m_oit_fbo) {
-        glDeleteFramebuffers(1, &m_oit_fbo);
-        m_oit_fbo = 0;
-    }
-    if (m_oit_accum_tex) {
-        glDeleteTextures(1, &m_oit_accum_tex);
-        m_oit_accum_tex = 0;
-    }
-    if (m_oit_reveal_tex) {
-        glDeleteTextures(1, &m_oit_reveal_tex);
-        m_oit_reveal_tex = 0;
-    }
-    // release the baked waterfall sheet geometry.
-    if (m_waterfall_vao) {
-        glDeleteVertexArrays(1, &m_waterfall_vao);
-        m_waterfall_vao = 0;
-    }
-    if (m_waterfall_vbo) {
-        glDeleteBuffers(1, &m_waterfall_vbo);
-        m_waterfall_vbo = 0;
-    }
-    m_waterfall_sheet_sites.clear();
-    m_waterfall_geometry_built = false;
+    // The pass-owned froxel kernels/volumes and WBOIT shaders/MRT retain their
+    // original cleanup point and deletion order inside their extracted owners.
+    m_froxel_pass->destroy();
+    m_glass_oit_pass->destroy();
+    m_waterfall_pass->destroy_geometry();
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) {
         m_particle_pass->destroy_buffers();
@@ -4286,8 +3727,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_debug_view_pass) {
         m_debug_view_pass->reset_shader();
     } // render-only debug view
-    m_aerial_shader.reset();    //  aerial-perspective fullscreen shader
-    m_waterfall_shader.reset(); //  waterfall falling-sheet shader
+    m_aerial_pass->reset_shader();    //  aerial-perspective fullscreen shader
+    m_waterfall_pass->reset_shader(); // waterfall falling-sheet shader
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();
@@ -4296,174 +3737,9 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_started = false;
 }
 
-// bake the live waterfall DRESSING for `world`. Builds one vertical
-// world-space quad per detected site into m_waterfall_vao/_vbo and emits one
-// spray emitter per site (capped).: the SITES are a pure function of
-// the generated world (camera/frame independent, same seed -> same sites), but
-// the dressing geometry/spray are never hashed (one-way, regression review/).
+// Bake the live waterfall dressing in the pass that owns its geometry and draw.
 void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
-    // Re-bakeable: drop any prior geometry so a re-enter rebuilds cleanly.
-    if (m_waterfall_vao) {
-        glDeleteVertexArrays(1, &m_waterfall_vao);
-        m_waterfall_vao = 0;
-    }
-    if (m_waterfall_vbo) {
-        glDeleteBuffers(1, &m_waterfall_vbo);
-        m_waterfall_vbo = 0;
-    }
-    m_waterfall_sheet_sites.clear();
-    m_waterfall_geometry_built = false;
-
-    // World-deterministic detection (cached). Copy into m_waterfall_sheet_sites so
-    // the per-site crest/foot Y survive even if the cache is later cleared.
-    const std::vector<WaterfallSite>& sites = waterfall_sites(world);
-    if (sites.empty()) {
-        LUMINUMBRA_CORE_INFO("[waterfall] prepare_waterfalls: 0 sites detected (no dressing)");
-        return;
-    }
-    m_waterfall_sheet_sites = sites;
-
-    // Interleaved pos(3) + normal(3) per vertex; 12 verts per site = the vertical SHEET (6) +
-    // a horizontal plunge-POOL quad at the foot (6) so the fall visibly lands in water (the
-    // "connect to water" fix — the pool reads as roiling foam because the shader's fall_t≈1 there).
-    constexpr int kFloatsPerVertex = 6;
-    constexpr int kVertsPerSite = 12;
-    std::vector<float> verts;
-    verts.reserve(m_waterfall_sheet_sites.size() * kVertsPerSite * kFloatsPerVertex);
-
-    constexpr float kMinWidth = 2.0f; // a sane minimum sheet width (m)
-    constexpr float kMinRun = 0.5f;   // ensure the foot is advanced downstream
-    const glm::vec3 up(0.0f, 1.0f, 0.0f);
-
-    for (const WaterfallSite& s : m_waterfall_sheet_sites) {
-        // Downhill flow azimuth in XZ. Guard div-by-zero on normalize (fallback +X).
-        glm::vec2 flow2 = s.flow_dir;
-        float flow_len = std::sqrt(flow2.x * flow2.x + flow2.y * flow2.y);
-        if (flow_len > 1e-5f) {
-            flow2 /= flow_len;
-        } else {
-            flow2 = glm::vec2(1.0f, 0.0f);
-        }
-        const glm::vec3 flow_dir(flow2.x, 0.0f, flow2.y);
-        // Cross-flow axis (the sheet's horizontal width direction): perpendicular
-        // to flow in XZ. cross(up, flow_dir) is unit (both unit + orthogonal).
-        const glm::vec3 cross_axis = glm::cross(up, flow_dir);
-
-        const float width = std::max(s.width, kMinWidth);
-        const float half_w = width * 0.5f;
-        const float run = std::max(s.run_length, kMinRun);
-
-        // Lip (top) at the crest XZ; foot (bottom) advanced downstream by the run.
-        // CONNECT-TO-WATER: anchor the lip to the upstream WATER surface where the river/lake
-        // actually carries water (WaterLevelAt > terrain), so the sheet starts AT the water
-        // instead of floating on dry rock. Falls back to the terrain crest on perched/dry drops.
-        const float crest_water = world.WaterLevelAt(s.crest.x, s.crest.z);
-        const float top_y = std::max(s.crest.y, crest_water);
-        const float bot_y = s.foot.y;
-        const glm::vec3 top_center(s.crest.x, top_y, s.crest.z);
-        const glm::vec3 bot_center =
-            top_center + flow_dir * run + glm::vec3(0.0f, bot_y - top_y, 0.0f);
-
-        // Four corners of the vertical sheet (left/right along the cross axis).
-        const glm::vec3 tl = top_center - cross_axis * half_w;
-        const glm::vec3 tr = top_center + cross_axis * half_w;
-        const glm::vec3 bl = bot_center - cross_axis * half_w;
-        const glm::vec3 br = bot_center + cross_axis * half_w;
-
-        // Normal: horizontal, perpendicular to the sheet. cross(cross_axis, up)
-        // == flow_dir (the downstream-facing horizontal normal). The sheet is
-        // drawn double-sided (cull off) so the exact orientation is cosmetic.
-        glm::vec3 n = glm::cross(cross_axis, up);
-        float nlen = glm::length(n);
-        n = (nlen > 1e-5f) ? (n / nlen) : glm::vec3(0.0f, 0.0f, 1.0f);
-
-        auto push_vert = [&](const glm::vec3& p) {
-            verts.push_back(p.x);
-            verts.push_back(p.y);
-            verts.push_back(p.z);
-            verts.push_back(n.x);
-            verts.push_back(n.y);
-            verts.push_back(n.z);
-        };
-        // Triangle 1: tl, bl, br; Triangle 2: tl, br, tr.
-        push_vert(tl);
-        push_vert(bl);
-        push_vert(br);
-        push_vert(tl);
-        push_vert(br);
-        push_vert(tr);
-
-        // PLUNGE POOL: a horizontal foamy water quad at the foot so the fall lands IN water
-        // (visually connects sheet -> pool). Centred at the foot, sized ~1.6x the sheet width,
-        // facing UP; at y≈foot the shader's fall_t≈1 -> roiling plunge foam, so it reads as a pool.
-        n = up; // these 6 verts face up (overrides the sheet's horizontal normal in push_vert)
-        const float pool_half = std::max(half_w * 1.6f, 2.0f);
-        const glm::vec3 pc(bot_center.x, bot_y + 0.10f, bot_center.z);
-        const glm::vec3 pa = cross_axis * pool_half; // width axis
-        const glm::vec3 pb = flow_dir * pool_half;   // downstream axis
-        const glm::vec3 ptl = pc - pa - pb;
-        const glm::vec3 ptr = pc + pa - pb;
-        const glm::vec3 pbl = pc - pa + pb;
-        const glm::vec3 pbr = pc + pa + pb;
-        push_vert(ptl);
-        push_vert(pbl);
-        push_vert(pbr);
-        push_vert(ptl);
-        push_vert(pbr);
-        push_vert(ptr);
-    }
-
-    // Upload the combined sheet geometry to a dedicated VAO/VBO.
-    glGenVertexArrays(1, &m_waterfall_vao);
-    glGenBuffers(1, &m_waterfall_vbo);
-    glBindVertexArray(m_waterfall_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_waterfall_vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(),
-                 GL_STATIC_DRAW);
-    // location 0 = aPos, location 1 = aNormal (basic.vert layout).
-    glVertexAttribPointer(
-        0, 3, GL_FLOAT, GL_FALSE, kFloatsPerVertex * sizeof(float), reinterpret_cast<void*>(0));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1,
-                          3,
-                          GL_FLOAT,
-                          GL_FALSE,
-                          kFloatsPerVertex * sizeof(float),
-                          reinterpret_cast<void*>(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    label_gl_object(GL_VERTEX_ARRAY, m_waterfall_vao, "waterfall.sheet_vao");
-    label_gl_object(GL_BUFFER, m_waterfall_vbo, "waterfall.sheet_vbo");
-    m_waterfall_geometry_built = true;
-
-    //  spray: one mist emitter per plunge foot, capped to bound particle cost.
-    constexpr std::size_t kMaxSpray = 24;
-    std::size_t spray_count = 0;
-    if (m_particle_pass) {
-        const std::filesystem::path spray_json =
-            m_root_path / "data/common/particles/waterfall_spray.json";
-        for (const WaterfallSite& s : m_waterfall_sheet_sites) {
-            if (spray_count >= kMaxSpray)
-                break;
-            m_particle_pass->add_waterfall_spray(spray_json, s.foot, s.drop_height, s.width);
-            ++spray_count;
-        }
-    }
-
-    if (m_waterfall_sheet_sites.size() > kMaxSpray) {
-        LUMINUMBRA_CORE_INFO(
-            "[waterfall] prepare_waterfalls: {} sites; sheets drawn for all, spray capped to {}",
-            m_waterfall_sheet_sites.size(),
-            kMaxSpray);
-    } else {
-        LUMINUMBRA_CORE_INFO(
-            "[waterfall] prepare_waterfalls: {} sites (sheets + {} spray emitters)",
-            m_waterfall_sheet_sites.size(),
-            spray_count);
-    }
+    m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);
 }
 
 // --- RESOURCE MANAGEMENT ---
@@ -5825,49 +5101,6 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
         return false;
     }
     return true;
-}
-
-// --- Compute-shader helpers ---
-
-GLuint create_compute_shader(const char* source) {
-    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint success;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        char infoLog[512];
-        glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-        LUMINUMBRA_CORE_ERROR("Compute shader compilation failed: {}", infoLog);
-        glDeleteShader(shader);
-        return 0;
-    }
-
-    return shader;
-}
-
-GLuint create_compute_program(const char* compute_source) {
-    GLuint compute_shader = create_compute_shader(compute_source);
-    if (compute_shader == 0)
-        return 0;
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, compute_shader);
-    glLinkProgram(program);
-
-    GLint success;
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char infoLog[512];
-        glGetProgramInfoLog(program, 512, nullptr, infoLog);
-        LUMINUMBRA_CORE_ERROR("Compute program linking failed: {}", infoLog);
-        glDeleteProgram(program);
-        program = 0;
-    }
-
-    glDeleteShader(compute_shader);
-    return program;
 }
 
 void RenderPipeline::update_time_of_day(float deltaTime) {
