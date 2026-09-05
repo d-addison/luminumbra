@@ -123,7 +123,10 @@ public:
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
     // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns false, fresh-world path unchanged).
+    // miss (returns true). A refusal returns false and disables saving.
+    const std::string& GetWorldOpenError() const {
+        return m_worldOpenError;
+    }
     bool LoadWorldState();
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
     std::size_t GetLastLoadedChunkCount() const {
@@ -416,6 +419,7 @@ private:
     // Generate a unique world ID
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
+    std::string m_worldOpenError;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 

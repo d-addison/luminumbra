@@ -835,8 +835,8 @@ TEST(PersistenceHardening, TruncatedRecordManifestRejected) {
     WorldSaveService service;
     // Claims 5 records but provides no record manifest bytes.
     std::string bytes = "LMR1";
-    bytes.push_back('\x01');
-    bytes.push_back('\0'); // version 1
+    bytes.push_back('\x02');
+    bytes.push_back('\0'); // version 2
     bytes.push_back('\x05');
     bytes.push_back('\0'); // record_count = 5, but no manifest follows
     WriteFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0), bytes);

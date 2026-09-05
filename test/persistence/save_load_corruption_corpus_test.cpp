@@ -13,8 +13,8 @@
 //       mid-header, mid-manifest, and at every 1/8 of a real region file. A partial
 //       write at ANY offset must be a clean rejection, not a crash or partial world.
 //   (3) SCHEMA-VERSION SKEW -- a future/unknown snapshot schema string, an old legacy
-//       v1 snapshot (the migration path must still LOAD it), and a future LMR1
-//       container version. Old saves degrade gracefully; unknown-future saves are
+//       v1 snapshot (must be refused), and a future LMR1
+//       container version. Old saves are refused; unknown-future saves are
 //       rejected rather than misread.
 //
 // Contract under test (WorldSaveService.h): load of a MISSING file is a clean miss
@@ -223,10 +223,10 @@ TEST(SaveLoadCorruptionCorpus, TornAtMagicBoundaryIsRejected) {
 TEST(SaveLoadCorruptionCorpus, HeaderClaimsMoreRecordsThanPresentIsRejected) {
     TempSaveDir dir("overclaim");
     WorldSaveService service;
-    // Valid magic + version 1, record_count = 0xFFFF, but no manifest/payload.
+    // Valid magic + version 2, record_count = 0xFFFF, but no manifest/payload.
     std::string bytes = "LMR1";
-    bytes.push_back('\x01');
-    bytes.push_back('\0'); // version 1
+    bytes.push_back('\x02');
+    bytes.push_back('\0'); // version 2
     bytes.push_back('\xFF');
     bytes.push_back('\xFF'); // record_count = 65535, none follow
     WriteFileBytes(WorldSaveService::region_file_path(dir.path, 0, 0), bytes);
@@ -239,7 +239,7 @@ TEST(SaveLoadCorruptionCorpus, HeaderClaimsMoreRecordsThanPresentIsRejected) {
 }
 
 // ---------------------------------------------------------------------------
-// (3) SCHEMA-VERSION SKEW: old saves migrate, future saves are rejected.
+// (3) SCHEMA-VERSION SKEW: old saves are refused, future saves are rejected.
 // ---------------------------------------------------------------------------
 
 TEST(SaveLoadCorruptionCorpus, FutureSnapshotSchemaIsRejected) {
@@ -281,32 +281,21 @@ TEST(SaveLoadCorruptionCorpus, UnknownOrderContractIsRejected) {
     EXPECT_FALSE(errors.empty());
 }
 
-TEST(SaveLoadCorruptionCorpus, LegacyV1SnapshotStillLoadsViaMigrationPath) {
-    // The migration contract (WorldSaveService.h:37-41): a directory holding ONLY the
-    // legacy v1 <save_dir>/chunks/world-state.json (no LMR1 region files, no manifest)
-    // must still load, and the loaded world must hash-match the original. An old save
-    // degrades GRACEFULLY -- it is read, not rejected.
+TEST(SaveLoadCorruptionCorpus, LegacyV1SnapshotRefusedAndPreserved) {
     TempSaveDir dir("legacy_v1");
     WorldSaveService service;
-
     WorldStreamingState world;
     AddChunk(world, IVec3(0, 0, 0), 1u);
-    AddChunk(world, IVec3(3, 0, 4), 2u);
-    const std::string expected_hash = service.world_hash(world);
-
-    // Hand-write the v1 single-snapshot file (the canonical serializer output) at the
-    // legacy path; do NOT create any v2 region files.
-    const std::string v1_json = SerializeWorldStreamingStateSnapshotJson(world);
-    WriteFileBytes(WorldSaveService::world_state_path(dir.path), v1_json);
-
-    WorldStreamingState restored;
+    const auto bytes = SerializeWorldStreamingStateSnapshotJson(world);
+    const auto path = WorldSaveService::world_state_path(dir.path);
+    WriteFileBytes(path, bytes);
     std::vector<std::string> errors;
-    EXPECT_TRUE(service.load_world(restored, dir.path, errors))
-        << "a legacy v1 snapshot must still load via the migration path";
-    EXPECT_TRUE(errors.empty());
-    EXPECT_EQ(restored.size(), 2u);
-    EXPECT_EQ(service.world_hash(restored), expected_hash)
-        << "v1-loaded world must hash-equal the original (migration must be lossless)";
+    EXPECT_FALSE(service.load_world(world, dir.path, errors));
+    ExpectNoPartialWorld(world);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), WorldSaveService::kObsoleteWorldMessage);
+    EXPECT_FALSE(service.save_world(world, dir.path));
+    EXPECT_EQ(ReadFileBytes(path), bytes);
 }
 
 TEST(SaveLoadCorruptionCorpus, CorruptLegacyV1SnapshotIsRejectedNotMisread) {
