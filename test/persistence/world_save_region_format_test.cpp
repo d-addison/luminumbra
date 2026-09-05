@@ -1,4 +1,4 @@
-//  persistence v2: LMR1 region container round-trip, v1->v2 migration
+//  persistence v2: LMR1 region container round-trip, obsolete-format refusal
 // (world-hash equality is the migration gate),.bak retention, and
 // O(edited regions) incremental saves. Container spec:
 // design decisions, section 3.
@@ -218,7 +218,7 @@ TEST(WorldSaveRegionFormat, SaveWritesLmr1RegionFilesAndManifest) {
     EXPECT_EQ(region_nn.filename().string(), "r.-1.-1.lmr");
 
     const ParsedRegionFile parsed = ParseRegionFile(region_00);
-    EXPECT_EQ(parsed.version, 1u);
+    EXPECT_EQ(parsed.version, 2u);
     ASSERT_EQ(parsed.records.size(), 2u);
     for (const ParsedRecordHeader& record : parsed.records) {
         EXPECT_EQ(record.lod_level, 0u);
@@ -257,63 +257,41 @@ TEST(WorldSaveRegionFormat, SaveWritesLmr1RegionFilesAndManifest) {
     EXPECT_FALSE(std::filesystem::exists(WorldSaveService::world_state_path(save_dir.path)));
 }
 
-TEST(WorldSaveRegionFormat, V1AndV2LoadsOfTheSameWorldHashEqual) {
-    // THE migration gate (the deterministic runtime contract section 3): world_hash is
-    // computed over the canonical in-memory snapshot, so loading the same
-    // world from a v1 file and from v2 region files must hash equal.
+TEST(WorldSaveRegionFormat, OldSnapshotRefusedAndCurrentContainerRoundTrips) {
+    WorldSaveService service;
     WorldStreamingState original;
     PopulateMultiRegionWorld(original);
-    WorldSaveService service;
-    const std::string original_hash = service.world_hash(original);
-
-    TempSaveDir v1_dir("migration_v1");
-    WriteV1SnapshotFile(original, v1_dir.path);
-    WorldStreamingState from_v1;
-    std::vector<std::string> v1_errors;
-    ASSERT_TRUE(service.load_world(from_v1, v1_dir.path, v1_errors));
-    EXPECT_TRUE(v1_errors.empty());
-
-    TempSaveDir v2_dir("migration_v2");
-    std::vector<std::string> save_errors;
-    ASSERT_TRUE(service.save_world(original, v2_dir.path, &save_errors));
-    WorldStreamingState from_v2;
-    std::vector<std::string> v2_errors;
-    ASSERT_TRUE(service.load_world(from_v2, v2_dir.path, v2_errors));
-    EXPECT_TRUE(v2_errors.empty());
-
-    EXPECT_EQ(from_v1.size(), original.size());
-    EXPECT_EQ(from_v2.size(), original.size());
-    EXPECT_EQ(service.world_hash(from_v1), original_hash);
-    EXPECT_EQ(service.world_hash(from_v2), original_hash);
-    EXPECT_EQ(service.world_hash(from_v1), service.world_hash(from_v2));
+    TempSaveDir old_dir("old");
+    WriteV1SnapshotFile(original, old_dir.path);
+    WorldStreamingState loaded;
+    loaded.insert_chunk(std::make_shared<Chunk>(IVec3(1, 0, 1)));
+    std::vector<std::string> errors;
+    EXPECT_FALSE(service.load_world(loaded, old_dir.path, errors));
+    EXPECT_TRUE(loaded.empty());
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), WorldSaveService::kObsoleteWorldMessage);
+    TempSaveDir current_dir("current");
+    errors.clear();
+    ASSERT_TRUE(service.save_world(original, current_dir.path, &errors));
+    ASSERT_TRUE(service.load_world(loaded, current_dir.path, errors));
+    EXPECT_EQ(service.world_hash(loaded), service.world_hash(original));
 }
 
-TEST(WorldSaveRegionFormat, FirstV2SaveOverV1WorldRetiresSnapshotToBak) {
-    TempSaveDir save_dir("bak");
+TEST(WorldSaveRegionFormat, SaveRefusesOldSnapshotWithoutRenamingOrOverwriting) {
+    TempSaveDir save_dir("refusal");
     WorldSaveService service;
-
     WorldStreamingState original;
     PopulateMultiRegionWorld(original);
     WriteV1SnapshotFile(original, save_dir.path);
-    const std::filesystem::path v1_path = WorldSaveService::world_state_path(save_dir.path);
-    const std::string v1_bytes = ReadFileBytes(v1_path);
-    ASSERT_TRUE(std::filesystem::exists(v1_path));
-
+    const auto path = WorldSaveService::world_state_path(save_dir.path);
+    const auto bytes = ReadFileBytes(path);
     std::vector<std::string> errors;
-    ASSERT_TRUE(service.save_world(original, save_dir.path, &errors));
-    EXPECT_TRUE(errors.empty());
-
-    EXPECT_FALSE(std::filesystem::exists(v1_path));
-    const std::filesystem::path bak_path = v1_path.parent_path() / "world-state.json.bak";
-    ASSERT_TRUE(std::filesystem::exists(bak_path));
-    EXPECT_EQ(ReadFileBytes(bak_path), v1_bytes);
-
-    // The v2 files are authoritative after migration.
-    WorldStreamingState restored;
-    std::vector<std::string> load_errors;
-    ASSERT_TRUE(service.load_world(restored, save_dir.path, load_errors));
-    EXPECT_TRUE(load_errors.empty());
-    EXPECT_EQ(service.world_hash(restored), service.world_hash(original));
+    EXPECT_FALSE(service.save_world(original, save_dir.path, &errors));
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), WorldSaveService::kObsoleteWorldMessage);
+    EXPECT_EQ(ReadFileBytes(path), bytes);
+    EXPECT_FALSE(std::filesystem::exists(path.string() + ".bak"));
+    EXPECT_FALSE(std::filesystem::exists(WorldSaveService::region_directory(save_dir.path)));
 }
 
 TEST(WorldSaveRegionFormat, SaveDirtyChunksRewritesOnlyDirtyRegions) {
@@ -532,7 +510,7 @@ TEST(WorldSaveRegionFormat, CorruptRegionFileReportsErrors) {
     EXPECT_FALSE(errors.empty());
 }
 
-TEST(WorldSaveRegionFormat, HasWorldSaveDetectsBothFormats) {
+TEST(WorldSaveRegionFormat, HasWorldSaveRecognizesOnlySupportedContainers) {
     TempSaveDir fresh("detect_fresh");
     EXPECT_FALSE(WorldSaveService::has_world_save(fresh.path));
 
@@ -540,7 +518,7 @@ TEST(WorldSaveRegionFormat, HasWorldSaveDetectsBothFormats) {
     WorldStreamingState state;
     PopulateMultiRegionWorld(state);
     WriteV1SnapshotFile(state, v1_dir.path);
-    EXPECT_TRUE(WorldSaveService::has_world_save(v1_dir.path));
+    EXPECT_FALSE(WorldSaveService::has_world_save(v1_dir.path));
 
     TempSaveDir v2_dir("detect_v2");
     WorldSaveService service;

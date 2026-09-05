@@ -1289,6 +1289,15 @@ target_link_libraries(frontier_gates_test PRIVATE
     luminumbra_common
 )
 
+# Exercise the shipping server runner and the client's GameSession open paths.
+add_executable(world_open_refusal_test
+    persistence/world_open_refusal_test.cpp
+    ../src/luminumbra_server/ServerWorldRunner.cpp
+)
+target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
+target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common)
+
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
 # Drives the real PhysicsSystem (luminumbra_common carries Jolt) -- no GL needed.
@@ -1489,6 +1498,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     species_behavior_overrides_test
     runtime_world_visual_validation_test
     frontier_gates_test
+    world_open_refusal_test
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test

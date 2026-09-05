@@ -252,28 +252,12 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsQuarantinedOnLoad) {
         session.SetJobSystem(&jobs);
         session.SetRootPath(root.root_string());
         ASSERT_TRUE(session.CreateWorld("QuarantineWorld", "12345", "default"));
-        ASSERT_TRUE(session.LoadWorldStateFrom(save_dir));
-
-        auto* world = session.GetWorldSystem();
-        ASSERT_NE(world, nullptr);
-        const Chunk* corrupt = nullptr;
-        const Chunk* control = nullptr;
-        for (const Chunk* c : world->get_renderable_chunks()) {
-            if (c->get_coords() == corrupt_coords)
-                corrupt = c;
-            if (c->get_coords() == control_coords)
-                control = c;
-        }
-        ASSERT_NE(corrupt, nullptr) << "the quarantined chunk must still load (mesh intact)";
-        ASSERT_NE(control, nullptr);
-        EXPECT_TRUE(corrupt->sdf_data.empty())
-            << "a wrong-sized SDF lattice must be quarantined (cleared for regeneration), "
-               "not adopted verbatim — got size "
-            << corrupt->sdf_data.size();
-        EXPECT_EQ(control->sdf_data.size(), kFullLattice)
-            << "a valid full lattice in the same save must survive adoption verbatim";
-        EXPECT_FALSE(corrupt->mesh_vertices.empty())
-            << "quarantine must keep the saved mesh renderable while regeneration is pending";
+        EXPECT_FALSE(session.LoadWorldStateFrom(save_dir));
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+        EXPECT_FALSE(session.SaveWorldStateTo(save_dir));
+        EXPECT_FALSE(session.SaveWorld());
     }
     jobs.shutdown();
 }

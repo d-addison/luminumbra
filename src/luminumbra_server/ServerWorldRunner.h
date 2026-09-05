@@ -153,6 +153,9 @@ public:
     // authoritative; generation only fills gaps), then synchronous
     // spawn-anchor streaming with collision ready around the spawn point.
     bool Boot();
+    const std::string& GetBootError() const {
+        return m_bootError;
+    }
 
     // boot water-settle exit stats + the settle CONTRACT. A global all-asleep
     // fixed point does not exist for this solver (wet/dry boundary cells limit-cycle and
@@ -256,6 +259,7 @@ public:
     void Shutdown(world::WorldStateSaveReport* shutdown_save_report = nullptr);
 
 private:
+    std::string m_bootError;
     ServerWorldRunnerConfig m_config;
     Luminumbra::JobSystem m_jobSystem;
     std::unique_ptr<world::GameSession> m_session;
