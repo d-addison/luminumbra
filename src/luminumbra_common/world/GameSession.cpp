@@ -806,6 +806,7 @@ bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
                               const std::string* customPresetJson) {
+    m_worldOpenError.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
         return false;
@@ -956,6 +957,17 @@ bool GameSession::CreateWorld(const std::string& name,
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
+    m_worldOpenError = "World metadata or configuration could not be opened.";
+    m_lastLoadedChunkCount = 0;
+    std::vector<std::string> open_errors;
+    if (!Persistence::WorldSaveService::validate_save(
+            fs::path(m_rootPath + "worlds/saves/" + worldId), &open_errors)) {
+        m_worldOpenError = open_errors.front();
+        if (m_worldSystem)
+            m_worldSystem->clear_world(m_physicsSystem.get());
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+        return false;
+    }
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before loading world");
         return false;
@@ -1110,11 +1122,17 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // same weather-rain wiring as CreateWorld (default-OFF = no-op).
     ApplyWeatherRainWiring();
 
+    m_worldOpenError.clear();
+    if (!LoadWorldState())
+        return false;
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
     return true;
 }
 
 bool GameSession::SaveWorld() {
+    if (!m_worldOpenError.empty() ||
+        !Persistence::WorldSaveService::validate_save(GetWorldSaveDir()))
+        return false;
     std::string worldPath = m_rootPath + "worlds/saves/" + m_metadata.worldId;
     std::string metadataPath = worldPath + "/world_info.json";
 
@@ -1126,6 +1144,7 @@ bool GameSession::SaveWorld() {
 
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
+        {"container_version", Persistence::WorldSaveService::kContainerVersion},
         {"name", m_metadata.name},
         {"seed", m_metadata.seed},
         {"worldType", m_metadata.worldType},
@@ -1172,9 +1191,12 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     if (report) {
         *report = result;
     }
-    if (!m_worldSystem || save_dir.empty()) {
+    if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
         return false;
     }
+
+    if (!Persistence::WorldSaveService::validate_save(save_dir))
+        return false;
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an
@@ -1213,8 +1235,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
-    // detects both the legacy v1 snapshot and the v2 LMR1 region
-    // container so subsequent saves take the O(edited regions) path.
+    // Subsequent saves rewrite the edited regions of a supported container.
     const bool has_snapshot = Persistence::WorldSaveService::has_world_save(save_dir);
 
     bool ok = false;
@@ -1279,7 +1300,7 @@ bool GameSession::LoadWorldState() {
 
 bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     m_lastLoadedChunkCount = 0;
-    if (!m_worldSystem || save_dir.empty()) {
+    if (!m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
         return false;
     }
 
@@ -1287,12 +1308,27 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     WorldStreamingState loaded;
     std::vector<std::string> errors;
     if (!service.load_world(loaded, save_dir, errors)) {
-        // Missing snapshot is a clean miss: errors stays empty and the world
-        // proceeds on the untouched fresh-generation path.
+        if (errors.empty())
+            return true; // fresh world
+        m_worldOpenError = errors.front();
+        m_worldSystem->clear_world(m_physicsSystem.get());
         for (const std::string& error : errors) {
             LUMINUMBRA_CORE_ERROR("World state load failed: {}", error);
         }
         return false;
+    }
+
+    // Validate every chunk before adopting any state. A malformed lattice must
+    // never become an invitation to regenerate over authoritative disk bytes.
+    constexpr std::size_t kFullSdfLattice =
+        static_cast<std::size_t>(CHUNK_SIZE_X + 1) * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
+    for (const auto& chunk : loaded.snapshot_chunks()) {
+        if (chunk && !chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
+            m_worldOpenError = "corrupt world chunk SDF lattice";
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
+            return false;
+        }
     }
 
     std::size_t adopted = 0;
@@ -1313,33 +1349,6 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         chunk->pending_mesh_indices.clear();
         chunk->pending_water_mesh_vertices.clear();
         chunk->pending_water_mesh_indices.clear();
-
-        // quarantine a wrong-sized SDF lattice at save
-        // ADOPTION (the persistence library itself stays byte-faithful — its
-        // roundtrip contract is load-bearing for the corruption-corpus tests).
-        // Legitimate persisted sdf_data is EMPTY ( coarse/band producer)
-        // or the full (CHUNK+1)^3 unit-step lattice; anything else is a
-        // corrupt/truncated record which must never reach the unit-step
-        // polygonise paths. Clearing marks the chunk for deterministic
-        // regeneration on its next build/promotion (the saved mesh stays
-        // renderable meanwhile). A truncated lattice is untrustworthy, so any
-        // voxel edits inside it are already lost — regeneration from
-        // seed/params is the least-bad recovery.
-        {
-            constexpr std::size_t kFullSdfLattice = static_cast<std::size_t>(CHUNK_SIZE_X + 1) *
-                                                    (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1);
-            if (!chunk->sdf_data.empty() && chunk->sdf_data.size() != kFullSdfLattice) {
-                LUMINUMBRA_CORE_WARN(
-                    "World load: chunk ({},{},{}) carries a malformed sdf_data lattice "
-                    "(size {} != {} and non-empty) — quarantined for regeneration",
-                    chunk->get_coords().x,
-                    chunk->get_coords().y,
-                    chunk->get_coords().z,
-                    chunk->sdf_data.size(),
-                    kFullSdfLattice);
-                chunk->sdf_data.clear();
-            }
-        }
 
         // Chunks saved mid-transition (Loading/Meshing/Unloading) settle to a
         // stable state; Ready and Idle are restored verbatim (a Ready chunk
@@ -1545,6 +1554,8 @@ void GameSession::InitializeEnergyFieldState() {
 }
 
 void GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
+    if (!m_worldOpenError.empty())
+        return;
     if (!m_energyFieldState || m_energyFieldState->page_count() == 0 || save_dir.empty()) {
         return; // null/all-zero layer -> no file -> byte-identical saves
     }

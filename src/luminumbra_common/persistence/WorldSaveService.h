@@ -3,6 +3,7 @@
 #include "world/WorldStreamingState.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -23,32 +24,20 @@ struct WorldSaveDirtyReport {
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
 //
-// On-disk layout (persistence v2, LMR1 container per the  design
-// decisions doc, section 3):
-//   <save_dir>/chunks/region/r.<rx>.<rz>.lmr   region files, 32x32 chunks each
-//   <save_dir>/chunks/region/world-manifest.json
-//                                              container version + durable
-//                                              entity id allocator counter
-// Region file: magic "LMR1" (u32) | u16 version=1 | u16 record_count |
-// manifest of record headers | LZ4-compressed record payloads in manifest
-// order. Record header: u64 chunk_id (or tile_id) | u8 lod_level (0 = full
-// live chunk record; 1/2 = far tiers /) | u8 flags (bit0
-// edited/authoritative, bit1 water-present) | u32 uncompressed_size |
-// u32 compressed_size. A lod_level 0 payload is the v1 chunk snapshot record
-// (single-chunk world_state_snapshot.v1 JSON), LZ4-compressed.
-//
-// Loading supports BOTH formats: v2 region files are preferred when present,
-// otherwise the legacy v1 single snapshot <save_dir>/chunks/world-state.json
-// is loaded. Writers emit v2 only; the first v2 save over a v1 world renames
-// the v1 snapshot to world-state.json.bak. world_hash stays computed over the
-// canonical IN-MEMORY snapshot, so a v1-file load and a v2-file load of the
-// same world hash equal (the migration gate).
-//
-// All v2 writes funnel through the private write_snapshot seam.
+// Current layout: chunks/region/r.<rx>.<rz>.lmr and world-manifest.json.
+// LMR1: magic | u16 version=2 | u16 record_count | record headers | LZ4 payloads.
+// Record headers: u64 id | u8 lod | u8 flags | u32 raw_size | u32 compressed_size.
+// Lod-0 payloads retain canonical in-memory world_state_snapshot.v1 serialization.
+// Obsolete disk formats are refused; migration is not supported.
 class WorldSaveService {
 public:
-    // Canonical location of the LEGACY v1 world state snapshot inside a save
-    // directory (still read for migration; never written).
+    // Also recorded in world_info.json, including before the first chunk save.
+    static constexpr std::uint16_t kContainerVersion = 2;
+    static constexpr const char* kObsoleteWorldMessage =
+        "This world predates the v0.3.0 format and cannot be opened. Create a new world; migration "
+        "is not supported.";
+
+    // Location used only to recognize and refuse obsolete snapshots.
     static std::filesystem::path world_state_path(const std::filesystem::path& save_dir);
 
     // v2 container locations.
@@ -74,9 +63,13 @@ public:
     static constexpr int kRegionChunkSpan = 32;
     static void region_coords_for_chunk(const IVec3& chunk_coords, int& out_rx, int& out_rz);
 
-    // True when the save directory contains a persisted world in either the
-    // v1 or the v2 format.
+    // True only for a valid supported save. Obsolete artifacts are still refused by load_world.
     static bool has_world_save(const std::filesystem::path& save_dir);
+
+    // Validates all existing persistence artifacts before a writer may modify them.
+    // A missing save is valid. Diagnostics distinguish obsolete, future and corrupt files.
+    static bool validate_save(const std::filesystem::path& save_dir,
+                              std::vector<std::string>* errors = nullptr);
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
@@ -146,20 +139,21 @@ public:
     // independent: computed over the in-memory snapshot, never file bytes.
     std::string world_hash(const WorldStreamingState& state) const;
 
-    // Incremental save pass: O(edited regions). Only region files containing
+    // Incremental writes: only region files containing
     // at least one dirty chunk are rewritten (all in-memory chunks of those
     // regions are refreshed; records of chunks absent from memory and far-LOD
     // tile records are preserved verbatim). Dirty flags of the saved chunks
     // are cleared after a successful write. With no dirty chunks nothing is
-    // written and saved stays false.
+    // written and saved stays false. Before writing, validation reads the whole
+    // existing save to refuse obsolete, mixed-format, or corrupt durable data.
     WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors = nullptr) const;
 
 private:
     // The single v2 write seam: serializes the given chunks into LMR1 region
-    // files, merging with on-disk records, refreshes the world manifest, and
-    // retires a legacy v1 snapshot to.bak. regions_written receives the
+    // files, merging with on-disk records, and refreshes the world manifest.
+    // regions_written receives the
     // number of region files rewritten when provided.
     bool write_snapshot(const std::vector<std::shared_ptr<Chunk>>& chunks,
                         const std::filesystem::path& save_dir,

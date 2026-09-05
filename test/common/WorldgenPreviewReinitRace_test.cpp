@@ -2,8 +2,7 @@
 // is closed by a QUIESCE, not a point guard. Worker threads soak far-LOD-style
 // sampling under the worldgen-epoch gate (acquire_worldgen_sample_scope) while
 // the main thread hammers set_params (reinitialize_noise takes the exclusive
-// side, toggling the shaping generators between built and nulled — the exact
-// transient the old pan crash dereferenced). The pin: no crash, every sampled
+// side, replacing the always-built shaping generators). The pin: no crash, every sampled
 // height finite, and post-settle values byte-equal a fresh reference world.
 #include <gtest/gtest.h>
 
@@ -22,8 +21,8 @@ namespace {
 
 TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
     TerrainGenParams params;
-    params.shaping_enabled = false;
     SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
+    SHIELD_WorldSystem original(nullptr, nullptr, params, 424242);
 
     std::atomic<bool> failed{false};
     std::atomic<bool> release_samplers{false};
@@ -34,26 +33,27 @@ TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
     constexpr int kSamplerThreads = 2;
     samplers.reserve(kSamplerThreads);
     for (int t = 0; t < kSamplerThreads; ++t) {
-        samplers.emplace_back([&world, &failed, &release_samplers, &samplers_in_scope, t]() {
-            // Far-LOD-style sampling: coarse strides over a wide area, each
-            // finite burst bracketed by the epoch gate exactly as the real
-            // tile-build job is.
-            const auto scope = world.acquire_worldgen_sample_scope();
-            samplers_in_scope.fetch_add(1, std::memory_order_release);
-            while (!release_samplers.load(std::memory_order_acquire)) {
-                std::this_thread::yield();
-            }
-            const float base = 1000.0f * static_cast<float>(t + 1);
-            for (int i = 0; i < 64; ++i) {
-                const float x = base + static_cast<float>(i) * 37.0f;
-                const float z = base - static_cast<float>(i) * 53.0f;
-                const float h = world.GetTerrainHeightAt(x, z);
-                if (!std::isfinite(h)) {
-                    failed.store(true, std::memory_order_release);
-                    return;
+        samplers.emplace_back(
+            [&world, &original, &failed, &release_samplers, &samplers_in_scope, t]() {
+                // Far-LOD-style sampling: coarse strides over a wide area, each
+                // finite burst bracketed by the epoch gate exactly as the real
+                // tile-build job is.
+                const auto scope = world.acquire_worldgen_sample_scope();
+                samplers_in_scope.fetch_add(1, std::memory_order_release);
+                while (!release_samplers.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
                 }
-            }
-        });
+                const float base = 1000.0f * static_cast<float>(t + 1);
+                for (int i = 0; i < 64; ++i) {
+                    const float x = base + static_cast<float>(i) * 37.0f;
+                    const float z = base - static_cast<float>(i) * 53.0f;
+                    const float h = world.GetTerrainHeightAt(x, z);
+                    if (!std::isfinite(h) || h != original.GetTerrainHeightAt(x, z)) {
+                        failed.store(true, std::memory_order_release);
+                        return;
+                    }
+                }
+            });
     }
 
     // Guarantee genuine overlap without relying on reader/writer scheduling
@@ -63,7 +63,7 @@ TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
         std::this_thread::yield();
     }
     TerrainGenParams knob = params;
-    knob.shaping_enabled = true;
+    knob.domain_warp_amplitude = 45.0f;
     knob.height_offset = 1.0f;
     std::thread writer([&]() {
         writer_started.store(true, std::memory_order_release);
@@ -83,14 +83,16 @@ TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
     }
     writer.join();
     EXPECT_TRUE(writer_finished.load(std::memory_order_acquire));
-    EXPECT_FALSE(failed.load()) << "a sampler observed a non-finite height mid-reinit";
+    EXPECT_FALSE(failed.load()) << "a sampler observed an incomplete world epoch mid-reinit";
 
-    // Repeatedly swing the shaping generators between built and null after
+    // Repeatedly rebuild shaping and toggle optional content generators after
     // the contended handoff. This preserves broad state-transition coverage
     // while keeping the concurrency proof bounded on every platform.
     constexpr int kReinitializations = 16;
     for (int iteration = 1; iteration < kReinitializations; ++iteration) {
-        knob.shaping_enabled = (iteration % 2) == 1;
+        knob.domain_warp_amplitude = 5.0f * static_cast<float>(iteration);
+        knob.rivers_enabled = (iteration % 2) == 1;
+        knob.caves_enabled = (iteration % 2) == 0;
         knob.height_offset = static_cast<float>(iteration % 7);
         world.set_params(knob);
     }

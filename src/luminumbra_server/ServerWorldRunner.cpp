@@ -314,6 +314,7 @@ bool ServerWorldRunner::Boot() {
         world_ready = m_session->CreateWorld(m_config.world_name, m_config.seed, m_config.preset);
     }
     if (!world_ready) {
+        m_bootError = m_session->GetWorldOpenError();
         LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world boot failed (preset='{}', world_id='{}')",
                               m_config.preset,
                               m_config.world_id);
@@ -326,7 +327,13 @@ bool ServerWorldRunner::Boot() {
     // into the streaming map first, so the spawn-anchor generation below only
     // fills gaps and can never clobber authoritative saved voxel data. A
     // fresh world is a clean miss here.
-    m_session->LoadWorldState();
+    if (m_config.world_id.empty() && !m_session->LoadWorldState()) {
+        m_bootError = m_session->GetWorldOpenError();
+        LUMINUMBRA_CORE_ERROR("ServerWorldRunner: world open refused: {}", m_bootError);
+        m_session.reset();
+        m_jobSystem.shutdown();
+        return false;
+    }
 
     auto* world_system = m_session->GetWorldSystem();
     auto* physics_system = m_session->GetPhysicsSystem();

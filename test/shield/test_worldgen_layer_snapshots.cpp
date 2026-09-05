@@ -752,7 +752,6 @@ TEST(WorldGenLayerSnapshotTest, LakePreviewBuildWithNullSystemsDoesNotCrash) {
     params.lacunarity = 2.0f;
     params.height_offset = 2.0f; // low -> basins dip below sea level (real lake water)
     params.caves_enabled = true;
-    params.shaping_enabled = true;     // builds the continentalness generator lakes require
     params.island_mask_enabled = true; // archipelago
     params.lakes_enabled = true;       // the lakes toggle the user set
     params.lake_depth = 6.0f;
@@ -1221,7 +1220,7 @@ std::uint64_t HashTerrainHeightGrid(const SHIELD_WorldSystem& world) {
     return hash;
 }
 
-struct LegacyPresetHeightFixture {
+struct DefaultShapingHeightFixture {
     const char* name;
     TerrainGenParams params;
     std::uint64_t expected_hash;
@@ -1237,14 +1236,11 @@ constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gc
 #endif
 }
 
-// Frozen copies of the five shipped presets' terrain params as of the commit
-// BEFORE  (shaping defaults off). These fixtures deliberately do NOT
-// load the preset JSON files: shipped presets may later opt into shaping
-//, but legacy params must keep producing bit-identical heights
-// forever. The expected hashes were captured by running this exact grid hash
-// against the pre-shaping GetTerrainHeightAt implementation.
-std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
-    std::vector<LegacyPresetHeightFixture> fixtures;
+// Synthetic parameter sets covering the five original terrain envelopes.
+// Fixed hashes are re-pinned for retirement of the pre-shaping algorithm.
+// Sampler agreement and repeatability cover the same terrain envelopes.
+std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
+    std::vector<DefaultShapingHeightFixture> fixtures;
 
     TerrainGenParams default_params;
     default_params.base_frequency = 0.01f;
@@ -1257,7 +1253,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     default_params.cave_frequency = 0.02f;
     fixtures.push_back({"default",
                         default_params,
-                        ToolchainHeightHash(0xabc65d0aa0350cebull, 0x1be02aac5ca74d60ull)});
+                        ToolchainHeightHash(0x5b1177b7f0cd121full, 0xaec140c43a735f9eull)});
 
     TerrainGenParams flat_params;
     flat_params.base_frequency = 0.02f;
@@ -1270,7 +1266,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     flat_params.cave_frequency = 0.0f;
     fixtures.push_back({"flat_lands",
                         flat_params,
-                        ToolchainHeightHash(0x5c5975fed81dfd26ull, 0xd3f8cb61b8f85576ull)});
+                        ToolchainHeightHash(0x499fac5a81a7784bull, 0x6b50de342336674aull)});
 
     TerrainGenParams mountains_params;
     mountains_params.base_frequency = 0.008f;
@@ -1283,7 +1279,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     mountains_params.cave_frequency = 0.03f;
     fixtures.push_back({"mountains",
                         mountains_params,
-                        ToolchainHeightHash(0xd5bd8812a5013e9cull, 0xec0cbc88ac710c4bull)});
+                        ToolchainHeightHash(0x1373155178dab3c8ull, 0xd8f3adb6564f52d4ull)});
 
     TerrainGenParams archipelago_params;
     archipelago_params.base_frequency = 0.009f;
@@ -1298,7 +1294,7 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     archipelago_params.cave_frequency = 0.03f;
     fixtures.push_back({"archipelago",
                         archipelago_params,
-                        ToolchainHeightHash(0xa3a51481233d998cull, 0xb17c0effd27aa30full)});
+                        ToolchainHeightHash(0x7f4ee46cde9fe0d4ull, 0xc4110e0446935b91ull)});
 
     TerrainGenParams forest_params;
     forest_params.base_frequency = 0.008f;
@@ -1311,46 +1307,49 @@ std::vector<LegacyPresetHeightFixture> LegacyPresetHeightFixtures() {
     forest_params.cave_frequency = 0.025f;
     fixtures.push_back({"temperate_forest",
                         forest_params,
-                        ToolchainHeightHash(0x7cdbfe2d641162f3ull, 0xf04d73a238d3b456ull)});
+                        ToolchainHeightHash(0x1cd96596ec25f7beull, 0xd656d367f306b8f3ull)});
 
     return fixtures;
 }
 
 } // namespace
 
-//  zero-hash-drift proof: legacy params (shaping_enabled == false, the
-// default) must produce heights bit-identical to the pre-shaping
-// implementation. Hashes captured pre-change; any drift here is a
-// review-blocking defect, never a update the baseline.
-TEST(WorldGenLayerSnapshotTest, LegacyPresetHeightsAreBitIdenticalToPreShaping) {
-    for (const LegacyPresetHeightFixture& fixture : LegacyPresetHeightFixtures()) {
+// Selector retirement preserves coverage with current sampler agreement and
+// independent-world determinism across all five synthetic terrain envelopes.
+TEST(WorldGenLayerSnapshotTest, DefaultShapingIsDeterministicAndAllSamplersAgree) {
+    for (const DefaultShapingHeightFixture& fixture : DefaultShapingHeightFixtures()) {
+        SCOPED_TRACE(fixture.name);
         SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
-        const std::uint64_t hash = HashTerrainHeightGrid(world);
-        std::cout << "[ LEGACYHEIGHT ] " << fixture.name << " seed=" << kSeed << " hash=0x"
-                  << std::hex << std::setfill('0') << std::setw(16) << hash << std::dec
-                  << std::setfill(' ') << std::endl;
-        EXPECT_EQ(hash, fixture.expected_hash)
-            << fixture.name << ": legacy (shaping-off) terrain heights drifted from the "
-            << "pre-shaping implementation - this is a hard determinism break";
+        SHIELD_WorldSystem reference(nullptr, nullptr, fixture.params, kSeed);
+        const auto hash = HashTerrainHeightGrid(world);
+        std::cout << "[ DEFAULTSHAPING ] " << fixture.name << " hash=0x" << std::hex << hash
+                  << std::dec << std::endl;
+        EXPECT_EQ(hash, fixture.expected_hash);
+        EXPECT_EQ(hash, HashTerrainHeightGrid(reference));
+        for (const IVec3 coords : {IVec3(0, 0, 0), IVec3(-3, 1, 2)}) {
+            Chunk full(coords), coarse(coords);
+            world.GenerateChunkData(full, 1);
+            world.GenerateChunkData(coarse, 4);
+            EXPECT_EQ(full.heightmap_data, coarse.heightmap_data);
+            for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+                for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                    const float wx = static_cast<float>(coords.x * CHUNK_SIZE_X + x);
+                    const float wz = static_cast<float>(coords.z * CHUNK_SIZE_Z + z);
+                    const auto i = static_cast<std::size_t>(x + z * (CHUNK_SIZE_X + 1));
+                    EXPECT_EQ(full.heightmap_data[i], world.GetTerrainHeightAt(wx, wz));
+                    EXPECT_EQ(full.heightmap_data[i],
+                              world.SampleWorldGenLayers(Vec3(wx, 0.0f, wz)).final_height);
+                }
+            }
+        }
     }
 }
 
-//  slice polish: CURRENT shipped-preset terrain hash. Unlike the
-// legacy fixture above (frozen pre-shaping params, must NEVER change), this
-// gate loads the LIVE preset JSON through the canonical loader and hashes the
-// resulting GetTerrainHeightAt grid. It catches accidental drift in a shipped
-// preset's generated terrain AND forces any deliberate preset edit to bump the
-// expected hash in the same commit (documented in the commit message).
-//
-// The archipelago hash was bumped deliberately in  when the schema_rev
-// 2 `shaping` block was added (spiky-blade shores -> rolling shores / walkable
-// interiors). The pre-shaping archipelago hash (0xc075cf55c182393c) is frozen
-// forever in the LEGACY fixture above as the default-off shaping proof.
+// The current shipped preset's height hash stays pinned across schema-only edits.
 TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/archipelago.json";
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.shaping_enabled)
-        << "archipelago.json must carry an enabled shaping block ()";
+    ASSERT_FALSE(params.continental_spline.empty());
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     const std::uint64_t hash = HashTerrainHeightGrid(world);
     std::cout << "[ CURRENTHASH ] archipelago seed=" << kSeed << " hash=0x" << std::hex
@@ -1386,7 +1385,6 @@ TerrainGenParams ShapingTestParams() {
     params.height_offset = 12.0f;
     params.caves_enabled = true;
     params.cave_frequency = 0.03f;
-    params.shaping_enabled = true;
     params.continentalness_frequency = 0.0008f;
     params.erosion_frequency = 0.0015f;
     params.peaks_frequency = 0.004f;
@@ -1402,15 +1400,8 @@ TerrainGenParams ShapingTestParams() {
 
 } // namespace
 
-//  batch-vs-scalar parity: with shaping enabled, every generation path
-// computes heights through the one shared scalar helper (GenSingle* APIs in
-// both the scalar and batch paths), so the batch heightmap bytes must be
-// EXACTLY equal (==, no epsilon) to GetTerrainHeightAt at the same world
-// coordinates - for the full-SDF path, the step>1 heightmap-only path, and
-// SampleWorldGenLayers. FastNoise SIMD grid batches (GenUniformGrid2D) are
-// deliberately NOT used for shaped heights precisely so no SIMD-lane epsilon
-// is needed here; the legacy (shaping-off) grid batches stay covered by the
-// existing max_sdf_sample_error < 1e-4 snapshot gate.
+// Full-SDF, coarse heightmap and scalar layer samples must agree exactly.
+// SIMD grid/position-array noise uses the same arithmetic as scalar shaping.
 TEST(WorldGenLayerSnapshotTest, ShapedHeightBatchPathsExactlyMatchScalarPath) {
     const TerrainGenParams params = ShapingTestParams();
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);

@@ -541,7 +541,8 @@ endif()
 # into an in-memory framebuffer and diffs two framebuffers produced in ONE process
 # with the same perceptual metric as tools/flip_diff.py (rendering/InProcessFlip.h,
 # header-only + GL-free). GL-only, self-contained (no luminumbra_common); the
-# RhiDiligent second-backend leg is wired and loudly skipped until.
+# second-backend parity cases live in rhi_pilot_flip_test below, enabled by
+# LUMINUMBRA_ENABLE_DILIGENT and exercised by the dedicated software GL/Vulkan CI lane.
 add_executable(dual_backend_flip_test
     rendering/dual_backend_flip_test.cpp
 )
@@ -697,9 +698,9 @@ target_include_directories(rhi_backend_test PRIVATE
 
 target_link_libraries(rhi_backend_test PRIVATE gtest_main)
 
-# the device-creation leg of RhiDeviceBringupGpu. This is the
-# ONLY target in the whole build that links Diligent (GL + Vk static engines) --
-# proof by construction that no shipping binary pulls it. GLFW backs a headless GL
+# Device-creation coverage for RhiDeviceBringupGpu. This target and
+# rhi_pilot_flip_test link Diligent (GL + Vk static engines); shipping binaries
+# do not. GLFW backs a headless GL
 # context; Device.cpp + RhiBackend.cpp are compiled directly (Diligent stays out of
 # luminumbra_client). Guarded by LUMINUMBRA_ENABLE_DILIGENT so a Diligent-less
 # configure still builds the rest of the suite.
@@ -1289,6 +1290,15 @@ target_link_libraries(frontier_gates_test PRIVATE
     luminumbra_common
 )
 
+# Exercise the shipping server runner and the client's GameSession open paths.
+add_executable(world_open_refusal_test
+    persistence/world_open_refusal_test.cpp
+    ../src/luminumbra_server/ServerWorldRunner.cpp
+)
+target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
+target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common)
+
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
 # Drives the real PhysicsSystem (luminumbra_common carries Jolt) -- no GL needed.
@@ -1489,6 +1499,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     species_behavior_overrides_test
     runtime_world_visual_validation_test
     frontier_gates_test
+    world_open_refusal_test
     jolt_tunneling_test
     surface_query_test
     audio_occlusion_test
