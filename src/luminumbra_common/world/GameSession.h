@@ -123,7 +123,10 @@ public:
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
     // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns false, fresh-world path unchanged).
+    // miss (returns true). A refusal returns false and disables saving.
+    const std::string& GetWorldOpenError() const {
+        return m_worldOpenError;
+    }
     bool LoadWorldState();
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
     std::size_t GetLastLoadedChunkCount() const {
@@ -279,14 +282,12 @@ public:
         m_weatherRainEnabled = enabled;
         m_weatherRainScaleMm = scale_mm;
     }
-    // Opt-in High-resolution water (sim.water_high_res, experimental).
-    // Stored pre-world; applied to the water solver ONCE at CreateWorld/LoadWorld —
-    // immediately after construction, before its first update — because the uniform
-    // hashed grid resolution can never change mid-run (the seam pass hard-gates on
-    // it). Default-OFF = Medium (8x8, 2 m cells) = byte-identical; ON = High (16x16,
-    // 1 m cells; the 4096-cell budget then derives a 16-chunk sim window). A loaded
-    // save whose chunks were written at another resolution migrates in one boot-time
-    // pass (see LoadWorldStateFrom).
+    // Supported opt-in High-resolution water (sim.water_high_res).
+    // Stored pre-world; applied once at CreateWorld/LoadWorld before the first update.
+    // The chosen resolution affects water/world hashes and must match on every peer.
+    // Default-OFF = Medium (8x8, 2 m cells); ON = High (16x16, 1 m cells), whose
+    // 4096-cell budget derives a 16-chunk sim window. Loading a current-format save
+    // resizes its water grids in one boot-time pass if needed (LoadWorldStateFrom).
     void SetWaterHighResEnabled(bool enabled) {
         m_waterHighResEnabled = enabled;
     }
@@ -416,6 +417,7 @@ private:
     // Generate a unique world ID
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
+    std::string m_worldOpenError;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 

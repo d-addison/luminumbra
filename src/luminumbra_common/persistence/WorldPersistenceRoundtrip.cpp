@@ -13,6 +13,7 @@
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace Luminumbra::Persistence {
@@ -213,7 +214,22 @@ nlohmann::json WaterStateToJson(const Chunk& chunk) {
         {"water_mesh_dirty_ticks", chunk.water_mesh_dirty_ticks}};
 }
 
-nlohmann::json ChunkToJson(const Chunk& chunk) {
+nlohmann::json ChunkToJson(const Chunk& chunk, bool sim_only = false) {
+    // The v0.3.0 cave router produces more render geometry. Hashing must not
+    // materialize that geometry only to discard it in the residency projection.
+    // Keep every key for the coverage audit; skipped arrays are erased below.
+    // Snapshot callers retain the complete canonical representation.
+    const auto array_field = [sim_only](const char* field, const auto& build) -> nlohmann::json {
+        if (sim_only) {
+            for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
+                if (std::string_view(field) == entry.field &&
+                    !luminumbra::core::MayFeedWorldHash(entry.residency)) {
+                    return nlohmann::json::array();
+                }
+            }
+        }
+        return build();
+    };
     const ChunkState state = chunk.get_state();
     return nlohmann::json{
         {"coords", IVec3ToJson(chunk.get_coords())},
@@ -225,14 +241,33 @@ nlohmann::json ChunkToJson(const Chunk& chunk) {
         // per-voxel structure material channel. Empty for non-structure
         // chunks => serializes as [] => byte-identical for structures-off worlds.
         {"material_data", chunk.material_data},
-        {"mesh_vertices", MeshVerticesToJson(chunk.mesh_vertices)},
-        {"mesh_indices", chunk.mesh_indices},
-        {"water_mesh_vertices", MeshVerticesToJson(chunk.water_mesh_vertices)},
-        {"water_mesh_indices", chunk.water_mesh_indices},
-        {"pending_mesh_vertices", MeshVerticesToJson(chunk.pending_mesh_vertices)},
-        {"pending_mesh_indices", chunk.pending_mesh_indices},
-        {"pending_water_mesh_vertices", MeshVerticesToJson(chunk.pending_water_mesh_vertices)},
-        {"pending_water_mesh_indices", chunk.pending_water_mesh_indices},
+        {"mesh_vertices",
+         array_field("mesh_vertices",
+                     [&]() -> nlohmann::json { return MeshVerticesToJson(chunk.mesh_vertices); })},
+        {"mesh_indices",
+         array_field("mesh_indices", [&]() -> nlohmann::json { return chunk.mesh_indices; })},
+        {"water_mesh_vertices",
+         array_field(
+             "water_mesh_vertices",
+             [&]() -> nlohmann::json { return MeshVerticesToJson(chunk.water_mesh_vertices); })},
+        {"water_mesh_indices",
+         array_field("water_mesh_indices",
+                     [&]() -> nlohmann::json { return chunk.water_mesh_indices; })},
+        {"pending_mesh_vertices",
+         array_field(
+             "pending_mesh_vertices",
+             [&]() -> nlohmann::json { return MeshVerticesToJson(chunk.pending_mesh_vertices); })},
+        {"pending_mesh_indices",
+         array_field("pending_mesh_indices",
+                     [&]() -> nlohmann::json { return chunk.pending_mesh_indices; })},
+        {"pending_water_mesh_vertices",
+         array_field("pending_water_mesh_vertices",
+                     [&]() -> nlohmann::json {
+                         return MeshVerticesToJson(chunk.pending_water_mesh_vertices);
+                     })},
+        {"pending_water_mesh_indices",
+         array_field("pending_water_mesh_indices",
+                     [&]() -> nlohmann::json { return chunk.pending_water_mesh_indices; })},
         {"has_collision", chunk.has_collision.load(std::memory_order_acquire)},
         {"current_lod", chunk.current_lod.load(std::memory_order_acquire)},
         {"pending_lod", chunk.pending_lod.load(std::memory_order_acquire)},
@@ -240,9 +275,15 @@ nlohmann::json ChunkToJson(const Chunk& chunk) {
         {"pending_mesh_failed", chunk.pending_mesh_failed.load(std::memory_order_acquire)},
         {"mesh_version", chunk.mesh_version.load(std::memory_order_acquire)},
         {"water_mesh_version", chunk.water_mesh_version.load(std::memory_order_acquire)},
-        {"water_level_data", chunk.water_level_data},
-        {"water_flow_data", Vec2ArrayToJson(chunk.water_flow_data)},
-        {"water_sim_terrain_height", chunk.water_sim_terrain_height},
+        {"water_level_data",
+         array_field("water_level_data",
+                     [&]() -> nlohmann::json { return chunk.water_level_data; })},
+        {"water_flow_data",
+         array_field("water_flow_data",
+                     [&]() -> nlohmann::json { return Vec2ArrayToJson(chunk.water_flow_data); })},
+        {"water_sim_terrain_height",
+         array_field("water_sim_terrain_height",
+                     [&]() -> nlohmann::json { return chunk.water_sim_terrain_height; })},
         // the AUTHORITATIVE fixed-point water sim state (mm). water_level_data/flow are now
         // render-only mirrors; these are what the sim continues from on load (no re-seed from
         // worldgen).
@@ -835,7 +876,7 @@ std::string SerializeWorldStreamingStateSimTruthForHash(const WorldStreamingStat
         if (!chunk) {
             continue;
         }
-        nlohmann::json cj = ChunkToJson(*chunk);
+        nlohmann::json cj = ChunkToJson(*chunk, true);
         VerifyChunkFieldResidencyCoverage(cj);
         for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
             if (!luminumbra::core::MayFeedWorldHash(entry.residency)) {

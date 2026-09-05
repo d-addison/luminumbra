@@ -37,6 +37,27 @@ The common engine groups functionality by responsibility:
 - `net/` and `network/` contain transport, lockstep, and replication paths.
 - `scripting/` exposes the supported Lua surface.
 
+`GameSession` already ticks instinct planning, perception/awareness, scent and
+creature-brain systems for participating entities, as well as plant growth and
+ecology. Headless avatar, creature and plant rosters have hash/replay coverage;
+their default opt-in behavior is not an absence of implementation.
+
+`PhysicsSystem::audio_raycast` obtains the hit body's surface normal from Jolt
+and orients it against the incoming ray. Attached terrain queries use the world's
+voxel/biome material classifier; dynamic bodies use Stone. Height-band material
+fallback applies only when no world system is attached.
+
+Persistence uses LMR1 container v2, the v1 world-manifest schema identifying that
+container version, and FSD2 payload v3. The
+[world format contract](engine-guide.md) gives the
+v0.3.0 refusal message, preset revision 6 and separate obsolete/future/corrupt
+failure behavior. Durable legacy worlds are not migrated.
+
+Reliable and unreliable delivery are implemented in the shared GNS/Steam
+`NetSocketsTransport`; Loopback/TCP remain reliable. The GNS CI build validates
+the shared source against its real dependency. Live multi-client transport
+testing and Steam SDK validation are separate from that build coverage.
+
 ## Rendering model
 
 The client consumes snapshots of common state and stages work through rendering
@@ -48,6 +69,13 @@ orphaned or invalid shader files.
 Visual results are validated separately from deterministic state. Structural tests
 cover pass contracts and resource lifetimes, while captured frames and perceptual
 diffs cover output that cannot be proven from source inspection.
+
+OpenGL remains the shipping backend. A required Diligent CI lane builds opt-in
+test targets and checks software GL/Vulkan device creation and calibration-cube
+parity, without linking Diligent into shipping binaries. Current motion vectors
+cover camera reprojection and instanced foliage sway; independent rigid-object
+and skinned previous-frame history remain gaps. Tree impostors default on when
+startup atlas baking succeeds.
 
 ## Data flow
 

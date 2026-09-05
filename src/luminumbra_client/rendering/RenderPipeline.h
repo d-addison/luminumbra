@@ -674,9 +674,8 @@ public:
     // quality. 0 = full (legacy full-res dome draw, byte-identical to before);
     // 1 = half (dome raymarched into a 1/2-per-axis FBO + depth-masked upsample
     // composite, the ~-3 ms structural win); 2 = quarter (1/4 per axis). The
-    // half/quarter path is  (no world_hash impact) and opt-in, so the
-    // default (0) leaves every existing visual gate byte-stable. Driven by the
-    // client from LUMIN_CLOUD_QUALITY (and, later, render.cloud_quality). Lazily
+    // half/quarter path is render-only (no world_hash impact). The pipeline starts
+    // at 0; the client selects 2 unless LUMIN_CLOUD_QUALITY overrides it. Lazily
     // (re)allocates the reduced-res FBO; safe to call before or after startup.
     void set_cloud_quality(int quality);
     int get_cloud_quality() const {
@@ -684,11 +683,10 @@ public:
     }
 
     // Render-optimization (ssao-gtao): AO algorithm/quality. 0 = legacy 64-sample
-    // hemisphere SSAO (byte-identical default); 1 = GTAO Low (8 spp) full-res;
+    // hemisphere SSAO (pipeline initial value); 1 = GTAO Low (8 spp) full-res;
     // 2 = GTAO High (18 spp) full-res; 3 = GTAO High at HALF-RES + joint-bilateral
-    // depth-aware upsample (cheapest, budget-holding even on dense views — the
-    // recommended default).  (no world_hash impact). Driven by
-    // LUMIN_SSAO_QUALITY.
+    // depth-aware upsample (client default). Render-only (no world_hash impact).
+    // The client applies LUMIN_SSAO_QUALITY when present.
     void set_ssao_quality(int quality) {
         m_ssao_quality = (quality < 0) ? 0 : (quality > 3 ? 3 : quality);
     }
@@ -1159,7 +1157,7 @@ private:
     //  rendering : the moon's DEDICATED radiance (cool key colour), fed to the
     // lighting pass via RenderContext.moon_radiance -> u_moonRadiance instead of a hardcoded shader
     // const, so the moon is tunable independent of the sun. Default == the prior shader kMoonColor
-    // (byte-identical until deliberately re-calibrated). LUMIN_MOON_RGB overrides for tuning/tests.
+    // (byte-identical until deliberately re-calibrated). This is a fixed pipeline value.
     glm::vec3 m_moonRadiance = glm::vec3(0.40f, 0.52f, 0.92f);
     static constexpr std::uint64_t kTicksPerLunarCycle =
         54000ull;                        // 30 min @ 30 Hz (a lunar "month")
@@ -1443,7 +1441,7 @@ private:
     void init_static_model_texture_array();
 
 public:
-    //  far-field tree impostors (opt-in via LUMIN_TREE_IMPOSTORS=1; default OFF). The atlas is
+    // Far-field tree impostors (default ON; LUMIN_TREE_IMPOSTORS=0 disables). The atlas is
     // baked once at init (BakeTreeImpostorAtlasToTextures) and the GBuffer LOD3 path draws one
     // camera-facing quad per far tree sampling it. Read-only accessors for GBufferPass.
     bool tree_impostor_enabled() const {

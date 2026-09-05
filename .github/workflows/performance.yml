@@ -150,9 +150,11 @@ jobs:
         run: |
           cmake --build build/base --target luminumbra_server_app --parallel 4
           cmake --build build/head --target luminumbra_server_app --parallel 4
+      # Headless smoke consumes common simulation data. Client UI markup, fonts
+      # and textures are not workload inputs and must not prevent comparison.
       - name: Measure base / first batch
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data)
+          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/base/performance-build.json \
@@ -169,7 +171,7 @@ jobs:
               --artifact ../build/base/server-smoke-evidence-1.json
       - name: Measure candidate / first batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data)
+          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -186,7 +188,7 @@ jobs:
               --artifact ../build/head/server-smoke-evidence-1.json
       - name: Measure candidate / second batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data)
+          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -203,7 +205,7 @@ jobs:
               --artifact ../build/head/server-smoke-evidence-2.json
       - name: Measure base / second batch
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data)
+          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common)
           python3 head/tools/perf/perf.py run \
             --workload server-smoke --workload-version 1 --layer end-to-end \
             --preset perf --build-manifest build/base/performance-build.json \
@@ -270,7 +272,7 @@ jobs:
       - name: Measure water base / first batch
         if: steps.water_base.outputs.supported == 'true'
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data)
+          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/base/performance-build.json \
@@ -288,7 +290,7 @@ jobs:
               --artifact ../build/base/water-smoke-evidence-1.json
       - name: Measure water candidate / first batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data)
+          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -306,7 +308,7 @@ jobs:
               --artifact ../build/head/water-smoke-evidence-1.json
       - name: Measure water candidate / second batch
         run: |
-          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data)
+          HEAD_FIXTURE=$(python3 head/tools/perf/fixture_hash.py head/data/common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/head/performance-build.json \
@@ -325,7 +327,7 @@ jobs:
       - name: Measure water base / second batch
         if: steps.water_base.outputs.supported == 'true'
         run: |
-          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data)
+          BASE_FIXTURE=$(python3 head/tools/perf/fixture_hash.py base/data/common)
           python3 head/tools/perf/perf.py run \
             --workload water-smoke --workload-version 1 --layer simulation \
             --preset perf --build-manifest build/base/performance-build.json \

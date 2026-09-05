@@ -680,8 +680,7 @@ void WaterSystem::update(entt::registry& registry,
     // (re)written by the main-thread LOD publish (process_completed_meshing_jobs); off-thread
     // meshing writes scratch/pending, never the live array. So this read cannot race, and the
     // workers below get a PRIVATE copy (never touch heightmap_data) — unlike the old worker-side
-    // read. When shaping is disabled, workers fall back to the analytic sampler, preserving
-    // identical water-bed values.
+    // read. Workers use the analytic sampler when no reusable heightmap is available.
     const int hm_stride = CHUNK_SIZE_X + 1; // heightmap is (CHUNK_SIZE_X+1)^2, x-fastest
     // The heightmap-node reuse below requires each water-cell CENTRE to land on an
     // integer heightmap node: centre = step*x + step/2 with step = CHUNK_SIZE_X /
@@ -692,8 +691,7 @@ void WaterSystem::update(entt::registry& registry,
     const int hm_step = (m_sim_resolution > 0 && CHUNK_SIZE_X % m_sim_resolution == 0)
                             ? CHUNK_SIZE_X / m_sim_resolution
                             : 0;
-    const bool reuse_heightmap =
-        m_shield_system->get_params().shaping_enabled && hm_step > 0 && hm_step % 2 == 0;
+    const bool reuse_heightmap = hm_step > 0 && hm_step % 2 == 0;
     std::vector<std::vector<float>> terrain_seed(
         to_init.size()); // [i] empty => worker samples the sampler
     if (reuse_heightmap) {
