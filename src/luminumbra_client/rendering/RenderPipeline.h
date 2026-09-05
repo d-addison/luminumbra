@@ -58,6 +58,8 @@ class FinalBlitPass;
 class AerialPass;
 class GodRaysPass;
 class TaauPass;
+class GlassOitPass;
+class FroxelPass;
 struct ScentFieldRenderMirror;
 } // namespace Luminumbra::Rendering
 
@@ -917,6 +919,8 @@ private:
     RenderContext make_aerial_context(const Camera& camera);
     RenderContext make_god_rays_context(const Camera& camera);
     RenderContext make_taau_context();
+    RenderContext make_glass_oit_context(const Camera& camera);
+    RenderContext make_froxel_context(const Camera& camera);
 
     std::vector<ChunkMeshSnapshot>
     build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
@@ -1214,6 +1218,8 @@ private:
     std::unique_ptr<AerialPass> m_aerial_pass;
     std::unique_ptr<GodRaysPass> m_god_rays_pass;
     std::unique_ptr<TaauPass> m_taau_pass;
+    std::unique_ptr<GlassOitPass> m_glass_oit_pass;
+    std::unique_ptr<FroxelPass> m_froxel_pass;
     RenderResourceRegistry m_render_registry; // typed render-resource handles (adopt/lookup)
     Client::ScenarioHarness::IsolationConfig m_isolation_config; //  (default {All,Scene} = no-op)
     WaterfallSiteCache m_waterfall_sites;                        //  (render-only, cached)
@@ -1343,27 +1349,9 @@ private:
     u32 m_lum_reduce_ssbo = 0;
     AsyncReadbackRing m_exposure_ring;
 
-    //  rendering (,  ): the froxel volumetrics chain —
-    // inject (media density + in-scatter per froxel, sampling the shadow depth
-    // AND the  tint cascade for colored shafts) then integrate (front-to-back
-    // per column). Lazy-init in the stages; torn down in cleanup_gpu_resources.
-    // Quality 0 (default) is a zero-GL no-op through both stages.
+    // Froxel quality remains pipeline orchestration state; the pass owns both
+    // compute programs and volumes and reads this value through RenderContext.
     int m_volumetric_quality = 0;
-    u32 m_froxel_inject_program = 0;
-    u32 m_froxel_integrate_program = 0;
-    u32 m_froxel_scatter_tex = 0;    // rgba16f 160x90x64: rgb in-scatter, a sigma
-    u32 m_froxel_integrated_tex = 0; // rgba16f 160x90x64: rgb accumulated L, a T
-
-    //   (,  ): the WBOIT glass chain — panes
-    // accumulate weighted premultiplied color (accum) + coverage product
-    // (reveal), depth-tested against the SHARED lighting depth (write off);
-    // the resolve composites the weighted average over the lit scene. Empty
-    // glass list = both stages are zero-GL no-ops. Lazy-init in the accum stage.
-    std::unique_ptr<Shader> m_glass_oit_shader;
-    std::unique_ptr<Shader> m_glass_oit_resolve_shader;
-    u32 m_oit_fbo = 0;
-    u32 m_oit_accum_tex = 0;  // RGBA16F: rgb = sum(w*a*c), a = sum(w*a)
-    u32 m_oit_reveal_tex = 0; // R16F: product of (1 - a_i)
 
     u32 m_terrainTextureArray = 0;
     // Per-material triplanar normal-map array. Same layer order as the

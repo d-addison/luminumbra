@@ -3,7 +3,6 @@
 #include "CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "ExposureModel.h"      //  rendering: SelectRenderExposure (manual EV precedence)
 #include "FarLodSystem.h"
-#include "FroxelGrid.h"    //  rendering: the froxel grid model
 #include "ImpostorBake.h"  //  far-field tree impostor atlas (opt-in)
 #include "InProcessFlip.h" // Deterministic in-process FLIP image comparison.
 #include "Mesh.h"
@@ -23,7 +22,9 @@
 #include "passes/DebugViewPass.h" // render-only G-buffer debug visualizer (default-OFF)
 #include "passes/FinalBlitPass.h" // -T01: FinalBlit on the RenderContext seam
 #include "passes/FoliagePass.h"
+#include "passes/FroxelPass.h"
 #include "passes/GBufferPass.h"
+#include "passes/GlassOitPass.h"
 #include "passes/GodRaysPass.h"
 #include "passes/GroundDecalPass.h" // render-only pheromone ground decal (flag-gated)
 #include "passes/LightingPass.h"
@@ -261,7 +262,9 @@ RenderPipeline::RenderPipeline()
     , m_final_blit_pass(std::make_unique<FinalBlitPass>())
     , m_aerial_pass(std::make_unique<AerialPass>())
     , m_god_rays_pass(std::make_unique<GodRaysPass>())
-    , m_taau_pass(std::make_unique<TaauPass>()) {}
+    , m_taau_pass(std::make_unique<TaauPass>())
+    , m_glass_oit_pass(std::make_unique<GlassOitPass>())
+    , m_froxel_pass(std::make_unique<FroxelPass>()) {}
 
 // forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
@@ -990,6 +993,58 @@ RenderContext RenderPipeline::make_water_context(const Camera& camera) {
     return ctx;
 }
 
+// The glass-OIT pass contract: the prepared view/projection, camera, output and
+// internal extents, shared pane/fullscreen geometry, opaque color, lit-scene
+// resolve target, and registry-owned lighting depth attachment. The OIT MRT and
+// its accumulation textures remain pass-owned and therefore do not enter ctx.
+RenderContext RenderPipeline::make_glass_oit_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.view = m_frame_prepared.view;
+    ctx.projection = m_frame_prepared.projection;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;
+    ctx.internal_height = m_internal_height;
+    ctx.registry = &m_render_registry;
+    ctx.screen_quad_vao = m_screen_quad_vao;
+    const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
+    ctx.lit_scene = m_render_registry.adopt_fbo("lit_scene", lighting_fbo.fbo_id);
+    ctx.opaque_scene =
+        m_render_registry.adopt_texture("opaque_scene", lighting_fbo.opaque_color_texture);
+    // Registry-owned renderbuffer handle; the extracted body deliberately keeps
+    // the existing attachment call byte-for-byte rather than changing GL behavior.
+    ctx.lit_scene_depth = RenderbufferHandle{lighting_fbo.depth_texture};
+    return ctx;
+}
+
+// The froxel pass contract: quality, camera/output extent, sun and ambient
+// lighting, plus the registry-owned shadow depth/tint arrays and the cascade
+// matrices/splits. Both froxel volumes remain pass-owned and stay out of ctx.
+RenderContext RenderPipeline::make_froxel_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.registry = &m_render_registry;
+    ctx.volumetric_quality = m_volumetric_quality;
+    ctx.sun = m_sun;
+    ctx.sky_ambient_color = m_skyAmbientColor;
+    const ShadowMap& shadow_map = m_shadow_pass->shadow_map();
+    ctx.shadow_depth_array =
+        m_render_registry.adopt_texture("shadow_depth_array", shadow_map.depth_texture_array);
+    ctx.shadow_tint_array = m_render_registry.adopt_texture("shadow_tint_cascades",
+                                                            m_shadow_pass->tint_texture_array());
+    if (shadow_map.cascade_splits.size() >= 5) {
+        ctx.cascade_splits = glm::vec4(shadow_map.cascade_splits[1],
+                                       shadow_map.cascade_splits[2],
+                                       shadow_map.cascade_splits[3],
+                                       shadow_map.cascade_splits[4]);
+    }
+    ctx.light_space_matrices = &shadow_map.light_space_matrices;
+    return ctx;
+}
+
 // build the GBuffer pass contract — frame state only; the
 // live-terrain submit callback, far-LOD, root path, static-model UV lane and
 // tree-impostor bundle travel through GBufferPassInput (built at the call site).
@@ -1266,11 +1321,11 @@ void RenderPipeline::enumerate_shaders(
     visit("waterfall", m_waterfall_shader.get());
     // the WBOIT glass chain (lazy — null until glass
     // first appears; health reports "not initialized", which is accurate).
-    if (m_glass_oit_shader) {
-        visit("glass_oit", m_glass_oit_shader.get());
+    if (m_glass_oit_pass->accum_shader()) {
+        visit("glass_oit", m_glass_oit_pass->accum_shader().get());
     }
-    if (m_glass_oit_resolve_shader) {
-        visit("glass_oit_resolve", m_glass_oit_resolve_shader.get());
+    if (m_glass_oit_pass->resolve_shader()) {
+        visit("glass_oit_resolve", m_glass_oit_pass->resolve_shader().get());
     }
 }
 
@@ -2862,144 +2917,23 @@ void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_glass_oit_accum(const Camera& camera) {
-    // WBOIT accumulation — each visible pane writes its
-    // depth-weighted premultiplied color into accum (blend ONE/ONE) and its
-    // coverage into reveal (ZERO/ONE_MINUS_SRC_ALPHA -> the (1-a) product),
-    // depth-TESTED against the SHARED lighting depth (write off). Empty glass
-    // list = zero GL work (the trace slot still records).
     record_frame_stage("glass_oit_accum");
-    if (m_glass_pane_items.empty() || m_glass_quad_vao == 0) {
-        return;
-    }
-    if (!m_glass_oit_shader) {
-        // Lazy init: shaders + the accum/reveal MRT FBO sharing the lighting depth.
-        m_glass_oit_shader =
-            std::make_unique<Shader>((m_root_path / "res/shaders/glass_oit.vert").string().c_str(),
-                                     (m_root_path / "res/shaders/glass_oit.frag").string().c_str());
-        label_gl_object(
-            GL_PROGRAM, m_glass_oit_shader ? m_glass_oit_shader->Id() : 0u, "shader.glass_oit");
-        m_glass_oit_resolve_shader = std::make_unique<Shader>(
-            (m_root_path / "res/shaders/volumetric_lighting.vert").string().c_str(),
-            (m_root_path / "res/shaders/glass_oit_resolve.frag").string().c_str());
-        label_gl_object(GL_PROGRAM,
-                        m_glass_oit_resolve_shader ? m_glass_oit_resolve_shader->Id() : 0u,
-                        "shader.glass_oit_resolve");
-
-        auto make_target = [&](GLenum ifmt, const char* name) {
-            GLuint t = 0;
-            glGenTextures(1, &t);
-            glBindTexture(GL_TEXTURE_2D, t);
-            glTexStorage2D(GL_TEXTURE_2D,
-                           1,
-                           ifmt,
-                           m_internal_width,
-                           m_internal_height); // match internal lighting depth
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            label_gl_object(GL_TEXTURE, t, name);
-            return t;
-        };
-        m_oit_accum_tex = make_target(GL_RGBA16F, "oit.accum");
-        m_oit_reveal_tex = make_target(GL_R16F, "oit.reveal");
-        glGenFramebuffers(1, &m_oit_fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, m_oit_fbo);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_oit_accum_tex, 0);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_oit_reveal_tex, 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER,
-                               GL_DEPTH_ATTACHMENT,
-                               GL_TEXTURE_2D,
-                               m_lighting_pass->lighting_fbo().depth_texture,
-                               0);
-        label_gl_object(GL_FRAMEBUFFER, m_oit_fbo, "oit.fbo");
-        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-            LUMINUMBRA_CORE_ERROR("glass_oit: MRT FBO incomplete; OIT disabled");
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
-            glDeleteFramebuffers(1, &m_oit_fbo);
-            m_oit_fbo = 0;
-            return;
-        }
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    }
-    if (m_oit_fbo == 0 || !m_glass_oit_shader->IsValid()) {
-        return;
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, m_oit_fbo);
-    const GLenum bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, bufs);
-    glViewport(0, 0, m_internal_width, m_internal_height); // OIT composites into internal scene
-    const GLfloat clear_accum[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    const GLfloat clear_reveal[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    glClearBufferfv(GL_COLOR, 0, clear_accum);
-    glClearBufferfv(GL_COLOR, 1, clear_reveal);
-
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
-    glDepthMask(GL_FALSE);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunci(0, GL_ONE, GL_ONE);
-    glBlendFunci(1, GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
-
-    m_glass_oit_shader->use();
-    m_glass_oit_shader->setMat4("u_view", m_frame_prepared.view);
-    m_glass_oit_shader->setMat4("u_projection", m_frame_prepared.projection);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().opaque_color_texture);
-    m_glass_oit_shader->setInt("u_opaqueScene", 0);
-    m_glass_oit_shader->setVec2(
-        "u_screenSize",
-        glm::vec2(static_cast<float>(m_screen_width), static_cast<float>(m_screen_height)));
-    m_glass_oit_shader->setVec3("u_cameraPos", camera.Position);
-    m_glass_oit_shader->setFloat("u_refractionStrength", 0.35f);
-    glBindVertexArray(m_glass_quad_vao);
-    for (const GlassPaneItem& pane : m_glass_pane_items) {
-        m_glass_oit_shader->setMat4("u_model", pane.model);
-        m_glass_oit_shader->setVec3("u_tint", pane.tint);
-        m_glass_oit_shader->setFloat("u_thickness", pane.thickness);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-    }
-    glBindVertexArray(0);
-
-    // Restore the default blend state (per-buffer funcs revert to the global).
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glDisable(GL_BLEND);
-    glEnable(GL_CULL_FACE);
-    glDepthMask(GL_TRUE);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    RenderContext ctx = make_glass_oit_context(camera);
+    GlassOitPassInput input;
+    input.glass_items = &m_glass_pane_items;
+    input.glass_vao = m_glass_quad_vao;
+    input.root_path = m_root_path;
+    m_glass_oit_pass->execute_accum(ctx, input);
 }
 
 void RenderPipeline::execute_stage_glass_oit_resolve(const Camera& camera) {
-    (void)camera;
-    // the WBOIT resolve — the weighted-average glass
-    // color composited over the lit scene with coverage = 1 - reveal. Runs
-    // BEFORE the weather snapshot so god-rays/weather observe resolved glass.
     record_frame_stage("glass_oit_resolve");
-    if (m_glass_pane_items.empty() || m_oit_fbo == 0 || !m_glass_oit_resolve_shader ||
-        !m_glass_oit_resolve_shader->IsValid() || m_screen_quad_vao == 0) {
-        return;
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-    glViewport(0, 0, m_internal_width, m_internal_height); // into internal lighting FBO
-    glDisable(GL_DEPTH_TEST);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    m_glass_oit_resolve_shader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_oit_accum_tex);
-    m_glass_oit_resolve_shader->setInt("u_accum", 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_oit_reveal_tex);
-    m_glass_oit_resolve_shader->setInt("u_reveal", 1);
-    glBindVertexArray(m_screen_quad_vao);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-    glDisable(GL_BLEND);
-    glEnable(GL_DEPTH_TEST);
-    glActiveTexture(GL_TEXTURE0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    RenderContext ctx = make_glass_oit_context(camera);
+    GlassOitPassInput input;
+    input.glass_items = &m_glass_pane_items;
+    input.glass_vao = m_glass_quad_vao;
+    input.root_path = m_root_path;
+    m_glass_oit_pass->execute_resolve(ctx, input);
 }
 
 void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera) {
@@ -3033,122 +2967,17 @@ void RenderPipeline::execute_stage_weather_overlay(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_froxel_inject(const Camera& camera) {
-    //  rendering: per-froxel media density + in-scatter into
-    // the scatter volume, sampling the shadow depth AND the  tint cascade so
-    // stained glass throws COLORED shafts. Quality 0 = zero-GL no-op.
     record_frame_stage("froxel_inject");
-    if (m_volumetric_quality <= 0) {
-        return;
+    RenderContext ctx = make_froxel_context(camera);
+    if (!m_froxel_pass->execute_inject(ctx, m_root_path)) {
+        m_volumetric_quality = 0;
     }
-    if (m_froxel_inject_program == 0) {
-        // Lazy init: both kernels + both 3D volumes, together.
-        auto load_comp = [&](const char* rel) -> GLuint {
-            std::ifstream file(std::filesystem::path(m_root_path) / rel);
-            if (!file) {
-                LUMINUMBRA_CORE_ERROR("froxel: missing {}", rel);
-                return 0;
-            }
-            std::stringstream source;
-            source << file.rdbuf();
-            return create_compute_program(source.str().c_str());
-        };
-        m_froxel_inject_program = load_comp("res/shaders/froxel_inject.comp");
-        m_froxel_integrate_program = load_comp("res/shaders/froxel_integrate.comp");
-        if (m_froxel_inject_program == 0 || m_froxel_integrate_program == 0) {
-            LUMINUMBRA_CORE_ERROR("froxel: kernel compile failed; volumetrics disabled");
-            m_volumetric_quality = 0;
-            return;
-        }
-        label_gl_object(GL_PROGRAM, m_froxel_inject_program, "shader.froxel_inject");
-        label_gl_object(GL_PROGRAM, m_froxel_integrate_program, "shader.froxel_integrate");
-        auto make_volume = [&](const char* label) -> GLuint {
-            GLuint t = 0;
-            glGenTextures(1, &t);
-            glBindTexture(GL_TEXTURE_3D, t);
-            glTexStorage3D(
-                GL_TEXTURE_3D, 1, GL_RGBA16F, Froxel::kGridX, Froxel::kGridY, Froxel::kGridZ);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-            label_gl_object(GL_TEXTURE, t, label);
-            glBindTexture(GL_TEXTURE_3D, 0);
-            return t;
-        };
-        m_froxel_scatter_tex = make_volume("froxel.scatter");
-        m_froxel_integrated_tex = make_volume("froxel.integrated");
-    }
-
-    const ShadowMap& sm = m_shadow_pass->shadow_map();
-    glm::vec4 splits(0.0f);
-    if (sm.cascade_splits.size() >= 5) {
-        splits = glm::vec4(
-            sm.cascade_splits[1], sm.cascade_splits[2], sm.cascade_splits[3], sm.cascade_splits[4]);
-    }
-
-    glUseProgram(m_froxel_inject_program);
-    glBindImageTexture(0, m_froxel_scatter_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, sm.depth_texture_array);
-    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowCascades"), 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadow_pass->tint_texture_array());
-    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowTintCascades"), 1);
-    glUniform1i(glGetUniformLocation(m_froxel_inject_program, "u_shadowTintEnabled"),
-                m_shadow_pass->tint_texture_array() != 0 ? 1 : 0);
-    for (int i = 0; i < 4 && i < static_cast<int>(sm.light_space_matrices.size()); ++i) {
-        const std::string name = "u_lightSpaceMatrices[" + std::to_string(i) + "]";
-        glUniformMatrix4fv(glGetUniformLocation(m_froxel_inject_program, name.c_str()),
-                           1,
-                           GL_FALSE,
-                           &sm.light_space_matrices[i][0][0]);
-    }
-    glUniform4fv(glGetUniformLocation(m_froxel_inject_program, "u_cascadeSplits"), 1, &splits[0]);
-    const glm::mat4 inv_view = glm::inverse(camera.GetViewMatrix());
-    glUniformMatrix4fv(glGetUniformLocation(m_froxel_inject_program, "u_inverseView"),
-                       1,
-                       GL_FALSE,
-                       &inv_view[0][0]);
-    glUniform3fv(
-        glGetUniformLocation(m_froxel_inject_program, "u_cameraPos"), 1, &camera.Position[0]);
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_tanHalfFovY"),
-                std::tan(glm::radians(camera.Zoom) * 0.5f));
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_aspect"),
-                static_cast<float>(m_screen_width) / static_cast<float>(m_screen_height));
-    // Toward-sun (sun-disc convention — matches the aerial pass's u_sunDirection).
-    const glm::vec3 toward_sun = -m_sun.direction;
-    glUniform3fv(
-        glGetUniformLocation(m_froxel_inject_program, "u_sunDirection"), 1, &toward_sun[0]);
-    glUniform3fv(glGetUniformLocation(m_froxel_inject_program, "u_sunColor"), 1, &m_sun.color[0]);
-    glUniform3fv(
-        glGetUniformLocation(m_froxel_inject_program, "u_ambientColor"), 1, &m_skyAmbientColor[0]);
-    // v1 media tuning (checkpoint-ratified): a gentle ground-hugging haze layer.
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_baseDensity"), 0.012f);
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_baseHeight"), 40.0f);
-    glUniform1f(glGetUniformLocation(m_froxel_inject_program, "u_densityFalloff"), 0.05f);
-
-    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, Froxel::kGridZ);
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
-    glUseProgram(0);
-    glActiveTexture(GL_TEXTURE0);
 }
 
 void RenderPipeline::execute_stage_froxel_integrate(const Camera& camera) {
-    (void)camera;
-    //  rendering: front-to-back march of the scatter volume —
-    // per-column accumulated in-scatter L + transmittance T.
     record_frame_stage("froxel_integrate");
-    if (m_volumetric_quality <= 0 || m_froxel_integrate_program == 0) {
-        return;
-    }
-    glUseProgram(m_froxel_integrate_program);
-    glBindImageTexture(0, m_froxel_scatter_tex, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA16F);
-    glBindImageTexture(1, m_froxel_integrated_tex, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-    glDispatchCompute(Froxel::kGridX / 8, Froxel::kGridY / 8 + 1, 1);
-    // The aerial composite samples the integrated volume as a texture.
-    glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
-    glUseProgram(0);
+    RenderContext ctx = make_froxel_context(camera);
+    m_froxel_pass->execute_integrate(ctx);
 }
 
 void RenderPipeline::execute_stage_aerial(const Camera& camera) {
@@ -3159,7 +2988,7 @@ void RenderPipeline::execute_stage_aerial(const Camera& camera) {
     record_frame_stage("aerial");
     if (m_isolation_config.renders(Client::ScenarioHarness::IsolationLayer::Aerial)) {
         RenderContext aerial_ctx = make_aerial_context(camera);
-        m_aerial_pass->set_froxel_input(m_volumetric_quality, m_froxel_integrated_tex);
+        m_aerial_pass->set_froxel_input(m_volumetric_quality, m_froxel_pass->integrated_texture());
         begin_gpu_pass_timer(GpuTimerPass::Aerial);
         m_aerial_pass->execute(aerial_ctx);
         end_gpu_pass_timer(GpuTimerPass::Aerial);
@@ -3943,38 +3772,10 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_exposure_ring.shutdown();
     m_metered_valid = false;
-    //  rendering: the froxel kernels + volumes.
-    if (m_froxel_inject_program) {
-        glDeleteProgram(m_froxel_inject_program);
-        m_froxel_inject_program = 0;
-    }
-    if (m_froxel_integrate_program) {
-        glDeleteProgram(m_froxel_integrate_program);
-        m_froxel_integrate_program = 0;
-    }
-    if (m_froxel_scatter_tex) {
-        glDeleteTextures(1, &m_froxel_scatter_tex);
-        m_froxel_scatter_tex = 0;
-    }
-    if (m_froxel_integrated_tex) {
-        glDeleteTextures(1, &m_froxel_integrated_tex);
-        m_froxel_integrated_tex = 0;
-    }
-    // the WBOIT glass chain.
-    m_glass_oit_shader.reset();
-    m_glass_oit_resolve_shader.reset();
-    if (m_oit_fbo) {
-        glDeleteFramebuffers(1, &m_oit_fbo);
-        m_oit_fbo = 0;
-    }
-    if (m_oit_accum_tex) {
-        glDeleteTextures(1, &m_oit_accum_tex);
-        m_oit_accum_tex = 0;
-    }
-    if (m_oit_reveal_tex) {
-        glDeleteTextures(1, &m_oit_reveal_tex);
-        m_oit_reveal_tex = 0;
-    }
+    // The pass-owned froxel kernels/volumes and WBOIT shaders/MRT retain their
+    // original cleanup point and deletion order inside their extracted owners.
+    m_froxel_pass->destroy();
+    m_glass_oit_pass->destroy();
     // release the baked waterfall sheet geometry.
     if (m_waterfall_vao) {
         glDeleteVertexArrays(1, &m_waterfall_vao);

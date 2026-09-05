@@ -63,6 +63,8 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SkyboxPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ParticlePass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FoliagePass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FroxelPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GlassOitPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/PlantProcgenPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GroundDecalPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GodRaysPass.cpp

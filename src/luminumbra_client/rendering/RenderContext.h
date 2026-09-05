@@ -37,6 +37,8 @@ struct RenderContext {
     u64 frame_index = 0;
     const Camera* camera = nullptr;
     float delta_time = 0.0f;
+    glm::mat4 view = glm::mat4(1.0f);
+    glm::mat4 projection = glm::mat4(1.0f);
 
     // Backbuffer / screen geometry (== OUTPUT extent).
     u32 screen_width = 0;
@@ -89,8 +91,9 @@ struct RenderContext {
     FboHandle gbuffer_fbo{};          // <- gbuffer().fbo_id
 
     // Group C (remaining) — lighting/scene targets (lit_scene already present).
-    TextureHandle lit_scene_color{}; // <- lighting_fbo().color_texture
-    TextureHandle opaque_scene{};    // <- lighting_fbo().opaque_color_texture
+    TextureHandle lit_scene_color{};      // <- lighting_fbo().color_texture
+    TextureHandle opaque_scene{};         // <- lighting_fbo().opaque_color_texture
+    RenderbufferHandle lit_scene_depth{}; // <- lighting_fbo().depth_texture
 
     // Group D — sky/atmosphere LUTs.
     TextureHandle sky_view_lut{};      // <- m_sky_lut.sky_view_texture()
@@ -191,6 +194,9 @@ struct RenderContext {
     //  metered value; photo-mode manual EV overrides. Render-only — it feeds
     // only u_exposure, never world_hash.
     float exposure = 0.0f;
+
+    // Group O — froxel volumetric quality (0 = both compute stages are no-ops).
+    int volumetric_quality = 0; // <- m_volumetric_quality
 
     // Destination resolution helpers (screen vs offscreen preview target).
     FboHandle dest_fbo() const {
