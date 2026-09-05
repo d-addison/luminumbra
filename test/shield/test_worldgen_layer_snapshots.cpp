@@ -1223,6 +1223,7 @@ std::uint64_t HashTerrainHeightGrid(const SHIELD_WorldSystem& world) {
 struct DefaultShapingHeightFixture {
     const char* name;
     TerrainGenParams params;
+    std::uint64_t expected_hash;
 };
 
 constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gcc_clang) {
@@ -1236,8 +1237,8 @@ constexpr std::uint64_t ToolchainHeightHash(std::uint64_t msvc, std::uint64_t gc
 }
 
 // Synthetic parameter sets covering the five original terrain envelopes.
-// Default shaping now applies to every set; agreement and repeatability below
-// replace the retired unshaped algorithm's golden hashes.
+// Fixed hashes are re-pinned for retirement of the pre-shaping algorithm.
+// Sampler agreement and repeatability cover the same terrain envelopes.
 std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     std::vector<DefaultShapingHeightFixture> fixtures;
 
@@ -1250,7 +1251,9 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     default_params.height_offset = 20.0f;
     default_params.caves_enabled = true;
     default_params.cave_frequency = 0.02f;
-    fixtures.push_back({"default", default_params});
+    fixtures.push_back({"default",
+                        default_params,
+                        ToolchainHeightHash(0xabc65d0aa0350cebull, 0xaec140c43a735f9eull)});
 
     TerrainGenParams flat_params;
     flat_params.base_frequency = 0.02f;
@@ -1261,7 +1264,9 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     flat_params.height_offset = 5.0f;
     flat_params.caves_enabled = false;
     flat_params.cave_frequency = 0.0f;
-    fixtures.push_back({"flat_lands", flat_params});
+    fixtures.push_back({"flat_lands",
+                        flat_params,
+                        ToolchainHeightHash(0x5c5975fed81dfd26ull, 0x6b50de342336674aull)});
 
     TerrainGenParams mountains_params;
     mountains_params.base_frequency = 0.008f;
@@ -1272,7 +1277,9 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     mountains_params.height_offset = 20.0f;
     mountains_params.caves_enabled = true;
     mountains_params.cave_frequency = 0.03f;
-    fixtures.push_back({"mountains", mountains_params});
+    fixtures.push_back({"mountains",
+                        mountains_params,
+                        ToolchainHeightHash(0xd5bd8812a5013e9cull, 0xd8f3adb6564f52d4ull)});
 
     TerrainGenParams archipelago_params;
     archipelago_params.base_frequency = 0.009f;
@@ -1285,7 +1292,9 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     archipelago_params.island_mask_frequency = 0.004f;
     archipelago_params.caves_enabled = true;
     archipelago_params.cave_frequency = 0.03f;
-    fixtures.push_back({"archipelago", archipelago_params});
+    fixtures.push_back({"archipelago",
+                        archipelago_params,
+                        ToolchainHeightHash(0xa3a51481233d998cull, 0xc4110e0446935b91ull)});
 
     TerrainGenParams forest_params;
     forest_params.base_frequency = 0.008f;
@@ -1296,7 +1305,9 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     forest_params.height_offset = 32.0f;
     forest_params.caves_enabled = true;
     forest_params.cave_frequency = 0.025f;
-    fixtures.push_back({"temperate_forest", forest_params});
+    fixtures.push_back({"temperate_forest",
+                        forest_params,
+                        ToolchainHeightHash(0x7cdbfe2d641162f3ull, 0xd656d367f306b8f3ull)});
 
     return fixtures;
 }
@@ -1310,7 +1321,11 @@ TEST(WorldGenLayerSnapshotTest, DefaultShapingIsDeterministicAndAllSamplersAgree
         SCOPED_TRACE(fixture.name);
         SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
         SHIELD_WorldSystem reference(nullptr, nullptr, fixture.params, kSeed);
-        EXPECT_EQ(HashTerrainHeightGrid(world), HashTerrainHeightGrid(reference));
+        const auto hash = HashTerrainHeightGrid(world);
+        std::cout << "[ DEFAULTSHAPING ] " << fixture.name << " hash=0x" << std::hex << hash
+                  << std::dec << std::endl;
+        EXPECT_EQ(hash, fixture.expected_hash);
+        EXPECT_EQ(hash, HashTerrainHeightGrid(reference));
         for (const IVec3 coords : {IVec3(0, 0, 0), IVec3(-3, 1, 2)}) {
             Chunk full(coords), coarse(coords);
             world.GenerateChunkData(full, 1);

@@ -80,6 +80,16 @@ struct ExpectedMeshHashes {
     std::uint64_t index_hash;
 };
 
+constexpr std::uint64_t ToolchainVertexHash(std::uint64_t msvc, std::uint64_t gcc_clang) {
+#ifdef _MSC_VER
+    (void)gcc_clang;
+    return msvc;
+#else
+    (void)msvc;
+    return gcc_clang;
+#endif
+}
+
 void VerifyCombo(const char* combo,
                  const TerrainGenParams& params,
                  int seed,
@@ -96,8 +106,8 @@ void VerifyCombo(const char* combo,
 }
 
 // Retirement of cave_style/shaping_enabled moves the synthetic terrain hashes.
-// Pin the measured GCC/Clang bytes and topology; independent-world replay proves
-// current determinism on every compiler, including MSVC's distinct float evaluation.
+// Pin vertex bytes for each compiler family and topology on every compiler.
+// Independent-world replay additionally proves current determinism.
 void VerifyCurrentCombo(const char* combo,
                         const TerrainGenParams& params,
                         int seed,
@@ -111,9 +121,7 @@ void VerifyCurrentCombo(const char* combo,
         EXPECT_EQ(first.index_count, replay.index_count);
         EXPECT_EQ(first.vertex_hash, replay.vertex_hash);
         EXPECT_EQ(first.index_hash, replay.index_hash);
-#ifndef _MSC_VER
         EXPECT_EQ(first.vertex_hash, exp.vertex_hash) << combo << " step " << exp.step;
-#endif
         EXPECT_EQ(first.index_hash, exp.index_hash) << combo << " step " << exp.step;
     }
 }
@@ -156,14 +164,20 @@ TerrainGenParams MakeFlatSurfaceParams() {
 // DETERMINISM HASH GATES
 // =====================================================================================
 
-// Index topology is toolchain-independent. Current terrain has a GCC/Clang
-// vertex baseline plus independent-world determinism checks on every compiler.
+// Index topology is toolchain-independent; vertex baselines cover each compiler
+// family, with additional independent-world determinism checks.
 TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
     // Re-pinned for cave_style/shaping_enabled retirement.
     const ExpectedMeshHashes expected[3] = {
-        {1, 0x43b033500a7e70afull, 0x7a014cd2e589b3a1ull},
-        {2, 0xd055fb106b361fddull, 0x9177a54dc6654457ull},
-        {4, 0x701ce4034488d411ull, 0x7257517ea6a6be50ull},
+        {1,
+         ToolchainVertexHash(0xf0e6299ae429d7aaull, 0x43b033500a7e70afull),
+         0x7a014cd2e589b3a1ull},
+        {2,
+         ToolchainVertexHash(0xc97ec36ec178039dull, 0xd055fb106b361fddull),
+         0x9177a54dc6654457ull},
+        {4,
+         ToolchainVertexHash(0xe844d2832557de7dull, 0x701ce4034488d411ull),
+         0x7257517ea6a6be50ull},
     };
     VerifyCurrentCombo(
         "archipelago seed=42 chunk=(0,0,0)", MakeArchipelagoParams(), 42, IVec3(0, 0, 0), expected);
@@ -172,9 +186,15 @@ TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
 TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
     // Re-pinned for cave_style/shaping_enabled retirement.
     const ExpectedMeshHashes expected[3] = {
-        {1, 0x9b9a0f1985b16decull, 0x501667b909047bbcull},
-        {2, 0xf0ca86d13f48b7cdull, 0xc026220b072ee6ddull},
-        {4, 0xf1dc86ff3820ef1full, 0x7298410a91b6706full},
+        {1,
+         ToolchainVertexHash(0x3c13cffb2df9002bull, 0x9b9a0f1985b16decull),
+         0x501667b909047bbcull},
+        {2,
+         ToolchainVertexHash(0x4ccea9a8928dcb11ull, 0xf0ca86d13f48b7cdull),
+         0xc026220b072ee6ddull},
+        {4,
+         ToolchainVertexHash(0x93681086fb859095ull, 0xf1dc86ff3820ef1full),
+         0x7298410a91b6706full},
     };
     VerifyCurrentCombo(
         "caves seed=12345 chunk=(0,0,0)", MakeCaveParams(), 12345, IVec3(0, 0, 0), expected);
