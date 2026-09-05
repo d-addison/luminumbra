@@ -1253,7 +1253,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     default_params.cave_frequency = 0.02f;
     fixtures.push_back({"default",
                         default_params,
-                        ToolchainHeightHash(0xabc65d0aa0350cebull, 0xaec140c43a735f9eull)});
+                        ToolchainHeightHash(0x5b1177b7f0cd121full, 0xaec140c43a735f9eull)});
 
     TerrainGenParams flat_params;
     flat_params.base_frequency = 0.02f;
@@ -1266,7 +1266,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     flat_params.cave_frequency = 0.0f;
     fixtures.push_back({"flat_lands",
                         flat_params,
-                        ToolchainHeightHash(0x5c5975fed81dfd26ull, 0x6b50de342336674aull)});
+                        ToolchainHeightHash(0x499fac5a81a7784bull, 0x6b50de342336674aull)});
 
     TerrainGenParams mountains_params;
     mountains_params.base_frequency = 0.008f;
@@ -1279,7 +1279,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     mountains_params.cave_frequency = 0.03f;
     fixtures.push_back({"mountains",
                         mountains_params,
-                        ToolchainHeightHash(0xd5bd8812a5013e9cull, 0xd8f3adb6564f52d4ull)});
+                        ToolchainHeightHash(0x1373155178dab3c8ull, 0xd8f3adb6564f52d4ull)});
 
     TerrainGenParams archipelago_params;
     archipelago_params.base_frequency = 0.009f;
@@ -1294,7 +1294,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     archipelago_params.cave_frequency = 0.03f;
     fixtures.push_back({"archipelago",
                         archipelago_params,
-                        ToolchainHeightHash(0xa3a51481233d998cull, 0xc4110e0446935b91ull)});
+                        ToolchainHeightHash(0x7f4ee46cde9fe0d4ull, 0xc4110e0446935b91ull)});
 
     TerrainGenParams forest_params;
     forest_params.base_frequency = 0.008f;
@@ -1307,7 +1307,7 @@ std::vector<DefaultShapingHeightFixture> DefaultShapingHeightFixtures() {
     forest_params.cave_frequency = 0.025f;
     fixtures.push_back({"temperate_forest",
                         forest_params,
-                        ToolchainHeightHash(0x7cdbfe2d641162f3ull, 0xd656d367f306b8f3ull)});
+                        ToolchainHeightHash(0x1cd96596ec25f7beull, 0xd656d367f306b8f3ull)});
 
     return fixtures;
 }

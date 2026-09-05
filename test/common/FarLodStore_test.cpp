@@ -880,7 +880,7 @@ TEST(FarLodStoreTest, PristineTileBuildIsDeterministic) {
     EXPECT_EQ(ComputeFarLodTileHash(first), ComputeFarLodTileHash(replay));
     // Re-pinned for cave_style/shaping_enabled retirement; each compiler remains gated.
     EXPECT_EQ(ComputeFarLodTileHash(first),
-              ToolchainHash(0x0d8e8dd980e41349ull, 0xa2b6be0236f39891ull))
+              ToolchainHash(0x9dd3ca2389a2d69cull, 0xa2b6be0236f39891ull))
         << "pristine far-LOD tile bytes changed";
     std::printf("farlod fixture tile hash (seed %d, F1, r0.0): %016llx\n",
                 kFixtureSeed,
@@ -1235,7 +1235,7 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
 
     EXPECT_EQ(HashMeshBytes(first), HashMeshBytes(second));
     // Re-pinned for cave_style/shaping_enabled retirement; each compiler remains gated.
-    EXPECT_EQ(HashMeshBytes(first), ToolchainHash(0x11c29aed57733e92ull, 0x7291723bda29eb0cull))
+    EXPECT_EQ(HashMeshBytes(first), ToolchainHash(0x9134d309929f8b26ull, 0x7291723bda29eb0cull))
         << "pristine F1 mesh bytes changed";
     std::printf("farlod fixture region mesh hash (seed %d, F1, r0.0): %016llx\n",
                 kFixtureSeed,
@@ -1269,7 +1269,7 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
     EXPECT_EQ(HashMeshBytes(mesh_f2), HashMeshBytes(mesh_f2_repeat))
         << "zero-brick F2 mesh bytes must remain deterministic";
     // Re-pinned for cave_style/shaping_enabled retirement; each compiler remains gated.
-    EXPECT_EQ(HashMeshBytes(mesh_f2), ToolchainHash(0x37609dc421d71a4eull, 0x48568b20f7fdbca1ull))
+    EXPECT_EQ(HashMeshBytes(mesh_f2), ToolchainHash(0x48568b20f7fdbca1ull, 0x48568b20f7fdbca1ull))
         << "zero-brick F2 mesh bytes changed";
 }
 

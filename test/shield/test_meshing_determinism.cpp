@@ -170,13 +170,13 @@ TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
     // Re-pinned for cave_style/shaping_enabled retirement.
     const ExpectedMeshHashes expected[3] = {
         {1,
-         ToolchainVertexHash(0xf0e6299ae429d7aaull, 0x43b033500a7e70afull),
+         ToolchainVertexHash(0x9d9c9b1d3942db3eull, 0x43b033500a7e70afull),
          0x7a014cd2e589b3a1ull},
         {2,
-         ToolchainVertexHash(0xc97ec36ec178039dull, 0xd055fb106b361fddull),
+         ToolchainVertexHash(0x71c0e159fcaa096dull, 0xd055fb106b361fddull),
          0x9177a54dc6654457ull},
         {4,
-         ToolchainVertexHash(0xe844d2832557de7dull, 0x701ce4034488d411ull),
+         ToolchainVertexHash(0x701ce4034488d411ull, 0x701ce4034488d411ull),
          0x7257517ea6a6be50ull},
     };
     VerifyCurrentCombo(
@@ -187,13 +187,13 @@ TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
     // Re-pinned for cave_style/shaping_enabled retirement.
     const ExpectedMeshHashes expected[3] = {
         {1,
-         ToolchainVertexHash(0x3c13cffb2df9002bull, 0x9b9a0f1985b16decull),
+         ToolchainVertexHash(0x9b9a0f1985b16decull, 0x9b9a0f1985b16decull),
          0x501667b909047bbcull},
         {2,
-         ToolchainVertexHash(0x4ccea9a8928dcb11ull, 0xf0ca86d13f48b7cdull),
+         ToolchainVertexHash(0xf0ca86d13f48b7cdull, 0xf0ca86d13f48b7cdull),
          0xc026220b072ee6ddull},
         {4,
-         ToolchainVertexHash(0x93681086fb859095ull, 0xf1dc86ff3820ef1full),
+         ToolchainVertexHash(0xf1dc86ff3820ef1full, 0xf1dc86ff3820ef1full),
          0x7298410a91b6706full},
     };
     VerifyCurrentCombo(
