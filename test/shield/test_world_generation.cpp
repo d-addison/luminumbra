@@ -39,7 +39,6 @@ protected:
         // A preset that should always generate a solid flat surface at y=8.0
         params_guaranteed_surface.base_amplitude = 0;
         params_guaranteed_surface.height_offset = 8.0f;
-        params_guaranteed_surface.caves_enabled = false;
 
         // A realistic preset that generates complex terrain within chunk bounds
         // Assuming CHUNK_SIZE_Y is 16 or 32, place terrain in the middle
@@ -49,13 +48,10 @@ protected:
         params_archipelago.persistence = 0.5f;
         params_archipelago.lacunarity = 2.2f;
         params_archipelago.height_offset = 8.0f; // Changed from 30 to be within chunk (0,0,0)
-        params_archipelago.island_mask_enabled = false;
-        params_archipelago.caves_enabled = false;
 
         // A preset that generates a low, relatively flat surface guaranteed to be below sea level.
         params_underwater_world.height_offset = -20.0f;
         params_underwater_world.base_amplitude = 5.0f;
-        params_underwater_world.caves_enabled = false;
 
         // A preset that generates a surface high in the air, guaranteed to be above sea level.
         params_sky_world.height_offset = 100.0f;
@@ -130,13 +126,17 @@ TEST_F(WorldGenerationTest, SurfaceIsGeneratedAtCorrectHeight) {
     EXPECT_GT(outside_density, 0.0f);
 }
 
-TEST_F(WorldGenerationTest, HeightmapIsCorrectForFlatSurface) {
+TEST_F(WorldGenerationTest, HeightmapMatchesModernSurface) {
     SHIELD_WorldSystem world_system(nullptr, nullptr, params_guaranteed_surface, 1337);
     Chunk chunk({0, 0, 0});
     world_system.GenerateChunkData(chunk);
     ASSERT_FALSE(chunk.heightmap_data.empty());
-    for (float height : chunk.heightmap_data) {
-        EXPECT_NEAR(height, params_guaranteed_surface.height_offset, 1e-6f);
+    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+        for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+            EXPECT_FLOAT_EQ(
+                chunk.heightmap_data[x + z * (CHUNK_SIZE_X + 1)],
+                world_system.GetTerrainHeightAt(static_cast<float>(x), static_cast<float>(z)));
+        }
     }
 }
 
@@ -153,23 +153,23 @@ TEST_F(WorldGenerationTest, GenerationIsDeterministicWithSameSeed) {
     EXPECT_EQ(chunk_A.heightmap_data, chunk_B.heightmap_data);
 }
 
-TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
-    TerrainGenParams params_no_caves = params_guaranteed_surface;
-    params_no_caves.caves_enabled = false;
-    params_no_caves.height_offset = 40.0f;
+TEST_F(WorldGenerationTest, CaveTuningChangesGeneratedMesh) {
+    TerrainGenParams baseline_params = params_guaranteed_surface;
 
-    TerrainGenParams params_with_caves = params_no_caves;
-    params_with_caves.caves_enabled = true;
+    baseline_params.height_offset = 40.0f;
+
+    TerrainGenParams params_with_caves = baseline_params;
+
     params_with_caves.cave_threshold = 0.55f;
     params_with_caves.cave_frequency = 0.15f;
     params_with_caves.cave_carve_value = 4.0f;
 
     int seed = 12345;
 
-    SHIELD_WorldSystem world_no_caves(nullptr, nullptr, params_no_caves, seed);
-    Chunk chunk_no_caves({0, 0, 0});
-    world_no_caves.GenerateChunkData(chunk_no_caves);
-    World::MarchingCubes::PolygoniseTerrain(world_no_caves, chunk_no_caves, 0.0f, 1);
+    SHIELD_WorldSystem baseline_world(nullptr, nullptr, baseline_params, seed);
+    Chunk baseline_chunk({0, 0, 0});
+    baseline_world.GenerateChunkData(baseline_chunk);
+    World::MarchingCubes::PolygoniseTerrain(baseline_world, baseline_chunk, 0.0f, 1);
 
     SHIELD_WorldSystem world_caves(nullptr, nullptr, params_with_caves, seed);
     Chunk chunk_caves({0, 0, 0});
@@ -178,9 +178,9 @@ TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
 
     size_t carved_air_samples = 0;
     size_t remaining_solid_samples = 0;
-    ASSERT_EQ(chunk_no_caves.sdf_data.size(), chunk_caves.sdf_data.size());
-    for (size_t i = 0; i < chunk_no_caves.sdf_data.size(); ++i) {
-        if (chunk_no_caves.sdf_data[i] < 0.0f && chunk_caves.sdf_data[i] > 0.0f) {
+    ASSERT_EQ(baseline_chunk.sdf_data.size(), chunk_caves.sdf_data.size());
+    for (size_t i = 0; i < baseline_chunk.sdf_data.size(); ++i) {
+        if (baseline_chunk.sdf_data[i] < 0.0f && chunk_caves.sdf_data[i] > 0.0f) {
             carved_air_samples++;
         }
         if (chunk_caves.sdf_data[i] < 0.0f) {
@@ -188,19 +188,17 @@ TEST_F(WorldGenerationTest, CavesChangeGeneratedMesh) {
         }
     }
 
-    ASSERT_TRUE(chunk_no_caves.mesh_vertices.empty())
-        << "No-caves deep chunk should have no exposed surface";
     ASSERT_FALSE(chunk_caves.mesh_vertices.empty()) << "Caves chunk should have vertices";
     ASSERT_GT(carved_air_samples, 0u) << "Caves should carve solid SDF samples into air";
     ASSERT_GT(remaining_solid_samples, 0u)
         << "Caves should not erase the entire solid terrain volume";
-    EXPECT_NE(chunk_caves.mesh_vertices.size(), chunk_no_caves.mesh_vertices.size());
+    EXPECT_NE(chunk_caves.mesh_vertices.size(), baseline_chunk.mesh_vertices.size());
 }
 
 TEST_F(WorldGenerationTest, CavesDoNotPunchThroughSurfaceCap) {
     TerrainGenParams params_with_forced_caves = params_guaranteed_surface;
     params_with_forced_caves.height_offset = 40.0f;
-    params_with_forced_caves.caves_enabled = true;
+
     params_with_forced_caves.cave_threshold = -1.0f;
     params_with_forced_caves.cave_frequency = 0.15f;
     params_with_forced_caves.cave_carve_value = 4.0f;

@@ -166,8 +166,7 @@ TerrainGenParams FixtureParams() {
     params.base_frequency = 0.005f;
     params.base_amplitude = 40.0f;
     params.height_offset = 10.0f;
-    params.caves_enabled = false;
-    params.island_mask_enabled = false;
+
     return params;
 }
 

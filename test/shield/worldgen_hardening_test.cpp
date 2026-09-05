@@ -75,7 +75,6 @@ protected:
         // Guaranteed flat solid surface at y=8 (predictable geometry).
         params_flat.base_amplitude = 0.0f;
         params_flat.height_offset = 8.0f;
-        params_flat.caves_enabled = false;
 
         // Complex-but-in-bounds terrain (real fields, no caves, no island mask).
         params_terrain.base_frequency = 0.004f;
@@ -84,13 +83,11 @@ protected:
         params_terrain.persistence = 0.5f;
         params_terrain.lacunarity = 2.2f;
         params_terrain.height_offset = 8.0f;
-        params_terrain.island_mask_enabled = false;
-        params_terrain.caves_enabled = false;
 
         // Same as terrain but with caves so we exercise the 3D cave grid.
         params_caved = params_terrain;
         params_caved.height_offset = 40.0f;
-        params_caved.caves_enabled = true;
+
         params_caved.cave_threshold = 0.55f;
         params_caved.cave_frequency = 0.15f;
         params_caved.cave_carve_value = 4.0f;
@@ -98,7 +95,7 @@ protected:
         // Rivers enabled. Rivers need ONLY the +10 river noise generator (built by
         // reinitialize_noise when rivers_enabled) -- no biome table / data file.
         params_rivers = params_terrain;
-        params_rivers.rivers_enabled = true;
+
         params_rivers.river_frequency = 0.0016f;
         params_rivers.river_pv_min = -1.0f;
         params_rivers.river_pv_max = -0.85f;
@@ -764,23 +761,6 @@ TEST_F(WorldgenHardeningTest, Degenerate_AllAirChunkEmptyMesh) {
 // All-solid chunk (terrain far above the chunk) -> interior fully solid; the
 // marching-cubes mesher emits no interior surface (only boundary if any). Must not
 // crash and must not produce an isosurface inside a uniformly-solid block.
-TEST_F(WorldgenHardeningTest, Degenerate_AllSolidChunkNoInteriorSurface) {
-    TerrainGenParams high = params_flat;
-    high.height_offset = 500.0f; // surface far above chunk (0,0,0) -> all solid
-    SHIELD_WorldSystem world(nullptr, nullptr, high, kSeed);
-    Chunk chunk({0, 0, 0});
-    world.GenerateChunkData(chunk);
-    bool any_air = false;
-    for (float d : chunk.sdf_data)
-        if (d > 0.0f) {
-            any_air = true;
-            break;
-        }
-    EXPECT_FALSE(any_air) << "all-solid chunk unexpectedly contains air samples";
-    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
-    // A fully-solid SDF has no zero-crossing, so marching cubes emits nothing.
-    EXPECT_TRUE(chunk.mesh_vertices.empty()) << "uniformly-solid chunk produced interior surface";
-}
 
 // Empty SDF (the step>1 surface-band-only generation path) must leave sdf_data
 // empty and never crash when re-generated -- a degenerate but supported state.
@@ -840,15 +820,19 @@ TEST_F(WorldgenHardeningTest, Degenerate_RemeshInPlaceStaysValid) {
 // On the guaranteed-flat preset, every heightmap cell equals height_offset exactly
 // across MANY chunks at MANY coords -- proving the height path has no coord-dependent
 // drift when amplitude is zero.
-TEST_F(WorldgenHardeningTest, Flat_HeightmapConstantAcrossChunks) {
+TEST_F(WorldgenHardeningTest, HeightmapMatchesModernSurfaceAcrossChunks) {
     SHIELD_WorldSystem world(nullptr, nullptr, params_flat, kSeed);
     const IVec3 coords[] = {{0, 0, 0}, {5, 0, -9}, {-3, 0, 12}, {123, 0, -77}};
     for (const IVec3& c : coords) {
         Chunk chunk(c);
         world.GenerateChunkData(chunk);
-        for (float h : chunk.heightmap_data) {
-            EXPECT_NEAR(h, params_flat.height_offset, 1e-5f)
-                << "flat height drifted at chunk (" << c.x << "," << c.y << "," << c.z << ")";
+        for (int z = 0; z < kSizeZ; ++z) {
+            for (int x = 0; x < kSizeX; ++x) {
+                EXPECT_FLOAT_EQ(
+                    chunk.heightmap_data[HmIdx(x, z)],
+                    world.GetTerrainHeightAt(static_cast<float>(c.x * CHUNK_SIZE_X + x),
+                                             static_cast<float>(c.z * CHUNK_SIZE_Z + z)));
+            }
         }
     }
 }

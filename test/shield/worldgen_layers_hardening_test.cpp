@@ -61,14 +61,13 @@ TerrainGenParams ArchipelagoParams() {
     params.persistence = 0.5f;
     params.lacunarity = 2.1f;
     params.height_offset = 10.0f;
-    params.caves_enabled = false;
-    params.island_mask_enabled = false;
+
     return params;
 }
 
 TerrainGenParams CaveParams() {
     TerrainGenParams params = ArchipelagoParams();
-    params.caves_enabled = true;
+
     params.cave_frequency = 0.15f;
     params.cave_threshold = 0.55f;
     params.cave_carve_value = 5.0f;
@@ -85,8 +84,7 @@ TerrainGenParams FlatParams(float height_offset) {
     params.persistence = 0.5f;
     params.lacunarity = 2.0f;
     params.height_offset = height_offset;
-    params.caves_enabled = false;
-    params.island_mask_enabled = false;
+
     return params;
 }
 
@@ -586,7 +584,13 @@ TEST(WorldgenHardening, FlatSurfaceNormalsAreExactlyUp) {
     // (0,1,0). Order-unstable float accumulation drifts the X/Z components.
     SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(8.0f), kSeed);
     Chunk chunk(IVec3(0, 0, 0));
-    GenerateAndMesh(world, chunk, 1);
+    world.GenerateChunkData(chunk);
+    // Supply an exact plane to test meshing independently of modern terrain relief.
+    for (int z = 0; z <= CHUNK_SIZE_Z; ++z)
+        for (int y = 0; y <= CHUNK_SIZE_Y; ++y)
+            for (int x = 0; x <= CHUNK_SIZE_X; ++x)
+                chunk.sdf_data[SdfIndex(x, y, z)] = static_cast<float>(y) - 8.0f;
+    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     ASSERT_FALSE(chunk.mesh_vertices.empty());
     for (const VoxelVertex& v : chunk.mesh_vertices) {
         EXPECT_NEAR(v.normal.y, 1.0f, 1.0e-5f);
@@ -643,14 +647,13 @@ TEST(WorldgenHardening, EmptyAirChunkMeshesToNothing) {
 }
 
 TEST(WorldgenHardening, AllSolidChunkHasNoInteriorTriangles) {
-    // A chunk entirely below the surface with no caves is all-solid. The fine
-    // marching-cubes mesher only crosses the iso-surface at the terrain skin,
-    // which is far above; so this interior chunk must mesh to nothing (no
-    // spurious interior faces).
-    TerrainGenParams params = FlatParams(400.0f); // surface in chunk-Y 25
-    SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
-    Chunk chunk(IVec3(0, 0, 0)); // deep interior, fully solid
-    GenerateAndMesh(world, chunk, 1);
+    SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(400.0f), kSeed);
+    Chunk chunk(IVec3(0, 0, 0));
+    world.GenerateChunkData(chunk);
+    // Generated deep chunks now contain caves. Supply uniform solid SDF to
+    // exercise the mesher's no-crossing contract directly.
+    std::fill(chunk.sdf_data.begin(), chunk.sdf_data.end(), -1.0f);
+    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 1);
     // Every SDF sample must be solid (negative) -- confirm the fixture.
     bool all_solid = true;
     for (float d : chunk.sdf_data) {

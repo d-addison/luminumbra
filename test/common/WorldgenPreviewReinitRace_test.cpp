@@ -22,7 +22,7 @@ namespace {
 
 TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
     TerrainGenParams params;
-    params.shaping_enabled = false;
+
     SHIELD_WorldSystem world(nullptr, nullptr, params, 424242);
 
     std::atomic<bool> failed{false};
@@ -63,7 +63,7 @@ TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
         std::this_thread::yield();
     }
     TerrainGenParams knob = params;
-    knob.shaping_enabled = true;
+
     knob.height_offset = 1.0f;
     std::thread writer([&]() {
         writer_started.store(true, std::memory_order_release);
@@ -85,12 +85,10 @@ TEST(WorldgenPreviewReinitRace, ConcurrentReinitAndSamplingSoak) {
     EXPECT_TRUE(writer_finished.load(std::memory_order_acquire));
     EXPECT_FALSE(failed.load()) << "a sampler observed a non-finite height mid-reinit";
 
-    // Repeatedly swing the shaping generators between built and null after
-    // the contended handoff. This preserves broad state-transition coverage
-    // while keeping the concurrency proof bounded on every platform.
+    // Rebuild the modern generators with changed tuning after the contended
+    // handoff, keeping the concurrency proof bounded on every platform.
     constexpr int kReinitializations = 16;
     for (int iteration = 1; iteration < kReinitializations; ++iteration) {
-        knob.shaping_enabled = (iteration % 2) == 1;
         knob.height_offset = static_cast<float>(iteration % 7);
         world.set_params(knob);
     }

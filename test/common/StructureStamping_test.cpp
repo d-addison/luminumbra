@@ -48,13 +48,7 @@ Systems::TerrainGenParams FixedParams() {
     p.base_frequency = 0.01f;
     p.base_amplitude = 4.0f; // tiny relief; surface stays ~[36, 44]
     p.height_offset = 40.0f; // comfortably above SEA_LEVEL (= 0)
-    p.caves_enabled = false;
-    p.surface_breaks_enabled = false;
-    p.island_mask_enabled = false;
-    p.shaping_enabled = false;
-    p.biomes_enabled = false;
-    p.hydro_enabled = false;
-    p.structures_enabled = true;
+
     p.structures_data_dir =
         (fs::path(LUMINUMBRA_SOURCE_ROOT) / "data" / "common" / "structures").string();
     return p;

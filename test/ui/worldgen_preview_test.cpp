@@ -105,8 +105,7 @@ Luminumbra::Systems::TerrainGenParams FixedCandidate() {
     p.persistence = 0.5f;
     p.lacunarity = 2.0f;
     p.height_offset = 8.0f;
-    p.caves_enabled = false;
-    p.shaping_enabled = true;
+
     p.peaks_amplitude = 48.0f;
     p.peaks_frequency = 0.0025f;
     p.domain_warp_amplitude = 18.0f;

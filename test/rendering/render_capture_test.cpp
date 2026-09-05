@@ -243,11 +243,11 @@ TerrainGenParams CaptureTerrainParams() {
     params.persistence = 0.5f;
     params.lacunarity = 2.1f;
     params.height_offset = 10.0f;
-    params.caves_enabled = true;
+
     params.cave_frequency = 0.15f;
     params.cave_threshold = 0.55f;
     params.cave_carve_value = 5.0f;
-    params.island_mask_enabled = true;
+
     params.island_mask_frequency = 0.075f;
     return params;
 }
@@ -257,8 +257,7 @@ TerrainGenParams CaptureWaterParams() {
     params.base_frequency = 0.02f;
     params.base_amplitude = 1.0f;
     params.height_offset = -4.0f;
-    params.caves_enabled = false;
-    params.island_mask_enabled = false;
+
     return params;
 }
 

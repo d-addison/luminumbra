@@ -262,7 +262,6 @@ TEST(WaterfallVisualTest, SiteDetectionDeterministicAndDressed) {
     const fs::path preset = SourceRoot() / "worlds/atlas/presets/mountains.json";
     ASSERT_TRUE(fs::exists(preset)) << preset.string();
     const TerrainGenParams params = LoadPresetParams(preset);
-    ASSERT_TRUE(params.rivers_enabled) << "mountains must opt into rivers";
 
     // --- (1) DETERMINISM (regression review). ---
     SHIELD_WorldSystem world_a(nullptr, nullptr, params, kSeed);

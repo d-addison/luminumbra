@@ -1,3 +1,4 @@
+#include "world/FarLodStore.h"
 // canonical TerrainPresetLoader unit coverage — consumed params,
 // shaping, biome, and feature blocks plus unknown-key
 // warnings, and the validation error contract.
@@ -46,7 +47,7 @@ constexpr const char* kMinimalPreset = R"({
       "height_offset": 20.0
     },
     "features": {
-      "caves_enabled": true,
+
       "cave_frequency": 0.02
     }
   }
@@ -66,8 +67,6 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_FLOAT_EQ(result.params.persistence, 0.5f);
     EXPECT_FLOAT_EQ(result.params.lacunarity, 2.0f);
     EXPECT_FLOAT_EQ(result.params.height_offset, 5.0f);
-    EXPECT_FALSE(result.params.island_mask_enabled);
-    EXPECT_TRUE(result.params.caves_enabled);
     EXPECT_FLOAT_EQ(result.params.cave_frequency, 0.02f);
     // Unconsumed cave fields keep the engine defaults when absent.
     EXPECT_FLOAT_EQ(result.params.cave_threshold, 0.7f);
@@ -79,19 +78,10 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     // hydraulic erosion, lakes, cliffs and per-biome relief, so these are all consumed/enabled
     // (the prior monochrome default had them off). This test pins the currently shipped preset.
     EXPECT_TRUE(result.extras.biomes.enabled);
-    EXPECT_TRUE(result.params.biomes_enabled);
     EXPECT_FALSE(result.params.biome_table_path.empty());
-    EXPECT_TRUE(result.params.biome_relief_enabled);
     EXPECT_TRUE(result.extras.features.present);
-    EXPECT_TRUE(result.extras.features.rivers_enabled);
-    EXPECT_TRUE(result.params.rivers_enabled);
-    EXPECT_TRUE(result.params.lakes_enabled);
-    EXPECT_TRUE(result.params.cliffs_enabled);
-    EXPECT_TRUE(result.params.hydro_enabled);
-    EXPECT_TRUE(result.extras.features.structures_enabled);
     // Default now ships a shaping block ( DEM realism calibration).
     EXPECT_TRUE(result.extras.shaping.present);
-    EXPECT_TRUE(result.params.shaping_enabled);
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
 }
 
@@ -107,11 +97,8 @@ TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
     ASSERT_TRUE(result.extras.biomes.present);
     EXPECT_TRUE(result.extras.biomes.enabled);
     EXPECT_EQ(result.extras.biomes.table, "common/biomes.json");
-    EXPECT_TRUE(result.params.biomes_enabled);
     EXPECT_FALSE(result.params.biome_table_path.empty());
 
-    EXPECT_TRUE(result.extras.features.rivers_enabled);
-    EXPECT_TRUE(result.params.rivers_enabled);
     EXPECT_FLOAT_EQ(result.params.river_pv_min, -1.0f);
     EXPECT_FLOAT_EQ(result.params.river_pv_max, -0.82f);
     EXPECT_FLOAT_EQ(result.params.river_depth, 4.0f);
@@ -147,7 +134,7 @@ TEST(TerrainPresetLoaderTest, ParsesReservedShapingBlock) {
         "peaks_spline": [[-1.0, 0.0], [1.0, 1.0]]
       }
     },
-    "features": { "caves_enabled": true, "cave_frequency": 0.03 }
+    "features": {  "cave_frequency": 0.03 }
   }
 })");
     const TerrainPresetLoadResult result = LoadTerrainPreset(path);
@@ -156,7 +143,6 @@ TEST(TerrainPresetLoaderTest, ParsesReservedShapingBlock) {
 
     const auto& shaping = result.extras.shaping;
     ASSERT_TRUE(shaping.present);
-    EXPECT_TRUE(shaping.enabled);
     EXPECT_FLOAT_EQ(shaping.continentalness_frequency, 0.0008f);
     EXPECT_FLOAT_EQ(shaping.erosion_frequency, 0.0015f);
     EXPECT_FLOAT_EQ(shaping.peaks_frequency, 0.004f);
@@ -182,7 +168,7 @@ TEST(TerrainPresetLoaderTest, WarnsOnUnknownKeys) {
       "persistence": 0.5, "lacunarity": 2.0, "height_offset": 20.0,
       "mystery_terrain": true
     },
-    "features": { "caves_enabled": true, "cave_frequency": 0.02, "mystery_feature": 3 },
+    "features": {  "cave_frequency": 0.02, "mystery_feature": 3 },
     "mystery_block": {}
   }
 })");
@@ -241,8 +227,8 @@ TEST(TerrainPresetLoaderTest, MissingRequiredFieldsReportContractErrors) {
 })");
     const TerrainPresetLoadResult result = LoadTerrainPreset(path);
     EXPECT_FALSE(result.ok);
-    // 6 terrain numerics + caves_enabled + cave_frequency.
-    EXPECT_EQ(result.errors.size(), 8u);
+    // Six terrain numerics and cave_frequency.
+    EXPECT_EQ(result.errors.size(), 7u);
     fs::remove(path);
 }
 
@@ -277,9 +263,8 @@ TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
         },
         "biomes": { "table": "common/biomes.json", "relief_enabled": true },
         "features": {
-          "caves_enabled": true, "cave_frequency": 0.02,
-          "rivers_enabled": true, "structures_enabled": true,
-          "cliffs_enabled": true
+           "cave_frequency": 0.02
+
         }
       }
     })";
@@ -307,13 +292,7 @@ TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
     EXPECT_FLOAT_EQ(mem.params.base_amplitude, disk.params.base_amplitude);
     EXPECT_EQ(mem.params.octaves, disk.params.octaves);
     EXPECT_FLOAT_EQ(mem.params.height_offset, disk.params.height_offset);
-    EXPECT_EQ(mem.params.shaping_enabled, disk.params.shaping_enabled);
-    EXPECT_EQ(mem.params.biomes_enabled, disk.params.biomes_enabled);
     EXPECT_EQ(mem.params.biome_table_path, disk.params.biome_table_path);
-    EXPECT_EQ(mem.params.biome_relief_enabled, disk.params.biome_relief_enabled);
-    EXPECT_EQ(mem.params.rivers_enabled, disk.params.rivers_enabled);
-    EXPECT_EQ(mem.params.cliffs_enabled, disk.params.cliffs_enabled);
-    EXPECT_EQ(mem.params.structures_enabled, disk.params.structures_enabled);
     EXPECT_EQ(mem.params.structures_data_dir, disk.params.structures_data_dir);
     // The resolved table path must be a real absolute path into the data root.
     EXPECT_FALSE(mem.params.biome_table_path.empty());
@@ -321,3 +300,37 @@ TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
 }
 
 } // namespace
+
+TEST(TerrainPresetLoaderTest, CurrentSchemaIgnoresRetiredStageSelectors) {
+    nlohmann::json preset = nlohmann::json::parse(kMinimalPreset);
+    preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision;
+    const auto baseline = Luminumbra::world::LoadTerrainPresetFromJson(preset, PresetDir());
+    ASSERT_TRUE(baseline.ok);
+    auto& terrain = preset["generation_params"]["terrain"];
+    auto& features = preset["generation_params"]["features"];
+    terrain["island_mask_enabled"] = "retired";
+    for (const char* key : {"caves_enabled",
+                            "cave_style",
+                            "surface_breaks_enabled",
+                            "shaping_enabled",
+                            "biomes_enabled",
+                            "biome_relief_enabled",
+                            "cliffs_enabled",
+                            "rivers_enabled",
+                            "lakes_enabled",
+                            "structures_enabled",
+                            "hydro_enabled"}) {
+        features[key] = "retired";
+    }
+    const auto retired = Luminumbra::world::LoadTerrainPresetFromJson(preset, PresetDir());
+    ASSERT_TRUE(retired.ok);
+    EXPECT_EQ(Luminumbra::World::ComputeTerrainParamsHash(baseline.params, 42),
+              Luminumbra::World::ComputeTerrainParamsHash(retired.params, 42));
+    EXPECT_FALSE(retired.params.structures_data_dir.empty());
+    features["river_depth"] = baseline.params.river_depth + 1.0f;
+    const auto tuned = Luminumbra::world::LoadTerrainPresetFromJson(preset, PresetDir());
+    ASSERT_TRUE(tuned.ok);
+    EXPECT_FLOAT_EQ(tuned.params.river_depth, baseline.params.river_depth + 1.0f);
+    preset["schema_rev"] = Luminumbra::world::kTerrainPresetSchemaRevision + 1;
+    EXPECT_FALSE(Luminumbra::world::LoadTerrainPresetFromJson(preset, PresetDir()).ok);
+}

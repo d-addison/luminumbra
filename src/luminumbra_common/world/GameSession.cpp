@@ -874,11 +874,10 @@ bool GameSession::CreateWorld(const std::string& name,
     ClampTerrainParams(params);
 
     int world_seed = StringToSeed(m_metadata.seed);
-    LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
+    LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}",
                          worldType,
                          params.height_offset,
-                         params.base_amplitude,
-                         params.caves_enabled);
+                         params.base_amplitude);
 
     // 1. Create the World System
     m_worldSystem =

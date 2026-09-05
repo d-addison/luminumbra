@@ -40,11 +40,6 @@ std::vector<WaterfallSite> DetectWaterfalls(const Luminumbra::Systems::SHIELD_Wo
                                             const WaterfallDetectParams& params) {
     std::vector<WaterfallSite> sites;
 
-    // Rivers carve the drops; with no river course there are no waterfalls.
-    if (!world.get_params().rivers_enabled) {
-        return sites;
-    }
-
     const float step = std::max(0.5f, params.lattice_step);
     const int half = std::max(0, params.half_extent);
     const int side = (2 * half) / static_cast<int>(step) + 1;
@@ -146,8 +141,8 @@ std::vector<WaterfallSite> DetectWaterfalls(const Luminumbra::Systems::SHIELD_Wo
     // SEA_LEVEL) whose downhill direction leaves the lake and FALLS away below the
     // lake surface over a short run is a spill point — a waterfall crest at the
     // rim. PURE: every value is a function of (seed, params) via WaterLevelAt +
-    // GetTerrainHeightAt. Only runs when lakes are enabled (else byte-zero work).
-    if (world.get_params().lakes_enabled) {
+    // GetTerrainHeightAt.
+    {
         const float lake_eps = std::max(0.0f, params.lake_surface_epsilon);
         const int lake_max_steps = std::max(1, static_cast<int>(params.lake_outlet_max_run / step));
         for (int zi = 0; zi < side; ++zi) {

@@ -692,8 +692,7 @@ void WaterSystem::update(entt::registry& registry,
     const int hm_step = (m_sim_resolution > 0 && CHUNK_SIZE_X % m_sim_resolution == 0)
                             ? CHUNK_SIZE_X / m_sim_resolution
                             : 0;
-    const bool reuse_heightmap =
-        m_shield_system->get_params().shaping_enabled && hm_step > 0 && hm_step % 2 == 0;
+    const bool reuse_heightmap = hm_step > 0 && hm_step % 2 == 0;
     std::vector<std::vector<float>> terrain_seed(
         to_init.size()); // [i] empty => worker samples the sampler
     if (reuse_heightmap) {

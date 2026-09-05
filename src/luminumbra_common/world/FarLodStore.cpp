@@ -199,25 +199,15 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
     FnvMixValue(hash, params.persistence);
     FnvMixValue(hash, params.lacunarity);
     FnvMixValue(hash, params.height_offset);
-    FnvMixValue(hash, static_cast<u8>(params.caves_enabled ? 1 : 0));
     FnvMixValue(hash, params.cave_frequency);
     FnvMixValue(hash, params.cave_threshold);
     FnvMixValue(hash, params.cave_carve_value);
-    FnvMixValue(hash, static_cast<u8>(params.island_mask_enabled ? 1 : 0));
     FnvMixValue(hash, params.island_mask_frequency);
-    // mix the biome-table content hash ONLY when biomes are enabled, so
-    // pristine far-LOD tiles self-invalidate on a table content change
-    // in the stable terrain identity. Worlds without biomes contribute nothing
-    // here, keeping every pre-biome far-tile cache key byte-identical (the
-    // disabled path stays byte-zero; FarLodStore fixtures pass unchanged).
-    if (params.biomes_enabled && params.biome_table_content_hash != 0) {
+    if (params.biome_table_content_hash != 0) {
         FnvMixValue(hash, static_cast<u8>(1));
         FnvMixValue(hash, params.biome_table_content_hash);
     }
-    // mix river params ONLY when rivers are enabled, so river presets'
-    // pristine far tiles invalidate on a river-tuning change while non-river
-    // worlds keep byte-identical far-tile cache keys.
-    if (params.rivers_enabled) {
+    {
         FnvMixValue(hash, static_cast<u8>(2));
         FnvMixValue(hash, params.river_frequency);
         FnvMixValue(hash, params.river_pv_min);
@@ -225,8 +215,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.river_depth);
         FnvMixValue(hash, params.river_max_carve);
     }
-    //  mix lake params ONLY when lakes are enabled (byte-zero drift off).
-    if (params.lakes_enabled) {
+    {
         FnvMixValue(hash, static_cast<u8>(4));
         FnvMixValue(hash, params.lake_frequency);
         FnvMixValue(hash, params.lake_threshold);
@@ -234,34 +223,21 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.lake_max_carve);
         FnvMixValue(hash, params.lake_bank_offset);
     }
-    //  per-biome relief modulation (only when enabled).
-    if (params.biome_relief_enabled) {
+    {
         FnvMixValue(hash, static_cast<u8>(5));
         FnvMixValue(hash, params.biome_relief_strength);
     }
-    //  cliff terracing (only when enabled).
-    if (params.cliffs_enabled) {
+    {
         FnvMixValue(hash, static_cast<u8>(6));
         FnvMixValue(hash, params.cliff_frequency);
         FnvMixValue(hash, params.cliff_threshold);
         FnvMixValue(hash, params.cliff_step);
     }
-    // mix the structure template content hash ONLY when structures are
-    // enabled, so structure presets' pristine far tiles invalidate on a template
-    // change while non-structure worlds keep byte-identical far-tile cache keys.
-    if (params.structures_enabled && params.structures_content_hash != 0) {
+    if (params.structures_content_hash != 0) {
         FnvMixValue(hash, static_cast<u8>(3));
         FnvMixValue(hash, params.structures_content_hash);
     }
-    // mix the SHAPING params ONLY when shaping is enabled, so shaped
-    // presets' pristine far-LOD tiles self-invalidate on a shaping-spline / freq
-    // change; continentalness, erosion, and peaks are all part of the key.
-    // Non-shaped worlds skip this block entirely, so their
-    // far-tile cache key is byte-identical to before (FarLodStore fixtures + the
-    // shaping-off legacy preset hash stay green). Canonical spline encoding:
-    // count (size_t) then each [input,output] control point in stored order via
-    // raw IEEE bits -- pinned by FarLodStore_test::TerrainParamsHashShapingFold.
-    if (params.shaping_enabled) {
+    {
         FnvMixValue(hash, static_cast<u8>(4)); // marker 0x05 (4th conditional block)
         FnvMixValue(hash, params.continentalness_frequency);
         FnvMixValue(hash, params.erosion_frequency);
@@ -280,10 +256,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         mix_spline(params.erosion_spline);
         mix_spline(params.peaks_spline);
     }
-    // mix the hydraulic-relief params ONLY when hydro is enabled, so a
-    // relief-tuning change invalidates shaped presets' pristine far-LOD tiles.
-    // Disabled worlds skip the block (byte-stable cache key). marker 0x06.
-    if (params.hydro_enabled) {
+    {
         FnvMixValue(hash, static_cast<u8>(5)); // marker 0x06 (5th conditional block)
         FnvMixValue(hash, kHydraulicErosionWorldgenVersion);
         FnvMixValue(hash, params.hydro_iterations);
@@ -297,10 +270,7 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, params.hydro_sediment_capacity);
         FnvMixValue(hash, params.hydro_max_offset);
     }
-    // mix surface-break params ONLY when enabled, so dolines/cave-mouths
-    // tuning invalidates pristine far-LOD tiles. Disabled worlds skip the block
-    // (byte-stable cache key -> byte-zero drift). marker 0x07.
-    if (params.surface_breaks_enabled) {
+    {
         FnvMixValue(hash, static_cast<u8>(6)); // marker 0x07 (6th conditional block)
         FnvMixValue(hash, params.surface_break_density);
         FnvMixValue(hash, params.feature_cell_size);

@@ -5,11 +5,7 @@
 // test_worldgen_layer_snapshots.cpp, runtime_world_visual_validation_test.cpp
 // and initial_world_loading_perf_test.cpp.
 //
-// Consumed parameters land in Systems::TerrainGenParams (byte-stable with the
-// legacy parsers). The `terrain.shaping` block is parsed into
-// TerrainPresetExtras AND consumed into TerrainGenParams ( terrain
-// shaping; an absent block leaves shaping_enabled=false -> bit-identical
-// legacy heights). Biome and feature blocks are likewise consumed by generation.
+// All modern generation stages run. Optional blocks supply their tuning.
 // Unknown keys produce LUMINUMBRA_CORE_WARN warnings.
 
 #include <array>
@@ -25,20 +21,9 @@
 namespace Luminumbra::world {
 
 // The revision authored presets are written against today.
-inline constexpr std::int64_t kTerrainPresetSchemaRevision = 5;
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 6;
 
-// The oldest revision still readable. This is not 5 because the shipped preset
-// set is not uniform: worlds/atlas/presets/archipelago.json is still authored at
-// revision 2, and it is pinned there deliberately —
-// WorldGenLayerSnapshotTest.CurrentShippedArchipelagoPresetHeightHash locks its
-// generated height hash, so re-authoring it at 5 would change the terrain that
-// preset produces for every existing world using it.
-//
-// Accepting a documented range still catches what this guard exists to catch: a
-// preset declaring a revision that does not exist (a typo, or content authored
-// against a future schema) is rejected, whereas before ANY value was accepted so
-// long as the key was present. Narrowing this to a single revision requires
-// migrating archipelago first and taking the hash bump deliberately.
+// Older shipped revisions remain readable; their retired stage selectors are ignored.
 inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 2;
 
 // generation_params.terrain.shaping — reserved keys pinned by
@@ -46,7 +31,6 @@ inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 2;
 // are monotone piecewise-linear control points, [input, output] pairs).
 struct TerrainShapingPreset {
     bool present = false; // block existed in the preset file
-    bool enabled = false;
     float continentalness_frequency = 0.0008f;
     float erosion_frequency = 0.0015f;
     float peaks_frequency = 0.004f;
@@ -62,8 +46,7 @@ struct TerrainShapingPreset {
 // table: "biomes": {"table": "common/biomes.json"}. The table path is relative
 // to the data/ root and resolved to an absolute path against the preset's
 // location at load time (presets live at <root>/worlds/atlas/presets/, data at
-// <root>/data/). With no "table" key biomes stay disabled and the consumed
-// params drift byte-zero from the pre-biome implementation.
+// <root>/data/). Without a table the world uses its single-material fallback.
 struct TerrainBiomesPreset {
     bool present = false;
     bool enabled = false;            // a non-empty "table" was supplied
@@ -71,24 +54,18 @@ struct TerrainBiomesPreset {
     std::string resolved_table_path; // absolute path handed to TerrainGenParams
     float temperature_frequency = 0.005f;
     float humidity_frequency = 0.005f;
-    bool relief_enabled = false; //  temperature-driven ridge scaling
     float relief_strength = 0.45f;
 };
 
-// generation_params.features flags beyond the cave params consumed through
-// TerrainGenParams.
+// Presence metadata for the feature tuning block.
 struct TerrainFeaturesPreset {
     bool present = false;
-    bool rivers_enabled = false;
-    bool structures_enabled = false;
 };
 
-// generation_params.terrain.hydro: hydraulic/thermal relief. A preset
-// opts in with "hydro": {"enabled": true,...}. Defaults mirror
-// TerrainGenParams' hydro_* defaults so a bare {"enabled": true} works.
+// generation_params.terrain.hydro: hydraulic/thermal relief tuning.
+// Defaults mirror TerrainGenParams hydro parameters.
 struct TerrainHydroPreset {
     bool present = false;
-    bool enabled = false;
     int iterations = 24;
     float cell_size_m = 8.0f;
     float talus_height = 1.2f;
@@ -119,7 +96,7 @@ struct TerrainPresetLoadResult {
 // Loads and validates a world preset JSON file. Validation contract matches
 // the historical GameSession parser: generation_params, terrain and features
 // must be objects, the six terrain noise fields must be numeric and
-// caves_enabled/cave_frequency must be present and typed. On any error the
+// cave_frequency must be present and numeric. On any error the
 // result carries ok=false and human-readable messages; params/extras are only
 // meaningful when ok=true.
 TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_path);

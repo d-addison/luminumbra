@@ -128,9 +128,7 @@ void WorldGenViewer::UpdateAndRender(bool& is_open,
     }
 
     if (ImGui::CollapsingHeader("Features", ImGuiTreeNodeFlags_DefaultOpen)) {
-        if (ImGui::Checkbox("Caves", &m_params.caves_enabled))
-            m_paramsChanged = true;
-        if (m_params.caves_enabled) {
+        {
             if (ImGui::SliderFloat(
                     "Cave Frequency", &m_params.cave_frequency, 0.005f, 0.1f, "%.3f"))
                 m_paramsChanged = true;
@@ -138,9 +136,7 @@ void WorldGenViewer::UpdateAndRender(bool& is_open,
 
         ImGui::Separator();
 
-        if (ImGui::Checkbox("Island Mask", &m_params.island_mask_enabled))
-            m_paramsChanged = true;
-        if (m_params.island_mask_enabled) {
+        {
             if (ImGui::SliderFloat(
                     "Island Mask Freq.", &m_params.island_mask_frequency, 0.0001f, 0.01f, "%.4f"))
                 m_paramsChanged = true;
@@ -177,10 +173,8 @@ void WorldGenViewer::RenderLayerGraphPanel() {
         {"persistence", m_params.persistence},
         {"lacunarity", m_params.lacunarity},
         {"height_offset", m_params.height_offset},
-        {"island_mask_enabled", m_params.island_mask_enabled},
     };
     gp["features"] = {
-        {"caves_enabled", m_params.caves_enabled},
         {"cave_frequency", m_params.cave_frequency},
     };
 

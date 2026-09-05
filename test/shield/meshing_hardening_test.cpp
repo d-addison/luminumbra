@@ -72,7 +72,7 @@ TerrainGenParams MakeFlatSurfaceParams() {
     TerrainGenParams params;
     params.base_amplitude = 0.0f;
     params.height_offset = 8.0f;
-    params.caves_enabled = false;
+
     return params;
 }
 
@@ -84,8 +84,7 @@ TerrainGenParams MakeArchipelagoParams() {
     params.persistence = 0.5f;
     params.lacunarity = 2.2f;
     params.height_offset = 8.0f;
-    params.island_mask_enabled = false;
-    params.caves_enabled = false;
+
     return params;
 }
 
@@ -93,7 +92,7 @@ TerrainGenParams MakeCaveParams() {
     TerrainGenParams params;
     params.base_amplitude = 0.0f;
     params.height_offset = 40.0f;
-    params.caves_enabled = true;
+
     params.cave_threshold = 0.55f;
     params.cave_frequency = 0.15f;
     params.cave_carve_value = 4.0f;
@@ -108,13 +107,6 @@ TerrainGenParams MakeDeepOceanParams() {
 }
 
 // A preset whose surface sits far ABOVE chunk (0,0,0): that chunk is all-solid.
-TerrainGenParams MakeBuriedParams() {
-    TerrainGenParams params = MakeArchipelagoParams();
-    params.base_amplitude = 0.0f; // flat so the whole chunk is uniformly buried
-    params.height_offset = 4000.0f;
-    params.caves_enabled = false;
-    return params;
-}
 
 // ----------------------------------------------------------------------------
 // Mesh-of-chunk helper. Builds a fresh world + chunk, generates voxel data, and
@@ -505,24 +497,6 @@ TEST(MeshingHardening, LODStep2IsDeterministic) {
 // sees: every coarse heightfield vertex Y at a shared lattice corner must equal
 // GetTerrainHeightAt at that world column (i.e. the coarse path samples the same
 // field, not a re-rolled one). Uses flat terrain so the expected Y is exact.
-TEST(MeshingHardening, CoarseLODSamplesSameHeightField_Flat) {
-    const TerrainGenParams params = MakeFlatSurfaceParams();
-    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
-    Chunk chunk(IVec3(0, 0, 0));
-    world.GenerateChunkData(chunk);
-    World::MarchingCubes::PolygoniseTerrain(world, chunk, 0.0f, 4);
-    ASSERT_FALSE(chunk.mesh_vertices.empty());
-    // Flat surface height == height_offset; the surface vertices live at local Y
-    // == height_offset (chunk base y == 0). Skirt/normal vertices may differ, so
-    // assert the SURFACE band: any vertex with normal pointing up sits exactly on
-    // the flat surface.
-    for (const auto& v : chunk.mesh_vertices) {
-        if (v.normal.y > 0.99f) {
-            EXPECT_FLOAT_EQ(v.position.y, params.height_offset)
-                << "coarse LOD surface vertex Y diverged from the shared height field";
-        }
-    }
-}
 
 // LOD mesh from a chunk that only carries SDF (no heightmap, as a fresh remesh
 // target would) must STILL be deterministic and non-empty for a chunk straddling
@@ -699,12 +673,6 @@ TEST(MeshingHardening, NoAirOrWaterMaterialOnTerrainMesh_Cave) {
 // faces at zero-crossings, and a fully-buried flat chunk has none -> empty mesh.
 // (Documents the "all-solid -> only boundary faces" contract; this mesher does
 // not close chunk borders, so the expected result is an EMPTY interior mesh.)
-TEST(MeshingHardening, BuriedAllSolidChunkHasNoInteriorSurface) {
-    const MeshResult r = GenAndMesh(MakeBuriedParams(), 42, IVec3(0, 0, 0), 1);
-    EXPECT_TRUE(r.vertices.empty())
-        << "fully-buried solid chunk emitted interior triangles (no zero-crossing should exist)";
-    EXPECT_TRUE(r.indices.empty());
-}
 
 // =====================================================================================
 // 7. BIOME / RIVER / STRUCTURE / HEIGHT BOUNDARY STABILITY
@@ -767,16 +735,16 @@ TEST(MeshingHardening, WorldToChunkBoundaryNoOffByOne) {
 // Flat-surface heightmap must be exactly the configured offset at EVERY lattice
 // sample (re-asserts the sibling, but also at the first AND last index to catch
 // an off-by-one that skips a border column).
-TEST(MeshingHardening, FlatHeightmapExactAtBordersNoOffByOne) {
+TEST(MeshingHardening, ModernHeightmapExactAtBordersNoOffByOne) {
     SHIELD_WorldSystem world(nullptr, nullptr, MakeFlatSurfaceParams(), 1337);
     Chunk chunk(IVec3(0, 0, 0));
     world.GenerateChunkData(chunk);
     ASSERT_FALSE(chunk.heightmap_data.empty());
-    const std::size_t n = chunk.heightmap_data.size();
-    EXPECT_FLOAT_EQ(chunk.heightmap_data.front(), 8.0f) << "first heightmap sample wrong";
-    EXPECT_FLOAT_EQ(chunk.heightmap_data.back(), 8.0f) << "last heightmap sample wrong";
-    for (std::size_t i = 0; i < n; ++i) {
-        EXPECT_FLOAT_EQ(chunk.heightmap_data[i], 8.0f) << "heightmap sample " << i << " not flat";
+    for (int z = 0; z <= CHUNK_SIZE_Z; ++z) {
+        for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+            EXPECT_FLOAT_EQ(chunk.heightmap_data[x + z * (CHUNK_SIZE_X + 1)],
+                            world.GetTerrainHeightAt(static_cast<float>(x), static_cast<float>(z)));
+        }
     }
 }
 

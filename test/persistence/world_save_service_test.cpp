@@ -198,7 +198,7 @@ TEST(ChunkDirtyTracking, GenerationAndMeshingLeaveChunkClean) {
     Luminumbra::Systems::TerrainGenParams params;
     params.base_amplitude = 0.0f;
     params.height_offset = 8.0f;
-    params.caves_enabled = false;
+
     const Luminumbra::Systems::SHIELD_WorldSystem world_system(nullptr, nullptr, params, 1337);
 
     Chunk chunk(IVec3(0, 0, 0));
