@@ -18,11 +18,10 @@
 #ifdef LUMINUMBRA_ENABLE_STEAM
 
 #include <cstdint>
-#include <deque>
 #include <string>
 #include <vector>
 
-#include "steam/steamnetworkingtypes.h"
+#include "NetSocketsTransport.h"
 
 namespace Luminumbra::Net {
 
@@ -40,7 +39,7 @@ public:
     static void RunCallbacks();
 };
 
-class SteamNetworkingTransport final : public ILockstepTransport {
+class SteamNetworkingTransport final : public NetSocketsTransport {
 public:
     SteamNetworkingTransport();
     ~SteamNetworkingTransport() override;
@@ -64,17 +63,6 @@ public:
     // Process-wide connection-status dispatcher (registered by SteamLink::Init).
     // Public so SteamLink can install it; fans out to every live transport.
     static void OnConnStatusChangedStatic(SteamNetConnectionStatusChangedCallback_t* info);
-
-private:
-    void HandleConnStatusChanged(SteamNetConnectionStatusChangedCallback_t* info);
-    void DrainInto();
-
-    HSteamListenSocket m_listen = 0; // k_HSteamListenSocket_Invalid
-    HSteamNetConnection m_conn = 0;  // k_HSteamNetConnection_Invalid
-    bool m_connected = false;
-    bool m_closed = false;
-    bool m_is_host = false;
-    std::deque<std::vector<std::uint8_t>> m_recv;
 };
 
 } // namespace Luminumbra::Net

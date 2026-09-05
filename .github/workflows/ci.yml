@@ -77,7 +77,10 @@ jobs:
   gns-compile-probe:
     name: GNS transport / compile probe
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Building GameNetworkingSockets from source (FetchContent + protobuf
+    # codegen) is several minutes on top of the project build, well past the
+    # 15 minutes a syntax-only probe needed.
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,32 +98,68 @@ jobs:
             -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_GNS=ON
-      - name: Syntax-check GNS transport body
+      - name: Build the shared sockets transport against GNS
         run: |
-          python3 - <<'PY'
-          import json
-          import pathlib
-          import shlex
-          import subprocess
+          # Upgraded from a -fsyntax-only probe of one file to a real build.
+          # SteamNetworkingTransport and GnsTransport now share NetSocketsTransport,
+          # because GameNetworkingSockets is Valve's open-source implementation of
+          # the same ISteamNetworkingSockets interface that the Steamworks SDK
+          # exposes. The Steam SDK is owner-provided and cannot be fetched here, so
+          # building the GNS side is the only way to get real compile coverage of
+          # the socket logic the Steam transport also runs. A syntax check could
+          # not catch a link-level or template-instantiation break; this can.
+          cmake --build build/gns-probe --target luminumbra_common --parallel 4
+          # Fail loudly if the shared body was not actually part of that build,
+          # so this job cannot silently degrade back into proving nothing.
+          find build/gns-probe -name 'NetSocketsTransport.cpp.o' -print -quit \
+            | grep -q . || { echo "NetSocketsTransport.cpp was not compiled"; exit 1; }
 
-          database = json.loads(pathlib.Path("build/gns-probe/compile_commands.json").read_text())
-          commands = [entry for entry in database if pathlib.Path(entry["file"]).name == "GnsTransport.cpp"]
-          if len(commands) != 1:
-              raise SystemExit(f"expected one GnsTransport.cpp compile command, found {len(commands)}")
-
-          entry = commands[0]
-          command = entry.get("arguments") or shlex.split(entry["command"])
-          syntax_command = []
-          skip_next = False
-          for argument in command:
-              if skip_next:
-                  skip_next = False
-              elif argument == "-o":
-                  skip_next = True
-              elif argument != "-c":
-                  syntax_command.append(argument)
-          subprocess.run([*syntax_command, "-fsyntax-only"], cwd=entry["directory"], check=True)
-          PY
+  diligent-rhi:
+    name: Diligent RHI / software GL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          # mesa-vulkan-drivers supplies lavapipe, Mesa's software Vulkan driver.
+          # A hosted runner has no GPU and ships no Vulkan ICD at all, so without
+          # it vkCreateInstance fails outright and the Vulkan half of this lane
+          # can only ever report a null device. Discovery finds the ICD on its
+          # own; the file name carries an architecture suffix on some Mesa
+          # releases and not others, so do not pin a path to it.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            mesa-vulkan-drivers ninja-build pkg-config python3-numpy \
+            python3-pil wayland-protocols xauth xorg-dev xvfb
+      - name: Restore compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: diligent-rhi-linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
+          restore-keys: diligent-rhi-linux-x64-gcc-ccache-
+      - name: Configure with Diligent RHI
+        run: |
+          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLUMINUMBRA_ENABLE_DILIGENT=ON
+      - name: Build with Diligent RHI
+        run: cmake --build --preset release --parallel 4
+      - name: Test Diligent RHI with software GL
+        run: |
+          # gtest_discover_tests registers ctest names as Suite.Test, NOT the CMake
+          # target name, so a target-name regex matches nothing and --no-tests=error
+          # then fails the lane while the backend is perfectly healthy.
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset release --no-tests=error \
+              -R '^RhiDeviceBringupGpu\.' --parallel 1 --timeout 180 \
+              --output-on-failure
+          env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
+            xvfb-run -a ctest --preset release --no-tests=error \
+              -R '^RhiPilotParityGpu\.' --parallel 1 --timeout 180 \
+              --output-on-failure
 
   windows-msvc:
     name: Windows / MSVC

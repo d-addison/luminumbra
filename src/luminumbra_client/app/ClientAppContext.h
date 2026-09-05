@@ -11,13 +11,20 @@
 
 #include "../../../include/luminumbra/core/Types.h"
 #include "luminumbra_common/ai/CreatureSpeciesRegistry.h"
+#include "luminumbra_common/animation/AnimationRuntime.h"
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/game/Objectives.h"
 #include "luminumbra_common/game/PhotoMode.h"
 #include "luminumbra_common/systems/FarmingSystem.h"
+#include "rendering/LightningBolt.h"
+#include "rendering/ScentFieldRenderMirror.h"
+#include "rendering/SnowCoverModel.h"
+#include "rendering/passes/FoliagePass.h"
+#include "rendering/passes/ParticlePass.h"
 
 #include <glm/glm.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -284,6 +291,114 @@ struct FrameAudioState {
     std::vector<PendingThunder> pendingThunder;
 };
 
+// Live forager presentation caches and diagnostics. The environment-gated
+// scent switch retains function-local-static lazy initialization semantics.
+struct ForagerRenderState {
+    std::unordered_map<std::uint32_t, float> cellHeight;
+    float forageLog = 0.0f;
+    std::uint32_t lastDeliveries = 0;
+    bool scentDecalInitialized = false;
+    bool scentDecal = false;
+    Luminumbra::Rendering::ScentFieldRenderMirror scentMirror;
+    int scentLog = 0;
+};
+
+// Normal-play profiling begins on the first frame that enters its branch, not
+// when the process-wide context is constructed.
+struct ProfileFlyState {
+    bool initialized = false;
+    double start = 0.0;
+};
+
+// One-time live-world dressing state. Skeleton and clip addresses remain
+// stable because ClientAppContext has process lifetime.
+struct WorldDressingState {
+    luminumbra::animation::Skeleton wildlifeSkeleton;
+    luminumbra::animation::AnimationClip wildlifeIdle;
+    bool dispatched = false;
+};
+
+// Live weather presentation state: scheduled lightning and snow accumulation.
+struct LiveWeatherState {
+    std::uint64_t lastStrikeTickDone = 0;
+    int boltFramesLeft = 0;
+    Luminumbra::Rendering::LightningRenderState liveBolt;
+    Luminumbra::Rendering::SnowCover::State snow;
+};
+
+struct FoliageScatterEntry {
+    bool accepted = false;
+    Luminumbra::Rendering::FoliagePass::ChunkScatter scatter;
+};
+
+// Live foliage setup and the normal-play per-chunk scatter cache.
+struct FoliageRenderState {
+    bool loaded = false;
+    std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> cachedScatter;
+    std::uint64_t cachedScatterSig = ~0ull;
+    std::unordered_map<Luminumbra::ChunkID, FoliageScatterEntry> scatterByChunk;
+    std::uint32_t ambientMotes = Luminumbra::Rendering::ParticlePass::kInvalidEmitter;
+};
+
+// Edge-trigger bookkeeping for interactive farming and terraforming controls.
+struct InteractionEdgeState {
+    bool farmPlant = false;
+    bool farmWater = false;
+    bool farmFertilize = false;
+    bool farmHarvest = false;
+    bool farmCycleSpecies = false;
+    bool terraformDig = false;
+    bool terraformFill = false;
+    float waterProbeRing[5][2] = {
+        {0.0f, 0.0f}, {4.0f, 0.0f}, {-4.0f, 0.0f}, {0.0f, 4.0f}, {0.0f, -4.0f}};
+};
+
+struct SceneCaptureState {
+    int settleFrames = 0;
+};
+
+struct RuntimeTelemetryState {
+    int slowFrameCount = 0;
+};
+
+// Accumulators for the opt-in render benchmark report.
+struct RenderBenchmarkState {
+    std::chrono::steady_clock::time_point previousFrameEnd{};
+    int warmupFrames = 0;
+    int measuredFrames = 0;
+    int nvmlSampleCount = 0;
+    double shadow = 0.0;
+    double gbuffer = 0.0;
+    double ssao = 0.0;
+    double ssaoBlur = 0.0;
+    double lighting = 0.0;
+    double water = 0.0;
+    double skybox = 0.0;
+    double particle = 0.0;
+    double foliage = 0.0;
+    double aerial = 0.0;
+    double finalBlit = 0.0;
+    double total = 0.0;
+    double cpu = 0.0;
+    double present = 0.0;
+    double wall = 0.0;
+    double power = 0.0;
+    double clock = 0.0;
+    double cpuPrepare = 0.0;
+    double cpuShadow = 0.0;
+    double cpuGbuffer = 0.0;
+    double cpuPost = 0.0;
+    double cpuStaticProp = 0.0;
+    double sim = 0.0;
+    double stream = 0.0;
+    double foliageRebuild = 0.0;
+    double ui = 0.0;
+    double renderCall = 0.0;
+    double poll = 0.0;
+    double scatter = 0.0;
+    bool nvmlEver = false;
+};
+
 struct ClientAppContext {
     HudState hud;
     OverlayState overlay;
@@ -292,6 +407,15 @@ struct ClientAppContext {
     LoadingState loading;
     MouseLookState input;
     FrameAudioState audio;
+    ForagerRenderState foragers;
+    ProfileFlyState profileFly;
+    WorldDressingState worldDressing;
+    LiveWeatherState weather;
+    FoliageRenderState foliage;
+    InteractionEdgeState interactions;
+    SceneCaptureState sceneCapture;
+    RuntimeTelemetryState telemetry;
+    RenderBenchmarkState benchmark;
 };
 
 } // namespace Luminumbra::Client::App

@@ -194,6 +194,22 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
 )
 
+# The QA runtime needs a public-checkout fallback for the private tree meshes
+# and textures used by the foliage visual scenario. Keep the fixture out of the
+# shipping client and generate its payloads only when the QA binary runs.
+target_sources(luminumbra_client_qa PRIVATE
+    rendering/synthetic_mesh_fixture.cpp
+)
+
+target_include_directories(luminumbra_client_qa PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_compile_definitions(luminumbra_client_qa PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+    LUMINUMBRA_SYNTHETIC_MESH_FIXTURE=1
+)
+
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
 # under test (src/luminumbra_client/rendering/TreeLod.h) is OpenGL-free pure logic,
 # so this target needs no client lib / GL link -- just the include root + gtest.

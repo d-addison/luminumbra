@@ -41,12 +41,30 @@ and content formats may still change.
 
 ## Networking
 
-- **TCP lockstep loopback is the exercised transport.** The GameNetworkingSockets
-  and Steam transport implementations are available through the
-  `LUMINUMBRA_ENABLE_GNS` and `LUMINUMBRA_ENABLE_STEAM` CMake options. Their SDK
-  inputs are owner-provided and not redistributed; no CI job compiles either
-  transport, and no over-the-wire multi-client test runs in CI (a manual soak
-  test exists).
+- **The Steamworks transport is not compiled or exercised in CI.** The
+  GameNetworkingSockets transport has a CI syntax probe because its pinned
+  upstream source is redistributable. Steamworks is different: its SDK is
+  owner-provided, is not redistributable, and `vendor/steamworks/` is
+  gitignored, so a hosted runner cannot fetch the required Steam headers and
+  libraries. A project-owned stub would have to reproduce the SDK declarations
+  used by `SteamNetworkingTransport.cpp`; besides creating a redistribution
+  concern, such a duplicate could drift from the real SDK and would not prove
+  compatibility with it.
+
+  Before trusting a Steam-enabled build, a maintainer with a licensed SDK must
+  compile the real transport and run the non-manual suite locally (replace the
+  path with the SDK root containing `public/steam/steam_api.h`):
+
+  ```sh
+  cmake --preset debug -DLUMINUMBRA_ENABLE_STEAM=ON \
+    -DLUMINUMBRA_STEAM_SDK_DIR=/absolute/path/to/steamworks/sdk
+  cmake --build --preset debug
+  ctest --preset debug --output-on-failure -LE manual
+  ```
+
+  This catches compile and link drift against that installed SDK, but the
+  standard test suite still does not exercise Steam's live service or an
+  over-the-wire Steam multi-client session.
 
 ## Client and audio
 

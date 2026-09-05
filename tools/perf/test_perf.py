@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import perf
 
@@ -87,6 +88,15 @@ def write_build_manifest(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def rebaseline_document(base: dict, candidate: dict, reason: str = "Fixture data changed") -> dict:
+    return {
+        "schema": perf.REBASELINE_SCHEMA,
+        "retired_comparability_key": base["comparability_key"],
+        "replacement_comparability_key": candidate["comparability_key"],
+        "reason": reason,
+    }
 
 
 class PerfContractTest(unittest.TestCase):
@@ -168,6 +178,88 @@ class PerfContractTest(unittest.TestCase):
         candidate = run_document([10.0] * 10, key="different")
         comparison = perf.compare_runs(base, candidate, 10.0)
         self.assertEqual(comparison["status"], "unevaluated")
+
+    def test_matching_rebaseline_waives_comparability_mismatch(self) -> None:
+        base = run_document([10.0] * 20)
+        candidate = run_document([10.0] * 20)
+        candidate["workload"]["fixture_hash"] = "e" * 40
+        candidate["comparability_key"] = perf.stable_hash(
+            perf.canonical_identity(candidate)
+        )
+
+        comparison = perf.compare_runs(
+            base,
+            candidate,
+            5.0,
+            rebaseline=rebaseline_document(base, candidate, "New world fixture data"),
+        )
+
+        self.assertEqual(comparison["status"], "evaluated")
+        self.assertEqual(comparison["verdict"], "rebaseline")
+        self.assertTrue(comparison["rebaseline"]["applied"])
+        self.assertEqual(comparison["rebaseline"]["reason"], "New world fixture data")
+        self.assertIn("explicitly re-baselined", comparison["reasons"][0])
+
+    def test_nonmatching_rebaseline_does_not_waive_mismatch(self) -> None:
+        base = run_document([10.0] * 20)
+        candidate = run_document([10.0] * 20)
+        candidate["workload"]["fixture_hash"] = "e" * 40
+        candidate["comparability_key"] = perf.stable_hash(
+            perf.canonical_identity(candidate)
+        )
+        declaration = rebaseline_document(base, candidate)
+        declaration["retired_comparability_key"] = "0" * 64
+
+        comparison = perf.compare_runs(
+            base, candidate, 5.0, rebaseline=declaration
+        )
+
+        self.assertEqual(comparison["status"], "unevaluated")
+        self.assertEqual(comparison["reasons"], ["comparability keys differ"])
+        self.assertFalse(comparison["rebaseline"]["applied"])
+        self.assertIn("does not match", comparison["rebaseline"]["warning"])
+
+    def test_rebaseline_declaration_cannot_waive_a_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base_document = run_document(
+                [10.0 + (index % 3) * 0.01 for index in range(20)]
+            )
+            candidate_document = run_document(
+                [12.0 + (index % 3) * 0.01 for index in range(20)]
+            )
+            base = Path(directory) / "base.json"
+            candidate = Path(directory) / "candidate.json"
+            declaration = Path(directory) / "rebaseline.json"
+            base.write_text(json.dumps(base_document), encoding="utf-8")
+            candidate.write_text(json.dumps(candidate_document), encoding="utf-8")
+            declaration.write_text(
+                json.dumps(
+                    {
+                        "schema": perf.REBASELINE_SCHEMA,
+                        "retired_comparability_key": "0" * 64,
+                        "replacement_comparability_key": "1" * 64,
+                        "reason": "A prior fixture transition",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(perf, "REBASELINE_PATH", declaration):
+                status = perf.main(
+                    ["compare", "--base", str(base), "--candidate", str(candidate)]
+                )
+
+        self.assertEqual(status, 1)
+
+    def test_malformed_rebaseline_declaration_is_an_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "re-baseline declaration fields"):
+            perf.validate_rebaseline(
+                {
+                    "schema": perf.REBASELINE_SCHEMA,
+                    "retired_comparability_key": "0" * 64,
+                    "reason": "Missing replacement key",
+                }
+            )
 
     def test_missing_candidate_metric_is_unevaluated(self) -> None:
         base = run_document([10.0] * 10)
