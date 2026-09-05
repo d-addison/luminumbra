@@ -868,7 +868,9 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
                                        const fs::path& dump_ppm = {},
                                        float aether_field_value = -1.0f,
                                        float emissive_intensity_norm = 0.0f,
-                                       float aether_material_modulation = 0.0f) {
+                                       float aether_material_modulation = 0.0f,
+                                       std::array<float, 3> light_travel = {-0.2f, 0.0f, -0.98f},
+                                       bool moon_only = false) {
     // 64x64 so the optional swatch dump is a reviewable PNG; the mean is the
     // same regardless of resolution (flat fragment).
     constexpr int kRes = 64;
@@ -998,9 +1000,16 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glUniform3f(glGetUniformLocation(lighting_program, "u_viewPos"), 0, 0, 0);
     // FIXED NOON lighting (mirrors RenderPipeline::update_time_of_day peak).
     glUniform3f(glGetUniformLocation(lighting_program, "u_skyAmbientColor"), 0.1f, 0.15f, 0.2f);
-    // Sun overhead-ish toward the +Z plate: L=(0.2,0.0,0.98) -> NdotL ~ 0.98.
-    glUniform3f(glGetUniformLocation(lighting_program, "u_sun.direction"), 0.2f, 0.0f, 0.98f);
+    // Rays travel toward the +Z-facing plate. Surface-to-light is the opposite vector,
+    // matching the production SunGeometry and foliage conventions.
+    glUniform3fv(glGetUniformLocation(lighting_program, "u_sun.direction"), 1, light_travel.data());
     glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 1.0f, 0.95f, 0.85f);
+    if (moon_only) {
+        glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 0.0f, 0.0f, 0.0f);
+        glUniform3fv(glGetUniformLocation(lighting_program, "u_moonDir"), 1, light_travel.data());
+        glUniform3f(glGetUniformLocation(lighting_program, "u_moonRadiance"), 0.5f, 0.6f, 0.8f);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_moonIllum"), 1.0f);
+    }
     glUniform1i(glGetUniformLocation(lighting_program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(lighting_program, "u_emissiveLutScale"), kEmissiveLutScale);
     // 0.0 mirrors the GLSL default (multiply by exactly 1.0).
@@ -2039,13 +2048,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glDeleteProgram(lighting_program);
 }
 
-//  aether coupling gate. Closes critique MAJOR #17 (the determinism gate
-// proves the field HASHES, not that anything CONSUMES it). Renders a flat plate
-// through the REAL lighting_pass shader with the aether tap inactive (baseline)
-// vs an active uniform aether field, and asserts the field measurably brightens
-// the lit output (blue-dominant glow) -- i.e. the lighting pass demonstrably
-// CONSUMES the field's values. Also asserts a zero field == baseline (the
-// u_aetherActive gating is correct, so shipped paths stay pixel-identical).
+// The field drives authored emissive materials, rather than making ordinary ground glow.
 TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -2056,11 +2059,10 @@ TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     ASSERT_NE(program, 0u);
 
     const std::array<float, 3> albedo{0.2f, 0.2f, 0.2f};
-    const LitNoonResult base = LitChainNoonOnscreenSrgb(program, albedo, 1.0f); // tap inactive
-    const LitNoonResult glow =
-        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.6f); // field=0.6
-    const LitNoonResult zero =
-        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.0f); // active, field=0
+    constexpr float emissive = 0.04f;
+    const LitNoonResult base = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, -1.0f, emissive);
+    const LitNoonResult glow = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.6f, emissive);
+    const LitNoonResult zero = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.0f, emissive);
 
     const float base_lum = base.r + base.g + base.b;
     const float glow_lum = glow.r + glow.g + glow.b;
@@ -2072,6 +2074,262 @@ TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     EXPECT_NEAR(zero.g, base.g, 1.0e-4f);
     EXPECT_NEAR(zero.b, base.b, 1.0e-4f);
 
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, ProceduralLeafHasACutoutAndConsistentAlbedo) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"instanced_mesh", "instanced_mesh.vert", "g_buffer.frag"});
+    ASSERT_NE(program, 0u);
+    GLuint fbo = 0, texture = 0, lut = 0, vao = 0, vbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, texture, 0);
+    const GLenum attachments[] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT2};
+    glDrawBuffers(3, attachments);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    const float lut_pixels[] = {0, .8f, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0};
+    glGenTextures(1, &lut);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, lut);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 4, 0, GL_RGBA, GL_FLOAT, lut_pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    // Position + UV. The remaining attributes are constant for this instance.
+    const float vertices[] = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, 1,  1, 0, 1, 1,
+                              -1, -1, 0, 0, 0, 1, 1,  0, 1, 1, -1, 1, 0, 0, 1};
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(
+        2, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttrib3f(1, 0, 0, 1);
+    for (GLuint column = 0; column < 4; ++column) {
+        std::array<float, 4> value{};
+        value[column] = 1;
+        glVertexAttrib4fv(3 + column, value.data());
+    }
+    glVertexAttrib3f(7, 1, 1, 1);
+    glUseProgram(program);
+    SetMat4Identity(program, "view");
+    SetMat4Identity(program, "projection");
+    SetMat3Identity(program, "u_normalViewMatrix");
+    glUniform1i(glGetUniformLocation(program, "u_materialId"), 3);
+    glUniform1i(glGetUniformLocation(program, "u_alphaTest"), 2);
+    for (const char* name :
+         {"u_terrainTextures", "u_terrainNormals", "u_terrainRoughness", "u_skinnedTextures"})
+        glUniform1i(glGetUniformLocation(program, name), 1);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, 64, 64);
+    std::array<std::array<unsigned char, 4>, 2> centers{};
+    for (int far_lod = 0; far_lod < 2; ++far_lod) {
+        glUniform1i(glGetUniformLocation(program, "u_forceFlat"), far_lod);
+        const GLfloat clear[4] = {0, 0, 0, 0};
+        glClearBufferfv(GL_COLOR, 2, clear);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, 1);
+        glReadBuffer(GL_COLOR_ATTACHMENT2);
+        std::array<unsigned char, 4> corner{};
+        glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner.data());
+        glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, centers[far_lod].data());
+        EXPECT_EQ(corner[3], 0) << "the empty corner must reveal the scene behind the leaf";
+        EXPECT_GT(centers[far_lod][1], 20) << "the leaf center must retain green reflectance";
+        EXPECT_GT(centers[far_lod][3], 180) << "the leaf must remain a matte surface";
+    }
+    EXPECT_EQ(centers[0], centers[1]);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(1, &texture);
+    glDeleteTextures(1, &lut);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, ContrastPreservesShadedMaterialDetail) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program =
+        LinkProgram({"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"});
+    ASSERT_NE(program, 0u);
+    glUseProgram(program);
+    glUniform1f(glGetUniformLocation(program, "u_contrast"), 1.42f);
+    glUniform1f(glGetUniformLocation(program, "u_saturation"), 1.30f);
+    glUniform1f(glGetUniformLocation(program, "u_exposure"), 1.12f);
+    // Two leaf reflectances receiving ambient light, with the direct sun behind them.
+    const auto dark = LitChainNoonOnscreenSrgb(
+        program, {0.02f, 0.03f, 0.01f}, 0.85f, {}, -1.0f, 0.0f, 0.0f, {0, 0, 1});
+    const auto light = LitChainNoonOnscreenSrgb(
+        program, {0.04f, 0.06f, 0.02f}, 0.85f, {}, -1.0f, 0.0f, 0.0f, {0, 0, 1});
+    EXPECT_GT(dark.g, 0.02f) << "shaded foliage must retain color above the black floor";
+    EXPECT_GT(light.g, dark.g + 0.01f) << "different reflectances must remain distinguishable";
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, GrassWindBendIsBoundedByBladeHeight) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"foliage", "foliage.vert", "foliage.frag"});
+    ASSERT_NE(program, 0u);
+    const char* varying = "gl_Position";
+    glTransformFeedbackVaryings(program, 1, &varying, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(program);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    glUseProgram(program);
+    SetMat4Identity(program, "u_view");
+    SetMat4Identity(program, "u_projection");
+    glUniform3f(glGetUniformLocation(program, "u_cameraPos"), 0, 3, 0);
+    glUniform1f(glGetUniformLocation(program, "u_fadeStart"), 10);
+    glUniform1f(glGetUniformLocation(program, "u_fadeEnd"), 20);
+    glUniform1f(glGetUniformLocation(program, "u_swayAmplitude"), 0.25f);
+    GLuint vao = 0, buffer = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glVertexAttrib3f(0, 0, 0, 0);
+    glVertexAttrib2f(1, 0.035f, 0.20f);
+    glVertexAttrib4f(2, 0.19f, 0.34f, 0.11f, 1);
+    glVertexAttrib2f(3, 100, 0);
+    glVertexAttrib1f(4, 0);
+    glVertexAttrib1f(5, 0);
+    std::array<float, 12 * 4> positions{};
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof(positions), nullptr, GL_STREAM_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_TRIANGLES);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(positions), positions.data());
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    for (int vertex = 0; vertex < 12; ++vertex) {
+        const float x = positions[vertex * 4];
+        const float y = positions[vertex * 4 + 1];
+        EXPECT_LE(std::abs(x), 0.035f + 0.20f * 0.5f + 0.001f);
+        if (y < 0) {
+            EXPECT_LE(std::abs(x), 0.036f) << "wind must leave the root anchored";
+        }
+    }
+    glDeleteBuffers(1, &buffer);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, GrassBladeNarrowsToATip) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"foliage", "foliage.vert", "foliage.frag"});
+    ASSERT_NE(program, 0u);
+    constexpr int size = 128;
+    GLuint fbo = 0, texture = 0, vao = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    // One real crossed-card instance. The second card is edge-on in this view.
+    glVertexAttrib3f(0, 0.0f, -0.5f, 0.0f);
+    glVertexAttrib2f(1, 0.8f, 0.5f);
+    glVertexAttrib4f(2, 0.19f, 0.34f, 0.11f, 1.0f);
+    glVertexAttrib2f(3, 0.0f, 0.0f);
+    glVertexAttrib1f(4, 0.0f);
+    glVertexAttrib1f(5, 0.0f);
+    glUseProgram(program);
+    SetMat4Identity(program, "u_view");
+    SetMat4Identity(program, "u_projection");
+    glUniform3f(glGetUniformLocation(program, "u_cameraPos"), 0, 3, 0);
+    glUniform1f(glGetUniformLocation(program, "u_fadeStart"), 10.0f);
+    glUniform1f(glGetUniformLocation(program, "u_fadeEnd"), 20.0f);
+    glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, -1, 0);
+    glUniform3f(glGetUniformLocation(program, "u_sunColor"), 1, 1, 1);
+    glUniform1f(glGetUniformLocation(program, "u_sunIntensity"), 1);
+    glUniform3f(glGetUniformLocation(program, "u_ambientColor"), 0.1f, 0.15f, 0.2f);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, size, size);
+    const GLfloat clear[4] = {0, 0, 0, 0};
+    glClearBufferfv(GL_COLOR, 0, clear);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+    std::vector<unsigned char> pixels(size * size * 4);
+    glReadPixels(0, 0, size, size, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    const auto width = [&](int y) {
+        int count = 0;
+        for (int x = 0; x < size; ++x)
+            count += pixels[(y * size + x) * 4 + 3] > 128;
+        return count;
+    };
+    const int lower_width = width(36);
+    const int tip_width = width(61);
+    EXPECT_GT(lower_width, 20);
+    EXPECT_GT(tip_width, 0);
+    EXPECT_LT(tip_width, lower_width / 3)
+        << "a grass tip must not retain the full rectangular card";
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(1, &texture);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, AetherFieldDoesNotMakeNonEmissiveTerrainGlow) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    const GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+    for (const std::array<float, 3> albedo : {std::array<float, 3>{0.087f, 0.083f, 0.065f},
+                                              {0.114f, 0.061f, 0.041f},
+                                              {0.056f, 0.071f, 0.014f}}) {
+        const auto base = LitChainNoonOnscreenSrgb(program, albedo, 0.85f);
+        for (const float field : {0.0f, 0.6f, 50.0f}) {
+            const auto active = LitChainNoonOnscreenSrgb(program, albedo, 0.85f, {}, field);
+            EXPECT_FLOAT_EQ(active.r, base.r);
+            EXPECT_FLOAT_EQ(active.g, base.g);
+            EXPECT_FLOAT_EQ(active.b, base.b);
+        }
+    }
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, DirectionalLightTravelLightsTheFacingSurface) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    const GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+    for (const bool moon : {false, true}) {
+        const auto facing = LitChainNoonOnscreenSrgb(
+            program, {0.2f, 0.2f, 0.2f}, 1.0f, {}, -1.0f, 0.0f, 0.0f, {0.0f, 0.0f, -1.0f}, moon);
+        const auto away = LitChainNoonOnscreenSrgb(
+            program, {0.2f, 0.2f, 0.2f}, 1.0f, {}, -1.0f, 0.0f, 0.0f, {0.0f, 0.0f, 1.0f}, moon);
+        EXPECT_GT(facing.r + facing.g + facing.b, away.r + away.g + away.b + 0.1f)
+            << (moon ? "moon" : "sun");
+    }
     glDeleteProgram(program);
 }
 
@@ -2609,7 +2867,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glUniform3f(glGetUniformLocation(program, "u_sun.direction"),
                 0.0f,
                 0.0f,
-                1.0f); // toward-light == +Z == the normal
+                -1.0f); // ray travel -Z; surface-to-light +Z matches the normal
     glUniform3f(glGetUniformLocation(program, "u_sun.color"), 1.0f, 1.0f, 1.0f);
     glUniform1i(glGetUniformLocation(program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(program, "u_emissiveLutScale"), 8.0f);

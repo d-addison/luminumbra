@@ -129,9 +129,11 @@ float fol_cloudShadow(vec3 worldPos) {
 void main() {
     // Blade alpha mask: taper toward the tip and soften the vertical edges so
     // the card reads as a tuft rather than a hard quad. texCoord.y: 0 base, 1 tip.
-    float edge = 1.0 - abs(fs_in.texCoord.x * 2.0 - 1.0); // 0 at sides, 1 centre
-    float taper = mix(1.0, 0.25, fs_in.texCoord.y);       // narrower at the tip
-    float alpha = smoothstep(0.0, 0.35, edge * taper) * fs_in.fade;
+    float x = abs(fs_in.texCoord.x * 2.0 - 1.0);
+    float halfWidth = fs_in.color.a > 0.5
+        ? pow(max(1.0 - fs_in.texCoord.y, 0.0), 0.8) : 1.0;
+    float edgeAA = max(fwidth(x), 0.015);
+    float alpha = (1.0 - smoothstep(halfWidth - edgeAA, halfWidth + edgeAA, x)) * fs_in.fade;
     if (alpha < 0.02) {
         discard;
     }

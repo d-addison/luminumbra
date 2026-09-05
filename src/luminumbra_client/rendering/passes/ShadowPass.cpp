@@ -106,6 +106,10 @@ void ShadowPass::init_shadow_map(RenderResourceRegistry& registry) {
         for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
             glFramebufferTextureLayer(
                 GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_tint_texture_array, 0, i);
+            // Color and depth must both refer to one layer; a layered depth
+            // attachment with a single-layer color makes the FBO incomplete.
+            glFramebufferTextureLayer(
+                GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
             glClear(GL_COLOR_BUFFER_BIT);
         }
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -153,7 +157,10 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
     m_shadow_map.light_space_matrices = light_space_matrices;
     glViewport(0, 0, m_shadow_map.resolution, m_shadow_map.resolution);
     glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
-    glClear(GL_DEPTH_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glClearDepth(1.0);
     glCullFace(GL_FRONT);
     m_shadow_shader->use();
     // the shadow cascades draw the SAME live terrain chunks as the
@@ -165,6 +172,9 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
         glFramebufferTextureLayer(
             GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_shadow_map.depth_texture_array, 0, i);
+        // Reset each selected layer. Clearing before the loop only resets the
+        // previous frame's final attachment and leaves stale depth in the others.
+        glClear(GL_DEPTH_BUFFER_BIT);
         m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
 
         glm::vec4 cascade_planes[6];

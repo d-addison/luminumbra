@@ -11,15 +11,18 @@
 //   * each pass is a true no-op when OFF (mode None / inactive mirror) -> target stays
 //     as cleared.
 #include "luminumbra_client/rendering/RenderContext.h"
+#include "luminumbra_client/rendering/RenderResourceRegistry.h"
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/GroundDecalPass.h"
+#include "luminumbra_client/rendering/passes/ShadowPass.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <string>
 #include <vector>
@@ -279,6 +282,55 @@ TEST(PassContext, GroundDecalTintsFromContextPositionAndScentMirror) {
 
     pass.destroy_buffers();
     glDeleteTextures(1, &posTex);
+}
+
+TEST(PassContext, ShadowCascadesDiscardPreviousFrameDepth) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+
+    using namespace Luminumbra::Rendering;
+    RenderResourceRegistry registry;
+    ShadowPass pass;
+    constexpr int resolution = 8;
+    pass.shadow_map().resolution = resolution;
+    pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_shadow_map(registry);
+    ASSERT_NE(pass.shadow_map().fbo_id, 0u);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR) << "shadow initialization must use complete framebuffers";
+    std::vector<unsigned char> tint(resolution * resolution * ShadowMap::CASCADE_COUNT * 4);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, pass.tint_texture_array());
+    glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, tint.data());
+    EXPECT_TRUE(std::all_of(tint.begin(), tint.end(), [](unsigned char v) { return v == 255; }))
+        << "empty shadow tint must transmit all light in every cascade";
+
+    ShadowPassInput input;
+    input.light_space_matrices.assign(ShadowMap::CASCADE_COUNT, glm::mat4(1.0f));
+    input.submit_terrain = [](const glm::vec4*) {
+        return TerrainSubmitStats{};
+    };
+    const RenderContext ctx;
+    std::vector<float> depths(resolution * resolution * ShadowMap::CASCADE_COUNT);
+    for (int frame = 0; frame < 3; ++frame) {
+        // An occluder from the previous frame has left every cascade occupied.
+        // The next empty frame must restore visibility in every layer.
+        const float stale_depth = 0.2f + 0.1f * static_cast<float>(frame);
+        glClearTexImage(
+            pass.shadow_map().depth_texture_array, 0, GL_DEPTH_COMPONENT, GL_FLOAT, &stale_depth);
+        glDepthMask(GL_FALSE); // A preceding transparent pass may disable writes.
+        glClearDepth(0.0);     // The shadow pass owns its depth-clear convention.
+        pass.execute(ctx, input);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, pass.shadow_map().depth_texture_array);
+        glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data());
+        ASSERT_EQ(glGetError(), GL_NO_ERROR);
+        for (int cascade = 0; cascade < ShadowMap::CASCADE_COUNT; ++cascade) {
+            const auto begin = depths.begin() + cascade * resolution * resolution;
+            EXPECT_TRUE(std::all_of(
+                begin, begin + resolution * resolution, [](float v) { return v == 1.0f; }))
+                << "frame " << frame << ", cascade " << cascade;
+        }
+    }
+    pass.destroy_shadow_map(registry);
 }
 
 } // namespace
