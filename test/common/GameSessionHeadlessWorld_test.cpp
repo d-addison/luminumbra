@@ -208,7 +208,7 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
 // SDF lattice is QUARANTINED at adoption — the chunk loads with its sdf_data
 // cleared (marked for deterministic regeneration) and is never fed to the
 // unit-step polygonise. A valid full lattice in the same save survives verbatim.
-TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsQuarantinedOnLoad) {
+TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsRefusedOnLoad) {
     namespace P = Luminumbra::Persistence;
     using Luminumbra::Chunk;
     using Luminumbra::ChunkState;

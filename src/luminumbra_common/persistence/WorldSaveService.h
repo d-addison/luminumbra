@@ -136,12 +136,13 @@ public:
     // independent: computed over the in-memory snapshot, never file bytes.
     std::string world_hash(const WorldStreamingState& state) const;
 
-    // Incremental save pass: O(edited regions). Only region files containing
+    // Incremental writes: only region files containing
     // at least one dirty chunk are rewritten (all in-memory chunks of those
     // regions are refreshed; records of chunks absent from memory and far-LOD
     // tile records are preserved verbatim). Dirty flags of the saved chunks
     // are cleared after a successful write. With no dirty chunks nothing is
-    // written and saved stays false.
+    // written and saved stays false. Before writing, validation reads the whole
+    // existing save to refuse obsolete, mixed-format, or corrupt durable data.
     WorldSaveDirtyReport save_dirty_chunks(WorldStreamingState& state,
                                            const std::filesystem::path& save_dir,
                                            std::vector<std::string>* errors = nullptr) const;

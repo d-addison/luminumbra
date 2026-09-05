@@ -541,7 +541,8 @@ endif()
 # into an in-memory framebuffer and diffs two framebuffers produced in ONE process
 # with the same perceptual metric as tools/flip_diff.py (rendering/InProcessFlip.h,
 # header-only + GL-free). GL-only, self-contained (no luminumbra_common); the
-# RhiDiligent second-backend leg is wired and loudly skipped until.
+# second-backend parity cases live in rhi_pilot_flip_test below, enabled by
+# LUMINUMBRA_ENABLE_DILIGENT and exercised by the dedicated software GL/Vulkan CI lane.
 add_executable(dual_backend_flip_test
     rendering/dual_backend_flip_test.cpp
 )
@@ -697,9 +698,9 @@ target_include_directories(rhi_backend_test PRIVATE
 
 target_link_libraries(rhi_backend_test PRIVATE gtest_main)
 
-# the device-creation leg of RhiDeviceBringupGpu. This is the
-# ONLY target in the whole build that links Diligent (GL + Vk static engines) --
-# proof by construction that no shipping binary pulls it. GLFW backs a headless GL
+# Device-creation coverage for RhiDeviceBringupGpu. This target and
+# rhi_pilot_flip_test link Diligent (GL + Vk static engines); shipping binaries
+# do not. GLFW backs a headless GL
 # context; Device.cpp + RhiBackend.cpp are compiled directly (Diligent stays out of
 # luminumbra_client). Guarded by LUMINUMBRA_ENABLE_DILIGENT so a Diligent-less
 # configure still builds the rest of the suite.
