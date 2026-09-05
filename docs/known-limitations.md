@@ -6,6 +6,16 @@ and content formats may still change.
 
 ## Simulation and world
 
+> This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
+
+- **v0.3.0 breaks saved-world compatibility.** Create a new world. Current saves
+  use LMR1 v2, the `luminumbra.persistence.world_manifest.v1` schema declaring
+  container version 2, and FSD2 v3. Explicit preset revisions must be 6; in-memory
+  callers may omit the revision. Shaping is unconditional and enabled caves use
+  the noise router; content, hydro and biome controls remain. Retired selectors
+  are rejected regardless of value. Future-format and corruption errors remain
+  distinct from this obsolete-world refusal. See the
+  [format contract](engine-guide.md#world-format-compatibility).
 - **Far-LOD terrain omits caves and edits.** Coarse distant tiers render
   surface authority only; caves and player voxel edits are not carried at
   distance. The [SHIELD SDF contract](shield/sdf-contract.md) defines the
@@ -33,17 +43,25 @@ and content formats may still change.
 
   The resolution is baked into the hashed water grids, so every peer in a session
   must match and enabling the flag deliberately changes the world hash.
-- **Physics surface queries are placeholders.** Raycasts currently report a
-  fixed upward surface normal, and surface material classification derives
-  from world height bands rather than actual voxel material. Audio
-  occlusion/absorption consumes both, so acoustic detail inherits these
-  approximations.
+- **Physics acoustic materials use a limited classifier.** Raycasts return real
+  Jolt body surface normals oriented against the ray. With a world attached,
+  terrain hits use its voxel/biome-derived surface materials and dynamic bodies
+  use Stone. Height-band fallback applies only to unattached physics instances.
+  These normals and material absorption feed audio occlusion; they do not imply
+  detailed acoustic materials for every dynamic object.
+
+Plants, server avatars/creature rosters, perception/awareness, scent and instinct
+systems are implemented. Their component/config opt-ins and empty default
+rosters should not be confused with missing simulation wiring.
 
 ## Networking
 
 - **The Steamworks transport is not compiled or exercised in CI.** The
-  GameNetworkingSockets transport has a CI syntax probe because its pinned
-  upstream source is redistributable. Steamworks is different: its SDK is
+  GameNetworkingSockets (GNS) CI lane builds `luminumbra_common`, including the
+  shared `NetSocketsTransport`, against pinned redistributable upstream source.
+  That implementation honours `FrameDelivery::Unreliable` for both GNS and
+  Steam sockets. Compile coverage is distinct from a live multi-client transport
+  test. Steamworks is different: its SDK is
   owner-provided, is not redistributable, and `vendor/steamworks/` is
   gitignored, so a hosted runner cannot fetch the required Steam headers and
   libraries. A project-owned stub would have to reproduce the SDK declarations
@@ -68,12 +86,23 @@ and content formats may still change.
 
 ## Client and audio
 
-- **Audio binaries are external.** Sound banks are intentionally not part of
-  the public tree; headless and CI runs use the null audio backend, and test
-  coverage of audio is limited to the pure math models (mixer, environmental
-  propagation).
-- **The Diligent/RHI second render backend is opt-in** and not exercised by
-  any CI lane; the OpenGL path is the maintained backend.
+- **Audio recordings are external.** Bank metadata is public; the referenced
+  recordings are optional. Synthetic silent-WAV fixtures already cover bank
+  paths, event literals and species-call references. Tests also cover mixer and
+  environmental math, volume readback math and physics-backed occlusion. This
+  does not validate external recording quality, audio-device output or a complete
+  reverb pipeline. Headless operation and `--no-audio` use the null backend.
+- **Diligent is not a shipping render backend.** Its opt-in test targets run in
+  the required software GL/Vulkan CI bring-up and calibration-cube parity lane.
+  OpenGL remains the maintained shipping renderer; this coverage is not full
+  scene/render-graph equivalence across backends.
+- **Motion history is incomplete for independently moving objects.** Camera
+  reprojection and instanced foliage wind sway already produce motion vectors
+  consumed by TAAU. Previous rigid-object transforms and previous skinned bone
+  poses are the remaining history gap.
+- **Tree impostors require a successful atlas bake.** They default on at startup;
+  `LUMIN_TREE_IMPOSTORS=0` disables them. See the
+  [environment controls](engine-guide.md#environment-controls) for exact parsing.
 
 ## Testing and CI
 

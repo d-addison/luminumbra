@@ -20,9 +20,9 @@
 // DETERMINISM (sim contract): the diffusion solver is deterministic (double,
 // fixed traversal order); evaporation is a uniform multiply; the gradient is a
 // central difference. No RNG / wall-clock / libm transcendentals. The field is a
-// standalone subsystem — until a deposit/sense system wires it into the canonical
-// tick it does not feed world_hash (and that wiring is data-flagged, like the
-// flocking/flee/path behaviors).
+// owned by GameSession, which runs deposit/foraging, diffusion/evaporation and
+// scent steering in its canonical tick when participants exist. Active scent state
+// contributes a scent sub-hash; sessions without participants remain empty-neutral.
 
 #include <cmath>
 #include <cstddef>

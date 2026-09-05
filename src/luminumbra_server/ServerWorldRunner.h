@@ -46,8 +46,8 @@ struct ServerWorldRunnerConfig {
     // boot (phyllotaxis ring around spawn; see World::DeterministicAvatarSpawnOffset).
     // Avatar positions feed the multi-anchor streaming vector and fold into the
     // `entities` sub-hash. DEFAULT 0 -> no avatars -> byte-identical to the zero-avatar
-    // headless lane (single spawn anchor, empty entity snapshot). Network
-    // connections drive this list in P3; this config is the test/prep entry point.
+    // headless lane (single spawn anchor, empty avatar snapshot). This boot-time
+    // roster is independent of the opt-in creature and plant rosters below.
     int avatar_count = 0;
     // gate-populated-world-replay: spawn a fixed deterministic KINEMATIC
     // creature roster (the gtest ecology_pipeline_test Populate fixture: 2
@@ -190,9 +190,9 @@ public:
 
     // per-system sub-hashes over the SAME streamed-chunk snapshot, for
     // desync localization. The top-level ComputeWorldHash above is unchanged;
-    // these are additive. entities is the stable hash of the (currently empty,
-    // terrain/water-only headless) ECS snapshot -- present so a future
-    // entity-bearing server desync is attributable.
+    // these are additive. entities hashes the deterministic avatar snapshot
+    // (empty only when no avatars are configured). Creature ecology and plants
+    // have their own sub-hashes in the composite world hash.
     Persistence::WorldStreamingStateSubHashes ComputeWorldSubHashes();
 
     //  replay checkpoint capture: computes the top-level world_hash AND

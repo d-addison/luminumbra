@@ -9,8 +9,22 @@ Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
 deterministic fixed-tick simulation, procedural terrain, entity-component systems,
 networking, and a GPU-driven client renderer.
 
-This is an owner-maintained hobby project. Version 0.2.1 is an early public
+This is an owner-maintained hobby project. Version 0.3.0 is an early public
 source release; interfaces and content formats may still change between releases.
+
+## v0.3.0 world format break
+
+> This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
+
+Older saved worlds are refused with this message. Create a new world with a
+current preset; there is no migration path. New saves use LMR1 container v2,
+the `luminumbra.persistence.world_manifest.v1` manifest with
+`container_version: 2`, and FSD2 far-LOD payload v3. Explicit preset `schema_rev`
+must be `6`; in-memory callers may omit it. Terrain shaping is always applied,
+and enabled caves always use the noise router. Content, hydrology, and biome
+controls remain available. Unknown future formats and corrupt data have distinct
+failures. See the [persistence contract](docs/engine-guide.md#world-format-compatibility)
+for the retired selectors and validation details.
 
 ![Luminumbra main menu](docs/assets/screenshots/main-menu.png)
 

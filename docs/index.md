@@ -5,6 +5,18 @@ simulation, a GPU client, and a headless authoritative server. This site starts
 with the engine model and development contracts; the generated namespace,
 class, and file indexes are the lower-level API reference.
 
+## v0.3.0 world format break
+
+> This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
+
+Create a new world using a current preset. The format is LMR1 container v2,
+`luminumbra.persistence.world_manifest.v1` with `container_version: 2`, and FSD2
+far-LOD payload v3. Explicit preset revisions must be `schema_rev: 6`; omission
+remains accepted for in-memory callers. Shaping is unconditional and enabled
+caves use the noise router, while content, hydrology, and biome controls remain.
+Future-format and corruption failures are separate from obsolete-world refusal.
+See [world format compatibility](engine-guide.md#world-format-compatibility).
+
 ## Start here
 
 - [Engine/framework guide](engine-guide.md) explains the runtime lifecycle,
@@ -62,6 +74,6 @@ build/debug/bin/luminumbra_client_app --no-audio
 build/debug/bin/luminumbra_server_app --smoke --root . --preset default --seed 1337 --ticks 90
 ```
 
-Luminumbra 0.2.1 is an early source release. The repository builds an engine and
+Luminumbra 0.3.0 is an early source release. The repository builds an engine and
 its applications together; it does not yet promise a stable installed SDK or
 ABI for third-party applications.
