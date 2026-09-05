@@ -91,7 +91,7 @@ TEST(TerrainPresetLoaderTest, LoadsShippedDefaultPreset) {
     EXPECT_TRUE(result.extras.features.structures_enabled);
     // Default now ships a shaping block ( DEM realism calibration).
     EXPECT_TRUE(result.extras.shaping.present);
-    EXPECT_TRUE(result.params.shaping_enabled);
+    EXPECT_FALSE(result.params.continental_spline.empty());
     EXPECT_TRUE(result.warnings.empty()) << result.warnings.front();
 }
 
@@ -118,8 +118,13 @@ TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
 }
 
 TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {
-    for (const char* name :
-         {"default", "flat_lands", "mountains", "archipelago", "temperate_forest"}) {
+    for (const char* name : {"default",
+                             "flat_lands",
+                             "mountains",
+                             "archipelago",
+                             "temperate_forest",
+                             "amplified",
+                             "caverns"}) {
         const TerrainPresetLoadResult result =
             LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
         EXPECT_TRUE(result.ok) << name;
@@ -135,7 +140,6 @@ TEST(TerrainPresetLoaderTest, ParsesReservedShapingBlock) {
       "base_frequency": 0.008, "base_amplitude": 120.0, "octaves": 6,
       "persistence": 0.65, "lacunarity": 2.2, "height_offset": 20.0,
       "shaping": {
-        "enabled": true,
         "continentalness_frequency": 0.0008,
         "erosion_frequency": 0.0015,
         "peaks_frequency": 0.004,
@@ -156,7 +160,7 @@ TEST(TerrainPresetLoaderTest, ParsesReservedShapingBlock) {
 
     const auto& shaping = result.extras.shaping;
     ASSERT_TRUE(shaping.present);
-    EXPECT_TRUE(shaping.enabled);
+    EXPECT_EQ(result.params.continental_spline, shaping.continental_spline);
     EXPECT_FLOAT_EQ(shaping.continentalness_frequency, 0.0008f);
     EXPECT_FLOAT_EQ(shaping.erosion_frequency, 0.0015f);
     EXPECT_FLOAT_EQ(shaping.peaks_frequency, 0.004f);
@@ -273,7 +277,7 @@ TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
           "persistence": 0.55,
           "lacunarity": 2.1,
           "height_offset": 9.0,
-          "shaping": { "enabled": true, "peaks_amplitude": 40.0 }
+          "shaping": { "peaks_amplitude": 40.0 }
         },
         "biomes": { "table": "common/biomes.json", "relief_enabled": true },
         "features": {
@@ -307,7 +311,8 @@ TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
     EXPECT_FLOAT_EQ(mem.params.base_amplitude, disk.params.base_amplitude);
     EXPECT_EQ(mem.params.octaves, disk.params.octaves);
     EXPECT_FLOAT_EQ(mem.params.height_offset, disk.params.height_offset);
-    EXPECT_EQ(mem.params.shaping_enabled, disk.params.shaping_enabled);
+    EXPECT_EQ(mem.params.peaks_amplitude, disk.params.peaks_amplitude);
+    EXPECT_EQ(mem.extras.shaping.present, disk.extras.shaping.present);
     EXPECT_EQ(mem.params.biomes_enabled, disk.params.biomes_enabled);
     EXPECT_EQ(mem.params.biome_table_path, disk.params.biome_table_path);
     EXPECT_EQ(mem.params.biome_relief_enabled, disk.params.biome_relief_enabled);
@@ -318,6 +323,76 @@ TEST(TerrainPresetLoaderTest, InMemorySeamMatchesOnDiskLoad) {
     // The resolved table path must be a real absolute path into the data root.
     EXPECT_FALSE(mem.params.biome_table_path.empty());
     EXPECT_NE(mem.params.biome_table_path.find("biomes.json"), std::string::npos);
+}
+
+TEST(TerrainPresetLoaderTest, RejectsRetiredSelectorsRegardlessOfValueOrRevisionPresence) {
+    for (bool explicit_revision : {false, true}) {
+        for (const nlohmann::json& value : {nlohmann::json(false),
+                                            nlohmann::json(true),
+                                            nlohmann::json(0),
+                                            nlohmann::json(1),
+                                            nlohmann::json(nullptr),
+                                            nlohmann::json("retired")}) {
+            for (const char* selector : {"features.cave_style", "terrain.shaping.enabled"}) {
+                auto preset = nlohmann::json::parse(kMinimalPreset);
+                if (explicit_revision) {
+                    preset["schema_rev"] = 6;
+                }
+                if (std::string(selector) == "features.cave_style") {
+                    preset["generation_params"]["features"]["cave_style"] = value;
+                } else {
+                    preset["generation_params"]["terrain"]["shaping"]["enabled"] = value;
+                }
+                const auto result = LoadTerrainPresetFromJson(preset, {}, "retirement-test");
+                EXPECT_FALSE(result.ok) << selector << "=" << value;
+                ASSERT_FALSE(result.errors.empty());
+                EXPECT_NE(result.errors.front().find(selector), std::string::npos);
+                EXPECT_TRUE(result.warnings.empty());
+            }
+        }
+    }
+}
+
+TEST(TerrainPresetLoaderTest, PreservesContentSwitchesAndOptionalErosionAndBiomes) {
+    for (bool enabled : {false, true}) {
+        auto preset = nlohmann::json::parse(kMinimalPreset);
+        auto& gp = preset["generation_params"];
+        gp["terrain"]["island_mask_enabled"] = enabled;
+        gp["terrain"]["hydro"]["enabled"] = enabled;
+        for (const char* key : {"caves_enabled",
+                                "rivers_enabled",
+                                "lakes_enabled",
+                                "cliffs_enabled",
+                                "structures_enabled"}) {
+            gp["features"][key] = enabled;
+        }
+        gp["biomes"] = {{"relief_enabled", enabled}, {"relief_strength", 0.3}};
+        if (enabled) {
+            gp["biomes"]["table"] = "common/biomes.json";
+        }
+        const auto result = LoadTerrainPresetFromJson(preset, {}, "content-switches");
+        ASSERT_TRUE(result.ok);
+        EXPECT_EQ(result.params.island_mask_enabled, enabled);
+        EXPECT_EQ(result.params.caves_enabled, enabled);
+        EXPECT_EQ(result.params.rivers_enabled, enabled);
+        EXPECT_EQ(result.params.lakes_enabled, enabled);
+        EXPECT_EQ(result.params.cliffs_enabled, enabled);
+        EXPECT_EQ(result.params.structures_enabled, enabled);
+        EXPECT_EQ(result.params.hydro_enabled, enabled);
+        EXPECT_EQ(result.params.biomes_enabled, enabled);
+        EXPECT_EQ(result.params.biome_relief_enabled, enabled);
+        EXPECT_FLOAT_EQ(result.extras.biomes.relief_strength, 0.3f);
+        EXPECT_FLOAT_EQ(result.params.biome_relief_strength, enabled ? 0.3f : 0.45f);
+    }
+    for (const char* name : {"flat_lands", "temperate_forest"}) {
+        const auto result = LoadTerrainPreset(PresetDir() / (std::string(name) + ".json"));
+        ASSERT_TRUE(result.ok);
+        EXPECT_FALSE(result.params.hydro_enabled) << name;
+        EXPECT_FALSE(result.params.biomes_enabled) << name;
+    }
+    const auto archipelago = LoadTerrainPreset(PresetDir() / "archipelago.json");
+    ASSERT_TRUE(archipelago.ok);
+    EXPECT_FALSE(archipelago.params.biomes_enabled);
 }
 
 } // namespace

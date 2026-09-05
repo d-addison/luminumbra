@@ -1184,10 +1184,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 27846,
+      "bytes": 27503,
       "license": "MIT",
       "path": "data/ui/world_creation.rml",
-      "sha256": "763d97fe81fd32632bdd82c09742d151bd3a2cd6b996cb6a1cb76fe940c34118",
+      "sha256": "16aab8f3bd4b13792877c351a4527a110059830753760debf0672c2d694ddf18",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1275,52 +1275,52 @@
       "source": "documented DEM fixtures"
     },
     {
-      "bytes": 2107,
+      "bytes": 2082,
       "license": "MIT",
       "path": "worlds/atlas/presets/amplified.json",
-      "sha256": "0a149c7c0cd83e39dc8e4fb5509dcf67e3c8dbca53c9576e6ddcebcad0dd025a",
+      "sha256": "3a7bbe7bc7bf5b1b9e19e51cd8505c0e42d41efa3261b66244e3436f3bf0ee4f",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1601,
+      "bytes": 1576,
       "license": "MIT",
       "path": "worlds/atlas/presets/archipelago.json",
-      "sha256": "5afc3fdd4ece5956257bfbd7ae89d775fccce4fb6a230103633588572f4a5ee3",
+      "sha256": "d2b1d4c5eb8b999f4daf77b1666eede80eb0419d847a708ab24526c107374538",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 2177,
+      "bytes": 2129,
       "license": "MIT",
       "path": "worlds/atlas/presets/caverns.json",
-      "sha256": "352caa69d60266541058e8c1f1a107c675a4d784c36220565ac373dc143fec42",
+      "sha256": "18d1b86c8f82536ffadd4be844f3098caee123d703077f8f0e00f87f94245a06",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 2877,
+      "bytes": 2852,
       "license": "MIT",
       "path": "worlds/atlas/presets/default.json",
-      "sha256": "7f3e69fc545d0bcdb3104a44ac2ec161c3c62a0309d4073a459fb58ab2574a3f",
+      "sha256": "f3be8ce413e2ea7ef02b76a1643d36c92bc4475513be5a42bf3438669fd6d261",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1290,
+      "bytes": 1265,
       "license": "MIT",
       "path": "worlds/atlas/presets/flat_lands.json",
-      "sha256": "0c234ec72df5a55167aef7ec2fe93def5121df1bed92421a411c3e0740e449d0",
+      "sha256": "d2a5b0955d959c9a43449aa015a93033a293ade54d9e490c0d8686f08b650a58",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1753,
+      "bytes": 1728,
       "license": "MIT",
       "path": "worlds/atlas/presets/mountains.json",
-      "sha256": "0d763e63aaab901048699511679cb06fb21c0add3e4fcff7a060f30ce0ed8ee4",
+      "sha256": "26b391dd4f7256bd54c46a9109d835ea1ee3635a103c85a2924f092ceb10800a",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1111,
+      "bytes": 1086,
       "license": "MIT",
       "path": "worlds/atlas/presets/temperate_forest.json",
-      "sha256": "69099af1e6a251f075c21647c61386fa3bb6e5a1cd89c4799f1d04f332de5f81",
+      "sha256": "a7366b7787e81298817d17be6f9d30d7e47b38756f54fe1c1d60ba3fefe3b4f7",
       "source": "Luminumbra authored worlds"
     }
   ],

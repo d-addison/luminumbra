@@ -61,7 +61,6 @@ void ParseShapingBlock(const nlohmann::json& terrain,
     }
     const nlohmann::json& block = terrain["shaping"];
     shaping.present = true;
-    shaping.enabled = block.value("enabled", shaping.enabled);
     shaping.continentalness_frequency =
         block.value("continentalness_frequency", shaping.continentalness_frequency);
     shaping.erosion_frequency = block.value("erosion_frequency", shaping.erosion_frequency);
@@ -76,8 +75,7 @@ void ParseShapingBlock(const nlohmann::json& terrain,
     shaping.peaks_spline = ParseSplinePoints(block, "peaks_spline");
     WarnUnknownKeys(block,
                     "generation_params.terrain.shaping",
-                    {"enabled",
-                     "continentalness_frequency",
+                    {"continentalness_frequency",
                      "erosion_frequency",
                      "peaks_frequency",
                      "peaks_amplitude",
@@ -241,6 +239,15 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
 
     const nlohmann::json& terrain = gen_params["terrain"];
     const nlohmann::json& features = gen_params["features"];
+    if (features.contains("cave_style")) {
+        result.errors.push_back(
+            "retired world preset selector generation_params.features.cave_style: " + provenance);
+    }
+    if (JsonHasObject(terrain, "shaping") && terrain["shaping"].contains("enabled")) {
+        result.errors.push_back(
+            "retired world preset selector generation_params.terrain.shaping.enabled: " +
+            provenance);
+    }
     for (const char* key : {"base_frequency",
                             "base_amplitude",
                             "octaves",
@@ -278,9 +285,6 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     params.cave_frequency = features.value("cave_frequency", 0.02f);
     params.cave_threshold = features.value("cave_threshold", params.cave_threshold);
     params.cave_carve_value = features.value("cave_carve_value", params.cave_carve_value);
-    // cave style (0 = legacy cheese-only, byte-identical; 1 = noise-router with
-    // spaghetti tunnels). Absent => 0 => existing presets unchanged.
-    params.cave_style = features.value("cave_style", params.cave_style);
     params.spaghetti_frequency = features.value("spaghetti_frequency", params.spaghetti_frequency);
     params.spaghetti_thickness = features.value("spaghetti_thickness", params.spaghetti_thickness);
     params.worley_frequency = features.value("worley_frequency", params.worley_frequency);
@@ -292,7 +296,6 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     ParseShapingBlock(terrain, result.extras.shaping, provenance, result.warnings);
     if (result.extras.shaping.present) {
         const TerrainShapingPreset& shaping = result.extras.shaping;
-        params.shaping_enabled = shaping.enabled;
         params.continentalness_frequency = shaping.continentalness_frequency;
         params.erosion_frequency = shaping.erosion_frequency;
         params.peaks_frequency = shaping.peaks_frequency;
@@ -397,7 +400,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
     // Unknown-key audit over every consumed scope.
     WarnUnknownKeys(data,
                     "$",
-                    {"name", "description", "schema_rev", "generation_params"},
+                    {"name", "description", "schema_rev", "realism_exempt", "generation_params"},
                     provenance,
                     result.warnings);
     // "knob_layer" is the semantic-knob layer the create-world UI writes alongside the resolved
@@ -424,37 +427,16 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
                     result.warnings);
     WarnUnknownKeys(features,
                     "generation_params.features",
-                    {"caves_enabled",
-                     "cave_frequency",
-                     "cave_threshold",
-                     "cave_carve_value",
-                     "rivers_enabled",
-                     "structures_enabled",
-                     "river_frequency",
-                     "river_depth",
-                     "river_pv_min",
-                     "river_pv_max",
-                     "river_max_carve",
-                     "lakes_enabled",
-                     "lake_frequency",
-                     "lake_threshold",
-                     "lake_depth",
-                     "lake_max_carve",
-                     "lake_bank_offset",
-                     "cliffs_enabled",
-                     "cliff_frequency",
-                     "cliff_threshold",
-                     "cliff_step",
-                     "surface_breaks_enabled",
-                     "surface_break_density",
-                     "feature_cell_size",
-                     "max_feature_radius",
-                     "carve_smoothness",
-                     "entrance_min_cap",
-                     "cave_style",
-                     "spaghetti_frequency",
-                     "spaghetti_thickness",
-                     "worley_frequency",
+                    {"caves_enabled",          "cave_frequency",        "cave_threshold",
+                     "cave_carve_value",       "rivers_enabled",        "structures_enabled",
+                     "river_frequency",        "river_depth",           "river_pv_min",
+                     "river_pv_max",           "river_max_carve",       "lakes_enabled",
+                     "lake_frequency",         "lake_threshold",        "lake_depth",
+                     "lake_max_carve",         "lake_bank_offset",      "cliffs_enabled",
+                     "cliff_frequency",        "cliff_threshold",       "cliff_step",
+                     "surface_breaks_enabled", "surface_break_density", "feature_cell_size",
+                     "max_feature_radius",     "carve_smoothness",      "entrance_min_cap",
+                     "spaghetti_frequency",    "spaghetti_thickness",   "worley_frequency",
                      "worley_threshold"},
                     provenance,
                     result.warnings);

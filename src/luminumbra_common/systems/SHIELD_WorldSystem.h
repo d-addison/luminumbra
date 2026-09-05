@@ -43,12 +43,7 @@ struct TerrainGenParams {
     float cave_frequency = 0.02f;
     float cave_threshold = 0.7f;
     float cave_carve_value = 2.0f;
-    // cave STYLE. 0 = legacy single 3D-Perlin BODY threshold (cheese-only,
-    // byte-identical to all pre-existing worlds). 1 = noise-router (Minecraft-1.18-style):
-    // the legacy cheese rooms PLUS spaghetti winding tunnels carved at the zero-crossing
-    // EDGE of a second Perlin (abs(noise) < thickness => air) so caves become connected
-    // networks, not isolated bubbles. Opt-in per preset; legacy stays byte-identical.
-    int cave_style = 0;
+    // Noise-router caves combine cheese rooms, spaghetti tunnels and Worley caverns.
     float spaghetti_frequency = 0.04f; // tunnel noise scale (higher = tighter winding)
     float spaghetti_thickness = 0.08f; // |noise| < this carves a tunnel (wider = fatter)
     float worley_frequency = 0.016f;   // CHEESE cavern cell scale (lower = bigger rooms)
@@ -84,11 +79,8 @@ struct TerrainGenParams {
     bool island_mask_enabled = false;
     float island_mask_frequency = 0.004f;
 
-    // ---  terrain shaping (default-off) ---
-    // With shaping_enabled == false every height path is bit-identical to the
-    // pre-shaping implementation (legacy regression hashes in
-    // test_worldgen_layer_snapshots.cpp prove it). When enabled, three 2D
-    // control channels modulate the base FBM detail channel:
+    // --- terrain shaping (unconditional) ---
+    // Three 2D control channels modulate the base FBM detail channel:
     //   continentalness (m_seed + 3) -> continental_spline -> base elevation
     //   erosion         (m_seed + 4) -> erosion_spline     -> amplitude mult
     //   peaks/valleys   (m_seed + 5) -> peaks_spline       -> ridge term
@@ -98,7 +90,6 @@ struct TerrainGenParams {
     // Splines are monotone piecewise-linear [input, output] control points
     // evaluated with plain lerp + endpoint clamping (no smoothstep, so the
     // scalar and batch paths cannot diverge).
-    bool shaping_enabled = false;
     float continentalness_frequency = 0.0008f;
     float erosion_frequency = 0.0015f;
     float peaks_frequency = 0.004f;
@@ -442,8 +433,7 @@ public:
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
     // the single cave-carve composition point. Samples the cheese BODY noise
-    // (byte-identical to the legacy path) and, in noise-router style (cave_style==1), adds
-    // spaghetti EDGE tunnels, composed via the existing order-free smax. Called identically
+    // and adds spaghetti EDGE tunnels and Worley caverns via order-free max. Called identically
     // by every density site (mesh / collision / query) so they cannot disagree.
     float EvaluateCaveDensity(const Vec3& world_pos,
                               float terrain_density,
@@ -1124,7 +1114,8 @@ private:
     static bool sim_available_lod0(const ::Luminumbra::Chunk& chunk);
     void wait_for_generation_jobs();
     void wait_for_meshing_jobs();
-    void reinitialize_noise();
+    void reinitialize_noise(const TerrainGenParams* params = nullptr,
+                            std::optional<int> seed = std::nullopt);
 
     // Shared terrain-height implementation.
     // Every terrain-height consumer (GetTerrainHeightAt, SampleWorldGenLayers,
@@ -1160,7 +1151,6 @@ private:
     // GenSingle2D scalar helper on this build (proven by the batch-vs-scalar
     // parity gtest, which now also exercises the SIMD path). The slow per-column
     // GenSingle2D loop cost ~26 us/column; the batched path is ~2 us/column.
-    // Only valid when m_params.shaping_enabled; callers gate on that.
     void ComputeShapedHeightGrid(int base_x, int base_z, int size_x, int size_z, float* out) const;
 
     // hydraulic/thermal relief (decision a). The analytic height is
@@ -1254,12 +1244,10 @@ private:
     // Noise states for procedural generation
     FastNoise::SmartNode<FastNoise::Generator> m_terrain_generator;
     FastNoise::SmartNode<FastNoise::Generator> m_cave_generator;
-    FastNoise::SmartNode<FastNoise::Generator>
-        m_spaghetti_generator; // noise-router tunnels, built when cave_style == 1
-    FastNoise::SmartNode<FastNoise::Generator>
-        m_worley_generator; // Worley cheese caverns, built when cave_style == 1
+    FastNoise::SmartNode<FastNoise::Generator> m_spaghetti_generator; // noise-router tunnels
+    FastNoise::SmartNode<FastNoise::Generator> m_worley_generator;    // Worley cheese caverns
     FastNoise::SmartNode<FastNoise::Generator> m_island_mask_generator;
-    //  shaping control noises (only built when shaping_enabled; seed
+    // Shaping control noises (always built; seed
     // offsets +3/+4/+5 for continentalness/erosion/peaks, the single warp
     // simplex is sampled with seeds +6 and +7 for the X/Z warp channels).
     FastNoise::SmartNode<FastNoise::Generator> m_continentalness_generator;

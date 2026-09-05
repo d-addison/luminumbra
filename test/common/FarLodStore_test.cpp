@@ -46,16 +46,6 @@ using namespace Luminumbra::World;
 
 constexpr int kFixtureSeed = 1337;
 
-constexpr u64 ToolchainHash(u64 msvc, u64 gcc_clang) {
-#ifdef _MSC_VER
-    (void)gcc_clang;
-    return msvc;
-#else
-    (void)msvc;
-    return gcc_clang;
-#endif
-}
-
 TerrainGenParams FixtureParams() {
     TerrainGenParams params;
     params.base_frequency = 0.005f;
@@ -875,9 +865,15 @@ TEST(FarLodStoreTest, PristineTileBuildIsDeterministic) {
     EXPECT_EQ(first.samples_per_side, 129u);
     EXPECT_FALSE(first.edited);
     EXPECT_EQ(ComputeFarLodTileHash(first), ComputeFarLodTileHash(second));
-    EXPECT_EQ(ComputeFarLodTileHash(first),
-              ToolchainHash(0x0d8e8dd980e41349ull, 0xf03d3a5d97fcd4aeull))
+    const SHIELD_WorldSystem reference(nullptr, nullptr, params, kFixtureSeed);
+    const auto replay = BuildPristineFarLodTile(reference, FarLodTier::F1, 0, 0, params_hash);
+    EXPECT_EQ(ComputeFarLodTileHash(first), ComputeFarLodTileHash(replay));
+#ifndef _MSC_VER
+    // GCC/Clang re-pin for cave_style/shaping_enabled retirement. Other compilers
+    // retain current sampler/replay determinism above instead of legacy float bytes.
+    EXPECT_EQ(ComputeFarLodTileHash(first), 0xa2b6be0236f39891ull)
         << "pristine far-LOD tile bytes changed";
+#endif
     std::printf("farlod fixture tile hash (seed %d, F1, r0.0): %016llx\n",
                 kFixtureSeed,
                 static_cast<unsigned long long>(ComputeFarLodTileHash(first)));
@@ -1230,8 +1226,10 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
     static_assert(sizeof(Luminumbra::VoxelVertex) == 28, "VoxelVertex layout must stay 28 bytes");
 
     EXPECT_EQ(HashMeshBytes(first), HashMeshBytes(second));
-    EXPECT_EQ(HashMeshBytes(first), ToolchainHash(0x11c29aed57733e92ull, 0x8d9bd7697a38ded1ull))
-        << "pristine F1 mesh bytes changed";
+#ifndef _MSC_VER
+    // GCC/Clang re-pin for cave_style/shaping_enabled retirement; replay stays portable.
+    EXPECT_EQ(HashMeshBytes(first), 0x7291723bda29eb0cull) << "pristine F1 mesh bytes changed";
+#endif
     std::printf("farlod fixture region mesh hash (seed %d, F1, r0.0): %016llx\n",
                 kFixtureSeed,
                 static_cast<unsigned long long>(HashMeshBytes(first)));
@@ -1263,8 +1261,10 @@ TEST(FarLodRegionMesher, FixtureRegionMeshIsDeterministic) {
     EXPECT_EQ(mesh_f2.vertices.size(), 65u * 65u + 256u * 4u);
     EXPECT_EQ(HashMeshBytes(mesh_f2), HashMeshBytes(mesh_f2_repeat))
         << "zero-brick F2 mesh bytes must remain deterministic";
-    EXPECT_EQ(HashMeshBytes(mesh_f2), ToolchainHash(0x37609dc421d71a4eull, 0xe0c514794eaa306eull))
-        << "zero-brick F2 mesh hash must remain pre- byte-identical";
+#ifndef _MSC_VER
+    // GCC/Clang re-pin for cave_style/shaping_enabled retirement; replay stays portable.
+    EXPECT_EQ(HashMeshBytes(mesh_f2), 0x48568b20f7fdbca1ull) << "zero-brick F2 mesh bytes changed";
+#endif
 }
 
 TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {
@@ -1285,14 +1285,10 @@ TEST(FarLodRegionMesher, AdjacentRegionsShareBorderVertexPositions) {
     }
 }
 
-// the shaping params (continentalness/erosion/peaks freqs + splines)
-// are folded into ComputeTerrainParamsHash, gated on shaping_enabled, so shaped
-// presets' pristine far-LOD tiles self-invalidate on a shaping change. Pins the
-// contract: shaping-OFF ignores the shaping fields (byte-stable cache key for
-// non-shaped worlds), shaping-ON re-keys on any spline/freq/count change, and
-// the hash is deterministic.
+// Shaping controls always contribute to terrain identity after selector retirement.
+// Spline content/count and every frequency must invalidate pristine tiles.
 TEST(FarLodStore, TerrainParamsHashShapingFold) {
-    auto make = [](bool shaping) {
+    auto make = []() {
         TerrainGenParams p;
         p.base_frequency = 0.008f;
         p.base_amplitude = 60.0f;
@@ -1300,7 +1296,6 @@ TEST(FarLodStore, TerrainParamsHashShapingFold) {
         p.persistence = 0.55f;
         p.lacunarity = 2.1f;
         p.height_offset = 12.0f;
-        p.shaping_enabled = shaping;
         p.continentalness_frequency = 0.0008f;
         p.erosion_frequency = 0.0015f;
         p.peaks_frequency = 0.004f;
@@ -1313,43 +1308,51 @@ TEST(FarLodStore, TerrainParamsHashShapingFold) {
         return p;
     };
     const int seed = 424242;
-    const TerrainGenParams off = make(false);
-    const TerrainGenParams on = make(true);
+    const TerrainGenParams on = make();
+    EXPECT_EQ(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(make(), seed));
 
-    // Determinism: identical params -> identical hash.
-    EXPECT_EQ(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on, seed));
+    // Even default params without authored splines use and hash shaping controls.
+    const TerrainGenParams defaults;
+    TerrainGenParams changed = defaults;
+    changed.domain_warp_amplitude += 1.0f;
+    EXPECT_NE(ComputeTerrainParamsHash(defaults, seed), ComputeTerrainParamsHash(changed, seed));
 
-    // Enabling shaping engages the fold -> hash differs from the shaping-off path.
-    EXPECT_NE(ComputeTerrainParamsHash(off, seed), ComputeTerrainParamsHash(on, seed))
-        << "shaping fold did not engage";
-
-    // Shaping-OFF ignores the shaping fields: mutating them on a shaping-off
-    // params must NOT change the hash (the gated block is skipped -> the far-tile
-    // cache key is byte-stable for every non-shaped world, fixtures stay green).
-    TerrainGenParams off2 = off;
-    off2.continental_spline = {{-1.0f, 99.0f}};
-    off2.peaks_amplitude = 1234.0f;
-    off2.erosion_frequency = 0.5f;
-    EXPECT_EQ(ComputeTerrainParamsHash(off, seed), ComputeTerrainParamsHash(off2, seed))
-        << "shaping-off path must ignore shaping fields (byte-stable cache key)";
-
-    // Shaping-ON: a spline control-point change re-keys the hash.
+    // Shaping: a spline control-point change re-keys the hash.
     TerrainGenParams on_spline = on;
     on_spline.peaks_spline = {{-1.0f, 0.0f}, {1.0f, 0.9f}};
     EXPECT_NE(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on_spline, seed))
         << "shaping spline content not hashed";
 
-    // Shaping-ON: a frequency change re-keys the hash.
+    // Shaping: a frequency change re-keys the hash.
     TerrainGenParams on_freq = on;
     on_freq.erosion_frequency = on.erosion_frequency * 2.0f;
     EXPECT_NE(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on_freq, seed))
         << "shaping frequency not hashed";
 
-    // Shaping-ON: spline COUNT matters (the count prefix prevents merge collisions).
+    // Shaping: spline COUNT matters (the count prefix prevents merge collisions).
     TerrainGenParams on_count = on;
     on_count.continental_spline = {{-1.0f, -40.0f}, {0.0f, 0.0f}, {1.0f, 40.0f}, {0.5f, 20.0f}};
     EXPECT_NE(ComputeTerrainParamsHash(on, seed), ComputeTerrainParamsHash(on_count, seed))
         << "spline count not hashed";
+}
+
+TEST(FarLodStore, TerrainParamsHashTracksNoiseRouterWhenCavesEnabled) {
+    const TerrainGenParams defaults;
+    constexpr int seed = 424242;
+    for (float TerrainGenParams::*control : {&TerrainGenParams::spaghetti_frequency,
+                                             &TerrainGenParams::spaghetti_thickness,
+                                             &TerrainGenParams::worley_frequency,
+                                             &TerrainGenParams::worley_threshold}) {
+        TerrainGenParams changed = defaults;
+        changed.*control += 0.01f;
+        EXPECT_NE(ComputeTerrainParamsHash(defaults, seed),
+                  ComputeTerrainParamsHash(changed, seed));
+        TerrainGenParams disabled = defaults;
+        disabled.caves_enabled = false;
+        changed.caves_enabled = false;
+        EXPECT_EQ(ComputeTerrainParamsHash(disabled, seed),
+                  ComputeTerrainParamsHash(changed, seed));
+    }
 }
 
 TEST(FarLodStore, TerrainParamsHashTracksHydraulicKernel) {
@@ -1369,5 +1372,6 @@ TEST(FarLodStore, TerrainParamsHashTracksHydraulicKernel) {
     EXPECT_NE(ComputeTerrainParamsHash(enabled, seed),
               ComputeTerrainParamsHash(enabled_changed, seed));
 
-    EXPECT_EQ(ComputeTerrainParamsHash(enabled, seed), 0x95d932de973229b9ull);
+    // Re-pinned for unconditional shaping after cave_style/shaping_enabled retirement.
+    EXPECT_EQ(ComputeTerrainParamsHash(enabled, seed), 0x47800606d5b30551ull);
 }

@@ -5,12 +5,10 @@
 // test_worldgen_layer_snapshots.cpp, runtime_world_visual_validation_test.cpp
 // and initial_world_loading_perf_test.cpp.
 //
-// Consumed parameters land in Systems::TerrainGenParams (byte-stable with the
-// legacy parsers). The `terrain.shaping` block is parsed into
-// TerrainPresetExtras AND consumed into TerrainGenParams ( terrain
-// shaping; an absent block leaves shaping_enabled=false -> bit-identical
-// legacy heights). Biome and feature blocks are likewise consumed by generation.
-// Unknown keys produce LUMINUMBRA_CORE_WARN warnings.
+// Consumed parameters land in Systems::TerrainGenParams. Shaping is always
+// applied; an absent terrain.shaping block uses the default shaping parameters.
+// Biome and feature blocks retain their content controls. Unknown keys warn;
+// retired algorithm selectors are errors.
 
 #include <array>
 #include <cstdint>
@@ -24,29 +22,15 @@
 
 namespace Luminumbra::world {
 
-// The revision authored presets are written against today.
-inline constexpr std::int64_t kTerrainPresetSchemaRevision = 5;
-
-// The oldest revision still readable. This is not 5 because the shipped preset
-// set is not uniform: worlds/atlas/presets/archipelago.json is still authored at
-// revision 2, and it is pinned there deliberately —
-// WorldGenLayerSnapshotTest.CurrentShippedArchipelagoPresetHeightHash locks its
-// generated height hash, so re-authoring it at 5 would change the terrain that
-// preset produces for every existing world using it.
-//
-// Accepting a documented range still catches what this guard exists to catch: a
-// preset declaring a revision that does not exist (a typo, or content authored
-// against a future schema) is rejected, whereas before ANY value was accepted so
-// long as the key was present. Narrowing this to a single revision requires
-// migrating archipelago first and taking the hash bump deliberately.
-inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 2;
+// Explicit preset revisions must match the current algorithm contract.
+inline constexpr std::int64_t kTerrainPresetSchemaRevision = 6;
+inline constexpr std::int64_t kMinTerrainPresetSchemaRevision = 6;
 
 // generation_params.terrain.shaping — reserved keys pinned by
 // (spline points
 // are monotone piecewise-linear control points, [input, output] pairs).
 struct TerrainShapingPreset {
     bool present = false; // block existed in the preset file
-    bool enabled = false;
     float continentalness_frequency = 0.0008f;
     float erosion_frequency = 0.0015f;
     float peaks_frequency = 0.004f;

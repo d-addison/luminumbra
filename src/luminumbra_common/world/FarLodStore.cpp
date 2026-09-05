@@ -203,6 +203,13 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
     FnvMixValue(hash, params.cave_frequency);
     FnvMixValue(hash, params.cave_threshold);
     FnvMixValue(hash, params.cave_carve_value);
+    if (params.caves_enabled) {
+        // The sole cave implementation now includes the complete noise router.
+        FnvMixValue(hash, params.spaghetti_frequency);
+        FnvMixValue(hash, params.spaghetti_thickness);
+        FnvMixValue(hash, params.worley_frequency);
+        FnvMixValue(hash, params.worley_threshold);
+    }
     FnvMixValue(hash, static_cast<u8>(params.island_mask_enabled ? 1 : 0));
     FnvMixValue(hash, params.island_mask_frequency);
     // mix the biome-table content hash ONLY when biomes are enabled, so
@@ -253,33 +260,28 @@ u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) 
         FnvMixValue(hash, static_cast<u8>(3));
         FnvMixValue(hash, params.structures_content_hash);
     }
-    // mix the SHAPING params ONLY when shaping is enabled, so shaped
-    // presets' pristine far-LOD tiles self-invalidate on a shaping-spline / freq
-    // change; continentalness, erosion, and peaks are all part of the key.
-    // Non-shaped worlds skip this block entirely, so their
-    // far-tile cache key is byte-identical to before (FarLodStore fixtures + the
-    // shaping-off legacy preset hash stay green). Canonical spline encoding:
-    // count (size_t) then each [input,output] control point in stored order via
-    // raw IEEE bits -- pinned by FarLodStore_test::TerrainParamsHashShapingFold.
-    if (params.shaping_enabled) {
-        FnvMixValue(hash, static_cast<u8>(4)); // marker 0x05 (4th conditional block)
-        FnvMixValue(hash, params.continentalness_frequency);
-        FnvMixValue(hash, params.erosion_frequency);
-        FnvMixValue(hash, params.peaks_frequency);
-        FnvMixValue(hash, params.peaks_amplitude);
-        FnvMixValue(hash, params.domain_warp_amplitude);
-        FnvMixValue(hash, params.domain_warp_frequency);
-        const auto mix_spline = [&hash](const std::vector<std::array<float, 2>>& spline) {
-            FnvMixValue(hash, static_cast<std::uint64_t>(spline.size()));
-            for (const std::array<float, 2>& cp : spline) {
-                FnvMixValue(hash, cp[0]);
-                FnvMixValue(hash, cp[1]);
-            }
-        };
-        mix_spline(params.continental_spline);
-        mix_spline(params.erosion_spline);
-        mix_spline(params.peaks_spline);
-    }
+    // Shaping is unconditional after the cave_style/shaping_enabled retirement.
+    // Hash every control frequency and spline so pristine tiles invalidate on edits.
+    // Canonical spline encoding: uint64 count, then ordered IEEE input/output bits.
+
+    FnvMixValue(hash, static_cast<u8>(4)); // marker 0x05 (4th conditional block)
+    FnvMixValue(hash, params.continentalness_frequency);
+    FnvMixValue(hash, params.erosion_frequency);
+    FnvMixValue(hash, params.peaks_frequency);
+    FnvMixValue(hash, params.peaks_amplitude);
+    FnvMixValue(hash, params.domain_warp_amplitude);
+    FnvMixValue(hash, params.domain_warp_frequency);
+    const auto mix_spline = [&hash](const std::vector<std::array<float, 2>>& spline) {
+        FnvMixValue(hash, static_cast<std::uint64_t>(spline.size()));
+        for (const std::array<float, 2>& cp : spline) {
+            FnvMixValue(hash, cp[0]);
+            FnvMixValue(hash, cp[1]);
+        }
+    };
+    mix_spline(params.continental_spline);
+    mix_spline(params.erosion_spline);
+    mix_spline(params.peaks_spline);
+
     // mix the hydraulic-relief params ONLY when hydro is enabled, so a
     // relief-tuning change invalidates shaped presets' pristine far-LOD tiles.
     // Disabled worlds skip the block (byte-stable cache key). marker 0x06.
