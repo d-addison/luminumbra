@@ -125,22 +125,6 @@ using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
 using Luminumbra::Rendering::WritePixelBufferPpm;
 
-// --- Global Pointers ---
-std::unique_ptr<Luminumbra::Rendering::Camera> g_camera;
-std::unique_ptr<Luminumbra::Client::PlayerController> g_playerController;
-
-// The frame loop's non-scenario state clusters (HUD, overlays, capture modes,
-// menu backdrop, loading, mouse-look, frame audio), grouped into ONE
-// file-scope context (app/ClientAppContext.h) with the same static-lifetime
-// semantics the individual globals had; the extracted frame helpers take it
-// by reference instead of reaching for externs.
-ClientAppContext g_app;
-
-// Single client config: defaults (data/common/systems.json) overlaid by the writable
-// per-user settings file (%APPDATA%/Luminumbra/settings.json). user.* is client-only,
-// never hashed. Loaded once at startup, before window creation.
-luminumbra::core::SystemConfig g_systemConfig;
-
 // Short human label for a GLFW key code (for the settings controls list). Printable keys use
 // glfwGetKeyName; special keys are named explicitly.
 // Derive the user-preset slug (and world-type id "user_<slug>") from a display name.
@@ -223,20 +207,15 @@ struct WorldDressingPending {
     // render.creature_spawn values resolved at dispatch (consume-side; no RNG involved).
     float pred_speed = 4.0f, prey_speed = 2.6f, init_hunger = 0.2f;
 };
-static std::shared_ptr<WorldDressingPending> s_worldDressing; // null = idle/consumed
-static Luminumbra::JobHandle s_worldDressingHandle;
-static void DrainWorldDressing(Luminumbra::JobSystem& jobs) {
-    if (s_worldDressingHandle.counter) {
-        jobs.wait(s_worldDressingHandle);
+static void DrainWorldDressing(Luminumbra::JobSystem& jobs,
+                               std::shared_ptr<WorldDressingPending>& worldDressing,
+                               Luminumbra::JobHandle& worldDressingHandle) {
+    if (worldDressingHandle.counter) {
+        jobs.wait(worldDressingHandle);
     }
-    s_worldDressingHandle = {};
-    s_worldDressing.reset();
+    worldDressingHandle = {};
+    worldDressing.reset();
 }
-
-// Bundled procgen plant/scatter render state (app/ProcgenPalettes.h): scatter
-// instances, cached bakes, palette counts. Owned here; passed by reference into
-// the bake/palette helpers. Render-only decoration, never hashed.
-ProcgenPlantState g_procgen;
 
 //  give any creature that still lacks a Jolt body (e.g. an offspring just born in the
 // sim) a deterministic avatar character so the GameSession physics bridge drives it and it
@@ -263,11 +242,18 @@ void AttachMissingCreatureBodies(Luminumbra::Systems::PhysicsSystem* phys,
     }
 }
 
-std::unique_ptr<Luminumbra::Client::Rml_UIManager> g_uiManager;
-std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> g_loading_visualizer;
-
-// --- Window-mode runtime state ---
-WindowState g_windowState;
+struct ClientRuntimeState {
+    std::unique_ptr<Luminumbra::Rendering::Camera> camera;
+    std::unique_ptr<Luminumbra::Client::PlayerController> playerController;
+    ClientAppContext app;
+    luminumbra::core::SystemConfig systemConfig;
+    std::shared_ptr<WorldDressingPending> worldDressing;
+    Luminumbra::JobHandle worldDressingHandle;
+    ProcgenPlantState procgen;
+    std::unique_ptr<Luminumbra::Client::Rml_UIManager> uiManager;
+    std::unique_ptr<Luminumbra::Client::WorldLoadingVisualizer> loadingVisualizer;
+    WindowState windowState;
+};
 
 // Debounce window for framebuffer resizes (seconds). A drag emits a burst of
 // framebuffer-size events; we coalesce them into one realloc once the size has
@@ -291,7 +277,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                                  Luminumbra::Rendering::RenderPipeline& renderPipeline,
                                  const std::filesystem::path& root_dir,
                                  ProcgenPlantState& g_procgen,
-                                 luminumbra::core::SystemConfig& g_systemConfig) {
+                                 luminumbra::core::SystemConfig& g_systemConfig,
+                                 std::shared_ptr<WorldDressingPending>& worldDressing,
+                                 Luminumbra::JobHandle& worldDressingHandle) {
     namespace anim = luminumbra::animation;
 
     // Consume: non-blocking poll of the JobHandle counter (
@@ -300,10 +288,10 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
     // caps (28000 trees / 14000 rocks / 40000 bushes / the herd) in
     // well under 20 frames; the synchronous path consumes everything
     // on this same frame, matching the old inline single-frame bring-up.
-    if (s_worldDressing && ws && s_worldDressing->world == ws &&
-        (!s_worldDressingHandle.counter ||
-         s_worldDressingHandle.counter->load(std::memory_order_acquire) <= 0)) {
-        WorldDressingPending& pend = *s_worldDressing;
+    if (worldDressing && ws && worldDressing->world == ws &&
+        (!worldDressingHandle.counter ||
+         worldDressingHandle.counter->load(std::memory_order_acquire) <= 0)) {
+        WorldDressingPending& pend = *worldDressing;
         auto& reg = gameSession->GetRegistry();
         const Luminumbra::Vec3 anchor = gameSession->GetMetadata().spawnPoint;
         auto terr = [&](float x, float z) {
@@ -789,8 +777,8 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     "sim.fire: spawned {}x{} combustible patch, centre alight", N, N);
             }
             // Fully consumed: release the pending result (idle again).
-            s_worldDressing.reset();
-            s_worldDressingHandle = {};
+            worldDressing.reset();
+            worldDressingHandle = {};
         }
     }
 }
@@ -1319,11 +1307,21 @@ static void HandlePlayerVerbs(ClientAppContext& g_app,
     }
 }
 
-// Grandfathered monolith: main() predates the scripts/tidy.sh complexity gate
-// and is tracked for decomposition. New functions must stay under the gate's
-// readability-function-cognitive-complexity threshold.
+// Grandfathered monolith: main() currently scores 1281 against the gate's 250 threshold.
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int main(int argc, char* argv[]) {
+    ClientRuntimeState runtime;
+    auto& g_camera = runtime.camera;
+    auto& g_playerController = runtime.playerController;
+    auto& g_app = runtime.app;
+    auto& g_systemConfig = runtime.systemConfig;
+    auto& s_worldDressing = runtime.worldDressing;
+    auto& s_worldDressingHandle = runtime.worldDressingHandle;
+    auto& g_procgen = runtime.procgen;
+    auto& g_uiManager = runtime.uiManager;
+    auto& g_loading_visualizer = runtime.loadingVisualizer;
+    auto& g_windowState = runtime.windowState;
+
     Log::Init();
     std::filesystem::path root_dir = ResolveRuntimeRoot(argc > 0 ? argv[0] : nullptr);
     std::string root_path_str = RuntimeRootString(root_dir);
@@ -1919,7 +1917,7 @@ int main(int argc, char* argv[]) {
             uiHotReload.SetEnabled(true);
             uiHotReload.WatchDirectory("data/ui", "rml");
             uiHotReload.WatchDirectory("data/ui", "rcss");
-            uiHotReload.SetReloadCallback([](const std::string&) {
+            uiHotReload.SetReloadCallback([&g_uiManager](const std::string&) {
                 if (g_uiManager)
                     g_uiManager->ReloadActiveDocument();
             });
@@ -2120,7 +2118,7 @@ int main(int argc, char* argv[]) {
         // hold the OLD world system pointer, which CreateWorld is about to replace.
         DrainBackgroundWorldScan(jobSystem);
         // same contract for the world-dressing placement job.
-        DrainWorldDressing(jobSystem);
+        DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
         if (gameSession->CreateWorld(name, seed, worldType, customPtr)) {
             // A real world replaces the  menu-backdrop world; stop the menu-branch from
             // rendering with the (now game-owned) camera/world.
@@ -2459,47 +2457,46 @@ int main(int argc, char* argv[]) {
             });
         // Wire the RML Settings screen (settings.rml) to the SystemConfig user settings.
         // Live-apply mirrors the  ImGui panel; Save persists the per-user overlay.
-        // Reference g_systemConfig directly (a global) so no captured local dangles.
         Luminumbra::Client::SettingsBridge sb;
-        sb.GetResolution = [] {
+        sb.GetResolution = [&] {
             return g_systemConfig.user().resolution;
         };
-        sb.SetResolution = [](const std::string& v) {
+        sb.SetResolution = [&](const std::string& v) {
             g_systemConfig.user().resolution = v;
         };
-        sb.GetWindowMode = [] {
+        sb.GetWindowMode = [&] {
             return g_systemConfig.user().window_mode;
         };
-        sb.SetWindowMode = [](const std::string& v) {
+        sb.SetWindowMode = [&](const std::string& v) {
             g_systemConfig.user().window_mode = v;
         };
-        sb.GetVSync = [] {
+        sb.GetVSync = [&] {
             return g_systemConfig.user().vsync;
         };
-        sb.SetVSync = [](bool v) {
+        sb.SetVSync = [&](bool v) {
             g_systemConfig.user().vsync = v;
             glfwSwapInterval(v ? 1 : 0);
         };
-        sb.GetFov = [] {
+        sb.GetFov = [&] {
             return g_systemConfig.user().fov;
         };
-        sb.SetFov = [](float v) {
+        sb.SetFov = [&](float v) {
             g_systemConfig.user().fov = v;
             if (g_camera)
                 g_camera->Zoom = v;
         };
-        sb.GetMouseSensitivity = [] {
+        sb.GetMouseSensitivity = [&] {
             return g_systemConfig.user().mouse_sensitivity;
         };
-        sb.SetMouseSensitivity = [](float v) {
+        sb.SetMouseSensitivity = [&](float v) {
             g_systemConfig.user().mouse_sensitivity = v;
             if (g_camera)
                 g_camera->MouseSensitivity = v;
         };
-        sb.GetUiScale = [] {
+        sb.GetUiScale = [&] {
             return g_systemConfig.user().ui_scale;
         };
-        sb.SetUiScale = [](float v) {
+        sb.SetUiScale = [&](float v) {
             // Clamp to the supported HUD-scale band and apply LIVE via the RmlUi context's
             // density-independent-pixel ratio (scales all px-based HUD/UI uniformly).
             if (v < 0.5f)
@@ -2510,40 +2507,40 @@ int main(int argc, char* argv[]) {
             if (g_uiManager && g_uiManager->GetContext())
                 g_uiManager->GetContext()->SetDensityIndependentPixelRatio(v);
         };
-        sb.GetAudioMaster = [] {
+        sb.GetAudioMaster = [&] {
             return g_systemConfig.user().audio_master;
         };
-        sb.SetAudioMaster = [&audioManager](float v) {
+        sb.SetAudioMaster = [&](float v) {
             g_systemConfig.user().audio_master = v;
             if (audioManager)
                 audioManager->SetMasterVolume(v);
         };
-        sb.GetAudioSfx = [] {
+        sb.GetAudioSfx = [&] {
             return g_systemConfig.user().audio_sfx;
         };
-        sb.SetAudioSfx = [&audioManager](float v) {
+        sb.SetAudioSfx = [&](float v) {
             g_systemConfig.user().audio_sfx = v;
             if (audioManager)
                 audioManager->SetSfxVolume(v); // applied live to the sfx bus
         };
-        sb.GetAudioMusic = [] {
+        sb.GetAudioMusic = [&] {
             return g_systemConfig.user().audio_music;
         };
-        sb.SetAudioMusic = [&audioManager](float v) {
+        sb.SetAudioMusic = [&](float v) {
             g_systemConfig.user().audio_music = v;
             if (audioManager)
                 audioManager->SetMusicVolume(v); // applied live to the music bus
         };
         // Controls: resolve the current binding label, and begin capturing the next key press
         // as a rebind (the existing key_callback applies it into user.keybinds[action]).
-        sb.GetKeybind = [](const std::string& action) -> std::string {
+        sb.GetKeybind = [&](const std::string& action) -> std::string {
             for (const auto& def : Luminumbra::Client::kInputActionDefs) {
                 if (action == def.name)
                     return KeyDisplayLabel(g_systemConfig.keybind(def.name, def.default_key));
             }
             return "";
         };
-        sb.BeginRebind = [](const std::string& action) {
+        sb.BeginRebind = [&](const std::string& action) {
             for (std::size_t i = 0; i < Luminumbra::Client::kInputActionDefs.size(); ++i) {
                 if (action == Luminumbra::Client::kInputActionDefs[i].name) {
                     g_app.hud.rebindCaptureAction = static_cast<int>(i);
@@ -2551,7 +2548,7 @@ int main(int argc, char* argv[]) {
                 }
             }
         };
-        sb.Save = [] {
+        sb.Save = [&] {
             return g_systemConfig.SaveUserOverlay(
                 luminumbra::core::SystemConfig::DefaultUserOverlayPath());
         };
@@ -2567,16 +2564,17 @@ int main(int argc, char* argv[]) {
             g_uiManager->GetContext()->SetDensityIndependentPixelRatio(boot_ui_scale);
         }
         //  pause-menu actions route here (main_client owns game state + cursor).
-        g_uiManager->SetPauseActionCallback([window, &gameStateManager](const std::string& act) {
-            if (act == "resume") {
-                SetGamePaused(window, false);
-            } else if (act == "quit") {
-                SetGamePaused(window, false);
-                SetGameState(window, gameStateManager, GameState::MAIN_MENU);
-                if (g_uiManager)
-                    g_uiManager->RequestLoadDocument("main_menu.rml");
-            }
-        });
+        g_uiManager->SetPauseActionCallback(
+            [window, &gameStateManager, &g_uiManager](const std::string& act) {
+                if (act == "resume") {
+                    SetGamePaused(window, false);
+                } else if (act == "quit") {
+                    SetGamePaused(window, false);
+                    SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                    if (g_uiManager)
+                        g_uiManager->RequestLoadDocument("main_menu.rml");
+                }
+            });
     }
 
     glfwSetKeyCallback(window, key_callback);
@@ -2713,7 +2711,7 @@ int main(int argc, char* argv[]) {
             // drain any in-flight  scan before replacing the world.
             DrainBackgroundWorldScan(jobSystem);
             // same contract for the world-dressing placement job.
-            DrainWorldDressing(jobSystem);
+            DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
             if (gameSession->CreateWorld("Menu Vista", "424242", "mountains")) {
                 if (auto* ws = gameSession->GetWorldSystem()) {
                     gameSession->LoadWorldState();
@@ -3579,8 +3577,8 @@ int main(int argc, char* argv[]) {
                         dcbs.biome_name = [ws](float x, float z) -> std::string {
                             return ws->biome_table().name_for(ws->BiomeIdAt(x, z));
                         };
-                        dcbs.species_for_biome = [](const std::string& biome,
-                                                    std::size_t pick) -> int {
+                        dcbs.species_for_biome = [&g_app](const std::string& biome,
+                                                          std::size_t pick) -> int {
                             // Biome-appropriate species: pick among the species that
                             // inhabit the local biome (generalists included); fall back
                             // to the full roster if the biome lists none.
@@ -3614,7 +3612,9 @@ int main(int argc, char* argv[]) {
                                          renderPipeline,
                                          root_dir,
                                          g_procgen,
-                                         g_systemConfig);
+                                         g_systemConfig,
+                                         s_worldDressing,
+                                         s_worldDressingHandle);
                 }
                 // world_visual_sweep: the synchronous capture matrix runs at
                 // this exact point, before the per-frame render below.
@@ -4587,7 +4587,7 @@ int main(int argc, char* argv[]) {
     DrainBackgroundWorldScan(jobSystem);
     // the world-dressing placement job likewise queries the world
     // through its callbacks — drain it too.
-    DrainWorldDressing(jobSystem);
+    DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     gameSession.reset();
     mark_shutdown("game_session_reset");
     jobSystem.shutdown();
