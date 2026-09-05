@@ -414,7 +414,19 @@ TEST(ReflectionCoverage, EverySamplerBindingPassRegistersAndValidatesALayout) {
         fs::path(LUMINUMBRA_SOURCE_ROOT) / "src/luminumbra_client/rendering/passes";
     ASSERT_TRUE(fs::exists(passes_dir)) << "passes dir not found: " << passes_dir.string();
 
-    const std::map<std::string, std::string> kExempt;
+    // filename -> why it cannot register a layout. An exemption is not a waiver:
+    // the staleness check below fails if an exempt pass stops binding samplers,
+    // so an entry cannot quietly outlive its reason.
+    const std::map<std::string, std::string> kExempt{
+        {"LuminanceMeterPass.cpp",
+         "drives a COMPUTE shader (res/shaders/luminance_reduce.comp) built with raw "
+         "glCreateShader(GL_COMPUTE_SHADER), not the Shader class. Shader is "
+         "vertex+fragment only (Shader.h:14) and PassShaderLayout requires a vert/frag "
+         "pair, so there is no Shader to call ValidateLayout on and no entry this "
+         "registry can express. Covering compute programs means teaching Shader and "
+         "PassShaderLayouts about them, which is a change to the validation machinery "
+         "rather than to this pass."},
+    };
 
     std::vector<std::string> unvalidated;  // binds samplers but never validates
     std::vector<std::string> stale_exempt; // exempt but no longer binds samplers

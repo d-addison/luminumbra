@@ -54,19 +54,26 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/ShaderReflection.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/PassShaderLayouts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WorldLoadingVisualizer.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/AerialPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ChunkGeometryPool.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GBufferPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/HierarchicalCuller.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LightingPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LuminanceMeterPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShadowPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SkyboxPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ParticlePass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FoliagePass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/FroxelPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GlassOitPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/PlantProcgenPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GroundDecalPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GodRaysPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/DebugViewPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SsaoPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/TaauPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterfallPass.cpp
 
     # World (client-side)
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenOverride.cpp
