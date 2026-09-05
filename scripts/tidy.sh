@@ -59,21 +59,18 @@ gate_checks+=",performance-unnecessary-value-param"
 gate_checks+=",cppcoreguidelines-avoid-non-const-global-variables"
 gate_checks+=",readability-function-cognitive-complexity"
 
-# The non-const globals in these translation units are already tracked for
-# decomposition. Keep every other blocking check enabled there while enforcing
-# cppcoreguidelines-avoid-non-const-global-variables everywhere else.
+# Keep every other blocking check enabled for translation units with known
+# non-const global state while enforcing the check everywhere else.
 tracked_global_tus=(
-    "src/luminumbra_client/main_client.cpp"
-    # Runtime-scenario state ownership is tracked by the planned harness decomposition.
-    "src/luminumbra_client/core/RuntimeScenarioHarness.cpp"
+    # Owns the four process-wide GL-debug diagnostic counters.
     "src/luminumbra_client/core/RuntimeScenarioConfig.cpp"
+    # Owns the GNS initialization flag and live-transport callback registry.
     "src/luminumbra_common/net/GnsTransport.cpp"
 )
 tracked_global_gate_checks="$gate_checks,-cppcoreguidelines-avoid-non-const-global-variables"
 
 # Threshold 250 is the smallest round value that grandfathers every existing
-# function (current worst first-party function scores 243; main_client.cpp's
-# main() carries an explicit NOLINT and is tracked for decomposition).
+# function (current worst first-party function scores 243).
 gate_config='{
   "Checks": "'"$gate_checks"'",
   "WarningsAsErrors": "*",
