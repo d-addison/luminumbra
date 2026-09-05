@@ -34,6 +34,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/net/ReplicationEndpoint.cpp
     # Steamworks ISteamNetworkingSockets transport (body guarded by
     # LUMINUMBRA_ENABLE_STEAM; compiles to nothing when the SDK is not wired in).
+    ${CMAKE_CURRENT_LIST_DIR}/net/NetSocketsTransport.cpp
     ${CMAKE_CURRENT_LIST_DIR}/net/SteamNetworkingTransport.cpp
     # standalone GameNetworkingSockets transport (body guarded by
     # LUMINUMBRA_ENABLE_GNS; compiles to nothing when GNS is not wired in).

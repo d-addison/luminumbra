@@ -22,6 +22,8 @@ from typing import Any, Sequence
 
 SCHEMA = "luminumbra.perf_run.v2"
 COMPARISON_SCHEMA = "luminumbra.perf_comparison.v1"
+REBASELINE_SCHEMA = "luminumbra.performance_rebaseline.v1"
+REBASELINE_PATH = Path(__file__).with_name("baselines") / "rebaseline.json"
 UNEVALUATED = 125
 MIN_GATING_SAMPLES = 20
 MIN_EFFECT_PERCENT = 5.0
@@ -593,6 +595,51 @@ def load_run(path: Path) -> dict[str, Any]:
     return document
 
 
+def validate_rebaseline(document: Any) -> dict[str, str]:
+    """Validate the tracked, single-use comparability-key transition."""
+    required = {
+        "schema",
+        "retired_comparability_key",
+        "replacement_comparability_key",
+        "reason",
+    }
+    if not isinstance(document, dict) or set(document) != required:
+        raise ValueError("re-baseline declaration fields are invalid")
+    if document.get("schema") != REBASELINE_SCHEMA:
+        raise ValueError(f"re-baseline schema must be {REBASELINE_SCHEMA}")
+    retired = document.get("retired_comparability_key")
+    replacement = document.get("replacement_comparability_key")
+    if not isinstance(retired, str) or not re.fullmatch(r"[0-9a-f]{64}", retired):
+        raise ValueError("retired comparability key must be a SHA-256 digest")
+    if not isinstance(replacement, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", replacement
+    ):
+        raise ValueError("replacement comparability key must be a SHA-256 digest")
+    if retired == replacement:
+        raise ValueError("retired and replacement comparability keys must differ")
+    reason = document.get("reason")
+    if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 1000:
+        raise ValueError("re-baseline reason must be non-empty prose of at most 1000 characters")
+    return {
+        "schema": REBASELINE_SCHEMA,
+        "retired_comparability_key": retired,
+        "replacement_comparability_key": replacement,
+        "reason": " ".join(reason.split()),
+    }
+
+
+def load_rebaseline(path: Path | None = None) -> dict[str, str] | None:
+    """Load the tracked declaration; absence means the strict default applies."""
+    path = REBASELINE_PATH if path is None else path
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"re-baseline declaration is invalid: {exc}") from exc
+    return validate_rebaseline(document)
+
+
 def mann_whitney_p(left: Sequence[float], right: Sequence[float]) -> float:
     values = list(left) + list(right)
     ordered_indices = sorted(range(len(values)), key=values.__getitem__)
@@ -704,7 +751,9 @@ def compare_runs(
     candidate: dict[str, Any],
     limit: float,
     min_samples: int = MIN_GATING_SAMPLES,
+    rebaseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    declaration = validate_rebaseline(rebaseline) if rebaseline is not None else None
     result: dict[str, Any] = {
         "schema": COMPARISON_SCHEMA,
         "status": "unevaluated",
@@ -730,6 +779,16 @@ def compare_runs(
         "reasons": [],
         "metrics": {},
     }
+    if declaration is not None:
+        result["rebaseline"] = {
+            "applied": False,
+            "retired_comparability_key": declaration["retired_comparability_key"],
+            "replacement_comparability_key": declaration[
+                "replacement_comparability_key"
+            ],
+            "reason": declaration["reason"],
+            "warning": "declaration does not match this base/candidate transition",
+        }
     if not math.isfinite(limit) or limit <= 0 or min_samples < 2:
         result["reasons"] = ["comparison policy is invalid"]
         return result
@@ -740,6 +799,20 @@ def compare_runs(
         result["reasons"] = ["only gating runs can produce a comparison verdict"]
         return result
     if base["comparability_key"] != candidate["comparability_key"]:
+        if declaration is not None and (
+            base["comparability_key"]
+            == declaration["retired_comparability_key"]
+            and candidate["comparability_key"]
+            == declaration["replacement_comparability_key"]
+        ):
+            result["status"] = "evaluated"
+            result["verdict"] = "rebaseline"
+            result["reasons"] = [
+                f"comparability mismatch explicitly re-baselined: {declaration['reason']}"
+            ]
+            result["rebaseline"]["applied"] = True
+            result["rebaseline"].pop("warning")
+            return result
         result["reasons"] = ["comparability keys differ"]
         return result
 
@@ -818,7 +891,11 @@ def compare_runs(
 def compare_command(args: argparse.Namespace) -> int:
     try:
         comparison = compare_runs(
-            load_run(args.base), load_run(args.candidate), args.limit, args.min_samples
+            load_run(args.base),
+            load_run(args.candidate),
+            args.limit,
+            args.min_samples,
+            load_rebaseline(),
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"performance comparison is invalid: {exc}", file=sys.stderr)
@@ -845,7 +922,16 @@ def validate_command(args: argparse.Namespace) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser()
+    root = argparse.ArgumentParser(
+        epilog=(
+            "Fixture re-baselines require a reviewed tools/perf/baselines/rebaseline.json "
+            "with schema luminumbra.performance_rebaseline.v1, the exact retired and "
+            "replacement comparability keys, and a prose reason. Treat it like a fixture "
+            "change: reviewers must verify both identities and the justification, then "
+            "remove the declaration after the stored base advances. A stale declaration "
+            "only emits evidence metadata and never waives another transition."
+        )
+    )
     commands = root.add_subparsers(dest="action", required=True)
 
     run = commands.add_parser("run", help="sample a command and write a performance run")
