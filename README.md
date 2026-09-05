@@ -23,7 +23,7 @@ the `luminumbra.persistence.world_manifest.v1` manifest with
 must be `6`; in-memory callers may omit it. Terrain shaping is always applied,
 and enabled caves always use the noise router. Content, hydrology, and biome
 controls remain available. Unknown future formats and corrupt data have distinct
-failures. See the [persistence contract](docs/engine-guide.md#world-format-compatibility)
+failures. See the [persistence contract](docs/engine-guide.md)
 for the retired selectors and validation details.
 
 ![Luminumbra main menu](docs/assets/screenshots/main-menu.png)

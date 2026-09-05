@@ -49,7 +49,7 @@ fallback applies only when no world system is attached.
 
 Persistence uses LMR1 container v2, the v1 world-manifest schema identifying that
 container version, and FSD2 payload v3. The
-[world format contract](engine-guide.md#world-format-compatibility) gives the
+[world format contract](engine-guide.md) gives the
 v0.3.0 refusal message, preset revision 6 and separate obsolete/future/corrupt
 failure behavior. Durable legacy worlds are not migrated.
 

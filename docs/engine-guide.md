@@ -269,7 +269,7 @@ High-resolution water is instead the supported `sim.water_high_res` configuratio
 flag, default off: Medium uses 8×8 cells per 16 m chunk (2 m cells), High uses
 16×16 (1 m cells). It changes hashed water state and must match on every peer.
 `GameSession` applies the chosen resolution at world creation/load; the underlying
-solver also supports amortized grid resizing. See the [water limits](known-limitations.md#simulation-and-world).
+solver also supports amortized grid resizing. See the [water limits](known-limitations.md).
 
 ## Embed the common engine
 

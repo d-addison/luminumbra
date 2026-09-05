@@ -15,7 +15,7 @@ and content formats may still change.
   the noise router; content, hydro and biome controls remain. Retired selectors
   are rejected regardless of value. Future-format and corruption errors remain
   distinct from this obsolete-world refusal. See the
-  [format contract](engine-guide.md#world-format-compatibility).
+  [format contract](engine-guide.md).
 - **Far-LOD terrain omits caves and edits.** Coarse distant tiers render
   surface authority only; caves and player voxel edits are not carried at
   distance. The [SHIELD SDF contract](shield/sdf-contract.md) defines the
@@ -102,7 +102,7 @@ rosters should not be confused with missing simulation wiring.
   poses are the remaining history gap.
 - **Tree impostors require a successful atlas bake.** They default on at startup;
   `LUMIN_TREE_IMPOSTORS=0` disables them. See the
-  [environment controls](engine-guide.md#environment-controls) for exact parsing.
+  [environment controls](engine-guide.md) for exact parsing.
 
 ## Testing and CI
 

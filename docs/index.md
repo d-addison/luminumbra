@@ -15,7 +15,7 @@ far-LOD payload v3. Explicit preset revisions must be `schema_rev: 6`; omission
 remains accepted for in-memory callers. Shaping is unconditional and enabled
 caves use the noise router, while content, hydrology, and biome controls remain.
 Future-format and corruption failures are separate from obsolete-world refusal.
-See [world format compatibility](engine-guide.md#world-format-compatibility).
+See [world format compatibility](engine-guide.md).
 
 ## Start here
 

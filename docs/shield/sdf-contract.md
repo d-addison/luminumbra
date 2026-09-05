@@ -13,7 +13,7 @@ Current durable storage uses LMR1 container v2, the
 and FSD2 far-LOD payload v3. Explicit preset `schema_rev` must be `6`; in-memory
 callers may omit it. Older worlds have no migration path. Unknown future versions
 and corrupt data produce separate failures; see the
-[persistence contract](../engine-guide.md#world-format-compatibility).
+[persistence contract](../engine-guide.md).
 
 Shaping is unconditional. `generation_params.terrain.shaping.enabled` and
 `generation_params.features.cave_style` are rejected whenever present, regardless
