@@ -56,6 +56,27 @@ constexpr u64 ToolchainHash(u64 msvc, u64 gcc_clang) {
 #endif
 }
 
+u64 VersionedZeroBrickHash(u64 legacy_stream_hash, u64 params_hash) {
+    u64 hash = legacy_stream_hash;
+    const auto mix = [&hash](const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i) {
+            hash ^= static_cast<u64>(bytes[i]);
+            hash *= 1099511628211ull;
+        }
+    };
+    constexpr char magic[] = {'F', 'S', 'D', '2'};
+    constexpr u16 version = 2u;
+    constexpr u8 edited = 0u;
+    constexpr u64 brick_count = 0u;
+    mix(magic, sizeof(magic));
+    mix(&version, sizeof(version));
+    mix(&params_hash, sizeof(params_hash));
+    mix(&edited, sizeof(edited));
+    mix(&brick_count, sizeof(brick_count));
+    return hash;
+}
+
 TerrainGenParams FixtureParams() {
     TerrainGenParams params;
     params.base_frequency = 0.005f;
@@ -236,7 +257,7 @@ void WriteTestValue(std::string& buffer, std::size_t offset, const T& value) {
 
 struct Fsd2TestLayout {
     std::size_t tier = 6u;
-    std::size_t height_count = 29u;
+    std::size_t height_count = 28u;
     std::size_t descriptor_stream = 0u;
     std::size_t density_stream = 0u;
 };
@@ -638,7 +659,7 @@ TEST(FarLodStoreTest, BrickUpsertsUseCanonicalOrderAndRejectDuplicateStreams) {
     EXPECT_FALSE(errors.empty());
 }
 
-TEST(FarLodStoreTest, LegacyEditedHeightRecordMigratesWithoutLosingSamples) {
+TEST(FarLodStoreTest, LegacyEditedHeightRecordIsRefused) {
     const TerrainGenParams params = FixtureParams();
     const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
     const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
@@ -663,44 +684,12 @@ TEST(FarLodStoreTest, LegacyEditedHeightRecordMigratesWithoutLosingSamples) {
         &errors));
     ASSERT_TRUE(errors.empty());
 
-    FarLodTile loaded;
-    ASSERT_TRUE(
-        store.load_tile(legacy.tier, legacy.rx, legacy.rz, params_hash + 1u, loaded, &errors));
-    EXPECT_TRUE(errors.empty());
-    EXPECT_TRUE(loaded.edited);
-    EXPECT_TRUE(loaded.legacy_surface_authority);
-    EXPECT_EQ(loaded.height_q, legacy.height_q);
-    EXPECT_EQ(loaded.material, legacy.material);
-    for (u8 flags : loaded.flags) {
-        EXPECT_NE(flags & kFarLodSampleFlagEdited, 0u);
-        EXPECT_NE(flags & kFarLodSampleFlagWater, 0u);
-    }
-
-    ASSERT_TRUE(store.save_tile(loaded, &errors));
-    std::vector<WorldSaveService::ContainerRecord> migrated_records;
-    ASSERT_TRUE(WorldSaveService::read_container_records(
-        WorldSaveService::region_file_path(save_dir.path, legacy.rx, legacy.rz),
-        migrated_records,
-        &errors));
-    ASSERT_EQ(migrated_records.size(), 1u);
-    ASSERT_GE(migrated_records.front().payload.size(), 4u);
-    EXPECT_EQ(std::memcmp(migrated_records.front().payload.data(), "FSD2", 4u), 0);
-
-    FarLodSdfSnapshot replacement = AuthoritativeSdfSnapshot(IVec3(-32, 0, 64), 1u);
-    std::string reduction_error;
-    ASSERT_EQ(ReduceChunkSdfIntoFarTile(loaded, replacement, &reduction_error),
-              FarLodSdfReduceResult::Inserted)
-        << reduction_error;
-    const u32 side = loaded.samples_per_side;
-    for (u32 z = 0; z <= 2u; ++z) {
-        for (u32 x = 0; x <= 2u; ++x) {
-            EXPECT_EQ(loaded.flags[x + z * side] & kFarLodSampleFlagEdited, 0u);
-        }
-    }
-    EXPECT_NE(loaded.flags[3u + 3u * side] & kFarLodSampleFlagEdited, 0u);
-    EXPECT_TRUE(loaded.legacy_surface_authority);
-    EXPECT_EQ(loaded.height_q[0], legacy.height_q[0]);
-    EXPECT_EQ(loaded.material[0], legacy.material[0]);
+    FarLodTile untouched;
+    untouched.rx = 777;
+    EXPECT_FALSE(
+        store.load_tile(legacy.tier, legacy.rx, legacy.rz, params_hash + 1u, untouched, &errors));
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(untouched.rx, 777);
 }
 
 TEST(FarLodStoreTest, MalformedPristineIsCacheMissButMalformedAuthorityIsHardError) {
@@ -876,7 +865,8 @@ TEST(FarLodStoreTest, PristineTileBuildIsDeterministic) {
     EXPECT_FALSE(first.edited);
     EXPECT_EQ(ComputeFarLodTileHash(first), ComputeFarLodTileHash(second));
     EXPECT_EQ(ComputeFarLodTileHash(first),
-              ToolchainHash(0x0d8e8dd980e41349ull, 0xf03d3a5d97fcd4aeull))
+              VersionedZeroBrickHash(ToolchainHash(0x0d8e8dd980e41349ull, 0xf03d3a5d97fcd4aeull),
+                                     params_hash))
         << "pristine far-LOD tile bytes changed";
     std::printf("farlod fixture tile hash (seed %d, F1, r0.0): %016llx\n",
                 kFixtureSeed,
@@ -894,77 +884,6 @@ TEST(FarLodStoreTest, PristineTileBuildIsDeterministic) {
     for (Luminumbra::u8 material : first.material) {
         EXPECT_NE(material, static_cast<Luminumbra::u8>(MaterialType::Air));
     }
-}
-
-TEST(FarLodStoreTest, PregenHashEqualsRebuildFromLiveOnPristineTerrain) {
-    // The far-tile determinism gate: a pristine tile built analytically and
-    // the same tile after downsampling an UNEDITED chunk's generated 17x17
-    // heightmap must hash equal (the live heightmap and GetTerrainHeightAt
-    // sample the same height function; 1/16 m quantization absorbs the
-    // batch-vs-scalar noise epsilon).
-    const TerrainGenParams params = FixtureParams();
-    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
-    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
-
-    const FarLodTile pregen = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
-    const u64 pregen_hash = ComputeFarLodTileHash(pregen);
-
-    for (const IVec3 coords : {IVec3(0, 1, 0), IVec3(3, 1, 5), IVec3(31, 1, 31)}) {
-        Chunk chunk(coords);
-        world.GenerateChunkData(chunk); // full generation, pristine heightmap
-        FarLodTile rebuilt = pregen;
-        const std::size_t written =
-            ApplyChunkHeightmapToFarLodTile(rebuilt, chunk, /*mark_edited=*/false);
-        EXPECT_EQ(written, 25u) << "F1: 16 m footprint / 4 m step + shared border = 5x5 samples";
-        EXPECT_FALSE(rebuilt.edited);
-        EXPECT_EQ(ComputeFarLodTileHash(rebuilt), pregen_hash)
-            << "unedited chunk heightmap must not change the pristine tile (chunk " << coords.x
-            << "," << coords.z << ")";
-    }
-
-    // F2 sees the same chunk at 8 m: 3x3 samples.
-    const FarLodTile pregen_f2 = BuildPristineFarLodTile(world, FarLodTier::F2, 0, 0, params_hash);
-    Chunk chunk(IVec3(4, 1, 4));
-    world.GenerateChunkData(chunk);
-    FarLodTile rebuilt_f2 = pregen_f2;
-    EXPECT_EQ(ApplyChunkHeightmapToFarLodTile(rebuilt_f2, chunk, false), 9u);
-    EXPECT_EQ(ComputeFarLodTileHash(rebuilt_f2), ComputeFarLodTileHash(pregen_f2));
-
-    // Chunks outside the region write nothing.
-    Chunk outside(IVec3(40, 1, 0));
-    world.GenerateChunkData(outside);
-    FarLodTile untouched = pregen;
-    EXPECT_EQ(ApplyChunkHeightmapToFarLodTile(untouched, outside, false), 0u);
-}
-
-TEST(FarLodStoreTest, EditedRebuildMarksTileAuthoritative) {
-    const TerrainGenParams params = FixtureParams();
-    const SHIELD_WorldSystem world(nullptr, nullptr, params, kFixtureSeed);
-    const u64 params_hash = ComputeTerrainParamsHash(params, kFixtureSeed);
-
-    const FarLodTile pristine = BuildPristineFarLodTile(world, FarLodTier::F1, 0, 0, params_hash);
-
-    Chunk chunk(IVec3(2, 1, 2));
-    world.GenerateChunkData(chunk);
-    for (float& height : chunk.heightmap_data) {
-        height += 5.0f; // player terraforming
-    }
-    chunk.mark_voxel_data_dirty();
-
-    FarLodTile edited = pristine;
-    const std::size_t written =
-        ApplyChunkHeightmapToFarLodTile(edited, chunk, /*mark_edited=*/true);
-    EXPECT_EQ(written, 25u);
-    EXPECT_TRUE(edited.edited);
-    EXPECT_NE(ComputeFarLodTileHash(edited), ComputeFarLodTileHash(pristine));
-
-    std::size_t edited_samples = 0;
-    for (Luminumbra::u8 flags : edited.flags) {
-        if (flags & kFarLodSampleFlagEdited) {
-            ++edited_samples;
-        }
-    }
-    EXPECT_EQ(edited_samples, 25u);
 }
 
 TEST(FarLodStoreTest, TilePersistenceRoundTripsThroughLmr1Container) {
@@ -1158,14 +1077,13 @@ TEST(FarLodStoreTest, PristineCacheMissesOnParamsHashMismatchEditedLoadsAnyway) 
     EXPECT_FALSE(store.load_tile(FarLodTier::F2, 0, 0, other_params_hash, loaded, &errors));
     EXPECT_TRUE(errors.empty()) << "params mismatch on a pristine tile must be a clean miss";
 
-    // Edited tile: authoritative - loads regardless of the params hash.
+    // A tile with authoritative SDF data loads regardless of the params hash.
     FarLodTile edited = pristine;
-    Chunk chunk(IVec3(1, 1, 1));
-    world.GenerateChunkData(chunk);
-    for (float& height : chunk.heightmap_data) {
-        height -= 3.0f;
-    }
-    ASSERT_GT(ApplyChunkHeightmapToFarLodTile(edited, chunk, true), 0u);
+    std::string reduction_error;
+    ASSERT_EQ(ReduceChunkSdfIntoFarTile(
+                  edited, AuthoritativeSdfSnapshot(IVec3(1, 1, 1), 1u), &reduction_error),
+              FarLodSdfReduceResult::Inserted)
+        << reduction_error;
     ASSERT_TRUE(edited.edited);
     ASSERT_TRUE(store.save_tile(edited, &errors));
     FarLodTile loaded_edited;

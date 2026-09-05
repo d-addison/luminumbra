@@ -38,8 +38,6 @@ namespace Luminumbra::Persistence {
 namespace {
 
 constexpr const char* kChunksDirectoryName = "chunks";
-constexpr const char* kWorldStateFileName = "world-state.json";
-constexpr const char* kWorldStateBackupFileName = "world-state.json.bak";
 constexpr const char* kRegionDirectoryName = "region";
 constexpr const char* kWorldManifestFileName = "world-manifest.json";
 constexpr const char* kWorldManifestSchema = "luminumbra.persistence.world_manifest.v1";
@@ -47,7 +45,7 @@ constexpr const char* kRegionFileExtension = ".lmr";
 
 // Container constants (the deterministic runtime contract section 3).
 constexpr char kRegionMagic[4] = {'L', 'M', 'R', '1'};
-constexpr std::uint16_t kRegionVersion = 1;
+constexpr std::uint16_t kRegionVersion = 2;
 // Header: magic u32 | version u16 | record_count u16.
 constexpr std::size_t kRegionFileHeaderSize = 8;
 // Record header: u64 id | u8 lod_level | u8 flags | u32 uncompressed_size |
@@ -454,9 +452,11 @@ bool ReadRegionFile(const std::filesystem::path& path,
     const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
     const std::uint16_t version = ReadU16(data + 4);
     if (version != kRegionVersion) {
-        AddError(errors,
-                 "unsupported LMR1 container version " + std::to_string(version) + ": " +
-                     path.string());
+        AddError(
+            errors,
+            "region file uses retired pre-v0.3.0 LMR1 container version " +
+                std::to_string(version) +
+                " and cannot be opened; create a new world with v0.3.0 or later: " + path.string());
         return false;
     }
     const std::uint16_t record_count = ReadU16(data + 6);
@@ -646,7 +646,7 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 } // namespace
 
 std::filesystem::path WorldSaveService::world_state_path(const std::filesystem::path& save_dir) {
-    return save_dir / kChunksDirectoryName / kWorldStateFileName;
+    return save_dir / kChunksDirectoryName / "world-state.json";
 }
 
 std::filesystem::path WorldSaveService::region_directory(const std::filesystem::path& save_dir) {
@@ -727,9 +727,6 @@ void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,
 bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
     std::error_code ec;
     if (std::filesystem::exists(world_manifest_path(save_dir), ec) && !ec) {
-        return true;
-    }
-    if (std::filesystem::exists(world_state_path(save_dir), ec) && !ec) {
         return true;
     }
     const std::filesystem::path region_dir = region_directory(save_dir);
@@ -907,12 +904,10 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
 bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>& errors) const {
-    // v2 sniff: a world manifest or any LMR1 region file selects the region
-    // container; otherwise fall back to the legacy v1 single snapshot.
     const std::filesystem::path region_dir = region_directory(save_dir);
     std::error_code ec;
     std::vector<std::filesystem::path> region_files;
-    bool v2_present = std::filesystem::exists(world_manifest_path(save_dir), ec) && !ec;
+    const bool manifest_present = std::filesystem::exists(world_manifest_path(save_dir), ec) && !ec;
     if (std::filesystem::exists(region_dir, ec) && !ec) {
         for (const auto& entry : std::filesystem::directory_iterator(region_dir, ec)) {
             if (!ec && entry.is_regular_file() && IsRegionFileName(entry.path())) {
@@ -920,76 +915,42 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             }
         }
     }
-    if (!region_files.empty()) {
-        v2_present = true;
+    if (!manifest_present && region_files.empty()) {
+        return false;
     }
 
-    if (v2_present) {
-        std::sort(region_files.begin(), region_files.end());
+    std::sort(region_files.begin(), region_files.end());
+    state.clear();
+    // A torn/corrupt region that fails partway (truncated payload, bit-flipped
+    // LZ4, a bad record after good ones) must NOT leave the caller with a
+    // partially-populated world it would mistake for a real one. Every hard-error
+    // exit clears the state so a rejected load is always observably empty (the
+    // load_world contract: false => no usable world). The clean-miss / success
+    // paths are unaffected.
+    const auto reject = [&state]() {
         state.clear();
-        // A torn/corrupt region that fails partway (truncated payload, bit-flipped
-        // LZ4, a bad record after good ones) must NOT leave the caller with a
-        // partially-populated world it would mistake for a real one. Every hard-error
-        // exit clears the state so a rejected load is always observably empty (the
-        // load_world contract: false => no usable world). The clean-miss / success
-        // paths are unaffected.
-        const auto reject = [&state]() {
-            state.clear();
-            return false;
-        };
-        for (const std::filesystem::path& path : region_files) {
-            std::vector<RegionRecord> records;
-            if (!ReadRegionFile(path, records, &errors)) {
+        return false;
+    };
+    for (const std::filesystem::path& path : region_files) {
+        std::vector<RegionRecord> records;
+        if (!ReadRegionFile(path, records, &errors)) {
+            return reject();
+        }
+        for (const RegionRecord& record : records) {
+            if (record.lod_level != 0) {
+                continue; // far-LOD tile records are read via FarLodStore
+            }
+            const std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, path, &errors);
+            if (!chunk) {
                 return reject();
             }
-            for (const RegionRecord& record : records) {
-                if (record.lod_level != 0) {
-                    continue; // far-LOD tile records are read via FarLodStore
-                }
-                const std::shared_ptr<Chunk> chunk = DecodeChunkRecord(record, path, &errors);
-                if (!chunk) {
-                    return reject();
-                }
-                if (!state.insert_chunk(chunk)) {
-                    errors.push_back("duplicate chunk id across region files: " + path.string());
-                    return reject();
-                }
-            }
-        }
-        return true;
-    }
-
-    // Legacy v1 single-snapshot load (migration path; still fully supported).
-    const std::filesystem::path snapshot_path = world_state_path(save_dir);
-    std::error_code exists_error;
-    if (!std::filesystem::exists(snapshot_path, exists_error) || exists_error) {
-        // Fresh world: nothing has been persisted yet. Not an error.
-        return false;
-    }
-
-    std::ifstream input(snapshot_path, std::ios::binary);
-    if (!input.is_open()) {
-        errors.push_back("failed to open world state snapshot for reading: " +
-                         snapshot_path.string());
-        return false;
-    }
-
-    std::ostringstream buffer;
-    buffer << input.rdbuf();
-    if (input.bad()) {
-        errors.push_back("failed to read world state snapshot: " + snapshot_path.string());
-        return false;
-    }
-
-    const bool loaded = LoadWorldStreamingStateSnapshotJson(buffer.str(), state, errors);
-    if (loaded) {
-        for (const auto& chunk : state.snapshot_chunks()) {
-            if (chunk) {
-                chunk->mark_sdf_loaded_or_edited();
+            if (!state.insert_chunk(chunk)) {
+                errors.push_back("duplicate chunk id across region files: " + path.string());
+                return reject();
             }
         }
     }
-    return loaded;
+    return true;
 }
 
 std::string WorldSaveService::world_hash(const WorldStreamingState& state) const {
@@ -1118,23 +1079,6 @@ bool WorldSaveService::write_snapshot(const std::vector<std::shared_ptr<Chunk>>&
 
         if (!WriteWorldManifest(world_manifest_path(save_dir), errors)) {
             return false;
-        }
-
-        // First v2 save over a v1 world: retire the legacy snapshot to.bak
-        // so the migration is reversible and the v2 files are authoritative.
-        const std::filesystem::path v1_path = world_state_path(save_dir);
-        std::error_code v1_exists_error;
-        if (std::filesystem::exists(v1_path, v1_exists_error) && !v1_exists_error) {
-            const std::filesystem::path backup_path =
-                v1_path.parent_path() / kWorldStateBackupFileName;
-            std::error_code rename_error;
-            std::filesystem::remove(backup_path, rename_error);
-            rename_error.clear();
-            std::filesystem::rename(v1_path, backup_path, rename_error);
-            if (rename_error) {
-                AddError(errors, "failed to retire v1 snapshot to.bak: " + rename_error.message());
-                return false;
-            }
         }
 
         if (regions_written) {
