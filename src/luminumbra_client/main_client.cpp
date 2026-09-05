@@ -1906,9 +1906,8 @@ int main(int argc, char* argv[]) {
             // cell so the expensive GetTerrainHeightAt (full domain-warp Perlin) runs once per
             // cell, not once per ant per frame. Cleared if it grows (a new world re-keys the
             // cells).
-            static std::unordered_map<std::uint32_t, float> s_cellHeight;
-            if (s_cellHeight.size() > 8192)
-                s_cellHeight.clear();
+            if (g_app.foragers.cellHeight.size() > 8192)
+                g_app.foragers.cellHeight.clear();
             for (auto e : fgview) {
                 const auto& fg = fgview.get<Luminumbra::Components::ForagerComponent>(e);
                 auto& tf = fgview.get<Luminumbra::Components::TransformComponent>(e);
@@ -1926,23 +1925,23 @@ int main(int argc, char* argv[]) {
                 if (fws) {
                     const std::uint32_t cellKey = (static_cast<std::uint32_t>(fg.cell_x) << 16) |
                                                   static_cast<std::uint32_t>(fg.cell_z & 0xFFFF);
-                    auto it = s_cellHeight.find(cellKey);
-                    if (it == s_cellHeight.end())
-                        it = s_cellHeight.emplace(cellKey, fws->GetTerrainHeightAt(wx, wz)).first;
+                    auto it = g_app.foragers.cellHeight.find(cellKey);
+                    if (it == g_app.foragers.cellHeight.end())
+                        it = g_app.foragers.cellHeight
+                                 .emplace(cellKey, fws->GetTerrainHeightAt(wx, wz))
+                                 .first;
                     tf.position.y = it->second + 0.15f;
                 }
             }
             if (antCount > 0) {
-                static float s_forageLog = 0.0f;
-                static std::uint32_t s_lastDeliveries = 0;
-                s_forageLog += static_cast<float>(deltaTime);
-                if (s_forageLog >= 10.0f) {
-                    s_forageLog = 0.0f;
-                    if (totalDeliveries != s_lastDeliveries) {
+                g_app.foragers.forageLog += static_cast<float>(deltaTime);
+                if (g_app.foragers.forageLog >= 10.0f) {
+                    g_app.foragers.forageLog = 0.0f;
+                    if (totalDeliveries != g_app.foragers.lastDeliveries) {
                         LUMINUMBRA_CORE_INFO(
                             "Forager colony: {} total deliveries (double-bridge foraging live)",
                             totalDeliveries);
-                        s_lastDeliveries = totalDeliveries;
+                        g_app.foragers.lastDeliveries = totalDeliveries;
                     }
                 }
             }
@@ -1952,15 +1951,17 @@ int main(int argc, char* argv[]) {
             // read of the just-completed tick on this same (single) thread -> race-free;
             // the sim never reads the mirror back, so it is determinism-neutral. Gated by
             // LUMIN_SCENT_DECAL so the default render stays byte-identical until opted in.
-            static const bool s_scentDecal =
-                Luminumbra::Core::ReadEnvironment("LUMIN_SCENT_DECAL").has_value();
-            if (s_scentDecal) {
-                static Luminumbra::Rendering::ScentFieldRenderMirror s_scentMirror;
+            if (!g_app.foragers.scentDecalInitialized) {
+                g_app.foragers.scentDecal =
+                    Luminumbra::Core::ReadEnvironment("LUMIN_SCENT_DECAL").has_value();
+                g_app.foragers.scentDecalInitialized = true;
+            }
+            if (g_app.foragers.scentDecal) {
                 const auto* sf = gameSession->GetScentField();
                 const int n = gameSession->ScentFieldCells();
                 if (sf && n > 0) {
-                    if (s_scentMirror.cells != n)
-                        s_scentMirror.resize(n);
+                    if (g_app.foragers.scentMirror.cells != n)
+                        g_app.foragers.scentMirror.resize(n);
                     bool any = false;
                     float maxScent = 0.0f;
                     for (int z = 0; z < n; ++z) {
@@ -1968,8 +1969,8 @@ int main(int argc, char* argv[]) {
                             const std::size_t i = (static_cast<std::size_t>(z) * n + x) * 2;
                             const float food = static_cast<float>(sf->Sample(2, x, z));
                             const float home = static_cast<float>(sf->Sample(3, x, z));
-                            s_scentMirror.rg[i + 0] = food;
-                            s_scentMirror.rg[i + 1] = home;
+                            g_app.foragers.scentMirror.rg[i + 0] = food;
+                            g_app.foragers.scentMirror.rg[i + 1] = home;
                             if (food > 0.0f || home > 0.0f)
                                 any = true;
                             if (food > maxScent)
@@ -1979,18 +1980,18 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     // Calibration diagnostic: the decal shader's u_scentScale wants ~1/peak.
-                    static int s_scentLog = 0;
-                    if ((s_scentLog++ % 15) == 0)
+                    if ((g_app.foragers.scentLog++ % 15) == 0)
                         LUMINUMBRA_CORE_INFO("Scent decal: peak trail value = {:.4f}", maxScent);
-                    s_scentMirror.cell_size = gameSession->ScentCellSize();
-                    s_scentMirror.origin_x = gameSession->ScentCellToWorldX(0);
-                    s_scentMirror.origin_z = gameSession->ScentCellToWorldZ(0);
-                    s_scentMirror.any_scent = any;
-                    s_scentMirror.valid = true;
+                    g_app.foragers.scentMirror.cell_size = gameSession->ScentCellSize();
+                    g_app.foragers.scentMirror.origin_x = gameSession->ScentCellToWorldX(0);
+                    g_app.foragers.scentMirror.origin_z = gameSession->ScentCellToWorldZ(0);
+                    g_app.foragers.scentMirror.any_scent = any;
+                    g_app.foragers.scentMirror.valid = true;
                 } else {
-                    s_scentMirror.valid = false;
+                    g_app.foragers.scentMirror.valid = false;
                 }
-                renderPipeline.UpdateScentDecals(s_scentMirror); // upload before render_frame
+                renderPipeline.UpdateScentDecals(
+                    g_app.foragers.scentMirror); // upload before render_frame
             }
         }
 
@@ -2160,8 +2161,11 @@ int main(int argc, char* argv[]) {
                     // explosion. A slow yaw drift sweeps varied terrain (rivers/biomes). Self-exits
                     // after g_app.capture.profile_fly_seconds. UpdateNoclip directly advances
                     // position (bypasses physics); streaming anchor = GetPosition follows.
-                    static double s_profile_start = glfwGetTime();
-                    const double elapsed = glfwGetTime() - s_profile_start;
+                    if (!g_app.profileFly.initialized) {
+                        g_app.profileFly.start = glfwGetTime();
+                        g_app.profileFly.initialized = true;
+                    }
+                    const double elapsed = glfwGetTime() - g_app.profileFly.start;
                     g_camera->Yaw =
                         static_cast<float>(std::fmod(elapsed * 6.0, 360.0)); // ~1 rev / 60s
                     g_camera->Pitch = 0.0f;
@@ -2434,12 +2438,8 @@ int main(int argc, char* argv[]) {
                     // to these, so they must outlive every spawned creature (statics,
                     // exactly as before the extraction).
                     namespace anim = luminumbra::animation;
-                    static anim::Skeleton s_wildlife_skeleton;
-                    static anim::AnimationClip s_wildlife_idle;
-                    static bool s_dressing_dispatched =
-                        false; // process-once (was s_trees_scattered)
-                    if (!s_dressing_dispatched && ws) {
-                        s_dressing_dispatched = true;
+                    if (!g_app.worldDressing.dispatched && ws) {
+                        g_app.worldDressing.dispatched = true;
                         const Luminumbra::Vec3 anchor = gameSession->GetMetadata().spawnPoint;
                         // PROGRAMMATIC TREES/ROCKS/BUSHES, NO MODEL (owner): build the
                         // procedural palettes once (into the instanced static-mesh cache)
@@ -2486,8 +2486,8 @@ int main(int argc, char* argv[]) {
                                 "data/models/creatures/grovestrider/grovestrider.idle.lanim";
                             if (anim::LoadSkinnedMeshAsset(gmesh.string(), masset) &&
                                 anim::LoadAnimClipAsset(gidle.string(), iclip)) {
-                                s_wildlife_skeleton = anim::BuildSkeleton(masset);
-                                s_wildlife_idle = anim::BuildClip(iclip);
+                                g_app.worldDressing.wildlifeSkeleton = anim::BuildSkeleton(masset);
+                                g_app.worldDressing.wildlifeIdle = anim::BuildClip(iclip);
                                 pending->wildlife_ok = true;
                             }
                         }
@@ -2797,8 +2797,8 @@ int main(int argc, char* argv[]) {
                                         .decay_duration = 900u;
                                 }
                                 auto& pl = reg.emplace<anim::AnimationPlayerComponent>(e);
-                                pl.skeleton = &s_wildlife_skeleton;
-                                pl.clip = &s_wildlife_idle;
+                                pl.skeleton = &g_app.worldDressing.wildlifeSkeleton;
+                                pl.clip = &g_app.worldDressing.wildlifeIdle;
                                 pl.time = c.anim_phase * 2.0; // staggered phase
                                 pl.looping = true;
                                 if (phys) {
@@ -3200,18 +3200,15 @@ int main(int argc, char* argv[]) {
                         // nothing back .
                         if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderLiveWeather)) {
                             if (const auto* lweather = gameSession->GetWeatherSystem()) {
-                                static std::uint64_t s_last_strike_tick_done = 0;
-                                static int s_bolt_frames_left = 0;
-                                static Luminumbra::Rendering::LightningRenderState s_live_bolt;
                                 for (const auto& strike : lweather->StrikeSchedule()) {
                                     if (strike.strike_tick > sim_tick)
                                         continue; // not due yet
                                     if (strike.strike_tick + 2 < sim_tick)
                                         continue; // window passed
-                                    if (strike.strike_tick <= s_last_strike_tick_done &&
-                                        s_last_strike_tick_done != 0)
+                                    if (strike.strike_tick <= g_app.weather.lastStrikeTickDone &&
+                                        g_app.weather.lastStrikeTickDone != 0)
                                         continue;
-                                    s_last_strike_tick_done = strike.strike_tick;
+                                    g_app.weather.lastStrikeTickDone = strike.strike_tick;
                                     auto* lws = gameSession->GetWorldSystem();
                                     const float gy = lws ? lws->GetTerrainHeightAt(strike.world_x,
                                                                                    strike.world_z)
@@ -3232,7 +3229,7 @@ int main(int argc, char* argv[]) {
                                         glm::perspective(
                                             glm::radians(g_camera->Zoom), aspect, 0.1f, 10000.0f) *
                                         g_camera->GetViewMatrix();
-                                    s_live_bolt = {};
+                                    g_app.weather.liveBolt = {};
                                     const auto project = [&](const glm::vec3& wp) -> glm::vec2 {
                                         const glm::vec4 clip = vp * glm::vec4(wp, 1.0f);
                                         if (clip.w <= 0.0f)
@@ -3241,12 +3238,13 @@ int main(int argc, char* argv[]) {
                                     };
                                     const auto push_stroke =
                                         [&](const std::vector<glm::vec3>& stroke) {
-                                            if (!s_live_bolt.bolt_points_ndc.empty()) {
-                                                s_live_bolt.bolt_points_ndc.emplace_back(
+                                            if (!g_app.weather.liveBolt.bolt_points_ndc.empty()) {
+                                                g_app.weather.liveBolt.bolt_points_ndc.emplace_back(
                                                     -3.0f, -3.0f); // pen-up
                                             }
                                             for (const glm::vec3& wp : stroke) {
-                                                s_live_bolt.bolt_points_ndc.push_back(project(wp));
+                                                g_app.weather.liveBolt.bolt_points_ndc.push_back(
+                                                    project(wp));
                                             }
                                         };
                                     push_stroke(bolt.main_channel);
@@ -3255,27 +3253,28 @@ int main(int argc, char* argv[]) {
                                     }
                                     const glm::vec3 ground(strike.world_x, gy, strike.world_z);
                                     const float dist = glm::length(ground - g_camera->Position);
-                                    s_live_bolt.active = true;
+                                    g_app.weather.liveBolt.active = true;
                                     // Magnitude-scaled flash, attenuated with distance (a far
                                     // strike lights the sky, a near one lights the scene).
-                                    s_live_bolt.pulse_intensity =
+                                    g_app.weather.liveBolt.pulse_intensity =
                                         0.22f * std::clamp(strike.magnitude, 0.2f, 1.0f) /
                                         (1.0f + dist / 400.0f);
-                                    s_live_bolt.bolt_width_ndc = 0.010f;
-                                    s_live_bolt.bolt_glow_ndc = 0.034f;
-                                    s_live_bolt.strike_ndc = project(ground);
-                                    s_bolt_frames_left = 3; // a few frames of flash
+                                    g_app.weather.liveBolt.bolt_width_ndc = 0.010f;
+                                    g_app.weather.liveBolt.bolt_glow_ndc = 0.034f;
+                                    g_app.weather.liveBolt.strike_ndc = project(ground);
+                                    g_app.weather.boltFramesLeft = 3; // a few frames of flash
                                     //  hook: queue the physically-delayed thunder cue.
                                     g_app.audio.pendingThunder.push_back({strike.strike_tick,
                                                                           glfwGetTime(),
                                                                           dist,
                                                                           strike.magnitude});
                                 }
-                                if (s_bolt_frames_left > 0) {
-                                    renderPipeline.set_lightning_state(s_live_bolt);
-                                    if (--s_bolt_frames_left == 0) {
-                                        s_live_bolt = {};
-                                        renderPipeline.set_lightning_state(s_live_bolt); // clear
+                                if (g_app.weather.boltFramesLeft > 0) {
+                                    renderPipeline.set_lightning_state(g_app.weather.liveBolt);
+                                    if (--g_app.weather.boltFramesLeft == 0) {
+                                        g_app.weather.liveBolt = {};
+                                        renderPipeline.set_lightning_state(
+                                            g_app.weather.liveBolt); // clear
                                     }
                                 }
                             }
@@ -3285,7 +3284,6 @@ int main(int argc, char* argv[]) {
                         // (SnowCoverModel.h). The switch is enabled in the shipped config.
                         if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderSnowCover)) {
                             if (const auto* snow_weather = gameSession->GetWeatherSystem()) {
-                                static Luminumbra::Rendering::SnowCover::State s_snow;
                                 const auto ssample =
                                     snow_weather->SampleAt(Luminumbra::Vec3(g_camera->Position.x,
                                                                             g_camera->Position.y,
@@ -3297,8 +3295,11 @@ int main(int argc, char* argv[]) {
                                 const float sun_up =
                                     std::max(-renderPipeline.sun_direction().y, 0.0f);
                                 Luminumbra::Rendering::SnowCover::Advance(
-                                    s_snow, snowing, sun_up, static_cast<float>(deltaTime));
-                                renderPipeline.set_snow_cover(s_snow.cover01);
+                                    g_app.weather.snow,
+                                    snowing,
+                                    sun_up,
+                                    static_cast<float>(deltaTime));
+                                renderPipeline.set_snow_cover(g_app.weather.snow.cover01);
                             }
                         }
                         // Upload the simulation's
@@ -3380,8 +3381,7 @@ int main(int argc, char* argv[]) {
                     if (auto* foliage = renderPipeline.foliage()) {
                         auto* fol_ws = gameSession->GetWorldSystem();
                         if (fol_ws != nullptr && g_camera) {
-                            static bool s_foliage_loaded = false;
-                            if (!s_foliage_loaded) {
+                            if (!g_app.foliage.loaded) {
                                 foliage->load_scatter_set(root_dir /
                                                           "data/common/foliage/scatter_set.json");
                                 // Grass overhaul: concentrate the instance budget into a DENSE NEAR
@@ -3392,7 +3392,7 @@ int main(int argc, char* argv[]) {
                                 // ground..
                                 foliage->set_fade_distances(48.0f, 92.0f);
                                 foliage->set_density_scale(1.6f);
-                                s_foliage_loaded = true;
+                                g_app.foliage.loaded = true;
                             }
                             // skip the foliage CPU readback (a ~5 ms sync
                             // stall — see FoliagePass::set_readback_enabled) in
@@ -3423,9 +3423,6 @@ int main(int argc, char* argv[]) {
                             // foliage stays camera-responsive. Gated OFF while any scenario is
                             // active so every gate rebuilds byte-exact (mirrors the readback gating
                             // above) — zero gate/determinism impact.
-                            static std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter>
-                                s_cached_scatter;
-                            static std::uint64_t s_cached_scatter_sig = ~0ull;
                             const auto& fol_renderable = fol_ws->get_renderable_chunks();
                             std::uint64_t scatter_sig = fol_renderable.size();
                             for (const Luminumbra::Chunk* chunk : fol_renderable) {
@@ -3443,7 +3440,7 @@ int main(int argc, char* argv[]) {
                             }
                             const bool scatter_rebuild =
                                 (scenario_config.active() && !g_app.capture.play_paths) ||
-                                scatter_sig != s_cached_scatter_sig;
+                                scatter_sig != g_app.foliage.cachedScatterSig;
                             if (scatter_rebuild) {
                                 //  implementation note: each per-chunk ChunkScatter
                                 //  (GetTerrainHeightAt +
@@ -3453,21 +3450,15 @@ int main(int argc, char* argv[]) {
                                 // newly-streamed chunks instead of re-sampling every renderable
                                 // chunk (~130ms while moving). The y-band reject is cached too
                                 // (stored as accepted=false)..
-                                struct ScatterEntry {
-                                    bool accepted;
-                                    Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
-                                };
-                                static std::unordered_map<Luminumbra::ChunkID, ScatterEntry>
-                                    s_scatter_by_chunk;
-                                s_cached_scatter.clear();
-                                s_cached_scatter.reserve(fol_renderable.size());
+                                g_app.foliage.cachedScatter.clear();
+                                g_app.foliage.cachedScatter.reserve(fol_renderable.size());
                                 for (const Luminumbra::Chunk* chunk : fol_renderable) {
                                     if (chunk == nullptr) {
                                         continue;
                                     }
                                     const Luminumbra::ChunkID id = chunk->get_id();
-                                    auto it = s_scatter_by_chunk.find(id);
-                                    if (it == s_scatter_by_chunk.end()) {
+                                    auto it = g_app.foliage.scatterByChunk.find(id);
+                                    if (it == g_app.foliage.scatterByChunk.end()) {
                                         const Luminumbra::IVec3 c = chunk->get_coords();
                                         const float origin_x =
                                             static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
@@ -3481,7 +3472,7 @@ int main(int argc, char* argv[]) {
                                             fol_ws->GetTerrainHeightAt(center_x, center_z);
                                         const float chunk_y0 =
                                             static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
-                                        ScatterEntry entry{};
+                                        FoliageScatterEntry entry{};
                                         if (surf_h < chunk_y0 ||
                                             surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
                                             entry.accepted = false;
@@ -3495,23 +3486,24 @@ int main(int argc, char* argv[]) {
                                                           .density
                                                     : 0.3f;
                                             entry.accepted = true;
-                                            entry.cs.chunk_xz = glm::ivec2(c.x, c.z);
-                                            entry.cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
-                                            entry.cs.extent_m =
+                                            entry.scatter.chunk_xz = glm::ivec2(c.x, c.z);
+                                            entry.scatter.origin =
+                                                glm::vec3(origin_x, 0.0f, origin_z);
+                                            entry.scatter.extent_m =
                                                 static_cast<float>(Luminumbra::CHUNK_SIZE_X);
-                                            entry.cs.biome_id = biome_id;
-                                            entry.cs.density = density;
+                                            entry.scatter.biome_id = biome_id;
+                                            entry.scatter.density = density;
                                         }
-                                        it = s_scatter_by_chunk.emplace(id, entry).first;
+                                        it = g_app.foliage.scatterByChunk.emplace(id, entry).first;
                                     }
                                     if (it->second.accepted) {
-                                        s_cached_scatter.push_back(it->second.cs);
+                                        g_app.foliage.cachedScatter.push_back(it->second.scatter);
                                     }
                                 }
-                                s_cached_scatter_sig = scatter_sig;
+                                g_app.foliage.cachedScatterSig = scatter_sig;
                                 // Bound the cache: drop entries no longer renderable once it grows
                                 // large.
-                                if (s_scatter_by_chunk.size() > 4096) {
+                                if (g_app.foliage.scatterByChunk.size() > 4096) {
                                     std::unordered_set<Luminumbra::ChunkID> live;
                                     live.reserve(fol_renderable.size());
                                     for (const Luminumbra::Chunk* ch : fol_renderable) {
@@ -3519,16 +3511,16 @@ int main(int argc, char* argv[]) {
                                             live.insert(ch->get_id());
                                         }
                                     }
-                                    for (auto pit = s_scatter_by_chunk.begin();
-                                         pit != s_scatter_by_chunk.end();) {
+                                    for (auto pit = g_app.foliage.scatterByChunk.begin();
+                                         pit != g_app.foliage.scatterByChunk.end();) {
                                         pit = live.count(pit->first)
                                                   ? std::next(pit)
-                                                  : s_scatter_by_chunk.erase(pit);
+                                                  : g_app.foliage.scatterByChunk.erase(pit);
                                     }
                                 }
                             }
                             const std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter>&
-                                chunk_scatter = s_cached_scatter;
+                                chunk_scatter = g_app.foliage.cachedScatter;
                             rb_scatter_ms = std::chrono::duration<double, std::milli>(
                                                 std::chrono::steady_clock::now() - _rb_scatter_t0)
                                                 .count();                             //
@@ -3547,16 +3539,15 @@ int main(int argc, char* argv[]) {
                     // around the player. Spawned once; its origin follows the camera
                     // each frame so the motes are always present as you explore.
                     {
-                        static std::uint32_t s_ambient_motes =
-                            Luminumbra::Rendering::ParticlePass::kInvalidEmitter;
                         if (auto* particles = renderPipeline.particles()) {
-                            if (s_ambient_motes ==
+                            if (g_app.foliage.ambientMotes ==
                                 Luminumbra::Rendering::ParticlePass::kInvalidEmitter) {
-                                s_ambient_motes = particles->add_emitter(
+                                g_app.foliage.ambientMotes = particles->add_emitter(
                                     root_dir / "data/common/particles/ambient_motes.json",
                                     g_camera->Position);
                             } else {
-                                particles->set_emitter_origin(s_ambient_motes, g_camera->Position);
+                                particles->set_emitter_origin(g_app.foliage.ambientMotes,
+                                                              g_camera->Position);
                             }
                         }
                     }
@@ -3597,9 +3588,8 @@ int main(int argc, char* argv[]) {
                     // stream + atmosphere), then read the clean back buffer (BEFORE any UI
                     // overlay this frame) and write the screenshot, then close.
                     if (g_app.capture.scene_active) {
-                        static int s_scene_settle = 0;
-                        if (s_scene_settle < 55) {
-                            ++s_scene_settle;
+                        if (g_app.sceneCapture.settleFrames < 55) {
+                            ++g_app.sceneCapture.settleFrames;
                         } else {
                             int vw = 0, vh = 0;
                             glfwGetFramebufferSize(window, &vw, &vh);
@@ -3816,13 +3806,11 @@ int main(int argc, char* argv[]) {
                                 root_dir / "data/common/foliage/species", ferr);
                             g_app.hud.farmSpeciesLoaded = true;
                         }
-                        static bool s_fp = false, s_fw = false, s_ff = false, s_fh = false,
-                                    s_fv = false;
                         // V cycles the selected species to plant (data-driven; oak/wheat/...).
                         {
                             const bool fv_now = glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS;
                             const std::size_t n = g_app.hud.farmSpecies.all().size();
-                            if (fv_now && !s_fv && n > 0) {
+                            if (fv_now && !g_app.interactions.farmCycleSpecies && n > 0) {
                                 g_app.hud.farmSelectedSpecies =
                                     (g_app.hud.farmSelectedSpecies + 1) % static_cast<int>(n);
                                 if (audioManager)
@@ -3831,7 +3819,7 @@ int main(int argc, char* argv[]) {
                                     "Farm: selected species '{}'",
                                     g_app.hud.farmSpecies.all()[g_app.hud.farmSelectedSpecies].id);
                             }
-                            s_fv = fv_now;
+                            g_app.interactions.farmCycleSpecies = fv_now;
                         }
                         auto farmEdge = [&](Luminumbra::Client::InputAction a, bool& prev) {
                             const bool now =
@@ -3851,7 +3839,7 @@ int main(int argc, char* argv[]) {
                         auto& freg = gameSession->GetRegistry();
                         const std::uint64_t ftick = gameSession->GetSimulationTickCount();
                         using IA = Luminumbra::Client::InputAction;
-                        if (farmEdge(IA::FarmPlant, s_fp)) {
+                        if (farmEdge(IA::FarmPlant, g_app.interactions.farmPlant)) {
                             const auto& species = g_app.hud.farmSpecies.all();
                             if (!species.empty()) {
                                 const luminumbra::foliage::SpeciesTemplate& tmpl =
@@ -3897,15 +3885,15 @@ int main(int argc, char* argv[]) {
                             return e;
                         };
                         const glm::vec3 aimSnd(aim.x, aim.y, aim.z);
-                        if (farmEdge(IA::FarmWater, s_fw)) {
+                        if (farmEdge(IA::FarmWater, g_app.interactions.farmWater)) {
                             if (g_app.hud.farming.Water(freg, fpick()) && audioManager)
                                 audioManager->PlayOneShot("farm_water", aimSnd);
                         }
-                        if (farmEdge(IA::FarmFertilize, s_ff)) {
+                        if (farmEdge(IA::FarmFertilize, g_app.interactions.farmFertilize)) {
                             if (g_app.hud.farming.Fertilize(freg, fpick()) && audioManager)
                                 audioManager->PlayOneShot("farm_fertilize", aimSnd);
                         }
-                        if (farmEdge(IA::FarmHarvest, s_fh)) {
+                        if (farmEdge(IA::FarmHarvest, g_app.interactions.farmHarvest)) {
                             const auto hr = g_app.hud.farming.Harvest(freg, fpick());
                             if (hr.harvestable) {
                                 if (audioManager)
@@ -3935,13 +3923,12 @@ int main(int argc, char* argv[]) {
                     if (g_playerController && currentState == GameState::IN_GAME &&
                         !scenario_config.active() && !g_app.hud.paused && gameSession && g_camera &&
                         gameSession->GetWorldSystem()) {
-                        static bool s_dig = false, s_fill = false;
                         const bool dig_now = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
                         const bool fill_now = glfwGetKey(window, GLFW_KEY_T) == GLFW_PRESS;
-                        const bool dig_fired = dig_now && !s_dig;
-                        s_dig = dig_now;
-                        const bool fill_fired = fill_now && !s_fill;
-                        s_fill = fill_now;
+                        const bool dig_fired = dig_now && !g_app.interactions.terraformDig;
+                        g_app.interactions.terraformDig = dig_now;
+                        const bool fill_fired = fill_now && !g_app.interactions.terraformFill;
+                        g_app.interactions.terraformFill = fill_now;
                         if (dig_fired || fill_fired) {
                             // Aim where the player looks: a point ~5 m down the camera ray.
                             constexpr float kReach = 5.0f, kRadius = 3.0f;
@@ -3984,10 +3971,8 @@ int main(int argc, char* argv[]) {
                                 // DRAINS, a fill DAMS) -> a one-shot rush so the coupling is heard,
                                 // not just seen.
                                 auto* tws = gameSession->GetWorldSystem();
-                                static const float ring[5][2] = {
-                                    {0, 0}, {4, 0}, {-4, 0}, {0, 4}, {0, -4}};
                                 bool bordersWater = false;
-                                for (const auto& o : ring) {
+                                for (const auto& o : g_app.interactions.waterProbeRing) {
                                     const float wx = aim.x + o[0], wz = aim.z + o[1];
                                     if (tws->WaterLevelAt(wx, wz) >
                                         tws->GetTerrainHeightAt(wx, wz) + 0.4f) {
@@ -4317,8 +4302,7 @@ int main(int argc, char* argv[]) {
                 std::chrono::duration<double, std::milli>(_now - _frameStart).count();
             const double _presentMs =
                 std::chrono::duration<double, std::milli>(_now - _beforeSwap).count();
-            static int _slowN = 0;
-            if (_wallMs > 12.0 && _slowN++ < 400) {
+            if (_wallMs > 12.0 && g_app.telemetry.slowFrameCount++ < 400) {
                 const double _other =
                     _wallMs - rb_sim_ms - rb_stream_ms - rb_render_call_ms - _presentMs;
                 LUMINUMBRA_CORE_WARN("SLOWFRAME {:.1f}ms ({:.0f}fps): sim={:.1f} stream={:.1f} "
@@ -4361,7 +4345,7 @@ int main(int argc, char* argv[]) {
                     .count();
             const double present_ms =
                 std::chrono::duration<double, std::milli>(rb_now - g_rb_before_swap).count();
-            static std::chrono::steady_clock::time_point rb_prev_end{};
+            auto& rb_prev_end = g_app.benchmark.previousFrameEnd;
             double wall_ms = 0.0;
             if (rb_prev_end.time_since_epoch().count() != 0)
                 wall_ms = std::chrono::duration<double, std::milli>(rb_now - rb_prev_end).count();
@@ -4375,17 +4359,39 @@ int main(int argc, char* argv[]) {
             const bool nv = g_rb_nvml_ok && g_rb_nvml.sample(gpu_power_w, gpu_clock_mhz);
 
             const auto& s = renderPipeline.get_last_render_pass_stats();
-            static int rb_warm = 0, rb_count = 0, rb_nv_count = 0;
-            static double rb_shadow = 0, rb_gbuffer = 0, rb_ssao = 0, rb_ssao_blur = 0,
-                          rb_lighting = 0, rb_water = 0, rb_skybox = 0, rb_particle = 0,
-                          rb_foliage = 0, rb_aerial = 0, rb_final = 0, rb_total = 0;
-            static double rb_cpu = 0, rb_present = 0, rb_wall = 0, rb_power = 0, rb_clock = 0;
-            static double rb_cpu_prep = 0, rb_cpu_shadow = 0, rb_cpu_gbuf = 0, rb_cpu_post = 0,
-                          rb_cpu_prop = 0;
-            static double rb_sim = 0, rb_stream = 0, rb_foliage_rebuild = 0, rb_ui = 0;
-            static double rb_render_call = 0, rb_poll = 0,
-                          rb_scatter = 0; //  unattributed-CPU localization
-            static bool rb_nv_ever = false;
+            auto& rb_warm = g_app.benchmark.warmupFrames;
+            auto& rb_count = g_app.benchmark.measuredFrames;
+            auto& rb_nv_count = g_app.benchmark.nvmlSampleCount;
+            auto& rb_shadow = g_app.benchmark.shadow;
+            auto& rb_gbuffer = g_app.benchmark.gbuffer;
+            auto& rb_ssao = g_app.benchmark.ssao;
+            auto& rb_ssao_blur = g_app.benchmark.ssaoBlur;
+            auto& rb_lighting = g_app.benchmark.lighting;
+            auto& rb_water = g_app.benchmark.water;
+            auto& rb_skybox = g_app.benchmark.skybox;
+            auto& rb_particle = g_app.benchmark.particle;
+            auto& rb_foliage = g_app.benchmark.foliage;
+            auto& rb_aerial = g_app.benchmark.aerial;
+            auto& rb_final = g_app.benchmark.finalBlit;
+            auto& rb_total = g_app.benchmark.total;
+            auto& rb_cpu = g_app.benchmark.cpu;
+            auto& rb_present = g_app.benchmark.present;
+            auto& rb_wall = g_app.benchmark.wall;
+            auto& rb_power = g_app.benchmark.power;
+            auto& rb_clock = g_app.benchmark.clock;
+            auto& rb_cpu_prep = g_app.benchmark.cpuPrepare;
+            auto& rb_cpu_shadow = g_app.benchmark.cpuShadow;
+            auto& rb_cpu_gbuf = g_app.benchmark.cpuGbuffer;
+            auto& rb_cpu_post = g_app.benchmark.cpuPost;
+            auto& rb_cpu_prop = g_app.benchmark.cpuStaticProp;
+            auto& rb_sim = g_app.benchmark.sim;
+            auto& rb_stream = g_app.benchmark.stream;
+            auto& rb_foliage_rebuild = g_app.benchmark.foliageRebuild;
+            auto& rb_ui = g_app.benchmark.ui;
+            auto& rb_render_call = g_app.benchmark.renderCall;
+            auto& rb_poll = g_app.benchmark.poll;
+            auto& rb_scatter = g_app.benchmark.scatter; // unattributed-CPU localization
+            auto& rb_nv_ever = g_app.benchmark.nvmlEver;
 
             if (rb_warm < g_app.capture.render_benchmark_warmup) {
                 ++rb_warm;
