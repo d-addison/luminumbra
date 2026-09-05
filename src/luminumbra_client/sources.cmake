@@ -59,6 +59,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/GBufferPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/HierarchicalCuller.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LightingPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/LuminanceMeterPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ShadowPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SkyboxPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/ParticlePass.cpp
@@ -72,6 +73,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/SsaoPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/TaauPass.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterPass.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/passes/WaterfallPass.cpp
 
     # World (client-side)
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldgenOverride.cpp

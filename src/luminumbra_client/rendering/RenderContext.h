@@ -13,6 +13,9 @@
 namespace Luminumbra::Client::ScenarioHarness {
 struct IsolationConfig;
 }
+namespace Luminumbra::Systems {
+class SHIELD_WorldSystem;
+}
 
 // the per-frame render PASS CONTRACT.
 //
@@ -197,6 +200,10 @@ struct RenderContext {
 
     // Group O — froxel volumetric quality (0 = both compute stages are no-ops).
     int volumetric_quality = 0; // <- m_volumetric_quality
+
+    // Group P — waterfall live-water mirror. The pass reads this one-way world
+    // view to extinguish a dammed/drained fall; it never mutates simulation state.
+    const Systems::SHIELD_WorldSystem* world_system = nullptr;
 
     // Destination resolution helpers (screen vs offscreen preview target).
     FboHandle dest_fbo() const {

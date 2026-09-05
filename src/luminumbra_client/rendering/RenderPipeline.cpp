@@ -28,6 +28,7 @@
 #include "passes/GodRaysPass.h"
 #include "passes/GroundDecalPass.h" // render-only pheromone ground decal (flag-gated)
 #include "passes/LightingPass.h"
+#include "passes/LuminanceMeterPass.h"
 #include "passes/ParticlePass.h"
 #include "passes/PassGlHelpers.h"    // Push and pop debug-group markers.
 #include "passes/PlantProcgenPass.h" //  render-only procedural plants (flag-gated)
@@ -36,6 +37,7 @@
 #include "passes/SsaoPass.h"
 #include "passes/TaauPass.h"
 #include "passes/WaterPass.h"
+#include "passes/WaterfallPass.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 #include <GLFW/glfw3.h>
@@ -98,9 +100,6 @@ AABBFrustumCulled(const glm::vec3& minp, const glm::vec3& maxp, const glm::vec4 
 } // namespace
 
 namespace Luminumbra::Rendering {
-
-// Forward declaration, reused by the luminance meter below.
-GLuint create_compute_program(const char* compute_source);
 
 namespace {
 
@@ -264,7 +263,9 @@ RenderPipeline::RenderPipeline()
     , m_god_rays_pass(std::make_unique<GodRaysPass>())
     , m_taau_pass(std::make_unique<TaauPass>())
     , m_glass_oit_pass(std::make_unique<GlassOitPass>())
-    , m_froxel_pass(std::make_unique<FroxelPass>()) {}
+    , m_froxel_pass(std::make_unique<FroxelPass>())
+    , m_waterfall_pass(std::make_unique<WaterfallPass>())
+    , m_luminance_meter_pass(std::make_unique<LuminanceMeterPass>()) {}
 
 // forward the one-way scent snapshot to the decal pass (render-only;
 // defined here where GroundDecalPass is a complete type).
@@ -1045,6 +1046,37 @@ RenderContext RenderPipeline::make_froxel_context(const Camera& camera) {
     return ctx;
 }
 
+// The waterfall pass contract: prepared camera matrices/time, sun lighting,
+// internal lit-scene target, and the one-way live-water world mirror. The
+// shader, site cache, and baked geometry remain pass-owned and stay out of ctx.
+RenderContext RenderPipeline::make_waterfall_context(const Camera& camera) {
+    RenderContext ctx;
+    ctx.camera = &camera;
+    ctx.view = m_frame_prepared.view;
+    ctx.projection = m_frame_prepared.projection;
+    ctx.screen_width = m_screen_width;
+    ctx.screen_height = m_screen_height;
+    ctx.internal_width = m_internal_width;
+    ctx.internal_height = m_internal_height;
+    ctx.registry = &m_render_registry;
+    ctx.time_seconds = m_wall_clock_time;
+    ctx.sun = m_sun;
+    ctx.world_system = m_frame_prepared.world_system;
+    ctx.lit_scene =
+        m_render_registry.adopt_fbo("lit_scene", m_lighting_pass->lighting_fbo().fbo_id);
+    return ctx;
+}
+
+// The luminance-meter pass contract: the resolved lighting color texture. The
+// reduction program, SSBO, and asynchronous readback ring remain pass-owned.
+RenderContext RenderPipeline::make_luminance_meter_context() {
+    RenderContext ctx;
+    ctx.registry = &m_render_registry;
+    ctx.lit_scene_color = m_render_registry.adopt_texture(
+        "lit_scene_color", m_lighting_pass->lighting_fbo().color_texture);
+    return ctx;
+}
+
 // build the GBuffer pass contract — frame state only; the
 // live-terrain submit callback, far-LOD, root path, static-model UV lane and
 // tree-impostor bundle travel through GBufferPassInput (built at the call site).
@@ -1318,7 +1350,7 @@ void RenderPipeline::enumerate_shaders(
     // the pipeline-owned post shaders, previously UNMONITORED by health.
     visit("god_rays", m_god_rays_pass->shader().get());
     visit("cloud_composite", m_cloud_composite_shader.get());
-    visit("waterfall", m_waterfall_shader.get());
+    visit("waterfall", m_waterfall_pass->shader().get());
     // the WBOIT glass chain (lazy — null until glass
     // first appears; health reports "not initialized", which is accurate).
     if (m_glass_oit_pass->accum_shader()) {
@@ -2301,10 +2333,10 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
     // blocks; a stale N-frame-old value is the contract) and advance the damped
     // exposure servo toward the mid-grey key. Flag OFF -> the analytic
     // AutoExposureForElevation curve stays the auto source.
-    if (m_auto_exposure_metered && m_exposure_ring.initialized()) {
+    if (m_auto_exposure_metered && m_luminance_meter_pass->initialized()) {
         const void* p = nullptr;
         std::size_t n = 0;
-        if (m_exposure_ring.consume(&p, &n) && n >= sizeof(float)) {
+        if (m_luminance_meter_pass->consume(&p, &n) && n >= sizeof(float)) {
             constexpr float kMeterKey = 0.18f;         // mid-grey target
             constexpr float kMeterMinExposure = 0.25f; // stop clamps (servo bounds)
             constexpr float kMeterMaxExposure = 4.0f;
@@ -2820,100 +2852,9 @@ void RenderPipeline::execute_stage_water(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_waterfall(const Camera& camera) {
-    const glm::mat4& projection = m_frame_prepared.projection;
-    const glm::mat4& view = m_frame_prepared.view;
-    // 7-W. WATERFALL SHEETS (, ): the animated falling-sheet veil drawn
-    // over each detected waterfall site. Render-only dressing on a world-
-    // deterministic site set (never hashed). Drawn after water, into the lit FBO,
-    // as a translucent double-sided veil (depth-test on, depth-write off, blend on
-    // so it layers over the scene + each other). A no-op (zero draws) when no
-    // sites were baked, so existing visual gates stay byte-stable.
     record_frame_stage("waterfall");
-    if (m_waterfall_geometry_built && m_waterfall_vao != 0 && !m_waterfall_sheet_sites.empty() &&
-        m_waterfall_shader && m_waterfall_shader->IsValid()) {
-        glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_pass->lighting_fbo().fbo_id);
-        glViewport(0, 0, m_internal_width, m_internal_height); // into internal lighting FBO
-
-        // Save GL state we toggle so it is restored exactly afterwards.
-        const GLboolean blend_was = glIsEnabled(GL_BLEND);
-        const GLboolean cull_was = glIsEnabled(GL_CULL_FACE);
-        const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
-        const GLboolean poly_off_was = glIsEnabled(GL_POLYGON_OFFSET_FILL);
-
-        m_waterfall_shader->use();
-        m_waterfall_shader->setMat4("model", glm::mat4(1.0f));
-        m_waterfall_shader->setMat4("view", view);
-        m_waterfall_shader->setMat4("projection", projection);
-        m_waterfall_shader->setMat3("normalMatrix", glm::mat3(1.0f));
-        // the per-frame wall-clock SNAPSHOT (prepare_frame), not a live
-        // glfwGetTime read — dispatch must be bit-idempotent per prepared frame
-        // (sub-µs sway phase shift; render-only).
-        m_waterfall_shader->setFloat("u_time", m_wall_clock_time);
-        m_waterfall_shader->setVec3("u_camera_pos", camera.Position);
-        const glm::vec3 sun_color =
-            (m_sun.color != glm::vec3(0.0f)) ? m_sun.color : glm::vec3(1.0f);
-        m_waterfall_shader->setVec3("u_sun_color", sun_color);
-        // Scene-light the waterfall (bright-waterfall fix): drive u_scene_light from the
-        // sun-up factor with a small night floor so the cascade is LIT by the scene and
-        // darkens at dusk/night instead of emitting near-white.  (the standalone
-        // WaterfallVisual gate never sets this uniform -> it keeps the shader default 1.0).
-        const float waterfall_scene_lit = 0.10f + 0.90f * glm::clamp(m_sun.intensity, 0.0f, 1.0f);
-        m_waterfall_shader->setVec3("u_scene_light", glm::vec3(waterfall_scene_lit));
-
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glEnable(GL_DEPTH_TEST); // self-sufficient: don't rely on the water pass leaving it on
-        glDepthMask(GL_FALSE);   // translucent veil: don't occlude
-        glDisable(GL_CULL_FACE); // double-sided sheet
-        // The sheet hugs the cliff face the river carved (same surface WaterPass/terrain
-        // draws), so pull it slightly toward the camera in depth to avoid z-fighting /
-        // being hidden behind the toe of the drop.
-        glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(-1.0f, -1.0f);
-
-        glBindVertexArray(m_waterfall_vao);
-        for (std::size_t i = 0; i < m_waterfall_sheet_sites.size(); ++i) {
-            const WaterfallSite& s = m_waterfall_sheet_sites[i];
-            //  ( T.1): the LIVE upstream water scales the sheet —
-            // a dammed/drained crest extinguishes its fall. Reads the live float
-            // mirror (one-way from mm, legal after derived-state reclassification); stable within
-            // the frame (the sim ticks outside render_frame), so dispatch stays bit-idempotent.
-            // Unstreamed crests read neutral 1.0.
-            float live = 1.0f;
-            if (m_frame_prepared.world_system != nullptr) {
-                live = Rendering::LiveWaterFactorAt(*m_frame_prepared.world_system, s);
-            }
-            if (live < 0.02f) {
-                continue; // extinguished: no sheet, no plunge pool
-            }
-            m_waterfall_shader->setFloat("u_live_factor", live);
-            m_waterfall_shader->setFloat("u_crest_y", s.crest.y);
-            m_waterfall_shader->setFloat("u_foot_y", s.foot.y);
-            // 12 verts/site: the vertical sheet (0..5) + the horizontal plunge-pool quad (6..11).
-            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(i * 12), 12);
-        }
-        glBindVertexArray(0);
-
-        // Restore GL state: depth writes on, cull/blend/depth-test/poly-offset as they were.
-        glDepthMask(GL_TRUE);
-        glPolygonOffset(0.0f, 0.0f);
-        if (poly_off_was)
-            glEnable(GL_POLYGON_OFFSET_FILL);
-        else
-            glDisable(GL_POLYGON_OFFSET_FILL);
-        if (depth_was)
-            glEnable(GL_DEPTH_TEST);
-        else
-            glDisable(GL_DEPTH_TEST);
-        if (cull_was)
-            glEnable(GL_CULL_FACE);
-        else
-            glDisable(GL_CULL_FACE);
-        if (blend_was)
-            glEnable(GL_BLEND);
-        else
-            glDisable(GL_BLEND);
-    }
+    const RenderContext ctx = make_waterfall_context(camera);
+    m_waterfall_pass->execute(ctx);
 }
 
 void RenderPipeline::execute_stage_glass_oit_accum(const Camera& camera) {
@@ -3062,43 +3003,9 @@ void RenderPipeline::execute_stage_luminance_meter(const Camera& camera) {
     if (!m_auto_exposure_metered) {
         return;
     }
-    if (m_lum_reduce_program == 0) {
-        // Lazy init: compile the reduce kernel + the 1-float SSBO on first use.
-        std::ifstream file(std::filesystem::path(m_root_path) /
-                           "res/shaders/luminance_reduce.comp");
-        if (!file) {
-            LUMINUMBRA_CORE_ERROR("luminance_meter: missing res/shaders/luminance_reduce.comp");
-            m_auto_exposure_metered = false;
-            return;
-        }
-        std::stringstream source;
-        source << file.rdbuf();
-        m_lum_reduce_program = create_compute_program(source.str().c_str());
-        if (m_lum_reduce_program == 0) {
-            LUMINUMBRA_CORE_ERROR("luminance_meter: compute compile failed; metering disabled");
-            m_auto_exposure_metered = false;
-            return;
-        }
-        label_gl_object(GL_PROGRAM, m_lum_reduce_program, "shader.luminance_reduce");
-        glGenBuffers(1, &m_lum_reduce_ssbo);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_lum_reduce_ssbo);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(float), nullptr, GL_DYNAMIC_COPY);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        label_gl_object(GL_BUFFER, m_lum_reduce_ssbo, "luminance_reduce.ssbo");
-    }
-    glUseProgram(m_lum_reduce_program);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_lighting_pass->lighting_fbo().color_texture);
-    glUniform1i(glGetUniformLocation(m_lum_reduce_program, "u_scene"), 0);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_lum_reduce_ssbo);
-    glDispatchCompute(1, 1, 1);
-    // The ring's GPU->GPU copy must observe the SSBO write.
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, 0);
-    glUseProgram(0);
-    if (m_exposure_ring.ensure(sizeof(float), 3) && m_exposure_ring.begin()) {
-        m_exposure_ring.copy_region(m_lum_reduce_ssbo, 0, 0, sizeof(float));
-        m_exposure_ring.submit();
+    const RenderContext ctx = make_luminance_meter_context();
+    if (!m_luminance_meter_pass->execute(ctx, m_root_path)) {
+        m_auto_exposure_metered = false;
     }
 }
 
@@ -3411,15 +3318,7 @@ void RenderPipeline::init_shaders() {
     m_ssao_pass->init_shaders(m_root_path);
     m_water_pass->init_shader(m_root_path);
     m_aerial_pass->init_shader(m_root_path);
-    // the waterfall falling-sheet shader. Drawn over detected
-    // waterfall sites (waterfall_sites) on a world-deterministic site; the
-    // dressing is render-only and never hashed. Reuses the basic vertex stage
-    // (world-position + normal varyings) the sheet quad is built with.
-    m_waterfall_shader =
-        std::make_unique<Shader>((m_root_path / "res/shaders/basic.vert").string().c_str(),
-                                 (m_root_path / "res/shaders/waterfall.frag").string().c_str());
-    label_gl_object(
-        GL_PROGRAM, m_waterfall_shader ? m_waterfall_shader->Id() : 0u, "shader.waterfall");
+    m_waterfall_pass->init_shader(m_root_path);
     // Render-optimization (cloud-raymarch-optimization, ): the depth-masked
     // upsample that composites the reduced-res sky dome into the lighting FBO.
     // Reuses the SSAO fullscreen-quad vertex stage. Only used when cloud quality > 0.
@@ -3761,32 +3660,13 @@ void RenderPipeline::cleanup_gpu_resources() {
         glDeleteBuffers(1, &m_glass_quad_vbo);
         m_glass_quad_vbo = 0;
     }
-    // the auto-exposure meter kernel + SSBO + readback ring.
-    if (m_lum_reduce_program) {
-        glDeleteProgram(m_lum_reduce_program);
-        m_lum_reduce_program = 0;
-    }
-    if (m_lum_reduce_ssbo) {
-        glDeleteBuffers(1, &m_lum_reduce_ssbo);
-        m_lum_reduce_ssbo = 0;
-    }
-    m_exposure_ring.shutdown();
+    m_luminance_meter_pass->destroy();
     m_metered_valid = false;
     // The pass-owned froxel kernels/volumes and WBOIT shaders/MRT retain their
     // original cleanup point and deletion order inside their extracted owners.
     m_froxel_pass->destroy();
     m_glass_oit_pass->destroy();
-    // release the baked waterfall sheet geometry.
-    if (m_waterfall_vao) {
-        glDeleteVertexArrays(1, &m_waterfall_vao);
-        m_waterfall_vao = 0;
-    }
-    if (m_waterfall_vbo) {
-        glDeleteBuffers(1, &m_waterfall_vbo);
-        m_waterfall_vbo = 0;
-    }
-    m_waterfall_sheet_sites.clear();
-    m_waterfall_geometry_built = false;
+    m_waterfall_pass->destroy_geometry();
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) {
         m_particle_pass->destroy_buffers();
@@ -3847,8 +3727,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     if (m_debug_view_pass) {
         m_debug_view_pass->reset_shader();
     } // render-only debug view
-    m_aerial_pass->reset_shader(); //  aerial-perspective fullscreen shader
-    m_waterfall_shader.reset();    //  waterfall falling-sheet shader
+    m_aerial_pass->reset_shader();    //  aerial-perspective fullscreen shader
+    m_waterfall_pass->reset_shader(); // waterfall falling-sheet shader
     m_shadow_pass->reset_shader();
     m_ssao_pass->reset_shaders();
     m_water_pass->reset_shader();
@@ -3857,174 +3737,9 @@ void RenderPipeline::cleanup_gpu_resources() {
     m_started = false;
 }
 
-// bake the live waterfall DRESSING for `world`. Builds one vertical
-// world-space quad per detected site into m_waterfall_vao/_vbo and emits one
-// spray emitter per site (capped).: the SITES are a pure function of
-// the generated world (camera/frame independent, same seed -> same sites), but
-// the dressing geometry/spray are never hashed (one-way, regression review/).
+// Bake the live waterfall dressing in the pass that owns its geometry and draw.
 void RenderPipeline::prepare_waterfalls(const Systems::SHIELD_WorldSystem& world) {
-    // Re-bakeable: drop any prior geometry so a re-enter rebuilds cleanly.
-    if (m_waterfall_vao) {
-        glDeleteVertexArrays(1, &m_waterfall_vao);
-        m_waterfall_vao = 0;
-    }
-    if (m_waterfall_vbo) {
-        glDeleteBuffers(1, &m_waterfall_vbo);
-        m_waterfall_vbo = 0;
-    }
-    m_waterfall_sheet_sites.clear();
-    m_waterfall_geometry_built = false;
-
-    // World-deterministic detection (cached). Copy into m_waterfall_sheet_sites so
-    // the per-site crest/foot Y survive even if the cache is later cleared.
-    const std::vector<WaterfallSite>& sites = waterfall_sites(world);
-    if (sites.empty()) {
-        LUMINUMBRA_CORE_INFO("[waterfall] prepare_waterfalls: 0 sites detected (no dressing)");
-        return;
-    }
-    m_waterfall_sheet_sites = sites;
-
-    // Interleaved pos(3) + normal(3) per vertex; 12 verts per site = the vertical SHEET (6) +
-    // a horizontal plunge-POOL quad at the foot (6) so the fall visibly lands in water (the
-    // "connect to water" fix — the pool reads as roiling foam because the shader's fall_t≈1 there).
-    constexpr int kFloatsPerVertex = 6;
-    constexpr int kVertsPerSite = 12;
-    std::vector<float> verts;
-    verts.reserve(m_waterfall_sheet_sites.size() * kVertsPerSite * kFloatsPerVertex);
-
-    constexpr float kMinWidth = 2.0f; // a sane minimum sheet width (m)
-    constexpr float kMinRun = 0.5f;   // ensure the foot is advanced downstream
-    const glm::vec3 up(0.0f, 1.0f, 0.0f);
-
-    for (const WaterfallSite& s : m_waterfall_sheet_sites) {
-        // Downhill flow azimuth in XZ. Guard div-by-zero on normalize (fallback +X).
-        glm::vec2 flow2 = s.flow_dir;
-        float flow_len = std::sqrt(flow2.x * flow2.x + flow2.y * flow2.y);
-        if (flow_len > 1e-5f) {
-            flow2 /= flow_len;
-        } else {
-            flow2 = glm::vec2(1.0f, 0.0f);
-        }
-        const glm::vec3 flow_dir(flow2.x, 0.0f, flow2.y);
-        // Cross-flow axis (the sheet's horizontal width direction): perpendicular
-        // to flow in XZ. cross(up, flow_dir) is unit (both unit + orthogonal).
-        const glm::vec3 cross_axis = glm::cross(up, flow_dir);
-
-        const float width = std::max(s.width, kMinWidth);
-        const float half_w = width * 0.5f;
-        const float run = std::max(s.run_length, kMinRun);
-
-        // Lip (top) at the crest XZ; foot (bottom) advanced downstream by the run.
-        // CONNECT-TO-WATER: anchor the lip to the upstream WATER surface where the river/lake
-        // actually carries water (WaterLevelAt > terrain), so the sheet starts AT the water
-        // instead of floating on dry rock. Falls back to the terrain crest on perched/dry drops.
-        const float crest_water = world.WaterLevelAt(s.crest.x, s.crest.z);
-        const float top_y = std::max(s.crest.y, crest_water);
-        const float bot_y = s.foot.y;
-        const glm::vec3 top_center(s.crest.x, top_y, s.crest.z);
-        const glm::vec3 bot_center =
-            top_center + flow_dir * run + glm::vec3(0.0f, bot_y - top_y, 0.0f);
-
-        // Four corners of the vertical sheet (left/right along the cross axis).
-        const glm::vec3 tl = top_center - cross_axis * half_w;
-        const glm::vec3 tr = top_center + cross_axis * half_w;
-        const glm::vec3 bl = bot_center - cross_axis * half_w;
-        const glm::vec3 br = bot_center + cross_axis * half_w;
-
-        // Normal: horizontal, perpendicular to the sheet. cross(cross_axis, up)
-        // == flow_dir (the downstream-facing horizontal normal). The sheet is
-        // drawn double-sided (cull off) so the exact orientation is cosmetic.
-        glm::vec3 n = glm::cross(cross_axis, up);
-        float nlen = glm::length(n);
-        n = (nlen > 1e-5f) ? (n / nlen) : glm::vec3(0.0f, 0.0f, 1.0f);
-
-        auto push_vert = [&](const glm::vec3& p) {
-            verts.push_back(p.x);
-            verts.push_back(p.y);
-            verts.push_back(p.z);
-            verts.push_back(n.x);
-            verts.push_back(n.y);
-            verts.push_back(n.z);
-        };
-        // Triangle 1: tl, bl, br; Triangle 2: tl, br, tr.
-        push_vert(tl);
-        push_vert(bl);
-        push_vert(br);
-        push_vert(tl);
-        push_vert(br);
-        push_vert(tr);
-
-        // PLUNGE POOL: a horizontal foamy water quad at the foot so the fall lands IN water
-        // (visually connects sheet -> pool). Centred at the foot, sized ~1.6x the sheet width,
-        // facing UP; at y≈foot the shader's fall_t≈1 -> roiling plunge foam, so it reads as a pool.
-        n = up; // these 6 verts face up (overrides the sheet's horizontal normal in push_vert)
-        const float pool_half = std::max(half_w * 1.6f, 2.0f);
-        const glm::vec3 pc(bot_center.x, bot_y + 0.10f, bot_center.z);
-        const glm::vec3 pa = cross_axis * pool_half; // width axis
-        const glm::vec3 pb = flow_dir * pool_half;   // downstream axis
-        const glm::vec3 ptl = pc - pa - pb;
-        const glm::vec3 ptr = pc + pa - pb;
-        const glm::vec3 pbl = pc - pa + pb;
-        const glm::vec3 pbr = pc + pa + pb;
-        push_vert(ptl);
-        push_vert(pbl);
-        push_vert(pbr);
-        push_vert(ptl);
-        push_vert(pbr);
-        push_vert(ptr);
-    }
-
-    // Upload the combined sheet geometry to a dedicated VAO/VBO.
-    glGenVertexArrays(1, &m_waterfall_vao);
-    glGenBuffers(1, &m_waterfall_vbo);
-    glBindVertexArray(m_waterfall_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_waterfall_vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(),
-                 GL_STATIC_DRAW);
-    // location 0 = aPos, location 1 = aNormal (basic.vert layout).
-    glVertexAttribPointer(
-        0, 3, GL_FLOAT, GL_FALSE, kFloatsPerVertex * sizeof(float), reinterpret_cast<void*>(0));
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1,
-                          3,
-                          GL_FLOAT,
-                          GL_FALSE,
-                          kFloatsPerVertex * sizeof(float),
-                          reinterpret_cast<void*>(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    label_gl_object(GL_VERTEX_ARRAY, m_waterfall_vao, "waterfall.sheet_vao");
-    label_gl_object(GL_BUFFER, m_waterfall_vbo, "waterfall.sheet_vbo");
-    m_waterfall_geometry_built = true;
-
-    //  spray: one mist emitter per plunge foot, capped to bound particle cost.
-    constexpr std::size_t kMaxSpray = 24;
-    std::size_t spray_count = 0;
-    if (m_particle_pass) {
-        const std::filesystem::path spray_json =
-            m_root_path / "data/common/particles/waterfall_spray.json";
-        for (const WaterfallSite& s : m_waterfall_sheet_sites) {
-            if (spray_count >= kMaxSpray)
-                break;
-            m_particle_pass->add_waterfall_spray(spray_json, s.foot, s.drop_height, s.width);
-            ++spray_count;
-        }
-    }
-
-    if (m_waterfall_sheet_sites.size() > kMaxSpray) {
-        LUMINUMBRA_CORE_INFO(
-            "[waterfall] prepare_waterfalls: {} sites; sheets drawn for all, spray capped to {}",
-            m_waterfall_sheet_sites.size(),
-            kMaxSpray);
-    } else {
-        LUMINUMBRA_CORE_INFO(
-            "[waterfall] prepare_waterfalls: {} sites (sheets + {} spray emitters)",
-            m_waterfall_sheet_sites.size(),
-            spray_count);
-    }
+    m_waterfall_pass->prepare(world, m_particle_pass.get(), m_root_path);
 }
 
 // --- RESOURCE MANAGEMENT ---
@@ -5386,49 +5101,6 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
         return false;
     }
     return true;
-}
-
-// --- Compute-shader helpers ---
-
-GLuint create_compute_shader(const char* source) {
-    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint success;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        char infoLog[512];
-        glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-        LUMINUMBRA_CORE_ERROR("Compute shader compilation failed: {}", infoLog);
-        glDeleteShader(shader);
-        return 0;
-    }
-
-    return shader;
-}
-
-GLuint create_compute_program(const char* compute_source) {
-    GLuint compute_shader = create_compute_shader(compute_source);
-    if (compute_shader == 0)
-        return 0;
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, compute_shader);
-    glLinkProgram(program);
-
-    GLint success;
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char infoLog[512];
-        glGetProgramInfoLog(program, 512, nullptr, infoLog);
-        LUMINUMBRA_CORE_ERROR("Compute program linking failed: {}", infoLog);
-        glDeleteProgram(program);
-        program = 0;
-    }
-
-    glDeleteShader(compute_shader);
-    return program;
 }
 
 void RenderPipeline::update_time_of_day(float deltaTime) {

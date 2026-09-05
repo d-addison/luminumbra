@@ -12,13 +12,13 @@
 #include "SkyAtmosphereLut.h"       //  Hillaire 2020 scattering LUTs
 #include "StaticModelTex.h"         // StaticModelTex hoisted to namespace scope
 #include "TerrainSubmit.h"          // SubmitTerrainChunksFn + TerrainSubmitStats
-#include "WaterfallDetect.h"        //  world-deterministic waterfall sites
 #include "core/AssetManager.h"
 #include "core/IsolationConfig.h" // isolation/layer render mode (backdrop + spawn-suppression)
 #include "luminumbra_common/components/LightingComponents.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "passes/ChunkGeometryPool.h"
 #include "passes/SsaoData.h" // SSAOData (extracted; still read here for stats)
+#include "passes/WaterfallPass.h"
 #include <array>
 #include <filesystem>
 #include <glad/glad.h>
@@ -60,6 +60,7 @@ class GodRaysPass;
 class TaauPass;
 class GlassOitPass;
 class FroxelPass;
+class LuminanceMeterPass;
 struct ScentFieldRenderMirror;
 } // namespace Luminumbra::Rendering
 
@@ -833,16 +834,16 @@ public:
     // cached site set for `world`, detecting on first use.
     const std::vector<WaterfallSite>& waterfall_sites(const Systems::SHIELD_WorldSystem& world,
                                                       const WaterfallDetectParams& params = {}) {
-        return m_waterfall_sites.sites_for(world, params);
+        return m_waterfall_pass->waterfall_sites(world, params);
     }
     WaterfallSiteCache& waterfall_cache() {
-        return m_waterfall_sites;
+        return m_waterfall_pass->waterfall_cache();
     }
 
     // build the live waterfall DRESSING for `world` (call once
     // after the world is entered). Queries waterfall_sites(world), bakes one
-    // vertical world-space quad per site into m_waterfall_vao/_vbo (drawn by the
-    // falling-sheet shader in render_frame), records the per-site crest/foot Y
+    // vertical world-space quad per site into the pass-owned VAO/VBO (drawn by
+    // the falling-sheet shader in render_frame), records the per-site crest/foot Y
     // for the shader's height-down-the-fall normalization, and emits an  spray
     // emitter at each plunge foot (capped to bound particle cost).
     // dressing on a world-deterministic site set — never hashed (one-way).
@@ -921,6 +922,8 @@ private:
     RenderContext make_taau_context();
     RenderContext make_glass_oit_context(const Camera& camera);
     RenderContext make_froxel_context(const Camera& camera);
+    RenderContext make_waterfall_context(const Camera& camera);
+    RenderContext make_luminance_meter_context();
 
     std::vector<ChunkMeshSnapshot>
     build_chunk_snapshots(const std::vector<Chunk*>& renderable_chunks) const;
@@ -1220,9 +1223,10 @@ private:
     std::unique_ptr<TaauPass> m_taau_pass;
     std::unique_ptr<GlassOitPass> m_glass_oit_pass;
     std::unique_ptr<FroxelPass> m_froxel_pass;
+    std::unique_ptr<WaterfallPass> m_waterfall_pass;
+    std::unique_ptr<LuminanceMeterPass> m_luminance_meter_pass;
     RenderResourceRegistry m_render_registry; // typed render-resource handles (adopt/lookup)
     Client::ScenarioHarness::IsolationConfig m_isolation_config; //  (default {All,Scene} = no-op)
-    WaterfallSiteCache m_waterfall_sites;                        //  (render-only, cached)
 
     //  Hillaire 2020 atmospheric scattering. The LUTs are built once at
     // startup and the sky-view LUT refreshed when the sun moves; the skybox pass
@@ -1240,18 +1244,6 @@ private:
     unsigned m_taau_frame = 0u; // Halton sequence index
     // Screen-space crepuscular rays (god rays). Additive pass over the lit scene when
     // the sun is above the horizon + on screen. Render-only.
-    // the animated falling-sheet shader (waterfall.frag) the live
-    // pipeline draws over detected waterfall sites. Render-only dressing.
-    std::unique_ptr<Shader> m_waterfall_shader;
-    // baked waterfall sheet geometry. One vertical world-space quad
-    // (6 verts, interleaved pos+normal) per detected site, all packed into one
-    // VBO; m_waterfall_sheet_sites keeps the per-site crest/foot Y the shader needs
-    // to normalize height-down-the-fall (drawn as 6-vert sub-ranges). Built once by
-    // prepare_waterfalls; render-only, never hashed. Released in cleanup_gpu_resources.
-    GLuint m_waterfall_vao = 0;
-    GLuint m_waterfall_vbo = 0;
-    std::vector<WaterfallSite> m_waterfall_sheet_sites;
-    bool m_waterfall_geometry_built = false;
     double m_sky_full_precompute_ms = 0.0;
     double m_sky_view_refresh_ms = 0.0; // last sky-view refresh cost (0 = none this frame)
     // Sky-derived scattering ambient (the sky-view hemisphere integral); folded
@@ -1338,16 +1330,12 @@ private:
     u32 m_glass_quad_vao = 0;
     u32 m_glass_quad_vbo = 0;
 
-    // the GPU auto-exposure meter — a 1-workgroup compute
-    // reduce of lighting.color into a 1-float SSBO, ring-copied out and consumed
-    // by the damped servo in prepare_frame (stale-safe, never blocks). Lazy-init
-    // inside the stage; torn down in cleanup_gpu_resources.
+    // The GPU auto-exposure meter pass owns its 1-workgroup compute reduction,
+    // 1-float SSBO, and readback ring. Pipeline state retains only the enable
+    // switch and damped exposure servo consumed by lighting.
     bool m_auto_exposure_metered = false;
     float m_metered_exposure = 1.0f;
     bool m_metered_valid = false;
-    u32 m_lum_reduce_program = 0;
-    u32 m_lum_reduce_ssbo = 0;
-    AsyncReadbackRing m_exposure_ring;
 
     // Froxel quality remains pipeline orchestration state; the pass owns both
     // compute programs and volumes and reads this value through RenderContext.
