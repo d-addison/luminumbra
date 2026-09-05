@@ -106,10 +106,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 2064,
+      "bytes": 1577,
       "license": "MIT",
       "path": "data/common/foliage/scatter_set.json",
-      "sha256": "2901c546499b55eddab721bc17f8cac3ae60468fb2b9bda124198bc2bdcf54c1",
+      "sha256": "6d7b68bc3ea05c54f0a8df5f6f031b2fa036aeae2e35f8cac6c45c8ae19c6823",
       "source": "Luminumbra first-party runtime data"
     },
     {
