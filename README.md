@@ -17,7 +17,9 @@ source release; interfaces and content formats may still change between releases
 > This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
 
 Older saved worlds are refused with this message. Create a new world with a
-current preset; there is no migration path. New saves use LMR1 container v2,
+current preset; there is no migration path. This includes older worlds that have
+only metadata and no saved chunks. New world metadata declares `container_version: 2`.
+New saves use LMR1 container v2,
 the `luminumbra.persistence.world_manifest.v1` manifest with
 `container_version: 2`, and FSD2 far-LOD payload v3. Explicit preset `schema_rev`
 must be `6`; in-memory callers may omit it. Terrain shaping is always applied,

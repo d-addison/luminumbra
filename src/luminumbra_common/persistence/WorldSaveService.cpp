@@ -50,7 +50,7 @@ constexpr const char* kRegionFileExtension = ".lmr";
 
 // Container constants (the deterministic runtime contract section 3).
 constexpr char kRegionMagic[4] = {'L', 'M', 'R', '1'};
-constexpr std::uint16_t kRegionVersion = 2;
+constexpr std::uint16_t kRegionVersion = WorldSaveService::kContainerVersion;
 // Header: magic u32 | version u16 | record_count u16.
 constexpr std::size_t kRegionFileHeaderSize = 8;
 // Record header: u64 id | u8 lod_level | u8 flags | u32 uncompressed_size |
@@ -942,6 +942,28 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         return false;
     };
     try {
+        const auto metadata_path = save_dir / "world_info.json";
+        if (std::filesystem::exists(metadata_path)) {
+            std::ifstream input(metadata_path, std::ios::binary);
+            const auto metadata = nlohmann::json::parse(input);
+            if (!metadata.is_object())
+                return reject("corrupt world metadata: expected an object");
+            // Old worlds can contain only metadata: no chunk container exists yet
+            // to reveal their version. Refuse them before the clean-miss path.
+            if (!metadata.contains("container_version"))
+                return reject(kObsoleteWorldMessage);
+            const auto& version = metadata.at("container_version");
+            if (!version.is_number_integer())
+                return reject("corrupt world metadata container version");
+            if (version != kContainerVersion) {
+                if (version >= 0 && version < kContainerVersion)
+                    return reject(kObsoleteWorldMessage);
+                if (version > kContainerVersion)
+                    return reject("unsupported future world metadata container version " +
+                                  version.dump());
+                return reject("corrupt world metadata container version");
+            }
+        }
         const auto chunks_dir = save_dir / kChunksDirectoryName;
         const auto region_dir = region_directory(save_dir);
         if (std::filesystem::exists(world_state_path(save_dir)) ||

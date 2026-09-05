@@ -3,6 +3,7 @@
 #include "world/WorldStreamingState.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -30,6 +31,8 @@ struct WorldSaveDirtyReport {
 // Obsolete disk formats are refused; migration is not supported.
 class WorldSaveService {
 public:
+    // Also recorded in world_info.json, including before the first chunk save.
+    static constexpr std::uint16_t kContainerVersion = 2;
     static constexpr const char* kObsoleteWorldMessage =
         "This world predates the v0.3.0 format and cannot be opened. Create a new world; migration "
         "is not supported.";

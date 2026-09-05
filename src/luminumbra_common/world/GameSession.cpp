@@ -1144,6 +1144,7 @@ bool GameSession::SaveWorld() {
 
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
+        {"container_version", Persistence::WorldSaveService::kContainerVersion},
         {"name", m_metadata.name},
         {"seed", m_metadata.seed},
         {"worldType", m_metadata.worldType},

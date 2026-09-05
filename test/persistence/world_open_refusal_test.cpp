@@ -59,7 +59,7 @@ protected:
         save = root / "worlds/saves/fixture";
         Write(
             save / "world_info.json",
-            R"({"name":"Fixture","seed":"1337","worldType":"default","creationTime":1,"spawnPoint":{"x":8,"y":18,"z":8}})");
+            R"({"container_version":2,"name":"Fixture","seed":"1337","worldType":"default","creationTime":1,"spawnPoint":{"x":8,"y":18,"z":8}})");
         jobs.startup(1);
         WorldStreamingState state;
         auto chunk = state.get_or_create_chunk(IVec3(0, 0, 0));
@@ -77,7 +77,7 @@ protected:
         fs::remove_all(root, ec);
     }
     std::string RootString() const {
-        return root.string() + fs::path::preferred_separator;
+        return root.generic_string() + "/";
     }
     void Damage(int kind) {
         const auto manifest = WorldSaveService::world_manifest_path(save);
@@ -133,6 +133,26 @@ protected:
         } else if (kind == 20) {
             fs::remove_all(WorldSaveService::region_directory(save));
             Write(WorldSaveService::region_file_path(save, 0, 0), "");
+        } else if (kind >= 22) {
+            const auto metadata = save / "world_info.json";
+            auto json = nlohmann::json::parse(Read(metadata));
+            if (kind == 22) {
+                // A world created before its first chunk save still has durable metadata.
+                fs::remove_all(save / "chunks");
+                json.erase("container_version");
+            } else if (kind == 23)
+                json.erase("container_version"); // mixed old metadata and current chunks
+            else if (kind == 24)
+                json["container_version"] = 3;
+            else if (kind == 25)
+                json["container_version"] = "2";
+            else if (kind == 27)
+                json["container_version"] = 1;
+            else if (kind == 28)
+                json["container_version"] = -1;
+            else if (kind == 29)
+                json = nlohmann::json::array();
+            Write(metadata, kind == 26 ? "{" : json.dump());
         } else if (kind == 14 || kind == 15 || kind == 16 || kind == 17) {
             WorldSaveService::ContainerRecord record;
             record.id = World::FarLodStore::tile_record_id(World::FarLodTier::F2, 0, 0);
@@ -165,8 +185,9 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
     }
     Damage(kind);
     const auto before = DiskBytes(root);
-    const bool obsolete = kind <= 4 || kind == 11 || kind == 14 || kind == 17;
-    const bool future = kind == 5 || kind == 8 || kind == 15 || kind == 21;
+    const bool obsolete = kind <= 4 || kind == 11 || kind == 14 || kind == 17 || kind == 22 ||
+                          kind == 23 || kind == 27;
+    const bool future = kind == 5 || kind == 8 || kind == 15 || kind == 21 || kind == 24;
     EXPECT_FALSE(WorldSaveService::has_world_save(save));
     WorldStreamingState rejected;
     rejected.get_or_create_chunk(IVec3(2, 0, 2));
@@ -222,7 +243,20 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
 
 INSTANTIATE_TEST_SUITE_P(PersistenceEntryPoints,
                          WorldOpenRefusal,
-                         testing::Combine(testing::Range(0, 3), testing::Range(0, 22)));
+                         testing::Combine(testing::Range(0, 3), testing::Range(0, 30)));
+
+TEST_F(WorldOpenRefusal, CurrentMetadataOnlyWorldLoadsBeforeFirstChunkSave) {
+    fs::remove_all(save / "chunks");
+    const auto before = DiskBytes(save);
+    EXPECT_FALSE(WorldSaveService::has_world_save(save));
+    EXPECT_TRUE(WorldSaveService::validate_save(save));
+    GameSession session;
+    session.SetJobSystem(&jobs);
+    session.SetRootPath(RootString());
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
+    EXPECT_EQ(DiskBytes(save), before);
+}
 
 TEST_F(WorldOpenRefusal, CurrentClientLoadPreservesAuthoritativeChunkAndFreshMissSucceeds) {
     GameSession session;

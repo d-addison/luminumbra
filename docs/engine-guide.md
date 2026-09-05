@@ -14,6 +14,7 @@ fallback, including when obsolete artifacts coexist with current region files.
 
 | Layer | Current identity |
 |---|---|
+| World metadata | `world_info.json` declares `container_version: 2` at creation, before any chunk records exist; missing versions are obsolete |
 | Region container | `chunks/region/r.<rx>.<rz>.lmr`: `LMR1` magic, little-endian `u16` container version `2`, `u16` record count, record headers and LZ4 payloads |
 | World manifest | `chunks/region/world-manifest.json`: `schema: "luminumbra.persistence.world_manifest.v1"`, `container: "LMR1"`, `container_version: 2` |
 | Far-LOD record payload | `FSD2` magic, payload version `3` inside the LMR1 container |
@@ -48,6 +49,11 @@ magic, manifest identity, headers, compressed data and truncated payload streams
 produce corruption/validation diagnostics, not obsolete-world advice. Loading
 refuses invalid durable data rather than regenerating over it. The persistence,
 far-LOD and terrain-preset tests cover these boundaries.
+
+Metadata is checked before a missing chunk directory can count as a fresh save.
+Unversioned metadata is refused even alongside current containers. A higher
+metadata version reports `unsupported future world metadata container version`;
+invalid JSON or invalid version types are corruption failures.
 
 ## Runtime lifecycle
 
