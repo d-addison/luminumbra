@@ -6,10 +6,12 @@ and content formats may still change.
 
 ## Simulation and world
 
-- **Far-LOD terrain omits caves and edits.** Coarse distant tiers render
-  surface authority only; caves and player voxel edits are not carried at
-  distance. The [SHIELD SDF contract](shield/sdf-contract.md) defines the
-  exact tier semantics.
+- **World saves from before 0.3.0 do not load.** Version 0.3.0 accepts LMR1
+  region containers at version 2 and FSD2 far-LOD payloads only. It refuses
+  LMR1 version 1 and the retired single-snapshot and height-only far-LOD
+  formats; there is no in-engine migration path. Create a new world with 0.3.0
+  or later. The [architecture guide](architecture.md#on-disk-world-format)
+  documents the files and the diagnostics used to identify this boundary.
 - **Water simulates at 2 m cells by default.** Chunks are 16 m across and the
   live water solver runs an 8×8 grid per chunk, so each cell is 2 m. Broad
   bodies, rain, and terraform coupling resolve well; channels narrower than a
