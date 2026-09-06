@@ -1072,10 +1072,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 24247,
+      "bytes": 25238,
       "license": "MIT",
       "path": "data/ui/game_theme.rcss",
-      "sha256": "3a19b9ac7c7b74b09018c0c190fcc5f9b46c4d14fe102874300edbe8b329d0f6",
+      "sha256": "6e37c1224c85458f3c1fb448330f722567b7bdbf5a4a735e8b42c7a5db119c2f",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1100,10 +1100,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 940,
+      "bytes": 1064,
       "license": "MIT",
       "path": "data/ui/pause.rml",
-      "sha256": "d2689ce3710cefa28a2e76c621214d939e2421c3b01737a48cae16d69bc09a1f",
+      "sha256": "17bea90774441eb14bf0f51634c36382387b97c266151b84bc4852d8723ada5a",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1191,10 +1191,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 4549,
+      "bytes": 1229,
       "license": "MIT",
       "path": "data/ui/world_selection.rml",
-      "sha256": "777476afea52508c89ce6ed0bde4fe7ecaa33bbc2611d59b861d32aaa5b0c216",
+      "sha256": "7966bb229cfcf443c1fa396fdfcdb23f1ab47c63999b4f0c8c8c8723e1cceb54",
       "source": "Luminumbra first-party runtime data"
     },
     {

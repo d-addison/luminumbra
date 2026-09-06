@@ -441,10 +441,67 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
 
     m_activeDocument = rml_path;
     m_selectedWorldId.clear();
+    if (document->GetId() == "world_selection")
+        PopulateWorlds(document);
     BindEventListeners(document);
     if (document->GetId() == "gallery")
         PopulateGallery(document);
     document->Show();
+}
+
+void Rml_UIManager::ShowMessage(const std::string& message) {
+    if (!m_context)
+        return;
+    for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
+        auto* document = m_context->GetDocument(i);
+        if (auto* note = document->GetElementById("notification")) {
+            note->SetClass("hidden", false);
+            if (auto* text = document->GetElementById("notification_text"))
+                text->SetInnerRML(Rml::StringUtilities::EncodeRml(message));
+        }
+    }
+}
+
+void Rml_UIManager::PopulateWorlds(Rml::ElementDocument* document) {
+    auto* items = document->GetElementById("world_list_items");
+    if (!items)
+        return;
+    items->SetInnerRML("");
+    Persistence::SavedWorldCatalog catalog;
+    if (m_savedWorldList)
+        catalog = m_savedWorldList();
+    else
+        catalog.error = "Saved worlds are unavailable: no save location is configured.";
+    if (auto* empty = document->GetElementById("no_worlds"))
+        empty->SetClass("hidden", !catalog.worlds.empty() || !catalog.error.empty());
+    if (auto* status = document->GetElementById("world_list_status")) {
+        status->SetInnerRML(Rml::StringUtilities::EncodeRml(catalog.error));
+        status->SetClass("hidden", catalog.error.empty());
+    }
+    for (const auto& world : catalog.worlds) {
+        auto item = document->CreateElement("button");
+        item->SetClassNames("list-item");
+        item->SetAttribute("data-world-id", world.metadata.worldId);
+        item->SetAttribute("data-world-error", world.error);
+        item->SetClass("unavailable", !world.error.empty());
+        std::string description;
+        if (world.error.empty()) {
+            description = world.metadata.worldType + " · seed " + world.metadata.seed;
+            const auto created = world.metadata.creationTime;
+            if (const auto* time = std::localtime(&created)) {
+                char date[32]{};
+                if (std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M", time))
+                    description += " · created " + std::string(date);
+            }
+        } else {
+            description = world.error;
+        }
+        item->SetInnerRML("<h3 class=\"list-item-title\">" +
+                          Rml::StringUtilities::EncodeRml(world.metadata.name) +
+                          "</h3><p class=\"list-item-description\">" +
+                          Rml::StringUtilities::EncodeRml(description) + "</p>");
+        items->AppendChild(std::move(item));
+    }
 }
 
 void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
@@ -540,9 +597,19 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
             m_selectedWorldId = selected->GetAttribute<Rml::String>("data-world-id", "");
             selected->SetAttribute("data-selected", "true");
             selected->SetClass("selected", true);
+            const auto error = selected->GetAttribute<Rml::String>("data-world-error", "");
             if (auto* load_button = document->GetElementById("load_selected_btn")) {
-                load_button->RemoveAttribute("disabled");
+                if (error.empty()) {
+                    load_button->RemoveAttribute("disabled");
+                } else {
+                    load_button->SetAttribute("disabled", "");
+                    m_selectedWorldId.clear();
+                }
             }
+            if (auto* note = document->GetElementById("notification"))
+                note->SetClass("hidden", error.empty());
+            if (!error.empty())
+                ShowMessage(error);
         });
     }
 

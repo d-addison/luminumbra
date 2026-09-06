@@ -2046,14 +2046,140 @@ int main(int argc, char* argv[]) {
     std::chrono::steady_clock::time_point scenario_play_started_at{};
     RuntimeReadinessReport last_readiness_report;
 
+    auto prepare_world_entry = [&]() {
+        renderPipeline.prepare_world_swap();
+        DrainBackgroundWorldScan(jobSystem);
+        DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
+    };
+
+    auto refuse_world_entry = [&](const std::string& fallback) {
+        const auto& detail = gameSession->GetWorldOpenError();
+        const std::string error = detail.empty() ? fallback : detail;
+        LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
+        if (g_uiManager)
+            g_uiManager->ShowMessage(error);
+        g_app.menu.menu_backdrop_active = false;
+        g_playerController.reset();
+        scenario_failed =
+            scenario_config.active() || HasCommandLineFlag(argc, argv, "--load-world");
+        scenario_failure_reason = error;
+        runtime_state_recorder.capture("world_open_refused",
+                                       &jobSystem,
+                                       gameSession.get(),
+                                       &renderPipeline,
+                                       scenario_frame_count,
+                                       {});
+    };
+
+    auto finish_world_entry = [&]() {
+        g_playerController.reset();
+        g_procgen = {};
+        g_app.worldDressing = {};
+        g_app.foragers = {};
+        g_app.weather = {};
+        g_app.interactions = {};
+        g_app.foliage.cachedScatter.clear();
+        g_app.foliage.scatterByChunk.clear();
+        g_app.foliage.cachedScatterSig = ~0ull;
+        // A real world replaces the  menu-backdrop world; stop the menu-branch from
+        // rendering with the (now game-owned) camera/world.
+        g_app.menu.menu_backdrop_active = false;
+        if (auto* world_system = gameSession->GetWorldSystem()) {
+            // bake the live waterfall dressing once for this
+            // world. Detection is a pure function of the generated world
+            // (river course x steep height drop), so it is valid here even
+            // before chunks stream in; the sheets +  spray are render-only
+            // (never hashed). Covers both the runtime-scenario bypass path and
+            // the interactive loading path below.
+            renderPipeline.prepare_waterfalls(*world_system);
+            LUMINUMBRA_CORE_INFO("Waterfall dressing prepared: {} site(s).",
+                                 renderPipeline.waterfall_sites(*world_system).size());
+        }
+
+        const bool bypass_loading_ui =
+            runtime_boot_recorder.enabled() ||
+            (scenario_config.active() && scenario_config.auto_enter_world);
+        if (bypass_loading_ui) {
+            LUMINUMBRA_CORE_INFO("Runtime scenario mode: entered world without loading UI.");
+            bool horizon_ready = true;
+            if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
+                horizon_ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
+                    gameSession->GetMetadata().spawnPoint,
+                    gameSession->GetPhysicsSystem(),
+                    scenario_config.horizon_radius,
+                    scenario_config.collision_radius);
+            }
+            g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
+                gameSession->GetMetadata().spawnPoint);
+            g_camera->MouseSensitivity =
+                g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
+            g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
+            g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
+                window, g_camera.get(), gameSession->GetPhysicsSystem());
+            g_playerController->ApplyKeyBindings(g_systemConfig); // user.controls.* (rebindable)
+            if (g_app.loading.world_render_data_initialized) {
+                renderPipeline.clear_all_chunk_data();
+            }
+            g_app.loading.world_render_data_initialized = true;
+            SetGameState(window, gameStateManager, GameState::IN_GAME);
+            last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
+            if (!horizon_ready || !last_readiness_report.ready) {
+                scenario_failed = true;
+                scenario_failure_reason = "world_readiness_failed";
+                runtime_state_recorder.capture("world_readiness_failed",
+                                               &jobSystem,
+                                               gameSession.get(),
+                                               &renderPipeline,
+                                               scenario_frame_count,
+                                               last_readiness_report);
+            } else {
+                scenario_ready = true;
+                scenario_play_started_at = std::chrono::steady_clock::now();
+                runtime_state_recorder.capture("world_entered",
+                                               &jobSystem,
+                                               gameSession.get(),
+                                               &renderPipeline,
+                                               scenario_frame_count,
+                                               last_readiness_report);
+            }
+            return;
+        }
+
+        // Hide the main menu UI
+        if (g_uiManager && g_uiManager->GetContext()) {
+            for (int i = 0; i < g_uiManager->GetContext()->GetNumDocuments(); ++i) {
+                if (auto* doc = g_uiManager->GetContext()->GetDocument(i)) {
+                    doc->Hide();
+                }
+            }
+            if (Rml::Element* focused_element = g_uiManager->GetContext()->GetFocusElement()) {
+                focused_element->Blur();
+            }
+        }
+
+        // 2. Switch to the loading state
+        SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
+
+        // 3. Get the list of chunks to generate and start the visualizer
+        auto* world_system = gameSession->GetWorldSystem();
+        // Use the actual spawn position for initial chunk loading
+        Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
+        if (runtime_boot_recorder.enabled()) {
+            g_app.loading.initial_chunks_to_load.clear();
+        } else {
+            g_app.loading.initial_chunks_to_load = world_system->GetInitialChunkLoadList(spawn_pos);
+        }
+
+        g_app.loading.generation_dispatch_index = 0;
+        if (g_loading_visualizer) {
+            g_loading_visualizer->BeginVisualization(g_app.loading.initial_chunks_to_load);
+        }
+    };
+
     auto start_world_creation = [&](const std::string& name,
                                     const std::string& seed,
                                     const std::string& worldType,
                                     const std::vector<Luminumbra::Client::WorldGenParam>& params) {
-        // drain in-flight far-LOD tile builds before CreateWorld
-        // replaces the world system they sample.
-        renderPipeline.prepare_world_swap();
-
         // If the customize form changed any param from the base preset, build a resolved preset
         // (base + only the real deltas) and hand it to CreateWorld, which embeds it in THIS world's
         // own save dir. No global custom files, no collisions, no dangling references. If nothing
@@ -2112,139 +2238,33 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // 1. Synchronously create the world systems and metadata. This is fast.
-        // drain any in-flight  background scan FIRST — its jobs
-        // hold the OLD world system pointer, which CreateWorld is about to replace.
-        DrainBackgroundWorldScan(jobSystem);
-        // same contract for the world-dressing placement job.
-        DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
-        if (gameSession->CreateWorld(name, seed, worldType, customPtr)) {
-            // A real world replaces the  menu-backdrop world; stop the menu-branch from
-            // rendering with the (now game-owned) camera/world.
-            g_app.menu.menu_backdrop_active = false;
-            if (auto* world_system = gameSession->GetWorldSystem()) {
-                // bake the live waterfall dressing once for this
-                // world. Detection is a pure function of the generated world
-                // (river course x steep height drop), so it is valid here even
-                // before chunks stream in; the sheets +  spray are render-only
-                // (never hashed). Covers both the runtime-scenario bypass path and
-                // the interactive loading path below.
-                renderPipeline.prepare_waterfalls(*world_system);
-                LUMINUMBRA_CORE_INFO("Waterfall dressing prepared: {} site(s).",
-                                     renderPipeline.waterfall_sites(*world_system).size());
-            }
-
-            // restore persisted chunk state AFTER the world systems
-            // initialize but BEFORE any chunk generation runs, so saved voxel
-            // edits cannot be clobbered by regeneration (generation skips
-            // chunks that already carry voxel data). A world without a
-            // snapshot is a clean miss and proceeds on the byte-for-byte
-            // unchanged fresh-world path.
-            const bool world_opened =
-                scenario_config.persistence_roundtrip_smoke() &&
-                        scenario_config.persistence_phase == "load" &&
-                        !scenario_config.persistence_session_dir.empty()
-                    ? gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir)
-                    : gameSession->LoadWorldState();
-            if (!world_opened) {
-                scenario_failed = true;
-                scenario_failure_reason = gameSession->GetWorldOpenError();
-                LUMINUMBRA_CORE_ERROR("World open refused: {}", scenario_failure_reason);
-                gameStateManager.SetState(GameState::MAIN_MENU);
-                return;
-            }
-            const bool bypass_loading_ui =
-                runtime_boot_recorder.enabled() ||
-                (scenario_config.active() && scenario_config.auto_enter_world);
-            if (bypass_loading_ui) {
-                LUMINUMBRA_CORE_INFO("Runtime scenario mode: created world without loading UI.");
-                bool horizon_ready = true;
-                if (gameSession->GetWorldSystem() && gameSession->GetPhysicsSystem()) {
-                    horizon_ready = gameSession->GetWorldSystem()->EnsureSurfaceReadyNear(
-                        gameSession->GetMetadata().spawnPoint,
-                        gameSession->GetPhysicsSystem(),
-                        scenario_config.horizon_radius,
-                        scenario_config.collision_radius);
-                }
-                g_camera = std::make_unique<Luminumbra::Rendering::Camera>(
-                    gameSession->GetMetadata().spawnPoint);
-                g_camera->MouseSensitivity =
-                    g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
-                g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
-                g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
-                    window, g_camera.get(), gameSession->GetPhysicsSystem());
-                g_playerController->ApplyKeyBindings(
-                    g_systemConfig); // user.controls.* (rebindable)
-                if (g_app.loading.world_render_data_initialized) {
-                    renderPipeline.clear_all_chunk_data();
-                }
-                g_app.loading.world_render_data_initialized = true;
-                SetGameState(window, gameStateManager, GameState::IN_GAME);
-                last_readiness_report = EvaluateReadiness(scenario_config, gameSession.get());
-                if (!horizon_ready || !last_readiness_report.ready) {
-                    scenario_failed = true;
-                    scenario_failure_reason = "world_readiness_failed";
-                    runtime_state_recorder.capture("world_readiness_failed",
-                                                   &jobSystem,
-                                                   gameSession.get(),
-                                                   &renderPipeline,
-                                                   scenario_frame_count,
-                                                   last_readiness_report);
-                } else {
-                    scenario_ready = true;
-                    scenario_play_started_at = std::chrono::steady_clock::now();
-                    runtime_state_recorder.capture("world_entered",
-                                                   &jobSystem,
-                                                   gameSession.get(),
-                                                   &renderPipeline,
-                                                   scenario_frame_count,
-                                                   last_readiness_report);
-                }
-                return;
-            }
-
-            // Hide the main menu UI
-            if (g_uiManager && g_uiManager->GetContext()) {
-                for (int i = 0; i < g_uiManager->GetContext()->GetNumDocuments(); ++i) {
-                    if (auto* doc = g_uiManager->GetContext()->GetDocument(i)) {
-                        doc->Hide();
-                    }
-                }
-                if (Rml::Element* focused_element = g_uiManager->GetContext()->GetFocusElement()) {
-                    focused_element->Blur();
-                }
-            }
-
-            // 2. Switch to the loading state
-            SetGameState(window, gameStateManager, GameState::WORLD_LOADING);
-
-            // 3. Get the list of chunks to generate and start the visualizer
-            auto* world_system = gameSession->GetWorldSystem();
-            // Use the actual spawn position for initial chunk loading
-            Luminumbra::Vec3 spawn_pos = gameSession->GetMetadata().spawnPoint;
-            if (runtime_boot_recorder.enabled()) {
-                g_app.loading.initial_chunks_to_load.clear();
-            } else {
-                g_app.loading.initial_chunks_to_load =
-                    world_system->GetInitialChunkLoadList(spawn_pos);
-            }
-
-            g_app.loading.generation_dispatch_index = 0;
-            if (g_loading_visualizer) {
-                g_loading_visualizer->BeginVisualization(g_app.loading.initial_chunks_to_load);
-            }
-
-        } else {
-            LUMINUMBRA_CORE_ERROR("Failed to create world!");
-            scenario_failed = scenario_config.active();
-            scenario_failure_reason = "create_world_failed";
-            runtime_state_recorder.capture("create_world_failed",
-                                           &jobSystem,
-                                           gameSession.get(),
-                                           &renderPipeline,
-                                           scenario_frame_count,
-                                           {});
+        prepare_world_entry();
+        if (!gameSession->CreateWorld(name, seed, worldType, customPtr)) {
+            refuse_world_entry("Could not create this world. Check the save location and preset.");
+            return;
         }
+        const bool opened =
+            scenario_config.persistence_roundtrip_smoke() &&
+                    scenario_config.persistence_phase == "load" &&
+                    !scenario_config.persistence_session_dir.empty()
+                ? gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir)
+                : gameSession->LoadWorldState();
+        if (!opened) {
+            refuse_world_entry("Could not restore saved world state.");
+            return;
+        }
+        finish_world_entry();
+    };
+
+    auto start_world_load = [&](const std::string& id) {
+        // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
+        prepare_world_entry();
+        if (!gameSession->LoadWorld(id)) {
+            refuse_world_entry("Could not load this world.");
+            return;
+        }
+        // LoadWorld restores saved authority before this shared entry path starts generation.
+        finish_world_entry();
     };
 
     if (g_uiManager) {
@@ -2262,6 +2282,10 @@ int main(int argc, char* argv[]) {
             }
         }
         g_uiManager->SetWorldCreationCallback(start_world_creation);
+        g_uiManager->SetLoadWorldCallback(start_world_load);
+        g_uiManager->SetSavedWorldList([root_path_str]() {
+            return Luminumbra::Persistence::EnumerateSavedWorlds(root_path_str);
+        });
         // Seed the create-world customize form from a preset: read generation_params.<path>.
         g_uiManager->SetWorldParamGetter([root_path_str](const std::string& worldType,
                                                          const std::string& path) -> std::string {
@@ -2569,17 +2593,26 @@ int main(int argc, char* argv[]) {
             g_uiManager->GetContext()->SetDensityIndependentPixelRatio(boot_ui_scale);
         }
         //  pause-menu actions route here (main_client owns game state + cursor).
-        g_uiManager->SetPauseActionCallback(
-            [window, &gameStateManager, &g_uiManager](const std::string& act) {
-                if (act == "resume") {
-                    SetGamePaused(window, false);
-                } else if (act == "quit") {
-                    SetGamePaused(window, false);
-                    SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+        g_uiManager->SetPauseActionCallback([&](const std::string& act) {
+            if (act == "resume") {
+                SetGamePaused(window, false);
+            } else if (act == "quit") {
+                if (g_camera)
+                    gameSession->SetSpawnPoint(g_camera->Position);
+                if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
                     if (g_uiManager)
-                        g_uiManager->RequestLoadDocument("main_menu.rml");
+                        g_uiManager->ShowMessage("Could not save this world. Check available disk "
+                                                 "space and permissions before leaving.");
+                    return;
                 }
-            });
+                prepare_world_entry();
+                g_playerController.reset();
+                SetGamePaused(window, false);
+                SetGameState(window, gameStateManager, GameState::MAIN_MENU);
+                if (g_uiManager)
+                    g_uiManager->RequestLoadDocument("main_menu.rml");
+            }
+        });
     }
 
     glfwSetKeyCallback(window, key_callback);
@@ -2621,8 +2654,12 @@ int main(int argc, char* argv[]) {
                    // else the historical "default" world.
                    : (scenario_config.world_preset.empty() ? std::string("default")
                                                            : scenario_config.world_preset));
-    if (scenario_config.auto_create_world ||
-        HasCommandLineFlag(argc, argv, "--auto-create-world") || runtime_boot_recorder.enabled()) {
+    const std::string requested_world_id = GetCommandLineOption(argc, argv, "--load-world", "");
+    if (!requested_world_id.empty()) {
+        start_world_load(requested_world_id);
+    } else if (scenario_config.auto_create_world ||
+               HasCommandLineFlag(argc, argv, "--auto-create-world") ||
+               runtime_boot_recorder.enabled()) {
         start_world_creation("Automated Test World", "424242", scenario_world_type, {});
     }
 
@@ -2702,10 +2739,11 @@ int main(int argc, char* argv[]) {
     // already shows terrain. Skipped for automated runs that drive their own world (scenario,
     // auto-create, boot-metrics, timelapse, render-benchmark) and via --no-menu-backdrop.
     {
-        const bool drives_own_world =
-            scenario_config.active() || HasCommandLineFlag(argc, argv, "--auto-create-world") ||
-            runtime_boot_recorder.enabled() || g_app.capture.timelapse_frames > 0 ||
-            !g_app.capture.render_benchmark_path.empty();
+        const bool drives_own_world = !requested_world_id.empty() || scenario_config.active() ||
+                                      HasCommandLineFlag(argc, argv, "--auto-create-world") ||
+                                      runtime_boot_recorder.enabled() ||
+                                      g_app.capture.timelapse_frames > 0 ||
+                                      !g_app.capture.render_benchmark_path.empty();
         const bool want_backdrop = !drives_own_world &&
                                    !HasCommandLineFlag(argc, argv, "--no-menu-backdrop") &&
                                    gameStateManager.GetCurrentState() == GameState::MAIN_MENU;
@@ -2717,7 +2755,7 @@ int main(int argc, char* argv[]) {
             DrainBackgroundWorldScan(jobSystem);
             // same contract for the world-dressing placement job.
             DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
-            if (gameSession->CreateWorld("Menu Vista", "424242", "mountains") &&
+            if (gameSession->CreateTransientWorld("Menu Vista", "424242", "mountains") &&
                 gameSession->LoadWorldState()) {
                 if (auto* ws = gameSession->GetWorldSystem()) {
                     // Surface-ready around the FIXED vantage (8,*,8), not the spawn point, so the
@@ -3060,17 +3098,17 @@ int main(int argc, char* argv[]) {
                                 [batch_start_index + static_cast<int>(batch_to_generate.size())]);
                     }
                     if (!batch_to_generate.empty()) {
-                        Luminumbra::JobHandle handle =
-                            gameSession->GetWorldSystem()->dispatch_generation_jobs(
-                                batch_to_generate);
-                        if (handle.counter) {
+                        gameSession->GetWorldSystem()->dispatch_generation_jobs(batch_to_generate);
+                        if (g_loading_visualizer) {
                             for (const auto& coords : batch_to_generate) {
                                 g_loading_visualizer->UpdateChunkState(
                                     coords, Luminumbra::Client::ChunkLoadVisualState::DISPATCHED);
                             }
-                            g_app.loading.generation_dispatch_index +=
-                                static_cast<int>(batch_to_generate.size());
                         }
+                        // An empty handle means every requested chunk already carries saved
+                        // authority. The batch is complete and must still advance the loader.
+                        g_app.loading.generation_dispatch_index +=
+                            static_cast<int>(batch_to_generate.size());
                     }
                 }
 
@@ -4639,11 +4677,16 @@ int main(int argc, char* argv[]) {
         shutdown_milestones.push_back(milestone);
     };
 
+    prepare_world_entry();
+
     // persist unsaved voxel edits on the world-exit/shutdown path,
     // before the streamed chunks are torn down. No-op when no world session
     // is active or when no chunk carries unsaved edits.
     if (gameSession && gameSession->SaveWorldState()) {
-        mark_shutdown("world_state_saved");
+        if (!g_app.menu.menu_backdrop_active && g_camera)
+            gameSession->SetSpawnPoint(g_camera->Position);
+        if (gameSession->SaveWorld())
+            mark_shutdown("world_state_saved");
     }
 
     // Drain the  far-field heightfield build before the world is cleared —

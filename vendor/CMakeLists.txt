@@ -63,6 +63,10 @@ set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
 set(GLM_BUILD_INSTALL  OFF CACHE BOOL "" FORCE)
 
 # Jolt (v5.x option names are TARGET_*; build only the library).
+# The application catches standard-library failures (including save I/O). Jolt's
+# default exports _HAS_EXCEPTIONS=0 to every MSVC consumer, turning those failures
+# into fast-fails and changing the STL exception ABI across linked targets.
+set(CPP_EXCEPTIONS_ENABLED ON CACHE BOOL "Enable C++ exceptions in Jolt and its consumers" FORCE)
 set(TARGET_UNIT_TESTS       OFF CACHE BOOL "" FORCE)
 set(TARGET_HELLO_WORLD      OFF CACHE BOOL "" FORCE)
 set(TARGET_PERFORMANCE_TEST OFF CACHE BOOL "" FORCE)

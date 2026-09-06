@@ -662,6 +662,27 @@ bool WriteWorldManifest(const std::filesystem::path& manifest_path,
 
 } // namespace
 
+bool WorldSaveService::save_metadata(const std::string& bytes,
+                                     const std::filesystem::path& save_dir,
+                                     std::vector<std::string>* errors) {
+    if (!validate_save(save_dir, errors))
+        return false;
+    const auto destination = save_dir / "world_info.json";
+    std::filesystem::path temp;
+    if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
+        return false;
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false)) {
+        RemoveTemporaryFile(temp);
+        AddError(errors, "interrupted before metadata replacement");
+        return false;
+    }
+    if (!ReplaceRegionFileAtomically(temp, destination, errors)) {
+        RemoveTemporaryFile(temp);
+        return false;
+    }
+    return true;
+}
+
 std::filesystem::path WorldSaveService::world_state_path(const std::filesystem::path& save_dir) {
     return save_dir / kChunksDirectoryName / kWorldStateFileName;
 }

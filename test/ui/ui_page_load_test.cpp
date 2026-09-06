@@ -178,3 +178,109 @@ TEST(UiPageLoadTest, EveryShippedDocumentLoadsWithAPopulatedBody) {
 
     ui.Shutdown();
 }
+
+TEST(UiPageLoadTest, SavedWorldSelectionUsesRealIdsAndReportsRefusals) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    Luminumbra::Persistence::SavedWorldCatalog catalog;
+    std::string loaded;
+    int enumerations = 0;
+    ui.SetSavedWorldList([&]() {
+        ++enumerations;
+        return catalog;
+    });
+    ui.SetLoadWorldCallback([&](const std::string& id) { loaded = id; });
+    auto open = [&]() {
+        ui.RequestLoadDocument("world_selection.rml");
+        ui.Update();
+        return FindDocumentByBodyId(ui.GetContext(), "world_selection");
+    };
+    auto* doc = open();
+    ASSERT_NE(doc, nullptr);
+    EXPECT_FALSE(doc->GetElementById("no_worlds")->IsClassSet("hidden"));
+    EXPECT_EQ(doc->GetElementById("world_list_items")->GetNumChildren(), 0);
+    EXPECT_TRUE(doc->GetElementById("load_selected_btn")->HasAttribute("disabled"));
+
+    Luminumbra::Persistence::SavedWorld current;
+    current.metadata.worldId = "world_real_123";
+    current.metadata.name = "My <button id='injected'> world & sky";
+    current.metadata.seed = "424242";
+    current.metadata.worldType = "default";
+    catalog.worlds.push_back(current);
+    current.metadata.worldId = "world_obsolete";
+    current.error = "This world predates the v0.3.0 format and cannot be opened.";
+    catalog.worlds.push_back(current);
+    ui.RequestLoadDocument("main_menu.rml");
+    ui.Update();
+    doc = open();
+    ASSERT_NE(doc, nullptr);
+    EXPECT_EQ(enumerations, 2);
+    EXPECT_TRUE(doc->GetElementById("no_worlds")->IsClassSet("hidden"));
+    auto* items = doc->GetElementById("world_list_items");
+    ASSERT_EQ(items->GetNumChildren(), 2);
+    auto* card = items->GetChild(0);
+    auto* description = card->GetChild(1);
+    ASSERT_NE(description, nullptr);
+    EXPECT_NE(description->GetInnerRML().find("424242"), std::string::npos);
+    EXPECT_LE(description->GetAbsoluteOffset().y + description->GetClientHeight(),
+              card->GetAbsoluteOffset().y + card->GetClientHeight());
+    EXPECT_EQ(doc->GetElementById("injected"), nullptr);
+    auto* load = doc->GetElementById("load_selected_btn");
+    EXPECT_FALSE(load->IsClassSet("hidden"));
+    items->GetChild(0)->DispatchEvent("click", {});
+    EXPECT_FALSE(load->HasAttribute("disabled"));
+    load->DispatchEvent("click", {});
+    EXPECT_EQ(loaded, "world_real_123");
+    loaded.clear();
+    items->GetChild(1)->DispatchEvent("click", {});
+    EXPECT_TRUE(load->HasAttribute("disabled"));
+    load->DispatchEvent("click", {});
+    EXPECT_TRUE(loaded.empty());
+    EXPECT_FALSE(doc->GetElementById("notification")->IsClassSet("hidden"));
+    EXPECT_NE(doc->GetElementById("notification_text")->GetInnerRML().find("predates"),
+              std::string::npos);
+
+    ui.ShowMessage("Could not open <missing> save.");
+    EXPECT_EQ(doc->GetElementById("missing"), nullptr);
+    catalog.worlds.clear();
+    catalog.error = "Saved worlds unavailable: access denied.";
+    ui.RequestLoadDocument("main_menu.rml");
+    ui.Update();
+    doc = open();
+    ASSERT_NE(doc, nullptr);
+    EXPECT_TRUE(doc->GetElementById("no_worlds")->IsClassSet("hidden"));
+    EXPECT_FALSE(doc->GetElementById("world_list_status")->IsClassSet("hidden"));
+    ui.Shutdown();
+}
+
+TEST(UiPageLoadTest, CreationCanScrollToItsActionAtSmallWindowSizes) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    ui.RequestLoadDocument("world_creation.rml");
+    ui.Update();
+    auto* doc = FindDocumentByBodyId(ui.GetContext(), "world_creation");
+    ASSERT_NE(doc, nullptr);
+    auto* create = doc->GetElementById("create_btn");
+    ASSERT_NE(create, nullptr);
+    for (const auto size : {Rml::Vector2i(800, 600), Rml::Vector2i(1280, 720)}) {
+        glfwSetWindowSize(context.window(), size.x, size.y);
+        ui.Update();
+        create->ScrollIntoView(false);
+        ui.Update();
+        const auto pos = create->GetAbsoluteOffset(Rml::BoxArea::Border);
+        EXPECT_GE(pos.x, 0.0f);
+        EXPECT_GE(pos.y, 0.0f);
+        EXPECT_LE(pos.x + create->GetClientWidth(), static_cast<float>(size.x));
+        EXPECT_LE(pos.y + create->GetClientHeight(), static_cast<float>(size.y));
+        EXPECT_GT(create->GetClientWidth(), 100.0f);
+        auto* name = doc->GetElementById("world_name");
+        EXPECT_GT(name->GetClientWidth(), 200.0f);
+    }
+    ui.Shutdown();
+}

@@ -47,6 +47,7 @@ set(COMMON_SOURCES
     # Persistence
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/SavedWorldCatalog.cpp
 
     # Replay (: LREC1 session replay stream; engine-generic)
     ${CMAKE_CURRENT_LIST_DIR}/replay/ReplayStream.cpp

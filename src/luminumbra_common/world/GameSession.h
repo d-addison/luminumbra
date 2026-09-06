@@ -10,6 +10,7 @@
 #include "../core/SimulationClock.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
+#include "WorldMetadata.h"
 #include "entt/entt.hpp"
 #include <cstdint>
 #include <ctime>
@@ -54,15 +55,6 @@ struct WeatherEventState; //  (): the epoch-schedule POD (WeatherEventSystem.h)
 
 namespace Luminumbra::world {
 
-struct WorldMetadata {
-    std::string name;
-    std::string seed;
-    std::string worldType;
-    std::string worldId;
-    std::time_t creationTime;
-    Vec3 spawnPoint;
-};
-
 struct WorldConfigValidationResult {
     bool ok = false;
     std::filesystem::path preset_path;
@@ -100,6 +92,11 @@ public:
     CreateWorld(const std::string& name, const std::string& seed, const std::string& worldType) {
         return CreateWorld(name, seed, worldType, nullptr);
     }
+
+    // Menu scenery has no save directory and never appears in the player catalog.
+    bool CreateTransientWorld(const std::string& name,
+                              const std::string& seed,
+                              const std::string& worldType);
 
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
@@ -383,6 +380,13 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    bool m_transientWorld = false;
+    void ResetWorldSystems();
+    bool CreateWorldInternal(const std::string& name,
+                             const std::string& seed,
+                             const std::string& worldType,
+                             const std::string* customPresetJson,
+                             bool transient);
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which

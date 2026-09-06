@@ -41,6 +41,7 @@
 #include "../core/Log.h"
 #include "../fields/EnergyFieldState.h"
 #include "../persistence/PlantPersistence.h"
+#include "../persistence/SavedWorldCatalog.h"
 #include "../persistence/WorldPersistenceRoundtrip.h" // Persistence::StableChecksum (ComputeScentSubHash)
 #include "../persistence/WorldSaveService.h"
 #include "../scripting/LuaState.h"
@@ -146,7 +147,29 @@ GameSession::GameSession() {
 }
 
 GameSession::~GameSession() {
-    // Destructor
+    // Jobs can read world, water, weather and physics. Drain before member destruction.
+    if (m_worldSystem)
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+    if (m_physicsSystem)
+        m_physicsSystem->set_world_system(nullptr);
+    m_worldSystem.reset();
+}
+
+void GameSession::ResetWorldSystems() {
+    if (m_worldSystem)
+        m_worldSystem->quiesce_streaming_jobs_for_save();
+    // Keep all dependencies alive while the world destructor publishes completed work.
+    if (m_physicsSystem)
+        m_physicsSystem->set_world_system(nullptr);
+    m_worldSystem.reset();
+    m_physicsSystem.reset();
+    m_waterSystem.reset();
+    m_registry.clear();
+    m_soilGrid.reset();
+    m_irrigationGrid.reset();
+    m_simulationClock.reset();
+    m_simulationEventBus.clear();
+    m_lastLoadedChunkCount = 0;
 }
 
 // load the per-world species definition table at world create/load.
@@ -806,6 +829,20 @@ bool GameSession::CreateWorld(const std::string& name,
                               const std::string& seed,
                               const std::string& worldType,
                               const std::string* customPresetJson) {
+    return CreateWorldInternal(name, seed, worldType, customPresetJson, false);
+}
+
+bool GameSession::CreateTransientWorld(const std::string& name,
+                                       const std::string& seed,
+                                       const std::string& worldType) {
+    return CreateWorldInternal(name, seed, worldType, nullptr, true);
+}
+
+bool GameSession::CreateWorldInternal(const std::string& name,
+                                      const std::string& seed,
+                                      const std::string& worldType,
+                                      const std::string* customPresetJson,
+                                      bool transient) {
     m_worldOpenError.clear();
     if (!m_jobSystem) {
         LUMINUMBRA_CORE_ERROR("JobSystem not set before creating world");
@@ -821,47 +858,37 @@ bool GameSession::CreateWorld(const std::string& name,
         return false;
     }
 
-    // Set up metadata
-    m_metadata.name = name;
-    m_metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
-    m_metadata.worldType = worldType;
-    m_metadata.worldId = GenerateWorldId();
-    m_metadata.creationTime = std::time(nullptr);
-    m_metadata.spawnPoint = Vec3(0, 100, 0);
-
-    // Create world directory
-    std::string worldPath = m_rootPath + "worlds/saves/" + m_metadata.worldId;
-    try {
-        fs::create_directories(worldPath);
-    } catch (const std::exception& e) {
-        LUMINUMBRA_CORE_ERROR("Failed to create world directory '{}': {}", worldPath, e.what());
-        return false;
+    WorldMetadata metadata;
+    metadata.name = name;
+    metadata.seed = seed.empty() ? std::to_string(std::random_device{}()) : seed;
+    metadata.worldType = worldType;
+    metadata.worldId = transient ? std::string{} : GenerateWorldId();
+    metadata.creationTime = std::time(nullptr);
+    metadata.spawnPoint = Vec3(0, 100, 0);
+    const auto worldPath = RuntimeRoot(m_rootPath) / "worlds/saves" / metadata.worldId;
+    if (!transient) {
+        try {
+            fs::create_directories(worldPath);
+        } catch (const std::exception& e) {
+            m_worldOpenError = "Could not create world save directory: " + std::string(e.what());
+            LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
+            return false;
+        }
     }
-
-    // Initialize Physics System
-    m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
-    m_physicsSystem->startup();
 
     // Customized world: embed the resolved preset in THIS world's own save dir and generate from
     // it, so the world is self-contained (no global custom files / dangling references).
     fs::path preset_to_load = validation.preset_path;
     if (customPresetJson) {
-        const fs::path world_preset = fs::path(worldPath) / "preset.json";
+        const fs::path world_preset = worldPath / "preset.json";
         std::ofstream pf(world_preset, std::ios::binary);
-        if (pf) {
-            pf << *customPresetJson;
-            if (pf.good()) {
-                preset_to_load = world_preset;
-                LUMINUMBRA_CORE_INFO("Custom world preset embedded in save: {}",
-                                     world_preset.string());
-            } else {
-                LUMINUMBRA_CORE_ERROR("Embedded preset write failed; using base preset '{}'",
-                                      worldType);
-            }
-        } else {
-            LUMINUMBRA_CORE_ERROR(
-                "Could not open embedded preset for write; using base preset '{}'", worldType);
+        pf << *customPresetJson;
+        pf.close();
+        if (!pf.good()) {
+            m_worldOpenError = "Could not save this world's customized preset.";
+            return false;
         }
+        preset_to_load = world_preset;
     }
 
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
@@ -873,6 +900,12 @@ bool GameSession::CreateWorld(const std::string& name,
     }
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
+
+    ResetWorldSystems();
+    m_metadata = std::move(metadata);
+    m_transientWorld = transient;
+    m_physicsSystem = std::make_unique<Systems::PhysicsSystem>();
+    m_physicsSystem->startup();
 
     int world_seed = StringToSeed(m_metadata.seed);
     LUMINUMBRA_CORE_INFO("Loaded world preset '{}': height_offset={}, amplitude={}, caves={}",
@@ -949,86 +982,34 @@ bool GameSession::CreateWorld(const std::string& name,
                          terrain_height);
 
     // Save world metadata
-    if (!SaveWorld()) {
-        LUMINUMBRA_CORE_ERROR("Failed to save world metadata");
+    if (!transient && !SaveWorld()) {
+        m_worldOpenError = "Could not save the new world's metadata.";
+        LUMINUMBRA_CORE_ERROR("{}", m_worldOpenError);
         return false;
     }
     return true;
 }
 
 bool GameSession::LoadWorld(const std::string& worldId) {
-    m_worldOpenError = "World metadata or configuration could not be opened.";
     m_lastLoadedChunkCount = 0;
-    std::vector<std::string> open_errors;
-    if (!Persistence::WorldSaveService::validate_save(
-            fs::path(m_rootPath + "worlds/saves/" + worldId), &open_errors)) {
-        m_worldOpenError = open_errors.front();
-        if (m_worldSystem)
-            m_worldSystem->clear_world(m_physicsSystem.get());
+    const auto saved = Persistence::InspectSavedWorld(RuntimeRoot(m_rootPath), worldId);
+    m_worldOpenError = saved.error;
+    if (!m_worldOpenError.empty()) {
         LUMINUMBRA_CORE_ERROR("World open refused: {}", m_worldOpenError);
         return false;
     }
     if (!m_jobSystem) {
-        LUMINUMBRA_CORE_ERROR("JobSystem not set before loading world");
+        m_worldOpenError = "JobSystem not set before loading world.";
         return false;
     }
-
-    std::string worldPath = m_rootPath + "worlds/saves/" + worldId;
-    std::string metadataPath = worldPath + "/world_info.json";
-
-    if (!fs::exists(metadataPath)) {
-        LUMINUMBRA_CORE_ERROR("World not found: {}", worldId);
-        return false;
-    }
-
-    // --- Load Metadata from world_info.json ---
-    std::ifstream metadata_file(metadataPath);
-    nlohmann::json metadata_json;
-    // restored after the world systems exist (see below). Old saves -> 0.
-    std::size_t water_sim_cursor = 0;
-    try {
-        metadata_json = nlohmann::json::parse(metadata_file);
-        m_metadata.name = metadata_json.value("name", "Unnamed World");
-        m_metadata.seed = metadata_json.value("seed", "0");
-        m_metadata.worldType = metadata_json.value("worldType", "default");
-        m_metadata.worldId = worldId;
-        m_metadata.creationTime = metadata_json.value("creationTime", 0);
-        //  (minimal additive hook): restore the persisted spawn point
-        // so a headless host booting an existing save anchors its chunk
-        // streaming where the world was created, not at the origin. Saves
-        // written before spawnPoint existed fall through to the terrain
-        // sample below.
-        if (metadata_json.contains("spawnPoint")) {
-            const nlohmann::json& spawn_json = metadata_json.at("spawnPoint");
-            m_metadata.spawnPoint = Vec3(spawn_json.value("x", 0.0f),
-                                         spawn_json.value("y", 0.0f),
-                                         spawn_json.value("z", 0.0f));
+    for (const auto& asset : m_requiredClientAssets) {
+        if (!fs::exists(RuntimeRoot(m_rootPath) / asset)) {
+            m_worldOpenError = "Missing required runtime asset: " + asset.string();
+            return false;
         }
-        water_sim_cursor = metadata_json.value("waterSimCursor", std::size_t{0});
-    } catch (const nlohmann::json::parse_error& e) {
-        LUMINUMBRA_CORE_ERROR(
-            "Failed to parse world metadata file '{}': {}", metadataPath, e.what());
-        return false;
     }
-
-    const WorldConfigValidationResult validation =
-        ValidateWorldConfig(m_rootPath, m_metadata.worldType, m_requiredClientAssets);
-    if (!validation.ok) {
-        for (const std::string& error : validation.errors) {
-            LUMINUMBRA_CORE_ERROR("World config validation failed: {}", error);
-        }
-        return false;
-    }
-
-    // --- Load Generation Preset ---
-    // Prefer this world's OWN embedded preset (custom worlds) over the named global preset, so a
-    // copied/shared save reproduces its exact terrain regardless of the curated presets dir.
-    fs::path preset_to_load = validation.preset_path;
-    const fs::path embedded_preset = fs::path(worldPath) / "preset.json";
-    if (fs::exists(embedded_preset)) {
-        preset_to_load = embedded_preset;
-        LUMINUMBRA_CORE_INFO("Loading embedded world preset: {}", embedded_preset.string());
-    }
+    const std::string worldPath = (RuntimeRoot(m_rootPath) / "worlds/saves" / worldId).string();
+    const auto& preset_to_load = saved.preset_path;
     const TerrainPresetLoadResult preset = LoadTerrainPreset(preset_to_load);
     if (!preset.ok) {
         for (const std::string& error : preset.errors) {
@@ -1039,6 +1020,9 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     TerrainGenParams params = preset.params;
     ClampTerrainParams(params);
 
+    ResetWorldSystems();
+    m_metadata = saved.metadata;
+    m_transientWorld = false;
     int world_seed = StringToSeed(m_metadata.seed);
 
     // Initialize Physics System after config and preset validation passes.
@@ -1101,7 +1085,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     // Legacy saves without a persisted spawnPoint: derive it from terrain
     // height exactly like CreateWorld does (pure function of seed/params).
-    if (!metadata_json.contains("spawnPoint")) {
+    if (!saved.has_spawn_point) {
         const float spawn_x = 8.0f;
         const float spawn_z = 8.0f;
         const float terrain_height = m_worldSystem->GetTerrainHeightAt(spawn_x, spawn_z);
@@ -1116,7 +1100,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     // restore the rotating water sim-window cursor so the loaded session
     // resimulates the exact windows the original would from the same water state.
     if (m_worldSystem) {
-        m_worldSystem->SetWaterSimWindowCursor(water_sim_cursor);
+        m_worldSystem->SetWaterSimWindowCursor(saved.water_sim_cursor);
     }
 
     // same weather-rain wiring as CreateWorld (default-OFF = no-op).
@@ -1130,18 +1114,8 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 }
 
 bool GameSession::SaveWorld() {
-    if (!m_worldOpenError.empty() ||
-        !Persistence::WorldSaveService::validate_save(GetWorldSaveDir()))
+    if (m_transientWorld || m_metadata.worldId.empty() || !m_worldOpenError.empty())
         return false;
-    std::string worldPath = m_rootPath + "worlds/saves/" + m_metadata.worldId;
-    std::string metadataPath = worldPath + "/world_info.json";
-
-    std::ofstream file(metadataPath);
-    if (!file.is_open()) {
-        LUMINUMBRA_CORE_ERROR("Failed to create world metadata file: {}", metadataPath);
-        return false;
-    }
-
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion},
@@ -1161,16 +1135,15 @@ bool GameSession::SaveWorld() {
         {"waterSimCursor",
          m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}};
 
-    file << std::setw(4) << metadata_json << std::endl;
-    file.close();
-    return true;
+    return Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
+                                                        GetWorldSaveDir());
 }
 
 std::filesystem::path GameSession::GetWorldSaveDir() const {
-    if (m_metadata.worldId.empty()) {
+    if (m_transientWorld || m_metadata.worldId.empty()) {
         return {};
     }
-    return fs::path(m_rootPath + "worlds/saves/" + m_metadata.worldId);
+    return RuntimeRoot(m_rootPath) / "worlds/saves" / m_metadata.worldId;
 }
 
 bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
@@ -1295,6 +1268,8 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 }
 
 bool GameSession::LoadWorldState() {
+    if (m_transientWorld)
+        return m_worldSystem && m_worldOpenError.empty();
     return LoadWorldStateFrom(GetWorldSaveDir());
 }
 

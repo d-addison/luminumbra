@@ -71,6 +71,12 @@ public:
     static bool validate_save(const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr);
 
+    // Uses the same durable temporary-file/atomic replacement path as chunk containers.
+    // Refuses an unsupported existing save before touching its metadata.
+    static bool save_metadata(const std::string& bytes,
+                              const std::filesystem::path& save_dir,
+                              std::vector<std::string>* errors = nullptr);
+
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk
     // region files; these helpers expose the container at record granularity

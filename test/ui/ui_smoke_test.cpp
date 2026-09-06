@@ -312,6 +312,17 @@ TEST(UiSmokeTest, CapturesMaintainedMenuScreenshots) {
     ui.Shutdown();
 }
 
+static Luminumbra::Persistence::SavedWorldCatalog SavedWorldFixture() {
+    Luminumbra::Persistence::SavedWorldCatalog catalog;
+    Luminumbra::Persistence::SavedWorld world;
+    world.metadata.worldId = "interaction_fixture";
+    world.metadata.name = "Interaction Test World";
+    world.metadata.worldType = "default";
+    world.metadata.seed = "424242";
+    catalog.worlds.push_back(world);
+    return catalog;
+}
+
 TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -341,12 +352,13 @@ TEST(UiSmokeTest, AuthoredRmlDocumentsLoadAndExposeRequiredElements) {
         {"world_creation.rml",
          {"world_name", "world_seed", "world_type", "back_btn", "create_btn"}},
         {"world_selection.rml",
-         {"filter_all",
-          "filter_recent",
-          "filter_favorites",
+         {"world_selection",
+          "world_list_items",
+          "world_list_status",
+          "no_worlds",
           "back_btn",
           "load_selected_btn",
-          "import_world_btn"}},
+          "new_world_btn"}},
         {"settings.rml",
          {"settings",
           "setting_resolution",
@@ -588,6 +600,7 @@ TEST(UiSmokeTest, AuthoredMenuInteractionsNavigateAndInvokeCallbacks) {
         created_world = CreatedWorld{name, seed, type, params};
     });
     ui.SetLoadWorldCallback([&](const std::string& world_id) { loaded_world_id = world_id; });
+    ui.SetSavedWorldList(SavedWorldFixture);
 
     int navigation_clicks_checked = 0;
     int form_fields_checked = 0;
@@ -1161,6 +1174,7 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
 
     int load_calls = 0;
     ui.SetLoadWorldCallback([&](const std::string&) { ++load_calls; });
+    ui.SetSavedWorldList(SavedWorldFixture);
 
     Rml::ElementDocument* ws = LoadDocumentAndFind(ui, "world_selection.rml", "world_selection");
     ASSERT_NE(ws, nullptr);
