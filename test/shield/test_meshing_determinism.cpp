@@ -184,20 +184,43 @@ TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
 }
 
 TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
-    // Re-pinned for cave_style/shaping_enabled retirement.
+    // Precise AVX reciprocal/sqrt operations preserve the reference topology.
+    // CPU-specific estimates previously crossed the Worley carve threshold at
+    // (0,10,15), changing 52 vertices / 174 indices into 51 / 168. Vertex bytes
+    // below follow the corrected field; all three index hashes remain unchanged.
     const ExpectedMeshHashes expected[3] = {
         {1,
-         ToolchainVertexHash(0x9b9a0f1985b16decull, 0x9b9a0f1985b16decull),
+         ToolchainVertexHash(0x52a14947bf315497ull, 0x52a14947bf315497ull),
          0x501667b909047bbcull},
         {2,
-         ToolchainVertexHash(0xf0ca86d13f48b7cdull, 0xf0ca86d13f48b7cdull),
+         ToolchainVertexHash(0x186c4e8e9203bc6eull, 0x186c4e8e9203bc6eull),
          0xc026220b072ee6ddull},
         {4,
-         ToolchainVertexHash(0xf1dc86ff3820ef1full, 0xf1dc86ff3820ef1full),
+         ToolchainVertexHash(0xf5a604c650bdef3full, 0xf5a604c650bdef3full),
          0x7298410a91b6706full},
     };
     VerifyCurrentCombo(
         "caves seed=12345 chunk=(0,0,0)", MakeCaveParams(), 12345, IVec3(0, 0, 0), expected);
+}
+
+TEST(MeshingDeterminism, WorleyCarveThresholdUsesPreciseNoise) {
+    auto worley = FastNoise::New<FastNoise::CellularDistance>(FastSIMD::Level_AVX2);
+    worley->SetDistanceIndex0(0);
+    worley->SetDistanceIndex1(2);
+    worley->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0Div1);
+    const auto params = MakeCaveParams();
+    // The first differing noise sample and the sole occupancy flip from the
+    // failing CI trace, respectively. Compare bits before meshing/interpolation.
+    const auto sample = [&](const Vec3& p) {
+        return worley->GenSingle3D(p.x * params.worley_frequency,
+                                   p.y * params.worley_frequency,
+                                   p.z * params.worley_frequency,
+                                   12345 + 21);
+    };
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(sample(Vec3(3, 0, 0))), 0x3e83ea99u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(sample(Vec3(0, 10, 15))), 0x3f1ebe77u);
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 12345);
+    EXPECT_LT(world.get_density_at(Vec3(0, 10, 15)), 0.0f);
 }
 
 TEST(MeshingDeterminism, FlatSurfaceChunkHashesAreStable) {
