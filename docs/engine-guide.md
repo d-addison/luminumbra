@@ -198,6 +198,27 @@ The contrast curve preserves black and shaded material differences. Public
 procedural tree leaves use a two-sided cutout with consistent reflectance across
 mesh LODs. Ground-cover sizes in `data/common/foliage/scatter_set.json` are metres
 before 20% variation; grass is 12–20 cm tall, with wind bend bounded by blade height.
+Grass anchors use the triangles uploaded to the terrain renderer, including mesh
+replacement and removal. Visibility follows the frustum and scene depth, without
+an artificial screen-height cutoff. Live rain and snow use camera-relative spawn
+volumes with particles that retain world-space positions; wind does not distort
+the terrain image. Ground snow cover samples weather at the terrain elevation.
+The weather fog layer activates for fog weather; clear-air haze belongs to the
+aerial pass. Both layers account for how much of an elevated sightline passes
+through air near the ground.
+
+Underwater effects require the camera to be between a water bed and its surface.
+Dry underground space below sea level remains air. Underground streaming retains
+a bounded full-SDF neighbourhood around the player below the surface band,
+up to 128 m horizontally and 64 m vertically within the active chunk budget.
+Aerial haze and water depth reconstruction distinguish cleared sky depth from
+all visible terrain depths. Screen-space god rays use opaque depth to mask land.
+The current far terrain radius is approximately 3 km, with a 3200 m camera far
+plane; it is a finite horizon and does not provide unlimited distant terrain.
+Distant surface tiles remain resident beneath the live terrain ring. The camera-region
+near-plane guard applies only near that region's vertical bounds, so an elevated view
+does not lose a square of ground beneath it. Water tint and caustics use the water pass;
+opaque cave floors do not become water-coloured simply because they are below sea level.
 
 ### UI, audio, and optional data
 
@@ -264,7 +285,7 @@ variables in CMake are build options, not these runtime environment controls.
 | `LUMIN_TREE_IMPOSTORS` | Unset enables atlas baking and far-tree impostors. Empty or any value beginning with `0` disables; every other nonempty value enables. A failed atlas bake leaves them disabled. | Each pipeline startup |
 | `LUMIN_CLOUD_QUALITY` | Client default `2`: quarter resolution per axis. `0` = full, `1` = half, `2` = quarter. Parsed with `atoi`, clamped to `[0, 2]`; empty/nonnumeric becomes `0`. | Client startup |
 | `LUMIN_SSAO_QUALITY` | Client default `3`: half-resolution GTAO High with depth-aware upsampling. `0` = 64-sample hemisphere SSAO, `1` = full-resolution GTAO Low (8 samples), `2` = full-resolution GTAO High (18 samples), `3` = half-resolution High. `atoi`, clamped to `[0, 3]`; empty/nonnumeric becomes `0`. | Client startup |
-| `LUMIN_ATMOS` | `density,maxDistance,inscatterStrength,warmth`; all four floats must parse to override the current atmosphere. Initial defaults are `0.0016,3000,60,1`. | Once per process on first aerial-context use |
+| `LUMIN_ATMOS` | `density,maxDistance,inscatterStrength,warmth`; all four floats must parse to override the current atmosphere. Initial defaults are `0.00045,3000,60,1`. | Once per process on first aerial-context use |
 | `LUMIN_GRADE` | `exposure,saturation,contrast,warmR,warmG,warmB`; defaults `1.12,1.30,1.42,1.06,1.0,0.92`. A parsed prefix replaces those fields; remaining fields retain defaults. A positive render-context exposure takes precedence over the grade exposure. | Once per process on first lighting use |
 | `LUMIN_MOON` | No forced illumination by default. A nonnegative float overrides moon illumination, clamped to `[0, 1]`. Negative or unparseable input falls back to the pipeline override or lunar cycle. | Once per process on first celestial update |
 | `LUMIN_MOON_WRAP_FLOOR` | Float, default `0.25`; parse failure retains the default. The C++ environment parser does not clamp it. | Once per process on first lighting use |

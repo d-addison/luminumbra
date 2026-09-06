@@ -32,11 +32,11 @@ uniform float u_water_depth_scaler;
 uniform float u_reflection_power;
 uniform vec3 u_sky_color; // approximate sky reflection color (time-of-day driven)
 
-const float FAR_DEPTH_THRESHOLD = 0.9999;
-
 bool has_opaque_depth(float depth)
 {
-    return depth < FAR_DEPTH_THRESHOLD;
+    // Every value below cleared depth is geometry, including terrain beyond
+    // 762 m with the current projection. Altitude must not turn land into sky.
+    return depth < 1.0;
 }
 
 // --- Procedural ripple normal -------------------------------------------
@@ -191,6 +191,8 @@ void main()
     if (background_has_opaque_depth) {
         vec3 background_world_pos = world_pos_from_depth(background_depth_sample, screen_uv);
         water_depth = max(0.0, fs_in.world_pos.y - background_world_pos.y);
+        if (u_camera_pos.y > fs_in.world_pos.y && water_depth <= 0.0)
+            discard; // submerged/occluded water triangles cannot coat dry ground
     }
 
     // --- 4. Refraction ---

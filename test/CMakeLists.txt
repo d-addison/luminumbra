@@ -351,6 +351,7 @@ target_include_directories(render_smoke_test PRIVATE
 )
 
 target_link_libraries(render_smoke_test PRIVATE
+    glm::glm
     gtest_main
     glfw
     glad
@@ -469,6 +470,9 @@ add_executable(pass_context_test
 ../src/luminumbra_client/rendering/passes/DebugViewPass.cpp
 ../src/luminumbra_client/rendering/passes/GroundDecalPass.cpp
 ../src/luminumbra_client/rendering/passes/ShadowPass.cpp
+../src/luminumbra_client/rendering/passes/ParticlePass.cpp
+../src/luminumbra_client/rendering/passes/FoliagePass.cpp
+../src/luminumbra_client/rendering/AsyncReadbackRing.cpp
 ../src/luminumbra_client/rendering/RenderResourceRegistry.cpp
 ../src/luminumbra_client/rendering/Shader.cpp
 ../src/luminumbra_client/rendering/ShaderReflection.cpp
@@ -1061,6 +1065,7 @@ target_include_directories(runtime_world_visual_validation_test PRIVATE
 target_link_libraries(runtime_world_visual_validation_test PRIVATE
     gtest_main
     luminumbra_common
+    luminumbra_client_qa
     glfw
     glad
 )

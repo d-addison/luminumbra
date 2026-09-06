@@ -535,9 +535,9 @@ void WriteWaterfallVisualAnalysis(const std::filesystem::path& artifact_dir,
 // (zero wind -> particles fall vertically) and a WINDY phase (strong horizontal
 // wind -> the falling field slants diagonally). The analysis measures, over the
 // near-field precipitation band, the orientation of the bright-particle mass: a
-// "slant ratio" = mean |dL/dx| / mean |dL/dy|. Calm rain is dominated by vertical
-// streak columns (low horizontal gradient relative to vertical); wind-advected
-// rain leans, raising the horizontal gradient component. The gate asserts
+// "slant ratio" = mean |dL/dy| / mean |dL/dx|. Calm rain has sharp edges across
+// vertical streaks and little variation along them; wind-advected rain leans,
+// raising the vertical gradient component. The gate asserts
 // precip particles are PRESENT in both frames (ParticlePass draws + a bright
 // pixel count floor) AND that the windy slant ratio exceeds the calm one by a
 // margin (the streaks demonstrably slant with wind). Particle MOTION is
@@ -552,7 +552,7 @@ struct PrecipPixelStats {
     // Mean |L(x+1,y)-L(x,y)| and |L(x,y+1)-L(x,y)| over bright neighborhoods.
     double horizontal_gradient_mean = 0.0;
     double vertical_gradient_mean = 0.0;
-    // horizontal_gradient_mean / vertical_gradient_mean. Rises as rain slants.
+    // vertical_gradient_mean / horizontal_gradient_mean. Rises as rain slants.
     double slant_ratio = 0.0;
     //  SHAPE/QUALITY metrics so the gate catches the
     // "dark speckled dots" failure that thresholds alone passed.

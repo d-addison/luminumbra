@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
+#include "../FoliageGroundMesh.h"
 #include "../RenderContext.h"
 
 #include <array>
@@ -134,6 +135,15 @@ public:
     void init_shader(const std::filesystem::path& root_path);
     void init_buffers();
     void destroy_buffers();
+    void use_rendered_ground() {
+        m_use_rendered_ground = true;
+    }
+    void update_ground_mesh(ChunkID id,
+                            const glm::ivec3& coords,
+                            const std::vector<VoxelVertex>& vertices,
+                            const std::vector<u32>& indices);
+    void remove_ground_mesh(ChunkID id);
+    void clear_ground_meshes();
     void reset_shader();
 
     //  #4: GPU grass scatter (compute). Compiles res/shaders/grass_scatter.comp
@@ -147,9 +157,7 @@ public:
     }
 
     // --- GPU scatter tuning (mirrors the CPU placement constants). ---
-    static constexpr int kSurfaceGrid = 8;                     // cells/side
-    static constexpr int kSurfaceGridVerts = kSurfaceGrid + 1; // 9 -> 81 samples/chunk
-    static constexpr std::size_t kWordsPerBlade = 9;           // 36-byte record = 9 u32
+    static constexpr std::size_t kWordsPerBlade = 9; // 36-byte record = 9 u32
     // m_count_ssbo stores one append counter followed by a DrawArraysIndirectCommand.
     static constexpr std::size_t kGrassDrawCommandOffsetBytes = sizeof(u32);
 
@@ -308,6 +316,13 @@ private:
     // the gate's instance_hash/coverage probes stay populated independent of the
     // scatter-cache elision..
     void poll_foliage_readback();
+    SurfaceSample sample_ground(
+        const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx, float x, float z) const;
+    bool m_use_rendered_ground = false;
+    std::uint64_t m_ground_revision = 0;
+    std::unordered_map<ChunkID, std::uint64_t> m_ground_columns;
+    std::unordered_map<std::uint64_t, std::unordered_map<ChunkID, FoliageGroundMesh>>
+        m_ground_meshes;
 
     //  implementation note (foliage streaming-burst amortization): build (or fetch the cached)
     // CAMERA-INDEPENDENT instance records for one chunk. The records (position/size/color/phase/
@@ -381,18 +396,19 @@ private:
     // grows past a soft cap.
     struct CachedChunkRecords {
         std::uint64_t gen = 0;
+        std::uint64_t placement = 0;
         std::vector<InstanceRecord> records;
     };
     std::unordered_map<std::uint64_t, CachedChunkRecords> m_chunk_cache;
     std::uint64_t m_chunk_cache_gen = 1;
-    //  implementation note: the GPU scatter path (rebuild_instances_gpu, the path that actually
-    //  runs
-    // in normal play) sampled the per-chunk SURFACE GRID (kSurfaceGridVerts^2 GetTerrainHeightAt
-    // calls) on the CPU for EVERY renderable chunk on every rebuild — ~1s when moving. The grid is
-    // a pure function of chunk_xz + the static terrain, so cache it per chunk (keyed by packed
-    // chunk_xz) and rebuild only a budgeted few new chunks per frame. Keyed identically to
-    // m_chunk_cache.
-    std::unordered_map<std::uint64_t, std::vector<glm::vec4>> m_surf_grid_cache;
+    // Exact mesh hits at the GPU's deterministic candidate positions. Biome and
+    // footprint changes move those positions, so they must invalidate cached hits.
+    // Mesh replacement/removal invalidates the affected column separately.
+    struct CachedSurfaceSamples {
+        std::uint64_t placement = 0;
+        std::vector<glm::vec4> samples;
+    };
+    std::unordered_map<std::uint64_t, CachedSurfaceSamples> m_surf_grid_cache;
     //  implementation note: when MOVING fast, many chunks stream into the renderable set in one
     //  frame,
     // and building their (uncached) records all at once re-ran hundreds of SurfaceQuery calls -> a

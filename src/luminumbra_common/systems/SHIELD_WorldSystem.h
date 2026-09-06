@@ -457,6 +457,10 @@ public:
     // elsewhere. The WaterSystem seeds + pins its per-cell rest level from this so
     // lakes sit at their basin elevation (mountain/valley) and never drain. Pure.
     float WaterLevelAt(float world_x, float world_z) const;
+    // Owner-thread, read-only volume query for presentation. Uses resident water
+    // beds/depths (including edits and rainfall), with worldgen fallback before
+    // a column's water grid is ready. A dry cave below a lake bed is not water.
+    bool IsUnderwater(const Vec3& world_pos) const;
     // coarse-LOD height. Identical to
     // GetTerrainHeightAt for step <= 1 (full-res byte-identical). For step > 1
     // the river carve - and ONLY the carve - is anti-aliased over the

@@ -103,12 +103,11 @@ struct RenderContext {
     TextureHandle transmittance_lut{}; // <- m_sky_lut.transmittance_texture()
     bool sky_lut_ready = false;        // <- m_sky_lut.ready()
 
-    // Group E (remaining) — shadow / SSAO / caustics reads.
+    // Group E (remaining) — shadow / SSAO reads.
     TextureHandle shadow_depth_array{}; // <- m_shadow_pass->shadow_map().depth_texture_array
     // the tinted-transmission cascade (white = identity).
     TextureHandle shadow_tint_array{}; // <- m_shadow_pass->tint_texture_array()
     TextureHandle ssao_blur{};         // <- m_ssao_pass->ssao().ssaoColorBufferBlur
-    TextureHandle caustics_tex{};      // <- m_water_pass->black_texture()
 
     // Group F — terrain/material arrays (GBuffer + Lighting).
     TextureHandle material_lut{};      // <- m_materialLUT

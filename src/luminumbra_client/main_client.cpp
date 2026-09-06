@@ -3424,8 +3424,12 @@ int main(int argc, char* argv[]) {
                                scenario_config.creature_slice_smoke()) &&
                               scenario_ready)) &&
                             g_camera;
+                        // PlayerController::Update may have moved g_camera back to
+                        // the player this frame; the fixed pose is reapplied later
+                        // for rendering. Stream its explicit position now as well.
                         const Luminumbra::Vec3 streaming_position =
-                            cam_anchored
+                            g_app.capture.fixed_cam ? Luminumbra::Vec3(g_app.capture.fixed_cam_pos)
+                            : cam_anchored
                                 ? Luminumbra::Vec3(g_camera->Position)
                                 : (g_playerController
                                        ? Luminumbra::Vec3(g_playerController->GetPosition())
@@ -3638,7 +3642,7 @@ int main(int argc, char* argv[]) {
                         renderPipeline.set_season_tick(sim_tick);
                         renderPipeline.set_time_of_day_tick(sim_tick);
                         // Sample live simulation weather at the camera and drive
-                        // weather at the camera and drive the overlay + cloud layer
+                        // the atmosphere, world-space precipitation and cloud layer
                         // through the pure WeatherRenderBridge mapping. The
                         // render.live_weather switch is enabled in the shipped config.
                         // Scenario/scene weather pins below override by frame order.
@@ -3648,9 +3652,18 @@ int main(int argc, char* argv[]) {
                                                                g_camera->Position.y,
                                                                g_camera->Position.z);
                                 const auto wsample = live_weather->SampleAt(cam_pos);
-                                renderPipeline.set_weather_state(
+                                const auto weather_state =
                                     Luminumbra::Rendering::WeatherBridge::BuildWeatherRenderState(
-                                        wsample));
+                                        wsample);
+                                renderPipeline.set_weather_state(weather_state);
+                                if (auto* particles = renderPipeline.particles()) {
+                                    particles->set_precipitation(root_dir / "data/common/particles",
+                                                                 g_camera->Position,
+                                                                 weather_state.rain_intensity,
+                                                                 weather_state.snow_intensity);
+                                    particles->set_wind(weather_state.wind_direction *
+                                                        weather_state.wind_strength * 8.0f);
+                                }
                                 renderPipeline.set_cloud_state(
                                     Luminumbra::Rendering::WeatherBridge::BuildCloudRenderState(
                                         wsample, sim_tick));
@@ -3749,10 +3762,14 @@ int main(int argc, char* argv[]) {
                         // (SnowCoverModel.h). The switch is enabled in the shipped config.
                         if (g_systemConfig.enabled(luminumbra::core::SysKey::RenderSnowCover)) {
                             if (const auto* snow_weather = gameSession->GetWeatherSystem()) {
-                                const auto ssample =
-                                    snow_weather->SampleAt(Luminumbra::Vec3(g_camera->Position.x,
-                                                                            g_camera->Position.y,
-                                                                            g_camera->Position.z));
+                                // Snow on the ground follows ground weather. Sampling
+                                // the flying camera's colder altitude whitened warm
+                                // terrain simply because the player climbed above it.
+                                Luminumbra::Vec3 ground_sample = g_camera->Position;
+                                if (const auto* world = gameSession->GetWorldSystem())
+                                    ground_sample.y =
+                                        world->GetTerrainHeightAt(ground_sample.x, ground_sample.z);
+                                const auto ssample = snow_weather->SampleAt(ground_sample);
                                 const float snowing =
                                     (ssample.category == Luminumbra::Systems::WeatherCategory::Snow)
                                         ? ssample.precip_intensity
@@ -3827,6 +3844,14 @@ int main(int argc, char* argv[]) {
                                       : (g_app.capture.scene_weather == 4) ? WT::Storm
                                                                            : WT::None;
                         renderPipeline.set_weather(wt, g_app.capture.scene_weather_intensity);
+                        if (auto* particles = renderPipeline.particles()) {
+                            const float intensity = g_app.capture.scene_weather_intensity;
+                            particles->set_precipitation(
+                                root_dir / "data/common/particles",
+                                g_camera->Position,
+                                (wt == WT::Rain || wt == WT::Storm) ? intensity : 0.0f,
+                                wt == WT::Snow ? intensity : 0.0f);
+                        }
                         if (g_app.capture.scene_clouds) {
                             Luminumbra::Rendering::CloudRenderState cs;
                             cs.enabled = true;
@@ -4225,7 +4250,7 @@ int main(int argc, char* argv[]) {
         // are measured, not just the GPU per-pass timer sum.
         if (!g_app.capture.render_benchmark_path.empty() && currentState == GameState::IN_GAME &&
             gameSession) {
-            if (g_camera) {
+            if (g_camera && !g_app.capture.fixed_cam) {
                 g_camera->Position = glm::vec3(8.0f, 56.0f, 8.0f);
                 g_camera->Yaw = 35.0f;
                 g_camera->Pitch = -6.0f; // shallow: deep forest carpet, not down at near ground
@@ -4424,7 +4449,76 @@ int main(int argc, char* argv[]) {
                 j["render_scale"] = renderPipeline.render_scale();
                 j["internal_width"] = renderPipeline.internal_width();
                 j["internal_height"] = renderPipeline.internal_height();
-                j["pose"] = "forest_dense";
+                j["pose"] = g_app.capture.fixed_cam ? "fixed_camera" : "forest_dense";
+                if (g_camera && gameSession && gameSession->GetWorldSystem()) {
+                    const auto* world = gameSession->GetWorldSystem();
+                    const auto coords = world->world_to_chunk_coords(g_camera->Position);
+                    const auto chunk = world->find_streamed_chunk(coords);
+                    j["camera"] = {
+                        {"position",
+                         {g_camera->Position.x, g_camera->Position.y, g_camera->Position.z}},
+                        {"chunk", {coords.x, coords.y, coords.z}},
+                        {"density", world->get_density_at(g_camera->Position)},
+                        {"underwater", world->IsUnderwater(g_camera->Position)}};
+                    j["camera_chunk"] = {{"resident", chunk != nullptr},
+                                         {"sdf_samples", chunk ? chunk->sdf_data.size() : 0},
+                                         {"mesh_indices", chunk ? chunk->mesh_indices.size() : 0},
+                                         {"lod", chunk ? chunk->current_lod.load() : -1}};
+                    const auto& streaming = world->get_last_streaming_budget_stats();
+                    j["streaming"] = {{"generation_pending", streaming.deferred_generation},
+                                      {"meshing_pending", streaming.deferred_meshing},
+                                      {"terrain_visible_chunks", s.terrain_visible_chunks}};
+                    const auto& uploads = renderPipeline.get_last_mesh_upload_stats();
+                    j["streaming"]["terrain_uploads_pending"] = uploads.terrain_uploads_deferred;
+                    j["streaming"]["terrain_draws"] = s.terrain_draws;
+                    j["camera"]["yaw"] = g_camera->Yaw;
+                    j["camera"]["pitch"] = g_camera->Pitch;
+                    j["camera"]["fov"] = g_camera->Zoom;
+                    int resident = 0, meshed = 0;
+                    for (int dz = -2; dz <= 2; ++dz) {
+                        for (int dy = -2; dy <= 2; ++dy) {
+                            for (int dx = -2; dx <= 2; ++dx) {
+                                const auto neighbour = world->find_streamed_chunk(
+                                    coords + Luminumbra::IVec3(dx, dy, dz));
+                                resident += neighbour != nullptr;
+                                meshed += neighbour && !neighbour->mesh_indices.empty();
+                            }
+                        }
+                    }
+                    j["camera_neighbourhood"] = {{"resident", resident}, {"meshed", meshed}};
+                    // Bounded readback only when emitting the requested benchmark artifact.
+                    // These samples distinguish missing geometry from a later shading defect.
+                    GLint read_fbo = 0;
+                    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, renderPipeline.gbuffer().fbo_id);
+                    auto probes = nlohmann::json::array();
+                    for (int py = 1; py <= 3; ++py) {
+                        for (int px = 1; px <= 3; ++px) {
+                            const int x =
+                                static_cast<int>(renderPipeline.internal_width()) * px / 4;
+                            const int y =
+                                static_cast<int>(renderPipeline.internal_height()) * py / 4;
+                            std::array<float, 3> position{}, albedo{};
+                            std::array<float, 4> normal{};
+                            float depth = 1.0f;
+                            glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+                            glReadBuffer(GL_COLOR_ATTACHMENT0);
+                            glReadPixels(x, y, 1, 1, GL_RGB, GL_FLOAT, position.data());
+                            glReadBuffer(GL_COLOR_ATTACHMENT1);
+                            glReadPixels(x, y, 1, 1, GL_RGBA, GL_FLOAT, normal.data());
+                            glReadBuffer(GL_COLOR_ATTACHMENT2);
+                            glReadPixels(x, y, 1, 1, GL_RGB, GL_FLOAT, albedo.data());
+                            probes.push_back({{"uv", {px / 4.0f, py / 4.0f}},
+                                              {"depth", depth},
+                                              {"view_position", position},
+                                              {"material", std::lround(normal[3] * 255.0f)},
+                                              {"albedo", albedo}});
+                        }
+                    }
+                    glReadBuffer(GL_COLOR_ATTACHMENT0);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
+                    j["gbuffer_probes"] = std::move(probes);
+                }
                 j["cloud_quality"] = renderPipeline.get_cloud_quality();
                 j["ssao_quality"] = renderPipeline.get_ssao_quality();
                 j["gpu_timers_supported"] = s.gpu_timers_supported;

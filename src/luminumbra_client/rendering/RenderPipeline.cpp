@@ -331,8 +331,9 @@ bool RenderPipeline::startup(u32 screen_width,
                           screen_height); // OUTPUT res: TAAU history/backbuffer stay at output
         init_halfres_cloud();             // no-op unless cloud quality was set > 0 before startup
         m_skybox_pass->init_geometry();
-        m_particle_pass->init_buffers();      //  persistent-mapped instance pool
-        m_foliage_pass->init_buffers();       //  persistent-mapped scatter pool
+        m_particle_pass->init_buffers(); //  persistent-mapped instance pool
+        m_foliage_pass->init_buffers();  //  persistent-mapped scatter pool
+        m_foliage_pass->use_rendered_ground();
         m_plant_procgen_pass->init_buffers(); //  dedicated procgen plant VAO/VBO/EBO
         m_ground_decal_pass->init_buffers();  // decal VAO + lazy scent texture
         m_debug_view_pass->init_buffers();    // render-only debug-view VAO (default-OFF)
@@ -846,7 +847,7 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.gbuffer_depth =
         m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
 
-    // Group E — shadow / SSAO / caustics reads.
+    // Group E — shadow / SSAO reads.
     ctx.shadow_depth_array = m_render_registry.adopt_texture(
         "shadow_depth_array", m_shadow_pass->shadow_map().depth_texture_array);
     // the tinted-transmission cascade (registry-owned by
@@ -855,8 +856,6 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
                                                             m_shadow_pass->tint_texture_array());
     ctx.ssao_blur =
         m_render_registry.adopt_texture("ssao_blur", m_ssao_pass->ssao().ssaoColorBufferBlur);
-    ctx.caustics_tex =
-        m_render_registry.adopt_texture("caustics_tex", m_water_pass->black_texture());
 
     // Group F — terrain / material arrays.
     ctx.terrain_textures =
@@ -2349,12 +2348,9 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         }
     }
     gather_lights(registry, camera.Position);
-    // Underwater detection: the aerial pass becomes a murky-water volume when the
-    // camera sits below the local water surface (sea OR a perched lake).
-    {
-        const float water_level = world_system.WaterLevelAt(camera.Position.x, camera.Position.z);
-        m_underwater_factor = (camera.Position.y < water_level - 0.05f) ? 1.0f : 0.0f;
-    }
+    // Underwater is a water-volume membership query, not a global height cutoff.
+    // Dry caves below sea/lake level retain their air lighting.
+    m_underwater_factor = world_system.IsUnderwater(camera.Position) ? 1.0f : 0.0f;
     auto renderable_chunks = world_system.get_renderable_chunks();
     auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
     m_last_mesh_upload_stats = {};
@@ -3275,6 +3271,7 @@ void RenderPipeline::clear_offscreen_target() {
 }
 
 void RenderPipeline::clear_all_chunk_data() {
+    m_foliage_pass->clear_ground_meshes();
     // Force clear all cached chunk render data to ensure fresh uploads.
     // terrain geometry lives in the shared pool; dropping the whole
     // pool releases every live slice at once. delete_chunk_slot still runs on
@@ -3409,6 +3406,8 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
 // to the retired inline block) so execute_god_rays reads only ctx. Render-only.
 RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -4234,6 +4233,7 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
         // Pool allocation failed (e.g. OOM): leave the record empty so the draw
         // loop skips it, and record the failure.
         render_data.element_count = 0;
+        m_foliage_pass->remove_ground_mesh(chunk.id);
         m_last_mesh_upload_stats.terrain_upload_failures++;
         if (record_created)
             m_last_mesh_upload_stats.terrain_slots_created++;
@@ -4241,6 +4241,7 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     }
 
     render_data.pool_handle = new_handle;
+    m_foliage_pass->update_ground_mesh(chunk.id, chunk.coords, payload.vertices, payload.indices);
     const ChunkGeometryPool::Allocation& alloc = m_chunk_geometry_pool.allocation(new_handle);
     // Track the reserved slot capacity (not just the written count) so the
     // distance-budget "needs growth" intuition and the VRAM estimate match the
@@ -4283,6 +4284,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 }
 
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
+    m_foliage_pass->remove_ground_mesh(chunk_id);
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {
         ChunkRenderData data = it->second;

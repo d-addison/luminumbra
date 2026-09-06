@@ -176,17 +176,17 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 1391,
+      "bytes": 796,
       "license": "MIT",
       "path": "data/common/particles/precip_rain.json",
-      "sha256": "905c1bfd80bf083a68aa89bbb913d0da9bd3fab82509c4a6629551b185b4b31c",
+      "sha256": "14331794120b5b85957be1d4034cea7eff8324608b24b766ffd22d2b54082d9d",
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 646,
+      "bytes": 794,
       "license": "MIT",
       "path": "data/common/particles/precip_snow.json",
-      "sha256": "91d522911536c126b6ed153f8ab0e35455d7d22f23ff34506fbe4a26e5be598d",
+      "sha256": "241bf3f4e626b15acc9afe31e3cd8cbc7bce81e867abb1d894d23b2635d021b7",
       "source": "Luminumbra first-party runtime data"
     },
     {

@@ -279,7 +279,11 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
            {},
            true});
     // 7b2: god rays sample the LATEST opaque snapshot (#2 if weather ran, else #1) + composite.
-    g.add({"god_rays", {"lighting.color"}, {"lighting.color"}, {"lighting.opaque_color"}, false});
+    g.add({"god_rays",
+           {"lighting.color", "gbuffer.depth"},
+           {"lighting.color"},
+           {"lighting.opaque_color"},
+           false});
     // 7c: foliage cards blend into the lit target, depth-tested.
     g.add({"foliage", {"lighting.depth"}, {"lighting.color"}, {}, true});
     // TAAU resolve of the opaque lit color before the transparent particle/lightning composite.

@@ -271,6 +271,8 @@ void ParticlePass::clear_emitters() {
     m_active_emitters.clear();
     m_descriptors.clear();
     m_next_emitter_id = 0;
+    m_precip_emitters.fill(kInvalidEmitter);
+    m_precip_load_attempted.fill(false);
     m_splash_emitter_index = kNoSplashEmitter;
     // Kill any live particles so existing byte-stable visual gates render an
     // empty (no-op) particle pass.
@@ -292,6 +294,31 @@ void ParticlePass::set_emitter_origin(uint32_t emitter_id, const glm::vec3& base
         if (emitter.id == emitter_id) {
             emitter.world_origin = base_origin + emitter.data.origin;
             return;
+        }
+    }
+}
+
+void ParticlePass::set_precipitation(const std::filesystem::path& particle_data_root,
+                                     const glm::vec3& camera_position,
+                                     float rain_intensity,
+                                     float snow_intensity) {
+    const std::array<float, 2> intensities{rain_intensity, snow_intensity};
+    constexpr std::array<const char*, 2> files{"precip_rain.json", "precip_snow.json"};
+    for (std::size_t i = 0; i < files.size(); ++i) {
+        const float intensity =
+            std::isfinite(intensities[i]) ? std::clamp(intensities[i], 0.0f, 1.0f) : 0.0f;
+        if (intensity > 0.0f && !m_precip_load_attempted[i]) {
+            m_precip_load_attempted[i] = true;
+            m_precip_emitters[i] = add_emitter(particle_data_root / files[i], camera_position);
+        }
+        if (m_precip_emitters[i] == kInvalidEmitter)
+            continue;
+        set_emitter_origin(m_precip_emitters[i], camera_position);
+        for (ActiveEmitter& emitter : m_active_emitters) {
+            if (emitter.id == m_precip_emitters[i]) {
+                emitter.spawn_scale = intensity;
+                break;
+            }
         }
     }
 }
@@ -383,11 +410,12 @@ uint64_t ParticlePass::emitter_descriptor_hash() const {
 }
 
 void ParticlePass::spawn_from_emitter(ActiveEmitter& emitter, float dt) {
-    if (!emitter.data.loaded || emitter.data.spawn_rate <= 0.0f) {
+    if (!emitter.data.loaded || emitter.data.spawn_rate <= 0.0f || emitter.spawn_scale <= 0.0f) {
         return;
     }
     emitter.spawn_accumulator +=
-        static_cast<double>(emitter.data.spawn_rate) * static_cast<double>(dt);
+        static_cast<double>(emitter.data.spawn_rate * emitter.spawn_scale) *
+        static_cast<double>(dt);
     int to_spawn = static_cast<int>(emitter.spawn_accumulator);
     if (to_spawn <= 0) {
         return;
@@ -534,27 +562,19 @@ void ParticlePass::update(float dt) {
                 // atan2(screen-right, screen-up): a vertical on-screen fall -> 0; wind
                 // shear or an oblique view tilts it. NDC y grows UP and the vertex
                 // stage elongates along +up, so this lines the streak up with motion.
-                rotation = std::atan2(sx, sy);
+                rotation = std::atan2(-sx, sy);
                 // How much of the motion is actually visible on screen. When the drop
                 // travels almost straight at/away from the camera (looking down/up),
                 // this drops toward 0 and the streak shortens to a droplet instead of
                 // a fake vertical bar. Smoothstep so side-on rain stays full-length.
                 if (world_speed > 1e-4f) {
                     const float frac = std::clamp(screen_speed / world_speed, 0.0f, 1.0f);
-                    // keep a VISIBLE streak floor when looking
-                    // down. The previous frac/0.45 collapsed end-on rain all the way to
-                    // a ~round dot; combined with the down-view grey veil, the down-look
-                    // read as fog with no rain at all. We now (a) widen the side-on band
-                    // (frac/0.30 reaches full streak sooner) and (b) lift the minimum so
-                    // even fully end-on rain (looking straight down) still draws a short
-                    // foreshortened streak instead of a near-invisible droplet. So down-
-                    // pitched rain reads as real falling streaks, not haze.
-                    screen_vel_scale = std::clamp(frac / 0.30f, 0.35f, 1.0f);
+                    screen_vel_scale = frac;
                 }
             } else {
                 const float horiz = advected_vel.x;
                 const float vert = advected_vel.y;
-                rotation = std::atan2(horiz, vert);
+                rotation = std::atan2(-horiz, vert);
             }
         }
 
@@ -575,37 +595,9 @@ void ParticlePass::update(float dt) {
         const float angle_norm =
             std::clamp(rotation * (1.0f / 3.14159265358979323846f), -1.0f, 1.0f);
         rec.rotation = static_cast<int8_t>(std::lround(angle_norm * 127.0f));
-        //  WIND-DRIVEN streak STRETCH. The streak elongation
-        // is no longer a constant -- it RESPONDS to the wind, so still air renders
-        // soft, near-round droplets and a storm gust SHEARS them into long hard
-        // streaks. This (a) is physically correct (wind-sheared rain), (b) honours
-        // the owner note that wind should visibly impact the rain, and (c) restores
-        // the Precipitation wind-slant gate. That gate measures the h/v gradient
-        // ratio (slant_ratio): a thin VERTICAL streak maximizes it, and leaning
-        // LOWERS it, so the gate's "windy slant_ratio >= 1.2x calm" can only hold
-        // when the WINDY streaks are MORE vertically-elongated than calm. Short calm
-        // streaks (aspect ~1.7) keep calm just above the dots-not-streaks floor while
-        // capping its ratio; long, only slightly-leaned windy streaks (aspect ramped
-        // toward 16 by the gust, with a small camera-right lean from main_client's
-        // reduced windy wind) read as a much higher ratio -> windy clears calm by the
-        // required margin. Round/magical emitters (streak_aspect <= 1) are untouched.
-        // The wind factor ramps the aspect from a soft droplet floor up to a long
-        // streak as the horizontal wind grows; deterministic, render-only .
+        // The authored shutter-length aspect follows projected fall velocity.
+        // Horizontal wind tilts the streak; it does not invent vertical stretch.
         float effective_aspect = emitter.data.streak_aspect;
-        if (emitter.data.streak_aspect > 1.0f && emitter.data.wind_response > 0.0f) {
-            const glm::vec3 wind = m_wind_velocity * emitter.data.wind_response;
-            const float wind_horiz = std::sqrt(wind.x * wind.x + wind.z * wind.z);
-            // Still air -> a short streak just past the dots-not-streaks floor; a
-            // storm gust -> a hard, much longer thin streak. The wide spread between
-            // the calm and windy streak length is what lets the windy capture clear
-            // the calm slant baseline by the gate's required margin while calm still
-            // reads as a (short) vertical streak, not a round dot.
-            constexpr float kCalmStreakAspect = 1.7f;   // short vertical streak at rest
-            constexpr float kWindyStreakAspect = 16.0f; // long hard streak in a gust
-            constexpr float kWindFullStretch = 4.0f;    // wind speed for full streak
-            const float t = std::clamp(wind_horiz / kWindFullStretch, 0.0f, 1.0f);
-            effective_aspect = kCalmStreakAspect + (kWindyStreakAspect - kCalmStreakAspect) * t;
-        }
         // shrink the streak toward a round droplet as
         // its on-screen motion vanishes (camera looking along the fall direction), so
         // down-pitched rain reads as droplets, not a fake vertical grey veil. Lerp

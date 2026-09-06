@@ -724,7 +724,7 @@ public:
         // Exponential extinction per metre — distance at which haze reaches ~63%
         // opacity is 1/density. Higher = thicker/closer haze (dramatic); lower =
         // crisp far view (Distant-Horizons-like).
-        float aerial_density = 0.0016f;
+        float aerial_density = 0.00045f;
         // Distance clamp for the fog term (m); matches the extended far horizon
         // (kF2OuterRangeMeters ~3000 m) so far terrain hazes fully into the sky
         // before the render edge instead of stopping short as a dark band.
@@ -1139,7 +1139,7 @@ private:
     // Render-only; never world_hash.
     float m_exposureOverride = -1.0f;
     // 1.0 when the render camera is below a water surface (drives the aerial pass's
-    // underwater murk). Set per-frame in render_frame from WaterLevelAt.
+    // underwater murk). Set per-frame from the world's water-volume query.
     float m_underwater_factor = 0.0f;
     // SEASON state, all DERIVED from m_seasonTick (a pure function
     // of the authoritative sim tick -- no wall-clock, no float accumulator). The

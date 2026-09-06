@@ -17,6 +17,14 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
     static const std::vector<PassShaderLayout> kLayouts = [] {
         std::vector<PassShaderLayout> v;
 
+        v.push_back({"god_rays", "res/shaders/ssao.vert", "res/shaders/god_rays.frag", [] {
+                         ExpectedLayout e;
+                         e.pass_name = "god_rays";
+                         e.samplers = {{"u_scene", GL_SAMPLER_2D, -1},
+                                       {"u_sceneDepth", GL_SAMPLER_2D, -1}};
+                         return e;
+                     }()});
+
         // --- GBufferPass ----------------------------------------------------
         // g_buffer.frag is shared by three programs (chunk / static-mesh / skinned-
         // mesh verts); the sampler set is fragment-determined and identical across
@@ -105,7 +113,6 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                      {"u_ssao", GL_SAMPLER_2D, -1},
                      {"u_materialLUT", GL_SAMPLER_2D, -1},
                      {"u_aetherField", GL_SAMPLER_2D, -1},
-                     {"u_causticsTexture", GL_SAMPLER_2D, -1},
                      {"u_shadowCascades", GL_SAMPLER_2D_ARRAY, -1},
                  };
                  return e;

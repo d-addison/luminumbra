@@ -162,8 +162,6 @@ void LightingPass::execute(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
     glActiveTexture(GL_TEXTURE8);
     glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
-    glActiveTexture(GL_TEXTURE9);
-    glBindTexture(GL_TEXTURE_2D, ctx.caustics_tex.id);
     // Aether emissive field at unit 10 (gated by u_aetherActive). When
     // no field is uploaded the texture is 0 and u_aetherActive=0, so the glow term
     // is skipped -> pixel-identical to the pre- path.
@@ -211,7 +209,6 @@ void LightingPass::execute(const RenderContext& ctx) {
     m_lighting_shader->setInt("u_terrainTextures", 7);
     m_lighting_shader->setInt("u_materialLUT", 8);
     m_lighting_shader->setFloat("u_emissiveLutScale", ctx.emissive_lut_scale);
-    m_lighting_shader->setInt("u_causticsTexture", 9);
     m_lighting_shader->setVec3("u_skyAmbientColor", ctx.sky_ambient_color);
     m_lighting_shader->setVec3("u_viewPos", camera.Position);
     m_lighting_shader->setVec3("u_sun.direction", ctx.sun.direction);
@@ -236,7 +233,6 @@ void LightingPass::execute(const RenderContext& ctx) {
     }();
     m_lighting_shader->setFloat("u_moonWrapFloor", s_moon_wrap_floor);
 
-    m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
     //  cinematic grade (-style): BOLD default — lifted exposure, rich
     // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone
     // (the key/fill cue). Tunable via LUMIN_GRADE="exposure,saturation,contrast,

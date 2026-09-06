@@ -35,6 +35,7 @@
 #include "rendering/SunLightModel.h"
 // the pure time-of-day policy facets under test.
 #include "rendering/TimeOfDayModel.h"
+#include "rendering/WeatherRenderBridge.h"
 // the declarative frame graph under test.
 #include "rendering/CelestialBodyModel.h" //  Tier 1: the celestial-body seam
 #include "rendering/FroxelGrid.h"         //  rendering: the froxel grid model
@@ -47,6 +48,20 @@ namespace fs = std::filesystem;
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
+
+TEST(WeatherRenderBridge, ClearWeatherDoesNotAddASecondFogLayer) {
+    WeatherSample sample{};
+    for (const auto category : {WeatherCategory::Clear,
+                                WeatherCategory::Overcast,
+                                WeatherCategory::Rain,
+                                WeatherCategory::Snow}) {
+        sample.category = category;
+        EXPECT_FLOAT_EQ(Rendering::WeatherBridge::BuildWeatherRenderState(sample).fog_density,
+                        0.0f);
+    }
+    sample.category = WeatherCategory::Fog;
+    EXPECT_GT(Rendering::WeatherBridge::BuildWeatherRenderState(sample).fog_density, 0.0f);
+}
 
 namespace {
 
@@ -1483,6 +1498,7 @@ TEST(RenderGraph, GodRaysReadLatestOpaqueSnapshotUnderBothBranches) {
     namespace R = Luminumbra::Rendering;
 
     R::RenderGraph with_weather = R::BuildLuminumbraFrameGraph();
+    EXPECT_EQ(with_weather.latest_writer_of("gbuffer.depth", "god_rays"), "plant_procgen");
     EXPECT_EQ(with_weather.latest_writer_of("lighting.opaque_color", "god_rays"),
               "weather_opaque_snapshot");
     EXPECT_TRUE(with_weather.validate().empty());

@@ -14,7 +14,9 @@
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
+#include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/GroundDecalPass.h"
+#include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
 
 #define GLFW_INCLUDE_NONE
@@ -334,3 +336,135 @@ TEST(PassContext, ShadowCascadesDiscardPreviousFrameDepth) {
 }
 
 } // namespace
+
+TEST(PassContext, LivePrecipitationStartsStopsAndRetainsOtherEmitters) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using Luminumbra::Rendering::ParticlePass;
+    ParticlePass pass;
+    pass.init_buffers();
+    const auto root = std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) / "data/common/particles";
+    const auto ambient = pass.add_emitter(root / "fixture_sparkle.json", glm::vec3(0));
+    ASSERT_NE(ambient, ParticlePass::kInvalidEmitter);
+    pass.set_precipitation(root, glm::vec3(0), 0, 0);
+    pass.rebuild_emitter_descriptors(1337, 0);
+    ASSERT_EQ(pass.emitter_descriptors().size(), 1u);
+    pass.set_precipitation(root, glm::vec3(0), 1, 0);
+    pass.rebuild_emitter_descriptors(1337, 0);
+    ASSERT_EQ(pass.emitter_descriptors().size(), 2u);
+    pass.update(0.1f);
+    EXPECT_GT(pass.frame_instance_count(), 400u)
+        << "live rain must actually emit world-space drops";
+    // A weather change retains the existing emitter identities and particles.
+    pass.set_precipitation(root, glm::vec3(100, 200, -100), 0, 1);
+    pass.rebuild_emitter_descriptors(1337, 1);
+    ASSERT_EQ(pass.emitter_descriptors().size(), 3u);
+    EXPECT_EQ(pass.emitter_descriptors().front().id, ambient);
+    for (int i = 0; i < 20; ++i) {
+        pass.set_precipitation(root, glm::vec3(100, 200, -100), 0, 1);
+        pass.update(0.1f);
+    }
+    EXPECT_GT(pass.frame_instance_count(), 1000u) << "snow must emit beyond the old rain lifetime";
+    pass.rebuild_emitter_descriptors(1337, 2);
+    EXPECT_EQ(pass.emitter_descriptors().size(), 3u)
+        << "repeated weather updates must not duplicate emitters";
+    pass.set_precipitation(root, glm::vec3(100, 200, -100), 0, 0);
+    for (int i = 0; i < 60; ++i)
+        pass.update(0.1f);
+    EXPECT_LT(pass.frame_instance_count(), 400u)
+        << "precipitation must stop while ambient emission survives";
+    EXPECT_GT(pass.frame_instance_count(), 0u);
+    pass.clear_emitters();
+    pass.set_precipitation(root, glm::vec3(0), 1, 0);
+    pass.rebuild_emitter_descriptors(1337, 3);
+    EXPECT_EQ(pass.emitter_descriptors().size(), 1u)
+        << "world reset must recreate the weather emitter";
+    pass.update(0.1f);
+    EXPECT_GT(pass.frame_instance_count(), 400u);
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    pass.destroy_buffers();
+}
+
+TEST(PassContext, CpuAndGpuGrassTrackUploadedMeshReplacementAndRemoval) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using Luminumbra::Rendering::FoliageGroundMesh;
+    using Luminumbra::Rendering::FoliagePass;
+    const auto fallback = +[](void*, float, float) {
+        FoliagePass::SurfaceSample s;
+        s.height = 100; // visibly wrong analytic surface; the uploaded mesh must win
+        return s;
+    };
+    const std::vector<Luminumbra::u32> indices{0, 2, 3, 0, 3, 1};
+    for (bool gpu : {false, true}) {
+        SCOPED_TRACE(gpu ? "GPU" : "CPU");
+        FoliagePass pass;
+        pass.init_buffers();
+        pass.set_readback_enabled(true);
+        pass.use_rendered_ground();
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        if (gpu) {
+            pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+            ASSERT_TRUE(pass.gpu_scatter_active());
+        }
+        FoliagePass::ChunkScatter chunk;
+        chunk.density = 0.5f;
+        chunk.biome_id = 1;
+        const auto rebuild = [&] {
+            for (int frame = 0; frame < 5; ++frame) {
+                pass.rebuild_instances({chunk}, fallback, nullptr, glm::vec3(16, 10, 16));
+                glFinish(); // drain the actual asynchronous GPU readback on the next rebuild
+            }
+        };
+        std::vector<Luminumbra::VoxelVertex> vertices{{{0, 8, 0}, {0, 1, 0}, 3},
+                                                      {{32, 11.2f, 0}, {0, 1, 0}, 3},
+                                                      {{0, 11.2f, 32}, {0, 1, 0}, 3},
+                                                      {{32, 8, 32}, {0, 1, 0}, 3}};
+        pass.update_ground_mesh(1, glm::ivec3(0), vertices, indices);
+        rebuild();
+        ASSERT_GT(pass.instances().size(), 100u);
+        const FoliageGroundMesh original(glm::vec3(0), vertices, indices);
+        for (const auto& blade : pass.instances()) {
+            const auto ground = original.sample(blade.pos[0], blade.pos[2]);
+            ASSERT_TRUE(ground.valid);
+            EXPECT_NEAR(blade.pos[1], ground.height, 0.0001f);
+        }
+        const auto original_count = pass.instances().size();
+        for (auto& vertex : vertices)
+            vertex.position.y -= 2;
+        pass.update_ground_mesh(1, glm::ivec3(0), vertices, indices);
+        rebuild();
+        ASSERT_EQ(pass.instances().size(), original_count);
+        for (const auto& blade : pass.instances())
+            EXPECT_NEAR(
+                blade.pos[1], original.sample(blade.pos[0], blade.pos[2]).height - 2, 0.0001f);
+        const auto first_position = pass.instances().front();
+        chunk.biome_id = 2;
+        rebuild();
+        ASSERT_GT(pass.instances().size(), 100u);
+        EXPECT_NE(pass.instances().front().pos[0], first_position.pos[0]);
+        for (const auto& blade : pass.instances())
+            EXPECT_NEAR(
+                blade.pos[1], original.sample(blade.pos[0], blade.pos[2]).height - 2, 0.0001f);
+        chunk.density = 0.1f;
+        rebuild();
+        EXPECT_LT(pass.instances().size(), original_count / 2);
+        pass.remove_ground_mesh(1);
+        rebuild();
+        EXPECT_TRUE(pass.instances().empty()) << "unloaded terrain must not leave floating grass";
+        pass.update_ground_mesh(1, glm::ivec3(0), vertices, indices);
+        rebuild();
+        ASSERT_FALSE(pass.instances().empty());
+        pass.clear_ground_meshes();
+        EXPECT_EQ(pass.frame_instance_count(), 0u);
+        rebuild();
+        EXPECT_TRUE(pass.instances().empty())
+            << "world changes must discard all mesh and readback history";
+        pass.destroy_compute();
+        pass.destroy_buffers();
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}

@@ -52,16 +52,6 @@ float region_nearest_distance(int rx, int rz, const glm::vec3& position) {
     return std::sqrt(dx * dx + dz * dz);
 }
 
-float region_farthest_distance(int rx, int rz, const glm::vec3& position) {
-    const float min_x = static_cast<float>(rx) * kRegionSize;
-    const float min_z = static_cast<float>(rz) * kRegionSize;
-    const float dx =
-        std::max(std::abs(position.x - min_x), std::abs(position.x - (min_x + kRegionSize)));
-    const float dz =
-        std::max(std::abs(position.z - min_z), std::abs(position.z - (min_z + kRegionSize)));
-    return std::sqrt(dx * dx + dz * dz);
-}
-
 bool aabb_outside_frustum(const glm::vec3& aabb_min,
                           const glm::vec3& aabb_max,
                           const glm::vec4 frustum_planes[6]) {
@@ -1543,13 +1533,9 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
             if (nearest > kF2OuterRangeMeters) {
                 continue;
             }
-            // Live wins: a region the live chunk ring covers entirely is
-            // never drawn far. (In preview mode the live slice is sub-region, so
-            // every region around the centre is wanted — its far mesh draws under
-            // the slice and the centre-relative inner discard hides it there.)
-            if (region_farthest_distance(rx, rz, stream_pos) <= kLiveRingRadiusMeters) {
-                continue;
-            }
+            // Retain far coverage beneath the live ring too. A camera above
+            // the surface can outlive/cull its live terrain; horizontal ring
+            // ownership alone must not leave an unrendered square below it.
             const World::FarLodTier tier =
                 nearest < kF1OuterRangeMeters ? World::FarLodTier::F1 : World::FarLodTier::F2;
             wanted.push_back({rx, rz, tier, nearest});
@@ -1758,7 +1744,7 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // (gl_ClipDistance[0]) to a radial band. The near radius removes the camera-
     // straddling triangles; the far radius removes the far-plane/frustum-edge
     // triangles - both rasterized as the horizon sky-sliver. The clipped band is
-    // invisible (inside the live ring / past the 1000 m far plane), so nothing is
+    // invisible (inside the live ring / beyond the far draw radius), so nothing is
     // lost. Camera-region skip also drops the one region the camera sits in,
     // whose near triangles straddle the camera even after the radial clip.
     glEnable(GL_CLIP_DISTANCE0);
@@ -1785,7 +1771,11 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     const auto is_camera_region = [&](const ResidentRegion& region) {
         // Preview mode (external orbit camera over a fixed sub-region slice): skip
         // no region — the centre region carries the diorama's far field.
-        return !m_preview_mode && region.rx == camera_rx && region.rz == camera_rz;
+        // The first-person near-plane guard applies only near this region's
+        // vertical bounds. Flying above it must retain its ground and water.
+        return !m_preview_mode && region.rx == camera_rx && region.rz == camera_rz &&
+               m_last_camera_position.y >= region.aabb_min.y - kFarClipInnerRadiusMeters &&
+               m_last_camera_position.y <= region.aabb_max.y + kFarClipInnerRadiusMeters;
     };
 
     std::size_t water_draws = 0;

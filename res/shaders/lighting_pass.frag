@@ -75,9 +75,7 @@ uniform int u_shadowTintEnabled;
 
 // Texture and world uniforms
 uniform sampler2DArray u_terrainTextures;
-uniform sampler2D u_causticsTexture;
 uniform float u_time;
-uniform float u_sea_level;
 
 uniform vec3 u_terrainOrigin;
 uniform vec3 u_viewPos;
@@ -574,19 +572,8 @@ void main() {
         }
     }
 
-    // --- NEW: CAUSTICS CALCULATION ---
-    vec3 caustics = vec3(0.0);
-    // Apply caustics only if fragment is below sea level and on an upward-facing surface
-    if (FragPos.y < u_sea_level && Normal.y > 0.5) {
-        vec2 uv1 = FragPos.xz * 0.2 + vec2(u_time * 0.01, u_time * 0.015);
-        vec2 uv2 = FragPos.xz * 0.15 - vec2(u_time * 0.02, u_time * 0.01);
-
-        float caustic1 = texture(u_causticsTexture, uv1).r;
-        float caustic2 = texture(u_causticsTexture, uv2).r;
-
-        // Sum and modulate by sun intensity and shadow
-        caustics = (caustic1 + caustic2) * u_sun.color * shadow * 0.5;
-    }
+    // Water tint and caustics belong to the depth-aware water pass. A surface
+    // below the global sea level can be a dry cave floor or an edited basin.
 
     // --- MAGICAL CRYSTAL EFFECTS ---
     vec3 crystalGlow = vec3(0.0);
@@ -709,32 +696,7 @@ void main() {
         markerGlow = Albedo * (markerEmissive * 6.0 * dayFade);
     }
 
-    vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow + markerGlow; // + emissive markers
-
-    //  (seabed waterline terracing de-band): the far seabed
-    // is a height-quantized heightfield (kFarLodHeightQuantScale = 1/16 m). Where
-    // the gently-sloping seabed crosses the waterline the 1/16 m steps read as
-    // horizontal terraces, and bare sun-bright sand shows above them. Tint any
-    // below-sea-level upward-facing terrain toward the deep-water color with
-    // depth: the terrace steps dissolve into a smooth depth gradient (the banding
-    // is HIDDEN, per design  "or hide (depth-fade)") and the submerged seabed
-    // reads as water rather than bright sand. Pure post-shade blend in linear
-    // space; no tile-byte change (world_hash + far-tile bytes untouched). The
-    // far-water sheet (id 200) and live water (id 7, discarded in g_buffer) are
-    // excluded - they carry their own surface look.
-    if (MaterialID != 200u && Normal.y > 0.3) {
-        float depth = u_sea_level - FragPos.y; // >0 below the waterline
-        if (depth > 0.0) {
-            // Deep-water linear color matched to the far-water sheet albedo run
-            // through the lit chain (g_buffer.frag case-200 ~vec3(0.018,0.065,
-            // 0.11)). 0..1 fade reaches near-full tint by ~2.5 m of depth, so the
-            // shoreline keeps a thin readable wet-sand lip and deeper seabed goes
-            // fully water-toned (no terrace steps).
-            vec3 deepWater = vec3(0.015, 0.05, 0.085);
-            float t = clamp(depth / 2.5, 0.0, 0.92);
-            color = mix(color, deepWater, t);
-        }
-    }
+    vec3 color = ambient + Lo + crystalGlow + aetherGlow + markerGlow; // + emissive markers
 
     // the lightning light-pulse + bolt are injected by a dedicated
     // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the

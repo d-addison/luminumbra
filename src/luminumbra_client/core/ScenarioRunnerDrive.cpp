@@ -631,22 +631,9 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
                 } else {
                     wind_dir = glm::normalize(wind_dir + right);
                 }
-                //  the storm-rain rework added hard
-                // VELOCITY-ALIGNED streak elongation, which inverted this
-                // gate's gradient metric: a thin VERTICAL streak maximizes
-                // the h/v slant_ratio and any lean LOWERS it, so a large
-                // windy lean drove the windy slant_ratio BELOW calm (gain
-                // collapsed to ~0.7-1.1, under the 1.2 floor). The fix is
-                // in ParticlePass: the streak length now RAMPS with the
-                // wind (calm = short droplet, windy = long hard streak), so
-                // the windy capture reads a much higher anisotropy. Here we
-                // keep the windy wind MODEST so the lean stays small (the
-                // long windy streaks stay vertical-dominant -> high ratio)
-                // while still visibly slanting the rain. Together: windy
-                // slant clears calm by a wide margin (gain ~1.7x), and the
-                // rain still reads as a natural wind-driven storm, not an
-                // absurd horizontal blast. Render-only .
-                const float wind_speed = 3.5f; // storm gust (modest screen-space lean)
+                // Exercise a visible crosswind. The analyzer measures lean, so
+                // the physical streak length can remain unchanged between phases.
+                const float wind_speed = 12.0f;
                 particles->set_wind(wind_dir * wind_speed);
             } else {
                 particles->set_wind(glm::vec3(0.0f));
