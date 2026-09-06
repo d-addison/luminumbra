@@ -1210,8 +1210,10 @@ TEST(FarLodWorker, CaveLocatorReturnsAnAirPositionInTheDefaultPreset) {
     SHIELD_WorldSystem world(nullptr, nullptr, preset.params, 424242);
     const auto pose = Luminumbra::Debug::FindEnclosedCave(world, glm::vec3(8, 17.15f, 8), 256);
     ASSERT_TRUE(pose.has_value());
-    EXPECT_GE(world.get_density_at(pose->pos), 0.0f)
-        << "cave capture must not put the camera inside solid rock";
+    if (pose.has_value()) {
+        EXPECT_GE(world.get_density_at(pose.value().pos), 0.0f)
+            << "cave capture must not put the camera inside solid rock";
+    }
 }
 
 TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {

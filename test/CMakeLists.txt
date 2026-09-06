@@ -15,6 +15,10 @@ target_link_libraries(world_generation_test PRIVATE
     luminumbra_common
 )
 
+target_compile_definitions(world_generation_test PRIVATE
+    LUMINUMBRA_TEST_ARTIFACT_DIR="${CMAKE_BINARY_DIR}/test-artifacts"
+)
+
 add_executable(worldgen_layer_snapshot_test
     shield/test_worldgen_layer_snapshots.cpp
     shield/worldgen_layers_hardening_test.cpp
