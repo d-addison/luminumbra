@@ -41,5 +41,5 @@ multi-file LOD builds are not atomic generation transactions; callers that need
 publication guarantees must build and validate in a separate directory.
 
 Identity geometry retains its existing binary layout. Skinned inputs use the
-separate LMS2 path; these static import rules do not qualify skeletal hierarchy,
-animation interpolation, morphs or prefab authoring support.
+separate [character asset path](character-assets.md). These static import rules
+do not qualify morphs or prefab authoring support.

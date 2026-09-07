@@ -82,6 +82,7 @@ endif()
 target_link_libraries(asset_processor_round_trip_test PRIVATE
     gtest_main
     stb_headers
+    luminumbra_common
 )
 
 if(TARGET meshoptimizer)
@@ -94,6 +95,7 @@ add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
     common/AnimationRuntime_test.cpp
+    common/AnimationClipFormat_test.cpp
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
