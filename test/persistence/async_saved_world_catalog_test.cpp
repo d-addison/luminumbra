@@ -55,8 +55,11 @@ TEST(AsyncSavedWorldCatalogTest, CoalescesRefreshesAndDiscardsLateResults) {
     EXPECT_FALSE(scan.Poll());
     release.set_value();
     const auto result = Await(scan);
-    ASSERT_TRUE(result);
-    EXPECT_EQ(result->error, "99");
+    if (result.has_value()) {
+        EXPECT_EQ(result->error, "99");
+    } else {
+        FAIL() << "Timed out waiting for the latest catalog result";
+    }
     EXPECT_EQ(calls.load(), 2);
     EXPECT_FALSE(scan.Poll());
 }
@@ -88,11 +91,17 @@ TEST(AsyncSavedWorldCatalogTest, ProviderFailureIsReportedAndNextScanCanSucceed)
         throw std::runtime_error("read failed");
     });
     auto result = Await(scan);
-    ASSERT_TRUE(result);
-    EXPECT_NE(result->error.find("read failed"), std::string::npos);
+    if (result.has_value()) {
+        EXPECT_NE(result->error.find("read failed"), std::string::npos);
+    } else {
+        FAIL() << "Timed out waiting for the provider failure";
+    }
     scan.Request([](const std::stop_token&) { return SavedWorldCatalog{}; });
     result = Await(scan);
-    ASSERT_TRUE(result);
-    EXPECT_TRUE(result->error.empty());
-    EXPECT_TRUE(result->worlds.empty());
+    if (result.has_value()) {
+        EXPECT_TRUE(result->error.empty());
+        EXPECT_TRUE(result->worlds.empty());
+    } else {
+        FAIL() << "Timed out waiting for the recovered catalog result";
+    }
 }
