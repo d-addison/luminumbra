@@ -8,8 +8,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iterator>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 // stb_image declarations only; the implementation is compiled into
@@ -121,9 +125,10 @@ std::string Base64Encode(const std::vector<unsigned char>& bytes) {
     return encoded;
 }
 
-std::vector<ExpectedVertex> WriteTwoPrimitiveGltf(const std::filesystem::path& path) {
+std::vector<ExpectedVertex> WriteTwoPrimitiveGltf(const std::filesystem::path& path,
+                                                  float firstX = 0.0f) {
     const std::vector<float> positions0 = {
-        0.0f,
+        firstX,
         0.0f,
         0.0f,
         2.0f,
@@ -362,6 +367,254 @@ TEST(AssetProcessorRoundTrip, CommandReportsMissingInputAndLodWriteFailure) {
     std::filesystem::create_directory(temp.path() / "mesh.lod1.lmesh");
     EXPECT_NE(Import({input.string(), output.string(), "--emit-lods"}), 0);
     EXPECT_TRUE(std::filesystem::is_regular_file(output));
+}
+
+namespace {
+
+bool ReplaceGltf(const std::filesystem::path& path,
+                 const std::string& from,
+                 const std::string& to) {
+    std::ifstream input(path);
+    std::string json((std::istreambuf_iterator<char>(input)), {});
+    input.close();
+    const auto position = json.find(from);
+    if (position == std::string::npos)
+        return false;
+    json.replace(position, from.size(), to);
+    std::ofstream output(path);
+    output << json;
+    return static_cast<bool>(output);
+}
+
+std::string FileBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(input)), {});
+}
+
+void ExpectVertices(const ProcessedMesh& mesh, const std::vector<ExpectedVertex>& expected) {
+    ASSERT_EQ(mesh.vertices.size(), expected.size());
+    for (const auto& vertex : expected) {
+        EXPECT_TRUE(
+            std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [&](const Vertex& actual) {
+                return MatchesVertex(actual, vertex);
+            }));
+    }
+}
+
+} // namespace
+
+TEST(StaticSceneImport, PreservesNestedTransformsAndRepeatedInstances) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "scene.gltf";
+    const auto output = temp.path() / "scene.lmesh";
+    const auto authored = WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(ReplaceGltf(input, R"("nodes": [{"mesh": 0}])", R"("nodes": [
+      {"translation": [3,1,-2], "rotation": [0,0,0.7071067811865476,0.7071067811865476],
+       "scale": [2,3,1], "children": [1,2]},
+      {"mesh": 0}, {"mesh": 0, "translation": [-1,0,2], "scale": [-1,1,1]}])"));
+    std::vector<ExpectedVertex> expected;
+    for (auto v : authored) {
+        const auto p = v.pos;
+        v.pos = {3 - 3 * p[1], 1 + 2 * p[0], -2};
+        expected.push_back(v);
+        v.pos = {3 - 3 * p[1], -1 - 2 * p[0], 0};
+        expected.push_back(v);
+    }
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    const auto mesh = ReadLmesh(output);
+    EXPECT_EQ(mesh.indices.size(), 12u);
+    ExpectVertices(mesh, expected);
+    const auto first = FileBytes(output);
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    EXPECT_EQ(first, FileBytes(output));
+}
+
+TEST(StaticSceneImport, UsesSelectedSceneAndExcludesOtherInstances) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "scene.gltf";
+    const auto output = temp.path() / "scene.lmesh";
+    auto expected = WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(ReplaceGltf(
+        input,
+        R"("nodes": [{"mesh": 0}])",
+        R"("nodes": [{"mesh": 0, "translation": [10,0,0]}, {"mesh": 0, "translation": [100,0,0]}])"));
+    ASSERT_TRUE(ReplaceGltf(
+        input, R"("scenes": [{"nodes": [0]}])", R"("scenes": [{"nodes": [0]}, {"nodes": [1]}])"));
+    ASSERT_TRUE(ReplaceGltf(input, R"("scene": 0)", R"("scene": 1)"));
+    for (auto& v : expected)
+        v.pos[0] += 100;
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    ExpectVertices(ReadLmesh(output), expected);
+}
+
+TEST(StaticSceneImport, BakesShearWithInverseTransposeNormals) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "shear.gltf";
+    const auto output = temp.path() / "shear.lmesh";
+    auto expected = WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(
+        ReplaceGltf(input,
+                    R"("nodes": [{"mesh": 0}])",
+                    R"("nodes": [{"mesh": 0, "matrix": [2,0,1,0, 0,3,0,0, 0,0,4,0, 5,-1,2,1]}])"));
+    for (auto& v : expected) {
+        const auto p = v.pos;
+        v.pos = {2 * p[0] + 5, 3 * p[1] - 1, p[0] + 2};
+        v.norm = {-1 / std::sqrt(5.0f), 0, 2 / std::sqrt(5.0f)};
+    }
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    ExpectVertices(ReadLmesh(output), expected);
+}
+
+TEST(StaticSceneImport, ReversesMirroredTriangleWinding) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "mirror.gltf";
+    const auto output = temp.path() / "mirror.lmesh";
+    auto expected = WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(ReplaceGltf(
+        input, R"("nodes": [{"mesh": 0}])", R"("nodes": [{"mesh": 0, "scale": [-2,3,1]}])"));
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    const auto mesh = ReadLmesh(output);
+    for (auto& v : expected) {
+        v.pos[0] *= -2;
+        v.pos[1] *= 3;
+    }
+    ExpectVertices(mesh, expected);
+    for (size_t i = 0; i < mesh.indices.size(); i += 3) {
+        const auto& a = mesh.vertices[mesh.indices[i]];
+        const auto& b = mesh.vertices[mesh.indices[i + 1]];
+        const auto& c = mesh.vertices[mesh.indices[i + 2]];
+        const float crossZ = (b.pos[0] - a.pos[0]) * (c.pos[1] - a.pos[1]) -
+                             (b.pos[1] - a.pos[1]) * (c.pos[0] - a.pos[0]);
+        EXPECT_GT(crossZ * a.norm[2], 0);
+    }
+}
+
+TEST(StaticSceneImport, PrimitiveSelectionKeepsEverySelectedInstance) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "parts.gltf";
+    const auto output = temp.path() / "parts.lmesh";
+    WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(ReplaceGltf(input,
+                            R"("nodes": [{"mesh": 0}])",
+                            R"("nodes": [{"mesh": 0}, {"mesh": 0, "translation": [0,0,2]}])"));
+    ASSERT_TRUE(
+        ReplaceGltf(input, R"("scenes": [{"nodes": [0]}])", R"("scenes": [{"nodes": [0,1]}])"));
+    ASSERT_EQ(Import({input.string(), output.string(), "--primitive", "1"}), 0);
+    const auto mesh = ReadLmesh(output);
+    EXPECT_EQ(mesh.indices.size(), 6u);
+    for (const auto& v : mesh.vertices)
+        EXPECT_GE(v.pos[0], 2.0f);
+    // Reset the CLI's per-part selection before subsequent public function calls.
+    ASSERT_EQ(Import({input.string(), output.string()}), 0);
+}
+
+TEST(StaticSceneImport, InvalidSelectedGeometryRetainsPreviousOutput) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "invalid.gltf";
+    const auto output = temp.path() / "valid.lmesh";
+    const std::vector<std::pair<std::string, std::string>> mutations = {
+        {R"("nodes": [{"mesh": 0}])", R"("nodes": [{"mesh": 0, "scale": [0,1,1]}])"},
+        {R"("POSITION": 0, "NORMAL": 1,)", R"("POSITION": 0,)"},
+        {R"("indices": 3})", R"("indices": 3, "mode": 1})"},
+        {R"("asset": {"version": "2.0"})",
+         R"("asset": {"version": "2.0"}, "extensionsRequired": ["UNKNOWN_required"])"},
+        {R"("nodes": [{"mesh": 0}])",
+         R"("nodes": [{"mesh": 0, "matrix": [1,0,0,1,0,1,0,0,0,0,1,0,0,0,0,1]}])"},
+        {R"("indices": 3})", R"("indices": 3, "targets": [{"POSITION": 0}]})"},
+        {R"(, "indices": 3})", R"(})"},
+        {R"("TEXCOORD_0": 2)", R"("TEXCOORD_1": 2)"},
+        {R"("scenes": [{"nodes": [0]}])", R"("scenes": [{"nodes": [0,0]}])"},
+        {R"("nodes": [{"mesh": 0}])",
+         R"("nodes": [{"mesh": 0, "translation": [0,0,0], "matrix": [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}])"},
+        {R"("bufferView": 3, "componentType": 5123)",
+         R"("bufferView": 3, "sparse": {"count": 1, "indices": {"bufferView": 3, "componentType": 5123}, "values": {"bufferView": 3, "byteOffset": 2}}, "componentType": 5123)"},
+    };
+    for (const auto& [from, to] : mutations) {
+        SCOPED_TRACE(to);
+        WriteTwoPrimitiveGltf(input);
+        ASSERT_TRUE(ReplaceGltf(input, from, to));
+        {
+            std::ofstream previous(output);
+            previous << "last-valid-generation";
+        }
+        EXPECT_FALSE(process_gltf_checked(input.string(), output.string()));
+        EXPECT_EQ(FileBytes(output), "last-valid-generation");
+    }
+}
+
+TEST(StaticSceneImport, RefusesNonfiniteVertexAttributes) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "nonfinite.gltf";
+    const auto output = temp.path() / "nonfinite.lmesh";
+    for (const float value : {std::numeric_limits<float>::quiet_NaN(),
+                              std::numeric_limits<float>::infinity(),
+                              std::numeric_limits<float>::max()}) {
+        SCOPED_TRACE(value);
+        WriteTwoPrimitiveGltf(input, value);
+        EXPECT_FALSE(process_gltf_checked(input.string(), output.string()));
+        EXPECT_FALSE(std::filesystem::exists(output));
+    }
+}
+
+TEST(StaticSceneImport, RefusesStaticMorphTargetsAndGpuInstances) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "deformed.gltf";
+    const auto output = temp.path() / "deformed.lmesh";
+    WriteTwoPrimitiveGltf(input);
+    // Match target counts on both primitives so this reaches static conversion.
+    ASSERT_TRUE(
+        ReplaceGltf(input, R"("indices": 3})", R"("indices": 3, "targets": [{"POSITION": 0}]})"));
+    ASSERT_TRUE(
+        ReplaceGltf(input, R"("indices": 7})", R"("indices": 7, "targets": [{"POSITION": 4}]})"));
+    EXPECT_FALSE(process_gltf_checked(input.string(), output.string()));
+    EXPECT_FALSE(std::filesystem::exists(output));
+    WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(ReplaceGltf(
+        input,
+        R"("nodes": [{"mesh": 0}])",
+        R"("nodes": [{"mesh": 0, "extensions": {"EXT_mesh_gpu_instancing": {"attributes": {"TRANSLATION": 0}}}}])"));
+    EXPECT_FALSE(process_gltf_checked(input.string(), output.string()));
+    EXPECT_FALSE(std::filesystem::exists(output));
+}
+
+TEST(StaticSceneImport, ResolvesUnambiguousDocumentsWithoutDefaultScene) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "library.gltf";
+    const auto output = temp.path() / "library.lmesh";
+    const auto expected = WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    const auto identityBytes = FileBytes(output);
+    // A sole scene, an implicit set of node roots, and a mesh-only library all
+    // retain legacy identity geometry, including the exact compiled layout.
+    ASSERT_TRUE(ReplaceGltf(input,
+                            R"(,
+  "scene": 0)",
+                            ""));
+    for (const auto& member : {R"("scenes": [{"nodes": [0]}])", R"("nodes": [{"mesh": 0}])"}) {
+        ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+        EXPECT_EQ(FileBytes(output), identityBytes);
+        ASSERT_TRUE(ReplaceGltf(input, std::string(",\n  ") + member, ""));
+    }
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    EXPECT_EQ(FileBytes(output), identityBytes);
+    ExpectVertices(ReadLmesh(output), expected);
+}
+
+TEST(StaticSceneImport, RefusesAmbiguousScenesAndEmptySelectedScene) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "scene.gltf";
+    const auto output = temp.path() / "scene.lmesh";
+    WriteTwoPrimitiveGltf(input);
+    ASSERT_TRUE(ReplaceGltf(
+        input, R"("scenes": [{"nodes": [0]}])", R"("scenes": [{"nodes": []}, {"nodes": [0]}])"));
+    EXPECT_FALSE(process_gltf_checked(input.string(), output.string()));
+    EXPECT_FALSE(std::filesystem::exists(output));
+    ASSERT_TRUE(ReplaceGltf(input,
+                            R"(,
+  "scene": 0)",
+                            ""));
+    EXPECT_FALSE(process_gltf_checked(input.string(), output.string()));
+    EXPECT_FALSE(std::filesystem::exists(output));
 }
 
 // ---------------------------------------------------------------------------
