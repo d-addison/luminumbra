@@ -210,6 +210,52 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
                 EXPECT_GT(pixels[center + 1], pixels[center] + 60);
             }
         }
+        // A spatially varying background must stay registered with the pane when
+        // the output resolution changes independently of the internal OIT extent.
+        std::vector<float> background(static_cast<std::size_t>(extent) * extent * 4);
+        for (int y = 0; y < extent; ++y) {
+            for (int x = 0; x < extent; ++x) {
+                const auto offset = (static_cast<std::size_t>(y) * extent + x) * 4;
+                background[offset] = static_cast<float>(x) / static_cast<float>(extent - 1);
+                background[offset + 1] = static_cast<float>(y) / static_cast<float>(extent - 1);
+                background[offset + 2] = 0.2f;
+                background[offset + 3] = 1.0f;
+            }
+        }
+        glBindTexture(GL_TEXTURE_2D, opaque);
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 0, 0, extent, extent, GL_RGBA, GL_FLOAT, background.data());
+        panes[0].tint = glm::vec3(1.0f);
+        ctx.internal_width = static_cast<unsigned>(extent);
+        ctx.internal_height = static_cast<unsigned>(extent);
+        std::vector<unsigned char> full_scale;
+        for (int output_multiple : {1, 2, 4}) {
+            SCOPED_TRACE(output_multiple);
+            ctx.screen_width = static_cast<unsigned>(extent * output_multiple);
+            ctx.screen_height = static_cast<unsigned>(extent * output_multiple);
+            glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+            glDepthMask(GL_TRUE);
+            glClearDepth(1.0);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            pass.execute_accum(ctx, input);
+            pass.execute_resolve(ctx, input);
+            EXPECT_EQ(glGetError(), GL_NO_ERROR);
+            const auto pixels = ReadTarget(target);
+            if (output_multiple == 1) {
+                full_scale = pixels;
+                const std::size_t near_corner =
+                    (static_cast<std::size_t>(extent / 4) * extent + extent / 4) * 4;
+                const std::size_t far_corner =
+                    (static_cast<std::size_t>(3 * extent / 4) * extent + 3 * extent / 4) * 4;
+                EXPECT_GT(pixels[far_corner], pixels[near_corner] + 60);
+                EXPECT_GT(pixels[far_corner + 1], pixels[near_corner + 1] + 60);
+            } else {
+                EXPECT_EQ(pixels, full_scale)
+                    << "glass refraction must use the internal scene's pixel coordinates";
+            }
+        }
+        panes[0].tint = glm::vec3(0.2f, 0.8f, 0.3f);
         pass.destroy(); // the pipeline destroys OIT before replacing its shared depth on resize
         glDeleteRenderbuffers(1, &depth);
         glDeleteTextures(1, &opaque);

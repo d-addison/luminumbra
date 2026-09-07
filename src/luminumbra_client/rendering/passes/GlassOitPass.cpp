@@ -106,7 +106,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     m_accum_shader->setInt("u_opaqueScene", 0);
     m_accum_shader->setVec2(
         "u_screenSize",
-        glm::vec2(static_cast<float>(ctx.screen_width), static_cast<float>(ctx.screen_height)));
+        glm::vec2(static_cast<float>(ctx.internal_w()), static_cast<float>(ctx.internal_h())));
     m_accum_shader->setVec3("u_cameraPos", ctx.camera->Position);
     m_accum_shader->setFloat("u_refractionStrength", 0.35f);
     glBindVertexArray(input.glass_vao);
