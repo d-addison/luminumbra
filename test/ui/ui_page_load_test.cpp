@@ -19,8 +19,13 @@
 
 #include <RmlUi/Core.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
+#include <future>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ui/Rml_UIManager.h"
@@ -112,6 +117,18 @@ Rml::ElementDocument* FindDocumentByBodyId(Rml::Context* context, const char* bo
 
 } // namespace
 
+static void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui,
+                              Rml::ElementDocument* document) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (document && document->HasAttribute("data-worlds-pending") &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ui.Update();
+    }
+    ASSERT_NE(document, nullptr);
+    EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+}
+
 // Every shipped document loads into a live RmlUi context and parses a populated
 // <body>. The body id is the document's stable root id (matches the authored
 // `<body id="...">`); a non-null lookup + a populated child list proves the
@@ -196,7 +213,9 @@ TEST(UiPageLoadTest, SavedWorldSelectionUsesRealIdsAndReportsRefusals) {
     auto open = [&]() {
         ui.RequestLoadDocument("world_selection.rml");
         ui.Update();
-        return FindDocumentByBodyId(ui.GetContext(), "world_selection");
+        auto* document = FindDocumentByBodyId(ui.GetContext(), "world_selection");
+        AwaitWorldCatalog(ui, document);
+        return document;
     };
     auto* doc = open();
     ASSERT_NE(doc, nullptr);
@@ -253,6 +272,63 @@ TEST(UiPageLoadTest, SavedWorldSelectionUsesRealIdsAndReportsRefusals) {
     ASSERT_NE(doc, nullptr);
     EXPECT_TRUE(doc->GetElementById("no_worlds")->IsClassSet("hidden"));
     EXPECT_FALSE(doc->GetElementById("world_list_status")->IsClassSet("hidden"));
+    ui.Shutdown();
+}
+
+TEST(UiPageLoadTest, PendingWorldValidationAllowsNavigationAndCannotPublishAfterReopening) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    std::promise<std::thread::id> started;
+    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), nullptr);
+    int loads = 0;
+    ui.SetLoadWorldCallback([&](const std::string&) { ++loads; });
+    ui.SetSavedWorldList([&](std::stop_token stop) {
+        started.set_value(std::this_thread::get_id());
+        std::mutex mutex;
+        std::condition_variable_any wake;
+        std::unique_lock lock(mutex);
+        wake.wait_for(lock, stop, std::chrono::seconds(5), [] { return false; });
+        Luminumbra::Persistence::SavedWorldCatalog obsolete;
+        obsolete.error = "obsolete scan result";
+        return obsolete;
+    });
+    ui.RequestLoadDocument("world_selection.rml");
+    ui.Update();
+    auto* document = FindDocumentByBodyId(ui.GetContext(), "world_selection");
+    ASSERT_NE(document, nullptr);
+    auto thread = started.get_future();
+    ASSERT_EQ(thread.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_NE(thread.get(), std::this_thread::get_id());
+    EXPECT_TRUE(document->HasAttribute("data-worlds-pending"));
+    EXPECT_TRUE(document->GetElementById("no_worlds")->IsClassSet("hidden"));
+    EXPECT_FALSE(document->GetElementById("world_list_status")->IsClassSet("hidden"));
+    auto* load = document->GetElementById("load_selected_btn");
+    ASSERT_NE(load, nullptr);
+    EXPECT_TRUE(load->HasAttribute("disabled"));
+    load->DispatchEvent("click", {});
+    EXPECT_EQ(loads, 0);
+    document->GetElementById("back_btn")->DispatchEvent("click", {});
+    ui.Update();
+    ASSERT_NE(FindDocumentByBodyId(ui.GetContext(), "main_menu"), nullptr);
+    ui.SetSavedWorldList([](std::stop_token) {
+        Luminumbra::Persistence::SavedWorldCatalog latest;
+        Luminumbra::Persistence::SavedWorld world;
+        world.metadata.worldId = "latest";
+        world.metadata.name = "Latest world";
+        latest.worlds.push_back(world);
+        return latest;
+    });
+    ui.RequestLoadDocument("world_selection.rml");
+    ui.Update();
+    document = FindDocumentByBodyId(ui.GetContext(), "world_selection");
+    AwaitWorldCatalog(ui, document);
+    ASSERT_NE(document, nullptr);
+    EXPECT_TRUE(document->GetElementById("world_list_status")->IsClassSet("hidden"));
+    auto* items = document->GetElementById("world_list_items");
+    ASSERT_EQ(items->GetNumChildren(), 1);
+    EXPECT_EQ(items->GetChild(0)->GetAttribute<Rml::String>("data-world-id", ""), "latest");
     ui.Shutdown();
 }
 

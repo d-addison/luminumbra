@@ -1,23 +1,32 @@
 {
-  "_comment": " static-model UV texture lane: maps each tree-part mesh to its albedo+normal .ltex (sampled by the mesh's own UVs in g_buffer.frag). Render-only; never hashed. leaves carry alpha_test (luma-keyed cutout) since the source leaf JPGs have no alpha channel.",
+  "_comment": " static-model UV texture lane: maps each tree-part mesh to its albedo+normal .ltex (sampled by the mesh's own UVs in g_buffer.frag). Render-only; never hashed. leaves carry an authored opacity map in albedo alpha; alpha_test uses a 0.5 cutoff. Albedo is sRGB, normal maps are linear.",
   "models": [
     {
-      "mesh": "data/models/trees/tree_small_02_trunk.lmesh",
-      "albedo": "data/textures/models/tree_trunk_albedo_512.ltex",
-      "normal": "data/textures/models/tree_trunk_normal_512.ltex",
-      "alpha_test": false
+      "mesh": "game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_trunk.lmesh",
+      "albedo": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_trunk_albedo_512.ltex",
+      "normal": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_trunk_normal_512.ltex",
+      "alpha_test": false,
+      "surface": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_trunk_arm_512.ltex",
+      "double_sided": true,
+      "metallic_factor": 0.0
     },
     {
-      "mesh": "data/models/trees/tree_small_02_branches.lmesh",
-      "albedo": "data/textures/models/tree_branch_albedo_512.ltex",
-      "normal": "data/textures/models/tree_branch_normal_512.ltex",
-      "alpha_test": false
+      "mesh": "game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_branches.lmesh",
+      "albedo": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_branch_albedo_512.ltex",
+      "normal": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_branch_normal_512.ltex",
+      "alpha_test": false,
+      "surface": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_branch_arm_512.ltex",
+      "double_sided": true,
+      "metallic_factor": 0.0
     },
     {
-      "mesh": "data/models/trees/tree_small_02_leaves.lmesh",
-      "albedo": "data/textures/models/tree_leaves_albedo_512.ltex",
-      "normal": "data/textures/models/tree_leaves_normal_512.ltex",
-      "alpha_test": true
+      "mesh": "game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_leaves.lmesh",
+      "albedo": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_leaves_albedo_512.ltex",
+      "normal": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_leaves_normal_512.ltex",
+      "alpha_test": true,
+      "surface": "game-assets/tree-small-02/1.0.0/data/textures/models/tree_leaves_arm_512.ltex",
+      "double_sided": true,
+      "metallic_factor": 0.0
     }
   ]
 }

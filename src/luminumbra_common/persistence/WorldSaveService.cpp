@@ -437,7 +437,8 @@ bool DecompressPayload(const RegionRecord& record,
 
 bool ReadRegionFile(const std::filesystem::path& path,
                     std::vector<RegionRecord>& out_records,
-                    std::vector<std::string>* errors) {
+                    std::vector<std::string>* errors,
+                    std::stop_token stop = {}) {
     out_records.clear();
 
     std::ifstream input(path, std::ios::binary);
@@ -446,7 +447,15 @@ bool ReadRegionFile(const std::filesystem::path& path,
         return false;
     }
     std::ostringstream buffer;
-    buffer << input.rdbuf();
+    char read_buffer[64 * 1024];
+    while (input) {
+        if (stop.stop_requested()) {
+            AddError(errors, "Saved-world validation cancelled.");
+            return false;
+        }
+        input.read(read_buffer, sizeof(read_buffer));
+        buffer.write(read_buffer, input.gcount());
+    }
     if (input.bad()) {
         AddError(errors, "failed to read region file: " + path.string());
         return false;
@@ -479,6 +488,11 @@ bool ReadRegionFile(const std::filesystem::path& path,
     out_records.resize(record_count);
     std::size_t payload_offset = kRegionFileHeaderSize + manifest_bytes;
     for (std::uint16_t i = 0; i < record_count; ++i) {
+        if (stop.stop_requested()) {
+            AddError(errors, "Saved-world validation cancelled.");
+            out_records.clear();
+            return false;
+        }
         const unsigned char* header =
             data + kRegionFileHeaderSize + static_cast<std::size_t>(i) * kRecordHeaderSize;
         RegionRecord& record = out_records[i];
@@ -771,10 +785,11 @@ bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
 }
 
 bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
-                                     std::vector<std::string>* errors) {
+                                     std::vector<std::string>* errors,
+                                     std::stop_token stop) {
     WorldStreamingState state;
     std::vector<std::string> diagnostics;
-    WorldSaveService{}.load_world(state, save_dir, diagnostics);
+    WorldSaveService{}.load_world(state, save_dir, diagnostics, stop);
     for (const auto& message : diagnostics)
         AddError(errors, message);
     return diagnostics.empty();
@@ -954,7 +969,8 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
 
 bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
-                                  std::vector<std::string>& errors) const {
+                                  std::vector<std::string>& errors,
+                                  std::stop_token stop) const {
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();
@@ -963,6 +979,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         return false;
     };
     try {
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
         const auto metadata_path = save_dir / "world_info.json";
         if (std::filesystem::exists(metadata_path)) {
             std::ifstream input(metadata_path, std::ios::binary);
@@ -994,6 +1012,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         if (!std::filesystem::exists(chunks_dir))
             return false;
         for (const auto& entry : std::filesystem::directory_iterator(chunks_dir)) {
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
             if (entry.path() != region_dir || !entry.is_directory())
                 return reject("corrupt or unknown world persistence artifact: " +
                               entry.path().string());
@@ -1003,6 +1023,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         std::vector<std::filesystem::path> region_files;
         bool present = false;
         for (const auto& entry : std::filesystem::directory_iterator(region_dir)) {
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
             int rx = 0, rz = 0;
             if (!entry.is_regular_file())
                 return reject("corrupt world persistence artifact: " + entry.path().string());
@@ -1054,12 +1076,16 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
         }
         std::sort(region_files.begin(), region_files.end());
         for (const auto& path : region_files) {
+            if (stop.stop_requested())
+                return reject("Saved-world validation cancelled.");
             int rx = 0, rz = 0;
             ParseRegionFileName(path, rx, rz);
             std::vector<RegionRecord> records;
-            if (!ReadRegionFile(path, records, &errors))
+            if (!ReadRegionFile(path, records, &errors, stop))
                 return reject("");
             for (const auto& record : records) {
+                if (stop.stop_requested())
+                    return reject("Saved-world validation cancelled.");
                 if (record.lod_level == 0) {
                     const auto chunk = DecodeChunkRecord(record, path, &errors);
                     if (!chunk)
@@ -1083,6 +1109,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             }
         }
         Ecs::EntityRegistrySnapshot plants;
+        if (stop.stop_requested())
+            return reject("Saved-world validation cancelled.");
         if (!load_plant_entities(plants, save_dir, &errors))
             return reject("");
         return true;

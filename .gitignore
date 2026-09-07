@@ -87,6 +87,8 @@ __pycache__/
 /data/ui/captures/
 /data/textures/models/
 /photos/
+/game-assets/
+/.asset-cache/
 /scratch_six/
 
 # Upstream imgui ships `* text=auto`, which resolves differently under the

@@ -63,6 +63,12 @@ uniform mat3 u_normalViewMatrix;
 // optional normal) layer by their mesh UVs instead of the terrain triplanar
 // path. Layers < 0 disable it (terrain/static draws set these to -1).
 uniform sampler2DArray u_skinnedTextures;
+layout(binding = 5) uniform sampler2DArray u_staticNormals;
+uniform int u_staticNormalsBound = 0;
+layout(binding = 6) uniform sampler2DArray u_staticSurface;
+uniform int u_staticSurfaceLayer = -1;
+uniform int u_staticDoubleSided = 0;
+uniform float u_staticMetallicFactor = 1.0;
 uniform int u_skinnedAlbedoLayer = -1;
 uniform int u_skinnedNormalLayer = -1;
 //  procedural creatures: per-creature albedo tint (linear RGB), set per skinned
@@ -70,7 +76,7 @@ uniform int u_skinnedNormalLayer = -1;
 // renders exactly as authored; only multiplies the skinned albedo sample below, so no
 // other (terrain/static) path is affected.
 uniform vec3 u_albedo_tint = vec3(1.0);
-uniform int u_alphaTest = 0; // 0 opaque, 1 texture-luma cutout, 2 procedural leaf silhouette.
+uniform int u_alphaTest = 0; // 0 opaque, 1 texture-luma cutout, 2 procedural leaf silhouette, 3 authored alpha cutoff.
 
 // macro ROCK-on-steep-faces overlay is a TERRAIN-only macro-variation
 // (natural cliffs read as scree). It costs vnoise + up to 3 extra triplanar samples per
@@ -333,7 +339,15 @@ void main()
         // tangent-derivative-free approximation (UV-space normal map, applied in
         // world space via the geometric normal as the z axis).
         // also the static-model lane (tree bark/leaf) — same UV sampling.
-        albedo = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer))).rgb * u_albedo_tint;
+        vec4 baseColor = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedAlbedoLayer)));
+        if (u_alphaTest == 3 && baseColor.a < 0.5) discard;
+        albedo = baseColor.rgb * u_albedo_tint;
+        if (u_staticSurfaceLayer >= 0) {
+            vec3 surface = sampleBias(u_staticSurface, vec3(fs_in.UV, float(u_staticSurfaceLayer))).rgb;
+            ao = surface.r;
+            roughness = surface.g;
+            metallic = surface.b * u_staticMetallicFactor;
+        }
         //  leaf cutout: the source leaf textures are RGB leaf-cards on a BLACK
         // background (no alpha), so key the cutout off luminance — the black inter-
         // leaf gaps are discarded, leaving the lit leaf shapes. NOTE: the array is
@@ -345,14 +359,22 @@ void main()
             if (leafLuma < 0.025) discard;
         }
         if (u_skinnedNormalLayer >= 0) {
-            vec3 tn = sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer))).xyz * 2.0 - 1.0;
-            // Build an ad-hoc tangent basis from the geometric world normal so
-            // the tangent-space perturbation maps into world space.
-            vec3 up = abs(worldN.y) < 0.99 ? vec3(0.0, 1.0, 0.0): vec3(1.0, 0.0, 0.0);
-            vec3 t = normalize(cross(up, worldN));
-            vec3 b = cross(worldN, t);
-            worldN = normalize(t * tn.x + b * tn.y + worldN * max(tn.z, 0.1));
+            vec3 tn = (u_staticNormalsBound == 1
+                ? sampleBias(u_staticNormals, vec3(fs_in.UV, float(u_skinnedNormalLayer)))
+                : sampleBias(u_skinnedTextures, vec3(fs_in.UV, float(u_skinnedNormalLayer)))).xyz * 2.0 - 1.0;
+            // Derivatives align tangent-space normals to the authored UVs, including mirrors.
+            vec3 dp1 = dFdx(fs_in.WorldPos), dp2 = dFdy(fs_in.WorldPos);
+            vec2 duv1 = dFdx(fs_in.UV), duv2 = dFdy(fs_in.UV);
+            vec3 perpendicular2 = cross(dp2, worldN), perpendicular1 = cross(worldN, dp1);
+            vec3 tangent = perpendicular2 * duv1.x + perpendicular1 * duv2.x;
+            vec3 bitangent = perpendicular2 * duv1.y + perpendicular1 * duv2.y;
+            float extent = max(dot(tangent, tangent), dot(bitangent, bitangent));
+            if (extent > 1e-12) {
+                float scale = inversesqrt(extent);
+                worldN = normalize(tangent * (tn.x * scale) + bitangent * (tn.y * scale) + worldN * tn.z);
+            }
         }
+        if (u_staticDoubleSided == 1 && !gl_FrontFacing) worldN = -worldN;
         textured = true;
     } else if (texInfo.a > 0.5 && u_forceFlat == 0) {
         float texLayer = floor(texInfo.r * 255.0 + 0.5);
@@ -425,7 +447,7 @@ void main()
     // natural-ground ids only (1..5; crystal/water/far-water untouched), subtle
     // +-12% so it reads as natural mottling, not blotches. Render-only; the mesh and
     // world_hash are untouched.
-    if (fs_in.MaterialID >= 1u && fs_in.MaterialID <= 5u) {
+    if (fs_in.MaterialID >= 1u && fs_in.MaterialID <= 5u && u_staticSurfaceLayer < 0) {
         float macro  = vnoise(fs_in.WorldPos * 0.012) * 0.6 + vnoise(fs_in.WorldPos * 0.045) * 0.4;
         float macroH = vnoise(fs_in.WorldPos * 0.020 + vec3(31.7));
         albedo *= (1.0 + (macro - 0.5) * 0.45); // +-22% brightness mottle

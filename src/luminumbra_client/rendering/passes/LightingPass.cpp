@@ -1,5 +1,6 @@
 #include "LightingPass.h"
 
+#include "../EnvironmentBrdfLut.gen.h"
 #include "../PassShaderLayouts.h"
 #include "../RenderContext.h"
 #include "../RenderResourceRegistry.h"
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <glm/gtc/matrix_transform.hpp>
+#include <stdexcept>
 #include <string>
 
 namespace Luminumbra::Rendering {
@@ -44,6 +46,37 @@ void LightingPass::init_shader(const std::filesystem::path& root_path) {
             m_lighting_shader->ValidateLayout(*layout);
         }
     }
+}
+
+void LightingPass::init_environment_brdf(RenderResourceRegistry& registry) {
+    TextureDesc desc;
+    desc.width = desc.height = kEnvironmentBrdfLutSize;
+    desc.internal_format = GL_RG16F;
+    desc.format = GL_RG;
+    desc.type = GL_HALF_FLOAT;
+    desc.min_filter = desc.mag_filter = GL_LINEAR;
+    desc.wrap_s = desc.wrap_t = GL_CLAMP_TO_EDGE;
+    desc.expected_layout = "sampled";
+    desc.debug_label = "lighting.environment_brdf";
+    m_environment_brdf = registry.create_texture("environment_brdf", desc).id;
+    if (m_environment_brdf == 0)
+        throw std::runtime_error("Unable to allocate the environment BRDF texture");
+    glBindTexture(GL_TEXTURE_2D, m_environment_brdf);
+    glTexSubImage2D(GL_TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    kEnvironmentBrdfLutSize,
+                    kEnvironmentBrdfLutSize,
+                    GL_RG,
+                    GL_HALF_FLOAT,
+                    kEnvironmentBrdfLut.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void LightingPass::destroy_environment_brdf(RenderResourceRegistry& registry) {
+    registry.destroy_owned("environment_brdf");
+    m_environment_brdf = 0;
 }
 
 void LightingPass::init_lighting_fbo(RenderResourceRegistry& registry, u32 width, u32 height) {
@@ -176,6 +209,9 @@ void LightingPass::execute(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.shadow_tint_array.id);
     m_lighting_shader->setInt("u_shadowTintCascades", 11);
     m_lighting_shader->setInt("u_shadowTintEnabled", ctx.shadow_tint_array.id != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE12);
+    glBindTexture(GL_TEXTURE_2D, m_environment_brdf);
+    m_lighting_shader->setInt("u_environmentBrdf", 12);
     if (ctx.aether_active && ctx.aether_extent > 0) {
         const float world_span = static_cast<float>(ctx.aether_extent) * ctx.aether_cell_size;
         m_lighting_shader->setFloat("u_aetherActive", 1.0f);

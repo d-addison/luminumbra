@@ -18,10 +18,15 @@ bool SafeName(const std::string& name) {
 }
 } // namespace
 
-SavedWorld InspectSavedWorld(const fs::path& root, const std::string& world_id) {
+SavedWorld
+InspectSavedWorld(const fs::path& root, const std::string& world_id, std::stop_token stop) {
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
+    if (stop.stop_requested()) {
+        result.error = "Saved-world validation cancelled.";
+        return result;
+    }
     result.error = "World unavailable: its save directory or metadata is missing or unreadable.";
     if (!SafeName(world_id)) {
         result.error = "World unavailable: invalid save identifier.";
@@ -46,7 +51,7 @@ SavedWorld InspectSavedWorld(const fs::path& root, const std::string& world_id) 
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.
         std::vector<std::string> errors;
-        if (!WorldSaveService::validate_save(save, &errors)) {
+        if (!WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
@@ -93,15 +98,25 @@ SavedWorld InspectSavedWorld(const fs::path& root, const std::string& world_id) 
     return result;
 }
 
-SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root) {
+SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, std::stop_token stop) {
     SavedWorldCatalog result;
+    if (stop.stop_requested()) {
+        result.error = "Saved-world validation cancelled.";
+        return result;
+    }
     try {
         const auto directory = root / "worlds/saves";
         if (!fs::exists(directory))
             return result;
         for (const auto& entry : fs::directory_iterator(directory)) {
+            if (stop.stop_requested()) {
+                result.worlds.clear();
+                result.error = "Saved-world validation cancelled.";
+                return result;
+            }
             if (entry.is_directory() || entry.is_symlink())
-                result.worlds.push_back(InspectSavedWorld(root, entry.path().filename().string()));
+                result.worlds.push_back(
+                    InspectSavedWorld(root, entry.path().filename().string(), stop));
         }
         std::sort(result.worlds.begin(), result.worlds.end(), [](const auto& a, const auto& b) {
             if (a.metadata.creationTime != b.metadata.creationTime)

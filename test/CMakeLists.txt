@@ -198,23 +198,15 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
 )
 
-# The QA runtime needs a public-checkout fallback for the private tree meshes
-# and textures used by the foliage visual scenario. Keep the fixture out of the
-# shipping client and generate its payloads only when the QA binary runs.
-target_sources(luminumbra_client_qa PRIVATE
-    rendering/synthetic_mesh_fixture.cpp
-)
-
-target_include_directories(luminumbra_client_qa PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_compile_definitions(luminumbra_client_qa PRIVATE
-    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
-    LUMINUMBRA_SYNTHETIC_MESH_FIXTURE=1
-)
-
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
+add_executable(game_assets_test
+    tools/game_assets_test.cpp
+    ../src/luminumbra_client/app/GameAssets.cpp
+)
+target_include_directories(game_assets_test PRIVATE ../src)
+target_link_libraries(game_assets_test PRIVATE gtest_main nlohmann_json)
+
+# Tree LOD selection remains independent of content acquisition.
 # under test (src/luminumbra_client/rendering/TreeLod.h) is OpenGL-free pure logic,
 # so this target needs no client lib / GL link -- just the include root + gtest.
 add_executable(tree_lod_test
@@ -784,6 +776,8 @@ add_executable(particle_determinism_test
 
 add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
+    rendering/terrain_culling_test.cpp
+    rendering/texture_file_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE
@@ -966,6 +960,17 @@ elseif(APPLE)
 else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(worldgen_preview_test PRIVATE OpenGL::GL)
+endif()
+
+add_executable(environment_brdf_test rendering/environment_brdf_test.cpp)
+target_include_directories(environment_brdf_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(environment_brdf_test PRIVATE gtest_main luminumbra_client)
+if(WIN32)
+    target_link_libraries(environment_brdf_test PRIVATE opengl32)
+elseif(APPLE)
+    target_link_libraries(environment_brdf_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    target_link_libraries(environment_brdf_test PRIVATE OpenGL::GL)
 endif()
 
 add_executable(initial_world_loading_perf_test
@@ -1304,6 +1309,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    persistence/async_saved_world_catalog_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
 )
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
@@ -1474,6 +1480,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
+    game_assets_test
     common_tests
     tree_lod_test
     # the hemi-octa mapping test was built but never
@@ -1494,6 +1501,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     async_readback_ring_test
     dual_backend_flip_test
     registry_ownership_test
+    environment_brdf_test
     pass_context_test
     shader_reflection_test
     rhi_backend_test
@@ -1531,6 +1539,7 @@ set(LUMINUMBRA_GL_GTEST_TARGETS
     async_readback_ring_test
     dual_backend_flip_test
     registry_ownership_test
+    environment_brdf_test
     pass_context_test
     shader_reflection_test
     waterfall_visual_test
@@ -1672,6 +1681,8 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    add_test(NAME GameAssetAcquisition COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+        -s "${CMAKE_SOURCE_DIR}/tools/assets" -v)
     list(APPEND _vc_candidates "${Python3_EXECUTABLE}")
     add_test(NAME RuntimeDataManifestDrift
         COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/check_runtime_data_manifest.py)

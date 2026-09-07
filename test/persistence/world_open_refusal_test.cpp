@@ -326,6 +326,26 @@ TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutW
     EXPECT_TRUE(unavailable.worlds.empty());
 }
 
+TEST_F(WorldOpenRefusal, CancelledValidationNeverReportsAValidSaveOrLeavesPartialAuthority) {
+    const auto before = DiskBytes(root);
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    const auto inspected =
+        Persistence::InspectSavedWorld(root, "fixture", cancellation.get_token());
+    EXPECT_FALSE(inspected.error.empty());
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::validate_save(save, &errors, cancellation.get_token()));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("cancelled"), std::string::npos);
+    WorldStreamingState rejected;
+    rejected.get_or_create_chunk(IVec3(2, 0, 2));
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save, errors, cancellation.get_token()));
+    EXPECT_TRUE(rejected.empty());
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
 TEST_F(WorldOpenRefusal, InvalidMetadataAndMissingWorldRefuseWithoutExceptionsOrWrites) {
     GameSession session;
     session.SetRootPath(RootString());

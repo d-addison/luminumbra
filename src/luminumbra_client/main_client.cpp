@@ -12,6 +12,7 @@
 #include "app/CrashHandler.h"
 #include "app/DebugOverlays.h"
 #include "app/FrameAudio.h"
+#include "app/GameAssets.h"
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
@@ -302,18 +303,14 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
         const std::size_t kRockBudget = pend.synchronous ? kNoBudget : 4000;   // <=4 frames at cap
         const std::size_t kBushBudget = pend.synchronous ? kNoBudget : 6000;   // <=7 frames at cap
         const std::size_t kCreatureBudget = pend.synchronous ? kNoBudget : 64; // herd is ~12
-        // Trees: TWO instanced static-mesh entities per placement — bark
-        // (soil/brown) + leaf (grass/green) — so the existing instanced +
-        // tree rendering LOD + frustum-cull path renders the vast forest cheaply.
-        //  full UV-texture lane: each part's bark/leaf texture is bound
-        // by GBufferPass via data/models/trees/tree_textures.json.
+        // Each authored tree has trunk, branch and leaf parts. Placement and RNG
+        // remain in WorldDressing; these client-only entities use the verified pack.
         {
             std::size_t budget = kTreeBudget;
             while (pend.trees_done < pend.result.trees.size() && budget-- > 0) {
                 const auto& t = pend.result.trees[pend.trees_done++];
                 if (t.palette_index < 0)
                     continue; // empty palette: counted, nothing to emit
-                const std::string base = "procgen://tree_" + std::to_string(t.palette_index);
                 const Luminumbra::Vec3 treeScale(t.eff_scale, t.eff_scale, t.eff_scale);
                 auto emit = [&](const std::string& meshKey, std::uint32_t mat) {
                     const auto e = reg.create();
@@ -325,8 +322,9 @@ static void ConsumeWorldDressing(ClientAppContext& g_app,
                     sm.meshPath = meshKey;
                     sm.materialId = mat;
                 };
-                emit(base + kBarkMatKey, 2u); // bark -> soil/brown material
-                emit(base + kLeafMatKey, 3u); // leaf -> grass/green material
+                emit(std::string(kTreeMeshPrefix) + "trunk.lmesh", 2u);
+                emit(std::string(kTreeMeshPrefix) + "branches.lmesh", 2u);
+                emit(std::string(kTreeMeshPrefix) + "leaves.lmesh", 3u);
             }
             if (!pend.trees_logged && pend.trees_done == pend.result.trees.size()) {
                 pend.trees_logged = true;
@@ -1959,6 +1957,10 @@ int main(int argc, char* argv[]) {
     if (const auto sq = Luminumbra::Core::ReadEnvironment("LUMIN_SSAO_QUALITY")) {
         ssao_quality = std::atoi(sq->c_str());
     }
+    const std::string game_asset_startup_error = VerifyGameAssets(root_dir);
+    if (!game_asset_startup_error.empty())
+        LUMINUMBRA_CORE_WARN("{}", game_asset_startup_error);
+    renderPipeline.enable_static_model_content(game_asset_startup_error.empty());
     if (!renderPipeline.startup(framebufferWidth, framebufferHeight, root_dir)) {
         LUMINUMBRA_CORE_ERROR("FATAL: Render pipeline startup failed.");
         runtime_state_recorder.capture("render_pipeline_startup_failed",
@@ -2036,8 +2038,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    g_loading_visualizer = std::make_unique<Luminumbra::Client::WorldLoadingVisualizer>();
-    g_loading_visualizer->Startup(root_dir, framebufferWidth, framebufferHeight);
+    if (g_app.overlay.imgui_enabled) {
+        g_loading_visualizer = std::make_unique<Luminumbra::Client::WorldLoadingVisualizer>();
+        g_loading_visualizer->Startup(root_dir, framebufferWidth, framebufferHeight);
+    }
 
     bool scenario_failed = false;
     std::string scenario_failure_reason;
@@ -2052,16 +2056,17 @@ int main(int argc, char* argv[]) {
         DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
     };
 
-    auto refuse_world_entry = [&](const std::string& fallback) {
+    auto refuse_world_entry = [&](const std::string& fallback, bool use_world_error = true) {
         const auto& detail = gameSession->GetWorldOpenError();
-        const std::string error = detail.empty() ? fallback : detail;
+        const std::string error = !use_world_error || detail.empty() ? fallback : detail;
         LUMINUMBRA_CORE_ERROR("World open refused: {}", error);
         if (g_uiManager)
             g_uiManager->ShowMessage(error);
         g_app.menu.menu_backdrop_active = false;
         g_playerController.reset();
-        scenario_failed =
-            scenario_config.active() || HasCommandLineFlag(argc, argv, "--load-world");
+        scenario_failed = scenario_config.active() ||
+                          HasCommandLineFlag(argc, argv, "--load-world") ||
+                          HasCommandLineFlag(argc, argv, "--auto-create-world");
         scenario_failure_reason = error;
         runtime_state_recorder.capture("world_open_refused",
                                        &jobSystem,
@@ -2069,6 +2074,23 @@ int main(int argc, char* argv[]) {
                                        &renderPipeline,
                                        scenario_frame_count,
                                        {});
+    };
+
+    auto game_content_error = [&]() -> std::string {
+        if (!game_asset_startup_error.empty())
+            return game_asset_startup_error;
+        if (const auto error = VerifyGameAssets(root_dir); !error.empty())
+            return error;
+        for (const std::string part : {"trunk", "branches", "leaves"}) {
+            if (!renderPipeline.static_model_tex(std::string(kTreeMeshPrefix) + part + ".lmesh"))
+                return "Required tree materials could not be loaded by the renderer. Check the "
+                       "client log, repair the asset pack and restart.";
+        }
+        const auto impostors = Luminumbra::Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS");
+        if ((!impostors || *impostors != "0") && !renderPipeline.tree_impostor_enabled())
+            return "Required tree impostor baking failed. Check the client log for the renderer "
+                   "error.";
+        return {};
     };
 
     auto finish_world_entry = [&]() {
@@ -2238,6 +2260,11 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        const auto asset_error = game_content_error();
+        if (!asset_error.empty()) {
+            refuse_world_entry(asset_error, false);
+            return;
+        }
         prepare_world_entry();
         if (!gameSession->CreateWorld(name, seed, worldType, customPtr)) {
             refuse_world_entry("Could not create this world. Check the save location and preset.");
@@ -2257,6 +2284,11 @@ int main(int argc, char* argv[]) {
     };
 
     auto start_world_load = [&](const std::string& id) {
+        const auto asset_error = game_content_error();
+        if (!asset_error.empty()) {
+            refuse_world_entry(asset_error, false);
+            return;
+        }
         // The UI's inspection is advisory: revalidate all artifacts at the moment of opening.
         prepare_world_entry();
         if (!gameSession->LoadWorld(id)) {
@@ -2283,8 +2315,8 @@ int main(int argc, char* argv[]) {
         }
         g_uiManager->SetWorldCreationCallback(start_world_creation);
         g_uiManager->SetLoadWorldCallback(start_world_load);
-        g_uiManager->SetSavedWorldList([root_path_str]() {
-            return Luminumbra::Persistence::EnumerateSavedWorlds(root_path_str);
+        g_uiManager->SetSavedWorldList([root_path_str](std::stop_token stop) {
+            return Luminumbra::Persistence::EnumerateSavedWorlds(root_path_str, stop);
         });
         // Seed the create-world customize form from a preset: read generation_params.<path>.
         g_uiManager->SetWorldParamGetter([root_path_str](const std::string& worldType,
@@ -2903,7 +2935,8 @@ int main(int argc, char* argv[]) {
         if (!g_app.capture.bake_impostor_path.empty() && !g_app.capture.bake_impostor_done) {
             g_app.capture.bake_impostor_done = true;
             Luminumbra::Rendering::OctaImpostorGrid bakeGrid;
-            bakeGrid.gridResolution = 12; // 12x12 = 144 views for smoother runtime view blending
+            bakeGrid.gridResolution = 12;
+            bakeGrid.tileResolution = 384;
             const Luminumbra::Rendering::ImpostorBakeResult br =
                 Luminumbra::Rendering::BakeTreeImpostorAtlas(
                     g_app.capture.bake_impostor_path, root_dir.string(), renderPipeline, bakeGrid);
@@ -2917,6 +2950,9 @@ int main(int argc, char* argv[]) {
                     br.min_coverage);
             } else {
                 LUMINUMBRA_CORE_ERROR("Impostor bake failed: {}", br.error);
+                scenario_failed = true;
+                scenario_failure_reason = "Impostor bake failed: " + br.error;
+                exit_code = 2;
             }
             glfwSetWindowShouldClose(window, GLFW_TRUE);
             continue;
@@ -3521,15 +3557,10 @@ int main(int argc, char* argv[]) {
                     if (!g_app.worldDressing.dispatched && ws) {
                         g_app.worldDressing.dispatched = true;
                         const Luminumbra::Vec3 anchor = gameSession->GetMetadata().spawnPoint;
-                        // PROGRAMMATIC TREES/ROCKS/BUSHES, NO MODEL (owner): build the
-                        // procedural palettes once (into the instanced static-mesh cache)
-                        // BEFORE dispatch — GL-side + cheap, and the palette COUNTS pin
-                        // the placements' palette-index modulo. None of the builders
-                        // touches the scatter frand stream, so hoisting the rock/bush
-                        // builds ahead of their loops keeps the seeded layout
-                        // byte-identical to the old inline order.
+                        // The authored tree uses one asset. Rock and bush palettes retain
+                        // their existing generation and placement hash schedule.
                         const glm::vec3 sunToward = -glm::normalize(renderPipeline.sun_direction());
-                        BuildProcgenTreePalette(g_procgen, renderPipeline, sunToward);
+                        g_procgen.treePaletteCount = 1;
                         BuildProcgenRockPalette(g_procgen, renderPipeline);
                         BuildProcgenBushPalette(g_procgen, renderPipeline);
                         // LIVING WORLD: ambient WILDLIFE for interactive play. The world
@@ -3960,8 +3991,9 @@ int main(int argc, char* argv[]) {
 
                     // --scene-config: self-contained capture. Settle a few frames (world
                     // stream + atmosphere), then read the clean back buffer (BEFORE any UI
-                    // overlay this frame) and write the screenshot, then close.
-                    if (g_app.capture.scene_active) {
+                    // overlay this frame) and write the screenshot, then close. When a
+                    // benchmark is requested, its warmup, output and exit own the capture.
+                    if (g_app.capture.scene_active && g_app.capture.render_benchmark_path.empty()) {
                         if (g_app.sceneCapture.settleFrames < 55) {
                             ++g_app.sceneCapture.settleFrames;
                         } else {
@@ -4297,6 +4329,37 @@ int main(int argc, char* argv[]) {
             renderPipeline.set_time_of_day(0.04f); // fixed near-noon (clouds + lit terrain)
         }
 
+        // Capture an additional, unmeasured frame before presentation. Hidden-window
+        // front buffers are not a portable readback source (Mesa can return black).
+        // Using the frame after the measured interval keeps readback out of its timings.
+        if (g_rb_active && currentState == GameState::IN_GAME &&
+            g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
+            !g_app.capture.render_benchmark_screenshot.empty()) {
+            int width = 0, height = 0;
+            glfwGetFramebufferSize(window, &width, &height);
+            if (width > 0 && height > 0) {
+                GLint previous_read_fbo = 0, previous_pack_alignment = 0;
+                glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previous_read_fbo);
+                glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack_alignment);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+                glReadBuffer(GL_BACK);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                std::vector<unsigned char> pixels(static_cast<size_t>(width) * height * 3u);
+                glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+                WritePixelBufferPpm(
+                    std::filesystem::path(g_app.capture.render_benchmark_screenshot),
+                    width,
+                    height,
+                    pixels);
+                glPixelStorei(GL_PACK_ALIGNMENT, previous_pack_alignment);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previous_read_fbo));
+                LUMINUMBRA_CORE_INFO("Render benchmark screenshot -> {} ({}x{}, unmeasured frame)",
+                                     g_app.capture.render_benchmark_screenshot,
+                                     width,
+                                     height);
+            }
+        }
+
         CaptureTimelapseFrame(
             g_app, window, currentState, gameSession.get(), renderPipeline, g_procgen);
         //  CPU-submit ends here (all GL work for the frame is
@@ -4448,30 +4511,6 @@ int main(int argc, char* argv[]) {
                 }
                 ++rb_count;
 
-                // Dump the forest-dense pose on the LAST measured frame (verifies
-                // density + supplies before/after PNGs). The back buffer was just
-                // swapped to front, so read GL_FRONT.
-                if (rb_count == g_app.capture.render_benchmark_frames &&
-                    !g_app.capture.render_benchmark_screenshot.empty()) {
-                    int vw = 0, vh = 0;
-                    glfwGetFramebufferSize(window, &vw, &vh);
-                    if (vw > 0 && vh > 0) {
-                        std::vector<unsigned char> px(static_cast<std::size_t>(vw) *
-                                                      static_cast<std::size_t>(vh) * 3u);
-                        glReadBuffer(GL_FRONT);
-                        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                        glReadPixels(0, 0, vw, vh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
-                        WritePixelBufferPpm(
-                            std::filesystem::path(g_app.capture.render_benchmark_screenshot),
-                            vw,
-                            vh,
-                            px);
-                        LUMINUMBRA_CORE_INFO("Render benchmark screenshot -> {} ({}x{})",
-                                             g_app.capture.render_benchmark_screenshot,
-                                             vw,
-                                             vh);
-                    }
-                }
             } else {
                 const double n = static_cast<double>(std::max(1, rb_count));
                 const double np = static_cast<double>(std::max(1, rb_nv_count));
@@ -4488,6 +4527,11 @@ int main(int argc, char* argv[]) {
                 j["internal_width"] = renderPipeline.internal_width();
                 j["internal_height"] = renderPipeline.internal_height();
                 j["pose"] = g_app.capture.fixed_cam ? "fixed_camera" : "forest_dense";
+                const auto resources = renderPipeline.get_runtime_render_stats();
+                j["resources"] = {
+                    {"estimated_vram_bytes", resources.estimated_vram_bytes},
+                    {"static_model_texture_bytes", resources.static_model_texture_bytes},
+                    {"tree_impostor_texture_bytes", resources.tree_impostor_texture_bytes}};
                 if (g_camera && gameSession && gameSession->GetWorldSystem()) {
                     const auto* world = gameSession->GetWorldSystem();
                     const auto coords = world->world_to_chunk_coords(g_camera->Position);

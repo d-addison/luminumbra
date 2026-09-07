@@ -10,6 +10,7 @@
 #include <RmlUi/Core/Elements/ElementFormControl.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "ui/Rml_UIManager.h"
@@ -212,11 +214,24 @@ Rml::ElementDocument* FindDocumentByElementId(Rml::Context* context, const char*
     return nullptr;
 }
 
+void AwaitWorldCatalog(Luminumbra::Client::Rml_UIManager& ui) {
+    auto* document = FindDocumentByElementId(ui.GetContext(), "world_selection");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (document && document->HasAttribute("data-worlds-pending") &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ui.Update();
+    }
+    if (document)
+        EXPECT_FALSE(document->HasAttribute("data-worlds-pending"));
+}
+
 Rml::ElementDocument* LoadDocumentAndFind(Luminumbra::Client::Rml_UIManager& ui,
                                           const char* path,
                                           const char* required_id) {
     ui.RequestLoadDocument(path);
     ui.Update();
+    AwaitWorldCatalog(ui);
     return FindDocumentByElementId(ui.GetContext(), required_id);
 }
 
@@ -224,6 +239,7 @@ void ClickAndUpdate(Luminumbra::Client::Rml_UIManager& ui, Rml::Element* element
     ASSERT_NE(element, nullptr);
     element->Click();
     ui.Update();
+    AwaitWorldCatalog(ui);
 }
 
 void SetControlValue(Rml::ElementDocument* document, const char* id, const std::string& value) {
@@ -1189,6 +1205,7 @@ TEST(UiSmokeTest, WorldSelectEmptyGuardAndHotReload) {
     // The manager tracks selection internally; reloading the doc resets it to empty.
     ui.ReloadActiveDocument();
     ui.Update();
+    AwaitWorldCatalog(ui);
     ws = FindDocumentByElementId(ui.GetContext(), "world_selection");
     ASSERT_NE(ws, nullptr) << "ReloadActiveDocument must re-load the world-selection screen";
 

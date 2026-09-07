@@ -26,6 +26,11 @@ public:
     ~LightingPass();
 
     void init_shader(const std::filesystem::path& root_path);
+    void init_environment_brdf(RenderResourceRegistry& registry);
+    void destroy_environment_brdf(RenderResourceRegistry& registry);
+    u32 environment_brdf_texture() const {
+        return m_environment_brdf;
+    }
     // Root path retained so the lightning overlay program can be lazily built on
     // first strike.
     std::filesystem::path m_root_path;
@@ -63,6 +68,7 @@ public:
 
 private:
     FrameBufferObject m_lighting_fbo;
+    u32 m_environment_brdf = 0; // registry-owned; independent of framebuffer size
     std::unique_ptr<Shader> m_lighting_shader;
     // the lightning overlay program (full-screen additive). Lazily
     // built on first use so non-lightning frames pay nothing.

@@ -320,6 +320,7 @@ bool RenderPipeline::startup(u32 screen_width,
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
+        m_lighting_pass->init_environment_brdf(m_render_registry);
         // SCALED intermediates render at internal res (== output at scale 1.0).
         m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
         m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
@@ -340,27 +341,33 @@ bool RenderPipeline::startup(u32 screen_width,
         load_material_texture_lut();
         init_terrain_textures();
         init_skinned_texture_array();
-        register_static_model_textures(); // Tree-part bark and leaf textures.
+        if (m_staticModelContentEnabled)
+            register_static_model_textures(); // Tree-part bark and leaf textures.
         //  far-field tree impostors: DEFAULT ON (set LUMIN_TREE_IMPOSTORS=0 to disable for
         // an A/B). Perf-validated win (render-benchmark forest_dense), scales with far tree count.
         // Bake the atlas now that the tree textures are loaded; the GBuffer LOD3 path samples it.
         const auto impostors = Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS");
-        if (!impostors || (!impostors->empty() && impostors->front() != '0')) {
+        if (m_staticModelContentEnabled &&
+            (!impostors || (!impostors->empty() && impostors->front() != '0'))) {
             OctaImpostorGrid g;
             g.gridResolution = 12;
+            g.tileResolution = 384;
             const ImpostorAtlasTextures ia =
                 BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
             if (ia.ok) {
                 m_treeImpostorAlbedo = ia.albedoTex;
                 m_treeImpostorNormal = ia.normalTex;
                 m_treeImpostorGrid = ia.grid;
+                m_treeImpostorAtlasSize = g.gridResolution * g.tileResolution;
                 m_treeImpostorRadius = ia.radius;
-                m_treeImpostorSphereY = ia.sphereY;
+                m_treeImpostorCenter = glm::vec3(ia.center.x, ia.center.y, ia.center.z);
                 m_treeImpostorsEnabled = true;
-                LUMINUMBRA_CORE_INFO("Tree impostors ON: atlas baked ({}x{} grid, radius {:.1f})",
-                                     ia.grid,
-                                     ia.grid,
-                                     ia.radius);
+                LUMINUMBRA_CORE_INFO(
+                    "Tree impostors ON: atlas baked ({}x{} grid, {}px tiles, radius {:.1f})",
+                    ia.grid,
+                    ia.grid,
+                    g.tileResolution,
+                    ia.radius);
             } else {
                 LUMINUMBRA_CORE_WARN("Tree impostor bake failed: {}", ia.error);
             }
@@ -1283,9 +1290,27 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_skinnedTextureArray)
         estimated_vram_bytes +=
             static_cast<size_t>(kSkinnedTextureResolution) * kSkinnedTextureResolution * 2u * 4u;
+    for (const GLuint texture :
+         {m_staticModelTextureArray, m_staticModelNormalArray, m_staticModelSurfaceArray}) {
+        if (texture) {
+            for (int mip = 0; mip < 10; ++mip) {
+                const size_t size =
+                    static_cast<size_t>(std::max(1, kStaticModelTextureResolution >> mip));
+                stats.static_model_texture_bytes += size * size * kStaticModelTextureLayers * 4u;
+            }
+        }
+    }
+    for (const GLuint texture : {m_treeImpostorAlbedo, m_treeImpostorNormal}) {
+        if (texture)
+            stats.tree_impostor_texture_bytes +=
+                static_cast<size_t>(m_treeImpostorAtlasSize) * m_treeImpostorAtlasSize * 4u;
+    }
+    estimated_vram_bytes += stats.static_model_texture_bytes + stats.tree_impostor_texture_bytes;
     if (m_materialLUT)
         estimated_vram_bytes +=
             256u * 4u * 4u; // 256 ids x 4 rows x RGBA8 (: was stale 2-row estimate)
+    if (m_lighting_pass->environment_brdf_texture())
+        estimated_vram_bytes += 64u * 64u * 4u; // RG16F environment BRDF, no mipmaps
     if (m_water_pass->flat_normal_texture())
         estimated_vram_bytes += 4u;
     if (m_water_pass->neutral_flow_texture())
@@ -1431,7 +1456,13 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_terrainTextureArray);
     stats.textures += count(m_terrainNormalArray);
     stats.textures += count(m_skinnedTextureArray);
+    stats.textures += count(m_staticModelTextureArray);
+    stats.textures += count(m_staticModelNormalArray);
+    stats.textures += count(m_staticModelSurfaceArray);
+    stats.textures += count(m_treeImpostorAlbedo);
+    stats.textures += count(m_treeImpostorNormal);
     stats.textures += count(m_materialLUT);
+    stats.textures += count(m_lighting_pass->environment_brdf_texture());
     stats.textures += count(m_water_pass->flat_normal_texture());
     stats.textures += count(m_water_pass->neutral_flow_texture());
     stats.textures += count(m_water_pass->black_fallback_texture());
@@ -1736,6 +1767,7 @@ void RenderPipeline::refresh_render_pass_metadata() {
               "ssao.blur",
               "terrain_texture_array",
               "material_lut",
+              "lighting.environment_brdf",
               "water.fallback.black"},
              {"lighting.color", "lighting.depth"},
              m_screen_width,
@@ -2596,6 +2628,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.far_lod = farlod();
         gbuffer_input.root_path = m_root_path;
         gbuffer_input.static_model_texture_array = static_model_texture_array();
+        gbuffer_input.static_model_normal_array = static_model_normal_array();
+        gbuffer_input.static_model_surface_array = static_model_surface_array();
         gbuffer_input.static_model_tex = [this](const std::string& mesh_path) {
             return static_model_tex(mesh_path);
         };
@@ -2604,7 +2638,7 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.tree_impostor_normal = tree_impostor_normal();
         gbuffer_input.tree_impostor_grid = tree_impostor_grid();
         gbuffer_input.tree_impostor_radius = tree_impostor_radius();
-        gbuffer_input.tree_impostor_sphere_y = tree_impostor_sphere_y();
+        gbuffer_input.tree_impostor_center = tree_impostor_center();
         const GBufferDrawStats gstats =
             m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input);
         // Fold with the EXACT current policy: terrain_visible_chunks '=', rest '+='.
@@ -3698,6 +3732,22 @@ void RenderPipeline::cleanup_gpu_resources() {
         glDeleteTextures(1, &m_terrainRoughnessArray);
         m_terrainRoughnessArray = 0;
     }
+    for (auto* texture : {&m_staticModelTextureArray,
+                          &m_staticModelNormalArray,
+                          &m_staticModelSurfaceArray,
+                          &m_treeImpostorAlbedo,
+                          &m_treeImpostorNormal}) {
+        if (*texture) {
+            glDeleteTextures(1, texture);
+            *texture = 0;
+        }
+    }
+    m_staticModelTextures.clear();
+    m_staticModelNextLayer = 0;
+    m_treeImpostorsEnabled = false;
+    m_treeImpostorGrid = 0;
+    m_treeImpostorAtlasSize = 0;
+    m_treeImpostorRadius = 0.0f;
     if (m_skinnedTextureArray) {
         glDeleteTextures(1, &m_skinnedTextureArray);
         m_skinnedTextureArray = 0;
@@ -3710,6 +3760,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     destroy_gpu_pass_timers();
     m_gbuffer_pass->reset_shaders();
     m_lighting_pass->reset_shader();
+    m_lighting_pass->destroy_environment_brdf(m_render_registry);
     m_skybox_pass->reset_shader();
     if (m_particle_pass) {
         m_particle_pass->reset_shader();
@@ -4658,103 +4709,107 @@ bool RenderPipeline::load_skinned_texture_set(const std::filesystem::path& albed
 void RenderPipeline::init_static_model_texture_array() {
     const int res = kStaticModelTextureResolution;
     const int layers = kStaticModelTextureLayers;
-    glGenTextures(1, &m_staticModelTextureArray);
-    label_gl_object(GL_TEXTURE, m_staticModelTextureArray, "static_model.texture_array");
-    glBindTexture(GL_TEXTURE_2D_ARRAY, m_staticModelTextureArray);
-    glTexImage3D(GL_TEXTURE_2D_ARRAY,
-                 0,
-                 GL_SRGB8_ALPHA8,
-                 res,
-                 res,
-                 layers,
-                 0,
-                 GL_RGBA,
-                 GL_UNSIGNED_BYTE,
-                 nullptr);
-    // Flat fallback every layer: even = mid-grey albedo, odd = up-normal.
-    for (int i = 0; i < layers; ++i) {
-        const bool is_normal = (i % 2) == 1;
+    for (int kind = 0; kind < 3; ++kind) {
+        auto& texture = kind == 0
+                            ? m_staticModelTextureArray
+                            : (kind == 1 ? m_staticModelNormalArray : m_staticModelSurfaceArray);
+        glGenTextures(1, &texture);
+        label_gl_object(
+            GL_TEXTURE,
+            texture,
+            kind == 0 ? "static_model.albedo_array"
+                      : (kind == 1 ? "static_model.normal_array" : "static_model.surface_array"));
+        glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+        glTexStorage3D(
+            GL_TEXTURE_2D_ARRAY, 10, kind == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, res, res, layers);
         std::vector<unsigned char> fill(static_cast<size_t>(res) * res * 4u);
-        for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
-            if (is_normal) {
-                fill[p * 4 + 0] = 128;
-                fill[p * 4 + 1] = 128;
-                fill[p * 4 + 2] = 255;
-                fill[p * 4 + 3] = 255;
-            } else {
-                fill[p * 4 + 0] = 120;
-                fill[p * 4 + 1] = 120;
-                fill[p * 4 + 2] = 120;
-                fill[p * 4 + 3] = 255;
-            }
+        for (size_t p = 0; p < fill.size(); p += 4) {
+            fill[p] = kind == 0 ? 120 : (kind == 1 ? 128 : 255);
+            fill[p + 1] = kind == 0 ? 120 : (kind == 1 ? 128 : 217);
+            fill[p + 2] = kind == 0 ? 120 : (kind == 1 ? 255 : 0);
+            fill[p + 3] = 255;
         }
-        glTexSubImage3D(
-            GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1, GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
-    }
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
-    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-    m_staticModelNextLayer = 0;
-    LUMINUMBRA_CORE_INFO(
-        "Static-model texture array allocated ({} layers, {}x{}).", layers, res, res);
-}
-
-bool RenderPipeline::load_static_model_texture_set(const std::filesystem::path& albedo_path,
-                                                   const std::filesystem::path& normal_path,
-                                                   int& albedo_layer_out,
-                                                   int& normal_layer_out) {
-    if (m_staticModelTextureArray == 0)
-        init_static_model_texture_array();
-    if (m_staticModelNextLayer + 1 >= kStaticModelTextureLayers) {
-        LUMINUMBRA_CORE_WARN("Static-model texture array full; cannot load '{}'.",
-                             albedo_path.string());
-        return false;
-    }
-    const int res = kStaticModelTextureResolution;
-    const int albedo_layer = m_staticModelNextLayer;
-    const int normal_layer = m_staticModelNextLayer + 1;
-    glBindTexture(GL_TEXTURE_2D_ARRAY, m_staticModelTextureArray);
-    struct SetLayer {
-        const std::filesystem::path& path;
-        int layer;
-    };
-    const std::array<SetLayer, 2> set = {
-        {{albedo_path, albedo_layer}, {normal_path, normal_layer}}};
-    bool albedo_ok = false;
-    for (const auto& s : set) {
-        if (s.path.empty())
-            continue;
-        LtexCpuImage img;
-        if (load_ltex_cpu_image(s.path, img) && img.width == static_cast<uint32_t>(res) &&
-            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+        for (int layer = 0; layer < layers; ++layer)
             glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
                             0,
                             0,
                             0,
-                            s.layer,
+                            layer,
                             res,
                             res,
                             1,
                             GL_RGBA,
                             GL_UNSIGNED_BYTE,
-                            img.bytes.data());
-            if (s.layer == albedo_layer)
-                albedo_ok = true;
-        } else {
-            LUMINUMBRA_CORE_WARN("Static-model texture: failed to load '{}', keeping fallback.",
-                                 s.path.string());
+                            fill.data());
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    }
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    m_staticModelNextLayer = 0;
+    LUMINUMBRA_CORE_INFO(
+        "Static-model albedo/normal/surface arrays allocated ({} layers each, {}x{}).",
+        layers,
+        res,
+        res);
+}
+
+bool RenderPipeline::load_static_model_texture_set(const std::filesystem::path& albedo_path,
+                                                   const std::filesystem::path& normal_path,
+                                                   const std::filesystem::path& surface_path,
+                                                   int& albedo_layer_out,
+                                                   int& normal_layer_out) {
+    if (m_staticModelTextureArray == 0)
+        init_static_model_texture_array();
+    if (m_staticModelNextLayer >= kStaticModelTextureLayers)
+        return false;
+    const int res = kStaticModelTextureResolution;
+    std::array<LtexCpuImage, 3> images;
+    const std::array<std::filesystem::path, 3> paths = {albedo_path, normal_path, surface_path};
+    for (size_t kind = 0; kind < images.size(); ++kind) {
+        auto& img = images[kind];
+        if (!load_ltex_cpu_image(paths[kind], img) || img.width != static_cast<uint32_t>(res) ||
+            img.height != static_cast<uint32_t>(res) || img.channels != 4u || img.mip_count != 10) {
+            LUMINUMBRA_CORE_ERROR("Static-model texture set refused: '{}' requires a complete "
+                                  "512x512 RGBA mip chain.",
+                                  paths[kind].string());
+            return false;
         }
     }
-    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    const int layer = m_staticModelNextLayer;
+    for (size_t kind = 0; kind < images.size(); ++kind) {
+        const auto& img = images[kind];
+        glBindTexture(GL_TEXTURE_2D_ARRAY,
+                      kind == 0
+                          ? m_staticModelTextureArray
+                          : (kind == 1 ? m_staticModelNormalArray : m_staticModelSurfaceArray));
+        size_t offset = 0;
+        int size = res;
+        for (int mip = 0; mip < img.mip_count; ++mip) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
+                            mip,
+                            0,
+                            0,
+                            layer,
+                            size,
+                            size,
+                            1,
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            img.bytes.data() + offset);
+            offset += static_cast<size_t>(size) * size * 4;
+            size = std::max(1, size / 2);
+        }
+    }
+    // Imported mips preserve linear-light color, normal direction and leaf coverage.
+    // Regenerating the array mips here would discard that authored data.
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-    m_staticModelNextLayer += 2;
-    albedo_layer_out = albedo_layer;
-    normal_layer_out = normal_layer;
-    return albedo_ok;
+    ++m_staticModelNextLayer;
+    albedo_layer_out = layer;
+    normal_layer_out = layer;
+    return true;
 }
 
 void RenderPipeline::register_static_model_textures() {
@@ -4778,14 +4833,18 @@ void RenderPipeline::register_static_model_textures() {
             const std::filesystem::path normal =
                 m.contains("normal") ? (m_root_path / m["normal"].get<std::string>())
                                      : std::filesystem::path{};
+            const std::filesystem::path surface = m_root_path / m.at("surface").get<std::string>();
             int al = -1, nl = -1;
-            const bool ok = load_static_model_texture_set(albedo, normal, al, nl);
+            const bool ok = load_static_model_texture_set(albedo, normal, surface, al, nl);
             if (!ok)
                 continue;
             StaticModelTex tex;
             tex.albedoLayer = al;
             tex.normalLayer = nl;
+            tex.surfaceLayer = al;
             tex.alphaTest = m.value("alpha_test", false);
+            tex.doubleSided = m.value("double_sided", tex.alphaTest);
+            tex.metallicFactor = std::clamp(m.value("metallic_factor", 1.0f), 0.0f, 1.0f);
             m_staticModelTextures[mesh] = tex;
         }
         LUMINUMBRA_CORE_INFO("Static-model textures registered ({} models).",
@@ -5047,8 +5106,7 @@ bool ReadPod(std::ifstream& in, T& value) {
 
 } // namespace
 
-bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
-                                         LtexCpuImage& out) const {
+bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         LUMINUMBRA_CORE_ERROR("Texture residency: could not open.ltex '{}'", path.string());
@@ -5075,7 +5133,11 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
             "Texture residency: unsupported.ltex version {} in '{}'", version, path.string());
         return false;
     }
-    if (width == 0 || height == 0 || channels == 0 || channels > 4 || mip_count == 0) {
+    uint16_t max_mips = 1;
+    for (uint32_t dimension = std::max(width, height); dimension > 1; dimension /= 2)
+        ++max_mips;
+    if (width == 0 || height == 0 || width > 16384 || height > 16384 || channels == 0 ||
+        channels > 4 || mip_count == 0 || mip_count > max_mips) {
         LUMINUMBRA_CORE_ERROR("Texture residency: invalid.ltex dimensions in '{}'", path.string());
         return false;
     }
@@ -5090,6 +5152,15 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
             w = std::max(1u, w / 2u);
             h = std::max(1u, h / 2u);
         }
+    }
+
+    std::error_code size_error;
+    const auto file_bytes = std::filesystem::file_size(path, size_error);
+    constexpr size_t kHeaderBytes = 17;
+    if (size_error || total_bytes > 256u * 1024u * 1024u ||
+        file_bytes != kHeaderBytes + total_bytes) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: invalid.ltex byte count in '{}'", path.string());
+        return false;
     }
 
     out.width = width;

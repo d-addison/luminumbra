@@ -10,6 +10,7 @@ uniform sampler2D gNormalMaterial;    // RGB10A2: Octahedral normal + material I
 uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
 uniform sampler2D u_ssao;
+uniform sampler2D u_environmentBrdf;
 
 // Material lookup (256 x 4 rows; row 2 holds emissive_intensity/scale)
 uniform sampler2D u_materialLUT;
@@ -272,14 +273,20 @@ float GeometrySmith(float NdotV, float NdotL, float k) {
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
-// terrain PBR: roughness-aware Fresnel for the ambient/environment term. Rougher
-// surfaces reflect less of the environment at grazing angles (the reflection
-// blurs out), so the grazing limit is clamped toward (1 - roughness) instead of
-// 1. Used ONLY for the analytic ambient specular below — the direct-light path
-// keeps the sharp fresnelSchlick. (Karis 2013, "Real Shading in UE4".)
+// Retained for the calibrated ambient diffuse weight. This Fresnel heuristic
+// is not an integrated environment BRDF and must not scale sky reflections.
 vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
     vec3 Fr = max(vec3(1.0 - roughness), F0);
     return F0 + (Fr - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+// Integrated GGX/Schlick response. Quadratic N.V coordinates resolve the grazing
+// lobe; endpoints map to texel centres in the 64x64 RG16F table. See its generator
+// for the model and sample count. Incident radiance is supplied separately.
+vec3 environmentBrdf(float NdotV, vec3 F0, float roughness) {
+    vec2 coordinate = vec2(sqrt(clamp(NdotV, 0.0, 1.0)),
+                           (clamp(roughness, 0.05, 1.0) - 0.05) / 0.95);
+    vec2 AB = texture(u_environmentBrdf, (coordinate * 63.0 + 0.5) / 64.0).rg;
+    return clamp(F0 * AB.x + AB.y, vec3(0.0), vec3(1.0));
 }
 float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
     // 1. Determine which cascade to use in a branchless way
@@ -648,15 +655,9 @@ void main() {
     crystalGlow *= (1.0 + aetherLocal * u_aetherMaterialModulation);
 
     // --- Final Color Composition ---
-    // terrain PBR: split the flat sky ambient into energy-conserving diffuse +
-    // specular. u_skyAmbientColor is ALREADY an irradiance (kAmbientIrradianceScale
-    // = PI matches SUN_IRRADIANCE_SCALE) — do NOT re-multiply by PI here or the
-    // ambient double-counts and blows past the ACES knee. The specular lobe gives
-    // metals/low-roughness surfaces a believable environment sheen at grazing
-    // angles (previously flat). Non-metals at normal incidence keep ~96% of the
-    // old diffuse (kD ~ 1 - 0.04) plus a faint rim, so the visual floor holds.
-    // Far-water (MaterialID 200) has F0=0 + roughness 1.0 => F_amb=0 => specular 0
-    // and diffuse unchanged, preserving the matte sky-tint sheet.
+    // Preserve the existing ambient diffuse calibration. The sky input is
+    // irradiance, but this legacy diffuse weight has no Lambertian 1/PI factor;
+    // recalibrating the entire lighting chain is a separate change.
     float NdotV_amb = max(dot(Normal, V), 0.0);
     vec3 F_amb = fresnelSchlickRoughness(NdotV_amb, F0, Roughness);
     vec3 kD_amb = (vec3(1.0) - F_amb) * (1.0 - Metallic);
@@ -669,7 +670,13 @@ void main() {
     vec3 groundBounce = u_skyAmbientColor * vec3(0.32, 0.29, 0.25); // dim, warm
     vec3 hemiAmbient = mix(groundBounce, u_skyAmbientColor, hemi);
     vec3 ambientDiffuse  = kD_amb * Albedo * hemiAmbient;
-    vec3 ambientSpecular = F_amb * hemiAmbient;
+    // Recover incident radiance from the PI-scaled sky irradiance and apply the
+    // integrated rough-surface response. Pointwise Fresnel overstates grazing
+    // reflections and previously turned brown soil purple under the cool sky.
+    vec3 ambientSpecular = environmentBrdf(NdotV_amb, F0, Roughness) * (hemiAmbient / PI);
+    if (MaterialID == 200u) {
+        ambientSpecular = vec3(0.0); // preserve the authored matte far-water sheet
+    }
     // Long-range sky visibility: roofed-over (cave/overhang) fragments lose the
     // flat sky-ambient fill so deep interiors go near-black and any point light
     // placed there reads as a real pool of light. GATED (default OFF) -> the

@@ -1,3 +1,4 @@
+#include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -858,6 +859,37 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
 struct LitNoonResult {
     float r = 0, g = 0, b = 0;
 };
+struct AmbientReflectionProbe {
+    float normal_dot_view = 1.0f;
+    unsigned char material_id = 1;
+};
+
+// Synthetic lighting draws bind the same embedded RG16F table as LightingPass.
+// The returned texture is owned by the caller, not by the shader program.
+GLuint BindEnvironmentBrdf(GLuint program) {
+    using namespace Luminumbra::Rendering;
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glActiveTexture(GL_TEXTURE12);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RG16F,
+                 kEnvironmentBrdfLutSize,
+                 kEnvironmentBrdfLutSize,
+                 0,
+                 GL_RG,
+                 GL_HALF_FLOAT,
+                 kEnvironmentBrdfLut.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_environmentBrdf"), 12);
+    glActiveTexture(GL_TEXTURE0);
+    return texture;
+}
 //  ( -6) additions, both defaulted so every existing
 // caller renders byte-identically: emissive_intensity_norm > 0 authors that
 // normalized emissive value into the LUT's row 2 for the plate's material
@@ -872,11 +904,13 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
                                        float aether_material_modulation = 0.0f,
                                        std::array<float, 3> light_travel = {-0.2f, 0.0f, -0.98f},
                                        bool moon_only = false,
-                                       const glm::mat4& inverse_view = glm::mat4(1.0f)) {
+                                       const glm::mat4& inverse_view = glm::mat4(1.0f),
+                                       const AmbientReflectionProbe* ambient_probe = nullptr) {
     // 64x64 so the optional swatch dump is a reviewable PNG; the mean is the
     // same regardless of resolution (flat fragment).
     constexpr int kRes = 64;
     constexpr float kEmissiveLutScale = 8.0f;
+    const GLuint environment_brdf = BindEnvironmentBrdf(lighting_program);
 
     GLuint fbo = 0, color_tex = 0;
     glGenFramebuffers(1, &fbo);
@@ -900,9 +934,11 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     };
     // Fragment in front of the camera; +Z normal; material id 1 (Stone-like, no
     // emission so the lit color is pure albedo response).
-    const float pos_px[3] = {0.0f, 0.0f, -3.0f};
+    const float ndv = ambient_probe ? ambient_probe->normal_dot_view : 1.0f;
+    const float pos_px[3] = {3.0f * std::sqrt(1.0f - ndv * ndv), 0.0f, -3.0f * ndv};
     GLuint g_pos = make_tex(GL_RGB16F, GL_RGB, GL_FLOAT, pos_px);
-    const unsigned char norm_px[4] = {128, 128, 0, 1};
+    const unsigned char norm_px[4] = {
+        128, 128, 0, ambient_probe ? ambient_probe->material_id : static_cast<unsigned char>(1)};
     GLuint g_norm = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, norm_px);
     // gAlbedoRoughness is a LINEAR RGBA8 buffer (the g-buffer stores already-
     // linearized albedo). Pack the requested linear albedo + roughness directly.
@@ -1060,6 +1096,25 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
         glUniform1f(glGetUniformLocation(lighting_program, "u_aetherFieldInvWorldSpan"), 0.0f);
     }
 
+    if (ambient_probe) {
+        // Unit incident sky radiance corresponds to PI irradiance. The caller
+        // rotates the plate upward so the hemispheric sky weight is one.
+        constexpr float pi = 3.14159265358979323846f;
+        glUniform3f(glGetUniformLocation(lighting_program, "u_skyAmbientColor"), pi, pi, pi);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 0, 0, 0);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_moonDir"), 0, -1, 0);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_moonRadiance"), 0, 0, 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_moonIllum"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_aetherActive"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_caveAmbientOcclusion"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_snowCover"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_exposure"), 1);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_saturation"), 1);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_contrast"), 1);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_splitToneStrength"), 0);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_lightWarmth"), 1, 1, 1);
+    }
+
     const GLfloat clear0[4] = {0, 0, 0, 1};
     glClearBufferfv(GL_COLOR, 0, clear0);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -1098,6 +1153,8 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     }
 
     glDeleteTextures(1, &lut_tex);
+    glDeleteTextures(1, &tint_arr);
+    glDeleteTextures(1, &environment_brdf);
     glDeleteTextures(1, &terrain_arr);
     glDeleteTextures(1, &shadow_arr);
     glDeleteTextures(1, &caustics_tex);
@@ -2254,6 +2311,35 @@ private:
 };
 } // namespace
 
+TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program =
+        LinkProgram({"water_caustics", "lighting_pass.vert", "caustics_generator.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform2f(glGetUniformLocation(program, "u_resolution"), 32, 1);
+    for (float time : {0.0f, 3.5f, 12.0f}) {
+        glUniform1f(glGetUniformLocation(program, "u_time"), time);
+        const auto pixels = probe.draw();
+        int clipped = 0;
+        float low = 1.0f, high = 0.0f;
+        for (const auto& pixel : pixels) {
+            EXPECT_TRUE(std::isfinite(pixel.r));
+            const float stored = std::clamp(pixel.r, 0.0f, 1.0f);
+            low = std::min(low, stored);
+            high = std::max(high, stored);
+            clipped += stored >= 0.98f;
+        }
+        EXPECT_LT(clipped, 3) << "time " << time << ": RGBA8 storage loses the caustic pattern";
+        EXPECT_GT(high - low, 0.05f) << "time " << time;
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround) {
     HiddenGlContext context;
     if (!context.ready())
@@ -2261,6 +2347,8 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
     const GLuint program = LinkProgram({"water", "water.vert", "water.frag"});
     ASSERT_NE(program, 0u);
     FullscreenFloatProbe probe;
+    glDisableVertexAttribArray(1);
+    glVertexAttrib3f(1, 0, 0, 1); // the quad becomes horizontal after the model rotation
     glUseProgram(program);
     const std::array<const char*, 6> samplers{"u_opaque_scene_color",
                                               "u_opaque_depth",
@@ -2276,7 +2364,7 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
     probe.texture(4, {glm::vec4(0.0f)});
     probe.texture(5, {glm::vec4(0.0f)});
     const auto projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
-    const auto view = glm::lookAt(glm::vec3(0, 1200, 0), glm::vec3(0), glm::vec3(0, 0, -1));
+    auto view = glm::lookAt(glm::vec3(0, 1200, 0), glm::vec3(0), glm::vec3(0, 0, -1));
     const auto model = glm::scale(
         glm::rotate(glm::mat4(1), glm::radians(-90.0f), glm::vec3(1, 0, 0)), glm::vec3(1000));
     const auto matrix = [&](const char* name, const glm::mat4& m) {
@@ -2311,6 +2399,30 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
     const auto dry = bed(2);
     EXPECT_FLOAT_EQ(dry.a, 0.0f)
         << "water below opaque land must not paint a water/foam layer on it";
+    // Even a maximum caustic input must preserve a colored, non-emissive bed.
+    // The old additive cyan term washed the native Default/424242 shallows white.
+    probe.texture(0, {glm::vec4(0.8f, 0.72f, 0.5f, 1.0f)}); // sunlit sand, as in the native scene
+    const auto sunlit_bed = bed(-1);
+    probe.texture(4, {glm::vec4(1.0f)});
+    const auto caustic = bed(-1);
+    EXPECT_LT(std::max({caustic.r, caustic.g, caustic.b}), 0.98f);
+    EXPECT_GT(glm::length(caustic - sunlit_bed), 0.005f)
+        << "caustics must still contribute rather than being disabled";
+    view = glm::lookAt(glm::vec3(0, 20, 0), glm::vec3(0), glm::vec3(0, 0, -1));
+    matrix("u_view", view);
+    matrix("u_inverse_view", glm::inverse(view));
+    matrix("u_view_projection", projection * view);
+    glUniform3f(glGetUniformLocation(program, "u_camera_pos"), 0, 20, 0);
+    probe.texture(4, {glm::vec4(0.0f)});
+    bed(-0.1f);
+    int colored_shallows = 0;
+    for (const auto& pixel : probe.draw()) {
+        const float range =
+            std::max({pixel.r, pixel.g, pixel.b}) - std::min({pixel.r, pixel.g, pixel.b});
+        colored_shallows += pixel.a > 0.0f && range > 0.10f;
+    }
+    EXPECT_GE(colored_shallows, 16)
+        << "quiet shallow water must retain bed/body color between broken shoreline foam";
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
 }
@@ -2730,6 +2842,91 @@ TEST(RenderSmokeTest, GrassBladeNarrowsToATip) {
     glDeleteProgram(program);
 }
 
+TEST(RenderSmokeTest, RoughAmbientReflectionMatchesIntegratedGgx) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program =
+        LinkProgram({"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"});
+    ASSERT_NE(program, 0u);
+
+    // Independently integrate the GGX/Schlick microfacet BRDF against a uniform
+    // hemisphere. This contains none of the shader's environment-fit constants.
+    const auto integrate = [](double roughness, double ndv) {
+        constexpr double pi = 3.14159265358979323846;
+        constexpr int polar_steps = 256;
+        constexpr int azimuth_steps = 512;
+        const double alpha = roughness * roughness;
+        const double alpha2 = alpha * alpha;
+        const double k = alpha / 2.0; // Schlick visibility for environment lighting
+        const auto geometry = [k](double cosine) {
+            return cosine / (cosine * (1.0 - k) + k);
+        };
+        const double vx = std::sqrt(1.0 - ndv * ndv);
+        double sum = 0;
+        for (int z = 0; z < polar_steps; ++z) {
+            const double ndl = (z + 0.5) / polar_steps;
+            const double radial = std::sqrt(1.0 - ndl * ndl);
+            for (int p = 0; p < azimuth_steps; ++p) {
+                const double phi = 2.0 * pi * (p + 0.5) / azimuth_steps;
+                const double hx = vx + radial * std::cos(phi);
+                const double hy = radial * std::sin(phi);
+                const double hz = ndv + ndl;
+                const double hlen = std::sqrt(hx * hx + hy * hy + hz * hz);
+                const double ndh = hz / hlen;
+                const double vdh = (vx * hx + ndv * hz) / hlen;
+                const double denominator = ndh * ndh * (alpha2 - 1.0) + 1.0;
+                const double distribution = alpha2 / (pi * denominator * denominator);
+                const double fresnel = 0.04 + 0.96 * std::pow(1.0 - vdh, 5.0);
+                // N.L cancels the BRDF denominator; integrate in d(cos theta) d(phi).
+                sum += distribution * geometry(ndv) * geometry(ndl) * fresnel / (4.0 * ndv);
+            }
+        }
+        return sum * 2.0 * pi / (polar_steps * azimuth_steps);
+    };
+    const auto onscreen = [](double linear) {
+        const double mapped =
+            linear * (2.51 * linear + 0.03) / (linear * (2.43 * linear + 0.59) + 0.14);
+        return std::max(std::pow(mapped, 1.0 / 2.2), 4.0 / 255.0);
+    };
+    const auto inverse_view = glm::rotate(glm::mat4(1), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+    const auto render = [&](float roughness, float ndv, unsigned char material = 1) {
+        const AmbientReflectionProbe probe{ndv, material};
+        return LitChainNoonOnscreenSrgb(
+            program, {0, 0, 0}, roughness, {}, -1, 0, 0, {0, -1, 0}, false, inverse_view, &probe);
+    };
+    for (const float roughness : {0.4f, 0.67f, 0.9f, 1.0f}) {
+        for (const float ndv : {1.0f, 0.5f, 0.1f, 0.02f}) {
+            SCOPED_TRACE(::testing::Message() << "roughness=" << roughness << " N.V=" << ndv);
+            const auto pixel = render(roughness, ndv);
+            const double quantized_roughness = std::lround(roughness * 255.0f) / 255.0;
+            const auto normal = DecodeOctahedral(128.0f / 255.0f, 128.0f / 255.0f);
+            const double actual_ndv = ndv * normal[2] - std::sqrt(1.0f - ndv * ndv) * normal[0];
+            const double reference = onscreen(integrate(quantized_roughness, actual_ndv));
+            // Allow 0.01 display units for the independent quadrature, table
+            // interpolation, RGBA8 inputs and final display quantization.
+            for (const float channel : {pixel.r, pixel.g, pixel.b}) {
+                EXPECT_NEAR(channel, reference, 0.01);
+                EXPECT_GT(channel, 4.0f / 255.0f + 0.01f);
+            }
+        }
+    }
+    EXPECT_GT(render(0.2f, 1.0f).r, 0.1f) << "glossy dielectrics must still reflect the sky";
+    EXPECT_NEAR(render(0.05f, 1.0f).r, onscreen(0.04), 0.005)
+        << "near-mirror dielectric reflection at normal incidence approaches F0";
+    const auto grazing_gloss = render(0.05f, 0.0f);
+    EXPECT_GT(grazing_gloss.r, 0.8f);
+    EXPECT_LE(grazing_gloss.r, 1.0f);
+    for (const float ndv : {1.0f, 0.1f}) {
+        const auto matte_water = render(1.0f, ndv, 200);
+        EXPECT_FLOAT_EQ(matte_water.r, 4.0f / 255.0f);
+        EXPECT_FLOAT_EQ(matte_water.g, 4.0f / 255.0f);
+        EXPECT_FLOAT_EQ(matte_water.b, 4.0f / 255.0f);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, AetherFieldDoesNotMakeNonEmissiveTerrainGlow) {
     HiddenGlContext context;
     if (!context.ready())
@@ -2874,6 +3071,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
     GLuint program = LinkProgram(spec);
     ASSERT_NE(program, 0u);
+    const GLuint environment_brdf = BindEnvironmentBrdf(program);
 
     constexpr int kRes = 16;
     constexpr float kEmissiveLutScale = 8.0f; // must match RenderPipeline::kEmissiveLutScale
@@ -3105,6 +3303,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
     glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &environment_brdf);
     glDeleteProgram(program);
 }
 
@@ -3205,6 +3404,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
     GLuint program = LinkProgram(spec);
     ASSERT_NE(program, 0u);
+    const GLuint environment_brdf = BindEnvironmentBrdf(program);
 
     constexpr int kRes = 8;
     GLuint fbo = 0, color_tex = 0;
@@ -3377,6 +3577,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
     glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &environment_brdf);
     glDeleteProgram(program);
 }
 

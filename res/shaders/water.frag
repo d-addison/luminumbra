@@ -341,7 +341,7 @@ void main()
     // procedurally: a depth-bounded shoreline band, animated
     // rolling shoreward (u_time + flow), and hashed sparkle so it reads as
     // broken foam rather than a solid stripe.
-    float shoreline_band = smoothstep(0.9, 0.1, water_depth);
+    float shoreline_band = 1.0 - smoothstep(0.02, 0.35, water_depth);
     float foam_phase = water_depth * 8.0 - u_time * 1.6 + (flow_vector.x + flow_vector.y) * 4.0;
     float foam_wave = 0.5 + 0.5 * sin(foam_phase);
     // Smooth animated noise (was a blocky floor-cell hash -> hard pixel grid).
@@ -350,7 +350,12 @@ void main()
     float foam_sparkle = foam_fbm(fs_in.world_pos.xz * 0.7, u_time * 0.6, flow_vector);
     float flow_foam = flow_data.b;
 
-    float foam_factor = clamp(shoreline_band * (0.55 + 0.55 * foam_wave + 0.55 * foam_sparkle) + flow_foam * 0.5, 0.0, 1.0);
+    // Quiet thin water must not become a continuous white plate. Break the
+    // narrow shore band into drifting patches, leaving bed/body color visible
+    // between them. Flow-authored froth can still contribute away from shore.
+    float shore_patches = smoothstep(0.50, 0.72, foam_sparkle);
+    float foam_factor = clamp(shoreline_band * shore_patches * (0.25 + 0.75 * foam_wave)
+                              + flow_foam * 0.5, 0.0, 0.65);
     // Foam is bright wind-whipped froth lit by the sky/sun; it is NOT emissive.
     // The base colour is near-white (luminance ~0.95), so without dimming it was
     // the brightest thing in a night frame -- the self-lit cyan-white shore band
@@ -370,10 +375,14 @@ void main()
     }
 
     // --- 12. Enhanced Final Composition ---
-    vec3 final_color = mix(refracted_color, reflected_color, fresnel);
+    // Caustics redistribute incident light on the submerged bed. Modulate its
+    // resolved color before transmission/absorption instead of adding a cyan
+    // light source on top of the water. The additive path clipped sunlit sand
+    // to white and lit dark beds even when they had no light to concentrate.
+    vec3 caustic_refraction = refracted_color * (vec3(1.0) + caustics_color * 0.35);
+    vec3 final_color = mix(caustic_refraction, reflected_color, fresnel);
     final_color = mix(final_color, water_color, clamp(0.22 + absorption_factor * 0.68, 0.22, 0.9));
     final_color += underwater_color; // Add underwater environment
-    final_color += caustics_color * 0.6; // Add caustics
     final_color += specular_highlight;
     final_color = mix(final_color, foam_color, foam_factor); // Blend foam on top
 

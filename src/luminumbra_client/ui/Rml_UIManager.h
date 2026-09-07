@@ -2,7 +2,7 @@
 
 #include "Rml_Interfaces.h"         // The one true source for interface definitions
 #include "gl3/RmlUi_Renderer_GL3.h" // RmlUi 6.1 reference backend: real blur/box-shadow/layers
-#include "persistence/SavedWorldCatalog.h"
+#include "persistence/AsyncSavedWorldCatalog.h"
 #include "world/WorldgenOverride.h" // WorldGenParam transport (engine-owned, not UI)
 #include <RmlUi/Core.h>
 #include <filesystem> // gallery fixture capture-source override
@@ -47,7 +47,7 @@ using WorldPresetDeleter = std::function<bool(const std::string& worldType)>;
 using WorldPresetRenamer =
     std::function<std::string(const std::string& worldType, const std::string& newDisplayName)>;
 using LoadWorldCallback = std::function<void(const std::string&)>;
-using SavedWorldList = std::function<Persistence::SavedWorldCatalog()>;
+using SavedWorldList = Persistence::AsyncSavedWorldCatalog::Scan;
 // Pause-menu actions ("resume" / "quit") routed back to main_client, which owns game state +
 // cursor.
 using PauseActionCallback = std::function<void(const std::string&)>;
@@ -170,6 +170,12 @@ public:
     void SetSavedWorldList(SavedWorldList callback) {
         m_savedWorldList = std::move(callback);
     }
+    // Convenience for bounded in-memory providers. Runs off-thread, too.
+    void SetSavedWorldList(std::function<Persistence::SavedWorldCatalog()> callback) {
+        m_savedWorldList = [scan = std::move(callback)](std::stop_token) {
+            return scan();
+        };
+    }
     void ShowMessage(const std::string& message);
     void SetSettingsBridge(SettingsBridge bridge) {
         m_settingsBridge = std::move(bridge);
@@ -201,7 +207,11 @@ private:
     void ProcessDocumentLoadRequest();
     void BindEventListeners(Rml::ElementDocument* document);
     void LoadDocument(const std::string& rml_path);
-    void PopulateWorlds(Rml::ElementDocument* document);
+    void StartWorldScan(Rml::ElementDocument* document);
+    void PollWorldScan();
+    void PopulateWorlds(Rml::ElementDocument* document,
+                        const Persistence::SavedWorldCatalog& catalog);
+    void BindWorldItems(Rml::ElementDocument* document);
 
     // settings.rml support: populate widgets from the bridge on load, and push a single
     // changed widget's value back through the bridge live.
@@ -241,6 +251,8 @@ private:
 
     WorldCreationCallback m_worldCreationCallback;
     SavedWorldList m_savedWorldList;
+    Persistence::AsyncSavedWorldCatalog m_savedWorldScan;
+    bool m_worldScanPending = false;
     WorldParamGetter m_worldParamGetter;
     WorldPresetSaver m_worldPresetSaver;
     WorldPresetList m_worldPresetList;

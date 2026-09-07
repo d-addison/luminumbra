@@ -343,8 +343,11 @@ void Rml_UIManager::Init(GLFWwindow* window, IAudioManager* audioManager) {
 }
 
 void Rml_UIManager::Shutdown() {
+    m_savedWorldScan.Cancel();
+    m_worldScanPending = false;
     if (m_context) {
         Rml::RemoveContext("main");
+        m_context = nullptr;
     }
     Rml::Shutdown();
     LUMINUMBRA_CORE_INFO("UI Manager Shutdown.");
@@ -353,6 +356,7 @@ void Rml_UIManager::Shutdown() {
 void Rml_UIManager::Update() {
     if (m_context) {
         ProcessDocumentLoadRequest(); // Process async loads
+        PollWorldScan();
         //  only push dimensions on an actual size change — a per-frame SetDimensions can
         // needlessly dirty layout even when the size is unchanged.
         int width, height;
@@ -425,6 +429,8 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
     if (!m_context || rml_path == m_activeDocument)
         return;
 
+    m_savedWorldScan.Cancel();
+    m_worldScanPending = false;
     // Close existing documents (except the debugger)
     for (int i = m_context->GetNumDocuments() - 1; i >= 0; --i) {
         Rml::ElementDocument* doc = m_context->GetDocument(i);
@@ -442,7 +448,7 @@ void Rml_UIManager::LoadDocument(const std::string& rml_path) {
     m_activeDocument = rml_path;
     m_selectedWorldId.clear();
     if (document->GetId() == "world_selection")
-        PopulateWorlds(document);
+        StartWorldScan(document);
     BindEventListeners(document);
     if (document->GetId() == "gallery")
         PopulateGallery(document);
@@ -462,16 +468,52 @@ void Rml_UIManager::ShowMessage(const std::string& message) {
     }
 }
 
-void Rml_UIManager::PopulateWorlds(Rml::ElementDocument* document) {
+void Rml_UIManager::StartWorldScan(Rml::ElementDocument* document) {
+    if (auto* load = document->GetElementById("load_selected_btn"))
+        load->SetAttribute("disabled", "");
+    if (!m_savedWorldList) {
+        Persistence::SavedWorldCatalog unavailable;
+        unavailable.error = "Saved worlds are unavailable: no save location is configured.";
+        PopulateWorlds(document, unavailable);
+        return;
+    }
+    m_worldScanPending = true;
+    document->SetAttribute("data-worlds-pending", "true");
+    if (auto* items = document->GetElementById("world_list_items"))
+        items->SetInnerRML("");
+    if (auto* empty = document->GetElementById("no_worlds"))
+        empty->SetClass("hidden", true);
+    if (auto* status = document->GetElementById("world_list_status")) {
+        status->SetInnerRML("Validating saved worlds…");
+        status->SetClass("hidden", false);
+    }
+    m_savedWorldScan.Request(m_savedWorldList);
+}
+
+void Rml_UIManager::PollWorldScan() {
+    if (!m_worldScanPending)
+        return;
+    auto catalog = m_savedWorldScan.Poll();
+    if (!catalog)
+        return;
+    m_worldScanPending = false;
+    for (int i = 0; i < m_context->GetNumDocuments(); ++i) {
+        auto* document = m_context->GetDocument(i);
+        if (document->GetId() == "world_selection") {
+            document->RemoveAttribute("data-worlds-pending");
+            PopulateWorlds(document, *catalog);
+            BindWorldItems(document);
+            break;
+        }
+    }
+}
+
+void Rml_UIManager::PopulateWorlds(Rml::ElementDocument* document,
+                                   const Persistence::SavedWorldCatalog& catalog) {
     auto* items = document->GetElementById("world_list_items");
     if (!items)
         return;
     items->SetInnerRML("");
-    Persistence::SavedWorldCatalog catalog;
-    if (m_savedWorldList)
-        catalog = m_savedWorldList();
-    else
-        catalog.error = "Saved worlds are unavailable: no save location is configured.";
     if (auto* empty = document->GetElementById("no_worlds"))
         empty->SetClass("hidden", !catalog.worlds.empty() || !catalog.error.empty());
     if (auto* status = document->GetElementById("world_list_status")) {
@@ -501,6 +543,69 @@ void Rml_UIManager::PopulateWorlds(Rml::ElementDocument* document) {
                           "</h3><p class=\"list-item-description\">" +
                           Rml::StringUtilities::EncodeRml(description) + "</p>");
         items->AppendChild(std::move(item));
+    }
+}
+
+void Rml_UIManager::BindWorldItems(Rml::ElementDocument* document) {
+    auto AddClickSoundListener = [this](Rml::Element* element,
+                                        LambdaEventListener::Callback callback) {
+        if (element) {
+            element->AddEventListener(
+                "click",
+                new LambdaEventListener([this, cb = std::move(callback)](Rml::Event& event) {
+                    if (m_audioManager)
+                        m_audioManager->PlayOneShot2D("ui_button_click", BusId::Ui);
+                    if (cb)
+                        cb(event);
+                }));
+            element->AddEventListener("mouseover", new LambdaEventListener([this](Rml::Event&) {
+                                          if (m_audioManager)
+                                              m_audioManager->PlayOneShot2D("ui_button_hover",
+                                                                            BusId::Ui);
+                                      }));
+        }
+    };
+    Rml::ElementList world_items;
+    document->GetElementsByClassName(world_items, "list-item");
+    for (Rml::Element* item : world_items) {
+        if (!item) {
+            continue;
+        }
+        AddClickSoundListener(item, [this, document](Rml::Event& event) {
+            Rml::Element* selected = event.GetTargetElement();
+            while (selected && selected->GetAttribute<Rml::String>("data-world-id", "").empty()) {
+                selected = selected->GetParentNode();
+            }
+            if (!selected) {
+                return;
+            }
+
+            Rml::ElementList all_items;
+            document->GetElementsByClassName(all_items, "list-item");
+            for (Rml::Element* item_to_clear : all_items) {
+                if (item_to_clear) {
+                    item_to_clear->RemoveAttribute("data-selected");
+                    item_to_clear->SetClass("selected", false);
+                }
+            }
+
+            m_selectedWorldId = selected->GetAttribute<Rml::String>("data-world-id", "");
+            selected->SetAttribute("data-selected", "true");
+            selected->SetClass("selected", true);
+            const auto error = selected->GetAttribute<Rml::String>("data-world-error", "");
+            if (auto* load_button = document->GetElementById("load_selected_btn")) {
+                if (error.empty()) {
+                    load_button->RemoveAttribute("disabled");
+                } else {
+                    load_button->SetAttribute("disabled", "");
+                    m_selectedWorldId.clear();
+                }
+            }
+            if (auto* note = document->GetElementById("notification"))
+                note->SetClass("hidden", error.empty());
+            if (!error.empty())
+                ShowMessage(error);
+        });
     }
 }
 
@@ -567,49 +672,6 @@ void Rml_UIManager::BindEventListeners(Rml::ElementDocument* document) {
             if (m_loadWorldCallback && !m_selectedWorldId.empty()) {
                 m_loadWorldCallback(m_selectedWorldId);
             }
-        });
-    }
-
-    Rml::ElementList world_items;
-    document->GetElementsByClassName(world_items, "list-item");
-    for (Rml::Element* item : world_items) {
-        if (!item) {
-            continue;
-        }
-        AddClickSoundListener(item, [this, document](Rml::Event& event) {
-            Rml::Element* selected = event.GetTargetElement();
-            while (selected && selected->GetAttribute<Rml::String>("data-world-id", "").empty()) {
-                selected = selected->GetParentNode();
-            }
-            if (!selected) {
-                return;
-            }
-
-            Rml::ElementList all_items;
-            document->GetElementsByClassName(all_items, "list-item");
-            for (Rml::Element* item_to_clear : all_items) {
-                if (item_to_clear) {
-                    item_to_clear->RemoveAttribute("data-selected");
-                    item_to_clear->SetClass("selected", false);
-                }
-            }
-
-            m_selectedWorldId = selected->GetAttribute<Rml::String>("data-world-id", "");
-            selected->SetAttribute("data-selected", "true");
-            selected->SetClass("selected", true);
-            const auto error = selected->GetAttribute<Rml::String>("data-world-error", "");
-            if (auto* load_button = document->GetElementById("load_selected_btn")) {
-                if (error.empty()) {
-                    load_button->RemoveAttribute("disabled");
-                } else {
-                    load_button->SetAttribute("disabled", "");
-                    m_selectedWorldId.clear();
-                }
-            }
-            if (auto* note = document->GetElementById("notification"))
-                note->SetClass("hidden", error.empty());
-            if (!error.empty())
-                ShowMessage(error);
         });
     }
 

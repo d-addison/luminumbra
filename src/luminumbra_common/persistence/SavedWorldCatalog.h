@@ -3,6 +3,7 @@
 #include "world/WorldMetadata.h"
 
 #include <filesystem>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -24,7 +25,10 @@ struct SavedWorldCatalog {
 };
 
 // Read-only. Never creates directories, repairs files or generates terrain.
-SavedWorld InspectSavedWorld(const std::filesystem::path& root, const std::string& world_id);
-SavedWorldCatalog EnumerateSavedWorlds(const std::filesystem::path& root);
+SavedWorld InspectSavedWorld(const std::filesystem::path& root,
+                             const std::string& world_id,
+                             std::stop_token stop = {});
+SavedWorldCatalog EnumerateSavedWorlds(const std::filesystem::path& root,
+                                       std::stop_token stop = {});
 
 } // namespace Luminumbra::Persistence
