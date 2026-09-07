@@ -32,7 +32,7 @@ TEST(AsyncSavedWorldCatalogTest, CoalescesRefreshesAndDiscardsLateResults) {
     auto released = release.get_future().share();
     std::atomic<int> calls{0};
     AsyncSavedWorldCatalog scan;
-    scan.Request([&](std::stop_token) {
+    scan.Request([&](const std::stop_token&) {
         ++calls;
         started.set_value();
         // Deliberately ignore cancellation: an obsolete callback must still
@@ -44,7 +44,7 @@ TEST(AsyncSavedWorldCatalogTest, CoalescesRefreshesAndDiscardsLateResults) {
     });
     ASSERT_EQ(started.get_future().wait_for(5s), std::future_status::ready);
     for (int i = 0; i < 100; ++i) {
-        scan.Request([&, i](std::stop_token) {
+        scan.Request([&, i](const std::stop_token&) {
             ++calls;
             SavedWorldCatalog result;
             result.error = std::to_string(i);
@@ -66,7 +66,7 @@ TEST(AsyncSavedWorldCatalogTest, CancellationDrainsProviderBeforeDestruction) {
     std::atomic<bool> cancelled{false};
     {
         AsyncSavedWorldCatalog scan;
-        scan.Request([&](std::stop_token stop) {
+        scan.Request([&](const std::stop_token& stop) {
             std::mutex mutex;
             std::condition_variable_any wake;
             std::unique_lock lock(mutex);
@@ -84,12 +84,13 @@ TEST(AsyncSavedWorldCatalogTest, CancellationDrainsProviderBeforeDestruction) {
 
 TEST(AsyncSavedWorldCatalogTest, ProviderFailureIsReportedAndNextScanCanSucceed) {
     AsyncSavedWorldCatalog scan;
-    scan.Request(
-        [](std::stop_token) -> SavedWorldCatalog { throw std::runtime_error("read failed"); });
+    scan.Request([](const std::stop_token&) -> SavedWorldCatalog {
+        throw std::runtime_error("read failed");
+    });
     auto result = Await(scan);
     ASSERT_TRUE(result);
     EXPECT_NE(result->error.find("read failed"), std::string::npos);
-    scan.Request([](std::stop_token) { return SavedWorldCatalog{}; });
+    scan.Request([](const std::stop_token&) { return SavedWorldCatalog{}; });
     result = Await(scan);
     ASSERT_TRUE(result);
     EXPECT_TRUE(result->error.empty());

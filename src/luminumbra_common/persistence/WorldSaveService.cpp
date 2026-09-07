@@ -438,7 +438,7 @@ bool DecompressPayload(const RegionRecord& record,
 bool ReadRegionFile(const std::filesystem::path& path,
                     std::vector<RegionRecord>& out_records,
                     std::vector<std::string>* errors,
-                    std::stop_token stop = {}) {
+                    const std::stop_token& stop = {}) {
     out_records.clear();
 
     std::ifstream input(path, std::ios::binary);
@@ -786,7 +786,7 @@ bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
 
 bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,
                                      std::vector<std::string>* errors,
-                                     std::stop_token stop) {
+                                     const std::stop_token& stop) {
     WorldStreamingState state;
     std::vector<std::string> diagnostics;
     WorldSaveService{}.load_world(state, save_dir, diagnostics, stop);
@@ -970,7 +970,7 @@ bool WorldSaveService::save_world(const WorldStreamingState& state,
 bool WorldSaveService::load_world(WorldStreamingState& state,
                                   const std::filesystem::path& save_dir,
                                   std::vector<std::string>& errors,
-                                  std::stop_token stop) const {
+                                  const std::stop_token& stop) const {
     state.clear();
     const auto reject = [&state, &errors](const std::string& message) {
         state.clear();

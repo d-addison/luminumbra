@@ -2315,7 +2315,7 @@ int main(int argc, char* argv[]) {
         }
         g_uiManager->SetWorldCreationCallback(start_world_creation);
         g_uiManager->SetLoadWorldCallback(start_world_load);
-        g_uiManager->SetSavedWorldList([root_path_str](std::stop_token stop) {
+        g_uiManager->SetSavedWorldList([root_path_str](const std::stop_token& stop) {
             return Luminumbra::Persistence::EnumerateSavedWorlds(root_path_str, stop);
         });
         // Seed the create-world customize form from a preset: read generation_params.<path>.

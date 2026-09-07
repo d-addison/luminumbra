@@ -71,7 +71,7 @@ public:
     // A missing save is valid. Diagnostics distinguish obsolete, future and corrupt files.
     static bool validate_save(const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr,
-                              std::stop_token stop = {});
+                              const std::stop_token& stop = {});
 
     // Uses the same durable temporary-file/atomic replacement path as chunk containers.
     // Refuses an unsupported existing save before touching its metadata.
@@ -141,7 +141,7 @@ public:
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
-                    std::stop_token stop = {}) const;
+                    const std::stop_token& stop = {}) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

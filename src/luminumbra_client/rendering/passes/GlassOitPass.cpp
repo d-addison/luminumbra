@@ -65,8 +65,8 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_accum_tex, 0);
         glFramebufferTexture2D(
             GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_reveal_tex, 0);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, ctx.lit_scene_depth.id, 0);
+        glFramebufferRenderbuffer(
+            GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, ctx.lit_scene_depth.id);
         PassGl::label_gl_object(GL_FRAMEBUFFER, m_fbo, "oit.fbo");
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             LUMINUMBRA_CORE_ERROR("glass_oit: MRT FBO incomplete; OIT disabled");

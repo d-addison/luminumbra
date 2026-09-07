@@ -10,11 +10,13 @@
 //     (proves gbuffer_position + the scent path run);
 //   * each pass is a true no-op when OFF (mode None / inactive mirror) -> target stays
 //     as cleared.
+#include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
+#include "luminumbra_client/rendering/passes/GlassOitPass.h"
 #include "luminumbra_client/rendering/passes/GroundDecalPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
@@ -131,6 +133,92 @@ std::vector<unsigned char> ReadTarget(const RenderTarget& rt) {
     glReadBuffer(GL_COLOR_ATTACHMENT0);
     glReadPixels(0, 0, rt.w, rt.h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     return px;
+}
+
+TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using namespace Luminumbra::Rendering;
+    GlassOitPass pass;
+    Camera camera(glm::vec3(0, 0, 2));
+    GLuint pane_vao = 0, quad_vao = 0;
+    std::array<GLuint, 2> buffers{};
+    glGenBuffers(2, buffers.data());
+    glGenVertexArrays(1, &pane_vao);
+    glBindVertexArray(pane_vao);
+    constexpr float pane_vertices[] = {-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, -1, 0, 1, 1, 0, -1, 1, 0};
+    glBindBuffer(GL_ARRAY_BUFFER, buffers[0]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(pane_vertices), pane_vertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
+    glGenVertexArrays(1, &quad_vao);
+    glBindVertexArray(quad_vao);
+    constexpr float quad[] = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, -1, 1, 0, 0, 1, 1, 1, 0, 1, 1};
+    glBindBuffer(GL_ARRAY_BUFFER, buffers[1]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    std::vector<GlassPaneItem> panes(1);
+    panes[0].model = glm::mat4(1);
+    panes[0].tint = glm::vec3(0.2f, 0.8f, 0.3f);
+    panes[0].thickness = 1;
+    GlassOitPassInput input{&panes, pane_vao, LUMINUMBRA_SOURCE_ROOT};
+    for (int extent : {16, 32}) {
+        const RenderTarget target = MakeTarget(extent, extent);
+        const GLuint opaque = MakeFloatTexture(
+            extent,
+            extent,
+            std::vector<float>(static_cast<std::size_t>(extent) * extent * 4, 0.8f));
+        GLuint depth = 0;
+        glGenRenderbuffers(1, &depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, extent, extent);
+        glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+        ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+        RenderContext ctx;
+        ctx.camera = &camera;
+        ctx.screen_width = static_cast<unsigned>(extent);
+        ctx.screen_height = static_cast<unsigned>(extent);
+        ctx.lit_scene = FboHandle{target.fbo};
+        ctx.lit_scene_depth = RenderbufferHandle{depth};
+        ctx.opaque_scene = TextureHandle{opaque};
+        ctx.screen_quad_vao = quad_vao;
+        // The pane lies at depth .5. A .25 foreground surface must hide it, while
+        // cleared sky at 1 must let the actual accumulation/resolve tint the target.
+        for (bool occluded : {true, false}) {
+            glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+            glDepthMask(GL_TRUE);
+            glClearDepth(occluded ? 0.25 : 1.0);
+            glClearColor(0.8f, 0.8f, 0.8f, 1);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            pass.execute_accum(ctx, input);
+            pass.execute_resolve(ctx, input);
+            EXPECT_EQ(glGetError(), GL_NO_ERROR);
+            const auto pixels = ReadTarget(target);
+            const std::size_t center =
+                (static_cast<std::size_t>(extent / 2) * extent + extent / 2) * 4;
+            if (occluded) {
+                for (int channel = 0; channel < 3; ++channel)
+                    EXPECT_NEAR(pixels[center + channel], 204, 1);
+            } else {
+                EXPECT_LT(pixels[center], 100) << "visible glass must tint the lit scene";
+                EXPECT_GT(pixels[center + 1], pixels[center] + 60);
+            }
+        }
+        pass.destroy(); // the pipeline destroys OIT before replacing its shared depth on resize
+        glDeleteRenderbuffers(1, &depth);
+        glDeleteTextures(1, &opaque);
+        glDeleteTextures(1, &target.tex);
+        glDeleteFramebuffers(1, &target.fbo);
+    }
+    glDeleteVertexArrays(1, &pane_vao);
+    glDeleteVertexArrays(1, &quad_vao);
+    glDeleteBuffers(2, buffers.data());
 }
 
 TEST(PassContext, DebugViewAlbedoModeReadsGbufferAlbedoFromContext) {

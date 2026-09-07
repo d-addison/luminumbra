@@ -1489,24 +1489,21 @@ TEST(CelestialBodyModel, SunMoonSeamBitExactAgainstPrimitives) {
     }
 }
 
-// The flagged dynamic edge: god rays sample whichever opaque snapshot executed most
-// recently -- snapshot #2 (weather) when the weather overlay ran, else snapshot #1.
-// The declaration models this as a latest_writer_read; pruning the (conditional)
-// weather snapshot -- exactly what happens on a clear-weather frame -- must shift the
-// resolution back to snapshot #1, and the graph must still be sound.
+// Ray-source colors are captured after transparent resolve and before grass, independently
+// of weather. Grass alpha-occludes the rays before the separate weather snapshot/grade.
 TEST(RenderGraph, GodRaysReadLatestOpaqueSnapshotUnderBothBranches) {
     namespace R = Luminumbra::Rendering;
 
     R::RenderGraph with_weather = R::BuildLuminumbraFrameGraph();
     EXPECT_EQ(with_weather.latest_writer_of("gbuffer.depth", "god_rays"), "plant_procgen");
     EXPECT_EQ(with_weather.latest_writer_of("lighting.opaque_color", "god_rays"),
-              "weather_opaque_snapshot");
+              "god_rays_opaque_snapshot");
     EXPECT_TRUE(with_weather.validate().empty());
 
     R::RenderGraph clear_weather = R::BuildLuminumbraFrameGraph();
     clear_weather.prune("weather_opaque_snapshot"); // no weather overlay this frame
     EXPECT_EQ(clear_weather.latest_writer_of("lighting.opaque_color", "god_rays"),
-              "opaque_snapshot");
+              "god_rays_opaque_snapshot");
     EXPECT_TRUE(clear_weather.validate().empty())
         << "god rays must still resolve a snapshot when the weather one is absent";
     // and the schedule stays complete + authored-consistent after pruning.
@@ -1519,10 +1516,11 @@ TEST(RenderGraph, GodRaysReadLatestOpaqueSnapshotUnderBothBranches) {
 TEST(RenderGraph, ValidatorReportsMisdeclaredDependencies) {
     namespace R = Luminumbra::Rendering;
 
-    // (1) Remove BOTH opaque snapshots: god rays' latest-writer read can no longer
+    // (1) Remove all opaque snapshots: god rays' latest-writer read can no longer
     // resolve -> a violation, and latest_writer_of returns "" (nothing to sample).
     R::RenderGraph no_snapshot = R::BuildLuminumbraFrameGraph();
     no_snapshot.prune("opaque_snapshot");
+    no_snapshot.prune("god_rays_opaque_snapshot");
     no_snapshot.prune("weather_opaque_snapshot");
     EXPECT_FALSE(no_snapshot.validate().empty());
     EXPECT_EQ(no_snapshot.latest_writer_of("lighting.opaque_color", "god_rays"), std::string{});

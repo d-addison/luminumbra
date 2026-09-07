@@ -983,6 +983,7 @@ private:
     void execute_stage_glass_oit_accum(const Camera& camera);
     void execute_stage_glass_oit_resolve(const Camera& camera);
     void execute_stage_weather_opaque_snapshot(const Camera& camera);
+    void execute_stage_god_rays_opaque_snapshot(const Camera& camera);
     void execute_stage_weather_overlay(const Camera& camera);
     void execute_stage_froxel_inject(const Camera& camera);
     void execute_stage_froxel_integrate(const Camera& camera);

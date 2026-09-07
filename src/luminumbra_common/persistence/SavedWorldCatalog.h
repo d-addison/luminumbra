@@ -27,8 +27,8 @@ struct SavedWorldCatalog {
 // Read-only. Never creates directories, repairs files or generates terrain.
 SavedWorld InspectSavedWorld(const std::filesystem::path& root,
                              const std::string& world_id,
-                             std::stop_token stop = {});
+                             const std::stop_token& stop = {});
 SavedWorldCatalog EnumerateSavedWorlds(const std::filesystem::path& root,
-                                       std::stop_token stop = {});
+                                       const std::stop_token& stop = {});
 
 } // namespace Luminumbra::Persistence

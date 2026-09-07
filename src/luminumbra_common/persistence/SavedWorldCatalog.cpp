@@ -19,7 +19,7 @@ bool SafeName(const std::string& name) {
 } // namespace
 
 SavedWorld
-InspectSavedWorld(const fs::path& root, const std::string& world_id, std::stop_token stop) {
+InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::stop_token& stop) {
     SavedWorld result;
     result.metadata.worldId = world_id;
     result.metadata.name = world_id;
@@ -98,7 +98,7 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, std::stop_t
     return result;
 }
 
-SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, std::stop_token stop) {
+SavedWorldCatalog EnumerateSavedWorlds(const fs::path& root, const std::stop_token& stop) {
     SavedWorldCatalog result;
     if (stop.stop_requested()) {
         result.error = "Saved-world validation cancelled.";

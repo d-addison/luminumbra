@@ -1,4 +1,5 @@
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
+#include "luminumbra_client/rendering/RenderGraph.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -2311,6 +2312,99 @@ private:
 };
 } // namespace
 
+TEST(RenderSmokeTest, GrassAndTerrainSampleTheSameProjectedCloudShadow) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    std::array<GLuint, 2> programs{};
+    for (int path = 0; path < 2; ++path) {
+        const std::string source = ReadTextFile(SourceRoot() / "res/shaders" /
+                                                (path ? "foliage.frag" : "lighting_pass.frag"));
+        const auto begin = source.find(path ? "float fol_cloud_hash" : "float cloud_hash");
+        const auto end = source.find(path ? "void main()" : "// ---: exposure", begin);
+        ASSERT_NE(begin, std::string::npos);
+        ASSERT_NE(end, std::string::npos);
+        // Compile the actual production sampling functions, exposing their numerical result
+        // before the different terrain/blade BRDFs and tone curves obscure spatial agreement.
+        std::string probe = R"(#version 450 core
+out vec4 FragColor;
+uniform int u_cloudShadowEnabled;
+uniform vec2 u_cloudScrollOffset;
+uniform float u_cloudCoverageAmount, u_cloudBiomeVariation;
+uniform float u_cloudPlaneHeight, u_cloudShadowStrength;
+uniform vec3 u_cloudSunDir, u_probeOrigin;
+)";
+        probe += source.substr(begin, end - begin);
+        probe += "\nvoid main() { float shadow = ";
+        probe += path ? "fol_cloudShadow" : "cloudShadow";
+        probe += R"((u_probeOrigin + vec3(gl_FragCoord.x * 137.0, 0, gl_FragCoord.x * 71.0));
+FragColor = vec4(shadow, shadow, shadow, 1); })";
+        GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+        const char* text = probe.c_str();
+        glShaderSource(fragment, 1, &text, nullptr);
+        glCompileShader(fragment);
+        GLint compiled = GL_FALSE;
+        glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+        ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+        const GLuint vertex =
+            CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+        programs[path] = glCreateProgram();
+        glAttachShader(programs[path], vertex);
+        glAttachShader(programs[path], fragment);
+        glLinkProgram(programs[path]);
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(programs[path], GL_LINK_STATUS, &linked);
+        ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(programs[path]);
+    }
+    FullscreenFloatProbe probe;
+    float largest_shadow = 0, largest_difference = 0;
+    for (float coverage : {0.2f, 0.7f, 1.0f}) {
+        for (const glm::vec2 scroll : {glm::vec2(0), glm::vec2(1837, -729)}) {
+            for (int condition = 0; condition < 4; ++condition) {
+                std::array<std::array<glm::vec4, FullscreenFloatProbe::width>, 2> samples{};
+                for (int path = 0; path < 2; ++path) {
+                    const GLuint program = programs[path];
+                    glUseProgram(program);
+                    glUniform1i(glGetUniformLocation(program, "u_cloudShadowEnabled"),
+                                condition != 1);
+                    glUniform2f(
+                        glGetUniformLocation(program, "u_cloudScrollOffset"), scroll.x, scroll.y);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudCoverageAmount"), coverage);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudBiomeVariation"), 0.1f);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudPlaneHeight"), 900);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudShadowStrength"), 0.8f);
+                    glUniform3f(glGetUniformLocation(program, "u_cloudSunDir"),
+                                -0.6f,
+                                condition == 2 ? 0.0f : -0.8f,
+                                0);
+                    glUniform3f(glGetUniformLocation(program, "u_probeOrigin"),
+                                -2500,
+                                condition == 3 ? 950.0f : 17.0f,
+                                -1400);
+                    samples[path] = probe.draw();
+                }
+                for (int i = 0; i < FullscreenFloatProbe::width; ++i) {
+                    largest_difference =
+                        std::max(largest_difference, std::abs(samples[0][i].r - samples[1][i].r));
+                    largest_shadow = std::max(largest_shadow, samples[0][i].r);
+                    if (condition != 0) {
+                        EXPECT_FLOAT_EQ(samples[0][i].r, 0);
+                        EXPECT_FLOAT_EQ(samples[1][i].r, 0);
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_GT(largest_shadow, 0.3f) << "the comparison must sample actual cloud cores";
+    EXPECT_LT(largest_difference, 0.002f)
+        << "grass and terrain must share shadow position and penumbra";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    for (GLuint program : programs)
+        glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
     HiddenGlContext context;
     if (!context.ready())
@@ -2674,6 +2768,229 @@ TEST(RenderSmokeTest, WeatherKeepsTerrainStationaryAndUsesWorldNormals) {
     glDeleteTextures(1, &target);
     glDeleteFramebuffers(1, &fbo);
     glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint grass = LinkProgram({"foliage", "foliage.vert", "foliage.frag"});
+    const GLuint weather = LinkProgram({"weather", "ssao.vert", "weather_system.frag"});
+    const GLuint rays = LinkProgram({"god_rays", "ssao.vert", "god_rays.frag"});
+    ASSERT_NE(grass, 0u);
+    ASSERT_NE(weather, 0u);
+    ASSERT_NE(rays, 0u);
+    constexpr int size = 128;
+    GLuint fbo = 0, target = 0, blade_vao = 0, quad_vao = 0, vbo = 0;
+    std::array<GLuint, 3> inputs{};
+    glGenTextures(3, inputs.data());
+    const auto upload = [&](int unit, const std::vector<glm::vec4>& pixels) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, pixels.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    };
+    upload(0, std::vector<glm::vec4>(size * size));
+    upload(1, std::vector<glm::vec4>(size * size, glm::vec4(0.5f)));
+    upload(2, std::vector<glm::vec4>(size * size, glm::vec4(0.5f, 1, 0, 0)));
+    glActiveTexture(GL_TEXTURE3);
+    glGenTextures(1, &target);
+    glBindTexture(GL_TEXTURE_2D, target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glGenVertexArrays(1, &quad_vao);
+    glBindVertexArray(quad_vao);
+    constexpr float quad[] = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, -1, 1, 0, 0, 1, 1, 1, 0, 1, 1};
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glGenVertexArrays(1, &blade_vao);
+    glBindVertexArray(blade_vao);
+    glVertexAttrib3f(0, 0, -0.5f, 0);
+    glVertexAttrib2f(1, 0.8f, 0.5f);
+    glVertexAttrib4f(2, 0.19f, 0.34f, 0.11f, 1);
+    glVertexAttrib2f(3, 0, 0);
+    glVertexAttrib1f(4, 0);
+    glVertexAttrib1f(5, 0);
+    glUseProgram(grass);
+    SetMat4Identity(grass, "u_view");
+    SetMat4Identity(grass, "u_projection");
+    glUniform3f(glGetUniformLocation(grass, "u_cameraPos"), 0, 3, 0);
+    glUniform1f(glGetUniformLocation(grass, "u_fadeStart"), 10);
+    glUniform1f(glGetUniformLocation(grass, "u_fadeEnd"), 20);
+    glUniform3f(glGetUniformLocation(grass, "u_sunDirection"), 0, -1, 0);
+    glUniform3f(glGetUniformLocation(grass, "u_moonDir"), 0, 1, 0);
+    glUniform3f(glGetUniformLocation(grass, "u_ambientColor"), 0.1f, 0.15f, 0.2f);
+    glUseProgram(weather);
+    glUniform1i(glGetUniformLocation(weather, "u_sceneColor"), 0);
+    glUniform1i(glGetUniformLocation(weather, "u_sceneDepth"), 1);
+    glUniform1i(glGetUniformLocation(weather, "gNormal"), 2);
+    SetMat4Identity(weather, "u_inverseProjection");
+    SetMat4Identity(weather, "u_inverseView");
+    glUniform3f(glGetUniformLocation(weather, "u_sunDirection"), 0, -1, 0);
+    // Isolate the global storm grade; ground-normal wetness and fog are covered separately.
+    glUniform1f(glGetUniformLocation(weather, "u_wetness"), 0);
+    glUniform1f(glGetUniformLocation(weather, "u_fogDensity"), 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, size, size);
+    const auto pixels = [&] {
+        std::vector<glm::vec4> result(size * size);
+        glReadPixels(0, 0, size, size, GL_RGBA, GL_FLOAT, result.data());
+        return result;
+    };
+    const auto draw_grass = [&](bool blend) {
+        glUseProgram(grass);
+        glBindVertexArray(blade_vao);
+        if (blend)
+            glEnable(GL_BLEND);
+        else
+            glDisable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+        glDisable(GL_BLEND);
+    };
+    const auto snapshot = [&] {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, inputs[0]);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, size, size);
+    };
+    const auto draw_weather = [&](float storm) {
+        glUseProgram(weather);
+        glUniform1f(glGetUniformLocation(weather, "u_stormIntensity"), storm);
+        glBindVertexArray(quad_vao);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    };
+    const GLfloat transparent[] = {0, 0, 0, 0};
+    glClearBufferfv(GL_COLOR, 0, transparent);
+    draw_grass(false);
+    const auto mask = pixels();
+    const auto order = Luminumbra::Rendering::BuildLuminumbraFrameGraph().schedule();
+    for (bool night : {false, true}) {
+        SCOPED_TRACE(night ? "night floor" : "day storm");
+        glUseProgram(grass);
+        const float sun = night ? 0.0f : 1.0f;
+        glUniform3f(glGetUniformLocation(grass, "u_sunColor"), sun, sun, sun);
+        glUniform1f(glGetUniformLocation(grass, "u_sunIntensity"), sun);
+        const GLfloat background[] = {
+            night ? 0.005f : 0.12f, night ? 0.005f : 0.18f, night ? 0.005f : 0.10f, 1};
+        const auto compose = [&](float storm) {
+            glClearBufferfv(GL_COLOR, 0, background);
+            // Follow the production graph, so moving foliage after weather reproduces the bug.
+            for (const auto& stage : order) {
+                if (stage == "foliage")
+                    draw_grass(true);
+                else if (stage == "weather_opaque_snapshot")
+                    snapshot();
+                else if (stage == "weather_overlay")
+                    draw_weather(storm);
+            }
+            return pixels();
+        };
+        const auto clear = compose(0);
+        const auto storm = compose(0.75f);
+        // The oracle grades the already blended clear scene using the actual weather shader.
+        // This tests composition at blade interiors AND antialiased edges without duplicating
+        // the shader's grade constants or deriving expectations from the scheduled result.
+        upload(0, clear);
+        draw_weather(0.75f);
+        const auto expected = pixels();
+        int opaque = 0, partial = 0;
+        float max_error = 0, clear_luma = 0, storm_luma = 0;
+        for (int i = 0; i < size * size; ++i) {
+            if (mask[i].a < 0.05f)
+                continue;
+            opaque += mask[i].a > 0.99f;
+            partial += mask[i].a > 0.1f && mask[i].a < 0.9f;
+            for (int channel = 0; channel < 3; ++channel)
+                max_error = std::max(max_error, std::abs(storm[i][channel] - expected[i][channel]));
+            clear_luma += glm::dot(glm::vec3(clear[i]), glm::vec3(0.299f, 0.587f, 0.114f));
+            storm_luma += glm::dot(glm::vec3(storm[i]), glm::vec3(0.299f, 0.587f, 0.114f));
+        }
+        EXPECT_GT(opaque, 200);
+        EXPECT_GT(partial, 20);
+        EXPECT_LT(max_error, 0.0002f) << "grass must receive the scene's storm grade once";
+        if (!night) {
+            EXPECT_LT(storm_luma, clear_luma * 0.7f);
+        }
+        // Storm zero must preserve both the opaque and blended blade colors.
+        upload(0, clear);
+        draw_weather(0);
+        const auto identity = pixels();
+        for (int i = 0; i < size * size; ++i)
+            for (int channel = 0; channel < 3; ++channel)
+                ASSERT_NEAR(identity[i][channel], clear[i][channel], 0.0002f);
+    }
+    // A blade against cleared sky must still occlude shafts at its true alpha,
+    // even though the G-buffer depth contains no terrain there. Sampling the
+    // lighting depth would hard-cut partially covered edges instead.
+    upload(1, std::vector<glm::vec4>(size * size, glm::vec4(1)));
+    glUseProgram(grass);
+    glUniform3f(glGetUniformLocation(grass, "u_sunColor"), 1, 1, 1);
+    glUniform1f(glGetUniformLocation(grass, "u_sunIntensity"), 1);
+    glUseProgram(rays);
+    glUniform1i(glGetUniformLocation(rays, "u_scene"), 0);
+    glUniform1i(glGetUniformLocation(rays, "u_sceneDepth"), 1);
+    glUniform2f(glGetUniformLocation(rays, "u_sunUV"), 0.9f, 0.8f);
+    glUniform1f(glGetUniformLocation(rays, "u_sunVisible"), 1);
+    glUniform1f(glGetUniformLocation(rays, "u_strength"), 0.85f);
+    const auto draw_rays = [&] {
+        glUseProgram(rays);
+        glBindVertexArray(quad_vao);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisable(GL_BLEND);
+    };
+    const GLfloat sky[] = {0.3f, 0.4f, 0.5f, 1};
+    glClearBufferfv(GL_COLOR, 0, sky);
+    snapshot();
+    draw_rays();
+    EXPECT_GT(pixels()[size * size / 2].r, sky[0] + 0.001f);
+    draw_grass(true);
+    snapshot();
+    draw_weather(0.75f);
+    const auto occluded_rays = pixels();
+    glClearBufferfv(GL_COLOR, 0, sky);
+    for (const auto& stage : order) {
+        if (stage == "opaque_snapshot" || stage == "god_rays_opaque_snapshot" ||
+            stage == "weather_opaque_snapshot")
+            snapshot();
+        else if (stage == "god_rays")
+            draw_rays();
+        else if (stage == "foliage")
+            draw_grass(true);
+        else if (stage == "weather_overlay")
+            draw_weather(0.75f);
+    }
+    const auto actual_rays = pixels();
+    float silhouette_error = 0;
+    for (int i = 0; i < size * size; ++i)
+        for (int channel = 0; channel < 3; ++channel)
+            silhouette_error = std::max(
+                silhouette_error, std::abs(actual_rays[i][channel] - occluded_rays[i][channel]));
+    EXPECT_LT(silhouette_error, 0.0002f)
+        << "soft grass silhouettes must occlude rays before the common weather grade";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(rays);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &blade_vao);
+    glDeleteVertexArrays(1, &quad_vao);
+    glDeleteTextures(3, inputs.data());
+    glDeleteTextures(1, &target);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(grass);
+    glDeleteProgram(weather);
 }
 
 TEST(RenderSmokeTest, GrassRemainsVisibleInUpperFrameAndOnRisingGround) {

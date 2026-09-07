@@ -468,6 +468,7 @@ add_executable(pass_context_test
 ../src/luminumbra_client/rendering/passes/ShadowPass.cpp
 ../src/luminumbra_client/rendering/passes/ParticlePass.cpp
 ../src/luminumbra_client/rendering/passes/FoliagePass.cpp
+../src/luminumbra_client/rendering/passes/GlassOitPass.cpp
 ../src/luminumbra_client/rendering/AsyncReadbackRing.cpp
 ../src/luminumbra_client/rendering/RenderResourceRegistry.cpp
 ../src/luminumbra_client/rendering/Shader.cpp

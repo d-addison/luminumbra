@@ -284,7 +284,7 @@ TEST(UiPageLoadTest, PendingWorldValidationAllowsNavigationAndCannotPublishAfter
     ui.Init(context.window(), nullptr);
     int loads = 0;
     ui.SetLoadWorldCallback([&](const std::string&) { ++loads; });
-    ui.SetSavedWorldList([&](std::stop_token stop) {
+    ui.SetSavedWorldList([&](const std::stop_token& stop) {
         started.set_value(std::this_thread::get_id());
         std::mutex mutex;
         std::condition_variable_any wake;
@@ -312,7 +312,7 @@ TEST(UiPageLoadTest, PendingWorldValidationAllowsNavigationAndCannotPublishAfter
     document->GetElementById("back_btn")->DispatchEvent("click", {});
     ui.Update();
     ASSERT_NE(FindDocumentByBodyId(ui.GetContext(), "main_menu"), nullptr);
-    ui.SetSavedWorldList([](std::stop_token) {
+    ui.SetSavedWorldList([](const std::stop_token&) {
         Luminumbra::Persistence::SavedWorldCatalog latest;
         Luminumbra::Persistence::SavedWorld world;
         world.metadata.worldId = "latest";

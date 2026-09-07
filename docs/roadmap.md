@@ -170,3 +170,5 @@ verification.
 
 
 Current evidence and open gates: [v0.3 acceptance record](v0.3-acceptance.md).
+
+Additional v0.3 visual findings are tracked separately: [storm grass #107](https://github.com/d-addison/luminumbra/issues/107), [cloud-shadow agreement #108](https://github.com/d-addison/luminumbra/issues/108), [high-view material/haze classification #109](https://github.com/d-addison/luminumbra/issues/109), and [glass depth/lifetime #110](https://github.com/d-addison/luminumbra/issues/110). Follow-up fixes and diagnostic classification do not by themselves complete packaged release acceptance.

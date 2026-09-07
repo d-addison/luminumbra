@@ -2523,10 +2523,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     //  -c3/c4 —  EXECUTION MIGRATION COMPLETE: the graph DRIVES
     // the passes. The order comes from the DECLARATION (schedule over
     // BuildLuminumbraFrameGraph, computed once — the graph is static data); the
-    // executor table maps each node name to its extracted body. Three locks pin
-    // this: the drift guard (schedule == the emitted trace, on every RenderHealth
-    // frame), the whole-frame A/B (-Mode RenderParityFrame == exactly 0.0), and
-    // FrameDispatch.ExecutorTableCoversEveryGraphNodeInOrder (table == declaration).
+    // executor table maps each node name to its extracted body. The RenderHealth
+    // drift guard compares the schedule with the emitted trace; whole-frame parity
+    // and the real-shader composition regressions cover observable ordering effects.
     // A new render feature adds a RenderGraphNode + an executor entry + its
     // record_frame_stage slot — the locks fail loudly on any of the three missing.
     static const std::vector<std::string> kSchedule =
@@ -2548,8 +2547,7 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
 const std::vector<std::pair<std::string, RenderPipeline::StageExecutorFn>>&
 RenderPipeline::stage_executor_table() {
-    // Authored order matches BuildLuminumbraFrameGraph's node order 1:1 (pinned
-    // by FrameDispatch.ExecutorTableCoversEveryGraphNodeInOrder).
+    // Keep entries in the authored graph order for review. Dispatch resolves by node name.
     static const std::vector<std::pair<std::string, StageExecutorFn>> kTable = {
         {"shadow", &RenderPipeline::execute_stage_shadow},
         {"gbuffer", &RenderPipeline::execute_stage_gbuffer},
@@ -2565,13 +2563,14 @@ RenderPipeline::stage_executor_table() {
         {"waterfall", &RenderPipeline::execute_stage_waterfall},
         {"glass_oit_accum", &RenderPipeline::execute_stage_glass_oit_accum},
         {"glass_oit_resolve", &RenderPipeline::execute_stage_glass_oit_resolve},
+        {"god_rays_opaque_snapshot", &RenderPipeline::execute_stage_god_rays_opaque_snapshot},
+        {"god_rays", &RenderPipeline::execute_stage_god_rays},
+        {"foliage", &RenderPipeline::execute_stage_foliage},
         {"weather_opaque_snapshot", &RenderPipeline::execute_stage_weather_opaque_snapshot},
         {"weather_overlay", &RenderPipeline::execute_stage_weather_overlay},
         {"froxel_inject", &RenderPipeline::execute_stage_froxel_inject},
         {"froxel_integrate", &RenderPipeline::execute_stage_froxel_integrate},
         {"aerial", &RenderPipeline::execute_stage_aerial},
-        {"god_rays", &RenderPipeline::execute_stage_god_rays},
-        {"foliage", &RenderPipeline::execute_stage_foliage},
         {"taau_resolve", &RenderPipeline::execute_stage_taau_resolve},
         {"luminance_meter", &RenderPipeline::execute_stage_luminance_meter},
         {"particles", &RenderPipeline::execute_stage_particles},
@@ -2908,13 +2907,8 @@ void RenderPipeline::execute_stage_glass_oit_resolve(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera) {
-    // 7a-pre. WEATHER OVERLAY's post-water opaque snapshot (owned by SkyboxPass's
-    // stage pair): relocated the snapshot here from inside
-    // SkyboxPass (a friendless pass can't call Lighting). Guarded by the SAME
-    // conditions the overlay runs under, so opaque_color_texture (also read by
-    // god-rays below) stays byte-identical to the prior behavior. (: the pair
-    // each compute overlay_will_run + ctx from the same frame-stable state —
-    // rebuild == the old shared block-locals.)
+    // Snapshot the resolved scene including rays and grass for the common weather grade.
+    // The snapshot and overlay use the same frame-stable activation conditions.
     const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
     const bool overlay_will_run =
         m_weather_type != WeatherType::None && m_weather_intensity > 0.0f &&
@@ -2924,6 +2918,19 @@ void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera)
     record_frame_stage("weather_opaque_snapshot");
     if (overlay_will_run) {
         m_lighting_pass->copy_lighting_color_to_opaque_texture(weather_ctx);
+    }
+}
+
+void RenderPipeline::execute_stage_god_rays_opaque_snapshot(const Camera& camera) {
+    record_frame_stage("god_rays_opaque_snapshot");
+    RenderContext ctx = make_god_rays_context(camera);
+    // Reuse the existing color snapshot without framebuffer feedback or an additional
+    // allocation. Keep resolved water/glass color available as before on weather frames.
+    // The source mask remains G-buffer depth: transparent depth is an approximation.
+    if (ctx.sun_visible > 0.002f && m_god_rays_pass->shader() &&
+        m_god_rays_pass->shader()->IsValid() && ctx.screen_quad_vao && ctx.lit_scene.id &&
+        ctx.opaque_scene.id && ctx.gbuffer_depth.id) {
+        m_lighting_pass->copy_lighting_color_to_opaque_texture(ctx);
     }
 }
 
@@ -3230,6 +3237,7 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     // skybox / far-LOD passes read the resized G-buffer and lighting targets
     // through the shared pipeline state and pick up the new size automatically.
     // SCALED intermediates reallocate at internal res (== output at scale 1.0).
+    m_glass_oit_pass->destroy(); // release the OIT attachment before replacing shared depth
     m_lighting_pass->destroy_lighting_fbo(m_render_registry);
     m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
@@ -3265,6 +3273,7 @@ void RenderPipeline::set_render_scale(float scale) {
         return; // startup() will size the internal extent from m_render_scale
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
     m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
+    m_glass_oit_pass->destroy(); // color targets and shared depth must use the new internal extent
     m_lighting_pass->destroy_lighting_fbo(m_render_registry);
     m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
@@ -3672,6 +3681,7 @@ void RenderPipeline::cleanup_gpu_resources() {
         delete_water_slot(d);
     }
     m_free_water_render_slots.clear();
+    m_glass_oit_pass->destroy(); // detach borrowed depth before its owner releases it
     m_lighting_pass->destroy_lighting_fbo(m_render_registry);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
     m_shadow_pass->destroy_shadow_map(m_render_registry);
@@ -3695,10 +3705,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_luminance_meter_pass->destroy();
     m_metered_valid = false;
-    // The pass-owned froxel kernels/volumes and WBOIT shaders/MRT retain their
-    // original cleanup point and deletion order inside their extracted owners.
+    // Release the remaining pass-owned volumes and geometry.
     m_froxel_pass->destroy();
-    m_glass_oit_pass->destroy();
     m_waterfall_pass->destroy_geometry();
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) {

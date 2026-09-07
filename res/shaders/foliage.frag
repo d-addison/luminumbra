@@ -26,10 +26,12 @@
 //      tracks sun-up (bright day, ~10x dimmer night) so the grass darkens with
 //      the scene. A faint sky tint is folded back in for cohesion, capped so it
 //      can never re-introduce a blue-dominant result.
-//   2) STORM darkening: replicate the lighting pass' projected cloud cast shadow
+//   2) CLOUD darkening: replicate the lighting pass' projected cloud cast shadow
 //      and attenuate BOTH the ambient and the direct sun by the cloud coverage
 //      overhead, so an overcast cell drives the blades DARK exactly like the
 //      ground beside them (the old shader left ambient un-attenuated -> glow).
+//      The global storm grade is applied later by weather_system.frag to the
+//      composited terrain and grass; cloud cover and storm intensity are distinct.
 //   3) Sun-weighted: the GREEN-hued direct sun term (albedo/PI * sunRadiance) is
 //      what lifts the daytime grass; u_sunColor is pre-scaled by sun intensity/
 //      transmittance on the CPU so it collapses to ~0 at night.
@@ -104,7 +106,7 @@ float fol_cloud_fbm(vec2 p, int octaves) {
     return value;
 }
 float fol_cloudCoverageAt(vec2 worldXZ) {
-    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 1200.0);
+    vec2 p = (worldXZ + u_cloudScrollOffset) * (1.0 / 2400.0);
     float base = fol_cloud_fbm(p, 5);
     float detail = fol_cloud_fbm(p * 2.7 + vec2(11.3, 4.7), 3);
     float field = base * 0.72 + detail * 0.28;
@@ -122,7 +124,13 @@ float fol_cloudShadow(vec3 worldPos) {
     if (dh <= 0.0) return 0.0;
     float t = dh / toSun.y;
     vec2 hitXZ = worldPos.xz + toSun.xz * t;
-    float coverage = fol_cloudCoverageAt(hitXZ);
+    // Match the terrain's 70 m five-tap penumbra at the same cloud plane.
+    const float r = 70.0;
+    float coverage = fol_cloudCoverageAt(hitXZ) * 0.40
+                   + fol_cloudCoverageAt(hitXZ + vec2( r, 0.0)) * 0.15
+                   + fol_cloudCoverageAt(hitXZ + vec2(-r, 0.0)) * 0.15
+                   + fol_cloudCoverageAt(hitXZ + vec2(0.0,  r)) * 0.15
+                   + fol_cloudCoverageAt(hitXZ + vec2(0.0, -r)) * 0.15;
     return clamp(coverage * u_cloudShadowStrength, 0.0, 1.0);
 }
 

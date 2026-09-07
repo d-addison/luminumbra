@@ -24,10 +24,12 @@ struct AsyncSavedWorldCatalog::Impl {
     std::uint64_t generation = 0;
     std::jthread worker;
 
-    void Run(std::stop_token stop) {
+    void Run(const std::stop_token& stop) {
         std::unique_lock lock(mutex);
         while (wake.wait(lock, stop, [this] { return pending.has_value(); })) {
-            Request request = std::move(*pending);
+            if (!pending.has_value())
+                continue;
+            Request request = std::move(pending.value());
             pending.reset();
             active = request.cancellation;
             lock.unlock();
@@ -60,12 +62,13 @@ AsyncSavedWorldCatalog::~AsyncSavedWorldCatalog() {
 void AsyncSavedWorldCatalog::Request(Scan scan) {
     std::lock_guard lock(m_impl->mutex);
     m_impl->active.request_stop();
-    if (m_impl->pending)
-        m_impl->pending->cancellation.request_stop();
+    auto& pending = m_impl->pending;
+    if (pending.has_value())
+        pending->cancellation.request_stop();
     m_impl->ready.reset();
     m_impl->pending = Impl::Request{std::move(scan), ++m_impl->generation, std::stop_source{}};
     if (!m_impl->worker.joinable())
-        m_impl->worker = std::jthread([this](std::stop_token stop) { m_impl->Run(stop); });
+        m_impl->worker = std::jthread([this](const std::stop_token& stop) { m_impl->Run(stop); });
     m_impl->wake.notify_one();
 }
 
@@ -73,8 +76,9 @@ void AsyncSavedWorldCatalog::Cancel() {
     std::lock_guard lock(m_impl->mutex);
     ++m_impl->generation;
     m_impl->active.request_stop();
-    if (m_impl->pending)
-        m_impl->pending->cancellation.request_stop();
+    auto& pending = m_impl->pending;
+    if (pending.has_value())
+        pending->cancellation.request_stop();
     m_impl->pending.reset();
     m_impl->ready.reset();
 }
