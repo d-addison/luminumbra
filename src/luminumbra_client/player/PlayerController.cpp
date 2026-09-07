@@ -288,14 +288,15 @@ void PlayerController::UpdateWalking(float deltaTime,
     // Crouching is a toggle. Check if the player wants to change state.
     if (crouchPressed) {
         if (m_isCrouching) { // If currently crouching, try to stand up
-            if (m_physicsSystem->player_has_space_to_stand()) {
+            if (m_physicsSystem->player_has_space_to_stand() &&
+                m_physicsSystem->set_player_crouched(false)) {
                 m_isCrouching = false;
-                m_physicsSystem->set_player_crouched(false);
             }
             // If there's no space, do nothing and remain crouched.
         } else { // If standing, crouch down
-            m_isCrouching = true;
-            m_physicsSystem->set_player_crouched(true);
+            if (m_physicsSystem->set_player_crouched(true)) {
+                m_isCrouching = true;
+            }
         }
     }
 
