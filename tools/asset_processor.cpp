@@ -1,10 +1,14 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -718,6 +722,259 @@ bool process_texture(const std::string& input_path, const std::string& output_pa
     return process_texture_resized(input_path, output_path, 0, false);
 }
 
+namespace {
+
+using ImportMatrix = std::array<float, 16>;
+constexpr ImportMatrix kImportIdentity = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+
+struct StaticInstance {
+    const cgltf_mesh* mesh = nullptr;
+    ImportMatrix world = kImportIdentity;
+    size_t nodeIndex = SIZE_MAX; // No node for a mesh-only library document.
+};
+
+bool ImportError(const char* rule, const std::string& message) {
+    std::cerr << "Error [" << rule << "]: " << message << '\n';
+    return false;
+}
+
+bool FiniteAffine(const ImportMatrix& matrix) {
+    return std::all_of(matrix.begin(), matrix.end(), [](float v) { return std::isfinite(v); }) &&
+           matrix[3] == 0 && matrix[7] == 0 && matrix[11] == 0 && matrix[15] == 1;
+}
+
+bool CollectStaticInstances(const cgltf_data* data, std::vector<StaticInstance>& instances) {
+    for (size_t i = 0; i < data->extensions_required_count; ++i) {
+        if (std::strcmp(data->extensions_required[i], "KHR_texture_transform") != 0)
+            return ImportError("extension.unsupported", data->extensions_required[i]);
+    }
+    if (data->animations_count != 0)
+        return ImportError("static.animation",
+                           "Bake a selected static pose before mesh conversion.");
+
+    const cgltf_scene* scene = data->scene;
+    if (!scene && data->scenes_count > 1)
+        return ImportError("scene.ambiguous",
+                           "Select a default scene before exporting multiple scenes.");
+    if (!scene && data->scenes_count == 1)
+        scene = &data->scenes[0];
+
+    struct Pending {
+        const cgltf_node* node;
+        ImportMatrix parent;
+    };
+    std::vector<Pending> pending;
+    if (scene) {
+        for (size_t i = scene->nodes_count; i > 0; --i)
+            pending.push_back({scene->nodes[i - 1], kImportIdentity});
+    } else if (data->nodes_count) {
+        for (size_t i = data->nodes_count; i > 0; --i) {
+            if (!data->nodes[i - 1].parent)
+                pending.push_back({&data->nodes[i - 1], kImportIdentity});
+        }
+    } else {
+        // Preserve the legacy library path only when there are no scene nodes
+        // whose placement or membership could be discarded.
+        for (size_t i = 0; i < data->meshes_count; ++i)
+            instances.push_back({&data->meshes[i], kImportIdentity, SIZE_MAX});
+    }
+
+    std::vector<bool> visited(data->nodes_count, false);
+    while (!pending.empty()) {
+        const Pending entry = pending.back();
+        pending.pop_back();
+        const auto* node = entry.node;
+        const size_t index = static_cast<size_t>(node - data->nodes);
+        if (visited[index])
+            return ImportError("scene.hierarchy",
+                               "Repeated or cyclic node " + std::to_string(index));
+        visited[index] = true;
+        if (node->has_mesh_gpu_instancing)
+            return ImportError("scene.gpu_instances",
+                               "Realize GPU instances on node " + std::to_string(index));
+        if (node->has_matrix && (node->has_translation || node->has_rotation || node->has_scale))
+            return ImportError("scene.transform",
+                               "Use matrix or TRS, not both, on node " + std::to_string(index));
+        ImportMatrix local;
+        cgltf_node_transform_local(node, local.data());
+        if (!FiniteAffine(local))
+            return ImportError("scene.transform",
+                               "Expected finite affine transform on node " + std::to_string(index));
+        ImportMatrix world{};
+        for (size_t col = 0; col < 4; ++col) {
+            for (size_t row = 0; row < 4; ++row) {
+                for (size_t k = 0; k < 4; ++k)
+                    world[col * 4 + row] += entry.parent[k * 4 + row] * local[col * 4 + k];
+            }
+        }
+        if (!FiniteAffine(world))
+            return ImportError("scene.transform",
+                               "World transform overflows on node " + std::to_string(index));
+        if (node->mesh)
+            instances.push_back({node->mesh, world, index});
+        for (size_t i = node->children_count; i > 0; --i)
+            pending.push_back({node->children[i - 1], world});
+    }
+    return true;
+}
+
+class StaticTransform {
+    const ImportMatrix& matrix;
+    double cofactors[9]{};
+    double determinant = 0;
+
+public:
+    explicit StaticTransform(const ImportMatrix& m)
+        : matrix(m) {
+        for (size_t col = 0; col < 3; ++col) {
+            const size_t a = ((col + 1) % 3) * 4;
+            const size_t b = ((col + 2) % 3) * 4;
+            cofactors[col * 3] = double(m[a + 1]) * m[b + 2] - double(m[a + 2]) * m[b + 1];
+            cofactors[col * 3 + 1] = double(m[a + 2]) * m[b] - double(m[a]) * m[b + 2];
+            cofactors[col * 3 + 2] = double(m[a]) * m[b + 1] - double(m[a + 1]) * m[b];
+        }
+        determinant = m[0] * cofactors[0] + m[1] * cofactors[1] + m[2] * cofactors[2];
+    }
+
+    bool Apply(Vertex& vertex) const {
+        for (const float v : vertex.pos)
+            if (!std::isfinite(v))
+                return false;
+        for (const float v : vertex.norm)
+            if (!std::isfinite(v))
+                return false;
+        for (const float v : vertex.uv)
+            if (!std::isfinite(v))
+                return false;
+        double length = 0;
+        for (const float v : vertex.norm)
+            length += double(v) * v;
+        if (length == 0)
+            return false;
+        // Avoid changing previously supported identity geometry's exact bytes.
+        if (matrix == kImportIdentity)
+            return true;
+        const Vertex source = vertex;
+        double normal[3]{};
+        length = 0;
+        for (size_t row = 0; row < 3; ++row) {
+            double position = matrix[12 + row];
+            for (size_t col = 0; col < 3; ++col) {
+                position += double(matrix[col * 4 + row]) * source.pos[col];
+                normal[row] += cofactors[col * 3 + row] * source.norm[col] / determinant;
+            }
+            vertex.pos[row] = static_cast<float>(position);
+            if (!std::isfinite(vertex.pos[row]))
+                return false;
+            length += normal[row] * normal[row];
+        }
+        if (!std::isfinite(length) || length == 0)
+            return false;
+        const double inverseLength = 1 / std::sqrt(length);
+        for (size_t row = 0; row < 3; ++row)
+            vertex.norm[row] = static_cast<float>(normal[row] * inverseLength);
+        return true;
+    }
+
+    bool IsSingular() const {
+        return determinant == 0 || !std::isfinite(determinant);
+    }
+
+    bool IsMirrored() const {
+        return determinant < 0;
+    }
+};
+
+bool AppendStaticPrimitive(const cgltf_primitive& primitive,
+                           const StaticInstance& instance,
+                           size_t primitiveIndex,
+                           std::vector<Vertex>& vertices,
+                           std::vector<uint32_t>& indices) {
+    const std::string owner = instance.nodeIndex == SIZE_MAX
+                                  ? "mesh library"
+                                  : "node " + std::to_string(instance.nodeIndex);
+    const std::string location = owner + ", primitive " + std::to_string(primitiveIndex) + ": ";
+    const auto fail = [&](const char* rule, const char* message) {
+        return ImportError(rule, location + message);
+    };
+    if (primitive.type != cgltf_primitive_type_triangles)
+        return fail("mesh.topology", "Export indexed triangles.");
+    if (primitive.targets_count)
+        return fail("mesh.morph_targets", "Bake shape keys before static mesh conversion.");
+    const StaticTransform transform(instance.world);
+    if (transform.IsSingular())
+        return fail("scene.singular_transform", "Remove zero-scale or singular transforms.");
+    const cgltf_texture_view* color = nullptr;
+    int wantedUv = 0;
+    if (primitive.material && primitive.material->has_pbr_metallic_roughness) {
+        color = &primitive.material->pbr_metallic_roughness.base_color_texture;
+        wantedUv = color->has_transform && color->transform.has_texcoord ? color->transform.texcoord
+                                                                         : color->texcoord;
+    }
+    const cgltf_accessor *position = nullptr, *normal = nullptr, *uv = nullptr;
+    for (size_t i = 0; i < primitive.attributes_count; ++i) {
+        const auto& attr = primitive.attributes[i];
+        if (attr.type == cgltf_attribute_type_position)
+            position = attr.data;
+        if (attr.type == cgltf_attribute_type_normal)
+            normal = attr.data;
+        if (attr.type == cgltf_attribute_type_texcoord && attr.index == wantedUv)
+            uv = attr.data;
+    }
+    const auto* index = primitive.indices;
+    if (!position || !normal || !uv || !index)
+        return fail("mesh.attributes",
+                    "Supply POSITION, NORMAL, the material's TEXCOORD set, and indices.");
+    if (position->is_sparse || normal->is_sparse || uv->is_sparse || index->is_sparse)
+        return fail("mesh.sparse_accessor",
+                    "Expand sparse attributes and indices before conversion.");
+    if (position->type != cgltf_type_vec3 || normal->type != cgltf_type_vec3 ||
+        uv->type != cgltf_type_vec2 || position->count == 0 || normal->count != position->count ||
+        uv->count != position->count)
+        return fail("mesh.attributes", "Attribute types and vertex counts must agree.");
+    if (index->count == 0 || index->count % 3 != 0)
+        return fail("mesh.indices", "Triangle index count must be a nonzero multiple of three.");
+    const size_t offset = vertices.size();
+    if (offset > UINT32_MAX || position->count > UINT32_MAX - offset ||
+        indices.size() > UINT32_MAX || index->count > UINT32_MAX - indices.size())
+        return fail("mesh.limit", "Geometry exceeds the 32-bit mesh format.");
+    for (size_t i = 0; i < position->count; ++i) {
+        Vertex vertex{};
+        if (!cgltf_accessor_read_float(position, i, vertex.pos, 3) ||
+            !cgltf_accessor_read_float(normal, i, vertex.norm, 3) ||
+            !cgltf_accessor_read_float(uv, i, vertex.uv, 2))
+            return fail("mesh.accessor", "Cannot decode a required vertex attribute.");
+        if (color && color->has_transform) {
+            const auto& t = color->transform;
+            const float u = vertex.uv[0] * t.scale[0];
+            const float v = vertex.uv[1] * t.scale[1];
+            const float c = std::cos(t.rotation), s = std::sin(t.rotation);
+            vertex.uv[0] = c * u - s * v + t.offset[0];
+            vertex.uv[1] = s * u + c * v + t.offset[1];
+        }
+        if (!transform.Apply(vertex))
+            return fail(
+                "mesh.nonfinite",
+                "Export finite attributes and nonzero normals within representable bounds.");
+        vertices.push_back(vertex);
+    }
+    for (size_t i = 0; i < index->count; i += 3) {
+        uint32_t triangle[3];
+        for (size_t lane = 0; lane < 3; ++lane) {
+            const size_t local = cgltf_accessor_read_index(index, i + lane);
+            if (local >= position->count)
+                return fail("mesh.indices", "Index is outside the primitive's vertex range.");
+            triangle[lane] = static_cast<uint32_t>(local + offset);
+        }
+        if (transform.IsMirrored())
+            std::swap(triangle[1], triangle[2]);
+        indices.insert(indices.end(), std::begin(triangle), std::end(triangle));
+    }
+    return true;
+}
+
+} // namespace
+
 // optional triangle budget for the static (.lmesh) path, set by main from
 // --max-tris. A file-static keeps process_gltf's 2-arg signature intact so the
 // asset round-trip tests (which forward-declare process_gltf(string,string)) and
@@ -751,103 +1008,40 @@ bool process_gltf_checked(const std::string& input_path, const std::string& outp
     }
 
     // Skinned assets take the LMS2 path; unskinned input continues through the
-    // original v1 writer below, byte-identical to previous releases.
+    // LMSH writer below. Identity geometry retains its existing byte layout;
+    // scene instances and transforms are now baked into the static geometry.
     if (data->skins_count > 0) {
         const bool ok = process_skinned_gltf(data, input_path, output_path);
         cgltf_free(data);
         return ok;
     }
 
-    // FIX: Create master lists to hold combined geometry from all primitives.
+    std::vector<StaticInstance> instances;
+    if (!CollectStaticInstances(data, instances)) {
+        cgltf_free(data);
+        return false;
+    }
     std::vector<Vertex> master_raw_vertices;
     std::vector<uint32_t> master_indices;
-    size_t vertex_offset = 0;
-
-    // FIX: Loop through all meshes and all primitives to combine them.
-    int global_prim_index = -1;
-    for (size_t mesh_idx = 0; mesh_idx < data->meshes_count; ++mesh_idx) {
-        for (size_t prim_idx = 0; prim_idx < data->meshes[mesh_idx].primitives_count; ++prim_idx) {
-            ++global_prim_index;
-            // per-part export — skip primitives that aren't the requested one.
-            if (g_only_primitive >= 0 && global_prim_index != g_only_primitive)
+    // --primitive keeps identifying a source mesh primitive, independently of
+    // node traversal order. Every selected instance of that primitive is baked.
+    std::vector<size_t> primitiveOffsets(data->meshes_count, 0);
+    for (size_t i = 1; i < data->meshes_count; ++i)
+        primitiveOffsets[i] = primitiveOffsets[i - 1] + data->meshes[i - 1].primitives_count;
+    for (const auto& instance : instances) {
+        const size_t meshIndex = static_cast<size_t>(instance.mesh - data->meshes);
+        for (size_t i = 0; i < instance.mesh->primitives_count; ++i) {
+            const size_t primitiveIndex = primitiveOffsets[meshIndex] + i;
+            if (g_only_primitive >= 0 && primitiveIndex != static_cast<size_t>(g_only_primitive))
                 continue;
-            cgltf_primitive* primitive = &data->meshes[mesh_idx].primitives[prim_idx];
-
-            cgltf_accessor* index_accessor = primitive->indices;
-            cgltf_accessor* pos_accessor = nullptr;
-            cgltf_accessor* norm_accessor = nullptr;
-            cgltf_accessor* uv_accessor = nullptr;
-
-            // pick the UV SET the base-color texture actually uses (gltf
-            // texCoord index). The tree's branches sample TEXCOORD_1; trunk/leaves
-            // sample TEXCOORD_0. Taking "the first texcoord" textures branches with
-            // the wrong UVs. Fall back to set 0 when no material/texture.
-            int wanted_uv_set = 0;
-            const cgltf_texture_view* color_texture = nullptr;
-            if (primitive->material && primitive->material->has_pbr_metallic_roughness) {
-                color_texture = &primitive->material->pbr_metallic_roughness.base_color_texture;
-                wanted_uv_set = color_texture->texcoord;
-                if (color_texture->has_transform && color_texture->transform.has_texcoord)
-                    wanted_uv_set = color_texture->transform.texcoord;
+            if (!AppendStaticPrimitive(instance.mesh->primitives[i],
+                                       instance,
+                                       primitiveIndex,
+                                       master_raw_vertices,
+                                       master_indices)) {
+                cgltf_free(data);
+                return false;
             }
-            cgltf_accessor* uv_fallback = nullptr;
-            for (size_t i = 0; i < primitive->attributes_count; ++i) {
-                cgltf_attribute* attr = &primitive->attributes[i];
-                if (attr->type == cgltf_attribute_type_position)
-                    pos_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_normal)
-                    norm_accessor = attr->data;
-                if (attr->type == cgltf_attribute_type_texcoord) {
-                    if (attr->index == wanted_uv_set)
-                        uv_accessor = attr->data;
-                    if (!uv_fallback)
-                        uv_fallback = attr->data;
-                }
-            }
-            if (!uv_accessor)
-                uv_accessor = uv_fallback;
-
-            if (!index_accessor || !pos_accessor || !norm_accessor || !uv_accessor) {
-                std::cerr << "Warning: Skipping primitive " << prim_idx << " in mesh " << mesh_idx
-                          << " due to missing attributes." << std::endl;
-                continue;
-            }
-
-            // Read indices for this primitive
-            for (size_t i = 0; i < index_accessor->count; ++i) {
-                // Add the current vertex offset to each index before adding it to the master list
-                const size_t local_index = cgltf_accessor_read_index(index_accessor, i);
-                if (vertex_offset > UINT32_MAX || local_index > UINT32_MAX - vertex_offset) {
-                    std::cerr << "Error: Mesh index exceeds the 32-bit output format in "
-                              << input_path << '\n';
-                    cgltf_free(data);
-                    return false;
-                }
-                master_indices.push_back(static_cast<uint32_t>(local_index + vertex_offset));
-            }
-
-            // Read vertices for this primitive
-            size_t current_vertex_count = pos_accessor->count;
-            for (size_t v = 0; v < current_vertex_count; ++v) {
-                Vertex vert;
-                cgltf_accessor_read_float(pos_accessor, v, vert.pos, 3);
-                cgltf_accessor_read_float(norm_accessor, v, vert.norm, 3);
-                cgltf_accessor_read_float(uv_accessor, v, vert.uv, 2);
-                if (color_texture && color_texture->has_transform) {
-                    // KHR_texture_transform: scale, rotate, then translate in UV space.
-                    const auto& transform = color_texture->transform;
-                    const float u = vert.uv[0] * transform.scale[0];
-                    const float v_coord = vert.uv[1] * transform.scale[1];
-                    const float c = std::cos(transform.rotation);
-                    const float s = std::sin(transform.rotation);
-                    vert.uv[0] = c * u - s * v_coord + transform.offset[0];
-                    vert.uv[1] = s * u + c * v_coord + transform.offset[1];
-                }
-                master_raw_vertices.push_back(vert);
-            }
-
-            // Update the vertex offset for the next primitive
-            vertex_offset += current_vertex_count;
         }
     }
 
@@ -956,6 +1150,13 @@ bool process_gltf_checked(const std::string& input_path, const std::string& outp
     float dy = max_ext[1] - sphere[1];
     float dz = max_ext[2] - sphere[2];
     sphere[3] = sqrtf(dx * dx + dy * dy + dz * dz);
+
+    if (!std::all_of(
+            std::begin(sphere), std::end(sphere), [](float v) { return std::isfinite(v); })) {
+        cgltf_free(data);
+        return ImportError("mesh.bounds",
+                           "Compiled bounding sphere exceeds the finite mesh format.");
+    }
 
     std::ofstream outFile(output_path, std::ios::binary);
     if (!outFile) {
