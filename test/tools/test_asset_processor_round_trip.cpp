@@ -15,9 +15,12 @@
 // stb_image declarations only; the implementation is compiled into
 // asset_processor.cpp which is linked into this test executable.
 #include "stb_image.h"
+#include "stb_image_write.h"
 
 void process_gltf(const std::string& input_path, const std::string& output_path);
 bool process_texture(const std::string& input_path, const std::string& output_path);
+bool process_gltf_checked(const std::string& input_path, const std::string& output_path);
+int asset_processor_main(int argc, char* argv[]);
 
 namespace {
 
@@ -74,6 +77,14 @@ public:
 private:
     std::filesystem::path path_;
 };
+
+int Import(std::vector<std::string> arguments) {
+    arguments.insert(arguments.begin(), "asset_processor");
+    std::vector<char*> argv;
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    return asset_processor_main(static_cast<int>(argv.size()), argv.data());
+}
 
 template<typename T>
 BufferView AppendValues(std::vector<unsigned char>& buffer, const std::vector<T>& values) {
@@ -301,6 +312,58 @@ TEST(AssetProcessorRoundTrip, WritesCombinedLmeshThatCanBeReadBack) {
         std::all_of(referenced.begin(), referenced.end(), [](bool value) { return value; }));
 }
 
+TEST(AssetProcessorRoundTrip, AppliesMaterialTextureTransformAndItsUvSetOverride) {
+    TempDirectory temp;
+    const auto input = temp.path() / "transformed.gltf";
+    const auto output = temp.path() / "transformed.lmesh";
+    auto expected = WriteTwoPrimitiveGltf(input);
+    std::ifstream source(input);
+    std::string json((std::istreambuf_iterator<char>(source)), {});
+    source.close();
+    const std::string attribute = "\"TEXCOORD_0\": 2}, \"indices\": 3";
+    const auto location = json.find(attribute);
+    ASSERT_NE(location, std::string::npos);
+    json.replace(location,
+                 attribute.size(),
+                 "\"TEXCOORD_0\": 2, \"TEXCOORD_1\": 6}, \"indices\": 3, \"material\": 0");
+    json.insert(1, R"(
+      "extensionsUsed": ["KHR_texture_transform"],
+      "images": [{"uri": "unused.png"}],
+      "textures": [{"source": 0}],
+      "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {
+        "index": 0, "texCoord": 0, "extensions": {"KHR_texture_transform": {
+          "texCoord": 1, "offset": [0.25, 0.5], "scale": [2, 3], "rotation": 1.5707963267948966
+        }}
+      }}}],
+    )");
+    std::ofstream modified(input);
+    modified << json;
+    modified.close();
+    expected[0].uv = {0.25f, 2.5f};
+    expected[1].uv = {-2.75f, 2.5f};
+    expected[2].uv = {-2.75f, 0.5f};
+    ASSERT_TRUE(process_gltf_checked(input.string(), output.string()));
+    const auto mesh = ReadLmesh(output);
+    ASSERT_EQ(mesh.vertices.size(), expected.size());
+    for (const auto& vertex : expected)
+        EXPECT_TRUE(
+            std::any_of(mesh.vertices.begin(), mesh.vertices.end(), [&](const Vertex& actual) {
+                return MatchesVertex(actual, vertex);
+            }));
+}
+
+TEST(AssetProcessorRoundTrip, CommandReportsMissingInputAndLodWriteFailure) {
+    TempDirectory temp;
+    const auto input = temp.path() / "source.gltf";
+    const auto output = temp.path() / "mesh.lmesh";
+    EXPECT_NE(Import({input.string(), output.string()}), 0);
+    EXPECT_FALSE(std::filesystem::exists(output));
+    WriteTwoPrimitiveGltf(input);
+    std::filesystem::create_directory(temp.path() / "mesh.lod1.lmesh");
+    EXPECT_NE(Import({input.string(), output.string(), "--emit-lods"}), 0);
+    EXPECT_TRUE(std::filesystem::is_regular_file(output));
+}
+
 // ---------------------------------------------------------------------------
 //.ltex texture round-trip
 // ---------------------------------------------------------------------------
@@ -483,4 +546,67 @@ TEST(LtexRoundTrip, GradientMip0RoundTripsExactly) {
     EXPECT_EQ(0,
               std::memcmp(image.mips.front().pixels.data(), png, image.mips.front().pixels.size()));
     stbi_image_free(png);
+}
+
+TEST(LtexRoundTrip, MaterialColorMipsFilterInLinearLight) {
+    TempDirectory temp;
+    const auto input = temp.path() / "contrast.png";
+    const auto output = temp.path() / "contrast.ltex";
+    const std::array<uint8_t, 16> pixels = {
+        0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255};
+    ASSERT_NE(stbi_write_png(input.string().c_str(), 2, 2, 4, pixels.data(), 8), 0);
+    ASSERT_EQ(Import({input.string(), output.string(), "--srgb"}), 0);
+    const auto image = ReadLtex(output);
+    ASSERT_EQ(image.mips.size(), 2u);
+    for (int channel = 0; channel < 3; ++channel)
+        EXPECT_NEAR(image.mips.back().pixels[channel], 188, 1);
+    EXPECT_EQ(image.mips.back().pixels[3], 255);
+    ASSERT_EQ(Import({input.string(), output.string(), "--linear"}), 0);
+    const auto linear = ReadLtex(output);
+    for (int channel = 0; channel < 3; ++channel)
+        EXPECT_NEAR(linear.mips.back().pixels[channel], 128, 1);
+}
+
+TEST(LtexRoundTrip, NormalMipsStayLinearAndUnitLength) {
+    TempDirectory temp;
+    const auto input = temp.path() / "normal.png";
+    const auto output = temp.path() / "normal.ltex";
+    const std::array<uint8_t, 16> pixels = {
+        255, 128, 128, 255, 128, 255, 128, 255, 255, 128, 128, 255, 128, 255, 128, 255};
+    ASSERT_NE(stbi_write_png(input.string().c_str(), 2, 2, 4, pixels.data(), 8), 0);
+    ASSERT_EQ(Import({input.string(), output.string(), "--normal-map"}), 0);
+    const auto image = ReadLtex(output);
+    ASSERT_EQ(image.mips.size(), 2u);
+    const auto& normal = image.mips.back().pixels;
+    EXPECT_NEAR(normal[0], 218, 1);
+    EXPECT_NEAR(normal[1], 218, 1);
+    EXPECT_NEAR(normal[2], 128, 1);
+}
+
+TEST(LtexRoundTrip, LeafCutoutUsesAuthoredOpacityRegardlessOfColor) {
+    TempDirectory temp;
+    const auto input = temp.path() / "albedo.png";
+    const auto mask = temp.path() / "mask.png";
+    const auto output = temp.path() / "leaf.ltex";
+    // All-black leaf color must retain opaque portions of its authored mask.
+    std::array<uint8_t, 8 * 8 * 4> pixels{};
+    std::array<uint8_t, 8 * 8> opacity{};
+    for (size_t i = 0; i < opacity.size(); ++i) {
+        pixels[i * 4 + 3] = 255;
+        opacity[i] = i % 8 < 4 ? 255 : 0;
+    }
+    ASSERT_NE(stbi_write_png(input.string().c_str(), 8, 8, 4, pixels.data(), 32), 0);
+    ASSERT_NE(stbi_write_png(mask.string().c_str(), 8, 8, 1, opacity.data(), 8), 0);
+    ASSERT_EQ(Import({input.string(), output.string(), "--alpha-mask", mask.string()}), 0);
+    const auto image = ReadLtex(output);
+    ASSERT_EQ(image.mips.size(), 4u);
+    for (const auto& mip : image.mips) {
+        if (mip.width == 1)
+            continue; // A single texel cannot express half coverage with a binary cutoff.
+        size_t covered = 0;
+        for (size_t i = 3; i < mip.pixels.size(); i += 4)
+            covered += mip.pixels[i] >= 128;
+        EXPECT_EQ(covered, static_cast<size_t>(mip.width * mip.height / 2));
+    }
+    EXPECT_NE(Import({input.string(), output.string(), "--alpha-mask", "missing.png"}), 0);
 }
