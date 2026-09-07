@@ -90,6 +90,7 @@ defined by the [SHIELD SDF contract](docs/shield/sdf-contract.md).
 - [Development and testing](docs/development.md)
 - [Performance measurement](docs/performance.md)
 - [Visual regression](docs/visual-regression.md)
+- [Blender authoring probes and service mock](tools/blender/authoring/README.md)
 - [Contributing](CONTRIBUTING.md)
 
 API documentation is built with Doxygen in CI and published from the validated
