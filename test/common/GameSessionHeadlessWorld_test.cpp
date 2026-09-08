@@ -7,8 +7,20 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include "luminumbra_client/rendering/TimeOfDayModel.h"
+#include "luminumbra_common/ai/CircadianSystem.h"
+#include "luminumbra_common/ai/EcologyHash.h"
+#include "luminumbra_common/ai/MigrationSystem.h"
+#include "luminumbra_common/ai/StimulusChannels.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/PlantGrowthSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 
 #include <nlohmann/json.hpp>
 
@@ -262,4 +274,297 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsRefusedOnLoad) {
     jobs.shutdown();
 }
 
+} // namespace
+
+namespace {
+namespace P = Luminumbra::Persistence;
+namespace C = Luminumbra::Components;
+namespace F = luminumbra::foliage;
+
+std::string ReadClockTestFile(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << input.rdbuf();
+    return bytes.str();
+}
+
+std::string SessionWorldHash(GameSession& session) {
+    Luminumbra::WorldStreamingState state;
+    for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
+        state.insert_chunk(chunk);
+    std::string aether = session.GetAetherFieldSystem()->ComputeAetherSubHash();
+    const auto energy = session.ComputeAetherStateSubHash();
+    if (!energy.empty())
+        aether = P::StableChecksum(aether + "|state:" + energy);
+    return P::ComposeWorldHash(P::ComputeWorldStreamingStateHash(state),
+                               session.GetWindFieldSystem()->ComputeWindSubHash(),
+                               session.GetWeatherSystem()->ComputeWeatherSubHash(),
+                               aether,
+                               session.ComputeScentSubHash(),
+                               session.FoldClockIntoEcologyHash(
+                                   luminumbra::ai::ComputeEcologySubHash(session.GetRegistry())),
+                               session.ComputePlantSubHash());
+}
+
+entt::entity ClockTestPlant(entt::registry& registry, const Luminumbra::Vec3& position) {
+    const auto plant = registry.create();
+    registry.emplace<C::PlantTag>(plant);
+    registry.emplace<C::PlantGenomeComponent>(plant).genes.fill(0.5f);
+    registry.emplace<C::PlantGrowthComponent>(plant);
+    registry.emplace<C::TransformComponent>(plant).position = position;
+    return plant;
+}
+
+TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, control, loaded;
+    for (auto* session : {&original, &control, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetAetherStateEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Clock saved", "1337", "default"));
+    ASSERT_TRUE(control.CreateTransientWorld("Clock control", "1337", "default"));
+    for (auto* session : {&original, &control}) {
+        ClockTestPlant(session->GetRegistry(), session->GetMetadata().spawnPoint);
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    constexpr int n = 317, k = 73;
+    const double dt = original.GetSimulationClock().fixed_dt();
+    for (int i = 0; i < n; ++i) {
+        ASSERT_EQ(original.TickSimulation(dt), 1u);
+        ASSERT_EQ(control.TickSimulation(dt), 1u);
+    }
+    ASSERT_FALSE(original.GetWeatherSystem()->StormCells().empty());
+    // Exercise nonempty energy epoch restoration with a deposit on the last tick.
+    for (auto* session : {&original, &control}) {
+        auto* energy = session->GetEnergyFieldState();
+        energy->QueueDeposit(1, 0, 0, 0, 60000);
+        energy->Tick(n);
+    }
+    ASSERT_FALSE(original.ComputeAetherStateSubHash().empty());
+    const auto before_save = SessionWorldHash(original);
+    ASSERT_TRUE(original.SaveWorldState());
+    EXPECT_EQ(SessionWorldHash(original), before_save);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetSimulationTickCount(), n);
+    EXPECT_EQ(SessionWorldHash(loaded), before_save);
+    EXPECT_EQ(loaded.GetWeatherSystem()->ComputeWeatherSubHash(),
+              original.GetWeatherSystem()->ComputeWeatherSubHash());
+    const auto& saved_storms = original.GetWeatherSystem()->StormCells();
+    const auto& loaded_storms = loaded.GetWeatherSystem()->StormCells();
+    ASSERT_EQ(saved_storms.size(), loaded_storms.size());
+    for (std::size_t i = 0; i < saved_storms.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(saved_storms[i].spawn_tick, loaded_storms[i].spawn_tick);
+        EXPECT_EQ(saved_storms[i].center_world, loaded_storms[i].center_world);
+        EXPECT_EQ(saved_storms[i].velocity, loaded_storms[i].velocity);
+        EXPECT_EQ(saved_storms[i].intensity, loaded_storms[i].intensity);
+    }
+    for (int i = 0; i < k; ++i) {
+        ASSERT_EQ(original.TickSimulation(dt), 1u);
+        ASSERT_EQ(control.TickSimulation(dt), 1u);
+        ASSERT_EQ(loaded.TickSimulation(dt), 1u);
+    }
+    EXPECT_EQ(loaded.GetSimulationTickCount(), n + k);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
+    EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(control));
+    // Clock bytes are evolution-relevant even in a world with no creatures.
+    EXPECT_NE(loaded.FoldClockIntoEcologyHash(""),
+              P::StableChecksum(Luminumbra::world::WorldClock(n + k - 1).canonical_bytes()));
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     ActiveClockWritesMetadataWithoutDirtyChunksAndExplicitLoadsRestoreIt) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Empty clock", "1337", "default"));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    const auto alternate = root.path() / "explicit-snapshot";
+    ASSERT_TRUE(session.SaveWorldStateTo(alternate));
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(alternate / "world_info.json"));
+    EXPECT_EQ(metadata.at("simulationTick"), 1u);
+    EXPECT_FALSE(fs::exists(alternate / "chunks"));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(session.LoadWorldStateFrom(alternate));
+    EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+    EXPECT_EQ(session.GetWorldClock().calendar(), Luminumbra::world::WorldCalendar{});
+    ASSERT_TRUE(session.SaveWorld());
+    const auto inspected = P::InspectSavedWorld(root.path(), session.GetMetadata().worldId);
+    EXPECT_TRUE(inspected.error.empty());
+    EXPECT_EQ(inspected.clock.tick(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, ClockSnapshotsRefuseInsideCatchUpBatch) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Boundary", "1337", "default"));
+    const auto metadata = session.GetWorldSaveDir() / "world_info.json";
+    const auto before = ReadClockTestFile(metadata);
+    int callbacks = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        ++callbacks;
+        EXPECT_EQ(session.GetSimulationTickCount(), event.tick);
+        EXPECT_FALSE(session.IsSimulationTickBoundary());
+        EXPECT_FALSE(session.SaveWorld());
+        EXPECT_FALSE(session.SaveWorldState());
+        EXPECT_FALSE(session.SaveWorldStateTo(root.path() / "reentrant-save"));
+        EXPECT_EQ(ReadClockTestFile(metadata), before);
+    });
+    session.GetSimulationEventBus().publish(1, "save", "");
+    session.GetSimulationEventBus().publish(2, "save", "");
+    EXPECT_EQ(session.TickSimulation(2 * session.GetSimulationClock().fixed_dt()), 2u);
+    EXPECT_EQ(callbacks, 2);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(metadata)).at("simulationTick"), 2u);
+}
+
+TEST(GameSessionHeadlessWorldTest, DefaultOffKeepsLegacyMetadataBytesAndTickZeroLoad) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    for (auto* s : {&session, &loaded}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(session.CreateWorld("Legacy clock", "1337", "default"));
+    const auto path = session.GetWorldSaveDir() / "world_info.json";
+    const auto before = ReadClockTestFile(path);
+    const auto& m = session.GetMetadata();
+    const nlohmann::json legacy = {
+        {"container_version", 2},
+        {"name", m.name},
+        {"seed", m.seed},
+        {"worldType", m.worldType},
+        {"creationTime", m.creationTime},
+        {"spawnPoint", {{"x", m.spawnPoint.x}, {"y", m.spawnPoint.y}, {"z", m.spawnPoint.z}}},
+        {"waterSimCursor", std::size_t{0}}};
+    EXPECT_EQ(before, legacy.dump(4) + "\n");
+    for (int i = 0; i < 10; ++i)
+        session.TickSimulation(session.GetSimulationClock().fixed_dt());
+    EXPECT_EQ(session.FoldClockIntoEcologyHash("legacy-ecology"), "legacy-ecology");
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(ReadClockTestFile(path), before);
+    ASSERT_TRUE(loaded.LoadWorld(m.worldId));
+    EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(ReadClockTestFile(path), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTickPath) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Phases", "1337", "default"));
+    const auto id = session.GetMetadata().worldId;
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    struct Pin {
+        std::uint64_t tick;
+        float day, year, daylight, warmth;
+    };
+    for (const auto pin : {Pin{9000, .25f, .03125f, .575f, .0625f},
+                           Pin{18000, .5f, .0625f, 1.0f, .125f},
+                           Pin{36000, 0, .125f, .15f, .25f},
+                           Pin{72000, 0, .25f, .15f, .5f},
+                           Pin{144000, 0, .5f, .15f, 1},
+                           Pin{216000, 0, .75f, .15f, .5f},
+                           Pin{288000, 0, 0, .15f, 0}}) {
+        SCOPED_TRACE(pin.tick);
+        Luminumbra::world::WorldClock(pin.tick - 1).write_metadata(metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+        ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+        const auto position = session.GetMetadata().spawnPoint;
+        const auto plant = ClockTestPlant(session.GetRegistry(), position);
+        const auto creature = session.GetRegistry().create();
+        session.GetRegistry().emplace<C::CircadianComponent>(creature);
+        session.GetRegistry().emplace<C::MigratoryComponent>(creature);
+        session.GetRegistry().emplace<C::TransformComponent>(creature).position =
+            Luminumbra::Vec3(0);
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        const auto& clock = session.GetWorldClock();
+        EXPECT_FLOAT_EQ(static_cast<float>(clock.day_phase(pin.tick)), pin.day);
+        EXPECT_FLOAT_EQ(static_cast<float>(clock.year_phase(pin.tick)), pin.year);
+        EXPECT_FLOAT_EQ(session.GetRegistry().get<C::CircadianComponent>(creature).activity,
+                        luminumbra::ai::CircadianActivity(pin.day, false));
+        const float spring = pin.year >= .25f ? pin.year - .25f : pin.year + .75f;
+        const auto target = luminumbra::ai::MigrationTargetAt(spring);
+        const auto& migration = session.GetRegistry().get<C::MigratoryComponent>(creature);
+        EXPECT_FLOAT_EQ(migration.drive, luminumbra::ai::MigrationDriveAt(spring));
+        const float length =
+            Luminumbra::DeterministicMath::Sqrt(target.x * target.x + target.z * target.z);
+        EXPECT_NEAR(migration.wish_x, target.x / length * migration.drive, 1e-6f);
+        EXPECT_NEAR(migration.wish_z, target.z / length * migration.drive, 1e-6f);
+        luminumbra::ai::StimulusContext context;
+        context.tick = pin.tick;
+        context.world_clock = &clock;
+        EXPECT_FLOAT_EQ(luminumbra::ai::StimulusChannelRegistry(context).Sample(
+                            luminumbra::ai::StimulusChannel::TimeOfDay),
+                        session.GetRegistry().get<C::CircadianComponent>(creature).activity);
+        const auto sky = Luminumbra::Rendering::ComputeSeason(clock);
+        EXPECT_FLOAT_EQ(sky.phase, spring);
+        EXPECT_FLOAT_EQ(Luminumbra::Rendering::TimeOfDayFromWorldClock(clock),
+                        pin.day >= .5f ? pin.day - .5f : pin.day + .5f);
+
+        // Independent one-tick plant reference: pinned light/season values,
+        // with the same terrain and rain samples but no session calendar math.
+        F::PlantEnvSample env;
+        auto* world = session.GetWorldSystem();
+        const float height = world->GetTerrainHeightAt(position.x, position.z);
+        switch (world->SurfaceVertexMaterial(position.x, position.z, height)) {
+            case Luminumbra::MaterialType::Grass:
+                env.soil_quality = .95f;
+                break;
+            case Luminumbra::MaterialType::Soil:
+                env.soil_quality = .85f;
+                break;
+            case Luminumbra::MaterialType::Sand:
+                env.soil_quality = .45f;
+                break;
+            case Luminumbra::MaterialType::Stone:
+                env.soil_quality = .30f;
+                break;
+            default:
+                env.soil_quality = .25f;
+                break;
+        }
+        env.temperature = F::clamp01(
+            F::clamp01(.60f - std::max(0.0f, height - static_cast<float>(Luminumbra::SEA_LEVEL)) *
+                                  .00045f) +
+            (pin.warmth - .5f) * .30f);
+        env.light = pin.daylight;
+        env.moisture =
+            F::clamp01(.30f + session.GetWeatherSystem()->PrecipitationAt(position) * .70f);
+        entt::registry expected;
+        const auto reference = ClockTestPlant(expected, position);
+        F::RunPlantGrowthSystemOnTick(expected, pin.tick, [&](const auto&) { return env; });
+        const auto& actual = session.GetRegistry().get<C::PlantGrowthComponent>(plant);
+        const auto& wanted = expected.get<C::PlantGrowthComponent>(reference);
+        EXPECT_EQ(actual.growth_points, wanted.growth_points);
+        EXPECT_EQ(actual.stress_points, wanted.stress_points);
+        EXPECT_EQ(actual.last_tick, pin.tick);
+    }
+}
 } // namespace

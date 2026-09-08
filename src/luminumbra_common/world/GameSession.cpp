@@ -1104,7 +1104,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 
     // unlike the re-derivable trio above, the stateful
     // energy layer is AUTHORITATIVE state — when enabled, a persisted record
-    // restores it (epoch-rebased onto the loaded tick base of 0); an absent
+    // restores it (epoch-rebased onto the session clock); an absent
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
     if (m_energyFieldState) {

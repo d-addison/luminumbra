@@ -625,15 +625,18 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         }
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
+        const std::uint64_t simulation_tick = m_session->ActiveRegionsEnabled()
+                                                  ? m_session->GetSimulationTickCount()
+                                                  : report.ticks_executed;
 
         // Supply the simulation tick to the activation queue so dispatched
         // batches receive deterministic due ticks.
-        world_system->begin_tick(static_cast<std::int64_t>(report.ticks_executed));
+        world_system->begin_tick(static_cast<std::int64_t>(simulation_tick));
         // Drive activation-latency telemetry from the same tick base used by
         // the availability digest.
         // Observability only — gated on --avail-trace like the digest itself.
         if (m_config.availability_trace) {
-            world_system->begin_tick_shadow(static_cast<std::int64_t>(report.ticks_executed));
+            world_system->begin_tick_shadow(static_cast<std::int64_t>(simulation_tick));
         }
 
         // Spawn-anchor streaming, then quiesce in-flight generation/meshing
@@ -698,7 +701,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         {
             LUMIN_PROFILE_ZONE_N(
                 "streaming_activate_due"); // the p99 latency the queue exists to shrink
-            world_system->activate_due(static_cast<std::int64_t>(report.ticks_executed));
+            world_system->activate_due(static_cast<std::int64_t>(simulation_tick));
         }
         const double _wait_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0)
@@ -721,8 +724,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                                             world_system->debug_water_state_hash().hash);
         }
 
-        if (m_config.autosave_interval_ticks > 0 && report.ticks_executed > 0 &&
-            (report.ticks_executed % m_config.autosave_interval_ticks) == 0) {
+        if (m_config.autosave_interval_ticks > 0 && simulation_tick > 0 &&
+            (simulation_tick % m_config.autosave_interval_ticks) == 0) {
             world::WorldStateSaveReport save_report;
             if (m_session->SaveWorldState(&save_report)) {
                 report.autosave_passes += 1;
