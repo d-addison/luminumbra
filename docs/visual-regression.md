@@ -104,6 +104,36 @@ Pin a threshold against a known-good vs known-bad pair when you add a new golden
 
 ## Self-test
 
+The frontier gate imports `tools/gates/capture-artifact-validation.ps1` for
+file-only P6 and runtime capture-size checks. Its adversarial fixtures run in a
+clean shell, without launching the engine or removing any gate output:
+
+```powershell
+powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/gates/test-capture-artifact-validation.ps1
+```
+
+CTest registers `CaptureArtifactValidationContract` when PowerShell is available.
+The helper accepts bounded binary P6 RGB images with maxval 255, header comments,
+and LF/CRLF separators. It requires the complete raster with no extra bytes and
+preserves whitespace and `#` pixel values at the start of the raster. Structural
+limits are 16,384 pixels per dimension and 128 megapixels; these are parser bounds,
+not supported render-resolution claims.
+
+`Assert-CapturePinned` validates typed `luminumbra.runtime_state.v1` metadata against
+the source-owned `runtime_scenario_v1` profile (3840 by 1600). The test checks for
+drift from `RuntimeScenarioConfig.h`. New resolution profiles require an explicit
+trusted source declaration; producer metadata cannot declare its own expected
+size. Every frontier pin call supplies its exact screenshot paths, validates their
+dimensions, and refuses files outside that run's artifact directory or reached
+through links. The positional `Assert-PpmArtifact <Path>` and metadata-only
+`Assert-CapturePinned -ArtifactDir <dir> -Name <scenario>` interfaces remain usable;
+the latter alone does not join any screenshot.
+
+These checks establish file structure, dimensions, and the latest recorded pin
+state. They do not establish capture-frame identity, acquisition provenance,
+camera or lighting fidelity, performance acceptance, or visual approval. Missing
+receipts are not synthesized and no golden is updated by this validation.
+
 `flip_diff.py --selftest` synthesizes an image, diffs it **against itself on
 every available backend** (must score `0`), confirms a deliberately perturbed
 copy scores `> 0`, and round-trips a heatmap. Run it in CI to prove the harness
