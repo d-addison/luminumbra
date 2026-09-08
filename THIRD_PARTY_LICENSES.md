@@ -47,6 +47,11 @@ The upstream generator expressions and explicit fused operations are retained.
 | [GoogleTest](https://github.com/google/googletest) | Unit and integration test framework | BSD-3-Clause |
 | [LZ4](https://github.com/lz4/lz4) | Fast compression | BSD-2-Clause |
 
+The stb resize header receives a local coefficient-copy correction in a private
+generated build header. `cmake/stb_resize.cmake` checks the pinned upstream header
+and replaces two unaligned integer-copy macros with overlap-safe byte copies.
+The fetched source, filtering arithmetic and SIMD paths are retained.
+
 ---
 
 ## Redistributed assets
