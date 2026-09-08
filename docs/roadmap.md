@@ -9,7 +9,7 @@ There are no assigned due dates or invented completion percentages.
 - **Released:** engine v0.2.1; separate game Tree Small 02 source/runtime packs
   `tree-small-02-source-v1.0.0` and `tree-small-02-runtime-v1.0.0`.
 - **Implemented, awaiting final integration/acceptance:** candidate `2c32211`
-  (repair branch, PR #56) contains devel `fdb16a8` plus asynchronous catalog
+  (repair branch, [#56](https://github.com/d-addison/luminumbra/pull/56)) contains devel `fdb16a8` plus asynchronous catalog
   validation, saved-world selection/loading, content acquisition, culling/no-UI and
   rendering repairs, the local-player feet-origin correction, explicit MSVC terrain
   arithmetic, validated source-release inventory, the benchmark camera/time
