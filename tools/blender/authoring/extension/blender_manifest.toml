@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "luminumbra_geometry_author"
-version = "0.1.0"
+version = "0.2.0"
 name = "Luminumbra Geometry Author"
 tagline = "Build marked geometry assets with installed engine tools"
 maintainer = "David Addison"

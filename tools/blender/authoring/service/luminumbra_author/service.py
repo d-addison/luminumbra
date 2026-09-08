@@ -17,10 +17,11 @@ import zipfile
 
 from . import VERSION
 from .contracts import (ASSET, GENERATION, MAX_DOCUMENT, MAX_OUTPUT, MAX_SNAPSHOT,
-                        PROFILE, RECEIPT, Refusal, Toolchain, atomic_json, canonical,
+                        PROFILE, PREFAB_PROFILE, RECEIPT, Refusal, Toolchain, atomic_json, canonical,
                         digest, file_digest, read_bounded, read_json, relative_path,
                         require, validate_asset)
-from .formats import clip_info, mesh_info, validate_glb
+from .formats import clip_info, mesh_info, texture_info, validate_glb
+from .prefab import PrefabPlan, SCHEMA as PREFAB_SCHEMA, encode_glb
 from .locking import ProjectLock
 
 TERMINAL = {"succeeded", "failed", "cancelled", "stale"}
@@ -98,10 +99,11 @@ class BuildService:
                 self._save(job)
 
     def capabilities(self):
-        return {"version": VERSION, "protocol": 1, "mode": "NATIVE", "profiles": [PROFILE],
-                "schemas": [ASSET], "engine_compilation": True, "engine_preview": False,
-                "graph_execution": False, "material_binding": False, "prefab_hierarchy": False,
+        return {"version": VERSION, "protocol": 1, "mode": "NATIVE", "profiles": [PROFILE, PREFAB_PROFILE],
+                "schemas": [ASSET, PREFAB_SCHEMA], "engine_compilation": True, "engine_preview": False,
+                "graph_execution": False, "material_binding": True, "prefab_hierarchy": True,
                 "source_revision_guards": True,
+                "static_prefab_compilation": True, "prefab_runtime_instantiation": False,
                 "operations": ["capabilities", "registry", "validate", "build", "job.status",
                                "job.cancel", "generation.inspect"],
                 "toolchain": self.toolchain.document, "max_snapshot_bytes": MAX_SNAPSHOT,
@@ -140,7 +142,12 @@ class BuildService:
         return asset, files, hashes
 
     def validate(self, source):
-        asset, _, hashes = self._snapshot(source)
+        asset, files, hashes = self._snapshot(source)
+        if asset["profile"] == PREFAB_PROFILE:
+            plan = PrefabPlan(files[asset["source"]], asset["asset_id"])
+            return {"asset_id": asset["asset_id"], "revision": asset["revision"],
+                    "input_hashes": hashes, "findings": [], "nodes": len(plan.description["nodes"]),
+                    "parts": len(plan.tasks), "scope": "Static prefab contracts; build validates native outputs."}
         return {"asset_id": asset["asset_id"], "revision": asset["revision"],
                 "input_hashes": hashes, "findings": [],
                 "scope": "Sidecar and GLB containment; build performs native geometry validation."}
@@ -181,11 +188,12 @@ class BuildService:
             self._save(self.jobs[job_id])
 
     def _compile(self, job_id, input_path, outputs, emit_lods):
-        directory = outputs.parent
+        self._invoke(job_id, input_path, outputs / "asset.lmesh", ["--emit-lods"] if emit_lods else [])
+
+    def _invoke(self, job_id, input_path, output_path, arguments):
+        directory = output_path.parent.parent
         result_path = directory / "compiler.json"
-        command = [str(self.toolchain.processor), str(input_path), str(outputs / "asset.lmesh")]
-        if emit_lods:
-            command.append("--emit-lods")
+        command = [str(self.toolchain.processor), str(input_path), str(output_path), *arguments]
         env = os.environ.copy()
         # The source invocation and the installed zipapp use the same worker.
         if not zipfile.is_zipfile(Path(sys.argv[0]).resolve()):
@@ -218,6 +226,49 @@ class BuildService:
             except subprocess.TimeoutExpired:
                 worker.kill()
                 worker.wait()
+
+    def _compile_prefab(self, job_id, outputs, plan):
+        parts = []
+        for index, (name, task) in enumerate(sorted(plan.tasks.items())):
+            self._check_cancelled(job_id)
+            payload = encode_glb(task["payload"], plan.binary) if task["kind"] == "mesh" else task["payload"]
+            path = outputs.parent / (f"part-{index:04d}.glb" if task["kind"] == "mesh" else f"part-{index:04d}.image")
+            path.write_bytes(payload)
+            expected = digest(payload)
+            try:
+                self._invoke(job_id, path, outputs / name, task["arguments"])
+                require(file_digest(path) == expected, "input.corrupt", "Compiler changed a derived source part.")
+            finally:
+                path.unlink(missing_ok=True)
+            parts.append({"output": name, "input_sha256": expected, "arguments": task["arguments"]})
+            self._change(job_id, compiled_parts=parts)
+            require(sum(p.stat().st_size for p in outputs.iterdir()) <= MAX_OUTPUT,
+                    "output.limit", "Compiled prefab exceeds the output budget.")
+        atomic_json(outputs / "prefab.json", plan.description)
+
+    def _prefab_outputs(self, directory, plan):
+        paths = list(directory.iterdir())
+        require({p.name for p in paths} == set(plan.tasks) | {"prefab.json"},
+                "output.prefab_members", "Unexpected or missing prefab output.")
+        result, total = {}, 0
+        for path in sorted(paths):
+            require(path.is_file() and not path.is_symlink(), "output.path", "Invalid compiled prefab member.")
+            data = read_bounded(path, MAX_OUTPUT - total)
+            total += len(data)
+            if path.name == "prefab.json":
+                require(read_json(path) == plan.description, "output.prefab", "Prefab descriptor changed during compilation.")
+                info = {"format": "PREFAB", "schema": PREFAB_SCHEMA, "nodes": len(plan.description["nodes"]),
+                        "meshes": len(plan.meshes), "materials": len(plan.materials), "bytes": len(data)}
+            elif plan.tasks[path.name]["kind"] == "mesh":
+                info = mesh_info(data)
+                require(info["format"] == "LMSH", "output.prefab_skin", "Static prefab produced a skinned mesh.")
+                info.pop("joint_ids")
+            else:
+                info = texture_info(data)
+                require([info["width"], info["height"]] == plan.tasks[path.name]["dimensions"],
+                        "output.texture_dimensions", "Compiler changed the texture dimensions.")
+            result[path.name] = {**info, "sha256": digest(data)}
+        return result
 
     def _outputs(self, directory):
         paths = list(directory.iterdir())
@@ -260,9 +311,9 @@ class BuildService:
             # Hash exact service code as well as the executable/library manifest.
             service_hashes = {name: digest(pkgutil.get_data(__package__, name)) for name in (
                 "__init__.py", "__main__.py", "contracts.py", "formats.py",
-                "locking.py", "process.py", "service.py")}
+                "locking.py", "process.py", "service.py", "prefab.py")}
             identity = digest(canonical({"inputs": hashes, "toolchain": toolchain,
-                                         "service": service_hashes, "profile": PROFILE,
+                                         "service": service_hashes, "profile": asset["profile"],
                                          "host": self.host_profile}))
             self._change(job_id, status="compiling", asset_id=asset["asset_id"], input_hashes=hashes,
                          build_identity=identity, toolchain=toolchain, service_hashes=service_hashes,
@@ -270,14 +321,21 @@ class BuildService:
             outputs = directory / "outputs"
             outputs.mkdir()
             check()
-            self._compile(job_id, input_path, outputs, asset.get("settings", {}).get("emit_lods", False))
+            plan = None
+            if asset["profile"] == PREFAB_PROFILE:
+                require(not asset.get("settings", {}).get("emit_lods"), "prefab.lods",
+                        "Prefab LOD policies need an explicit reduction recipe.")
+                plan = PrefabPlan(files[asset["source"]], asset["asset_id"])
+                self._compile_prefab(job_id, outputs, plan)
+            else:
+                self._compile(job_id, input_path, outputs, asset.get("settings", {}).get("emit_lods", False))
             check()
             self.toolchain.verify()
             require(file_digest(input_path) == hashes[asset["source"]],
                     "input.corrupt", "Compiler input snapshot changed.")
             for expected in hashes.values():
                 require(file_digest(inputs / expected) == expected, "input.corrupt", "Input snapshot changed.")
-            validated = self._outputs(outputs)
+            validated = self._prefab_outputs(outputs, plan) if plan else self._outputs(outputs)
             manifest = {"schema": GENERATION, "mode": "NATIVE", "job_id": job_id,
                         "asset_id": asset["asset_id"], "revision": asset["revision"],
                         "build_identity": identity, "input_hashes": hashes, "outputs": validated}
