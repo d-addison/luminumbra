@@ -150,3 +150,6 @@ therefore does not affect `world_hash`. The legacy default preset stays
 byte-identical (`--smoke == 6f008a9f637c40b7`). The golden images live under a
 `goldens/` tree you choose; they are not part of the deterministic sim contract,
 they are the *visual* contract that sits alongside it.
+
+For controlled foliage stills, receipt semantics and the remaining full-gate
+requirements, see [Foliage control and capture validation](foliage-visual-validation.md).
