@@ -13,6 +13,7 @@ RECEIPT = "luminumbra.authoring.receipt.v1"
 GENERATION = "luminumbra.authoring.generation.v1"
 TOOLCHAIN = "luminumbra.authoring.toolchain.v1"
 PROFILE = "glb-geometry-v1"
+PREFAB_PROFILE = "glb-static-prefab-v1"
 MAX_SNAPSHOT = 256 * 1024 * 1024
 MAX_DOCUMENT = 1024 * 1024
 MAX_OUTPUT = 256 * 1024 * 1024
@@ -118,7 +119,7 @@ def validate_asset(value):
     keys(value, ("schema", "asset_id", "revision", "profile", "source", "dependencies", "exporter"),
          ("settings", "required_schemas", "annotations", "expected_dependency_hashes"))
     require(value["schema"] == ASSET, "schema.unsupported", "Unknown required asset schema.")
-    require(value["profile"] == PROFILE, "profile.unsupported", "Unsupported compilation profile.")
+    require(value["profile"] in (PROFILE, PREFAB_PROFILE), "profile.unsupported", "Unsupported compilation profile.")
     require(isinstance(value["asset_id"], str) and ID.fullmatch(value["asset_id"]),
             "identity.invalid", "Use a stable namespaced asset ID.", "asset_id")
     require(type(value["revision"]) is int and value["revision"] >= 0,

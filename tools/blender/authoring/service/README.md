@@ -1,14 +1,16 @@
-# Installed geometry build service
+# Installed asset build service
 
 `luminumbra-author` runs an explicitly configured native `asset_processor` in a
-separate process. It snapshots source files, validates compiled meshes and clips,
+separate process. It snapshots source files, validates compiled assets,
 and publishes a generation only after the build succeeds. This optional Python
 3.11+ tool has no Blender or game dependency and uses only the standard library.
 
 The `glb-geometry-v1` profile produces flattened LMSH geometry or one-skin LMS2
 geometry with LANM clips, according to the installed compiler's qualified profile.
-It does not produce material bindings, editable prefab hierarchies, runtime
-components, graphs or engine preview frames. `capabilities` reports those limits.
+The optional [static prefab profile](PREFABS.md) preserves hierarchy and instances
+with material bindings and compiled textures. Runtime prefab instantiation,
+components, graphs and engine preview frames remain unavailable. `capabilities`
+reports those limits separately from asset compilation.
 Compiler fidelity must be qualified with the exact installed executable: pinning
 a hash does not establish that an older compiler supports a new asset feature.
 

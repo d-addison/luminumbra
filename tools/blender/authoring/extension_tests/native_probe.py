@@ -220,6 +220,54 @@ def main():
             check("eight realized foliage surfaces compiled", manifest["outputs"]["asset.lmesh"]["triangles"] == 16,
                   outputs=manifest["outputs"])
         bpy.ops.luminumbra.geometry(operation="stop")
+    for kind in ("prop", "plant"):
+        bpy.ops.object.select_all(action="SELECT")
+        bpy.ops.object.delete(use_global=False)
+        asset_collection = bpy.data.collections.new("Prefab_" + kind)
+        scene = bpy.context.scene
+        scene.collection.children.link(asset_collection)
+        layer = next(child for child in bpy.context.view_layer.layer_collection.children if child.collection == asset_collection)
+        bpy.context.view_layer.active_layer_collection = layer
+        blender_fixture.prop() if kind == "prop" else blender_fixture.plant(42)
+        for obj in asset_collection.all_objects:
+            for slot in obj.material_slots:
+                if slot.material:
+                    for node in slot.material.node_tree.nodes:
+                        if node.type == "TEX_IMAGE":
+                            node.image.colorspace_settings.name = "sRGB"
+        scene.lum_author_project = str(project)
+        scene.lum_author_python = str(args.python)
+        scene.lum_author_service = str(args.service)
+        scene.lum_author_toolchain = str(args.toolchain)
+        scene.lum_author_auto = False
+        scene.lum_author_prefab = True
+        check(kind + " prefab mark", bpy.ops.luminumbra.mark_geometry() == {"FINISHED"})
+        check(kind + " prefab build", bpy.ops.luminumbra.geometry(operation="build") == {"FINISHED"})
+        yield from wait_build()
+        check(kind + " prefab published", extension._session.state.published_revision == extension._session.state.revision,
+              status=extension._session.state.status)
+        current = json.loads((project / ".luminumbra-author/current.json").read_text())
+        directory = project / ".luminumbra-author/generations" / current["job_id"]
+        descriptor = json.loads((directory / "prefab.json").read_text())
+        check(kind + " material and texture retained", bool(descriptor["materials"])
+              and any(m["textures"] for m in descriptor["materials"].values()))
+        if kind == "prop":
+            mesh_nodes = [node for node in descriptor["nodes"] if "mesh" in node]
+            check("prefab hierarchy and shared mesh retained", len(mesh_nodes) == 2
+                  and mesh_nodes[0]["mesh"] == mesh_nodes[1]["mesh"] and all(node["parent"] for node in mesh_nodes))
+        else:
+            check("authored leaf alpha cutoff retained", any(m["alpha_mode"] == "MASK" and m["alpha_cutoff"] == .5
+                  for m in descriptor["materials"].values()))
+            shader = next(slot.material.node_tree.nodes.get("Principled BSDF") for obj in asset_collection.all_objects
+                          for slot in obj.material_slots if slot.material)
+            shader.inputs["Coat Weight"].default_value = 1
+            refused = False
+            try:
+                bpy.ops.luminumbra.geometry(operation="build")
+            except RuntimeError as error:
+                refused = "Principled" in str(error)
+            check("unsupported shader construction refused", refused)
+        bpy.ops.luminumbra.geometry(operation="stop")
     bpy.ops.preferences.addon_disable(module=module_name)
     report["passed"] = all(item["passed"] for item in checks)
     (args.output / "receipt.json").write_text(json.dumps(report, indent=2))

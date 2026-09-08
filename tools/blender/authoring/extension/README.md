@@ -1,11 +1,12 @@
-# Blender geometry authoring
+# Blender asset authoring
 
 This optional Blender extension builds a marked collection with the installed
 Luminumbra asset compiler. It provides persistent IDs, separate static/character
 export profiles, a half-second edit debounce, cancellation and compiled asset
 counts. The existing `probes/extension` package remains a separate mock.
 
-Engine-rendered viewports, material bindings, prefab runtime hierarchy, behavior
+The optional static prefab profile preserves material bindings and hierarchy in
+compiled assets. Engine-rendered viewports, prefab runtime instantiation, behavior
 graphs, morphs, retargeting, IK and physical animation remain unavailable. Build
 receipts do not qualify those workflows or production content in a composed game.
 
@@ -17,7 +18,8 @@ python tools/blender/authoring/package_extension.py /your/output/luminumbra_geom
 
 Install the ZIP through Blender's **Install from Disk**. Install the
 [authoring service](../service/README.md) separately; this adapter requires service
-0.2 or newer with `source_revision_guards`. Configure the project directory,
+0.2 or newer with `source_revision_guards` for geometry, or 0.3 for static prefabs.
+Configure the project directory,
 external Python 3.11+, installed service archive and compiler manifest in the
 **Luminumbra** sidebar of the 3D View.
 
@@ -25,7 +27,10 @@ Select a regular collection in the Outliner and click **Mark / Refresh Asset IDs
 This undoable operator assigns asset, object, mesh and material identities. It
 preserves distinct IDs, repairs copied IDs and retains shared mesh identity for
 objects using the same mesh data. Renaming an object leaves its ID unchanged.
-Click **Build Geometry** to capture and compile the collection.
+Click **Build Asset** to capture and compile the collection. Enable **Preserve
+static prefab and materials** for a static asset with hierarchy, shared geometry
+and the supported material subset described below. Leave it disabled for the
+geometry-only character profile.
 
 **Rebuild after edits** rebuilds after a half-second pause. Editing during a build
 cancels that work and advances its revision guard. Unsupported content leaves
@@ -53,6 +58,17 @@ clips over the scene range; apply non-armature modifiers beforehand. Each
 character asset contains one rig; export unskinned attachments separately.
 Shape keys, drivers, linked libraries and overrides are refused. Add UVs before
 building. The compiler enforces remaining geometry and skin budgets.
+
+Static prefabs use the service's [declared material contract](../service/PREFABS.md).
+The Blender adapter accepts an active Material Output fed directly by Principled
+BSDF, constant metallic/roughness values, a direct sRGB base-color image and an
+optional tangent Normal Map using a Non-Color image. Image vectors use the active
+render UV map without connected vector nodes. Linear/Closest interpolation and
+Repeat/Extend/Mirror extension are supported. Alpha may come from the same color
+image, directly or through one Greater Than cutoff. Additional Principled layers,
+custom specular/IOR settings, volume and displacement are refused. Bake unsupported
+shader constructions explicitly before building. Arbitrary Blender node graphs
+are not compiled into runtime shaders.
 
 The snapshot dependency closure refuses audio, scripts, movies and whole scenes.
 Unpacked images must be static files inside the project. Generated and packed

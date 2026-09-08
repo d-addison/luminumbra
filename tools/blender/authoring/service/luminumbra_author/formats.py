@@ -72,6 +72,23 @@ def finite(values):
     require(all(math.isfinite(x) for x in values), "output.nonfinite", "Nonfinite compiled attribute.")
 
 
+def texture_info(data):
+    reader = Reader(data)
+    magic, version, count, width, height, channels = reader.take("4sHHIIB")
+    require(magic == b"LTEX" and version == 1 and channels == 4
+            and 1 <= width <= 4096 and 1 <= height <= 4096,
+            "output.texture", "Expected bounded LTEX v1 RGBA8 data.")
+    w, h, levels, size = width, height, 1, width * height * 4
+    while w > 1 or h > 1:
+        w, h = max(1, w // 2), max(1, h // 2)
+        size += w * h * 4
+        levels += 1
+    require(count == levels, "output.texture_mips", "Expected a complete halving mip chain.")
+    reader.extent(size)
+    return {"format": "LTEX", "width": width, "height": height, "channels": channels,
+            "mip_levels": count, "bytes": len(data)}
+
+
 def mesh_info(data):
     reader = Reader(data)
     magic, = reader.take("4s")

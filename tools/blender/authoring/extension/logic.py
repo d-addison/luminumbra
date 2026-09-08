@@ -75,7 +75,11 @@ class BuildState:
         if result["status"] == "succeeded":
             self.published_revision = self.revision
             self.generation = result["job_id"]
-            mesh = result["outputs"]["asset.lmesh"]
-            self.metrics = f"{mesh['triangles']:,} triangles; {sum(x['bytes'] for x in result['outputs'].values()):,} compiled bytes"
+            outputs = result["outputs"]
+            if "prefab.json" in outputs:
+                self.metrics = f"{outputs['prefab.json']['nodes']:,} objects; {outputs['prefab.json']['materials']:,} materials"
+            else:
+                self.metrics = f"{outputs['asset.lmesh']['triangles']:,} triangles"
+            self.metrics += f"; {sum(x['bytes'] for x in outputs.values()):,} compiled bytes"
         elif result.get("findings"):
             self.status = result["findings"][0]["message"]
