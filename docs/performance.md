@@ -245,3 +245,8 @@ cannot replace earlier evidence. Limits are 8191 warmup plus measured frames and
 16,777,216 pixels per internal/output image. Diagnostics add CPU work during the
 run, so their timing observations are labelled instrumented and must not be used
 as ordinary-play performance results.
+
+See [Terrain coverage diagnostics](terrain-coverage-diagnostics.md) for a recorded
+same-camera guard/bypass pair, original images, provenance joins and reproduction
+commands. Its coverage findings do not qualify a production ownership policy or
+ordinary-play performance.

@@ -75,6 +75,16 @@ deficient baseline groups and zero approved groups; these images show G04 and R1
 
 [![Foliage diagnostic dominated by sky](docs/assets/visual-baselines/20260908/foliage-functional-preview.png)](docs/visual-baselines.md#foliage-diagnostic)
 
+A later [terrain coverage diagnostic](docs/terrain-coverage-diagnostics.md)
+compares the ordinary camera-region guard with an experimental bypass. The
+matched capture gains 257,075 covered pixels; the bypass is not a production fix
+and neither image has visual approval. These previews are resized; the guide
+links the unretouched full images and provenance.
+
+| Ordinary guard | Diagnostic bypass |
+|---|---|
+| [![Ordinary guard with a black terrain gap](docs/assets/terrain-coverage/20260908/forest-guard-preview.png)](docs/terrain-coverage-diagnostics.md) | [![Experimental bypass showing recovered terrain coverage](docs/assets/terrain-coverage/20260908/forest-bypass-preview.png)](docs/terrain-coverage-diagnostics.md) |
+
 ## Architecture
 
 Game code currently remains in this repository. The accepted
