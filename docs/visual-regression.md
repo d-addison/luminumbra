@@ -102,6 +102,40 @@ Thresholds are per-backend in spirit (FLIP/SSIM/luma are not the same scale).
 Pin a threshold against a known-good vs known-bad pair when you add a new golden;
 `0.05` is a reasonable starting point for FLIP/luma.
 
+## World-sweep review sheets
+
+For a completed or failed `world_visual_sweep` capture directory, run:
+
+```sh
+python tools/gates/build-visual-sweep-montages.py /your/capture-directory
+python tools/gates/test_visual_sweep_montages.py
+```
+
+The tool requires Pillow and the `luminumbra.world_visual_sweep.v1` manifest.
+It preserves the complete declared summer/winter matrix: camera columns and
+clear/storm rows never move when a capture is missing. Missing records, duplicate
+records, unproduced frames and unreadable images occupy labeled failure slots.
+Image thumbnails retain their aspect ratio. Feature sheets also retain missing
+slots; a completely absent declared season still has its own sheets.
+
+Original PPM files remain unchanged. Decoded PNGs live in `sweep/png/`; contact
+sheets and `review.json` live in `sweep/montages/`. The report records source
+manifest/image hashes, decoded PNG hashes, dimensions, current sheet hashes,
+producer failures and per-slot findings. A failed rerun removes that slot's old
+derived PNG. Use fresh capture directories for distinct runs, and use the report's
+sheet list instead of treating every older file in a reused directory as current.
+
+Exit 0 means the declared evidence set was assembled completely, exit 1 means a
+review was generated with failed/incomplete evidence, and exit 2 means invalid
+input or an I/O failure prevented assembly. A source producer failure remains a
+failure. Running the tool directly on a failed directory provides diagnostic
+sheets even when an upstream native gate has already stopped.
+
+Assembly does not establish rendered fidelity, performance or visual approval.
+Each scenario's concrete screenshots and supporting test/performance evidence
+require the owner's review before it is presented as visually accepted in the
+README or docs. The tool always labels visual approval as pending.
+
 ## Self-test
 
 `flip_diff.py --selftest` synthesizes an image, diffs it **against itself on
