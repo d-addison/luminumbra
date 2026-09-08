@@ -14,7 +14,8 @@ def dispatch(service, operation, params):
     if operation in ("capabilities", "registry"):
         keys(params, ())
         return service.capabilities() if operation == "capabilities" else {
-            "schemas": [ASSET], "components": [], "nodes": []}
+            "schemas": service.capabilities()["schemas"], "profiles": service.capabilities()["profiles"],
+            "components": [], "nodes": []}
     if operation == "validate":
         keys(params, ("source",))
         return service.validate(params["source"])

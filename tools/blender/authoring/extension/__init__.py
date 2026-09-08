@@ -31,6 +31,7 @@ class Session:
         if not self.project.is_dir() or not all(Path(value).is_file() for value in (python, service, toolchain)):
             raise ValueError("Configure an existing project, Python, installed service and toolchain manifest")
         self.asset_id = collection["luminumbra.asset_id"]
+        self.prefab = scene.lum_author_prefab
         self.scene = scene
         self.state = BuildState()
         self.sequence = 0
@@ -98,7 +99,7 @@ class Session:
         try:
             guard_hash = self.write_guard()
             request = capture(self.scene, collection, self.project, self.state.revision,
-                              self.guard, guard_hash)
+                              self.guard, guard_hash, prefab=self.prefab)
             self.state.submitted()
             self.sequence += 1
             self.pending = self.sequence
@@ -202,7 +203,7 @@ def timer():
             scene = _session.scene
             collection = scene.lum_author_collection
             if (not collection or collection.get("luminumbra.asset_id") != _session.asset_id
-                    or configuration(scene) != _session.config):
+                    or configuration(scene) != _session.config or scene.lum_author_prefab != _session.prefab):
                 stop()
                 return 0.1
             timing = _session.scene_timing()
@@ -258,7 +259,7 @@ class LUMINUMBRA_OT_geometry(bpy.types.Operator):
                 scene, collection = context.scene, context.scene.lum_author_collection
                 validate_collection(scene, collection)
                 if _session and (_session.scene != scene or _session.asset_id != collection["luminumbra.asset_id"]
-                                 or _session.config != configuration(scene)):
+                                 or _session.config != configuration(scene) or _session.prefab != scene.lum_author_prefab):
                     stop()
                 if _session is None:
                     _session = Session(scene, collection)
@@ -281,12 +282,13 @@ class LUMINUMBRA_PT_geometry(bpy.types.Panel):
         layout.label(text="Geometry builds with installed engine tools")
         layout.operator("luminumbra.mark_geometry")
         layout.prop(scene, "lum_author_collection")
+        layout.prop(scene, "lum_author_prefab")
         for name in ("project", "python", "service", "toolchain"):
             layout.prop(scene, "lum_author_" + name)
         layout.prop(scene, "lum_author_auto")
         row = layout.row()
         row.enabled = not _session or not _session.state.busy
-        row.operator("luminumbra.geometry", text="Build Geometry").operation = "build"
+        row.operator("luminumbra.geometry", text="Build Asset").operation = "build"
         if _session:
             layout.label(text=_session.state.status)
             if _session.state.metrics:
@@ -312,6 +314,7 @@ def register():
     scene.lum_author_service = bpy.props.StringProperty(name="Installed authoring service", subtype="FILE_PATH")
     scene.lum_author_toolchain = bpy.props.StringProperty(name="Toolchain manifest", subtype="FILE_PATH")
     scene.lum_author_auto = bpy.props.BoolProperty(name="Rebuild after edits", default=True)
+    scene.lum_author_prefab = bpy.props.BoolProperty(name="Preserve static prefab and materials", default=False)
     for handlers, callback in ((bpy.app.handlers.load_pre, file_changed),
                                (bpy.app.handlers.depsgraph_update_post, edited),
                                (bpy.app.handlers.undo_post, undone), (bpy.app.handlers.redo_post, undone)):
@@ -328,7 +331,7 @@ def unregister():
                                (bpy.app.handlers.undo_post, undone), (bpy.app.handlers.redo_post, undone)):
         if callback in handlers:
             handlers.remove(callback)
-    for name in ("collection", "project", "python", "service", "toolchain", "auto"):
+    for name in ("collection", "project", "python", "service", "toolchain", "auto", "prefab"):
         delattr(bpy.types.Scene, "lum_author_" + name)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)

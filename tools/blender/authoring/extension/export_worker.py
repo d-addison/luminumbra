@@ -96,7 +96,10 @@ def main():
     # canonical record-array digest is pinned by the subsequent file-level audit.
     if exporter["sha256"] != "5fe9f5ede7e5264b0a1045dc3784e243e645a90cb6073fc73ae56bc7a10de447":
         raise RuntimeError("Exporter source differs from the qualified Blender profile")
-    asset = {"schema": "luminumbra.authoring.asset.v1", "profile": "glb-geometry-v1",
+    build_profile = request.get("build_profile", "glb-geometry-v1")
+    if build_profile not in ("glb-geometry-v1", "glb-static-prefab-v1") or (build_profile == "glb-static-prefab-v1" and profile != "static"):
+        raise RuntimeError("Unsupported asset compilation profile")
+    asset = {"schema": "luminumbra.authoring.asset.v1", "profile": build_profile,
              "asset_id": request["asset_id"], "revision": request["revision"],
              "source": output.relative_to(project).as_posix(), "dependencies": sorted(dependencies),
              "expected_dependency_hashes": dependencies, "exporter": exporter,

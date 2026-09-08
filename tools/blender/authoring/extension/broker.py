@@ -129,6 +129,8 @@ class Broker:
         capabilities = self.rpc("capabilities")
         if not capabilities.get("source_revision_guards"):
             raise RuntimeError("Install authoring service 0.2 or newer with source revision guards")
+        if request.get("build_profile", "glb-geometry-v1") not in capabilities["profiles"]:
+            raise RuntimeError("Install an authoring service supporting the selected asset profile")
         if self.cancelled.is_set():
             raise RuntimeError("Geometry build cancelled")
         source = self.export(request)
