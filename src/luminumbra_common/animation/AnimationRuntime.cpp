@@ -9,7 +9,7 @@
 
 #include "SkinnedMeshFormat.h"
 
-#include "luminumbra_common/core/DeterministicMath.h"
+#include "../core/DeterministicMath.h"
 
 // Determinism note ( gate): this translation unit is compiled with
 // -ffp-contract=off (see sources.cmake) so the compiler cannot fuse
