@@ -1,3 +1,4 @@
+#include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
 #include "gtest/gtest.h"
@@ -77,6 +78,14 @@ public:
             return;
         }
 
+        glEnable(GL_DEBUG_OUTPUT);
+        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+        glDebugMessageCallback(
+            [](GLenum, GLenum type, GLuint, GLenum, GLsizei, const GLchar* message, const void*) {
+                if (type == GL_DEBUG_TYPE_ERROR)
+                    ADD_FAILURE() << "GL debug error: " << message;
+            },
+            nullptr);
         m_ready = true;
     }
 
@@ -1395,7 +1404,7 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     glGenTextures(1, &depth_texture);
     glBindTexture(GL_TEXTURE_2D, depth_texture);
     glTexImage2D(
-        GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, 64, 64, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, 64, 64, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth_texture, 0);
 
     const GLenum attachments[4] = {
@@ -1476,6 +1485,9 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
                            reinterpret_cast<void*>(offsetof(GBufferVertex, material)));
 
     glViewport(0, 0, 64, 64);
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    glDepthFunc(GL_GREATER);
+    glClearDepth(0.0);
     glEnable(GL_DEPTH_TEST);
     const GLfloat clear0[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     glClearBufferfv(GL_COLOR, 0, clear0);
@@ -1487,7 +1499,9 @@ TEST(RenderSmokeTest, GBufferStoresFullViewSpacePosition) {
     glUseProgram(program);
     SetMat4Identity(program, "model");
     SetMat4Identity(program, "view");
-    SetMat4Identity(program, "projection");
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(90.0f), 1.0f, 0.1f, 3200.0f);
+    glUniformMatrix4fv(glGetUniformLocation(program, "projection"), 1, GL_FALSE, &projection[0][0]);
     SetMat3Identity(program, "normalMatrix");
     glUniform1i(glGetUniformLocation(program, "u_materialLUT"), 0);
     // Active samplers of different types may not alias one texture unit, even
@@ -2312,6 +2326,74 @@ private:
 };
 } // namespace
 
+TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const GLuint program = LinkProgram({"cloud_composite", "ssao.vert", "cloud_composite.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_cloudColor"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    probe.texture(0, {glm::vec4(0, 1, 0, 1)});
+    // Even depth arbitrarily close to the far plane is geometry, not sky.
+    probe.texture(1, {glm::vec4(0), glm::vec4(1e-9f)});
+    glClearColor(1, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    const auto pixels = probe.draw();
+    for (int x = 0; x < 32; ++x) {
+        EXPECT_FLOAT_EQ(pixels[x].r, x < 16 ? 0 : 1);
+        EXPECT_FLOAT_EQ(pixels[x].g, x < 16 ? 1 : 0);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, ReversedDepthSoftParticlesFadeAgainstGeometry) {
+    HiddenGlContext context;
+    ASSERT_TRUE(context.ready()) << context.error();
+    const GLuint program =
+        LinkProgram({"particles", "magical_particles.vert", "magical_particles.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    // One round billboard at 30 m, using the production vertex and fragment stages.
+    for (GLuint attribute = 0; attribute < 6; ++attribute)
+        glDisableVertexAttribArray(attribute);
+    glVertexAttrib3f(0, 0, 0, -30);
+    glVertexAttrib1f(1, 60);
+    glVertexAttrib4f(2, 1, 1, 1, 1);
+    glVertexAttribI1ui(3, 0);
+    glVertexAttrib1f(4, 0);
+    glVertexAttrib1f(5, 0);
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    glUseProgram(program);
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(90.0f), 1.0f, 0.1f, 3200.0f);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_projection"), 1, GL_FALSE, &projection[0][0]);
+    SetMat4Identity(program, "u_view");
+    glUniform3f(glGetUniformLocation(program, "u_cameraRight"), 1, 0, 0);
+    glUniform3f(glGetUniformLocation(program, "u_cameraUp"), 0, 1, 0);
+    glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, 0, -1);
+    glUniform2f(glGetUniformLocation(program, "u_screenSize"), 32, 1);
+    glUniform1f(glGetUniformLocation(program, "u_nearPlane"), 0.1f);
+    glUniform1f(glGetUniformLocation(program, "u_farPlane"), 3200.0f);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 0);
+    const auto alpha = [&](float distance) {
+        const auto clip = projection * glm::vec4(0, 0, -distance, 1);
+        probe.texture(0, {glm::vec4(distance == 0 ? 0 : clip.z / clip.w)});
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        return probe.draw()[16].a;
+    };
+    EXPECT_NEAR(alpha(32), 1.0f, 0.001f);
+    EXPECT_NEAR(alpha(30.75f), 0.5f, 0.001f);
+    EXPECT_FLOAT_EQ(alpha(29), 0.0f);
+    EXPECT_NEAR(alpha(0), 1.0f, 0.001f) << "cleared sky must not fade particles";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
 TEST(RenderSmokeTest, GrassAndTerrainSampleTheSameProjectedCloudShadow) {
     HiddenGlContext context;
     if (!context.ready())
@@ -2440,6 +2522,7 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
         GTEST_SKIP() << context.error();
     const GLuint program = LinkProgram({"water", "water.vert", "water.frag"});
     ASSERT_NE(program, 0u);
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     FullscreenFloatProbe probe;
     glDisableVertexAttribArray(1);
     glVertexAttrib3f(1, 0, 0, 1); // the quad becomes horizontal after the model rotation
@@ -2457,7 +2540,8 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
     probe.texture(3, {glm::vec4(0.5f, 0.5f, 0.0f, 0.0f)});
     probe.texture(4, {glm::vec4(0.0f)});
     probe.texture(5, {glm::vec4(0.0f)});
-    const auto projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
     auto view = glm::lookAt(glm::vec3(0, 1200, 0), glm::vec3(0), glm::vec3(0, 0, -1));
     const auto model = glm::scale(
         glm::rotate(glm::mat4(1), glm::radians(-90.0f), glm::vec3(1, 0, 0)), glm::vec3(1000));
@@ -2481,7 +2565,7 @@ TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround
     glUniform1f(glGetUniformLocation(program, "u_reflection_power"), 0.7f);
     const auto bed = [&](float height) {
         const auto clip = projection * view * glm::vec4(0, height, 0, 1);
-        probe.texture(1, {glm::vec4(clip.z / clip.w * 0.5f + 0.5f)});
+        probe.texture(1, {glm::vec4(clip.z / clip.w)});
         glClearColor(0, 0, 0, 0);
         glClear(GL_COLOR_BUFFER_BIT);
         return probe.draw()[16];
@@ -2537,7 +2621,8 @@ TEST(RenderSmokeTest, AerialHazeContinuesAcrossDistantTerrainAndLeavesOnlySkyCle
     glUniform1i(glGetUniformLocation(program, "u_transmittanceLut"), 2);
     glUniform1i(glGetUniformLocation(program, "u_froxelIntegrated"), 3);
     SetMat4Identity(program, "u_inverseView");
-    const auto projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
     const auto inverse = glm::inverse(projection);
     glUniformMatrix4fv(
         glGetUniformLocation(program, "u_inverseProjection"), 1, GL_FALSE, &inverse[0][0]);
@@ -2550,8 +2635,8 @@ TEST(RenderSmokeTest, AerialHazeContinuesAcrossDistantTerrainAndLeavesOnlySkyCle
     float previous = 0;
     for (float distance : {500.0f, 750.0f, 780.0f, 1000.0f, 2000.0f, 3000.0f}) {
         const auto clip = projection * glm::vec4(0, 0, -distance, 1);
-        const float depth = (clip.z / clip.w) * 0.5f + 0.5f;
-        ASSERT_LT(depth, 1.0f);
+        const float depth = clip.z / clip.w;
+        ASSERT_GT(depth, 0.0f);
         probe.texture(0, {glm::vec4(depth)});
         const float haze = probe.draw()[16].a;
         EXPECT_GE(haze, previous - 0.001f) << "haze must not disappear at distance " << distance;
@@ -2574,7 +2659,7 @@ TEST(RenderSmokeTest, AerialHazeContinuesAcrossDistantTerrainAndLeavesOnlySkyCle
         glGetUniformLocation(program, "u_inverseView"), 1, GL_FALSE, &looking_down[0][0]);
     EXPECT_GT(probe.draw()[16].r, 0.1f)
         << "downward air haze must not use the LUT's black ground hemisphere";
-    probe.texture(0, {glm::vec4(1.0f)});
+    probe.texture(0, {glm::vec4(0.0f)});
     EXPECT_FLOAT_EQ(probe.draw()[16].a, 0.0f) << "only cleared sky depth bypasses aerial haze";
     glUniform1f(glGetUniformLocation(program, "u_underwater"), 1);
     EXPECT_GT(probe.draw()[16].a, 0.9f) << "underwater sky still receives water extinction";
@@ -2596,12 +2681,12 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
     glUniform1f(glGetUniformLocation(program, "u_sunVisible"), 1);
     glUniform1f(glGetUniformLocation(program, "u_strength"), 0.85f);
     probe.texture(0, {glm::vec4(0.3f, 0.4f, 0.5f, 1.0f)});
-    probe.texture(1, {glm::vec4(1.0f)});
+    probe.texture(1, {glm::vec4(0.0f)});
     const auto sky = probe.draw();
     EXPECT_GT(sky[16].r, 0.005f)
         << "ordinary blue sky must produce shafts without an underwater overlay";
     // A bright foreground object may neither emit shafts nor receive the sky proxy.
-    std::vector<glm::vec4> depths(32, glm::vec4(1.0f));
+    std::vector<glm::vec4> depths(32, glm::vec4(0.0f));
     for (int x = 14; x < 22; ++x)
         depths[x] = glm::vec4(0.5f);
     probe.texture(0, {glm::vec4(1.0f)});
@@ -2613,7 +2698,7 @@ TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
     EXPECT_FLOAT_EQ(probe.draw()[24].r, 0.0f)
         << "a sun hidden behind terrain must not shine through it";
     glUniform1f(glGetUniformLocation(program, "u_sunVisible"), 0);
-    probe.texture(1, {glm::vec4(1.0f)});
+    probe.texture(1, {glm::vec4(0.0f)});
     EXPECT_FLOAT_EQ(probe.draw()[24].r, 0.0f);
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
@@ -2635,14 +2720,15 @@ TEST(RenderSmokeTest, WeatherFogIntegratesTheGroundLayerFromAnElevatedCamera) {
     glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, -1, 0);
     probe.texture(0, {glm::vec4(0.2f, 0.1f, 0.04f, 1)});
     probe.texture(2, {glm::vec4(0)});
-    const auto projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto projection =
+        Luminumbra::Rendering::ReversedZPerspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
     const auto inverse_projection = glm::inverse(projection);
     glUniformMatrix4fv(glGetUniformLocation(program, "u_inverseProjection"),
                        1,
                        GL_FALSE,
                        &inverse_projection[0][0]);
     const auto clip = projection * glm::vec4(0, 0, -1200, 1);
-    probe.texture(1, {glm::vec4(clip.z / clip.w * 0.5f + 0.5f)});
+    probe.texture(1, {glm::vec4(clip.z / clip.w)});
     SetMat4Identity(program, "u_inverseView");
     const auto ground = probe.draw()[16];
     EXPECT_GT(ground.r, 0.35f) << "a horizontal sightline inside fog still loses visibility";
@@ -2758,7 +2844,7 @@ TEST(RenderSmokeTest, WeatherKeepsTerrainStationaryAndUsesWorldNormals) {
     normal(0.5f, 0.5f); // world +Z wall
     EXPECT_TRUE(draw() == dry)
         << "vertical walls must not receive the upward-facing wetness response";
-    upload(1, std::vector<float>(size * size * 4, 1.0f));
+    upload(1, std::vector<float>(size * size * 4, 0.0f));
     normal(1.0f, 0.5f);
     EXPECT_TRUE(draw() == dry) << "cleared sky depth must never receive ground wetness";
     EXPECT_EQ(glGetError(), GL_NO_ERROR);
@@ -2934,7 +3020,7 @@ TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
     // A blade against cleared sky must still occlude shafts at its true alpha,
     // even though the G-buffer depth contains no terrain there. Sampling the
     // lighting depth would hard-cut partially covered edges instead.
-    upload(1, std::vector<glm::vec4>(size * size, glm::vec4(1)));
+    upload(1, std::vector<glm::vec4>(size * size, glm::vec4(0)));
     glUseProgram(grass);
     glUniform3f(glGetUniformLocation(grass, "u_sunColor"), 1, 1, 1);
     glUniform1f(glGetUniformLocation(grass, "u_sunIntensity"), 1);
