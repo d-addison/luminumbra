@@ -76,6 +76,16 @@ TEST(FilesystemPath, UncDotDotCannotConsumeTheShareRoot) {
         paths::LexicallyNormalPath(fs::path(LR"(\\server\share\folder\..\..\shader.vert)"));
     EXPECT_EQ(path.native(), fs::path(LR"(\\server\share\shader.vert)").native());
     EXPECT_TRUE(paths::IsAbsolutePath(path));
+    auto ancestor = paths::LexicallyNormalPath(fs::path(LR"(\\server\share\folder\child)"));
+    for (int i = 0; i < 8; ++i) {
+        ancestor = paths::LexicallyNormalPath(ancestor / "..");
+    }
+    std::string root = paths::GenericPathString(ancestor);
+    if (root.back() == '/') {
+        root.pop_back();
+    }
+    EXPECT_EQ(root, "//server/share");
+    EXPECT_EQ(paths::LexicallyNormalPath(ancestor / "..").native(), ancestor.native());
 }
 
 TEST(FilesystemPath, UncNormalizationKeepsUnicodeAndRuntimeRootPrefix) {

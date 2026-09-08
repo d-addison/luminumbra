@@ -25,7 +25,9 @@ void AddAncestorCandidates(std::vector<std::filesystem::path>& candidates,
 
     while (!path.empty()) {
         candidates.push_back(path);
-        const std::filesystem::path parent = path.parent_path();
+        const std::filesystem::path parent = Filesystem::IsWindowsUncPath(path)
+                                                 ? Filesystem::LexicallyNormalPath(path / "..")
+                                                 : path.parent_path();
         if (parent == path) {
             break;
         }
