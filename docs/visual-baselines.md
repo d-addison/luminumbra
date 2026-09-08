@@ -64,16 +64,23 @@ most of the frame occupied by sky. There is no calm screenshot for comparison.
 | Instances drawn / within ring | 262,144 / 262,144 |
 | Foliage draws / reported GL errors | 1 / 0 |
 | Observed fade start / end | 48 / 92 m |
-| Observed calm / windy maximum sway | 0 / 9.319 m; plausibility remains unverified |
+| Producer calm / windy `max_sway` | 0 / 9.319; raw wind magnitude, not vertex displacement |
 | GPU query sample / declared target | 0.23824 / 0.6 ms |
 | Timing interpretation | One last available query sample below the target; no distribution |
 
 See the [producer analysis](assets/visual-baselines/20260908/foliage-functional.json).
-The runtime fade differs from the scenario setup's 60/96 m intention, so profile
-ownership needs investigation. The reported sway magnitude needs independent
-visual and geometric checks. Hash equality rereads one live instance set; it is
-not evidence of two independent rebuilds. The numeric pass does not resolve these
-gaps or constitute visual approval.
+The common foliage updater runs after the scenario driver and overwrites its
+60/96 m fade, density and controlled wind settings. The scenario also lacks the
+daytime override used by other visual captures. These ownership defects prevent
+the intended controlled workload from reaching the renderer.
+
+The producer's `max_sway` reads the raw wind vector stored on instances. It does
+not measure blade-tip movement: the vertex shader applies amplitude and
+oscillation, then caps displacement to 45% of blade height. Neither rendered
+motion nor a controlled calm phase has been established by these values. Hash
+equality rereads one live instance set; it is not evidence of two independent
+rebuilds. The numeric pass does not resolve these gaps or constitute visual
+approval.
 
 ## Hardware and execution context
 
