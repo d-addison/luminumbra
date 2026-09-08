@@ -169,3 +169,37 @@ Profiling builds and captures are diagnostic evidence, not comparable benchmark
 numbers. Preserve the exact scenario metadata and raw trace with the associated
 measurement so a change can be traced from end-to-end symptoms to a subsystem and
 then to code.
+
+## Render capture state
+
+The default `--render-benchmark` camera is `(8,56,8)`, yaw `35`, pitch `-6`,
+with render time of day `0.04`. Streaming and rendering use that pose after
+player simulation. Explicit `--cam-pos` or scene camera settings take precedence;
+an explicit scene also overrides time of day and FOV. This ordering corrects
+[#120](https://github.com/d-addison/luminumbra/issues/120): older default captures
+reported a camera/time pin applied after rendering, then overwritten by the next
+player and simulation update. Those captures cannot qualify the intended forest view.
+
+Benchmark JSON includes `render_uniforms`, the linked geometry/static/lighting
+shader state read while emitting the artifact, and `capture_context`, including
+controller presence and the last position passed to world streaming. The readback
+runs outside the measured interval. It observes the report frame; it does not prove
+that every shader drew or that every measured frame used identical state.
+
+With the real controller active, validate a default capture and separate explicit
+camera/time overrides using the file-only checker:
+
+```sh
+python3 tools/perf/validate_render_capture.py forest.json \
+  --position 8 56 8 --yaw 35 --pitch -6 --tod 0.04 \
+  --require-controller --require-distinct-controller --require-geometry --require-settled
+```
+
+The checker reconstructs camera matrices and sun phase independently of reported
+camera metadata. It rejects absent or inconsistent shader values. Use the actual
+requested pose/time for override captures, and `--fov` to check an explicit FOV.
+Keep hot reload, frame scans and interactive camera/settings changes disabled during
+these controlled checks. Zero pending queues and camera agreement are separate
+requirements; an elevated camera in empty air need not have a resident camera chunk.
+Read actual framebuffer dimensions from the artifact. Short ordering regressions
+are not performance measurements, and estimated resource totals are not measured VRAM.

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -69,6 +70,13 @@ public:
     // Validates all existing persistence artifacts before a writer may modify them.
     // A missing save is valid. Diagnostics distinguish obsolete, future and corrupt files.
     static bool validate_save(const std::filesystem::path& save_dir,
+                              std::vector<std::string>* errors = nullptr,
+                              const std::stop_token& stop = {});
+
+    // Uses the same durable temporary-file/atomic replacement path as chunk containers.
+    // Refuses an unsupported existing save before touching its metadata.
+    static bool save_metadata(const std::string& bytes,
+                              const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr);
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
@@ -132,7 +140,8 @@ public:
     // Malformed or unreadable snapshots return false with diagnostics.
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
-                    std::vector<std::string>& errors) const;
+                    std::vector<std::string>& errors,
+                    const std::stop_token& stop = {}) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

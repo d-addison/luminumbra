@@ -197,6 +197,14 @@ public:
     // No-op for an unknown id. Touches only render state -- never world_hash.
     void set_emitter_origin(uint32_t emitter_id, const glm::vec3& base_origin);
 
+    // Live weather owns at most one rain and one snow emitter. Changing intensity
+    // stops/starts emission without clearing unrelated particles; in-flight drops
+    // keep their world positions when the camera moves. Reset by clear_emitters.
+    void set_precipitation(const std::filesystem::path& particle_data_root,
+                           const glm::vec3& camera_position,
+                           float rain_intensity,
+                           float snow_intensity);
+
     // registers a SPLASH emitter (a zero-spawn-rate burst template)
     // that impact_splash particles trigger when they reach the impact plane. The
     // emitter's spawn_rate is forced to 0 so it produces nothing on its own --
@@ -266,6 +274,7 @@ private:
         uint64_t rng_seed = 0;
         double spawn_accumulator = 0.0; // fractional particles carried frame to frame
         uint64_t rng_state = 0;         // xorshift state, render-only
+        float spawn_scale = 1.0f;       // live presentation intensity, not authored data
     };
 
     // Render-only particle (motion state lives here, NEVER snapshotted).
@@ -301,6 +310,8 @@ private:
     // Per-frame instance count actually written to the mapping.
     std::size_t m_frame_instance_count = 0;
     uint32_t m_next_emitter_id = 0;
+    std::array<uint32_t, 2> m_precip_emitters{kInvalidEmitter, kInvalidEmitter};
+    std::array<bool, 2> m_precip_load_attempted{};
 
     // per-frame wind velocity (render-only) + splash template index.
     glm::vec3 m_wind_velocity{0.0f};

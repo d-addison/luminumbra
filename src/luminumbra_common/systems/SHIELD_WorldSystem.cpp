@@ -1474,6 +1474,45 @@ float SHIELD_WorldSystem::WaterLevelAt(float world_x, float world_z) const {
     return level;
 }
 
+bool SHIELD_WorldSystem::IsUnderwater(const Vec3& world_pos) const {
+    if (!std::isfinite(world_pos.x) || !std::isfinite(world_pos.y) || !std::isfinite(world_pos.z))
+        return false;
+    const IVec3 column = world_to_chunk_coords(world_pos);
+    bool has_live_grid = false;
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        if (!chunk || !chunk->has_water_sim.load(std::memory_order_acquire))
+            continue;
+        const IVec3 coords = chunk->get_coords();
+        if (coords.x != column.x || coords.z != column.z)
+            continue;
+        const int res = chunk->current_water_resolution.load(std::memory_order_relaxed);
+        if (res <= 1)
+            continue;
+        const std::size_t side = static_cast<std::size_t>(res);
+        if (chunk->water_bed_mm.size() != side * side ||
+            chunk->water_depth_mm.size() != side * side)
+            continue;
+        has_live_grid = true;
+        const float lx = world_pos.x - static_cast<float>(coords.x * CHUNK_SIZE_X);
+        const float lz = world_pos.z - static_cast<float>(coords.z * CHUNK_SIZE_Z);
+        const int x = std::clamp(static_cast<int>(lx * res / CHUNK_SIZE_X), 0, res - 1);
+        const int z = std::clamp(static_cast<int>(lz * res / CHUNK_SIZE_Z), 0, res - 1);
+        const std::size_t cell = static_cast<std::size_t>(z) * side + x;
+        const float bed = static_cast<float>(chunk->water_bed_mm[cell]) / 1000.0f;
+        const float depth = static_cast<float>(chunk->water_depth_mm[cell]) / 1000.0f;
+        if (depth > 0.05f && world_pos.y >= bed && world_pos.y < bed + depth - 0.05f)
+            return true;
+    }
+    if (has_live_grid)
+        return false; // a dry/drained live cell overrides the worldgen rest level
+    const float surface = WaterLevelAt(world_pos.x, world_pos.z);
+    if (world_pos.y >= surface - 0.05f)
+        return false;
+    const float bed = GetTerrainHeightAt(world_pos.x, world_pos.z);
+    return world_pos.y >= bed && surface > bed + 0.05f;
+}
+
 float SHIELD_WorldSystem::LakeCarveAmount(float final_height,
                                           float influence,
                                           float lake_surface) const {
@@ -3159,6 +3198,7 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
         int horizontal_distance_sq = 0;
         int vertical_rank = 0;
         int target_step = 1;
+        bool interior_focus = false;
     };
 
     int target_radius = streaming_radius_for_pressure(
@@ -3209,7 +3249,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                              int ring_distance,
                              int horizontal_dist2,
                              int vertical_rank,
-                             const Vec3& anchor_pos) {
+                             const Vec3& anchor_pos,
+                             bool interior_focus = false) {
         // NOTE: the active-chunk budget is no longer applied here.
         // Enforcing it during enumeration capped candidates in row-major scan
         // order, so when the wanted set exceeded the budget (mountains preset
@@ -3250,11 +3291,17 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
                 std::min(existing.horizontal_distance_sq, horizontal_dist2);
             existing.vertical_rank = std::min(existing.vertical_rank, vertical_rank);
             existing.target_step = std::min(existing.target_step, target_step);
+            existing.interior_focus = existing.interior_focus || interior_focus;
             return;
         }
         candidate_index.emplace(id, to_create.size());
-        to_create.push_back(
-            {coords, surface, ring_distance, horizontal_dist2, vertical_rank, target_step});
+        to_create.push_back({coords,
+                             surface,
+                             ring_distance,
+                             horizontal_dist2,
+                             vertical_rank,
+                             target_step,
+                             interior_focus});
     };
 
     // UNION the wanted-set across every anchor. candidate_index (in add_candidate)
@@ -3264,6 +3311,31 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
         const IVec3 camera_chunk = camera_chunks[ai];
         const Vec3& anchor_pos = anchors[ai];
+        // Surface streaming alone never requests deeper cave chunks. Once the
+        // anchor leaves that band, keep a bounded full-SDF neighbourhood around
+        // its actual Y. Surface travel retains its existing wanted set and order.
+        const auto anchor_surface = column_surface_span(camera_chunk.x, camera_chunk.z);
+        if (camera_chunk.y < anchor_surface.min_y - 1) {
+            // Default caves can expose a wall over 100 m away at the client's
+            // wide FOV. A two-chunk cube left those sightlines open to the sky.
+            // Bound the interior to 128 m horizontally and 64 m vertically;
+            // smaller requested radii retain their existing residency budget.
+            const int interior_radius = std::min(target_radius, 8);
+            const int interior_height = std::min(interior_radius, 4);
+            for (int dz = -interior_radius; dz <= interior_radius; ++dz) {
+                for (int dx = -interior_radius; dx <= interior_radius; ++dx) {
+                    for (int dy = -interior_height; dy <= interior_height; ++dy) {
+                        add_candidate(camera_chunk + IVec3(dx, dy, dz),
+                                      false,
+                                      horizontal_ring_distance(dx, dz),
+                                      horizontal_distance_sq(dx, dz),
+                                      std::abs(dy),
+                                      anchor_pos,
+                                      true);
+                    }
+                }
+            }
+        }
         for (int dz = -target_radius; dz <= target_radius; ++dz) {
             for (int dx = -target_radius; dx <= target_radius; ++dx) {
                 const int horizontal_dist2 = horizontal_distance_sq(dx, dz);
@@ -3334,6 +3406,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     std::sort(to_create.begin(),
               to_create.end(),
               [](const GenerationCandidate& a, const GenerationCandidate& b) {
+                  if (a.interior_focus != b.interior_focus)
+                      return a.interior_focus; // immediate cave walls precede distant surface fill
                   if (a.surface != b.surface) {
                       return a.surface;
                   }

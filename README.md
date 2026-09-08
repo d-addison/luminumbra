@@ -9,8 +9,10 @@ Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
 deterministic fixed-tick simulation, procedural terrain, entity-component systems,
 networking, and a GPU-driven client renderer.
 
-This is an owner-maintained hobby project. Version 0.3.0 is an early public
-source release; interfaces and content formats may still change between releases.
+This is an owner-maintained hobby project. Version 0.3.0 is undergoing acceptance;
+the latest published source release is v0.2.1. Interfaces and content formats may
+still change between releases. See the [coordinated roadmap](docs/roadmap.md) for
+release status and the populated engine/game milestones.
 
 ## v0.3.0 world format break
 
@@ -57,7 +59,17 @@ The primary executables are written to `build/<preset>/bin/`:
 See [Development and testing](docs/development.md) for platform dependencies,
 validation lanes, and source-list ownership.
 
+Before entering a game world, acquire the separately versioned tree pack with
+`python3 tools/assets/acquire.py` (Windows: `py -3 tools/assets/acquire.py`).
+See [Game assets](docs/game-assets.md) for provenance, offline setup and repair.
+
 ## Architecture
+
+Game code currently remains in this repository. The accepted
+[engine/game boundary](docs/engine-game-boundary.md) establishes optional reusable
+engine modules and a separately composed game, with script/component/data authoring
+that does not require rebuilding engine C++. Extraction follows verified v0.3
+publication and roadmap approval; it has not been implemented yet.
 
 The common engine owns deterministic simulation, world generation, persistence,
 replay, and networking. The client adds rendering, audio, input, and UI. The

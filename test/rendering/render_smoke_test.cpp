@@ -1,8 +1,11 @@
+#include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
+#include "luminumbra_client/rendering/RenderGraph.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <array>
@@ -857,6 +860,37 @@ std::array<float, 3> DecodeOctahedral(float ex, float ey) {
 struct LitNoonResult {
     float r = 0, g = 0, b = 0;
 };
+struct AmbientReflectionProbe {
+    float normal_dot_view = 1.0f;
+    unsigned char material_id = 1;
+};
+
+// Synthetic lighting draws bind the same embedded RG16F table as LightingPass.
+// The returned texture is owned by the caller, not by the shader program.
+GLuint BindEnvironmentBrdf(GLuint program) {
+    using namespace Luminumbra::Rendering;
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glActiveTexture(GL_TEXTURE12);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RG16F,
+                 kEnvironmentBrdfLutSize,
+                 kEnvironmentBrdfLutSize,
+                 0,
+                 GL_RG,
+                 GL_HALF_FLOAT,
+                 kEnvironmentBrdfLut.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_environmentBrdf"), 12);
+    glActiveTexture(GL_TEXTURE0);
+    return texture;
+}
 //  ( -6) additions, both defaulted so every existing
 // caller renders byte-identically: emissive_intensity_norm > 0 authors that
 // normalized emissive value into the LUT's row 2 for the plate's material
@@ -868,11 +902,16 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
                                        const fs::path& dump_ppm = {},
                                        float aether_field_value = -1.0f,
                                        float emissive_intensity_norm = 0.0f,
-                                       float aether_material_modulation = 0.0f) {
+                                       float aether_material_modulation = 0.0f,
+                                       std::array<float, 3> light_travel = {-0.2f, 0.0f, -0.98f},
+                                       bool moon_only = false,
+                                       const glm::mat4& inverse_view = glm::mat4(1.0f),
+                                       const AmbientReflectionProbe* ambient_probe = nullptr) {
     // 64x64 so the optional swatch dump is a reviewable PNG; the mean is the
     // same regardless of resolution (flat fragment).
     constexpr int kRes = 64;
     constexpr float kEmissiveLutScale = 8.0f;
+    const GLuint environment_brdf = BindEnvironmentBrdf(lighting_program);
 
     GLuint fbo = 0, color_tex = 0;
     glGenFramebuffers(1, &fbo);
@@ -896,9 +935,11 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     };
     // Fragment in front of the camera; +Z normal; material id 1 (Stone-like, no
     // emission so the lit color is pure albedo response).
-    const float pos_px[3] = {0.0f, 0.0f, -3.0f};
+    const float ndv = ambient_probe ? ambient_probe->normal_dot_view : 1.0f;
+    const float pos_px[3] = {3.0f * std::sqrt(1.0f - ndv * ndv), 0.0f, -3.0f * ndv};
     GLuint g_pos = make_tex(GL_RGB16F, GL_RGB, GL_FLOAT, pos_px);
-    const unsigned char norm_px[4] = {128, 128, 0, 1};
+    const unsigned char norm_px[4] = {
+        128, 128, 0, ambient_probe ? ambient_probe->material_id : static_cast<unsigned char>(1)};
     GLuint g_norm = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, norm_px);
     // gAlbedoRoughness is a LINEAR RGBA8 buffer (the g-buffer stores already-
     // linearized albedo). Pack the requested linear albedo + roughness directly.
@@ -915,7 +956,7 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     GLuint g_metallic = make_tex(GL_RG16F, GL_RG, GL_FLOAT, metallic_px);
     const float ssao_px[1] = {1.0f};
     GLuint ssao_tex = make_tex(GL_R16F, GL_RED, GL_FLOAT, ssao_px);
-    const unsigned char caustics_px[4] = {0, 0, 0, 255};
+    const unsigned char caustics_px[4] = {255, 255, 255, 255};
     GLuint caustics_tex = make_tex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, caustics_px);
 
     auto make_array_tex = [&](GLenum ifmt, GLenum fmt, GLenum type, const void* data) {
@@ -987,20 +1028,28 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     glUniform1i(glGetUniformLocation(lighting_program, "u_shadowTintCascades"), 9);
     glUniform1i(glGetUniformLocation(lighting_program, "u_shadowTintEnabled"), 0);
 
-    SetMat4Identity(lighting_program, "u_inverseView");
+    glUniformMatrix4fv(
+        glGetUniformLocation(lighting_program, "u_inverseView"), 1, GL_FALSE, &inverse_view[0][0]);
     for (int i = 0; i < 4; ++i)
         SetMat4Identity(lighting_program,
                         ("u_lightSpaceMatrices[" + std::to_string(i) + "]").c_str());
     glUniform4f(glGetUniformLocation(lighting_program, "u_cascadeSplits"), 1e9f, 1e9f, 1e9f, 1e9f);
     glUniform1f(glGetUniformLocation(lighting_program, "u_time"), 0.0f);
-    glUniform1f(glGetUniformLocation(lighting_program, "u_sea_level"), -1000.0f);
+    glUniform1f(glGetUniformLocation(lighting_program, "u_sea_level"), 0.0f);
     glUniform3f(glGetUniformLocation(lighting_program, "u_terrainOrigin"), 0, 0, 0);
-    glUniform3f(glGetUniformLocation(lighting_program, "u_viewPos"), 0, 0, 0);
+    glUniform3fv(glGetUniformLocation(lighting_program, "u_viewPos"), 1, &inverse_view[3][0]);
     // FIXED NOON lighting (mirrors RenderPipeline::update_time_of_day peak).
     glUniform3f(glGetUniformLocation(lighting_program, "u_skyAmbientColor"), 0.1f, 0.15f, 0.2f);
-    // Sun overhead-ish toward the +Z plate: L=(0.2,0.0,0.98) -> NdotL ~ 0.98.
-    glUniform3f(glGetUniformLocation(lighting_program, "u_sun.direction"), 0.2f, 0.0f, 0.98f);
+    // Rays travel toward the +Z-facing plate. Surface-to-light is the opposite vector,
+    // matching the production SunGeometry and foliage conventions.
+    glUniform3fv(glGetUniformLocation(lighting_program, "u_sun.direction"), 1, light_travel.data());
     glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 1.0f, 0.95f, 0.85f);
+    if (moon_only) {
+        glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 0.0f, 0.0f, 0.0f);
+        glUniform3fv(glGetUniformLocation(lighting_program, "u_moonDir"), 1, light_travel.data());
+        glUniform3f(glGetUniformLocation(lighting_program, "u_moonRadiance"), 0.5f, 0.6f, 0.8f);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_moonIllum"), 1.0f);
+    }
     glUniform1i(glGetUniformLocation(lighting_program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(lighting_program, "u_emissiveLutScale"), kEmissiveLutScale);
     // 0.0 mirrors the GLSL default (multiply by exactly 1.0).
@@ -1048,6 +1097,25 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
         glUniform1f(glGetUniformLocation(lighting_program, "u_aetherFieldInvWorldSpan"), 0.0f);
     }
 
+    if (ambient_probe) {
+        // Unit incident sky radiance corresponds to PI irradiance. The caller
+        // rotates the plate upward so the hemispheric sky weight is one.
+        constexpr float pi = 3.14159265358979323846f;
+        glUniform3f(glGetUniformLocation(lighting_program, "u_skyAmbientColor"), pi, pi, pi);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_sun.color"), 0, 0, 0);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_moonDir"), 0, -1, 0);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_moonRadiance"), 0, 0, 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_moonIllum"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_aetherActive"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_caveAmbientOcclusion"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_snowCover"), 0);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_exposure"), 1);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_saturation"), 1);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_contrast"), 1);
+        glUniform1f(glGetUniformLocation(lighting_program, "u_splitToneStrength"), 0);
+        glUniform3f(glGetUniformLocation(lighting_program, "u_lightWarmth"), 1, 1, 1);
+    }
+
     const GLfloat clear0[4] = {0, 0, 0, 1};
     glClearBufferfv(GL_COLOR, 0, clear0);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -1086,6 +1154,8 @@ LitNoonResult LitChainNoonOnscreenSrgb(GLuint lighting_program,
     }
 
     glDeleteTextures(1, &lut_tex);
+    glDeleteTextures(1, &tint_arr);
+    glDeleteTextures(1, &environment_brdf);
     glDeleteTextures(1, &terrain_arr);
     glDeleteTextures(1, &shadow_arr);
     glDeleteTextures(1, &caustics_tex);
@@ -2039,13 +2109,7 @@ TEST(RenderSmokeTest, CalibrationPlateCloseRangeMaterialGate) {
     glDeleteProgram(lighting_program);
 }
 
-//  aether coupling gate. Closes critique MAJOR #17 (the determinism gate
-// proves the field HASHES, not that anything CONSUMES it). Renders a flat plate
-// through the REAL lighting_pass shader with the aether tap inactive (baseline)
-// vs an active uniform aether field, and asserts the field measurably brightens
-// the lit output (blue-dominant glow) -- i.e. the lighting pass demonstrably
-// CONSUMES the field's values. Also asserts a zero field == baseline (the
-// u_aetherActive gating is correct, so shipped paths stay pixel-identical).
+// The field drives authored emissive materials, rather than making ordinary ground glow.
 TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     HiddenGlContext context;
     if (!context.ready()) {
@@ -2056,11 +2120,10 @@ TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     ASSERT_NE(program, 0u);
 
     const std::array<float, 3> albedo{0.2f, 0.2f, 0.2f};
-    const LitNoonResult base = LitChainNoonOnscreenSrgb(program, albedo, 1.0f); // tap inactive
-    const LitNoonResult glow =
-        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.6f); // field=0.6
-    const LitNoonResult zero =
-        LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.0f); // active, field=0
+    constexpr float emissive = 0.04f;
+    const LitNoonResult base = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, -1.0f, emissive);
+    const LitNoonResult glow = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.6f, emissive);
+    const LitNoonResult zero = LitChainNoonOnscreenSrgb(program, albedo, 1.0f, {}, 0.0f, emissive);
 
     const float base_lum = base.r + base.g + base.b;
     const float glow_lum = glow.r + glow.g + glow.b;
@@ -2072,6 +2135,1176 @@ TEST(RenderSmokeTest, AetherEmissiveTapBrightensLitOutput) {
     EXPECT_NEAR(zero.g, base.g, 1.0e-4f);
     EXPECT_NEAR(zero.b, base.b, 1.0e-4f);
 
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, ProceduralLeafHasACutoutAndConsistentAlbedo) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"instanced_mesh", "instanced_mesh.vert", "g_buffer.frag"});
+    ASSERT_NE(program, 0u);
+    GLuint fbo = 0, texture = 0, lut = 0, vao = 0, vbo = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, texture, 0);
+    const GLenum attachments[] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT2};
+    glDrawBuffers(3, attachments);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    const float lut_pixels[] = {0, .8f, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0};
+    glGenTextures(1, &lut);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, lut);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 4, 0, GL_RGBA, GL_FLOAT, lut_pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    // Position + UV. The remaining attributes are constant for this instance.
+    const float vertices[] = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, 1,  1, 0, 1, 1,
+                              -1, -1, 0, 0, 0, 1, 1,  0, 1, 1, -1, 1, 0, 0, 1};
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(
+        2, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glVertexAttrib3f(1, 0, 0, 1);
+    for (GLuint column = 0; column < 4; ++column) {
+        std::array<float, 4> value{};
+        value[column] = 1;
+        glVertexAttrib4fv(3 + column, value.data());
+    }
+    glVertexAttrib3f(7, 1, 1, 1);
+    glUseProgram(program);
+    SetMat4Identity(program, "view");
+    SetMat4Identity(program, "projection");
+    SetMat3Identity(program, "u_normalViewMatrix");
+    glUniform1i(glGetUniformLocation(program, "u_materialId"), 3);
+    glUniform1i(glGetUniformLocation(program, "u_alphaTest"), 2);
+    for (const char* name :
+         {"u_terrainTextures", "u_terrainNormals", "u_terrainRoughness", "u_skinnedTextures"})
+        glUniform1i(glGetUniformLocation(program, name), 1);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, 64, 64);
+    std::array<std::array<unsigned char, 4>, 2> centers{};
+    for (int far_lod = 0; far_lod < 2; ++far_lod) {
+        glUniform1i(glGetUniformLocation(program, "u_forceFlat"), far_lod);
+        const GLfloat clear[4] = {0, 0, 0, 0};
+        glClearBufferfv(GL_COLOR, 2, clear);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, 1);
+        glReadBuffer(GL_COLOR_ATTACHMENT2);
+        std::array<unsigned char, 4> corner{};
+        glReadPixels(2, 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corner.data());
+        glReadPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, centers[far_lod].data());
+        EXPECT_EQ(corner[3], 0) << "the empty corner must reveal the scene behind the leaf";
+        EXPECT_GT(centers[far_lod][1], 20) << "the leaf center must retain green reflectance";
+        EXPECT_GT(centers[far_lod][3], 180) << "the leaf must remain a matte surface";
+    }
+    EXPECT_EQ(centers[0], centers[1]);
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(1, &texture);
+    glDeleteTextures(1, &lut);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, ContrastPreservesShadedMaterialDetail) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program =
+        LinkProgram({"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"});
+    ASSERT_NE(program, 0u);
+    glUseProgram(program);
+    glUniform1f(glGetUniformLocation(program, "u_contrast"), 1.42f);
+    glUniform1f(glGetUniformLocation(program, "u_saturation"), 1.30f);
+    glUniform1f(glGetUniformLocation(program, "u_exposure"), 1.12f);
+    // Two leaf reflectances receiving ambient light, with the direct sun behind them.
+    const auto dark = LitChainNoonOnscreenSrgb(
+        program, {0.02f, 0.03f, 0.01f}, 0.85f, {}, -1.0f, 0.0f, 0.0f, {0, 0, 1});
+    const auto light = LitChainNoonOnscreenSrgb(
+        program, {0.04f, 0.06f, 0.02f}, 0.85f, {}, -1.0f, 0.0f, 0.0f, {0, 0, 1});
+    EXPECT_GT(dark.g, 0.02f) << "shaded foliage must retain color above the black floor";
+    EXPECT_GT(light.g, dark.g + 0.01f) << "different reflectances must remain distinguishable";
+    glDeleteProgram(program);
+}
+
+// Real weather shader readback: high-frequency terrain makes even a subpixel
+// screen warp visible, and encoded normals exercise the G-buffer contract.
+namespace {
+// A float target preserves small contributions and depth-boundary discontinuities
+// from the actual production fullscreen shaders without a window or tonemapper.
+class FullscreenFloatProbe {
+public:
+    static constexpr int width = 32;
+    FullscreenFloatProbe() {
+        glGenTextures(1, &target);
+        glBindTexture(GL_TEXTURE_2D, target);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+        glDrawBuffer(GL_COLOR_ATTACHMENT0);
+        glGenTextures(static_cast<GLsizei>(inputs.size()), inputs.data());
+        constexpr float quad[] = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, -1, 1, 0, 0, 1, 1, 1, 0, 1, 1};
+        glGenVertexArrays(1, &vao);
+        glBindVertexArray(vao);
+        glGenBuffers(1, &vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1,
+                              2,
+                              GL_FLOAT,
+                              GL_FALSE,
+                              5 * sizeof(float),
+                              reinterpret_cast<void*>(3 * sizeof(float)));
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+        glViewport(0, 0, width, 1);
+    }
+    ~FullscreenFloatProbe() {
+        glDeleteTextures(static_cast<GLsizei>(inputs.size()), inputs.data());
+        glDeleteTextures(1, &target);
+        glDeleteFramebuffers(1, &fbo);
+        glDeleteBuffers(1, &vbo);
+        glDeleteVertexArrays(1, &vao);
+    }
+    void texture(int unit, const std::vector<glm::vec4>& pixels, int rows = 1) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGBA32F,
+                     static_cast<GLsizei>(pixels.size() / rows),
+                     rows,
+                     0,
+                     GL_RGBA,
+                     GL_FLOAT,
+                     pixels.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    std::array<glm::vec4, width> draw() const {
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        std::array<glm::vec4, width> pixels{};
+        glReadPixels(0, 0, width, 1, GL_RGBA, GL_FLOAT, pixels.data());
+        return pixels;
+    }
+
+private:
+    GLuint target = 0, fbo = 0, vao = 0, vbo = 0;
+    std::array<GLuint, 6> inputs{};
+};
+} // namespace
+
+TEST(RenderSmokeTest, GrassAndTerrainSampleTheSameProjectedCloudShadow) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    std::array<GLuint, 2> programs{};
+    for (int path = 0; path < 2; ++path) {
+        const std::string source = ReadTextFile(SourceRoot() / "res/shaders" /
+                                                (path ? "foliage.frag" : "lighting_pass.frag"));
+        const auto begin = source.find(path ? "float fol_cloud_hash" : "float cloud_hash");
+        const auto end = source.find(path ? "void main()" : "// ---: exposure", begin);
+        ASSERT_NE(begin, std::string::npos);
+        ASSERT_NE(end, std::string::npos);
+        // Compile the actual production sampling functions, exposing their numerical result
+        // before the different terrain/blade BRDFs and tone curves obscure spatial agreement.
+        std::string probe = R"(#version 450 core
+out vec4 FragColor;
+uniform int u_cloudShadowEnabled;
+uniform vec2 u_cloudScrollOffset;
+uniform float u_cloudCoverageAmount, u_cloudBiomeVariation;
+uniform float u_cloudPlaneHeight, u_cloudShadowStrength;
+uniform vec3 u_cloudSunDir, u_probeOrigin;
+)";
+        probe += source.substr(begin, end - begin);
+        probe += "\nvoid main() { float shadow = ";
+        probe += path ? "fol_cloudShadow" : "cloudShadow";
+        probe += R"((u_probeOrigin + vec3(gl_FragCoord.x * 137.0, 0, gl_FragCoord.x * 71.0));
+FragColor = vec4(shadow, shadow, shadow, 1); })";
+        GLuint fragment = glCreateShader(GL_FRAGMENT_SHADER);
+        const char* text = probe.c_str();
+        glShaderSource(fragment, 1, &text, nullptr);
+        glCompileShader(fragment);
+        GLint compiled = GL_FALSE;
+        glGetShaderiv(fragment, GL_COMPILE_STATUS, &compiled);
+        ASSERT_EQ(compiled, GL_TRUE) << GetShaderInfoLog(fragment);
+        const GLuint vertex =
+            CompileShader(SourceRoot() / "res/shaders/ssao.vert", GL_VERTEX_SHADER);
+        programs[path] = glCreateProgram();
+        glAttachShader(programs[path], vertex);
+        glAttachShader(programs[path], fragment);
+        glLinkProgram(programs[path]);
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(programs[path], GL_LINK_STATUS, &linked);
+        ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(programs[path]);
+    }
+    FullscreenFloatProbe probe;
+    float largest_shadow = 0, largest_difference = 0;
+    for (float coverage : {0.2f, 0.7f, 1.0f}) {
+        for (const glm::vec2 scroll : {glm::vec2(0), glm::vec2(1837, -729)}) {
+            for (int condition = 0; condition < 4; ++condition) {
+                std::array<std::array<glm::vec4, FullscreenFloatProbe::width>, 2> samples{};
+                for (int path = 0; path < 2; ++path) {
+                    const GLuint program = programs[path];
+                    glUseProgram(program);
+                    glUniform1i(glGetUniformLocation(program, "u_cloudShadowEnabled"),
+                                condition != 1);
+                    glUniform2f(
+                        glGetUniformLocation(program, "u_cloudScrollOffset"), scroll.x, scroll.y);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudCoverageAmount"), coverage);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudBiomeVariation"), 0.1f);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudPlaneHeight"), 900);
+                    glUniform1f(glGetUniformLocation(program, "u_cloudShadowStrength"), 0.8f);
+                    glUniform3f(glGetUniformLocation(program, "u_cloudSunDir"),
+                                -0.6f,
+                                condition == 2 ? 0.0f : -0.8f,
+                                0);
+                    glUniform3f(glGetUniformLocation(program, "u_probeOrigin"),
+                                -2500,
+                                condition == 3 ? 950.0f : 17.0f,
+                                -1400);
+                    samples[path] = probe.draw();
+                }
+                for (int i = 0; i < FullscreenFloatProbe::width; ++i) {
+                    largest_difference =
+                        std::max(largest_difference, std::abs(samples[0][i].r - samples[1][i].r));
+                    largest_shadow = std::max(largest_shadow, samples[0][i].r);
+                    if (condition != 0) {
+                        EXPECT_FLOAT_EQ(samples[0][i].r, 0);
+                        EXPECT_FLOAT_EQ(samples[1][i].r, 0);
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_GT(largest_shadow, 0.3f) << "the comparison must sample actual cloud cores";
+    EXPECT_LT(largest_difference, 0.002f)
+        << "grass and terrain must share shadow position and penumbra";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    for (GLuint program : programs)
+        glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, WaterCausticsRetainPatternInNormalizedTarget) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program =
+        LinkProgram({"water_caustics", "lighting_pass.vert", "caustics_generator.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform2f(glGetUniformLocation(program, "u_resolution"), 32, 1);
+    for (float time : {0.0f, 3.5f, 12.0f}) {
+        glUniform1f(glGetUniformLocation(program, "u_time"), time);
+        const auto pixels = probe.draw();
+        int clipped = 0;
+        float low = 1.0f, high = 0.0f;
+        for (const auto& pixel : pixels) {
+            EXPECT_TRUE(std::isfinite(pixel.r));
+            const float stored = std::clamp(pixel.r, 0.0f, 1.0f);
+            low = std::min(low, stored);
+            high = std::max(high, stored);
+            clipped += stored >= 0.98f;
+        }
+        EXPECT_LT(clipped, 3) << "time " << time << ": RGBA8 storage loses the caustic pattern";
+        EXPECT_GT(high - low, 0.05f) << "time " << time;
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, DistantWaterStillUsesOpaqueTerrainDepthAndRejectsDryGround) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"water", "water.vert", "water.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glDisableVertexAttribArray(1);
+    glVertexAttrib3f(1, 0, 0, 1); // the quad becomes horizontal after the model rotation
+    glUseProgram(program);
+    const std::array<const char*, 6> samplers{"u_opaque_scene_color",
+                                              "u_opaque_depth",
+                                              "u_normal_map",
+                                              "u_flow_map",
+                                              "u_caustics_texture",
+                                              "u_underwater_texture"};
+    for (int i = 0; i < 6; ++i)
+        glUniform1i(glGetUniformLocation(program, samplers[i]), i);
+    probe.texture(0, {glm::vec4(0.3f, 0.2f, 0.1f, 1.0f)});
+    probe.texture(2, {glm::vec4(0.5f, 0.5f, 1.0f, 1.0f)});
+    probe.texture(3, {glm::vec4(0.5f, 0.5f, 0.0f, 0.0f)});
+    probe.texture(4, {glm::vec4(0.0f)});
+    probe.texture(5, {glm::vec4(0.0f)});
+    const auto projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    auto view = glm::lookAt(glm::vec3(0, 1200, 0), glm::vec3(0), glm::vec3(0, 0, -1));
+    const auto model = glm::scale(
+        glm::rotate(glm::mat4(1), glm::radians(-90.0f), glm::vec3(1, 0, 0)), glm::vec3(1000));
+    const auto matrix = [&](const char* name, const glm::mat4& m) {
+        glUniformMatrix4fv(glGetUniformLocation(program, name), 1, GL_FALSE, &m[0][0]);
+    };
+    matrix("u_model", model);
+    matrix("u_view", view);
+    matrix("u_projection", projection);
+    matrix("u_inverse_view", glm::inverse(view));
+    matrix("u_inverse_projection", glm::inverse(projection));
+    matrix("u_view_projection", projection * view);
+    glUniform2f(glGetUniformLocation(program, "u_screen_size"), 32, 1);
+    glUniform3f(glGetUniformLocation(program, "u_camera_pos"), 0, 1200, 0);
+    glUniform3f(glGetUniformLocation(program, "u_sun_direction"), 0, -1, 0);
+    glUniform3f(glGetUniformLocation(program, "u_sun_color"), 1, 1, 1);
+    glUniform3f(glGetUniformLocation(program, "u_sky_color"), 0.4f, 0.6f, 0.9f);
+    glUniform3f(glGetUniformLocation(program, "u_shallow_color"), 0.3f, 0.8f, 0.7f);
+    glUniform3f(glGetUniformLocation(program, "u_deep_color"), 0.02f, 0.18f, 0.34f);
+    glUniform1f(glGetUniformLocation(program, "u_water_depth_scaler"), 0.2f);
+    glUniform1f(glGetUniformLocation(program, "u_reflection_power"), 0.7f);
+    const auto bed = [&](float height) {
+        const auto clip = projection * view * glm::vec4(0, height, 0, 1);
+        probe.texture(1, {glm::vec4(clip.z / clip.w * 0.5f + 0.5f)});
+        glClearColor(0, 0, 0, 0);
+        glClear(GL_COLOR_BUFFER_BIT);
+        return probe.draw()[16];
+    };
+    const auto shallow = bed(-2);
+    const auto deep = bed(-40);
+    EXPECT_GT(glm::length(shallow - deep), 0.05f)
+        << "terrain below distant water still controls depth tint and absorption";
+    const auto dry = bed(2);
+    EXPECT_FLOAT_EQ(dry.a, 0.0f)
+        << "water below opaque land must not paint a water/foam layer on it";
+    // Even a maximum caustic input must preserve a colored, non-emissive bed.
+    // The old additive cyan term washed the native Default/424242 shallows white.
+    probe.texture(0, {glm::vec4(0.8f, 0.72f, 0.5f, 1.0f)}); // sunlit sand, as in the native scene
+    const auto sunlit_bed = bed(-1);
+    probe.texture(4, {glm::vec4(1.0f)});
+    const auto caustic = bed(-1);
+    EXPECT_LT(std::max({caustic.r, caustic.g, caustic.b}), 0.98f);
+    EXPECT_GT(glm::length(caustic - sunlit_bed), 0.005f)
+        << "caustics must still contribute rather than being disabled";
+    view = glm::lookAt(glm::vec3(0, 20, 0), glm::vec3(0), glm::vec3(0, 0, -1));
+    matrix("u_view", view);
+    matrix("u_inverse_view", glm::inverse(view));
+    matrix("u_view_projection", projection * view);
+    glUniform3f(glGetUniformLocation(program, "u_camera_pos"), 0, 20, 0);
+    probe.texture(4, {glm::vec4(0.0f)});
+    bed(-0.1f);
+    int colored_shallows = 0;
+    for (const auto& pixel : probe.draw()) {
+        const float range =
+            std::max({pixel.r, pixel.g, pixel.b}) - std::min({pixel.r, pixel.g, pixel.b});
+        colored_shallows += pixel.a > 0.0f && range > 0.10f;
+    }
+    EXPECT_GE(colored_shallows, 16)
+        << "quiet shallow water must retain bed/body color between broken shoreline foam";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, AerialHazeContinuesAcrossDistantTerrainAndLeavesOnlySkyClear) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"aerial", "ssao.vert", "volumetric_lighting.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    probe.texture(1, {glm::vec4(0.01f)});
+    probe.texture(2, {glm::vec4(1.0f)});
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "gDepth"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_skyViewLut"), 1);
+    glUniform1i(glGetUniformLocation(program, "u_transmittanceLut"), 2);
+    glUniform1i(glGetUniformLocation(program, "u_froxelIntegrated"), 3);
+    SetMat4Identity(program, "u_inverseView");
+    const auto projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverse = glm::inverse(projection);
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_inverseProjection"), 1, GL_FALSE, &inverse[0][0]);
+    glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, 1, 0);
+    glUniform1f(glGetUniformLocation(program, "u_sunCosZenith"), 1);
+    glUniform1f(glGetUniformLocation(program, "u_skyDayFactor"), 1);
+    // Exercise a dense atmosphere across the old depth cutoff independently
+    // of the lighter clear-weather default used by the client.
+    glUniform1f(glGetUniformLocation(program, "u_aerialDensity"), 0.0016f);
+    float previous = 0;
+    for (float distance : {500.0f, 750.0f, 780.0f, 1000.0f, 2000.0f, 3000.0f}) {
+        const auto clip = projection * glm::vec4(0, 0, -distance, 1);
+        const float depth = (clip.z / clip.w) * 0.5f + 0.5f;
+        ASSERT_LT(depth, 1.0f);
+        probe.texture(0, {glm::vec4(depth)});
+        const float haze = probe.draw()[16].a;
+        EXPECT_GE(haze, previous - 0.001f) << "haze must not disappear at distance " << distance;
+        EXPECT_GT(haze, 0.4f);
+        previous = haze;
+    }
+    const float ground_haze = probe.draw()[16].a;
+    const auto elevated = glm::translate(glm::mat4(1), glm::vec3(0, 1200, 0));
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_inverseView"), 1, GL_FALSE, &elevated[0][0]);
+    glUniform3f(glGetUniformLocation(program, "u_viewPos"), 0, 1200, 0);
+    EXPECT_LT(probe.draw()[16].a, ground_haze * 0.25f)
+        << "clear air above the ground layer must not have ground-level extinction";
+    glUniform3f(glGetUniformLocation(program, "u_viewPos"), 0, 0, 0);
+    // The sky LUT is evaluated from ground level: its lower hemisphere is
+    // dark ground, not air radiance along a flying camera's downward sightline.
+    probe.texture(1, {glm::vec4(0.01f), glm::vec4(0.0f)}, 2);
+    const auto looking_down = glm::rotate(glm::mat4(1), glm::radians(-80.0f), glm::vec3(1, 0, 0));
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_inverseView"), 1, GL_FALSE, &looking_down[0][0]);
+    EXPECT_GT(probe.draw()[16].r, 0.1f)
+        << "downward air haze must not use the LUT's black ground hemisphere";
+    probe.texture(0, {glm::vec4(1.0f)});
+    EXPECT_FLOAT_EQ(probe.draw()[16].a, 0.0f) << "only cleared sky depth bypasses aerial haze";
+    glUniform1f(glGetUniformLocation(program, "u_underwater"), 1);
+    EXPECT_GT(probe.draw()[16].a, 0.9f) << "underwater sky still receives water extinction";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, GodRaysUseSkyOcclusionAndRemainVisibleInAir) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"god_rays", "ssao.vert", "god_rays.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_scene"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    glUniform2f(glGetUniformLocation(program, "u_sunUV"), 0.9f, 0.5f);
+    glUniform1f(glGetUniformLocation(program, "u_sunVisible"), 1);
+    glUniform1f(glGetUniformLocation(program, "u_strength"), 0.85f);
+    probe.texture(0, {glm::vec4(0.3f, 0.4f, 0.5f, 1.0f)});
+    probe.texture(1, {glm::vec4(1.0f)});
+    const auto sky = probe.draw();
+    EXPECT_GT(sky[16].r, 0.005f)
+        << "ordinary blue sky must produce shafts without an underwater overlay";
+    // A bright foreground object may neither emit shafts nor receive the sky proxy.
+    std::vector<glm::vec4> depths(32, glm::vec4(1.0f));
+    for (int x = 14; x < 22; ++x)
+        depths[x] = glm::vec4(0.5f);
+    probe.texture(0, {glm::vec4(1.0f)});
+    probe.texture(1, depths);
+    const auto occluded = probe.draw();
+    EXPECT_FLOAT_EQ(occluded[16].r, 0.0f);
+    EXPECT_GT(occluded[24].r, 0.005f);
+    probe.texture(1, {glm::vec4(0.5f)});
+    EXPECT_FLOAT_EQ(probe.draw()[24].r, 0.0f)
+        << "a sun hidden behind terrain must not shine through it";
+    glUniform1f(glGetUniformLocation(program, "u_sunVisible"), 0);
+    probe.texture(1, {glm::vec4(1.0f)});
+    EXPECT_FLOAT_EQ(probe.draw()[24].r, 0.0f);
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, WeatherFogIntegratesTheGroundLayerFromAnElevatedCamera) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"weather", "ssao.vert", "weather_system.frag"});
+    ASSERT_NE(program, 0u);
+    FullscreenFloatProbe probe;
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_sceneColor"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    glUniform1i(glGetUniformLocation(program, "gNormal"), 2);
+    glUniform1f(glGetUniformLocation(program, "u_fogDensity"), 0.4f);
+    glUniform1f(glGetUniformLocation(program, "u_sunIntensity"), 1.0f);
+    glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, -1, 0);
+    probe.texture(0, {glm::vec4(0.2f, 0.1f, 0.04f, 1)});
+    probe.texture(2, {glm::vec4(0)});
+    const auto projection = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 3200.0f);
+    const auto inverse_projection = glm::inverse(projection);
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_inverseProjection"),
+                       1,
+                       GL_FALSE,
+                       &inverse_projection[0][0]);
+    const auto clip = projection * glm::vec4(0, 0, -1200, 1);
+    probe.texture(1, {glm::vec4(clip.z / clip.w * 0.5f + 0.5f)});
+    SetMat4Identity(program, "u_inverseView");
+    const auto ground = probe.draw()[16];
+    EXPECT_GT(ground.r, 0.35f) << "a horizontal sightline inside fog still loses visibility";
+    const auto elevated = glm::translate(glm::mat4(1), glm::vec3(0, 1200, 0)) *
+                          glm::rotate(glm::mat4(1), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+    glUniformMatrix4fv(
+        glGetUniformLocation(program, "u_inverseView"), 1, GL_FALSE, &elevated[0][0]);
+    glUniform3f(glGetUniformLocation(program, "u_cameraPos"), 0, 1200, 0);
+    const auto aerial = probe.draw()[16];
+    EXPECT_NEAR(aerial.r, 0.2f, 0.025f);
+    EXPECT_NEAR(aerial.g, 0.1f, 0.025f);
+    EXPECT_NEAR(aerial.b, 0.04f, 0.025f)
+        << "a thin ground layer must not whiten a kilometre of clear air above it";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, WeatherKeepsTerrainStationaryAndUsesWorldNormals) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"weather", "ssao.vert", "weather_system.frag"});
+    ASSERT_NE(program, 0u);
+    constexpr int size = 128;
+    GLuint fbo = 0, target = 0, vao = 0, vbo = 0;
+    std::array<GLuint, 3> inputs{};
+    glGenTextures(3, inputs.data());
+    std::vector<float> scene(size * size * 4, 1.0f);
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const float value = (x + y) % 2 ? 0.7f : 0.2f;
+            for (int c = 0; c < 3; ++c)
+                scene[(y * size + x) * 4 + c] = value;
+        }
+    }
+    const auto upload = [&](int unit, const std::vector<float>& pixels) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, pixels.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    };
+    upload(0, scene);
+    upload(1, std::vector<float>(size * size * 4, 0.5f));
+    std::vector<float> normals(size * size * 4, 0.0f);
+    const auto normal = [&](float x, float y) {
+        for (int i = 0; i < size * size; ++i) {
+            normals[i * 4] = x;
+            normals[i * 4 + 1] = y;
+        }
+        upload(2, normals);
+    };
+    normal(0.5f, 1.0f); // octahedral encoding of view-space +Y
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &target);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    constexpr float quad[] = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, -1, 1, 0, 0, 1, 1, 1, 0, 1, 1};
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glUseProgram(program);
+    glUniform1i(glGetUniformLocation(program, "u_sceneColor"), 0);
+    glUniform1i(glGetUniformLocation(program, "u_sceneDepth"), 1);
+    glUniform1i(glGetUniformLocation(program, "gNormal"), 2);
+    SetMat4Identity(program, "u_inverseProjection");
+    SetMat4Identity(program, "u_inverseView");
+    glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, -1, 0);
+    glUniform1f(glGetUniformLocation(program, "u_windStrength"), 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glViewport(0, 0, size, size);
+    const auto draw = [&] {
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        std::vector<unsigned char> pixels(size * size * 4);
+        glReadPixels(0, 0, size, size, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+        return pixels;
+    };
+    const auto dry = draw();
+    glUniform1f(glGetUniformLocation(program, "u_windStrength"), 1);
+    glUniform1f(glGetUniformLocation(program, "u_time"), 0.7f);
+    EXPECT_TRUE(draw() == dry) << "wind must never warp the terrain image";
+    glUniform1f(glGetUniformLocation(program, "u_windStrength"), 0);
+    for (const char* precip : {"u_rainIntensity", "u_snowIntensity"}) {
+        glUniform1f(glGetUniformLocation(program, precip), 1);
+        EXPECT_TRUE(draw() == dry)
+            << precip << " must use world-space particles, not a screen veil";
+        glUniform1f(glGetUniformLocation(program, precip), 0);
+    }
+    glUniform1f(glGetUniformLocation(program, "u_wetness"), 1);
+    const auto wet = draw();
+    EXPECT_LT(wet[0], dry[0]);
+    // Rotate the camera 90 degrees: the same world-up normal is now view +X.
+    normal(1.0f, 0.5f);
+    constexpr float rotated[] = {0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    glUniformMatrix4fv(glGetUniformLocation(program, "u_inverseView"), 1, GL_FALSE, rotated);
+    EXPECT_TRUE(draw() == wet)
+        << "camera rotation must not move wetness between surface orientations";
+    normal(0.5f, 0.5f); // world +Z wall
+    EXPECT_TRUE(draw() == dry)
+        << "vertical walls must not receive the upward-facing wetness response";
+    upload(1, std::vector<float>(size * size * 4, 1.0f));
+    normal(1.0f, 0.5f);
+    EXPECT_TRUE(draw() == dry) << "cleared sky depth must never receive ground wetness";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(3, inputs.data());
+    glDeleteTextures(1, &target);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, StormGradesCompositedGrassIncludingSoftEdges) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint grass = LinkProgram({"foliage", "foliage.vert", "foliage.frag"});
+    const GLuint weather = LinkProgram({"weather", "ssao.vert", "weather_system.frag"});
+    const GLuint rays = LinkProgram({"god_rays", "ssao.vert", "god_rays.frag"});
+    ASSERT_NE(grass, 0u);
+    ASSERT_NE(weather, 0u);
+    ASSERT_NE(rays, 0u);
+    constexpr int size = 128;
+    GLuint fbo = 0, target = 0, blade_vao = 0, quad_vao = 0, vbo = 0;
+    std::array<GLuint, 3> inputs{};
+    glGenTextures(3, inputs.data());
+    const auto upload = [&](int unit, const std::vector<glm::vec4>& pixels) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D, inputs[unit]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, pixels.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    };
+    upload(0, std::vector<glm::vec4>(size * size));
+    upload(1, std::vector<glm::vec4>(size * size, glm::vec4(0.5f)));
+    upload(2, std::vector<glm::vec4>(size * size, glm::vec4(0.5f, 1, 0, 0)));
+    glActiveTexture(GL_TEXTURE3);
+    glGenTextures(1, &target);
+    glBindTexture(GL_TEXTURE_2D, target);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, size, size, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glGenVertexArrays(1, &quad_vao);
+    glBindVertexArray(quad_vao);
+    constexpr float quad[] = {-1, -1, 0, 0, 0, 1, -1, 0, 1, 0, -1, 1, 0, 0, 1, 1, 1, 0, 1, 1};
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(
+        1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), reinterpret_cast<void*>(3 * sizeof(float)));
+    glGenVertexArrays(1, &blade_vao);
+    glBindVertexArray(blade_vao);
+    glVertexAttrib3f(0, 0, -0.5f, 0);
+    glVertexAttrib2f(1, 0.8f, 0.5f);
+    glVertexAttrib4f(2, 0.19f, 0.34f, 0.11f, 1);
+    glVertexAttrib2f(3, 0, 0);
+    glVertexAttrib1f(4, 0);
+    glVertexAttrib1f(5, 0);
+    glUseProgram(grass);
+    SetMat4Identity(grass, "u_view");
+    SetMat4Identity(grass, "u_projection");
+    glUniform3f(glGetUniformLocation(grass, "u_cameraPos"), 0, 3, 0);
+    glUniform1f(glGetUniformLocation(grass, "u_fadeStart"), 10);
+    glUniform1f(glGetUniformLocation(grass, "u_fadeEnd"), 20);
+    glUniform3f(glGetUniformLocation(grass, "u_sunDirection"), 0, -1, 0);
+    glUniform3f(glGetUniformLocation(grass, "u_moonDir"), 0, 1, 0);
+    glUniform3f(glGetUniformLocation(grass, "u_ambientColor"), 0.1f, 0.15f, 0.2f);
+    glUseProgram(weather);
+    glUniform1i(glGetUniformLocation(weather, "u_sceneColor"), 0);
+    glUniform1i(glGetUniformLocation(weather, "u_sceneDepth"), 1);
+    glUniform1i(glGetUniformLocation(weather, "gNormal"), 2);
+    SetMat4Identity(weather, "u_inverseProjection");
+    SetMat4Identity(weather, "u_inverseView");
+    glUniform3f(glGetUniformLocation(weather, "u_sunDirection"), 0, -1, 0);
+    // Isolate the global storm grade; ground-normal wetness and fog are covered separately.
+    glUniform1f(glGetUniformLocation(weather, "u_wetness"), 0);
+    glUniform1f(glGetUniformLocation(weather, "u_fogDensity"), 0);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, size, size);
+    const auto pixels = [&] {
+        std::vector<glm::vec4> result(size * size);
+        glReadPixels(0, 0, size, size, GL_RGBA, GL_FLOAT, result.data());
+        return result;
+    };
+    const auto draw_grass = [&](bool blend) {
+        glUseProgram(grass);
+        glBindVertexArray(blade_vao);
+        if (blend)
+            glEnable(GL_BLEND);
+        else
+            glDisable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+        glDisable(GL_BLEND);
+    };
+    const auto snapshot = [&] {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, inputs[0]);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, size, size);
+    };
+    const auto draw_weather = [&](float storm) {
+        glUseProgram(weather);
+        glUniform1f(glGetUniformLocation(weather, "u_stormIntensity"), storm);
+        glBindVertexArray(quad_vao);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    };
+    const GLfloat transparent[] = {0, 0, 0, 0};
+    glClearBufferfv(GL_COLOR, 0, transparent);
+    draw_grass(false);
+    const auto mask = pixels();
+    const auto order = Luminumbra::Rendering::BuildLuminumbraFrameGraph().schedule();
+    for (bool night : {false, true}) {
+        SCOPED_TRACE(night ? "night floor" : "day storm");
+        glUseProgram(grass);
+        const float sun = night ? 0.0f : 1.0f;
+        glUniform3f(glGetUniformLocation(grass, "u_sunColor"), sun, sun, sun);
+        glUniform1f(glGetUniformLocation(grass, "u_sunIntensity"), sun);
+        const GLfloat background[] = {
+            night ? 0.005f : 0.12f, night ? 0.005f : 0.18f, night ? 0.005f : 0.10f, 1};
+        const auto compose = [&](float storm) {
+            glClearBufferfv(GL_COLOR, 0, background);
+            // Follow the production graph, so moving foliage after weather reproduces the bug.
+            for (const auto& stage : order) {
+                if (stage == "foliage")
+                    draw_grass(true);
+                else if (stage == "weather_opaque_snapshot")
+                    snapshot();
+                else if (stage == "weather_overlay")
+                    draw_weather(storm);
+            }
+            return pixels();
+        };
+        const auto clear = compose(0);
+        const auto storm = compose(0.75f);
+        // The oracle grades the already blended clear scene using the actual weather shader.
+        // This tests composition at blade interiors AND antialiased edges without duplicating
+        // the shader's grade constants or deriving expectations from the scheduled result.
+        upload(0, clear);
+        draw_weather(0.75f);
+        const auto expected = pixels();
+        int opaque = 0, partial = 0;
+        float max_error = 0, clear_luma = 0, storm_luma = 0;
+        for (int i = 0; i < size * size; ++i) {
+            if (mask[i].a < 0.05f)
+                continue;
+            opaque += mask[i].a > 0.99f;
+            partial += mask[i].a > 0.1f && mask[i].a < 0.9f;
+            for (int channel = 0; channel < 3; ++channel)
+                max_error = std::max(max_error, std::abs(storm[i][channel] - expected[i][channel]));
+            clear_luma += glm::dot(glm::vec3(clear[i]), glm::vec3(0.299f, 0.587f, 0.114f));
+            storm_luma += glm::dot(glm::vec3(storm[i]), glm::vec3(0.299f, 0.587f, 0.114f));
+        }
+        EXPECT_GT(opaque, 200);
+        EXPECT_GT(partial, 20);
+        EXPECT_LT(max_error, 0.0002f) << "grass must receive the scene's storm grade once";
+        if (!night) {
+            EXPECT_LT(storm_luma, clear_luma * 0.7f);
+        }
+        // Storm zero must preserve both the opaque and blended blade colors.
+        upload(0, clear);
+        draw_weather(0);
+        const auto identity = pixels();
+        for (int i = 0; i < size * size; ++i)
+            for (int channel = 0; channel < 3; ++channel)
+                ASSERT_NEAR(identity[i][channel], clear[i][channel], 0.0002f);
+    }
+    // A blade against cleared sky must still occlude shafts at its true alpha,
+    // even though the G-buffer depth contains no terrain there. Sampling the
+    // lighting depth would hard-cut partially covered edges instead.
+    upload(1, std::vector<glm::vec4>(size * size, glm::vec4(1)));
+    glUseProgram(grass);
+    glUniform3f(glGetUniformLocation(grass, "u_sunColor"), 1, 1, 1);
+    glUniform1f(glGetUniformLocation(grass, "u_sunIntensity"), 1);
+    glUseProgram(rays);
+    glUniform1i(glGetUniformLocation(rays, "u_scene"), 0);
+    glUniform1i(glGetUniformLocation(rays, "u_sceneDepth"), 1);
+    glUniform2f(glGetUniformLocation(rays, "u_sunUV"), 0.9f, 0.8f);
+    glUniform1f(glGetUniformLocation(rays, "u_sunVisible"), 1);
+    glUniform1f(glGetUniformLocation(rays, "u_strength"), 0.85f);
+    const auto draw_rays = [&] {
+        glUseProgram(rays);
+        glBindVertexArray(quad_vao);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisable(GL_BLEND);
+    };
+    const GLfloat sky[] = {0.3f, 0.4f, 0.5f, 1};
+    glClearBufferfv(GL_COLOR, 0, sky);
+    snapshot();
+    draw_rays();
+    EXPECT_GT(pixels()[size * size / 2].r, sky[0] + 0.001f);
+    draw_grass(true);
+    snapshot();
+    draw_weather(0.75f);
+    const auto occluded_rays = pixels();
+    glClearBufferfv(GL_COLOR, 0, sky);
+    for (const auto& stage : order) {
+        if (stage == "opaque_snapshot" || stage == "god_rays_opaque_snapshot" ||
+            stage == "weather_opaque_snapshot")
+            snapshot();
+        else if (stage == "god_rays")
+            draw_rays();
+        else if (stage == "foliage")
+            draw_grass(true);
+        else if (stage == "weather_overlay")
+            draw_weather(0.75f);
+    }
+    const auto actual_rays = pixels();
+    float silhouette_error = 0;
+    for (int i = 0; i < size * size; ++i)
+        for (int channel = 0; channel < 3; ++channel)
+            silhouette_error = std::max(
+                silhouette_error, std::abs(actual_rays[i][channel] - occluded_rays[i][channel]));
+    EXPECT_LT(silhouette_error, 0.0002f)
+        << "soft grass silhouettes must occlude rays before the common weather grade";
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(rays);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &blade_vao);
+    glDeleteVertexArrays(1, &quad_vao);
+    glDeleteTextures(3, inputs.data());
+    glDeleteTextures(1, &target);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(grass);
+    glDeleteProgram(weather);
+}
+
+TEST(RenderSmokeTest, GrassRemainsVisibleInUpperFrameAndOnRisingGround) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"foliage", "foliage.vert", "foliage.frag"});
+    ASSERT_NE(program, 0u);
+    const char* varying = "gl_Position";
+    glTransformFeedbackVaryings(program, 1, &varying, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(program);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    glUseProgram(program);
+    SetMat4Identity(program, "u_view");
+    SetMat4Identity(program, "u_projection");
+    glUniform1f(glGetUniformLocation(program, "u_fadeStart"), 10);
+    glUniform1f(glGetUniformLocation(program, "u_fadeEnd"), 20);
+    GLuint vao = 0, buffer = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glVertexAttrib3f(0, 0, 0.55f, 0);
+    glVertexAttrib2f(1, 0.035f, 0.20f);
+    glVertexAttrib4f(2, 0.19f, 0.34f, 0.11f, 1);
+    glVertexAttrib2f(3, 0, 0);
+    std::array<float, 12 * 4> positions{};
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof(positions), nullptr, GL_STREAM_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+    for (float eye_height : {3.0f, 0.5f}) {
+        glUniform3f(glGetUniformLocation(program, "u_cameraPos"), 0, eye_height, 0);
+        glEnable(GL_RASTERIZER_DISCARD);
+        glBeginTransformFeedback(GL_TRIANGLES);
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+        glEndTransformFeedback();
+        glDisable(GL_RASTERIZER_DISCARD);
+        glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(positions), positions.data());
+        for (int vertex = 0; vertex < 12; ++vertex) {
+            EXPECT_NEAR(positions[vertex * 4 + 3], 1.0f, 0.001f);
+            EXPECT_GE(positions[vertex * 4 + 1], 0.48f);
+            EXPECT_LE(positions[vertex * 4 + 1], 0.76f)
+                << "visible uphill grass must not be collapsed into an offscreen point";
+        }
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteBuffers(1, &buffer);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, GrassWindBendIsBoundedByBladeHeight) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"foliage", "foliage.vert", "foliage.frag"});
+    ASSERT_NE(program, 0u);
+    const char* varying = "gl_Position";
+    glTransformFeedbackVaryings(program, 1, &varying, GL_INTERLEAVED_ATTRIBS);
+    glLinkProgram(program);
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    ASSERT_EQ(linked, GL_TRUE) << GetProgramInfoLog(program);
+    glUseProgram(program);
+    SetMat4Identity(program, "u_view");
+    SetMat4Identity(program, "u_projection");
+    glUniform3f(glGetUniformLocation(program, "u_cameraPos"), 0, 3, 0);
+    glUniform1f(glGetUniformLocation(program, "u_fadeStart"), 10);
+    glUniform1f(glGetUniformLocation(program, "u_fadeEnd"), 20);
+    glUniform1f(glGetUniformLocation(program, "u_swayAmplitude"), 0.25f);
+    GLuint vao = 0, buffer = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    glVertexAttrib3f(0, 0, 0, 0);
+    glVertexAttrib2f(1, 0.035f, 0.20f);
+    glVertexAttrib4f(2, 0.19f, 0.34f, 0.11f, 1);
+    glVertexAttrib2f(3, 100, 0);
+    glVertexAttrib1f(4, 0);
+    glVertexAttrib1f(5, 0);
+    std::array<float, 12 * 4> positions{};
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, buffer);
+    glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, sizeof(positions), nullptr, GL_STREAM_READ);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer);
+    glEnable(GL_RASTERIZER_DISCARD);
+    glBeginTransformFeedback(GL_TRIANGLES);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+    glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+    glGetBufferSubData(GL_TRANSFORM_FEEDBACK_BUFFER, 0, sizeof(positions), positions.data());
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    for (int vertex = 0; vertex < 12; ++vertex) {
+        const float x = positions[vertex * 4];
+        const float y = positions[vertex * 4 + 1];
+        EXPECT_LE(std::abs(x), 0.035f + 0.20f * 0.5f + 0.001f);
+        if (y < 0) {
+            EXPECT_LE(std::abs(x), 0.036f) << "wind must leave the root anchored";
+        }
+    }
+    glDeleteBuffers(1, &buffer);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, GrassBladeNarrowsToATip) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program = LinkProgram({"foliage", "foliage.vert", "foliage.frag"});
+    ASSERT_NE(program, 0u);
+    constexpr int size = 128;
+    GLuint fbo = 0, texture = 0, vao = 0;
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+    // One real crossed-card instance. The second card is edge-on in this view.
+    glVertexAttrib3f(0, 0.0f, -0.5f, 0.0f);
+    glVertexAttrib2f(1, 0.8f, 0.5f);
+    glVertexAttrib4f(2, 0.19f, 0.34f, 0.11f, 1.0f);
+    glVertexAttrib2f(3, 0.0f, 0.0f);
+    glVertexAttrib1f(4, 0.0f);
+    glVertexAttrib1f(5, 0.0f);
+    glUseProgram(program);
+    SetMat4Identity(program, "u_view");
+    SetMat4Identity(program, "u_projection");
+    glUniform3f(glGetUniformLocation(program, "u_cameraPos"), 0, 3, 0);
+    glUniform1f(glGetUniformLocation(program, "u_fadeStart"), 10.0f);
+    glUniform1f(glGetUniformLocation(program, "u_fadeEnd"), 20.0f);
+    glUniform3f(glGetUniformLocation(program, "u_sunDirection"), 0, -1, 0);
+    glUniform3f(glGetUniformLocation(program, "u_sunColor"), 1, 1, 1);
+    glUniform1f(glGetUniformLocation(program, "u_sunIntensity"), 1);
+    glUniform3f(glGetUniformLocation(program, "u_ambientColor"), 0.1f, 0.15f, 0.2f);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glViewport(0, 0, size, size);
+    const GLfloat clear[4] = {0, 0, 0, 0};
+    glClearBufferfv(GL_COLOR, 0, clear);
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 12, 1);
+    std::vector<unsigned char> pixels(size * size * 4);
+    glReadPixels(0, 0, size, size, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    ASSERT_EQ(glGetError(), GL_NO_ERROR);
+    const auto width = [&](int y) {
+        int count = 0;
+        for (int x = 0; x < size; ++x)
+            count += pixels[(y * size + x) * 4 + 3] > 128;
+        return count;
+    };
+    const int lower_width = width(36);
+    const int tip_width = width(61);
+    EXPECT_GT(lower_width, 20);
+    EXPECT_GT(tip_width, 0);
+    EXPECT_LT(tip_width, lower_width / 3)
+        << "a grass tip must not retain the full rectangular card";
+    glDeleteVertexArrays(1, &vao);
+    glDeleteTextures(1, &texture);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, RoughAmbientReflectionMatchesIntegratedGgx) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program =
+        LinkProgram({"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"});
+    ASSERT_NE(program, 0u);
+
+    // Independently integrate the GGX/Schlick microfacet BRDF against a uniform
+    // hemisphere. This contains none of the shader's environment-fit constants.
+    const auto integrate = [](double roughness, double ndv) {
+        constexpr double pi = 3.14159265358979323846;
+        constexpr int polar_steps = 256;
+        constexpr int azimuth_steps = 512;
+        const double alpha = roughness * roughness;
+        const double alpha2 = alpha * alpha;
+        const double k = alpha / 2.0; // Schlick visibility for environment lighting
+        const auto geometry = [k](double cosine) {
+            return cosine / (cosine * (1.0 - k) + k);
+        };
+        const double vx = std::sqrt(1.0 - ndv * ndv);
+        double sum = 0;
+        for (int z = 0; z < polar_steps; ++z) {
+            const double ndl = (z + 0.5) / polar_steps;
+            const double radial = std::sqrt(1.0 - ndl * ndl);
+            for (int p = 0; p < azimuth_steps; ++p) {
+                const double phi = 2.0 * pi * (p + 0.5) / azimuth_steps;
+                const double hx = vx + radial * std::cos(phi);
+                const double hy = radial * std::sin(phi);
+                const double hz = ndv + ndl;
+                const double hlen = std::sqrt(hx * hx + hy * hy + hz * hz);
+                const double ndh = hz / hlen;
+                const double vdh = (vx * hx + ndv * hz) / hlen;
+                const double denominator = ndh * ndh * (alpha2 - 1.0) + 1.0;
+                const double distribution = alpha2 / (pi * denominator * denominator);
+                const double fresnel = 0.04 + 0.96 * std::pow(1.0 - vdh, 5.0);
+                // N.L cancels the BRDF denominator; integrate in d(cos theta) d(phi).
+                sum += distribution * geometry(ndv) * geometry(ndl) * fresnel / (4.0 * ndv);
+            }
+        }
+        return sum * 2.0 * pi / (polar_steps * azimuth_steps);
+    };
+    const auto onscreen = [](double linear) {
+        const double mapped =
+            linear * (2.51 * linear + 0.03) / (linear * (2.43 * linear + 0.59) + 0.14);
+        return std::max(std::pow(mapped, 1.0 / 2.2), 4.0 / 255.0);
+    };
+    const auto inverse_view = glm::rotate(glm::mat4(1), glm::radians(-90.0f), glm::vec3(1, 0, 0));
+    const auto render = [&](float roughness, float ndv, unsigned char material = 1) {
+        const AmbientReflectionProbe probe{ndv, material};
+        return LitChainNoonOnscreenSrgb(
+            program, {0, 0, 0}, roughness, {}, -1, 0, 0, {0, -1, 0}, false, inverse_view, &probe);
+    };
+    for (const float roughness : {0.4f, 0.67f, 0.9f, 1.0f}) {
+        for (const float ndv : {1.0f, 0.5f, 0.1f, 0.02f}) {
+            SCOPED_TRACE(::testing::Message() << "roughness=" << roughness << " N.V=" << ndv);
+            const auto pixel = render(roughness, ndv);
+            const double quantized_roughness = std::lround(roughness * 255.0f) / 255.0;
+            const auto normal = DecodeOctahedral(128.0f / 255.0f, 128.0f / 255.0f);
+            const double actual_ndv = ndv * normal[2] - std::sqrt(1.0f - ndv * ndv) * normal[0];
+            const double reference = onscreen(integrate(quantized_roughness, actual_ndv));
+            // Allow 0.01 display units for the independent quadrature, table
+            // interpolation, RGBA8 inputs and final display quantization.
+            for (const float channel : {pixel.r, pixel.g, pixel.b}) {
+                EXPECT_NEAR(channel, reference, 0.01);
+                EXPECT_GT(channel, 4.0f / 255.0f + 0.01f);
+            }
+        }
+    }
+    EXPECT_GT(render(0.2f, 1.0f).r, 0.1f) << "glossy dielectrics must still reflect the sky";
+    EXPECT_NEAR(render(0.05f, 1.0f).r, onscreen(0.04), 0.005)
+        << "near-mirror dielectric reflection at normal incidence approaches F0";
+    const auto grazing_gloss = render(0.05f, 0.0f);
+    EXPECT_GT(grazing_gloss.r, 0.8f);
+    EXPECT_LE(grazing_gloss.r, 1.0f);
+    for (const float ndv : {1.0f, 0.1f}) {
+        const auto matte_water = render(1.0f, ndv, 200);
+        EXPECT_FLOAT_EQ(matte_water.r, 4.0f / 255.0f);
+        EXPECT_FLOAT_EQ(matte_water.g, 4.0f / 255.0f);
+        EXPECT_FLOAT_EQ(matte_water.b, 4.0f / 255.0f);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, AetherFieldDoesNotMakeNonEmissiveTerrainGlow) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    const GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+    for (const std::array<float, 3> albedo : {std::array<float, 3>{0.087f, 0.083f, 0.065f},
+                                              {0.114f, 0.061f, 0.041f},
+                                              {0.056f, 0.071f, 0.014f}}) {
+        const auto base = LitChainNoonOnscreenSrgb(program, albedo, 0.85f);
+        for (const float field : {0.0f, 0.6f, 50.0f}) {
+            const auto active = LitChainNoonOnscreenSrgb(program, albedo, 0.85f, {}, field);
+            EXPECT_FLOAT_EQ(active.r, base.r);
+            EXPECT_FLOAT_EQ(active.g, base.g);
+            EXPECT_FLOAT_EQ(active.b, base.b);
+        }
+    }
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, DirectionalLightTravelLightsTheFacingSurface) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
+    const GLuint program = LinkProgram(spec);
+    ASSERT_NE(program, 0u);
+    for (const bool moon : {false, true}) {
+        const auto facing = LitChainNoonOnscreenSrgb(
+            program, {0.2f, 0.2f, 0.2f}, 1.0f, {}, -1.0f, 0.0f, 0.0f, {0.0f, 0.0f, -1.0f}, moon);
+        const auto away = LitChainNoonOnscreenSrgb(
+            program, {0.2f, 0.2f, 0.2f}, 1.0f, {}, -1.0f, 0.0f, 0.0f, {0.0f, 0.0f, 1.0f}, moon);
+        EXPECT_GT(facing.r + facing.g + facing.b, away.r + away.g + away.b + 0.1f)
+            << (moon ? "moon" : "sun");
+    }
+    glDeleteProgram(program);
+}
+
+TEST(RenderSmokeTest, DryGroundBelowSeaLevelHasNoWaterTintOrCaustics) {
+    HiddenGlContext context;
+    if (!context.ready())
+        GTEST_SKIP() << context.error();
+    const GLuint program =
+        LinkProgram({"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"});
+    ASSERT_NE(program, 0u);
+    const auto render_floor = [&](float height) {
+        const auto inverse_view = glm::rotate(glm::translate(glm::mat4(1), glm::vec3(0, height, 0)),
+                                              glm::radians(-90.0f),
+                                              glm::vec3(1, 0, 0));
+        return LitChainNoonOnscreenSrgb(
+            program, {0.2f, 0.08f, 0.03f}, 0.9f, {}, -1, 0, 0, {0, -1, 0}, false, inverse_view);
+    };
+    const auto above = render_floor(40);
+    for (float height : {-40.0f, -400.0f}) {
+        const auto below = render_floor(height);
+        EXPECT_FLOAT_EQ(below.r, above.r);
+        EXPECT_FLOAT_EQ(below.g, above.g);
+        EXPECT_FLOAT_EQ(below.b, above.b);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
     glDeleteProgram(program);
 }
 
@@ -2155,6 +3388,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
     GLuint program = LinkProgram(spec);
     ASSERT_NE(program, 0u);
+    const GLuint environment_brdf = BindEnvironmentBrdf(program);
 
     constexpr int kRes = 16;
     constexpr float kEmissiveLutScale = 8.0f; // must match RenderPipeline::kEmissiveLutScale
@@ -2386,6 +3620,7 @@ TEST(RenderSmokeTest, EmissiveCalibrationMonotonic) {
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
     glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &environment_brdf);
     glDeleteProgram(program);
 }
 
@@ -2486,6 +3721,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     const ShaderProgramSpec spec{"lighting_pass", "lighting_pass.vert", "lighting_pass.frag"};
     GLuint program = LinkProgram(spec);
     ASSERT_NE(program, 0u);
+    const GLuint environment_brdf = BindEnvironmentBrdf(program);
 
     constexpr int kRes = 8;
     GLuint fbo = 0, color_tex = 0;
@@ -2609,7 +3845,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glUniform3f(glGetUniformLocation(program, "u_sun.direction"),
                 0.0f,
                 0.0f,
-                1.0f); // toward-light == +Z == the normal
+                -1.0f); // ray travel -Z; surface-to-light +Z matches the normal
     glUniform3f(glGetUniformLocation(program, "u_sun.color"), 1.0f, 1.0f, 1.0f);
     glUniform1i(glGetUniformLocation(program, "u_pointLightCount"), 0);
     glUniform1f(glGetUniformLocation(program, "u_emissiveLutScale"), 8.0f);
@@ -2658,6 +3894,7 @@ TEST(RenderSmokeTest, ColoredShadowTintedTransmissionColorsDirectSun) {
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
     glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &environment_brdf);
     glDeleteProgram(program);
 }
 
@@ -3166,7 +4403,7 @@ TEST(RenderSmokeTest, RenderFrameworkContractsEmitArtifacts) {
     EXPECT_NE(source.find("terrain_texture_fallback_layers"), std::string::npos);
     EXPECT_NE(source.find("copy_lighting_color_to_opaque_texture"), std::string::npos);
     EXPECT_NE(source.find("lighting.opaque_color_copy"), std::string::npos);
-    EXPECT_NE(source.find("u_causticsTexture"), std::string::npos);
+    EXPECT_NE(source.find("u_caustics_texture"), std::string::npos);
     EXPECT_NE(source.find("u_normal_map"), std::string::npos);
     EXPECT_NE(source.find("u_flow_map"), std::string::npos);
     EXPECT_NE(source.find("u_foam_texture"), std::string::npos);

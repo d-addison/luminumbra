@@ -1,12 +1,14 @@
 #include <gtest/gtest.h>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -185,6 +187,10 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
     }
     Damage(kind);
     const auto before = DiskBytes(root);
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_TRUE(catalog.error.empty());
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_FALSE(inspected.error.empty());
     const bool obsolete = kind <= 4 || kind == 11 || kind == 14 || kind == 17 || kind == 22 ||
                           kind == 23 || kind == 27;
     const bool future = kind == 5 || kind == 8 || kind == 15 || kind == 21 || kind == 24;
@@ -296,6 +302,176 @@ TEST_F(WorldOpenRefusal, CurrentServerBootKeepsLoadedAuthorityAndSkipsWaterSettl
     EXPECT_TRUE(found);
     runner.Shutdown();
     EXPECT_EQ(DiskBytes(save), before);
+}
+
+TEST_F(WorldOpenRefusal, CatalogSeparatesEmptyUnavailableAndRealMetadataWithoutWriting) {
+    const auto before = DiskBytes(root);
+    const auto catalog = Persistence::EnumerateSavedWorlds(root);
+    ASSERT_TRUE(catalog.error.empty());
+    ASSERT_EQ(catalog.worlds.size(), 1u);
+    EXPECT_TRUE(catalog.worlds.front().error.empty());
+    EXPECT_EQ(catalog.worlds.front().metadata.worldId, "fixture");
+    EXPECT_EQ(catalog.worlds.front().metadata.name, "Fixture");
+    EXPECT_EQ(catalog.worlds.front().metadata.seed, "1337");
+    EXPECT_EQ(catalog.worlds.front().metadata.creationTime, 1);
+    const auto empty = Persistence::EnumerateSavedWorlds(root / "absent");
+    EXPECT_TRUE(empty.error.empty());
+    EXPECT_TRUE(empty.worlds.empty());
+    EXPECT_EQ(DiskBytes(root), before);
+
+    fs::remove_all(root / "worlds/saves");
+    Write(root / "worlds/saves", "not a directory");
+    const auto unavailable = Persistence::EnumerateSavedWorlds(root);
+    EXPECT_FALSE(unavailable.error.empty());
+    EXPECT_TRUE(unavailable.worlds.empty());
+}
+
+TEST_F(WorldOpenRefusal, CancelledValidationNeverReportsAValidSaveOrLeavesPartialAuthority) {
+    const auto before = DiskBytes(root);
+    std::stop_source cancellation;
+    cancellation.request_stop();
+    const auto inspected =
+        Persistence::InspectSavedWorld(root, "fixture", cancellation.get_token());
+    EXPECT_FALSE(inspected.error.empty());
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WorldSaveService::validate_save(save, &errors, cancellation.get_token()));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors.front().find("cancelled"), std::string::npos);
+    WorldStreamingState rejected;
+    rejected.get_or_create_chunk(IVec3(2, 0, 2));
+    errors.clear();
+    EXPECT_FALSE(WorldSaveService{}.load_world(rejected, save, errors, cancellation.get_token()));
+    EXPECT_TRUE(rejected.empty());
+    EXPECT_FALSE(errors.empty());
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, InvalidMetadataAndMissingWorldRefuseWithoutExceptionsOrWrites) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    const auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    const std::vector<std::pair<std::string, nlohmann::json>> invalid = {
+        {"name", 42},
+        {"seed", nullptr},
+        {"worldType", "../default"},
+        {"creationTime", "yesterday"},
+        {"spawnPoint", {{"x", "bad"}, {"y", 1}, {"z", 1}}},
+        {"waterSimCursor", -1}};
+    for (const auto& [field, value] : invalid) {
+        auto damaged = metadata;
+        damaged[field] = value;
+        Write(save / "world_info.json", damaged.dump());
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(session.LoadWorld("fixture")) << field;
+        EXPECT_FALSE(session.GetWorldOpenError().empty()) << field;
+        EXPECT_FALSE(session.SaveWorld());
+        EXPECT_FALSE(session.SaveWorldState());
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+    for (const std::string id : {"missing", "../fixture", "..\\fixture", "/fixture"}) {
+        const auto before = DiskBytes(root);
+        EXPECT_FALSE(session.LoadWorld(id));
+        EXPECT_EQ(DiskBytes(root), before);
+    }
+}
+
+TEST_F(WorldOpenRefusal, EmbeddedPresetLoadsWithoutTheOriginalNamedPreset) {
+    fs::rename(root / "worlds/atlas/presets/default.json", save / "preset.json");
+    const auto before = DiskBytes(root);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture")) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetLastLoadedChunkCount(), 1u);
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, CreateEditSaveRestartAndSwitchPreserveAuthority) {
+    std::string id;
+    std::vector<float> edited_sdf;
+    {
+        GameSession created;
+        created.SetRootPath(RootString());
+        created.SetJobSystem(&jobs);
+        ASSERT_TRUE(created.CreateWorld("Edited <world>", "424242", "default"));
+        id = created.GetMetadata().worldId;
+        auto* world = created.GetWorldSystem();
+        world->dispatch_generation_jobs(std::vector<IVec3>{{0, 0, 0}});
+        world->wait_for_streaming_jobs();
+        auto chunks = world->snapshot_streamed_chunks();
+        ASSERT_EQ(chunks.size(), 1u);
+        const auto original_sdf = chunks.front()->sdf_data;
+        ASSERT_GT(world->EditTerrainVoxel(Vec3(8, 8, 8), 3.0f, false, created.GetPhysicsSystem()),
+                  0);
+        world->wait_for_streaming_jobs();
+        edited_sdf = chunks.front()->sdf_data;
+        ASSERT_NE(edited_sdf, original_sdf);
+        created.SetSpawnPoint(Vec3(8, 18, 8));
+        world::WorldStateSaveReport report;
+        ASSERT_TRUE(created.SaveWorldState(&report));
+        ASSERT_TRUE(report.saved);
+        ASSERT_TRUE(created.SaveWorld());
+    }
+    const auto before = DiskBytes(root);
+    GameSession reopened;
+    reopened.SetRootPath(RootString());
+    reopened.SetJobSystem(&jobs);
+    for (int switch_count = 0; switch_count < 6; ++switch_count) {
+        ASSERT_TRUE(reopened.LoadWorld(id)) << reopened.GetWorldOpenError();
+        EXPECT_EQ(reopened.GetMetadata().spawnPoint, Vec3(8, 18, 8));
+        auto* world = reopened.GetWorldSystem();
+        // A fully restored batch is successful with no jobs. It must preserve the edit.
+        ASSERT_FALSE(world->dispatch_generation_jobs(std::vector<IVec3>{{0, 0, 0}}).counter);
+        auto chunks = world->snapshot_streamed_chunks();
+        const auto edited = std::find_if(chunks.begin(), chunks.end(), [](const auto& chunk) {
+            return chunk->get_coords() == IVec3(0, 0, 0);
+        });
+        ASSERT_NE(edited, chunks.end());
+        EXPECT_EQ((*edited)->sdf_data, edited_sdf);
+        EXPECT_EQ((*edited)->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+        // Replace the world while background generation is active; its dependencies must live
+        // until the workers complete, and the next world must not inherit these chunks.
+        world->dispatch_generation_jobs(
+            std::vector<IVec3>{{100, 0, 100}, {101, 0, 100}, {102, 0, 100}});
+        ASSERT_TRUE(reopened.LoadWorld("fixture")) << reopened.GetWorldOpenError();
+        EXPECT_EQ(reopened.GetLastLoadedChunkCount(), 1u);
+        EXPECT_EQ(reopened.GetWorldSystem()->snapshot_streamed_chunks().front()->sdf_data.front(),
+                  1.0f);
+    }
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, InterruptedMetadataSaveKeepsPreviousBytesAndCanRetry) {
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    const auto before = DiskBytes(root);
+    session.SetSpawnPoint(Vec3(10, 20, 30));
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    EXPECT_FALSE(session.SaveWorld());
+    WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_EQ(DiskBytes(root), before);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto saved = Persistence::InspectSavedWorld(root, "fixture");
+    EXPECT_TRUE(saved.error.empty());
+    EXPECT_EQ(saved.metadata.spawnPoint, Vec3(10, 20, 30));
+}
+
+TEST_F(WorldOpenRefusal, MenuWorldCreatesNoSaveAndClearsPreviousWorldState) {
+    const auto before = DiskBytes(root);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.LoadWorld("fixture"));
+    ASSERT_TRUE(session.CreateTransientWorld("Menu Vista", "424242", "default"));
+    EXPECT_TRUE(session.LoadWorldState());
+    EXPECT_TRUE(session.GetWorldSaveDir().empty());
+    EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_FALSE(session.SaveWorldState());
+    EXPECT_EQ(DiskBytes(root), before);
 }
 
 } // namespace

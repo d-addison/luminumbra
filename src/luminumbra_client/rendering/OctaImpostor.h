@@ -19,11 +19,9 @@
 //
 // DETERMINISM: render-only. Nothing here is hashed, serialized, or fed to the sim.
 //
-// Convention: tree "up" is +Y. Impostors capture the UPPER hemisphere of view
-// directions (horizon up to top-down) — you never view a tree from underground —
-// so we use a HEMI-octahedral parameterization that maps the whole y>=0 hemisphere
-// onto the [0,1]^2 atlas with no wasted area (full octahedral would waste half the
-// atlas on never-sampled bottom-hemisphere tiles).
+// Convention: tree "up" is +Y. The atlas captures the full sphere: a player on
+// lower ground or below the canopy can look upward at a distant tree. Hemi-octa
+// helpers remain available for callers whose views are restricted to y >= 0.
 
 #include <algorithm>
 #include <array>
@@ -71,6 +69,30 @@ inline Vec3f HemiOctaDecode(Vec2f uv) {
 }
 
 // --- Atlas grid -------------------------------------------------------------------
+
+inline Vec2f OctaEncode(Vec3f dir) {
+    const float l1 = std::fabs(dir.x) + std::fabs(dir.y) + std::fabs(dir.z);
+    float x = l1 > 0.0f ? dir.x / l1 : 0.0f;
+    float z = l1 > 0.0f ? dir.z / l1 : 0.0f;
+    if (dir.y < 0.0f) {
+        const float old_x = x;
+        x = (1.0f - std::fabs(z)) * (old_x < 0.0f ? -1.0f : 1.0f);
+        z = (1.0f - std::fabs(old_x)) * (z < 0.0f ? -1.0f : 1.0f);
+    }
+    return {x * 0.5f + 0.5f, z * 0.5f + 0.5f};
+}
+
+inline Vec3f OctaDecode(Vec2f uv) {
+    float x = uv.x * 2.0f - 1.0f, z = uv.y * 2.0f - 1.0f;
+    const float y = 1.0f - std::fabs(x) - std::fabs(z);
+    if (y < 0.0f) {
+        const float old_x = x;
+        x = (1.0f - std::fabs(z)) * (old_x < 0.0f ? -1.0f : 1.0f);
+        z = (1.0f - std::fabs(old_x)) * (z < 0.0f ? -1.0f : 1.0f);
+    }
+    const float inv = 1.0f / std::sqrt(x * x + y * y + z * z);
+    return {x * inv, y * inv, z * inv};
+}
 //
 // gridResolution x gridResolution tiles. Tile (i,j) captures the direction at its
 // CELL CENTER so the bake and the shader agree. A larger grid = smoother view
@@ -81,19 +103,19 @@ struct OctaImpostorGrid {
     int tileResolution = 128; // pixels per tile side in the atlas
 };
 
-// Direction captured by tile (i,j) — the hemi-octa decode of the cell CENTER.
+// Direction captured by tile (i,j) — the full-sphere decode of the cell center.
 inline Vec3f OctaTileDirection(int i, int j, const OctaImpostorGrid& grid) {
     const int n = std::max(1, grid.gridResolution);
     const Vec2f uv{(static_cast<float>(i) + 0.5f) / static_cast<float>(n),
                    (static_cast<float>(j) + 0.5f) / static_cast<float>(n)};
-    return HemiOctaDecode(uv);
+    return OctaDecode(uv);
 }
 
 // Continuous tile coordinate for a view direction (in [0, gridResolution]); the
 // integer part is the tile, the fractional part is the blend toward the next tile.
 inline Vec2f OctaTileCoord(Vec3f viewDir, const OctaImpostorGrid& grid) {
     const int n = std::max(1, grid.gridResolution);
-    const Vec2f uv = HemiOctaEncode(viewDir);
+    const Vec2f uv = OctaEncode(viewDir);
     return Vec2f{uv.x * static_cast<float>(n), uv.y * static_cast<float>(n)};
 }
 

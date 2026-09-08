@@ -30,7 +30,7 @@ uniform float u_skyDayFactor;  // night-darkening envelope (matches the dome)
 // Aerial-perspective tuning. Distance at which fog reaches ~63% opacity scales
 // inversely with this; kept modest so near terrain stays clear and only the
 // far field hazes (the FarLodHorizon sky-ratio premise is unaffected).
-uniform float u_aerialDensity = 0.0016;
+uniform float u_aerialDensity = 0.00045;
 uniform float u_aerialMaxDistance = 1600.0;
 //  controllable atmosphere: HDR scale of the sky in-scatter veil, and a
 // warmth blend (0 = raw sky-view hue -> bluer/crisp aerial; 1 = warmed land
@@ -74,7 +74,10 @@ vec3 worldPositionFromDepth(vec2 uv, float depth) {
 // Sample the sky-view LUT in the view direction so the in-scatter color matches
 // the warm low-sun horizon the dome shows.
 vec3 sampleSkyInscatter(vec3 viewDir) {
-    float cosV = clamp(viewDir.y, -1.0, 1.0);
+    // This LUT is integrated from ground level; downward rays hit the planet
+    // almost immediately and carry no air radiance. Use its horizon air colour
+    // for downward aerial perspective instead of turning distant land black.
+    float cosV = clamp(viewDir.y, 0.02, 1.0);
     float zenith = acos(cosV);              // 0 = up, pi = down
     vec2 vh = normalize(vec2(viewDir.x, viewDir.z) + 1e-5);
     vec2 sh = normalize(vec2(u_sunDirection.x, u_sunDirection.z) + 1e-5);
@@ -99,7 +102,7 @@ void main() {
     // being underwater (limited visibility) rather than dry air with a tint.
     if (u_underwater > 0.5) {
         float d;
-        if (sceneDepth >= 0.9999) {
+        if (sceneDepth >= 1.0) {
             d = u_underwaterVisibility * 4.0; // far/surface -> deep murk
         } else {
             vec3 wp = worldPositionFromDepth(TexCoords, sceneDepth);
@@ -110,10 +113,10 @@ void main() {
         return;
     }
 
-    // Far-depth (sky) pixels: the dome + its own scattering already supply the
-    // color. Leave them untouched (alpha 0) so the horizon sky-ratio that
-    // FarLodHorizon measures does not move.
-    if (sceneDepth >= 0.9999) {
+    // Only cleared depth is sky. With a 0.1/3200 m projection, 0.9999
+    // already describes terrain at about 762 m: treating it as sky cut a
+    // hard ring through the atmosphere and made farther terrain suddenly clear.
+    if (sceneDepth >= 1.0) {
         FragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
@@ -123,8 +126,17 @@ void main() {
     float dist = min(length(toFrag), u_aerialMaxDistance);
     vec3 viewDir = normalize(toFrag);
 
-    // Analytic exponential fog opacity over distance.
-    float fog = 1.0 - exp(-dist * u_aerialDensity);
+    // Integrate an exponential aerosol density along the sightline. A uniform
+    // ground-level density applied over a kilometre of clear air above the
+    // ground turned downward views opaque white. The 250 m scale height keeps
+    // lowland haze while reducing its column density for elevated views.
+    const float aerosolScaleHeight = 250.0;
+    float h0 = max(u_viewPos.y, 0.0) / aerosolScaleHeight;
+    float h1 = max(worldPos.y, 0.0) / aerosolScaleHeight;
+    float dh = h1 - h0;
+    float meanDensity = abs(dh) < 0.001 ? exp(-0.5 * (h0 + h1))
+                                      : (exp(-h0) - exp(-h1)) / dh;
+    float fog = 1.0 - exp(-dist * u_aerialDensity * meanDensity);
     fog = clamp(fog, 0.0, 1.0);
 
     // VALLEY / GROUND FOG: density rises toward the valley floor (low worldPos.y),

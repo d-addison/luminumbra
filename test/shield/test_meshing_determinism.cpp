@@ -10,12 +10,18 @@
 
 #include "gtest/gtest.h"
 
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <vector>
+
+#include <FastNoise/FastNoise.h>
+#include <nlohmann/json.hpp>
 
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
@@ -52,11 +58,81 @@ struct MeshHashes {
     std::size_t index_count = 0;
 };
 
+// Retain the inputs and individual vertex fields alongside the hash oracle.
+// CI uploads test-artifacts, allowing the first field divergence to be located
+// across compilers and CPUs without replacing a failed baseline.
+void WriteMeshEvidence(const TerrainGenParams& params, int seed, const Chunk& chunk, int step) {
+    const auto bits = [](float value) {
+        return std::bit_cast<std::uint32_t>(value);
+    };
+    auto perlin = FastNoise::New<FastNoise::Perlin>(FastSIMD::Level_AVX2);
+    auto worley = FastNoise::New<FastNoise::CellularDistance>(FastSIMD::Level_AVX2);
+    worley->SetDistanceIndex0(0);
+    worley->SetDistanceIndex1(2);
+    worley->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0Div1);
+    nlohmann::json evidence;
+#ifdef _MSC_VER
+    evidence["compiler"] = _MSC_FULL_VER;
+#else
+    evidence["compiler"] = __VERSION__;
+#endif
+    evidence["cpu_max_simd"] = static_cast<unsigned>(FastSIMD::CPUMaxSIMDLevel());
+    evidence["noise_simd"] = static_cast<unsigned>(perlin->GetSIMDLevel());
+    evidence["seed"] = seed;
+    evidence["step"] = step;
+    evidence["float_encoding"] = "IEEE754 binary32 bits";
+    evidence["sdf"] = nlohmann::json::array();
+    for (float value : chunk.sdf_data)
+        evidence["sdf"].push_back(bits(value));
+    evidence["heights"] = nlohmann::json::array();
+    for (float value : chunk.heightmap_data)
+        evidence["heights"].push_back(bits(value));
+    evidence["noise_fields"] = nlohmann::json::array();
+    const IVec3 base = chunk.get_coords() * IVec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
+    if (params.caves_enabled) {
+        for (int z = 0; z <= CHUNK_SIZE_Z; ++z)
+            for (int y = 0; y <= CHUNK_SIZE_Y; ++y)
+                for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                    const Vec3 p(base + IVec3(x, y, z));
+                    const auto sample = [&](float frequency, int offset) {
+                        return bits(perlin->GenSingle3D(
+                            p.x * frequency, p.y * frequency, p.z * frequency, seed + offset));
+                    };
+                    evidence["noise_fields"].push_back(
+                        {sample(params.cave_frequency, 1),
+                         sample(params.spaghetti_frequency, 20),
+                         bits(worley->GenSingle3D(p.x * params.worley_frequency,
+                                                  p.y * params.worley_frequency,
+                                                  p.z * params.worley_frequency,
+                                                  seed + 21))});
+                }
+    }
+    evidence["vertices"] = nlohmann::json::array();
+    for (const auto& vertex : chunk.mesh_vertices)
+        evidence["vertices"].push_back({bits(vertex.position.x),
+                                        bits(vertex.position.y),
+                                        bits(vertex.position.z),
+                                        bits(vertex.normal.x),
+                                        bits(vertex.normal.y),
+                                        bits(vertex.normal.z),
+                                        vertex.material_id});
+    evidence["indices"] = chunk.mesh_indices;
+    const std::filesystem::path directory =
+        std::filesystem::path(LUMINUMBRA_TEST_ARTIFACT_DIR) / "meshing-determinism";
+    std::filesystem::create_directories(directory);
+    const auto path = directory / (std::to_string(seed) + "-" + std::to_string(step) + ".json");
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << evidence.dump() << '\n';
+    ASSERT_TRUE(output.good()) << path.string();
+}
+
 MeshHashes HashChunkMesh(const TerrainGenParams& params, int seed, const IVec3& coords, int step) {
     SHIELD_WorldSystem world_system(nullptr, nullptr, params, seed);
     Chunk chunk(coords);
     world_system.GenerateChunkData(chunk);
     World::MarchingCubes::PolygoniseTerrain(world_system, chunk, 0.0f, step);
+    WriteMeshEvidence(params, seed, chunk, step);
 
     MeshHashes hashes;
     hashes.vertex_count = chunk.mesh_vertices.size();
@@ -184,20 +260,43 @@ TEST(MeshingDeterminism, ArchipelagoChunkHashesAreStable) {
 }
 
 TEST(MeshingDeterminism, CaveChunkHashesAreStable) {
-    // Re-pinned for cave_style/shaping_enabled retirement.
+    // Precise AVX reciprocal/sqrt operations preserve the reference topology.
+    // CPU-specific estimates previously crossed the Worley carve threshold at
+    // (0,10,15), changing 52 vertices / 174 indices into 51 / 168. Vertex bytes
+    // below follow the corrected field; all three index hashes remain unchanged.
     const ExpectedMeshHashes expected[3] = {
         {1,
-         ToolchainVertexHash(0x9b9a0f1985b16decull, 0x9b9a0f1985b16decull),
+         ToolchainVertexHash(0x52a14947bf315497ull, 0x52a14947bf315497ull),
          0x501667b909047bbcull},
         {2,
-         ToolchainVertexHash(0xf0ca86d13f48b7cdull, 0xf0ca86d13f48b7cdull),
+         ToolchainVertexHash(0x186c4e8e9203bc6eull, 0x186c4e8e9203bc6eull),
          0xc026220b072ee6ddull},
         {4,
-         ToolchainVertexHash(0xf1dc86ff3820ef1full, 0xf1dc86ff3820ef1full),
+         ToolchainVertexHash(0xf5a604c650bdef3full, 0xf5a604c650bdef3full),
          0x7298410a91b6706full},
     };
     VerifyCurrentCombo(
         "caves seed=12345 chunk=(0,0,0)", MakeCaveParams(), 12345, IVec3(0, 0, 0), expected);
+}
+
+TEST(MeshingDeterminism, WorleyCarveThresholdUsesPreciseNoise) {
+    auto worley = FastNoise::New<FastNoise::CellularDistance>(FastSIMD::Level_AVX2);
+    worley->SetDistanceIndex0(0);
+    worley->SetDistanceIndex1(2);
+    worley->SetReturnType(FastNoise::CellularDistance::ReturnType::Index0Div1);
+    const auto params = MakeCaveParams();
+    // The first differing noise sample and the sole occupancy flip from the
+    // failing CI trace, respectively. Compare bits before meshing/interpolation.
+    const auto sample = [&](const Vec3& p) {
+        return worley->GenSingle3D(p.x * params.worley_frequency,
+                                   p.y * params.worley_frequency,
+                                   p.z * params.worley_frequency,
+                                   12345 + 21);
+    };
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(sample(Vec3(3, 0, 0))), 0x3e83ea99u);
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(sample(Vec3(0, 10, 15))), 0x3f1ebe77u);
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 12345);
+    EXPECT_LT(world.get_density_at(Vec3(0, 10, 15)), 0.0f);
 }
 
 TEST(MeshingDeterminism, FlatSurfaceChunkHashesAreStable) {

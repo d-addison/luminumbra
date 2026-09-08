@@ -72,15 +72,33 @@ TEST(OctaImpostor, StraightUpMapsToCenter) {
     EXPECT_NEAR(uv.y, 0.5f, 1e-5f);
 }
 
-TEST(OctaImpostor, TileDirectionsAreUnitAndUpperHemisphere) {
+TEST(OctaImpostor, TileDirectionsAreUnitAndCoverBothHemispheres) {
     OctaImpostorGrid grid;
     grid.gridResolution = 8;
+    int upper = 0, lower = 0;
     for (int j = 0; j < grid.gridResolution; ++j) {
         for (int i = 0; i < grid.gridResolution; ++i) {
             const Vec3f dir = OctaTileDirection(i, j, grid);
             EXPECT_NEAR(std::sqrt(Dot(dir, dir)), 1.0f, 1e-4f)
                 << "tile (" << i << "," << j << ") not unit";
-            EXPECT_GE(dir.y, -1e-4f) << "tile (" << i << "," << j << ") points below horizon";
+            upper += dir.y > 0.0f ? 1 : 0;
+            lower += dir.y < 0.0f ? 1 : 0;
+        }
+    }
+    EXPECT_GT(upper, 0);
+    EXPECT_GT(lower, 0);
+}
+
+TEST(OctaImpostor, FullSphereRoundTripsIncludingViewsBelowTheCanopy) {
+    for (auto direction : HemisphereSamples()) {
+        for (const float sign : {-1.0f, 1.0f}) {
+            direction.y = std::fabs(direction.y) * sign;
+            const auto uv = Luminumbra::Rendering::OctaEncode(direction);
+            EXPECT_GE(uv.x, 0.0f);
+            EXPECT_LE(uv.x, 1.0f);
+            EXPECT_GE(uv.y, 0.0f);
+            EXPECT_LE(uv.y, 1.0f);
+            EXPECT_NEAR(Dot(direction, Luminumbra::Rendering::OctaDecode(uv)), 1.0f, 1e-4f);
         }
     }
 }

@@ -211,6 +211,30 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
           cmake --build --preset release --parallel 4
+          # Retain one CPU-only diagnostic binary with its compiler runtime so a
+          # terrain-hash failure can distinguish compiler output from host effects.
+          # This temporary CI artifact is not a software release or game package.
+          $diagnostic = 'build/release/worldgen-diagnostic'
+          New-Item -ItemType Directory -Force $diagnostic | Out-Null
+          Copy-Item build/release/bin/worldgen_layer_snapshot_test.exe $diagnostic
+          $crt = @(Get-ChildItem (Join-Path $env:VCToolsRedistDir 'x64') -Directory -Filter 'Microsoft.VC*.CRT')
+          if ($crt.Count -ne 1) { throw 'Expected exactly one x64 MSVC CRT directory' }
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            Copy-Item (Join-Path $crt[0].FullName $dll) $diagnostic
+          }
+          $files = @{}
+          Get-ChildItem $diagnostic -File | ForEach-Object {
+            $files[$_.Name] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          @{
+            revision = (git rev-parse HEAD)
+            purpose = 'CPU-only worldgen test diagnosis; not a release'
+            compiler = (Get-Item (Get-Command cl).Source).VersionInfo.FileVersion
+            portable_test_filter = 'WorldGenLayerSnapshotTest.DefaultShapingIsDeterministicAndAllSamplersAgree'
+            diagnostic_output_variable = 'LUMINUMBRA_WORLDGEN_DIAGNOSTIC_DIR'
+            limitation = 'Other cases may require the compile-time source checkout; the portable filter uses five synthetic presets only.'
+            file_sha256 = $files
+          } | ConvertTo-Json -Depth 4 | Set-Content "$diagnostic/identity.json"
           # Deploy the staged Mesa3D llvmpipe runtime next to the test
           # executables so glfwCreateWindow gets a GL 4.5 core context.
           Copy-Item (Join-Path $env:RUNNER_TEMP 'mesa3d/x64/opengl32.dll'), `
@@ -232,6 +256,14 @@ jobs:
             build/release/ctest.junit.xml
             build/release/Testing/Temporary
             build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload native worldgen diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-msvc-worldgen-diagnostic-${{ github.sha }}
+          path: build/release/worldgen-diagnostic
           if-no-files-found: warn
           retention-days: 14
       - name: Validate dormant and enabled Windows packaging

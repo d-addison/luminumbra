@@ -24,12 +24,19 @@ This canonicalises before hashing:
 A file whose suffix is `.json` but which does not parse is hashed byte for byte
 rather than skipped: a malformed fixture must still be visible to the gate.
 
-Usage:  fixture_hash.py <data-root>
+By default every file is included. The explicit `headless-server` scope accepts
+`data/common` as its root and excludes only the client grass scatter and rain/snow emitter descriptors.
+These are loaded by client render/preview paths, never by the server workloads.
+Simulation species and other foliage data remain part of the hash. Both sides
+of a comparison must use the same scope.
+
+Usage:  fixture_hash.py <data-root> [--scope all|headless-server]
 Prints the hex digest on stdout.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
@@ -40,6 +47,12 @@ from typing import Any
 # input to the engine. `data/common/systems.json` uses the convention heavily
 # (`_water_high_res_comment` and friends).
 COMMENT_KEY_PREFIX = "_"
+SCOPES = ("all", "headless-server")
+SERVER_RENDER_ONLY_FILES = frozenset({
+    "foliage/scatter_set.json",
+    "particles/precip_rain.json",
+    "particles/precip_snow.json",
+})
 
 
 def strip_comment_keys(value: Any) -> Any:
@@ -72,11 +85,18 @@ def canonical_file_digest(path: Path) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def fixture_hash(root: Path) -> str:
+def fixture_hash(root: Path, *, scope: str = "all") -> str:
     """Digest a fixture tree. Path-ordered, so the result is reproducible."""
+    if scope not in SCOPES:
+        raise ValueError(f"unknown fixture scope: {scope}")
     digest = hashlib.sha256()
+    if scope != "all":
+        # Separate scoped identities from the existing full-tree hash format.
+        digest.update(f"fixture-scope:{scope}\0".encode("ascii"))
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         relative = path.relative_to(root).as_posix()
+        if scope == "headless-server" and relative in SERVER_RENDER_ONLY_FILES:
+            continue
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(canonical_file_digest(path).encode("ascii"))
@@ -85,14 +105,18 @@ def fixture_hash(root: Path) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(f"usage: {Path(argv[0]).name} <data-root>", file=sys.stderr)
-        return 2
-    root = Path(argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("data_root", type=Path)
+    parser.add_argument(
+        "--scope", choices=SCOPES, default="all",
+        help="headless-server expects data/common and omits only client grass/rain/snow rendering data",
+    )
+    args = parser.parse_args(argv[1:])
+    root = args.data_root
     if not root.is_dir():
         print(f"fixture root is not a directory: {root}", file=sys.stderr)
         return 2
-    print(fixture_hash(root))
+    print(fixture_hash(root, scope=args.scope))
     return 0
 
 

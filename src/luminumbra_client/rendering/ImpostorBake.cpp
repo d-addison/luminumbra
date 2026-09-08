@@ -17,42 +17,67 @@ namespace {
 
 struct BakePart {
     const char* path;
-    glm::vec3 flatColor;
 };
 const BakePart kParts[] = {
-    {"data/models/trees/tree_small_02_trunk.lmesh", glm::vec3(0.30f, 0.19f, 0.10f)},
-    {"data/models/trees/tree_small_02_branches.lmesh", glm::vec3(0.32f, 0.20f, 0.10f)},
-    {"data/models/trees/tree_small_02_leaves.lmesh", glm::vec3(0.18f, 0.42f, 0.14f)},
+    {"game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_trunk.lmesh"},
+    {"game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_branches.lmesh"},
+    {"game-assets/tree-small-02/1.0.0/data/models/trees/tree_small_02_leaves.lmesh"},
 };
-constexpr glm::vec3 kBackground(1.0f, 0.0f, 1.0f); // magenta key
+constexpr glm::vec3 kPreviewBackground(1.0f, 0.0f, 1.0f); // Diagnostic export only.
 
 GLuint CompileBakeProgram(std::string& err) {
-    const char* kVert =
-        "#version 450 core\n"
-        "layout(location=0) in vec3 aPos;\n"
-        "layout(location=1) in vec3 aNorm;\n"
-        "layout(location=2) in vec2 aUV;\n"
-        "uniform mat4 uMVP;\n"
-        "out vec2 vUV;\n out vec3 vNorm;\n"
-        "void main(){ vUV = aUV; vNorm = aNorm; gl_Position = uMVP * vec4(aPos, 1.0); }\n";
-    const char* kFrag =
-        "#version 450 core\n"
-        "in vec2 vUV;\n in vec3 vNorm;\n"
-        "uniform sampler2DArray uTex;\n"
-        "uniform int  uLayer;\n uniform vec3 uFlat;\n uniform int uAlphaTest;\n"
-        "layout(location=0) out vec4 oAlbedo;\n"
-        "layout(location=1) out vec4 oNormal;\n"
-        "void main(){\n"
-        "  vec3 col;\n"
-        "  if (uLayer < 0) { col = uFlat; }\n"
-        "  else {\n"
-        "    vec3 a = texture(uTex, vec3(vUV, float(uLayer))).rgb;\n"
-        "    if (uAlphaTest == 1) { if (dot(a, vec3(0.299,0.587,0.114)) < 0.025) discard; }\n"
-        "    col = a;\n"
-        "  }\n"
-        "  oAlbedo = vec4(pow(col, vec3(1.0/2.2)), 1.0);\n"
-        "  oNormal = vec4(normalize(vNorm) * 0.5 + 0.5, 1.0);\n"
-        "}\n";
+    const char* kVert = R"GLSL(#version 450 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNorm;
+layout(location=2) in vec2 aUV;
+uniform mat4 uMVP;
+out vec2 vUV;
+out vec3 vNorm;
+out vec3 vPos;
+void main() { vUV = aUV; vNorm = aNorm; vPos = aPos; gl_Position = uMVP * vec4(aPos, 1.0); }
+)GLSL";
+    const char* kFrag = R"GLSL(#version 450 core
+in vec2 vUV;
+in vec3 vNorm;
+in vec3 vPos;
+uniform sampler2DArray uTex;
+uniform sampler2DArray uNormals;
+uniform sampler2DArray uSurface;
+uniform int uLayer;
+uniform int uNormalLayer;
+uniform int uAlphaTest;
+uniform int uDoubleSided;
+layout(location=0) out vec4 oAlbedo;
+layout(location=1) out vec4 oNormal;
+vec2 encodeNormal(vec3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 p = n.xy;
+    if (n.z < 0.0) p = (1.0 - abs(p.yx)) * (step(0.0, p.xy) * 2.0 - 1.0);
+    return p * 0.5 + 0.5;
+}
+void main() {
+    vec4 color = texture(uTex, vec3(vUV, float(uLayer)));
+    if (uAlphaTest == 1 && color.a < 0.5) discard;
+    vec3 normal = normalize(vNorm);
+    vec3 tn = texture(uNormals, vec3(vUV, float(uNormalLayer))).xyz * 2.0 - 1.0;
+    vec3 dp1 = dFdx(vPos), dp2 = dFdy(vPos);
+    vec2 duv1 = dFdx(vUV), duv2 = dFdy(vUV);
+    vec3 perpendicular2 = cross(dp2, normal), perpendicular1 = cross(normal, dp1);
+    vec3 tangent = perpendicular2 * duv1.x + perpendicular1 * duv2.x;
+    vec3 bitangent = perpendicular2 * duv1.y + perpendicular1 * duv2.y;
+    float extent = max(dot(tangent, tangent), dot(bitangent, bitangent));
+    if (extent > 1e-12) {
+        float scale = inversesqrt(extent);
+        normal = normalize(tangent * (tn.x * scale) + bitangent * (tn.y * scale) + normal * tn.z);
+    }
+    if (uDoubleSided == 1 && !gl_FrontFacing) normal = -normal;
+    vec3 surface = texture(uSurface, vec3(vUV, float(uLayer))).rgb;
+    // Both atlases have zero outside the silhouette. Coverage in albedo alpha
+    // lets the runtime undo the black contribution after bilinear filtering.
+    oAlbedo = vec4(color.rgb, 1.0);
+    oNormal = vec4(encodeNormal(normal), surface.g, surface.r);
+}
+)GLSL";
     auto compile = [&](GLenum type, const char* src) -> GLuint {
         GLuint s = glCreateShader(type);
         glShaderSource(s, 1, &src, nullptr);
@@ -110,7 +135,8 @@ struct RenderedAtlas {
     bool ok = false;
     GLuint albedo = 0, normal = 0;
     int size = 0;
-    float sphereY = 0, radius = 0;
+    glm::vec3 center{0.0f};
+    float radius = 0;
     std::string err;
 };
 RenderedAtlas
@@ -125,7 +151,8 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
         std::unique_ptr<Mesh> mesh;
         int layer;
         int alphaTest;
-        glm::vec3 flat;
+        int normalLayer;
+        bool doubleSided;
     };
     std::vector<LoadedPart> parts;
     glm::vec3 unionC(0.0f);
@@ -150,16 +177,22 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
             unionC = mid;
         }
         const RenderPipeline::StaticModelTex* tex = rp.static_model_tex(p.path);
+        if (!tex || tex->albedoLayer < 0 || tex->normalLayer < 0) {
+            out.err = std::string("required tree material is unavailable: ") + p.path;
+            return out;
+        }
         LoadedPart lp;
         lp.mesh = std::move(m);
-        lp.layer = tex ? tex->albedoLayer : -1;
+        lp.layer = tex->albedoLayer;
+        lp.normalLayer = tex->normalLayer;
+        lp.doubleSided = tex->doubleSided;
         lp.alphaTest = (tex && tex->alphaTest) ? 1 : 0;
-        lp.flat = p.flatColor;
+
         parts.push_back(std::move(lp));
     }
     if (unionR <= 0.0f)
         unionR = 1.0f;
-    out.sphereY = unionC.y;
+    out.center = unionC;
     out.radius = unionR;
 
     std::string err;
@@ -206,19 +239,26 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
     glUseProgram(prog);
     const GLint locMVP = glGetUniformLocation(prog, "uMVP");
     const GLint locLayer = glGetUniformLocation(prog, "uLayer");
-    const GLint locFlat = glGetUniformLocation(prog, "uFlat");
+    const GLint locNormal = glGetUniformLocation(prog, "uNormalLayer");
     const GLint locAlpha = glGetUniformLocation(prog, "uAlphaTest");
+    const GLint locDoubleSided = glGetUniformLocation(prog, "uDoubleSided");
+    glUniform1i(glGetUniformLocation(prog, "uSurface"), 2);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, rp.static_model_surface_array());
     glUniform1i(glGetUniformLocation(prog, "uTex"), 0);
+    glUniform1i(glGetUniformLocation(prog, "uNormals"), 1);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, rp.static_model_normal_array());
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, rp.static_model_texture_array());
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glViewport(0, 0, atlas, atlas);
-    glClearColor(kBackground.r, kBackground.g, kBackground.b, 0.0f);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     const float D = unionR * 2.0f;
-    const float hr = unionR * 0.52f;
+    const float hr = unionR; // Match the runtime quad half-size; retain the complete silhouette.
     for (int j = 0; j < n; ++j) {
         for (int i = 0; i < n; ++i) {
             const Vec3f d3 = OctaTileDirection(i, j, grid);
@@ -233,7 +273,8 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
             for (const LoadedPart& lp : parts) {
                 glUniform1i(locLayer, lp.layer);
                 glUniform1i(locAlpha, lp.alphaTest);
-                glUniform3f(locFlat, lp.flat.r, lp.flat.g, lp.flat.b);
+                glUniform1i(locDoubleSided, lp.doubleSided ? 1 : 0);
+                glUniform1i(locNormal, lp.normalLayer);
                 glBindVertexArray(lp.mesh->vao);
                 glDrawElements(GL_TRIANGLES,
                                static_cast<GLsizei>(lp.mesh->indexCount),
@@ -269,15 +310,22 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
     const int n = std::max(1, grid.gridResolution);
     const int tile = std::max(1, grid.tileResolution);
     std::vector<unsigned char> rgb(static_cast<std::size_t>(atlas) * atlas * 3u);
+    std::vector<unsigned char> rgba(static_cast<std::size_t>(atlas) * atlas * 4u);
     std::vector<unsigned char> nrm(static_cast<std::size_t>(atlas) * atlas * 3u);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glBindTexture(GL_TEXTURE_2D, ra.albedo);
-    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb.data());
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     glBindTexture(GL_TEXTURE_2D, ra.normal);
     glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, nrm.data());
 
-    const unsigned char bgR = static_cast<unsigned char>(kBackground.r * 255.0f);
-    const unsigned char bgB = static_cast<unsigned char>(kBackground.b * 255.0f);
+    for (std::size_t pixel = 0; pixel < rgba.size() / 4; ++pixel) {
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            rgb[pixel * 3 + channel] =
+                rgba[pixel * 4 + 3] > 0
+                    ? rgba[pixel * 4 + channel]
+                    : static_cast<unsigned char>(kPreviewBackground[channel] * 255.0f);
+        }
+    }
     std::vector<float> tileCov(static_cast<std::size_t>(n) * n, 0.0f);
     double covSum = 0.0;
     out.min_coverage = 1.0f;
@@ -287,8 +335,8 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
             for (int py = 0; py < tile; ++py)
                 for (int px = 0; px < tile; ++px) {
                     const std::size_t idx =
-                        (static_cast<std::size_t>(tj * tile + py) * atlas + (ti * tile + px)) * 3u;
-                    if (!(rgb[idx] == bgR && rgb[idx + 1] == 0 && rgb[idx + 2] == bgB))
+                        (static_cast<std::size_t>(tj * tile + py) * atlas + (ti * tile + px)) * 4u;
+                    if (rgba[idx + 3] >= 128)
                         ++covered;
                 }
             const float cov = static_cast<float>(covered) / static_cast<float>(tile * tile);
@@ -306,8 +354,8 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
         else
             normalPath += "_normal";
     }
-    WritePpm(normalPath, atlas, atlas, nrm);
-    out.ok = WritePpm(outPpmPath, atlas, atlas, rgb);
+    const bool normal_written = WritePpm(normalPath, atlas, atlas, nrm);
+    out.ok = WritePpm(outPpmPath, atlas, atlas, rgb) && normal_written;
     if (!out.ok)
         out.error = "failed to write atlas PPM: " + outPpmPath;
     else {
@@ -343,7 +391,7 @@ ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(const std::string& rootDir
     out.albedoTex = ra.albedo;
     out.normalTex = ra.normal;
     out.grid = std::max(1, grid.gridResolution);
-    out.sphereY = ra.sphereY;
+    out.center = {ra.center.x, ra.center.y, ra.center.z};
     out.radius = ra.radius;
     return out;
 }

@@ -1,9 +1,15 @@
 #include "gtest/gtest.h"
 
+#include "luminumbra_client/debug/DebugCamera.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
+#include "luminumbra_client/rendering/Shader.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
+#define GLFW_INCLUDE_NONE
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/MarchingCubes.h"
+#include <GLFW/glfw3.h>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <array>
@@ -1119,4 +1125,262 @@ TEST(FarLodWorker, DurableChunkTruthRepairsOldFarWithoutAStreamedSnapshot) {
         EXPECT_EQ(durable_after_phase_b.front()->sdf_data, durable_chunk->sdf_data);
         EXPECT_EQ(durable_after_phase_b.front()->material_data, durable_chunk->material_data);
     }
+}
+
+TEST(TreeImpostorMaterial, FilteredLeafEdgesPreserveColorNormalRoughnessAndOcclusion) {
+    if (!glfwInit())
+        GTEST_SKIP() << "glfwInit failed";
+    struct GlLifetime {
+        GLFWwindow* window = nullptr;
+        GLuint fbo = 0, vao = 0;
+        std::array<GLuint, 7> textures{};
+        ~GlLifetime() {
+            if (fbo) {
+                glDeleteFramebuffers(1, &fbo);
+                glDeleteVertexArrays(1, &vao);
+                glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+            }
+            if (window)
+                glfwDestroyWindow(window);
+            glfwTerminate();
+        }
+    } gl;
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    gl.window = glfwCreateWindow(16, 16, "impostor material", nullptr, nullptr);
+    if (!gl.window)
+        GTEST_SKIP() << "OpenGL 4.5 context unavailable";
+    glfwMakeContextCurrent(gl.window);
+    ASSERT_TRUE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)));
+    TempSaveDir fixture;
+    const auto vertex_path = fixture.path / "impostor.vert";
+    std::ofstream(vertex_path) << R"(#version 450 core
+uniform vec2 sampleUV;
+out vec2 vQuadUV;
+out vec3 vViewDir, vWorldPos, vViewPos;
+flat out mat3 vObjectToWorld;
+flat out vec3 vTint;
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0, 1);
+    vQuadUV = sampleUV; vViewDir = vec3(0, 1, 0);
+    vWorldPos = vec3(0); vViewPos = vec3(0, 0, -10); vTint = vec3(1);
+    vObjectToWorld = mat3(0,0,-1, 0,1,0, 1,0,0); // object +Z becomes world +X
+}
+)";
+    const auto source_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const auto fragment_path = source_root / "res/shaders/tree_impostor.frag";
+    Shader shader(vertex_path.string().c_str(), fragment_path.string().c_str());
+    ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+    glGenFramebuffers(1, &gl.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, gl.fbo);
+    glGenTextures(static_cast<GLsizei>(gl.textures.size()), gl.textures.data());
+    std::array<GLenum, 5> attachments{};
+    for (std::size_t i = 0; i < attachments.size(); ++i) {
+        attachments[i] = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i);
+        glBindTexture(GL_TEXTURE_2D, gl.textures[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i], GL_TEXTURE_2D, gl.textures[i], 0);
+    }
+    glDrawBuffers(static_cast<GLsizei>(attachments.size()), attachments.data());
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    // One occupied texel and transparent black beside it, as emitted by the bake.
+    const std::array<float, 8> albedo{0.2f, 0.4f, 0.05f, 1.0f, 0, 0, 0, 0};
+    const std::array<float, 8> normal_surface{0.5f, 0.5f, 0.8f, 0.4f, 0, 0, 0, 0};
+    for (int i = 0; i < 2; ++i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, gl.textures[static_cast<std::size_t>(5 + i)]);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGBA32F,
+                     2,
+                     1,
+                     0,
+                     GL_RGBA,
+                     GL_FLOAT,
+                     i == 0 ? albedo.data() : normal_surface.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    shader.use();
+    shader.setInt("u_albedo", 0);
+    shader.setInt("u_normal", 1);
+    shader.setFloat("u_grid", 1.0f);
+    shader.setFloat("u_materialId", 3.0f / 255.0f);
+    shader.setMat4("u_view", glm::mat4(1));
+    glGenVertexArrays(1, &gl.vao);
+    glBindVertexArray(gl.vao);
+    glViewport(0, 0, 1, 1);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    const std::array<float, 4> clear{-1, -1, -1, -1};
+    for (float u : {0.25f, 0.375f, 0.625f}) {
+        SCOPED_TRACE(u);
+        for (int i = 0; i < 5; ++i)
+            glClearBufferfv(GL_COLOR, i, clear.data());
+        shader.setVec2("sampleUV", u, 0.5f);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        std::array<float, 4> color{}, normal{}, surface{};
+        glReadBuffer(GL_COLOR_ATTACHMENT2);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, color.data());
+        if (u > 0.5f) {
+            EXPECT_EQ(color, clear) << "low-coverage gaps must remain empty";
+            continue;
+        }
+        for (int i = 0; i < 3; ++i)
+            EXPECT_NEAR(color[i], albedo[i], 0.002f);
+        EXPECT_NEAR(color[3], 0.8f, 0.002f);
+        glReadBuffer(GL_COLOR_ATTACHMENT1);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, normal.data());
+        EXPECT_NEAR(normal[0], 1.0f, 0.002f);
+        EXPECT_NEAR(normal[1], 0.5f, 0.002f);
+        glReadBuffer(GL_COLOR_ATTACHMENT3);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, surface.data());
+        EXPECT_NEAR(surface[0], 0.0f, 0.002f);
+        EXPECT_NEAR(surface[1], 0.4f, 0.002f);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(FarLodWorker, ElevatedCameraSeesTerrainInsideItsOwnRegion) {
+    if (!glfwInit())
+        GTEST_SKIP() << "glfwInit failed";
+    struct GlLifetime {
+        GLFWwindow* window = nullptr;
+        ~GlLifetime() {
+            if (window)
+                glfwDestroyWindow(window);
+            glfwTerminate();
+        }
+    } gl;
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    gl.window = glfwCreateWindow(64, 64, "far region coverage", nullptr, nullptr);
+    if (!gl.window)
+        GTEST_SKIP() << "OpenGL 4.5 context unavailable";
+    glfwMakeContextCurrent(gl.window);
+    ASSERT_TRUE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)));
+    TempSaveDir fixture;
+    const auto vertex_path = fixture.path / "coverage.vert";
+    const auto fragment_path = fixture.path / "coverage.frag";
+    std::ofstream(vertex_path) << R"(#version 450 core
+layout(location=0) in vec3 position;
+uniform mat4 model, view, projection;
+out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[1]; };
+void main() { gl_Position = projection * view * model * vec4(position, 1); gl_ClipDistance[0] = 1; }
+)";
+    std::ofstream(fragment_path) << R"(#version 450 core
+out vec4 color;
+void main() { color = vec4(1); }
+)";
+    Shader shader(vertex_path.string().c_str(), fragment_path.string().c_str());
+    ASSERT_TRUE(shader.IsValid());
+    // One FIFO worker lets a queued fence wait for all preceding tile jobs,
+    // without sleeps or exposing scheduler internals to the fixture.
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
+    FarLodSystem far;
+    far.attach_job_system(&jobs);
+    const glm::vec3 camera(256, 1200, 256);
+    for (int frame = 0; frame < 12; ++frame) {
+        far.update(world, camera);
+        jobs.wait(jobs.dispatch_batch({[] {
+        }}));
+    }
+    ASSERT_GT(far.stats().regions_resident, 0u);
+    shader.use();
+    const auto view = glm::lookAt(camera, camera - glm::vec3(0, 1, 0), glm::vec3(0, 0, -1));
+    shader.setMat4("view", view);
+    shader.setMat4("projection", glm::perspective(glm::radians(15.0f), 1.0f, 0.1f, 3200.0f));
+    const glm::vec4 planes[6]{}; // hardware frustum clips the actual geometry
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 64, 64);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    std::size_t draws = 0, indices = 0;
+    far.draw_gbuffer(shader, view, planes, draws, indices);
+    std::array<unsigned char, 64 * 64 * 4> pixels{};
+    glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    // This entire narrow view lies in the camera's 512 m region. Other
+    // resident regions cannot fill a missing centre tile from this camera.
+    for (int y : {16, 32, 48})
+        for (int x : {16, 32, 48})
+            EXPECT_EQ(pixels[(y * 64 + x) * 4], 255) << "missing ground at " << x << "," << y;
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    far.shutdown();
+    jobs.shutdown();
+}
+
+TEST(FarLodWorker, CaveLocatorReturnsAnAirPositionInTheDefaultPreset) {
+    const auto root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const auto preset =
+        Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(preset.ok);
+    SHIELD_WorldSystem world(nullptr, nullptr, preset.params, 424242);
+    const auto pose = Luminumbra::Debug::FindEnclosedCave(world, glm::vec3(8, 17.15f, 8), 256);
+    ASSERT_TRUE(pose.has_value());
+    if (pose.has_value()) {
+        EXPECT_GE(world.get_density_at(pose.value().pos), 0.0f)
+            << "cave capture must not put the camera inside solid rock";
+    }
+}
+
+TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {
+    const auto root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const auto preset =
+        Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(preset.ok);
+    JobSystem jobs;
+    jobs.startup();
+    {
+        SHIELD_WorldSystem world(&jobs, nullptr, preset.params, 424242);
+        world.debug_set_streaming_radius_cap(8);
+        entt::registry registry;
+        const Vec3 camera(8.469266f, -46.070644f, 11.695518f);
+        ASSERT_GT(world.get_density_at(camera), 0.0f);
+        for (int frame = 0; frame < 48; ++frame) {
+            world.update(registry, camera, nullptr);
+            world.wait_for_streaming_jobs();
+        }
+        // At the default 110-degree FOV, the leftward cave wall is over 100 m
+        // away. The old 32 m neighbourhood exposed sky inside this air pocket.
+        for (const auto coords : {IVec3(4, -6, -7), IVec3(2, -3, -4)}) {
+            const auto wall = world.find_streamed_chunk(coords);
+            ASSERT_NE(wall, nullptr) << "visible cave wall must be resident";
+            EXPECT_EQ(wall->get_state(), ChunkState::Ready);
+            EXPECT_FALSE(wall->mesh_indices.empty());
+        }
+        EXPECT_LT(world.get_runtime_chunk_stats().total_chunks, 4000u);
+        const auto center = world.world_to_chunk_coords(camera);
+        for (int dz = -2; dz <= 2; ++dz) {
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const auto coords = center + IVec3(dx, dy, dz);
+                    SCOPED_TRACE(::testing::Message()
+                                 << coords.x << ',' << coords.y << ',' << coords.z);
+                    const auto streamed = world.find_streamed_chunk(coords);
+                    ASSERT_NE(streamed, nullptr);
+                    EXPECT_EQ(streamed->get_state(), ChunkState::Ready);
+                    Chunk reference(coords);
+                    world.GenerateChunkData(reference, 1);
+                    MarchingCubes::PolygoniseTerrain(world, reference, 0.0f, 1);
+                    EXPECT_EQ(streamed->sdf_data, reference.sdf_data);
+                    EXPECT_EQ(streamed->mesh_indices, reference.mesh_indices);
+                }
+            }
+        }
+    }
+    jobs.shutdown();
 }

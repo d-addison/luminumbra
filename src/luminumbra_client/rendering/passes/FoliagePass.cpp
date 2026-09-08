@@ -50,6 +50,22 @@ uint64_t fnv1a(const void* data, std::size_t len, uint64_t seed = 14695981039346
     return hash;
 }
 
+uint64_t scatter_signature(const FoliagePass::ChunkScatter& chunk) {
+    uint64_t hash = 1469598103934665603ull;
+    const auto mix = [&hash](const auto& value) {
+        hash = fnv1a(&value, sizeof(value), hash);
+    };
+    mix(chunk.chunk_xz.x);
+    mix(chunk.chunk_xz.y);
+    mix(chunk.origin.x);
+    mix(chunk.origin.y);
+    mix(chunk.origin.z);
+    mix(chunk.extent_m);
+    mix(chunk.biome_id);
+    mix(chunk.density);
+    return hash;
+}
+
 // 64 high bits of a splitmix64 word -> [0,1).
 float hash_unit(uint64_t h) {
     return static_cast<float>(h >> 40) / 16777216.0f;
@@ -159,6 +175,7 @@ void FoliagePass::init_buffers() {
 }
 
 void FoliagePass::destroy_buffers() {
+    clear_ground_meshes();
     for (std::size_t ring = 0; ring < kRingFrames; ++ring) {
         if (m_instance_vbo[ring]) {
             glBindBuffer(GL_ARRAY_BUFFER, m_instance_vbo[ring]);
@@ -181,6 +198,80 @@ void FoliagePass::destroy_buffers() {
 
 void FoliagePass::reset_shader() {
     m_shader.reset();
+}
+
+void FoliagePass::update_ground_mesh(ChunkID id,
+                                     const glm::ivec3& coords,
+                                     const std::vector<VoxelVertex>& vertices,
+                                     const std::vector<u32>& indices) {
+    const auto key = detail::pack_foliage_chunk_key(coords.x, coords.z);
+    if (const auto old = m_ground_columns.find(id);
+        old != m_ground_columns.end() && old->second != key)
+        remove_ground_mesh(id);
+    m_ground_columns[id] = key;
+    m_ground_meshes[key].insert_or_assign(
+        id,
+        FoliageGroundMesh(glm::vec3(coords * glm::ivec3(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)),
+                          vertices,
+                          indices));
+    m_chunk_cache.erase(key);
+    m_surf_grid_cache.erase(key);
+    ++m_ground_revision;
+}
+
+void FoliagePass::clear_ground_meshes() {
+    m_ground_meshes.clear();
+    m_ground_columns.clear();
+    m_chunk_cache.clear();
+    m_surf_grid_cache.clear();
+    m_instances.clear();
+    m_frame_instance_count = 0;
+    m_gpu_active = false;
+    m_scatter_built = false;
+    m_foliage_build_backlog = false;
+    ++m_ground_revision;
+    // Old-world readbacks must never repopulate the new world's instance list.
+    m_readback_ring.shutdown();
+}
+
+void FoliagePass::remove_ground_mesh(ChunkID id) {
+    const auto it = m_ground_columns.find(id);
+    if (it == m_ground_columns.end())
+        return;
+    const auto key = it->second;
+    auto column = m_ground_meshes.find(key);
+    if (column != m_ground_meshes.end()) {
+        column->second.erase(id);
+        if (column->second.empty())
+            m_ground_meshes.erase(column);
+    }
+    m_ground_columns.erase(it);
+    m_chunk_cache.erase(key);
+    m_surf_grid_cache.erase(key);
+    ++m_ground_revision;
+}
+
+FoliagePass::SurfaceSample FoliagePass::sample_ground(
+    const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx, float x, float z) const {
+    if (!m_use_rendered_ground)
+        return query(query_ctx, x, z);
+    SurfaceSample sample;
+    sample.valid = false;
+    const auto column =
+        m_ground_meshes.find(detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y));
+    if (column == m_ground_meshes.end())
+        return sample;
+    for (const auto& [id, mesh] : column->second) {
+        (void)id;
+        const auto hit = mesh.sample(x, z);
+        if (hit.valid && (!sample.valid || hit.height > sample.height)) {
+            sample.valid = true;
+            sample.height = hit.height;
+            sample.slope = std::clamp(hit.slope, 0.0f, 1.0f);
+            sample.moisture = 1.0f - sample.slope;
+        }
+    }
+    return sample;
 }
 
 namespace {
@@ -354,6 +445,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             sig *= 1099511628211ull;
         };
         mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
+        mix(m_ground_revision);
         mix(static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
             (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull));
         // wind is in the rebuild signature ONLY in gate mode
@@ -376,13 +468,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         mix(static_cast<std::uint64_t>(std::llround(m_density_scale * 100.0f)));
         std::uint64_t chunk_acc = chunks.size();
         for (const ChunkScatter& c : chunks) {
-            const std::uint64_t ch =
-                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.x)) *
-                 73856093ull) ^
-                (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.y)) *
-                 19349663ull) ^
-                (static_cast<std::uint64_t>(c.biome_id) << 40) ^
-                (static_cast<std::uint64_t>(std::llround(c.density * 16.0f)) << 48);
+            const std::uint64_t ch = scatter_signature(c);
             chunk_acc ^= splitmix64(ch); // XOR fold -> order-independent over the chunk list
         }
         mix(chunk_acc);
@@ -448,7 +534,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.y)) << 32);
         const std::vector<InstanceRecord>* cachedp = nullptr;
         auto cit = m_chunk_cache.find(key);
-        if (cit != m_chunk_cache.end() && cit->second.gen == m_chunk_cache_gen) {
+        if (cit != m_chunk_cache.end() && cit->second.gen == m_chunk_cache_gen &&
+            cit->second.placement == scatter_signature(chunk)) {
             cachedp = &cit->second.records;
         } else if (builds_left > 0) {
             cachedp = &build_or_get_chunk_records(chunk, query, query_ctx);
@@ -524,11 +611,14 @@ const std::vector<FoliagePass::InstanceRecord>& FoliagePass::build_or_get_chunk_
         (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.x))) |
         (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.y)) << 32);
     auto it = m_chunk_cache.find(key);
-    if (it != m_chunk_cache.end() && it->second.gen == m_chunk_cache_gen) {
+    const auto placement = scatter_signature(chunk);
+    if (it != m_chunk_cache.end() && it->second.gen == m_chunk_cache_gen &&
+        it->second.placement == placement) {
         return it->second.records;
     }
     CachedChunkRecords& slot = m_chunk_cache[key];
     slot.gen = m_chunk_cache_gen;
+    slot.placement = placement;
     slot.records.clear();
 
     // Total archetype weight for the deterministic per-instance archetype pick.
@@ -565,7 +655,7 @@ const std::vector<FoliagePass::InstanceRecord>& FoliagePass::build_or_get_chunk_
             // the camera); these cached records are camera-independent. The caller skips any record
             // whose anchor is past m_fade_end_m before emitting, preserving the ring-bounded set.
 
-            const SurfaceSample surf = query(query_ctx, wx, wz);
+            const SurfaceSample surf = sample_ground(chunk, query, query_ctx, wx, wz);
             if (!surf.valid) {
                 continue; // underwater / no ground here
             }
@@ -683,28 +773,16 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         return false;
     }
 
-    // --- Build the per-chunk param + surface-grid uploads on the CPU. Only
-    // chunks with density > 0 within the fade ring are uploaded (matches the CPU
-    // whole-chunk cull). The surface is sampled on a coarse (kSurfaceGridVerts^2)
-    // grid -- ~81 queries/chunk instead of up to kMaxCandidatesPerChunk. ---
+    // Cache exact surface hits for deterministic candidate positions. A coarse
+    // bilinear height grid can float above valleys and bridge edited-away ground.
     struct GpuChunk {
         float origin_extent[4];
         float id_density[4];
     };
     std::vector<GpuChunk> chunk_params;
-    std::vector<glm::vec4> surf_grid; // (height, moisture, slope, valid) per grid vert
+    std::vector<glm::vec4> surf_grid;
     chunk_params.reserve(chunks.size());
-    const int gv = kSurfaceGridVerts;
-    surf_grid.reserve(chunks.size() * static_cast<std::size_t>(gv) * static_cast<std::size_t>(gv));
-
-    //  implementation note: the per-chunk surface grid is the expensive part (kSurfaceGridVerts^2
-    // GetTerrainHeightAt calls) and is CAMERA-INDEPENDENT (pure function of chunk_xz + static
-    // terrain). Cache it per chunk and only BUILD a budgeted few new chunks per frame so a fast
-    // streaming burst doesn't re-sample every chunk's grid at once (~1s hitch). Deferred chunks
-    // contribute no foliage this frame and build over the next few (foliage fades in — ).
-    // In gate mode (m_readback_enabled) build everything (no defer) so the FoliageInstancing gate's
-    // instance_hash sees the full, exact scatter.
-    const int gv2 = gv * gv;
+    surf_grid.reserve(chunks.size() * kMaxCandidatesPerChunk);
     const int kMaxSurfBuildsPerFrame = m_readback_enabled ? std::numeric_limits<int>::max() : 4;
     int builds_left = kMaxSurfBuildsPerFrame;
     bool deferred_any = false;
@@ -724,23 +802,24 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
             detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
         const std::vector<glm::vec4>* gridp = nullptr;
         auto git = m_surf_grid_cache.find(key);
-        if (git != m_surf_grid_cache.end()) {
-            gridp = &git->second;
+        const auto placement = scatter_signature(chunk);
+        if (git != m_surf_grid_cache.end() && git->second.placement == placement) {
+            gridp = &git->second.samples;
         } else if (builds_left > 0) {
-            // Build (and cache) this chunk's surface grid. Grid vert (gx,gy) maps to local [0,1]^2.
             std::vector<glm::vec4> grid;
-            grid.reserve(static_cast<std::size_t>(gv2));
-            for (int gy = 0; gy < gv; ++gy) {
-                for (int gx = 0; gx < gv; ++gx) {
-                    const float lx = static_cast<float>(gx) / static_cast<float>(kSurfaceGrid);
-                    const float lz = static_cast<float>(gy) / static_cast<float>(kSurfaceGrid);
-                    const float wx = chunk.origin.x + lx * chunk.extent_m;
-                    const float wz = chunk.origin.z + lz * chunk.extent_m;
-                    const SurfaceSample s = query(query_ctx, wx, wz);
-                    grid.emplace_back(s.height, s.moisture, s.slope, s.valid ? 1.0f : 0.0f);
-                }
+            grid.reserve(kMaxCandidatesPerChunk);
+            for (uint32_t candidate = 0; candidate < kMaxCandidatesPerChunk; ++candidate) {
+                const uint64_t h0 =
+                    placement_hash(chunk.chunk_xz.x, chunk.chunk_xz.y, chunk.biome_id, candidate);
+                const uint64_t h1 = splitmix64(h0 ^ 0x2545F4914F6CDD1Dull);
+                const float wx = chunk.origin.x + hash_unit(h0) * chunk.extent_m;
+                const float wz = chunk.origin.z + hash_unit(h1) * chunk.extent_m;
+                const SurfaceSample s = sample_ground(chunk, query, query_ctx, wx, wz);
+                grid.emplace_back(s.height, s.moisture, s.slope, s.valid ? 1.0f : 0.0f);
             }
-            gridp = &m_surf_grid_cache.emplace(key, std::move(grid)).first->second;
+            gridp = &m_surf_grid_cache
+                         .insert_or_assign(key, CachedSurfaceSamples{placement, std::move(grid)})
+                         .first->second.samples;
             --builds_left;
         } else {
             deferred_any = true; // over budget this frame -> build on a later frame

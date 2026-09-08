@@ -159,12 +159,11 @@ AnalyzePrecipPixels(const std::vector<unsigned char>& pixels, int width, int hei
         const double lo = std::min(stats.horizontal_gradient_mean, stats.vertical_gradient_mean);
         stats.streak_anisotropy = (lo > 1e-6) ? (hi / lo) : 0.0;
     }
-    // Slant ratio: horizontal vs vertical gradient energy around bright streaks.
-    // Vertical (calm) rain produces near-vertical streaks -> strong vertical
-    // gradient, weak horizontal -> LOW ratio. Wind-slanted rain leans -> the
-    // horizontal gradient component rises -> HIGHER ratio.
-    if (stats.vertical_gradient_mean > 1e-6) {
-        stats.slant_ratio = stats.horizontal_gradient_mean / stats.vertical_gradient_mean;
+    // A vertical bright streak has sharp horizontal edges and little change
+    // along Y. Leaning it adds vertical edges, so vertical/horizontal gradient
+    // energy increases. The inverse ratio rewards longer vertical streaks.
+    if (stats.horizontal_gradient_mean > 1e-6) {
+        stats.slant_ratio = stats.vertical_gradient_mean / stats.horizontal_gradient_mean;
     }
     return stats;
 }

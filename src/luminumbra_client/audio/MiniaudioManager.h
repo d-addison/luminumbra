@@ -110,6 +110,9 @@ public:
     bool Init() override;
     void Update() override;
     void Shutdown() override;
+    bool IsPlaybackEnabled() const override {
+        return m_engine != nullptr;
+    }
 
     bool LoadBank(const std::string& bankPath) override;
     void UnloadBank(const std::string& bankPath) override;

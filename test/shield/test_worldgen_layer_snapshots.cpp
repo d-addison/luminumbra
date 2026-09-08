@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -17,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/Environment.h"
 #include "core/JobSystem.h"
 #include "entt/entt.hpp"
 #include "nlohmann/json.hpp"
@@ -805,9 +807,64 @@ TEST(WorldGenLayerSnapshotTest, SpawnCollisionBootstrapPreparesWalkingStart) {
     }
 
     const glm::vec3 final_position = physics.get_player_position();
-    EXPECT_GT(final_position.y, terrain_height - 1.0f);
-    EXPECT_LT(final_position.y, terrain_height + 4.0f);
+    // Compare feet with the collider below their current position. The old
+    // centered capsule was embedded at spawn; a safely placed capsule follows
+    // this same downhill path, whose surface is below the original hill height.
+    const auto support =
+        physics.audio_raycast({final_position.x, terrain_height + 10.0f, final_position.z},
+                              {final_position.x, terrain_height - 10.0f, final_position.z});
+    ASSERT_TRUE(support.hit);
+    EXPECT_TRUE(physics.is_player_grounded());
+    EXPECT_GT(final_position.y, support.hit_point.y - 0.25f);
+    EXPECT_LT(final_position.y, support.hit_point.y + 0.4f);
     physics.shutdown();
+}
+
+TEST(WorldGenLayerSnapshotTest, DefaultWalkingSpawnRemainsSupportedAtClampedFrameStep) {
+    const auto params = LoadPresetParams(SourceRoot() / "worlds/atlas/presets/default.json");
+    for (float dt : {1.0f / 60.0f, 0.05f}) {
+        SCOPED_TRACE(dt);
+        SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
+        WaterSystem water(nullptr, &world);
+        world.SetWaterSystem(&water);
+        PhysicsSystem physics;
+        physics.startup();
+        const float terrain_height = world.GetTerrainHeightAt(8.0f, 8.0f);
+        const Vec3 camera_spawn(8.0f, terrain_height + 1.95f, 8.0f);
+        ASSERT_TRUE(world.EnsureCollisionReadyNear(camera_spawn, &physics, 1));
+        const auto surface = physics.audio_raycast({8.0f, terrain_height + 10.0f, 8.0f},
+                                                   {8.0f, terrain_height - 10.0f, 8.0f});
+        ASSERT_TRUE(surface.hit) << "walking start requires a real collider, not a creation count";
+        ASSERT_NEAR(surface.hit_point.y, terrain_height, 0.02f);
+        // Production camera spawn minus the local controller's 1.71 m eye height.
+        physics.create_player_controller({8.0f, terrain_height + 0.24f, 8.0f});
+        float lowest_clearance = 1.0f;
+        float highest_clearance = -1.0f;
+        for (int frame = 0; frame < 600; ++frame) {
+            physics.update_player(glm::vec3(0.0f), false, 0.0f, dt);
+            physics.update(dt);
+            const auto feet = physics.get_player_position();
+            ASSERT_TRUE(std::isfinite(feet.x) && std::isfinite(feet.y) && std::isfinite(feet.z));
+            // The current controller can slide downhill while idle. Compare its
+            // feet to the real collider at its current X/Z, not the original height.
+            const auto support = physics.audio_raycast({feet.x, terrain_height + 10.0f, feet.z},
+                                                       {feet.x, terrain_height - 100.0f, feet.z});
+            ASSERT_TRUE(support.hit) << "frame " << frame;
+            const float clearance = feet.y - support.hit_point.y;
+            lowest_clearance = std::min(lowest_clearance, clearance);
+            highest_clearance = std::max(highest_clearance, clearance);
+        }
+        EXPECT_GT(lowest_clearance, -0.25f)
+            << "the production walking spawn must not fall through its confirmed collider";
+        EXPECT_LT(highest_clearance, 0.4f);
+        EXPECT_TRUE(physics.is_player_grounded());
+        const auto feet = physics.get_player_position();
+        const auto support = physics.audio_raycast({feet.x, terrain_height + 10.0f, feet.z},
+                                                   {feet.x, terrain_height - 100.0f, feet.z});
+        ASSERT_TRUE(support.hit);
+        EXPECT_NEAR(feet.y, support.hit_point.y, 0.3f);
+        physics.shutdown();
+    }
 }
 
 TEST(WorldGenLayerSnapshotTest, InitialChunkLoadListCoversSpawnSurfaceNeighborhood) {
@@ -1220,6 +1277,56 @@ std::uint64_t HashTerrainHeightGrid(const SHIELD_WorldSystem& world) {
     return hash;
 }
 
+// Preserve the actual samples behind the hash so compiler/host drift can be
+// diagnosed numerically without changing the pinned compatibility expectation.
+void WriteHeightGridDiagnostic(const SHIELD_WorldSystem& world, const char* fixture) {
+    const auto diagnostic_directory = Core::ReadEnvironment("LUMINUMBRA_WORLDGEN_DIAGNOSTIC_DIR");
+    fs::path directory = ArtifactRoot() / "height_grids";
+    if (diagnostic_directory.has_value()) {
+        directory = *diagnostic_directory;
+    }
+    fs::create_directories(directory);
+    nlohmann::json report;
+    report["fixture"] = fixture;
+    report["seed"] = kSeed;
+    report["grid"] = {{"side", 64}, {"start", -512.0f}, {"step", 16.25f}};
+#ifdef _MSC_FULL_VER
+    report["msvc_full_ver"] = _MSC_FULL_VER;
+#else
+    report["compiler"] = __VERSION__;
+#endif
+    report["columns"] = {"terrain_height",
+                         "base_noise",
+                         "base_height",
+                         "island_noise",
+                         "island_mask",
+                         "final_height"};
+    auto& rows = report["float32_bits"] = nlohmann::json::array();
+    for (int j = 0; j < 64; ++j) {
+        for (int i = 0; i < 64; ++i) {
+            const float x = -512.0f + static_cast<float>(i) * 16.25f;
+            const float z = -512.0f + static_cast<float>(j) * 16.25f;
+            const auto sample = world.SampleWorldGenLayers(Vec3(x, 0.0f, z));
+            nlohmann::json bits = nlohmann::json::array();
+            for (float value : {world.GetTerrainHeightAt(x, z),
+                                sample.base_noise,
+                                sample.base_height,
+                                sample.island_noise,
+                                sample.island_mask,
+                                sample.final_height}) {
+                bits.push_back(std::bit_cast<std::uint32_t>(value));
+            }
+            rows.push_back(std::move(bits));
+        }
+    }
+    const fs::path path = directory / (std::string(fixture) + ".json");
+    std::ofstream output(path);
+    ASSERT_TRUE(output) << path.string();
+    output << report.dump() << '\n';
+    output.close();
+    ASSERT_TRUE(output) << path.string();
+}
+
 struct DefaultShapingHeightFixture {
     const char* name;
     TerrainGenParams params;
@@ -1322,6 +1429,7 @@ TEST(WorldGenLayerSnapshotTest, DefaultShapingIsDeterministicAndAllSamplersAgree
         SHIELD_WorldSystem world(nullptr, nullptr, fixture.params, kSeed);
         SHIELD_WorldSystem reference(nullptr, nullptr, fixture.params, kSeed);
         const auto hash = HashTerrainHeightGrid(world);
+        WriteHeightGridDiagnostic(world, fixture.name);
         std::cout << "[ DEFAULTSHAPING ] " << fixture.name << " hash=0x" << std::hex << hash
                   << std::dec << std::endl;
         EXPECT_EQ(hash, fixture.expected_hash);
@@ -1352,6 +1460,7 @@ TEST(WorldGenLayerSnapshotTest, CurrentShippedArchipelagoPresetHeightHash) {
     ASSERT_FALSE(params.continental_spline.empty());
     SHIELD_WorldSystem world(nullptr, nullptr, params, kSeed);
     const std::uint64_t hash = HashTerrainHeightGrid(world);
+    WriteHeightGridDiagnostic(world, "shipped_archipelago");
     std::cout << "[ CURRENTHASH ] archipelago seed=" << kSeed << " hash=0x" << std::hex
               << std::setfill('0') << std::setw(16) << hash << std::dec << std::setfill(' ')
               << std::endl;

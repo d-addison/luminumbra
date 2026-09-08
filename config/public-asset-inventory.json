@@ -106,10 +106,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 2064,
+      "bytes": 1577,
       "license": "MIT",
       "path": "data/common/foliage/scatter_set.json",
-      "sha256": "2901c546499b55eddab721bc17f8cac3ae60468fb2b9bda124198bc2bdcf54c1",
+      "sha256": "6d7b68bc3ea05c54f0a8df5f6f031b2fa036aeae2e35f8cac6c45c8ae19c6823",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -176,17 +176,17 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 1391,
+      "bytes": 796,
       "license": "MIT",
       "path": "data/common/particles/precip_rain.json",
-      "sha256": "905c1bfd80bf083a68aa89bbb913d0da9bd3fab82509c4a6629551b185b4b31c",
+      "sha256": "14331794120b5b85957be1d4034cea7eff8324608b24b766ffd22d2b54082d9d",
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 646,
+      "bytes": 794,
       "license": "MIT",
       "path": "data/common/particles/precip_snow.json",
-      "sha256": "91d522911536c126b6ed153f8ab0e35455d7d22f23ff34506fbe4a26e5be598d",
+      "sha256": "241bf3f4e626b15acc9afe31e3cd8cbc7bce81e867abb1d894d23b2635d021b7",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -372,10 +372,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 1001,
+      "bytes": 1786,
       "license": "MIT",
       "path": "data/models/trees/tree_textures.json",
-      "sha256": "ce09514547492748b420a61b7c807530f0c90351a0957418609a219112f6471e",
+      "sha256": "facfadf7cef30d4919277a6adc15c9ce2ab87b5aa3fdb5e5ff2d401186c85e94",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1072,10 +1072,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 24247,
+      "bytes": 25238,
       "license": "MIT",
       "path": "data/ui/game_theme.rcss",
-      "sha256": "3a19b9ac7c7b74b09018c0c190fcc5f9b46c4d14fe102874300edbe8b329d0f6",
+      "sha256": "6e37c1224c85458f3c1fb448330f722567b7bdbf5a4a735e8b42c7a5db119c2f",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1089,7 +1089,7 @@
       "bytes": 1647,
       "license": "MIT",
       "path": "data/ui/main_menu.rml",
-      "sha256": "0dd2fbfaf6da7cb8b5260a08c0e1030af1eb286b5cc1014b265559a83200c0fc",
+      "sha256": "8b622f8d448561d9d4dc5493b2898cf6ba5b473849df99db90ca2b8c7fd5fa70",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1100,10 +1100,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 940,
+      "bytes": 1064,
       "license": "MIT",
       "path": "data/ui/pause.rml",
-      "sha256": "d2689ce3710cefa28a2e76c621214d939e2421c3b01737a48cae16d69bc09a1f",
+      "sha256": "17bea90774441eb14bf0f51634c36382387b97c266151b84bc4852d8723ada5a",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1114,10 +1114,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 7716,
+      "bytes": 7817,
       "license": "MIT",
       "path": "data/ui/settings.rml",
-      "sha256": "ae8fee0ce5b89aefab94bafed2576266b00ed973f9ac6b90c315478a25efaf15",
+      "sha256": "38788d4acc889df996249bd39714fa0b6bf7df21455b538a2b1a2a31d5afaa29",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1191,10 +1191,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 4549,
+      "bytes": 1229,
       "license": "MIT",
       "path": "data/ui/world_selection.rml",
-      "sha256": "777476afea52508c89ce6ed0bde4fe7ecaa33bbc2611d59b861d32aaa5b0c216",
+      "sha256": "7966bb229cfcf443c1fa396fdfcdb23f1ab47c63999b4f0c8c8c8723e1cceb54",
       "source": "Luminumbra first-party runtime data"
     },
     {

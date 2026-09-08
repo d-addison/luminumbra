@@ -294,6 +294,8 @@ public:
         size_t terrain_index_capacity = 0;
         size_t water_vertex_capacity = 0;
         size_t water_index_capacity = 0;
+        size_t static_model_texture_bytes = 0;
+        size_t tree_impostor_texture_bytes = 0;
         size_t estimated_vram_bytes = 0;
         bool started = false;
         bool geometry_shader_ok = false;
@@ -724,7 +726,7 @@ public:
         // Exponential extinction per metre — distance at which haze reaches ~63%
         // opacity is 1/density. Higher = thicker/closer haze (dramatic); lower =
         // crisp far view (Distant-Horizons-like).
-        float aerial_density = 0.0016f;
+        float aerial_density = 0.00045f;
         // Distance clamp for the fog term (m); matches the extended far horizon
         // (kF2OuterRangeMeters ~3000 m) so far terrain hazes fully into the sky
         // before the render edge instead of stopping short as a dark band.
@@ -848,6 +850,8 @@ public:
     void prepare_waterfalls(const Systems::SHIELD_WorldSystem& world);
 
 private:
+    friend struct TerrainCullingTestPeer;
+    friend struct TextureFileTestPeer;
     // Extracted render pass classes. Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
@@ -979,6 +983,7 @@ private:
     void execute_stage_glass_oit_accum(const Camera& camera);
     void execute_stage_glass_oit_resolve(const Camera& camera);
     void execute_stage_weather_opaque_snapshot(const Camera& camera);
+    void execute_stage_god_rays_opaque_snapshot(const Camera& camera);
     void execute_stage_weather_overlay(const Camera& camera);
     void execute_stage_froxel_inject(const Camera& camera);
     void execute_stage_froxel_integrate(const Camera& camera);
@@ -1139,7 +1144,7 @@ private:
     // Render-only; never world_hash.
     float m_exposureOverride = -1.0f;
     // 1.0 when the render camera is below a water surface (drives the aerial pass's
-    // underwater murk). Set per-frame in render_frame from WaterLevelAt.
+    // underwater murk). Set per-frame from the world's water-volume query.
     float m_underwater_factor = 0.0f;
     // SEASON state, all DERIVED from m_seasonTick (a pure function
     // of the authoritative sim tick -- no wall-clock, no float accumulator). The
@@ -1433,10 +1438,13 @@ public:
     using StaticModelTex = Luminumbra::Rendering::StaticModelTex;
 
 private:
+    bool m_staticModelContentEnabled = true;
     u32 m_staticModelTextureArray = 0;
+    u32 m_staticModelNormalArray = 0;
+    u32 m_staticModelSurfaceArray = 0;
     static constexpr int kStaticModelTextureResolution = 512;
-    static constexpr int kStaticModelTextureLayers = 8;
-    int m_staticModelNextLayer = 0; // next free layer pair to fill
+    static constexpr int kStaticModelTextureLayers = 4;
+    int m_staticModelNextLayer = 0; // next free layer in each array
     std::unordered_map<std::string, StaticModelTex> m_staticModelTextures; // meshPath -> layers
     void init_static_model_texture_array();
 
@@ -1459,8 +1467,8 @@ public:
     float tree_impostor_radius() const {
         return m_treeImpostorRadius;
     }
-    float tree_impostor_sphere_y() const {
-        return m_treeImpostorSphereY;
+    glm::vec3 tree_impostor_center() const {
+        return m_treeImpostorCenter;
     }
 
 private:
@@ -1468,12 +1476,14 @@ private:
     u32 m_treeImpostorAlbedo = 0;
     u32 m_treeImpostorNormal = 0;
     int m_treeImpostorGrid = 0;
+    int m_treeImpostorAtlasSize = 0;
     float m_treeImpostorRadius = 0.0f;
-    float m_treeImpostorSphereY = 0.0f;
+    glm::vec3 m_treeImpostorCenter{0.0f};
     // Loads albedo+normal.ltex into the next free layer pair; returns false +
     // keeps the flat fallback on failure. Layer indices come back via the outs.
     bool load_static_model_texture_set(const std::filesystem::path& albedo_path,
                                        const std::filesystem::path& normal_path,
+                                       const std::filesystem::path& surface_path,
                                        int& albedo_layer_out,
                                        int& normal_layer_out);
     // Loads the tree-part textures and populates m_staticModelTextures (data-driven
@@ -1483,6 +1493,17 @@ private:
 public:
     u32 static_model_texture_array() const {
         return m_staticModelTextureArray;
+    }
+    // Set before startup when an application refuses its content pack. Generic
+    // rendering and the main menu remain available without loading corrupt files.
+    void enable_static_model_content(bool enabled) {
+        m_staticModelContentEnabled = enabled;
+    }
+    u32 static_model_normal_array() const {
+        return m_staticModelNormalArray;
+    }
+    u32 static_model_surface_array() const {
+        return m_staticModelSurfaceArray;
     }
     const StaticModelTex* static_model_tex(const std::string& mesh_path) const {
         auto it = m_staticModelTextures.find(mesh_path);
@@ -1573,7 +1594,7 @@ private:
 
     // Loads a.ltex file from disk into a CPU image (full mip chain). Returns
     // false on any header/size error.
-    bool load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) const;
+    static bool load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out);
 
     std::vector<PointLight> m_point_lights_this_frame;
     const int MAX_POINT_LIGHTS = 32;

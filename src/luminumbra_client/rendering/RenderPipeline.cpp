@@ -40,6 +40,7 @@
 #include "passes/WaterfallPass.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
+#include "rendering/TreeImpostorPolicy.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cassert>
@@ -320,6 +321,7 @@ bool RenderPipeline::startup(u32 screen_width,
         set_default_shadow_cascade_splits(m_shadow_pass->shadow_map());
 
         init_shaders();
+        m_lighting_pass->init_environment_brdf(m_render_registry);
         // SCALED intermediates render at internal res (== output at scale 1.0).
         m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
         m_gbuffer_pass->init_gbuffer(m_render_registry, m_internal_width, m_internal_height);
@@ -331,35 +333,41 @@ bool RenderPipeline::startup(u32 screen_width,
                           screen_height); // OUTPUT res: TAAU history/backbuffer stay at output
         init_halfres_cloud();             // no-op unless cloud quality was set > 0 before startup
         m_skybox_pass->init_geometry();
-        m_particle_pass->init_buffers();      //  persistent-mapped instance pool
-        m_foliage_pass->init_buffers();       //  persistent-mapped scatter pool
+        m_particle_pass->init_buffers(); //  persistent-mapped instance pool
+        m_foliage_pass->init_buffers();  //  persistent-mapped scatter pool
+        m_foliage_pass->use_rendered_ground();
         m_plant_procgen_pass->init_buffers(); //  dedicated procgen plant VAO/VBO/EBO
         m_ground_decal_pass->init_buffers();  // decal VAO + lazy scent texture
         m_debug_view_pass->init_buffers();    // render-only debug-view VAO (default-OFF)
         load_material_texture_lut();
         init_terrain_textures();
         init_skinned_texture_array();
-        register_static_model_textures(); // Tree-part bark and leaf textures.
+        if (m_staticModelContentEnabled)
+            register_static_model_textures(); // Tree-part bark and leaf textures.
         //  far-field tree impostors: DEFAULT ON (set LUMIN_TREE_IMPOSTORS=0 to disable for
         // an A/B). Perf-validated win (render-benchmark forest_dense), scales with far tree count.
         // Bake the atlas now that the tree textures are loaded; the GBuffer LOD3 path samples it.
-        const auto impostors = Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS");
-        if (!impostors || (!impostors->empty() && impostors->front() != '0')) {
+        if (m_staticModelContentEnabled &&
+            TreeImpostorsRequested(Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS"))) {
             OctaImpostorGrid g;
             g.gridResolution = 12;
+            g.tileResolution = 384;
             const ImpostorAtlasTextures ia =
                 BakeTreeImpostorAtlasToTextures(m_root_path.string(), *this, g);
             if (ia.ok) {
                 m_treeImpostorAlbedo = ia.albedoTex;
                 m_treeImpostorNormal = ia.normalTex;
                 m_treeImpostorGrid = ia.grid;
+                m_treeImpostorAtlasSize = g.gridResolution * g.tileResolution;
                 m_treeImpostorRadius = ia.radius;
-                m_treeImpostorSphereY = ia.sphereY;
+                m_treeImpostorCenter = glm::vec3(ia.center.x, ia.center.y, ia.center.z);
                 m_treeImpostorsEnabled = true;
-                LUMINUMBRA_CORE_INFO("Tree impostors ON: atlas baked ({}x{} grid, radius {:.1f})",
-                                     ia.grid,
-                                     ia.grid,
-                                     ia.radius);
+                LUMINUMBRA_CORE_INFO(
+                    "Tree impostors ON: atlas baked ({}x{} grid, {}px tiles, radius {:.1f})",
+                    ia.grid,
+                    ia.grid,
+                    g.tileResolution,
+                    ia.radius);
             } else {
                 LUMINUMBRA_CORE_WARN("Tree impostor bake failed: {}", ia.error);
             }
@@ -846,7 +854,7 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     ctx.gbuffer_depth =
         m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
 
-    // Group E — shadow / SSAO / caustics reads.
+    // Group E — shadow / SSAO reads.
     ctx.shadow_depth_array = m_render_registry.adopt_texture(
         "shadow_depth_array", m_shadow_pass->shadow_map().depth_texture_array);
     // the tinted-transmission cascade (registry-owned by
@@ -855,8 +863,6 @@ RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
                                                             m_shadow_pass->tint_texture_array());
     ctx.ssao_blur =
         m_render_registry.adopt_texture("ssao_blur", m_ssao_pass->ssao().ssaoColorBufferBlur);
-    ctx.caustics_tex =
-        m_render_registry.adopt_texture("caustics_tex", m_water_pass->black_texture());
 
     // Group F — terrain / material arrays.
     ctx.terrain_textures =
@@ -1284,9 +1290,27 @@ RenderPipeline::RuntimeRenderStats RenderPipeline::get_runtime_render_stats() co
     if (m_skinnedTextureArray)
         estimated_vram_bytes +=
             static_cast<size_t>(kSkinnedTextureResolution) * kSkinnedTextureResolution * 2u * 4u;
+    for (const GLuint texture :
+         {m_staticModelTextureArray, m_staticModelNormalArray, m_staticModelSurfaceArray}) {
+        if (texture) {
+            for (int mip = 0; mip < 10; ++mip) {
+                const size_t size =
+                    static_cast<size_t>(std::max(1, kStaticModelTextureResolution >> mip));
+                stats.static_model_texture_bytes += size * size * kStaticModelTextureLayers * 4u;
+            }
+        }
+    }
+    for (const GLuint texture : {m_treeImpostorAlbedo, m_treeImpostorNormal}) {
+        if (texture)
+            stats.tree_impostor_texture_bytes +=
+                static_cast<size_t>(m_treeImpostorAtlasSize) * m_treeImpostorAtlasSize * 4u;
+    }
+    estimated_vram_bytes += stats.static_model_texture_bytes + stats.tree_impostor_texture_bytes;
     if (m_materialLUT)
         estimated_vram_bytes +=
             256u * 4u * 4u; // 256 ids x 4 rows x RGBA8 (: was stale 2-row estimate)
+    if (m_lighting_pass->environment_brdf_texture())
+        estimated_vram_bytes += 64u * 64u * 4u; // RG16F environment BRDF, no mipmaps
     if (m_water_pass->flat_normal_texture())
         estimated_vram_bytes += 4u;
     if (m_water_pass->neutral_flow_texture())
@@ -1432,7 +1456,13 @@ RenderPipeline::RenderResourceRegistryStats RenderPipeline::get_resource_registr
     stats.textures += count(m_terrainTextureArray);
     stats.textures += count(m_terrainNormalArray);
     stats.textures += count(m_skinnedTextureArray);
+    stats.textures += count(m_staticModelTextureArray);
+    stats.textures += count(m_staticModelNormalArray);
+    stats.textures += count(m_staticModelSurfaceArray);
+    stats.textures += count(m_treeImpostorAlbedo);
+    stats.textures += count(m_treeImpostorNormal);
     stats.textures += count(m_materialLUT);
+    stats.textures += count(m_lighting_pass->environment_brdf_texture());
     stats.textures += count(m_water_pass->flat_normal_texture());
     stats.textures += count(m_water_pass->neutral_flow_texture());
     stats.textures += count(m_water_pass->black_fallback_texture());
@@ -1737,6 +1767,7 @@ void RenderPipeline::refresh_render_pass_metadata() {
               "ssao.blur",
               "terrain_texture_array",
               "material_lut",
+              "lighting.environment_brdf",
               "water.fallback.black"},
              {"lighting.color", "lighting.depth"},
              m_screen_width,
@@ -2349,12 +2380,9 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         }
     }
     gather_lights(registry, camera.Position);
-    // Underwater detection: the aerial pass becomes a murky-water volume when the
-    // camera sits below the local water surface (sea OR a perched lake).
-    {
-        const float water_level = world_system.WaterLevelAt(camera.Position.x, camera.Position.z);
-        m_underwater_factor = (camera.Position.y < water_level - 0.05f) ? 1.0f : 0.0f;
-    }
+    // Underwater is a water-volume membership query, not a global height cutoff.
+    // Dry caves below sea/lake level retain their air lighting.
+    m_underwater_factor = world_system.IsUnderwater(camera.Position) ? 1.0f : 0.0f;
     auto renderable_chunks = world_system.get_renderable_chunks();
     auto renderable_chunk_snapshots = build_chunk_snapshots(renderable_chunks);
     m_last_mesh_upload_stats = {};
@@ -2495,10 +2523,9 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
     //  -c3/c4 —  EXECUTION MIGRATION COMPLETE: the graph DRIVES
     // the passes. The order comes from the DECLARATION (schedule over
     // BuildLuminumbraFrameGraph, computed once — the graph is static data); the
-    // executor table maps each node name to its extracted body. Three locks pin
-    // this: the drift guard (schedule == the emitted trace, on every RenderHealth
-    // frame), the whole-frame A/B (-Mode RenderParityFrame == exactly 0.0), and
-    // FrameDispatch.ExecutorTableCoversEveryGraphNodeInOrder (table == declaration).
+    // executor table maps each node name to its extracted body. The RenderHealth
+    // drift guard compares the schedule with the emitted trace; whole-frame parity
+    // and the real-shader composition regressions cover observable ordering effects.
     // A new render feature adds a RenderGraphNode + an executor entry + its
     // record_frame_stage slot — the locks fail loudly on any of the three missing.
     static const std::vector<std::string> kSchedule =
@@ -2520,8 +2547,7 @@ void RenderPipeline::dispatch_stages(const Camera& camera) {
 
 const std::vector<std::pair<std::string, RenderPipeline::StageExecutorFn>>&
 RenderPipeline::stage_executor_table() {
-    // Authored order matches BuildLuminumbraFrameGraph's node order 1:1 (pinned
-    // by FrameDispatch.ExecutorTableCoversEveryGraphNodeInOrder).
+    // Keep entries in the authored graph order for review. Dispatch resolves by node name.
     static const std::vector<std::pair<std::string, StageExecutorFn>> kTable = {
         {"shadow", &RenderPipeline::execute_stage_shadow},
         {"gbuffer", &RenderPipeline::execute_stage_gbuffer},
@@ -2537,13 +2563,14 @@ RenderPipeline::stage_executor_table() {
         {"waterfall", &RenderPipeline::execute_stage_waterfall},
         {"glass_oit_accum", &RenderPipeline::execute_stage_glass_oit_accum},
         {"glass_oit_resolve", &RenderPipeline::execute_stage_glass_oit_resolve},
+        {"god_rays_opaque_snapshot", &RenderPipeline::execute_stage_god_rays_opaque_snapshot},
+        {"god_rays", &RenderPipeline::execute_stage_god_rays},
+        {"foliage", &RenderPipeline::execute_stage_foliage},
         {"weather_opaque_snapshot", &RenderPipeline::execute_stage_weather_opaque_snapshot},
         {"weather_overlay", &RenderPipeline::execute_stage_weather_overlay},
         {"froxel_inject", &RenderPipeline::execute_stage_froxel_inject},
         {"froxel_integrate", &RenderPipeline::execute_stage_froxel_integrate},
         {"aerial", &RenderPipeline::execute_stage_aerial},
-        {"god_rays", &RenderPipeline::execute_stage_god_rays},
-        {"foliage", &RenderPipeline::execute_stage_foliage},
         {"taau_resolve", &RenderPipeline::execute_stage_taau_resolve},
         {"luminance_meter", &RenderPipeline::execute_stage_luminance_meter},
         {"particles", &RenderPipeline::execute_stage_particles},
@@ -2600,6 +2627,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.far_lod = farlod();
         gbuffer_input.root_path = m_root_path;
         gbuffer_input.static_model_texture_array = static_model_texture_array();
+        gbuffer_input.static_model_normal_array = static_model_normal_array();
+        gbuffer_input.static_model_surface_array = static_model_surface_array();
         gbuffer_input.static_model_tex = [this](const std::string& mesh_path) {
             return static_model_tex(mesh_path);
         };
@@ -2608,7 +2637,7 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         gbuffer_input.tree_impostor_normal = tree_impostor_normal();
         gbuffer_input.tree_impostor_grid = tree_impostor_grid();
         gbuffer_input.tree_impostor_radius = tree_impostor_radius();
-        gbuffer_input.tree_impostor_sphere_y = tree_impostor_sphere_y();
+        gbuffer_input.tree_impostor_center = tree_impostor_center();
         const GBufferDrawStats gstats =
             m_gbuffer_pass->execute(gbuffer_ctx, registry, gbuffer_input);
         // Fold with the EXACT current policy: terrain_visible_chunks '=', rest '+='.
@@ -2878,13 +2907,8 @@ void RenderPipeline::execute_stage_glass_oit_resolve(const Camera& camera) {
 }
 
 void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera) {
-    // 7a-pre. WEATHER OVERLAY's post-water opaque snapshot (owned by SkyboxPass's
-    // stage pair): relocated the snapshot here from inside
-    // SkyboxPass (a friendless pass can't call Lighting). Guarded by the SAME
-    // conditions the overlay runs under, so opaque_color_texture (also read by
-    // god-rays below) stays byte-identical to the prior behavior. (: the pair
-    // each compute overlay_will_run + ctx from the same frame-stable state —
-    // rebuild == the old shared block-locals.)
+    // Snapshot the resolved scene including rays and grass for the common weather grade.
+    // The snapshot and overlay use the same frame-stable activation conditions.
     const FrameBufferObject& lighting_fbo = m_lighting_pass->lighting_fbo();
     const bool overlay_will_run =
         m_weather_type != WeatherType::None && m_weather_intensity > 0.0f &&
@@ -2894,6 +2918,19 @@ void RenderPipeline::execute_stage_weather_opaque_snapshot(const Camera& camera)
     record_frame_stage("weather_opaque_snapshot");
     if (overlay_will_run) {
         m_lighting_pass->copy_lighting_color_to_opaque_texture(weather_ctx);
+    }
+}
+
+void RenderPipeline::execute_stage_god_rays_opaque_snapshot(const Camera& camera) {
+    record_frame_stage("god_rays_opaque_snapshot");
+    RenderContext ctx = make_god_rays_context(camera);
+    // Reuse the existing color snapshot without framebuffer feedback or an additional
+    // allocation. Keep resolved water/glass color available as before on weather frames.
+    // The source mask remains G-buffer depth: transparent depth is an approximation.
+    if (ctx.sun_visible > 0.002f && m_god_rays_pass->shader() &&
+        m_god_rays_pass->shader()->IsValid() && ctx.screen_quad_vao && ctx.lit_scene.id &&
+        ctx.opaque_scene.id && ctx.gbuffer_depth.id) {
+        m_lighting_pass->copy_lighting_color_to_opaque_texture(ctx);
     }
 }
 
@@ -3200,6 +3237,7 @@ void RenderPipeline::on_resize(u32 new_width, u32 new_height) {
     // skybox / far-LOD passes read the resized G-buffer and lighting targets
     // through the shared pipeline state and pick up the new size automatically.
     // SCALED intermediates reallocate at internal res (== output at scale 1.0).
+    m_glass_oit_pass->destroy(); // release the OIT attachment before replacing shared depth
     m_lighting_pass->destroy_lighting_fbo(m_render_registry);
     m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
@@ -3235,6 +3273,7 @@ void RenderPipeline::set_render_scale(float scale) {
         return; // startup() will size the internal extent from m_render_scale
     m_internal_width = static_cast<u32>(std::lround(m_screen_width * m_render_scale));
     m_internal_height = static_cast<u32>(std::lround(m_screen_height * m_render_scale));
+    m_glass_oit_pass->destroy(); // color targets and shared depth must use the new internal extent
     m_lighting_pass->destroy_lighting_fbo(m_render_registry);
     m_lighting_pass->init_lighting_fbo(m_render_registry, m_internal_width, m_internal_height);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
@@ -3275,6 +3314,7 @@ void RenderPipeline::clear_offscreen_target() {
 }
 
 void RenderPipeline::clear_all_chunk_data() {
+    m_foliage_pass->clear_ground_meshes();
     // Force clear all cached chunk render data to ensure fresh uploads.
     // terrain geometry lives in the shared pool; dropping the whole
     // pool releases every live slice at once. delete_chunk_slot still runs on
@@ -3409,6 +3449,8 @@ RenderContext RenderPipeline::make_aerial_context(const Camera& camera) {
 // to the retired inline block) so execute_god_rays reads only ctx. Render-only.
 RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.gbuffer_depth =
+        m_render_registry.adopt_texture("gbuffer_depth", m_gbuffer_pass->gbuffer().depth_texture);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -3639,6 +3681,7 @@ void RenderPipeline::cleanup_gpu_resources() {
         delete_water_slot(d);
     }
     m_free_water_render_slots.clear();
+    m_glass_oit_pass->destroy(); // detach borrowed depth before its owner releases it
     m_lighting_pass->destroy_lighting_fbo(m_render_registry);
     m_gbuffer_pass->destroy_gbuffer(m_render_registry);
     m_shadow_pass->destroy_shadow_map(m_render_registry);
@@ -3662,10 +3705,8 @@ void RenderPipeline::cleanup_gpu_resources() {
     }
     m_luminance_meter_pass->destroy();
     m_metered_valid = false;
-    // The pass-owned froxel kernels/volumes and WBOIT shaders/MRT retain their
-    // original cleanup point and deletion order inside their extracted owners.
+    // Release the remaining pass-owned volumes and geometry.
     m_froxel_pass->destroy();
-    m_glass_oit_pass->destroy();
     m_waterfall_pass->destroy_geometry();
     m_skybox_pass->destroy_geometry();
     if (m_particle_pass) {
@@ -3699,6 +3740,22 @@ void RenderPipeline::cleanup_gpu_resources() {
         glDeleteTextures(1, &m_terrainRoughnessArray);
         m_terrainRoughnessArray = 0;
     }
+    for (auto* texture : {&m_staticModelTextureArray,
+                          &m_staticModelNormalArray,
+                          &m_staticModelSurfaceArray,
+                          &m_treeImpostorAlbedo,
+                          &m_treeImpostorNormal}) {
+        if (*texture) {
+            glDeleteTextures(1, texture);
+            *texture = 0;
+        }
+    }
+    m_staticModelTextures.clear();
+    m_staticModelNextLayer = 0;
+    m_treeImpostorsEnabled = false;
+    m_treeImpostorGrid = 0;
+    m_treeImpostorAtlasSize = 0;
+    m_treeImpostorRadius = 0.0f;
     if (m_skinnedTextureArray) {
         glDeleteTextures(1, &m_skinnedTextureArray);
         m_skinnedTextureArray = 0;
@@ -3711,6 +3768,7 @@ void RenderPipeline::cleanup_gpu_resources() {
     destroy_gpu_pass_timers();
     m_gbuffer_pass->reset_shaders();
     m_lighting_pass->reset_shader();
+    m_lighting_pass->destroy_environment_brdf(m_render_registry);
     m_skybox_pass->reset_shader();
     if (m_particle_pass) {
         m_particle_pass->reset_shader();
@@ -4234,6 +4292,7 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
         // Pool allocation failed (e.g. OOM): leave the record empty so the draw
         // loop skips it, and record the failure.
         render_data.element_count = 0;
+        m_foliage_pass->remove_ground_mesh(chunk.id);
         m_last_mesh_upload_stats.terrain_upload_failures++;
         if (record_created)
             m_last_mesh_upload_stats.terrain_slots_created++;
@@ -4241,6 +4300,7 @@ void RenderPipeline::upload_chunk_mesh(const ChunkMeshSnapshot& chunk,
     }
 
     render_data.pool_handle = new_handle;
+    m_foliage_pass->update_ground_mesh(chunk.id, chunk.coords, payload.vertices, payload.indices);
     const ChunkGeometryPool::Allocation& alloc = m_chunk_geometry_pool.allocation(new_handle);
     // Track the reserved slot capacity (not just the written count) so the
     // distance-budget "needs growth" intuition and the VRAM estimate match the
@@ -4283,6 +4343,7 @@ void RenderPipeline::unload_water_resources(ChunkID chunk_id) {
 }
 
 void RenderPipeline::unload_chunk_resources(ChunkID chunk_id) {
+    m_foliage_pass->remove_ground_mesh(chunk_id);
     auto it = m_chunk_render_data.find(chunk_id);
     if (it != m_chunk_render_data.end()) {
         ChunkRenderData data = it->second;
@@ -4656,103 +4717,107 @@ bool RenderPipeline::load_skinned_texture_set(const std::filesystem::path& albed
 void RenderPipeline::init_static_model_texture_array() {
     const int res = kStaticModelTextureResolution;
     const int layers = kStaticModelTextureLayers;
-    glGenTextures(1, &m_staticModelTextureArray);
-    label_gl_object(GL_TEXTURE, m_staticModelTextureArray, "static_model.texture_array");
-    glBindTexture(GL_TEXTURE_2D_ARRAY, m_staticModelTextureArray);
-    glTexImage3D(GL_TEXTURE_2D_ARRAY,
-                 0,
-                 GL_SRGB8_ALPHA8,
-                 res,
-                 res,
-                 layers,
-                 0,
-                 GL_RGBA,
-                 GL_UNSIGNED_BYTE,
-                 nullptr);
-    // Flat fallback every layer: even = mid-grey albedo, odd = up-normal.
-    for (int i = 0; i < layers; ++i) {
-        const bool is_normal = (i % 2) == 1;
+    for (int kind = 0; kind < 3; ++kind) {
+        auto& texture = kind == 0
+                            ? m_staticModelTextureArray
+                            : (kind == 1 ? m_staticModelNormalArray : m_staticModelSurfaceArray);
+        glGenTextures(1, &texture);
+        label_gl_object(
+            GL_TEXTURE,
+            texture,
+            kind == 0 ? "static_model.albedo_array"
+                      : (kind == 1 ? "static_model.normal_array" : "static_model.surface_array"));
+        glBindTexture(GL_TEXTURE_2D_ARRAY, texture);
+        glTexStorage3D(
+            GL_TEXTURE_2D_ARRAY, 10, kind == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, res, res, layers);
         std::vector<unsigned char> fill(static_cast<size_t>(res) * res * 4u);
-        for (size_t p = 0; p < static_cast<size_t>(res) * res; ++p) {
-            if (is_normal) {
-                fill[p * 4 + 0] = 128;
-                fill[p * 4 + 1] = 128;
-                fill[p * 4 + 2] = 255;
-                fill[p * 4 + 3] = 255;
-            } else {
-                fill[p * 4 + 0] = 120;
-                fill[p * 4 + 1] = 120;
-                fill[p * 4 + 2] = 120;
-                fill[p * 4 + 3] = 255;
-            }
+        for (size_t p = 0; p < fill.size(); p += 4) {
+            fill[p] = kind == 0 ? 120 : (kind == 1 ? 128 : 255);
+            fill[p + 1] = kind == 0 ? 120 : (kind == 1 ? 128 : 217);
+            fill[p + 2] = kind == 0 ? 120 : (kind == 1 ? 255 : 0);
+            fill[p + 3] = 255;
         }
-        glTexSubImage3D(
-            GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, res, res, 1, GL_RGBA, GL_UNSIGNED_BYTE, fill.data());
-    }
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 10);
-    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-    m_staticModelNextLayer = 0;
-    LUMINUMBRA_CORE_INFO(
-        "Static-model texture array allocated ({} layers, {}x{}).", layers, res, res);
-}
-
-bool RenderPipeline::load_static_model_texture_set(const std::filesystem::path& albedo_path,
-                                                   const std::filesystem::path& normal_path,
-                                                   int& albedo_layer_out,
-                                                   int& normal_layer_out) {
-    if (m_staticModelTextureArray == 0)
-        init_static_model_texture_array();
-    if (m_staticModelNextLayer + 1 >= kStaticModelTextureLayers) {
-        LUMINUMBRA_CORE_WARN("Static-model texture array full; cannot load '{}'.",
-                             albedo_path.string());
-        return false;
-    }
-    const int res = kStaticModelTextureResolution;
-    const int albedo_layer = m_staticModelNextLayer;
-    const int normal_layer = m_staticModelNextLayer + 1;
-    glBindTexture(GL_TEXTURE_2D_ARRAY, m_staticModelTextureArray);
-    struct SetLayer {
-        const std::filesystem::path& path;
-        int layer;
-    };
-    const std::array<SetLayer, 2> set = {
-        {{albedo_path, albedo_layer}, {normal_path, normal_layer}}};
-    bool albedo_ok = false;
-    for (const auto& s : set) {
-        if (s.path.empty())
-            continue;
-        LtexCpuImage img;
-        if (load_ltex_cpu_image(s.path, img) && img.width == static_cast<uint32_t>(res) &&
-            img.height == static_cast<uint32_t>(res) && img.channels == 4u) {
+        for (int layer = 0; layer < layers; ++layer)
             glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
                             0,
                             0,
                             0,
-                            s.layer,
+                            layer,
                             res,
                             res,
                             1,
                             GL_RGBA,
                             GL_UNSIGNED_BYTE,
-                            img.bytes.data());
-            if (s.layer == albedo_layer)
-                albedo_ok = true;
-        } else {
-            LUMINUMBRA_CORE_WARN("Static-model texture: failed to load '{}', keeping fallback.",
-                                 s.path.string());
+                            fill.data());
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    }
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    m_staticModelNextLayer = 0;
+    LUMINUMBRA_CORE_INFO(
+        "Static-model albedo/normal/surface arrays allocated ({} layers each, {}x{}).",
+        layers,
+        res,
+        res);
+}
+
+bool RenderPipeline::load_static_model_texture_set(const std::filesystem::path& albedo_path,
+                                                   const std::filesystem::path& normal_path,
+                                                   const std::filesystem::path& surface_path,
+                                                   int& albedo_layer_out,
+                                                   int& normal_layer_out) {
+    if (m_staticModelTextureArray == 0)
+        init_static_model_texture_array();
+    if (m_staticModelNextLayer >= kStaticModelTextureLayers)
+        return false;
+    const int res = kStaticModelTextureResolution;
+    std::array<LtexCpuImage, 3> images;
+    const std::array<std::filesystem::path, 3> paths = {albedo_path, normal_path, surface_path};
+    for (size_t kind = 0; kind < images.size(); ++kind) {
+        auto& img = images[kind];
+        if (!load_ltex_cpu_image(paths[kind], img) || img.width != static_cast<uint32_t>(res) ||
+            img.height != static_cast<uint32_t>(res) || img.channels != 4u || img.mip_count != 10) {
+            LUMINUMBRA_CORE_ERROR("Static-model texture set refused: '{}' requires a complete "
+                                  "512x512 RGBA mip chain.",
+                                  paths[kind].string());
+            return false;
         }
     }
-    glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+    const int layer = m_staticModelNextLayer;
+    for (size_t kind = 0; kind < images.size(); ++kind) {
+        const auto& img = images[kind];
+        glBindTexture(GL_TEXTURE_2D_ARRAY,
+                      kind == 0
+                          ? m_staticModelTextureArray
+                          : (kind == 1 ? m_staticModelNormalArray : m_staticModelSurfaceArray));
+        size_t offset = 0;
+        int size = res;
+        for (int mip = 0; mip < img.mip_count; ++mip) {
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY,
+                            mip,
+                            0,
+                            0,
+                            layer,
+                            size,
+                            size,
+                            1,
+                            GL_RGBA,
+                            GL_UNSIGNED_BYTE,
+                            img.bytes.data() + offset);
+            offset += static_cast<size_t>(size) * size * 4;
+            size = std::max(1, size / 2);
+        }
+    }
+    // Imported mips preserve linear-light color, normal direction and leaf coverage.
+    // Regenerating the array mips here would discard that authored data.
     glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
-    m_staticModelNextLayer += 2;
-    albedo_layer_out = albedo_layer;
-    normal_layer_out = normal_layer;
-    return albedo_ok;
+    ++m_staticModelNextLayer;
+    albedo_layer_out = layer;
+    normal_layer_out = layer;
+    return true;
 }
 
 void RenderPipeline::register_static_model_textures() {
@@ -4776,14 +4841,18 @@ void RenderPipeline::register_static_model_textures() {
             const std::filesystem::path normal =
                 m.contains("normal") ? (m_root_path / m["normal"].get<std::string>())
                                      : std::filesystem::path{};
+            const std::filesystem::path surface = m_root_path / m.at("surface").get<std::string>();
             int al = -1, nl = -1;
-            const bool ok = load_static_model_texture_set(albedo, normal, al, nl);
+            const bool ok = load_static_model_texture_set(albedo, normal, surface, al, nl);
             if (!ok)
                 continue;
             StaticModelTex tex;
             tex.albedoLayer = al;
             tex.normalLayer = nl;
+            tex.surfaceLayer = al;
             tex.alphaTest = m.value("alpha_test", false);
+            tex.doubleSided = m.value("double_sided", tex.alphaTest);
+            tex.metallicFactor = std::clamp(m.value("metallic_factor", 1.0f), 0.0f, 1.0f);
             m_staticModelTextures[mesh] = tex;
         }
         LUMINUMBRA_CORE_INFO("Static-model textures registered ({} models).",
@@ -5045,8 +5114,7 @@ bool ReadPod(std::ifstream& in, T& value) {
 
 } // namespace
 
-bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
-                                         LtexCpuImage& out) const {
+bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
         LUMINUMBRA_CORE_ERROR("Texture residency: could not open.ltex '{}'", path.string());
@@ -5073,7 +5141,11 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
             "Texture residency: unsupported.ltex version {} in '{}'", version, path.string());
         return false;
     }
-    if (width == 0 || height == 0 || channels == 0 || channels > 4 || mip_count == 0) {
+    uint16_t max_mips = 1;
+    for (uint32_t dimension = std::max(width, height); dimension > 1; dimension /= 2)
+        ++max_mips;
+    if (width == 0 || height == 0 || width > 16384 || height > 16384 || channels == 0 ||
+        channels > 4 || mip_count == 0 || mip_count > max_mips) {
         LUMINUMBRA_CORE_ERROR("Texture residency: invalid.ltex dimensions in '{}'", path.string());
         return false;
     }
@@ -5088,6 +5160,15 @@ bool RenderPipeline::load_ltex_cpu_image(const std::filesystem::path& path,
             w = std::max(1u, w / 2u);
             h = std::max(1u, h / 2u);
         }
+    }
+
+    std::error_code size_error;
+    const auto file_bytes = std::filesystem::file_size(path, size_error);
+    constexpr size_t kHeaderBytes = 17;
+    if (size_error || total_bytes > 256u * 1024u * 1024u ||
+        file_bytes != kHeaderBytes + total_bytes) {
+        LUMINUMBRA_CORE_ERROR("Texture residency: invalid.ltex byte count in '{}'", path.string());
+        return false;
     }
 
     out.width = width;
