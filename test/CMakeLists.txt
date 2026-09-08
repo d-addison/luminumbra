@@ -1393,6 +1393,19 @@ target_link_libraries(audio_prune_guard_test PRIVATE
     glm
 )
 
+# review of 2c32211: stance-independent saved spawn anchor and the shared
+# LUMIN_TREE_IMPOSTORS predicate (header-only; no GL/device).
+add_executable(client_policy_test
+    client/client_policy_test.cpp
+)
+target_include_directories(client_policy_test PRIVATE
+../src/luminumbra_client
+)
+target_link_libraries(client_policy_test PRIVATE
+    gtest_main
+    glm::glm
+)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -1541,6 +1554,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     surface_query_test
     audio_occlusion_test
     audio_prune_guard_test
+    client_policy_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test

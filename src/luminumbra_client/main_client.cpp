@@ -87,7 +87,8 @@
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/ScentFieldRenderMirror.h" // one-way scent snapshot for the ground decal
 #include "rendering/Shader.h"
-#include "rendering/SnowCoverModel.h"      // Render-only snow cover.
+#include "rendering/SnowCoverModel.h" // Render-only snow cover.
+#include "rendering/TreeImpostorPolicy.h"
 #include "rendering/WeatherRenderBridge.h" // Live weather bridge.
 #include "rendering/WorldLoadingVisualizer.h"
 #include "rendering/passes/ParticlePass.h"     //  EmitterDescriptor + accessor type
@@ -2091,8 +2092,9 @@ int main(int argc, char* argv[]) {
                 return "Required tree materials could not be loaded by the renderer. Check the "
                        "client log, repair the asset pack and restart.";
         }
-        const auto impostors = Luminumbra::Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS");
-        if ((!impostors || *impostors != "0") && !renderPipeline.tree_impostor_enabled())
+        if (Luminumbra::Rendering::TreeImpostorsRequested(
+                Luminumbra::Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS")) &&
+            !renderPipeline.tree_impostor_enabled())
             return "Required tree impostor baking failed. Check the client log for the renderer "
                    "error.";
         return {};
@@ -2635,7 +2637,9 @@ int main(int argc, char* argv[]) {
                 SetGamePaused(window, false);
             } else if (act == "quit") {
                 if (g_camera)
-                    gameSession->SetSpawnPoint(g_camera->Position);
+                    gameSession->SetSpawnPoint(g_playerController
+                                                   ? g_playerController->SavedSpawnAnchor()
+                                                   : g_camera->Position);
                 if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -4782,7 +4786,8 @@ int main(int argc, char* argv[]) {
     // is active or when no chunk carries unsaved edits.
     if (gameSession && gameSession->SaveWorldState()) {
         if (!g_app.menu.menu_backdrop_active && g_camera)
-            gameSession->SetSpawnPoint(g_camera->Position);
+            gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()
+                                                          : g_camera->Position);
         if (gameSession->SaveWorld())
             mark_shutdown("world_state_saved");
     }

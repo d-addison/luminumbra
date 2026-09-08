@@ -19,8 +19,7 @@ PlayerController::PlayerController(GLFWwindow* window,
     if (m_mode == MovementMode::Noclip) {
         m_position = m_camera->Position;
     } else {
-        const float standingEyeHeight = m_standingHeight * 0.95f;
-        m_position = m_camera->Position - glm::vec3(0.0f, standingEyeHeight, 0.0f);
+        m_position = Player::FeetFromSpawnAnchor(m_camera->Position, m_standingHeight);
         if (m_physicsSystem) {
             m_physicsSystem->create_player_controller(m_position);
             m_hasInitializedPhysicsPlayer = true;
@@ -166,8 +165,8 @@ void PlayerController::ResetReplayFrameCounter(std::uint64_t frame) {
 
 void PlayerController::UpdateCameraFromControllerPosition() {
     if (m_mode == MovementMode::Walking) {
-        const float standingEyeHeight = m_standingHeight * 0.95f;
-        const float crouchingEyeHeight = m_crouchHeight * 0.9f;
+        const float standingEyeHeight = Player::StandingEyeHeight(m_standingHeight);
+        const float crouchingEyeHeight = m_crouchHeight * Player::kCrouchingEyeHeightFactor;
         const float currentEyeHeight = m_isCrouching ? crouchingEyeHeight : standingEyeHeight;
         m_camera->Position = m_position + glm::vec3(0.0f, currentEyeHeight, 0.0f);
     } else {
@@ -186,8 +185,7 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         } else { // m_mode == MovementMode::Noclip
             m_mode = MovementMode::Walking;
             // When exiting noclip, sync the physics body to the camera's position.
-            const float standingEyeHeight = m_standingHeight * 0.95f;
-            m_position = m_camera->Position - glm::vec3(0.0f, standingEyeHeight, 0.0f);
+            m_position = Player::FeetFromSpawnAnchor(m_camera->Position, m_standingHeight);
 
             if (m_physicsSystem) {
                 // If this is the first time entering walking mode, create the physics body.
@@ -327,3 +325,10 @@ void PlayerController::UpdateNoclip(float deltaTime, const glm::vec3& wishDir, b
 }
 
 } // namespace Luminumbra::Client
+
+glm::vec3 PlayerController::SavedSpawnAnchor() const {
+    if (m_mode == MovementMode::Walking) {
+        return Player::SavedSpawnAnchorForFeet(m_position, m_standingHeight);
+    }
+    return m_camera ? m_camera->Position : m_position;
+}

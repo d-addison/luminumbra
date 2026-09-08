@@ -40,6 +40,7 @@
 #include "passes/WaterfallPass.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
+#include "rendering/TreeImpostorPolicy.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cassert>
@@ -346,9 +347,8 @@ bool RenderPipeline::startup(u32 screen_width,
         //  far-field tree impostors: DEFAULT ON (set LUMIN_TREE_IMPOSTORS=0 to disable for
         // an A/B). Perf-validated win (render-benchmark forest_dense), scales with far tree count.
         // Bake the atlas now that the tree textures are loaded; the GBuffer LOD3 path samples it.
-        const auto impostors = Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS");
         if (m_staticModelContentEnabled &&
-            (!impostors || (!impostors->empty() && impostors->front() != '0'))) {
+            TreeImpostorsRequested(Core::ReadEnvironment("LUMIN_TREE_IMPOSTORS"))) {
             OctaImpostorGrid g;
             g.gridResolution = 12;
             g.tileResolution = 384;
