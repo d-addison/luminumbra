@@ -83,6 +83,8 @@
     "Forest statistics are means over 240 frames after 400 warmup frames; no raw frame percentiles.",
     "Forest shader/settling validation applies only to the report frame.",
     "Foliage GPU cost is one last available query sample.",
+    "Producer foliage max_sway values measure raw instance wind magnitude, not geometric displacement. The vertex shader caps displacement to 45% of blade height; rendered motion was not measured.",
+    "The common foliage updater overwrites the scenario's fade, density and wind settings; this scenario also lacks a daytime capture override.",
     "Full PowerShell visual gate was not executed.",
     "UNC runtime-root launch failed; that path profile is not qualified."
   ]
