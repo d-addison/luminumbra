@@ -595,6 +595,10 @@ TEST(AnimationImport, StepHoldsUntilExactNextKey) {
     AnimClipAsset clip;
     ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
     ASSERT_TRUE(LoadAnimClipAsset((temp.path() / "rig.wiggle.lanim").string(), clip));
+    ASSERT_EQ(clip.header.version, 2u);
+    ASSERT_FALSE(clip.tracks.empty());
+    for (const auto& track : clip.tracks)
+        EXPECT_EQ(track.interpolation, luminumbra::animation::AnimInterpolation::Step);
     const auto skeleton = luminumbra::animation::BuildSkeleton(mesh);
     const auto runtime = luminumbra::animation::BuildClip(clip);
     EXPECT_FLOAT_EQ(
@@ -613,6 +617,10 @@ TEST(AnimationImport, CubicSplineUsesValuesTangentsAndIntervalLength) {
     AnimClipAsset clip;
     ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
     ASSERT_TRUE(LoadAnimClipAsset((temp.path() / "rig.wiggle.lanim").string(), clip));
+    ASSERT_EQ(clip.header.version, 2u);
+    ASSERT_FALSE(clip.tracks.empty());
+    for (const auto& track : clip.tracks)
+        EXPECT_EQ(track.interpolation, luminumbra::animation::AnimInterpolation::CubicSpline);
     const auto skeleton = luminumbra::animation::BuildSkeleton(mesh);
     const auto runtime = luminumbra::animation::BuildClip(clip);
     const auto middle = luminumbra::animation::SamplePose(skeleton, runtime, 1.0f);
@@ -635,6 +643,10 @@ TEST(AnimationImport, LinearRotationFollowsSphericalInterpolation) {
     AnimClipAsset clip;
     ASSERT_TRUE(LoadSkinnedMeshAsset(output.string(), mesh));
     ASSERT_TRUE(LoadAnimClipAsset((temp.path() / "rig.wiggle.lanim").string(), clip));
+    ASSERT_EQ(clip.header.version, 2u);
+    ASSERT_FALSE(clip.tracks.empty());
+    for (const auto& track : clip.tracks)
+        EXPECT_EQ(track.interpolation, luminumbra::animation::AnimInterpolation::Linear);
     const auto pose = luminumbra::animation::SamplePose(
         luminumbra::animation::BuildSkeleton(mesh), luminumbra::animation::BuildClip(clip), 0.25f);
     EXPECT_NEAR(pose.joints[1].rotation[2], 0.19509032f, 1e-4f);

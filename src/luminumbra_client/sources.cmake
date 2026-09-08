@@ -128,6 +128,7 @@ set(CLIENT_QA_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/PersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/PlayerViewSmoke.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/Precipitation.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkinnedMeshTestAssets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkinnedMeshVisualSmoke.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkyboxVisual.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/StreamingLodBoundary.cpp
