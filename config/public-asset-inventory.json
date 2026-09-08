@@ -1114,10 +1114,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 7716,
+      "bytes": 7817,
       "license": "MIT",
       "path": "data/ui/settings.rml",
-      "sha256": "ae8fee0ce5b89aefab94bafed2576266b00ed973f9ac6b90c315478a25efaf15",
+      "sha256": "38788d4acc889df996249bd39714fa0b6bf7df21455b538a2b1a2a31d5afaa29",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1230,6 +1230,55 @@
       "license": "MIT",
       "path": "docs/assets/screenshots/main-menu.png",
       "sha256": "b977315d51697f8b3e9069e20f586c61abf09f11974f9909a3147c4768da08f2",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 280348,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional-preview.png",
+      "sha256": "d947144cd1ffea3557b78d7931d7f8cdd5a83daa0ed502cadf39d090e3cfb5d4",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 1471,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional.json",
+      "sha256": "4c4df138b8cdb3eb668e2aeead13beda3463656cfaf2cbbd23d177f613cae7ac",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 2570597,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional.png",
+      "sha256": "6d864644ab5f40b4fdedd4125163bcdc16049af49dbddf9b42dc98bc1b226e6f",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 493967,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference-preview.png",
+      "sha256": "30cb284697a0d272c62cc19118faee4fe6ad1c8b0118eec6c538b8cf5ad54015",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 7494,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference.json",
+      "sha256": "b6fdf25209b5abb1ff024a134bdafc68a8d3be4543a3fa3b524b594f46c89dd7",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 5788098,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference.png",
+      "sha256": "c8ea3be89ed6d9a5b33c5501c0c925f31b0a1398667788d02a8ee124fa95f4a7",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 4135,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/receipts.json",
+      "sha256": "d2cb192e829439a033e9cd7969f299e6de79337b11b18b286131e94f5937d30a",
       "source": "Luminumbra documentation assets"
     },
     {
