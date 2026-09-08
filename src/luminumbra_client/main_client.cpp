@@ -1352,7 +1352,12 @@ int main(int argc, char* argv[]) {
     RuntimeStateRecorder runtime_state_recorder(scenario_config, g_camera);
     InstallRuntimeCrashHandler(runtime_state_recorder);
     std::unique_ptr<HangWatchdog> hang_watchdog;
-    if (scenario_config.hang_watchdog_seconds > 0) {
+    if (scenario_config.hang_watchdog_seconds > 0 &&
+        !PrepareHangReport(scenario_config.crash_dir)) {
+        LUMINUMBRA_CORE_ERROR("Hang watchdog NOT armed: crash directory {} could not be prepared "
+                              "(must exist and, on Windows, have a short path without spaces)",
+                              scenario_config.crash_dir.string());
+    } else if (scenario_config.hang_watchdog_seconds > 0) {
         hang_watchdog = std::make_unique<HangWatchdog>(
             [] { return g_main_loop_heartbeat.load(std::memory_order_relaxed); },
             std::chrono::seconds(scenario_config.hang_watchdog_seconds),
@@ -4874,8 +4879,10 @@ int main(int argc, char* argv[]) {
     mark_shutdown("job_system_shutdown");
     const auto shutdown_job_stats = jobSystem.get_runtime_stats();
     runtime_state_recorder.write_shutdown(shutdown_milestones, shutdown_job_stats);
-    if (hang_watchdog)
+    if (hang_watchdog) {
+        CancelPendingHangReport();
         hang_watchdog->stop();
+    }
     glfwDestroyWindow(window);
     glfwTerminate();
     return exit_code;
