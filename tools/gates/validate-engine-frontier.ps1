@@ -1295,24 +1295,15 @@ function Test-LuaApiManifestGate {
     if ($analysis.manifest.deterministic_order -ne "module_then_name") {
         throw "Lua API manifest must declare module_then_name deterministic ordering"
     }
-    if ([int64]$analysis.manifest.entry_count -lt 9) {
-        throw "Lua API manifest must cover the baseline scripting API entries"
+    if ([int64]$analysis.manifest.entry_count -ne 2) {
+        throw "Lua API manifest must describe the two installed sampler entry points"
+    }
+    if ($analysis.evidence_kind -ne "source_structure_only") {
+        throw "Lua API manifest source checks must not claim live execution evidence"
     }
 
-    foreach ($module in @("core", "entity", "simulation", "time", "world")) {
-        Assert-ArrayContains -Values $analysis.manifest.required_modules -Needle $module -Description "Lua API manifest required_modules"
-    }
-    foreach ($entry in @(
-        "core.log",
-        "core.version",
-        "entity.destroy",
-        "entity.spawn",
-        "simulation.emit_event",
-        "simulation.subscribe",
-        "time.delta_seconds",
-        "world.get_block",
-        "world.set_block"
-    )) {
+    Assert-ArrayContains -Values $analysis.manifest.required_modules -Needle "world" -Description "Lua API manifest required_modules"
+    foreach ($entry in @("sample_energy_field", "world.sample_energy_field")) {
         Assert-ArrayContains -Values $analysis.manifest.required_entries -Needle $entry -Description "Lua API manifest required_entries"
     }
 

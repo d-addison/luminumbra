@@ -35,7 +35,7 @@ The common engine groups functionality by responsibility:
   types (`PhysicsSystem`) and hosts the water, weather, wind, and aether solvers.
 - `persistence/` and `replay/` encode and verify durable state.
 - `net/` and `network/` contain transport, lockstep, and replication paths.
-- `scripting/` exposes the supported Lua surface.
+- `scripting/` exposes the [supported Lua surface](scripting.md).
 
 `GameSession` already ticks instinct planning, perception/awareness, scent and
 creature-brain systems for participating entities, as well as plant growth and
