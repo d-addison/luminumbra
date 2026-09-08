@@ -1,5 +1,9 @@
 # Blender authoring probes and service mock
 
+The separate [installed geometry build service](service/README.md) performs real
+native compilation and generation publication. The probes and extension below
+remain explicitly labelled mocks; they are not connected to that service yet.
+
 This optional source package generates reproducible asset fixtures and exercises
 an authoring service lifecycle in Blender. The service and extension display
 **MOCK**: they validate draft sidecars, copy immutable snapshots and return preview
