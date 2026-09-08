@@ -697,6 +697,12 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
         return false;
     }
+    std::error_code directory_error;
+    std::filesystem::create_directories(save_dir, directory_error);
+    if (directory_error) {
+        AddError(errors, "Could not create metadata directory: " + directory_error.message());
+        return false;
+    }
     const auto destination = save_dir / "world_info.json";
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))

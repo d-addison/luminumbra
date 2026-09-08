@@ -46,8 +46,8 @@ std::uint64_t WorldClock::year_index(std::uint64_t tick) const {
     return tick / year_length_ticks();
 }
 double WorldClock::spring_phase(std::uint64_t tick) const {
-    const double phase = year_phase(tick) + 0.75;
-    return phase >= 1.0 ? phase - 1.0 : phase;
+    const double shifted = year_phase(tick) + 0.75;
+    return shifted >= 1.0 ? shifted - 1.0 : shifted;
 }
 void WorldClock::set_tick(std::uint64_t tick) {
     if (!ValidTick(tick))

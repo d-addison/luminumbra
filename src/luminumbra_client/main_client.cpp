@@ -1827,6 +1827,8 @@ int main(int argc, char* argv[]) {
         g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
     // Supported opt-in High-resolution water (hashed sim flag; default OFF =
     // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
+    gameSession->SetActiveRegionsEnabled(
+        g_systemConfig.enabled(luminumbra::core::SysKey::SimActiveRegions));
     gameSession->SetWaterHighResEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     // opt-in deterministic weather-event epochs (hashed sim flag).
@@ -3726,8 +3728,12 @@ int main(int argc, char* argv[]) {
                     // overwrites it, so all capture paths keep their exact pins.
                     {
                         const std::uint64_t sim_tick = gameSession->GetSimulationTickCount();
-                        renderPipeline.set_season_tick(sim_tick);
-                        renderPipeline.set_time_of_day_tick(sim_tick);
+                        if (gameSession->ActiveRegionsEnabled()) {
+                            renderPipeline.set_world_clock(gameSession->GetWorldClock());
+                        } else {
+                            renderPipeline.set_season_tick(sim_tick);
+                            renderPipeline.set_time_of_day_tick(sim_tick);
+                        }
                         // Sample live simulation weather at the camera and drive
                         // the atmosphere, world-space precipitation and cloud layer
                         // through the pure WeatherRenderBridge mapping. The
