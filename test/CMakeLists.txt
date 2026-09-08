@@ -1709,6 +1709,22 @@ set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
 # test with the first that has it (the same strategy the validator gate uses to
 # pick $VISUAL_SWEEP_PYTHON). If none has numpy, warn and skip registration.
 find_package(Python3 COMPONENTS Interpreter QUIET)
+# File-only PowerShell checks are optional on hosts without PowerShell. They do
+# not invoke the visual dispatcher, engine, or graphics APIs.
+if(WIN32)
+    find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell powershell.exe)
+else()
+    # Do not discover WSL's powershell.exe: it cannot consume Linux CTest paths.
+    find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell)
+endif()
+if(CAPTURE_VALIDATION_POWERSHELL)
+    add_test(NAME CaptureArtifactValidationContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
+    set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+else()
+    message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+endif()
 set(_vc_candidates "")
 if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
