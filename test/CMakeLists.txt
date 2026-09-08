@@ -1763,6 +1763,9 @@ if(_tl_python)
     add_test(NAME TimelapseSelftest
         COMMAND "${_tl_python}" ${CMAKE_SOURCE_DIR}/tools/timelapse.py --selftest)
     set_tests_properties(TimelapseSelftest PROPERTIES LABELS "visual;tools" TIMEOUT 120)
+    add_test(NAME VisualSweepMontageEvidence
+        COMMAND "${_tl_python}" ${CMAKE_SOURCE_DIR}/tools/gates/test_visual_sweep_montages.py)
+    set_tests_properties(VisualSweepMontageEvidence PROPERTIES LABELS "visual;tools" TIMEOUT 120)
     message(STATUS "TimelapseSelftest registered using python: ${_tl_python}")
 else()
     message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")
