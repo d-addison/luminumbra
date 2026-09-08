@@ -32,6 +32,9 @@ See [world format compatibility](engine-guide.md).
   visual evidence.
 - [SHIELD signed-distance-field contract](shield/sdf-contract.md) defines the
   terrain sampling and meshing invariants.
+- [Distant world and distant simulation contract](distant-world.md) defines
+  the 16 km volumetric far representation, persistent active regions, the
+  per-system distant policy, format additions and the performance contract.
 - [Known limitations](known-limitations.md) is an honest inventory of the
   engine's current boundaries.
 
