@@ -319,6 +319,11 @@ target_link_libraries(forest_perf_budget_test PRIVATE
 # GL-free regression coverage for the foliage surface-grid cache prune: the
 # helper is a free template in FoliagePass.h precisely so it can be exercised
 # without a GL context.
+# Final foliage policy and receipt contracts are GL-free and do not link the engine.
+add_executable(foliage_visual_contract_test rendering/foliage_visual_contract_test.cpp)
+target_include_directories(foliage_visual_contract_test PRIVATE ../src/luminumbra_client)
+target_link_libraries(foliage_visual_contract_test PRIVATE gtest_main nlohmann_json)
+
 add_executable(foliage_cache_prune_test
     rendering/foliage_cache_prune_test.cpp
 )
@@ -1526,6 +1531,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test
+    foliage_visual_contract_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test

@@ -230,6 +230,12 @@ void FoliagePass::clear_ground_meshes() {
     m_scatter_built = false;
     m_foliage_build_backlog = false;
     ++m_ground_revision;
+    m_instance_generation = 0;
+    m_instances_from_gpu_readback = false;
+    m_readback_submitted_generation = 0;
+    m_build_frame = 0;
+    m_instance_available_frame = 0;
+    m_build_phase = 0;
     // Old-world readbacks must never repopulate the new world's instance list.
     m_readback_ring.shutdown();
 }
@@ -424,7 +430,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     // rebuild_instances_gpu, which the elision skips) keeps instance_hash/coverage
     // populated on static frames. Stale-safe: m_instances is replaced only when a
     // newer result arrives, so it is never re-emptied once primed.
-    if (m_readback_enabled) {
+    if (m_readback_enabled && m_gpu_active) {
+        // A queued GPU result must not replace a newer CPU fallback instance set.
         poll_foliage_readback();
     }
 
@@ -446,6 +453,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         };
         mix(m_enabled ? 0x9E3779B97F4A7C15ull : 0x1ull);
         mix(m_ground_revision);
+        mix(m_evidence_phase);
         mix(static_cast<std::uint64_t>(cell(camera_pos.x)) * 73856093ull ^
             (static_cast<std::uint64_t>(cell(camera_pos.z)) * 19349663ull));
         // wind is in the rebuild signature ONLY in gate mode
@@ -473,12 +481,21 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         }
         mix(chunk_acc);
         if (m_scatter_built && sig == m_last_scatter_sig && !m_foliage_build_backlog) {
+            // A busy ring may have refused the first submission for this build.
+            // Retry its unchanged GPU buffer instead of permanently reusing stale evidence.
+            if (m_readback_enabled && m_gpu_active &&
+                m_readback_submitted_generation != m_build_generation) {
+                submit_foliage_readback();
+            }
             return; // unchanged -> reuse the last build (ring VBO + frame_instance_count)
         }
         m_last_scatter_sig = sig;
         m_scatter_built = true;
     }
 
+    ++m_build_generation;
+    m_build_frame = m_evidence_frame;
+    m_build_phase = m_evidence_phase;
     if (!m_enabled || m_archetypes.empty() || query == nullptr) {
         m_instances.clear();
         m_frame_instance_count = 0;
@@ -596,6 +613,9 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     // draining the backlog (fading the rest of the foliage in) even if the camera holds still.
     m_foliage_build_backlog = deferred_any;
 
+    m_instance_generation = m_build_generation;
+    m_instances_from_gpu_readback = false;
+    m_instance_available_frame = m_evidence_frame;
     map_instances_for_frame();
 }
 
@@ -946,16 +966,7 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         // (no glGetBufferSubData stall). The COMPLETED result is drained into
         // m_instances by poll_foliage_readback (called every frame from
         // rebuild_instances), so it survives the scatter-cache elision.
-        constexpr std::size_t kSlotBytes =
-            kReadbackCountBytes + kMaxInstances * sizeof(InstanceRecord);
-        if (m_readback_ring.ensure(kSlotBytes, 3) && m_readback_ring.begin()) {
-            m_readback_ring.copy_region(m_count_ssbo, sizeof(GLuint) * 2, 0, kReadbackCountBytes);
-            m_readback_ring.copy_region(m_blade_ssbo,
-                                        0,
-                                        static_cast<std::ptrdiff_t>(kReadbackCountBytes),
-                                        kMaxInstances * sizeof(InstanceRecord));
-            m_readback_ring.submit();
-        }
+        submit_foliage_readback();
     } else {
         // Play / benchmark: no readback. m_instances is gate-only and unused in this
         // mode, so keep it empty (mirrors the prior synchronous path's else branch).
@@ -973,6 +984,19 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     return true;
 }
 
+void FoliagePass::submit_foliage_readback() {
+    constexpr std::size_t kSlotBytes = kReadbackCountBytes + kMaxInstances * sizeof(InstanceRecord);
+    if (m_readback_ring.ensure(kSlotBytes, 3) && m_readback_ring.begin()) {
+        m_readback_ring.copy_region(m_count_ssbo, sizeof(GLuint) * 2, 0, kReadbackCountBytes);
+        m_readback_ring.copy_region(m_blade_ssbo,
+                                    0,
+                                    static_cast<std::ptrdiff_t>(kReadbackCountBytes),
+                                    kMaxInstances * sizeof(InstanceRecord));
+        m_readback_ring.submit(m_build_generation);
+        m_readback_submitted_generation = m_build_generation;
+    }
+}
+
 void FoliagePass::poll_foliage_readback() {
     // drain the most-recent COMPLETED blade readback into
     // m_instances (stale-safe). Replaces m_instances only when a NEWER result
@@ -981,7 +1005,8 @@ void FoliagePass::poll_foliage_readback() {
     // frames..
     const void* slot = nullptr;
     std::size_t slot_bytes = 0;
-    if (!m_readback_ring.consume(&slot, &slot_bytes) || slot == nullptr) {
+    std::uint64_t generation = 0;
+    if (!m_readback_ring.consume(&slot, &slot_bytes, &generation) || slot == nullptr) {
         return; // no newer completed result this frame -> keep the held set
     }
     GLuint count = 0;
@@ -990,6 +1015,9 @@ void FoliagePass::poll_foliage_readback() {
     const InstanceRecord* blades = reinterpret_cast<const InstanceRecord*>(
         static_cast<const char*>(slot) + kReadbackCountBytes);
     m_instances.assign(blades, blades + count);
+    m_instance_generation = generation;
+    m_instances_from_gpu_readback = true;
+    m_instance_available_frame = m_evidence_frame;
     // Keep the draw guard / foliage-instances stat synced with the drained set even
     // on scatter-cache-elided frames (where rebuild_instances_gpu does not run).
     m_frame_instance_count = m_instances.size();
@@ -1045,6 +1073,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     m_shader->setMat4("u_view", view);
     m_shader->setMat4("u_projection", projection);
     m_shader->setVec3("u_cameraPos", camera.Position);
+    m_last_draw_shader_time = ctx.time_seconds;
     m_shader->setFloat("u_time", ctx.time_seconds);
     m_shader->setFloat("u_swayAmplitude", m_sway_amplitude);
     m_shader->setFloat("u_swaySpeed", m_sway_speed);
@@ -1135,7 +1164,7 @@ std::size_t FoliagePass::instances_beyond(const glm::vec3& center, float radius_
     return count;
 }
 
-float FoliagePass::max_sway_displacement() const {
+float FoliagePass::max_instance_wind_magnitude() const {
     float max_mag = 0.0f;
     for (const auto& rec : m_instances) {
         const float mag = std::sqrt(rec.sway[0] * rec.sway[0] + rec.sway[1] * rec.sway[1]);

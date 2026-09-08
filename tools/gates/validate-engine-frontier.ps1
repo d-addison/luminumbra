@@ -2749,17 +2749,9 @@ function Test-CloudShadow {
 }
 
 function Test-FoliageInstancing {
-    # instanced foliage scatter + wind response gate. The scatter
-    # is a DETERMINISTIC pure hash of (chunk coords, biome id, slope, moisture,
-    # instance index) -- NO global RNG, NO world_hash growth. The gate asserts,
-    # from the instance-set DATA: (a) coverage density tracks the biome table
-    # within a band at fixed seeds; (b) the distance-fade is present (no foliage
-    # beyond the live ring / fade end); (c) the wind-sway responds (calm vs windy
-    # max tip displacement differs, only swaying archetypes move); (d) the
-    # FoliagePass GPU-timer is within the pinned release budget. The instance-set
-    # hash is asserted reproducible (run==run).: world_hash stays
-    # d950a6afc12a5cdc (one-way, regression review). Foliage adds ground pixels, so the
-    # RenderHealth update the baseline is DELIBERATE and logged (the deterministic runtime contract ).
+    # v2 retains identified calm/windy stills and checks final rendered controls.
+    # Full qualification remains incomplete until independent reconstruction,
+    # rendered motion and source-frame-correlated timing are implemented.
     $exe = Get-ClientExe
     $visualDir = "build/$BuildPreset/test-artifacts/runtime/foliage-instancing"
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $visualDir
@@ -2785,77 +2777,46 @@ function Test-FoliageInstancing {
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.foliage_instancing.v1") {
-        throw "Unexpected foliage instancing analysis schema '$($analysis.schema)'"
+    if ($analysis.schema -ne "luminumbra.foliage_instancing.v2" -or
+        $analysis.profile -ne "luminumbra.foliage_control.v2") {
+        throw "Unexpected foliage analysis schema/profile '$($analysis.schema)' / '$($analysis.profile)'"
     }
-    # the client writes an explicit refusal analysis instead of ending a
-    # gate run silent (readback-disabled / zero-instance / no-draws shapes).
     if ($analysis.refusal) {
         throw "Foliage instancing run REFUSED: $($analysis.refusal)"
     }
-    if ([int64]$analysis.gl_debug.errors -ne 0) {
-        throw "Foliage instancing run emitted GL debug errors: $($analysis.gl_debug.errors)"
+    if ($analysis.functional_control.passed -isnot [bool] -or
+        -not $analysis.functional_control.passed) {
+        throw "Foliage final controls, readback, coverage or GL checks failed"
     }
-    if ([int]$analysis.render_pass.foliage_draws -le 0) {
-        throw "Foliage instancing run did not submit foliage draws"
+    if ([int64]$analysis.coverage_density.instances_within_ring -lt 100000 -or
+        [double]$analysis.gpu_timer.budget_ms -ne 0.6) {
+        throw "Foliage workload must retain the 100000-instance floor and 0.6 ms budget"
     }
-    if ([int64]$analysis.render_pass.foliage_instances_drawn -le 0) {
-        throw "Foliage instancing run drew zero scatter instances"
-    }
-    # Determinism: the instance-set hash is byte-equal across two rebuilds.
-    if (-not $analysis.determinism.passed -or -not $analysis.determinism.hash_byte_equal) {
-        throw "Foliage placement is not deterministic: hash_a=$($analysis.determinism.instance_hash_run_a) hash_b=$($analysis.determinism.instance_hash_run_b)"
-    }
-    if ([bool]$analysis.determinism.global_rng) {
-        throw "Foliage placement reports a global RNG (must be a pure per-chunk hash)"
-    }
-    if ([bool]$analysis.determinism.world_hash_written) {
-        throw "Foliage reported writing world_hash (must be render-only / one-way)"
-    }
-    # Coverage density tracks the biome table within a band.
-    if (-not $analysis.coverage_density.passed) {
-        throw "Foliage coverage density off-band: measured=$($analysis.coverage_density.measured_density) biome=$($analysis.coverage_density.biome_density) delta=$($analysis.coverage_density.density_delta) band=$($analysis.coverage_density.density_band)"
-    }
-    if ([int64]$analysis.coverage_density.instances_within_ring -le 0) {
-        throw "Foliage produced no instances within the live ring"
-    }
-    #  update the baseline floor (2026-07-02): the lush-default flat_lands scatter
-    # saturates the 262144 budget in-ring; a hard floor keeps decimation-class
-    # regressions RED even though measured_density saturates at the calibrated cap.
-    if ([int64]$analysis.coverage_density.instances_within_ring -lt 100000) {
-        throw "Foliage in-ring instance count $($analysis.coverage_density.instances_within_ring) is below the 100000 decimation floor (saturated-carpet contract, re-blessed 2026-07-02)"
-    }
-    # Distance-fade: NO foliage beyond the live ring / fade end.
-    if (-not $analysis.distance_fade.passed -or [int64]$analysis.distance_fade.instances_beyond_fade -ne 0) {
-        throw "Foliage present beyond the live ring: $($analysis.distance_fade.instances_beyond_fade) instances past fade_end $($analysis.distance_fade.fade_end_m) m"
-    }
-    # Wind sway responds: windy max tip displacement exceeds calm by a margin.
-    if (-not $analysis.wind_sway.passed) {
-        throw "Foliage sway did not respond to wind: calm=$($analysis.wind_sway.calm_max_sway) windy=$($analysis.wind_sway.windy_max_sway) delta=$($analysis.wind_sway.sway_delta) (min $($analysis.wind_sway.min_sway_delta))"
-    }
-    # GPU-timer budget (release-enforced; informational on debug, / precedent).
-    if ($null -eq $analysis.gpu_timer) {
-        throw "Foliage instancing analysis is missing the gpu_timer section ()"
-    }
-    if ([double]$analysis.gpu_timer.foliage_gpu_ms -lt 0) {
-        throw "Foliage gpu_timer.foliage_gpu_ms reports a negative value"
-    }
-    if ($BuildPreset -eq "release" -and [bool]$analysis.gpu_timer.supported) {
-        if (-not $analysis.gpu_timer.within_budget) {
-            throw "FoliagePass GPU timer $($analysis.gpu_timer.foliage_gpu_ms) ms exceeds budget $($analysis.gpu_timer.budget_ms) ms (release)"
+    $screenshots = @()
+    foreach ($phaseName in @("calm", "windy")) {
+        $phase = $analysis.phases.$phaseName
+        if ($phase.sampled -isnot [bool] -or -not $phase.sampled -or
+            $phase.instance_matches_drawn_build -isnot [bool] -or
+            -not $phase.instance_matches_drawn_build -or $phase.phase -ne $phaseName) {
+            throw "Foliage $phaseName phase has no matching sampled build/readback"
         }
+        $path = Join-Path $visualDir $phase.screenshot
+        Assert-PpmArtifact -Path $path -ArtifactDir $visualDir -Name "FoliageInstancing/$phaseName"
+        $screenshots += $path
     }
-    if (-not $analysis.passed) {
-        throw "Foliage instancing analysis reported failure"
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "FoliageInstancing" -ScreenshotPaths $screenshots
+    Write-Host ("Foliage controls: {0} instances; raw wind {1:N3} -> {2:N3}; timer status {3}" -f `
+        $analysis.coverage_density.instances_within_ring, `
+        $analysis.phases.calm.maximum_instance_wind_magnitude, `
+        $analysis.phases.windy.maximum_instance_wind_magnitude, $analysis.gpu_timer.status)
+    # Do not replace the old full gate with a weaker green control-only gate.
+    # Snapshot equality and wind-input magnitude cannot close the original requirements.
+    if ($analysis.qualification.status -ne "complete" -or $analysis.passed -isnot [bool] -or
+        -not $analysis.passed) {
+        throw "Foliage qualification incomplete: $($analysis.qualification.missing -join '; ')"
     }
 
-    Assert-PpmArtifact -Path $analysis.foliage_screenshot -ArtifactDir $visualDir -Name "FoliageInstancing"
-    Assert-CapturePinned -ArtifactDir $visualDir -Name "FoliageInstancing" -ScreenshotPaths @($analysis.foliage_screenshot)
-    Write-Host ("FoliageInstancing: {0} instances ({1} in-ring); density measured {2:N3} vs biome {3:N3}; sway calm {4:N4} -> windy {5:N4} m; {6:N4} ms" -f `
-        $analysis.render_pass.foliage_instances_drawn, $analysis.coverage_density.instances_within_ring, `
-        $analysis.coverage_density.measured_density, $analysis.coverage_density.biome_density, `
-        $analysis.wind_sway.calm_max_sway, $analysis.wind_sway.windy_max_sway, `
-        $analysis.gpu_timer.foliage_gpu_ms)
+
 }
 
 function Test-ParticleEmitterDeterminism {

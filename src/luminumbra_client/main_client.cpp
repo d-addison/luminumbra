@@ -3961,14 +3961,18 @@ int main(int argc, char* argv[]) {
                             renderPipeline.set_cloud_state(cs);
                         }
                     }
-                    UpdateFoliageScatter(g_app,
-                                         root_dir,
-                                         scenario_config,
-                                         g_camera.get(),
-                                         gameSession.get(),
-                                         renderPipeline,
-                                         rb_scatter_ms,
-                                         rb_foliage_ms);
+                    // Apply functional foliage QA after all camera/time overrides.
+                    // Normal play, other scenarios and --play-paths retain the common path.
+                    if (!scenario_runner || !scenario_runner->onPreRenderFoliage()) {
+                        UpdateFoliageScatter(g_app,
+                                             root_dir,
+                                             scenario_config,
+                                             g_camera.get(),
+                                             gameSession.get(),
+                                             renderPipeline,
+                                             rb_scatter_ms,
+                                             rb_foliage_ms);
+                    }
                     // Ambient atmosphere particles: a soft drift of pollen/dust motes
                     // around the player. Spawned once; its origin follows the camera
                     // each frame so the motes are always present as you explore.

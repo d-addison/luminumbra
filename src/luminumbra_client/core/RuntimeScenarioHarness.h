@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/FoliageVisualReport.h"
+
 #include "core/RuntimeScenarioConfig.h"
 #include "luminumbra_common/net/ReplicationEndpoint.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
@@ -449,46 +451,6 @@ void WriteParticleEmitterDeterminismAnalysis(
     const ParticleDeterminismResult& result,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
-// --- Foliage instancing smoke ( / ) ---
-// Drives the instanced foliage scatter over the visible live ring and snapshots
-// the scatter instance set so the FoliageInstancing gate can assert, from the
-// DATA (not pixels), that: (a) coverage density tracks the biome table within a
-// band at fixed seeds; (b) the distance-fade is present (no instances beyond the
-// live ring / fade end); (c) the wind-sway responds (calm vs windy max-tip
-// displacement differs, and only swaying archetypes move); (d) the FoliagePass
-// GPU-timer is within the pinned release budget. The placement hash is asserted
-// reproducible (run==run) — the determinism surface.: nothing here
-// writes world_hash (one-way, regression review).
-struct FoliageInstancingResult {
-    // Determinism: the instance-set hash from two identical rebuilds.
-    std::uint64_t instance_hash_run_a = 0;
-    std::uint64_t instance_hash_run_b = 0;
-    bool hash_byte_equal = false;
-    std::uint64_t world_seed = 0;
-    // Coverage density: live instances within the live-ring radius and the
-    // measured biome density they were generated against (band-checked).
-    std::size_t instances_within_ring = 0;
-    std::size_t instances_total = 0;
-    double measured_density = 0.0;   // instances / candidate budget, normalized
-    double biome_density = 0.0;      // the biome table density the scatter used
-    double biome_density_band = 0.5; // |measured - biome| tolerance band
-    // Distance fade: instances beyond the fade end (must be 0) + the fade band.
-    std::size_t instances_beyond_fade = 0;
-    double fade_start_m = 0.0;
-    double fade_end_m = 0.0;
-    double live_ring_radius_m = 0.0;
-    // Wind sway: calm vs windy max tip displacement (must differ) + that pebbles
-    // / clutter (non-swaying archetypes) carry zero displacement.
-    double calm_max_sway = 0.0;
-    double windy_max_sway = 0.0;
-    bool sway_responds = false;
-    // GPU timing.
-    double foliage_gpu_ms = 0.0;
-    double foliage_budget_ms = 0.6;
-    bool gpu_timers_supported = false;
-    std::size_t foliage_draws = 0;
-    std::size_t foliage_instances_drawn = 0;
-};
 
 void WriteFoliageInstancingAnalysis(
     const std::filesystem::path& artifact_dir,
