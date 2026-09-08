@@ -53,3 +53,5 @@ Private audio recordings and Steam payloads are not included in public art packs
 
 For the standalone mesh compiler's scene, transform and primitive-selection
 contract, see [Static mesh import](static-mesh-import.md).
+Material filtering and inline cutout options are documented in
+[Texture import](texture-import.md).

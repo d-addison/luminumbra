@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -1055,14 +1056,22 @@ bool WriteLtex(const std::string& output_path,
 // plate is committable/reviewable as a PNG alongside the binary.ltex.
 // 4-arg worker. The 2-arg public overload below preserves the
 // ABI/declaration the round-trip test links against.
-bool process_material_texture(const std::string& input_path,
-                              const std::string& output_path,
-                              uint32_t target_size,
-                              bool emit_preview_png,
-                              bool normal_map,
-                              const std::string& alpha_mask,
-                              bool material_mips,
-                              bool linear_data) {
+bool process_material_texture_with_cutoff(const std::string& input_path,
+                                          const std::string& output_path,
+                                          uint32_t target_size,
+                                          bool emit_preview_png,
+                                          bool normal_map,
+                                          const std::string& alpha_mask,
+                                          bool material_mips,
+                                          bool linear_data,
+                                          float alpha_cutoff) {
+    const bool inline_coverage = alpha_cutoff >= 0;
+    if (!std::isfinite(alpha_cutoff) || alpha_cutoff > 1 ||
+        (inline_coverage && (normal_map || linear_data))) {
+        std::cerr << "Error: Alpha coverage needs a color texture and a cutoff in [0, 1]"
+                  << std::endl;
+        return false;
+    }
     int width = 0;
     int height = 0;
     int source_channels = 0;
@@ -1168,14 +1177,22 @@ bool process_material_texture(const std::string& input_path,
     }
 
     std::vector<LtexMip> mips;
-    if (!normal_map && alpha_mask.empty() && !material_mips && !linear_data) {
+    if (!normal_map && alpha_mask.empty() && !material_mips && !linear_data && !inline_coverage) {
         // Preserve the existing native texture import ABI and its byte-level fixtures.
         mips = BuildMipChain(std::move(base), channels);
     } else {
-        auto coverage = [](const LtexMip& mip, float scale) {
+        auto coverage = [alpha_cutoff, inline_coverage](const LtexMip& mip, float scale) {
             size_t covered = 0;
-            for (size_t p = 3; p < mip.pixels.size(); p += 4)
-                covered += mip.pixels[p] * scale >= 127.5f;
+            for (size_t p = 3; p < mip.pixels.size(); p += 4) {
+                if (inline_coverage) {
+                    // Measure the quantized bytes that the shader will sample.
+                    const auto alpha = std::clamp(std::lround(mip.pixels[p] * scale), 0l, 255l);
+                    covered += alpha >= alpha_cutoff * 255.0f;
+                } else {
+                    // Retain the existing external-mask path's exact arithmetic.
+                    covered += mip.pixels[p] * scale >= 127.5f;
+                }
+            }
             return static_cast<float>(covered) / static_cast<float>(mip.width * mip.height);
         };
         const float base_coverage = coverage(base, 1.0f);
@@ -1200,8 +1217,8 @@ bool process_material_texture(const std::string& input_path,
                 return false;
             if (normal_map) {
                 normalize_normals(mip);
-            } else if (!alpha_mask.empty()) {
-                // Preserve leaf coverage at the runtime alpha cutoff (0.5) as cards recede.
+            } else if ((!alpha_mask.empty() && !inline_coverage) || alpha_cutoff > 0) {
+                // Preserve cutout coverage at the declared shader threshold.
                 float lo = 0.0f, hi = 256.0f;
                 for (int iteration = 0; iteration < 16; ++iteration) {
                     const float mid = (lo + hi) * 0.5f;
@@ -1235,6 +1252,25 @@ bool process_material_texture(const std::string& input_path,
               << std::endl;
     std::cout << "  - Mip levels: " << mips.size() << std::endl;
     return true;
+}
+
+bool process_material_texture(const std::string& input_path,
+                              const std::string& output_path,
+                              uint32_t target_size,
+                              bool emit_preview_png,
+                              bool normal_map,
+                              const std::string& alpha_mask,
+                              bool material_mips,
+                              bool linear_data) {
+    return process_material_texture_with_cutoff(input_path,
+                                                output_path,
+                                                target_size,
+                                                emit_preview_png,
+                                                normal_map,
+                                                alpha_mask,
+                                                material_mips,
+                                                linear_data,
+                                                -1.0f);
 }
 
 bool process_texture_resized(const std::string& input_path,
@@ -1503,10 +1539,12 @@ int main(int argc, char* argv[]) {
         std::cerr << "  --preview-png: for.ltex output, also write a sibling <stem>.png of the "
                      "(resized) mip-0 image"
                   << std::endl;
-        std::cerr << "  --srgb: filter color mips in linear light\n"
-                     "  --linear: filter non-color data without gamma conversion\n"
-                     "  --normal-map: filter linear normals and renormalize\n"
-                     "  --alpha-mask <image>: merge an opacity map and preserve cutout coverage\n";
+        std::cerr
+            << "  --srgb: filter color mips in linear light\n"
+               "  --linear: filter non-color data without gamma conversion\n"
+               "  --normal-map: filter linear normals and renormalize\n"
+               "  --alpha-mask <image>: merge an opacity map and preserve cutout coverage\n"
+               "  --alpha-cutoff <0..1>: preserve inline RGBA cutout coverage at this threshold\n";
         return 1;
     }
 
@@ -1526,6 +1564,7 @@ int main(int argc, char* argv[]) {
         bool normal_map = false;
         bool material_mips = false;
         bool linear_data = false;
+        float alpha_cutoff = -1;
         std::string alpha_mask;
         for (int a = 3; a < argc; ++a) {
             const std::string arg = argv[a];
@@ -1539,6 +1578,19 @@ int main(int argc, char* argv[]) {
                 normal_map = true;
             } else if (arg == "--alpha-mask" && a + 1 < argc) {
                 alpha_mask = argv[++a];
+            } else if (arg == "--alpha-cutoff" && a + 1 < argc) {
+                try {
+                    const std::string value = argv[++a];
+                    size_t consumed = 0;
+                    alpha_cutoff = std::stof(value, &consumed);
+                    if (consumed != value.size() || !std::isfinite(alpha_cutoff) ||
+                        alpha_cutoff < 0 || alpha_cutoff > 1)
+                        throw std::invalid_argument("cutoff");
+                } catch (...) {
+                    std::cerr << "Error: --alpha-cutoff needs a finite number in [0, 1]"
+                              << std::endl;
+                    return 1;
+                }
             } else {
                 try {
                     target_size = static_cast<uint32_t>(std::stoul(arg));
@@ -1552,14 +1604,15 @@ int main(int argc, char* argv[]) {
             std::cerr << "Error: target size exceeds 16384" << std::endl;
             return 1;
         }
-        return process_material_texture(argv[1],
-                                        output_path,
-                                        target_size,
-                                        emit_preview_png,
-                                        normal_map,
-                                        alpha_mask,
-                                        material_mips,
-                                        linear_data)
+        return process_material_texture_with_cutoff(argv[1],
+                                                    output_path,
+                                                    target_size,
+                                                    emit_preview_png,
+                                                    normal_map,
+                                                    alpha_mask,
+                                                    material_mips,
+                                                    linear_data,
+                                                    alpha_cutoff)
                    ? 0
                    : 1;
     }
