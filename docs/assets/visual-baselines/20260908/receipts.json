@@ -1,0 +1,89 @@
+{
+  "schema": "luminumbra.visual.documented-baselines.v1",
+  "status": "unapproved_baseline_observations",
+  "entries": [
+    {
+      "scenario_id": "G04",
+      "role": "forest-reference",
+      "visual_approval": "not_approved",
+      "started_utc": "2026-09-08T13:05:21.359963+00:00",
+      "image": "forest-reference.png",
+      "image_sha256": "c8ea3be89ed6d9a5b33c5501c0c925f31b0a1398667788d02a8ee124fa95f4a7",
+      "preview": "forest-reference-preview.png",
+      "preview_dimensions": [
+        960,
+        400
+      ],
+      "analysis": "forest-reference.json",
+      "analysis_sha256": "b6fdf25209b5abb1ff024a134bdafc68a8d3be4543a3fa3b524b594f46c89dd7",
+      "process_exit_code": 0,
+      "source_commit": "17c70af79c96d600bde11b0fb13c59b7af15a105",
+      "input_file_manifest_sha256": "0c86156704c20cc14ffda61e1a7d7c1b4b1891fcc534616948fdcff828285dea",
+      "original_ppm_sha256": "13d94ba728dc56c15dfae1e3ae3180a8d471b3016b370741043c759ff96a7598",
+      "native_analysis_sha256": "8ee1d1ee549165c4f8b728cb807178e1568b6ad876aba5b81017f3298ade7dbc",
+      "analysis_encoding": "UTF-8 with canonical LF; JSON values unchanged from native report"
+    },
+    {
+      "scenario_id": "R14",
+      "role": "foliage-functional",
+      "visual_approval": "not_approved",
+      "started_utc": "2026-09-08T13:06:38.345882+00:00",
+      "image": "foliage-functional.png",
+      "image_sha256": "6d864644ab5f40b4fdedd4125163bcdc16049af49dbddf9b42dc98bc1b226e6f",
+      "preview": "foliage-functional-preview.png",
+      "preview_dimensions": [
+        960,
+        400
+      ],
+      "analysis": "foliage-functional.json",
+      "analysis_sha256": "4c4df138b8cdb3eb668e2aeead13beda3463656cfaf2cbbd23d177f613cae7ac",
+      "process_exit_code": 0,
+      "source_commit": "17c70af79c96d600bde11b0fb13c59b7af15a105",
+      "input_file_manifest_sha256": "0c86156704c20cc14ffda61e1a7d7c1b4b1891fcc534616948fdcff828285dea",
+      "original_ppm_sha256": "115e5bed65491d35fc0ba0507cddf7fc5646641397b2749c7359ed7235ffa437",
+      "native_analysis_sha256": "9a18740278f1cd6192631fd3da2f10b1a8229e924531b5d3b7282a0bbd81fdeb",
+      "analysis_encoding": "UTF-8 with canonical LF; JSON values unchanged from native report"
+    }
+  ],
+  "profile": {
+    "os": "Windows 11 Education 10.0.26200",
+    "cpu": "AMD Ryzen 7 9800X3D (8 cores, 16 logical processors)",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti",
+    "driver": "595.97",
+    "renderer_backend": "OpenGL",
+    "framebuffer": [
+      3840,
+      1600
+    ],
+    "build_type": "Release",
+    "compiler": "GNU UCRT64 15.1.0",
+    "native_drive_runtime": true,
+    "audio_enabled": false,
+    "background_context": "Ordinary desktop GPU clients remained running. No other engine, Blender or build process was active at the preflight check.",
+    "gpu_observation": "The owned process PID was observed on NVIDIA GPU 0. One startup process-table query was made in each run.",
+    "source_settings": "Fresh private application settings; tracked engine runtime data and unchanged published Tree Small 02 runtime v1.0.0.",
+    "library_hashes": {
+      "libstdc++-6.dll": "5fc9ecdb4902bee4b4011ea39d5d94c747dfe6a527a29a5561d6939d05af5f76",
+      "libgcc_s_seh-1.dll": "4b62ad1a9a934598b086add9551f035259b6754f71482231e377dcc4332069bb",
+      "libwinpthread-1.dll": "5df04e91b01fca90ecd50e37a5472c32a066c2bd4a1f8af5672d8513389c544b"
+    }
+  },
+  "build": {
+    "luminumbra_client_app.exe": {
+      "bytes": 21990342,
+      "sha256": "c44d3373528a98e1ff05cb24bae15e7e937b6949808d6b5487b92dc1b1d5ba51"
+    },
+    "luminumbra_client_qa_app.exe": {
+      "bytes": 23656472,
+      "sha256": "09317639a923a9ad59aaeb3f77385d13227e417bea193d0b8b5de6be4e5b3b0b"
+    }
+  },
+  "limitations": [
+    "Not a golden reference or visual approval.",
+    "Forest statistics are means over 240 frames after 400 warmup frames; no raw frame percentiles.",
+    "Forest shader/settling validation applies only to the report frame.",
+    "Foliage GPU cost is one last available query sample.",
+    "Full PowerShell visual gate was not executed.",
+    "UNC runtime-root launch failed; that path profile is not qualified."
+  ]
+}

@@ -1,5 +1,9 @@
 # Visual regression: FLIP-style golden-image harness
 
+See the [documented visual baselines](visual-baselines.md) for real engine
+captures with separate numeric findings, visible defects and approval status.
+Those unapproved observations must not be promoted automatically to goldens.
+
 `tools/flip_diff.py` is a perceptual image-diff gate. It compares a **candidate**
 render against a blessed **golden** reference and produces:
 
