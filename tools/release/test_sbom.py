@@ -167,7 +167,8 @@ class SbomFixture(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.base = Path(self.temp.name)
+        # Windows temp paths may use an 8.3 alias; match root_inventory canonicalization.
+        self.base = Path(self.temp.name).resolve()
         self.root = self.base / "stage"
         self.root.mkdir()
         (self.root / "a.txt").write_bytes(b"hello\r\n")
@@ -226,8 +227,11 @@ class InputTests(SbomFixture):
         # Mock metadata so this regression also runs on Windows without symlink privileges.
         original = Path.lstat
         for mode in (0o120777, 0o010600):
+            intercepted = []
+
             def fake_lstat(path, *args, **kwargs):
                 if path == self.root / "a.txt":
+                    intercepted.append(path)
                     info = list(original(path, *args, **kwargs))
                     info[0] = mode
                     return os.stat_result(info)
@@ -235,6 +239,7 @@ class InputTests(SbomFixture):
             with self.subTest(mode=mode), patch.object(Path, "lstat", fake_lstat):
                 with self.assertRaisesRegex(ValueError, "unsupported package entry"):
                     generator.root_inventory(self.root, False, self.output)
+                self.assertEqual(intercepted, [self.root / "a.txt"])
 
     def test_link_detection_with_optional_windows_attributes(self):
         # A synthetic Windows os.stat_result can expose attributes as None.
@@ -252,10 +257,12 @@ class InputTests(SbomFixture):
         junction.mkdir()
         (junction / "outside.txt").write_bytes(b"must not be inventoried")
         original = Path.lstat
+        intercepted = []
 
         def junction_lstat(path, *args, **kwargs):
             info = original(path, *args, **kwargs)
             if path == junction:
+                intercepted.append(path)
                 return SimpleNamespace(st_mode=info.st_mode,
                                        st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
             return info
@@ -264,6 +271,7 @@ class InputTests(SbomFixture):
         with patch.object(Path, "lstat", junction_lstat):
             with self.assertRaisesRegex(ValueError, "unsupported package entry.*junction"):
                 generator.root_inventory(self.root, False, self.output)
+        self.assertEqual(intercepted, [junction])
 
 
 class ArchiveTests(SbomFixture):
