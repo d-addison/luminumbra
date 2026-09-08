@@ -3,7 +3,10 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
@@ -575,7 +578,13 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     Server::ServerWorldRunner original(config);
     ASSERT_TRUE(original.Boot()) << original.GetBootError();
     ASSERT_TRUE(original.Session()->ActiveRegionsEnabled());
-    original.RunFixedTicks(45);
+    // A single runner tick must autosave at absolute tick 45, even though
+    // this RunFixedTicks call has executed only one tick.
+    for (int i = 0; i < 44; ++i)
+        ASSERT_EQ(
+            original.Session()->TickSimulation(original.Session()->GetSimulationClock().fixed_dt()),
+            1u);
+    original.RunFixedTicks(1);
     EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").clock.tick(), 45u);
     ASSERT_GT(original.SaveFullSnapshot(), 0u);
     const auto before = DiskBytes(root);
@@ -584,11 +593,12 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     EXPECT_EQ(loaded.TickCount(), original.TickCount());
     EXPECT_EQ(DiskBytes(root), before);
     const auto compare = [&]() {
-        const auto a = original.ComputeWorldSubHashes();
-        const auto b = loaded.ComputeWorldSubHashes();
-        EXPECT_EQ(a.wind, b.wind);
-        EXPECT_EQ(a.weather, b.weather);
-        EXPECT_EQ(a.aether, b.aether);
+        EXPECT_EQ(original.Session()->GetWindFieldSystem()->ComputeWindSubHash(),
+                  loaded.Session()->GetWindFieldSystem()->ComputeWindSubHash());
+        EXPECT_EQ(original.Session()->GetWeatherSystem()->ComputeWeatherSubHash(),
+                  loaded.Session()->GetWeatherSystem()->ComputeWeatherSubHash());
+        EXPECT_EQ(original.Session()->GetAetherFieldSystem()->ComputeAetherSubHash(),
+                  loaded.Session()->GetAetherFieldSystem()->ComputeAetherSubHash());
         EXPECT_EQ(original.Session()->GetWorldClock().canonical_bytes(),
                   loaded.Session()->GetWorldClock().canonical_bytes());
     };
