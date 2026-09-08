@@ -68,7 +68,8 @@ See [Game assets](docs/game-assets.md) for provenance, offline setup and repair.
 The [documented visual baselines](docs/visual-baselines.md) include original
 screenshots, settings, measurements and visible failures. These September 8
 captures have **not received visual approval**; numeric test results alone do
-not establish scene quality.
+not establish scene quality. The catalog of 70 scenario groups currently has two
+deficient baseline groups and zero approved groups; these images show G04 and R14.
 
 [![Forest baseline with a visible terrain discontinuity](docs/assets/visual-baselines/20260908/forest-reference-preview.png)](docs/visual-baselines.md#forest-reference)
 

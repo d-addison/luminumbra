@@ -3,14 +3,25 @@
 These September 8, 2026 captures record existing behavior at engine commit
 `17c70af79c96d600bde11b0fb13c59b7af15a105`. Both processes exited successfully,
 but **neither scenario has received visual approval**. The images expose defects
-that the current numeric checks do not reject. They are diagnostic baselines,
+that the recorded numeric checks did not reject. They are diagnostic baselines,
 not golden references or completed visual improvements.
+
+The September 8 visual catalog contains 70 scenario groups and their required
+variants. This page documents two deficient baseline groups, G04 and R14. There
+are zero review-ready packets and zero approved groups; the other 68 groups have
+no fresh qualified baseline in that catalog. Screenshot count is not group
+coverage, and approval of one group cannot establish approval of another.
 
 The full images are lossless PNG conversions of the original 3840×1600 RGB
 captures; decoded pixel equality was verified. Inline previews are resized to
 960×400. No retouching, generated imagery or additional color grading was applied.
 The [receipts](assets/visual-baselines/20260908/receipts.json) record source,
 binary, image, input-manifest and support-library hashes.
+Those identities describe the recorded runs, not the documentation revision or
+a later renderer build. They do not provide an immutable frame identity joining
+every image to its measurements: the forest screenshot is a separate unmeasured
+frame, and the foliage pin record describes latest runtime state. Subsequent
+source fixes do not supply missing provenance or a new capture for these images.
 
 ## Forest reference
 
@@ -52,7 +63,7 @@ automatically to this normal-play workload.
 
 [![Foliage diagnostic whose upward framing primarily shows the night sky](assets/visual-baselines/20260908/foliage-functional-preview.png)](assets/visual-baselines/20260908/foliage-functional.png)
 
-The existing `foliage_visual_smoke` producer reports a pass. Direct checks also
+The captured `foliage_visual_smoke` producer reported a pass. Direct checks also
 confirmed its numeric assertions, including the gate's 100,000-instance floor,
 image dimensions and capture-pin metadata. The image nevertheless provides a
 poor demonstration of foliage: the camera is elevated and points upward, with
@@ -69,12 +80,13 @@ most of the frame occupied by sky. There is no calm screenshot for comparison.
 | Timing interpretation | One last available query sample below the target; no distribution |
 
 See the [producer analysis](assets/visual-baselines/20260908/foliage-functional.json).
-The common foliage updater runs after the scenario driver and overwrites its
-60/96 m fade, density and controlled wind settings. The scenario also lacks the
-daytime override used by other visual captures. These ownership defects prevent
-the intended controlled workload from reaching the renderer.
+At the recorded renderer revision, the common foliage updater ran after the
+scenario driver and overwrote its 60/96 m fade, density and controlled wind
+settings. The scenario also lacked the daytime override used by other visual
+captures. Those ownership defects prevented the intended controlled workload
+from reaching the renderer in this run.
 
-The producer's `max_sway` reads the raw wind vector stored on instances. It does
+The captured producer's `max_sway` reads the raw wind vector stored on instances. It does
 not measure blade-tip movement: the vertex shader applies amplitude and
 oscillation, then caps displacement to 45% of blade height. Neither rendered
 motion nor a controlled calm phase has been established by these values. Hash
@@ -122,9 +134,11 @@ report, run `tools/perf/validate_render_capture.py` with position `8 56 8`, yaw
 `35`, pitch `-6`, TOD `0.04`, `--require-controller`, `--require-geometry` and
 `--require-settled`.
 
-The full PowerShell visual gate was not executed. Its tracked callers reference
-`Assert-PpmArtifact` and `Assert-CapturePinned` without providing those helpers;
-the direct checks used here are not a claim that the wrapper passed.
+The full PowerShell visual gate was not executed for these captures. At their
+recorded source revision, its callers referenced `Assert-PpmArtifact` and
+`Assert-CapturePinned` without providing those helpers. Later helper repairs do
+not establish that the historical wrapper passed, and file structure or latest
+pin-state validation cannot establish capture-frame provenance or visual quality.
 
 Each improved scenario requires new screenshots, relevant correctness checks,
 honest performance scope and explicit user approval of the concrete result.
