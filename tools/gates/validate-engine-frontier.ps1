@@ -1302,9 +1302,13 @@ function Test-LuaApiManifestGate {
         throw "Lua API manifest source checks must not claim live execution evidence"
     }
 
-    Assert-ArrayContains -Values $analysis.manifest.required_modules -Needle "world" -Description "Lua API manifest required_modules"
+    if (@($analysis.manifest.required_modules) -cnotcontains "world") {
+        throw "Lua API manifest required_modules is missing 'world'"
+    }
     foreach ($entry in @("sample_energy_field", "world.sample_energy_field")) {
-        Assert-ArrayContains -Values $analysis.manifest.required_entries -Needle $entry -Description "Lua API manifest required_entries"
+        if (@($analysis.manifest.required_entries) -cnotcontains $entry) {
+            throw "Lua API manifest required_entries is missing '$entry'"
+        }
     }
 
     $requiredChecks = @(

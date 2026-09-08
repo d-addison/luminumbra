@@ -1726,8 +1726,8 @@ set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
 # test with the first that has it (the same strategy the validator gate uses to
 # pick $VISUAL_SWEEP_PYTHON). If none has numpy, warn and skip registration.
 find_package(Python3 COMPONENTS Interpreter QUIET)
-# File-only PowerShell checks are optional on hosts without PowerShell. They do
-# not invoke the visual dispatcher, engine, or graphics APIs.
+# File-only PowerShell checks are optional on hosts without PowerShell. The Lua
+# source mode only inspects source files; neither check runs the engine or graphics APIs.
 if(WIN32)
     find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell powershell.exe)
 else()
@@ -1739,8 +1739,15 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME LuaApiManifestSourceContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/validate-engine-frontier.ps1"
+            -Mode LuaApiManifestGate -BuildPreset lua-source-contract)
+    set_tests_properties(LuaApiManifestSourceContract PROPERTIES
+        LABELS "scripting;tools" TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 else()
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
 endif()
 set(_vc_candidates "")
 if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
