@@ -46,12 +46,26 @@ jobs:
           mkdir -p dist
           git archive --format=tar --prefix="luminumbra-${GITHUB_REF_NAME#v}/" HEAD | gzip -n > "dist/luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz"
           python3 tools/release/validate_package.py "dist/luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz"
-          python3 tools/release/generate_sbom.py --root . --tracked \
+          # Reproducible SPDX timestamp: exact tagged commit's committer time.
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_REF_NAME}^{commit}")"
+          python3 tools/release/generate_sbom.py \
+            --archive "dist/luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz" \
             --name luminumbra-source --version "${GITHUB_REF_NAME#v}" \
             --output "dist/luminumbra-${GITHUB_REF_NAME#v}-source.spdx.json"
           cd dist
           sha256sum "luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz" \
             "luminumbra-${GITHUB_REF_NAME#v}-source.spdx.json" > SHA256SUMS
+      - name: Validate SPDX schema, semantics, and source archive bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/sbom-validator"
+          "${RUNNER_TEMP}/sbom-validator/bin/python" -m pip install --disable-pip-version-check -r tools/release/requirements-sbom.txt
+          "${RUNNER_TEMP}/sbom-validator/bin/python" tools/release/test_sbom.py
+          "${RUNNER_TEMP}/sbom-validator/bin/python" tools/release/test_sbom_schema.py
+          "${RUNNER_TEMP}/sbom-validator/bin/python" tools/release/validate_sbom.py \
+            "dist/luminumbra-${GITHUB_REF_NAME#v}-source.spdx.json" \
+            --archive "dist/luminumbra-${GITHUB_REF_NAME#v}-source.tar.gz"
       - name: Attest source artifacts
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:

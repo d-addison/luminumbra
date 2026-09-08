@@ -1684,6 +1684,9 @@ endif()
 if(Python3_FOUND)
     add_test(NAME GameAssetAcquisition COMMAND "${Python3_EXECUTABLE}" -m unittest discover
         -s "${CMAKE_SOURCE_DIR}/tools/assets" -v)
+    add_test(NAME ReleaseSbomInventory
+        COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/release/test_sbom.py)
+    set_tests_properties(ReleaseSbomInventory PROPERTIES LABELS "release;tools" TIMEOUT 120)
     list(APPEND _vc_candidates "${Python3_EXECUTABLE}")
     add_test(NAME RuntimeDataManifestDrift
         COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/check_runtime_data_manifest.py)
