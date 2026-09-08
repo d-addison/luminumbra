@@ -50,6 +50,8 @@ The upstream generator expressions and explicit fused operations are retained.
 The stb resize header receives a local coefficient-copy correction in a private
 generated build header. `cmake/stb_resize.cmake` checks the pinned upstream header
 and replaces two unaligned integer-copy macros with overlap-safe byte copies.
+It also applies the SIMD lookup-table offset to each index instead of forming a
+pointer before the table.
 The fetched source, filtering arithmetic and SIMD paths are retained.
 
 ---
