@@ -191,6 +191,16 @@ camera reprojection and instanced foliage wind-sway motion to TAAU. Previous
 rigid-object transforms and previous skinned bone poses remain missing.
 Far-tree impostors are enabled at startup by default when atlas baking succeeds.
 
+Scene depth uses `GL_DEPTH_COMPONENT32F` with reversed-Z and
+`glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE)`: the 0.1 m near plane maps to 1,
+the 3200 m far plane and cleared sky map to 0, and visible geometry wins with
+`GL_GREATER` (or `GL_GEQUAL` for equal-depth overlays). Depth reconstruction
+uses the sampled value directly as clip Z. Camera frustum extraction uses
+`row3 - row2` for the near plane and `row2` for the far plane.
+Shadow cascades retain conventional orthographic depth, clear to 1, and use
+`GL_LESS`; ShadowPass temporarily selects `GL_NEGATIVE_ONE_TO_ONE` and restores
+the scene convention afterward. Shadow-coordinate sampling remains unchanged.
+
 Directional-light inputs describe ray travel; surface lighting uses their
 opposite. Each shadow cascade clears its own depth layer every frame. Aether
 enhances authored emissive materials without making ordinary ground emit light.

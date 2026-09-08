@@ -1027,7 +1027,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     // soft edges.
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_TRUE);
-    glDepthFunc(GL_LEQUAL);
+    glDepthFunc(GL_GEQUAL);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     const GLboolean cull_was_enabled = glIsEnabled(GL_CULL_FACE);
@@ -1036,11 +1036,11 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     }
 
     m_shader->use();
-    const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                                  static_cast<float>(ctx.screen_width) /
-                                                      static_cast<float>(ctx.screen_height),
-                                                  camera.GetNearPlane(),
-                                                  camera.GetFarPlane());
+    const glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                      static_cast<float>(ctx.screen_width) /
+                                                          static_cast<float>(ctx.screen_height),
+                                                      camera.GetNearPlane(),
+                                                      camera.GetFarPlane());
     const glm::mat4 view = camera.GetViewMatrix();
     m_shader->setMat4("u_view", view);
     m_shader->setMat4("u_projection", projection);
@@ -1097,7 +1097,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     }
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
-    glDepthFunc(GL_LESS);
+    glDepthFunc(GL_GREATER);
 
     return m_frame_instance_count;
 }

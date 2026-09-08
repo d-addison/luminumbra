@@ -154,6 +154,16 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
         return cascade_stats;
     }
 
+    // Shadow coordinates and shader PCF remain conventional. Restore the caller's
+    // scene convention after both opaque and tinted shadow draws.
+    GLint clip_origin = 0, clip_depth = 0, depth_func = 0;
+    GLdouble clear_depth = 0;
+    glGetIntegerv(GL_CLIP_ORIGIN, &clip_origin);
+    glGetIntegerv(GL_CLIP_DEPTH_MODE, &clip_depth);
+    glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
+    glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear_depth);
+    glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+
     m_shadow_map.light_space_matrices = light_space_matrices;
     glViewport(0, 0, m_shadow_map.resolution, m_shadow_map.resolution);
     glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_map.fbo_id);
@@ -178,7 +188,8 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
         m_shadow_shader->setMat4("u_lightSpaceMatrix", light_space_matrices[i]);
 
         glm::vec4 cascade_planes[6];
-        PassGl::ExtractFrustumPlanes(light_space_matrices[i], cascade_planes);
+        PassGl::ExtractFrustumPlanes(
+            light_space_matrices[i], cascade_planes, PassGl::ClipDepth::NegativeOneToOne);
         // ONE submit per cascade via the Codex-signed-off callback
         // (reproduces CullHierarchical + draw_chunks_mdi exactly). Returns the
         // per-cascade counts; the call site folds them into stats with =/+=.
@@ -236,6 +247,9 @@ ShadowPass::execute(const RenderContext& ctx, const ShadowPassInput& input) {
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glClipControl(static_cast<GLenum>(clip_origin), static_cast<GLenum>(clip_depth));
+    glDepthFunc(static_cast<GLenum>(depth_func));
+    glClearDepth(clear_depth);
     return cascade_stats;
 }
 

@@ -83,7 +83,7 @@ float fbm(vec3 p, int octaves) {
 
 // Reconstruct world position from depth
 vec3 worldPosFromDepth(vec2 uv, float depth) {
-    float z = depth * 2.0 - 1.0;
+    float z = depth; // reversed-Z already uses [0,1] clip depth
     vec4 clipPos = vec4(uv * 2.0 - 1.0, z, 1.0);
     vec4 viewPos = u_inverseProjection * clipPos;
     viewPos /= viewPos.w;
@@ -145,7 +145,7 @@ vec3 renderFog(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
 // color and never feeds back into sim/world_hash.
 vec3 renderWetness(vec3 sceneColor, vec2 screenUV, vec3 worldPos) {
     if (u_wetness < 0.01) return sceneColor;
-    if (texture(u_sceneDepth, screenUV).r >= 1.0) return sceneColor;
+    if (texture(u_sceneDepth, screenUV).r <= 0.0) return sceneColor;
     vec2 encoded = texture(gNormal, screenUV).rg * 2.0 - 1.0;
     vec3 n = vec3(encoded, 1.0 - abs(encoded.x) - abs(encoded.y));
     float t = clamp(-n.z, 0.0, 1.0);
@@ -209,7 +209,7 @@ void main() {
         // has no normal, so it is untouched and stays a dark dome). Only meaningful
         // where the surface is already very dark (night), so the daytime storm is
         // unaffected. The max never darkens -- it only sets a minimum.
-        if (sceneDepth < 1.0) {
+        if (sceneDepth > 0.0) {
             float surfLuma = dot(finalColor, vec3(0.299, 0.587, 0.114));
             float floorLift = clamp(u_stormIntensity, 0.0, 1.0)
                               * (1.0 - smoothstep(0.0, 0.10, surfLuma)) * 0.045;
