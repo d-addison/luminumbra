@@ -1470,6 +1470,13 @@ void FarLodSystem::integrate_completed_builds() {
         region.last_wanted_frame = m_frame;
         region.region_authority_revision = result.region_authority_revision;
         region.persistence_pending = persistence_pending;
+        if (m_coverage_enabled) {
+            region.edited_samples_observed = true;
+            region.has_edited_samples =
+                std::any_of(result.tile.flags.begin(), result.tile.flags.end(), [](u8 flags) {
+                    return (flags & World::kFarLodSampleFlagEdited) != 0;
+                });
+        }
 
         auto existing = m_residents.find(key);
         if (existing != m_residents.end()) {
@@ -1487,6 +1494,16 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
                           const glm::vec3& camera_position) {
     ++m_frame;
     m_last_camera_position = camera_position;
+    if (m_coverage_enabled) {
+        m_coverage = {};
+        m_coverage.enabled = true;
+        m_coverage.update_frame = m_frame;
+        m_coverage.camera = camera_position;
+        m_coverage.preview_anchored = m_preview_mode;
+        m_coverage.camera_region_guard_bypassed = m_coverage_camera_region_guard_bypass;
+        m_coverage.preview_anchor = m_preview_anchor;
+        m_coverage.preview_inner_radius = m_preview_inner_radius;
+    }
     m_stats.enabled = m_enabled;
     m_stats.region_draws = 0;
     m_stats.indices_drawn = 0;
@@ -1713,6 +1730,57 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
         ++m_stats.evictions_this_frame;
     }
 
+    if (m_coverage_enabled) {
+        m_coverage.wanted = wanted.size();
+        m_coverage.pending = m_pending.size();
+        const int eye_rx = static_cast<int>(std::floor(camera_position.x / kRegionSize));
+        const int eye_rz = static_cast<int>(std::floor(camera_position.z / kRegionSize));
+        for (const Wanted& want : wanted) {
+            const u64 key = region_key(want.rx, want.rz);
+            const auto resident = m_residents.find(key);
+            const u64 revision = world_system.far_lod_region_authority_revision(want.rx, want.rz);
+            const bool current = resident != m_residents.end() &&
+                                 resident->second.tier == want.tier &&
+                                 resident->second.region_authority_revision == revision &&
+                                 !resident->second.persistence_pending;
+            m_coverage.resident += resident != m_residents.end();
+            m_coverage.missing += resident == m_residents.end();
+            m_coverage.stale += resident != m_residents.end() && !current;
+            if (std::abs(want.rx - eye_rx) > 1 || std::abs(want.rz - eye_rz) > 1)
+                continue;
+            RegionCoverage row;
+            row.rx = want.rx;
+            row.rz = want.rz;
+            row.wanted = true;
+            row.wanted_tier = want.tier;
+            row.pending = m_pending.count(key) != 0;
+            row.resident = resident != m_residents.end();
+            row.current = current;
+            row.authority_revision = revision;
+            if (row.resident) {
+                const auto& region = resident->second;
+                row.resident_tier = region.tier;
+                row.resident_authority_revision = region.region_authority_revision;
+                row.persistence_pending = region.persistence_pending;
+                row.has_edited_samples = region.has_edited_samples;
+                row.edited_samples_observed = region.edited_samples_observed;
+                row.aabb_min = region.aabb_min;
+                row.aabb_max = region.aabb_max;
+                row.terrain_indices = region.element_count;
+                row.water_indices = region.water_element_count;
+            } else {
+                row.terrain_decision = "not_resident";
+                row.water_decision = "not_resident";
+            }
+            m_coverage.neighbourhood.push_back(row);
+        }
+        std::sort(m_coverage.neighbourhood.begin(),
+                  m_coverage.neighbourhood.end(),
+                  [](const RegionCoverage& a, const RegionCoverage& b) {
+                      return std::tie(a.rz, a.rx) < std::tie(b.rz, b.rx);
+                  });
+    }
+
     m_stats.regions_wanted = wanted.size();
     m_stats.regions_missing = missing;
     m_stats.regions_building = m_pending.size();
@@ -1773,10 +1841,34 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
         // no region — the centre region carries the diorama's far field.
         // The first-person near-plane guard applies only near this region's
         // vertical bounds. Flying above it must retain its ground and water.
-        return !m_preview_mode && region.rx == camera_rx && region.rz == camera_rz &&
+        return !(m_coverage_enabled && m_coverage_camera_region_guard_bypass) && !m_preview_mode &&
+               region.rx == camera_rx && region.rz == camera_rz &&
                m_last_camera_position.y >= region.aabb_min.y - kFarClipInnerRadiusMeters &&
                m_last_camera_position.y <= region.aabb_max.y + kFarClipInnerRadiusMeters;
     };
+
+    if (m_coverage_enabled) {
+        m_coverage.draw_observed = true;
+        m_coverage.camera_region_guard_bypassed = m_coverage_camera_region_guard_bypass;
+        // Same predicates, priority and frustum used by the two draw loops below.
+        for (auto& row : m_coverage.neighbourhood) {
+            const auto found = m_residents.find(region_key(row.rx, row.rz));
+            if (found == m_residents.end())
+                continue;
+            const auto& region = found->second;
+            const auto decision = [&](u32 count) {
+                if (count == 0)
+                    return "empty_mesh";
+                if (is_camera_region(region))
+                    return "camera_region_guard";
+                if (aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes))
+                    return "outside_frustum";
+                return "submitted";
+            };
+            row.terrain_decision = decision(region.element_count);
+            row.water_decision = decision(region.water_element_count);
+        }
+    }
 
     std::size_t water_draws = 0;
     std::size_t water_indices = 0;
