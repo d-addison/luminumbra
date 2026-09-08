@@ -344,6 +344,12 @@ bool PrepareHangReport(const std::filesystem::path& crash_dir) {
         std::wcsncpy(short_form, wide.c_str(), MAX_PATH - 1);
     if (std::wcschr(short_form, L' ') != nullptr)
         return false; // a spaced path cannot be passed to the helper unquoted
+    // The report formats "<dir>\\hang-YYYYMMDD-HHMMSS.txt" (and .dmp) into MAX_PATH
+    // buffers. Reject at arm time any directory long enough for those two names to
+    // truncate, which would otherwise collide into one filename.
+    constexpr std::size_t kArtifactSuffixChars = 26; // backslash + "hang-" + 15 stamp + ".txt"
+    if (std::wcslen(short_form) + kArtifactSuffixChars >= MAX_PATH)
+        return false;
     std::wcsncpy(prep.dir, short_form, MAX_PATH - 1);
     swprintf(prep.command_prefix,
              64,
@@ -377,8 +383,12 @@ void ReportMainThreadHangImpl(std::uint64_t last_heartbeat, double stalled_secon
              st.wMinute,
              st.wSecond);
     wchar_t report_path[MAX_PATH], dump_path[MAX_PATH];
-    swprintf(report_path, MAX_PATH, L"%s\\hang-%s.txt", prep.dir, stamp);
-    swprintf(dump_path, MAX_PATH, L"%s\\hang-%s.dmp", prep.dir, stamp);
+    // PrepareHangReport guarantees these fit; treat a negative return as a hard stop
+    // rather than writing both artifacts to one truncated name.
+    if (swprintf(report_path, MAX_PATH, L"%s\\hang-%s.txt", prep.dir, stamp) < 0 ||
+        swprintf(dump_path, MAX_PATH, L"%s\\hang-%s.dmp", prep.dir, stamp) < 0) {
+        return;
+    }
 
     RawFile report(report_path);
     char line[512];

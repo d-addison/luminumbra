@@ -110,6 +110,10 @@ private:
 
     void write_last_known() const;
 
+    // True once an incremental shutdown record has been written (watchdog armed), so
+    // the final record adds "complete" only in that mode and is otherwise unchanged.
+    bool m_wrote_shutdown_progress = false;
+
     RuntimeScenarioConfig m_config;
     std::unique_ptr<Luminumbra::Rendering::Camera>& g_camera;
     std::chrono::steady_clock::time_point m_started_at{};

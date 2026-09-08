@@ -1426,6 +1426,7 @@ target_link_libraries(audio_physics_binding_test PRIVATE
     miniaudio
     nlohmann_json
     glm
+    spdlog::spdlog
 )
 
 # main-loop stall detector (pure std; no window/GL/device). Fires once per

@@ -168,13 +168,18 @@ void RuntimeStateRecorder::write_shutdown(const std::vector<std::string>& milest
         {"milestones", milestones},
         {"job_queue", JobStatsToJson(job_stats)},
         {"jobs_drained",
-         job_stats.queue_depth == 0 && job_stats.worker_count == 0 && !job_stats.accepting_jobs},
-        {"complete", true}};
+         job_stats.queue_depth == 0 && job_stats.worker_count == 0 && !job_stats.accepting_jobs}};
+    if (m_wrote_shutdown_progress) {
+        // Only meaningful when incremental records were written (watchdog armed);
+        // otherwise the record keeps exactly its previous shape.
+        artifact["complete"] = true;
+    }
     std::ofstream output(m_config.artifact_dir / "shutdown.json");
     output << std::setw(2) << artifact << '\n';
 }
 
 void RuntimeStateRecorder::write_shutdown_progress(const std::vector<std::string>& milestones) {
+    m_wrote_shutdown_progress = true;
     std::error_code ec;
     std::filesystem::create_directories(m_config.artifact_dir, ec);
     nlohmann::json artifact = {{"schema", "luminumbra.shutdown.v1"},

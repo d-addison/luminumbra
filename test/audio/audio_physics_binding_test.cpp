@@ -13,10 +13,32 @@
 #include <gtest/gtest.h>
 
 #include "audio/MiniaudioManager.h"
+#include "core/Log.h"
+
+#include <spdlog/sinks/base_sink.h>
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
 
 namespace {
+
+// Counts binding log records without touching the shared logger's sink list: a
+// private logger with the same sink type is installed for the duration of the test
+// via the manager's own logging path, so nothing races the periodic flusher.
+class CountingSink : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    std::size_t count = 0;
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        const std::string text(msg.payload.data(), msg.payload.size());
+        if (text.find("audio spatial clustering") != std::string::npos)
+            ++count;
+    }
+    void flush_() override {}
+};
 
 // Distinct non-null pointer values; the pointee is never dereferenced by the binding.
 ::Luminumbra::Systems::PhysicsSystem* FakePhysics(std::uintptr_t token) {
@@ -24,6 +46,30 @@ namespace {
 }
 
 } // namespace
+
+TEST(AudioPhysicsBinding, RepeatedBindingLogsOnce) {
+    // Swap in a private logger for the duration of the test, restoring the previous
+    // one afterwards, so no sink is added to or removed from a logger that a
+    // background flusher may be using.
+    auto sink = std::make_shared<CountingSink>();
+    auto probe = std::make_shared<spdlog::logger>("LUMINUMBRA_BINDING_PROBE", sink);
+    probe->set_level(spdlog::level::trace);
+    // GetCoreLogger() returns a reference to the static handle, so the swap is a
+    // plain assignment; the probe logger is never registered with spdlog, so the
+    // periodic flusher never touches it.
+    auto previous = Log::GetCoreLogger();
+    Log::GetCoreLogger() = probe;
+    {
+        Luminumbra::Client::MiniaudioManager manager(".");
+        auto* physics = FakePhysics(0x1000);
+        for (int frame = 0; frame < 1000; ++frame) {
+            manager.SetPhysicsSystem(physics);
+        }
+        manager.SetPhysicsSystem(FakePhysics(0x2000));
+    }
+    Log::GetCoreLogger() = previous;
+    EXPECT_EQ(sink->count, 2u); // one bind, one rebind; never one per frame
+}
 
 TEST(AudioPhysicsBinding, RepeatedBindingCountsOnce) {
     Luminumbra::Client::MiniaudioManager manager(".");
