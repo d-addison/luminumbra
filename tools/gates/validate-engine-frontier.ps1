@@ -9,6 +9,7 @@
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "nightly-provenance.ps1")
+. (Join-Path $ScriptDir "capture-artifact-validation.ps1")
 
 $ArtifactDir = "tools/gates/baselines"
 
@@ -2467,8 +2468,8 @@ function Test-SkyboxVisual {
         throw "Skybox visual analysis reported failure"
     }
 
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.screenshot)
-    Assert-CapturePinned -ArtifactDir $visualDir -Name "SkyboxVisual"
+    Assert-PpmArtifact -Path $analysis.screenshot -ArtifactDir $visualDir -Name "SkyboxVisual"
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "SkyboxVisual" -ScreenshotPaths @($analysis.screenshot)
     Write-Host ("SkyboxVisual (noon): dome horizon {0:N1} / zenith {1:N1} (spread {2:N1}, max band step {3:N1}); sun cluster {4:N3}; aerial {5:N3} ms, sky precompute {6:N3} ms" -f `
         $analysis.gradient.horizon_band_mean, $analysis.gradient.zenith_band_mean, `
         $analysis.gradient.horizon_zenith_spread, $analysis.gradient.max_adjacent_band_step, `
@@ -2524,8 +2525,8 @@ function Test-WeatherVisual {
         throw "Weather visual analysis reported failure"
     }
 
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.baseline_screenshot)
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.weather_screenshot)
+    Assert-PpmArtifact -Path $analysis.baseline_screenshot -ArtifactDir $visualDir -Name "WeatherVisual baseline"
+    Assert-PpmArtifact -Path $analysis.weather_screenshot -ArtifactDir $visualDir -Name "WeatherVisual weather"
 
     # the WeatherVisual gate ALSO asserts the LIGHTNING strike FRAME --
     # the photography timing shot. The same weather_visual_smoke run fires a
@@ -2585,8 +2586,8 @@ function Test-WeatherVisual {
     if (-not $strike.passed) {
         throw "Lightning strike visual analysis reported failure"
     }
-    Assert-PpmArtifact (Join-Path $visualDir $strike.neighbor_screenshot)
-    Assert-PpmArtifact (Join-Path $visualDir $strike.strike_screenshot)
+    Assert-PpmArtifact -Path $strike.neighbor_screenshot -ArtifactDir $visualDir -Name "WeatherVisual neighbor"
+    Assert-PpmArtifact -Path $strike.strike_screenshot -ArtifactDir $visualDir -Name "WeatherVisual strike"
     Write-Host ("lightning strike frame gate passed: frame-mean luminance pulse +{0:N4} (neighbour {1:N4} -> strike {2:N4}); {3} bolt pixels; pulse GPU {4:N4} ms" -f `
         $strike.pulse.frame_mean_luminance_delta, $strike.neighbor.frame_mean_luminance, $strike.strike.frame_mean_luminance, `
         $strike.bolt.bright_thin_pixels, $strike.render_pass.lightning_pulse_gpu_ms)
@@ -2748,8 +2749,8 @@ function Test-CloudShadow {
         throw "Cloud shadow analysis reported failure"
     }
 
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.terrain_t1_screenshot)
-    Assert-CapturePinned -ArtifactDir $visualDir -Name "CloudShadow"
+    Assert-PpmArtifact -Path $analysis.terrain_t1_screenshot -ArtifactDir $visualDir -Name "CloudShadow"
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "CloudShadow" -ScreenshotPaths @($analysis.terrain_t0_screenshot, $analysis.terrain_t1_screenshot, $analysis.sky_screenshot)
     Write-Host ("CloudShadow: terrain ROI luminance t0 {0:N4} -> t1 {1:N4} (delta {2:N4}); cloud sky gradient {3:N4}; cloud-shadow added {4:N4} ms" -f `
         $analysis.moving_shadow.terrain_roi_luminance_t0, $analysis.moving_shadow.terrain_roi_luminance_t1, `
         $analysis.moving_shadow.terrain_roi_luminance_delta, $analysis.cloud_layer.sky_horizontal_gradient_mean, `
@@ -2857,8 +2858,8 @@ function Test-FoliageInstancing {
         throw "Foliage instancing analysis reported failure"
     }
 
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.foliage_screenshot)
-    Assert-CapturePinned -ArtifactDir $visualDir -Name "FoliageInstancing"
+    Assert-PpmArtifact -Path $analysis.foliage_screenshot -ArtifactDir $visualDir -Name "FoliageInstancing"
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "FoliageInstancing" -ScreenshotPaths @($analysis.foliage_screenshot)
     Write-Host ("FoliageInstancing: {0} instances ({1} in-ring); density measured {2:N3} vs biome {3:N3}; sway calm {4:N4} -> windy {5:N4} m; {6:N4} ms" -f `
         $analysis.render_pass.foliage_instances_drawn, $analysis.coverage_density.instances_within_ring, `
         $analysis.coverage_density.measured_density, $analysis.coverage_density.biome_density, `
@@ -2938,7 +2939,7 @@ function Test-ParticleEmitterDeterminism {
         throw "Particle determinism analysis reported failure"
     }
 
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.particle_screenshot)
+    Assert-PpmArtifact -Path $analysis.particle_screenshot -ArtifactDir $visualDir -Name "ParticleEmitterDeterminism"
     Write-Host ("particle determinism: descriptor set byte-equal over {0} emitter(s); ParticlePass {1} ms (budget {2} ms)" -f `
         $analysis.determinism.descriptor_count, $analysis.gpu_timer.particle_pass_gpu_ms, $analysis.gpu_timer.budget_ms)
 }
@@ -3049,8 +3050,8 @@ function Test-Precipitation {
         throw "Precipitation analysis reported failure"
     }
 
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.calm_screenshot)
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.windy_screenshot)
+    Assert-PpmArtifact -Path $analysis.calm_screenshot -ArtifactDir $visualDir -Name "Precipitation calm"
+    Assert-PpmArtifact -Path $analysis.windy_screenshot -ArtifactDir $visualDir -Name "Precipitation windy"
     Write-Host ("precipitation gate passed: rain particles present (calm bright {0:P3}, windy bright {1:P3}); streaks slant with wind (calm slant {2:N3} -> windy slant {3:N3}, gain {4:}x); ParticlePass storm {5} ms <= {6} ms budget" -f `
         $analysis.presence.calm_bright_fraction, $analysis.presence.windy_bright_fraction, `
         $analysis.wind_slant.calm_slant_ratio, $analysis.wind_slant.windy_slant_ratio, `
@@ -3100,7 +3101,7 @@ function Test-TimeOfDaySweep {
             if ($matches.Count -ne 1) {
                 throw "Time-of-day season sweep is missing the season $seasonIndex '$phaseName' phase capture"
             }
-            Assert-PpmArtifact (Join-Path $visualDir $matches[0].screenshot)
+            Assert-PpmArtifact -Path $matches[0].screenshot -ArtifactDir $visualDir -Name "TimeOfDaySweep"
         }
     }
 
@@ -3209,7 +3210,7 @@ function Test-TimeOfDaySweep {
         throw "Time-of-day emissive night check failed (status=$($analysis.emissive_check.status))"
     }
     if ($analysis.emissive_check.status -eq "checked_surface_emissive") {
-        Assert-PpmArtifact (Join-Path $visualDir $analysis.emissive_check.screenshot)
+        Assert-PpmArtifact -Path $analysis.emissive_check.screenshot -ArtifactDir $visualDir -Name "TimeOfDaySweep emissive"
         if ([int64]$analysis.emissive_check.center_glow_pixels -lt [int64]$analysis.thresholds.min_emissive_glow_pixels) {
             throw "Emissive night capture has too few glow pixels: $($analysis.emissive_check.center_glow_pixels)"
         }
@@ -3279,7 +3280,7 @@ function Test-WorldVisualSweep {
         if (-not $cell.produced) {
             throw "world_visual_sweep cell not produced: $($cell.file)"
         }
-        Assert-PpmArtifact (Join-Path $visualDir $cell.file)
+        Assert-PpmArtifact -Path $cell.file -ArtifactDir $visualDir -Name "WorldVisualSweep"
         if (-not $cell.non_black) {
             throw "world_visual_sweep cell is black/empty: $($cell.file) (mean_luminance=$($cell.mean_luminance))"
         }
@@ -3431,7 +3432,7 @@ function Test-PlayerView {
 
         $skyEnforced = [bool]$analysis.thresholds.sky_ratio_enforced
         foreach ($station in $analysis.stations) {
-            Assert-PpmArtifact (Join-Path $viewDir $station.file)
+            Assert-PpmArtifact -Path $station.file -ArtifactDir $viewDir -Name "PlayerView ($preset) station $($station.name)"
             if ([int64]$station.coverage.missing_frustum_surface_chunks -gt 0) {
                 throw "player view ($preset) station '$($station.name)' is missing $($station.coverage.missing_frustum_surface_chunks) frustum surface chunks"
             }
@@ -3465,7 +3466,7 @@ function Test-PlayerView {
         if (-not $analysis.passed) {
             throw "player view ($preset) analysis reported failure"
         }
-        Assert-CapturePinned -ArtifactDir $viewDir -Name "PlayerView ($preset)"
+        Assert-CapturePinned -ArtifactDir $viewDir -Name "PlayerView ($preset)" -ScreenshotPaths @($analysis.stations | ForEach-Object { $_.file })
         Write-Host "player view ($preset): stations=$($analysis.aggregates.captured_stations), max_missing=$($analysis.aggregates.max_missing_frustum_surface_chunks), min_renderable_ratio=$($analysis.aggregates.min_renderable_frustum_ratio), max_sky_ratio=$($analysis.aggregates.max_below_horizon_sky_ratio) (enforced=$skyEnforced), max_void_clusters=$($analysis.aggregates.max_near_black_cluster_count)"
     }
 }
@@ -3560,7 +3561,7 @@ function Test-FarLodHorizon {
         }
         $skyEnforced = [bool]$analysis.thresholds.sky_ratio_enforced
         foreach ($station in $analysis.stations) {
-            Assert-PpmArtifact (Join-Path $viewDir $station.file)
+            Assert-PpmArtifact -Path $station.file -ArtifactDir $viewDir -Name "FarLodHorizon ($preset) station $($station.name)"
             if ([bool]$station.boundary_band.resolved) {
                 if ($skyEnforced -and [double]$station.boundary_band.band_sky_ratio -ge [double]$analysis.thresholds.max_boundary_band_sky_ratio) {
                     throw "farlod horizon ($preset) station '$($station.name)' shows a sky band at the live/far boundary: ratio $($station.boundary_band.band_sky_ratio)"
@@ -3665,7 +3666,7 @@ function Test-FarLodHorizon {
         }
         Write-Host ("farlod horizon ({0}): far-attributable sky-sliver max={1}px within {2}px hard-fail budget (raw far-ON max={3}px)" -f `
             $preset, $maxFarAttributable, $sliverBudget, $maxSliver)
-        Assert-CapturePinned -ArtifactDir $viewDir -Name "FarLodHorizon ($preset)"
+        Assert-CapturePinned -ArtifactDir $viewDir -Name "FarLodHorizon ($preset)" -ScreenshotPaths @($analysis.stations | ForEach-Object { $_.file })
     }
 }
 
@@ -3714,8 +3715,8 @@ function Test-IsolationLayer {
     if ($shots.Count -lt 1) {
         throw "isolation-layer run produced no screenshots under $isoDir/screenshots"
     }
-    foreach ($s in $shots) { Assert-PpmArtifact $s.FullName }
-    Assert-CapturePinned -ArtifactDir $isoDir -Name "IsolationLayer (terrain/greenscreen)"
+    foreach ($s in $shots) { Assert-PpmArtifact -Path $s.FullName -ArtifactDir $isoDir -Name "IsolationLayer" }
+    Assert-CapturePinned -ArtifactDir $isoDir -Name "IsolationLayer (terrain/greenscreen)" -ScreenshotPaths @($shots | ForEach-Object { $_.FullName })
 
     # Objective backdrop-fill + geometry-present check. numpy REQUIRED (a gate
     # CI cannot run is not a gate); override with $env:VISUAL_SWEEP_PYTHON.
@@ -4849,7 +4850,7 @@ function Test-SkinnedMeshVisual {
         if ([int64]$capture.skinned_draws -lt 1) {
             throw "Skinned mesh visual capture '$($capture.file)' rendered no skinned draws"
         }
-        Assert-PpmArtifact (Join-Path $visualDir $capture.file)
+        Assert-PpmArtifact -Path $capture.file -ArtifactDir $visualDir -Name "SkinnedMeshVisual"
     }
     if ([double]$analysis.capture_b.animation_time_seconds -le [double]$analysis.capture_a.animation_time_seconds) {
         throw "Skinned mesh visual captures do not advance the animation clock: $($analysis.capture_a.animation_time_seconds) -> $($analysis.capture_b.animation_time_seconds)"
@@ -4874,7 +4875,7 @@ function Test-SkinnedMeshVisual {
         $analysis.capture_a.animation_time_seconds, $analysis.capture_b.animation_time_seconds, `
         $analysis.diff.changed_pixels, $analysis.diff.changed_ratio, `
         $analysis.diff.mesh_like_pixels_a, $analysis.diff.mesh_like_pixels_b)
-    Assert-CapturePinned -ArtifactDir $visualDir -Name "SkinnedMeshVisual"
+    Assert-CapturePinned -ArtifactDir $visualDir -Name "SkinnedMeshVisual" -ScreenshotPaths @($analysis.capture_a.file, $analysis.capture_b.file)
 }
 
 function Test-EngineGameSplitLint {
@@ -5330,7 +5331,7 @@ function Test-CreatureSlice {
         if ([int64]$capture.skinned_draws -lt 1) {
             throw "Creature slice capture '$($capture.file)' rendered no skinned draws"
         }
-        Assert-PpmArtifact (Join-Path $sliceDir $capture.file)
+        Assert-PpmArtifact -Path $capture.file -ArtifactDir $sliceDir -Name "CreatureSlice"
     }
     if ($analysis.before_stimulus.plan.action -ne $analysis.expected.before_action) {
         throw "Creature slice pre-stimulus plan is '$($analysis.before_stimulus.plan.action)', expected '$($analysis.expected.before_action)'"
@@ -5386,7 +5387,7 @@ function Test-CreatureSlice {
         $analysis.before_stimulus.plan.active_clip, $analysis.after_stimulus.plan.active_clip, `
         $analysis.before_stimulus.skinned_draws, $analysis.after_stimulus.skinned_draws, `
         $analysis.before_stimulus.plan.plans_executed, $analysis.after_stimulus.plan.plans_executed)
-    Assert-CapturePinned -ArtifactDir $sliceDir -Name "CreatureSlice"
+    Assert-CapturePinned -ArtifactDir $sliceDir -Name "CreatureSlice" -ScreenshotPaths @($analysis.before_stimulus.file, $analysis.after_stimulus.file)
 }
 
 # ---   StimulusChannelGate mode: append-only ---
@@ -5722,7 +5723,7 @@ function Test-WindowModeStress {
     if (-not [bool]$pin.pinned) {
         throw "window-mode stress final capture is NOT pinned: $($pin.capture_width)x$($pin.capture_height)"
     }
-    Assert-PpmArtifact (Join-Path $visualDir $analysis.final_capture.file)
+    Assert-PpmArtifact -Path $analysis.final_capture.file -ArtifactDir $visualDir -Name "WindowModeStress"
     if (-not [bool]$analysis.passed) {
         throw "window-mode stress analysis reported failure (dark_ratio=$($analysis.aggregates.final_dark_ratio))"
     }
