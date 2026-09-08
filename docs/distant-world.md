@@ -189,9 +189,13 @@ water cells, page updates), never in wall-clock time; the limits are calibrated
 from measured telemetry and recorded in the world's configuration identity.
 Every transition-driving value (per-region pressure and hold counters, cadence
 shift and phase, the last decision tick) is persisted in the ledger record and
-hashed, so reduction and recovery reproduce after reload; comparisons are
-strict greater-than against the limit, and transitions are applied in the
-total region order within one tick.
+hashed, so reduction and recovery reproduce after reload; observational
+bookkeeping (last-save stamps, transaction generations, storage identities) is
+persisted but excluded from the hash projection. Comparisons are strict
+greater-than against the limit, work units are summed per tick before any
+decision, at most one state step is applied per region per tick, transitions
+are applied in the total region order, and counters reset when a region
+changes state.
 Regions are totally ordered by rank (pinned before edited before visited), then
 by ticks since last proximity, then by region coordinates. When the counted work
 exceeds the limit, the lowest-ordered regions first drop to a reduced cadence
@@ -227,12 +231,12 @@ and no region ledger exists.
 | System | Near (live disc) | Distant active region | Frozen region |
 |---|---|---|---|
 | Terrain edits | Full lattice | Persisted chunk records plus far authority bricks | Unchanged on disk |
-| Plants, soil, irrigation, living-world ladder | Every tick | Coarse cadence; each system's coarse rule is specified in its slice (rounding order, saturation, threshold crossings, event multiplicity) and either proven equal to k single ticks or given a documented tolerance band | No advance; bounded resume hook |
+| Plants, soil, irrigation, living-world ladder | Every tick | Coarse cadence; each system's coarse rule is specified in its slice (rounding order, saturation, threshold crossings, environmental sampling, event multiplicity); integer-linear paths must equal k single ticks exactly, and every other path is qualified to at most one stage transition or one event of divergence per cadence period against the full-rate trajectory, with resume hooks capped at one calendar day | No advance; bounded resume hook |
 | Wildlife | Full utility AI, physics avatars | Persisted; coarse needs, lifespan, reproduction and region-to-region travel at cadence; promoted to full AI on approach; travel into a frozen region parks the creature at the border until the region thaws | No advance |
 | Water | Rotating cell window | Authoritative water steps on the host fixed tick (today the client host steps it per rendered frame), with eligibility from resident simulation arrays and the ledger, independent of render streaming. The cell budget is shared in indivisible units of one chunk window: shares are proportional to awake chunks, rounded down, with the remainder carried as persisted service debt so every due region receives at least one full window per cadence period; reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with a paired reservation and paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow |
 | Wind, weather, aether ambience | Stateful world-anchored pages | A 24 m cell is owned by the region containing its centre; a page update is masked to owned cells whose region is due this tick, a partially active page seeds only its owned cells on first activation, and exchange across a cell boundary follows the same shared-boundary schedule as water (both owners due, at the coarser cadence, sealed toward frozen regions), so a frozen region's cells and digest never change; storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, advance and schedule strikes only while their region is due, and transfer ownership across a border only on a tick when the destination is due, otherwise waiting at the border; a page entering activation is seeded from seed, tick and position | Owned cells immutable; no catch-up (this deliberately replaces the energy field's catch-up rule) |
 | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer deletes the record as today | Frozen pages kept |
-| Scent and foraging | Spawn-anchored near facility, unchanged; nonpersistent historical state (not re-derivable after a reload) | Not simulated at distance; distant creatures do not use scent; save/resume equivalence is qualified with scent and foraging participants excluded and documented as a known limitation | — |
+| Scent and foraging | Spawn-anchored near facility; the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; distant creatures do not use scent | — |
 | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances |
 | Scheduled game events | Not implemented | Deferred to a later milestone | — |
 
@@ -306,7 +310,8 @@ in the engine guide:
 | `far/v<tier>.<tx>.<tz>.lmr` (FSV1 payload, edit-baked bricks with tombstones and generation) | `<save>/far/` | regenerate or rebuild from edited chunk records | refuse | refuse as future format |
 | `snapshot.json` commit index (members, content identities, generation, tick, anchors) | `<save>/chunks/region/` | legacy save without simulation records: load with defaults | refuse as inconsistent snapshot | refuse as future format |
 | `aether_state.efs` (existing) | `<save>/` unchanged | none | refuse | refuse as future format |
-| `plant-entities.json` (existing, gains persistent identities additively) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |
+| `plant-entities.json` (existing; persistent identities are recorded in a versioned sibling identity map, the plant payload bytes are unchanged) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |
+| scent grid section of `field-pages.fpg` (the near scent field is historical state; it is persisted so near creatures that consume it resume continuously) | `<save>/chunks/region/` | re-seeded empty | refuse | refuse as future format |
 
 Persisted creature records inventory every evolution-relevant component and
 reference (creature, genome, needs, mortality and decay, thirst, circadian,
@@ -326,11 +331,16 @@ persistent identity allocator and the species/content identity used by coarse
 simulation are stored with the ledger and refused on mismatch.
 
 A save is one committed snapshot published through the commit index. The
-index enumerates every member the snapshot requires (chunk region files, far
-overlay files, the energy record, plant, creature, ground-object, ledger and
+index enumerates every authoritative member the snapshot requires (chunk
+region files, the energy record, plant, creature, ground-object, ledger and
 page records, the clock metadata), each with its content identity and the
-generation in which it last changed, and records intentionally empty or deleted
-members explicitly; unchanged members are reused, not rewritten. Existing
+generation in which it last changed, records intentionally empty or deleted
+members explicitly, and lists derived members (far overlay files) separately:
+a missing or stale derived member is rebuilt from the authoritative records,
+while a corrupt one is refused; unchanged members are reused, not rewritten.
+Catalog inspection is read-only and reports a save whose journal is pending
+recovery as such; recovery and snapshot selection happen when the world is
+opened, before any member (including clock metadata) is read. Existing
 payload bytes carry no transaction metadata; the index does. Publication is
 recoverable through a journal carrying the transaction identity and the
 generation it replaces: before any member is replaced its previous file is
@@ -349,16 +359,20 @@ still publishes the clock, ledger, pages and entity records that changed.
 Interruption is tested after every rename and during the bake.
 
 Everything in this section is gated by `sim.active_regions`: with the key off,
-clock restoration, the calendar unification, the chunk projection, the water
-host-tick change and every new hash section are inactive and the world
-behaves and hashes exactly as today. With the key on, world hash composition
+clock restoration, the calendar unification, identity-dependent random
+streams, the chunk projection, the water host-tick change and every new hash
+section are inactive, so the existing determinism fixtures (canonical debug
+and release hashes, populated goldens, replay and lockstep gates) stay
+byte-identical; a save written with the key on and opened with it off refuses
+as incompatible configuration rather than silently degrading. With the key on, world hash composition
 keeps its append-only order and folds new state into existing slots as tagged
 canonical sections, each present only when its state is non-empty: clock, calendar, scheduler configuration and ledger state, region
 random-stream state, persistent-identity allocator, creature and ground-object
 records fold into the `ecology` slot; page bytes fold into the `wind`, `weather`
-and `aether` slots. Authoritative chunk membership is the set of chunks with an edited or
-simulated record (live, parked or durable), never the procedural cache
-residency; each member contributes exactly one canonical simulation-only
+and `aether` slots. The host-owned authoritative chunk domain is the set of chunks with an edited
+or simulated record (live, parked or durable) plus the simulation arrays of
+regions that are due this tick; it is decided by the host tick, never by
+render or storage arrivals, and pristine chunks are hash-neutral; each member contributes exactly one canonical simulation-only
 projection (voxel lattice, materials and water millimetre state; never meshes,
 storage envelopes or compression) with the precedence live over parked over
 durable, and pristine space contributes through the seed and generation
@@ -425,6 +439,21 @@ Current behaviour: the benchmark records means only, sums eleven pass timers
 instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not
 record the renderer string; present-to-present wall timing already exists but
 is not retained per frame.
+
+## Evidence map
+
+| Contract area | Executable evidence |
+|---|---|
+| Far ladder, caves, seams | `far_volume_horizon_smoke` scenario (v2 artifact) through `validate-engine-frontier.ps1 -Mode FarLodHorizon` on default, mountains, archipelago and the cave-dense fixture; `FarVolumeTile`, mesher and store gtests in the default ctest lane |
+| Edits and far authority | `edit_bake_all_tiers_test`, `far_volume_store_test`, `world_open_refusal_test` cases, the `PersistenceRoundtrip` gate with the edited-world tour save |
+| Snapshot commit and recovery | `snapshot_commit_test` (interruption after every rename and during the bake), catalog read-only inspection test, refusal matrix in `world_open_refusal_test` |
+| Clock, ledger, pages, creatures, water | Unit gtests per record, `HeadlessServerTickHeavy` oracle extended to N-save-load-K versus N+K over every persisted subsystem with negative controls, `MovingResidency` 20 km drift, `PopulatedWorldReplay` |
+| Hash and determinism | `validate-determinism-matrix.ps1` pins, `ecology_hash_test` additivity guards, `ReplayRoundtrip`, `LockstepLoopback` with checkpoint exchange enabled |
+| Performance | Benchmark schema v3 artifacts for six fixed views and three traversals per profile per display from the native command set, checked by `tools/perf/render_contract.py` and `validate_render_capture.py` |
+| Client hang | `hang_watchdog_test`, the reproduction matrix records and hang reports archived with the campaign evidence |
+
+Names of new tests are binding once their slices land; the activation slice
+fills in fixture identifiers, thresholds and artifact schemas per row.
 
 ## Deferred
 
