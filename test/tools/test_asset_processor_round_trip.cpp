@@ -863,3 +863,46 @@ TEST(LtexRoundTrip, LeafCutoutUsesAuthoredOpacityRegardlessOfColor) {
     }
     EXPECT_NE(Import({input.string(), output.string(), "--alpha-mask", "missing.png"}), 0);
 }
+
+TEST(LtexRoundTrip, InlineCutoutPreservesCoverageAtAuthoredThreshold) {
+    TempDirectory temp;
+    const auto input = temp.path() / "inline.png";
+    const auto output = temp.path() / "inline.ltex";
+    std::array<uint8_t, 8 * 8 * 4> pixels{};
+    for (size_t i = 0; i < 64; ++i) {
+        pixels[i * 4] = 100;
+        pixels[i * 4 + 3] = i % 8 < 4 ? 230 : 30;
+    }
+    ASSERT_NE(stbi_write_png(input.string().c_str(), 8, 8, 4, pixels.data(), 32), 0);
+    for (const auto cutoff : {"0.3", "0.75", "1"}) {
+        ASSERT_EQ(Import({input.string(), output.string(), "--srgb", "--alpha-cutoff", cutoff}), 0);
+        const auto image = ReadLtex(output);
+        ASSERT_EQ(image.mips.size(), 4u);
+        EXPECT_TRUE(std::equal(
+            image.mips.front().pixels.begin(), image.mips.front().pixels.end(), pixels.begin()));
+        for (const auto& mip : image.mips) {
+            if (mip.width == 1)
+                continue; // Binary coverage has only zero/one choices at 1x1.
+            size_t covered = 0;
+            for (size_t i = 3; i < mip.pixels.size(); i += 4)
+                covered += mip.pixels[i] >= std::stof(cutoff) * 255.0f;
+            EXPECT_EQ(covered, std::stof(cutoff) == 1 ? 0u : mip.width * mip.height / 2);
+        }
+    }
+    ASSERT_EQ(Import({input.string(), output.string(), "--alpha-cutoff", "0"}), 0);
+    const auto zero = ReadLtex(output);
+    EXPECT_GT(zero.mips.back().pixels[3], 0); // A zero threshold must not erase authored alpha.
+}
+
+TEST(LtexRoundTrip, InvalidInlineCutoffRetainsExistingOutput) {
+    TempDirectory temp;
+    const auto output = temp.path() / "existing.ltex";
+    std::ofstream(output, std::ios::binary) << "previous valid generation";
+    const auto input = TestTexturePath("gradient_16.png");
+    for (const auto value : {"nan", "inf", "-0.01", "1.1", "0.5junk"})
+        EXPECT_NE(Import({input.string(), output.string(), "--alpha-cutoff", value}), 0);
+    for (const auto mode : {"--normal-map", "--linear"})
+        EXPECT_NE(Import({input.string(), output.string(), mode, "--alpha-cutoff", "0.5"}), 0);
+    std::ifstream file(output, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(file), {}), "previous valid generation");
+}
