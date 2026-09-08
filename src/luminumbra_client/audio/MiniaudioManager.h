@@ -323,6 +323,10 @@ private:
     // Spatial audio clustering system
     std::unique_ptr<AudioSpatialCluster> m_spatial_cluster;
     bool m_spatial_clustering_enabled = true;
+    // Last physics system handed to the spatial cluster. SetPhysicsSystem is re-issued
+    // every in-game frame so a world (re)load rebinds automatically; the binding is
+    // logged only when this pointer actually changes, never per frame.
+    ::Luminumbra::Systems::PhysicsSystem* m_cluster_physics_system = nullptr;
 };
 
 } // namespace Luminumbra::Client

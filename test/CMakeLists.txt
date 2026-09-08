@@ -1404,6 +1404,26 @@ target_include_directories(client_policy_test PRIVATE
 target_link_libraries(client_policy_test PRIVATE
     gtest_main
     glm::glm
+# edge-triggered physics binding log. Compiles MiniaudioManager.cpp
+# and AudioSpatialCluster.cpp directly (constructor only; Init() never opens a device);
+# needs miniaudio + nlohmann_json for the manager's link interface.
+add_executable(audio_physics_binding_test
+    audio/audio_physics_binding_test.cpp
+../src/luminumbra_client/audio/MiniaudioManager.cpp
+../src/luminumbra_client/audio/AudioSpatialCluster.cpp
+)
+target_include_directories(audio_physics_binding_test PRIVATE
+../src
+../src/luminumbra_client
+../src/luminumbra_common
+../include
+)
+target_link_libraries(audio_physics_binding_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
 )
 
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
@@ -1555,6 +1575,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     audio_occlusion_test
     audio_prune_guard_test
     client_policy_test
+    audio_physics_binding_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test
