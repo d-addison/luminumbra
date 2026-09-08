@@ -79,7 +79,7 @@ def file_digest(path):
 
 def atomic_json(path, value):
     path = Path(path)
-    temp = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    temp = path.with_name(".tmp-" + uuid.uuid4().hex)
     try:
         with temp.open("xb") as stream:
             stream.write(canonical(value) + b"\n")
@@ -116,7 +116,7 @@ def relative_path(root, name):
 
 def validate_asset(value):
     keys(value, ("schema", "asset_id", "revision", "profile", "source", "dependencies", "exporter"),
-         ("settings", "required_schemas", "annotations"))
+         ("settings", "required_schemas", "annotations", "expected_dependency_hashes"))
     require(value["schema"] == ASSET, "schema.unsupported", "Unknown required asset schema.")
     require(value["profile"] == PROFILE, "profile.unsupported", "Unsupported compilation profile.")
     require(isinstance(value["asset_id"], str) and ID.fullmatch(value["asset_id"]),
@@ -129,6 +129,10 @@ def validate_asset(value):
     require(isinstance(deps, list) and len(deps) <= 128 and all(isinstance(x, str) for x in deps)
             and len(set(deps)) == len(deps) and value["source"] not in deps,
             "dependency.invalid", "Supply at most 128 distinct source dependency paths.")
+    expected = value.get("expected_dependency_hashes", {})
+    require(isinstance(expected, dict) and expected.keys() <= set(deps)
+            and all(isinstance(x, str) and SHA.fullmatch(x) for x in expected.values()),
+            "dependency.expected_hash", "Expected hashes must name declared dependencies and contain SHA-256 values.")
     required = value.get("required_schemas", [])
     require(isinstance(required, list) and all(x == ASSET for x in required),
             "schema.unsupported", "Unknown required schema; no execution occurred.")

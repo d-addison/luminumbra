@@ -101,6 +101,7 @@ class BuildService:
         return {"version": VERSION, "protocol": 1, "mode": "NATIVE", "profiles": [PROFILE],
                 "schemas": [ASSET], "engine_compilation": True, "engine_preview": False,
                 "graph_execution": False, "material_binding": False, "prefab_hierarchy": False,
+                "source_revision_guards": True,
                 "operations": ["capabilities", "registry", "validate", "build", "job.status",
                                "job.cancel", "generation.inspect"],
                 "toolchain": self.toolchain.document, "max_snapshot_bytes": MAX_SNAPSHOT,
@@ -129,6 +130,9 @@ class BuildService:
                 "revision.stale", "Sidecar changed during extraction.")
         validate_glb(files[asset["source"]])
         hashes = {name: digest(data) for name, data in sorted(files.items())}
+        for name, expected in asset.get("expected_dependency_hashes", {}).items():
+            require(hashes[name] == expected, "revision.stale",
+                    "A dependency changed since the authoring snapshot was captured.", name)
         for name, expected in hashes.items():
             check()
             require(file_digest(relative_path(self.project, name)) == expected,
