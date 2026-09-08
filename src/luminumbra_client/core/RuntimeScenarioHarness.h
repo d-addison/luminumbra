@@ -451,7 +451,6 @@ void WriteParticleEmitterDeterminismAnalysis(
     const ParticleDeterminismResult& result,
     const Luminumbra::Rendering::RenderPipeline::RenderPassFrameStats& render_pass);
 
-
 void WriteFoliageInstancingAnalysis(
     const std::filesystem::path& artifact_dir,
     const std::string& foliage_screenshot,
