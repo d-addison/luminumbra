@@ -23,6 +23,7 @@
 #include <thread>
 #include <vector>
 
+#include "audio/NullAudioManager.h"
 #include "ui/Rml_UIManager.h"
 #include "ui/components/common/Button.h"
 #include "ui/components/common/Input.h"
@@ -827,6 +828,59 @@ TEST(UiSmokeTest, SettingsScreenRoundTripsThroughTheBridge) {
     EXPECT_EQ(model.save_count, 1) << "Apply & Save must invoke the bridge Save()";
 
     ui.Shutdown();
+}
+
+TEST(UiSmokeTest, DisabledAudioShowsStatusAndPreservesSavedVolumes) {
+    HiddenGlContext context;
+    if (!context.ready()) {
+        GTEST_SKIP() << context.error();
+    }
+    Luminumbra::Client::NullAudioManager audio;
+    ASSERT_TRUE(audio.Init());
+    audio.SetMasterVolume(1.0f);
+    Luminumbra::Client::Rml_UIManager ui(SourceRoot().string() + "/");
+    ui.Init(context.window(), &audio);
+    ASSERT_NE(ui.GetContext(), nullptr);
+    int audio_set_calls = 0;
+    int save_calls = 0;
+    Luminumbra::Client::SettingsBridge bridge;
+    bridge.GetAudioMaster = bridge.GetAudioMusic = bridge.GetAudioSfx = [] {
+        return 1.0f;
+    };
+    bridge.SetAudioMaster = bridge.SetAudioMusic = bridge.SetAudioSfx = [&](float) {
+        ++audio_set_calls;
+    };
+    bridge.Save = [&] {
+        ++save_calls;
+        return true;
+    };
+    ui.SetSettingsBridge(std::move(bridge));
+    auto* menu = LoadDocumentAndFind(ui, "main_menu.rml", "main_menu");
+    ASSERT_NE(menu, nullptr);
+    ClickAndUpdate(ui, menu->GetElementById("settings_btn"));
+    auto* settings = FindDocumentByElementId(ui.GetContext(), "settings");
+    ASSERT_NE(settings, nullptr);
+    auto* status = settings->GetElementById("setting_audio_status");
+    ASSERT_NE(status, nullptr);
+    EXPECT_NE(status->GetInnerRML().find("Audio is disabled for this release."), std::string::npos);
+    for (const char* id : {"setting_audio_master", "setting_audio_music", "setting_audio_sfx"}) {
+        auto* control = dynamic_cast<Rml::ElementFormControl*>(settings->GetElementById(id));
+        ASSERT_NE(control, nullptr);
+        EXPECT_TRUE(control->HasAttribute("disabled"));
+        EXPECT_FLOAT_EQ(std::stof(control->GetValue()), 1.0f);
+        // Even a programmatic change or Apply & Save cannot edit a disabled level.
+        control->SetValue("0.25");
+        Rml::Dictionary parameters;
+        control->DispatchEvent(Rml::EventId::Change, parameters);
+        ui.Update();
+    }
+    ClickAndUpdate(ui, settings->GetElementById("apply_settings_btn"));
+    EXPECT_EQ(audio_set_calls, 0);
+    EXPECT_EQ(save_calls, 1);
+    EXPECT_FALSE(audio.IsPlaybackEnabled());
+    EXPECT_EQ(audio.RecordedRequestCount(), 0u);
+    ui.Shutdown();
+    audio.Shutdown();
 }
 
 // The cinematic redesign's custom widgets are FUNCTIONAL (not just decorative): the vsync

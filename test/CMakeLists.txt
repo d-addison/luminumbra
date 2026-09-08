@@ -1410,6 +1410,23 @@ target_link_libraries(audio_volume_readback_test PRIVATE
     glm
 )
 
+# Default-off launch policy, null playback and explicitly requested telemetry.
+# The real CLI parser and null manager run without a client, GL or audio device.
+add_executable(audio_disabled_test
+    audio/audio_disabled_test.cpp
+../src/luminumbra_client/core/RuntimeScenarioConfig.cpp
+)
+target_include_directories(audio_disabled_test PRIVATE
+../src
+../src/luminumbra_client
+)
+target_link_libraries(audio_disabled_test PRIVATE
+    gtest_main
+    luminumbra_common
+    nlohmann_json
+    glm
+)
+
 #  capture-native update the baseline: resolution-relative gate-threshold scaling unit
 # tests (core/CaptureScale.h is dependency-free, so this needs no GL/common libs).
 add_executable(capture_scale_test
@@ -1525,6 +1542,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     audio_occlusion_test
     audio_prune_guard_test
     audio_volume_readback_test
+    audio_disabled_test
     capture_scale_test
     isolation_config_test
 )

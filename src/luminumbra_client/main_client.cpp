@@ -1870,11 +1870,15 @@ int main(int argc, char* argv[]) {
     });
 
     std::unique_ptr<Luminumbra::Client::IAudioManager> audioManager;
-    if (scenario_config.no_audio) {
+    if (!scenario_config.audio_playback_enabled()) {
         audioManager = std::make_unique<Luminumbra::Client::NullAudioManager>(
-            scenario_config.audio_telemetry_path);
+            scenario_config.audio_telemetry_path,
+            scenario_config.no_audio ? Luminumbra::Client::NullAudioActivation::ExplicitNoAudio
+                                     : Luminumbra::Client::NullAudioActivation::ReleaseDefaultOff);
+        LUMINUMBRA_CORE_INFO("Audio disabled for this release.");
     } else {
         audioManager = Luminumbra::Client::CreateAudioManager(root_path_str);
+        LUMINUMBRA_CORE_INFO("Experimental audio enabled by --enable-audio.");
     }
     audioManager->Init();
     audioManager->SetMasterVolume(

@@ -148,6 +148,7 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     config.auto_create_world = HasCommandLineFlag(argc, argv, "--auto-create-world");
     config.auto_enter_world = HasCommandLineFlag(argc, argv, "--auto-enter-world");
     config.no_audio = HasCommandLineFlag(argc, argv, "--no-audio");
+    config.enable_audio = HasCommandLineFlag(argc, argv, "--enable-audio");
     config.no_ui = HasCommandLineFlag(argc, argv, "--no-ui");
     config.hidden_window = HasCommandLineFlag(argc, argv, "--hidden-window");
 
@@ -263,13 +264,11 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
 
     const std::filesystem::path default_artifact_dir =
         root_dir / "build/debug/test-artifacts/runtime";
-    const std::filesystem::path default_audio_telemetry_path =
-        root_dir / "build/debug/test-artifacts/audio/audio-telemetry.json";
     const std::filesystem::path default_crash_dir = root_dir / "build/debug/crashes";
     config.artifact_dir =
         GetCommandLineOption(argc, argv, "--runtime-artifact-dir", default_artifact_dir.string());
-    config.audio_telemetry_path = GetCommandLineOption(
-        argc, argv, "--audio-telemetry-path", default_audio_telemetry_path.string());
+    // Disabled normal play must not write a telemetry JSON on every listener update.
+    config.audio_telemetry_path = GetCommandLineOption(argc, argv, "--audio-telemetry-path", "");
     config.crash_dir = GetCommandLineOption(argc, argv, "--crash-dir", default_crash_dir.string());
     return config;
 }

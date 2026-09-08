@@ -49,6 +49,11 @@ struct RuntimeScenarioConfig {
     bool auto_create_world = false;
     bool auto_enter_world = false;
     bool no_audio = false;
+    // Temporary release policy: only an explicit diagnostic opt-in can start audio.
+    bool enable_audio = false;
+    bool audio_playback_enabled() const {
+        return enable_audio && !no_audio;
+    }
     bool no_ui = false;
     bool hidden_window = false;
     //  isolation/layer render mode (--isolation-layers <csv>, --isolation-backdrop

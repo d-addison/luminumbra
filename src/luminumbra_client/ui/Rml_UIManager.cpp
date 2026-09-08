@@ -1230,6 +1230,22 @@ void Rml_UIManager::PopulateSettingsForm(Rml::ElementDocument* document) {
         SetValueLabel(document, "setting_ui_scale_value", FormatPercent(s));
     }
 
+    // A host without an audio manager can still edit saved levels through the bridge.
+    // A real null backend explicitly disables playback and the volume controls.
+    const bool audio_disabled = m_audioManager && !m_audioManager->IsPlaybackEnabled();
+    if (auto* status = document->GetElementById("setting_audio_status")) {
+        status->SetInnerRML(audio_disabled   ? "Audio is disabled for this release."
+                            : m_audioManager ? "Experimental audio enabled."
+                                             : "Saved audio levels.");
+    }
+    for (const char* id : {"setting_audio_master", "setting_audio_sfx", "setting_audio_music"}) {
+        if (auto* control = document->GetElementById(id)) {
+            if (audio_disabled)
+                control->SetAttribute("disabled", "");
+            else
+                control->RemoveAttribute("disabled");
+        }
+    }
     // Audio
     if (b.GetAudioMaster) {
         const float v = b.GetAudioMaster();
@@ -1277,6 +1293,11 @@ void Rml_UIManager::ApplySettingFromElement(Rml::Element* element) {
     if (!element)
         return;
     const std::string id = element->GetId();
+    if (m_audioManager && !m_audioManager->IsPlaybackEnabled() &&
+        (id == "setting_audio_master" || id == "setting_audio_sfx" ||
+         id == "setting_audio_music")) {
+        return;
+    }
     const std::string value = ReadFormControlValue(element, "");
     SettingsBridge& b = m_settingsBridge;
     Rml::ElementDocument* doc = element->GetOwnerDocument();
