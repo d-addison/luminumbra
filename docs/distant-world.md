@@ -27,7 +27,7 @@ format change listed here exists until its slice lands.
   the sampling phase; it is neither guaranteed to vanish nor to appear, and a
   sampling-phase test matrix documents the behaviour per tier.
 - The far representation is volumetric coarse signed-distance tiers. Raising the
-  camera far plane over the existing surface-only far tiles does not satisfy
+  camera far plane over the existing heightfield far tiles does not satisfy
   this contract.
 - Simulation over distance runs only in **persistent active regions** and only
   while the world host runs. There is no wall-clock progression while a world is
@@ -108,15 +108,16 @@ level, while chunks first generated at a coarser level carry heightmaps only.
 ### Vertical coverage and the cave field
 
 The cave field carves without a lower bound, so pristine coverage is bounded by
-depth requests rather than by a preset property: a tile's pristine span runs
-from its highest surface height down to 256 m below the lowest of its lowest
-surface height and the deepest depth any anchor or the camera has requested
-for that tile (the same 256 m the live disc streams below an anchor); columns
-with durable chunk records above or below that span extend to the records.
-Requests are bounded per frame, the span is stored in the tile record, and
-discovery walks only the span, so a camera descending a deep cave extends the
-spans of the tiles around it without any unbounded column scan, and deep
-interior sightlines beyond the requested span appear as the request grows. Pristine bricks sample the same terrain and cave density
+requests rather than by any preset or live-streaming property: a tile's
+pristine span is initialised to its surface band plus a contract default of
+256 m below its lowest surface height (a number chosen for this contract, not
+a property of today's streaming), and extended, upward and downward, by every
+anchor, camera and sightline depth request that reaches the tile and by any
+durable chunk record above or below it. Requests are bounded per frame, the
+encoded span bounds are stored in the tile record, and discovery walks only
+the span, so a camera descending a deep cave extends the spans of the tiles
+around it without any unbounded column scan, and deep interior sightlines
+beyond the requested span appear as the request grows. Pristine bricks sample the same terrain and cave density
 composition the live path uses. At spacings of 8 m or less (V1 and V2) the full
 cave router is sampled unchanged. At 16 m and beyond, the noise-carved cave
 terms alias when point-sampled, so two representations are qualified against
@@ -233,9 +234,9 @@ and no region ledger exists.
 | Terrain edits | Full lattice | Persisted chunk records plus far authority bricks | Unchanged on disk |
 | Plants, soil, irrigation, living-world ladder | Every tick | Coarse cadence; each system's coarse rule is specified in its slice (rounding order, saturation, threshold crossings, environmental sampling, event multiplicity); integer-linear paths must equal k single ticks exactly, and every other path is qualified to at most one stage transition or one event of divergence per cadence period against the full-rate trajectory, with resume hooks capped at one calendar day | No advance; bounded resume hook |
 | Wildlife | Full utility AI, physics avatars | Persisted; coarse needs, lifespan, reproduction and region-to-region travel at cadence; promoted to full AI on approach; travel into a frozen region parks the creature at the border until the region thaws | No advance |
-| Water | Rotating cell window | Authoritative water steps on the host fixed tick (today the client host steps it per rendered frame), with eligibility from resident simulation arrays and the ledger, independent of render streaming. The cell budget is shared in indivisible units of one chunk window: shares are proportional to awake chunks, rounded down, with the remainder carried as persisted service debt so every due region receives at least one full window per cadence period; reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with a paired reservation and paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow |
+| Water | Rotating cell window | Authoritative water steps on the host fixed tick (today the client host steps it per rendered frame), with eligibility from resident simulation arrays and the ledger, independent of render streaming. The cell budget is shared in indivisible units of one chunk window: shares are proportional to awake chunks, rounded down, with the remainder carried as persisted service debt; service is starvation-free in the bounded sense that every due region receives at least one chunk window within a number of its due ticks no greater than the total awake chunks divided by the per-tick window budget, a bound the diagnostic panel publishes; reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with a paired reservation and paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow |
 | Wind, weather, aether ambience | Stateful world-anchored pages | A 24 m cell is owned by the region containing its centre; a page update is masked to owned cells whose region is due this tick, a partially active page seeds only its owned cells on first activation, and exchange across a cell boundary follows the same shared-boundary schedule as water (both owners due, at the coarser cadence, sealed toward frozen regions), so a frozen region's cells and digest never change; storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, advance and schedule strikes only while their region is due, and transfer ownership across a border only on a tick when the destination is due, otherwise waiting at the border; a page entering activation is seeded from seed, tick and position | Owned cells immutable; no catch-up (this deliberately replaces the energy field's catch-up rule) |
-| Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer deletes the record as today | Frozen pages kept |
+| Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept |
 | Scent and foraging | Spawn-anchored near facility; the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; distant creatures do not use scent | — |
 | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances |
 | Scheduled game events | Not implemented | Deferred to a later milestone | — |
