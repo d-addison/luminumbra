@@ -36,4 +36,6 @@ attempting calls, verify actual runtime failure, and invoke every advertised
 sampler entry point. `LuaEvaluation` tests distinguish success, conversion failure
 and execution errors. Existing `AetherScriptBinding` tests exercise populated
 fields and read-only sampling. The PowerShell manifest gate checks source
-structure only; its receipt is not evidence of live execution.
+structure only; its receipt is not evidence of live execution. On hosts with
+PowerShell, CTest registers `LuaApiManifestSourceContract` to exercise both the
+source report producer and the frontier gate consumer in a clean process.
