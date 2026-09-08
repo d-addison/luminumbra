@@ -168,9 +168,33 @@ void RuntimeStateRecorder::write_shutdown(const std::vector<std::string>& milest
         {"milestones", milestones},
         {"job_queue", JobStatsToJson(job_stats)},
         {"jobs_drained",
-         job_stats.queue_depth == 0 && job_stats.worker_count == 0 && !job_stats.accepting_jobs}};
+         job_stats.queue_depth == 0 && job_stats.worker_count == 0 && !job_stats.accepting_jobs},
+        {"complete", true}};
     std::ofstream output(m_config.artifact_dir / "shutdown.json");
     output << std::setw(2) << artifact << '\n';
+}
+
+void RuntimeStateRecorder::write_shutdown_progress(const std::vector<std::string>& milestones) {
+    std::error_code ec;
+    std::filesystem::create_directories(m_config.artifact_dir, ec);
+    nlohmann::json artifact = {{"schema", "luminumbra.shutdown.v1"},
+                               {"timestamp_utc", TimestampUtc()},
+                               {"scenario", m_config.scenario},
+                               {"milestones", milestones},
+                               {"complete", false}};
+    std::ofstream output(m_config.artifact_dir / "shutdown.json");
+    output << std::setw(2) << artifact << '\n';
+}
+
+void RuntimeStateRecorder::mark_hang(uint64_t last_heartbeat,
+                                     double stalled_seconds,
+                                     const std::string& report) {
+    m_last_known["phase"] = "hang_suspected";
+    m_last_known["hang"] = {{"last_heartbeat", last_heartbeat},
+                            {"stalled_seconds", stalled_seconds},
+                            {"report", report}};
+    m_last_known["timestamp_utc"] = TimestampUtc();
+    write_last_known();
 }
 
 void RuntimeStateRecorder::mark_unhandled_exception(uint32_t exception_code) {

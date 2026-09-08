@@ -87,6 +87,10 @@ struct RuntimeScenarioConfig {
     std::filesystem::path artifact_dir;
     std::filesystem::path audio_telemetry_path;
     std::filesystem::path crash_dir;
+    // Opt-in main-loop stall detector (--hang-watchdog-seconds N, 0 = off): when the
+    // frame/shutdown heartbeat does not advance for N seconds, write a symbolized
+    // main-thread stack and a minidump into crash_dir and mark the runtime state.
+    int hang_watchdog_seconds = 0;
     // Persistence runtime roundtrip: which half of the roundtrip
     // this process runs ("save" or "load") and the shared session directory
     // the world snapshot travels through.

@@ -13,6 +13,7 @@
 #include "app/DebugOverlays.h"
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
+#include "app/HangWatchdog.h"
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
@@ -123,6 +124,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// Main-loop heartbeat for the opt-in hang watchdog (--hang-watchdog-seconds): bumped
+// once per rendered frame and once per shutdown milestone, read from the watchdog
+// thread. Relaxed atomics are enough; the watchdog only needs "did it change".
+static std::atomic<std::uint64_t> g_main_loop_heartbeat{0};
 
 using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
@@ -1345,6 +1351,18 @@ int main(int argc, char* argv[]) {
 #endif
     RuntimeStateRecorder runtime_state_recorder(scenario_config, g_camera);
     InstallRuntimeCrashHandler(runtime_state_recorder);
+    std::unique_ptr<HangWatchdog> hang_watchdog;
+    if (scenario_config.hang_watchdog_seconds > 0) {
+        hang_watchdog = std::make_unique<HangWatchdog>(
+            [] { return g_main_loop_heartbeat.load(std::memory_order_relaxed); },
+            std::chrono::seconds(scenario_config.hang_watchdog_seconds),
+            [](std::uint64_t last_heartbeat, double stalled_seconds) {
+                ReportMainThreadHang(last_heartbeat, stalled_seconds);
+            });
+        LUMINUMBRA_CORE_INFO("Hang watchdog armed: main-loop stall threshold {} s (reports to {})",
+                             scenario_config.hang_watchdog_seconds,
+                             scenario_config.crash_dir.string());
+    }
     g_app.overlay.imgui_enabled = !scenario_config.no_ui;
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
@@ -2875,6 +2893,7 @@ int main(int argc, char* argv[]) {
     bool g_rb_has_streaming_position = false;
     const glm::vec3 kRenderBenchmarkCameraPosition(8.0f, 56.0f, 8.0f);
     while (!glfwWindowShouldClose(window)) {
+        g_main_loop_heartbeat.fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
@@ -4777,6 +4796,10 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> shutdown_milestones;
     auto mark_shutdown = [&](const std::string& milestone) {
         shutdown_milestones.push_back(milestone);
+        // Written after every stage (complete=false) so a hang during teardown
+        // localizes to the last stage reached; the final write_shutdown marks complete.
+        g_main_loop_heartbeat.fetch_add(1, std::memory_order_relaxed);
+        runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
     };
 
     prepare_world_entry();
@@ -4839,6 +4862,8 @@ int main(int argc, char* argv[]) {
     mark_shutdown("job_system_shutdown");
     const auto shutdown_job_stats = jobSystem.get_runtime_stats();
     runtime_state_recorder.write_shutdown(shutdown_milestones, shutdown_job_stats);
+    if (hang_watchdog)
+        hang_watchdog->stop();
     glfwDestroyWindow(window);
     glfwTerminate();
     return exit_code;

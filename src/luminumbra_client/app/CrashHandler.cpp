@@ -14,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 
 #if defined(_WIN32)
@@ -44,11 +45,20 @@ RuntimeStateRecorder*& RuntimeStateRecorderSlot() {
 
 namespace {
 
-bool WriteMiniDump(EXCEPTION_POINTERS* exception_info, const std::filesystem::path& crash_dir) {
+// Duplicated handle of the thread that installed the crash handler (the main
+// thread), so the hang report can suspend and walk it from the watchdog thread.
+HANDLE& MainThreadHandleSlot() {
+    static HANDLE handle = nullptr;
+    return handle;
+}
+
+bool WriteMiniDump(EXCEPTION_POINTERS* exception_info,
+                   const std::filesystem::path& crash_dir,
+                   const char* stem = "luminumbra") {
     std::error_code ec;
     std::filesystem::create_directories(crash_dir, ec);
     const std::filesystem::path dump_path =
-        crash_dir / ("luminumbra-" + TimestampForFile() + ".dmp");
+        crash_dir / (std::string(stem) + "-" + TimestampForFile() + ".dmp");
 
     HANDLE file = CreateFileW(dump_path.wstring().c_str(),
                               GENERIC_WRITE,
@@ -66,15 +76,80 @@ bool WriteMiniDump(EXCEPTION_POINTERS* exception_info, const std::filesystem::pa
     exception_information.ExceptionPointers = exception_info;
     exception_information.ClientPointers = FALSE;
 
-    const BOOL wrote_dump = MiniDumpWriteDump(GetCurrentProcess(),
-                                              GetCurrentProcessId(),
-                                              file,
-                                              MiniDumpNormal,
-                                              exception_info ? &exception_information : nullptr,
-                                              nullptr,
-                                              nullptr);
+    const BOOL wrote_dump = MiniDumpWriteDump(
+        GetCurrentProcess(),
+        GetCurrentProcessId(),
+        file,
+        exception_info ? MiniDumpNormal
+                       : static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithThreadInfo |
+                                                    MiniDumpWithIndirectlyReferencedMemory),
+        exception_info ? &exception_information : nullptr,
+        nullptr,
+        nullptr);
     CloseHandle(file);
     return wrote_dump == TRUE;
+}
+
+// Walk and symbolize `thread` from `ctx` (mutated as it unwinds), emitting one
+// line per frame. Shared by the crash filter and the hang report.
+void WalkStackFrames(HANDLE proc,
+                     HANDLE thread,
+                     CONTEXT& ctx,
+                     const std::function<void(const std::string&)>& emit) {
+    STACKFRAME64 frame{};
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+
+    alignas(SYMBOL_INFO) char symbuf[sizeof(SYMBOL_INFO) + 512];
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
+
+    for (int i = 0; i < 64; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64,
+                         proc,
+                         thread,
+                         &frame,
+                         &ctx,
+                         nullptr,
+                         SymFunctionTableAccess64,
+                         SymGetModuleBase64,
+                         nullptr)) {
+            break;
+        }
+        const DWORD64 pc = frame.AddrPC.Offset;
+        if (pc == 0)
+            break;
+
+        const DWORD64 mod_base = SymGetModuleBase64(proc, pc);
+        char mod_name[MAX_PATH] = "?";
+        if (mod_base) {
+            GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), mod_name, MAX_PATH);
+        }
+        const DWORD64 rva = mod_base ? (pc - mod_base) : 0;
+
+        std::memset(sym, 0, sizeof(SYMBOL_INFO));
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 512;
+        DWORD64 disp = 0;
+        const char* fn = SymFromAddr(proc, pc, &disp, sym) ? sym->Name : "??";
+
+        const char* slash = std::strrchr(mod_name, '\\');
+        const char* mod_short = slash ? slash + 1 : mod_name;
+
+        char b[1100];
+        std::snprintf(b,
+                      sizeof b,
+                      "#%-2d 0x%016llX  %s+0x%llX  %s",
+                      i,
+                      static_cast<unsigned long long>(pc),
+                      mod_short,
+                      static_cast<unsigned long long>(rva),
+                      fn);
+        emit(b);
+    }
 }
 
 // Walk + symbolize the faulting thread's stack at crash time and write it to a
@@ -149,60 +224,7 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
         ctx.Rip = ret; // pretend we are in the caller
         ctx.Rsp += 8;  // pop the pushed return address
     }
-    STACKFRAME64 frame{};
-    frame.AddrPC.Offset = ctx.Rip;
-    frame.AddrPC.Mode = AddrModeFlat;
-    frame.AddrFrame.Offset = ctx.Rbp;
-    frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Offset = ctx.Rsp;
-    frame.AddrStack.Mode = AddrModeFlat;
-
-    alignas(SYMBOL_INFO) char symbuf[sizeof(SYMBOL_INFO) + 512];
-    auto* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
-
-    for (int i = 0; i < 64; ++i) {
-        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64,
-                         proc,
-                         thread,
-                         &frame,
-                         &ctx,
-                         nullptr,
-                         SymFunctionTableAccess64,
-                         SymGetModuleBase64,
-                         nullptr)) {
-            break;
-        }
-        const DWORD64 pc = frame.AddrPC.Offset;
-        if (pc == 0)
-            break;
-
-        const DWORD64 mod_base = SymGetModuleBase64(proc, pc);
-        char mod_name[MAX_PATH] = "?";
-        if (mod_base) {
-            GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), mod_name, MAX_PATH);
-        }
-        const DWORD64 rva = mod_base ? (pc - mod_base) : 0;
-
-        std::memset(sym, 0, sizeof(SYMBOL_INFO));
-        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-        sym->MaxNameLen = 512;
-        DWORD64 disp = 0;
-        const char* fn = SymFromAddr(proc, pc, &disp, sym) ? sym->Name : "??";
-
-        const char* slash = std::strrchr(mod_name, '\\');
-        const char* mod_short = slash ? slash + 1 : mod_name;
-
-        char b[1100];
-        std::snprintf(b,
-                      sizeof b,
-                      "#%-2d 0x%016llX  %s+0x%llX  %s",
-                      i,
-                      static_cast<unsigned long long>(pc),
-                      mod_short,
-                      static_cast<unsigned long long>(rva),
-                      fn);
-        emit(b);
-    }
+    WalkStackFrames(proc, thread, ctx, emit);
     emit("=== end stack ===  (resolve file:line with tools/gates/symbolize-crash.ps1 <crash.txt>)");
     SymCleanup(proc);
 }
@@ -250,11 +272,106 @@ LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) 
 
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
     RuntimeStateRecorderSlot() = &recorder;
+    HANDLE duplicated = nullptr;
+    if (DuplicateHandle(GetCurrentProcess(),
+                        GetCurrentThread(),
+                        GetCurrentProcess(),
+                        &duplicated,
+                        0,
+                        FALSE,
+                        DUPLICATE_SAME_ACCESS)) {
+        MainThreadHandleSlot() = duplicated;
+    }
     SetUnhandledExceptionFilter(RuntimeUnhandledExceptionFilter);
+}
+
+void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) {
+    RuntimeStateRecorder* recorder = RuntimeStateRecorderSlot();
+    const std::filesystem::path crash_dir =
+        recorder ? recorder->crash_dir() : std::filesystem::path("crashes");
+    std::error_code ec;
+    std::filesystem::create_directories(crash_dir, ec);
+    const std::filesystem::path path = crash_dir / ("hang-" + TimestampForFile() + ".txt");
+    std::ofstream out(path);
+    auto emit = [&](const std::string& line) {
+        if (out) {
+            out << line << "\n";
+            out.flush();
+        }
+        LUMINUMBRA_CORE_CRITICAL("{}", line);
+    };
+    {
+        char b[200];
+        std::snprintf(b,
+                      sizeof b,
+                      "=== LUMINUMBRA HANG  heartbeat=%llu  stalled=%.1fs ===",
+                      static_cast<unsigned long long>(last_heartbeat),
+                      stalled_seconds);
+        emit(b);
+    }
+    const HANDLE proc = GetCurrentProcess();
+    const HANDLE main_thread = MainThreadHandleSlot();
+    if (!main_thread) {
+        emit("(no main thread handle — crash handler was not installed)");
+    } else if (SuspendThread(main_thread) == static_cast<DWORD>(-1)) {
+        emit("(SuspendThread failed — cannot walk the main thread)");
+    } else {
+        CONTEXT ctx{};
+        ctx.ContextFlags = CONTEXT_FULL;
+        if (GetThreadContext(main_thread, &ctx)) {
+            char b[256];
+            std::snprintf(b,
+                          sizeof b,
+                          "main thread regs: rip=0x%llX rsp=0x%llX rbp=0x%llX",
+                          (unsigned long long)ctx.Rip,
+                          (unsigned long long)ctx.Rsp,
+                          (unsigned long long)ctx.Rbp);
+            emit(b);
+            SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+            SymInitialize(proc, nullptr, TRUE);
+            WalkStackFrames(proc, main_thread, ctx, emit);
+            SymCleanup(proc);
+        } else {
+            emit("(GetThreadContext failed — cannot walk the main thread)");
+        }
+        const bool wrote_dump = WriteMiniDump(nullptr, crash_dir, "hang");
+        emit(wrote_dump ? "minidump written beside this report (hang-*.dmp)"
+                        : "minidump NOT written");
+        ResumeThread(main_thread);
+    }
+    emit("=== end hang report ===  (resolve file:line with tools/gates/symbolize-crash.ps1)");
+    if (recorder) {
+        recorder->mark_hang(last_heartbeat, stalled_seconds, path.string());
+    }
+    if (auto& lg = Log::GetCoreLogger())
+        lg->flush();
 }
 #else
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
     RuntimeStateRecorderSlot() = &recorder;
+}
+
+void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) {
+    RuntimeStateRecorder* recorder = RuntimeStateRecorderSlot();
+    const std::filesystem::path crash_dir =
+        recorder ? recorder->crash_dir() : std::filesystem::path("crashes");
+    std::error_code ec;
+    std::filesystem::create_directories(crash_dir, ec);
+    const std::filesystem::path path = crash_dir / ("hang-" + TimestampForFile() + ".txt");
+    {
+        std::ofstream out(path);
+        out << "=== LUMINUMBRA HANG  heartbeat=" << last_heartbeat
+            << "  stalled=" << stalled_seconds << "s ===\n(stack capture is Windows-only)\n";
+    }
+    LUMINUMBRA_CORE_CRITICAL("main-loop heartbeat stalled for {:.1f}s (heartbeat {}); report {}",
+                             stalled_seconds,
+                             last_heartbeat,
+                             path.string());
+    if (recorder) {
+        recorder->mark_hang(last_heartbeat, stalled_seconds, path.string());
+    }
+    if (auto& lg = Log::GetCoreLogger())
+        lg->flush();
 }
 #endif
 
