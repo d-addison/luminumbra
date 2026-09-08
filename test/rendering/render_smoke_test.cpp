@@ -1,5 +1,6 @@
 #include "luminumbra_client/rendering/EnvironmentBrdfLut.gen.h"
 #include "luminumbra_client/rendering/RenderGraph.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -104,7 +105,10 @@ private:
 };
 
 fs::path SourceRoot() {
-    return fs::weakly_canonical(fs::path(LUMINUMBRA_SOURCE_ROOT));
+    const fs::path root(LUMINUMBRA_SOURCE_ROOT);
+    return Luminumbra::Filesystem::IsWindowsUncPath(root)
+               ? Luminumbra::Filesystem::AbsolutePath(root)
+               : fs::weakly_canonical(root);
 }
 
 fs::path RenderPerfArtifactRoot() {
@@ -133,8 +137,9 @@ bool ReadShaderSourceRecursive(const fs::path& path,
                                std::unordered_set<std::string>& include_stack,
                                std::string& source,
                                std::string& diagnostic) {
-    const fs::path normalized = fs::absolute(path).lexically_normal();
-    const std::string key = normalized.generic_string();
+    const fs::path normalized =
+        Luminumbra::Filesystem::LexicallyNormalPath(Luminumbra::Filesystem::AbsolutePath(path));
+    const std::string key = Luminumbra::Filesystem::GenericPathString(normalized);
     if (!include_stack.insert(key).second) {
         diagnostic = "cyclic shader include: " + key;
         return false;

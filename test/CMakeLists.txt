@@ -200,6 +200,16 @@ target_link_libraries(common_tests PRIVATE
     luminumbra_common
 )
 
+# File-only path contracts run without a GL context or the common-library graph.
+add_executable(filesystem_path_test
+    common/FilesystemPath_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
+    ../src/luminumbra_client/app/RuntimeRoot.cpp
+)
+target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra_client)
+target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(filesystem_path_test PRIVATE gtest_main)
+
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
 add_executable(game_assets_test
     tools/game_assets_test.cpp
@@ -342,6 +352,7 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
 )
 
 target_compile_definitions(render_smoke_test PRIVATE
@@ -590,6 +601,7 @@ endif()
 # reflection TU under test directly (GL-only, no luminumbra_client dependency).
 add_executable(shader_reflection_test
     rendering/shader_reflection_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
 ../src/luminumbra_client/rendering/ShaderReflection.cpp
 ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
 )
@@ -1528,6 +1540,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     asset_processor_round_trip_test
     game_assets_test
     common_tests
+    filesystem_path_test
     skinned_test_assets_test
     tree_lod_test
     # the hemi-octa mapping test was built but never
