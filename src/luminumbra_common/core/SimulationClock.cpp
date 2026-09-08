@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace luminumbra::core {
 
@@ -30,13 +32,15 @@ std::uint32_t SimulationClock::advance(double frame_dt) {
         ++dropped_frame_count_;
     }
 
+    if (ticks_executed > std::numeric_limits<std::uint64_t>::max() - tick_count_)
+        throw std::overflow_error("Simulation clock tick overflow");
     tick_count_ += ticks_executed;
     return ticks_executed;
 }
 
-void SimulationClock::reset() {
+void SimulationClock::reset(std::uint64_t base_tick) {
     accumulator_ = 0.0;
-    tick_count_ = 0;
+    tick_count_ = base_tick;
     dropped_time_seconds_ = 0.0;
     dropped_frame_count_ = 0;
 }

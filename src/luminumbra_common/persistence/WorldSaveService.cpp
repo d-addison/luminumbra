@@ -681,6 +681,22 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
                                      std::vector<std::string>* errors) {
     if (!validate_save(save_dir, errors))
         return false;
+    world::WorldClock clock;
+    std::string clock_error;
+    const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    if (!world::WorldClock::from_metadata(metadata, clock, clock_error)) {
+        AddError(errors, clock_error);
+        return false;
+    }
+    world::WorldClock previous_clock;
+    bool requires_active_regions = false;
+    if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
+        return false;
+    if (requires_active_regions && !metadata.contains("simulationTick") &&
+        !metadata.contains("calendar")) {
+        AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
+        return false;
+    }
     const auto destination = save_dir / "world_info.json";
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
@@ -695,6 +711,36 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         return false;
     }
     return true;
+}
+
+bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
+                                           world::WorldClock& clock,
+                                           bool& requires_active_regions,
+                                           std::vector<std::string>* errors) {
+    clock = world::WorldClock{};
+    requires_active_regions = false;
+    try {
+        const auto path = save_dir / "world_info.json";
+        if (!std::filesystem::exists(path))
+            return true;
+        if (std::filesystem::file_size(path) > 1024 * 1024) {
+            AddError(errors, "Corrupt world metadata: exceeds the 1 MiB limit.");
+            return false;
+        }
+        std::ifstream input(path, std::ios::binary);
+        const auto metadata = nlohmann::json::parse(input);
+        std::string error;
+        if (!world::WorldClock::from_metadata(metadata, clock, error)) {
+            AddError(errors, error);
+            return false;
+        }
+        requires_active_regions =
+            metadata.contains("simulationTick") || metadata.contains("calendar");
+        return true;
+    } catch (const std::exception& e) {
+        AddError(errors, std::string("Corrupt world metadata: ") + e.what());
+        return false;
+    }
 }
 
 std::filesystem::path WorldSaveService::world_state_path(const std::filesystem::path& save_dir) {
@@ -981,6 +1027,10 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
     try {
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
+        world::WorldClock clock;
+        bool requires_active_regions = false;
+        if (!read_clock_metadata(save_dir, clock, requires_active_regions, &errors))
+            return reject("");
         const auto metadata_path = save_dir / "world_info.json";
         if (std::filesystem::exists(metadata_path)) {
             std::ifstream input(metadata_path, std::ios::binary);
