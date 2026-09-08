@@ -1,7 +1,7 @@
 # Distant world and distant simulation contract
 
-Status: accepted contract, September 8, 2026, revised the same day after the
-first independent review round. Implementation is planned in bounded slices and
+Status: accepted contract, September 8, 2026, revised the same day after two
+independent review rounds. Implementation is planned in bounded slices and
 is **not** present in the tree at the time of writing; each section states the
 current shipped behaviour so nothing here reads as implemented. Nothing in this
 document waives the acceptance evidence that each slice must supply, and no
@@ -13,10 +13,12 @@ format change listed here exists until its slice lands.
   edge**: terrain streams procedurally in every direction. The addressable
   extent is set by the packed chunk identity (`Chunk.h`, ±2^20 chunks of 16 m,
   about ±16,777 km on each horizontal axis; coordinates are masked, never range
-  checked). World positions are 32-bit floats, so v0.3 qualifies traversal and
-  rendering within 32 km of the world origin, where positions keep sub-centimetre
-  precision; travel beyond that radius is not qualified and the origin-precision
-  work it needs is tracked as residual scope.
+  checked). World positions are 32-bit floats. By owner decision (September 8,
+  2026) v0.3 qualifies traversal and rendering within 32 km of the world origin,
+  where positions keep sub-centimetre precision; the camera-relative
+  (floating-origin) precision work that would qualify the full addressable extent
+  is deliberately residual scope, not an open contract gap. Chunk identity,
+  region identity, persistence and hashing are integer-addressed and unaffected.
 - Distant caves are real: long interior sightlines from inside caverns and
   tunnels, coarse real interiors visible through cave mouths from outside, and
   openings, overhangs and arches kept as silhouette features to the full radius.
@@ -52,9 +54,12 @@ This contract separates three sets that may overlap but are never equated.
 | Storage residency | What is held in memory and on disk: chunk lattices in the live disc, regenerable far-tile caches, durable region records and the far authority overlay. | Persistence and streaming |
 
 Camera position, noclip flight, disabled rendering and coarse rendering never
-create or wake an active region; a differential test proves that host
-activation, scheduling and authoritative hashes are identical with the camera
-elsewhere or rendering disabled.
+create or wake an active region. The host's simulation anchor for the local
+player is the last walking feet position; noclip and debug-camera movement do
+not move it, and it is persisted with the ledger and restored before the first
+tick. A differential test proves that host activation, scheduling and
+authoritative hashes are identical with the camera elsewhere, in noclip, or
+with rendering disabled.
 
 ## Distant-world representation
 
@@ -75,13 +80,15 @@ with Marching Cubes; a brick record exists where the field crosses zero.
 Distances are horizontal (XZ) distances from the camera to the nearest point of
 a tile. Spacing over outer radius is constant (1/256 rad), so screen-space
 sample density is uniform across the ladder. Multi-tier residency and draw
-ownership are new machinery: each tier is resident over its whole disc and drawn
-only inside its band through the radial clip band, the coarser tier is always
-resident and drawn beneath the finer one with a one-brick overlap, and the
-cross-tier transition rule (finer wins by depth bias; no stitching topology)
-must be proven on walls, ceilings, arches and overhangs, not only on open
-ground. The V1 inner clip follows the live disc's actual radius, so the adaptive
-shrink under pressure never opens a gap. The live disc, its three live detail
+ownership are new machinery with an explicit arrival-state rule: the coarser
+tier is always resident and drawn beneath the finer one with a one-brick
+overlap; a finer tile replaces the coarser surface inside its band only once it
+is built and uploaded, and until then the coarser surface stays visible, so a
+missing or late tile is never a hole; ownership at the live edge is decided
+against the live chunks that are actually meshed and uploaded (including cave
+ceilings and floors), replacing today's camera-region skip; the transition rule
+(finer wins by depth bias; no stitching topology) must be proven on walls,
+ceilings, arches and overhangs, not only on open ground. The live disc, its three live detail
 levels and the bounded full-lattice cave neighbourhood are unchanged; long
 interior sightlines come from V1 and V2 bricks, which sample the same cave
 field.
@@ -98,11 +105,14 @@ level, while chunks first generated at a coarser level carry heightmaps only.
 
 ### Vertical coverage and the cave field
 
-Bricks are discovered over the complete column span a tile can contain: from
-the deepest depth the preset's cave field can carve below the lowest surface
-height in the tile to the highest surface height, with the span recorded in the
-tile record so deep camera positions and long sightlines never depend on an
-unbounded scan. Pristine bricks sample the same terrain and cave density
+The cave field carves without a lower bound, so coverage is bounded by the
+same rule the live disc uses: pristine bricks are discovered from the highest
+surface height in the tile down to 256 m below its lowest surface height (the
+depth the live disc streams below an anchor standing on the surface); columns
+with durable chunk records deeper than that extend to the deepest record. The
+span is stored in the tile record, discovery walks only that span, and a
+camera below the pristine span sees pristine bricks only within it. Deeper
+pristine interiors are outside this contract and documented as such. Pristine bricks sample the same terrain and cave density
 composition the live path uses. At spacings of 8 m or less (V1 and V2) the full
 cave router is sampled unchanged. At 16 m and beyond, the noise-carved cave
 terms alias when point-sampled, so two representations are qualified against
@@ -118,7 +128,9 @@ it.
 ### Edits and the far authority overlay
 
 Edits are baked into every tier on the world host inside the save path, after
-dirty chunks are written and before far authority is notified. A baked
+dirty chunks are written and before far authority is notified; a failed bake is
+retried by the next save (the host owns retries) and never blocks the chunk
+write that preceded it. A baked
 authoritative brick record carries one of three states: present (sampled
 signed-distance values), homogeneous air, or homogeneous solid; the two
 homogeneous states are tombstones, so a brick that an edit emptied or filled is
@@ -188,7 +200,11 @@ instead of being discarded. Dirtiness is defined per record, not only by voxel
 edits: modified water depths, fluxes, sleep and scheduling state, page bytes,
 entity records and ledger entries each carry their own dirty flag. The host
 autosaves on a tick interval short enough to cover a traversal capture, and
-parked memory is bounded by that interval and reported in the diagnostic panel.
+parked memory is bounded by a byte limit: when parking would exceed it the host
+performs a blocking save first, and while a save is failing eviction of dirty
+chunks stops (they stay resident) and the failure is reported; dirty state is
+never dropped. Parked bytes, save latency and failures are shown in the
+diagnostic panel and qualified on the historical 5,433-chunk edited save.
 
 Current behaviour: eviction erases dirty chunks without a flush, the client
 saves only on quit or shutdown, the server autosave interval defaults to zero,
@@ -201,11 +217,11 @@ and no region ledger exists.
 | Terrain edits | Full lattice | Persisted chunk records plus far authority bricks | Unchanged on disk |
 | Plants, soil, irrigation, living-world ladder | Every tick | Coarse cadence; each system's coarse rule is specified in its slice (rounding order, saturation, threshold crossings, event multiplicity) and either proven equal to k single ticks or given a documented tolerance band | No advance; bounded resume hook |
 | Wildlife | Full utility AI, physics avatars | Persisted; coarse needs, lifespan, reproduction and region-to-region travel at cadence; promoted to full AI on approach; travel into a frozen region parks the creature at the border until the region thaws | No advance |
-| Water | Rotating cell window | Deterministic integer share of the cell budget per region with remainder carried by rank order and a starvation guarantee; flux crosses a border only between two regions that are both due this tick, with border flux accounted on both sides | Millimetre arrays kept, no flow |
-| Wind, weather, aether ambience | Stateful world-anchored pages | Pages tick only in due regions; a page is ranked by the region containing its centre and ticks if any intersecting region is due; storms carry an absolute spawn tick and an active-age accumulator, so lifetimes and strike deadlines advance only while active; a page entering activation is seeded from seed, tick and position | Page bytes kept; no catch-up (this deliberately replaces the energy field's catch-up rule) |
+| Water | Rotating cell window | Deterministic integer share of the cell budget per region (proportional to awake cells, rounded down, remainder assigned in rank order) with a starvation bound of one full window per region per cadence period; reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow |
+| Wind, weather, aether ambience | Stateful world-anchored pages | Cells are owned by the region that contains them; a page update is masked to cells whose region is due this tick, and exchange across a cell boundary happens only when both regions are due, so a frozen region's cells and digest never change; storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, and advance only while their region is due; a page entering activation is seeded from seed, tick and position | Owned cells immutable; no catch-up (this deliberately replaces the energy field's catch-up rule) |
 | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; file placement and bytes unchanged | Frozen pages kept |
-| Scent and foraging | Spawn-anchored near facility, unchanged | Not simulated at distance; distant creatures do not use scent | — |
-| Ground objects | Settle, persist, despawn | Despawn when due | Despawn deferred |
+| Scent and foraging | Spawn-anchored near facility, unchanged and not persisted (re-derived) | Not simulated at distance; distant creatures do not use scent; save/resume equivalence is asserted with scent participants excluded, as the oracle already excludes re-derived weather today | — |
+| Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances |
 | Scheduled game events | Not implemented | Deferred to a later milestone | — |
 
 Authority is server-only on the deterministic fixed tick with per-region
@@ -236,9 +252,13 @@ override.
 | Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 1,800-tick day, 432,000-tick season | Calendar day and year |
 
 The clock metadata (`simulationTick`, `calendar`) is validated strictly: absent
-keys mean tick zero and the pinned defaults; a non-integer, negative or zero day
-length, a year of zero days, or a tick that is not an unsigned integer refuses
-the world as corrupt metadata.
+keys mean tick zero and the pinned defaults; `dayLengthTicks` must be an integer
+in [1, 2^31), `daysPerYear` an integer in [1, 366], `simulationTick` an
+unsigned integer below 2^62, and the products day × year and tick + catch-up
+clamp are overflow-checked; anything else refuses the world as corrupt metadata.
+Calendar phase origins equal today's formulas (phase = tick modulo period from
+tick zero), so the plant season still starts at its cold minimum. Snapshots are
+taken only on tick boundaries, never inside a batched client catch-up.
 
 Current behaviour: the tick counter restarts at zero on every load, so a loaded
 world resumes tick-zero weather, and the six durations above coexist.
@@ -249,10 +269,10 @@ Unchanged: preset revision 6, LMR1 container v2 for `chunks/region/*.lmr`
 including its lod-level and flag validation, the
 `luminumbra.persistence.world_manifest.v1` manifest, FSD2 far payload v3 (kept
 decodable with its existing dimensions and validation; no longer written by the
-runtime once the volumetric ladder lands), `aether_state.efs` placement and
-bytes, canonical in-memory serialization, the LREC1 replay record layout and
-checkpoint bytes, and the lockstep hash message and protocol. There is no
-obsolete-world migration.
+runtime once the volumetric ladder lands), the `aether_state.efs` payload bytes
+and placement, the plant record payload, canonical in-memory serialization, the
+LREC1 replay record layout and checkpoint bytes, and the lockstep hash message
+and protocol. There is no obsolete-world migration.
 
 New records, each declared before its slice lands with exact version identity,
 byte order, lengths, checksums, allocation limits and section-evolution rules
@@ -266,6 +286,9 @@ in the engine guide:
 | `creature-entities.json` | `<save>/chunks/region/` | no creatures | refuse | refuse as future format |
 | `ground-objects.json` | `<save>/chunks/region/` | no objects | refuse | refuse as future format |
 | `far/v<tier>.<tx>.<tz>.lmr` (FSV1 payload, edit-baked bricks with tombstones and generation) | `<save>/far/` | regenerate or rebuild from edited chunk records | refuse | refuse as future format |
+| `snapshot.json` commit index (members, content identities, generation, tick, anchors) | `<save>/chunks/region/` | legacy save without simulation records: load with defaults | refuse as inconsistent snapshot | refuse as future format |
+| `aether_state.efs` (existing) | `<save>/` unchanged | none | refuse | refuse as future format |
+| `plant-entities.json` (existing, gains persistent identities additively) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |
 
 Records under `chunks/region/` (the directory returned by
 `WorldSaveService::region_directory`) join the integrity scan. Engine builds
@@ -278,25 +301,46 @@ dangling-reference rules, numeric bounds and unknown-component refusal; the
 persistent identity allocator and the species/content identity used by coarse
 simulation are stored with the ledger and refused on mismatch.
 
-A save is one committed snapshot. Every record written by a save carries the
-same snapshot generation and tick, each file is written to a temporary path and
-renamed, and the manifest records the committed generation last. A save with
-zero dirty chunks still writes the clock, ledger, pages and entity records that
-changed. On load, records whose generation disagrees with the manifest are
-refused as an inconsistent snapshot; the prior complete generation remains
-loadable because no file is replaced before it is fully written.
+A save is one committed snapshot published through the commit index. The
+index enumerates every member the snapshot requires (chunk region files, far
+overlay files, the energy record, plant, creature, ground-object, ledger and
+page records, the clock metadata), each with its content identity and the
+generation in which it last changed, and records intentionally empty or deleted
+members explicitly; unchanged members are reused, not rewritten. Existing
+payload bytes carry no transaction metadata; the index does. Publication is
+recoverable: before any member is replaced its previous file is copied into a
+journal directory beside the index, every changed member is written to a
+temporary path and renamed, the new index is renamed last, and the journal is
+deleted only after the index is durable. On load, a journal that still exists
+is rolled back before the index is read; members whose content identity
+disagrees with the index are refused as an inconsistent snapshot; a required
+member that is missing is refused, and a save with no index at all is a legacy
+save that loads with default simulation state. A save with zero dirty chunks
+still publishes the clock, ledger, pages and entity records that changed.
+Interruption is tested after every rename and during the bake.
 
 World hash composition keeps its append-only order and folds new state into
-existing slots only when non-empty, following the energy-field precedent:
-clock, calendar, scheduler configuration and ledger state, region random-stream
-state, parked chunk records and creature/ground-object records fold into the
-`ecology` slot as tagged canonical sections; page bytes fold into the `wind`,
-`weather` and `aether` slots. Frozen regions contribute the content digest
-stamped at freeze. Canonical hashes are therefore unchanged while the features
-are off or empty. The replay checkpoint record keeps its existing fields; the
-new sub-hashes are diagnostics outside the checkpoint. A lockstep session
-admits a peer only when the calendar, simulation configuration and content
-identities match, failing before the first tick; the wire layout is unchanged.
+existing slots as tagged canonical sections, each present only when its feature
+key is on and its state is non-empty (the clock section is present only when
+`sim.active_regions` is on, so a world with the feature off hashes exactly as
+today): clock, calendar, scheduler configuration and ledger state, region
+random-stream state, persistent-identity allocator, creature and ground-object
+records fold into the `ecology` slot; page bytes fold into the `wind`, `weather`
+and `aether` slots. Every chunk contributes exactly one canonical simulation-only
+projection (voxel lattice, materials and water millimetre state; never meshes,
+storage envelopes or compression) with the precedence live over parked over
+durable, so the hash is independent of residency and of the camera; frozen
+regions contribute the digest stamped at freeze, computed from the same
+projection. Identity, ordering and random-stream rules apply to plants,
+creatures, avatars and ground objects alike through their persistent
+identities. The replay checkpoint record keeps its existing fields; the new
+sub-hashes are diagnostics outside the checkpoint. Replay determinism gates in
+v0.3 start from fresh worlds; replaying a resumed snapshot needs a replay boot
+reference to a snapshot and absolute tick, which is tracked separately. In v0.3
+lockstep evidence is produced with identical builds and content; pre-tick
+admission by calendar, configuration and content identity belongs to the v0.4
+admission work, and until then the existing first hash exchange ends a
+mismatched session.
 
 ## Performance measurement contract
 
@@ -322,13 +366,21 @@ outstanding queries are drained before the report; unavailable timers are
 recorded as unavailable, never as zero. Reports carry p50, p95, p99, maximum and
 median absolute deviation using the same percentile definition as
 `tools/perf/perf.py`, record the GL vendor and renderer strings, and fail when
-the adapter is not the qualified GPU. The far horizon gate requires complete
-per-tier coverage at every qualified station within a bounded settle time,
-bounded below-horizon sky, no seam band at any tier radius and no edge at the
-outer radius, and a seam or a missing tile is a failure, not a warning. The
-activation slice publishes a requirement-to-evidence matrix naming the
-executable tests, native commands, fixtures, thresholds and artifact schemas
-behind every statement in this document.
+the adapter is not the qualified GPU. A capture is invalid, independently of
+any threshold, when timer coverage is incomplete, an undeclared calendar or
+render debug override is active, the workload manifest does not match, or the
+far ladder did not settle within 90 s; invalid captures fail. The far horizon
+gate requires complete per-tier coverage against an independently computed
+expected wanted set at every qualified station within the settle limit,
+below-horizon sky at most 2%, no seam band at any tier radius and no edge at
+the outer radius, with fixtures for valid empty tiles and cave openings; a seam
+or a missing tile is a failure, not a warning. The activation slice publishes a
+requirement-to-evidence matrix naming the executable tests, native commands,
+fixtures, thresholds and artifact schemas behind every statement in this
+document, and its acceptance includes an executable oracle that a world saved
+at tick N, loaded and advanced K ticks equals an uninterrupted N+K run over
+every persisted subsystem, the clock, the scheduler and the identity allocator,
+with negative controls per subsystem.
 
 Current behaviour: the benchmark records means only, sums eleven pass timers
 instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not
