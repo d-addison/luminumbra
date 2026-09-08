@@ -338,10 +338,15 @@ bool PrepareHangReport(const std::filesystem::path& crash_dir) {
     if (wide.size() >= MAX_PATH || !CreateDirectoryTree(wide.c_str()))
         return false;
     // Short-path form removes spaces so the comsvcs helper receives an unquoted path.
-    wchar_t short_form[MAX_PATH];
+    wchar_t short_form[MAX_PATH] = {};
     const DWORD n = GetShortPathNameW(wide.c_str(), short_form, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH)
-        std::wcsncpy(short_form, wide.c_str(), MAX_PATH - 1);
+    if (n == 0 || n >= MAX_PATH) {
+        // wcsncpy does not terminate when the source fills the buffer, so copy the
+        // known length and terminate explicitly. `wide` is shorter than MAX_PATH
+        // (checked above), and every later read of short_form assumes termination.
+        std::wmemcpy(short_form, wide.c_str(), wide.size());
+        short_form[wide.size()] = L'\0';
+    }
     if (std::wcschr(short_form, L' ') != nullptr)
         return false; // a spaced path cannot be passed to the helper unquoted
     // The report formats "<dir>\\hang-YYYYMMDD-HHMMSS.txt" (and .dmp) into MAX_PATH
