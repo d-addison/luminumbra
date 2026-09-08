@@ -236,6 +236,17 @@ class InputTests(SbomFixture):
                 with self.assertRaisesRegex(ValueError, "unsupported package entry"):
                     generator.root_inventory(self.root, False, self.output)
 
+    def test_link_detection_with_optional_windows_attributes(self):
+        # A synthetic Windows os.stat_result can expose attributes as None.
+        for attributes in ({}, {"st_file_attributes": None}, {"st_file_attributes": 0}):
+            for mode in (stat.S_IFREG | 0o600, stat.S_IFIFO | 0o600):
+                with self.subTest(attributes=attributes, mode=mode):
+                    self.assertFalse(generator.is_link(SimpleNamespace(st_mode=mode, **attributes)))
+            self.assertTrue(generator.is_link(SimpleNamespace(st_mode=stat.S_IFLNK, **attributes)))
+        for mode in (stat.S_IFREG, stat.S_IFDIR):
+            self.assertTrue(generator.is_link(SimpleNamespace(
+                st_mode=mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)))
+
     def test_windows_junction_attributes_rejected_before_traversal(self):
         junction = self.root / "junction"
         junction.mkdir()
@@ -312,6 +323,7 @@ class ArchiveTests(SbomFixture):
 class GitArchiveTests(SbomFixture):
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.root), "-c", "core.autocrlf=false",
+                                        "-c", "core.eol=lf",
                                         "-c", "core.hooksPath=" + str(self.base / "no-hooks"),
                                         "-c", "commit.gpgsign=false", "-c", "user.name=SBOM Test",
                                         "-c", "user.email=sbom-test@example.invalid", *args],
@@ -339,6 +351,22 @@ class GitArchiveTests(SbomFixture):
         commit = self.git("rev-parse", "HEAD").strip() + b"\n"
         self.assertEqual(files["./pkg/substitute.txt"]["checksums"][1]["checksumValue"],
                          hashlib.sha256(commit).hexdigest())
+        validator.validate_archive(document, archive)
+
+    def test_git_archive_crlf_bytes_match_inventory(self):
+        # Archive applies checkout conversion: Windows native EOL can differ from the blob.
+        archive = self.base / "crlf-source.tar"
+        archive.write_bytes(self.git("-c", "core.eol=crlf", "archive", "--format=tar",
+                                     "--prefix=pkg/", "HEAD"))
+        self.assertEqual(self.git("show", "HEAD:a.txt"), b"hello\n")
+        with tarfile.open(archive) as stream:
+            self.assertEqual(stream.extractfile("pkg/a.txt").read(), b"hello\r\n")
+        self.cli("--archive", archive)
+        document = json.loads(self.output.read_text())
+        files = {item["fileName"]: item for item in document["files"]}
+        self.assertEqual(files["./pkg/a.txt"]["checksums"], [
+            {"algorithm": "SHA1", "checksumValue": hashlib.sha1(b"hello\r\n").hexdigest()},
+            {"algorithm": "SHA256", "checksumValue": hashlib.sha256(b"hello\r\n").hexdigest()}])
         validator.validate_archive(document, archive)
 
     def test_tracked_sidecar_reproducibility_and_self_inclusion(self):

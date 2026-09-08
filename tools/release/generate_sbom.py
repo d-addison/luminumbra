@@ -41,7 +41,7 @@ def checksums(stream: BinaryIO) -> list[dict]:
 def is_link(info: os.stat_result) -> bool:
     # Windows junctions are directories with reparse attributes, not symlinks.
     return stat.S_ISLNK(info.st_mode) or bool(
-        getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        (getattr(info, "st_file_attributes", 0) or 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def archive_inventory(path: Path) -> dict[str, list[dict]]:
