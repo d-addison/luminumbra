@@ -1466,6 +1466,14 @@ target_link_libraries(isolation_config_test PRIVATE
     gtest_main
 )
 
+# Exercise the visual scenario's real asset producer without a GL context.
+add_executable(skinned_test_assets_test
+    rendering/skinned_test_assets_test.cpp
+    ../src/luminumbra_client/core/scenarios/SkinnedMeshTestAssets.cpp
+)
+target_include_directories(skinned_test_assets_test PRIVATE ../src)
+target_link_libraries(skinned_test_assets_test PRIVATE gtest_main luminumbra_common)
+
 # Standalone main gate programs registered directly with CTest.
 add_executable(eventbus_order_gate_test
     simulation/eventbus_order_gate_test.cpp
@@ -1515,6 +1523,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     asset_processor_round_trip_test
     game_assets_test
     common_tests
+    skinned_test_assets_test
     tree_lod_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero

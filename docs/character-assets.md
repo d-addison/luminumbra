@@ -44,6 +44,12 @@ playback math, and the committed legacy pose checksum remains applicable.
 Consumers must support version 2 before using newly compiled clips; old consumers
 refuse the new version. No committed clip files are rewritten by this change.
 
+The single-rig skinned visual smoke deliberately writes version 1 to preserve its
+original bytes and motion. Its CPU regression runs the same fixture producer used
+by the visual scenario, reloads the mesh and clip through the runtime readers,
+and checks legacy playback. Importer regressions separately exercise version 2
+LINEAR, STEP and CUBICSPLINE clips.
+
 Target types are translation `0`, rotation `1`, and scale `2`, with three
 components for translation/scale and four XYZW components for rotation.
 Interpolation modes in version 2 are STEP `1`, LINEAR `2`, and CUBICSPLINE `3`.
