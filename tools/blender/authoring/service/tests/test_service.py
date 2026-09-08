@@ -101,6 +101,20 @@ class Project(unittest.TestCase):
         second = self.success(service)
         self.assertNotEqual(first["build_identity"], second["build_identity"])
 
+    def test_producer_revision_guard_rejects_edits_before_extraction(self):
+        service = self.open()
+        self.success(service)
+        pointer = service.current()
+        self.asset["expected_dependency_hashes"] = {
+            "source.blend": digest((self.project / "source.blend").read_bytes())}
+        atomic_json(self.project / "asset.json", self.asset)
+        (self.project / "source.blend").write_bytes(b"edit made before submission")
+        with patch.object(service, "_compile") as compiler:
+            result = self.wait(service, service.submit("asset.json", 1))
+        self.assertEqual(result["status"], "stale")
+        self.assertEqual(service.current(), pointer)
+        compiler.assert_not_called()
+
     def test_partial_and_malformed_outputs_preserve_previous(self):
         service = self.open()
         previous = self.success(service)
