@@ -906,3 +906,26 @@ TEST(LtexRoundTrip, InvalidInlineCutoffRetainsExistingOutput) {
     std::ifstream file(output, std::ios::binary);
     EXPECT_EQ(std::string(std::istreambuf_iterator<char>(file), {}), "previous valid generation");
 }
+
+TEST(LtexRoundTrip, OddCutoutRetainsCompiledBytesAcrossCoefficientPacking) {
+    const TempDirectory temp;
+    const auto input = temp.path() / "odd-cutout.png";
+    const auto output = temp.path() / "odd-cutout.ltex";
+    std::array<uint8_t, 9 * 7 * 4> pixels{};
+    for (size_t i = 0; i < 9 * 7; ++i) {
+        pixels[i * 4] = static_cast<uint8_t>(i * 17 + 3);
+        pixels[i * 4 + 1] = static_cast<uint8_t>(i * 29 + 11);
+        pixels[i * 4 + 2] = static_cast<uint8_t>(i * 43 + 23);
+        pixels[i * 4 + 3] = static_cast<uint8_t>(i * 61 + 37);
+    }
+    ASSERT_NE(stbi_write_png(input.string().c_str(), 9, 7, 4, pixels.data(), 36), 0);
+    ASSERT_EQ(Import({input.string(), output.string(), "--srgb", "--alpha-cutoff", "0.35"}), 0);
+    const auto bytes = FileBytes(output);
+    // Pin the complete output from the original coefficient packer, including
+    // mip dimensions and alpha. Alignment-safe copies must preserve every bit.
+    ASSERT_EQ(bytes.size(), 329u);
+    uint64_t checksum = 14695981039346656037ull;
+    for (const unsigned char byte : bytes)
+        checksum = (checksum ^ byte) * 1099511628211ull;
+    EXPECT_EQ(checksum, 4632687360821141353ull);
+}
