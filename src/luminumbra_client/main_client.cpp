@@ -86,8 +86,9 @@
 #include "rendering/RenderPipeline.h"
 #include "rendering/SceneSurvey.h" // survey: autonomous tour+screenshot of world POIs (render-only)
 #include "rendering/ScentFieldRenderMirror.h" // one-way scent snapshot for the ground decal
-#include "rendering/SnowCoverModel.h"         // Render-only snow cover.
-#include "rendering/WeatherRenderBridge.h"    // Live weather bridge.
+#include "rendering/Shader.h"
+#include "rendering/SnowCoverModel.h"      // Render-only snow cover.
+#include "rendering/WeatherRenderBridge.h" // Live weather bridge.
 #include "rendering/WorldLoadingVisualizer.h"
 #include "rendering/passes/ParticlePass.h"     //  EmitterDescriptor + accessor type
 #include "rendering/passes/PlantProcgenPass.h" //  render-only procedural plant bake (flag-gated)
@@ -2862,6 +2863,9 @@ int main(int argc, char* argv[]) {
     bool g_rb_nvml_ok = false;
     std::chrono::steady_clock::time_point g_rb_frame_start{};
     std::chrono::steady_clock::time_point g_rb_before_swap{};
+    Luminumbra::Vec3 g_rb_last_streaming_position{};
+    bool g_rb_has_streaming_position = false;
+    const glm::vec3 kRenderBenchmarkCameraPosition(8.0f, 56.0f, 8.0f);
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
@@ -3475,9 +3479,9 @@ int main(int argc, char* argv[]) {
                     _rb_stream_t0 = std::chrono::steady_clock::now(); //
                     if (gameSession->GetWorldSystem() && (g_playerController || g_camera)) {
                         // Anchor world streaming on the CAMERA (not the spawn-bound player)
-                        // whenever a fixed/scenario camera drives the view — otherwise a --cam-pos
-                        // far from spawn streams chunks around the player at spawn and the camera
-                        // sees an unloaded, unlit void (the "far-camera renders black" bug).
+                        // whenever a fixed, benchmark or scenario camera drives the view.
+                        // Otherwise, a --cam-pos far from spawn streams around the player and the
+                        // camera sees an unloaded, unlit void (the "far-camera renders black" bug).
                         // g_app.capture.fixed_cam covers the capture/showcase path; the scenario
                         // smokes keep their existing behaviour.
                         const bool cam_anchored =
@@ -3499,15 +3503,21 @@ int main(int argc, char* argv[]) {
                               scenario_ready)) &&
                             g_camera;
                         // PlayerController::Update may have moved g_camera back to
-                        // the player this frame; the fixed pose is reapplied later
-                        // for rendering. Stream its explicit position now as well.
+                        // the player this frame; the capture pose is reapplied later
+                        // for rendering. Stream that same position now as well.
                         const Luminumbra::Vec3 streaming_position =
                             g_app.capture.fixed_cam ? Luminumbra::Vec3(g_app.capture.fixed_cam_pos)
+                            : g_rb_active && g_camera
+                                ? Luminumbra::Vec3(kRenderBenchmarkCameraPosition)
                             : cam_anchored
                                 ? Luminumbra::Vec3(g_camera->Position)
                                 : (g_playerController
                                        ? Luminumbra::Vec3(g_playerController->GetPosition())
                                        : Luminumbra::Vec3(g_camera->Position));
+                        if (g_rb_active) {
+                            g_rb_last_streaming_position = streaming_position;
+                            g_rb_has_streaming_position = true;
+                        }
                         gameSession->GetWorldSystem()->update(gameSession->GetRegistry(),
                                                               streaming_position,
                                                               gameSession->GetPhysicsSystem());
@@ -3892,6 +3902,17 @@ int main(int argc, char* argv[]) {
                         BakeCombustibleMarkers(renderPipeline.plant_procgen(),
                                                gameSession->GetRegistry(),
                                                gameSession->GetWorldSystem());
+                    }
+                    // Apply the default benchmark pose after simulation, using the same
+                    // position as streaming. Explicit camera and scene settings take priority.
+                    if (g_rb_active) {
+                        if (!g_app.capture.fixed_cam) {
+                            g_camera->Position = kRenderBenchmarkCameraPosition;
+                            g_camera->Yaw = 35.0f;
+                            g_camera->Pitch = -6.0f;
+                            g_camera->updateCameraVectors();
+                        }
+                        renderPipeline.set_time_of_day(0.04f);
                     }
                     if (g_app.capture.fixed_cam && g_camera) {
                         g_camera->Position = g_app.capture.fixed_cam_pos;
@@ -4308,27 +4329,6 @@ int main(int argc, char* argv[]) {
                                                                  _rb_ui_t0)
                            .count(); //
 
-        // --render-benchmark: pin a FIXED, FOREST-DENSE camera pose + time-of-day so
-        // the budget capture is reproducible AND actually stresses the static-prop
-        // submit path  optimizes (an open-horizon pose under-samples the
-        // 40-110k-instance loop). High over the grove looking out at a shallow
-        // downward angle frames a deep carpet of canopy stretching to the horizon
-        // (max instances in frustum + max overdraw). Set every frame so gravity /
-        // settle can't drift it; it takes effect on the NEXT rendered frame. The
-        // GPU-timer averaging + the honest CPU-submit/present/NVML accounting run
-        // AFTER glfwSwapBuffers (see the post-swap block) so present + wall-clock
-        // are measured, not just the GPU per-pass timer sum.
-        if (!g_app.capture.render_benchmark_path.empty() && currentState == GameState::IN_GAME &&
-            gameSession) {
-            if (g_camera && !g_app.capture.fixed_cam) {
-                g_camera->Position = glm::vec3(8.0f, 56.0f, 8.0f);
-                g_camera->Yaw = 35.0f;
-                g_camera->Pitch = -6.0f; // shallow: deep forest carpet, not down at near ground
-                g_camera->updateCameraVectors();
-            }
-            renderPipeline.set_time_of_day(0.04f); // fixed near-noon (clouds + lit terrain)
-        }
-
         // Capture an additional, unmeasured frame before presentation. Hidden-window
         // front buffers are not a portable readback source (Mesa can return black).
         // Using the frame after the measured interval keeps readback out of its timings.
@@ -4527,6 +4527,56 @@ int main(int argc, char* argv[]) {
                 j["internal_width"] = renderPipeline.internal_width();
                 j["internal_height"] = renderPipeline.internal_height();
                 j["pose"] = g_app.capture.fixed_cam ? "fixed_camera" : "forest_dense";
+                // Read the linked programs only while emitting the artifact, outside the
+                // measured interval. This is report-time shader state, not proof that every
+                // program drew; absent programs and inactive uniforms remain explicit.
+                j["render_uniforms"]["observation"] = "report_time_shader_state";
+                j["render_uniforms"]["matrix_layout"] = "column_major";
+                renderPipeline.enumerate_shaders([&](const char* name,
+                                                     Luminumbra::Rendering::Shader* shader) {
+                    const bool geometry = std::strcmp(name, "geometry") == 0 ||
+                                          std::strcmp(name, "instanced_static_mesh") == 0;
+                    const bool lighting = std::strcmp(name, "lighting") == 0;
+                    if (!geometry && !lighting)
+                        return;
+                    auto& entry = j["render_uniforms"][name];
+                    entry["available"] = shader && shader->IsValid();
+                    if (!shader || !shader->IsValid())
+                        return;
+                    const auto read_uniform = [&](const char* uniform, std::size_t count) {
+                        const GLint location = glGetUniformLocation(shader->Id(), uniform);
+                        if (location < 0) {
+                            entry[uniform] = nullptr;
+                            return;
+                        }
+                        std::array<float, 16> value{};
+                        glGetUniformfv(shader->Id(), location, value.data());
+                        entry[uniform] = std::vector<float>(value.begin(), value.begin() + count);
+                    };
+                    if (geometry) {
+                        read_uniform("view", 16);
+                        read_uniform("projection", 16);
+                    } else {
+                        read_uniform("u_viewPos", 3);
+                        read_uniform("u_inverseView", 16);
+                        read_uniform("u_sun.direction", 3);
+                    }
+                });
+                j["capture_context"]["time_of_day_at_report"] = renderPipeline.get_time_of_day();
+                if (g_rb_has_streaming_position) {
+                    j["capture_context"]["last_world_streaming_position"] = {
+                        g_rb_last_streaming_position.x,
+                        g_rb_last_streaming_position.y,
+                        g_rb_last_streaming_position.z};
+                } else {
+                    j["capture_context"]["last_world_streaming_position"] = nullptr;
+                }
+                j["capture_context"]["controller_present"] = g_playerController != nullptr;
+                if (g_playerController) {
+                    const auto position = g_playerController->GetPosition();
+                    j["capture_context"]["controller_position"] = {
+                        position.x, position.y, position.z};
+                }
                 const auto resources = renderPipeline.get_runtime_render_stats();
                 j["resources"] = {
                     {"estimated_vram_bytes", resources.estimated_vram_bytes},
