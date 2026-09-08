@@ -37,10 +37,12 @@ format change listed here exists until its slice lands.
 
 ## Three explicit sets
 
-Current behaviour: live chunk residency follows a streaming disc of at most 32
-chunks (512 m) that adapts down to 24 or 20 chunks under generation pressure
-(`SHIELD_WorldSystem::streaming_radius_for_pressure`); far rendering is a
-separate camera-relative set of heightfield tiles to about 3 km; simulation
+Current behaviour: live chunk residency is the union of one adaptive disc per
+anchor (at most 32 chunks, 512 m, reduced to 24 or 20 chunks under generation
+pressure and further when several anchors share the budget,
+`SHIELD_WorldSystem::streaming_radius_for_pressure`); far rendering is a
+separate camera-relative set of pristine heightfield tiles to about 3 km with
+authoritative volumetric overlays captured from resident chunks; simulation
 systems tick every registry participant regardless of residency; wind, weather,
 aether ambience, scent, soil and irrigation are fixed grids anchored on the
 spawn point. There is no notion of an active region.
@@ -105,14 +107,16 @@ level, while chunks first generated at a coarser level carry heightmaps only.
 
 ### Vertical coverage and the cave field
 
-The cave field carves without a lower bound, so coverage is bounded by the
-same rule the live disc uses: pristine bricks are discovered from the highest
-surface height in the tile down to 256 m below its lowest surface height (the
-depth the live disc streams below an anchor standing on the surface); columns
-with durable chunk records deeper than that extend to the deepest record. The
-span is stored in the tile record, discovery walks only that span, and a
-camera below the pristine span sees pristine bricks only within it. Deeper
-pristine interiors are outside this contract and documented as such. Pristine bricks sample the same terrain and cave density
+The cave field carves without a lower bound, so pristine coverage is bounded by
+depth requests rather than by a preset property: a tile's pristine span runs
+from its highest surface height down to 256 m below the lowest of its lowest
+surface height and the deepest depth any anchor or the camera has requested
+for that tile (the same 256 m the live disc streams below an anchor); columns
+with durable chunk records above or below that span extend to the records.
+Requests are bounded per frame, the span is stored in the tile record, and
+discovery walks only the span, so a camera descending a deep cave extends the
+spans of the tiles around it without any unbounded column scan, and deep
+interior sightlines beyond the requested span appear as the request grows. Pristine bricks sample the same terrain and cave density
 composition the live path uses. At spacings of 8 m or less (V1 and V2) the full
 cave router is sampled unchanged. At 16 m and beyond, the noise-carved cave
 terms alias when point-sampled, so two representations are qualified against
@@ -128,9 +132,12 @@ it.
 ### Edits and the far authority overlay
 
 Edits are baked into every tier on the world host inside the save path, after
-dirty chunks are written and before far authority is notified; a failed bake is
-retried by the next save (the host owns retries) and never blocks the chunk
-write that preceded it. A baked
+dirty chunks are written and before far authority is notified. Bake
+obligations are derived, never remembered: on every save and load, any column
+whose committed chunk generation exceeds its overlay generation is due for a
+bake, so an interrupted or failed bake is retried by the next save without
+blocking the chunk write that preceded it, and a snapshot commits successfully
+with bakes still due. A baked
 authoritative brick record carries one of three states: present (sampled
 signed-distance values), homogeneous air, or homogeneous solid; the two
 homogeneous states are tombstones, so a brick that an edit emptied or filled is
@@ -180,6 +187,11 @@ Scheduling is a deterministic function of host tick state only. Pressure is
 measured in integer work units counted per tick (region ticks, entity updates,
 water cells, page updates), never in wall-clock time; the limits are calibrated
 from measured telemetry and recorded in the world's configuration identity.
+Every transition-driving value (per-region pressure and hold counters, cadence
+shift and phase, the last decision tick) is persisted in the ledger record and
+hashed, so reduction and recovery reproduce after reload; comparisons are
+strict greater-than against the limit, and transitions are applied in the
+total region order within one tick.
 Regions are totally ordered by rank (pinned before edited before visited), then
 by ticks since last proximity, then by region coordinates. When the counted work
 exceeds the limit, the lowest-ordered regions first drop to a reduced cadence
@@ -217,10 +229,10 @@ and no region ledger exists.
 | Terrain edits | Full lattice | Persisted chunk records plus far authority bricks | Unchanged on disk |
 | Plants, soil, irrigation, living-world ladder | Every tick | Coarse cadence; each system's coarse rule is specified in its slice (rounding order, saturation, threshold crossings, event multiplicity) and either proven equal to k single ticks or given a documented tolerance band | No advance; bounded resume hook |
 | Wildlife | Full utility AI, physics avatars | Persisted; coarse needs, lifespan, reproduction and region-to-region travel at cadence; promoted to full AI on approach; travel into a frozen region parks the creature at the border until the region thaws | No advance |
-| Water | Rotating cell window | Deterministic integer share of the cell budget per region (proportional to awake cells, rounded down, remainder assigned in rank order) with a starvation bound of one full window per region per cadence period; reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow |
-| Wind, weather, aether ambience | Stateful world-anchored pages | Cells are owned by the region that contains them; a page update is masked to cells whose region is due this tick, and exchange across a cell boundary happens only when both regions are due, so a frozen region's cells and digest never change; storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, and advance only while their region is due; a page entering activation is seeded from seed, tick and position | Owned cells immutable; no catch-up (this deliberately replaces the energy field's catch-up rule) |
-| Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; file placement and bytes unchanged | Frozen pages kept |
-| Scent and foraging | Spawn-anchored near facility, unchanged and not persisted (re-derived) | Not simulated at distance; distant creatures do not use scent; save/resume equivalence is asserted with scent participants excluded, as the oracle already excludes re-derived weather today | — |
+| Water | Rotating cell window | Authoritative water steps on the host fixed tick (today the client host steps it per rendered frame), with eligibility from resident simulation arrays and the ledger, independent of render streaming. The cell budget is shared in indivisible units of one chunk window: shares are proportional to awake chunks, rounded down, with the remainder carried as persisted service debt so every due region receives at least one full window per cadence period; reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with a paired reservation and paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow |
+| Wind, weather, aether ambience | Stateful world-anchored pages | A 24 m cell is owned by the region containing its centre; a page update is masked to owned cells whose region is due this tick, a partially active page seeds only its owned cells on first activation, and exchange across a cell boundary follows the same shared-boundary schedule as water (both owners due, at the coarser cadence, sealed toward frozen regions), so a frozen region's cells and digest never change; storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, advance and schedule strikes only while their region is due, and transfer ownership across a border only on a tick when the destination is due, otherwise waiting at the border; a page entering activation is seeded from seed, tick and position | Owned cells immutable; no catch-up (this deliberately replaces the energy field's catch-up rule) |
+| Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer deletes the record as today | Frozen pages kept |
+| Scent and foraging | Spawn-anchored near facility, unchanged; nonpersistent historical state (not re-derivable after a reload) | Not simulated at distance; distant creatures do not use scent; save/resume equivalence is qualified with scent and foraging participants excluded and documented as a known limitation | — |
 | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances |
 | Scheduled game events | Not implemented | Deferred to a later milestone | — |
 
@@ -250,6 +262,12 @@ override.
 | Migration (`GameSession.cpp`) | 108,000-tick year | Calendar year |
 | Stimulus channels (`StimulusChannels.h`) | 7,200-tick day, 432,000-tick season | Calendar day and year |
 | Rendered sky (`TimeOfDayModel.h`, `RenderPipeline.h`) | 1,800-tick day, 432,000-tick season | Calendar day and year |
+
+One physical origin governs every consumer: tick zero is midnight of day zero
+in midwinter, which is the origin the plant and circadian formulas use today;
+the rendered sky, migration and stimulus channels adopt the same origin with
+explicit per-consumer offsets, and a test asserts that sky, plant and
+circadian phases agree at a set of pinned ticks.
 
 The clock metadata (`simulationTick`, `calendar`) is validated strictly: absent
 keys mean tick zero and the pinned defaults; `dayLengthTicks` must be an integer
@@ -290,8 +308,14 @@ in the engine guide:
 | `aether_state.efs` (existing) | `<save>/` unchanged | none | refuse | refuse as future format |
 | `plant-entities.json` (existing, gains persistent identities additively) | `<save>/chunks/region/` unchanged | no plants | refuse | refuse as future format |
 
-Records under `chunks/region/` (the directory returned by
-`WorldSaveService::region_directory`) join the integrity scan. Engine builds
+Persisted creature records inventory every evolution-relevant component and
+reference (creature, genome, needs, mortality and decay, thirst, circadian,
+alarm, pack, territory and bias, migration, scavenging, sensing, reproduction
+cooldown and courtship, coarse tier and promotion state) and the slice proves
+completeness with a projection test: after every system has run, a save and
+reload must reproduce the ecology hash. Records under `chunks/region/` (the
+directory returned by `WorldSaveService::region_directory`) join the integrity
+scan. Engine builds
 that predate a record refuse a save containing it as an unknown region file;
 that refusal is accepted for the pre-release format and a fixture proves it.
 The far authority overlay at the save root is derived render state: older
@@ -308,28 +332,37 @@ page records, the clock metadata), each with its content identity and the
 generation in which it last changed, and records intentionally empty or deleted
 members explicitly; unchanged members are reused, not rewritten. Existing
 payload bytes carry no transaction metadata; the index does. Publication is
-recoverable: before any member is replaced its previous file is copied into a
-journal directory beside the index, every changed member is written to a
-temporary path and renamed, the new index is renamed last, and the journal is
-deleted only after the index is durable. On load, a journal that still exists
-is rolled back before the index is read; members whose content identity
-disagrees with the index are refused as an inconsistent snapshot; a required
-member that is missing is refused, and a save with no index at all is a legacy
-save that loads with default simulation state. A save with zero dirty chunks
+recoverable through a journal carrying the transaction identity and the
+generation it replaces: before any member is replaced its previous file is
+copied into the journal with an undo record (created members get a delete
+record, deleted members a restore record), every changed member is written to
+a temporary path and renamed, the previous index is retained under its
+generation, the new index is renamed last, and the journal is deleted only
+after the new index is durable. On load, a journal whose transaction is not
+the committed index is rolled back in reverse order before the index is read;
+a journal whose transaction matches the committed index is stale and deleted.
+Members whose content identity disagrees with the index are refused as an
+inconsistent snapshot and a required member that is missing is refused. A save
+is legacy only when it has no index and no new-format record; any new-format
+record without an index is refused as inconsistent. A save with zero dirty chunks
 still publishes the clock, ledger, pages and entity records that changed.
 Interruption is tested after every rename and during the bake.
 
-World hash composition keeps its append-only order and folds new state into
-existing slots as tagged canonical sections, each present only when its feature
-key is on and its state is non-empty (the clock section is present only when
-`sim.active_regions` is on, so a world with the feature off hashes exactly as
-today): clock, calendar, scheduler configuration and ledger state, region
+Everything in this section is gated by `sim.active_regions`: with the key off,
+clock restoration, the calendar unification, the chunk projection, the water
+host-tick change and every new hash section are inactive and the world
+behaves and hashes exactly as today. With the key on, world hash composition
+keeps its append-only order and folds new state into existing slots as tagged
+canonical sections, each present only when its state is non-empty: clock, calendar, scheduler configuration and ledger state, region
 random-stream state, persistent-identity allocator, creature and ground-object
 records fold into the `ecology` slot; page bytes fold into the `wind`, `weather`
-and `aether` slots. Every chunk contributes exactly one canonical simulation-only
+and `aether` slots. Authoritative chunk membership is the set of chunks with an edited or
+simulated record (live, parked or durable), never the procedural cache
+residency; each member contributes exactly one canonical simulation-only
 projection (voxel lattice, materials and water millimetre state; never meshes,
 storage envelopes or compression) with the precedence live over parked over
-durable, so the hash is independent of residency and of the camera; frozen
+durable, and pristine space contributes through the seed and generation
+parameters, so the hash is independent of residency and of the camera; frozen
 regions contribute the digest stamped at freeze, computed from the same
 projection. Identity, ordering and random-stream rules apply to plants,
 creatures, avatars and ground objects alike through their persistent
@@ -339,8 +372,10 @@ v0.3 start from fresh worlds; replaying a resumed snapshot needs a replay boot
 reference to a snapshot and absolute tick, which is tracked separately. In v0.3
 lockstep evidence is produced with identical builds and content; pre-tick
 admission by calendar, configuration and content identity belongs to the v0.4
-admission work, and until then the existing first hash exchange ends a
-mismatched session.
+admission work. The existing periodic hash exchange is state-divergence
+detection, not admission: qualified sessions must run with checkpoint
+exchange enabled, and a mismatch ends the session at the first exchange after
+it arises.
 
 ## Performance measurement contract
 
@@ -380,7 +415,11 @@ fixtures, thresholds and artifact schemas behind every statement in this
 document, and its acceptance includes an executable oracle that a world saved
 at tick N, loaded and advanced K ticks equals an uninterrupted N+K run over
 every persisted subsystem, the clock, the scheduler and the identity allocator,
-with negative controls per subsystem.
+with negative controls per subsystem. The traversal workloads include an
+identified edit, a successful snapshot commit and the corresponding all-tier
+bake inside the measured window, with artifact timestamps proving inclusion,
+and a construction above a tile's pristine maximum height is part of the
+edited-world tour.
 
 Current behaviour: the benchmark records means only, sums eleven pass timers
 instead of bracketing the frame, pins the framebuffer to 3840×1600, and does not
