@@ -65,6 +65,13 @@ and hashes only; the service never opens them in Blender or executes their scrip
 The exporter identity is a declaration from the snapshot producer, recorded in
 build identity. Qualification of that exporter remains a separate fixture lane.
 
+Snapshot producers may supply `expected_dependency_hashes`, an object mapping
+declared dependency paths to their captured SHA-256 digests. Extraction refuses
+a mismatch before running the compiler. The Blender adapter uses this guard to
+prevent an edit made before service extraction from publishing an older export.
+Dependencies are checked again before publication. These producer guards are
+optional for ordinary immutable CLI inputs.
+
 `required_schemas` may contain only `luminumbra.authoring.asset.v1`. Unknown fields,
 required extensions and engine metadata are refused. The only engine extras
 accepted in GLB are string correlation IDs named `luminumbra.object_id`,
