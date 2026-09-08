@@ -63,6 +63,17 @@ Before entering a game world, acquire the separately versioned tree pack with
 `python3 tools/assets/acquire.py` (Windows: `py -3 tools/assets/acquire.py`).
 See [Game assets](docs/game-assets.md) for provenance, offline setup and repair.
 
+## Visual test evidence
+
+The [documented visual baselines](docs/visual-baselines.md) include original
+screenshots, settings, measurements and visible failures. These September 8
+captures have **not received visual approval**; numeric test results alone do
+not establish scene quality.
+
+[![Forest baseline with a visible terrain discontinuity](docs/assets/visual-baselines/20260908/forest-reference-preview.png)](docs/visual-baselines.md#forest-reference)
+
+[![Foliage diagnostic dominated by sky](docs/assets/visual-baselines/20260908/foliage-functional-preview.png)](docs/visual-baselines.md#foliage-diagnostic)
+
 ## Architecture
 
 Game code currently remains in this repository. The accepted
