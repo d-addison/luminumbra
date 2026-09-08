@@ -324,11 +324,11 @@ void PlayerController::UpdateNoclip(float deltaTime, const glm::vec3& wishDir, b
     m_position += m_velocity * deltaTime;
 }
 
-} // namespace Luminumbra::Client
-
 glm::vec3 PlayerController::SavedSpawnAnchor() const {
     if (m_mode == MovementMode::Walking) {
         return Player::SavedSpawnAnchorForFeet(m_position, m_standingHeight);
     }
     return m_camera ? m_camera->Position : m_position;
 }
+
+} // namespace Luminumbra::Client
