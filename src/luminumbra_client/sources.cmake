@@ -47,6 +47,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/SceneSurvey.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/LightningBolt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Mesh.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/TerrainCoverageCapture.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderPipeline.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderResourceRegistry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WaterfallDetect.cpp
