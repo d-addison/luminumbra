@@ -6,8 +6,10 @@
 #include <glad/glad.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace {
@@ -211,6 +213,35 @@ TEST(ReversedZProjection, FrustumPlanesMatchZeroToOneClipBounds) {
         for (const auto& plane : planes)
             inside_planes &= glm::dot(plane, world) >= 0;
         EXPECT_EQ(inside_planes, inside_clip) << "view z = " << view_point.z;
+    }
+}
+
+// Exercises the PRODUCTION corner extraction (PassGl::cascade_frustum_corners_world,
+// called by RenderPipeline::get_light_space_matrices) rather than re-deriving the
+// mathematics in the test: the shared helper is the only place the NDC z endpoints
+// live, so reverting them to the conventional -1/1 pair fails this test.
+TEST(ReversedZProjection, ProductionCascadeCornersSpanTheSplitRange) {
+    for (const auto& range : {std::pair{0.1f, 15.0f},
+                              std::pair{15.0f, 40.0f},
+                              std::pair{40.0f, 100.0f},
+                              std::pair{100.0f, 250.0f}}) {
+        Camera camera(glm::vec3(0, 0, 0));
+        const glm::mat4 view = camera.GetViewMatrix();
+        const glm::mat4 projection =
+            ReversedZPerspective(glm::radians(camera.Zoom), 1.5f, range.first, range.second);
+        const auto corners = PassGl::cascade_frustum_corners_world(projection, view);
+        float nearest = std::numeric_limits<float>::max();
+        float farthest = 0.0f;
+        for (const auto& corner : corners) {
+            const glm::vec4 in_view = view * corner;
+            nearest = std::min(nearest, -in_view.z);
+            farthest = std::max(farthest, -in_view.z);
+        }
+        // The eight corners must bracket exactly the split range: a conventional
+        // (-1/1) endpoint pair would collapse both planes onto the far distance.
+        EXPECT_NEAR(nearest, range.first, 0.001f) << "near plane of split " << range.first;
+        EXPECT_NEAR(farthest, range.second, 0.001f) << "far plane of split " << range.second;
+        EXPECT_GT(farthest - nearest, 0.0f);
     }
 }
 

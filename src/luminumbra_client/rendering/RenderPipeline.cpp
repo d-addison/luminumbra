@@ -43,6 +43,7 @@
 #include "rendering/TreeImpostorPolicy.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono> // CPU per-phase submit cost
 #include <cmath>
@@ -5525,16 +5526,9 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
                                               split_near,
                                               split_far);
         glm::mat4 view = camera.GetViewMatrix();
-        std::vector<glm::vec4> corners;
-        for (int x = 0; x < 2; ++x)
-            for (int y = 0; y < 2; ++y)
-                for (int z = 0; z < 2; ++z) {
-                    const glm::vec4 pt =
-                        glm::inverse(proj * view) *
-                        glm::vec4(
-                            2.0f * x - 1.0f, 2.0f * y - 1.0f, 1.0f - static_cast<float>(z), 1.0f);
-                    corners.push_back(pt / pt.w);
-                }
+        const std::array<glm::vec4, 8> corner_array =
+            PassGl::cascade_frustum_corners_world(proj, view);
+        const std::vector<glm::vec4> corners(corner_array.begin(), corner_array.end());
         glm::vec3 center = glm::vec3(0.0f);
         for (const auto& v : corners)
             center += glm::vec3(v);

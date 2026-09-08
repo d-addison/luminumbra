@@ -6,6 +6,7 @@
 // intentional so the extraction stays a mechanical move with zero behavior
 // change.
 
+#include <array>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <string>
@@ -127,6 +128,28 @@ inline void ExtractFrustumPlanes(const glm::mat4& m,
         float inv_len = 1.0f / glm::length(glm::vec3(planes[i]));
         planes[i] *= inv_len;
     }
+}
+
+// World-space corners of one shadow cascade's frustum. Under reversed-Z the near
+// plane is clip z = 1 and the far plane is clip z = 0, so the NDC z endpoints are
+// 1 and 0 rather than the conventional -1 and 1. Shared by the production cascade
+// builder and its regression so the endpoints cannot drift apart.
+inline std::array<glm::vec4, 8> cascade_frustum_corners_world(const glm::mat4& projection,
+                                                              const glm::mat4& view) {
+    const glm::mat4 inverse_view_projection = glm::inverse(projection * view);
+    std::array<glm::vec4, 8> corners{};
+    std::size_t index = 0;
+    for (int x = 0; x < 2; ++x)
+        for (int y = 0; y < 2; ++y)
+            for (int z = 0; z < 2; ++z) {
+                const glm::vec4 point =
+                    inverse_view_projection * glm::vec4(2.0f * static_cast<float>(x) - 1.0f,
+                                                        2.0f * static_cast<float>(y) - 1.0f,
+                                                        1.0f - static_cast<float>(z),
+                                                        1.0f);
+                corners[index++] = point / point.w;
+            }
+    return corners;
 }
 
 inline void set_default_shadow_cascade_splits(ShadowMap& shadow_map) {

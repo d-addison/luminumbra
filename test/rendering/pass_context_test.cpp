@@ -26,6 +26,7 @@
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <cstdlib>
 #include <glad/glad.h>
 #include <gtest/gtest.h>
 
@@ -149,10 +150,47 @@ std::vector<unsigned char> ReadTarget(const RenderTarget& rt) {
     return px;
 }
 
+// Scoped override of an environment variable, restored on destruction, so the test
+// does not inherit (or leak) a render-scale setting from the surrounding session.
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value)
+        : m_name(name) {
+        if (const char* previous = std::getenv(name)) {
+            m_had_previous = true;
+            m_previous = previous;
+        }
+        if (value)
+            setenv(name, value, 1);
+        else
+            unsetenv(name);
+    }
+    ~ScopedEnv() {
+        if (m_had_previous)
+            setenv(m_name, m_previous.c_str(), 1);
+        else
+            unsetenv(m_name);
+    }
+
+private:
+    const char* m_name;
+    bool m_had_previous = false;
+    std::string m_previous;
+};
+
 TEST(PassContext, FloatDepthFramebuffersSurviveResizeAndRenderScaleChange) {
     HiddenGlContext gl;
     ASSERT_TRUE(gl.ready()) << gl.error();
     using namespace Luminumbra::Rendering;
+    // Pin the render scale for the duration of the test so the expected attachment
+    // sizes below hold regardless of the caller's environment.
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    // Establish the CONVENTIONAL depth state first: the assertions after startup
+    // then prove that startup itself installed the reversed convention, rather than
+    // observing state some earlier fixture happened to leave behind.
+    glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+    glDepthFunc(GL_LESS);
+    glClearDepth(1.0);
     RenderPipeline pipeline;
     ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
     const auto check = [&](int width, int height) {
