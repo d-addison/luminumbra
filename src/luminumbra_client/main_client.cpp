@@ -1359,9 +1359,12 @@ int main(int argc, char* argv[]) {
             [](std::uint64_t last_heartbeat, double stalled_seconds) {
                 ReportMainThreadHang(last_heartbeat, stalled_seconds);
             });
-        LUMINUMBRA_CORE_INFO("Hang watchdog armed: main-loop stall threshold {} s (reports to {})",
-                             scenario_config.hang_watchdog_seconds,
-                             scenario_config.crash_dir.string());
+        LUMINUMBRA_CORE_INFO(
+            "Hang watchdog armed: main-loop stall threshold {} s (best-effort external "
+            "minidump and hang-*.txt in {}); choose a threshold longer than the "
+            "longest legitimate stage such as a large save",
+            scenario_config.hang_watchdog_seconds,
+            scenario_config.crash_dir.string());
     }
     g_app.overlay.imgui_enabled = !scenario_config.no_ui;
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
@@ -4794,13 +4797,22 @@ int main(int argc, char* argv[]) {
     }
 
     std::vector<std::string> shutdown_milestones;
+    const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {
         shutdown_milestones.push_back(milestone);
-        // Written after every stage (complete=false) so a hang during teardown
-        // localizes to the last stage reached; the final write_shutdown marks complete.
         g_main_loop_heartbeat.fetch_add(1, std::memory_order_relaxed);
-        runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
+        // With the hang watchdog armed, shutdown.json is rewritten after every stage
+        // (complete=false) so a teardown hang localizes to the last stage reached; the
+        // final write_shutdown marks it complete. Off by default: the record is then
+        // written once at the end exactly as before.
+        if (incremental_shutdown_record)
+            runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
     };
+    if (incremental_shutdown_record) {
+        // Publish a fresh, empty, incomplete record before any teardown stage so a hang
+        // in the first stage cannot leave a previous run's completed record in place.
+        runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
+    }
 
     prepare_world_entry();
 

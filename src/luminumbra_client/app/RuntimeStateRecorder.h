@@ -82,10 +82,6 @@ public:
 
     void mark_unhandled_exception(uint32_t exception_code);
 
-    // Hang diagnostics: record that the main-loop heartbeat stalled (phase
-    // "hang_suspected") without touching any other last-known field.
-    void mark_hang(uint64_t last_heartbeat, double stalled_seconds, const std::string& report);
-
     // Incremental shutdown record: rewrites shutdown.json after every milestone with
     // "complete": false so a hang during teardown localizes to the last stage reached.
     void write_shutdown_progress(const std::vector<std::string>& milestones);

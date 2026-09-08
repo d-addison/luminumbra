@@ -22,10 +22,11 @@ void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder);
 // pipeline end to end (--forced-crash).
 [[noreturn]] void TriggerForcedCrash();
 
-// Hang diagnostics (called from the HangWatchdog thread): on Windows suspends the
-// main thread, writes its symbolized stack to <crash_dir>/hang-<ts>.txt and a
-// minidump beside it, resumes the thread and marks the runtime state
-// "hang_suspected". Elsewhere writes the text record only. Never throws.
-void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds);
+// Hang diagnostics (called from the HangWatchdog thread). Best-effort and
+// allocation-free: writes <crash_dir>/hang-<ts>.txt with raw file calls and, on
+// Windows, asks an external process (rundll32 comsvcs.dll MiniDump) for a
+// minidump beside it. It never suspends the main thread, never logs and never
+// enters DbgHelp, so it cannot deadlock against a hung main thread. Never throws.
+void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) noexcept;
 
 } // namespace Luminumbra::Client::App

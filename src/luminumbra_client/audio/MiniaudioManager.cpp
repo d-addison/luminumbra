@@ -928,6 +928,7 @@ void MiniaudioManager::SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* ph
         return;
     }
     m_cluster_physics_system = physics_system;
+    ++m_cluster_physics_binding_changes;
     if (physics_system) {
         LUMINUMBRA_CORE_INFO("Physics system integration established for audio spatial clustering");
     } else {

@@ -186,17 +186,6 @@ void RuntimeStateRecorder::write_shutdown_progress(const std::vector<std::string
     output << std::setw(2) << artifact << '\n';
 }
 
-void RuntimeStateRecorder::mark_hang(uint64_t last_heartbeat,
-                                     double stalled_seconds,
-                                     const std::string& report) {
-    m_last_known["phase"] = "hang_suspected";
-    m_last_known["hang"] = {{"last_heartbeat", last_heartbeat},
-                            {"stalled_seconds", stalled_seconds},
-                            {"report", report}};
-    m_last_known["timestamp_utc"] = TimestampUtc();
-    write_last_known();
-}
-
 void RuntimeStateRecorder::mark_unhandled_exception(uint32_t exception_code) {
     m_last_known["phase"] = "unhandled_exception";
     m_last_known["exception_code"] = exception_code;

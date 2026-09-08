@@ -1,8 +1,10 @@
 #pragma once
+
 #include "audio/IAudioManager.h"
 #include "audio/MixerModel.h"
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <miniaudio.h>
 #include <nlohmann/json.hpp>
 #include <random>
@@ -162,6 +164,11 @@ public:
 
     // Spatial Audio Clustering Integration
     void SetPhysicsSystem(::Luminumbra::Systems::PhysicsSystem* physics_system);
+    // Number of times the spatial-cluster physics binding actually changed (the
+    // per-frame re-issue is not a change). Diagnostic; used by the regression test.
+    std::uint64_t physics_binding_changes() const {
+        return m_cluster_physics_binding_changes;
+    }
     void EnableSpatialClustering(bool enabled) {
         m_spatial_clustering_enabled = enabled;
     }
@@ -327,6 +334,7 @@ private:
     // every in-game frame so a world (re)load rebinds automatically; the binding is
     // logged only when this pointer actually changes, never per frame.
     ::Luminumbra::Systems::PhysicsSystem* m_cluster_physics_system = nullptr;
+    std::uint64_t m_cluster_physics_binding_changes = 0;
 };
 
 } // namespace Luminumbra::Client

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -44,13 +45,6 @@ RuntimeStateRecorder*& RuntimeStateRecorderSlot() {
 #if defined(_WIN32)
 
 namespace {
-
-// Duplicated handle of the thread that installed the crash handler (the main
-// thread), so the hang report can suspend and walk it from the watchdog thread.
-HANDLE& MainThreadHandleSlot() {
-    static HANDLE handle = nullptr;
-    return handle;
-}
 
 bool WriteMiniDump(EXCEPTION_POINTERS* exception_info,
                    const std::filesystem::path& crash_dir,
@@ -272,106 +266,138 @@ LONG WINAPI RuntimeUnhandledExceptionFilter(EXCEPTION_POINTERS* exception_info) 
 
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
     RuntimeStateRecorderSlot() = &recorder;
-    HANDLE duplicated = nullptr;
-    if (DuplicateHandle(GetCurrentProcess(),
-                        GetCurrentThread(),
-                        GetCurrentProcess(),
-                        &duplicated,
-                        0,
-                        FALSE,
-                        DUPLICATE_SAME_ACCESS)) {
-        MainThreadHandleSlot() = duplicated;
-    }
     SetUnhandledExceptionFilter(RuntimeUnhandledExceptionFilter);
 }
 
-void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) {
+namespace {
+
+// Fixed-size, allocation-free writer used by the hang report: the main thread may
+// be blocked inside the allocator or the logger, so this path touches neither.
+struct RawFile {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    explicit RawFile(const wchar_t* path) {
+        handle = CreateFileW(path,
+                             GENERIC_WRITE,
+                             FILE_SHARE_READ,
+                             nullptr,
+                             CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+    }
+    ~RawFile() {
+        if (handle != INVALID_HANDLE_VALUE)
+            CloseHandle(handle);
+    }
+    void line(const char* text) noexcept {
+        if (handle == INVALID_HANDLE_VALUE)
+            return;
+        DWORD written = 0;
+        WriteFile(handle, text, static_cast<DWORD>(std::strlen(text)), &written, nullptr);
+        WriteFile(handle, "\r\n", 2, &written, nullptr);
+        FlushFileBuffers(handle);
+    }
+};
+
+} // namespace
+
+void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) noexcept {
+    // Best-effort, Windows-only. The report is written with raw Win32 file calls and
+    // the dump is taken by an external process (rundll32 comsvcs.dll MiniDump), so
+    // nothing here suspends, allocates on, logs from or shares DbgHelp with the
+    // possibly-hung main thread. Symbolize the dump offline with the retained PDB.
     RuntimeStateRecorder* recorder = RuntimeStateRecorderSlot();
-    const std::filesystem::path crash_dir =
-        recorder ? recorder->crash_dir() : std::filesystem::path("crashes");
-    std::error_code ec;
-    std::filesystem::create_directories(crash_dir, ec);
-    const std::filesystem::path path = crash_dir / ("hang-" + TimestampForFile() + ".txt");
-    std::ofstream out(path);
-    auto emit = [&](const std::string& line) {
-        if (out) {
-            out << line << "\n";
-            out.flush();
-        }
-        LUMINUMBRA_CORE_CRITICAL("{}", line);
-    };
-    {
-        char b[200];
-        std::snprintf(b,
-                      sizeof b,
-                      "=== LUMINUMBRA HANG  heartbeat=%llu  stalled=%.1fs ===",
-                      static_cast<unsigned long long>(last_heartbeat),
-                      stalled_seconds);
-        emit(b);
-    }
-    const HANDLE proc = GetCurrentProcess();
-    const HANDLE main_thread = MainThreadHandleSlot();
-    if (!main_thread) {
-        emit("(no main thread handle — crash handler was not installed)");
-    } else if (SuspendThread(main_thread) == static_cast<DWORD>(-1)) {
-        emit("(SuspendThread failed — cannot walk the main thread)");
-    } else {
-        CONTEXT ctx{};
-        ctx.ContextFlags = CONTEXT_FULL;
-        if (GetThreadContext(main_thread, &ctx)) {
-            char b[256];
-            std::snprintf(b,
-                          sizeof b,
-                          "main thread regs: rip=0x%llX rsp=0x%llX rbp=0x%llX",
-                          (unsigned long long)ctx.Rip,
-                          (unsigned long long)ctx.Rsp,
-                          (unsigned long long)ctx.Rbp);
-            emit(b);
-            SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
-            SymInitialize(proc, nullptr, TRUE);
-            WalkStackFrames(proc, main_thread, ctx, emit);
-            SymCleanup(proc);
-        } else {
-            emit("(GetThreadContext failed — cannot walk the main thread)");
-        }
-        const bool wrote_dump = WriteMiniDump(nullptr, crash_dir, "hang");
-        emit(wrote_dump ? "minidump written beside this report (hang-*.dmp)"
-                        : "minidump NOT written");
-        ResumeThread(main_thread);
-    }
-    emit("=== end hang report ===  (resolve file:line with tools/gates/symbolize-crash.ps1)");
+    wchar_t dir[MAX_PATH] = L"crashes";
     if (recorder) {
-        recorder->mark_hang(last_heartbeat, stalled_seconds, path.string());
+        const std::wstring wide = recorder->crash_dir().wstring();
+        if (wide.size() < MAX_PATH)
+            std::wcsncpy(dir, wide.c_str(), MAX_PATH - 1);
     }
-    if (auto& lg = Log::GetCoreLogger())
-        lg->flush();
+    CreateDirectoryW(dir, nullptr);
+    SYSTEMTIME st{};
+    GetSystemTime(&st);
+    wchar_t stamp[32];
+    swprintf(stamp,
+             32,
+             L"%04u%02u%02u-%02u%02u%02u",
+             st.wYear,
+             st.wMonth,
+             st.wDay,
+             st.wHour,
+             st.wMinute,
+             st.wSecond);
+    wchar_t report_path[MAX_PATH], dump_path[MAX_PATH];
+    swprintf(report_path, MAX_PATH, L"%s\\hang-%s.txt", dir, stamp);
+    swprintf(dump_path, MAX_PATH, L"%s\\hang-%s.dmp", dir, stamp);
+
+    RawFile report(report_path);
+    char line[512];
+    std::snprintf(line,
+                  sizeof line,
+                  "=== LUMINUMBRA HANG  heartbeat=%llu  stalled=%.1fs  pid=%lu ===",
+                  static_cast<unsigned long long>(last_heartbeat),
+                  stalled_seconds,
+                  static_cast<unsigned long>(GetCurrentProcessId()));
+    report.line(line);
+
+    wchar_t command[MAX_PATH * 2 + 96];
+    swprintf(command,
+             MAX_PATH * 2 + 96,
+             L"rundll32.exe C:\\Windows\\System32\\comsvcs.dll,MiniDump %lu \"%s\" mini",
+             static_cast<unsigned long>(GetCurrentProcessId()),
+             dump_path);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(
+        nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (started) {
+        const DWORD wait = WaitForSingleObject(pi.hProcess, 120000);
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        std::snprintf(line,
+                      sizeof line,
+                      "external minidump: %s (wait=%lu exit=%lu)",
+                      wait == WAIT_OBJECT_0 ? "finished" : "timed out",
+                      static_cast<unsigned long>(wait),
+                      static_cast<unsigned long>(code));
+        report.line(line);
+    } else {
+        std::snprintf(line,
+                      sizeof line,
+                      "external minidump: CreateProcess failed (error %lu)",
+                      static_cast<unsigned long>(GetLastError()));
+        report.line(line);
+    }
+    report.line(
+        "symbolize offline: cdb -z <hang-*.dmp> -c \"~*k; q\" with the PDB beside the executable");
+    report.line("=== end hang report ===");
 }
 #else
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
     RuntimeStateRecorderSlot() = &recorder;
 }
 
-void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) {
+void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) noexcept {
+    // Text record only (no stack capture off Windows); raw stdio, no logger, no
+    // allocation beyond the path string built before any file is touched.
     RuntimeStateRecorder* recorder = RuntimeStateRecorderSlot();
-    const std::filesystem::path crash_dir =
-        recorder ? recorder->crash_dir() : std::filesystem::path("crashes");
+    std::string dir = recorder ? recorder->crash_dir().string() : std::string("crashes");
     std::error_code ec;
-    std::filesystem::create_directories(crash_dir, ec);
-    const std::filesystem::path path = crash_dir / ("hang-" + TimestampForFile() + ".txt");
-    {
-        std::ofstream out(path);
-        out << "=== LUMINUMBRA HANG  heartbeat=" << last_heartbeat
-            << "  stalled=" << stalled_seconds << "s ===\n(stack capture is Windows-only)\n";
+    std::filesystem::create_directories(dir, ec);
+    char name[128];
+    std::snprintf(
+        name, sizeof name, "/hang-%llu.txt", static_cast<unsigned long long>(last_heartbeat));
+    dir += name;
+    if (FILE* f = std::fopen(dir.c_str(), "w")) {
+        std::fprintf(f,
+                     "=== LUMINUMBRA HANG  heartbeat=%llu  stalled=%.1fs ===\n(stack capture is "
+                     "Windows-only)\n",
+                     static_cast<unsigned long long>(last_heartbeat),
+                     stalled_seconds);
+        std::fclose(f);
     }
-    LUMINUMBRA_CORE_CRITICAL("main-loop heartbeat stalled for {:.1f}s (heartbeat {}); report {}",
-                             stalled_seconds,
-                             last_heartbeat,
-                             path.string());
-    if (recorder) {
-        recorder->mark_hang(last_heartbeat, stalled_seconds, path.string());
-    }
-    if (auto& lg = Log::GetCoreLogger())
-        lg->flush();
 }
 #endif
 
