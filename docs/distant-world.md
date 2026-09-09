@@ -96,7 +96,9 @@ interior sightlines come from V1 and V2 bricks, which sample the same cave
 field.
 
 One tier table replaces the separate far-range constants and the differing
-1,536 m and 3,000 m horizon figures in code, comments and gates.
+1,536 m and 3,000 m horizon figures in code, comments and gates. The table is
+declared first and adopted by runtime streaming and the gates in the slices
+that build the tiers, so the replacement is staged rather than optional.
 
 Current behaviour: two pristine heightfield tiers (4 m to 768 m, 8 m to about
 3,000 m) with a 3,200 m far plane; edits reach far tiles only through
@@ -104,6 +106,50 @@ authoritative SDF brick overlays captured from chunks that are still resident,
 because the far store is never attached to a save directory at runtime; full
 lattices exist only for chunks generated or retained at the full live detail
 level, while chunks first generated at a coarser level carry heightmaps only.
+
+### Far-range declaration and compatibility
+
+`src/luminumbra_common/world/FarTierTable.h` declares the
+ladder above as a header-only `constexpr` table in `Luminumbra::World`. New
+volumetric far code reads this table instead of introducing local range
+constants. For tier number `t` in 1 through 5, sample spacing is
+`4 * 2^(t-1)` metres, brick edge is `4 * spacing`, tile edge is
+`128 * spacing`, and horizontal outer radius is `256 * spacing`.
+
+The source API exposes `kFarTierCount`, `kFarTierTable`, the one-based
+`FarTierAt(t)` accessor, and `kFarOuterRadiusMeters`. Each `FarTierDimensions`
+entry has integer metre fields `sample_spacing_meters`, `brick_edge_meters`,
+`tile_edge_meters`, and `outer_radius_meters`. `FarTierForHorizontalDistance`
+returns the one-based nominal band owner for an XZ camera-to-nearest-tile
+distance: V1 owns `[0, 1024]`, then each tier owns
+`(previous outer radius, own outer radius]`. Exact radii belong to the finer
+tier, including V5's outer edge. Actual live coverage, arrival fallback and
+one-brick overlap remain obligations of later slices.
+
+This is a source API addition, with no serialized file, record, field, artifact
+key or feature switch added to the engine. An absent header fails compilation;
+invalid table dimensions fail its compile-time invariants. `FarTierAt` refuses
+zero and unsupported or future tier numbers with `std::nullopt`, without
+clamping or indexing out of bounds. The distance accessor returns
+`std::nullopt` for negative, non-finite or beyond-horizon values. There is no
+runtime table loader or format version to accept, migrate or reinterpret.
+`test/common/FarTierTable_test.cpp` adds five cases
+to `common_tests` covering the published values, nesting, angular density,
+exact boundaries and invalid inputs; a missing source fails configuration or
+build, and a broken contract fails its tests.
+
+The legacy two-tier heightfield path remains pinned to F1 = 768 m,
+F2 = 3,000 m, fragment clips = 176 m and 3,050 m, and camera far plane =
+3,200 m. Removing the unreferenced `NEAR_FIELD_DISTANCE` and
+`FAR_FIELD_DISTANCE` declarations changes no consumer. The frontier gate
+continues to assert the reported missing-region count for the runtime wanted
+set, without independently computing a coverage radius. Its existing
+`luminumbra.farlod_horizon.v1` artifact still writes the historical
+`thresholds.f2_outer_range_m` value 1,536; the gate never reads that field.
+That value is retained solely to preserve artifact bytes and is not the
+runtime horizon. No frontier capture or wider-radius qualification is claimed
+by this declaration. Runtime constants, gate assertions, payloads, world
+hashes and configuration remain unchanged.
 
 ### Vertical coverage and the cave field
 
@@ -235,7 +281,7 @@ and no region ledger exists.
 | Plants, soil, irrigation, living-world ladder | Every tick | Coarse cadence; each system's coarse rule is specified in its slice (rounding order, saturation, threshold crossings, environmental sampling, event multiplicity); integer-linear paths must equal k single ticks exactly, and every other path is qualified to at most one stage transition or one event of divergence per cadence period against the full-rate trajectory, with resume hooks capped at one calendar day | No advance; bounded resume hook |
 | Wildlife | Full utility AI, physics avatars | Persisted; coarse needs, lifespan, reproduction and region-to-region travel at cadence; promoted to full AI on approach; travel into a frozen region parks the creature at the border until the region thaws | No advance |
 | Water | Rotating cell window | Authoritative water steps on the host fixed tick (today the client host steps it per rendered frame), with eligibility from resident simulation arrays and the ledger, independent of render streaming. The cell budget is shared in indivisible units of one chunk window: shares are proportional to awake chunks, rounded down, with the remainder carried as persisted service debt; service is starvation-free in the bounded sense that every due region receives at least one chunk window within a number of its due ticks no greater than the total awake chunks divided by the per-tick window budget, a bound the diagnostic panel publishes; reduced cadences use power-of-two divisors with a common phase so neighbouring due ticks coincide, a border steps only on ticks when both regions are due (at the coarser cadence) with a paired reservation and paired accounting, and a border to a frozen region is sealed | Millimetre arrays kept, no flow |
-| Wind, weather, aether ambience | Stateful world-anchored pages | A 24 m cell is owned by the region containing its centre; a page update is masked to owned cells whose region is due this tick, a partially active page seeds only its owned cells on first activation, and exchange across a cell boundary follows the same shared-boundary schedule as water (both owners due, at the coarser cadence, sealed toward frozen regions), so a frozen region's cells and digest never change; storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, advance and schedule strikes only while their region is due, and transfer ownership across a border only on a tick when the destination is due, otherwise waiting at the border; a page entering activation is seeded from seed, tick and position | Owned cells immutable; no catch-up (this deliberately replaces the energy field's catch-up rule) |
+| Wind, weather, aether ambience | Stateful world-anchored pages in C4; C1 uses a persisted fixed ambient anchor independent of respawn | A 24 m cell is owned by the region containing its centre; a page update is masked to owned cells whose region is due this tick, a partially active page seeds only its owned cells on first activation, and exchange across a cell boundary follows the same shared-boundary schedule as water (both owners due, at the coarser cadence, sealed toward frozen regions), so a frozen region's cells and digest never change; storms are owned by the region containing their centre, carry an absolute spawn tick and an active-age accumulator, advance and schedule strikes only while their region is due, and transfer ownership across a border only on a tick when the destination is due, otherwise waiting at the border; a page entering activation is seeded from seed, tick and position | Owned cells immutable; no catch-up (this deliberately replaces the energy field's catch-up rule) |
 | Existing energy layer (`aether_state.efs`) | Unchanged | Under active regions its window policy is replaced by region activation with the same no-catch-up rule; its serializer never mutates state, the per-owner cadence and active-age metadata live in the ledger record (the EFS1 payload is unchanged), frozen pages hash as their stored bytes, and an all-zero layer writes no record while the snapshot index records the record as intentionally absent | Frozen pages kept |
 | Scent and foraging | Spawn-anchored near facility; the scent grid is historical state and is persisted with the page records so near consumers resume continuously | Not simulated at distance; distant creatures do not use scent | — |
 | Ground objects | Settle, persist, despawn | Despawn deadlines are active-age counters, advancing only while the owning region is due | Nothing advances |
@@ -249,8 +295,15 @@ simulation-only residency class is not part of this contract and would be a
 separate decision.
 
 Current behaviour: every creature and plant in the registry ticks every tick
-regardless of distance; creatures are not persisted; wind, weather, aether,
-scent, soil and irrigation are fixed grids anchored on the spawn point.
+regardless of distance; creatures are not persisted. With `sim.active_regions`
+off, wind, weather and aether remain spawn-anchored. C1's enabled path persists
+`ambientFieldAnchor` beside the clock and uses it for both live ambient updates
+and reconstruction, so saving a new player respawn point preserves surviving
+storms. These fixed grids do not follow the player; C4 replaces them with the
+world-anchored pages above. Scent, soil and irrigation remain spawn-anchored.
+C1 also preserves an empty energy layer's non-aligned legacy cadence in an
+EFS1 header-only record; once C4 stores cadence in the ledger, the all-zero
+record omission in the table applies without losing that phase.
 
 ## Simulation clock and calendar
 

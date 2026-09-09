@@ -25,9 +25,11 @@ const float SPEED = 2.5f;
 const float SENSITIVITY = 0.1f;
 const float ZOOM = 45.0f;
 const float NEAR_PLANE = 0.1f;
-// Must exceed the far-LOD  outer edge (1536 m) plus diagonal margin:
-// far-region triangles straddling the projection far plane rasterize as
-// sky-crossing sliver streaks ( root cause).
+// Legacy two-tier heightfield path: F2 streams to 3000 m and fragments clip
+// at 3050 m; the 3200 m far plane leaves projection margin. Far-region
+// triangles straddling that plane can rasterize as sky-crossing slivers.
+// The volumetric FarTierTable.h ladder supersedes these ranges when it lands;
+// its camera far-plane change is separate from the declaration.
 const float FAR_PLANE = 3200.0f;
 
 // Right-handed, finite reversed-Z projection for GL_ZERO_TO_ONE: near -> 1,

@@ -104,6 +104,7 @@ add_executable(common_tests
     common/EngineContracts_test.cpp
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
+    common/FarTierTable_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
@@ -124,6 +125,7 @@ add_executable(common_tests
     common/ReplayStream_test.cpp
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
+    common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
     common/TerrainPresetLoader_test.cpp
@@ -777,6 +779,7 @@ add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
     rendering/terrain_culling_test.cpp
     rendering/texture_file_test.cpp
+    rendering/render_clock_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE

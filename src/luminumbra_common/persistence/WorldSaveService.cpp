@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cerrno>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -125,6 +126,35 @@ void AddError(std::vector<std::string>* errors, std::string message) {
     if (errors) {
         errors->push_back(std::move(message));
     }
+}
+
+bool ReadAmbientAnchor(const nlohmann::json& metadata,
+                       std::optional<Vec3>& anchor,
+                       std::string& error) {
+    anchor.reset();
+    if (!metadata.contains("simulationTick") && !metadata.contains("calendar"))
+        return true;
+    // Older clock snapshots used spawnPoint itself as the ambient anchor.
+    const char* key = metadata.contains("ambientFieldAnchor") ? "ambientFieldAnchor" : "spawnPoint";
+    if (!metadata.contains(key))
+        return true;
+    const auto& value = metadata.at(key);
+    Vec3 point{};
+    for (int i = 0; i < 3; ++i) {
+        const char* axis = i == 0 ? "x" : (i == 1 ? "y" : "z");
+        if (!value.is_object() || value.size() != 3 || !value.contains(axis) ||
+            !value.at(axis).is_number()) {
+            error = "Corrupt world metadata: invalid ambient field anchor.";
+            return false;
+        }
+        point[i] = value.at(axis).get<float>();
+        if (!std::isfinite(point[i])) {
+            error = "Corrupt world metadata: ambient field anchor must be finite.";
+            return false;
+        }
+    }
+    anchor = point;
+    return true;
 }
 
 std::uint64_t CurrentProcessIdValue() {
@@ -681,6 +711,26 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
                                      std::vector<std::string>* errors) {
     if (!validate_save(save_dir, errors))
         return false;
+    world::WorldClock clock;
+    std::string clock_error;
+    const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    // Legacy metadata is opaque input to this helper. Only clock-bearing input
+    // opts into the new validation; the existing destination is still validated.
+    const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
+    std::optional<Vec3> ambient_anchor;
+    if (has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+                      !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
+        AddError(errors, clock_error);
+        return false;
+    }
+    world::WorldClock previous_clock;
+    bool requires_active_regions = false;
+    if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
+        return false;
+    if (requires_active_regions && !has_clock) {
+        AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
+        return false;
+    }
     const auto destination = save_dir / "world_info.json";
     std::filesystem::path temp;
     if (!WriteDurableRegionTemp(destination, bytes, temp, errors))
@@ -695,6 +745,39 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
         return false;
     }
     return true;
+}
+
+bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
+                                           world::WorldClock& clock,
+                                           bool& requires_active_regions,
+                                           std::vector<std::string>* errors,
+                                           std::optional<Vec3>* ambient_anchor) {
+    clock = world::WorldClock{};
+    requires_active_regions = false;
+    if (ambient_anchor)
+        ambient_anchor->reset();
+    try {
+        const auto path = save_dir / "world_info.json";
+        if (!std::filesystem::exists(path))
+            return true;
+        std::ifstream input(path, std::ios::binary);
+        const auto metadata = nlohmann::json::parse(input);
+        std::string error;
+        std::optional<Vec3> anchor;
+        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+            !ReadAmbientAnchor(metadata, anchor, error)) {
+            AddError(errors, error);
+            return false;
+        }
+        requires_active_regions =
+            metadata.contains("simulationTick") || metadata.contains("calendar");
+        if (ambient_anchor)
+            *ambient_anchor = anchor;
+        return true;
+    } catch (const std::exception& e) {
+        AddError(errors, std::string("Corrupt world metadata: ") + e.what());
+        return false;
+    }
 }
 
 std::filesystem::path WorldSaveService::world_state_path(const std::filesystem::path& save_dir) {
@@ -1001,6 +1084,14 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     return reject("unsupported future world metadata container version " +
                                   version.dump());
                 return reject("corrupt world metadata container version");
+            }
+            if (metadata.contains("simulationTick") || metadata.contains("calendar")) {
+                world::WorldClock clock;
+                std::string error;
+                std::optional<Vec3> anchor;
+                if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+                    !ReadAmbientAnchor(metadata, anchor, error))
+                    return reject(error);
             }
         }
         const auto chunks_dir = save_dir / kChunksDirectoryName;
