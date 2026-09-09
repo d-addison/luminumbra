@@ -89,23 +89,39 @@ tick at every boundary. Ledger bytes are staged as unique
 `chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place.
 A separately mounted region directory causes replacement to fail across devices;
 no copy fallback compromises atomicity. Termination can leave staging debris in
-the save root, but loading and later saves ignore it. Unknown files inside the region
+the save root; loading and later saves ignore it, and the next successful ledger
+save reclaims it, so repeated interruptions cannot accumulate ledger copies until
+the volume is exhausted. Reclamation is safe because saves are serialized per
+destination by construction, so a staging file that already exists was abandoned
+by a process that is no longer writing it. It is best effort: a file that cannot
+be removed is left alone and never blocks the save. Unknown files inside the region
 directory are still refused. The POSIX subprocess regression exits after the
-staging file is flushed and closed and verifies recovery while that file remains.
+staging file is flushed and closed, verifies recovery while that file remains, and
+then verifies the next successful save removes it.
 
-An accepted partial pair can contain an older ledger than its saved clock. Session
-load rebases only the in-memory ledger header to the restored clock. It preserves
+An accepted partial pair can contain an older ledger than its saved clock. The
+ledger therefore carries two tick values. The canonical scheduler tick advances
+only when the scheduler runs and is part of the hash projection. The validation
+ceiling is the latest world time the ledger knows about, bounds every persisted
+record stamp, and is observational bookkeeping excluded from the hash.
+
+Session load raises only the ceiling to the restored clock. The canonical tick,
 every region record, hold counter, pressure, simulation cursor, frozen digest,
-configuration and anchor. It executes no scheduler tick or catch-up. Immediate
-save/edit stamps therefore fit under the header, and the next actual host tick
-uses the restored absolute clock. The raw persistence reader still exposes the
+configuration and anchor are preserved, and no scheduler tick or catch-up runs.
+Recovery therefore cannot move the hash projection of a state nobody simulated.
+Immediate save and edit stamps fit under the ceiling, scheduling refuses any tick
+at or below it because those ticks have already elapsed, and the next actual host
+tick uses the restored absolute clock. Saving does not raise the ceiling: a save
+whose clock runs ahead of everything the ledger knows about stamps a last-save
+value above the ceiling and fails its own decode check, which is how an
+inconsistent metadata and ledger pair is refused rather than written. The raw persistence reader still exposes the
 durable older header for validation and inspection. Recovery tests reload rewind
 metadata failures, forward ledger failures and terminated ledger writes into
 fresh sessions and save immediately, both unchanged and after an edit.
 
 Absent means an empty ledger, with unlimited scheduling defaults and no saved
 local anchor; the host supplies its spawn feet position for a legacy save. Its
-header tick starts at the restored WorldClock tick without executing a tick, so
+ceiling starts at the restored WorldClock tick without executing a tick, so
 an immediate edit or pin can be saved before simulation advances.
 No old-world migration occurs. Corrupt, truncated, oversized, duplicate,
 misordered or inconsistent records refuse with `Corrupt active-region ledger.`

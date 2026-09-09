@@ -80,7 +80,9 @@ class ActiveRegionLedger {
 public:
     static constexpr std::uint32_t kMaxRegions = 1u << 20;
     static constexpr std::size_t kRecordBytes = 104;
-    static constexpr std::size_t kHeaderBytes = 48;
+    // Magic, version, reserved, canonical tick, validation ceiling, config,
+    // anchor presence and anchor.
+    static constexpr std::size_t kHeaderBytes = 56;
     static constexpr std::size_t kMaxFileBytes = kHeaderBytes + kMaxRegions * kRecordBytes + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
     static constexpr const char* kFutureMessage =
@@ -96,8 +98,17 @@ public:
     [[nodiscard]] const RegionSchedulerConfig& config() const {
         return m_config;
     }
+    // The canonical scheduler tick. Advances only when the scheduler runs, and
+    // is part of the hash projection.
     [[nodiscard]] std::uint64_t tick() const {
         return m_tick;
+    }
+    // The decode validation ceiling: no persisted record stamp may exceed it.
+    // Reconciliation after an interrupted save raises this and never the
+    // canonical tick, so recovery cannot move the hash projection. Observational
+    // bookkeeping, persisted but excluded from the hash.
+    [[nodiscard]] std::uint64_t header_tick() const {
+        return m_headerTick;
     }
     [[nodiscard]] const std::optional<Vec3>& local_anchor() const {
         return m_localAnchor;
@@ -108,8 +119,9 @@ public:
     void set_populated(RegionKey key, bool populated);
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
     void mark_saved(const WorldClock& clock);
-    // An accepted partial save may have an older ledger than its clock. Rebase
-    // only the header on load; never run catch-up or alter any region record.
+    // An accepted partial save may have an older ledger than its clock. Raise
+    // only the validation ceiling on load; never run catch-up, alter any region
+    // record, or move the canonical tick that the hash projection reads.
     void restore_clock(const WorldClock& clock);
     [[nodiscard]] static RegionKey region_at(const Vec3& position);
     [[nodiscard]] static std::uint32_t phase(RegionKey key, std::uint8_t shift);
@@ -141,6 +153,7 @@ private:
     std::map<RegionKey, ActiveRegionRecord> m_records;
     std::optional<Vec3> m_localAnchor;
     std::uint64_t m_tick = 0;
+    std::uint64_t m_headerTick = 0;
 };
 
 } // namespace Luminumbra::world

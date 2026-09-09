@@ -60,7 +60,8 @@ private:
 
 ActiveRegionLedger::ActiveRegionLedger(RegionSchedulerConfig config, const WorldClock& clock)
     : m_config(config)
-    , m_tick(clock.tick()) {
+    , m_tick(clock.tick())
+    , m_headerTick(clock.tick()) {
     if (!ValidConfig(config))
         throw std::invalid_argument("Invalid active-region scheduler configuration");
 }
@@ -80,13 +81,14 @@ void ActiveRegionLedger::set_local_anchor(const Vec3& walking_feet) {
             (*m_localAnchor)[axis] = 0.0f;
 }
 ActiveRegionRecord& ActiveRegionLedger::activate(RegionKey key, const WorldClock& clock) {
-    if (!ValidKey(key) || clock.tick() < m_tick)
+    if (!ValidKey(key) || clock.tick() < m_headerTick)
         throw std::invalid_argument("Invalid region activation");
     if (!m_records.contains(key) && m_records.size() == kMaxRegions)
         throw std::length_error("Active-region ledger capacity reached");
     auto [it, added] = m_records.try_emplace(key);
     if (added)
         it->second.first_active = clock.tick();
+    m_headerTick = std::max(m_headerTick, clock.tick());
     return it->second;
 }
 void ActiveRegionLedger::mark_edited(RegionKey key, const WorldClock& clock) {
@@ -114,11 +116,18 @@ void ActiveRegionLedger::mark_saved(const WorldClock& clock) {
         (void)key;
         record.last_save = clock.tick();
     }
+    // The ceiling is deliberately not raised here. A save whose clock runs ahead
+    // of everything this ledger knows about must stamp a last_save above the
+    // ceiling and fail its own decode check, which is how an inconsistent
+    // metadata/ledger pair is refused rather than written.
 }
 void ActiveRegionLedger::restore_clock(const WorldClock& clock) {
-    if (clock.tick() < m_tick)
+    if (clock.tick() < m_headerTick)
         throw std::invalid_argument("Cannot restore a region ledger ahead of the world clock");
-    m_tick = clock.tick();
+    // Only the validation ceiling moves. The canonical tick belongs to the
+    // scheduler, so an accepted state keeps the hash projection it was saved
+    // with and recovery cannot rewrite history.
+    m_headerTick = clock.tick();
 }
 std::uint32_t ActiveRegionLedger::phase(RegionKey key, std::uint8_t shift) {
     if (shift > 16)
@@ -173,7 +182,10 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
                                       std::optional<std::span<const Vec3>> replicated_anchors,
                                       std::span<const RegionWork> work,
                                       const DurableDigest& durable_digest) {
-    if (clock.tick() <= m_tick)
+    // The ceiling, not the canonical tick, is the latest world time this ledger
+    // knows about. After reconciling an interrupted save the canonical tick is
+    // older, and scheduling at an already elapsed tick would re-run it.
+    if (clock.tick() <= m_headerTick)
         throw std::invalid_argument("Region schedule requires a new absolute tick");
     const auto anchors = replicated_anchors.value_or(std::span<const Vec3>{});
     for (const auto& anchor : anchors)
@@ -280,6 +292,7 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
         }
     }
     m_tick = clock.tick();
+    m_headerTick = std::max(m_headerTick, clock.tick());
     std::string trace = "region_schedule:v1:";
     Append(trace, result.tick, 8);
     Append(trace, result.work, 8);
@@ -305,6 +318,8 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
 std::string ActiveRegionLedger::payload(bool observational) const {
     std::string bytes;
     Append(bytes, m_tick, 8);
+    if (observational)
+        Append(bytes, m_headerTick, 8);
     Append(bytes, m_config.work_limit, 8);
     Append(bytes, m_config.hold_ticks, 4);
     Append(bytes, m_config.reduced_shift, 1);
@@ -374,12 +389,14 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
             return false;
         ActiveRegionLedger result;
         result.m_tick = in.read(8);
+        result.m_headerTick = in.read(8);
         result.m_config.work_limit = in.read(8);
         result.m_config.hold_ticks = static_cast<std::uint32_t>(in.read(4));
         result.m_config.reduced_shift = static_cast<std::uint8_t>(in.read(1));
         const auto has_anchor = in.read(1);
         if (in.read(2) != 0 || has_anchor > 1 || !ValidConfig(result.m_config) ||
-            result.m_tick >= WorldClock::kTickLimit)
+            result.m_tick >= WorldClock::kTickLimit ||
+            result.m_headerTick >= WorldClock::kTickLimit || result.m_headerTick < result.m_tick)
             return false;
         Vec3 anchor{};
         for (int axis = 0; axis < 3; ++axis)
@@ -430,7 +447,7 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                                     r.frozen_at,
                                     r.last_save,
                                     r.last_decision})
-                if (tick > result.m_tick)
+                if (tick > result.m_headerTick)
                     return false;
             if (r.over_hold > result.m_config.hold_ticks ||
                 r.under_hold > result.m_config.hold_ticks || (r.over_hold && r.under_hold) ||

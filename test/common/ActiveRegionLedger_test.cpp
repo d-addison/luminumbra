@@ -106,11 +106,19 @@ TEST(ActiveRegionLedgerTest, RestoringNewerClockPreservesHoldsAndFrozenSimulatio
             ASSERT_EQ(record.frozen_digest, 0x123456789abcdef0ull);
         }
         auto loaded = Reload(ledger);
+        const auto canonical_before = loaded.canonical_bytes();
+        const auto tick_before = loaded.tick();
         loaded.restore_clock(WorldClock(100));
-        EXPECT_EQ(loaded.tick(), 100u);
+        // Reconciliation raises only the validation ceiling. The canonical tick
+        // and the hash projection belong to the scheduler and must not move
+        // without simulation, or recovery would rewrite an accepted state.
+        EXPECT_EQ(loaded.header_tick(), 100u);
+        EXPECT_EQ(loaded.tick(), tick_before);
+        EXPECT_EQ(loaded.canonical_bytes(), canonical_before);
         EXPECT_EQ(loaded.records(), ledger.records());
         EXPECT_EQ(loaded.config(), ledger.config());
         EXPECT_EQ(Reload(loaded).encode(), loaded.encode());
+        EXPECT_EQ(Reload(loaded).canonical_bytes(), canonical_before);
         const auto before = loaded.encode();
         EXPECT_THROW(loaded.restore_clock(WorldClock(99)), std::invalid_argument);
         EXPECT_EQ(loaded.encode(), before);
@@ -280,7 +288,7 @@ TEST(ActiveRegionLedgerTest, CanonicalLayoutAndObservationalExclusion) {
     ledger.set_populated(kFar, true);
     const auto bytes = ledger.encode();
     EXPECT_EQ(bytes.substr(0, 8), std::string("ARL1\x01\0\0\0", 8));
-    EXPECT_EQ(bytes.size(), 48u + 104u + 8u);
+    EXPECT_EQ(bytes.size(), 56u + 104u + 8u);
     const auto canonical = ledger.canonical_bytes();
     ledger.mark_saved(WorldClock(1));
     EXPECT_NE(ledger.encode(), bytes);
@@ -331,19 +339,21 @@ TEST(ActiveRegionLedgerTest, ValidChecksumsCannotHideInvalidRecordSemantics) {
             bytes[bytes.size() - 8 + i] = static_cast<char>((checksum >> (8 * i)) & 255);
         return bytes;
     };
-    // Header reserved/config/count; record key/flags/state/phase/hold/timestamp.
+    // Header reserved/ceiling/config/count; record key/flags/state/phase/hold/timestamp.
+    // A ceiling below the canonical tick is refused: recovery may raise it, never lower it.
     for (const auto& [offset, value] :
-         std::array<std::pair<std::size_t, unsigned char>, 11>{{{6, 1},
-                                                                {24, 0},
-                                                                {28, 17},
-                                                                {29, 2},
-                                                                {44, 2},
-                                                                {51, 127},
-                                                                {56, 128},
-                                                                {57, 3},
-                                                                {60, 1},
-                                                                {128, 3},
-                                                                {112, 2}}}) {
+         std::array<std::pair<std::size_t, unsigned char>, 12>{{{6, 1},
+                                                                {16, 0},
+                                                                {32, 0},
+                                                                {36, 17},
+                                                                {37, 2},
+                                                                {52, 2},
+                                                                {59, 127},
+                                                                {64, 128},
+                                                                {65, 3},
+                                                                {68, 1},
+                                                                {136, 3},
+                                                                {120, 2}}}) {
         SCOPED_TRACE(offset);
         ActiveRegionLedger restored;
         std::string error;

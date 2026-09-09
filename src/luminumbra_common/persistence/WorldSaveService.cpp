@@ -207,6 +207,33 @@ void RemoveTemporaryFile(const std::filesystem::path& path) {
     std::filesystem::remove(path, remove_error);
 }
 
+// Reclaim staging files abandoned by a terminated save. Saves are serialized per
+// destination by construction, so any staging file that already exists for this
+// destination was left by a process that is no longer writing it. Without this,
+// every interruption leaks a full ledger copy and repeated crashes exhaust the
+// volume. Best effort: a file that cannot be removed is left alone and never
+// blocks the save, because staging lives outside every scanned directory.
+std::size_t ReclaimAbandonedStaging(const std::filesystem::path& destination) {
+    std::error_code list_error;
+    const auto directory = destination.parent_path();
+    const auto prefix = destination.filename().string() + ".tmp.";
+    std::size_t reclaimed = 0;
+    std::filesystem::directory_iterator it(directory, list_error);
+    if (list_error)
+        return 0;
+    for (const auto& entry : it) {
+        std::error_code kind_error;
+        if (!entry.is_regular_file(kind_error) || kind_error)
+            continue;
+        if (entry.path().filename().string().rfind(prefix, 0) != 0)
+            continue;
+        std::error_code remove_error;
+        if (std::filesystem::remove(entry.path(), remove_error) && !remove_error)
+            ++reclaimed;
+    }
+    return reclaimed;
+}
+
 #if defined(_WIN32)
 
 std::string WindowsErrorMessage(DWORD error) {
@@ -797,7 +824,7 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
     saved.mark_saved(clock);
     world::ActiveRegionLedger checked;
     if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error) ||
-        ledger.tick() > clock.tick()) {
+        ledger.header_tick() > clock.tick()) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
@@ -971,7 +998,8 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     const auto bytes = saved.encode();
     world::ActiveRegionLedger checked;
     std::string error;
-    if (!world::ActiveRegionLedger::decode(bytes, checked, error) || ledger.tick() > clock.tick()) {
+    if (!world::ActiveRegionLedger::decode(bytes, checked, error) ||
+        ledger.header_tick() > clock.tick()) {
         AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
         return false;
     }
@@ -983,6 +1011,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         // The save root is on the save filesystem; replacement refuses EXDEV
         // if a separately mounted chunks/region/ directory violates that layout.
         const auto staging = save_dir / path.filename();
+        ReclaimAbandonedStaging(staging);
         if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
             return false;
         if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
@@ -1392,7 +1421,7 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             bool required = false;
             if (!read_clock_metadata(save_dir, clock, required, &errors))
                 return reject("");
-            if (ledger.tick() > clock.tick())
+            if (ledger.header_tick() > clock.tick())
                 return reject(world::ActiveRegionLedger::kCorruptMessage);
         }
         Ecs::EntityRegistrySnapshot plants;

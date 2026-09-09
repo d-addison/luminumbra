@@ -496,7 +496,12 @@ void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
         }
         ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
         EXPECT_EQ(loaded.GetSimulationTickCount(), tick);
-        EXPECT_EQ(loaded.GetActiveRegionLedger().tick(), tick);
+        // Reconciliation raises only the validation ceiling. The canonical tick
+        // stays where the interrupted save left it, so recovery cannot move the
+        // hash projection of an accepted state.
+        EXPECT_EQ(loaded.GetActiveRegionLedger().tick(), durable.tick());
+        EXPECT_EQ(loaded.GetActiveRegionLedger().header_tick(), tick);
+        EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(), durable.canonical_bytes());
         EXPECT_EQ(loaded.GetActiveRegionLedger().records(), durable.records());
         EXPECT_EQ(loaded.GetActiveRegionLedger().config(), durable.config());
         EXPECT_EQ(loaded.GetActiveRegionLedger().local_anchor(), durable.local_anchor());
@@ -669,7 +674,15 @@ TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAnd
     jobs.startup(1);
     ASSERT_NO_FATAL_FAILURE(
         CheckPartialPairReloadAndSave(root, jobs, save.filename().string(), save));
-    EXPECT_TRUE(fs::exists(debris.front())); // recovery never relies on cleaning it up
+    // Recovery never depends on cleaning the staging file up, but the next
+    // successful save must reclaim it. Otherwise every interruption leaks a full
+    // ledger copy and repeated crashes exhaust the volume.
+    std::size_t remaining = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(save))
+        if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
+            ++remaining;
+    EXPECT_EQ(remaining, 0u);
+    EXPECT_FALSE(fs::exists(debris.front()));
 }
 #endif
 
