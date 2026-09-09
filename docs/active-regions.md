@@ -235,7 +235,7 @@ save/load sequence under test. Their hashes are computed in the same build.
 `hashes.json` retains the historical capture values; it is not a save member or a
 portable hash oracle. Missing or changed fixture bytes still fail the tests.
 
-### PR 161 CI investigation
+### Ambient hash portability investigation
 
 The historical world-hash literals encode the ambient fields' selected FastNoise
 instruction set. Terrain uses `NewWorldNoise` with an AVX2 cap; wind, weather and
