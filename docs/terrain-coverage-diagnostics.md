@@ -107,10 +107,13 @@ interactive settings changes disabled. This PowerShell example runs from the
 repository root with an existing Release build. It creates fresh application
 profiles and output directories, then restores the calling shell's environment.
 The benchmark exits after capture; an automated runner should also enforce a
-420-second process deadline and retain failed attempts.
+420-second process deadline and retain failed attempts. New runs arm the
+60-second hang watchdog and keep stdout and crash artifacts on the local C:
+drive, following [native acceptance](v0.3-acceptance.md). This adds instrumentation
+that was absent from the historical screenshots above.
 
 ```powershell
-$diagnosticRoot = Join-Path (Get-Location) 'build/terrain-coverage-example'
+$diagnosticRoot = Join-Path 'C:\Temp' ('luminumbra-terrain-coverage-' + [guid]::NewGuid().ToString('N'))
 if (Test-Path $diagnosticRoot) { throw 'Use a fresh diagnostic directory.' }
 New-Item -ItemType Directory $diagnosticRoot | Out-Null
 $previousEnvironment = @{}
@@ -133,11 +136,13 @@ try {
         & .\build\release\bin\luminumbra_client_app.exe `
             --auto-create-world --auto-enter-world --world-preset default `
             --no-audio --no-ui --no-menu-backdrop --hidden-window `
+            --hang-watchdog-seconds 60 --crash-dir (Join-Path $runDirectory 'crashes') `
             --cam-pos '8,56,8' --cam-yaw 35 --cam-pitch -6 `
             --runtime-artifact-dir (Join-Path $runDirectory 'artifacts') `
             --render-benchmark (Join-Path $runDirectory 'benchmark.json') `
             --render-benchmark-warmup 400 --render-benchmark-frames 240 `
-            --render-benchmark-aovs (Join-Path $runDirectory 'aovs') @extra
+            --render-benchmark-aovs (Join-Path $runDirectory 'aovs') @extra `
+            *> (Join-Path $runDirectory 'engine.log')
         if ($LASTEXITCODE -ne 0) { throw "Capture failed: $mode" }
     }
 } finally {
@@ -154,17 +159,42 @@ camera before interpreting the images:
 ```powershell
 foreach ($mode in @('guard', 'bypass')) {
     py -3 tools/perf/validate_render_capture.py `
-        "build/terrain-coverage-example/$mode/benchmark.json" `
+        "$diagnosticRoot/$mode/benchmark.json" `
         --position 8 56 8 --yaw 35 --pitch -6 --fov 45 --tod 0.04 `
         --require-controller --require-distinct-controller --require-geometry --require-settled
     if ($LASTEXITCODE -ne 0) { throw "Report validation failed: $mode" }
+    py -3 tools/perf/inspect_terrain_aovs.py "$diagnosticRoot/$mode/aovs" `
+        --benchmark "$diagnosticRoot/$mode/benchmark.json"
+    if ($LASTEXITCODE -ne 0) { throw "AOV validation failed: $mode" }
 }
 ```
 
 That checker validates report-frame uniforms and streaming state, not complete
 pixel coverage. For A/B analysis, join each complete manifest to its unique
 `capture` frame observation, then compare exact camera, frame, input and binary
-identities. Decode the six attachments according to their declared formats;
-count transitions from depth `1` to below `1` and the reverse. Compare far-region
-records and live-mesh versions before assigning a cause. Preserve original
-planes and hashes, and treat PNG conversion as a separate artifact.
+identities. `inspect_terrain_aovs.py` requires numpy, validates all six raw planes,
+checks projection endpoints against the declared depth convention, and joins the
+optional benchmark capture observation. It does not establish binary/input
+identity or acquisition provenance.
+
+Current scene depth is reversed-Z float depth: near is `1`, far/clear is `0`, and
+covered pixels have depth greater than `0`. The manifest's `depth_convention`
+records this explicitly; shadow-map depth uses a separate conventional contract.
+The historical source773 images and numbers above used forward depth, with clear
+`1` and coverage below `1`. Their original bytes and meaning are unchanged. To
+inspect those older raw packets, explicitly pass `--legacy-forward-depth`; the
+tool also checks their projection direction and rejects an incompatible label.
+It refuses comparisons between depth conventions.
+
+```powershell
+py -3 tools/perf/inspect_terrain_aovs.py "$diagnosticRoot/guard/aovs" `
+    --compare "$diagnosticRoot/bypass/aovs"
+if ($LASTEXITCODE -ne 0) { throw 'AOV comparison failed.' }
+```
+
+Compare far-region records and live-mesh versions before assigning a cause.
+Preserve original planes and hashes, and treat PNG conversion as a separate
+artifact. Require the watchdog arm log, complete shutdown with drained jobs and
+all ten headless-profile milestones, and no crash/hang reports before treating
+an automated capture run as complete. None of these checks grants visual
+approval or makes the diagnostic bypass a production fix.

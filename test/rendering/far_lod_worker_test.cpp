@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include "luminumbra_client/debug/DebugCamera.h"
+#include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
 #include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
@@ -1268,6 +1269,7 @@ TEST(FarLodWorker, ElevatedCameraSeesTerrainInsideItsOwnRegion) {
         GTEST_SKIP() << "OpenGL 4.5 context unavailable";
     glfwMakeContextCurrent(gl.window);
     ASSERT_TRUE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)));
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     TempSaveDir fixture;
     const auto vertex_path = fixture.path / "coverage.vert";
     const auto fragment_path = fixture.path / "coverage.frag";
@@ -1300,7 +1302,8 @@ void main() { color = vec4(1); }
     shader.use();
     const auto view = glm::lookAt(camera, camera - glm::vec3(0, 1, 0), glm::vec3(0, 0, -1));
     shader.setMat4("view", view);
-    shader.setMat4("projection", glm::perspective(glm::radians(15.0f), 1.0f, 0.1f, 3200.0f));
+    shader.setMat4("projection",
+                   ReversedZPerspective(glm::radians(15.0f), 1.0f, NEAR_PLANE, FAR_PLANE));
     const glm::vec4 planes[6]{}; // hardware frustum clips the actual geometry
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, 64, 64);
@@ -1358,6 +1361,7 @@ TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegion
         GTEST_SKIP() << "OpenGL 4.5 context unavailable";
     glfwMakeContextCurrent(gl.window);
     ASSERT_TRUE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)));
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
     gl.loaded = true;
     const auto root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
     const auto vertex = root / "res/shaders/g_buffer.vert";
@@ -1377,7 +1381,7 @@ TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegion
     glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
     glGenRenderbuffers(1, &gl.depth);
     glBindRenderbuffer(GL_RENDERBUFFER, gl.depth);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, 128, 64);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, 128, 64);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, gl.depth);
     ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
     // All sampler types get distinct compatible bindings even when the flat
@@ -1446,16 +1450,17 @@ TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegion
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
+    glDepthFunc(GL_GREATER);
     glDepthMask(GL_TRUE);
-    glClearDepth(1.0);
+    glClearDepth(0.0);
     JobSystem jobs;
     jobs.startup(1);
     SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
     FarLodSystem far;
     far.attach_job_system(&jobs);
     far.set_coverage_diagnostics_enabled(true);
-    const glm::mat4 projection = glm::perspective(glm::radians(45.0f), 2.0f, 0.1f, 3200.0f);
+    const glm::mat4 projection =
+        ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);
     struct Pose {
         glm::vec3 camera;
         float yaw;
@@ -1500,7 +1505,7 @@ TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegion
             EXPECT_LT(x, 128);
             EXPECT_GE(y, 0);
             EXPECT_LT(y, 64);
-            float depth = 1;
+            float depth = 0;
             glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
             return depth;
         };
@@ -1525,12 +1530,13 @@ TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegion
         const auto guarded = draw(false);
         ASSERT_TRUE(far.coverage_diagnostics().draw_observed);
         EXPECT_STREQ(camera_row()->terrain_decision, "camera_region_guard");
-        EXPECT_LT(guarded[0], 1.0f) << "live near patch missing";
-        EXPECT_EQ(guarded[1], 1.0f) << "expected diagnostic guard footprint outside live patch";
+        EXPECT_GT(guarded[0], 0.0f) << "live near patch missing";
+        EXPECT_EQ(guarded[1], 0.0f) << "expected diagnostic guard footprint outside live patch";
         const auto bypassed = draw(true);
         EXPECT_STREQ(camera_row()->terrain_decision, "submitted");
         EXPECT_EQ(bypassed[0], guarded[0]) << "176 m production clip must preserve near ownership";
-        EXPECT_LT(bypassed[1], 1.0f) << "production shader should cover the in-region far point";
+        EXPECT_GT(bypassed[1], 0.0f) << "production shader should cover the in-region far point";
+        EXPECT_GT(bypassed[0], bypassed[1]) << "reversed depth must keep the live patch nearer";
         EXPECT_EQ(glGetError(), GL_NO_ERROR);
         // A bypass request cannot modify ordinary rendering without diagnostics.
         far.set_coverage_diagnostics_enabled(false);

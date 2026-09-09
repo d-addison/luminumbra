@@ -1,5 +1,6 @@
 #include "RenderPipeline.h"
 
+#include "Camera.h"
 #include "FarLodSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 
@@ -230,6 +231,16 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
     receipt["gbuffer_dimensions"] = {m_internal_width, m_internal_height};
     receipt["time_of_day"] = get_time_of_day();
     receipt["matrix_layout"] = "column_major";
+    // Describe the stored scene depth, not the conventional shadow-map depth.
+    receipt["depth_convention"] = {{"schema", "luminumbra.depth_convention.v1"},
+                                   {"direction", "reversed"},
+                                   {"clip_depth_range", "zero_to_one"},
+                                   {"clear_value", 0.0f},
+                                   {"near_plane_depth", 1.0f},
+                                   {"far_plane_depth", 0.0f},
+                                   {"near_plane_m", NEAR_PLANE},
+                                   {"far_plane_m", FAR_PLANE},
+                                   {"storage_format", "GL_DEPTH_COMPONENT32F"}};
     receipt["view"] = std::vector<float>(glm::value_ptr(m_frame_prepared.view),
                                          glm::value_ptr(m_frame_prepared.view) + 16);
     auto projection = m_frame_prepared.projection;
@@ -301,7 +312,8 @@ bool RenderPipeline::capture_terrain_coverage(const std::filesystem::path& out_d
         return false;
     receipt["attachments"] = {
         {"color.ppm", "RGB8 final display output; top-down; no additional transfer conversion"},
-        {"depth.pfm", "float32 OpenGL window depth [0,1], clear=1; bottom-up"},
+        {"depth.pfm",
+         "float32 reversed-Z OpenGL window depth [0,1], near=1, far/clear=0; bottom-up"},
         {"position.pfm", "float32 RGB view-space metres expanded from RGB16F; bottom-up"},
         {"normal.pfm",
          "float32 RGB view-space unit normal decoded from octahedral RG8; bottom-up; ignore "

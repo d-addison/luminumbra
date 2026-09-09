@@ -1835,6 +1835,9 @@ foreach(_cand ${_vc_candidates})
     endif()
 endforeach()
 if(_vc_python)
+    add_test(NAME TerrainAovDepthContract
+        COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/perf/test_terrain_aovs.py)
+    set_tests_properties(TerrainAovDepthContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
     add_test(NAME VisualCritiqueFlags
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/test_visual_critique.py)
     set_tests_properties(VisualCritiqueFlags PROPERTIES LABELS "visual;critique" TIMEOUT 120)
