@@ -1920,12 +1920,12 @@ if(NOT Python3_FOUND)
 endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
 
+# Ordinary test lanes need no downloaded game art. Generate valid synthetic
+# meshes/materials and their manifest solely for the isolated runner roots.
 add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
-    ${CMAKE_SOURCE_DIR}/tools/assets/acquire.py
-    --manifest ${CMAKE_SOURCE_DIR}/config/game-asset-packs.json
-    --root ${CMAKE_BINARY_DIR}/test-artifacts/render-assets
-    --cache ${CMAKE_SOURCE_DIR}/build/asset-cache)
-set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 180)
+    ${CMAKE_SOURCE_DIR}/tools/perf/synthetic_render_content.py
+    --root ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content)
+set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
 foreach(case IN ITEMS
     "RenderTraversalIntegrated;test_traversal_twice"
     "RenderBenchmarkImplicitCreationFailure;test_implicit_creation_failure"
@@ -1937,7 +1937,7 @@ foreach(case IN ITEMS
         ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner.py
         --client $<TARGET_FILE:luminumbra_client_app>
         --source ${CMAKE_SOURCE_DIR}
-        --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-assets/game-assets
+        --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
         --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
         RenderRunnerTests.${test_method})
     set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)

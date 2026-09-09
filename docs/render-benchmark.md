@@ -162,9 +162,15 @@ point 248 80 8 0 -6
 point 488 80 8 0 -6
 ```
 
-Each `point` is X Y Z yaw pitch. Positions interpolate at constant speed along
-nonzero Euclidean segments; angles interpolate linearly along each segment (no
-implicit wrap). Duration times tick rate must equal expected ticks. Only 30 Hz,
+Each `point` is X Y Z yaw pitch. The workload advances **one fixed simulation tick
+per measured frame**, with path spacing of `speed_mps / tick_rate` metres per tick
+along nonzero Euclidean segments. The declared speed sets path spacing per tick,
+not a wall-clock speed. Angles interpolate linearly along each segment (no
+implicit wrap). `duration_seconds` is simulation duration; duration times tick
+rate must equal expected ticks. A 60-second script at 30 Hz therefore measures
+1800 frames and does **not** necessarily take 60 seconds of wall time. The achieved
+wall duration is recorded as an observation in `measured_duration_seconds`, not
+used to pace the workload. Only 30 Hz,
 preset revision 6 and a fresh-process cold cache are supported. The
 cache declaration concerns engine world/tile caches at launch, not driver shader
 caches or OS caches. Warmup subsequently populates the engine caches.
@@ -247,12 +253,20 @@ Committed and generated evidence has these compatibility rules:
   directories. `RenderTraversalIntegrated` compares two actual captures;
   `RenderBenchmarkImplicitCreationFailure`, `RenderBenchmarkOverrideCollection`
   and `RenderTraversalEmbeddedPresetRefusal` exercise the real failure and collection
-  paths. These cases fail rather than skip when rendering or required content is
-  unavailable. The `RenderBenchmarkAssets` CTest fixture uses the existing pinned
-  asset acquisition tool and verified archive cache; absent content is acquired,
-  corrupt content or failed acquisition fails the fixture. No placeholder content
-  or runtime defaults are installed. The intended CTest discovery delta is eleven
-  over the original base (five added in this fix round).
+  paths. These cases run in the ordinary lanes and fail rather than skip when
+  rendering or their synthetic inputs are unavailable. The `RenderBenchmarkAssets`
+  CTest fixture runs `tools/perf/synthetic_render_content.py` without acquisition,
+  network access or an archive cache. It generates all 18 required files and a
+  matching size/SHA-256 manifest in a build-local content root: nine valid 136-byte
+  LMSH triangle meshes (three parts, three LODs) and nine solid-color LTEX textures.
+  The material loader requires 512×512 RGBA with ten mip levels, so even these
+  synthetic textures need complete mip chains (1,398,117 bytes each). The runner
+  copies the synthetic manifest and inputs into each isolated runtime directory;
+  successful captures also assert mesh loading and all three material registrations
+  to rule out fallback-only success. These are explicit generic renderer test
+  inputs, not authored-art or performance qualification evidence, and never change
+  the shipping manifest or runtime defaults. The CTest discovery delta remains
+  eleven over the original base.
 - `build/campaign-archives-20260907/slice-A2/receipt.json` is generated campaign
   evidence, not runtime input. It records branch, head commit, changed files,
   added tests, both CTest totals, before/after fixture hashes and deviations.

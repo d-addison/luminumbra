@@ -25,8 +25,15 @@ class RenderRunnerTests(unittest.TestCase):
             except OSError:
                 return shutil.copy2(source, target)
         for name in ('data', 'res', 'config'):
-            shutil.copytree(OPTIONS.source / name, self.root / name, copy_function=link_or_copy)
-        shutil.copytree(OPTIONS.assets, self.root / 'game-assets', copy_function=link_or_copy)
+            # Do not link the shipping manifest: only the synthetic root's
+            # manifest describes these test inputs, and the source stays intact.
+            ignore = shutil.ignore_patterns('game-asset-packs.json') if name == 'config' else None
+            shutil.copytree(OPTIONS.source / name, self.root / name,
+                            copy_function=link_or_copy, ignore=ignore)
+        shutil.copy2(OPTIONS.assets / 'config/game-asset-packs.json',
+                     self.root / 'config/game-asset-packs.json')
+        shutil.copytree(OPTIONS.assets / 'game-assets', self.root / 'game-assets',
+                        copy_function=link_or_copy)
         shutil.copytree(OPTIONS.source / 'worlds/atlas', self.root / 'worlds/atlas')
         self.environment = os.environ.copy()
         for name in list(self.environment):
@@ -54,6 +61,12 @@ class RenderRunnerTests(unittest.TestCase):
         if expected_exit:
             self.assertFalse(artifact.exists())
             return log.read_text(errors='replace')
+        # A completed capture alone could hide a mesh/material fallback. Require
+        # the real loaders to accept the synthetic inputs on every success path.
+        output = log.read_text(errors='replace')
+        self.assertIn('Static-model textures registered (3 models).', output)
+        for part in ('trunk', 'branches', 'leaves'):
+            self.assertIn(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", output)
         data = json.loads(artifact.read_bytes())
         (OPTIONS.artifacts / (self._testMethodName + '-' + name + '.json')).write_bytes(artifact.read_bytes())
         return data
@@ -110,7 +123,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--client', type=Path, required=True)
     parser.add_argument('--source', type=Path, required=True)
-    parser.add_argument('--assets', type=Path, required=True)
+    parser.add_argument('--assets', type=Path, required=True,
+                        help='Synthetic content root containing config/ and game-assets/')
     parser.add_argument('--artifacts', type=Path, required=True)
     OPTIONS, remaining = parser.parse_known_args()
     OPTIONS.artifacts.mkdir(parents=True, exist_ok=True)
