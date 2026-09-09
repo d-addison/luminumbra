@@ -56,9 +56,6 @@ const int RENDER_DISTANCE = 32;
 const int RENDER_DISTANCE_UP = 8;
 const int RENDER_DISTANCE_DOWN = 16;
 
-constexpr f32 NEAR_FIELD_DISTANCE = 256.0f;
-constexpr f32 FAR_FIELD_DISTANCE = 8192.0f;
-
 enum class MaterialType : u32 {
     Air = 0,
     Stone = 1,
