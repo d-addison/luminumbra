@@ -651,6 +651,9 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // settled state in both determinism runs. With avatars, stream
         // around the UNION of avatar positions (multi-anchor); with none, the
         // single spawn anchor via the Vec3 overload (byte-identical to zero-avatar).
+        std::chrono::steady_clock::time_point streaming_start;
+        if (budget.Enabled())
+            streaming_start = std::chrono::steady_clock::now();
         if (m_avatars.empty()) {
             Vec3 anchor = spawn_anchor;
             if (m_config.water_smoke) {
@@ -677,6 +680,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 anchors.push_back(a.position);
             }
             world_system->update(m_session->GetRegistry(), anchors, physics_system);
+        }
+        double streaming_update_ms = 0.0;
+        if (budget.Enabled()) {
+            streaming_update_ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - streaming_start)
+                                      .count();
         }
         // water-smoke: sample the water sub-phase timings + sim-load counters the
         // update above just produced. Const reads of never-hashed telemetry (the same
@@ -715,20 +724,19 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 .count();
         wait_samples.push_back(_wait_ms);
         if (budget.Enabled()) {
-            // Existing disjoint phase timers: no new barriers, worker-completion reads,
-            // or changes to the server's water/streaming order.
+            // Include the complete update, including its final resident-chunk scan and
+            // queue bookkeeping. Water has its own disjoint bracket; activation is separate.
             const auto& timing = world_system->dbg_stream_timings();
             const auto scheduled =
                 world_system->get_last_streaming_budget_stats().scheduled_generation;
             budget.Record(BudgetStage::ServerStreaming,
                           budget_tick,
                           scheduled,
-                          timing.process_completed + timing.telemetry + timing.activation +
-                              timing.meshing_pass + timing.collision + _wait_ms);
+                          streaming_update_ms - timing.water + _wait_ms);
             const auto* water = m_session->GetWaterSystem();
             budget.Record(BudgetStage::ServerWater,
                           budget_tick,
-                          water ? water->dbg_cells_simmed() : 0u,
+                          water ? water->cells_stepped_last_update() : 0u,
                           timing.water);
         }
         LUMIN_PROFILE_PLOT("streaming_wait_ms", _wait_ms); // no-op unless LUMINUMBRA_ENABLE_TRACY

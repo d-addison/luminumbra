@@ -74,7 +74,7 @@ calibrated from measurements before any scheduler chooses weights or limits.
 | `migration` | Entities with migratory and transform components |
 | `events` | Pending events examined by the ordered drain (including future events sorted but not delivered) |
 | `server_streaming` | Chunk generation submissions in the current server update (`scheduled_generation`); zero on elided updates |
-| `server_water` | Water cells actually stepped by that update (`dbg_cells_simmed`) |
+| `server_water` | Water cells stepped by that update (`cells_stepped_last_update`); zero for empty or paused updates, independent of the legacy debug counter |
 
 With active regions enabled and both fields present, `wind_weather` measures
 exactly one `WeatherSystem::UpdateFromClock` call with the absolute tick and
@@ -89,9 +89,11 @@ make this choice visible. Telemetry never controls this branch.
 
 The first and last two rows are server supplements. Physics precedes the
 session tick. Streaming and water still run **outside** `TickSimulation`, in
-the existing server update. Streaming duration sums its existing disjoint
-process-completed, telemetry, activation, meshing and collision timers plus
-the existing due-activation wait. Water uses the existing water-phase bracket.
+the existing server update. When collection is enabled, streaming duration
+brackets the complete update, including the final resident-chunk scan and queue
+bookkeeping, subtracts the existing water-phase bracket, and adds the separate
+due-activation wait. Water uses that water-phase bracket. The existing phase
+timers and water-smoke debug outputs are preserved with collection disabled.
 They do not double-count time; streaming is split around water in execution.
 Boot generation, boot water settling, hashes, autosaves, shutdown and diagnostic
 serialization are outside these stage distributions. No warm-up simulation
@@ -155,6 +157,8 @@ Compatibility and refusal rules:
   nonfinite/negative/unordered percentiles, and false replay verdicts refuse a
   telemetry capture. They never cause a world-load refusal: artifacts are not
   world input and there is no telemetry save record.
+  Both world hashes must be strings of exactly 16 lowercase hexadecimal digits,
+  matching the producer's checksum format, before replay equality is evaluated.
 - A missing or unrecognized telemetry schema, including a future version, is
   refused by the capture reader. It must not reinterpret unfamiliar evidence
   as an empty or zero-cost tick. Duration comparisons are observational only.
@@ -162,10 +166,23 @@ Compatibility and refusal rules:
 Independent devel smoke artifacts already contain nondeterministic wall times,
 generated world IDs and render-mesh diagnostics, so raw-byte equality between
 independent executions is not a valid existing guarantee. The disabled path
-preserves the existing serializer and its exact output for identical inputs;
-`DisabledSkipsCounterAndPreservesArtifactBytes` checks this property. Runtime
-comparison must also report authoritative hash parity rather than treating
-those existing nondeterministic fields as simulation changes.
+is checked separately by `SimBudgetTelemetry.DisabledProductionArtifactMatchesDevelBytes`.
+It calls the complete production `WriteSmokeArtifact` writer with fixed legacy
+run inputs and compares the file in binary mode against the checked-in
+`test/fixtures/smoke_artifact/devel-{0,1,2}.json` baselines. These were generated
+from devel commit `f2895388cd14fda8591ed571f87c0ffe026db15d`'s `Smoke.cpp`, replacing
+only its simulation-input producer with the same fixed inputs. The cases cover
+ordinary output, all optional legacy diagnostic blocks, and divergent replay
+verdicts. Times, world IDs, mesh diagnostics, counts and hashes are pinned;
+no output fields are removed or normalized. On Windows, expected baseline line
+endings follow devel's existing text-stream CRLF expansion. Provenance hashes
+and the explicit baseline generator live beside the fixtures.
+
+`DisabledSkipsCounterAndArtifactExtension` is only a unit check that disabled
+collection skips counter callbacks and the append helper leaves an existing
+JSON object alone; it does not prove production artifact compatibility. Runtime
+comparisons of independent executions check authoritative hash parity separately,
+without demanding equality of their nondeterministic artifact fields.
 
 ## Repeatable capture
 
@@ -207,7 +224,9 @@ separately from duration distributions. This slice proposes no limits or caps.
 
 ## Executable checks
 
-Five `SimBudgetTelemetry` gtests cover disabled byte preservation, interpolation,
+Seven `SimBudgetTelemetry` gtests cover complete production artifact byte equality
+against the pinned devel baselines, disabled callbacks and append behavior,
+water work after nonzero → empty and nonzero → paused updates, interpolation,
 duration-free replay comparisons, artifact separation, and batched tick identities
 and reset. `ActiveRegions/SimBudgetWorldParity` runs the real populated server
 three times (telemetry off, on, on) for each active-regions setting, covering all
@@ -218,6 +237,6 @@ starting plant/creature counts, and ordinary save bytes (including plants,
 metadata and clock) across a telemetry toggle at the same tick. Active regions
 intentionally changes the simulation; equality is required across telemetry
 settings, not across active-regions settings. `SimBudgetCaptureContract` runs
-six Python command and refusal tests, including both field paths and refusal
-of mixed coverage. Discovered totals, the measured delta against current devel,
+seven Python command and refusal tests, including both field paths, refusal
+of mixed coverage, and wrongly typed or malformed world hashes. Discovered totals, the measured delta against current devel,
 execution results and qualification limitations are in the campaign receipt.

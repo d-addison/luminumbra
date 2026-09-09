@@ -329,6 +329,11 @@ public:
     [[nodiscard]] std::size_t dbg_cells_simmed() const {
         return m_dbg_cells_simmed;
     }
+    // Work performed by the latest update, including zero for empty/paused updates.
+    // Separate from the legacy debug counter, whose early-return behavior is preserved.
+    [[nodiscard]] std::size_t cells_stepped_last_update() const {
+        return m_cells_stepped_last_update;
+    }
 
 private:
     std::int64_t m_dbg_last_source_mm = 0;
@@ -337,6 +342,7 @@ private:
     int m_dbg_seam_wet_pairs = 0;
     std::size_t m_dbg_awake_water_chunks = 0; // see dbg_awake_water_chunks()
     std::size_t m_dbg_cells_simmed = 0;       // see dbg_cells_simmed()
+    std::size_t m_cells_stepped_last_update = 0;
     DbgWaterTimings m_dbg_water;              // sub-phase telemetry (see dbg_water_timings())
 
     std::size_t m_water_sim_cursor = 0;

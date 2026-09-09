@@ -6,3 +6,6 @@
 # the comparison and the commit happen on normalised bytes, so the churn can
 # neither be seen nor be committed. Binary files are detected and left alone.
 * text=auto
+
+# Fixed serializer baseline bytes; the test handles native Windows stream newlines.
+test/fixtures/smoke_artifact/devel-*.json -text

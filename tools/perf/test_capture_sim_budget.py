@@ -13,7 +13,8 @@ import capture_sim_budget as capture
 def artifact() -> dict:
     return {
         "schema": "luminumbra.server_tick.v1", "preset": "default", "seed": "1337",
-        "ticks_requested": 2, "passed": True, "world_hash": "abc", "world_hash_replay": "abc",
+        "ticks_requested": 2, "passed": True,
+        "world_hash": "0123456789abcdef", "world_hash_replay": "0123456789abcdef",
         "sim_budget": {
             "schema": "luminumbra.sim_budget.v2", "work_replay_match": True,
             "stages": [{"name": name, "samples": 2, "work_total": 3,
@@ -58,9 +59,23 @@ class SimBudgetCaptureTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.validate(data)
         data = artifact()
-        data["world_hash_replay"] = "different"
+        data["world_hash_replay"] = "fedcba9876543210"
         with self.assertRaises(ValueError):
             self.validate(data)
+
+    def test_invalid_world_hash_types_and_formats_are_refused(self) -> None:
+        for value in (True, False, 1, 1234567890123456, ["0123456789abcdef"], [],
+                      {}, None, "", "abc", "0123456789abcde", "0123456789abcdef0",
+                      "0123456789abcdeg", "0123456789ABCDEF", "0123456789abcdef\n",
+                      " 0123456789abcdef", "0x0123456789abcdef"):
+            for fields in (("world_hash",), ("world_hash_replay",),
+                           ("world_hash", "world_hash_replay")):
+                with self.subTest(value=value, fields=fields):
+                    data = artifact()
+                    for field in fields:
+                        data[field] = value
+                    with self.assertRaises(ValueError):
+                        self.validate(data)
 
     def test_missing_reordered_unknown_and_duplicate_stages_are_refused(self) -> None:
         original = artifact()["sim_budget"]["stages"]

@@ -1,18 +1,101 @@
+#include <chrono>
 #include <cstddef>
+#include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <nlohmann/json_fwd.hpp>
 #include <string>
+#include <unordered_map>
 
+#include "../fixtures/smoke_artifact/FixedInputs.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
+#include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WaterSystem.h"
+#include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/SimBudgetArtifact.h"
+#include "luminumbra_server/modes/SmokeArtifact.h"
 
 namespace {
 using luminumbra::simulation::SimBudgetStage;
 using luminumbra::simulation::SimBudgetTelemetry;
 
-TEST(SimBudgetTelemetry, DisabledSkipsCounterAndPreservesArtifactBytes) {
+TEST(SimBudgetTelemetry, DisabledProductionArtifactMatchesDevelBytes) {
+    namespace fs = std::filesystem;
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path output =
+        fs::temp_directory_path() / ("smoke_artifact_" + std::to_string(stamp) + ".json");
+    for (int scenario = 0; scenario != 3; ++scenario) {
+        SCOPED_TRACE(scenario);
+        ServerCliOptions options;
+        Luminumbra::Server::SmokeRunResult first, replay;
+        FixedSmokeInputs(scenario, options, first, replay);
+        ASSERT_FALSE(options.sim_budget);
+        ASSERT_FALSE(first.sim_budget.Enabled());
+        ASSERT_FALSE(replay.sim_budget.Enabled());
+        options.artifact_path = output.string();
+        EXPECT_EQ(Luminumbra::Server::WriteSmokeArtifact(options, first, replay),
+                  scenario == 2 ? 1 : 0);
+        std::ifstream actual_file(output, std::ios::binary);
+        ASSERT_TRUE(actual_file.is_open());
+        const std::string actual((std::istreambuf_iterator<char>(actual_file)), {});
+        std::ifstream baseline_file(fs::path(LUMINUMBRA_SOURCE_ROOT) /
+                                        "test/fixtures/smoke_artifact" /
+                                        ("devel-" + std::to_string(scenario) + ".json"),
+                                    std::ios::binary);
+        ASSERT_TRUE(baseline_file.is_open());
+        std::string baseline((std::istreambuf_iterator<char>(baseline_file)), {});
+#ifdef _WIN32
+        // Devel's text-mode ofstream expands LF to CRLF on Windows as well.
+        std::string native;
+        for (const char c : baseline) {
+            if (c == '\n')
+                native += '\r';
+            native += c;
+        }
+        baseline = std::move(native);
+#endif
+        EXPECT_EQ(actual, baseline);
+    }
+    fs::remove(output);
+}
+
+TEST(SimBudgetTelemetry, WaterWorkIsZeroAfterEmptyAndPausedUpdates) {
+    using namespace Luminumbra;
+    Systems::SHIELD_WorldSystem world(nullptr, nullptr, Systems::TerrainGenParams{}, 1337);
+    Systems::WaterSystem water(nullptr, &world);
+    entt::registry registry;
+    auto chunk = std::make_shared<Chunk>(IVec3(0, 0, 0));
+    chunk->has_water_sim = true;
+    chunk->current_water_resolution = 8;
+    chunk->water_depth_mm.assign(64, 1000);
+    chunk->water_bed_mm.assign(64, 1000);
+    chunk->water_src_mm.assign(64, 0);
+    chunk->water_level_data.assign(64, 2.0f);
+    chunk->water_flow_data.assign(64, Vec2(0.0f));
+    chunk->water_sim_terrain_height.assign(64, 1.0f);
+    chunk->water_rest_level.assign(64, 2.0f);
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> chunks = {{chunk->get_id(), chunk}};
+    const std::unordered_map<ChunkID, std::shared_ptr<Chunk>> empty;
+    EXPECT_EQ(water.cells_stepped_last_update(), 0u);
+    for (const bool paused : {false, true}) {
+        SCOPED_TRACE(paused);
+        water.SetBootPaused(false);
+        chunk->is_water_sleeping = false;
+        water.update(registry, chunks);
+        ASSERT_EQ(water.cells_stepped_last_update(), 64u);
+        ASSERT_EQ(water.dbg_cells_simmed(), 64u);
+        water.SetBootPaused(paused);
+        water.update(registry, paused ? chunks : empty);
+        EXPECT_EQ(water.cells_stepped_last_update(), 0u);
+        EXPECT_EQ(water.dbg_cells_simmed(), 64u); // Preserve the legacy flag-off output.
+    }
+}
+
+TEST(SimBudgetTelemetry, DisabledSkipsCounterAndArtifactExtension) {
     SimBudgetTelemetry telemetry;
     EXPECT_FALSE(telemetry.Enabled());
     bool counter_called = false;
@@ -28,8 +111,8 @@ TEST(SimBudgetTelemetry, DisabledSkipsCounterAndPreservesArtifactBytes) {
     for (const auto& stage : telemetry.SamplesByStage())
         EXPECT_TRUE(stage.empty());
 
-    // Fixed pre-extension serializer inputs: the append operation must leave
-    // every existing byte (including unknown keys) alone when disabled.
+    // Unit coverage of the append helper only. The complete serializer has its
+    // own fixed-input devel baseline test below.
     nlohmann::json artifact = {{"schema", "luminumbra.server_tick.v1"},
                                {"world_hash", "fixed hash"},
                                {"runs", {{{"wall_seconds", 1.25}, {"world_id", "fixed id"}}}},

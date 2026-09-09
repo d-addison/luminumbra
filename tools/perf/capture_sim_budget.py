@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -31,11 +32,14 @@ def integer(value: Any) -> bool:
 
 def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) -> None:
     """Ignore unknown object keys; refuse incomplete, corrupt or future evidence."""
+    for field in ("world_hash", "world_hash_replay"):
+        value = data.get(field)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{16}", value) is None:
+            raise ValueError(f"invalid checksum: {field}")
     if (data.get("schema") != "luminumbra.server_tick.v1"
             or data.get("preset") != preset or data.get("seed") != seed
             or not integer(data.get("ticks_requested")) or data["ticks_requested"] != ticks
             or data.get("passed") is not True
-            or not data.get("world_hash")
             or data.get("world_hash") != data.get("world_hash_replay")):
         raise ValueError("smoke identity, tick count or replay verdict mismatch")
     budget = data.get("sim_budget")

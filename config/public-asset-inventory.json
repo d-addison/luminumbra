@@ -1275,6 +1275,48 @@
       "source": "documented DEM fixtures"
     },
     {
+      "bytes": 3064,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/FixedInputs.h",
+      "sha256": "85a67a9181f191c6e4c2fb187775fb15468cc6c44b2d9d39aa587a6f8adc86da",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 3308,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/devel-0.json",
+      "sha256": "bbc4acd5b749d65b11c8364ef3b599f3ae2d9edb7cef0017fce193a97c1ba1ef",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 4364,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/devel-1.json",
+      "sha256": "1f816e2789c16335e21551c40c884f85812c9a93164e2e0914dec14da362f753",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 4368,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/devel-2.json",
+      "sha256": "b43660ba245a25b812565ecdb42def58f4ebdff030c8f662e40de846f41fc276",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 4038,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/generate_baseline.py",
+      "sha256": "27b2d677edf519c05be91d4762000cfff0704e3e5adf3271e11237aef39f49a5",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 750,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/provenance.json",
+      "sha256": "8852adb634a60b184b13165b8fed8cf7b5cfdcba5dee446c7bbcd39728f48a41",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 2082,
       "license": "MIT",
       "path": "worlds/atlas/presets/amplified.json",
