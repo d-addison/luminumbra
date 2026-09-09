@@ -305,7 +305,7 @@ std::string ReadClockTestTextRecord(const fs::path& path) {
     return text;
 }
 
-std::string SessionWorldHash(GameSession& session) {
+nlohmann::json SessionWorldSubHashes(GameSession& session) {
     Luminumbra::WorldStreamingState state;
     for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
         state.insert_chunk(chunk);
@@ -313,14 +313,26 @@ std::string SessionWorldHash(GameSession& session) {
     const auto energy = session.ComputeAetherStateSubHash();
     if (!energy.empty())
         aether = P::StableChecksum(aether + "|state:" + energy);
-    return P::ComposeWorldHash(P::ComputeWorldStreamingStateHash(state),
-                               session.GetWindFieldSystem()->ComputeWindSubHash(),
-                               session.GetWeatherSystem()->ComputeWeatherSubHash(),
-                               aether,
-                               session.ComputeScentSubHash(),
-                               session.FoldClockIntoEcologyHash(
-                                   luminumbra::ai::ComputeEcologySubHash(session.GetRegistry())),
-                               session.ComputePlantSubHash());
+    return {{"chunk", P::ComputeWorldStreamingStateHash(state)},
+            {"wind", session.GetWindFieldSystem()->ComputeWindSubHash()},
+            {"weather", session.GetWeatherSystem()->ComputeWeatherSubHash()},
+            {"aether", aether},
+            {"scents", session.ComputeScentSubHash()},
+            {"ecology",
+             session.FoldClockIntoEcologyHash(
+                 luminumbra::ai::ComputeEcologySubHash(session.GetRegistry()))},
+            {"plants", session.ComputePlantSubHash()}};
+}
+
+std::string SessionWorldHash(GameSession& session) {
+    const auto hashes = SessionWorldSubHashes(session);
+    return P::ComposeWorldHash(hashes.at("chunk"),
+                               hashes.at("wind"),
+                               hashes.at("weather"),
+                               hashes.at("aether"),
+                               hashes.at("scents"),
+                               hashes.at("ecology"),
+                               hashes.at("plants"));
 }
 
 entt::entity ClockTestPlant(entt::registry& registry, const Luminumbra::Vec3& position) {
@@ -1215,29 +1227,48 @@ TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTick
 }
 } // namespace
 
+// Expected sessions contain the devel fixture's logical state without executing
+// the persistence sequence under test. Ambient fields are computed in this build:
+// their legacy FastNoise auto-dispatch differs between AVX2 and AVX-512, unlike
+// terrain's pinned AVX2 path. Exact serialized fixture bytes remain the disk oracle.
+void AdoptRegionGoldenChunk(GameSession& session, int x) {
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {8.0f + x, 8.5f + x, 9.0f + x};
+    if (x == 0)
+        chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+}
+
+void ExpectSameWorldHash(GameSession& actual, GameSession& expected) {
+    EXPECT_EQ(SessionWorldHash(actual), SessionWorldHash(expected))
+        << "actual: " << SessionWorldSubHashes(actual).dump()
+        << "\nexpected: " << SessionWorldSubHashes(expected).dump();
+}
+
 TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSaveBytes) {
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session;
-    session.SetRootPath(root.root_string());
-    session.SetJobSystem(&jobs);
-    ASSERT_TRUE(session.CreateWorld("Region golden", "1337", "default"));
-    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
-    chunk->set_state(Luminumbra::ChunkState::Idle);
-    chunk->heightmap_data = {8.0f, 8.5f, 9.0f};
-    chunk->mark_voxel_data_dirty();
-    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    GameSession session, expected;
+    for (auto* s : {&session, &expected}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+        ASSERT_TRUE(s->CreateWorld("Region golden", "1337", "default"));
+        ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(*s, 0));
+    }
     // Disabled entry points must be inert, including otherwise invalid inputs.
     session.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(20000, 0, 20000), true);
     session.PinActiveRegion({123, 45}, true);
     session.NotifyGroundObjectEdit(Luminumbra::Vec3(5000, 0, 5000));
     session.RecordActiveRegionWork({{123, 45}, UINT64_MAX, 0, 0, 0});
-    for (int i = 0; i < 7; ++i)
+    for (int i = 0; i < 7; ++i) {
         ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_EQ(expected.TickSimulation(expected.GetSimulationClock().fixed_dt()), 1u);
+    }
     const auto save = root.path() / "golden-save";
     ASSERT_TRUE(session.SaveWorldStateTo(save));
-    EXPECT_EQ(SessionWorldHash(session), "a088c112ee5c428f");
+    ExpectSameWorldHash(session, expected);
     EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
     const auto fixture =
         fs::path(LUMINUMBRA_SOURCE_ROOT) / "test/fixtures/active-regions/devel-off";
@@ -1259,14 +1290,8 @@ void SavePlantRosterThenMultiRegionEdit(GameSession& session, const fs::path& sa
     ASSERT_TRUE(P::WorldSaveService::has_world_save(save));
     ASSERT_TRUE(fs::exists(P::WorldSaveService::plant_entities_path(save)));
     ASSERT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 0, 0)));
-    for (const int x : {0, 32}) {
-        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
-        chunk->set_state(Luminumbra::ChunkState::Idle);
-        chunk->heightmap_data = {8.0f + x, 8.5f + x, 9.0f + x};
-        if (x == 0)
-            chunk->mark_voxel_data_dirty();
-        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
-    }
+    for (const int x : {0, 32})
+        ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(session, x));
     ASSERT_TRUE(session.SaveWorldStateTo(save));
 }
 
@@ -1275,23 +1300,28 @@ TEST(GameSessionHeadlessWorldTest,
     const HeadlessRoot root;
     JobSystem jobs;
     jobs.startup(1);
-    GameSession session, loaded;
-    for (auto* s : {&session, &loaded}) {
+    GameSession session, loaded, expected_live, expected_loaded;
+    for (auto* s : {&session, &loaded, &expected_live, &expected_loaded}) {
         s->SetRootPath(root.root_string());
         s->SetJobSystem(&jobs);
         ASSERT_TRUE(s->CreateTransientWorld("Plant region golden", "1337", "default"));
     }
+    for (auto* s : {&expected_live, &expected_loaded}) {
+        ClockTestPlant(s->GetRegistry(), Luminumbra::Vec3(8, 20, 8));
+        ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(*s, 0));
+    }
+    // Only the live session retains the clean, unsaved second region.
+    ASSERT_NO_FATAL_FAILURE(AdoptRegionGoldenChunk(expected_live, 32));
     const auto save = root.path() / "plant-golden-save";
     ASSERT_NO_FATAL_FAILURE(SavePlantRosterThenMultiRegionEdit(session, save));
     EXPECT_FALSE(session.ActiveRegionsEnabled());
     EXPECT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 1, 0)));
     const auto fixture =
         fs::path(LUMINUMBRA_SOURCE_ROOT) / "test/fixtures/active-regions/devel-off-plant-edit";
-    const auto hashes = nlohmann::json::parse(ReadClockTestFile(fixture / "hashes.json"));
-    EXPECT_EQ(SessionWorldHash(session), hashes.at("live_world_hash").get<std::string>());
+    ExpectSameWorldHash(session, expected_live);
     ASSERT_TRUE(loaded.LoadWorldStateFrom(save));
     EXPECT_EQ(loaded.GetWorldSystem()->snapshot_streamed_chunks().size(), 1u);
-    EXPECT_EQ(SessionWorldHash(loaded), hashes.at("loaded_world_hash").get<std::string>());
+    ExpectSameWorldHash(loaded, expected_loaded);
     std::size_t files = 0;
     for (const auto& entry : fs::recursive_directory_iterator(save)) {
         if (!entry.is_regular_file())

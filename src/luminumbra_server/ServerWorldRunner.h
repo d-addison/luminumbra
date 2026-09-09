@@ -39,6 +39,10 @@ struct ServerWorldRunnerConfig {
     // EnsureSurfaceReadyNear horizon/collision split.
     int surface_radius = 4;
     int collision_radius = 2;
+    // Test harness only: cap ongoing streaming as well as the initial horizon.
+    // Zero preserves normal residency. Record and replay must use the same cap;
+    // this diagnostic override is deliberately not part of the LREC1 format.
+    int test_streaming_radius_cap = 0;
     // Autosave every N simulation ticks through WorldSaveService
     // (GameSession::SaveWorldState incremental contract). 0 disables.
     std::uint64_t autosave_interval_ticks = 0;

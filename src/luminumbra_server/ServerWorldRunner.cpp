@@ -305,6 +305,8 @@ bool ServerWorldRunner::Boot() {
         return false;
     }
 
+    world_system->debug_set_streaming_radius_cap(m_config.test_streaming_radius_cap);
+
     // a session booted FROM A SAVE must not advance water anywhere in Boot —
     // the restored mid-flow state (depths, sleep flags, counters, persisted sim-window
     // cursor) is authoritative, and the water network flows perpetually, so any boot

@@ -317,7 +317,11 @@ std::string ActiveRegionLedger::payload(bool observational) const {
     for (const auto& [key, r] : m_records) {
         Append(bytes, static_cast<std::uint32_t>(key.x), 4);
         Append(bytes, static_cast<std::uint32_t>(key.z), 4);
-        Append(bytes, r.visited | (r.edited << 1) | (r.pinned << 2) | (r.populated << 3), 1);
+        const auto flags = static_cast<std::uint8_t>(r.visited) |
+                           (static_cast<std::uint8_t>(r.edited) << 1) |
+                           (static_cast<std::uint8_t>(r.pinned) << 2) |
+                           (static_cast<std::uint8_t>(r.populated) << 3);
+        Append(bytes, flags, 1);
         Append(bytes, static_cast<std::uint8_t>(r.state), 1);
         Append(bytes, r.cadence_shift, 1);
         Append(bytes, r.wake_pending, 1);

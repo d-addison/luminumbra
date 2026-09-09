@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 
 
 def main():
@@ -23,14 +24,18 @@ def main():
         companion = Path(str(recording) + ".regions.json")
 
         def run(*options, failure=False):
-            # Use the authored flat preset so this filesystem/replay regression
-            # also finishes under ASan; both roundtrips still verify tick 30.
+            # Bound the ongoing wanted set too: --radius only bounds boot's
+            # initial horizon, after which streaming otherwise fills 4,459 chunks.
+            # Both shipping record/replay paths still verify the tick-30 checkpoint.
             command = [str(args.server), "--root", str(root), "--radius", "1",
-                       "--collision-radius", "1", "--preset", "flat_lands", *map(str, options)]
+                       "--collision-radius", "1", "--test-streaming-radius-cap", "1",
+                       "--preset", "flat_lands", *map(str, options)]
+            start = time.monotonic()
             result = subprocess.run(command, cwd=root, text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    timeout=180)
+                                    timeout=45)
             print(result.stdout, flush=True)
+            print(f"Subprocess {options[0]}: {time.monotonic() - start:.2f}s", flush=True)
             if failure:
                 assert result.returncode != 0, "recording reported success after removal failed"
                 assert "cannot remove stale region schedule trace" in result.stdout
@@ -42,6 +47,7 @@ def main():
         # Playback requires a final checkpoint (one every 30 ticks).
         run("--record", recording, "--ticks", "30")
         assert companion.is_file()
+        assert len(json.loads(companion.read_text())["ticks"]) == 30
         enabled_bytes = recording.read_bytes()
         run("--replay", recording)
 

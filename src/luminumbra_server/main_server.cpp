@@ -162,6 +162,9 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--collision-radius") == 0) {
             if (const char* v = next_value(i))
                 options.collision_radius = std::atoi(v);
+        } else if (std::strcmp(arg, "--test-streaming-radius-cap") == 0) {
+            if (const char* v = next_value(i))
+                options.test_streaming_radius_cap = std::atoi(v);
         } else if (std::strcmp(arg, "--autosave-ticks") == 0) {
             if (const char* v = next_value(i))
                 options.autosave_ticks = std::strtoull(v, nullptr, 10);

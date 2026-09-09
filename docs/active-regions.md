@@ -214,8 +214,9 @@ LREC1 payloads and checkpoint fields are unchanged.
 `world-manifest.json` are exact bytes captured from origin/devel at
 f2895388cd14fda8591ed571f87c0ffe026db15d. The fixture is a default-off seed-1337
 session after seven ticks, with one adopted idle chunk at (0,0,0), height samples
-8, 8.5 and 9, and a dirty voxel flag. Its composed world hash is
-`a088c112ee5c428f`. The metadata byte-layout oracle remains
+8, 8.5 and 9, and a dirty voxel flag. The test compares its composed world hash
+against an independently assembled session in the same build, without the disabled
+region calls or the save operation under test. The metadata byte-layout oracle remains
 `DefaultOffKeepsLegacyMetadataBytesAndTickZeroLoad`; creation timestamps are
 observations rather than pinned fixture inputs. Missing or changed fixture bytes
 fail the exact-byte test; these fixtures are never installed as runtime data.
@@ -228,11 +229,53 @@ session first saves only a plant roster, then retains idle chunks at (0,0,0)
 and (32,0,0), dirties only the former, and saves again without advancing a tick.
 `DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes` checks
 every output file against the fixture: plant roster, `r.0.0.lmr`, and manifest,
-with no `r.1.0.lmr`. It checks the live world hash `f4caef7e08157d8b` and the
-reloaded world hash `993b7f0b151dc6c3`, whose chunk domain contains only the dirty
-region. `hashes.json` records these comparison values and is not a save member.
-The test refuses missing/changed fixture bytes or hashes; it installs no runtime
-data and changes no save schema.
+with no `r.1.0.lmr`. Independent expected sessions contain the plant roster and
+respectively two live chunks or just the dirty saved chunk, without executing the
+save/load sequence under test. Their hashes are computed in the same build.
+`hashes.json` retains the historical capture values; it is not a save member or a
+portable hash oracle. Missing or changed fixture bytes still fail the tests.
+
+### PR 161 CI investigation
+
+The historical world-hash literals encode the ambient fields' selected FastNoise
+instruction set. Terrain uses `NewWorldNoise` with an AVX2 cap; wind, weather and
+aether instead use automatic CPU dispatch. With identical GCC ASan objects,
+changing only the diagnostic dispatch from native AVX-512 to AVX2 reproduces every
+reported CI value:
+
+| State | AVX-512 | AVX2 |
+| --- | --- | --- |
+| Seven ticks | `a088c112ee5c428f` | `95c493661166ef9a` |
+| Plant edit, live | `f4caef7e08157d8b` | `8570c9cd10372b20` |
+| Plant edit, loaded | `993b7f0b151dc6c3` | `f3b4b51bad5cbbf8` |
+
+Only `wind`, `weather` and `aether` move. `chunk`, `scents`, `ecology` and `plants`
+are identical. The ambient implementations, their headers and vendored FastNoise
+are byte-identical to the fixture's devel commit. A standalone probe compiled from
+that commit's ambient sources reproduces the same component hashes for both
+instruction sets. This is a pre-existing cross-CPU determinism gap in ambient
+fields, outside terrain's pinned dispatch, rather than an ASan-induced region
+regression. An identical runner image does not guarantee identical CPU features.
+The dispatch-only reproduction establishes the cause of these failures without
+relying on uninitialized memory or pointer ordering.
+
+The ambient runtime behavior is unchanged here; cross-CPU ambient hash equality
+remains unresolved. These persistence tests now use expected sessions computed in
+the same build, retain the exact devel save bytes, and print all seven actual and
+expected component hashes on mismatch. Diagnostic sources, component values,
+compiler commands and predecessor source identities accompany the campaign receipt
+under `ci-investigation/`.
+
+`RegionRecordingOverwrite` runs the shipping recorder/player with
+`--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies
+the existing streaming cap before boot; zero is the default. It is not serialized
+in LREC1, so capped diagnostic recordings must be replayed with the same option.
+The ordinary `--radius 1` only bounds the initial horizon: subsequent streaming
+previously expanded the test to 4,459 chunks, exceeding even its explicit
+600-second CI timeout. The cap bounds the ongoing wanted set while retaining both
+tick-30 checkpoint roundtrips, all 30 enabled schedule entries, disabled companion
+removal and the failed-removal assertion. Each subprocess has a 45-second limit;
+the test registration allows 240 seconds for all five subprocesses and cleanup.
 
 The campaign receipt is a local build artifact at
 `build/campaign-archives-20260907/slice-C2/receipt.json`, containing branch, head
