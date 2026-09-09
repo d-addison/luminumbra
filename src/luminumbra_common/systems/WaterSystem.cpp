@@ -575,6 +575,7 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
 
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
+    m_cells_stepped_last_update = 0;
     // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
     // the _dbg_split pattern from SHIELD_WorldSystem::update.
     m_dbg_water = {};
@@ -1025,6 +1026,7 @@ void WaterSystem::update(entt::registry& registry,
         chunks_to_sim.swap(window);
     }
     m_dbg_cells_simmed = chunks_to_sim.size() * water_cells_per_chunk;
+    m_cells_stepped_last_update = m_dbg_cells_simmed;
 
     // --- Step 4:  — INTEGER virtual-pipes. Per chunk: internal-edge flux + sources/sinks
     // (StepChunkWaterFixed). Then a CROSS-CHUNK owner-edge shared-flux pass so rivers/lakes are

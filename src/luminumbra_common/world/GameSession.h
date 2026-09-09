@@ -8,6 +8,7 @@
 #include "../ai/ThirstSystem.h"               // ai::ThirstTuning
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
+#include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
 #include "WorldClock.h"
@@ -367,6 +368,17 @@ public:
     // fixed ticks executed this frame.
     std::uint32_t TickSimulation(double frame_dt);
 
+    // Opt-in observation; never part of persistent or hashed session state.
+    void SetSimBudgetTelemetryEnabled(bool enabled) {
+        m_simBudgetTelemetry.SetEnabled(enabled);
+    }
+    [[nodiscard]] luminumbra::simulation::SimBudgetTelemetry& GetSimBudgetTelemetry() {
+        return m_simBudgetTelemetry;
+    }
+    [[nodiscard]] const luminumbra::simulation::SimBudgetTelemetry& GetSimBudgetTelemetry() const {
+        return m_simBudgetTelemetry;
+    }
+
     [[nodiscard]] std::uint64_t GetSimulationTickCount() const noexcept {
         return m_activeRegionsEnabled ? m_worldClock.tick() : m_simulationClock.tick_count();
     }
@@ -386,6 +398,7 @@ public:
     }
 
 private:
+    luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
     luminumbra::ai::WildlifeFoliageTuning

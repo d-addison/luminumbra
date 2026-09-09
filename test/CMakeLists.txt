@@ -108,6 +108,8 @@ add_executable(common_tests
     common/FarLodStore_test.cpp
     common/FarTierTable_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
+    common/SimBudgetTelemetry_test.cpp
+    ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
     audio/AudioBankIntegrity_test.cpp
@@ -1330,6 +1332,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    common/SimBudgetWorldParity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
 )
@@ -1692,6 +1695,17 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         # Keep every case in the required suite and give its measurement the CPU.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RUN_SERIAL TRUE)
+    elseif(_lum_gtest_target STREQUAL world_open_refusal_test)
+        # Carries the populated 3,600-tick telemetry parity runs, which execute
+        # three full simulations per parameter. They take about four minutes each
+        # in Debug and about eight under the sanitizer on a developer machine, so
+        # the workflow's 300-second default expires on a slower runner. The tick
+        # count is the evidence, not the runtime: it is what proves the world hash
+        # is unmoved by telemetry across both switches, so raise the bound rather
+        # than shorten the run. Everything else in this target is fast; the cost of
+        # the wider bound is only that a genuine hang here surfaces later.
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RESOURCE_LOCK luminumbra_gl_context)
@@ -1743,6 +1757,12 @@ add_test(NAME ShieldRtSpike COMMAND shieldrt_spike_bench)
 set_tests_properties(ShieldRtSpike PROPERTIES
     LABELS "manual;perf;spike"
     TIMEOUT 600)
+
+# Simulation telemetry captures require the standard-library Python validator.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME SimBudgetCaptureContract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
+set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf

@@ -44,6 +44,7 @@ struct ServerCliOptions {
     // percentiles and sim-load counters in the smoke artifact (see
     // ServerWorldRunnerConfig::water_smoke). Observability only; implies --smoke.
     bool water_smoke = false;
+    bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
 
     //  --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client
