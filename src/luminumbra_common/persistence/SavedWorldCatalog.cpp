@@ -75,6 +75,10 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             return result;
         }
         result.water_sim_cursor = json.value("waterSimCursor", std::size_t{0});
+        if (!world::WorldClock::from_metadata(json, result.clock, result.error))
+            return result;
+        result.requires_active_regions =
+            json.contains("simulationTick") || json.contains("calendar");
         if (!SafeName(result.metadata.worldType)) {
             result.error = "Corrupt world metadata: invalid world type.";
             return result;

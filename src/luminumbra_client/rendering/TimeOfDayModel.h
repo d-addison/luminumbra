@@ -26,6 +26,7 @@
 #include <glm/gtc/constants.hpp>
 
 #include "luminumbra_common/core/DeterministicMath.h"
+#include "luminumbra_common/world/WorldClock.h"
 
 namespace Luminumbra::Rendering {
 
@@ -61,6 +62,18 @@ inline SeasonState ComputeSeason(std::uint64_t seasonTick, std::uint64_t ticksPe
     // noon arc than winter.
     const float sunDeclination = kSeasonalTiltAmplitude * wave;
     return SeasonState{phase, wave, sunDeclination};
+}
+
+// Calendar uses midnight/midwinter; the existing sky geometry uses noon and
+// spring equinox. These explicit offsets keep the physical origins aligned.
+inline float TimeOfDayFromWorldClock(const world::WorldClock& clock) {
+    const double shifted = clock.day_phase(clock.tick()) + 0.5;
+    return static_cast<float>(shifted >= 1.0 ? shifted - 1.0 : shifted);
+}
+inline SeasonState ComputeSeason(const world::WorldClock& clock) {
+    const float phase = static_cast<float>(clock.spring_phase(clock.tick()));
+    const float wave = DeterministicMath::Sin(phase * DeterministicMath::kTwoPi);
+    return {phase, wave, kSeasonalTiltAmplitude * wave};
 }
 
 // SUN GEOMETRY + derived day-factors, a pure function of (timeOfDay, sunDeclination).

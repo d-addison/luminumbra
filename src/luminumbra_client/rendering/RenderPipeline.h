@@ -1,5 +1,8 @@
 #pragma once
 
+#include "luminumbra_common/world/WorldClock.h"
+#include <optional>
+
 #include "../../include/luminumbra/core/Types.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
@@ -584,8 +587,10 @@ public:
     // (set_time_of_day) run AFTER this in the frame, overwriting it. Paths that
     // never call this keep the legacy wall-clock advance byte-identically.
     void set_time_of_day_tick(std::uint64_t sim_tick);
+    void set_world_clock(const world::WorldClock& clock);
     void set_day_length_ticks(std::uint64_t ticks) {
         m_dayLengthTicks = ticks == 0 ? 1 : ticks;
+        m_dayLengthOverride = true;
     }
     // SEASON / celestial model. The season phase is a PURE FUNCTION
     // of the authoritative TICK COUNT (integer epoch math; DeterministicMath for
@@ -854,6 +859,7 @@ public:
 private:
     friend struct TerrainCullingTestPeer;
     friend struct TextureFileTestPeer;
+    friend struct RenderClockTestPeer;
     // Extracted render pass classes. Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
@@ -1075,6 +1081,8 @@ private:
     float m_dayDurationSeconds = 60.0f;
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
+    std::optional<world::WorldClock> m_worldClock;
+    bool m_dayLengthOverride = false;
     std::uint64_t m_dayLengthTicks = 1800; // == TimeOfDayModel kDefaultDayLengthTicks
     bool m_todTickDriven = false;
 
