@@ -148,6 +148,15 @@ WorldStreamingStateSubHashes
 ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
                                     const std::string& entity_snapshot_json);
 
+// Append-only runtime hash order; shared with the production server runner.
+std::string ComposeWorldHash(const std::string& chunk_hash,
+                             const std::string& wind_hash,
+                             const std::string& weather_hash,
+                             const std::string& aether_hash,
+                             const std::string& scent_hash,
+                             const std::string& ecology_hash,
+                             const std::string& plant_hash);
+
 // Exposes the determinism-stable checksum (fnv1a_64_stable_json) used by every
 // world/sub hash so callers can hash auxiliary canonical strings (e.g. an
 // entity snapshot) with the identical algorithm.
