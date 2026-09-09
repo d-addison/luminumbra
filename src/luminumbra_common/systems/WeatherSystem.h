@@ -135,6 +135,16 @@ public:
     // wall-clock, no RNG. `wind` may be null (storm cells then drift on their
     // last velocity); production always supplies it.
     // Budget: <= 0.20 ms/tick at the streamed extent (WeatherVisual gate).
+    // Clock-gated ambient update: storm motion samples base wind, then storms
+    // perturb the authoritative wind consumed by the rest of the simulation.
+    // Keeping motion independent of prior gust feedback makes history bounded.
+    void UpdateFromClock(std::uint64_t tick, const Vec3& region_anchor, WindFieldSystem& wind);
+
+    // Reconstruct the fixed-anchor ambient weather on load in at most one storm
+    // lifetime. This is the C1 bridge; regional storm persistence belongs to C4.
+    // Updates wind to the same absolute tick. Does not emit simulation events.
+    void RestoreAtTick(std::uint64_t tick, const Vec3& region_anchor, WindFieldSystem& wind);
+
     void Update(std::uint64_t tick, const Vec3& region_anchor, const WindFieldSystem* wind);
 
     // --- Public weather-state query API (stable; consumed by  lightning

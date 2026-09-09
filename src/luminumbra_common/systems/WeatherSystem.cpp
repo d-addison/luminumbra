@@ -491,6 +491,37 @@ float WeatherSystem::StormIntensityAt(const Vec3& world_pos) const {
     return best;
 }
 
+void WeatherSystem::UpdateFromClock(std::uint64_t tick,
+                                    const Vec3& region_anchor,
+                                    WindFieldSystem& wind) {
+    wind.ClearStormPerturbations();
+    wind.Update(tick, region_anchor);
+    Update(tick, region_anchor, &wind);
+    for (const auto& storm : m_storm_cells)
+        wind.InjectStormPerturbation({storm.center_world, 96.0f, storm.velocity, storm.intensity});
+    wind.Update(tick, region_anchor);
+    m_anchor_wind =
+        wind.SampleWind(Vec3(region_anchor.x, 5.0f, region_anchor.z), WindLayer::Ground);
+}
+
+void WeatherSystem::RestoreAtTick(std::uint64_t tick,
+                                  const Vec3& region_anchor,
+                                  WindFieldSystem& wind) {
+    // At most ceil(240/45) storms can coexist, below the cap. Motion samples
+    // base wind, so earlier storms cannot affect the survivors of this window.
+    static_assert(kMaxStormCells >
+                  (kStormLifetimeTicks + kStormSpawnEpochTicks - 1) / kStormSpawnEpochTicks);
+    m_storm_cells.clear();
+    m_strikes.clear();
+    const std::uint64_t first = tick >= kStormLifetimeTicks ? tick - kStormLifetimeTicks + 1 : 1;
+    for (std::uint64_t t = first; t < tick; ++t) {
+        wind.ClearStormPerturbations();
+        wind.Update(t, region_anchor);
+        StepStormCells(t, region_anchor, &wind);
+    }
+    UpdateFromClock(tick, region_anchor, wind);
+}
+
 void WeatherSystem::Update(std::uint64_t tick,
                            const Vec3& region_anchor,
                            const WindFieldSystem* wind) {

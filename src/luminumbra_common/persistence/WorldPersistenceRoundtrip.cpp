@@ -1016,6 +1016,19 @@ ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state,
     return sub;
 }
 
+std::string ComposeWorldHash(const std::string& chunk_hash,
+                             const std::string& wind_hash,
+                             const std::string& weather_hash,
+                             const std::string& aether_hash,
+                             const std::string& scent_hash,
+                             const std::string& ecology_hash,
+                             const std::string& plant_hash) {
+    // Preserve the established append-only slot order, including empty slots.
+    return StableChecksum(chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash +
+                          "|aether:" + aether_hash + "|scents:" + scent_hash +
+                          "|ecology:" + ecology_hash + "|plants:" + plant_hash);
+}
+
 std::string StableChecksum(const std::string& canonical_text) {
     return Checksum(canonical_text);
 }

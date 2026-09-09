@@ -209,16 +209,16 @@ void GBufferPass::init_gbuffer(RenderResourceRegistry& registry, u32 width, u32 
                             color_desc(GL_RG16F, GL_RG, GL_FLOAT, "gbuffer.motion_vectors"))
             .id;
 
-    // Depth: DEPTH_COMPONENT24, clamp-to-border with a white border.
+    // Depth: DEPTH_COMPONENT32F, reversed-Z, clamp-to-border with cleared sky depth.
     TextureDesc depth_desc =
-        color_desc(GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, "gbuffer.depth");
+        color_desc(GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT, "gbuffer.depth");
     depth_desc.wrap_s = GL_CLAMP_TO_BORDER;
     depth_desc.wrap_t = GL_CLAMP_TO_BORDER;
     depth_desc.has_border_color = true;
-    depth_desc.border_color[0] = 1.0f;
-    depth_desc.border_color[1] = 1.0f;
-    depth_desc.border_color[2] = 1.0f;
-    depth_desc.border_color[3] = 1.0f;
+    depth_desc.border_color[0] = 0.0f;
+    depth_desc.border_color[1] = 0.0f;
+    depth_desc.border_color[2] = 0.0f;
+    depth_desc.border_color[3] = 0.0f;
     depth_desc.expected_layout = "depth_attachment";
     m_gbuffer.depth_texture = registry.create_texture("gbuffer_depth", depth_desc).id;
 
@@ -288,6 +288,10 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     const Camera& camera = *ctx.camera;
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GREATER);
+    glDepthMask(GL_TRUE);
+    glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     //  isolation/layer mode: skip the draws whose layer bit is cleared so an
@@ -333,10 +337,10 @@ void GBufferPass::geometry_pass_chunks(const RenderContext& ctx,
                                        const glm::vec4 (&frustum_planes)[6],
                                        GBufferDrawStats& stats) {
     m_geometry_shader->use();
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                            (float)ctx.screen_width / (float)ctx.screen_height,
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
+    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                (float)ctx.screen_width / (float)ctx.screen_height,
+                                                camera.GetNearPlane(),
+                                                camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
     //  TAAU: sub-pixel jitter the projection (0 when TAAU off -> byte-identical).
     const glm::vec2 taau_jit = ctx.taau_jitter_ndc;
@@ -518,10 +522,10 @@ void GBufferPass::geometry_pass_static_meshes(const RenderContext& ctx,
     m_instanced_static_mesh_shader->use();
     const glm::mat4 static_view = camera.GetViewMatrix();
     const glm::vec2 static_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 static_proj = glm::perspective(glm::radians(camera.Zoom),
-                                             (float)ctx.screen_width / (float)ctx.screen_height,
-                                             camera.GetNearPlane(),
-                                             camera.GetFarPlane());
+    glm::mat4 static_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                 (float)ctx.screen_width / (float)ctx.screen_height,
+                                                 camera.GetNearPlane(),
+                                                 camera.GetFarPlane());
     static_proj[2][0] += static_taau_jit.x;
     static_proj[2][1] += static_taau_jit.y;
     m_instanced_static_mesh_shader->setMat4("projection", static_proj);
@@ -878,10 +882,11 @@ void GBufferPass::geometry_pass_skinned_meshes(const RenderContext& ctx,
     m_skinned_mesh_shader->use();
     const glm::mat4 skinned_view = camera.GetViewMatrix();
     const glm::vec2 skinned_taau_jit = ctx.taau_jitter_ndc; //  TAAU (0 when off)
-    glm::mat4 skinned_proj = glm::perspective(glm::radians(camera.Zoom),
-                                              (float)ctx.screen_width / (float)ctx.screen_height,
-                                              camera.GetNearPlane(),
-                                              camera.GetFarPlane());
+    glm::mat4 skinned_proj =
+        ReversedZPerspective(glm::radians(camera.Zoom),
+                             (float)ctx.screen_width / (float)ctx.screen_height,
+                             camera.GetNearPlane(),
+                             camera.GetFarPlane());
     skinned_proj[2][0] += skinned_taau_jit.x;
     skinned_proj[2][1] += skinned_taau_jit.y;
     m_skinned_mesh_shader->setMat4("projection", skinned_proj);

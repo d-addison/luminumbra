@@ -1,5 +1,6 @@
 #pragma once
 
+#include "world/WorldClock.h"
 #include "world/WorldMetadata.h"
 
 #include <filesystem>
@@ -14,6 +15,8 @@ struct SavedWorld {
     std::filesystem::path preset_path;
     bool has_spawn_point = false;
     std::size_t water_sim_cursor = 0;
+    world::WorldClock clock;
+    bool requires_active_regions = false;
     // Empty only when metadata, preset and all existing save artifacts are supported.
     std::string error;
 };
