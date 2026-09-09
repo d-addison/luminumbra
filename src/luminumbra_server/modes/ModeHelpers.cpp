@@ -16,6 +16,7 @@ Luminumbra::Server::ServerWorldRunnerConfig RunnerConfigFrom(const ServerCliOpti
     config.availability_trace = options.availability_trace;
     config.water_hash_trace = options.water_hash_trace;
     config.water_smoke = options.water_smoke;
+    config.sim_budget = options.sim_budget;
     return config;
 }
 

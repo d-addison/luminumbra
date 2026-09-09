@@ -43,6 +43,11 @@ change of at least 5%, a paired two-sided sign-test p-value no greater than 0.05
 and an effect larger than three pooled median absolute deviations. Smaller or
 underpowered changes are reported as warnings.
 
+For populated fixed-tick stage measurements on default, mountains and
+archipelago, use the [simulation budget capture command](sim-budget-telemetry.md#repeatable-capture).
+It reports deterministic work separately from wall-time distributions and
+leaves the normal server smoke artifact unchanged when disabled.
+
 ## Measurement layers
 
 | Layer | Representative evidence |

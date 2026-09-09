@@ -284,6 +284,7 @@ bool ServerWorldRunner::Boot() {
     }
 
     m_session = std::make_unique<world::GameSession>();
+    m_session->SetSimBudgetTelemetryEnabled(m_config.sim_budget);
     m_session->SetJobSystem(&m_jobSystem);
     m_session->SetRootPath(m_config.root_path);
     // host==peer: the headless host must run the SAME water-sim resolution the
@@ -650,6 +651,11 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // One frame == one fixed tick: feeding the clock exactly fixed_dt
         // keeps the frame/tick mapping 1:1 and removes wall-clock timing from
         // the simulation entirely (determinism discipline).
+        using BudgetStage = luminumbra::simulation::SimBudgetStage;
+        auto& budget = m_session->GetSimBudgetTelemetry();
+        const std::uint64_t budget_tick = m_session->GetSimulationTickCount() + 1;
+        luminumbra::simulation::SimBudgetTelemetry::TickScope physics_budget(budget, budget_tick);
+        physics_budget.Next(BudgetStage::ServerPhysics, [] { return 1u; });
         physics_system->update(static_cast<float>(fixed_dt));
         //  step the server-authoritative avatar characters (gravity +
         // world collision; deterministic index order) and read their settled
@@ -662,6 +668,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
             }
         }
+        physics_budget.Finish();
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
 
@@ -743,6 +750,23 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0)
                 .count();
         wait_samples.push_back(_wait_ms);
+        if (budget.Enabled()) {
+            // Existing disjoint phase timers: no new barriers, worker-completion reads,
+            // or changes to the server's water/streaming order.
+            const auto& timing = world_system->dbg_stream_timings();
+            const auto scheduled =
+                world_system->get_last_streaming_budget_stats().scheduled_generation;
+            budget.Record(BudgetStage::ServerStreaming,
+                          budget_tick,
+                          scheduled,
+                          timing.process_completed + timing.telemetry + timing.activation +
+                              timing.meshing_pass + timing.collision + _wait_ms);
+            const auto* water = m_session->GetWaterSystem();
+            budget.Record(BudgetStage::ServerWater,
+                          budget_tick,
+                          water ? water->dbg_cells_simmed() : 0u,
+                          timing.water);
+        }
         LUMIN_PROFILE_PLOT("streaming_wait_ms", _wait_ms); // no-op unless LUMINUMBRA_ENABLE_TRACY
 
         //  gate (runtime audit): record the per-tick availability set right

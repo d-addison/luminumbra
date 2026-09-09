@@ -105,6 +105,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
+    common/SimBudgetTelemetry_test.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
     audio/AudioBankIntegrity_test.cpp
@@ -1308,6 +1309,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    common/SimBudgetWorldParity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
 )
@@ -1710,6 +1712,12 @@ add_test(NAME ShieldRtSpike COMMAND shieldrt_spike_bench)
 set_tests_properties(ShieldRtSpike PROPERTIES
     LABELS "manual;perf;spike"
     TIMEOUT 600)
+
+# Simulation telemetry captures require the standard-library Python validator.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME SimBudgetCaptureContract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
+set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf

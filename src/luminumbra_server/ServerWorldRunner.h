@@ -95,6 +95,7 @@ struct ServerWorldRunnerConfig {
     // in the other smoke lanes. DEFAULT false -> byte-identical to the existing lanes
     // (no new reads, no anchor change).
     bool water_smoke = false;
+    bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
 };
 
 struct ServerTickReport {

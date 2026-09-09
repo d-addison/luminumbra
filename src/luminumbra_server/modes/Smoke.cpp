@@ -1,3 +1,4 @@
+#include "../SimBudgetArtifact.h"
 #include "ModeHelpers.h"
 #include "Modes.h"
 
@@ -8,6 +9,7 @@ constexpr const char* kServerTickArtifactSchema = "luminumbra.server_tick.v1";
 
 struct SmokeRunResult {
     bool ok = false;
+    luminumbra::simulation::SimBudgetTelemetry sim_budget;
     std::string world_hash;
     // per-system sub-hashes (additive; top-level world_hash unchanged).
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub_hashes;
@@ -80,6 +82,8 @@ SmokeRunResult RunSmokeOnce(const ServerCliOptions& options, const char* run_lab
     result.creature_count_end = runner.CreatureCount();
     result.avail_trace = runner.AvailabilityTrace();   // empty unless --avail-trace
     result.water_hash_trace = runner.WaterHashTrace(); // empty unless --water-hash-trace
+    if (options.sim_budget)
+        result.sim_budget = runner.Session()->GetSimBudgetTelemetry();
     result.chunks_streamed = runner.StreamedChunkCount();
     result.world_id = runner.Session()->GetMetadata().worldId;
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
@@ -207,7 +211,12 @@ int RunSmoke(const ServerCliOptions& options) {
         (first.ticks.water.mass_ok && replay.ticks.water.mass_ok &&
          first.ticks.water.seam_wet_pairs_max > 0 && first.ticks.water.cells_simmed_total > 0);
 
-    const bool passed = deterministic && first.ticks.ticks_executed == options.ticks &&
+    const bool sim_budget_match =
+        !options.sim_budget || first.sim_budget.WorkMatches(replay.sim_budget);
+    if (!sim_budget_match)
+        LUMINUMBRA_CORE_ERROR("Simulation budget work trace does not match replay");
+    const bool passed = sim_budget_match && deterministic &&
+                        first.ticks.ticks_executed == options.ticks &&
                         replay.ticks.ticks_executed == options.ticks && first.chunks_streamed > 0 &&
                         water_nonvacuous;
 
@@ -385,6 +394,8 @@ int RunSmoke(const ServerCliOptions& options) {
                 water_first_divergent);
         }
     }
+
+    Luminumbra::Server::AppendSimBudgetArtifact(artifact, first.sim_budget, replay.sim_budget);
 
     if (!options.artifact_path.empty()) {
         const fs::path artifact_path(options.artifact_path);
