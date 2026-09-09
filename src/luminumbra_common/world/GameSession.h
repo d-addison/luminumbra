@@ -403,6 +403,8 @@ private:
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
+    // Stable only in the clock slice; world-anchored pages replace this grid in C4.
+    Vec3 m_ambientFieldAnchor{};
     bool m_activeRegionsEnabled = false;
     bool m_simulationBatchInProgress = false;
     bool CreateWorldInternal(const std::string& name,

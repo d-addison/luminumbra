@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -85,7 +86,8 @@ public:
     static bool read_clock_metadata(const std::filesystem::path& save_dir,
                                     world::WorldClock& clock,
                                     bool& requires_active_regions,
-                                    std::vector<std::string>* errors = nullptr);
+                                    std::vector<std::string>* errors = nullptr,
+                                    std::optional<Vec3>* ambient_anchor = nullptr);
 
     // --- Raw LMR1 record access (far-LOD tiles, ) ---
     // Non-chunk payloads (lod_level 1/2 far tier records) share the chunk

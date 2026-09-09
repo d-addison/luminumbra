@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cerrno>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -125,6 +126,35 @@ void AddError(std::vector<std::string>* errors, std::string message) {
     if (errors) {
         errors->push_back(std::move(message));
     }
+}
+
+bool ReadAmbientAnchor(const nlohmann::json& metadata,
+                       std::optional<Vec3>& anchor,
+                       std::string& error) {
+    anchor.reset();
+    if (!metadata.contains("simulationTick") && !metadata.contains("calendar"))
+        return true;
+    // Older clock snapshots used spawnPoint itself as the ambient anchor.
+    const char* key = metadata.contains("ambientFieldAnchor") ? "ambientFieldAnchor" : "spawnPoint";
+    if (!metadata.contains(key))
+        return true;
+    const auto& value = metadata.at(key);
+    Vec3 point{};
+    for (int i = 0; i < 3; ++i) {
+        const char* axis = i == 0 ? "x" : (i == 1 ? "y" : "z");
+        if (!value.is_object() || value.size() != 3 || !value.contains(axis) ||
+            !value.at(axis).is_number()) {
+            error = "Corrupt world metadata: invalid ambient field anchor.";
+            return false;
+        }
+        point[i] = value.at(axis).get<float>();
+        if (!std::isfinite(point[i])) {
+            error = "Corrupt world metadata: ambient field anchor must be finite.";
+            return false;
+        }
+    }
+    anchor = point;
+    return true;
 }
 
 std::uint64_t CurrentProcessIdValue() {
@@ -687,7 +717,9 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     // Legacy metadata is opaque input to this helper. Only clock-bearing input
     // opts into the new validation; the existing destination is still validated.
     const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
-    if (has_clock && !world::WorldClock::from_metadata(metadata, clock, clock_error)) {
+    std::optional<Vec3> ambient_anchor;
+    if (has_clock && (!world::WorldClock::from_metadata(metadata, clock, clock_error) ||
+                      !ReadAmbientAnchor(metadata, ambient_anchor, clock_error))) {
         AddError(errors, clock_error);
         return false;
     }
@@ -718,9 +750,12 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
                                            world::WorldClock& clock,
                                            bool& requires_active_regions,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           std::optional<Vec3>* ambient_anchor) {
     clock = world::WorldClock{};
     requires_active_regions = false;
+    if (ambient_anchor)
+        ambient_anchor->reset();
     try {
         const auto path = save_dir / "world_info.json";
         if (!std::filesystem::exists(path))
@@ -728,12 +763,16 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         std::ifstream input(path, std::ios::binary);
         const auto metadata = nlohmann::json::parse(input);
         std::string error;
-        if (!world::WorldClock::from_metadata(metadata, clock, error)) {
+        std::optional<Vec3> anchor;
+        if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+            !ReadAmbientAnchor(metadata, anchor, error)) {
             AddError(errors, error);
             return false;
         }
         requires_active_regions =
             metadata.contains("simulationTick") || metadata.contains("calendar");
+        if (ambient_anchor)
+            *ambient_anchor = anchor;
         return true;
     } catch (const std::exception& e) {
         AddError(errors, std::string("Corrupt world metadata: ") + e.what());
@@ -1049,7 +1088,9 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (metadata.contains("simulationTick") || metadata.contains("calendar")) {
                 world::WorldClock clock;
                 std::string error;
-                if (!world::WorldClock::from_metadata(metadata, clock, error))
+                std::optional<Vec3> anchor;
+                if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+                    !ReadAmbientAnchor(metadata, anchor, error))
                     return reject(error);
             }
         }

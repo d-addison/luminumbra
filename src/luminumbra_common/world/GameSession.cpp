@@ -528,7 +528,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
 
         if (m_activeRegionsEnabled && m_windFieldSystem && m_weatherSystem) {
             m_weatherSystem->UpdateFromClock(
-                current_tick, m_metadata.spawnPoint, *m_windFieldSystem);
+                current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
         } else {
             // 3.  : wind field update. Deterministic (DeterministicMath +
             // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
@@ -570,8 +570,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // world_hash `aether` sub-hash; the update runs every tick so run==replay
         // and resim agree on the field at every checkpoint.
         if (m_aetherFieldSystem) {
-            m_aetherFieldSystem->Update(
-                current_tick, m_metadata.spawnPoint, m_windFieldSystem.get());
+            m_aetherFieldSystem->Update(current_tick,
+                                        m_activeRegionsEnabled ? m_ambientFieldAnchor
+                                                               : m_metadata.spawnPoint,
+                                        m_windFieldSystem.get());
         }
 
         // 5a.: the STATEFUL energy layer ticks directly
@@ -1008,6 +1010,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     LUMINUMBRA_CORE_INFO("Initial terrain height sampled at spawn: {}.", terrain_height);
 
     m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
+    m_ambientFieldAnchor = m_metadata.spawnPoint;
     InitializeScentField(m_metadata.spawnPoint);
 
     // species definitions load once at world create (content-pure; see the helper).
@@ -1174,8 +1177,8 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_simulationClock.reset(clock.tick());
     if (m_energyFieldState)
         m_energyFieldState->ResetEmptyAtTick(clock.tick());
-    m_weatherSystem->RestoreAtTick(clock.tick(), m_metadata.spawnPoint, *m_windFieldSystem);
-    m_aetherFieldSystem->Update(clock.tick(), m_metadata.spawnPoint, m_windFieldSystem.get());
+    m_weatherSystem->RestoreAtTick(clock.tick(), m_ambientFieldAnchor, *m_windFieldSystem);
+    m_aetherFieldSystem->Update(clock.tick(), m_ambientFieldAnchor, m_windFieldSystem.get());
 }
 
 bool GameSession::SaveWorld() {
@@ -1214,8 +1217,12 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         {"waterSimCursor",
          m_worldSystem ? m_worldSystem->GetWaterSimWindowCursor() : std::size_t{0}}};
 
-    if (m_activeRegionsEnabled)
+    if (m_activeRegionsEnabled) {
         m_worldClock.write_metadata(metadata_json);
+        metadata_json["ambientFieldAnchor"] = {{"x", m_ambientFieldAnchor.x},
+                                               {"y", m_ambientFieldAnchor.y},
+                                               {"z", m_ambientFieldAnchor.z}};
+    }
     return Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n", save_dir);
 }
 
@@ -1245,7 +1252,8 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         *report = result;
     }
     if (!IsSimulationTickBoundary() || !ClockConfigurationCompatible(save_dir) ||
-        !m_worldOpenError.empty() || !m_worldSystem || save_dir.empty()) {
+        !m_worldOpenError.empty() || !m_worldSystem || save_dir.empty() ||
+        (m_activeRegionsEnabled && (m_transientWorld || m_metadata.worldId.empty()))) {
         return false;
     }
 
@@ -1392,10 +1400,11 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     }
 
     WorldClock saved_clock;
+    std::optional<Vec3> ambient_anchor;
     bool requires_active_regions = false;
     std::vector<std::string> clock_errors;
     if (!Persistence::WorldSaveService::read_clock_metadata(
-            save_dir, saved_clock, requires_active_regions, &clock_errors) ||
+            save_dir, saved_clock, requires_active_regions, &clock_errors, &ambient_anchor) ||
         (requires_active_regions && !m_activeRegionsEnabled)) {
         m_worldOpenError =
             clock_errors.empty()
@@ -1406,8 +1415,10 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     }
     if (!snapshot_present && !m_activeRegionsEnabled)
         return true; // legacy fresh world
-    if (m_activeRegionsEnabled)
+    if (m_activeRegionsEnabled) {
+        m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
         RestoreWorldClock(saved_clock);
+    }
 
     // Validate every chunk before adopting any state. A malformed lattice must
     // never become an invitation to regenerate over authoritative disk bytes.
@@ -1647,8 +1658,22 @@ void GameSession::InitializeEnergyFieldState() {
 bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
     if (!m_worldOpenError.empty())
         return false;
-    if (!m_energyFieldState || m_energyFieldState->page_count() == 0 || save_dir.empty()) {
-        return true; // null/all-zero layer -> no file -> byte-identical saves
+    if (!m_energyFieldState || save_dir.empty())
+        return true;
+    if (m_energyFieldState->page_count() == 0) {
+        if (!m_activeRegionsEnabled)
+            return true; // Preserve legacy empty-layer save behavior.
+        const auto tick = GetSimulationTickCount();
+        const auto aligned_next = tick + (luminumbra::fields::kEnergyCadenceTicks -
+                                          tick % luminumbra::fields::kEnergyCadenceTicks);
+        if (m_energyFieldState->next_fire_tick() == aligned_next) {
+            // Absence reconstructs this phase. Retire any stale nonempty record.
+            std::error_code error;
+            fs::remove(save_dir / "aether_state.efs", error);
+            return !error;
+        }
+        // A legacy import can retain a different phase after its last unit decays.
+        // The existing header alone preserves it without adding zero pages.
     }
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
     std::ofstream file(save_dir / "aether_state.efs", std::ios::trunc);
