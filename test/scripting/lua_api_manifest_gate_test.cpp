@@ -1,33 +1,49 @@
-#include "../../src/luminumbra_common/scripting/LuaApiManifest.h"
+#include "scripting/LuaApiManifest.h"
 
-#include <stdexcept>
+#include "gtest/gtest.h"
+
 #include <string>
 
 namespace {
+using namespace Luminumbra::scripting;
 
-bool RunLuaApiManifestGate() {
-    const auto& manifest = Luminumbra::scripting::GetLuaApiManifest();
-    if (!Luminumbra::scripting::LuaApiManifestMeetsBaseline(manifest)) {
-        throw std::runtime_error("Lua API manifest does not meet the baseline contract");
+TEST(LuaApiManifest, DescribesOnlyTheInstalledSamplerAndAlias) {
+    const auto& manifest = GetLuaApiManifest();
+    ASSERT_TRUE(LuaApiManifestMeetsBaseline(manifest));
+    ASSERT_EQ(manifest.entries.size(), 2u);
+    EXPECT_EQ(manifest.manifest_version, "1.1.0");
+    EXPECT_EQ(manifest.entries[0].module, "");
+    EXPECT_EQ(manifest.entries[1].module, "world");
+    for (const auto& entry : manifest.entries) {
+        EXPECT_EQ(entry.name, "sample_energy_field");
+        EXPECT_EQ(entry.kind, "function");
     }
-
-    const std::string json = Luminumbra::scripting::SerializeLuaApiManifestJson(manifest);
-    for (const char* needle : {
-             "luminumbra.scripting.lua_api_manifest.v1",
-             "module_then_name",
-             "\"module\": \"core\"",
-             "\"name\": \"log\"",
-             "\"module\": \"world\"",
-             "\"name\": \"set_block\"",
-         }) {
-        if (json.find(needle) == std::string::npos) {
-            throw std::runtime_error("Lua API manifest JSON is missing a required token");
-        }
+    const auto json = SerializeLuaApiManifestJson(manifest);
+    EXPECT_NE(json.find("luminumbra.scripting.lua_api_manifest.v1"), std::string::npos);
+    EXPECT_NE(json.find("module_then_name"), std::string::npos);
+    EXPECT_NE(json.find("\"module\": \"\""), std::string::npos);
+    EXPECT_NE(json.find("world.sample_energy_field"), std::string::npos);
+    for (const auto* absent :
+         {"set_block", "get_block", "emit_event", "subscribe", "spawn", "destroy"}) {
+        EXPECT_EQ(json.find(absent), std::string::npos) << absent;
     }
-
-    return true;
 }
 
-const bool kLuaApiManifestGateResult = RunLuaApiManifestGate();
-
+TEST(LuaApiManifest, RejectsMissingDuplicatedUnimplementedAndMalformedEntries) {
+    auto manifest = GetLuaApiManifest();
+    manifest.entries.pop_back();
+    EXPECT_FALSE(LuaApiManifestMeetsBaseline(manifest));
+    manifest = GetLuaApiManifest();
+    manifest.entries[1] = manifest.entries[0];
+    EXPECT_FALSE(LuaApiManifestMeetsBaseline(manifest));
+    manifest = GetLuaApiManifest();
+    manifest.entries.push_back({"world", "set_block", "function", "world.set_block()", "Unbound"});
+    EXPECT_FALSE(LuaApiManifestMeetsBaseline(manifest));
+    manifest = GetLuaApiManifest();
+    manifest.entries[1].signature.clear();
+    EXPECT_FALSE(LuaApiManifestMeetsBaseline(manifest));
+    manifest = GetLuaApiManifest();
+    manifest.manifest_version = "1.0.0";
+    EXPECT_FALSE(LuaApiManifestMeetsBaseline(manifest));
+}
 } // namespace

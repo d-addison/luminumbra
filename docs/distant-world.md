@@ -96,7 +96,9 @@ interior sightlines come from V1 and V2 bricks, which sample the same cave
 field.
 
 One tier table replaces the separate far-range constants and the differing
-1,536 m and 3,000 m horizon figures in code, comments and gates.
+1,536 m and 3,000 m horizon figures in code, comments and gates. The table is
+declared first and adopted by runtime streaming and the gates in the slices
+that build the tiers, so the replacement is staged rather than optional.
 
 Current behaviour: two pristine heightfield tiers (4 m to 768 m, 8 m to about
 3,000 m) with a 3,200 m far plane; edits reach far tiles only through
@@ -104,6 +106,50 @@ authoritative SDF brick overlays captured from chunks that are still resident,
 because the far store is never attached to a save directory at runtime; full
 lattices exist only for chunks generated or retained at the full live detail
 level, while chunks first generated at a coarser level carry heightmaps only.
+
+### Far-range declaration and compatibility
+
+`src/luminumbra_common/world/FarTierTable.h` declares the
+ladder above as a header-only `constexpr` table in `Luminumbra::World`. New
+volumetric far code reads this table instead of introducing local range
+constants. For tier number `t` in 1 through 5, sample spacing is
+`4 * 2^(t-1)` metres, brick edge is `4 * spacing`, tile edge is
+`128 * spacing`, and horizontal outer radius is `256 * spacing`.
+
+The source API exposes `kFarTierCount`, `kFarTierTable`, the one-based
+`FarTierAt(t)` accessor, and `kFarOuterRadiusMeters`. Each `FarTierDimensions`
+entry has integer metre fields `sample_spacing_meters`, `brick_edge_meters`,
+`tile_edge_meters`, and `outer_radius_meters`. `FarTierForHorizontalDistance`
+returns the one-based nominal band owner for an XZ camera-to-nearest-tile
+distance: V1 owns `[0, 1024]`, then each tier owns
+`(previous outer radius, own outer radius]`. Exact radii belong to the finer
+tier, including V5's outer edge. Actual live coverage, arrival fallback and
+one-brick overlap remain obligations of later slices.
+
+This is a source API addition, with no serialized file, record, field, artifact
+key or feature switch added to the engine. An absent header fails compilation;
+invalid table dimensions fail its compile-time invariants. `FarTierAt` refuses
+zero and unsupported or future tier numbers with `std::nullopt`, without
+clamping or indexing out of bounds. The distance accessor returns
+`std::nullopt` for negative, non-finite or beyond-horizon values. There is no
+runtime table loader or format version to accept, migrate or reinterpret.
+`test/common/FarTierTable_test.cpp` adds five cases
+to `common_tests` covering the published values, nesting, angular density,
+exact boundaries and invalid inputs; a missing source fails configuration or
+build, and a broken contract fails its tests.
+
+The legacy two-tier heightfield path remains pinned to F1 = 768 m,
+F2 = 3,000 m, fragment clips = 176 m and 3,050 m, and camera far plane =
+3,200 m. Removing the unreferenced `NEAR_FIELD_DISTANCE` and
+`FAR_FIELD_DISTANCE` declarations changes no consumer. The frontier gate
+continues to assert the reported missing-region count for the runtime wanted
+set, without independently computing a coverage radius. Its existing
+`luminumbra.farlod_horizon.v1` artifact still writes the historical
+`thresholds.f2_outer_range_m` value 1,536; the gate never reads that field.
+That value is retained solely to preserve artifact bytes and is not the
+runtime horizon. No frontier capture or wider-radius qualification is claimed
+by this declaration. Runtime constants, gate assertions, payloads, world
+hashes and configuration remain unchanged.
 
 ### Vertical coverage and the cave field
 

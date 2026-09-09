@@ -35,6 +35,8 @@ jobs:
           set -euo pipefail
           mkdir -p build/docs
           doxygen Doxyfile
+          mkdir -p build/docs/html/assets
+          cp -R docs/assets/. build/docs/html/assets/
           test -f build/docs/html/index.html
           python3 tools/ci/check_docs.py --html build/docs/html
 

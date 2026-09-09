@@ -54,20 +54,20 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
 
 class FarLodSystem {
 public:
-    // Pinned numbers (the deterministic runtime contract section 4).
+    // Legacy two-tier heightfield ranges, held unchanged until volumetric
+    // streaming adopts the ladder declared in world/FarTierTable.h.
     static constexpr float kF1OuterRangeMeters = 768.0f;
-    // Finite far horizon; a larger configurable hierarchy is future work.
-    // F2 streams to ~3000 m; the camera FAR_PLANE (3200 m) clears it + margin.
+    // F2 streams to 3000 m; the camera FAR_PLANE (3200 m) clears it + margin.
     static constexpr float kF2OuterRangeMeters = 3000.0f;
     static constexpr std::size_t kResidentBudgetBytes = 384ull * 1024ull * 1024ull;
-    // Fragment-level live/far handoff: far-mesh fragments closer than this
+    // Legacy fragment-level live/far handoff: far-mesh fragments closer than this
     // (the guaranteed-renderable LOD0 ring minus one chunk of overlap) are
     // discarded in the G-buffer shader so the under-terrain far fill cannot
     // show through live LOD seam cracks at close range, while everything
     // beyond the live ring keeps far coverage (no gap band: the overlap chunk
     // is drawn by BOTH paths and depth resolves it).
     static constexpr float kFarClipInnerRadiusMeters = 176.0f;
-    // Bound distant geometry inside the 3200 m camera far plane. This is
+    // Bound legacy distant geometry inside the 3200 m camera far plane. This is
     // a finite horizon; elevated views can still see its outer edge.
     static constexpr float kFarClipOuterRadiusMeters = 3050.0f;
     // Far meshes sit slightly below the live surface so live geometry always
@@ -97,8 +97,9 @@ public:
         bool enabled = false;
         std::size_t regions_wanted = 0;
         std::size_t regions_resident = 0;
-        // Wanted regions with no resident mesh yet (the FarLodHorizon gate
-        // requires this to settle to 0 out to 1536 m).
+        // Wanted regions with no resident mesh yet. The FarLodHorizon gate
+        // checks this count settles to 0 for the legacy runtime wanted set
+        // (kF2OuterRangeMeters); it does not independently verify a radius.
         std::size_t regions_missing = 0;
         std::size_t regions_building = 0;
         std::size_t resident_bytes = 0; // tile payload + GPU mesh bytes
@@ -125,6 +126,46 @@ public:
         std::size_t evictions_this_frame = 0; // regions evicted this frame (wanted-set + budget)
         std::size_t pending_depth = 0;        // build jobs in flight at end of update()
     };
+
+    // Opt-in capture diagnostics. No region walk or allocation while disabled.
+    // Readiness is recomputed AFTER eviction; legacy FrameStats::regions_missing
+    // is an earlier scheduler observation and is not a complete readiness test.
+    struct RegionCoverage {
+        int rx = 0, rz = 0;
+        World::FarLodTier wanted_tier = World::FarLodTier::F1;
+        World::FarLodTier resident_tier = World::FarLodTier::F1;
+        bool wanted = false, pending = false, resident = false, current = false;
+        bool persistence_pending = false, has_edited_samples = false;
+        bool edited_samples_observed = false;
+        u64 authority_revision = 0, resident_authority_revision = 0;
+        glm::vec3 aabb_min{0.0f}, aabb_max{0.0f};
+        u32 terrain_indices = 0, water_indices = 0;
+        const char* terrain_decision = "not_drawn";
+        const char* water_decision = "not_drawn";
+    };
+    struct CoverageDiagnostics {
+        bool enabled = false, draw_observed = false;
+        bool camera_region_guard_bypassed = false;
+        u64 update_frame = 0;
+        glm::vec3 camera{0.0f};
+        bool preview_anchored = false;
+        glm::vec3 preview_anchor{0.0f};
+        float preview_inner_radius = 0.0f;
+        std::size_t wanted = 0, resident = 0, missing = 0, stale = 0, pending = 0;
+        std::vector<RegionCoverage> neighbourhood;
+    };
+    void set_coverage_diagnostics_enabled(bool enabled) {
+        m_coverage_enabled = enabled;
+        if (!enabled)
+            m_coverage = {};
+    }
+    // Causal A/B only. Has no effect unless coverage diagnostics are enabled.
+    void set_coverage_camera_region_guard_bypass(bool bypass) {
+        m_coverage_camera_region_guard_bypass = bypass;
+    }
+    const CoverageDiagnostics& coverage_diagnostics() const {
+        return m_coverage;
+    }
 
     FarLodSystem();
     ~FarLodSystem();
@@ -221,6 +262,8 @@ private:
         u64 last_wanted_frame = 0;
         u64 region_authority_revision = 0;
         bool persistence_pending = false;
+        bool has_edited_samples = false;
+        bool edited_samples_observed = false;
     };
 
     struct BuildResult {
@@ -292,6 +335,9 @@ private:
     std::unordered_map<u64, World::FarLodTier> m_pending;
     std::unordered_map<u64, ResidentRegion> m_residents;
 
+    bool m_coverage_enabled = false;
+    bool m_coverage_camera_region_guard_bypass = false;
+    CoverageDiagnostics m_coverage;
     FrameStats m_stats;
 };
 
