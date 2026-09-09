@@ -168,6 +168,8 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     generate_caustics(ctx);
 
     // --- 1. Set OpenGL State ---
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GREATER);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
@@ -176,10 +178,10 @@ WaterPass::execute(const RenderContext& ctx, const WaterPassInput& input, const 
     // --- 2. Activate Shader and Set Uniforms ---
     m_water_shader->use();
 
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                            (float)ctx.screen_width / (float)ctx.screen_height,
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
+    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                (float)ctx.screen_width / (float)ctx.screen_height,
+                                                camera.GetNearPlane(),
+                                                camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
 
     // Set matrices

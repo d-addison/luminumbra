@@ -83,7 +83,7 @@ void LightingPass::init_lighting_fbo(RenderResourceRegistry& registry, u32 width
     // allocate the lighting FBO + attachments THROUGH the
     // registry. The descs reproduce the retired glTexImage2D/glRenderbufferStorage
     // calls exactly (RGBA16F LINEAR HDR color; RGBA16F LINEAR + CLAMP_TO_EDGE
-    // opaque copy; DEPTH_COMPONENT24 renderbuffer) so the objects are
+    // opaque copy; DEPTH_COMPONENT32F renderbuffer) so the objects are
     // parameter-identical; the FrameBufferObject struct caches the owned ids.
     TextureDesc color;
     color.width = width;
@@ -111,7 +111,7 @@ void LightingPass::init_lighting_fbo(RenderResourceRegistry& registry, u32 width
     RenderbufferDesc depth;
     depth.width = width;
     depth.height = height;
-    depth.internal_format = GL_DEPTH_COMPONENT24;
+    depth.internal_format = GL_DEPTH_COMPONENT32F;
     depth.debug_label = "lighting.depth";
     m_lighting_fbo.depth_texture = registry.create_renderbuffer("lighting_depth", depth).id;
 
@@ -173,8 +173,14 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
 
 void LightingPass::execute(const RenderContext& ctx) {
     const Camera& camera = *ctx.camera;
+    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
+    // The fullscreen quad lies at clip depth zero. Scene visibility comes from
+    // the G-buffer, and its depth is blitted here after deferred lighting.
+    glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // deferred lighting into the internal FBO
+    glDepthMask(GL_TRUE);
+    glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
     glActiveTexture(GL_TEXTURE0);
@@ -316,11 +322,11 @@ void LightingPass::execute(const RenderContext& ctx) {
     // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
     // same projection the SSAO pass builds, plus the screen size.
     {
-        const glm::mat4 cave_proj = glm::perspective(glm::radians(camera.Zoom),
-                                                     static_cast<float>(ctx.screen_width) /
-                                                         static_cast<float>(ctx.screen_height),
-                                                     camera.GetNearPlane(),
-                                                     camera.GetFarPlane());
+        const glm::mat4 cave_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                         static_cast<float>(ctx.screen_width) /
+                                                             static_cast<float>(ctx.screen_height),
+                                                         camera.GetNearPlane(),
+                                                         camera.GetFarPlane());
         m_lighting_shader->setMat4("u_projection", cave_proj);
         m_lighting_shader->setVec2(
             "u_screenSize",
@@ -389,6 +395,8 @@ void LightingPass::execute(const RenderContext& ctx) {
         ++(*ctx.lighting_draws);
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (depth_was_enabled)
+        glEnable(GL_DEPTH_TEST);
 }
 
 void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {

@@ -19,8 +19,8 @@ uniform float u_strength;    // overall intensity
 const int SAMPLES = 24; // radial blur stays smooth at 24; keeps the pass cheap
 
 void main() {
-    if (u_sunVisible <= 0.0 || texture(u_sceneDepth, TexCoords).r < 1.0 ||
-        texture(u_sceneDepth, u_sunUV).r < 1.0) {
+    if (u_sunVisible <= 0.0 || texture(u_sceneDepth, TexCoords).r > 0.0 ||
+        texture(u_sceneDepth, u_sunUV).r > 0.0) {
         FragColor = vec4(0.0);
         return;
     }
@@ -38,7 +38,7 @@ void main() {
         // sky is below the old 0.5 luminance threshold; a smooth response lets
         // it produce shafts in air while dark clouds still interrupt the rays.
         float lum = dot(s, vec3(0.2126, 0.7152, 0.0722));
-        float bright = texture(u_sceneDepth, sampleUV).r >= 1.0 ? lum / (lum + 0.2) : 0.0;
+        float bright = texture(u_sceneDepth, sampleUV).r <= 0.0 ? lum / (lum + 0.2) : 0.0;
         accum += s * bright * w;
         w *= decay;
     }

@@ -646,7 +646,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     // and blend additively into the HDR lighting target.
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
-    glDepthFunc(GL_LEQUAL);
+    glDepthFunc(GL_GEQUAL);
     glEnable(GL_BLEND);
     //  honour the emitter blend mode. The old
     // path hardcoded additive (GL_SRC_ALPHA, GL_ONE) for EVERY emitter -- but RAIN
@@ -675,11 +675,11 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     }
 
     m_shader->use();
-    const glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                                  static_cast<float>(ctx.screen_width) /
-                                                      static_cast<float>(ctx.screen_height),
-                                                  camera.GetNearPlane(),
-                                                  camera.GetFarPlane());
+    const glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                      static_cast<float>(ctx.screen_width) /
+                                                          static_cast<float>(ctx.screen_height),
+                                                      camera.GetNearPlane(),
+                                                      camera.GetFarPlane());
     const glm::mat4 view = camera.GetViewMatrix();
     // cache the camera screen basis so next frame's
     // update can orient rain streaks by SCREEN-projected velocity (kills the
@@ -740,7 +740,7 @@ std::size_t ParticlePass::execute(const RenderContext& ctx, const Camera& camera
     }
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
-    glDepthFunc(GL_LESS);
+    glDepthFunc(GL_GREATER);
     return m_frame_instance_count;
 }
 

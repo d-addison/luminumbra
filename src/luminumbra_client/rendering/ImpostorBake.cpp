@@ -223,7 +223,7 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
     glDrawBuffers(2, drawBufs);
     glGenRenderbuffers(1, &depthRb);
     glBindRenderbuffer(GL_RENDERBUFFER, depthRb);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, atlas, atlas);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, atlas, atlas);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRb);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         out.err = "impostor atlas FBO incomplete";
@@ -251,6 +251,10 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
     glBindTexture(GL_TEXTURE_2D_ARRAY, rp.static_model_normal_array());
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D_ARRAY, rp.static_model_texture_array());
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    glClearDepth(0.0);
+    glDepthFunc(GL_GREATER);
+    glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glViewport(0, 0, atlas, atlas);
@@ -266,7 +270,7 @@ RenderAtlas(const std::string& rootDir, const RenderPipeline& rp, const OctaImpo
             const glm::vec3 eye = unionC + dir * D;
             const glm::vec3 up =
                 (std::fabs(dir.y) > 0.99f) ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
-            const glm::mat4 mvp = glm::ortho(-hr, hr, -hr, hr, 0.01f, D + unionR * 2.0f) *
+            const glm::mat4 mvp = glm::orthoRH_ZO(-hr, hr, -hr, hr, D + unionR * 2.0f, 0.01f) *
                                   glm::lookAt(eye, unionC, up);
             glViewport(i * tile, j * tile, tile, tile);
             glUniformMatrix4fv(locMVP, 1, GL_FALSE, &mvp[0][0]);

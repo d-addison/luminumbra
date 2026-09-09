@@ -50,9 +50,8 @@ uniform sampler2D u_sceneDepth;
 
 // Linearize a hardware depth-buffer sample to view-space depth (positive).
 float linearize_depth(float d) {
-    float z = d * 2.0 - 1.0; // NDC
-    return (2.0 * u_nearPlane * u_farPlane) /
-           (u_farPlane + u_nearPlane - z * (u_farPlane - u_nearPlane));
+    return (u_nearPlane * u_farPlane) /
+           (u_nearPlane + d * (u_farPlane - u_nearPlane));
 }
 
 // Radial soft sprite mask (round flakes / magical sparkles).

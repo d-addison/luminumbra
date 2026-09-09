@@ -34,9 +34,9 @@ uniform vec3 u_sky_color; // approximate sky reflection color (time-of-day drive
 
 bool has_opaque_depth(float depth)
 {
-    // Every value below cleared depth is geometry, including terrain beyond
+    // Every value above cleared depth is geometry, including terrain beyond
     // 762 m with the current projection. Altitude must not turn land into sky.
-    return depth < 1.0;
+    return depth > 0.0;
 }
 
 // --- Procedural ripple normal -------------------------------------------
@@ -110,7 +110,7 @@ float foam_fbm(vec2 p, float t, vec2 flow) {
 }
 
 vec3 world_pos_from_depth(float depth, vec2 screen_uv) {
-    float z = depth * 2.0 - 1.0;
+    float z = depth; // reversed-Z already uses [0,1] clip depth
     vec4 clip_space_pos = vec4(screen_uv * 2.0 - 1.0, z, 1.0);
     vec4 view_space_pos = u_inverse_projection * clip_space_pos;
     view_space_pos /= view_space_pos.w;

@@ -537,6 +537,8 @@ public:
     // writes sim state or feeds world_hash. Defined in the.cpp because GBufferPass
     // is forward-declared here.
     const GBuffer& gbuffer() const;
+    // Read-only scene target access for attachment diagnostics and capture tests.
+    const FrameBufferObject& lighting_fbo() const;
     // SSAO parity: run the ORIGINAL pipeline-sourced SSAO+blur
     // GL sequence (golden A-leg) then the ctx-sourced SsaoPass seam (B-leg) into the
     // pass-owned blur FBO in the same frame, reading back R16F between legs, for each

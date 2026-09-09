@@ -91,7 +91,7 @@ void GlassOitPass::execute_accum(const RenderContext& ctx, const GlassOitPassInp
     glClearBufferfv(GL_COLOR, 1, clear_reveal);
 
     glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
+    glDepthFunc(GL_GREATER);
     glDepthMask(GL_FALSE);
     glDisable(GL_CULL_FACE);
     glEnable(GL_BLEND);
