@@ -6,6 +6,7 @@
 namespace Luminumbra::scripting {
 
 struct LuaApiManifestEntry {
+    // Empty module names a bare global; it does not expose a Lua _G table.
     std::string module;
     std::string name;
     std::string kind;
@@ -20,6 +21,7 @@ struct LuaApiManifest {
     std::vector<LuaApiManifestEntry> entries;
 };
 
+// Initially installed callable surface, not a list of proposed future APIs.
 const LuaApiManifest& GetLuaApiManifest();
 std::string SerializeLuaApiManifestJson(const LuaApiManifest& manifest);
 bool LuaApiManifestMeetsBaseline(const LuaApiManifest& manifest);
