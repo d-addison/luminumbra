@@ -119,7 +119,11 @@ void main() { result = color; }
 
     void draw(float distance, bool near) {
         glUniform1f(glGetUniformLocation(program, "distanceMetres"), distance);
-        glUniform4f(glGetUniformLocation(program, "color"), near ? 1 : 0, near ? 0 : 1, 0, 1);
+        glUniform4f(glGetUniformLocation(program, "color"),
+                    near ? 1.0f : 0.0f,
+                    near ? 0.0f : 1.0f,
+                    0.0f,
+                    1.0f);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
@@ -187,7 +191,7 @@ TEST_F(ReversedZDepth, RuntimeClipPlanesRemainPointOneAnd3200Metres) {
         clear();
         draw(distance, true);
         expect_color(0, 0);
-        EXPECT_FLOAT_EQ(depth(), 0);
+        EXPECT_FLOAT_EQ(depth(), 0.0f);
     }
 }
 
