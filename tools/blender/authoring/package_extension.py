@@ -7,7 +7,8 @@ import zipfile
 def build(target):
     here = Path(__file__).resolve().parent
     files = {name: here / "extension" / name for name in (
-        "blender_manifest.toml", "__init__.py", "blender_asset.py", "logic.py", "broker.py", "export_worker.py")}
+        "blender_manifest.toml", "__init__.py", "blender_asset.py", "logic.py", "broker.py", "export_worker.py",
+        "recipes.py", "blender_recipes.py")}
     files["LICENSE"] = here.parents[2] / "LICENSE"
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)

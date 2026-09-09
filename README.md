@@ -85,6 +85,11 @@ links the unretouched full images and provenance.
 |---|---|
 | [![Ordinary guard with a black terrain gap](docs/assets/terrain-coverage/20260908/forest-guard-preview.png)](docs/terrain-coverage-diagnostics.md) | [![Experimental bypass showing recovered terrain coverage](docs/assets/terrain-coverage/20260908/forest-bypass-preview.png)](docs/terrain-coverage-diagnostics.md) |
 
+The optional Blender extension also provides [reviewed ID repairs](docs/authoring-recipes.md)
+with explicit change lists, shared-data disclosure and undo/redo. Its actual
+editor screenshot and 22-check native qualification are documented separately
+from engine rendering and remain pending visual approval.
+
 ## Architecture
 
 Game code currently remains in this repository. The accepted
