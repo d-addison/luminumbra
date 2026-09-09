@@ -13,6 +13,7 @@
 #include "app/DebugOverlays.h"
 #include "app/FrameAudio.h"
 #include "app/GameAssets.h"
+#include "app/HangWatchdog.h"
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
@@ -123,6 +124,18 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// Main-loop heartbeat for the opt-in hang watchdog (--hang-watchdog-seconds): bumped
+// once per rendered frame and once per shutdown milestone, read from the watchdog
+// thread. Relaxed atomics are enough; the watchdog only needs "did it change".
+// A function-local static rather than a file-scope variable: the client is compiled
+// with cppcoreguidelines-avoid-non-const-global-variables as an error.
+namespace {
+std::atomic<std::uint64_t>& MainLoopHeartbeat() {
+    static std::atomic<std::uint64_t> beat{0};
+    return beat;
+}
+} // namespace
 
 using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
@@ -1345,6 +1358,26 @@ int main(int argc, char* argv[]) {
 #endif
     RuntimeStateRecorder runtime_state_recorder(scenario_config, g_camera);
     InstallRuntimeCrashHandler(runtime_state_recorder);
+    std::unique_ptr<HangWatchdog> hang_watchdog;
+    if (scenario_config.hang_watchdog_seconds > 0 &&
+        !PrepareHangReport(scenario_config.crash_dir)) {
+        LUMINUMBRA_CORE_ERROR("Hang watchdog NOT armed: crash directory {} could not be prepared "
+                              "(must exist and, on Windows, have a short path without spaces)",
+                              scenario_config.crash_dir.string());
+    } else if (scenario_config.hang_watchdog_seconds > 0) {
+        hang_watchdog = std::make_unique<HangWatchdog>(
+            [] { return MainLoopHeartbeat().load(std::memory_order_relaxed); },
+            std::chrono::seconds(scenario_config.hang_watchdog_seconds),
+            [](std::uint64_t last_heartbeat, double stalled_seconds) {
+                ReportMainThreadHang(last_heartbeat, stalled_seconds);
+            });
+        LUMINUMBRA_CORE_INFO(
+            "Hang watchdog armed: main-loop stall threshold {} s (best-effort external "
+            "minidump and hang-*.txt in {}); choose a threshold longer than the "
+            "longest legitimate stage such as a large save",
+            scenario_config.hang_watchdog_seconds,
+            scenario_config.crash_dir.string());
+    }
     g_app.overlay.imgui_enabled = !scenario_config.no_ui;
     runtime_state_recorder.capture("startup_requested", nullptr, nullptr, nullptr, 0, {});
 
@@ -2875,6 +2908,7 @@ int main(int argc, char* argv[]) {
     bool g_rb_has_streaming_position = false;
     const glm::vec3 kRenderBenchmarkCameraPosition(8.0f, 56.0f, 8.0f);
     while (!glfwWindowShouldClose(window)) {
+        MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
@@ -4775,9 +4809,22 @@ int main(int argc, char* argv[]) {
     }
 
     std::vector<std::string> shutdown_milestones;
+    const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {
         shutdown_milestones.push_back(milestone);
+        MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
+        // With the hang watchdog armed, shutdown.json is rewritten after every stage
+        // (complete=false) so a teardown hang localizes to the last stage reached; the
+        // final write_shutdown marks it complete. Off by default: the record is then
+        // written once at the end exactly as before.
+        if (incremental_shutdown_record)
+            runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
     };
+    if (incremental_shutdown_record) {
+        // Publish a fresh, empty, incomplete record before any teardown stage so a hang
+        // in the first stage cannot leave a previous run's completed record in place.
+        runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
+    }
 
     prepare_world_entry();
 
@@ -4839,6 +4886,10 @@ int main(int argc, char* argv[]) {
     mark_shutdown("job_system_shutdown");
     const auto shutdown_job_stats = jobSystem.get_runtime_stats();
     runtime_state_recorder.write_shutdown(shutdown_milestones, shutdown_job_stats);
+    if (hang_watchdog) {
+        CancelPendingHangReport();
+        hang_watchdog->stop();
+    }
     glfwDestroyWindow(window);
     glfwTerminate();
     return exit_code;

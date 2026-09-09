@@ -1406,6 +1406,44 @@ target_link_libraries(client_policy_test PRIVATE
     glm::glm
 )
 
+# edge-triggered physics binding log. Compiles MiniaudioManager.cpp
+# and AudioSpatialCluster.cpp directly (constructor only; Init() never opens a device);
+# needs miniaudio + nlohmann_json for the manager's link interface.
+add_executable(audio_physics_binding_test
+    audio/audio_physics_binding_test.cpp
+../src/luminumbra_client/audio/MiniaudioManager.cpp
+../src/luminumbra_client/audio/AudioSpatialCluster.cpp
+)
+target_include_directories(audio_physics_binding_test PRIVATE
+../src
+../src/luminumbra_client
+../src/luminumbra_common
+../include
+)
+target_link_libraries(audio_physics_binding_test PRIVATE
+    gtest_main
+    luminumbra_common
+    miniaudio
+    nlohmann_json
+    glm
+    spdlog::spdlog
+)
+
+# main-loop stall detector (pure std; no window/GL/device). Fires once per
+# stall episode, re-arms when the heartbeat resumes.
+find_package(Threads REQUIRED)
+add_executable(hang_watchdog_test
+    client/hang_watchdog_test.cpp
+../src/luminumbra_client/app/HangWatchdog.cpp
+)
+target_include_directories(hang_watchdog_test PRIVATE
+../src/luminumbra_client
+)
+target_link_libraries(hang_watchdog_test PRIVATE
+    gtest_main
+    Threads::Threads
+)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -1555,6 +1593,8 @@ set(LUMINUMBRA_GTEST_TARGETS
     audio_occlusion_test
     audio_prune_guard_test
     client_policy_test
+    audio_physics_binding_test
+    hang_watchdog_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test

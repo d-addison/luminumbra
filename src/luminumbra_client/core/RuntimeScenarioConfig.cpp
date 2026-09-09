@@ -2,6 +2,7 @@
 #include "core/Log.h"
 #include "luminumbra_common/core/Environment.h"
 #include <algorithm>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
@@ -270,6 +271,8 @@ ParseRuntimeScenarioConfig(int argc, char* argv[], const std::filesystem::path& 
     // Disabled normal play must not write a telemetry JSON on every listener update.
     config.audio_telemetry_path = GetCommandLineOption(argc, argv, "--audio-telemetry-path", "");
     config.crash_dir = GetCommandLineOption(argc, argv, "--crash-dir", default_crash_dir.string());
+    config.hang_watchdog_seconds = std::max(
+        0, std::atoi(GetCommandLineOption(argc, argv, "--hang-watchdog-seconds", "0").c_str()));
     return config;
 }
 

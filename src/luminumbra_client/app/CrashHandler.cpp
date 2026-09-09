@@ -12,8 +12,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 
 #if defined(_WIN32)
@@ -44,11 +46,13 @@ RuntimeStateRecorder*& RuntimeStateRecorderSlot() {
 
 namespace {
 
-bool WriteMiniDump(EXCEPTION_POINTERS* exception_info, const std::filesystem::path& crash_dir) {
+bool WriteMiniDump(EXCEPTION_POINTERS* exception_info,
+                   const std::filesystem::path& crash_dir,
+                   const char* stem = "luminumbra") {
     std::error_code ec;
     std::filesystem::create_directories(crash_dir, ec);
     const std::filesystem::path dump_path =
-        crash_dir / ("luminumbra-" + TimestampForFile() + ".dmp");
+        crash_dir / (std::string(stem) + "-" + TimestampForFile() + ".dmp");
 
     HANDLE file = CreateFileW(dump_path.wstring().c_str(),
                               GENERIC_WRITE,
@@ -66,15 +70,80 @@ bool WriteMiniDump(EXCEPTION_POINTERS* exception_info, const std::filesystem::pa
     exception_information.ExceptionPointers = exception_info;
     exception_information.ClientPointers = FALSE;
 
-    const BOOL wrote_dump = MiniDumpWriteDump(GetCurrentProcess(),
-                                              GetCurrentProcessId(),
-                                              file,
-                                              MiniDumpNormal,
-                                              exception_info ? &exception_information : nullptr,
-                                              nullptr,
-                                              nullptr);
+    const BOOL wrote_dump = MiniDumpWriteDump(
+        GetCurrentProcess(),
+        GetCurrentProcessId(),
+        file,
+        exception_info ? MiniDumpNormal
+                       : static_cast<MINIDUMP_TYPE>(MiniDumpNormal | MiniDumpWithThreadInfo |
+                                                    MiniDumpWithIndirectlyReferencedMemory),
+        exception_info ? &exception_information : nullptr,
+        nullptr,
+        nullptr);
     CloseHandle(file);
     return wrote_dump == TRUE;
+}
+
+// Walk and symbolize `thread` from `ctx` (mutated as it unwinds), emitting one
+// line per frame. Shared by the crash filter and the hang report.
+void WalkStackFrames(HANDLE proc,
+                     HANDLE thread,
+                     CONTEXT& ctx,
+                     const std::function<void(const std::string&)>& emit) {
+    STACKFRAME64 frame{};
+    frame.AddrPC.Offset = ctx.Rip;
+    frame.AddrPC.Mode = AddrModeFlat;
+    frame.AddrFrame.Offset = ctx.Rbp;
+    frame.AddrFrame.Mode = AddrModeFlat;
+    frame.AddrStack.Offset = ctx.Rsp;
+    frame.AddrStack.Mode = AddrModeFlat;
+
+    alignas(SYMBOL_INFO) char symbuf[sizeof(SYMBOL_INFO) + 512];
+    auto* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
+
+    for (int i = 0; i < 64; ++i) {
+        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64,
+                         proc,
+                         thread,
+                         &frame,
+                         &ctx,
+                         nullptr,
+                         SymFunctionTableAccess64,
+                         SymGetModuleBase64,
+                         nullptr)) {
+            break;
+        }
+        const DWORD64 pc = frame.AddrPC.Offset;
+        if (pc == 0)
+            break;
+
+        const DWORD64 mod_base = SymGetModuleBase64(proc, pc);
+        char mod_name[MAX_PATH] = "?";
+        if (mod_base) {
+            GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), mod_name, MAX_PATH);
+        }
+        const DWORD64 rva = mod_base ? (pc - mod_base) : 0;
+
+        std::memset(sym, 0, sizeof(SYMBOL_INFO));
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 512;
+        DWORD64 disp = 0;
+        const char* fn = SymFromAddr(proc, pc, &disp, sym) ? sym->Name : "??";
+
+        const char* slash = std::strrchr(mod_name, '\\');
+        const char* mod_short = slash ? slash + 1 : mod_name;
+
+        char b[1100];
+        std::snprintf(b,
+                      sizeof b,
+                      "#%-2d 0x%016llX  %s+0x%llX  %s",
+                      i,
+                      static_cast<unsigned long long>(pc),
+                      mod_short,
+                      static_cast<unsigned long long>(rva),
+                      fn);
+        emit(b);
+    }
 }
 
 // Walk + symbolize the faulting thread's stack at crash time and write it to a
@@ -149,60 +218,7 @@ void WriteCrashStackTrace(EXCEPTION_POINTERS* xp, const std::filesystem::path& c
         ctx.Rip = ret; // pretend we are in the caller
         ctx.Rsp += 8;  // pop the pushed return address
     }
-    STACKFRAME64 frame{};
-    frame.AddrPC.Offset = ctx.Rip;
-    frame.AddrPC.Mode = AddrModeFlat;
-    frame.AddrFrame.Offset = ctx.Rbp;
-    frame.AddrFrame.Mode = AddrModeFlat;
-    frame.AddrStack.Offset = ctx.Rsp;
-    frame.AddrStack.Mode = AddrModeFlat;
-
-    alignas(SYMBOL_INFO) char symbuf[sizeof(SYMBOL_INFO) + 512];
-    auto* sym = reinterpret_cast<SYMBOL_INFO*>(symbuf);
-
-    for (int i = 0; i < 64; ++i) {
-        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64,
-                         proc,
-                         thread,
-                         &frame,
-                         &ctx,
-                         nullptr,
-                         SymFunctionTableAccess64,
-                         SymGetModuleBase64,
-                         nullptr)) {
-            break;
-        }
-        const DWORD64 pc = frame.AddrPC.Offset;
-        if (pc == 0)
-            break;
-
-        const DWORD64 mod_base = SymGetModuleBase64(proc, pc);
-        char mod_name[MAX_PATH] = "?";
-        if (mod_base) {
-            GetModuleFileNameA(reinterpret_cast<HMODULE>(mod_base), mod_name, MAX_PATH);
-        }
-        const DWORD64 rva = mod_base ? (pc - mod_base) : 0;
-
-        std::memset(sym, 0, sizeof(SYMBOL_INFO));
-        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-        sym->MaxNameLen = 512;
-        DWORD64 disp = 0;
-        const char* fn = SymFromAddr(proc, pc, &disp, sym) ? sym->Name : "??";
-
-        const char* slash = std::strrchr(mod_name, '\\');
-        const char* mod_short = slash ? slash + 1 : mod_name;
-
-        char b[1100];
-        std::snprintf(b,
-                      sizeof b,
-                      "#%-2d 0x%016llX  %s+0x%llX  %s",
-                      i,
-                      static_cast<unsigned long long>(pc),
-                      mod_short,
-                      static_cast<unsigned long long>(rva),
-                      fn);
-        emit(b);
-    }
+    WalkStackFrames(proc, thread, ctx, emit);
     emit("=== end stack ===  (resolve file:line with tools/gates/symbolize-crash.ps1 <crash.txt>)");
     SymCleanup(proc);
 }
@@ -252,9 +268,237 @@ void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
     RuntimeStateRecorderSlot() = &recorder;
     SetUnhandledExceptionFilter(RuntimeUnhandledExceptionFilter);
 }
+
+namespace {
+
+// Everything the hang report needs is prepared once, at arm time, in fixed
+// buffers: the report must not allocate, log or take locks, because the main
+// thread it is diagnosing may be blocked inside the allocator or the logger.
+struct HangReportPrep {
+    std::atomic<bool> ready{false};
+    std::atomic<bool> cancel{false};
+    wchar_t dir[MAX_PATH] = {};      // short (8.3) form, no spaces, no quoting needed
+    wchar_t command_prefix[64] = {}; // rundll32 comsvcs prefix with the pid
+};
+
+HangReportPrep& Prep() {
+    static HangReportPrep prep;
+    return prep;
+}
+
+// Fixed-size, allocation-free writer used by the hang report.
+struct RawFile {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    explicit RawFile(const wchar_t* path) noexcept {
+        handle = CreateFileW(path,
+                             GENERIC_WRITE,
+                             FILE_SHARE_READ,
+                             nullptr,
+                             CREATE_ALWAYS,
+                             FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+    }
+    ~RawFile() {
+        if (handle != INVALID_HANDLE_VALUE)
+            CloseHandle(handle);
+    }
+    void line(const char* text) noexcept {
+        if (handle == INVALID_HANDLE_VALUE)
+            return;
+        DWORD written = 0;
+        WriteFile(handle, text, static_cast<DWORD>(std::strlen(text)), &written, nullptr);
+        WriteFile(handle, "\r\n", 2, &written, nullptr);
+        FlushFileBuffers(handle);
+    }
+};
+
+bool CreateDirectoryTree(const wchar_t* path) noexcept {
+    wchar_t buffer[MAX_PATH];
+    if (wcsnlen(path, MAX_PATH) >= MAX_PATH)
+        return false;
+    std::wcsncpy(buffer, path, MAX_PATH);
+    for (wchar_t* p = buffer + 3; *p; ++p) { // skip the drive prefix "C:\"
+        if (*p == L'\\' || *p == L'/') {
+            const wchar_t saved = *p;
+            *p = L'\0';
+            CreateDirectoryW(buffer, nullptr);
+            *p = saved;
+        }
+    }
+    CreateDirectoryW(buffer, nullptr);
+    const DWORD attributes = GetFileAttributesW(buffer);
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+} // namespace
+
+bool PrepareHangReport(const std::filesystem::path& crash_dir) {
+    HangReportPrep& prep = Prep();
+    const std::wstring wide = std::filesystem::absolute(crash_dir).wstring();
+    if (wide.size() >= MAX_PATH || !CreateDirectoryTree(wide.c_str()))
+        return false;
+    // Short-path form removes spaces so the comsvcs helper receives an unquoted path.
+    wchar_t short_form[MAX_PATH] = {};
+    const DWORD n = GetShortPathNameW(wide.c_str(), short_form, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        // wcsncpy does not terminate when the source fills the buffer, so copy the
+        // known length and terminate explicitly. `wide` is shorter than MAX_PATH
+        // (checked above), and every later read of short_form assumes termination.
+        std::wmemcpy(short_form, wide.c_str(), wide.size());
+        short_form[wide.size()] = L'\0';
+    }
+    if (std::wcschr(short_form, L' ') != nullptr)
+        return false; // a spaced path cannot be passed to the helper unquoted
+    // The report formats "<dir>\\hang-YYYYMMDD-HHMMSS.txt" (and .dmp) into MAX_PATH
+    // buffers. Reject at arm time any directory long enough for those two names to
+    // truncate, which would otherwise collide into one filename.
+    constexpr std::size_t kArtifactSuffixChars = 26; // backslash + "hang-" + 15 stamp + ".txt"
+    if (std::wcslen(short_form) + kArtifactSuffixChars >= MAX_PATH)
+        return false;
+    std::wcsncpy(prep.dir, short_form, MAX_PATH - 1);
+    swprintf(prep.command_prefix,
+             64,
+             L"rundll32.exe comsvcs.dll,MiniDump %lu ",
+             static_cast<unsigned long>(GetCurrentProcessId()));
+    prep.cancel.store(false);
+    prep.ready.store(true);
+    return true;
+}
+
+void CancelPendingHangReport() noexcept {
+    Prep().cancel.store(true);
+}
+
+namespace {
+
+void ReportMainThreadHangImpl(std::uint64_t last_heartbeat, double stalled_seconds) noexcept {
+    HangReportPrep& prep = Prep();
+    if (!prep.ready.load())
+        return; // never armed, or preparation failed and was reported at arm time
+    SYSTEMTIME st{};
+    GetSystemTime(&st);
+    wchar_t stamp[32];
+    swprintf(stamp,
+             32,
+             L"%04u%02u%02u-%02u%02u%02u",
+             st.wYear,
+             st.wMonth,
+             st.wDay,
+             st.wHour,
+             st.wMinute,
+             st.wSecond);
+    wchar_t report_path[MAX_PATH], dump_path[MAX_PATH];
+    // PrepareHangReport guarantees these fit; treat a negative return as a hard stop
+    // rather than writing both artifacts to one truncated name.
+    if (swprintf(report_path, MAX_PATH, L"%s\\hang-%s.txt", prep.dir, stamp) < 0 ||
+        swprintf(dump_path, MAX_PATH, L"%s\\hang-%s.dmp", prep.dir, stamp) < 0) {
+        return;
+    }
+
+    RawFile report(report_path);
+    char line[512];
+    std::snprintf(line,
+                  sizeof line,
+                  "=== LUMINUMBRA HANG  heartbeat=%llu  stalled=%.1fs  pid=%lu ===",
+                  static_cast<unsigned long long>(last_heartbeat),
+                  stalled_seconds,
+                  static_cast<unsigned long>(GetCurrentProcessId()));
+    report.line(line);
+
+    wchar_t command[MAX_PATH + 96];
+    swprintf(command, MAX_PATH + 96, L"%s%s mini", prep.command_prefix, dump_path);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessW(
+        nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (started) {
+        // Bounded, cancellable wait: shutdown may cancel it, in which case the
+        // helper keeps running on its own and the dump completes independently.
+        DWORD wait = WAIT_TIMEOUT;
+        for (int slice = 0; slice < 120 && !prep.cancel.load(); ++slice) {
+            wait = WaitForSingleObject(pi.hProcess, 250);
+            if (wait != WAIT_TIMEOUT)
+                break;
+        }
+        DWORD code = 0;
+        GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        std::snprintf(line,
+                      sizeof line,
+                      "external minidump helper: %s (exit=%lu)",
+                      wait == WAIT_OBJECT_0 ? "finished"
+                      : prep.cancel.load()  ? "left running (shutdown cancelled the wait)"
+                                            : "still running after 30 s (left running)",
+                      static_cast<unsigned long>(code));
+        report.line(line);
+        const DWORD attributes = GetFileAttributesW(dump_path);
+        report.line(attributes != INVALID_FILE_ATTRIBUTES ? "dump file present"
+                                                          : "dump file not present at report time");
+    } else {
+        std::snprintf(line,
+                      sizeof line,
+                      "external minidump helper: CreateProcess failed (error %lu)",
+                      static_cast<unsigned long>(GetLastError()));
+        report.line(line);
+    }
+    report.line(
+        "symbolize offline: cdb -z hang-<ts>.dmp -c \"~*k; q\" with the PDB beside the executable");
+    report.line("=== end hang report ===");
+}
+
+} // namespace
+
+void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) noexcept {
+    // Best-effort, Windows-only. No suspension, no logging, no allocation, no DbgHelp.
+    try {
+        ReportMainThreadHangImpl(last_heartbeat, stalled_seconds);
+    } catch (...) {}
+}
 #else
 void InstallRuntimeCrashHandler(RuntimeStateRecorder& recorder) {
     RuntimeStateRecorderSlot() = &recorder;
+}
+
+namespace {
+std::string& HangReportDirSlot() {
+    static std::string dir;
+    return dir;
+}
+} // namespace
+
+bool PrepareHangReport(const std::filesystem::path& crash_dir) {
+    std::error_code ec;
+    std::filesystem::create_directories(crash_dir, ec);
+    if (ec || !std::filesystem::is_directory(crash_dir, ec))
+        return false;
+    HangReportDirSlot() = crash_dir.string();
+    return true;
+}
+
+void CancelPendingHangReport() noexcept {}
+
+void ReportMainThreadHang(std::uint64_t last_heartbeat, double stalled_seconds) noexcept {
+    // Text record only (no stack capture off Windows); raw stdio, no logger; the
+    // path is prepared at arm time so nothing here allocates.
+    const std::string& dir = HangReportDirSlot();
+    if (dir.empty())
+        return;
+    char path[4096];
+    std::snprintf(path,
+                  sizeof path,
+                  "%s/hang-%llu.txt",
+                  dir.c_str(),
+                  static_cast<unsigned long long>(last_heartbeat));
+    if (FILE* f = std::fopen(path, "w")) {
+        std::fprintf(f,
+                     "=== LUMINUMBRA HANG  heartbeat=%llu  stalled=%.1fs ===\n(stack capture is "
+                     "Windows-only)\n",
+                     static_cast<unsigned long long>(last_heartbeat),
+                     stalled_seconds);
+        std::fclose(f);
+    }
 }
 #endif
 
