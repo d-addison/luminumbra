@@ -6,10 +6,12 @@ generation. Use the same sidecar and commands as the [build service](README.md),
 with `profile` set to `glb-static-prefab-v1`. Every source mesh, material and scene
 node needs its persistent correlation ID. Names are labels.
 
-This is an asset compilation contract. Engine prefab instantiation, rendering,
-runtime components and engine frames in Blender remain unavailable. Check both
-`static_prefab_compilation` and `prefab_runtime_instantiation` in `capabilities`
-when selecting a consumer workflow.
+This is an asset compilation contract. The optional
+[compiled prefab runtime](../../../prefab_runtime/README.md) loads a pinned
+generation into an ECS hierarchy and provides an installed headless inspector.
+Rendering, runtime components and engine frames in Blender remain unavailable.
+The service's `prefab_runtime_instantiation` capability remains false: it does not
+run or discover the separately installed runtime consumer.
 
 ## Geometry and placement
 
