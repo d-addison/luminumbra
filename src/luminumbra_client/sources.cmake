@@ -6,6 +6,7 @@ set(CLIENT_INTERNAL_SOURCES
     # App (pre-main() helpers + frame-loop regions peeled out of main_client.cpp)
     ${CMAKE_CURRENT_LIST_DIR}/app/CaveFlourishes.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/CrashHandler.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app/HangWatchdog.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/DebugOverlays.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/FrameAudio.cpp
     ${CMAKE_CURRENT_LIST_DIR}/app/GameAssets.cpp
