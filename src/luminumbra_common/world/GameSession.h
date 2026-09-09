@@ -10,6 +10,7 @@
 #include "../core/SimulationClock.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
+#include "ActiveRegionLedger.h"
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
@@ -353,10 +354,24 @@ public:
     [[nodiscard]] const WorldClock& GetWorldClock() const {
         return m_worldClock;
     }
+    [[nodiscard]] const ActiveRegionLedger& GetActiveRegionLedger() const {
+        return m_activeRegionLedger;
+    }
+    [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
+        return m_regionSchedule;
+    }
+    // Set before world creation. Loaded worlds restore their persisted configuration.
+    void SetRegionSchedulerConfig(RegionSchedulerConfig config);
+    void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
+    void SetReplicatedSimulationAnchors(std::vector<Vec3> anchors);
+    void NotifyGroundObjectEdit(const Vec3& position);
+    void PinActiveRegion(RegionKey key, bool pinned);
+    void RecordActiveRegionWork(RegionWork work);
+
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
     [[nodiscard]] bool IsSimulationTickBoundary() const {
-        return !m_activeRegionsEnabled || !m_simulationBatchInProgress;
+        return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
 
     // --- Fixed-rate simulation ---
@@ -403,6 +418,13 @@ private:
     bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
+    void AttachRegionEditObserver();
+    RegionSchedulerConfig m_regionSchedulerConfig;
+    ActiveRegionLedger m_activeRegionLedger;
+    RegionSchedule m_regionSchedule;
+    std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
+    std::vector<RegionWork> m_regionWork;
+    std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};
     bool m_activeRegionsEnabled = false;

@@ -2197,7 +2197,13 @@ int main(int argc, char* argv[]) {
                 g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
             g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
             g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
-                window, g_camera.get(), gameSession->GetPhysicsSystem());
+                window,
+                g_camera.get(),
+                gameSession->GetPhysicsSystem(),
+                gameSession->ActiveRegionsEnabled() &&
+                        gameSession->GetActiveRegionLedger().tick() > 0
+                    ? gameSession->GetActiveRegionLedger().local_anchor()
+                    : std::nullopt);
             g_playerController->ApplyKeyBindings(g_systemConfig); // user.controls.* (rebindable)
             if (g_app.loading.world_render_data_initialized) {
                 renderPipeline.clear_all_chunk_data();
@@ -2693,6 +2699,7 @@ int main(int argc, char* argv[]) {
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
+                // Synchronous main-thread save; shutdown cannot overlap this callback.
                 if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -3279,7 +3286,13 @@ int main(int argc, char* argv[]) {
                         g_loading_visualizer->EndVisualization();
                     }
                     g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
-                        window, g_camera.get(), gameSession->GetPhysicsSystem());
+                        window,
+                        g_camera.get(),
+                        gameSession->GetPhysicsSystem(),
+                        gameSession->ActiveRegionsEnabled() &&
+                                gameSession->GetActiveRegionLedger().tick() > 0
+                            ? gameSession->GetActiveRegionLedger().local_anchor()
+                            : std::nullopt);
                     g_playerController->ApplyKeyBindings(
                         g_systemConfig); // user.controls.* (rebindable)
                     // (camera created + chunk data cleared + upload backlog drained above, before
@@ -3512,6 +3525,11 @@ int main(int argc, char* argv[]) {
                 // host, and camera-anchored streaming would diverge the hashed world.
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
+                    if (g_playerController)
+                        gameSession->SetLocalPlayerSimulationPosition(
+                            g_playerController->GetPosition(),
+                            g_playerController->GetMovementMode() ==
+                                Luminumbra::Client::MovementMode::Walking);
                     if (g_app.capture.timeScale == 1.0f) {
                         gameSession->TickSimulation(static_cast<double>(
                             deltaTime)); // byte-identical default (gates run here)
@@ -4890,6 +4908,7 @@ int main(int argc, char* argv[]) {
     // persist unsaved voxel edits on the world-exit/shutdown path,
     // before the streamed chunks are torn down. No-op when no world session
     // is active or when no chunk carries unsaved edits.
+    // The main loop and its quit callback have returned; keep saving on this thread.
     if (gameSession && gameSession->SaveWorldState()) {
         if (!g_app.menu.menu_backdrop_active && g_camera)
             gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()

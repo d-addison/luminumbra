@@ -6,3 +6,6 @@
 # the comparison and the commit happen on normalised bytes, so the churn can
 # neither be seen nor be committed. Binary files are detected and left alone.
 * text=auto
+# Devel persistence oracle: preserve exact fixture bytes on every platform.
+test/fixtures/active-regions/devel-off/* -text
+test/fixtures/active-regions/devel-off-plant-edit/* -text

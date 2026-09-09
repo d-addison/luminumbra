@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "luminumbra_common/core/JobSystem.h"
+#include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
@@ -189,6 +190,21 @@ TEST(PromotionSimTruthDecoupling, SimTruthPublishesIndependentlyOfRenderMesh) {
         const std::uint64_t sdf_hash = HashVec(target->sdf_data);
         const std::uint64_t heightmap_hash = HashVec(target->heightmap_data);
         const std::uint64_t material_hash = HashVec(target->material_data);
+
+        // Freeze identity must survive the real Meshing -> Ready publication,
+        // including the collider invalidation performed by that publication.
+        namespace P = Luminumbra::Persistence;
+        Luminumbra::world::RegionKey region;
+        P::WorldSaveService::region_coords_for_chunk(coords, region.x, region.z);
+        target->has_collision.store(true);
+        const auto mesh_version = target->mesh_version.load();
+        const auto content_digest =
+            P::WorldSaveService::region_simulation_digest({}, region, {target});
+        world->wait_for_streaming_jobs();
+        EXPECT_GT(target->mesh_version.load(), mesh_version);
+        EXPECT_FALSE(target->has_collision.load());
+        EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, region, {target}),
+                  content_digest);
 
         // The render half completes under the full barrier; the mesh publish must
         // not touch sim truth (the standing "meshing never writes sim truth" pin).

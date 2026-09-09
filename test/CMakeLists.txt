@@ -127,6 +127,7 @@ add_executable(common_tests
     common/ReplayStream_test.cpp
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
+    common/ActiveRegionLedger_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp
@@ -1884,6 +1885,10 @@ foreach(_cand ${_vc_candidates})
     endif()
 endforeach()
 if(_sdf_python)
+    add_test(NAME RegionRecordingOverwrite
+        COMMAND "${_sdf_python}" ${CMAKE_SOURCE_DIR}/test/persistence/region_recording_overwrite.py
+            --server $<TARGET_FILE:luminumbra_server_app> --source ${CMAKE_SOURCE_DIR})
+    set_tests_properties(RegionRecordingOverwrite PROPERTIES LABELS "persistence" TIMEOUT 600)
     add_test(NAME SdfContractDocLint
         COMMAND "${_sdf_python}" ${CMAKE_SOURCE_DIR}/tools/check_sdf_contract_doc.py)
     set_tests_properties(SdfContractDocLint PROPERTIES LABELS "docs;shield" TIMEOUT 60)

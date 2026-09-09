@@ -170,6 +170,11 @@ void GameSession::ResetWorldSystems() {
     m_irrigationGrid.reset();
     m_simulationClock.reset();
     m_worldClock = WorldClock{};
+    m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
+    m_regionSchedule = {};
+    m_replicatedSimulationAnchors.reset();
+    m_regionWork.clear();
+    m_regionDurableDirectory.clear();
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
 }
@@ -238,7 +243,8 @@ void GameSession::LoadSpeciesDefinitions() {
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
-    if (!IsSimulationTickBoundary())
+    // Queued work belongs to this next tick; only reentrant batches must refuse.
+    if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
     struct BatchGuard {
         bool& active;
@@ -826,6 +832,21 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         }
 
         m_simulationEventBus.drain(current_tick);
+        if (m_activeRegionsEnabled) {
+            const auto anchors =
+                m_replicatedSimulationAnchors
+                    ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
+                    : std::nullopt;
+            m_regionSchedule = m_activeRegionLedger.schedule(
+                m_worldClock, anchors, m_regionWork, [this](RegionKey key) {
+                    const auto directory = m_regionDurableDirectory.empty()
+                                               ? GetWorldSaveDir()
+                                               : m_regionDurableDirectory;
+                    return Persistence::WorldSaveService::region_simulation_digest(
+                        directory, key, m_worldSystem->snapshot_streamed_chunks());
+                });
+            m_regionWork.clear();
+        }
     }
     return ticks_executed;
 }
@@ -1011,6 +1032,9 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
     m_ambientFieldAnchor = m_metadata.spawnPoint;
+    if (m_activeRegionsEnabled)
+        m_activeRegionLedger.set_local_anchor(m_metadata.spawnPoint);
+    AttachRegionEditObserver();
     InitializeScentField(m_metadata.spawnPoint);
 
     // species definitions load once at world create (content-pure; see the helper).
@@ -1153,6 +1177,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     ApplyWeatherRainWiring();
 
     m_worldOpenError.clear();
+    AttachRegionEditObserver();
     if (!LoadWorldState())
         return false;
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
@@ -1166,9 +1191,45 @@ bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
            (!required || m_activeRegionsEnabled);
 }
 
+void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
+    if (m_worldSystem)
+        throw std::logic_error("Set region scheduler configuration before creating a world");
+    m_activeRegionLedger = ActiveRegionLedger(config);
+    m_regionSchedulerConfig = config;
+}
+void GameSession::SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking) {
+    if (m_activeRegionsEnabled && walking)
+        m_activeRegionLedger.set_local_anchor(feet);
+}
+void GameSession::SetReplicatedSimulationAnchors(std::vector<Vec3> anchors) {
+    if (m_activeRegionsEnabled)
+        m_replicatedSimulationAnchors = std::move(anchors);
+}
+void GameSession::NotifyGroundObjectEdit(const Vec3& position) {
+    if (m_activeRegionsEnabled)
+        m_activeRegionLedger.mark_edited(ActiveRegionLedger::region_at(position), m_worldClock);
+}
+void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
+    if (m_activeRegionsEnabled)
+        m_activeRegionLedger.pin(key, pinned, m_worldClock);
+}
+void GameSession::RecordActiveRegionWork(RegionWork work) {
+    if (m_activeRegionsEnabled)
+        m_regionWork.push_back(work);
+}
+void GameSession::AttachRegionEditObserver() {
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
+            int x = 0, z = 0;
+            Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
+            m_activeRegionLedger.mark_edited({x, z}, m_worldClock);
+        });
+}
+
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
-               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes())
+               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
+                                             m_activeRegionLedger.canonical_bytes())
                : ecology_hash;
 }
 
@@ -1223,7 +1284,19 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
     }
-    return Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n", save_dir);
+    if (m_activeRegionsEnabled) {
+        // All production callers save synchronously on the host thread: client
+        // world creation/quit/shutdown and server autosave/snapshot/shutdown.
+        // Do not dispatch this pair to workers; the writer asserts non-overlap.
+        if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
+                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
+            return false;
+        m_regionDurableDirectory = save_dir;
+    } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
+                                                             save_dir)) {
+        return false;
+    }
+    return true;
 }
 
 std::filesystem::path GameSession::GetWorldSaveDir() const {
@@ -1310,7 +1383,9 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     // Subsequent saves rewrite the edited regions of a supported container.
-    const bool has_snapshot = Persistence::WorldSaveService::has_world_save(save_dir);
+    const bool has_snapshot = m_activeRegionsEnabled
+                                  ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
+                                  : Persistence::WorldSaveService::has_world_save(save_dir);
 
     bool ok = false;
     if (!has_snapshot) {
@@ -1417,6 +1492,23 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return true; // legacy fresh world
     if (m_activeRegionsEnabled) {
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
+        ActiveRegionLedger ledger;
+        if (!Persistence::WorldSaveService::load_active_regions(
+                ledger, save_dir, &clock_errors, saved_clock)) {
+            m_worldOpenError = clock_errors.front();
+            return false;
+        }
+        // Validation accepted ledger.tick() <= saved_clock.tick(). An interrupted
+        // pair can be strictly older. Rebase its header without scheduling work,
+        // so immediate edits/save stamps at the restored clock remain decodable.
+        ledger.restore_clock(saved_clock);
+        m_activeRegionLedger = std::move(ledger);
+        if (!m_activeRegionLedger.local_anchor())
+            m_activeRegionLedger.set_local_anchor(m_metadata.spawnPoint);
+        m_regionDurableDirectory = save_dir;
+        m_regionSchedule = {};
+        m_regionWork.clear();
+        m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved_clock);
     }
 
