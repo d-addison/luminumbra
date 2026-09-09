@@ -40,7 +40,9 @@ jobs:
           key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
           restore-keys: linux-x64-gcc-ccache-
       - name: Configure
-        run: cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: >-
+          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
       - name: Build
         run: cmake --build --preset release --parallel 4
       - name: Test
@@ -49,6 +51,13 @@ jobs:
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
               --parallel 4 --timeout 180 --output-junit ctest.junit.xml
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      - name: Qualify installed prefab runtime
+        timeout-minutes: 5
+        run: |
+          python3 tools/ci/test_qualify_prefab_runtime.py
+          python3 tools/ci/qualify_prefab_runtime.py --build build/release \
+            --ctest-report build/release/ctest.junit.xml \
+            --output build/release/test-artifacts/prefab-runtime
       - name: Test over-the-wire networking
         run: |
           ctest --preset release --no-tests=error -R '^NetSoak$' \
@@ -63,6 +72,16 @@ jobs:
             build/release/netsoak.junit.xml
             build/release/Testing/Temporary
             build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload installed prefab generations and receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-gcc-prefab-runtime-${{ github.sha }}
+          path: build/release/test-artifacts/prefab-runtime
+          # Retain the synthetic project's .luminumbra-author generations too.
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
       - name: Validate dormant and enabled Linux packaging
