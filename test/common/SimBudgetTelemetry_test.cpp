@@ -16,6 +16,7 @@
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/world/Chunk.h"
 #include "luminumbra_common/world/GameSession.h"
+#include "luminumbra_server/ServerStreamingBudget.h"
 #include "luminumbra_server/SimBudgetArtifact.h"
 #include "luminumbra_server/modes/SmokeArtifact.h"
 
@@ -93,6 +94,117 @@ TEST(SimBudgetTelemetry, WaterWorkIsZeroAfterEmptyAndPausedUpdates) {
         EXPECT_EQ(water.cells_stepped_last_update(), 0u);
         EXPECT_EQ(water.dbg_cells_simmed(), 64u); // Preserve the legacy flag-off output.
     }
+}
+
+TEST(SimBudgetTelemetry, StreamingIncludesNoWaterUpdateAndTailAfterLastInnerTimer) {
+    struct Clock {
+        using time_point = std::chrono::steady_clock::time_point;
+        static time_point& Time() {
+            static time_point time;
+            return time;
+        }
+        static int& Reads() {
+            static int reads = 0;
+            return reads;
+        }
+        static time_point now() {
+            ++Reads();
+            return Time();
+        }
+        static void Work(int milliseconds) {
+            Time() += std::chrono::milliseconds(milliseconds);
+        }
+    };
+    SimBudgetTelemetry telemetry;
+    telemetry.SetEnabled(true);
+    Luminumbra::Server::ServerStreamingBudget<Clock> observer(telemetry);
+    // Reuse the observer across wet -> dry -> wet updates. The zero-water case
+    // never calls the water body. All intervals are exact integer milliseconds.
+    std::uint64_t tick = 0;
+    for (const bool run_water : {true, false, true}) {
+        SCOPED_TRACE(run_water);
+        ++tick;
+        Luminumbra::Systems::SHIELD_WorldSystem::DbgStreamTimings timing;
+        std::uint64_t water_work = 0;
+        int water_calls = 0;
+        int tail_calls = 0;
+        const auto update_start = Clock::now();
+        observer.MeasureUpdate([&] {
+            auto previous = Clock::now();
+            const auto split = [&](double& slot) {
+                const auto end = Clock::now();
+                slot = std::chrono::duration<double, std::milli>(end - previous).count();
+                previous = end;
+            };
+            Clock::Work(2);
+            split(timing.process_completed);
+            Clock::Work(3);
+            split(timing.telemetry);
+            Clock::Work(5);
+            split(timing.activation);
+            if (run_water) {
+                ++water_calls;
+                water_work = 64;
+                Clock::Work(100); // Larger than streaming: catches a double subtraction.
+            }
+            split(timing.water); // The bracket closes even when water does not run.
+            Clock::Work(7);
+            split(timing.meshing_pass);
+            Clock::Work(11);
+            split(timing.collision); // Last existing inner timer.
+            ++tail_calls;
+            Clock::Work(17); // Resident scan / queue bookkeeping before update returns.
+        });
+        const double whole_update =
+            std::chrono::duration<double, std::milli>(Clock::now() - update_start).count();
+        Clock::Work(1000); // Diagnostics between the update and activation are excluded.
+        const auto wait_start = Clock::now();
+        Clock::Work(13);
+        const double wait_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - wait_start).count();
+        observer.Record(tick, timing, 3, water_work, wait_ms);
+
+        const auto& streaming =
+            telemetry.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::ServerStreaming)];
+        const auto& water =
+            telemetry.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::ServerWater)];
+        ASSERT_EQ(streaming.size(), tick);
+        ASSERT_EQ(water.size(), tick);
+        EXPECT_EQ(streaming.back().tick, tick);
+        EXPECT_EQ(water.back().tick, tick);
+        EXPECT_EQ(streaming.back().work, 3u);
+        EXPECT_EQ(water_calls, run_water ? 1 : 0);
+        EXPECT_EQ(water.back().work, run_water ? 64u : 0u);
+        EXPECT_DOUBLE_EQ(water.back().duration_ms, run_water ? 100.0 : 0.0);
+        EXPECT_DOUBLE_EQ(whole_update, run_water ? 145.0 : 45.0);
+        ASSERT_EQ(tail_calls, 1);
+        const double inner_streaming = timing.process_completed + timing.telemetry +
+                                       timing.activation + timing.meshing_pass + timing.collision;
+        EXPECT_DOUBLE_EQ(inner_streaming, 28.0);
+        EXPECT_DOUBLE_EQ(streaming.back().duration_ms, 58.0);
+        // The pre-fix inner-sum arithmetic gives 41 ms, losing all 17 ms of tail.
+        EXPECT_DOUBLE_EQ(streaming.back().duration_ms - (inner_streaming + wait_ms), 17.0);
+        EXPECT_GE(streaming.back().duration_ms, 0.0);
+        EXPECT_GE(streaming.back().duration_ms, inner_streaming + 17.0 + wait_ms);
+        EXPECT_DOUBLE_EQ(streaming.back().duration_ms + water.back().duration_ms,
+                         whole_update + wait_ms);
+        if (!run_water) {
+            EXPECT_DOUBLE_EQ(timing.water, 0.0);
+            EXPECT_DOUBLE_EQ(streaming.back().duration_ms, whole_update + wait_ms);
+        }
+    }
+    telemetry.SetEnabled(false);
+    const int reads_before = Clock::Reads();
+    int updates = 0;
+    observer.MeasureUpdate([&] {
+        ++updates;
+        Clock::Work(9);
+    });
+    observer.Record(++tick, {}, 0, 0, 0.0);
+    EXPECT_EQ(updates, 1);
+    EXPECT_EQ(Clock::Reads(), reads_before);
+    for (const auto& samples : telemetry.SamplesByStage())
+        EXPECT_TRUE(samples.empty());
 }
 
 TEST(SimBudgetTelemetry, DisabledSkipsCounterAndArtifactExtension) {

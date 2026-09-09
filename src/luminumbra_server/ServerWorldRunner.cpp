@@ -1,5 +1,7 @@
 #include "ServerWorldRunner.h"
 
+#include "ServerStreamingBudget.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -651,42 +653,36 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         // settled state in both determinism runs. With avatars, stream
         // around the UNION of avatar positions (multi-anchor); with none, the
         // single spawn anchor via the Vec3 overload (byte-identical to zero-avatar).
-        std::chrono::steady_clock::time_point streaming_start;
-        if (budget.Enabled())
-            streaming_start = std::chrono::steady_clock::now();
-        if (m_avatars.empty()) {
-            Vec3 anchor = spawn_anchor;
-            if (m_config.water_smoke) {
-                // water-smoke walk: +X 2 m/tick from the wet anchor, so the run keeps
-                // streaming fresh columns THROUGH/along the wet body — first-time grid
-                // inits, the rotating sim window, and cross-chunk seam flux all engage
-                // every activation. Pure fn of the tick -> run==replay holds.
-                const float d = 2.0f * static_cast<float>(report.ticks_executed);
-                anchor = Vec3(water_walk_start.x + d, water_walk_start.y, water_walk_start.z);
-            } else if (m_config.moving_anchor) {
-                // B' harness: walk the streaming anchor +X/+Z each tick so chunks stream IN ahead
-                // and OUT behind during the run. ~0.5 m/tick -> ~45 m over 90 ticks (~3 chunks).
-                // Pure fn of the tick -> both --smoke runs drift identically; any run!=replay is
-                // the moving-case water nondeterminism (boot warm-up only settles the INITIAL
-                // residency).
-                const float d = 0.5f * static_cast<float>(report.ticks_executed);
-                anchor = Vec3(spawn_anchor.x + d, spawn_anchor.y, spawn_anchor.z + d);
+        ServerStreamingBudget streaming_budget(budget);
+        streaming_budget.MeasureUpdate([&] {
+            if (m_avatars.empty()) {
+                Vec3 anchor = spawn_anchor;
+                if (m_config.water_smoke) {
+                    // water-smoke walk: +X 2 m/tick from the wet anchor, so the run keeps
+                    // streaming fresh columns THROUGH/along the wet body — first-time grid
+                    // inits, the rotating sim window, and cross-chunk seam flux all engage
+                    // every activation. Pure fn of the tick -> run==replay holds.
+                    const float d = 2.0f * static_cast<float>(report.ticks_executed);
+                    anchor = Vec3(water_walk_start.x + d, water_walk_start.y, water_walk_start.z);
+                } else if (m_config.moving_anchor) {
+                    // B' harness: walk the streaming anchor +X/+Z each tick so chunks stream IN
+                    // ahead and OUT behind during the run. ~0.5 m/tick -> ~45 m over 90 ticks (~3
+                    // chunks). Pure fn of the tick -> both --smoke runs drift identically; any
+                    // run!=replay is the moving-case water nondeterminism (boot warm-up only
+                    // settles the INITIAL residency).
+                    const float d = 0.5f * static_cast<float>(report.ticks_executed);
+                    anchor = Vec3(spawn_anchor.x + d, spawn_anchor.y, spawn_anchor.z + d);
+                }
+                world_system->update(m_session->GetRegistry(), anchor, physics_system);
+            } else {
+                std::vector<Vec3> anchors;
+                anchors.reserve(m_avatars.size());
+                for (const World::PlayerAvatar& a : m_avatars) {
+                    anchors.push_back(a.position);
+                }
+                world_system->update(m_session->GetRegistry(), anchors, physics_system);
             }
-            world_system->update(m_session->GetRegistry(), anchor, physics_system);
-        } else {
-            std::vector<Vec3> anchors;
-            anchors.reserve(m_avatars.size());
-            for (const World::PlayerAvatar& a : m_avatars) {
-                anchors.push_back(a.position);
-            }
-            world_system->update(m_session->GetRegistry(), anchors, physics_system);
-        }
-        double streaming_update_ms = 0.0;
-        if (budget.Enabled()) {
-            streaming_update_ms = std::chrono::duration<double, std::milli>(
-                                      std::chrono::steady_clock::now() - streaming_start)
-                                      .count();
-        }
+        });
         // water-smoke: sample the water sub-phase timings + sim-load counters the
         // update above just produced. Const reads of never-hashed telemetry (the same
         // read class as the availability digest) — hash-neutral, off by default.
@@ -729,15 +725,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
             const auto& timing = world_system->dbg_stream_timings();
             const auto scheduled =
                 world_system->get_last_streaming_budget_stats().scheduled_generation;
-            budget.Record(BudgetStage::ServerStreaming,
-                          budget_tick,
-                          scheduled,
-                          streaming_update_ms - timing.water + _wait_ms);
             const auto* water = m_session->GetWaterSystem();
-            budget.Record(BudgetStage::ServerWater,
-                          budget_tick,
-                          water ? water->cells_stepped_last_update() : 0u,
-                          timing.water);
+            streaming_budget.Record(budget_tick,
+                                    timing,
+                                    scheduled,
+                                    water ? water->cells_stepped_last_update() : 0u,
+                                    _wait_ms);
         }
         LUMIN_PROFILE_PLOT("streaming_wait_ms", _wait_ms); // no-op unless LUMINUMBRA_ENABLE_TRACY
 
