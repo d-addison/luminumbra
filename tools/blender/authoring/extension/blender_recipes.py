@@ -139,6 +139,9 @@ class LUMINUMBRA_OT_review_id_repairs(bpy.types.Operator):
             for user in change["shared_users"]:
                 box.label(text="Also used by: " + user, icon="INFO")
 
+    def cancel(self, _context):
+        state.plans.pop(self.plan_sha256, None)
+
     def execute(self, context):
         try:
             result = run(context.scene, context.scene.lum_author_collection,

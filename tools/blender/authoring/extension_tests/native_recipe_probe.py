@@ -1,5 +1,6 @@
 """Qualify reviewed recipes in an isolated interactive Blender editor."""
 import argparse
+import hashlib
 import importlib
 import json
 from pathlib import Path
@@ -73,6 +74,28 @@ def main():
     bpy.context.view_layer.update()
     yield 0.1
     check("revision exists before any build session", extension._session is None and recipes.state.revision > 0)
+    window = bpy.context.window_manager.windows[0]
+    area = next(area for area in window.screen.areas if area.type == "VIEW_3D")
+    region = next(region for region in area.regions if region.type == "WINDOW")
+    ui_before = recipes.records(scene, collection)[0]
+    previous_plans = set(recipes.state.plans)
+    with bpy.context.temp_override(window=window, area=area, region=region):
+        dialog = bpy.ops.luminumbra.review_id_repairs("INVOKE_DEFAULT")
+    check("review dialog opens without editing", dialog == {"RUNNING_MODAL"}
+          and recipes.records(scene, collection)[0] == ui_before)
+    dialog_plans = set(recipes.state.plans) - previous_plans
+    yield 0.3
+    screenshot = args.output / "review-dialog.png"
+    with bpy.context.temp_override(window=window):
+        captured = bpy.ops.screen.screenshot(filepath=str(screenshot))
+    check("actual review dialog screenshot", captured == {"FINISHED"} and screenshot.is_file(),
+          sha256=hashlib.sha256(screenshot.read_bytes()).hexdigest())
+    window.event_simulate(type="ESC", value="PRESS")
+    window.event_simulate(type="ESC", value="RELEASE")
+    yield 0.3
+    check("cancel invalidates the dialog plan without editing", bool(dialog_plans)
+          and not dialog_plans.intersection(recipes.state.plans)
+          and recipes.records(scene, collection)[0] == ui_before)
     bpy.ops.ed.undo_push(message="Before reviewed identity repairs")
     before = recipes.records(scene, collection)[0]
     planned = recipes.plan(scene, collection)
