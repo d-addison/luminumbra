@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include "luminumbra_common/components/PlantComponents.h"
 #include "luminumbra_common/simulation/SimBudgetTelemetry.h"
@@ -11,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <ios>
+#include <iostream>
 #include <map>
 #include <sstream>
 #include <string>
@@ -21,7 +24,7 @@ namespace fs = std::filesystem;
 using luminumbra::simulation::SimBudgetStage;
 using luminumbra::simulation::SimBudgetTelemetry;
 
-class SimBudgetWorldParity : public testing::Test {
+class SimBudgetWorldParity : public testing::TestWithParam<bool> {
 private:
     fs::path root;
 
@@ -41,6 +44,14 @@ protected:
         fs::copy(fs::path(LUMINUMBRA_SOURCE_ROOT) / "data/common",
                  root / "data/common",
                  fs::copy_options::recursive);
+        const fs::path systems_path = root / "data/common/systems.json";
+        nlohmann::json systems;
+        {
+            std::ifstream input(systems_path);
+            input >> systems;
+        }
+        systems["sim"]["active_regions"]["enabled"] = GetParam();
+        std::ofstream(systems_path) << systems.dump(2) << '\n';
     }
     void TearDown() override {
         std::error_code ec;
@@ -61,7 +72,7 @@ protected:
     }
 };
 
-TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
+TEST_P(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
     constexpr std::uint64_t ticks = 3600;
     std::string untraced_hash;
     SimBudgetTelemetry first_trace;
@@ -77,6 +88,7 @@ TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         config.sim_budget = pass != 0;
         Luminumbra::Server::ServerWorldRunner runner(config);
         ASSERT_TRUE(runner.Boot());
+        ASSERT_EQ(runner.Session()->ActiveRegionsEnabled(), GetParam());
         ASSERT_EQ(runner.CreatureCount(), 8u);
         ASSERT_FALSE(
             runner.Session()->GetRegistry().view<Luminumbra::Components::PlantTag>().empty());
@@ -84,6 +96,8 @@ TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         ASSERT_EQ(report.ticks_executed, ticks);
         const std::string hash = runner.ComputeWorldHash();
         ASSERT_FALSE(hash.empty());
+        std::cout << "SimBudgetParity active_regions=" << GetParam()
+                  << " telemetry=" << config.sim_budget << " world_hash=" << hash << '\n';
         if (pass == 0) {
             untraced_hash = hash;
             for (const auto& samples : runner.Session()->GetSimBudgetTelemetry().SamplesByStage())
@@ -91,7 +105,16 @@ TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         } else {
             EXPECT_EQ(hash, untraced_hash);
             const auto& trace = runner.Session()->GetSimBudgetTelemetry();
-            for (const auto& samples : trace.SamplesByStage()) {
+            for (std::size_t stage = 0; stage < trace.SamplesByStage().size(); ++stage) {
+                const auto& samples = trace.SamplesByStage()[stage];
+                const auto identity = static_cast<SimBudgetStage>(stage);
+                const bool unexecuted = GetParam() ? identity == SimBudgetStage::Wind ||
+                                                         identity == SimBudgetStage::Weather
+                                                   : identity == SimBudgetStage::WindWeather;
+                if (unexecuted) {
+                    EXPECT_TRUE(samples.empty());
+                    continue;
+                }
                 ASSERT_EQ(samples.size(), ticks);
                 for (std::size_t i = 0; i < samples.size(); ++i)
                     EXPECT_EQ(samples[i].tick, i + 1);
@@ -99,7 +122,12 @@ TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
             EXPECT_GT(trace.Summarize(SimBudgetStage::Creatures).work_total, 0u);
             EXPECT_GT(trace.Summarize(SimBudgetStage::Plants).work_total, 0u);
             EXPECT_GT(trace.Summarize(SimBudgetStage::Scent).work_total, 0u);
-            EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total, ticks * 64u * 64u);
+            EXPECT_EQ(trace.Summarize(SimBudgetStage::Wind).work_total,
+                      GetParam() ? 0u : ticks * 64u * 64u);
+            EXPECT_EQ(trace.Summarize(SimBudgetStage::Weather).work_total,
+                      GetParam() ? 0u : ticks * 64u * 64u);
+            EXPECT_EQ(trace.Summarize(SimBudgetStage::WindWeather).work_total,
+                      GetParam() ? ticks * 2u * 64u * 64u : 0u);
             EXPECT_EQ(
                 trace.SamplesByStage()[static_cast<std::size_t>(SimBudgetStage::Plants)][0].work,
                 6u);
@@ -124,4 +152,10 @@ TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
         runner.Shutdown();
     }
 }
+INSTANTIATE_TEST_SUITE_P(ActiveRegions,
+                         SimBudgetWorldParity,
+                         testing::Bool(),
+                         [](const testing::TestParamInfo<bool>& info) {
+                             return info.param ? "Enabled" : "Disabled";
+                         });
 } // namespace

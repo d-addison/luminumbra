@@ -91,7 +91,7 @@ TEST(SimBudgetTelemetry, ArtifactSeparatesWorkTraceFromDurationDistribution) {
     nlohmann::json artifact = {{"schema", "luminumbra.server_tick.v1"}};
     Luminumbra::Server::AppendSimBudgetArtifact(artifact, first, replay);
     const auto& block = artifact.at("sim_budget");
-    EXPECT_EQ(block.at("schema"), "luminumbra.sim_budget.v1");
+    EXPECT_EQ(block.at("schema"), "luminumbra.sim_budget.v2");
     EXPECT_TRUE(block.at("work_replay_match").get<bool>());
     const auto& stages = block.at("stages");
     const auto& plants = stages.at(static_cast<std::size_t>(SimBudgetStage::Plants));
@@ -113,6 +113,10 @@ TEST(SimBudgetTelemetry, BatchedTicksKeepAbsoluteIdsAndClearOnToggle) {
          stage <= static_cast<std::size_t>(SimBudgetStage::Events);
          ++stage) {
         const auto& samples = telemetry.SamplesByStage()[stage];
+        if (stage == static_cast<std::size_t>(SimBudgetStage::WindWeather)) {
+            EXPECT_TRUE(samples.empty());
+            continue;
+        }
         ASSERT_EQ(samples.size(), 3u);
         for (std::size_t i = 0; i < samples.size(); ++i) {
             EXPECT_EQ(samples[i].tick, i + 1);

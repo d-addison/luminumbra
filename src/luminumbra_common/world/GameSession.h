@@ -11,6 +11,7 @@
 #include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
+#include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
 #include <cstdint>
@@ -343,6 +344,22 @@ public:
         return m_speciesTable.get();
     }
 
+    // Set before creating/opening a world, like the other sim feature keys.
+    void SetActiveRegionsEnabled(bool enabled) {
+        m_activeRegionsEnabled = enabled;
+    }
+    [[nodiscard]] bool ActiveRegionsEnabled() const {
+        return m_activeRegionsEnabled;
+    }
+    [[nodiscard]] const WorldClock& GetWorldClock() const {
+        return m_worldClock;
+    }
+    // Fold only when enabled, inside the existing ecology hash slot.
+    [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
+    [[nodiscard]] bool IsSimulationTickBoundary() const {
+        return !m_activeRegionsEnabled || !m_simulationBatchInProgress;
+    }
+
     // --- Fixed-rate simulation ---
     // Advances the 30 Hz simulation clock by one variable-dt frame and runs
     // the produced fixed ticks (clamped to the clock's catch-up limit). Per
@@ -363,7 +380,7 @@ public:
     }
 
     [[nodiscard]] std::uint64_t GetSimulationTickCount() const noexcept {
-        return m_simulationClock.tick_count();
+        return m_activeRegionsEnabled ? m_worldClock.tick() : m_simulationClock.tick_count();
     }
     [[nodiscard]] const luminumbra::core::SimulationClock& GetSimulationClock() const noexcept {
         return m_simulationClock;
@@ -395,6 +412,14 @@ private:
     WorldMetadata m_metadata;
     bool m_transientWorld = false;
     void ResetWorldSystems();
+    void RestoreWorldClock(const WorldClock& clock);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
+    WorldClock m_worldClock;
+    // Stable only in the clock slice; world-anchored pages replace this grid in C4.
+    Vec3 m_ambientFieldAnchor{};
+    bool m_activeRegionsEnabled = false;
+    bool m_simulationBatchInProgress = false;
     bool CreateWorldInternal(const std::string& name,
                              const std::string& seed,
                              const std::string& worldType,
@@ -447,7 +472,7 @@ private:
     void InitializeEnergyFieldState();
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
-    void SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
+    bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
     void LoadSpeciesDefinitions();          // fills m_speciesTable (world create + load)
     void ApplyWeatherRainWiring();          // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring();      // Raises the water solver to High when opted in.

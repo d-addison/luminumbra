@@ -15,10 +15,13 @@ def artifact() -> dict:
         "schema": "luminumbra.server_tick.v1", "preset": "default", "seed": "1337",
         "ticks_requested": 2, "passed": True, "world_hash": "abc", "world_hash_replay": "abc",
         "sim_budget": {
-            "schema": "luminumbra.sim_budget.v1", "work_replay_match": True,
+            "schema": "luminumbra.sim_budget.v2", "work_replay_match": True,
             "stages": [{"name": name, "samples": 2, "work_total": 3,
                         "work_trace": [{"tick": 1, "work": 1}, {"tick": 2, "work": 2}],
                         "duration_ms": {"p50": 0.5, "p95": 0.95, "p99": 0.99, "maximum": 1.0}}
+                        if name != "wind_weather" else
+                        {"name": name, "samples": 0, "work_total": 0,
+                         "work_trace": [], "duration_ms": None}
                        for name in capture.STAGES],
         },
     }
@@ -34,9 +37,20 @@ class SimBudgetCaptureTests(unittest.TestCase):
         data["sim_budget"]["extension"] = 1
         data["sim_budget"]["stages"][0]["extension"] = 1
         self.validate(data)
+        # The combined path has its own complete trace; neither separate stage runs.
+        stages = {stage["name"]: stage for stage in data["sim_budget"]["stages"]}
+        for key in ("samples", "work_total", "work_trace", "duration_ms"):
+            stages["wind_weather"][key] = copy.deepcopy(stages["wind"][key])
+            for name in ("wind", "weather"):
+                stages[name][key] = [] if key == "work_trace" else None if key == "duration_ms" else 0
+        self.validate(data)
+        stages["wind"]["samples"] = 2
+        with self.assertRaises(ValueError):
+            self.validate(data)
 
     def test_absent_corrupt_future_and_mismatched_replay_are_refused(self) -> None:
-        for value in (None, {}, {"schema": "luminumbra.sim_budget.v2"},
+        for value in (None, {}, {"schema": "luminumbra.sim_budget.v1"},
+                      {"schema": "luminumbra.sim_budget.v3"},
                       {**artifact()["sim_budget"], "work_replay_match": False}):
             with self.subTest(value=value):
                 data = artifact()

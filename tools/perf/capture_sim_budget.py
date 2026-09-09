@@ -18,7 +18,7 @@ from fixture_hash import fixture_hash
 PRESETS = ("default", "mountains", "archipelago")
 STAGES = (
     "server_physics", "animation", "instinct", "perception", "scent", "locomotion",
-    "creatures", "wind", "weather", "aether", "energy", "irrigation", "soil", "plants",
+    "creatures", "wind", "weather", "wind_weather", "aether", "energy", "irrigation", "soil", "plants",
     "pollination", "disease", "crops", "fire", "grazing", "lifespan", "alarm", "decay",
     "circadian", "territory", "packs", "migration", "events", "server_streaming",
     "server_water",
@@ -39,7 +39,7 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
             or data.get("world_hash") != data.get("world_hash_replay")):
         raise ValueError("smoke identity, tick count or replay verdict mismatch")
     budget = data.get("sim_budget")
-    if not isinstance(budget, dict) or budget.get("schema") != "luminumbra.sim_budget.v1":
+    if not isinstance(budget, dict) or budget.get("schema") != "luminumbra.sim_budget.v2":
         raise ValueError("missing or unsupported sim_budget schema")
     if budget.get("work_replay_match") is not True:
         raise ValueError("simulation work counts did not reproduce")
@@ -47,7 +47,17 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
     if (not isinstance(stages, list) or any(not isinstance(s, dict) for s in stages)
             or [s.get("name") for s in stages] != list(STAGES)):
         raise ValueError("missing, duplicate, reordered or unsupported simulation stage")
+    by_name = {stage["name"]: stage for stage in stages}
+    combined = by_name["wind_weather"].get("samples") == ticks
+    unexecuted = {"wind", "weather"} if combined else {"wind_weather"}
     for stage in stages:
+        if stage["name"] in unexecuted:
+            if (type(stage.get("samples")) is not int or stage["samples"] != 0
+                    or type(stage.get("work_total")) is not int or stage["work_total"] != 0
+                    or stage.get("work_trace") != [] or "duration_ms" not in stage
+                    or stage["duration_ms"] is not None):
+                raise ValueError(f"unexpected wind/weather path coverage: {stage['name']}")
+            continue
         if not integer(stage.get("samples")) or stage["samples"] != ticks:
             raise ValueError(f"incomplete timer coverage: {stage['name']}")
         trace = stage.get("work_trace")
@@ -69,7 +79,9 @@ def validate_artifact(data: dict[str, Any], preset: str, seed: str, ticks: int) 
             raise ValueError(f"invalid duration distribution: {stage['name']}")
     # The capture command promises populated simulation, not just a successful empty tick.
     totals = {stage["name"]: stage["work_total"] for stage in stages}
-    if any(totals[name] == 0 for name in ("creatures", "plants", "scent", "wind", "weather")):
+    required_work = ("creatures", "plants", "scent") + (
+        ("wind_weather",) if combined else ("wind", "weather"))
+    if any(totals[name] == 0 for name in required_work):
         raise ValueError("capture did not exercise the populated simulation")
 
 

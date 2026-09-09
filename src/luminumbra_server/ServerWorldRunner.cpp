@@ -123,47 +123,6 @@ std::string ScentSubHash(world::GameSession* session) {
     return session ? session->ComputeScentSubHash() : std::string();
 }
 
-// Folds the chunk-derived top-level hash, the wind sub-hash, and the weather
-// sub-hash into the composite world_hash. This is the DELIBERATE bump chain: the
-// chunk hash (WorldSaveService::world_hash / ComputeWorldStreamingStateHash) is
-// unchanged byte-for-byte (persistence fixtures stay green); the runner-level
-// world_hash ALSO commits the wind field ( bump, 2fa007951a21e140 ->
-// 0eac465289e7c88b), the weather state ( bump #2, 0eac465289e7c88b ->
-// 0857e683b4b8c47e; weather_sub_hash a7d8f3d28401386f), and now the lightning
-// STRIKE SCHEDULE folded into the SAME weather sub-hash ( , hash revision,
-// 0857e683b4b8c47e -> d950a6afc12a5cdc; weather_sub_hash a7d8f3d28401386f ->
-// e3c7e0aa219ebbe5). The strike schedule replaces the reserved single-0 slot
-// left in ComputeWeatherSubHash, so the wind term + the byte layout before the
-// strike block are unchanged. Order is fixed (chunk, then wind, then weather,
-// then aether) so the composite is reproducible.  appends the `aether`
-// term (bump #4, d950a6afc12a5cdc -> f17726d44054d133) -- append-only, so the
-// bytes before "|aether:" are unchanged (wind/weather sub-hashes are intact).
-//  appends the `scents` term after aether, preserving the whole
-// pre-ecology byte prefix while making live scent fields authoritative.
-// gate-populated-world-replay appends the `ecology` term LAST (canonical bump #6,
-// 8a6b7bb6795da912 -> d8f84cf6d7d0b978 empty-roster composite): the id-ordered
-// creature-state sub-hash.
-// Append-only, so the bytes before "|ecology:" (chunk + wind + weather + aether +
-// scents) are byte-identical to the pre-fold composite -- the empty-roster default
-// folds an EMPTY ecology value, so the composite differs from pre-fold ONLY by the
-// appended "|ecology:" suffix (additivity guard, ).
-std::string ComposeWorldHash(const std::string& chunk_hash,
-                             const std::string& wind_hash,
-                             const std::string& weather_hash,
-                             const std::string& aether_hash,
-                             const std::string& scent_hash,
-                             const std::string& ecology_hash,
-                             const std::string& plant_hash) {
-    //   (bump #7): fold the plant sub-hash in LAST, append-only. An empty plant
-    // roster yields an empty plant_hash (GameSession::ComputePlantSubHash), so the composite
-    // differs from the pre-fold value ONLY by the literal "|plants:" suffix (additivity guard) —
-    // the bytes before it stay byte-identical. This moved the canonical empty-roster composite
-    // once.
-    return Persistence::StableChecksum(
-        chunk_hash + "|wind:" + wind_hash + "|weather:" + weather_hash + "|aether:" + aether_hash +
-        "|scents:" + scent_hash + "|ecology:" + ecology_hash + "|plants:" + plant_hash);
-}
-
 // gate-populated-world-replay: spawn the deterministic KINEMATIC creature
 // roster into `registry`. This mirrors the gtest ecology_pipeline_test Populate
 // fixture (2 predators + 6 prey, with genomes/alarm/mortal/decay/migratory/
@@ -302,6 +261,8 @@ bool ServerWorldRunner::Boot() {
             systems_json = fsys::path("data") / "common" / "systems.json";
         }
         const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
+        m_session->SetActiveRegionsEnabled(
+            sys_cfg.enabled(luminumbra::core::SysKey::SimActiveRegions));
         m_session->SetWaterHighResEnabled(
             sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     }
@@ -671,15 +632,18 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         physics_budget.Finish();
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
+        const std::uint64_t simulation_tick = m_session->ActiveRegionsEnabled()
+                                                  ? m_session->GetSimulationTickCount()
+                                                  : report.ticks_executed;
 
         // Supply the simulation tick to the activation queue so dispatched
         // batches receive deterministic due ticks.
-        world_system->begin_tick(static_cast<std::int64_t>(report.ticks_executed));
+        world_system->begin_tick(static_cast<std::int64_t>(simulation_tick));
         // Drive activation-latency telemetry from the same tick base used by
         // the availability digest.
         // Observability only — gated on --avail-trace like the digest itself.
         if (m_config.availability_trace) {
-            world_system->begin_tick_shadow(static_cast<std::int64_t>(report.ticks_executed));
+            world_system->begin_tick_shadow(static_cast<std::int64_t>(simulation_tick));
         }
 
         // Spawn-anchor streaming, then quiesce in-flight generation/meshing
@@ -744,7 +708,7 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
         {
             LUMIN_PROFILE_ZONE_N(
                 "streaming_activate_due"); // the p99 latency the queue exists to shrink
-            world_system->activate_due(static_cast<std::int64_t>(report.ticks_executed));
+            world_system->activate_due(static_cast<std::int64_t>(simulation_tick));
         }
         const double _wait_ms =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - _wait_t0)
@@ -784,8 +748,8 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                                             world_system->debug_water_state_hash().hash);
         }
 
-        if (m_config.autosave_interval_ticks > 0 && report.ticks_executed > 0 &&
-            (report.ticks_executed % m_config.autosave_interval_ticks) == 0) {
+        if (m_config.autosave_interval_ticks > 0 && simulation_tick > 0 &&
+            (simulation_tick % m_config.autosave_interval_ticks) == 0) {
             world::WorldStateSaveReport save_report;
             if (m_session->SaveWorldState(&save_report)) {
                 report.autosave_passes += 1;
@@ -963,13 +927,14 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     //   +   hash revisionS: fold the wind AND weather sub-hashes
     // into the top-level hash. The chunk hash itself is unchanged; the composite
     // deliberately is not.
-    return ComposeWorldHash(service.world_hash(state),
-                            WindSubHash(m_session.get()),
-                            WeatherSubHash(m_session.get()),
-                            AetherSubHash(m_session.get()),
-                            ScentSubHash(m_session.get()),
-                            ComputeEcologySubHash(),
-                            m_session->ComputePlantSubHash()); //  plant fold (empty-neutral)
+    return Persistence::ComposeWorldHash(
+        service.world_hash(state),
+        WindSubHash(m_session.get()),
+        WeatherSubHash(m_session.get()),
+        AetherSubHash(m_session.get()),
+        ScentSubHash(m_session.get()),
+        ComputeEcologySubHash(),
+        m_session->ComputePlantSubHash()); //  plant fold (empty-neutral)
 }
 
 Persistence::WorldStreamingStateSubHashes ServerWorldRunner::ComputeWorldSubHashes() {
@@ -1048,13 +1013,13 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     //   +   +  + gate-populated-world-replay +
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
-    out_world_hash = ComposeWorldHash(service.world_hash(state),
-                                      wind_hash,
-                                      weather_hash,
-                                      aether_hash,
-                                      scent_hash,
-                                      ecology_hash,
-                                      plant_hash);
+    out_world_hash = Persistence::ComposeWorldHash(service.world_hash(state),
+                                                   wind_hash,
+                                                   weather_hash,
+                                                   aether_hash,
+                                                   scent_hash,
+                                                   ecology_hash,
+                                                   plant_hash);
 
     const std::string entities_snapshot =
         Ecs::SerializeEntityRegistrySnapshotJson(World::BuildAvatarEntitySnapshot(m_avatars));
@@ -1070,7 +1035,8 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
 std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // write the FULL in-memory streamed-chunk set (not dirty-gated) so
     // a loaded session can adopt exactly this set. Reuses WorldSaveService.
-    if (!m_booted || !m_session || !m_session->GetWorldSystem()) {
+    if (!m_booted || !m_session || !m_session->GetWorldSystem() ||
+        !m_session->IsSimulationTickBoundary()) {
         return 0;
     }
     auto* world_system = m_session->GetWorldSystem();
@@ -1097,7 +1063,11 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // sim state captured there (the water sim-window cursor) reflects THIS save
     // moment, not world creation. Without this a loaded session resimulates from a
     // stale cursor and the water evolution diverges from the original's.
-    m_session->SaveWorld();
+    if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
+        return 0;
+    const bool metadata_saved = m_session->SaveWorld();
+    if (m_session->ActiveRegionsEnabled() && !metadata_saved)
+        return 0;
     return state.size();
 }
 
@@ -1123,7 +1093,8 @@ std::string ServerWorldRunner::ComputeEcologySubHash() const {
     if (!m_session) {
         return {};
     }
-    return luminumbra::ai::ComputeEcologySubHash(m_session->GetRegistry());
+    return m_session->FoldClockIntoEcologyHash(
+        luminumbra::ai::ComputeEcologySubHash(m_session->GetRegistry()));
 }
 
 std::size_t ServerWorldRunner::CreatureCount() const {

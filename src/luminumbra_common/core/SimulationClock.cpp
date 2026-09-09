@@ -34,9 +34,9 @@ std::uint32_t SimulationClock::advance(double frame_dt) {
     return ticks_executed;
 }
 
-void SimulationClock::reset() {
+void SimulationClock::reset(std::uint64_t base_tick) {
     accumulator_ = 0.0;
-    tick_count_ = 0;
+    tick_count_ = base_tick;
     dropped_time_seconds_ = 0.0;
     dropped_frame_count_ = 0;
 }

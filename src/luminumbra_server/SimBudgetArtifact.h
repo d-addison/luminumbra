@@ -33,7 +33,7 @@ inline void AppendSimBudgetArtifact(nlohmann::json& artifact,
                                                                  {"maximum", summary.max_ms}}}});
     }
     artifact["sim_budget"] = {
-        {"schema", "luminumbra.sim_budget.v1"},
+        {"schema", "luminumbra.sim_budget.v2"},
         {"work_replay_match", replay.Enabled() && first.WorkMatches(replay)},
         {"stages", std::move(stages)},
     };

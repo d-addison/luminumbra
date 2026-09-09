@@ -55,6 +55,91 @@ Unversioned metadata is refused even alongside current containers. A higher
 metadata version reports `unsupported future world metadata container version`;
 invalid JSON or invalid version types are corruption failures.
 
+### Simulation clock metadata
+
+The hashed `sim.active_regions` key is off by default. When enabled, every
+successful persistent `GameSession` save writes three additional keys in
+`world_info.json` beside `waterSimCursor`, through `WorldSaveService`'s existing
+temporary-file and atomic replacement path:
+
+```json
+"simulationTick": 317,
+"calendar": { "dayLengthTicks": 36000, "daysPerYear": 8 },
+"ambientFieldAnchor": { "x": 8.0, "y": 100.0, "z": 8.0 }
+```
+
+`simulationTick` is the absolute completed host tick; there is no wall-clock
+progression while a world is closed. Tick zero is midnight on day zero in
+midwinter. At 30 Hz the default day lasts 20 minutes and the year lasts eight
+days. Plants and circadian activity use the midnight phase directly; migration,
+stimulus seasons and the sky's seasonal sine offset the year by three quarters
+to their spring-equinoctial origin. Sky geometry offsets the day by half a cycle
+because its existing zero is noon. An explicit render day-length override and
+photo/scenario time pins remain presentation controls.
+
+| Metadata condition | Open / write behavior |
+|---|---|
+| `simulationTick` absent | Tick zero |
+| `calendar` absent | Pinned defaults: 36,000 ticks/day, 8 days/year |
+| `simulationTick` present | JSON unsigned integer in `[0, 2^62)` |
+| `calendar` present | Object containing exactly `dayLengthTicks` and `daysPerYear` |
+| `dayLengthTicks` | JSON integer in `[1, 2^31)` |
+| `daysPerYear` | JSON integer in `[1, 366]` |
+| `ambientFieldAnchor` present in a clock save | Object containing finite numeric `x`, `y`, `z` coordinates |
+| `ambientFieldAnchor` absent | Use the saved spawn point, or the initialized spawn if metadata has none |
+| Invalid clock type, null, negative/out-of-range clock number, fractional/exponent clock number, incomplete calendar, unknown calendar member or arithmetic overflow | Corrupt world metadata; refuse before generation or writing |
+| Either clock key present with `sim.active_regions` off | Incompatible configuration; refuse without modifying disk bytes |
+
+Day × year and tick + the catch-up bound are checked before use. Validation
+also applies to initialized saves with no chunk directory, catalog inspection,
+explicit snapshot directories, and saves over existing metadata. The catalog
+reports valid clock metadata without selecting a runtime configuration; opening
+checks the feature requirement. Presence of either clock key marks the save as
+requiring `sim.active_regions`; metadata writes cannot remove both keys from an
+initialized clock save. Save calls inside a simulation catch-up batch are
+refused; successful snapshots observe a completed tick boundary.
+Enabled transient sessions can read explicit snapshots, but saving them is
+refused before creating a directory or writing any member, just as their
+canonical saves are refused.
+
+With the key off, saves omit all three keys, loads restart at zero, and every
+legacy period and hash byte stays unchanged. With it on, clock canonical bytes fold
+into the existing ecology hash slot without changing the top-level hash order.
+The canonical clock section is ASCII `world_clock:v1:` followed by little-endian
+`u64 simulationTick`, `u32 dayLengthTicks`, and `u32 daysPerYear` (16 payload
+bytes). It excludes frame accumulators and telemetry. Calendar and tick changes
+therefore affect the hash even when the entity roster is empty.
+
+C1 persists the ambient grid's anchor separately from the player respawn
+`spawnPoint`. It is initialized from the spawn when creating or importing a
+world and stays fixed for live wind, weather and aether updates. Client quit
+and shutdown saves can therefore change `spawnPoint` without moving these
+fields or their surviving storms. Loads reconstruct wind and aether ambience
+at the restored tick and weather over at most its 240-tick storm lifetime,
+using the persisted `ambientFieldAnchor`. In the key-on path, storms move using
+base wind; their current gusts then perturb the
+authoritative wind consumed by aether, plants and other systems. This removes
+storm-to-wind-to-storm motion feedback from that path, so expired storms cannot
+carry unbounded history into later storms. The key-off update order and feedback
+are unchanged. This is a bounded C1 bridge: it does not provide ambient coverage
+following the player at distance. C4 replaces the fixed grids with world-anchored
+pages, regional storm records and activation history. Older clock snapshots
+without an anchor use their saved spawn; a historical anchor already lost by
+such a snapshot cannot be recovered. The snapshot commit index, rollback
+journal, and multi-file recovery belong to C2/C3. C1 uses the existing metadata write path and is not a
+claim of atomic publication across chunk, entity, energy and metadata files.
+The feature remains default-off until those persistence slices land. LMR1 v2,
+world_manifest.v1, FSD2 v3, preset revision 6, and existing canonical chunk and
+entity serialization are unchanged.
+
+An absent energy record restores an empty layer with its next firing on the
+next absolute eight-tick boundary. A legacy import may carry a different
+cadence phase even after all its energy decays: enabled saves preserve that
+phase in a header-only `EFS1` record. Empty layers with the aligned phase omit
+the record and remove any stale prior record. This keeps the existing EFS1
+format and empty-neutral hash bytes; C4 moves cadence ownership into the ledger
+and restores the contract's all-zero record omission there.
+
 ## Runtime lifecycle
 
 A normal process follows this sequence:

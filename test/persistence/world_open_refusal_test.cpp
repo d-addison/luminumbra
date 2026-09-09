@@ -3,7 +3,10 @@
 #include "luminumbra_common/core/JobSystem.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 #include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_server/ServerWorldRunner.h"
@@ -154,6 +157,40 @@ protected:
                 json["container_version"] = -1;
             else if (kind == 29)
                 json = nlohmann::json::array();
+            if (kind >= 30) {
+                const std::vector<std::string> invalid = {
+                    R"({"simulationTick":-1})",
+                    R"({"simulationTick":1.5})",
+                    R"({"simulationTick":"1"})",
+                    R"({"simulationTick":null})",
+                    R"({"simulationTick":true})",
+                    R"({"simulationTick":[]})",
+                    R"({"simulationTick":{}})",
+                    R"({"simulationTick":4611686018427387904})",
+                    R"({"simulationTick":18446744073709551616})",
+                    R"({"calendar":null})",
+                    R"({"calendar":[]})",
+                    R"({"calendar":"default"})",
+                    R"({"calendar":false})",
+                    R"({"calendar":{}})",
+                    R"({"calendar":{"dayLengthTicks":36000}})",
+                    R"({"calendar":{"daysPerYear":8}})",
+                    R"({"calendar":{"dayLengthTicks":0,"daysPerYear":8}})",
+                    R"({"calendar":{"dayLengthTicks":-1,"daysPerYear":8}})",
+                    R"({"calendar":{"dayLengthTicks":2147483648,"daysPerYear":8}})",
+                    R"({"calendar":{"dayLengthTicks":36000.0,"daysPerYear":8}})",
+                    R"({"calendar":{"dayLengthTicks":true,"daysPerYear":8}})",
+                    R"({"calendar":{"dayLengthTicks":"36000","daysPerYear":8}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":0}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":-1}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":367}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":8.5}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":null}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":false}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":"8"}})",
+                    R"({"calendar":{"dayLengthTicks":36000,"daysPerYear":8,"extra":1}})"};
+                json.update(nlohmann::json::parse(invalid.at(static_cast<std::size_t>(kind - 30))));
+            }
             Write(metadata, kind == 26 ? "{" : json.dump());
         } else if (kind == 14 || kind == 15 || kind == 16 || kind == 17) {
             WorldSaveService::ContainerRecord record;
@@ -250,6 +287,62 @@ TEST_P(WorldOpenRefusal, RefusesBeforeGenerationAndPreservesAllDiskBytes) {
 INSTANTIATE_TEST_SUITE_P(PersistenceEntryPoints,
                          WorldOpenRefusal,
                          testing::Combine(testing::Range(0, 3), testing::Range(0, 30)));
+
+INSTANTIATE_TEST_SUITE_P(ClockMetadataEntryPoints,
+                         WorldOpenRefusal,
+                         testing::Combine(testing::Range(0, 3), testing::Range(30, 60)));
+
+TEST_F(WorldOpenRefusal, ActiveClockSaveRefusesWithFeatureOffThroughEveryOpenPath) {
+    GameSession writer;
+    writer.SetRootPath(RootString());
+    writer.SetJobSystem(&jobs);
+    writer.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(writer.LoadWorld("fixture"));
+    writer.TickSimulation(writer.GetSimulationClock().fixed_dt());
+    ASSERT_TRUE(writer.SaveWorldState());
+    const auto before = DiskBytes(root);
+    const auto inspected = Persistence::InspectSavedWorld(root, "fixture");
+    ASSERT_TRUE(inspected.error.empty());
+    EXPECT_TRUE(inspected.requires_active_regions);
+    EXPECT_EQ(inspected.clock.tick(), 1u);
+    GameSession reader;
+    reader.SetRootPath(RootString());
+    reader.SetJobSystem(&jobs);
+    ASSERT_TRUE(reader.CreateTransientWorld("Reader", "1337", "default"));
+    EXPECT_FALSE(reader.LoadWorldStateFrom(save));
+    EXPECT_NE(reader.GetWorldOpenError().find("Incompatible configuration"), std::string::npos);
+    EXPECT_FALSE(reader.SaveWorldStateTo(save));
+    EXPECT_FALSE(reader.LoadWorld("fixture"));
+    EXPECT_NE(reader.GetWorldOpenError().find("Incompatible configuration"), std::string::npos);
+    EXPECT_FALSE(reader.SaveWorld());
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    EXPECT_FALSE(runner.Boot());
+    EXPECT_NE(runner.GetBootError().find("Incompatible configuration"), std::string::npos);
+    runner.Shutdown();
+    EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, CorruptClockMetadataOnlySaveRefusesBeforeFirstChunkSave) {
+    fs::remove_all(save / "chunks");
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["simulationTick"] = -1;
+    Write(save / "world_info.json", metadata.dump());
+    const auto before = DiskBytes(root);
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    EXPECT_FALSE(session.LoadWorld("fixture"));
+    EXPECT_NE(session.GetWorldOpenError().find("simulationTick"), std::string::npos);
+    EXPECT_FALSE(session.SaveWorld());
+    EXPECT_FALSE(WorldSaveService::validate_save(save));
+    EXPECT_EQ(DiskBytes(root), before);
+}
 
 TEST_F(WorldOpenRefusal, CurrentMetadataOnlyWorldLoadsBeforeFirstChunkSave) {
     fs::remove_all(save / "chunks");
@@ -472,6 +565,109 @@ TEST_F(WorldOpenRefusal, MenuWorldCreatesNoSaveAndClearsPreviousWorldState) {
     EXPECT_FALSE(session.SaveWorld());
     EXPECT_FALSE(session.SaveWorldState());
     EXPECT_EQ(DiskBytes(root), before);
+}
+
+TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
+    Write(root / "data/common/systems.json", R"({"sim":{"active_regions":{"enabled":true}}})");
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    config.autosave_interval_ticks = 5;
+    Server::ServerWorldRunner original(config);
+    ASSERT_TRUE(original.Boot()) << original.GetBootError();
+    ASSERT_TRUE(original.Session()->ActiveRegionsEnabled());
+    // Boot warms the production streaming radius independently of surface_radius.
+    // Keep this clock/persistence oracle bounded to its saved chunk and nearby cells.
+    original.Session()->GetWorldSystem()->clear_world(original.Session()->GetPhysicsSystem());
+    original.Session()->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(original.Session()->LoadWorldState());
+    // A single runner tick must autosave at absolute tick 45, even though
+    // this RunFixedTicks call has executed only one tick.
+    for (int i = 0; i < 44; ++i)
+        ASSERT_EQ(
+            original.Session()->TickSimulation(original.Session()->GetSimulationClock().fixed_dt()),
+            1u);
+    original.RunFixedTicks(1);
+    EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").clock.tick(), 45u);
+    ASSERT_GT(original.SaveFullSnapshot(), 0u);
+    const auto before = DiskBytes(root);
+    Server::ServerWorldRunner loaded(config);
+    ASSERT_TRUE(loaded.Boot()) << loaded.GetBootError();
+    EXPECT_EQ(loaded.TickCount(), original.TickCount());
+    EXPECT_EQ(DiskBytes(root), before);
+    const auto compare = [&]() {
+        EXPECT_EQ(original.Session()->GetWindFieldSystem()->ComputeWindSubHash(),
+                  loaded.Session()->GetWindFieldSystem()->ComputeWindSubHash());
+        EXPECT_EQ(original.Session()->GetWeatherSystem()->ComputeWeatherSubHash(),
+                  loaded.Session()->GetWeatherSystem()->ComputeWeatherSubHash());
+        EXPECT_EQ(original.Session()->GetAetherFieldSystem()->ComputeAetherSubHash(),
+                  loaded.Session()->GetAetherFieldSystem()->ComputeAetherSubHash());
+        EXPECT_EQ(original.Session()->GetWorldClock().canonical_bytes(),
+                  loaded.Session()->GetWorldClock().canonical_bytes());
+    };
+    compare();
+    loaded.Session()->GetWorldSystem()->clear_world(loaded.Session()->GetPhysicsSystem());
+    loaded.Session()->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(loaded.Session()->LoadWorldState());
+    original.RunFixedTicks(5);
+    loaded.RunFixedTicks(5);
+    compare();
+    bool callback = false;
+    original.Session()->GetSimulationEventBus().subscribe([&](const auto&) {
+        callback = true;
+        EXPECT_EQ(original.SaveFullSnapshot(), 0u);
+    });
+    original.Session()->GetSimulationEventBus().publish(51, "save", "");
+    original.RunFixedTicks(1);
+    EXPECT_TRUE(callback);
+    original.Shutdown();
+    EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").clock.tick(), 51u);
+    loaded.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_FALSE(runner.Session()->ActiveRegionsEnabled());
+    runner.Session()->GetWorldSystem()->clear_world(runner.Session()->GetPhysicsSystem());
+    ASSERT_TRUE(runner.Session()->LoadWorldState());
+    const auto chunks = runner.StreamedChunkCount();
+    ASSERT_GT(chunks, 0u);
+    bool called = false;
+    runner.Session()->GetSimulationEventBus().subscribe([&](const auto&) {
+        called = true;
+        EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
+    });
+    runner.Session()->GetSimulationEventBus().publish(1, "save", "");
+    ASSERT_EQ(runner.Session()->TickSimulation(runner.Session()->GetSimulationClock().fixed_dt()),
+              1u);
+    EXPECT_TRUE(called);
+    // A failed open leaves the old streamed chunks available but blocks metadata
+    // saving. The legacy full-snapshot writer still reports the chunk count.
+    ASSERT_FALSE(runner.Session()->LoadWorld("missing-world"));
+    ASSERT_FALSE(runner.Session()->SaveWorld());
+    EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
+    runner.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["extension"] = std::string(1024 * 1024, 'x');
+    Write(save / "world_info.json", metadata.dump());
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    EXPECT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
 }
 
 } // namespace

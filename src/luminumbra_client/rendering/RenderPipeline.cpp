@@ -5194,7 +5194,8 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
     // palette EXACTLY. Render-derived, one-way, never folded into world_hash.
     namespace DM = Luminumbra::DeterministicMath;
     const Rendering::SeasonState season =
-        Rendering::ComputeSeason(m_seasonTick, kTicksPerSeasonCycle);
+        m_worldClock ? Rendering::ComputeSeason(*m_worldClock)
+                     : Rendering::ComputeSeason(m_seasonTick, kTicksPerSeasonCycle);
     m_seasonPhase = season.phase;
     const float season_wave = season.wave;
     m_seasonSunDeclination = season.sunDeclination;
@@ -5378,6 +5379,7 @@ void RenderPipeline::update_time_of_day(float deltaTime) {
 }
 
 void RenderPipeline::set_season_tick(std::uint64_t tick) {
+    m_worldClock.reset();
     //  season: store the authoritative sim tick; update_time_of_day
     // recomputes the season phase/declination/tint from it as a pure function.
     // One-way : this never feeds back into the sim and never touches
@@ -5391,6 +5393,21 @@ u32 RenderPipeline::water_caustics_texture() const {
 
 void RenderPipeline::set_time_of_day(float normalized_time) {
     m_timeOfDay = std::clamp(normalized_time, 0.0f, 1.0f);
+}
+
+void RenderPipeline::set_world_clock(const world::WorldClock& clock) {
+    m_worldClock = clock;
+    m_seasonTick = clock.tick();
+    if (!m_timeOfDayHold) {
+        if (m_dayLengthOverride) {
+            const float shifted =
+                Rendering::TimeOfDayFromTick(clock.tick(), m_dayLengthTicks) + 0.5f;
+            m_timeOfDay = shifted >= 1.0f ? shifted - 1.0f : shifted;
+        } else {
+            m_timeOfDay = Rendering::TimeOfDayFromWorldClock(clock);
+        }
+    }
+    m_todTickDriven = true;
 }
 
 void RenderPipeline::set_time_of_day_tick(std::uint64_t sim_tick) {

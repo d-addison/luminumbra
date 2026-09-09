@@ -28,9 +28,8 @@ trace does not extend LREC1 records or checkpoints.
 Wall durations are nondeterministic, never drive simulation, and are excluded
 from work comparisons, saves, world hashes and fixture hashes. The collector
 does not contribute a world-hash slot or change the append-only
-`chunk|wind|weather|aether|scents|ecology|plants` order. Preset revision 6, LMR1
-container v2, the existing world manifest, FSD2 payload v3 and canonical
-serialization are unchanged. With collection off, no counter callback or new
+`chunk|wind|weather|aether|scents|ecology|plants` order. `sim.active_regions` owns the persisted clock and its save/hash contract;
+telemetry adds no save fields or format changes. With collection off, no counter callback or new
 clock read executes and no artifact member is added.
 
 ## Stage identity and integer units
@@ -53,8 +52,9 @@ calibrated from measurements before any scheduler chooses weights or limits.
 | `scent` | 128 × 128 × 4 channel-cells when scent or foraging participants activate the field; otherwise zero. Includes deposit, foraging, advection, diffusion and clamp duration |
 | `locomotion` | Entities with action plan, transform and locomotion profile; includes the following scent-steering duration |
 | `creatures` | Entities with creature and transform components at entry; includes brain, mate seeking, steering, thirst/scavenging, physics bridge and mating resolution in their existing order |
-| `wind` | 64 × 64 grid cells when the field exists, otherwise zero |
-| `weather` | 64 × 64 grid cells when the field exists, otherwise zero; includes storm processing |
+| `wind` | Separate path only: 64 × 64 grid cells when the field exists, otherwise zero |
+| `weather` | Separate path only: 64 × 64 grid cells when the field exists, otherwise zero; includes storm processing |
+| `wind_weather` | Combined clock path only: 64 × 64 wind cells + 64 × 64 weather cells = 8,192 input field cells; includes both wind rebuilds, storm processing and wind sampling |
 | `aether` | 64 × 64 grid cells when the ambience field exists, otherwise zero |
 | `energy` | Stored energy pages at entry (including pages outside the window); zero when disabled. A page-work proxy for anchor, emitter, deposit and cadence processing, not a claim that every page decays each tick |
 | `irrigation` | 256 × 256 grid cells when a water-source participant enables the update, otherwise zero |
@@ -76,6 +76,17 @@ calibrated from measurements before any scheduler chooses weights or limits.
 | `server_streaming` | Chunk generation submissions in the current server update (`scheduled_generation`); zero on elided updates |
 | `server_water` | Water cells actually stepped by that update (`dbg_cells_simmed`) |
 
+With active regions enabled and both fields present, `wind_weather` measures
+exactly one `WeatherSystem::UpdateFromClock` call with the absolute tick and
+ambient anchor. It preserves the internal wind → weather → wind sequence.
+Each input cell is counted once per field, not once per rebuild, following the
+input-work convention above. Separate `wind` and `weather` then have zero
+samples, zero totals, empty traces and null durations. Otherwise the existing
+wind then weather calls retain their spawn-point inputs and separate attribution,
+and `wind_weather` has no samples. No work or time is duplicated or estimated
+by splitting the combined call. The artifact's distinct stage and trace coverage
+make this choice visible. Telemetry never controls this branch.
+
 The first and last two rows are server supplements. Physics precedes the
 session tick. Streaming and water still run **outside** `TickSimulation`, in
 the existing server update. Streaming duration sums its existing disjoint
@@ -95,7 +106,7 @@ optional top-level object, `sim_budget`, only with collection enabled:
 ```json
 {
   "sim_budget": {
-    "schema": "luminumbra.sim_budget.v1",
+    "schema": "luminumbra.sim_budget.v2",
     "work_replay_match": true,
     "stages": [
       {
@@ -115,7 +126,7 @@ Totals, sample counts, traces and distributions describe the **first** smoke
 run only. The second run supplies the work-equality verdict; neither run's
 durations enter that verdict. JSON tick/count values are integers in
 `[0, 2^64)`; consumers must preserve integer precision, not coerce them through
-IEEE double. The trace is ordered by tick, with one sample per executed tick.
+IEEE double. The trace is ordered by tick, with one sample per tick on the executed path.
 `work_total` is its sum and `samples` its length. Duration values are finite,
 nonnegative milliseconds. A stage with no samples has `duration_ms: null`;
 an executed but inactive stage has zero work and a measured duration.
@@ -132,9 +143,13 @@ Compatibility and refusal rules:
   extension. Ordinary smoke consumers continue accepting the existing artifact.
   A telemetry capture reader refuses absence as missing measurement evidence.
 - Unknown object keys at any level are ignored, so existing consumers can
-  ignore the entire extension. Within schema v1, required keys must be present;
+  ignore the entire extension. Within schema v2, required keys must be present;
   unknown, duplicate, missing or reordered **stage identities** are refused.
-  Changed stage units/order require a new telemetry schema identity.
+  Changed stage units/order require a new telemetry schema identity. Version 2
+  adds `wind_weather` and mutually exclusive field-path coverage; the reader
+  refuses version 1 instead of interpreting its different stage layout.
+  Only the unexecuted field path may have no samples in a server capture; the
+  executed field path and every other stage must cover all requested ticks.
 - Corrupt JSON, wrong types (including booleans/fractions used as integers),
   out-of-range counts, inconsistent totals/ticks, missing timer coverage,
   nonfinite/negative/unordered percentiles, and false replay verdicts refuse a
@@ -194,12 +209,15 @@ separately from duration distributions. This slice proposes no limits or caps.
 
 Five `SimBudgetTelemetry` gtests cover disabled byte preservation, interpolation,
 duration-free replay comparisons, artifact separation, and batched tick identities
-and reset. `SimBudgetWorldParity.Populated3600TicksPreserveWorldHashAndReplayWork`
-runs the real populated server three times (off, on, on), checks world hash
-equality and complete per-tick work replay, pins starting plant/creature and
-wind-cell counts, and checks the ordinary save path (including plants and
-metadata) for binary byte equality across a telemetry toggle at the same tick.
-`SimBudgetCaptureContract` runs six Python command and refusal tests. Both build
-lanes discover 2,017 tests with manual tests excluded, exactly seven more than
-the 2,010 entries discovered from the starting devel source archive. Execution
-results and any qualification deviations are recorded in the campaign receipt.
+and reset. `ActiveRegions/SimBudgetWorldParity` runs the real populated server
+three times (telemetry off, on, on) for each active-regions setting, covering all
+four switch combinations. Each run advances 3,600 ticks. It checks world hash
+equality within each active-regions setting, complete per-tick work replay,
+mutually exclusive wind/weather stage coverage and exact field work totals,
+starting plant/creature counts, and ordinary save bytes (including plants,
+metadata and clock) across a telemetry toggle at the same tick. Active regions
+intentionally changes the simulation; equality is required across telemetry
+settings, not across active-regions settings. `SimBudgetCaptureContract` runs
+six Python command and refusal tests, including both field paths and refusal
+of mixed coverage. Discovered totals, the measured delta against current devel,
+execution results and qualification limitations are in the campaign receipt.
