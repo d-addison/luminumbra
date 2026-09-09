@@ -106,10 +106,17 @@ probe for this separately installed consumer.
 
 ## Qualification
 
+The [recorded Linux and Windows qualification](../../docs/compiled-prefab-runtime.md)
+documents the exact executed source and component hashes. Linux passed 20 C++
+cases and 19 installed checks; Windows passed 19 C++ cases and 23 installed
+checks, including refusal of an actual NTFS junction. The Linux suite also passed
+with ASan, UBSan and default LeakSanitizer. These are headless runtime results;
+they do not establish rendered output.
+
 `prefab_runtime_test` exercises the real loader and ECS lifecycle, including full
 hierarchy depth, shared assets, affine transforms, equal-count replacement and
 rollback. The POSIX symlink test is compiled only on POSIX; Windows reparse
-behavior needs host qualification instead of a permission-dependent skipped test.
+behavior uses an explicit host qualification instead of a permission-dependent skipped test.
 Run ASan for the ownership path using the normal `debug-asan` preset and enabling
 the same option.
 
