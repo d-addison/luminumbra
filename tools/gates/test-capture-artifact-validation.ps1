@@ -2,8 +2,9 @@
 .SYNOPSIS
     File-only adversarial tests. Run in a clean PowerShell process with -NoProfile.
 .DESCRIPTION
-    Loads only the helper import declared by the gate. Never invokes the gate,
-    engine, Blender, network, or graphics APIs. Owns one temporary fixture folder.
+    Loads the gate's helper and extracts its foliage file-consumer statements.
+    Never runs the mode dispatcher, engine, Blender, network, or graphics APIs.
+    Owns one temporary fixture folder.
 #>
 [CmdletBinding()]
 param()
@@ -57,6 +58,42 @@ foreach ($call in $pinCalls) {
     $names = @($call.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
     Assert-Test ($names -contains "ScreenshotPaths") "pin call at line $($call.Extent.StartLineNumber) joins explicit screenshot paths"
 }
+
+# Exercise the actual foliage consumer with relative and absolute artifact roots.
+# Keep every statement from analysisPath to the function end, omitting setup and
+# launch only. Reject any non-file command before creating the executable block.
+$foliageFunctions = @($ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "Test-FoliageInstancing"
+}, $true))
+Assert-Test ($foliageFunctions.Count -eq 1) "exactly one foliage consumer is defined"
+$statements = @($foliageFunctions[0].Body.EndBlock.Statements)
+$boundaries = @()
+for ($i = 0; $i -lt $statements.Count; $i++) {
+    $statement = $statements[$i]
+    if ($statement -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+        $statement.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+        $statement.Left.VariablePath.UserPath -ceq "analysisPath") { $boundaries += $i }
+}
+Assert-Test ($boundaries.Count -eq 1 -and $boundaries[0] -gt 0) "foliage file-consumer boundary is unambiguous"
+$selected = @($statements[$boundaries[0]..($statements.Count - 1)])
+$allowed = @("Join-Path", "Test-Path", "Get-Content", "ConvertFrom-Json",
+    "Assert-PpmArtifact", "Assert-CapturePinned", "Write-Host")
+$consumerCalls = @()
+foreach ($statement in $selected) {
+    foreach ($command in $statement.FindAll({ param($node)
+        $node -is [System.Management.Automation.Language.CommandAst]
+    }, $true)) {
+        $name = $command.GetCommandName()
+        Assert-Test ($allowed -ccontains $name) "foliage file consumer cannot launch or delete: $name"
+        $consumerCalls += $name
+    }
+}
+foreach ($name in @("Assert-PpmArtifact", "Assert-CapturePinned")) {
+    Assert-Test (@($consumerCalls | Where-Object { $_ -ceq $name }).Count -eq 1) "actual foliage consumer retains $name"
+}
+$consumerCode = 'param([string]$visualDir)' + "`n" + (($selected | ForEach-Object { $_.Extent.Text }) -join "`n")
+$foliageConsumer = [scriptblock]::Create($consumerCode)
 
 $profile = Get-CapturePinProfile
 $config = Get-Content -LiteralPath (Join-Path $repo "src/luminumbra_client/core/RuntimeScenarioConfig.h") -Raw
@@ -149,6 +186,51 @@ try {
     Assert-Test (@(Assert-CapturePinned -ArtifactDir $run -Name "FixtureScenario").Count -eq 0) "legacy metadata-only signature remains supported"
     Assert-RunPinned -Paths @((Join-Path $run "pinned.ppm"))
     $script:checks++
+
+    $screenshots = Join-Path $run "screenshots"
+    New-Item -ItemType Directory -Path $screenshots | Out-Null
+    $phases = [ordered]@{}
+    foreach ($phase in @("calm", "windy")) {
+        $relative = "screenshots/$phase.ppm"
+        Write-PpmFixture (Join-Path $run $relative) -Header "P6`n3840 1600`n255`n" -PayloadBytes (3840L * 1600 * 3)
+        $phases[$phase] = [ordered]@{
+            sampled = $true; instance_matches_drawn_build = $true; phase = $phase
+            screenshot = $relative; maximum_instance_wind_magnitude = 0
+        }
+    }
+    $analysis = [ordered]@{
+        schema = "luminumbra.foliage_instancing.v2"; profile = "luminumbra.foliage_control.v2"
+        refusal = $null; functional_control = @{ passed = $true }
+        coverage_density = @{ instances_within_ring = 100000 }
+        gpu_timer = @{ budget_ms = 0.6; status = "unqualified_fixture" }
+        phases = $phases; qualification = @{ status = "incomplete"; missing = @("fixture has no renderer evidence") }
+        passed = $false
+    }
+    [System.IO.File]::WriteAllText((Join-Path $run "foliage-instancing-analysis.json"),
+        (ConvertTo-Json -InputObject $analysis -Depth 10))
+    Push-Location -LiteralPath $fixtureRoot
+    try {
+        foreach ($artifactRoot in @("run", $run)) {
+            $message = $null
+            try { & $foliageConsumer -visualDir $artifactRoot | Out-Null }
+            catch { $message = $_.Exception.Message }
+            Assert-Test ($message -ceq "Foliage qualification incomplete: fixture has no renderer evidence") "actual foliage consumer reads both PPMs and pin metadata with artifact root '$artifactRoot': $message"
+        }
+        $windyPath = Join-Path $screenshots "windy.ppm"
+        Remove-Item -LiteralPath $windyPath
+        $message = $null
+        try { & $foliageConsumer -visualDir "run" | Out-Null }
+        catch { $message = $_.Exception.Message }
+        Assert-Test ($null -ne $message -and $message.Contains("FoliageInstancing/windy") -and
+            $message.Contains("windy.ppm")) "actual relative-root consumer rejects the missing windy artifact: $message"
+        Write-PpmFixture $windyPath
+        $message = $null
+        try { & $foliageConsumer -visualDir "run" | Out-Null }
+        catch { $message = $_.Exception.Message }
+        Assert-Test ($null -ne $message -and $message.Contains("windy.ppm") -and
+            $message.Contains("expected 3840x1600")) "actual relative-root consumer joins both screenshot dimensions to pin metadata: $message"
+    } finally { Pop-Location }
+
     Assert-Rejected { Assert-RunPinned -Paths @("small.ppm") } "small.ppm" "pinned metadata with wrong image dimensions"
     Assert-Rejected { Assert-RunPinned -Paths @("pinned.ppm", "small.ppm") } "small.ppm" "one invalid image among explicit screenshots"
     Assert-Rejected { Assert-RunPinned -Paths @("missing.ppm") } "missing.ppm" "no recursive fallback to a different image"

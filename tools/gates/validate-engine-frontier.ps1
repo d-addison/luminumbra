@@ -2804,7 +2804,7 @@ function Test-FoliageInstancing {
             -not $phase.instance_matches_drawn_build -or $phase.phase -ne $phaseName) {
             throw "Foliage $phaseName phase has no matching sampled build/readback"
         }
-        $path = Join-Path $visualDir $phase.screenshot
+        $path = $phase.screenshot
         Assert-PpmArtifact -Path $path -ArtifactDir $visualDir -Name "FoliageInstancing/$phaseName"
         $screenshots += $path
     }
