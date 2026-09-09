@@ -1695,6 +1695,17 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         # Keep every case in the required suite and give its measurement the CPU.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RUN_SERIAL TRUE)
+    elseif(_lum_gtest_target STREQUAL world_open_refusal_test)
+        # Carries the populated 3,600-tick telemetry parity runs, which execute
+        # three full simulations per parameter. They take about four minutes each
+        # in Debug and about eight under the sanitizer on a developer machine, so
+        # the workflow's 300-second default expires on a slower runner. The tick
+        # count is the evidence, not the runtime: it is what proves the world hash
+        # is unmoved by telemetry across both switches, so raise the bound rather
+        # than shorten the run. Everything else in this target is fast; the cost of
+        # the wider bound is only that a genuine hang here surfaces later.
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RESOURCE_LOCK luminumbra_gl_context)
