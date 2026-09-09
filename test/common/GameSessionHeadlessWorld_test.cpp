@@ -4,6 +4,7 @@
 // must succeed in a root containing nothing but the world preset.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -288,6 +289,18 @@ std::string ReadClockTestFile(const fs::path& path) {
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
+}
+
+// Reads a record that production writes through a text-mode stream, so its bytes
+// carry the host's line endings: the energy record (GameSession writes
+// aether_state.efs with a default-mode ofstream) is LF on Linux and CRLF on
+// Windows. That platform difference predates this change; normalising here keeps
+// the assertions about record CONTENT independent of it. Tests that assert exact
+// bytes written by the test itself use binary streams instead.
+std::string ReadClockTestTextRecord(const fs::path& path) {
+    std::string text = ReadClockTestFile(path);
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
 }
 
 std::string SessionWorldHash(GameSession& session) {
@@ -578,14 +591,16 @@ TEST(GameSessionHeadlessWorldTest, ClockAnchorMetadataUsesLegacySpawnAndRejectsI
         metadata["ambientFieldAnchor"] = value;
         EXPECT_FALSE(P::WorldSaveService::save_metadata(metadata.dump(), save));
         EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), valid_bytes);
-        std::ofstream(save / "world_info.json") << metadata.dump();
+        // Binary mode: the reader compares exact bytes, and Windows text mode would
+        // translate newlines and make the comparison fail for the wrong reason.
+        std::ofstream(save / "world_info.json", std::ios::binary) << metadata.dump();
         EXPECT_FALSE(P::WorldSaveService::validate_save(save));
         EXPECT_FALSE(
             P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).error.empty());
         Luminumbra::world::WorldClock clock;
         bool required = false;
         EXPECT_FALSE(P::WorldSaveService::read_clock_metadata(save, clock, required));
-        std::ofstream(save / "world_info.json") << valid_bytes;
+        std::ofstream(save / "world_info.json", std::ios::binary) << valid_bytes;
     }
 }
 
@@ -664,9 +679,9 @@ TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedC
     ASSERT_EQ(control.GetEnergyFieldState()->next_fire_tick(), 11u);
     const auto explicit_save = root.path() / "empty-offset-snapshot";
     ASSERT_TRUE(control.SaveWorldStateTo(explicit_save));
-    EXPECT_EQ(ReadClockTestFile(explicit_save / "aether_state.efs"), "EFS1 2 4\n");
+    EXPECT_EQ(ReadClockTestTextRecord(explicit_save / "aether_state.efs"), "EFS1 2 4\n");
     ASSERT_TRUE(control.SaveWorldState());
-    EXPECT_EQ(ReadClockTestFile(save / "aether_state.efs"), "EFS1 2 4\n");
+    EXPECT_EQ(ReadClockTestTextRecord(save / "aether_state.efs"), "EFS1 2 4\n");
     ASSERT_TRUE(loaded.LoadWorld(control.GetMetadata().worldId));
     ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit", "1337", "default"));
     ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));

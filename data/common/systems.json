@@ -41,7 +41,7 @@
     "water_high_res": { "enabled": false },
     "_aether_state_comment": "The stateful energy-field layer uses world-anchored sparse pages and an integer kernel; its sub-hash is folded into the aether hash slot. OFF -> no allocation, no tick work, zero hash bytes, and byte-identical saves. Activation deliberately changes the world hash.",
     "aether_state": { "enabled": false },
-    "active_regions": { "enabled": false }
+    "_active_regions_comment": "Persistent active regions and the absolute simulation clock. The engine default is OFF and this file deliberately does not restate it: an explicit entry is a value the engine reads, so it would change the performance fixture hash even though the disabled feature changes no behaviour. The real entry lands with the activation change that turns the feature on, where a new performance baseline is genuinely warranted. Enabling it restores the absolute tick across save and load, unifies the calendar, and deliberately changes the world hash."
   },
   "render": {
     "moonlight": { "enabled": false, "params": { "strength": 0.0, "color": [0.6, 0.7, 1.0] } },
