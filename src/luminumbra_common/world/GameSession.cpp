@@ -238,18 +238,20 @@ void GameSession::LoadSpeciesDefinitions() {
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
-    if (m_simulationBatchInProgress)
+    if (!IsSimulationTickBoundary())
         return 0;
     struct BatchGuard {
         bool& active;
-        explicit BatchGuard(bool& value)
-            : active(value) {
-            active = true;
+        bool previous;
+        BatchGuard(bool& value, bool enabled)
+            : active(value)
+            , previous(value) {
+            active = enabled;
         }
         ~BatchGuard() {
-            active = false;
+            active = previous;
         }
-    } guard(m_simulationBatchInProgress);
+    } guard(m_simulationBatchInProgress, m_activeRegionsEnabled);
     std::uint32_t ticks_executed;
     if (m_activeRegionsEnabled) {
         auto advanced_clock = m_simulationClock;
@@ -1170,6 +1172,8 @@ std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_has
 void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_worldClock = clock;
     m_simulationClock.reset(clock.tick());
+    if (m_energyFieldState)
+        m_energyFieldState->ResetEmptyAtTick(clock.tick());
     m_weatherSystem->RestoreAtTick(clock.tick(), m_metadata.spawnPoint, *m_windFieldSystem);
     m_aetherFieldSystem->Update(clock.tick(), m_metadata.spawnPoint, m_windFieldSystem.get());
 }
@@ -1183,6 +1187,14 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
         !ClockConfigurationCompatible(save_dir) || m_transientWorld || m_metadata.worldId.empty() ||
         !m_worldOpenError.empty())
         return false;
+    if (m_activeRegionsEnabled) {
+        if (!Persistence::WorldSaveService::validate_save(save_dir))
+            return false;
+        std::error_code error;
+        fs::create_directories(save_dir, error);
+        if (error)
+            return false;
+    }
     // Using nlohmann::json for robust saving
     nlohmann::json metadata_json = {
         {"container_version", Persistence::WorldSaveService::kContainerVersion},
@@ -1239,6 +1251,15 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
 
     if (!Persistence::WorldSaveService::validate_save(save_dir))
         return false;
+
+    // Clock snapshots can contain energy or metadata without any chunk/plant writer
+    // creating the destination. Create it only after every refusal check passes.
+    if (m_activeRegionsEnabled) {
+        std::error_code error;
+        fs::create_directories(save_dir, error);
+        if (error)
+            return false;
+    }
 
     // Quiesce in-flight generation/promotion/meshing so chunk data is stable
     // on disk — WITHOUT publishing: a save must never be an
@@ -1357,6 +1378,19 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return false;
     }
 
+    Persistence::WorldSaveService service;
+    WorldStreamingState loaded;
+    std::vector<std::string> errors;
+    const bool snapshot_present = service.load_world(loaded, save_dir, errors);
+    if (!snapshot_present && !errors.empty()) {
+        m_worldOpenError = errors.front();
+        m_worldSystem->clear_world(m_physicsSystem.get());
+        for (const std::string& error : errors) {
+            LUMINUMBRA_CORE_ERROR("World state load failed: {}", error);
+        }
+        return false;
+    }
+
     WorldClock saved_clock;
     bool requires_active_regions = false;
     std::vector<std::string> clock_errors;
@@ -1370,22 +1404,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_worldSystem->clear_world(m_physicsSystem.get());
         return false;
     }
-    Persistence::WorldSaveService service;
-    WorldStreamingState loaded;
-    std::vector<std::string> errors;
-    if (!service.load_world(loaded, save_dir, errors)) {
-        if (errors.empty()) {
-            if (!m_activeRegionsEnabled)
-                return true; // legacy fresh world
-        } else {
-            m_worldOpenError = errors.front();
-            m_worldSystem->clear_world(m_physicsSystem.get());
-            for (const std::string& error : errors) {
-                LUMINUMBRA_CORE_ERROR("World state load failed: {}", error);
-            }
-            return false;
-        }
-    }
+    if (!snapshot_present && !m_activeRegionsEnabled)
+        return true; // legacy fresh world
     if (m_activeRegionsEnabled)
         RestoreWorldClock(saved_clock);
 

@@ -1041,7 +1041,8 @@ std::size_t ServerWorldRunner::SaveFullSnapshot() {
     // stale cursor and the water evolution diverges from the original's.
     if (m_session->ActiveRegionsEnabled() && !m_session->SaveWorldState())
         return 0;
-    if (!m_session->SaveWorld())
+    const bool metadata_saved = m_session->SaveWorld();
+    if (m_session->ActiveRegionsEnabled() && !metadata_saved)
         return 0;
     return state.size();
 }

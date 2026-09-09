@@ -154,7 +154,8 @@ TEST(WorldClockTest, SimulationClockResetRestoresBaseAndClearsFrameRemainder) {
     simulation.reset();
     EXPECT_EQ(simulation.tick_count(), 0u);
     simulation.reset(std::numeric_limits<std::uint64_t>::max());
-    EXPECT_THROW(simulation.advance(simulation.fixed_dt()), std::overflow_error);
+    EXPECT_EQ(simulation.advance(simulation.fixed_dt()), 1u);
+    EXPECT_EQ(simulation.tick_count(), 0u); // legacy unsigned wrap, guarded by enabled WorldClock
 }
 
 TEST(WorldClockTest, ActiveRegionsIsGeneratedHashedAndDefaultOff) {

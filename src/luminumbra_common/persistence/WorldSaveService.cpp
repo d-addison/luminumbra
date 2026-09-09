@@ -684,7 +684,10 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     world::WorldClock clock;
     std::string clock_error;
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
-    if (!world::WorldClock::from_metadata(metadata, clock, clock_error)) {
+    // Legacy metadata is opaque input to this helper. Only clock-bearing input
+    // opts into the new validation; the existing destination is still validated.
+    const bool has_clock = metadata.contains("simulationTick") || metadata.contains("calendar");
+    if (has_clock && !world::WorldClock::from_metadata(metadata, clock, clock_error)) {
         AddError(errors, clock_error);
         return false;
     }
@@ -692,15 +695,8 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     bool requires_active_regions = false;
     if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
         return false;
-    if (requires_active_regions && !metadata.contains("simulationTick") &&
-        !metadata.contains("calendar")) {
+    if (requires_active_regions && !has_clock) {
         AddError(errors, "Incompatible configuration: this world requires sim.active_regions.");
-        return false;
-    }
-    std::error_code directory_error;
-    std::filesystem::create_directories(save_dir, directory_error);
-    if (directory_error) {
-        AddError(errors, "Could not create metadata directory: " + directory_error.message());
         return false;
     }
     const auto destination = save_dir / "world_info.json";
@@ -729,10 +725,6 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
         const auto path = save_dir / "world_info.json";
         if (!std::filesystem::exists(path))
             return true;
-        if (std::filesystem::file_size(path) > 1024 * 1024) {
-            AddError(errors, "Corrupt world metadata: exceeds the 1 MiB limit.");
-            return false;
-        }
         std::ifstream input(path, std::ios::binary);
         const auto metadata = nlohmann::json::parse(input);
         std::string error;
@@ -1033,10 +1025,6 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
     try {
         if (stop.stop_requested())
             return reject("Saved-world validation cancelled.");
-        world::WorldClock clock;
-        bool requires_active_regions = false;
-        if (!read_clock_metadata(save_dir, clock, requires_active_regions, &errors))
-            return reject("");
         const auto metadata_path = save_dir / "world_info.json";
         if (std::filesystem::exists(metadata_path)) {
             std::ifstream input(metadata_path, std::ios::binary);
@@ -1057,6 +1045,12 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                     return reject("unsupported future world metadata container version " +
                                   version.dump());
                 return reject("corrupt world metadata container version");
+            }
+            if (metadata.contains("simulationTick") || metadata.contains("calendar")) {
+                world::WorldClock clock;
+                std::string error;
+                if (!world::WorldClock::from_metadata(metadata, clock, error))
+                    return reject(error);
             }
         }
         const auto chunks_dir = save_dir / kChunksDirectoryName;

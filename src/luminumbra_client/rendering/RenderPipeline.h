@@ -857,6 +857,7 @@ public:
 private:
     friend struct TerrainCullingTestPeer;
     friend struct TextureFileTestPeer;
+    friend struct RenderClockTestPeer;
     // Extracted render pass classes. Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.

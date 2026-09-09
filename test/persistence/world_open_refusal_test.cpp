@@ -578,6 +578,11 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     Server::ServerWorldRunner original(config);
     ASSERT_TRUE(original.Boot()) << original.GetBootError();
     ASSERT_TRUE(original.Session()->ActiveRegionsEnabled());
+    // Boot warms the production streaming radius independently of surface_radius.
+    // Keep this clock/persistence oracle bounded to its saved chunk and nearby cells.
+    original.Session()->GetWorldSystem()->clear_world(original.Session()->GetPhysicsSystem());
+    original.Session()->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(original.Session()->LoadWorldState());
     // A single runner tick must autosave at absolute tick 45, even though
     // this RunFixedTicks call has executed only one tick.
     for (int i = 0; i < 44; ++i)
@@ -603,6 +608,9 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
                   loaded.Session()->GetWorldClock().canonical_bytes());
     };
     compare();
+    loaded.Session()->GetWorldSystem()->clear_world(loaded.Session()->GetPhysicsSystem());
+    loaded.Session()->GetWorldSystem()->debug_set_streaming_radius_cap(1);
+    ASSERT_TRUE(loaded.Session()->LoadWorldState());
     original.RunFixedTicks(5);
     loaded.RunFixedTicks(5);
     compare();
@@ -617,6 +625,49 @@ TEST_F(WorldOpenRefusal, ServerAutosaveAndFullSnapshotCarryTheAbsoluteClock) {
     original.Shutdown();
     EXPECT_EQ(Persistence::InspectSavedWorld(root, "fixture").clock.tick(), 51u);
     loaded.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, LegacyFullSnapshotCallbackAndMetadataFailureKeepChunkCount) {
+    Server::ServerWorldRunnerConfig config;
+    config.root_path = RootString();
+    config.world_id = "fixture";
+    config.surface_radius = 0;
+    config.collision_radius = 0;
+    Server::ServerWorldRunner runner(config);
+    ASSERT_TRUE(runner.Boot()) << runner.GetBootError();
+    ASSERT_FALSE(runner.Session()->ActiveRegionsEnabled());
+    runner.Session()->GetWorldSystem()->clear_world(runner.Session()->GetPhysicsSystem());
+    ASSERT_TRUE(runner.Session()->LoadWorldState());
+    const auto chunks = runner.StreamedChunkCount();
+    ASSERT_GT(chunks, 0u);
+    bool called = false;
+    runner.Session()->GetSimulationEventBus().subscribe([&](const auto&) {
+        called = true;
+        EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
+    });
+    runner.Session()->GetSimulationEventBus().publish(1, "save", "");
+    ASSERT_EQ(runner.Session()->TickSimulation(runner.Session()->GetSimulationClock().fixed_dt()),
+              1u);
+    EXPECT_TRUE(called);
+    // A failed open leaves the old streamed chunks available but blocks metadata
+    // saving. The legacy full-snapshot writer still reports the chunk count.
+    ASSERT_FALSE(runner.Session()->LoadWorld("missing-world"));
+    ASSERT_FALSE(runner.Session()->SaveWorld());
+    EXPECT_EQ(runner.SaveFullSnapshot(), chunks);
+    runner.Shutdown();
+}
+
+TEST_F(WorldOpenRefusal, LegacyExplicitSessionSnapshotsKeepLargeKeylessMetadata) {
+    auto metadata = nlohmann::json::parse(Read(save / "world_info.json"));
+    metadata["extension"] = std::string(1024 * 1024, 'x');
+    Write(save / "world_info.json", metadata.dump());
+    GameSession session;
+    session.SetRootPath(RootString());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateTransientWorld("Legacy direct load", "1337", "default"));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save)) << session.GetWorldOpenError();
+    EXPECT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_EQ(Read(save / "world_info.json"), metadata.dump());
 }
 
 } // namespace

@@ -780,6 +780,7 @@ add_executable(far_lod_worker_test
     rendering/far_lod_worker_test.cpp
     rendering/terrain_culling_test.cpp
     rendering/texture_file_test.cpp
+    rendering/render_clock_test.cpp
 )
 
 target_include_directories(far_lod_worker_test PRIVATE

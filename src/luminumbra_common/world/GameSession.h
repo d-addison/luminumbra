@@ -356,7 +356,7 @@ public:
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
     [[nodiscard]] bool IsSimulationTickBoundary() const {
-        return !m_simulationBatchInProgress;
+        return !m_activeRegionsEnabled || !m_simulationBatchInProgress;
     }
 
     // --- Fixed-rate simulation ---
