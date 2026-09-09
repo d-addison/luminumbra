@@ -2,10 +2,12 @@
 
 // Far-LOD region tile store (, the deterministic runtime contract sections 3/4).
 //
-// Far tiers extend the visible horizon past the live chunk ring with packed
-// per-region heightfield tiles:
-//   F1: 4 m samples, intended coverage 512-768 m
-//   F2: 8 m samples, intended coverage 768-1536 m
+// The legacy two-tier path extends the horizon with packed per-region
+// heightfield tiles (horizontal camera-to-nearest-region distance):
+//   F1: 4 m samples, selected inside 768 m, including beneath the live ring
+//   F2: 8 m samples, selected from 768 through 3000 m
+// FarTierTable.h declares the volumetric ladder that supersedes these ranges
+// when implemented; the F1/F2 store and its payload remain unchanged here.
 // Region = 32x32 chunks = 512 m, addressed like the persistence container
 // (rx = floor(chunk_x/32), rz = floor(chunk_z/32)). A tile spans its full
 // region INCLUDING a shared border row/column (samples_per_side =
@@ -39,8 +41,8 @@ struct TerrainGenParams;
 namespace Luminumbra::World {
 
 enum class FarLodTier : u8 {
-    F1 = 1, // 4 m samples, 512-768 m
-    F2 = 2, // 8 m samples, 768-1536 m
+    F1 = 1, // Legacy heightfield: 4 m samples, inside 768 m
+    F2 = 2, // Legacy heightfield: 8 m samples, 768-3000 m; see FarTierTable.h
 };
 
 // Region edge length in meters (32 chunks x 16 m).
