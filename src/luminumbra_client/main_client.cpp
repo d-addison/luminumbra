@@ -4578,6 +4578,7 @@ int main(int argc, char* argv[]) {
                         {"capture_complete", terrain_coverage_capture_ok},
                         {"performance_qualification", "diagnostic_instrumentation_enabled"},
                         {"frame_observations", std::move(terrain_coverage_frames)}};
+                    terrain_coverage_frames = nlohmann::json::array();
                 }
                 j["frames"] = rb_count;
                 j["warmup_frames"] = g_app.capture.render_benchmark_warmup;
