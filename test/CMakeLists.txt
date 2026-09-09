@@ -458,22 +458,22 @@ else()
     target_link_libraries(registry_ownership_test PRIVATE OpenGL::GL)
 endif()
 
+# Finite reversed-Z precision and frustum coverage on a hidden GL 4.5 target.
+add_executable(reversed_z_depth_test rendering/reversed_z_depth_test.cpp)
+target_link_libraries(reversed_z_depth_test PRIVATE gtest_main luminumbra_client)
+if(WIN32)
+    target_link_libraries(reversed_z_depth_test PRIVATE opengl32)
+elseif(APPLE)
+    target_link_libraries(reversed_z_depth_test PRIVATE ${OPENGL_LIBRARIES})
+else()
+    target_link_libraries(reversed_z_depth_test PRIVATE OpenGL::GL)
+endif()
+
 # the pilot-pass seam contract — DebugView + GroundDecal
 # execute(RenderContext&) active paths against a real hidden GL context (both are
 # default-OFF, so a headless flip is vacuous — this is the non-vacuous proof).
 add_executable(pass_context_test
     rendering/pass_context_test.cpp
-../src/luminumbra_client/rendering/passes/DebugViewPass.cpp
-../src/luminumbra_client/rendering/passes/GroundDecalPass.cpp
-../src/luminumbra_client/rendering/passes/ShadowPass.cpp
-../src/luminumbra_client/rendering/passes/ParticlePass.cpp
-../src/luminumbra_client/rendering/passes/FoliagePass.cpp
-../src/luminumbra_client/rendering/passes/GlassOitPass.cpp
-../src/luminumbra_client/rendering/AsyncReadbackRing.cpp
-../src/luminumbra_client/rendering/RenderResourceRegistry.cpp
-../src/luminumbra_client/rendering/Shader.cpp
-../src/luminumbra_client/rendering/ShaderReflection.cpp
-../src/luminumbra_client/rendering/PassShaderLayouts.cpp
 )
 
 target_compile_definitions(pass_context_test PRIVATE
@@ -489,9 +489,7 @@ target_include_directories(pass_context_test PRIVATE
 
 target_link_libraries(pass_context_test PRIVATE
     gtest_main
-    glfw
-    glad
-    luminumbra_common
+    luminumbra_client
 )
 
 if(WIN32)
@@ -1572,6 +1570,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     registry_ownership_test
     environment_brdf_test
     pass_context_test
+    reversed_z_depth_test
     shader_reflection_test
     rhi_backend_test
     waterfall_visual_test
@@ -1614,6 +1613,7 @@ set(LUMINUMBRA_GL_GTEST_TARGETS
     registry_ownership_test
     environment_brdf_test
     pass_context_test
+    reversed_z_depth_test
     shader_reflection_test
     waterfall_visual_test
     particle_determinism_test

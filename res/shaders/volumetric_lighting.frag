@@ -63,7 +63,7 @@ const float FROXEL_FAR = 160.0;
 const float PI = 3.14159265359;
 
 vec3 worldPositionFromDepth(vec2 uv, float depth) {
-    float z = depth * 2.0 - 1.0;
+    float z = depth; // reversed-Z already uses [0,1] clip depth
     vec4 clip = vec4(uv * 2.0 - 1.0, z, 1.0);
     vec4 viewSpace = u_inverseProjection * clip;
     viewSpace /= viewSpace.w;
@@ -102,7 +102,7 @@ void main() {
     // being underwater (limited visibility) rather than dry air with a tint.
     if (u_underwater > 0.5) {
         float d;
-        if (sceneDepth >= 1.0) {
+        if (sceneDepth <= 0.0) {
             d = u_underwaterVisibility * 4.0; // far/surface -> deep murk
         } else {
             vec3 wp = worldPositionFromDepth(TexCoords, sceneDepth);
@@ -113,10 +113,9 @@ void main() {
         return;
     }
 
-    // Only cleared depth is sky. With a 0.1/3200 m projection, 0.9999
-    // already describes terrain at about 762 m: treating it as sky cut a
-    // hard ring through the atmosphere and made farther terrain suddenly clear.
-    if (sceneDepth >= 1.0) {
+    // Only cleared reversed-Z depth is sky. Positive depth, however small,
+    // still describes terrain and must receive aerial perspective.
+    if (sceneDepth <= 0.0) {
         FragColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }

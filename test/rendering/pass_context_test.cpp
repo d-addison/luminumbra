@@ -12,17 +12,21 @@
 //     as cleared.
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/RenderContext.h"
+#include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
+#include "luminumbra_client/rendering/passes/GBufferPass.h"
 #include "luminumbra_client/rendering/passes/GlassOitPass.h"
 #include "luminumbra_client/rendering/passes/GroundDecalPass.h"
+#include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
+#include <cstdlib>
 #include <glad/glad.h>
 #include <gtest/gtest.h>
 
@@ -65,6 +69,17 @@ public:
             m_error = "gladLoadGLLoader failed";
             return;
         }
+        glEnable(GL_DEBUG_OUTPUT);
+        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+        glDebugMessageCallback(
+            [](GLenum, GLenum type, GLuint, GLenum, GLsizei, const GLchar* message, const void*) {
+                if (type == GL_DEBUG_TYPE_ERROR)
+                    ADD_FAILURE() << "GL debug error: " << message;
+            },
+            nullptr);
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        glDepthFunc(GL_GREATER);
+        glClearDepth(0.0);
         m_ready = true;
     }
     ~HiddenGlContext() {
@@ -135,6 +150,115 @@ std::vector<unsigned char> ReadTarget(const RenderTarget& rt) {
     return px;
 }
 
+// Scoped override of an environment variable, restored on destruction, so the test
+// does not inherit (or leak) a render-scale setting from the surrounding session.
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value)
+        : m_name(name) {
+        if (const char* previous = std::getenv(name)) {
+            m_had_previous = true;
+            m_previous = previous;
+        }
+        assign(name, value);
+    }
+    ~ScopedEnv() {
+        assign(m_name, m_had_previous ? m_previous.c_str() : nullptr);
+    }
+
+private:
+    // setenv/unsetenv are POSIX only; MSVC provides _putenv_s, where an empty value
+    // removes the variable.
+    static void assign(const char* name, const char* value) {
+#if defined(_WIN32)
+        _putenv_s(name, value ? value : "");
+#else
+        if (value)
+            setenv(name, value, 1);
+        else
+            unsetenv(name);
+#endif
+    }
+
+    const char* m_name;
+    bool m_had_previous = false;
+    std::string m_previous;
+};
+
+TEST(PassContext, FloatDepthFramebuffersSurviveResizeAndRenderScaleChange) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    // Pin the render scale for the duration of the test so the expected attachment
+    // sizes below hold regardless of the caller's environment.
+    ScopedEnv pinned_scale("LUMIN_RENDER_SCALE", "1.0");
+    // Establish the CONVENTIONAL depth state first: the assertions after startup
+    // then prove that startup itself installed the reversed convention, rather than
+    // observing state some earlier fixture happened to leave behind.
+    glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+    glDepthFunc(GL_LESS);
+    glClearDepth(1.0);
+    RenderPipeline pipeline;
+    ASSERT_TRUE(pipeline.startup(64, 48, LUMINUMBRA_SOURCE_ROOT));
+    const auto check = [&](int width, int height) {
+        const auto& gbuffer = pipeline.gbuffer();
+        const auto& lighting = pipeline.lighting_fbo();
+        GLint value = 0;
+        glBindTexture(GL_TEXTURE_2D, gbuffer.depth_texture);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &value);
+        EXPECT_EQ(value, GL_DEPTH_COMPONENT32F);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &value);
+        EXPECT_EQ(value, width);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &value);
+        EXPECT_EQ(value, height);
+        std::array<float, 4> border{};
+        glGetTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border.data());
+        EXPECT_EQ(border, (std::array<float, 4>{0, 0, 0, 0}));
+        glBindRenderbuffer(GL_RENDERBUFFER, lighting.depth_texture);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_INTERNAL_FORMAT, &value);
+        EXPECT_EQ(value, GL_DEPTH_COMPONENT32F);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &value);
+        EXPECT_EQ(value, width);
+        glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &value);
+        EXPECT_EQ(value, height);
+        for (GLuint fbo : {gbuffer.fbo_id, lighting.fbo_id}) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            EXPECT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+        }
+        // Blitting depth requires matching formats, not just individually complete FBOs.
+        glBindFramebuffer(GL_FRAMEBUFFER, gbuffer.fbo_id);
+        glDepthMask(GL_TRUE);
+        glClearDepth(0.125);
+        glClear(GL_DEPTH_BUFFER_BIT);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, gbuffer.fbo_id);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, lighting.fbo_id);
+        glBlitFramebuffer(
+            0, 0, width, height, 0, 0, width, height, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, lighting.fbo_id);
+        float copied = 0;
+        glReadPixels(width / 2, height / 2, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &copied);
+        EXPECT_FLOAT_EQ(copied, 0.125f);
+        glClearDepth(0.0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    };
+    GLint mode = 0, func = 0;
+    GLdouble clear = 1;
+    glGetIntegerv(GL_CLIP_DEPTH_MODE, &mode);
+    glGetIntegerv(GL_DEPTH_FUNC, &func);
+    glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear);
+    EXPECT_EQ(mode, GL_ZERO_TO_ONE);
+    EXPECT_EQ(func, GL_GREATER);
+    EXPECT_DOUBLE_EQ(clear, 0.0);
+    check(64, 48);
+    pipeline.on_resize(80, 60);
+    check(80, 60);
+    pipeline.set_render_scale(0.5f);
+    check(40, 30);
+    pipeline.shutdown();
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
 TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
     HiddenGlContext gl;
     if (!gl.ready())
@@ -176,7 +300,7 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
         GLuint depth = 0;
         glGenRenderbuffers(1, &depth);
         glBindRenderbuffer(GL_RENDERBUFFER, depth);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, extent, extent);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, extent, extent);
         glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
         ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
@@ -188,12 +312,15 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
         ctx.lit_scene_depth = RenderbufferHandle{depth};
         ctx.opaque_scene = TextureHandle{opaque};
         ctx.screen_quad_vao = quad_vao;
-        // The pane lies at depth .5. A .25 foreground surface must hide it, while
-        // cleared sky at 1 must let the actual accumulation/resolve tint the target.
+        // Convert the synthetic identity projection's [-1,1] clip depth to
+        // reversed [1,0], preserving the pane's screen footprint and depth .5.
+        ctx.projection[2][2] = -0.5f;
+        ctx.projection[3][2] = 0.5f;
+        // A .75 foreground surface hides the pane; cleared sky at 0 admits it.
         for (bool occluded : {true, false}) {
             glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
             glDepthMask(GL_TRUE);
-            glClearDepth(occluded ? 0.25 : 1.0);
+            glClearDepth(occluded ? 0.75 : 0.0);
             glClearColor(0.8f, 0.8f, 0.8f, 1);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             pass.execute_accum(ctx, input);
@@ -235,7 +362,7 @@ TEST(PassContext, GlassUsesSharedRenderbufferDepthAndSurvivesRecreation) {
             ctx.screen_height = static_cast<unsigned>(extent * output_multiple);
             glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
             glDepthMask(GL_TRUE);
-            glClearDepth(1.0);
+            glClearDepth(0.0);
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             pass.execute_accum(ctx, input);
@@ -442,7 +569,14 @@ TEST(PassContext, ShadowCascadesDiscardPreviousFrameDepth) {
 
     ShadowPassInput input;
     input.light_space_matrices.assign(ShadowMap::CASCADE_COUNT, glm::mat4(1.0f));
-    input.submit_terrain = [](const glm::vec4*) {
+    input.submit_terrain = [](const glm::vec4* planes) {
+        GLint mode = 0, func = 0;
+        glGetIntegerv(GL_CLIP_DEPTH_MODE, &mode);
+        glGetIntegerv(GL_DEPTH_FUNC, &func);
+        EXPECT_EQ(mode, GL_NEGATIVE_ONE_TO_ONE);
+        EXPECT_EQ(func, GL_LESS);
+        EXPECT_FLOAT_EQ(planes[4].w, 1.0f); // identity light matrix: near at -1
+        EXPECT_FLOAT_EQ(planes[5].w, 1.0f); // far at +1
         return TerrainSubmitStats{};
     };
     const RenderContext ctx;
@@ -456,6 +590,14 @@ TEST(PassContext, ShadowCascadesDiscardPreviousFrameDepth) {
         glDepthMask(GL_FALSE); // A preceding transparent pass may disable writes.
         glClearDepth(0.0);     // The shadow pass owns its depth-clear convention.
         pass.execute(ctx, input);
+        GLint mode = 0, func = 0;
+        GLdouble clear = 1;
+        glGetIntegerv(GL_CLIP_DEPTH_MODE, &mode);
+        glGetIntegerv(GL_DEPTH_FUNC, &func);
+        glGetDoublev(GL_DEPTH_CLEAR_VALUE, &clear);
+        EXPECT_EQ(mode, GL_ZERO_TO_ONE);
+        EXPECT_EQ(func, GL_GREATER);
+        EXPECT_DOUBLE_EQ(clear, 0.0);
         glBindTexture(GL_TEXTURE_2D_ARRAY, pass.shadow_map().depth_texture_array);
         glGetTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data());
         ASSERT_EQ(glGetError(), GL_NO_ERROR);

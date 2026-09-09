@@ -43,6 +43,7 @@
 #include "rendering/TreeImpostorPolicy.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono> // CPU per-phase submit cost
 #include <cmath>
@@ -66,25 +67,6 @@
 #include "SkyAtmosphereLut.ipp"
 
 namespace {
-// Helper for frustum culling
-inline void ExtractFrustumPlanes(const glm::mat4& m, glm::vec4 planes[6]) {
-    planes[0] =
-        glm::vec4(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0], m[3][3] + m[3][0]);
-    planes[1] =
-        glm::vec4(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0], m[3][3] - m[3][0]);
-    planes[2] =
-        glm::vec4(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1], m[3][3] + m[3][1]);
-    planes[3] =
-        glm::vec4(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1], m[3][3] - m[3][1]);
-    planes[4] =
-        glm::vec4(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2], m[3][3] + m[3][2]);
-    planes[5] =
-        glm::vec4(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2], m[3][3] - m[3][2]);
-    for (int i = 0; i < 6; ++i) {
-        float inv_len = 1.0f / glm::length(glm::vec3(planes[i]));
-        planes[i] *= inv_len;
-    }
-}
 inline bool AABBOutsidePlane(const glm::vec3& minp, const glm::vec3& maxp, const glm::vec4& plane) {
     glm::vec3 p = glm::vec3(plane.x >= 0 ? maxp.x : minp.x,
                             plane.y >= 0 ? maxp.y : minp.y,
@@ -289,6 +271,9 @@ RenderPipeline::~RenderPipeline() {
 bool RenderPipeline::startup(u32 screen_width,
                              u32 screen_height,
                              const std::filesystem::path& root_path) {
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    glClearDepth(0.0);
+    glDepthFunc(GL_GREATER);
     m_started = false;
     m_screen_width = screen_width;
     m_screen_height = screen_height;
@@ -412,6 +397,10 @@ bool RenderPipeline::has_procgen_mesh(const std::string& key) const {
 // existing GL texture ids; nothing is hashed or written to sim state.
 const GBuffer& RenderPipeline::gbuffer() const {
     return m_gbuffer_pass->gbuffer();
+}
+
+const FrameBufferObject& RenderPipeline::lighting_fbo() const {
+    return m_lighting_pass->lighting_fbo();
 }
 
 bool RenderPipeline::capture_frame_parity(const Camera& camera,
@@ -2416,10 +2405,10 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         m_farlod->update(world_system, camera.Position);
     }
 
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                            (float)m_screen_width / (float)m_screen_height,
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
+    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                (float)m_screen_width / (float)m_screen_height,
+                                                camera.GetNearPlane(),
+                                                camera.GetFarPlane());
     glm::mat4 view = camera.GetViewMatrix();
 
     //  TAAU: per-frame Halton[2,3] sub-pixel jitter for the G-buffer projection. Computed ONLY
@@ -2456,7 +2445,7 @@ void RenderPipeline::prepare_frame(entt::registry& registry,
         std::abs(camera.Zoom - m_frustumCache.lastZoom) > 0.1f;
 
     if (needsUpdate) {
-        ExtractFrustumPlanes(projection * view, m_frustumCache.planes);
+        PassGl::ExtractFrustumPlanes(projection * view, m_frustumCache.planes);
         m_frustumCache.lastCameraPos = camera.Position;
         m_frustumCache.lastCameraFront = camera.Front;
         m_frustumCache.lastZoom = camera.Zoom;
@@ -2657,7 +2646,7 @@ void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
     // SAME G-buffer the static meshes just wrote. The combined world-space mesh
     // is baked + pushed by the client (set_plants); OFF by default, so this is a
     // no-op (zero GL work) and the render is byte-identical. Bind the G-buffer
-    // FBO + its 4 draw buffers and depth-test (GL_LESS) so the plants occlude /
+    // FBO + its 4 draw buffers and depth-test (GL_GREATER) so the plants occlude /
     // are occluded correctly, mirroring the far-field injection below.
     // NOTE : the GBuffer GPU-timer bracket spans gbuffer -> plant_procgen (it
     // opened in execute_stage_gbuffer and closes here) — preserved verbatim.
@@ -2670,7 +2659,7 @@ void RenderPipeline::execute_stage_plant_procgen(const Camera& camera) {
         glDrawBuffers(4, pp_bufs);
         glViewport(0, 0, m_internal_width, m_internal_height); // into internal G-buffer
         glEnable(GL_DEPTH_TEST);
-        glDepthFunc(GL_LESS);
+        glDepthFunc(GL_GREATER);
         glDepthMask(GL_TRUE);
         glDisable(GL_CULL_FACE); // procgen branches/leaves are 2-sided
         RenderContext plant_ctx = make_plant_context();
@@ -2790,7 +2779,7 @@ void RenderPipeline::execute_stage_skybox(const Camera& camera) {
         // sky dome at reduced resolution, then depth-mask-composite it into the
         // lighting FBO. The expensive cloud march pays for 1/4 (half) or 1/16
         // (quarter) of the fragments.  (no world_hash impact); sky
-        // pixels only (scene depth == far plane), reproducing the legacy GL_LEQUAL
+        // pixels only (scene depth == far plane), reproducing the legacy GL_GEQUAL
         // sky mask. Quality 0 takes the byte-identical legacy path below.
         //
         // (a) Dome -> reduced-res FBO. No depth attachment / depth test off: the
@@ -3470,10 +3459,10 @@ RenderContext RenderPipeline::make_god_rays_context(const Camera& camera) {
     if (sun_visible > 0.0f) {
         const glm::mat4 view = camera.GetViewMatrix();
         const glm::mat4 projection =
-            glm::perspective(glm::radians(camera.Zoom),
-                             (float)m_screen_width / (float)m_screen_height,
-                             camera.GetNearPlane(),
-                             camera.GetFarPlane());
+            ReversedZPerspective(glm::radians(camera.Zoom),
+                                 (float)m_screen_width / (float)m_screen_height,
+                                 camera.GetNearPlane(),
+                                 camera.GetFarPlane());
         const glm::vec4 clip = projection * glm::mat4(glm::mat3(view)) * glm::vec4(toSun, 1.0f);
         if (clip.w > 0.0f) {
             const glm::vec2 ndc = glm::vec2(clip) / clip.w;
@@ -5532,20 +5521,14 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; i++) {
         float split_near = (i == 0) ? camera.GetNearPlane() : shadow_map.cascade_splits[i];
         float split_far = shadow_map.cascade_splits[i + 1];
-        glm::mat4 proj = glm::perspective(glm::radians(camera.Zoom),
-                                          (float)m_screen_width / (float)m_screen_height,
-                                          split_near,
-                                          split_far);
+        glm::mat4 proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                              (float)m_screen_width / (float)m_screen_height,
+                                              split_near,
+                                              split_far);
         glm::mat4 view = camera.GetViewMatrix();
-        std::vector<glm::vec4> corners;
-        for (int x = 0; x < 2; ++x)
-            for (int y = 0; y < 2; ++y)
-                for (int z = 0; z < 2; ++z) {
-                    const glm::vec4 pt =
-                        glm::inverse(proj * view) *
-                        glm::vec4(2.0f * x - 1.0f, 2.0f * y - 1.0f, 2.0f * z - 1.0f, 1.0f);
-                    corners.push_back(pt / pt.w);
-                }
+        const std::array<glm::vec4, 8> corner_array =
+            PassGl::cascade_frustum_corners_world(proj, view);
+        const std::vector<glm::vec4> corners(corner_array.begin(), corner_array.end());
         glm::vec3 center = glm::vec3(0.0f);
         for (const auto& v : corners)
             center += glm::vec3(v);
@@ -5575,7 +5558,8 @@ std::vector<glm::mat4> RenderPipeline::get_light_space_matrices(const Camera& ca
         constexpr float z_mult = 10.0f;
         minZ = (minZ < 0) ? minZ * z_mult : minZ / z_mult;
         maxZ = (maxZ < 0) ? maxZ / z_mult : maxZ * z_mult;
-        glm::mat4 light_proj = glm::ortho(minX, maxX, minY, maxY, minZ, maxZ);
+        // ShadowPass keeps the conventional [-1,1] orthographic clip convention.
+        glm::mat4 light_proj = glm::orthoRH_NO(minX, maxX, minY, maxY, minZ, maxZ);
         matrices.push_back(light_proj * light_view);
     }
     return matrices;

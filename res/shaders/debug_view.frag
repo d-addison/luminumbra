@@ -81,9 +81,7 @@ void main() {
             outColor = vec3(linear);
         } else {
             float z = texture(gDepth, TexCoords).r;          // [0,1] non-linear
-            float ndc = z * 2.0 - 1.0;
-            float lin = (2.0 * u_near * u_far) /
-                        (u_far + u_near - ndc * (u_far - u_near));
+            float lin = (u_near * u_far) / (u_near + z * (u_far - u_near));
             outColor = vec3(clamp(lin * u_depthScale, 0.0, 1.0));
         }
     } else if (u_mode == 4) {

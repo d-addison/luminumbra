@@ -1738,7 +1738,7 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // discard far fragments inside the guaranteed-live ring so the
     // under-terrain fill cannot peek through live seam cracks at close range.
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(2.0f, 4.0f);
+    glPolygonOffset(-2.0f, -4.0f);
     geometry_shader.setFloat("u_farClipInnerRadius", kFarClipInnerRadiusMeters);
     // clip far geometry at the GEOMETRY level
     // (gl_ClipDistance[0]) to a radial band. The near radius removes the camera-
