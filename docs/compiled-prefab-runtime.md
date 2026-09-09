@@ -64,3 +64,11 @@ inspection reports retain `renderer_qualified: false`. Material rendering,
 Blender preview, picking, physics, scripts, replication, save persistence, GPU
 performance, and visual approval remain outside this change. Qualification above
 retains its exact source identity when this commit is composed into another branch.
+
+The Linux/GCC CI job enables the optional targets in its existing build. Its
+installed-prefab gate requires the 20 named C++ obligations in the full CTest
+report, then installs the consumer and runs the real service/compiler acceptance.
+Missing, duplicate, failed, or skipped component cases fail the gate. Artifacts
+retain the installed tool hashes, receipt logs and synthetic compiled generations.
+This ongoing Linux gate does not replace the separately pinned Windows evidence
+above or claim rendered preview coverage.
