@@ -95,8 +95,10 @@ levels and the bounded full-lattice cave neighbourhood are unchanged; long
 interior sightlines come from V1 and V2 bricks, which sample the same cave
 field.
 
-One tier table is the authority for the volumetric ranges; adopting it in
-runtime streaming and gates belongs to the later implementation slices.
+One tier table replaces the separate far-range constants and the differing
+1,536 m and 3,000 m horizon figures in code, comments and gates. The table is
+declared first and adopted by runtime streaming and the gates in the slices
+that build the tiers, so the replacement is staged rather than optional.
 
 Current behaviour: two pristine heightfield tiers (4 m to 768 m, 8 m to about
 3,000 m) with a 3,200 m far plane; edits reach far tiles only through
@@ -148,16 +150,6 @@ That value is retained solely to preserve artifact bytes and is not the
 runtime horizon. No frontier capture or wider-radius qualification is claimed
 by this declaration. Runtime constants, gate assertions, payloads, world
 hashes and configuration remain unchanged.
-
-The declaration's evidence receipt is
-`build/campaign-archives-20260907/slice-B2/receipt.json`. It is evidence only,
-never engine input. Its `schema_version` is 1; it records `branch`,
-`head_commit`, `files_changed`, `tests_added`, `ctest`, `fixture_hash`,
-`verification`, `runtime_constants`, `dead_constants`, `frontier_gate`,
-`deviations` and `out_of_scope`. An absent receipt means missing evidence;
-invalid JSON or missing required fields means corrupt evidence; an
-unsupported schema version must be refused by an evidence reader. None of
-these conditions changes world loading or supported bytes.
 
 ### Vertical coverage and the cave field
 
