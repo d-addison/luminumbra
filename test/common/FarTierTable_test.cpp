@@ -25,7 +25,10 @@ TEST(FarTierTable, PublishedValues) {
     for (std::size_t index = 0; index < expected.size(); ++index) {
         SCOPED_TRACE(index + 1);
         const auto actual = FarTierAt(index + 1);
-        ASSERT_TRUE(actual.has_value());
+        if (!actual.has_value()) {
+            ADD_FAILURE() << "tier " << (index + 1) << " is absent from the table";
+            continue;
+        }
         EXPECT_EQ(actual->sample_spacing_meters, expected[index].sample_spacing_meters);
         EXPECT_EQ(actual->brick_edge_meters, expected[index].brick_edge_meters);
         EXPECT_EQ(actual->tile_edge_meters, expected[index].tile_edge_meters);
