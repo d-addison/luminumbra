@@ -109,7 +109,7 @@ level, while chunks first generated at a coarser level carry heightmaps only.
 
 ### Far-range declaration and compatibility
 
-[`FarTierTable.h`](../src/luminumbra_common/world/FarTierTable.h) declares the
+`src/luminumbra_common/world/FarTierTable.h` declares the
 ladder above as a header-only `constexpr` table in `Luminumbra::World`. New
 volumetric far code reads this table instead of introducing local range
 constants. For tier number `t` in 1 through 5, sample spacing is
@@ -133,7 +133,7 @@ zero and unsupported or future tier numbers with `std::nullopt`, without
 clamping or indexing out of bounds. The distance accessor returns
 `std::nullopt` for negative, non-finite or beyond-horizon values. There is no
 runtime table loader or format version to accept, migrate or reinterpret.
-[`FarTierTable_test.cpp`](../test/common/FarTierTable_test.cpp) adds five cases
+`test/common/FarTierTable_test.cpp` adds five cases
 to `common_tests` covering the published values, nesting, angular density,
 exact boundaries and invalid inputs; a missing source fails configuration or
 build, and a broken contract fails its tests.
