@@ -29,8 +29,10 @@
 #include <glm/glm.hpp>
 #include <map>
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -548,6 +550,13 @@ public:
     // pass-owned blur FBO in the same frame, reading back R16F between legs, for each
     // ssao_quality 0..3. memcmp==0 catches a call-site ctx mis-population. Writes a
     // ssao_parity.txt verdict under out_dir; returns false on GL/IO error or mismatch.
+    // Explicit diagnostic captures only: records actual far and live draw decisions.
+    // capture_terrain_coverage must run after render_frame and before buffer swap.
+    void set_terrain_coverage_diagnostics_enabled(bool enabled,
+                                                  bool bypass_camera_region_guard = false);
+    nlohmann::json terrain_coverage_diagnostics(bool include_live_chunks = false) const;
+    bool capture_terrain_coverage(const std::filesystem::path& out_dir) const;
+
     bool capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera);
     //   (the  unlock): the in-process WHOLE-FRAME A/B. Re-dispatch the
     // full 23-stage sequence TWICE over the frame prepare_frame already built
@@ -1684,7 +1693,11 @@ private:
     // pipeline-owned CullHierarchical + draw_chunks_mdi, shared by GBuffer + Shadow
     // so neither needs friend access for terrain submission. Returns counts; the
     // caller folds them into pass stats.
-    SubmitTerrainChunksFn make_terrain_submitter();
+    SubmitTerrainChunksFn make_terrain_submitter(bool record_coverage = false);
+    bool m_terrain_coverage_enabled = false;
+    u64 m_terrain_coverage_frame = 0;
+    bool m_terrain_coverage_live_submit_observed = false;
+    std::unordered_set<ChunkID> m_terrain_coverage_visible;
 
     struct TerrainCullingCache {
         u64 chunk_set_signature = 0;

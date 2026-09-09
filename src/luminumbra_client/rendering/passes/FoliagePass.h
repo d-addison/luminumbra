@@ -107,7 +107,7 @@ public:
         float pos[3];     // world ground anchor
         float size[2];    // half-width, height (world units)
         uint8_t color[4]; // rgba8 (a = per-archetype sway flag scale 0..255)
-        float sway[2];    // per-instance wind displacement at the tip (world XZ)
+        float sway[2];    // per-instance raw wind input (world XZ)
         uint16_t phase;   // f16 sway phase offset (radians)
         uint16_t facing;  // f16 card yaw in the XZ plane (radians)
     };
@@ -209,8 +209,11 @@ public:
     // marker — determinism-adjacent). Default 1.0 == byte-identical to the biome-tracked
     // density; the FoliageInstancing gate (which runs the default) is unaffected.
     void set_density_scale(float scale) {
-        m_density_scale = scale > 0.0f ? scale : 1.0f;
-        ++m_chunk_cache_gen;
+        const float effective = scale > 0.0f ? scale : 1.0f;
+        if (m_density_scale != effective) {
+            m_density_scale = effective;
+            ++m_chunk_cache_gen;
+        }
     }
     float density_scale() const {
         return m_density_scale;
@@ -291,9 +294,37 @@ public:
     // Count of instances whose anchor lies within `radius_m` of `center` — the
     // gate's coverage-density probe (instances within the live ring).
     std::size_t instances_within(const glm::vec3& center, float radius_m) const;
-    // Max tip sway displacement magnitude across live instances this frame
-    // (calm vs windy differs — the gate's wind-response probe).
-    float max_sway_displacement() const;
+    // Raw wind magnitude baked in the completed instance snapshot. This is NOT
+    // geometric displacement; the shader applies bend, oscillation and a height cap.
+    float max_instance_wind_magnitude() const;
+    void set_evidence_frame(std::uint64_t frame, std::uint32_t phase) {
+        m_evidence_frame = frame;
+        m_evidence_phase = phase;
+    }
+    std::uint64_t build_generation() const {
+        return m_build_generation;
+    }
+    std::uint64_t instance_generation() const {
+        return m_instance_generation;
+    }
+    std::uint64_t build_frame() const {
+        return m_build_frame;
+    }
+    std::uint64_t instance_available_frame() const {
+        return m_instance_available_frame;
+    }
+    bool instances_from_gpu_readback() const {
+        return m_instances_from_gpu_readback;
+    }
+    std::uint32_t build_phase() const {
+        return m_build_phase;
+    }
+    const glm::vec2& wind_input() const {
+        return m_wind_xz;
+    }
+    float last_draw_shader_time() const {
+        return m_last_draw_shader_time;
+    }
     // Count of live instances beyond `radius_m` (the gate asserts this is 0 once
     // the fade end is inside the live ring).
     std::size_t instances_beyond(const glm::vec3& center, float radius_m) const;
@@ -316,6 +347,7 @@ private:
     // the gate's instance_hash/coverage probes stay populated independent of the
     // scatter-cache elision..
     void poll_foliage_readback();
+    void submit_foliage_readback();
     SurfaceSample sample_ground(
         const ChunkScatter& chunk, SurfaceQuery query, void* query_ctx, float x, float z) const;
     bool m_use_rendered_ground = false;
@@ -358,6 +390,16 @@ private:
     // allocated on first readback use, so the play path (readback disabled) pays
     // nothing..
     AsyncReadbackRing m_readback_ring;
+    std::uint64_t m_evidence_frame = 0;
+    std::uint32_t m_evidence_phase = 0;
+    std::uint64_t m_build_generation = 0;
+    std::uint64_t m_instance_generation = 0;
+    std::uint64_t m_readback_submitted_generation = 0;
+    std::uint64_t m_build_frame = 0;
+    std::uint64_t m_instance_available_frame = 0;
+    std::uint32_t m_build_phase = 0;
+    float m_last_draw_shader_time = 0.0f;
+    bool m_instances_from_gpu_readback = false;
     std::array<u32, kRingFrames> m_instance_vbo{};
     std::array<InstanceRecord*, kRingFrames> m_instance_ptr{};
     std::size_t m_ring_cursor = 0;

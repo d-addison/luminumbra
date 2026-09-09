@@ -1554,6 +1554,24 @@ int main(int argc, char* argv[]) {
             "Schema v3 requires 1..18000 measured frames and 1..18000 warmup frames");
         return 2;
     }
+    const std::string terrain_coverage_dir =
+        GetCommandLineOption(argc, argv, "--render-benchmark-aovs", "");
+    const bool terrain_coverage_bypass_camera_region_guard =
+        HasCommandLineFlag(argc, argv, "--render-benchmark-aovs-bypass-camera-region-guard");
+    nlohmann::json terrain_coverage_frames = nlohmann::json::array();
+    bool terrain_coverage_capture_ok = false;
+    if ((terrain_coverage_bypass_camera_region_guard && terrain_coverage_dir.empty()) ||
+        (!terrain_coverage_dir.empty() &&
+         (g_app.capture.render_benchmark_path.empty() ||
+          g_app.capture.render_benchmark_warmup < 0 || g_app.capture.render_benchmark_frames <= 0 ||
+          static_cast<long long>(g_app.capture.render_benchmark_warmup) +
+                  g_app.capture.render_benchmark_frames >=
+              8192))) {
+        LUMINUMBRA_CORE_ERROR(
+            "Terrain AOV capture requires --render-benchmark, a fresh AOV directory, "
+            "and 1..8191 warmup plus measured frames; bypass requires AOV capture");
+        return 2;
+    }
     g_app.capture.render_benchmark_screenshot =
         GetCommandLineOption(argc, argv, "--render-benchmark-screenshot", "");
     {
@@ -4225,14 +4243,18 @@ int main(int argc, char* argv[]) {
                             renderPipeline.set_cloud_state(cs);
                         }
                     }
-                    UpdateFoliageScatter(g_app,
-                                         root_dir,
-                                         scenario_config,
-                                         g_camera.get(),
-                                         gameSession.get(),
-                                         renderPipeline,
-                                         rb_scatter_ms,
-                                         rb_foliage_ms);
+                    // Apply functional foliage QA after all camera/time overrides.
+                    // Normal play, other scenarios and --play-paths retain the common path.
+                    if (!scenario_runner || !scenario_runner->onPreRenderFoliage()) {
+                        UpdateFoliageScatter(g_app,
+                                             root_dir,
+                                             scenario_config,
+                                             g_camera.get(),
+                                             gameSession.get(),
+                                             renderPipeline,
+                                             rb_scatter_ms,
+                                             rb_foliage_ms);
+                    }
                     // Ambient atmosphere particles: a soft drift of pollen/dust motes
                     // around the player. Spawned once; its origin follows the camera
                     // each frame so the motes are always present as you explore.
@@ -4273,6 +4295,9 @@ int main(int argc, char* argv[]) {
                         g_app.overlay
                             .debug_view_mode); // render-only; 0 = byte-identical default ( /
                                                // --debug-view)
+                    if (!terrain_coverage_dir.empty())
+                        renderPipeline.set_terrain_coverage_diagnostics_enabled(
+                            g_rb_active, terrain_coverage_bypass_camera_region_guard);
                     renderPipeline.render_frame(gameSession->GetRegistry(),
                                                 *gameSession->GetWorldSystem(),
                                                 *g_camera,
@@ -4632,6 +4657,17 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        if (g_rb_active && currentState == GameState::IN_GAME &&
+            g_app.benchmark.measuredFrames == g_app.capture.render_benchmark_frames &&
+            !terrain_coverage_dir.empty()) {
+            terrain_coverage_capture_ok =
+                renderPipeline.capture_terrain_coverage(terrain_coverage_dir);
+            if (!terrain_coverage_capture_ok) {
+                LUMINUMBRA_CORE_ERROR("Terrain coverage capture failed: {}", terrain_coverage_dir);
+                exit_code = 2;
+            }
+        }
+
         CaptureTimelapseFrame(
             g_app, window, currentState, gameSession.get(), renderPipeline, g_procgen);
         //  CPU-submit ends here (all GL work for the frame is
@@ -4735,6 +4771,15 @@ int main(int argc, char* argv[]) {
             double gpu_power_w = 0.0, gpu_clock_mhz = 0.0;
             const bool nv = g_rb_nvml_ok && g_rb_nvml.sample(gpu_power_w, gpu_clock_mhz);
 
+            if (!terrain_coverage_dir.empty()) {
+                auto coverage = renderPipeline.terrain_coverage_diagnostics();
+                coverage["benchmark_phase"] =
+                    g_app.benchmark.warmupFrames < g_app.capture.render_benchmark_warmup ? "warmup"
+                    : g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames
+                        ? "measured"
+                        : "capture";
+                terrain_coverage_frames.push_back(std::move(coverage));
+            }
             const auto& s = renderPipeline.get_last_render_pass_stats();
             auto& rb_warm = g_app.benchmark.warmupFrames;
             auto& rb_count = g_app.benchmark.measuredFrames;
@@ -4830,6 +4875,14 @@ int main(int argc, char* argv[]) {
                 const double cpu = rb_cpu / n;
                 nlohmann::json j;
                 j["schema"] = "luminumbra.render_benchmark.v2";
+                if (!terrain_coverage_dir.empty()) {
+                    j["terrain_coverage"] = {
+                        {"capture_directory", terrain_coverage_dir},
+                        {"capture_complete", terrain_coverage_capture_ok},
+                        {"performance_qualification", "diagnostic_instrumentation_enabled"},
+                        {"frame_observations", std::move(terrain_coverage_frames)}};
+                    terrain_coverage_frames = nlohmann::json::array();
+                }
                 j["frames"] = rb_count;
                 j["warmup_frames"] = g_app.capture.render_benchmark_warmup;
                 j["width"] = renderPipeline.screen_width();

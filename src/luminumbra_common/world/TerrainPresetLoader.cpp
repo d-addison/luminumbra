@@ -5,6 +5,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include "../core/FilesystemPath.h"
 #include "../core/Log.h"
 
 namespace Luminumbra::world {
@@ -147,7 +148,8 @@ void ParseBiomesBlock(const nlohmann::json& gen_params,
         // explicit data_root the caller supplied (the on-disk loader derives it
         // four parents up from the preset; the in-memory seam is handed it
         // directly so the table resolves correctly without a temp file).
-        biomes.resolved_table_path = (data_root / biomes.table).lexically_normal().string();
+        biomes.resolved_table_path =
+            Filesystem::LexicallyNormalPath(data_root / biomes.table).string();
     }
     WarnUnknownKeys(block,
                     "generation_params.biomes",
@@ -186,7 +188,7 @@ TerrainPresetLoadResult LoadTerrainPreset(const std::filesystem::path& preset_pa
     // so on-disk loads are byte-identical to before.
     std::error_code ec;
     const std::filesystem::path preset_dir =
-        std::filesystem::absolute(preset_path, ec).parent_path();
+        Filesystem::AbsolutePath(preset_path, ec).parent_path();
     const std::filesystem::path data_root =
         preset_dir.parent_path().parent_path().parent_path() / "data";
     return LoadTerrainPresetFromJson(data, data_root, preset_path.string());
@@ -351,7 +353,7 @@ TerrainPresetLoadResult LoadTerrainPresetFromJson(const nlohmann::json& data,
         // Resolve <data_root>/common/structures to an absolute path (the same
         // data root the biome table resolves against, supplied by the caller).
         params.structures_data_dir =
-            (data_root / "common" / "structures").lexically_normal().string();
+            Filesystem::LexicallyNormalPath(data_root / "common" / "structures").string();
     }
     if (result.extras.features.rivers_enabled) {
         params.rivers_enabled = true;
