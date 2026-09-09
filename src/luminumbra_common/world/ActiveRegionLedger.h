@@ -87,7 +87,9 @@ public:
         "Unsupported future active-region ledger version.";
     using DurableDigest = std::function<std::uint64_t(RegionKey)>;
 
-    explicit ActiveRegionLedger(RegionSchedulerConfig config = {});
+    // An absent ledger starts at the restored clock without scheduling a tick.
+    explicit ActiveRegionLedger(RegionSchedulerConfig config = {},
+                                const WorldClock& clock = WorldClock{});
     [[nodiscard]] const std::map<RegionKey, ActiveRegionRecord>& records() const {
         return m_records;
     }

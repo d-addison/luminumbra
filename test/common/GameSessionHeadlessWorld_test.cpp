@@ -1076,6 +1076,100 @@ TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSav
     EXPECT_FALSE(fs::exists(P::WorldSaveService::active_regions_path(save)));
 }
 
+void SavePlantRosterThenMultiRegionEdit(GameSession& session, const fs::path& save) {
+    ClockTestPlant(session.GetRegistry(), Luminumbra::Vec3(8, 20, 8));
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    ASSERT_TRUE(P::WorldSaveService::has_world_save(save));
+    ASSERT_TRUE(fs::exists(P::WorldSaveService::plant_entities_path(save)));
+    ASSERT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 0, 0)));
+    for (const int x : {0, 32}) {
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(x, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->heightmap_data = {8.0f + x, 8.5f + x, 9.0f + x};
+        if (x == 0)
+            chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    for (auto* s : {&session, &loaded}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+        ASSERT_TRUE(s->CreateTransientWorld("Plant region golden", "1337", "default"));
+    }
+    const auto save = root.path() / "plant-golden-save";
+    ASSERT_NO_FATAL_FAILURE(SavePlantRosterThenMultiRegionEdit(session, save));
+    EXPECT_FALSE(session.ActiveRegionsEnabled());
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::region_file_path(save, 1, 0)));
+    const auto fixture =
+        fs::path(LUMINUMBRA_SOURCE_ROOT) / "test/fixtures/active-regions/devel-off-plant-edit";
+    const auto hashes = nlohmann::json::parse(ReadClockTestFile(fixture / "hashes.json"));
+    EXPECT_EQ(SessionWorldHash(session), hashes.at("live_world_hash").get<std::string>());
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(save));
+    EXPECT_EQ(loaded.GetWorldSystem()->snapshot_streamed_chunks().size(), 1u);
+    EXPECT_EQ(SessionWorldHash(loaded), hashes.at("loaded_world_hash").get<std::string>());
+    std::size_t files = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(save)) {
+        if (!entry.is_regular_file())
+            continue;
+        ++files;
+        EXPECT_EQ(ReadClockTestFile(entry.path()),
+                  ReadClockTestFile(fixture / entry.path().filename()));
+    }
+    EXPECT_EQ(files, 3u); // plant roster, dirty region and manifest; no clean region
+}
+
+TEST(GameSessionHeadlessWorldTest, AbsentLedgerAtRestoredTickAllowsEditAndPinBeforeSave) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original;
+    original.SetRootPath(root.root_string());
+    original.SetJobSystem(&jobs);
+    original.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(original.CreateWorld("Absent ledger", "1337", "default"));
+    for (int i = 0; i < 7; ++i)
+        ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(original.SaveWorldState());
+    for (const bool pin : {false, true}) {
+        ASSERT_TRUE(
+            fs::remove(P::WorldSaveService::active_regions_path(original.GetWorldSaveDir())));
+        GameSession loaded, restored;
+        for (auto* s : {&loaded, &restored}) {
+            s->SetRootPath(root.root_string());
+            s->SetJobSystem(&jobs);
+            s->SetActiveRegionsEnabled(true);
+        }
+        ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
+        ASSERT_EQ(loaded.GetWorldClock().tick(), 7u);
+        ASSERT_EQ(loaded.GetActiveRegionLedger().tick(), 7u);
+        ASSERT_TRUE(loaded.GetActiveRegionLedger().records().empty());
+        EXPECT_EQ(loaded.GetRegionSchedule().tick, 0u); // no synthetic simulation tick
+        const Luminumbra::world::RegionKey key{10, -3};
+        if (pin)
+            loaded.PinActiveRegion(key, true);
+        else
+            loaded.NotifyGroundObjectEdit(Luminumbra::Vec3(5200, 0, -1500));
+        ASSERT_TRUE(loaded.IsSimulationTickBoundary());
+        ASSERT_TRUE(loaded.SaveWorldState());
+        ASSERT_TRUE(restored.LoadWorld(original.GetMetadata().worldId));
+        EXPECT_EQ(restored.GetWorldClock().tick(), 7u);
+        EXPECT_EQ(restored.GetActiveRegionLedger().canonical_bytes(),
+                  loaded.GetActiveRegionLedger().canonical_bytes());
+        EXPECT_EQ(restored.GetActiveRegionLedger().records().at(key).first_active, 7u);
+        EXPECT_TRUE(restored.GetActiveRegionLedger().records().at(key).wake_pending);
+        ASSERT_EQ(restored.TickSimulation(restored.GetSimulationClock().fixed_dt()), 1u);
+        EXPECT_EQ(restored.GetActiveRegionLedger().records().at(key).last_ticked, 8u);
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHoldCounters) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -1174,11 +1268,8 @@ TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnl
     const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
     live->heightmap_data = {4.0f};
     live->mark_voxel_data_dirty();
-    Luminumbra::WorldStreamingState expected;
-    expected.insert_chunk(live);
-    expected.insert_chunk(unloaded);
     const auto digest = P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live});
-    EXPECT_EQ(digest, std::stoull(P::ComputeWorldStreamingStateHash(expected), nullptr, 16));
+    EXPECT_EQ(digest, P::WorldSaveService::region_simulation_digest({}, {0, 0}, {unloaded, live}));
     EXPECT_NE(digest, P::WorldSaveService::region_simulation_digest(save, {0, 0}, {}));
     // Both durable render data and live render data are outside the projection.
     unloaded->mesh_vertices.resize(3);
@@ -1190,8 +1281,50 @@ TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnl
     live->mesh_indices = {2, 1, 0};
     live->water_mesh_dirty_ticks = 29;
     EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    for (const auto state : {Luminumbra::ChunkState::Meshing, Luminumbra::ChunkState::Ready}) {
+        live->set_state(state);
+        for (const bool collision : {true, false}) {
+            live->has_collision.store(collision);
+            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+        }
+    }
     live->heightmap_data[0] = 5.0f;
     EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    live->heightmap_data[0] = 4.0f;
+    live->material_data = {1};
+    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    live->material_data.clear();
+    live->water_depth_mm = {1};
+    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormalization) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    for (auto* s : {&session, &loaded}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+        s->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(session.CreateWorld("Collision normalization", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Meshing);
+    chunk->has_collision.store(true);
+    chunk->heightmap_data = {8.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    const auto digest = P::WorldSaveService::region_simulation_digest({}, {0, 0}, {chunk});
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
+    const auto chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
+    ASSERT_EQ(chunks.size(), 1u);
+    EXPECT_FALSE(chunks.front()->has_collision.load());
+    EXPECT_EQ(chunks.front()->get_state(), Luminumbra::ChunkState::Idle);
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, {0, 0}, chunks), digest);
+    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), {0, 0}, {}),
+              digest);
 }
 
 TEST(GameSessionHeadlessWorldTest, FirstEnabledChunkSaveIncludesCleanResidentRegions) {

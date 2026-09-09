@@ -114,6 +114,16 @@ int RunRecord(const ServerCliOptions& options) {
             LUMINUMBRA_CORE_ERROR("record: {}", error);
             return 1;
         }
+    } else {
+        std::error_code ec;
+        const auto companion = options.record_path + ".regions.json";
+        fs::remove(companion, ec);
+        if (ec) {
+            LUMINUMBRA_CORE_ERROR("record: cannot remove stale region schedule trace '{}': {}",
+                                  companion,
+                                  ec.message());
+            return 1;
+        }
     }
     const std::string final_hash = runner.ComputeWorldHash();
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();

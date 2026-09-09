@@ -64,12 +64,16 @@ contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
 not alter LMR1 v2, the world manifest, preset revision 6, EFS1, plant payloads,
 FSD2 v3, or canonical chunk serialization. An anchor-only ledger is not a chunk
-snapshot: the first save with dirty chunks writes all resident chunks, including
-clean chunks in other regions. Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
+snapshot: with active regions enabled, the first save with dirty chunks writes all
+resident chunks, including clean chunks in other regions. The disabled path keeps
+the legacy existing-save query: a plant-only save makes later saves incremental.
+Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
 replacement primitive for the ledger, without claiming cross-file atomicity.
 
 Absent means an empty ledger, with unlimited scheduling defaults and no saved
-local anchor; the host supplies its spawn feet position for a legacy save.
+local anchor; the host supplies its spawn feet position for a legacy save. Its
+header tick starts at the restored WorldClock tick without executing a tick, so
+an immediate edit or pin can be saved before simulation advances.
 No old-world migration occurs. Corrupt, truncated, oversized, duplicate,
 misordered or inconsistent records refuse with `Corrupt active-region ledger.`
 A valid magic followed by a version greater than 1 refuses distinctly with
@@ -127,9 +131,12 @@ read from an unrecorded machine-local budget.
 
 Frozen content is supplied at the transition by merging live lod-0 chunks with
 durable region records by id, with live records taking precedence. The provider
-uses the existing canonical simulation-only chunk hash projection in id order,
-excluding render meshes, render bookkeeping, transient dirtiness, far render
-records, compression and container envelopes. Serialization is unchanged. Later durable per-region systems must extend that provider
+uses a dedicated `region_content_v1` projection in chunk-id order: identity,
+SDF, heightmap, materials, integer water depth/bed/flux, water initialization,
+resolution and solver sleep/threshold state. Lifecycle state/state_value,
+collider flags, render meshes/bookkeeping, transient dirtiness, far render
+records, compression and container envelopes are excluded. Legacy hashing and
+serialization are unchanged. Later durable per-region systems must extend that provider
 with a declared canonical projection before consuming the scheduler.
 
 ## Hash and replay
@@ -162,6 +169,8 @@ count, and reject unknown keys, invalid digests and checksum mismatches as
 `Corrupt region schedule trace.` Absence is `Missing region schedule trace.`;
 a higher numeric schema suffix is `Unsupported future region schedule trace
 version.` An off replay with a companion refuses incompatible configuration.
+Finalizing a disabled recording removes any previous companion at that path;
+a filesystem removal error makes recording fail and reports the path and cause.
 The sidecar is diagnostic replay evidence, never a save member or world-hash
 input. Recording and playback emit and verify one digest after each host tick;
 LREC1 payloads and checkpoint fields are unchanged.
@@ -179,6 +188,18 @@ observations rather than pinned fixture inputs. Missing or changed fixture bytes
 fail the exact-byte test; these fixtures are never installed as runtime data.
 The unchanged LMR1/manifest validators supply their corruption and future-version
 refusals.
+
+`test/fixtures/active-regions/devel-off-plant-edit/` is a second exact-byte
+oracle captured from the same origin/devel commit in this worktree. A seed-1337
+session first saves only a plant roster, then retains idle chunks at (0,0,0)
+and (32,0,0), dirties only the former, and saves again without advancing a tick.
+`DisabledPlantRosterThenMultiRegionEditMatchesDevelHashAndExactSaveBytes` checks
+every output file against the fixture: plant roster, `r.0.0.lmr`, and manifest,
+with no `r.1.0.lmr`. It checks the live world hash `f4caef7e08157d8b` and the
+reloaded world hash `993b7f0b151dc6c3`, whose chunk domain contains only the dirty
+region. `hashes.json` records these comparison values and is not a save member.
+The test refuses missing/changed fixture bytes or hashes; it installs no runtime
+data and changes no save schema.
 
 The campaign receipt is a local build artifact at
 `build/campaign-archives-20260907/slice-C2/receipt.json`, containing branch, head

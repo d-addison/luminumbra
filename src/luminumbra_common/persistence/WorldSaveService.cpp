@@ -861,11 +861,12 @@ std::filesystem::path WorldSaveService::active_regions_path(const std::filesyste
 
 bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
                                            const std::filesystem::path& save_dir,
-                                           std::vector<std::string>* errors) {
+                                           std::vector<std::string>* errors,
+                                           const world::WorldClock& absent_clock) {
     try {
         const auto path = active_regions_path(save_dir);
         if (!std::filesystem::exists(path)) {
-            ledger = world::ActiveRegionLedger{};
+            ledger = world::ActiveRegionLedger({}, absent_clock);
             return true;
         }
         const auto length = std::filesystem::file_size(path);
@@ -948,7 +949,7 @@ WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir
         for (const auto& chunk : durable_chunks)
             region.insert_chunk(chunk);
     }
-    return std::stoull(ComputeWorldStreamingStateHash(region), nullptr, 16);
+    return std::stoull(ComputeRegionContentHash(region), nullptr, 16);
 }
 
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,

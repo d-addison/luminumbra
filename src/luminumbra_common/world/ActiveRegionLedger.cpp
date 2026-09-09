@@ -58,8 +58,9 @@ private:
 };
 } // namespace
 
-ActiveRegionLedger::ActiveRegionLedger(RegionSchedulerConfig config)
-    : m_config(config) {
+ActiveRegionLedger::ActiveRegionLedger(RegionSchedulerConfig config, const WorldClock& clock)
+    : m_config(config)
+    , m_tick(clock.tick()) {
     if (!ValidConfig(config))
         throw std::invalid_argument("Invalid active-region scheduler configuration");
 }

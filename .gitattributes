@@ -8,3 +8,4 @@
 * text=auto
 # Devel persistence oracle: preserve exact fixture bytes on every platform.
 test/fixtures/active-regions/devel-off/* -text
+test/fixtures/active-regions/devel-off-plant-edit/* -text

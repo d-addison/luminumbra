@@ -1379,7 +1379,9 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     // Subsequent saves rewrite the edited regions of a supported container.
-    const bool has_snapshot = Persistence::WorldSaveService::has_chunk_snapshot(save_dir);
+    const bool has_snapshot = m_activeRegionsEnabled
+                                  ? Persistence::WorldSaveService::has_chunk_snapshot(save_dir)
+                                  : Persistence::WorldSaveService::has_world_save(save_dir);
 
     bool ok = false;
     if (!has_snapshot) {
@@ -1487,7 +1489,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (m_activeRegionsEnabled) {
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
         ActiveRegionLedger ledger;
-        if (!Persistence::WorldSaveService::load_active_regions(ledger, save_dir, &clock_errors)) {
+        if (!Persistence::WorldSaveService::load_active_regions(
+                ledger, save_dir, &clock_errors, saved_clock)) {
             m_worldOpenError = clock_errors.front();
             return false;
         }

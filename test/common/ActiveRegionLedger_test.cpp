@@ -98,11 +98,19 @@ TEST(ActiveRegionLedgerTest, PrioritySelectsLowestForReductionAndHighestForRecov
     ledger.mark_edited({2, 0}, WorldClock{});
     const std::array anchors{Vec3(2304, 0, 2304)};
     ledger.schedule(WorldClock(1), anchors);
-    const std::vector<RegionKey> priority{
-        {1, 0}, {2, 0}, {3, 3}, {3, 4}, {3, 5}, {4, 3}, {4, 4}, {4, 5}, {5, 3}, {5, 4}, {5, 5}};
+    // More recent proximity outranks coordinates: this group's coordinates
+    // sort after the old group, so omitting/reversing age fails both loops.
+    const std::array recent{Vec3(4352, 0, 4352)};
+    ledger.schedule(WorldClock(2), recent);
+    const std::vector<RegionKey> priority{{1, 0}, {2, 0}, {7, 7}, {7, 8}, {7, 9}, {8, 7}, {8, 8},
+                                          {8, 9}, {9, 7}, {9, 8}, {9, 9}, {3, 3}, {3, 4}, {3, 5},
+                                          {4, 3}, {4, 4}, {4, 5}, {5, 3}, {5, 4}, {5, 5}};
     ASSERT_EQ(ledger.records().size(), priority.size());
+    ASSERT_EQ(ledger.records().at({3, 3}).last_proximity, 1u);
+    ASSERT_EQ(ledger.records().at({7, 7}).last_proximity, 2u);
+    ledger = Reload(ledger);
     const std::array work{RegionWork{{1, 0}, 1, 0, 0, 0}};
-    std::uint64_t tick = 1;
+    std::uint64_t tick = 2;
     for (auto it = priority.rbegin(); it != priority.rend(); ++it) {
         for (const auto state : {RegionState::Reduced, RegionState::Frozen}) {
             const auto schedule =
@@ -112,8 +120,22 @@ TEST(ActiveRegionLedgerTest, PrioritySelectsLowestForReductionAndHighestForRecov
             EXPECT_EQ(schedule.transitions.front().to, state);
         }
     }
+    // Forced wakes with the same pin rank retain their different proximity
+    // ages across reload. Current proximity would refresh both ages to zero.
+    auto waking = ledger;
+    waking.pin({3, 3}, true, WorldClock(tick));
+    waking.pin({7, 7}, true, WorldClock(tick));
+    waking = Reload(waking);
+    const auto wake = waking.schedule(WorldClock(tick + 1), {}, work);
+    const std::vector<RegionKey> wake_priority{{7, 7}, {3, 3}};
+    ASSERT_EQ(wake.transitions.size(), wake_priority.size());
+    EXPECT_EQ(wake.due, wake_priority);
+    for (std::size_t i = 0; i < wake_priority.size(); ++i)
+        EXPECT_EQ(wake.transitions[i],
+                  (RegionTransition{wake_priority[i], RegionState::Frozen, RegionState::Active}));
+
     // Every region is eligible at once: recovery must choose forward priority,
-    // including pin/edit rank and signed coordinate tie breaks.
+    // including pin/edit rank, proximity age and coordinate tie breaks.
     for (const auto key : priority) {
         for (const auto state : {RegionState::Reduced, RegionState::Active}) {
             const auto schedule = ledger.schedule(WorldClock(++tick));

@@ -70,8 +70,9 @@ public:
                                     std::vector<std::string>* errors = nullptr);
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
-                                    std::vector<std::string>* errors = nullptr);
-    // Simulation-only lod-0 projection; live chunks override durable records by id.
+                                    std::vector<std::string>* errors = nullptr,
+                                    const world::WorldClock& absent_clock = world::WorldClock{});
+    // Content-only lod-0 projection; live chunks override durable records by id.
     static std::uint64_t
     region_simulation_digest(const std::filesystem::path& save_dir,
                              world::RegionKey key,
