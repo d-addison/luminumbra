@@ -63,6 +63,28 @@ Before entering a game world, acquire the separately versioned tree pack with
 `python3 tools/assets/acquire.py` (Windows: `py -3 tools/assets/acquire.py`).
 See [Game assets](docs/game-assets.md) for provenance, offline setup and repair.
 
+## Visual test evidence
+
+The [documented visual baselines](docs/visual-baselines.md) include original
+screenshots, settings, measurements and visible failures. These September 8
+captures have **not received visual approval**; numeric test results alone do
+not establish scene quality. The catalog of 70 scenario groups currently has two
+deficient baseline groups and zero approved groups; these images show G04 and R14.
+
+[![Forest baseline with a visible terrain discontinuity](docs/assets/visual-baselines/20260908/forest-reference-preview.png)](docs/visual-baselines.md#forest-reference)
+
+[![Foliage diagnostic dominated by sky](docs/assets/visual-baselines/20260908/foliage-functional-preview.png)](docs/visual-baselines.md#foliage-diagnostic)
+
+A later [terrain coverage diagnostic](docs/terrain-coverage-diagnostics.md)
+compares the ordinary camera-region guard with an experimental bypass. The
+matched capture gains 257,075 covered pixels; the bypass is not a production fix
+and neither image has visual approval. These previews are resized; the guide
+links the unretouched full images and provenance.
+
+| Ordinary guard | Diagnostic bypass |
+|---|---|
+| [![Ordinary guard with a black terrain gap](docs/assets/terrain-coverage/20260908/forest-guard-preview.png)](docs/terrain-coverage-diagnostics.md) | [![Experimental bypass showing recovered terrain coverage](docs/assets/terrain-coverage/20260908/forest-bypass-preview.png)](docs/terrain-coverage-diagnostics.md) |
+
 ## Architecture
 
 Game code currently remains in this repository. The accepted

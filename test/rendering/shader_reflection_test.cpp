@@ -13,6 +13,7 @@
 // GTEST_SKIPs on a headless machine without a usable GL context (matches the
 // other GL render tests' policy).
 
+#include "luminumbra_common/core/FilesystemPath.h"
 #include "gtest/gtest.h"
 
 #define GLFW_INCLUDE_NONE
@@ -131,8 +132,9 @@ bool ReadShaderSourceRecursive(const std::filesystem::path& path,
                                std::unordered_set<std::string>& include_stack,
                                std::string& out,
                                std::string& err) {
-    const std::filesystem::path normalized = std::filesystem::absolute(path).lexically_normal();
-    const std::string key = normalized.generic_string();
+    const std::filesystem::path normalized =
+        Luminumbra::Filesystem::LexicallyNormalPath(Luminumbra::Filesystem::AbsolutePath(path));
+    const std::string key = Luminumbra::Filesystem::GenericPathString(normalized);
     if (!include_stack.insert(key).second) {
         err = "cyclic shader include: " + key;
         return false;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace luminumbra::fields {
@@ -11,14 +12,26 @@ namespace Luminumbra::scripting {
 
 struct LuaApiManifest;
 
-// The engine's sandboxed script host. promoted this from
-// a manifest-only host to a live sol2 interpreter carrying the read-only
-// binding: the read-only energy-field sampler `sample_energy_field(x, y, z)`
-// (also reachable as `world.sample_energy_field`, its manifest home). The VM
-// opens NO standard libraries — the exposed surface is exactly what this class
-// registers, and the manifest gate (LuaApiManifestMeetsBaseline + the escape
-// corpus in test/scripting/) enforces that every binding has a manifest entry
-// and no escape-shaped surface exists.
+enum class LuaEvaluationStatus {
+    Succeeded,
+    SyntaxError,
+    RuntimeError,
+    OtherError
+};
+
+struct LuaEvaluationResult {
+    LuaEvaluationStatus status = LuaEvaluationStatus::Succeeded;
+    // The first return value, when convertible by the existing numeric seam.
+    // An empty optional does not imply that execution failed.
+    std::optional<double> number;
+    std::string diagnostic;
+};
+
+// The engine's Lua host exposes only the read-only energy-field sampler through
+// `sample_energy_field` and `world.sample_energy_field`. No standard libraries
+// are opened. The manifest describes these two initially installed entry points.
+// This test/dev host has no instruction or memory budget, per-chunk global
+// isolation, or general behavior execution contract.
 //
 // SIM-PATH RULE (the  bridge rule): script sampling is one-way
 // read-only. Bindings CONSUME sim state through const pointers wired by the
@@ -47,6 +60,11 @@ public:
     // GAMEPLAY units (raw / kEnergyRawPerUnit). The field is columnar (2.5D):
     // y is accepted for API symmetry and ignored. 0.0 when no layer is wired.
     [[nodiscard]] double sample_energy_field(double x, double y, double z) const;
+
+    // Execute a chunk and distinguish success (including no/nonnumeric return)
+    // from syntax/runtime failures. Diagnostics describe Lua errors; they are
+    // not yet graph source maps. The VM's globals persist between evaluations.
+    [[nodiscard]] LuaEvaluationResult Evaluate(const std::string& chunk) const;
 
     // Run a Lua chunk in the sandboxed VM and extract its first return value
     // as a number. Returns false (out_value untouched) on a parse/runtime

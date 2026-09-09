@@ -9,6 +9,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "luminumbra_common/core/FilesystemPath.h"
+#include "luminumbra_common/world/BiomeTable.h"
 #include "luminumbra_common/world/TerrainPresetLoader.h"
 
 namespace fs = std::filesystem;
@@ -115,6 +117,16 @@ TEST(TerrainPresetLoaderTest, MountainsOptsIntoBiomesAndRivers) {
     EXPECT_FLOAT_EQ(result.params.river_pv_min, -1.0f);
     EXPECT_FLOAT_EQ(result.params.river_pv_max, -0.82f);
     EXPECT_FLOAT_EQ(result.params.river_depth, 4.0f);
+}
+
+TEST(TerrainPresetLoaderTest, ShippedPresetResolvesReadableBiomeTable) {
+    const auto result = LoadTerrainPreset(PresetDir() / "default.json");
+    ASSERT_TRUE(result.ok);
+    ASSERT_TRUE(result.params.biomes_enabled);
+    ASSERT_TRUE(Luminumbra::Filesystem::IsAbsolutePath(result.params.biome_table_path));
+    std::ifstream input(result.params.biome_table_path, std::ios::binary);
+    ASSERT_TRUE(input.is_open()) << result.params.biome_table_path;
+    EXPECT_FALSE(Luminumbra::World::BiomeTable::Load(result.params.biome_table_path).empty());
 }
 
 TEST(TerrainPresetLoaderTest, AllShippedPresetsLoadWithoutErrorsOrWarnings) {

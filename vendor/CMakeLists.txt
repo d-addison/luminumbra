@@ -141,8 +141,12 @@ endif()
 # stb is header-only. Export its fetched include directory without copying
 # generated dependency state back into the source checkout.
 if(NOT TARGET stb_headers)
+  include("${CMAKE_CURRENT_LIST_DIR}/../cmake/stb_resize.cmake")
+  set(_stb_generated_headers "${CMAKE_CURRENT_BINARY_DIR}/stb-headers")
+  luminumbra_prepare_stb_resize("${stb_SOURCE_DIR}" "${_stb_generated_headers}")
   add_library(stb_headers INTERFACE)
-  target_include_directories(stb_headers SYSTEM INTERFACE "${stb_SOURCE_DIR}")
+  target_include_directories(stb_headers SYSTEM INTERFACE
+    "${_stb_generated_headers}" "${stb_SOURCE_DIR}")
 endif()
 
 # Dear ImGui does not provide a CMake project. Build the pinned sources and GL

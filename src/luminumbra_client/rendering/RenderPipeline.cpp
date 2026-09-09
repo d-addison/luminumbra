@@ -1105,12 +1105,18 @@ RenderContext RenderPipeline::make_gbuffer_context(const Camera& camera,
     return ctx;
 }
 
-SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter() {
-    return [this](const glm::vec4(&frustum_planes)[6]) -> TerrainSubmitStats {
+SubmitTerrainChunksFn RenderPipeline::make_terrain_submitter(bool record_coverage) {
+    return [this, record_coverage](const glm::vec4(&frustum_planes)[6]) -> TerrainSubmitStats {
         std::vector<const ChunkCullEntry*> visible_chunks;
         m_hierarchicalCuller.CullHierarchical(frustum_planes, visible_chunks);
         std::size_t draws = 0;
         std::size_t indices = 0;
+        if (record_coverage && m_terrain_coverage_enabled) {
+            m_terrain_coverage_live_submit_observed = true;
+            m_terrain_coverage_visible.clear();
+            for (const auto* chunk : visible_chunks)
+                m_terrain_coverage_visible.insert(chunk->id);
+        }
         draw_chunks_mdi(visible_chunks, draws, indices);
         return TerrainSubmitStats{visible_chunks.size(), draws, indices};
     };
@@ -2299,6 +2305,11 @@ void RenderPipeline::render_frame(entt::registry& registry,
     // per-frame epilogue. Byte-identical to the pre-split monolith by construction —
     // the bodies moved verbatim. The harness (capture_frame_parity) reuses the same
     // prepared frame and dispatches TWICE, which must be bit-identical.
+    if (m_terrain_coverage_enabled) {
+        ++m_terrain_coverage_frame;
+        m_terrain_coverage_live_submit_observed = false;
+        m_terrain_coverage_visible.clear();
+    }
     prepare_frame(registry, world_system, camera, deltaTime, wireframe);
     dispatch_stages(camera);
 
@@ -2612,7 +2623,7 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         GBufferPassInput gbuffer_input;
         // Live-terrain submit: the Codex-signed-off callback (CullHierarchical +
         // draw_chunks_mdi, byte-identical), shared with ShadowPass.
-        gbuffer_input.submit_terrain_chunks = make_terrain_submitter();
+        gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
         gbuffer_input.far_lod = farlod();
         gbuffer_input.root_path = m_root_path;
         gbuffer_input.static_model_texture_array = static_model_texture_array();

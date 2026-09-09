@@ -48,6 +48,7 @@ set(CLIENT_INTERNAL_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/rendering/SceneSurvey.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/LightningBolt.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/Mesh.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/rendering/TerrainCoverageCapture.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderPipeline.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/RenderResourceRegistry.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rendering/WaterfallDetect.cpp
@@ -128,6 +129,7 @@ set(CLIENT_QA_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/PersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/PlayerViewSmoke.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/Precipitation.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkinnedMeshTestAssets.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkinnedMeshVisualSmoke.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/SkyboxVisual.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/scenarios/StreamingLodBoundary.cpp

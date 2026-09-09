@@ -82,6 +82,7 @@ endif()
 target_link_libraries(asset_processor_round_trip_test PRIVATE
     gtest_main
     stb_headers
+    luminumbra_common
 )
 
 if(TARGET meshoptimizer)
@@ -94,6 +95,7 @@ add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
     common/AnimationRuntime_test.cpp
+    common/AnimationClipFormat_test.cpp
     common/BiomeReverb_test.cpp
     common/DeterministicMath_test.cpp
     common/SystemConfig_test.cpp
@@ -200,6 +202,16 @@ target_link_libraries(common_tests PRIVATE
     gtest_main
     luminumbra_common
 )
+
+# File-only path contracts run without a GL context or the common-library graph.
+add_executable(filesystem_path_test
+    common/FilesystemPath_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
+    ../src/luminumbra_client/app/RuntimeRoot.cpp
+)
+target_include_directories(filesystem_path_test PRIVATE ../src ../src/luminumbra_client)
+target_compile_definitions(filesystem_path_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(filesystem_path_test PRIVATE gtest_main)
 
 # tree rendering (tree rendering): render-only tree LOD distance selection. The header
 add_executable(game_assets_test
@@ -322,6 +334,11 @@ target_link_libraries(forest_perf_budget_test PRIVATE
 # GL-free regression coverage for the foliage surface-grid cache prune: the
 # helper is a free template in FoliagePass.h precisely so it can be exercised
 # without a GL context.
+# Final foliage policy and receipt contracts are GL-free and do not link the engine.
+add_executable(foliage_visual_contract_test rendering/foliage_visual_contract_test.cpp)
+target_include_directories(foliage_visual_contract_test PRIVATE ../src/luminumbra_client)
+target_link_libraries(foliage_visual_contract_test PRIVATE gtest_main nlohmann_json)
+
 add_executable(foliage_cache_prune_test
     rendering/foliage_cache_prune_test.cpp
 )
@@ -338,6 +355,7 @@ target_link_libraries(foliage_cache_prune_test PRIVATE
 
 add_executable(render_smoke_test
     rendering/render_smoke_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
 )
 
 target_compile_definitions(render_smoke_test PRIVATE
@@ -584,6 +602,7 @@ endif()
 # reflection TU under test directly (GL-only, no luminumbra_client dependency).
 add_executable(shader_reflection_test
     rendering/shader_reflection_test.cpp
+    ../src/luminumbra_common/core/FilesystemPath.cpp
 ../src/luminumbra_client/rendering/ShaderReflection.cpp
 ../src/luminumbra_client/rendering/PassShaderLayouts.cpp
 )
@@ -1504,6 +1523,14 @@ target_link_libraries(isolation_config_test PRIVATE
     gtest_main
 )
 
+# Exercise the visual scenario's real asset producer without a GL context.
+add_executable(skinned_test_assets_test
+    rendering/skinned_test_assets_test.cpp
+    ../src/luminumbra_client/core/scenarios/SkinnedMeshTestAssets.cpp
+)
+target_include_directories(skinned_test_assets_test PRIVATE ../src)
+target_link_libraries(skinned_test_assets_test PRIVATE gtest_main luminumbra_common)
+
 # Standalone main gate programs registered directly with CTest.
 add_executable(eventbus_order_gate_test
     simulation/eventbus_order_gate_test.cpp
@@ -1553,6 +1580,8 @@ set(LUMINUMBRA_GTEST_TARGETS
     asset_processor_round_trip_test
     game_assets_test
     common_tests
+    filesystem_path_test
+    skinned_test_assets_test
     tree_lod_test
     # the hemi-octa mapping test was built but never
     # registered — the atlas-bake/shader shared source of truth had zero
@@ -1566,6 +1595,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     # world-dressing placement determinism (CPU-only).
     world_dressing_test
     foliage_cache_prune_test
+    foliage_visual_contract_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test
@@ -1753,6 +1783,29 @@ set_tests_properties(ShieldRtFarFieldMaxMipGpu PROPERTIES
 # test with the first that has it (the same strategy the validator gate uses to
 # pick $VISUAL_SWEEP_PYTHON). If none has numpy, warn and skip registration.
 find_package(Python3 COMPONENTS Interpreter QUIET)
+# File-only PowerShell checks are optional on hosts without PowerShell. The Lua
+# source mode only inspects source files; neither check runs the engine or graphics APIs.
+if(WIN32)
+    find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell powershell.exe)
+else()
+    # Do not discover WSL's powershell.exe: it cannot consume Linux CTest paths.
+    find_program(CAPTURE_VALIDATION_POWERSHELL NAMES pwsh powershell)
+endif()
+if(CAPTURE_VALIDATION_POWERSHELL)
+    add_test(NAME CaptureArtifactValidationContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
+    set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME LuaApiManifestSourceContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/validate-engine-frontier.ps1"
+            -Mode LuaApiManifestGate -BuildPreset lua-source-contract)
+    set_tests_properties(LuaApiManifestSourceContract PROPERTIES
+        LABELS "scripting;tools" TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+else()
+    message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
+endif()
 set(_vc_candidates "")
 if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
@@ -1784,6 +1837,9 @@ foreach(_cand ${_vc_candidates})
     endif()
 endforeach()
 if(_vc_python)
+    add_test(NAME TerrainAovDepthContract
+        COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/perf/test_terrain_aovs.py)
+    set_tests_properties(TerrainAovDepthContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
     add_test(NAME VisualCritiqueFlags
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/test_visual_critique.py)
     set_tests_properties(VisualCritiqueFlags PROPERTIES LABELS "visual;critique" TIMEOUT 120)
@@ -1807,6 +1863,9 @@ if(_tl_python)
     add_test(NAME TimelapseSelftest
         COMMAND "${_tl_python}" ${CMAKE_SOURCE_DIR}/tools/timelapse.py --selftest)
     set_tests_properties(TimelapseSelftest PROPERTIES LABELS "visual;tools" TIMEOUT 120)
+    add_test(NAME VisualSweepMontageEvidence
+        COMMAND "${_tl_python}" ${CMAKE_SOURCE_DIR}/tools/gates/test_visual_sweep_montages.py)
+    set_tests_properties(VisualSweepMontageEvidence PROPERTIES LABELS "visual;tools" TIMEOUT 120)
     message(STATUS "TimelapseSelftest registered using python: ${_tl_python}")
 else()
     message(FATAL_ERROR "No python with Pillow found: TimelapseSelftest cannot be registered. Install Pillow or configure with -DBUILD_TESTING=OFF.")

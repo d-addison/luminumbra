@@ -25,7 +25,7 @@
 //   0: pos (vec3)        ground anchor (world)
 //   1: size (vec2)       half-width / height (world units)
 //   2: color (rgba8)     albedo tint (a = sway flag scale 0..1)
-//   3: sway (vec2)       per-instance wind displacement (world XZ at the tip)
+//   3: sway (vec2)       per-instance raw wind input (world XZ)
 //   4: phase (f16)       per-instance sway phase offset (radians)
 //   5: facing (f16)      yaw of the card in the XZ plane (radians)
 // ===========================================================================

@@ -1233,6 +1233,90 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 38090,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/evidence.json",
+      "sha256": "e4dc6f0d13c1399c759c4f25e6632023419e54798e9456c7621bdcc56b9f6105",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 485229,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-bypass-preview.png",
+      "sha256": "cf9b5b745ffefc18c9b14b54fa879e007199e3228b8998766fb99e3666e8b43c",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 5961365,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-bypass.png",
+      "sha256": "d66324b37896ce5ae857af12f98522abb31f6f4e9ef78485d9b787da5d6b838c",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 481843,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-guard-preview.png",
+      "sha256": "5170c286eb5687e3b6a3536ee6e8dcb68550de2a978440490f6bcb2faabcec79",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 5774090,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-guard.png",
+      "sha256": "c0f7a71dbca9754800b9944fa380fc04b4a06d38cd4a91c6c9f54691fc81b00e",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 280348,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional-preview.png",
+      "sha256": "d947144cd1ffea3557b78d7931d7f8cdd5a83daa0ed502cadf39d090e3cfb5d4",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 1471,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional.json",
+      "sha256": "4c4df138b8cdb3eb668e2aeead13beda3463656cfaf2cbbd23d177f613cae7ac",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 2570597,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional.png",
+      "sha256": "6d864644ab5f40b4fdedd4125163bcdc16049af49dbddf9b42dc98bc1b226e6f",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 493967,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference-preview.png",
+      "sha256": "30cb284697a0d272c62cc19118faee4fe6ad1c8b0118eec6c538b8cf5ad54015",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 7494,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference.json",
+      "sha256": "b6fdf25209b5abb1ff024a134bdafc68a8d3be4543a3fa3b524b594f46c89dd7",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 5788098,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference.png",
+      "sha256": "c8ea3be89ed6d9a5b33c5501c0c925f31b0a1398667788d02a8ee124fa95f4a7",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 4480,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/receipts.json",
+      "sha256": "780115b3181199c1456b97ad54269d6ce3178aba959cafd22d0bc4c6631901d6",
+      "source": "Luminumbra documentation assets"
+    },
+    {
       "bytes": 87,
       "license": "MIT",
       "path": "test/fixtures/active-regions/devel-off-plant-edit/hashes.json",
