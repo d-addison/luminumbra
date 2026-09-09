@@ -51,7 +51,7 @@ test-process time; no recipe latency or GPU performance target is established by
 that measurement. The engine's viewport performance targets do not apply to this
 Blender UI fixture.
 
-See the [extension guide](../tools/blender/authoring/extension/README.md) for
+See the [extension guide](https://github.com/d-addison/luminumbra/blob/136e823e58baa5a908597f89dbc32757c3225001/tools/blender/authoring/extension/README.md) for
 installation, supported assets and receipt behavior. Run the portable contracts
 with `python -B -m unittest discover -s tools/blender/authoring/extension_tests -v`.
 The native probe is `tools/blender/authoring/extension_tests/native_recipe_probe.py`;
