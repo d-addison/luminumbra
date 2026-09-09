@@ -2342,8 +2342,8 @@ TEST(RenderSmokeTest, ReversedDepthCloudMaskPreservesDistantGeometry) {
     glClear(GL_COLOR_BUFFER_BIT);
     const auto pixels = probe.draw();
     for (int x = 0; x < 32; ++x) {
-        // Float literals: MSVC treats the int ternary as a narrowing conversion
-        // (C4244) and the render tests build with warnings as errors.
+        // Float literals: MSVC reports an int-to-float narrowing conversion for an
+        // int ternary here, and the render tests build with warnings as errors.
         EXPECT_FLOAT_EQ(pixels[x].r, x < 16 ? 0.0f : 1.0f);
         EXPECT_FLOAT_EQ(pixels[x].g, x < 16 ? 1.0f : 0.0f);
     }

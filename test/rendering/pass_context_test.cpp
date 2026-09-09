@@ -160,19 +160,26 @@ public:
             m_had_previous = true;
             m_previous = previous;
         }
+        assign(name, value);
+    }
+    ~ScopedEnv() {
+        assign(m_name, m_had_previous ? m_previous.c_str() : nullptr);
+    }
+
+private:
+    // setenv/unsetenv are POSIX only; MSVC provides _putenv_s, where an empty value
+    // removes the variable.
+    static void assign(const char* name, const char* value) {
+#if defined(_WIN32)
+        _putenv_s(name, value ? value : "");
+#else
         if (value)
             setenv(name, value, 1);
         else
             unsetenv(name);
-    }
-    ~ScopedEnv() {
-        if (m_had_previous)
-            setenv(m_name, m_previous.c_str(), 1);
-        else
-            unsetenv(m_name);
+#endif
     }
 
-private:
     const char* m_name;
     bool m_had_previous = false;
     std::string m_previous;
