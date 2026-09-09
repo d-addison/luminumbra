@@ -92,6 +92,32 @@ TEST(ActiveRegionLedgerTest, ReductionFreezeRecoveryAndHoldsSurviveReload) {
     }
 }
 
+TEST(ActiveRegionLedgerTest, RestoringNewerClockPreservesHoldsAndFrozenSimulationState) {
+    auto ledger = Distant();
+    ledger.set_water_cursor(kFar, 42);
+    for (std::uint64_t tick = 2; tick <= 6; ++tick) {
+        Step(ledger, tick, tick < 6 ? 11 : 0);
+        const auto& record = ledger.records().at(kFar);
+        if (tick == 2)
+            ASSERT_EQ(record.over_hold, 1u);
+        if (tick == 6) {
+            ASSERT_EQ(record.state, RegionState::Frozen);
+            ASSERT_EQ(record.under_hold, 1u);
+            ASSERT_EQ(record.frozen_digest, 0x123456789abcdef0ull);
+        }
+        auto loaded = Reload(ledger);
+        loaded.restore_clock(WorldClock(100));
+        EXPECT_EQ(loaded.tick(), 100u);
+        EXPECT_EQ(loaded.records(), ledger.records());
+        EXPECT_EQ(loaded.config(), ledger.config());
+        EXPECT_EQ(Reload(loaded).encode(), loaded.encode());
+        const auto before = loaded.encode();
+        EXPECT_THROW(loaded.restore_clock(WorldClock(99)), std::invalid_argument);
+        EXPECT_EQ(loaded.encode(), before);
+        EXPECT_THROW(loaded.schedule(WorldClock(100)), std::invalid_argument);
+    }
+}
+
 TEST(ActiveRegionLedgerTest, PrioritySelectsLowestForReductionAndHighestForRecovery) {
     ActiveRegionLedger ledger({0, 1, 1});
     ledger.pin({1, 0}, true, WorldClock{});

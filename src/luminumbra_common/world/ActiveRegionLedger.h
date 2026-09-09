@@ -108,6 +108,9 @@ public:
     void set_populated(RegionKey key, bool populated);
     void set_water_cursor(RegionKey key, std::uint64_t cursor);
     void mark_saved(const WorldClock& clock);
+    // An accepted partial save may have an older ledger than its clock. Rebase
+    // only the header on load; never run catch-up or alter any region record.
+    void restore_clock(const WorldClock& clock);
     [[nodiscard]] static RegionKey region_at(const Vec3& position);
     [[nodiscard]] static std::uint32_t phase(RegionKey key, std::uint8_t shift);
     [[nodiscard]] static RegionResumeWindow resume_window(RegionKey key,

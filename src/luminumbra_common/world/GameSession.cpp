@@ -1285,6 +1285,9 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
                                                {"z", m_ambientFieldAnchor.z}};
     }
     if (m_activeRegionsEnabled) {
+        // All production callers save synchronously on the host thread: client
+        // world creation/quit/shutdown and server autosave/snapshot/shutdown.
+        // Do not dispatch this pair to workers; the writer asserts non-overlap.
         if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
                 metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
             return false;
@@ -1495,6 +1498,10 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldOpenError = clock_errors.front();
             return false;
         }
+        // Validation accepted ledger.tick() <= saved_clock.tick(). An interrupted
+        // pair can be strictly older. Rebase its header without scheduling work,
+        // so immediate edits/save stamps at the restored clock remain decodable.
+        ledger.restore_clock(saved_clock);
         m_activeRegionLedger = std::move(ledger);
         if (!m_activeRegionLedger.local_anchor())
             m_activeRegionLedger.set_local_anchor(m_metadata.spawnPoint);

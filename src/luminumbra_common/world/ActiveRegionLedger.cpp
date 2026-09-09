@@ -115,6 +115,11 @@ void ActiveRegionLedger::mark_saved(const WorldClock& clock) {
         record.last_save = clock.tick();
     }
 }
+void ActiveRegionLedger::restore_clock(const WorldClock& clock) {
+    if (clock.tick() < m_tick)
+        throw std::invalid_argument("Cannot restore a region ledger ahead of the world clock");
+    m_tick = clock.tick();
+}
 std::uint32_t ActiveRegionLedger::phase(RegionKey key, std::uint8_t shift) {
     if (shift > 16)
         throw std::invalid_argument("Invalid region cadence shift");

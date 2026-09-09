@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <charconv>
 #include <cmath>
@@ -70,6 +71,34 @@ std::atomic<bool>& InterruptBeforeRegionReplaceForTesting() {
     static std::atomic<bool> interrupt{false};
     return interrupt;
 }
+
+using ActiveRegionsReplaceHook = bool (*)();
+ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {
+    static ActiveRegionsReplaceHook hook = nullptr;
+    return hook;
+}
+
+#ifndef NDEBUG
+// Production pair saves are synchronous on the process's host thread. Detect
+// concurrent or reentrant callers instead of silently serializing a violated
+// ownership contract. This guard does not wait and is absent in release builds.
+class PairedSaveGuard {
+public:
+    PairedSaveGuard() {
+        const bool already_saving = saving().test_and_set(std::memory_order_acquire);
+        assert(!already_saving && "Clock/ledger saves must not overlap");
+    }
+    ~PairedSaveGuard() {
+        saving().clear(std::memory_order_release);
+    }
+
+private:
+    static std::atomic_flag& saving() {
+        static std::atomic_flag flag = ATOMIC_FLAG_INIT;
+        return flag;
+    }
+};
+#endif
 
 // One record of an LMR1 region file kept in its on-disk (compressed) form so
 // untouched records survive a merge byte-for-byte without a decode pass.
@@ -373,7 +402,8 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
                                  const std::filesystem::path& destination,
                                  std::vector<std::string>* errors) {
     // POSIX rename replaces an existing same-filesystem destination atomically.
-    // The temporary file is always created beside the live LMR1 file.
+    // LMR1 staging is beside the live file; ledger staging is in the save root,
+    // outside the chunks scan. A cross-filesystem rename fails without replacing.
     if (std::rename(temp.c_str(), destination.c_str()) != 0) {
         const int error = errno;
         AddError(errors,
@@ -751,6 +781,9 @@ bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes
                                                         world::ActiveRegionLedger& ledger,
                                                         const std::filesystem::path& save_dir,
                                                         std::vector<std::string>* errors) {
+#ifndef NDEBUG
+    const PairedSaveGuard guard;
+#endif
     const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
     world::WorldClock clock;
     std::optional<Vec3> ambient_anchor;
@@ -946,8 +979,17 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
         const auto path = active_regions_path(save_dir);
         std::filesystem::create_directories(path.parent_path());
         std::filesystem::path temp;
-        if (!WriteDurableRegionTemp(path, bytes, temp, errors))
+        // Keep abandoned staging files outside the strict region integrity scan.
+        // The save root is on the save filesystem; replacement refuses EXDEV
+        // if a separately mounted chunks/region/ directory violates that layout.
+        const auto staging = save_dir / path.filename();
+        if (!WriteDurableRegionTemp(staging, bytes, temp, errors))
             return false;
+        if (const auto hook = BeforeActiveRegionsReplaceForTesting(); hook && !hook()) {
+            RemoveTemporaryFile(temp);
+            AddError(errors, "interrupted before active-region ledger replacement");
+            return false;
+        }
         if (!ReplaceRegionFileAtomically(temp, path, errors)) {
             RemoveTemporaryFile(temp);
             return false;
@@ -1180,6 +1222,10 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
 
 void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enabled) {
     InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
+}
+
+void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook)()) {
+    BeforeActiveRegionsReplaceForTesting() = hook;
 }
 
 bool WorldSaveService::save_world(const WorldStreamingState& state,

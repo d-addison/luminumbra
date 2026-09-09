@@ -70,6 +70,39 @@ the legacy existing-save query: a plant-only save makes later saves incremental.
 Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
 replacement primitive for the ledger, without claiming cross-file atomicity.
 
+Clock/ledger pair saves are synchronous and non-reentrant on the process's host
+thread. The client calls them during world creation, its main-thread pause-menu
+quit callback, and shutdown after the main loop returns. Its explicit persistence
+scenario also runs on that thread. The server calls them synchronously from
+`RunFixedTicks` autosave, `SaveFullSnapshot` between runs, and `Shutdown` after
+the tick loop. Job workers do not call the pair writer. No overlapping production
+pair writers were found, including across sessions in one process. The call sites
+state this ownership contract, and a debug-only atomic assertion guards the whole
+pair writer against concurrent or reentrant calls. It does not serialize saves;
+there is no production locking scheme. Independently launched processes sharing
+one save directory are outside this ownership contract.
+
+Incoming pairs are validated before either replacement. Forward saves replace
+metadata first; rewinds replace the ledger first, preserving ledger tick <= clock
+tick at every boundary. Ledger bytes are staged as unique
+`<save>/active-regions.arl.tmp.<pid>.<sequence>` files, outside the strict
+`chunks/` and `chunks/region/` scans on the save filesystem, then atomically renamed into place.
+A separately mounted region directory causes replacement to fail across devices;
+no copy fallback compromises atomicity. Termination can leave staging debris in
+the save root, but loading and later saves ignore it. Unknown files inside the region
+directory are still refused. The POSIX subprocess regression exits after the
+staging file is flushed and closed and verifies recovery while that file remains.
+
+An accepted partial pair can contain an older ledger than its saved clock. Session
+load rebases only the in-memory ledger header to the restored clock. It preserves
+every region record, hold counter, pressure, simulation cursor, frozen digest,
+configuration and anchor. It executes no scheduler tick or catch-up. Immediate
+save/edit stamps therefore fit under the header, and the next actual host tick
+uses the restored absolute clock. The raw persistence reader still exposes the
+durable older header for validation and inspection. Recovery tests reload rewind
+metadata failures, forward ledger failures and terminated ledger writes into
+fresh sessions and save immediately, both unchanged and after an edit.
+
 Absent means an empty ledger, with unlimited scheduling defaults and no saved
 local anchor; the host supplies its spawn feet position for a legacy save. Its
 header tick starts at the restored WorldClock tick without executing a tick, so
@@ -92,7 +125,7 @@ The header is exactly 48 bytes:
 | 0 | 4 | ASCII ARL1 |
 | 4 | 2 | version = 1 |
 | 6 | 2 | reserved zero |
-| 8 | 8 | last completed scheduler absolute tick |
+| 8 | 8 | scheduler clock floor (last scheduled or reconciled restored tick) |
 | 16 | 8 | work limit; UINT64_MAX is unlimited |
 | 24 | 4 | nonzero hold ticks |
 | 28 | 1 | reduced cadence shift, 1 through 16 |

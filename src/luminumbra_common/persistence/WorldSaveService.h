@@ -100,6 +100,8 @@ public:
                               std::vector<std::string>* errors = nullptr);
     // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
     // between replacements, including when an explicit snapshot rewinds the clock.
+    // Host-thread-only, synchronous and non-reentrant across sessions. Production
+    // callers own one save destination; debug builds assert if pair saves overlap.
     static bool save_metadata_and_active_regions(const std::string& bytes,
                                                  world::ActiveRegionLedger& ledger,
                                                  const std::filesystem::path& save_dir,
@@ -161,6 +163,12 @@ public:
     // process-global and must only be used by single-threaded persistence
     // tests.
     static void set_interrupt_before_region_replace_for_testing(bool enabled);
+
+    // Called after ledger staging is flushed/closed, before replacement. Returning
+    // false fails the write and cleans up; a test subprocess may terminate here
+    // to leave real crash debris. Single-threaded persistence tests only; nullptr
+    // disables the hook.
+    static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in

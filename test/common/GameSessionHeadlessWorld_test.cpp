@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -458,6 +459,64 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
               control.GetRegistry().get<C::NeedsComponent>(creatures[1]).needs[0].pressure);
 }
 
+void CheckPartialPairReloadAndSave(const HeadlessRoot& root,
+                                   JobSystem& jobs,
+                                   const std::string& world_id,
+                                   const fs::path& save) {
+    const auto metadata_bytes = ReadClockTestFile(save / "world_info.json");
+    const auto ledger_path = P::WorldSaveService::active_regions_path(save);
+    const auto ledger_bytes = ReadClockTestFile(ledger_path);
+    Luminumbra::world::ActiveRegionLedger durable;
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(durable, save));
+    const auto tick =
+        nlohmann::json::parse(metadata_bytes).at("simulationTick").get<std::uint64_t>();
+    ASSERT_LT(durable.tick(), tick);
+    for (const bool edit : {false, true}) {
+        SCOPED_TRACE(edit);
+        // Each fresh session must load the partial pair, including the edit case.
+        std::ofstream(save / "world_info.json", std::ios::binary) << metadata_bytes;
+        std::ofstream(ledger_path, std::ios::binary) << ledger_bytes;
+        GameSession loaded, reloaded;
+        for (auto* session : {&loaded, &reloaded}) {
+            session->SetRootPath(root.root_string());
+            session->SetJobSystem(&jobs);
+            session->SetActiveRegionsEnabled(true);
+        }
+        ASSERT_TRUE(loaded.LoadWorld(world_id)) << loaded.GetWorldOpenError();
+        EXPECT_EQ(loaded.GetSimulationTickCount(), tick);
+        EXPECT_EQ(loaded.GetActiveRegionLedger().tick(), tick);
+        EXPECT_EQ(loaded.GetActiveRegionLedger().records(), durable.records());
+        EXPECT_EQ(loaded.GetActiveRegionLedger().config(), durable.config());
+        EXPECT_EQ(loaded.GetActiveRegionLedger().local_anchor(), durable.local_anchor());
+        EXPECT_EQ(loaded.GetRegionSchedule().tick, 0u);
+        if (edit) {
+            loaded.NotifyGroundObjectEdit(Luminumbra::Vec3(5200, 0, -1500));
+            EXPECT_EQ(loaded.GetActiveRegionLedger().records().at({10, -3}).last_edit, tick);
+            EXPECT_TRUE(loaded.GetActiveRegionLedger().records().at({10, -3}).wake_pending);
+        }
+        ASSERT_TRUE(loaded.SaveWorld());
+        ASSERT_TRUE(loaded.SaveWorldState());
+        EXPECT_EQ(loaded.GetSimulationTickCount(), tick);
+        EXPECT_EQ(loaded.GetRegionSchedule().tick, 0u);
+        // Only observational save stamps (and the explicit edit) may change.
+        auto saved_records = loaded.GetActiveRegionLedger().records();
+        if (edit)
+            saved_records.erase({10, -3});
+        auto expected_records = durable.records();
+        for (auto& [key, record] : expected_records) {
+            (void)key;
+            record.last_save = tick;
+        }
+        EXPECT_EQ(saved_records, expected_records);
+        ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+        ASSERT_TRUE(reloaded.LoadWorld(world_id)) << reloaded.GetWorldOpenError();
+        EXPECT_EQ(reloaded.GetSimulationTickCount(), tick);
+        EXPECT_EQ(reloaded.GetActiveRegionLedger().encode(),
+                  loaded.GetActiveRegionLedger().encode());
+        EXPECT_EQ(SessionWorldHash(reloaded), SessionWorldHash(loaded));
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest,
      ActiveClockWritesMetadataWithoutDirtyChunksAndExplicitLoadsRestoreIt) {
     const HeadlessRoot root;
@@ -522,12 +581,85 @@ TEST(GameSessionHeadlessWorldTest,
     EXPECT_EQ(P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).clock.tick(), 2u);
     ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
     EXPECT_EQ(saved_ledger.tick(), 1u);
+    ASSERT_NO_FATAL_FAILURE(
+        CheckPartialPairReloadAndSave(root, jobs, session.GetMetadata().worldId, save));
     ASSERT_TRUE(session.SaveWorld());
     ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId)) << session.GetWorldOpenError();
     EXPECT_EQ(session.GetSimulationTickCount(), 1u);
     EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), restored_ledger);
     EXPECT_EQ(SessionWorldHash(session), restored_hash);
 }
+
+TEST(GameSessionHeadlessWorldTest, FailedForwardLedgerWriteReloadsAndSavesImmediately) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Forward failure", "1337", "default"));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    P::WorldSaveService::set_before_active_regions_replace_for_testing([] { return false; });
+    const bool saved = session.SaveWorld();
+    P::WorldSaveService::set_before_active_regions_replace_for_testing(nullptr);
+    ASSERT_FALSE(saved);
+    ASSERT_NO_FATAL_FAILURE(CheckPartialPairReloadAndSave(
+        root, jobs, session.GetMetadata().worldId, session.GetWorldSaveDir()));
+}
+
+#if GTEST_HAS_DEATH_TEST && !defined(_WIN32)
+TEST(GameSessionHeadlessWorldDeathTest, TerminatedLedgerStagingLeavesLoadableAndSavableWorld) {
+    // Fork before starting any workers, so the child owns every job it must drain.
+    // Fast death-test mode also preserves this unique directory in the child.
+    GTEST_FLAG_SET(death_test_style, "fast");
+    const HeadlessRoot root;
+    ASSERT_EXIT(
+        {
+            JobSystem jobs;
+            jobs.startup(1);
+            GameSession session;
+            session.SetRootPath(root.root_string());
+            session.SetJobSystem(&jobs);
+            session.SetActiveRegionsEnabled(true);
+            if (!session.CreateWorld("Ledger crash", "1337", "default"))
+                std::_Exit(1);
+            session.TickSimulation(session.GetSimulationClock().fixed_dt());
+            if (!session.SaveWorld())
+                std::_Exit(2);
+            session.TickSimulation(session.GetSimulationClock().fixed_dt());
+            P::WorldSaveService::set_before_active_regions_replace_for_testing([]() -> bool {
+                std::_Exit(73); // no destructors, unwinding or temporary-file cleanup
+            });
+            session.SaveWorld();
+            std::_Exit(3);
+        },
+        testing::ExitedWithCode(73),
+        "");
+    const auto save = fs::directory_iterator(root.path() / "worlds/saves")->path();
+    std::vector<fs::path> debris;
+    for (const auto& entry : fs::recursive_directory_iterator(save)) {
+        if (entry.path().filename().string().find("active-regions.arl.tmp.") == 0)
+            debris.push_back(entry.path());
+    }
+    ASSERT_EQ(debris.size(), 1u);
+    EXPECT_EQ(debris.front().parent_path(), save);
+    Luminumbra::world::ActiveRegionLedger staged;
+    std::string error;
+    ASSERT_TRUE(Luminumbra::world::ActiveRegionLedger::decode(
+        ReadClockTestFile(debris.front()), staged, error))
+        << error;
+    EXPECT_EQ(staged.tick(), 2u);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    JobSystem jobs;
+    jobs.startup(1);
+    ASSERT_NO_FATAL_FAILURE(
+        CheckPartialPairReloadAndSave(root, jobs, save.filename().string(), save));
+    EXPECT_TRUE(fs::exists(debris.front())); // recovery never relies on cleaning it up
+}
+#endif
 
 TEST(GameSessionHeadlessWorldTest, ActiveClockKeepsAmbientAnchorWhenClientSavesMovedSpawn) {
     const HeadlessRoot root;

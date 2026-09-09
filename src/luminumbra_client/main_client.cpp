@@ -2681,6 +2681,7 @@ int main(int argc, char* argv[]) {
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
+                // Synchronous main-thread save; shutdown cannot overlap this callback.
                 if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -4854,6 +4855,7 @@ int main(int argc, char* argv[]) {
     // persist unsaved voxel edits on the world-exit/shutdown path,
     // before the streamed chunks are torn down. No-op when no world session
     // is active or when no chunk carries unsaved edits.
+    // The main loop and its quit callback have returned; keep saving on this thread.
     if (gameSession && gameSession->SaveWorldState()) {
         if (!g_app.menu.menu_backdrop_active && g_camera)
             gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()
