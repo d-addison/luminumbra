@@ -305,15 +305,30 @@ void PhysicsSystem::create_player_controller(const glm::vec3& start_pos) {
     if (!m_jolt_system)
         return;
 
-    // Create and cache shapes using reference-counted pointers
-    m_player_stand_shape = JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
-    m_player_crouch_shape = JPH::CapsuleShapeSettings(0.45f, 0.4f).Create().Get();
+    // The local controller passes feet positions. Keep both capsule bases at that
+    // origin so spawning and changing stance cannot embed the capsule in terrain.
+    const JPH::Ref<JPH::Shape> standing_capsule =
+        JPH::CapsuleShapeSettings(0.9f, 0.4f).Create().Get();
+    const JPH::Ref<JPH::Shape> crouching_capsule =
+        JPH::CapsuleShapeSettings(0.45f, 0.4f).Create().Get();
+    m_player_stand_shape = JPH::RotatedTranslatedShapeSettings(JPH::Vec3(0.0f, 1.3f, 0.0f),
+                                                               JPH::Quat::sIdentity(),
+                                                               standing_capsule.GetPtr())
+                               .Create()
+                               .Get();
+    m_player_crouch_shape = JPH::RotatedTranslatedShapeSettings(JPH::Vec3(0.0f, 0.85f, 0.0f),
+                                                                JPH::Quat::sIdentity(),
+                                                                crouching_capsule.GetPtr())
+                                .Create()
+                                .Get();
 
     JPH::CharacterVirtualSettings settings;
     settings.mShape = m_player_stand_shape; // Start with the standing shape
     settings.mMass = 80.0f;
     settings.mMaxSlopeAngle = glm::radians(50.0f);
-    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.1f);
+    // Supporting contacts are relative to the feet, and may touch the lower
+    // sphere above its bottom when standing on a walkable slope.
+    settings.mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), -0.4f);
     m_player_character =
         std::make_unique<JPH::CharacterVirtual>(&settings,
                                                 JPH::RVec3(start_pos.x, start_pos.y, start_pos.z),
@@ -391,23 +406,25 @@ void PhysicsSystem::update_player(const glm::vec3& wish_velocity,
                                        *m_temp_allocator);
 }
 
-void PhysicsSystem::set_player_crouched(bool is_crouched) {
-    if (!m_player_character)
-        return;
+bool PhysicsSystem::set_player_crouched(bool is_crouched) {
+    if (!m_player_character || !m_jolt_system)
+        return false;
 
     // --- REFACTORED: Use cached shapes to avoid memory leaks/reallocation ---
     JPH::Ref<JPH::Shape> target_shape = is_crouched ? m_player_crouch_shape : m_player_stand_shape;
 
     // Only change the shape if it's actually different
     if (m_player_character->GetShape() != target_shape) {
-        m_player_character->SetShape(target_shape,
-                                     1.5f,
-                                     BroadPhaseLayerFilterAll(),
-                                     ObjectLayerFilterAll(),
-                                     JPH::BodyFilter(),
-                                     JPH::ShapeFilter(),
-                                     *m_temp_allocator);
+        return m_player_character->SetShape(
+            target_shape,
+            1.5f * m_jolt_system->GetPhysicsSettings().mPenetrationSlop,
+            BroadPhaseLayerFilterAll(),
+            ObjectLayerFilterAll(),
+            JPH::BodyFilter(),
+            JPH::ShapeFilter(),
+            *m_temp_allocator);
     }
+    return true;
 }
 
 void PhysicsSystem::set_player_position(const glm::vec3& position) {
@@ -587,10 +604,17 @@ bool PhysicsSystem::player_has_space_to_stand() const {
     // Note: We use the cached m_player_stand_shape here for consistency
     const JPH::Shape* standing_shape = m_player_stand_shape.GetPtr();
 
-    JPH::Mat44 transform = JPH::Mat44::sRotationTranslation(m_player_character->GetRotation(),
-                                                            m_player_character->GetPosition());
+    // CollideShape expects the target shape's center-of-mass transform, including
+    // the same offset and padding used by CharacterVirtual's own shape query.
+    const JPH::RMat44 transform =
+        JPH::RMat44::sRotationTranslation(m_player_character->GetRotation(),
+                                          m_player_character->GetPosition())
+            .PreTranslated(m_player_character->GetShapeOffset() + standing_shape->GetCenterOfMass())
+            .PostTranslated(m_player_character->GetCharacterPadding() *
+                            m_player_character->GetUp());
 
     CollideShapeSettings settings;
+    settings.mBackFaceMode = EBackFaceMode::CollideWithBackFaces;
 
     m_jolt_system->GetNarrowPhaseQuery().CollideShape(standing_shape,
                                                       JPH::Vec3::sReplicate(1.0f),

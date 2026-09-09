@@ -5,7 +5,7 @@
 //
 // Layer 1 is RenderResourceHandle -- what a pass holds. Layer 2 (here) is
 // the backend resource an owned registry entry is ACTUALLY made of: a GL name
-// today, a Diligent IBuffer*/ITexture*/IPipelineState* tomorrow. A pass only ever
+// in the shipping OpenGL renderer, with an optional backend backing slot. A pass only ever
 // sees the layer-1 handle, so it can never tell a GL name from a Diligent
 // resource -- that is the whole point of the abstraction.
 //
@@ -17,8 +17,8 @@
 //
 // defines the vocabulary and gives owned registry entries an (unused) optional
 // backing slot; the ids are populated only when a pass is first driven through a
-// Diligent device. Until then every backing is null and the GL path is
-// unchanged -- byte-identical by construction.
+// Diligent device. Shipping registry backings remain null. Diligent device and
+// GL/Vulkan parity tests run separately in CI; they do not make it a shipping backend.
 
 #include <cstdint>
 

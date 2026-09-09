@@ -422,101 +422,105 @@ bool ScenarioRunnerImpl::driveParticleDeterminism() {
     return false;
 }
 
-bool ScenarioRunnerImpl::driveFoliageVisual() {
-    if (scenario_config.foliage_visual_smoke() && scenario_ready && g_camera) {
-        // instanced foliage scatter. Fixed noon framing of
-        // lit ground. Load the scatter set once, then each frame build the
-        // deterministic per-chunk scatter over the visible live ring,
-        // sampling the  wind field at the camera for the sway bridge
-        // (one-way, ). A CALM phase (zero wind) then a WINDY phase
-        // (strong wind) so the gate can isolate the wind-sway response.
-        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
-        auto* foliage = renderPipeline.foliage();
-        auto* world_system = gameSession->GetWorldSystem();
-        if (foliage != nullptr && world_system != nullptr) {
-            if (!foliage_scatter_loaded) {
-                foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
-                // Fade band INSIDE the live ring (radius_4 gate footprint
-                // ~ a few chunks). Pin the fade end well within the visible
-                // ring so the gate can assert "no foliage beyond the ring".
-                foliage->set_fade_distances(60.0f, 96.0f);
-                // #1b-lush (render-only): per-preset showcase density.
-                // Default 1.0 == biome-tracked density (byte-identical to
-                // the FoliageInstancing-gated path); a preset can raise it
-                // for near-continuous turf WITHOUT touching biome data.
-                foliage->set_density_scale(scenario_config.foliage_density_scale);
-                foliage_scatter_loaded = true;
-            }
-            const double elapsed_play_seconds =
-                std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                              scenario_play_started_at)
-                    .count();
-            const double duration =
-                static_cast<double>(std::max(1, scenario_config.timed_run_seconds));
-            const double progress = std::clamp(elapsed_play_seconds / duration, 0.0, 1.0);
-            const bool windy_phase = progress >= 0.5;
-
-            // Wind bridge (one-way): sample the  wind field at the camera.
-            // CALM phase forces zero wind so the sway delta isolates wind.
-            glm::vec2 wind_xz(0.0f, 0.0f);
-            if (windy_phase) {
-                const Luminumbra::Vec3 cam(
-                    g_camera->Position.x, g_camera->Position.y, g_camera->Position.z);
-                if (auto* wind = gameSession->GetWindFieldSystem()) {
-                    const Luminumbra::Vec2 w = wind->SampleWind(cam);
-                    wind_xz = glm::vec2(w.x, w.y);
-                }
-                // Floor the windy-phase wind to a strong deterministic value
-                // so the sway delta is unambiguous even if the field is calm.
-                if (glm::length(wind_xz) < 4.0f) {
-                    wind_xz = glm::vec2(6.0f, 0.0f);
-                }
-            }
-            foliage->set_wind(wind_xz);
-
-            // Build the per-chunk scatter inputs from the visible chunks.
-            Luminumbra::Client::ScenarioHarness::FoliageScatterContext ctx{world_system};
-            std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> chunk_scatter;
-            const auto& renderable = world_system->get_renderable_chunks();
-            chunk_scatter.reserve(renderable.size());
-            for (const Luminumbra::Chunk* chunk : renderable) {
-                if (chunk == nullptr) {
-                    continue;
-                }
-                const Luminumbra::IVec3 c = chunk->get_coords();
-                // Only ground-level chunks (the column the surface sits in)
-                // contribute scatter; skip clearly sub-surface / sky chunks.
-                const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
-                const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
-                const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
-                const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
-                const float surf_h = world_system->GetTerrainHeightAt(center_x, center_z);
-                // The chunk that straddles the surface column.
-                const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
-                if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
-                    continue;
-                }
-                const Luminumbra::u8 biome_id = world_system->BiomeIdAt(center_x, center_z);
-                const float density =
-                    world_system->biomes_enabled()
-                        ? world_system->biome_table().vegetation_for(biome_id).density
-                        : 0.3f; // default temperate density when biomes are off
-                Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
-                cs.chunk_xz = glm::ivec2(c.x, c.z);
-                cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
-                cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
-                cs.biome_id = biome_id;
-                cs.density = density;
-                chunk_scatter.push_back(cs);
-            }
-            foliage->rebuild_instances(chunk_scatter,
-                                       &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
-                                       &ctx,
-                                       g_camera->Position);
+void ScenarioRunnerImpl::applyFoliageVisualCamera() {
+    if (!foliage_camera_initialized) {
+        const auto spawn = gameSession->GetMetadata().spawnPoint;
+        foliage_terrain_height =
+            gameSession->GetWorldSystem()->GetTerrainHeightAt(spawn.x, spawn.z);
+        if (!std::isfinite(foliage_terrain_height)) {
+            return;
         }
-        return true;
+        foliage_camera_position = Luminumbra::Vec3(
+            spawn.x, foliage_terrain_height + FoliageVisualProfile::eye_height_m, spawn.z);
+        foliage_camera_initialized = true;
     }
-    return false;
+    g_camera->Position = foliage_camera_position;
+    g_camera->Yaw = FoliageVisualProfile::yaw_degrees;
+    g_camera->Pitch = FoliageVisualProfile::pitch_degrees;
+    g_camera->Zoom = FoliageVisualProfile::fov_degrees;
+    g_camera->updateCameraVectors();
+}
+
+bool ScenarioRunnerImpl::driveFoliageVisual() {
+    if (!scenario_config.foliage_visual_smoke() || !scenario_ready || !g_camera || !gameSession ||
+        !gameSession->GetWorldSystem()) {
+        return false;
+    }
+    if (g_app.capture.play_paths) {
+        // Keep the existing play-path camera and ordinary scatter/readback policy.
+        ApplySkyboxVisualCamera(gameSession.get(), g_camera.get(), 0.30f);
+    } else {
+        // Streaming sees the same ground-facing pose as the final render pin.
+        applyFoliageVisualCamera();
+    }
+    return true;
+}
+
+bool ScenarioRunnerImpl::onPreRenderFoliage() {
+    if (!FoliageScenarioOwnsFrame(scenario_config.foliage_visual_smoke(),
+                                  g_app.capture.play_paths) ||
+        !scenario_ready || !g_camera || !gameSession || !gameSession->GetWorldSystem()) {
+        return false;
+    }
+    applyFoliageVisualCamera();
+    renderPipeline.set_time_of_day(FoliageVisualProfile::time_of_day);
+    auto* foliage = renderPipeline.foliage();
+    auto* world_system = gameSession->GetWorldSystem();
+    if (foliage != nullptr && foliage_camera_initialized) {
+        if (!foliage_scatter_loaded) {
+            foliage_scatter_loaded =
+                foliage->load_scatter_set(root_dir / "data/common/foliage/scatter_set.json");
+        }
+        foliage->set_fade_distances(FoliageVisualProfile::fade_start_m,
+                                    FoliageVisualProfile::fade_end_m);
+        foliage->set_density_scale(FoliageVisualProfile::density_scale *
+                                   scenario_config.foliage_density_scale);
+        foliage->set_readback_enabled(true);
+        // Stay calm until a fresh, identified calm frame was actually retained.
+        // The bounded run refuses missing evidence instead of manufacturing zero.
+        const std::uint32_t phase = foliage_calm.sampled ? 2u : 1u;
+        foliage->set_wind(glm::vec2(phase == 2 ? FoliageVisualProfile::windy_input : 0.0f, 0.0f));
+        foliage->set_evidence_frame(scenario_frame_count + 1, phase);
+        // Build the per-chunk scatter inputs from the visible chunks.
+        Luminumbra::Client::ScenarioHarness::FoliageScatterContext ctx{world_system};
+        std::vector<Luminumbra::Rendering::FoliagePass::ChunkScatter> chunk_scatter;
+        const auto& renderable = world_system->get_renderable_chunks();
+        chunk_scatter.reserve(renderable.size());
+        for (const Luminumbra::Chunk* chunk : renderable) {
+            if (chunk == nullptr) {
+                continue;
+            }
+            const Luminumbra::IVec3 c = chunk->get_coords();
+            // Only ground-level chunks (the column the surface sits in)
+            // contribute scatter; skip clearly sub-surface / sky chunks.
+            const float origin_x = static_cast<float>(c.x * Luminumbra::CHUNK_SIZE_X);
+            const float origin_z = static_cast<float>(c.z * Luminumbra::CHUNK_SIZE_Z);
+            const float center_x = origin_x + Luminumbra::CHUNK_SIZE_X * 0.5f;
+            const float center_z = origin_z + Luminumbra::CHUNK_SIZE_Z * 0.5f;
+            const float surf_h = world_system->GetTerrainHeightAt(center_x, center_z);
+            // The chunk that straddles the surface column.
+            const float chunk_y0 = static_cast<float>(c.y * Luminumbra::CHUNK_SIZE_Y);
+            if (surf_h < chunk_y0 || surf_h >= chunk_y0 + Luminumbra::CHUNK_SIZE_Y) {
+                continue;
+            }
+            const Luminumbra::u8 biome_id = world_system->BiomeIdAt(center_x, center_z);
+            const float density = world_system->biomes_enabled()
+                                      ? world_system->biome_table().vegetation_for(biome_id).density
+                                      : 0.3f; // default temperate density when biomes are off
+            Luminumbra::Rendering::FoliagePass::ChunkScatter cs;
+            cs.chunk_xz = glm::ivec2(c.x, c.z);
+            cs.origin = glm::vec3(origin_x, 0.0f, origin_z);
+            cs.extent_m = static_cast<float>(Luminumbra::CHUNK_SIZE_X);
+            cs.biome_id = biome_id;
+            cs.density = density;
+            chunk_scatter.push_back(cs);
+        }
+        foliage->rebuild_instances(chunk_scatter,
+                                   &Luminumbra::Client::ScenarioHarness::FoliageSurfaceQuery,
+                                   &ctx,
+                                   g_camera->Position);
+    }
+    return true;
 }
 
 bool ScenarioRunnerImpl::drivePrecipitation() {
@@ -631,22 +635,9 @@ bool ScenarioRunnerImpl::drivePrecipitation() {
                 } else {
                     wind_dir = glm::normalize(wind_dir + right);
                 }
-                //  the storm-rain rework added hard
-                // VELOCITY-ALIGNED streak elongation, which inverted this
-                // gate's gradient metric: a thin VERTICAL streak maximizes
-                // the h/v slant_ratio and any lean LOWERS it, so a large
-                // windy lean drove the windy slant_ratio BELOW calm (gain
-                // collapsed to ~0.7-1.1, under the 1.2 floor). The fix is
-                // in ParticlePass: the streak length now RAMPS with the
-                // wind (calm = short droplet, windy = long hard streak), so
-                // the windy capture reads a much higher anisotropy. Here we
-                // keep the windy wind MODEST so the lean stays small (the
-                // long windy streaks stay vertical-dominant -> high ratio)
-                // while still visibly slanting the rain. Together: windy
-                // slant clears calm by a wide margin (gain ~1.7x), and the
-                // rain still reads as a natural wind-driven storm, not an
-                // absurd horizontal blast. Render-only .
-                const float wind_speed = 3.5f; // storm gust (modest screen-space lean)
+                // Exercise a visible crosswind. The analyzer measures lean, so
+                // the physical streak length can remain unchanged between phases.
+                const float wind_speed = 12.0f;
                 particles->set_wind(wind_dir * wind_speed);
             } else {
                 particles->set_wind(glm::vec3(0.0f));

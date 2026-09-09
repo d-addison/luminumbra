@@ -11,6 +11,7 @@ out vec4 FragColor;
 in vec2 TexCoords;
 
 uniform sampler2D u_scene;   // post-sky scene snapshot (display-space)
+uniform sampler2D u_sceneDepth; // opaque depth: only cleared pixels supply sky light
 uniform vec2 u_sunUV;        // sun screen-space position [0,1]
 uniform float u_sunVisible;  // 0..1 master gate (above horizon + on screen)
 uniform float u_strength;    // overall intensity
@@ -18,7 +19,11 @@ uniform float u_strength;    // overall intensity
 const int SAMPLES = 24; // radial blur stays smooth at 24; keeps the pass cheap
 
 void main() {
-    if (u_sunVisible <= 0.0) { FragColor = vec4(0.0); return; }
+    if (u_sunVisible <= 0.0 || texture(u_sceneDepth, TexCoords).r > 0.0 ||
+        texture(u_sceneDepth, u_sunUV).r > 0.0) {
+        FragColor = vec4(0.0);
+        return;
+    }
     // March from this pixel toward the sun, sampling the scene along the ray.
     vec2 delta = (u_sunUV - TexCoords) / float(SAMPLES) * 0.9;
     vec2 uv = TexCoords;
@@ -27,10 +32,13 @@ void main() {
     vec3 accum = vec3(0.0);
     for (int i = 0; i < SAMPLES; ++i) {
         uv += delta;
-        vec3 s = texture(u_scene, clamp(uv, 0.0, 1.0)).rgb;
-        // Only bright sky contributes; dark occluders leave gaps -> shafts.
+        vec2 sampleUV = clamp(uv, 0.0, 1.0);
+        vec3 s = texture(u_scene, sampleUV).rgb;
+        // Scene depth rejects bright terrain as a light source. Ordinary blue
+        // sky is below the old 0.5 luminance threshold; a smooth response lets
+        // it produce shafts in air while dark clouds still interrupt the rays.
         float lum = dot(s, vec3(0.2126, 0.7152, 0.0722));
-        float bright = smoothstep(0.5, 0.95, lum);
+        float bright = texture(u_sceneDepth, sampleUV).r <= 0.0 ? lum / (lum + 0.2) : 0.0;
         accum += s * bright * w;
         w *= decay;
     }

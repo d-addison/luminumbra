@@ -9,8 +9,26 @@ Luminumbra is a C++20 voxel engine for a persistent simulated world. It combines
 deterministic fixed-tick simulation, procedural terrain, entity-component systems,
 networking, and a GPU-driven client renderer.
 
-This is an owner-maintained hobby project. Version 0.2.1 is an early public
-source release; interfaces and content formats may still change between releases.
+This is an owner-maintained hobby project. Version 0.3.0 is undergoing acceptance;
+the latest published source release is v0.2.1. Interfaces and content formats may
+still change between releases. See the [coordinated roadmap](docs/roadmap.md) for
+release status and the populated engine/game milestones.
+
+## v0.3.0 world format break
+
+> This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
+
+Older saved worlds are refused with this message. Create a new world with a
+current preset; there is no migration path. This includes older worlds that have
+only metadata and no saved chunks. New world metadata declares `container_version: 2`.
+New saves use LMR1 container v2,
+the `luminumbra.persistence.world_manifest.v1` manifest with
+`container_version: 2`, and FSD2 far-LOD payload v3. Explicit preset `schema_rev`
+must be `6`; in-memory callers may omit it. Terrain shaping is always applied,
+and enabled caves always use the noise router. Content, hydrology, and biome
+controls remain available. Unknown future formats and corrupt data have distinct
+failures. See the [persistence contract](docs/engine-guide.md)
+for the retired selectors and validation details.
 
 ![Luminumbra main menu](docs/assets/screenshots/main-menu.png)
 
@@ -41,7 +59,39 @@ The primary executables are written to `build/<preset>/bin/`:
 See [Development and testing](docs/development.md) for platform dependencies,
 validation lanes, and source-list ownership.
 
+Before entering a game world, acquire the separately versioned tree pack with
+`python3 tools/assets/acquire.py` (Windows: `py -3 tools/assets/acquire.py`).
+See [Game assets](docs/game-assets.md) for provenance, offline setup and repair.
+
+## Visual test evidence
+
+The [documented visual baselines](docs/visual-baselines.md) include original
+screenshots, settings, measurements and visible failures. These September 8
+captures have **not received visual approval**; numeric test results alone do
+not establish scene quality. The catalog of 70 scenario groups currently has two
+deficient baseline groups and zero approved groups; these images show G04 and R14.
+
+[![Forest baseline with a visible terrain discontinuity](docs/assets/visual-baselines/20260908/forest-reference-preview.png)](docs/visual-baselines.md#forest-reference)
+
+[![Foliage diagnostic dominated by sky](docs/assets/visual-baselines/20260908/foliage-functional-preview.png)](docs/visual-baselines.md#foliage-diagnostic)
+
+A later [terrain coverage diagnostic](docs/terrain-coverage-diagnostics.md)
+compares the ordinary camera-region guard with an experimental bypass. The
+matched capture gains 257,075 covered pixels; the bypass is not a production fix
+and neither image has visual approval. These previews are resized; the guide
+links the unretouched full images and provenance.
+
+| Ordinary guard | Diagnostic bypass |
+|---|---|
+| [![Ordinary guard with a black terrain gap](docs/assets/terrain-coverage/20260908/forest-guard-preview.png)](docs/terrain-coverage-diagnostics.md) | [![Experimental bypass showing recovered terrain coverage](docs/assets/terrain-coverage/20260908/forest-bypass-preview.png)](docs/terrain-coverage-diagnostics.md) |
+
 ## Architecture
+
+Game code currently remains in this repository. The accepted
+[engine/game boundary](docs/engine-game-boundary.md) establishes optional reusable
+engine modules and a separately composed game, with script/component/data authoring
+that does not require rebuilding engine C++. Extraction follows verified v0.3
+publication and roadmap approval; it has not been implemented yet.
 
 The common engine owns deterministic simulation, world generation, persistence,
 replay, and networking. The client adds rendering, audio, input, and UI. The
@@ -74,6 +124,7 @@ defined by the [SHIELD SDF contract](docs/shield/sdf-contract.md).
 - [Development and testing](docs/development.md)
 - [Performance measurement](docs/performance.md)
 - [Visual regression](docs/visual-regression.md)
+- [Blender authoring probes and service mock](tools/blender/authoring/README.md)
 - [Contributing](CONTRIBUTING.md)
 
 API documentation is built with Doxygen in CI and published from the validated

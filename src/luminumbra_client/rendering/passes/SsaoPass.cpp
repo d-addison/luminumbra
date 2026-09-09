@@ -180,10 +180,10 @@ void SsaoPass::execute_ssao(const RenderContext& ctx) {
         glViewport(0, 0, static_cast<GLsizei>(m_ssao.halfW), static_cast<GLsizei>(m_ssao.halfH));
     glClear(GL_COLOR_BUFFER_BIT);
     const glm::mat4 projection =
-        glm::perspective(glm::radians(camera.Zoom),
-                         (float)ctx.screen_width / (float)ctx.screen_height,
-                         camera.GetNearPlane(),
-                         camera.GetFarPlane());
+        ReversedZPerspective(glm::radians(camera.Zoom),
+                             (float)ctx.screen_width / (float)ctx.screen_height,
+                             camera.GetNearPlane(),
+                             camera.GetFarPlane());
     // the G-buffer position/normal are the INTERNAL (scaled) extent, so the AO
     // march metric + noise tiling must use the internal size (at scale 1.0 internal==screen,
     // byte-identical). The half-res GTAO sub-scaling composes on top of this.

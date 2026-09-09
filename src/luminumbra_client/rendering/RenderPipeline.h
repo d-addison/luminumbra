@@ -1,5 +1,9 @@
 #pragma once
 
+#include "BenchmarkGpuQueries.h"
+#include "luminumbra_common/world/WorldClock.h"
+#include <optional>
+
 #include "../../include/luminumbra/core/Types.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
@@ -25,8 +29,10 @@
 #include <glm/glm.hpp>
 #include <map>
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -294,6 +300,8 @@ public:
         size_t terrain_index_capacity = 0;
         size_t water_vertex_capacity = 0;
         size_t water_index_capacity = 0;
+        size_t static_model_texture_bytes = 0;
+        size_t tree_impostor_texture_bytes = 0;
         size_t estimated_vram_bytes = 0;
         bool started = false;
         bool geometry_shader_ok = false;
@@ -383,6 +391,9 @@ public:
     // after this, for the A/B capture path). Also safe at runtime (a settings change): when
     // already started it reallocates the scaled intermediates like on_resize (the output-res
     // TAAU/backbuffer targets are untouched -- only the internal extent moved).
+    void set_benchmark_gpu_queries(BenchmarkGpuQueries* queries) {
+        m_benchmark_gpu_queries = queries;
+    }
     void set_render_scale(float scale);
 
     //   (ADDITIVE offscreen render-target redirect for the
@@ -532,11 +543,20 @@ public:
     // writes sim state or feeds world_hash. Defined in the.cpp because GBufferPass
     // is forward-declared here.
     const GBuffer& gbuffer() const;
+    // Read-only scene target access for attachment diagnostics and capture tests.
+    const FrameBufferObject& lighting_fbo() const;
     // SSAO parity: run the ORIGINAL pipeline-sourced SSAO+blur
     // GL sequence (golden A-leg) then the ctx-sourced SsaoPass seam (B-leg) into the
     // pass-owned blur FBO in the same frame, reading back R16F between legs, for each
     // ssao_quality 0..3. memcmp==0 catches a call-site ctx mis-population. Writes a
     // ssao_parity.txt verdict under out_dir; returns false on GL/IO error or mismatch.
+    // Explicit diagnostic captures only: records actual far and live draw decisions.
+    // capture_terrain_coverage must run after render_frame and before buffer swap.
+    void set_terrain_coverage_diagnostics_enabled(bool enabled,
+                                                  bool bypass_camera_region_guard = false);
+    nlohmann::json terrain_coverage_diagnostics(bool include_live_chunks = false) const;
+    bool capture_terrain_coverage(const std::filesystem::path& out_dir) const;
+
     bool capture_ssao_parity(const std::filesystem::path& out_dir, const Camera& camera);
     //   (the  unlock): the in-process WHOLE-FRAME A/B. Re-dispatch the
     // full 23-stage sequence TWICE over the frame prepare_frame already built
@@ -580,8 +600,10 @@ public:
     // (set_time_of_day) run AFTER this in the frame, overwriting it. Paths that
     // never call this keep the legacy wall-clock advance byte-identically.
     void set_time_of_day_tick(std::uint64_t sim_tick);
+    void set_world_clock(const world::WorldClock& clock);
     void set_day_length_ticks(std::uint64_t ticks) {
         m_dayLengthTicks = ticks == 0 ? 1 : ticks;
+        m_dayLengthOverride = true;
     }
     // SEASON / celestial model. The season phase is a PURE FUNCTION
     // of the authoritative TICK COUNT (integer epoch math; DeterministicMath for
@@ -674,9 +696,8 @@ public:
     // quality. 0 = full (legacy full-res dome draw, byte-identical to before);
     // 1 = half (dome raymarched into a 1/2-per-axis FBO + depth-masked upsample
     // composite, the ~-3 ms structural win); 2 = quarter (1/4 per axis). The
-    // half/quarter path is  (no world_hash impact) and opt-in, so the
-    // default (0) leaves every existing visual gate byte-stable. Driven by the
-    // client from LUMIN_CLOUD_QUALITY (and, later, render.cloud_quality). Lazily
+    // half/quarter path is render-only (no world_hash impact). The pipeline starts
+    // at 0; the client selects 2 unless LUMIN_CLOUD_QUALITY overrides it. Lazily
     // (re)allocates the reduced-res FBO; safe to call before or after startup.
     void set_cloud_quality(int quality);
     int get_cloud_quality() const {
@@ -684,11 +705,10 @@ public:
     }
 
     // Render-optimization (ssao-gtao): AO algorithm/quality. 0 = legacy 64-sample
-    // hemisphere SSAO (byte-identical default); 1 = GTAO Low (8 spp) full-res;
+    // hemisphere SSAO (pipeline initial value); 1 = GTAO Low (8 spp) full-res;
     // 2 = GTAO High (18 spp) full-res; 3 = GTAO High at HALF-RES + joint-bilateral
-    // depth-aware upsample (cheapest, budget-holding even on dense views — the
-    // recommended default).  (no world_hash impact). Driven by
-    // LUMIN_SSAO_QUALITY.
+    // depth-aware upsample (client default). Render-only (no world_hash impact).
+    // The client applies LUMIN_SSAO_QUALITY when present.
     void set_ssao_quality(int quality) {
         m_ssao_quality = (quality < 0) ? 0 : (quality > 3 ? 3 : quality);
     }
@@ -726,7 +746,7 @@ public:
         // Exponential extinction per metre — distance at which haze reaches ~63%
         // opacity is 1/density. Higher = thicker/closer haze (dramatic); lower =
         // crisp far view (Distant-Horizons-like).
-        float aerial_density = 0.0016f;
+        float aerial_density = 0.00045f;
         // Distance clamp for the fog term (m); matches the extended far horizon
         // (kF2OuterRangeMeters ~3000 m) so far terrain hazes fully into the sky
         // before the render edge instead of stopping short as a dark band.
@@ -850,6 +870,9 @@ public:
     void prepare_waterfalls(const Systems::SHIELD_WorldSystem& world);
 
 private:
+    friend struct TerrainCullingTestPeer;
+    friend struct TextureFileTestPeer;
+    friend struct RenderClockTestPeer;
     // Extracted render pass classes. Passes own their GL resources
     // (FBOs/textures/shaders); the pipeline keeps orchestration order, shared
     // state, stats collection, and GPU timer issue/collect calls.
@@ -981,6 +1004,7 @@ private:
     void execute_stage_glass_oit_accum(const Camera& camera);
     void execute_stage_glass_oit_resolve(const Camera& camera);
     void execute_stage_weather_opaque_snapshot(const Camera& camera);
+    void execute_stage_god_rays_opaque_snapshot(const Camera& camera);
     void execute_stage_weather_overlay(const Camera& camera);
     void execute_stage_froxel_inject(const Camera& camera);
     void execute_stage_froxel_integrate(const Camera& camera);
@@ -1046,6 +1070,7 @@ private:
         std::array<double, kGpuTimerPassCount> last_gpu_ms{};
     };
     GpuPassTimers m_gpu_timers;
+    BenchmarkGpuQueries* m_benchmark_gpu_queries = nullptr;
 
     void init_gpu_pass_timers();
     void destroy_gpu_pass_timers();
@@ -1070,6 +1095,8 @@ private:
     float m_dayDurationSeconds = 60.0f;
     // tick-authority state. m_todTickDriven marks "the sim tick fed TOD this
     // frame" so update_time_of_day skips the wall-clock advance; cleared every frame.
+    std::optional<world::WorldClock> m_worldClock;
+    bool m_dayLengthOverride = false;
     std::uint64_t m_dayLengthTicks = 1800; // == TimeOfDayModel kDefaultDayLengthTicks
     bool m_todTickDriven = false;
 
@@ -1141,7 +1168,7 @@ private:
     // Render-only; never world_hash.
     float m_exposureOverride = -1.0f;
     // 1.0 when the render camera is below a water surface (drives the aerial pass's
-    // underwater murk). Set per-frame in render_frame from WaterLevelAt.
+    // underwater murk). Set per-frame from the world's water-volume query.
     float m_underwater_factor = 0.0f;
     // SEASON state, all DERIVED from m_seasonTick (a pure function
     // of the authoritative sim tick -- no wall-clock, no float accumulator). The
@@ -1159,7 +1186,7 @@ private:
     //  rendering : the moon's DEDICATED radiance (cool key colour), fed to the
     // lighting pass via RenderContext.moon_radiance -> u_moonRadiance instead of a hardcoded shader
     // const, so the moon is tunable independent of the sun. Default == the prior shader kMoonColor
-    // (byte-identical until deliberately re-calibrated). LUMIN_MOON_RGB overrides for tuning/tests.
+    // (byte-identical until deliberately re-calibrated). This is a fixed pipeline value.
     glm::vec3 m_moonRadiance = glm::vec3(0.40f, 0.52f, 0.92f);
     static constexpr std::uint64_t kTicksPerLunarCycle =
         54000ull;                        // 30 min @ 30 Hz (a lunar "month")
@@ -1435,15 +1462,18 @@ public:
     using StaticModelTex = Luminumbra::Rendering::StaticModelTex;
 
 private:
+    bool m_staticModelContentEnabled = true;
     u32 m_staticModelTextureArray = 0;
+    u32 m_staticModelNormalArray = 0;
+    u32 m_staticModelSurfaceArray = 0;
     static constexpr int kStaticModelTextureResolution = 512;
-    static constexpr int kStaticModelTextureLayers = 8;
-    int m_staticModelNextLayer = 0; // next free layer pair to fill
+    static constexpr int kStaticModelTextureLayers = 4;
+    int m_staticModelNextLayer = 0; // next free layer in each array
     std::unordered_map<std::string, StaticModelTex> m_staticModelTextures; // meshPath -> layers
     void init_static_model_texture_array();
 
 public:
-    //  far-field tree impostors (opt-in via LUMIN_TREE_IMPOSTORS=1; default OFF). The atlas is
+    // Far-field tree impostors (default ON; LUMIN_TREE_IMPOSTORS=0 disables). The atlas is
     // baked once at init (BakeTreeImpostorAtlasToTextures) and the GBuffer LOD3 path draws one
     // camera-facing quad per far tree sampling it. Read-only accessors for GBufferPass.
     bool tree_impostor_enabled() const {
@@ -1461,8 +1491,8 @@ public:
     float tree_impostor_radius() const {
         return m_treeImpostorRadius;
     }
-    float tree_impostor_sphere_y() const {
-        return m_treeImpostorSphereY;
+    glm::vec3 tree_impostor_center() const {
+        return m_treeImpostorCenter;
     }
 
 private:
@@ -1470,12 +1500,14 @@ private:
     u32 m_treeImpostorAlbedo = 0;
     u32 m_treeImpostorNormal = 0;
     int m_treeImpostorGrid = 0;
+    int m_treeImpostorAtlasSize = 0;
     float m_treeImpostorRadius = 0.0f;
-    float m_treeImpostorSphereY = 0.0f;
+    glm::vec3 m_treeImpostorCenter{0.0f};
     // Loads albedo+normal.ltex into the next free layer pair; returns false +
     // keeps the flat fallback on failure. Layer indices come back via the outs.
     bool load_static_model_texture_set(const std::filesystem::path& albedo_path,
                                        const std::filesystem::path& normal_path,
+                                       const std::filesystem::path& surface_path,
                                        int& albedo_layer_out,
                                        int& normal_layer_out);
     // Loads the tree-part textures and populates m_staticModelTextures (data-driven
@@ -1485,6 +1517,17 @@ private:
 public:
     u32 static_model_texture_array() const {
         return m_staticModelTextureArray;
+    }
+    // Set before startup when an application refuses its content pack. Generic
+    // rendering and the main menu remain available without loading corrupt files.
+    void enable_static_model_content(bool enabled) {
+        m_staticModelContentEnabled = enabled;
+    }
+    u32 static_model_normal_array() const {
+        return m_staticModelNormalArray;
+    }
+    u32 static_model_surface_array() const {
+        return m_staticModelSurfaceArray;
     }
     const StaticModelTex* static_model_tex(const std::string& mesh_path) const {
         auto it = m_staticModelTextures.find(mesh_path);
@@ -1575,7 +1618,7 @@ private:
 
     // Loads a.ltex file from disk into a CPU image (full mip chain). Returns
     // false on any header/size error.
-    bool load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out) const;
+    static bool load_ltex_cpu_image(const std::filesystem::path& path, LtexCpuImage& out);
 
     std::vector<PointLight> m_point_lights_this_frame;
     const int MAX_POINT_LIGHTS = 32;
@@ -1650,7 +1693,11 @@ private:
     // pipeline-owned CullHierarchical + draw_chunks_mdi, shared by GBuffer + Shadow
     // so neither needs friend access for terrain submission. Returns counts; the
     // caller folds them into pass stats.
-    SubmitTerrainChunksFn make_terrain_submitter();
+    SubmitTerrainChunksFn make_terrain_submitter(bool record_coverage = false);
+    bool m_terrain_coverage_enabled = false;
+    u64 m_terrain_coverage_frame = 0;
+    bool m_terrain_coverage_live_submit_observed = false;
+    std::unordered_set<ChunkID> m_terrain_coverage_visible;
 
     struct TerrainCullingCache {
         u64 chunk_set_signature = 0;

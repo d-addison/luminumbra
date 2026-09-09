@@ -8,8 +8,11 @@
 #include "../ai/ThirstSystem.h"               // ai::ThirstTuning
 #include "../ai/WildlifeFoliageSystem.h"      // ai::WildlifeFoliageTuning (full-control)
 #include "../core/SimulationClock.h"
+#include "../simulation/SimBudgetTelemetry.h"
 #include "../simulation/SimulationEventBus.h"
 #include "../systems/PollinationSystem.h"
+#include "WorldClock.h"
+#include "WorldMetadata.h"
 #include "entt/entt.hpp"
 #include <cstdint>
 #include <ctime>
@@ -54,15 +57,6 @@ struct WeatherEventState; //  (): the epoch-schedule POD (WeatherEventSystem.h)
 
 namespace Luminumbra::world {
 
-struct WorldMetadata {
-    std::string name;
-    std::string seed;
-    std::string worldType;
-    std::string worldId;
-    std::time_t creationTime;
-    Vec3 spawnPoint;
-};
-
 struct WorldConfigValidationResult {
     bool ok = false;
     std::filesystem::path preset_path;
@@ -101,6 +95,11 @@ public:
         return CreateWorld(name, seed, worldType, nullptr);
     }
 
+    // Menu scenery has no save directory and never appears in the player catalog.
+    bool CreateTransientWorld(const std::string& name,
+                              const std::string& seed,
+                              const std::string& worldType);
+
     // Load an existing world from disk
     bool LoadWorld(const std::string& worldId);
 
@@ -123,7 +122,10 @@ public:
     // generates fresh state: loaded chunks are adopted into the streaming map,
     // and generation skips chunks that already carry voxel data, so loaded
     // edits are never clobbered by regeneration. A missing snapshot is a clean
-    // miss (returns false, fresh-world path unchanged).
+    // miss (returns true). A refusal returns false and disables saving.
+    const std::string& GetWorldOpenError() const {
+        return m_worldOpenError;
+    }
     bool LoadWorldState();
     bool LoadWorldStateFrom(const std::filesystem::path& save_dir);
     std::size_t GetLastLoadedChunkCount() const {
@@ -279,14 +281,12 @@ public:
         m_weatherRainEnabled = enabled;
         m_weatherRainScaleMm = scale_mm;
     }
-    // Opt-in High-resolution water (sim.water_high_res, experimental).
-    // Stored pre-world; applied to the water solver ONCE at CreateWorld/LoadWorld —
-    // immediately after construction, before its first update — because the uniform
-    // hashed grid resolution can never change mid-run (the seam pass hard-gates on
-    // it). Default-OFF = Medium (8x8, 2 m cells) = byte-identical; ON = High (16x16,
-    // 1 m cells; the 4096-cell budget then derives a 16-chunk sim window). A loaded
-    // save whose chunks were written at another resolution migrates in one boot-time
-    // pass (see LoadWorldStateFrom).
+    // Supported opt-in High-resolution water (sim.water_high_res).
+    // Stored pre-world; applied once at CreateWorld/LoadWorld before the first update.
+    // The chosen resolution affects water/world hashes and must match on every peer.
+    // Default-OFF = Medium (8x8, 2 m cells); ON = High (16x16, 1 m cells), whose
+    // 4096-cell budget derives a 16-chunk sim window. Loading a current-format save
+    // resizes its water grids in one boot-time pass if needed (LoadWorldStateFrom).
     void SetWaterHighResEnabled(bool enabled) {
         m_waterHighResEnabled = enabled;
     }
@@ -344,6 +344,22 @@ public:
         return m_speciesTable.get();
     }
 
+    // Set before creating/opening a world, like the other sim feature keys.
+    void SetActiveRegionsEnabled(bool enabled) {
+        m_activeRegionsEnabled = enabled;
+    }
+    [[nodiscard]] bool ActiveRegionsEnabled() const {
+        return m_activeRegionsEnabled;
+    }
+    [[nodiscard]] const WorldClock& GetWorldClock() const {
+        return m_worldClock;
+    }
+    // Fold only when enabled, inside the existing ecology hash slot.
+    [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
+    [[nodiscard]] bool IsSimulationTickBoundary() const {
+        return !m_activeRegionsEnabled || !m_simulationBatchInProgress;
+    }
+
     // --- Fixed-rate simulation ---
     // Advances the 30 Hz simulation clock by one variable-dt frame and runs
     // the produced fixed ticks (clamped to the clock's catch-up limit). Per
@@ -352,8 +368,19 @@ public:
     // fixed ticks executed this frame.
     std::uint32_t TickSimulation(double frame_dt);
 
+    // Opt-in observation; never part of persistent or hashed session state.
+    void SetSimBudgetTelemetryEnabled(bool enabled) {
+        m_simBudgetTelemetry.SetEnabled(enabled);
+    }
+    [[nodiscard]] luminumbra::simulation::SimBudgetTelemetry& GetSimBudgetTelemetry() {
+        return m_simBudgetTelemetry;
+    }
+    [[nodiscard]] const luminumbra::simulation::SimBudgetTelemetry& GetSimBudgetTelemetry() const {
+        return m_simBudgetTelemetry;
+    }
+
     [[nodiscard]] std::uint64_t GetSimulationTickCount() const noexcept {
-        return m_simulationClock.tick_count();
+        return m_activeRegionsEnabled ? m_worldClock.tick() : m_simulationClock.tick_count();
     }
     [[nodiscard]] const luminumbra::core::SimulationClock& GetSimulationClock() const noexcept {
         return m_simulationClock;
@@ -371,6 +398,7 @@ public:
     }
 
 private:
+    luminumbra::simulation::SimBudgetTelemetry m_simBudgetTelemetry;
     entt::registry m_registry;
     luminumbra::ai::EcologyTuning m_ecologyTuning{}; // Defaults match compiled constants.
     luminumbra::ai::WildlifeFoliageTuning
@@ -382,6 +410,21 @@ private:
     float m_circadianAmplitude = 1.0f;
     float m_plantMutationRate = luminumbra::foliage::kPollinationMutationFrac;
     WorldMetadata m_metadata;
+    bool m_transientWorld = false;
+    void ResetWorldSystems();
+    void RestoreWorldClock(const WorldClock& clock);
+    bool SaveWorldMetadataTo(const std::filesystem::path& save_dir);
+    bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
+    WorldClock m_worldClock;
+    // Stable only in the clock slice; world-anchored pages replace this grid in C4.
+    Vec3 m_ambientFieldAnchor{};
+    bool m_activeRegionsEnabled = false;
+    bool m_simulationBatchInProgress = false;
+    bool CreateWorldInternal(const std::string& name,
+                             const std::string& seed,
+                             const std::string& worldType,
+                             const std::string* customPresetJson,
+                             bool transient);
     // Cap catch-up to 2 ticks/frame (default is 4) so a
     // single slow frame replays at most 2 sim ticks instead of 4 — halving the worst-case
     // TickSimulation spike. Scoped HERE (not the shared SimulationClock.h constant, which
@@ -416,6 +459,7 @@ private:
     // Generate a unique world ID
     std::string GenerateWorldId();
     std::unique_ptr<Systems::PhysicsSystem> m_physicsSystem;
+    std::string m_worldOpenError;
     std::size_t m_lastLoadedChunkCount = 0;
     std::vector<std::filesystem::path> m_requiredClientAssets;
 
@@ -428,7 +472,7 @@ private:
     void InitializeEnergyFieldState();
     // Persist the layer's record beside the chunk save (null/all-zero -> no
     // file). Serialize normalizes, which is state-idempotent at save time.
-    void SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
+    bool SaveEnergyFieldRecord(const std::filesystem::path& save_dir);
     void LoadSpeciesDefinitions();          // fills m_speciesTable (world create + load)
     void ApplyWeatherRainWiring();          // Wires weather to rain when opted in.
     void ApplyWaterResolutionWiring();      // Raises the water solver to High when opted in.

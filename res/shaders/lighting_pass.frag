@@ -10,6 +10,7 @@ uniform sampler2D gNormalMaterial;    // RGB10A2: Octahedral normal + material I
 uniform sampler2D gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
 uniform sampler2D gMetallicAO;        // RG16F: Metallic + AO
 uniform sampler2D u_ssao;
+uniform sampler2D u_environmentBrdf;
 
 // Material lookup (256 x 4 rows; row 2 holds emissive_intensity/scale)
 uniform sampler2D u_materialLUT;
@@ -75,9 +76,7 @@ uniform int u_shadowTintEnabled;
 
 // Texture and world uniforms
 uniform sampler2DArray u_terrainTextures;
-uniform sampler2D u_causticsTexture;
 uniform float u_time;
-uniform float u_sea_level;
 
 uniform vec3 u_terrainOrigin;
 uniform vec3 u_viewPos;
@@ -274,14 +273,20 @@ float GeometrySmith(float NdotV, float NdotL, float k) {
 vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
-// terrain PBR: roughness-aware Fresnel for the ambient/environment term. Rougher
-// surfaces reflect less of the environment at grazing angles (the reflection
-// blurs out), so the grazing limit is clamped toward (1 - roughness) instead of
-// 1. Used ONLY for the analytic ambient specular below — the direct-light path
-// keeps the sharp fresnelSchlick. (Karis 2013, "Real Shading in UE4".)
+// Retained for the calibrated ambient diffuse weight. This Fresnel heuristic
+// is not an integrated environment BRDF and must not scale sky reflections.
 vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
     vec3 Fr = max(vec3(1.0 - roughness), F0);
     return F0 + (Fr - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+// Integrated GGX/Schlick response. Quadratic N.V coordinates resolve the grazing
+// lobe; endpoints map to texel centres in the 64x64 RG16F table. See its generator
+// for the model and sample count. Incident radiance is supplied separately.
+vec3 environmentBrdf(float NdotV, vec3 F0, float roughness) {
+    vec2 coordinate = vec2(sqrt(clamp(NdotV, 0.0, 1.0)),
+                           (clamp(roughness, 0.05, 1.0) - 0.05) / 0.95);
+    vec2 AB = texture(u_environmentBrdf, (coordinate * 63.0 + 0.5) / 64.0).rg;
+    return clamp(F0 * AB.x + AB.y, vec3(0.0), vec3(1.0));
 }
 float CalculateShadow(vec3 fragPos, vec3 normal, vec3 lightDir, float viewDepth) {
     // 1. Determine which cascade to use in a branchless way
@@ -475,7 +480,8 @@ void main() {
 
     // --- LIGHTING CALCULATION ---
     vec3 Lo = vec3(0.0);
-    vec3 L_sun = normalize(u_sun.direction);
+    // The input is the ray-travel direction; the BRDF needs surface-to-light.
+    vec3 L_sun = normalize(-u_sun.direction);
     float shadow = CalculateShadow(FragPos, Normal, L_sun, abs(viewPos.z));
     // Convert the authored sun COLOR into surface IRRADIANCE (x PI) so the
     // diffuse 1/PI division round-trips albedo faithfully (exposure-audit root
@@ -504,16 +510,9 @@ void main() {
     float sunLum = max(u_sun.color.r, max(u_sun.color.g, u_sun.color.b));
     float nightFactor = 1.0 - smoothstep(0.0, 0.06, sunLum); // ~0 day -> ~1 night
     if (nightFactor > 0.001) {
-        // The lighting pass uses u_sun.direction directly as the toward-light
-        // vector L. The moon's TRAVEL direction is -u_sun.direction (anti-sun),
-        // so its toward-light vector is +u_sun.direction — i.e. the same form the
-        // sun uses, which correctly lights the up-facing terrain at night.
-        // moon-shadows: the moon is now a REAL directional key that CASTS shadows,
-        // not just a flat fill. L_moon is the uploaded toward-light dir (anti-sun,
-        // overhead at midnight) — at night get_light_space_matrices builds the
-        // shadow cascade from this SAME direction, so CalculateShadow(...,L_moon)
-        // gives genuine moon cast/received shadows. Render-only.
-        vec3 L_moon = normalize(u_moonDir);
+        // MoonGeometry supplies a ray-travel direction too. Use its opposite for
+        // lighting, matching foliage and the cascade camera convention.
+        vec3 L_moon = normalize(-u_moonDir);
         float NdotL_moon = max(dot(Normal, L_moon), 0.0);
         // Cast-shadow term from the (now moon-keyed) cascade. Moonlight is dim, so
         // a touch of softening: lift the floor a hair to avoid harsh black edges /
@@ -580,19 +579,8 @@ void main() {
         }
     }
 
-    // --- NEW: CAUSTICS CALCULATION ---
-    vec3 caustics = vec3(0.0);
-    // Apply caustics only if fragment is below sea level and on an upward-facing surface
-    if (FragPos.y < u_sea_level && Normal.y > 0.5) {
-        vec2 uv1 = FragPos.xz * 0.2 + vec2(u_time * 0.01, u_time * 0.015);
-        vec2 uv2 = FragPos.xz * 0.15 - vec2(u_time * 0.02, u_time * 0.01);
-
-        float caustic1 = texture(u_causticsTexture, uv1).r;
-        float caustic2 = texture(u_causticsTexture, uv2).r;
-
-        // Sum and modulate by sun intensity and shadow
-        caustics = (caustic1 + caustic2) * u_sun.color * shadow * 0.5;
-    }
+    // Water tint and caustics belong to the depth-aware water pass. A surface
+    // below the global sea level can be a dry cave floor or an edited basin.
 
     // --- MAGICAL CRYSTAL EFFECTS ---
     vec3 crystalGlow = vec3(0.0);
@@ -652,7 +640,10 @@ void main() {
                 vec3 pole = pol >= 0.0 ? u_aetherPolarityColorPos: u_aetherPolarityColorNeg;
                 glowColor = mix(glowColor, pole, abs(pol));
             }
-            aetherGlow = aether * glowColor * u_aetherGlowIntensity;
+            // Ordinary terrain and trees do not emit. Applying this field to every
+            // surface washes the streamed region white/cyan and hides its materials.
+            float response = clamp(emissiveIntensity, 0.0, 1.0);
+            aetherGlow = aether * glowColor * u_aetherGlowIntensity * response;
         }
     }
 
@@ -664,15 +655,9 @@ void main() {
     crystalGlow *= (1.0 + aetherLocal * u_aetherMaterialModulation);
 
     // --- Final Color Composition ---
-    // terrain PBR: split the flat sky ambient into energy-conserving diffuse +
-    // specular. u_skyAmbientColor is ALREADY an irradiance (kAmbientIrradianceScale
-    // = PI matches SUN_IRRADIANCE_SCALE) — do NOT re-multiply by PI here or the
-    // ambient double-counts and blows past the ACES knee. The specular lobe gives
-    // metals/low-roughness surfaces a believable environment sheen at grazing
-    // angles (previously flat). Non-metals at normal incidence keep ~96% of the
-    // old diffuse (kD ~ 1 - 0.04) plus a faint rim, so the visual floor holds.
-    // Far-water (MaterialID 200) has F0=0 + roughness 1.0 => F_amb=0 => specular 0
-    // and diffuse unchanged, preserving the matte sky-tint sheet.
+    // Preserve the existing ambient diffuse calibration. The sky input is
+    // irradiance, but this legacy diffuse weight has no Lambertian 1/PI factor;
+    // recalibrating the entire lighting chain is a separate change.
     float NdotV_amb = max(dot(Normal, V), 0.0);
     vec3 F_amb = fresnelSchlickRoughness(NdotV_amb, F0, Roughness);
     vec3 kD_amb = (vec3(1.0) - F_amb) * (1.0 - Metallic);
@@ -685,7 +670,13 @@ void main() {
     vec3 groundBounce = u_skyAmbientColor * vec3(0.32, 0.29, 0.25); // dim, warm
     vec3 hemiAmbient = mix(groundBounce, u_skyAmbientColor, hemi);
     vec3 ambientDiffuse  = kD_amb * Albedo * hemiAmbient;
-    vec3 ambientSpecular = F_amb * hemiAmbient;
+    // Recover incident radiance from the PI-scaled sky irradiance and apply the
+    // integrated rough-surface response. Pointwise Fresnel overstates grazing
+    // reflections and previously turned brown soil purple under the cool sky.
+    vec3 ambientSpecular = environmentBrdf(NdotV_amb, F0, Roughness) * (hemiAmbient / PI);
+    if (MaterialID == 200u) {
+        ambientSpecular = vec3(0.0); // preserve the authored matte far-water sheet
+    }
     // Long-range sky visibility: roofed-over (cave/overhang) fragments lose the
     // flat sky-ambient fill so deep interiors go near-black and any point light
     // placed there reads as a real pool of light. GATED (default OFF) -> the
@@ -712,32 +703,7 @@ void main() {
         markerGlow = Albedo * (markerEmissive * 6.0 * dayFade);
     }
 
-    vec3 color = ambient + Lo + caustics + crystalGlow + aetherGlow + markerGlow; // + emissive markers
-
-    //  (seabed waterline terracing de-band): the far seabed
-    // is a height-quantized heightfield (kFarLodHeightQuantScale = 1/16 m). Where
-    // the gently-sloping seabed crosses the waterline the 1/16 m steps read as
-    // horizontal terraces, and bare sun-bright sand shows above them. Tint any
-    // below-sea-level upward-facing terrain toward the deep-water color with
-    // depth: the terrace steps dissolve into a smooth depth gradient (the banding
-    // is HIDDEN, per design  "or hide (depth-fade)") and the submerged seabed
-    // reads as water rather than bright sand. Pure post-shade blend in linear
-    // space; no tile-byte change (world_hash + far-tile bytes untouched). The
-    // far-water sheet (id 200) and live water (id 7, discarded in g_buffer) are
-    // excluded - they carry their own surface look.
-    if (MaterialID != 200u && Normal.y > 0.3) {
-        float depth = u_sea_level - FragPos.y; // >0 below the waterline
-        if (depth > 0.0) {
-            // Deep-water linear color matched to the far-water sheet albedo run
-            // through the lit chain (g_buffer.frag case-200 ~vec3(0.018,0.065,
-            // 0.11)). 0..1 fade reaches near-full tint by ~2.5 m of depth, so the
-            // shoreline keeps a thin readable wet-sand lip and deeper seabed goes
-            // fully water-toned (no terrace steps).
-            vec3 deepWater = vec3(0.015, 0.05, 0.085);
-            float t = clamp(depth / 2.5, 0.0, 0.92);
-            color = mix(color, deepWater, t);
-        }
-    }
+    vec3 color = ambient + Lo + crystalGlow + aetherGlow + markerGlow; // + emissive markers
 
     // the lightning light-pulse + bolt are injected by a dedicated
     // FULL-SCREEN overlay (lightning_overlay.frag) drawn AFTER the skybox, so the
@@ -757,7 +723,15 @@ void main() {
     // and apply a subtle sun warmth tint. Applied in tonemapped [0,1] space.
     float gradeLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(gradeLuma), color, u_saturation);
-    color = clamp((color - 0.5) * u_contrast + 0.5, 0.0, 1.0);
+    // Contrast must preserve black and retain shaded material detail. Subtracting
+    // a fixed offset per channel crushed foliage to black and left blue fringes.
+    // Apply an endpoint-preserving curve to luminance, then scale RGB together.
+    float y = clamp(gradeLuma, 0.0, 1.0);
+    float contrast = max(u_contrast, 0.01);
+    float toe = min(y, 1.0 - y);
+    float curvedToe = toe / (contrast + (1.0 - contrast) * 2.0 * toe);
+    float gradedY = y < 0.5 ? curvedToe : 1.0 - curvedToe;
+    color = clamp(color * (gradedY / max(y, 0.000001)), 0.0, 1.0);
     // Cinematic split-tone: cool shadows -> warm highlights, blended by luma.
     float toneT = smoothstep(0.12, 0.88, gradeLuma);
     vec3 splitTint = mix(u_shadowTint, u_highlightTint, toneT);

@@ -1,5 +1,9 @@
 # Visual regression: FLIP-style golden-image harness
 
+See the [documented visual baselines](visual-baselines.md) for real engine
+captures with separate numeric findings, visible defects and approval status.
+Those unapproved observations must not be promoted automatically to goldens.
+
 `tools/flip_diff.py` is a perceptual image-diff gate. It compares a **candidate**
 render against a blessed **golden** reference and produces:
 
@@ -102,7 +106,71 @@ Thresholds are per-backend in spirit (FLIP/SSIM/luma are not the same scale).
 Pin a threshold against a known-good vs known-bad pair when you add a new golden;
 `0.05` is a reasonable starting point for FLIP/luma.
 
+## World-sweep review sheets
+
+For a completed or failed `world_visual_sweep` capture directory, run:
+
+```sh
+python tools/gates/build-visual-sweep-montages.py /your/capture-directory
+python tools/gates/test_visual_sweep_montages.py
+```
+
+The tool requires Pillow and the `luminumbra.world_visual_sweep.v1` manifest.
+It preserves the complete declared summer/winter matrix: camera columns and
+clear/storm rows never move when a capture is missing. Missing records, duplicate
+records, unproduced frames and unreadable images occupy labeled failure slots.
+Image thumbnails retain their aspect ratio. Feature sheets also retain missing
+slots; a completely absent declared season still has its own sheets.
+
+Original PPM files remain unchanged. Decoded PNGs live in `sweep/png/`; contact
+sheets and `review.json` live in `sweep/montages/`. The report records source
+manifest/image hashes, decoded PNG hashes, dimensions, current sheet hashes,
+producer failures and per-slot findings. A failed rerun removes that slot's old
+derived PNG. Use fresh capture directories for distinct runs, and use the report's
+sheet list instead of treating every older file in a reused directory as current.
+
+Exit 0 means the declared evidence set was assembled completely, exit 1 means a
+review was generated with failed/incomplete evidence, and exit 2 means invalid
+input or an I/O failure prevented assembly. A source producer failure remains a
+failure. Running the tool directly on a failed directory provides diagnostic
+sheets even when an upstream native gate has already stopped.
+
+Assembly does not establish rendered fidelity, performance or visual approval.
+Each scenario's concrete screenshots and supporting test/performance evidence
+require the owner's review before it is presented as visually accepted in the
+README or docs. The tool always labels visual approval as pending.
+
 ## Self-test
+
+The frontier gate imports `tools/gates/capture-artifact-validation.ps1` for
+file-only P6 and runtime capture-size checks. Its adversarial fixtures run in a
+clean shell, without launching the engine or removing any gate output:
+
+```powershell
+powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools/gates/test-capture-artifact-validation.ps1
+```
+
+CTest registers `CaptureArtifactValidationContract` when PowerShell is available.
+The helper accepts bounded binary P6 RGB images with maxval 255, header comments,
+and LF/CRLF separators. It requires the complete raster with no extra bytes and
+preserves whitespace and `#` pixel values at the start of the raster. Structural
+limits are 16,384 pixels per dimension and 128 megapixels; these are parser bounds,
+not supported render-resolution claims.
+
+`Assert-CapturePinned` validates typed `luminumbra.runtime_state.v1` metadata against
+the source-owned `runtime_scenario_v1` profile (3840 by 1600). The test checks for
+drift from `RuntimeScenarioConfig.h`. New resolution profiles require an explicit
+trusted source declaration; producer metadata cannot declare its own expected
+size. Every frontier pin call supplies its exact screenshot paths, validates their
+dimensions, and refuses files outside that run's artifact directory or reached
+through links. The positional `Assert-PpmArtifact <Path>` and metadata-only
+`Assert-CapturePinned -ArtifactDir <dir> -Name <scenario>` interfaces remain usable;
+the latter alone does not join any screenshot.
+
+These checks establish file structure, dimensions, and the latest recorded pin
+state. They do not establish capture-frame identity, acquisition provenance,
+camera or lighting fidelity, performance acceptance, or visual approval. Missing
+receipts are not synthesized and no golden is updated by this validation.
 
 `flip_diff.py --selftest` synthesizes an image, diffs it **against itself on
 every available backend** (must score `0`), confirms a deliberately perturbed
@@ -120,3 +188,6 @@ therefore does not affect `world_hash`. The legacy default preset stays
 byte-identical (`--smoke == 6f008a9f637c40b7`). The golden images live under a
 `goldens/` tree you choose; they are not part of the deterministic sim contract,
 they are the *visual* contract that sits alongside it.
+
+For controlled foliage stills, receipt semantics and the remaining full-gate
+requirements, see [Foliage control and capture validation](foliage-visual-validation.md).

@@ -1,7 +1,7 @@
 {
   "name": "Flat Lands",
   "description": "Mostly flat, gently rolling plains — DEM-grounded to real prairie statistics",
-  "schema_rev": 5,
+  "schema_rev": 6,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.006,
@@ -11,7 +11,6 @@
       "lacunarity": 2.0,
       "height_offset": 5.0,
       "shaping": {
-        "enabled": true,
         "continentalness_frequency": 0.001,
         "erosion_frequency": 0.0016,
         "peaks_frequency": 0.003,

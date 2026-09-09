@@ -1,7 +1,7 @@
 {
   "name": "Mountainous",
   "description": "Dramatic shaped mountain ranges rising from walkable valleys and plateaus",
-  "schema_rev": 5,
+  "schema_rev": 6,
   "generation_params": {
     "terrain": {
       "base_frequency": 0.008,
@@ -11,7 +11,6 @@
       "lacunarity": 2.0,
       "height_offset": 10.0,
       "shaping": {
-        "enabled": true,
         "continentalness_frequency": 0.0008,
         "erosion_frequency": 0.0015,
         "peaks_frequency": 0.0025,

@@ -46,7 +46,6 @@ nlohmann::json FixedBasePreset() {
                 "height_offset": 10.0,
                 "island_mask_enabled": false,
                 "shaping": {
-                    "enabled": true,
                     "peaks_amplitude": 52.0,
                     "peaks_frequency": 0.0025,
                     "domain_warp_amplitude": 20.0

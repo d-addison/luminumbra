@@ -106,10 +106,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 2064,
+      "bytes": 1577,
       "license": "MIT",
       "path": "data/common/foliage/scatter_set.json",
-      "sha256": "2901c546499b55eddab721bc17f8cac3ae60468fb2b9bda124198bc2bdcf54c1",
+      "sha256": "6d7b68bc3ea05c54f0a8df5f6f031b2fa036aeae2e35f8cac6c45c8ae19c6823",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -176,17 +176,17 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 1391,
+      "bytes": 796,
       "license": "MIT",
       "path": "data/common/particles/precip_rain.json",
-      "sha256": "905c1bfd80bf083a68aa89bbb913d0da9bd3fab82509c4a6629551b185b4b31c",
+      "sha256": "14331794120b5b85957be1d4034cea7eff8324608b24b766ffd22d2b54082d9d",
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 646,
+      "bytes": 794,
       "license": "MIT",
       "path": "data/common/particles/precip_snow.json",
-      "sha256": "91d522911536c126b6ed153f8ab0e35455d7d22f23ff34506fbe4a26e5be598d",
+      "sha256": "241bf3f4e626b15acc9afe31e3cd8cbc7bce81e867abb1d894d23b2635d021b7",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -253,10 +253,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 5068,
+      "bytes": 5643,
       "license": "MIT",
       "path": "data/common/systems.json",
-      "sha256": "30e98f720fe0f1bbf8c51c82477e6e54a4fce96eef7887ec698f0fd3b7d765ec",
+      "sha256": "4b82754823930670ed7d4ba9f7fcea2e8c3534f7e4f57fc3cd8fb1ec11678043",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -372,10 +372,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 1001,
+      "bytes": 1786,
       "license": "MIT",
       "path": "data/models/trees/tree_textures.json",
-      "sha256": "ce09514547492748b420a61b7c807530f0c90351a0957418609a219112f6471e",
+      "sha256": "facfadf7cef30d4919277a6adc15c9ce2ab87b5aa3fdb5e5ff2d401186c85e94",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1072,10 +1072,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 24247,
+      "bytes": 25238,
       "license": "MIT",
       "path": "data/ui/game_theme.rcss",
-      "sha256": "3a19b9ac7c7b74b09018c0c190fcc5f9b46c4d14fe102874300edbe8b329d0f6",
+      "sha256": "6e37c1224c85458f3c1fb448330f722567b7bdbf5a4a735e8b42c7a5db119c2f",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1089,7 +1089,7 @@
       "bytes": 1647,
       "license": "MIT",
       "path": "data/ui/main_menu.rml",
-      "sha256": "0dd2fbfaf6da7cb8b5260a08c0e1030af1eb286b5cc1014b265559a83200c0fc",
+      "sha256": "8b622f8d448561d9d4dc5493b2898cf6ba5b473849df99db90ca2b8c7fd5fa70",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1100,10 +1100,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 940,
+      "bytes": 1064,
       "license": "MIT",
       "path": "data/ui/pause.rml",
-      "sha256": "d2689ce3710cefa28a2e76c621214d939e2421c3b01737a48cae16d69bc09a1f",
+      "sha256": "17bea90774441eb14bf0f51634c36382387b97c266151b84bc4852d8723ada5a",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1114,10 +1114,10 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 7716,
+      "bytes": 7817,
       "license": "MIT",
       "path": "data/ui/settings.rml",
-      "sha256": "ae8fee0ce5b89aefab94bafed2576266b00ed973f9ac6b90c315478a25efaf15",
+      "sha256": "38788d4acc889df996249bd39714fa0b6bf7df21455b538a2b1a2a31d5afaa29",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1184,17 +1184,17 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 27846,
+      "bytes": 27503,
       "license": "MIT",
       "path": "data/ui/world_creation.rml",
-      "sha256": "763d97fe81fd32632bdd82c09742d151bd3a2cd6b996cb6a1cb76fe940c34118",
+      "sha256": "16aab8f3bd4b13792877c351a4527a110059830753760debf0672c2d694ddf18",
       "source": "Luminumbra first-party runtime data"
     },
     {
-      "bytes": 4549,
+      "bytes": 1229,
       "license": "MIT",
       "path": "data/ui/world_selection.rml",
-      "sha256": "777476afea52508c89ce6ed0bde4fe7ecaa33bbc2611d59b861d32aaa5b0c216",
+      "sha256": "7966bb229cfcf443c1fa396fdfcdb23f1ab47c63999b4f0c8c8c8723e1cceb54",
       "source": "Luminumbra first-party runtime data"
     },
     {
@@ -1230,6 +1230,90 @@
       "license": "MIT",
       "path": "docs/assets/screenshots/main-menu.png",
       "sha256": "b977315d51697f8b3e9069e20f586c61abf09f11974f9909a3147c4768da08f2",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 38090,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/evidence.json",
+      "sha256": "e4dc6f0d13c1399c759c4f25e6632023419e54798e9456c7621bdcc56b9f6105",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 485229,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-bypass-preview.png",
+      "sha256": "cf9b5b745ffefc18c9b14b54fa879e007199e3228b8998766fb99e3666e8b43c",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 5961365,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-bypass.png",
+      "sha256": "d66324b37896ce5ae857af12f98522abb31f6f4e9ef78485d9b787da5d6b838c",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 481843,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-guard-preview.png",
+      "sha256": "5170c286eb5687e3b6a3536ee6e8dcb68550de2a978440490f6bcb2faabcec79",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 5774090,
+      "license": "MIT",
+      "path": "docs/assets/terrain-coverage/20260908/forest-guard.png",
+      "sha256": "c0f7a71dbca9754800b9944fa380fc04b4a06d38cd4a91c6c9f54691fc81b00e",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 280348,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional-preview.png",
+      "sha256": "d947144cd1ffea3557b78d7931d7f8cdd5a83daa0ed502cadf39d090e3cfb5d4",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 1471,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional.json",
+      "sha256": "4c4df138b8cdb3eb668e2aeead13beda3463656cfaf2cbbd23d177f613cae7ac",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 2570597,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/foliage-functional.png",
+      "sha256": "6d864644ab5f40b4fdedd4125163bcdc16049af49dbddf9b42dc98bc1b226e6f",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 493967,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference-preview.png",
+      "sha256": "30cb284697a0d272c62cc19118faee4fe6ad1c8b0118eec6c538b8cf5ad54015",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 7494,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference.json",
+      "sha256": "b6fdf25209b5abb1ff024a134bdafc68a8d3be4543a3fa3b524b594f46c89dd7",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 5788098,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/forest-reference.png",
+      "sha256": "c8ea3be89ed6d9a5b33c5501c0c925f31b0a1398667788d02a8ee124fa95f4a7",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 4480,
+      "license": "MIT",
+      "path": "docs/assets/visual-baselines/20260908/receipts.json",
+      "sha256": "780115b3181199c1456b97ad54269d6ce3178aba959cafd22d0bc4c6631901d6",
       "source": "Luminumbra documentation assets"
     },
     {
@@ -1275,52 +1359,94 @@
       "source": "documented DEM fixtures"
     },
     {
-      "bytes": 2107,
+      "bytes": 3064,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/FixedInputs.h",
+      "sha256": "85a67a9181f191c6e4c2fb187775fb15468cc6c44b2d9d39aa587a6f8adc86da",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 3308,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/devel-0.json",
+      "sha256": "bbc4acd5b749d65b11c8364ef3b599f3ae2d9edb7cef0017fce193a97c1ba1ef",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 4364,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/devel-1.json",
+      "sha256": "1f816e2789c16335e21551c40c884f85812c9a93164e2e0914dec14da362f753",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 4368,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/devel-2.json",
+      "sha256": "b43660ba245a25b812565ecdb42def58f4ebdff030c8f662e40de846f41fc276",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 4038,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/generate_baseline.py",
+      "sha256": "27b2d677edf519c05be91d4762000cfff0704e3e5adf3271e11237aef39f49a5",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 750,
+      "license": "MIT",
+      "path": "test/fixtures/smoke_artifact/provenance.json",
+      "sha256": "8852adb634a60b184b13165b8fed8cf7b5cfdcba5dee446c7bbcd39728f48a41",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 2082,
       "license": "MIT",
       "path": "worlds/atlas/presets/amplified.json",
-      "sha256": "0a149c7c0cd83e39dc8e4fb5509dcf67e3c8dbca53c9576e6ddcebcad0dd025a",
+      "sha256": "3a7bbe7bc7bf5b1b9e19e51cd8505c0e42d41efa3261b66244e3436f3bf0ee4f",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1601,
+      "bytes": 1576,
       "license": "MIT",
       "path": "worlds/atlas/presets/archipelago.json",
-      "sha256": "5afc3fdd4ece5956257bfbd7ae89d775fccce4fb6a230103633588572f4a5ee3",
+      "sha256": "d2b1d4c5eb8b999f4daf77b1666eede80eb0419d847a708ab24526c107374538",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 2177,
+      "bytes": 2129,
       "license": "MIT",
       "path": "worlds/atlas/presets/caverns.json",
-      "sha256": "352caa69d60266541058e8c1f1a107c675a4d784c36220565ac373dc143fec42",
+      "sha256": "18d1b86c8f82536ffadd4be844f3098caee123d703077f8f0e00f87f94245a06",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 2877,
+      "bytes": 2852,
       "license": "MIT",
       "path": "worlds/atlas/presets/default.json",
-      "sha256": "7f3e69fc545d0bcdb3104a44ac2ec161c3c62a0309d4073a459fb58ab2574a3f",
+      "sha256": "f3be8ce413e2ea7ef02b76a1643d36c92bc4475513be5a42bf3438669fd6d261",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1290,
+      "bytes": 1265,
       "license": "MIT",
       "path": "worlds/atlas/presets/flat_lands.json",
-      "sha256": "0c234ec72df5a55167aef7ec2fe93def5121df1bed92421a411c3e0740e449d0",
+      "sha256": "d2a5b0955d959c9a43449aa015a93033a293ade54d9e490c0d8686f08b650a58",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1753,
+      "bytes": 1728,
       "license": "MIT",
       "path": "worlds/atlas/presets/mountains.json",
-      "sha256": "0d763e63aaab901048699511679cb06fb21c0add3e4fcff7a060f30ce0ed8ee4",
+      "sha256": "26b391dd4f7256bd54c46a9109d835ea1ee3635a103c85a2924f092ceb10800a",
       "source": "Luminumbra authored worlds"
     },
     {
-      "bytes": 1111,
+      "bytes": 1086,
       "license": "MIT",
       "path": "worlds/atlas/presets/temperate_forest.json",
-      "sha256": "69099af1e6a251f075c21647c61386fa3bb6e5a1cd89c4799f1d04f332de5f81",
+      "sha256": "a7366b7787e81298817d17be6f9d30d7e47b38756f54fe1c1d60ba3fefe3b4f7",
       "source": "Luminumbra authored worlds"
     }
   ],

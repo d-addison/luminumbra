@@ -1,5 +1,6 @@
 #include "LightingPass.h"
 
+#include "../EnvironmentBrdfLut.gen.h"
 #include "../PassShaderLayouts.h"
 #include "../RenderContext.h"
 #include "../RenderResourceRegistry.h"
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <glm/gtc/matrix_transform.hpp>
+#include <stdexcept>
 #include <string>
 
 namespace Luminumbra::Rendering {
@@ -46,11 +48,42 @@ void LightingPass::init_shader(const std::filesystem::path& root_path) {
     }
 }
 
+void LightingPass::init_environment_brdf(RenderResourceRegistry& registry) {
+    TextureDesc desc;
+    desc.width = desc.height = kEnvironmentBrdfLutSize;
+    desc.internal_format = GL_RG16F;
+    desc.format = GL_RG;
+    desc.type = GL_HALF_FLOAT;
+    desc.min_filter = desc.mag_filter = GL_LINEAR;
+    desc.wrap_s = desc.wrap_t = GL_CLAMP_TO_EDGE;
+    desc.expected_layout = "sampled";
+    desc.debug_label = "lighting.environment_brdf";
+    m_environment_brdf = registry.create_texture("environment_brdf", desc).id;
+    if (m_environment_brdf == 0)
+        throw std::runtime_error("Unable to allocate the environment BRDF texture");
+    glBindTexture(GL_TEXTURE_2D, m_environment_brdf);
+    glTexSubImage2D(GL_TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    kEnvironmentBrdfLutSize,
+                    kEnvironmentBrdfLutSize,
+                    GL_RG,
+                    GL_HALF_FLOAT,
+                    kEnvironmentBrdfLut.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void LightingPass::destroy_environment_brdf(RenderResourceRegistry& registry) {
+    registry.destroy_owned("environment_brdf");
+    m_environment_brdf = 0;
+}
+
 void LightingPass::init_lighting_fbo(RenderResourceRegistry& registry, u32 width, u32 height) {
     // allocate the lighting FBO + attachments THROUGH the
     // registry. The descs reproduce the retired glTexImage2D/glRenderbufferStorage
     // calls exactly (RGBA16F LINEAR HDR color; RGBA16F LINEAR + CLAMP_TO_EDGE
-    // opaque copy; DEPTH_COMPONENT24 renderbuffer) so the objects are
+    // opaque copy; DEPTH_COMPONENT32F renderbuffer) so the objects are
     // parameter-identical; the FrameBufferObject struct caches the owned ids.
     TextureDesc color;
     color.width = width;
@@ -78,7 +111,7 @@ void LightingPass::init_lighting_fbo(RenderResourceRegistry& registry, u32 width
     RenderbufferDesc depth;
     depth.width = width;
     depth.height = height;
-    depth.internal_format = GL_DEPTH_COMPONENT24;
+    depth.internal_format = GL_DEPTH_COMPONENT32F;
     depth.debug_label = "lighting.depth";
     m_lighting_fbo.depth_texture = registry.create_renderbuffer("lighting_depth", depth).id;
 
@@ -140,8 +173,14 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
 
 void LightingPass::execute(const RenderContext& ctx) {
     const Camera& camera = *ctx.camera;
+    const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
+    // The fullscreen quad lies at clip depth zero. Scene visibility comes from
+    // the G-buffer, and its depth is blitted here after deferred lighting.
+    glDisable(GL_DEPTH_TEST);
     glBindFramebuffer(GL_FRAMEBUFFER, m_lighting_fbo.fbo_id);
     glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // deferred lighting into the internal FBO
+    glDepthMask(GL_TRUE);
+    glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
     glActiveTexture(GL_TEXTURE0);
@@ -162,8 +201,6 @@ void LightingPass::execute(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.terrain_textures.id);
     glActiveTexture(GL_TEXTURE8);
     glBindTexture(GL_TEXTURE_2D, ctx.material_lut.id);
-    glActiveTexture(GL_TEXTURE9);
-    glBindTexture(GL_TEXTURE_2D, ctx.caustics_tex.id);
     // Aether emissive field at unit 10 (gated by u_aetherActive). When
     // no field is uploaded the texture is 0 and u_aetherActive=0, so the glow term
     // is skipped -> pixel-identical to the pre- path.
@@ -178,6 +215,9 @@ void LightingPass::execute(const RenderContext& ctx) {
     glBindTexture(GL_TEXTURE_2D_ARRAY, ctx.shadow_tint_array.id);
     m_lighting_shader->setInt("u_shadowTintCascades", 11);
     m_lighting_shader->setInt("u_shadowTintEnabled", ctx.shadow_tint_array.id != 0 ? 1 : 0);
+    glActiveTexture(GL_TEXTURE12);
+    glBindTexture(GL_TEXTURE_2D, m_environment_brdf);
+    m_lighting_shader->setInt("u_environmentBrdf", 12);
     if (ctx.aether_active && ctx.aether_extent > 0) {
         const float world_span = static_cast<float>(ctx.aether_extent) * ctx.aether_cell_size;
         m_lighting_shader->setFloat("u_aetherActive", 1.0f);
@@ -211,7 +251,6 @@ void LightingPass::execute(const RenderContext& ctx) {
     m_lighting_shader->setInt("u_terrainTextures", 7);
     m_lighting_shader->setInt("u_materialLUT", 8);
     m_lighting_shader->setFloat("u_emissiveLutScale", ctx.emissive_lut_scale);
-    m_lighting_shader->setInt("u_causticsTexture", 9);
     m_lighting_shader->setVec3("u_skyAmbientColor", ctx.sky_ambient_color);
     m_lighting_shader->setVec3("u_viewPos", camera.Position);
     m_lighting_shader->setVec3("u_sun.direction", ctx.sun.direction);
@@ -236,7 +275,6 @@ void LightingPass::execute(const RenderContext& ctx) {
     }();
     m_lighting_shader->setFloat("u_moonWrapFloor", s_moon_wrap_floor);
 
-    m_lighting_shader->setFloat("u_sea_level", SEA_LEVEL);
     //  cinematic grade (-style): BOLD default — lifted exposure, rich
     // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone
     // (the key/fill cue). Tunable via LUMIN_GRADE="exposure,saturation,contrast,
@@ -284,11 +322,11 @@ void LightingPass::execute(const RenderContext& ctx) {
     // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
     // same projection the SSAO pass builds, plus the screen size.
     {
-        const glm::mat4 cave_proj = glm::perspective(glm::radians(camera.Zoom),
-                                                     static_cast<float>(ctx.screen_width) /
-                                                         static_cast<float>(ctx.screen_height),
-                                                     camera.GetNearPlane(),
-                                                     camera.GetFarPlane());
+        const glm::mat4 cave_proj = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                         static_cast<float>(ctx.screen_width) /
+                                                             static_cast<float>(ctx.screen_height),
+                                                         camera.GetNearPlane(),
+                                                         camera.GetFarPlane());
         m_lighting_shader->setMat4("u_projection", cave_proj);
         m_lighting_shader->setVec2(
             "u_screenSize",
@@ -357,6 +395,8 @@ void LightingPass::execute(const RenderContext& ctx) {
         ++(*ctx.lighting_draws);
     glBindVertexArray(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (depth_was_enabled)
+        glEnable(GL_DEPTH_TEST);
 }
 
 void LightingPass::execute_lightning_overlay(const RenderContext& ctx) {

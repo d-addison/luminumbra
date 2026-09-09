@@ -19,8 +19,7 @@ PlayerController::PlayerController(GLFWwindow* window,
     if (m_mode == MovementMode::Noclip) {
         m_position = m_camera->Position;
     } else {
-        const float standingEyeHeight = m_standingHeight * 0.95f;
-        m_position = m_camera->Position - glm::vec3(0.0f, standingEyeHeight, 0.0f);
+        m_position = Player::FeetFromSpawnAnchor(m_camera->Position, m_standingHeight);
         if (m_physicsSystem) {
             m_physicsSystem->create_player_controller(m_position);
             m_hasInitializedPhysicsPlayer = true;
@@ -166,8 +165,8 @@ void PlayerController::ResetReplayFrameCounter(std::uint64_t frame) {
 
 void PlayerController::UpdateCameraFromControllerPosition() {
     if (m_mode == MovementMode::Walking) {
-        const float standingEyeHeight = m_standingHeight * 0.95f;
-        const float crouchingEyeHeight = m_crouchHeight * 0.9f;
+        const float standingEyeHeight = Player::StandingEyeHeight(m_standingHeight);
+        const float crouchingEyeHeight = m_crouchHeight * Player::kCrouchingEyeHeightFactor;
         const float currentEyeHeight = m_isCrouching ? crouchingEyeHeight : standingEyeHeight;
         m_camera->Position = m_position + glm::vec3(0.0f, currentEyeHeight, 0.0f);
     } else {
@@ -186,8 +185,7 @@ void PlayerController::ProcessKeyInput(int key, int action) {
         } else { // m_mode == MovementMode::Noclip
             m_mode = MovementMode::Walking;
             // When exiting noclip, sync the physics body to the camera's position.
-            const float standingEyeHeight = m_standingHeight * 0.95f;
-            m_position = m_camera->Position - glm::vec3(0.0f, standingEyeHeight, 0.0f);
+            m_position = Player::FeetFromSpawnAnchor(m_camera->Position, m_standingHeight);
 
             if (m_physicsSystem) {
                 // If this is the first time entering walking mode, create the physics body.
@@ -288,14 +286,15 @@ void PlayerController::UpdateWalking(float deltaTime,
     // Crouching is a toggle. Check if the player wants to change state.
     if (crouchPressed) {
         if (m_isCrouching) { // If currently crouching, try to stand up
-            if (m_physicsSystem->player_has_space_to_stand()) {
+            if (m_physicsSystem->player_has_space_to_stand() &&
+                m_physicsSystem->set_player_crouched(false)) {
                 m_isCrouching = false;
-                m_physicsSystem->set_player_crouched(false);
             }
             // If there's no space, do nothing and remain crouched.
         } else { // If standing, crouch down
-            m_isCrouching = true;
-            m_physicsSystem->set_player_crouched(true);
+            if (m_physicsSystem->set_player_crouched(true)) {
+                m_isCrouching = true;
+            }
         }
     }
 
@@ -323,6 +322,13 @@ void PlayerController::UpdateNoclip(float deltaTime, const glm::vec3& wishDir, b
     // Noclip directly modifies the position, bypassing physics
     m_velocity = wishDir * current_speed;
     m_position += m_velocity * deltaTime;
+}
+
+glm::vec3 PlayerController::SavedSpawnAnchor() const {
+    if (m_mode == MovementMode::Walking) {
+        return Player::SavedSpawnAnchorForFeet(m_position, m_standingHeight);
+    }
+    return m_camera ? m_camera->Position : m_position;
 }
 
 } // namespace Luminumbra::Client

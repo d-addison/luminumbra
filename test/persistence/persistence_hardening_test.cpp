@@ -13,6 +13,8 @@
 // divergence through the normal test failure path.
 #include "gtest/gtest.h"
 
+#include "core/ResidencyContract.h"
+#include "nlohmann/json.hpp"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "world/WorldStreamingState.h"
@@ -21,6 +23,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -835,8 +838,8 @@ TEST(PersistenceHardening, TruncatedRecordManifestRejected) {
     WorldSaveService service;
     // Claims 5 records but provides no record manifest bytes.
     std::string bytes = "LMR1";
-    bytes.push_back('\x01');
-    bytes.push_back('\0'); // version 1
+    bytes.push_back('\x02');
+    bytes.push_back('\0'); // version 2
     bytes.push_back('\x05');
     bytes.push_back('\0'); // record_count = 5, but no manifest follows
     WriteFileBytes(WorldSaveService::region_file_path(save_dir.path, 0, 0), bytes);
@@ -897,6 +900,36 @@ TEST(PersistenceHardening, HeaderShorterThanEightBytesRejected) {
 // MUTATION DETECTION: any persisted field change must move the world hash
 // (proves nothing important is silently dropped from the canonical bytes).
 // ---------------------------------------------------------------------------
+
+TEST(PersistenceHardening, SimHashMatchesCanonicalSnapshotProjection) {
+    WorldStreamingState world;
+    PopulateRichWorld(world);
+    const std::string snapshot = SerializeWorldStreamingStateSnapshotJson(world);
+    auto projected = nlohmann::json::parse(snapshot);
+    for (auto& chunk : projected.at("chunks")) {
+        ASSERT_FALSE(chunk.at("mesh_vertices").empty());
+        ASSERT_FALSE(chunk.at("water_flow_data").empty());
+        for (const auto& entry : luminumbra::core::kChunkFieldResidency) {
+            if (!luminumbra::core::MayFeedWorldHash(entry.residency)) {
+                chunk.erase(entry.field);
+                chunk.at("water_state").erase(entry.field);
+            }
+        }
+    }
+    projected["hash_scope"] = "sim_truth_no_render_mesh_v1";
+    // Independent oracle: serialize the complete persisted representation first,
+    // then apply the declared projection and checksum its canonical bytes.
+    const std::string bytes = projected.dump(4) + "\n";
+    std::uint64_t hash = 14695981039346656037ull;
+    for (unsigned char byte : bytes) {
+        hash ^= byte;
+        hash *= 1099511628211ull;
+    }
+    std::ostringstream expected;
+    expected << std::hex << std::setw(16) << std::setfill('0') << hash;
+    EXPECT_EQ(ComputeWorldStreamingStateHash(world), expected.str());
+    EXPECT_EQ(SerializeWorldStreamingStateSnapshotJson(world), snapshot);
+}
 
 TEST(PersistenceHardening, EachPersistedFieldMutationMovesHash) {
     WorldSaveService service;

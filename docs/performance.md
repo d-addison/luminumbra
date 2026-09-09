@@ -43,6 +43,11 @@ change of at least 5%, a paired two-sided sign-test p-value no greater than 0.05
 and an effect larger than three pooled median absolute deviations. Smaller or
 underpowered changes are reported as warnings.
 
+For populated fixed-tick stage measurements on default, mountains and
+archipelago, use the [simulation budget capture command](sim-budget-telemetry.md).
+It reports deterministic work separately from wall-time distributions and
+leaves the normal server smoke artifact unchanged when disabled.
+
 ## Measurement layers
 
 | Layer | Representative evidence |
@@ -169,3 +174,84 @@ Profiling builds and captures are diagnostic evidence, not comparable benchmark
 numbers. Preserve the exact scenario metadata and raw trace with the associated
 measurement so a change can be traced from end-to-end symptoms to a subsystem and
 then to code.
+
+## Render capture state
+
+The default `--render-benchmark` camera is `(8,56,8)`, yaw `35`, pitch `-6`,
+with render time of day `0.04`. Streaming and rendering use that pose after
+player simulation. Explicit `--cam-pos` or scene camera settings take precedence;
+an explicit scene also overrides time of day and FOV. This ordering corrects
+[#120](https://github.com/d-addison/luminumbra/issues/120): older default captures
+reported a camera/time pin applied after rendering, then overwritten by the next
+player and simulation update. Those captures cannot qualify the intended forest view.
+
+Benchmark JSON includes `render_uniforms`, the linked geometry/static/lighting
+shader state read while emitting the artifact, and `capture_context`, including
+controller presence and the last position passed to world streaming. The readback
+runs outside the measured interval. It observes the report frame; it does not prove
+that every shader drew or that every measured frame used identical state.
+
+With the real controller active, validate a default capture and separate explicit
+camera/time overrides using the file-only checker:
+
+```sh
+python3 tools/perf/validate_render_capture.py forest.json \
+  --position 8 56 8 --yaw 35 --pitch -6 --tod 0.04 \
+  --require-controller --require-distinct-controller --require-geometry --require-settled
+```
+
+The checker reconstructs camera matrices and sun phase independently of reported
+camera metadata. It rejects absent or inconsistent shader values. Use the actual
+requested pose/time for override captures, and `--fov` to check an explicit FOV.
+Keep hot reload, frame scans and interactive camera/settings changes disabled during
+these controlled checks. Zero pending queues and camera agreement are separate
+requirements; an elevated camera in empty air need not have a resident camera chunk.
+Read actual framebuffer dimensions from the artifact. Short ordering regressions
+are not performance measurements, and estimated resource totals are not measured VRAM.
+
+### Matched terrain coverage attachments
+
+For a coverage diagnosis, add `--render-benchmark-aovs <fresh-directory>` to a
+render benchmark. The directory's parent must exist. This opt-in mode records
+far-region readiness and camera-neighbourhood draw decisions on each warmup,
+measured and capture frame. It then writes one additional, unmeasured frame's
+`color.ppm`, `depth.pfm`, `position.pfm`, `normal.pfm`, `albedo.pfm` and
+`material.pgm`, together with `manifest.json`. Use `--no-ui` for scene-only color.
+
+The manifest identifies the rendered frame, view and actual G-buffer projection,
+internal/output dimensions, jitter, time of day, per-region bounds, authority
+revisions and draw decisions. `missing_after_eviction` and `stale_after_eviction`
+separate absent tiles from resident tiles awaiting a tier/authority rebuild.
+Live-chunk rows retain prepared mesh versions, uploaded versions, pool residency,
+and visibility from the actual G-buffer culler. They cover prepared renderable
+snapshots, not every requested world chunk; truncation beyond 8192 rows is explicit.
+Readiness and submission counts do not establish per-pixel coverage.
+
+PFM attachments contain unscaled floating-point values, bottom row first, with
+endianness declared by the PFM scale sign. Position and normal are view-space;
+normal is decoded from the production octahedral encoding. TAAU state and jitter
+are recorded; keep TAAU disabled for spatial coverage comparisons because its
+color contains history. Depth is OpenGL window
+depth with clear value 1. PPM and PGM use top-down rows; PGM stores the material ID,
+including clear ID 255. Ignore position/normal/material values where depth is
+clear. These are the deferred attachments from the same rendered frame as color;
+they do not represent all transparent-surface contributions to final color.
+
+For a controlled diagnostic A/B only,
+`--render-benchmark-aovs-bypass-camera-region-guard` suppresses the whole camera
+region's draw guard while retaining the production 176 m near clipping and 3 km
+far range. It requires AOV capture and is recorded in every region receipt. This
+is an experiment control, not a supported terrain-ownership policy or a cave/edit
+correctness claim. Ordinary rendering is unchanged without diagnostics.
+
+Existing output directories are refused. Successful publication requires every
+attachment and a final complete manifest; a failed capture exits nonzero and
+cannot replace earlier evidence. Limits are 8191 warmup plus measured frames and
+16,777,216 pixels per internal/output image. Diagnostics add CPU work during the
+run, so their timing observations are labelled instrumented and must not be used
+as ordinary-play performance results.
+
+See [Terrain coverage diagnostics](terrain-coverage-diagnostics.md) for a recorded
+same-camera guard/bypass pair, original images, provenance joins and reproduction
+commands. Its coverage findings do not qualify a production ownership policy or
+ordinary-play performance.

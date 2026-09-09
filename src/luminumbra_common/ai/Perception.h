@@ -11,8 +11,9 @@
 // PURE + DETERMINISTIC (sim contract): float-only, DeterministicMath::Sqrt only,
 // NO libm transcendentals. The FOV is supplied as cos(half-angle) so the per-tick
 // test needs no acos/cos — the caller precomputes it once at spawn (a creature's
-// FOV is constant, or an evolvable genome gene). World_hash-neutral until a
-// perception system wires these into the tick (data-flagged, like the rest).
+// FOV is constant, or an evolvable genome gene). RunPerceptionSystemOnTick consumes
+// these primitives in GameSession's fixed tick for entities with perception and
+// awareness components; entities without those components do not participate.
 
 #include "../core/DeterministicMath.h"
 

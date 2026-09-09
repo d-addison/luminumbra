@@ -2,7 +2,7 @@
 
 //  far-field tree impostors, : the ATLAS BAKE.
 //
-// Renders the static tree parts from each hemi-octahedral view direction
+// Renders the static tree parts from each full-sphere octahedral view direction
 // (OctaImpostor.h) into a single texture atlas — one tile per direction — and
 // writes it out (PPM + a per-tile coverage JSON) for review. A distant tree later
 // draws ONE camera-facing quad sampling the tile(s) nearest the view direction, so
@@ -31,10 +31,10 @@ struct ImpostorBakeResult {
 //   <outBasePath>            -> the atlas as a binary PPM (RGB; tree on a keyed background)
 //   <outBasePath>.json       -> { atlas_size, grid, mean_coverage, min_coverage, per-tile coverage
 //   }
-// rootDir is the asset root (the tree parts load from rootDir/data/models/trees/...). rp supplies
-// the loaded static-model texture array + per-part albedo layer / luma-cutout flag so the bake
-// renders the REAL bark/leaf textures (leaves luma-keyed, matching g_buffer.frag). Requires a
-// current GL context.
+// rootDir contains the acquired game-assets/tree-small-02/1.0.0 pack. The pipeline
+// supplies each part's albedo, normal and surface maps and authored opacity cutoff.
+// The companion _normal PPM exposes packed normal-RG / roughness-B channels.
+// Requires a current GL context.
 ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
                                          const std::string& rootDir,
                                          const RenderPipeline& rp,
@@ -47,12 +47,11 @@ ImpostorBakeResult BakeTreeImpostorAtlas(const std::string& outPpmPath,
 // context.
 struct ImpostorAtlasTextures {
     bool ok = false;
-    unsigned int albedoTex =
-        0; // GL_TEXTURE_2D, atlas_size^2, sRGB-encoded albedo (magenta = empty)
-    unsigned int normalTex = 0; // GL_TEXTURE_2D, atlas_size^2, encoded object-space normal
+    unsigned int albedoTex = 0; // GL_TEXTURE_2D, atlas_size^2, linear albedo (alpha zero = empty)
+    unsigned int normalTex = 0; // octahedral object normal RG, roughness B, occlusion A
     int grid = 0;               // tiles per axis (== OctaImpostorGrid.gridResolution)
-    float sphereY = 0; // tree local bounding-sphere center Y (height the billboard centers on)
-    float radius = 0;  // tree local bounding-sphere radius (billboard half-size)
+    Vec3f center{};             // tree local bounding-sphere center
+    float radius = 0;           // tree local bounding-sphere radius (billboard half-size)
     std::string error;
 };
 ImpostorAtlasTextures BakeTreeImpostorAtlasToTextures(const std::string& rootDir,

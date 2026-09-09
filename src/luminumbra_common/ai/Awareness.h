@@ -10,8 +10,8 @@
 // where the three senses combine before feeding the InstinctPlanner.
 //
 // PURE + DETERMINISTIC: a single update is a pure function of its inputs (no RNG,
-// no wall-clock, float-only). World_hash-neutral until a PerceptionSystem owns the
-// per-agent AwarenessComponent in the tick.
+// no wall-clock, float-only). RunPerceptionSystemOnTick uses this update for
+// entities with PerceptionComponent + AwarenessComponent in GameSession's fixed tick.
 
 namespace luminumbra::ai {
 

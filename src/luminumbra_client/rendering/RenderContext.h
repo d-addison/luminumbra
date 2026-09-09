@@ -89,26 +89,25 @@ struct RenderContext {
     // Group B (remaining) — G-buffer attachment handles (adopt_texture/adopt_fbo by name).
     TextureHandle gbuffer_albedo{};   // <- gbuffer().albedo_texture
     TextureHandle gbuffer_material{}; // <- gbuffer().material_texture
-    TextureHandle gbuffer_depth{};    // <- gbuffer().depth_texture
+    TextureHandle gbuffer_depth{};    // D32F reversed-Z: near 1, cleared sky 0
     TextureHandle motion_vectors{};   // <- gbuffer().motion_vector_texture
     FboHandle gbuffer_fbo{};          // <- gbuffer().fbo_id
 
     // Group C (remaining) — lighting/scene targets (lit_scene already present).
     TextureHandle lit_scene_color{};      // <- lighting_fbo().color_texture
     TextureHandle opaque_scene{};         // <- lighting_fbo().opaque_color_texture
-    RenderbufferHandle lit_scene_depth{}; // <- lighting_fbo().depth_texture
+    RenderbufferHandle lit_scene_depth{}; // D32F reversed-Z, copied from G-buffer
 
     // Group D — sky/atmosphere LUTs.
     TextureHandle sky_view_lut{};      // <- m_sky_lut.sky_view_texture()
     TextureHandle transmittance_lut{}; // <- m_sky_lut.transmittance_texture()
     bool sky_lut_ready = false;        // <- m_sky_lut.ready()
 
-    // Group E (remaining) — shadow / SSAO / caustics reads.
-    TextureHandle shadow_depth_array{}; // <- m_shadow_pass->shadow_map().depth_texture_array
+    // Group E (remaining) — shadow / SSAO reads.
+    TextureHandle shadow_depth_array{}; // conventional depth: near 0, cleared sky 1
     // the tinted-transmission cascade (white = identity).
     TextureHandle shadow_tint_array{}; // <- m_shadow_pass->tint_texture_array()
     TextureHandle ssao_blur{};         // <- m_ssao_pass->ssao().ssaoColorBufferBlur
-    TextureHandle caustics_tex{};      // <- m_water_pass->black_texture()
 
     // Group F — terrain/material arrays (GBuffer + Lighting).
     TextureHandle material_lut{};      // <- m_materialLUT

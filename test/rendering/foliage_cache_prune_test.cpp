@@ -74,3 +74,48 @@ TEST(FoliageCachePruneTest, HandlesEmptyAndFullyLiveChunkSets) {
 }
 
 } // namespace
+
+TEST(FoliageGroundMesh, AnchorsFollowRenderedTrianglesInsteadOfBilinearHeight) {
+    using Luminumbra::Rendering::FoliageGroundMesh;
+    const std::vector<Luminumbra::VoxelVertex> vertices{{{0, 8, 0}, {0, 1, 0}, 3},
+                                                        {{4, 8.4f, 0}, {0, 1, 0}, 3},
+                                                        {{0, 8.4f, 4}, {0, 1, 0}, 3},
+                                                        {{4, 8, 4}, {0, 1, 0}, 3}};
+    const glm::vec3 origin(-32, 64, 32);
+    FoliageGroundMesh mesh(origin, vertices, {0, 2, 3, 0, 3, 1});
+    const auto diagonal = mesh.sample(-30, 34);
+    ASSERT_TRUE(diagonal.valid);
+    EXPECT_NEAR(diagonal.height, 72.0f, 0.0001f);
+    // Bilinear interpolation of the four corners yields 72.2: a full short
+    // blade's height above the actual diagonal shared by the drawn triangles.
+    EXPECT_GT(72.2f - diagonal.height, 0.19f);
+    const auto slope = mesh.sample(-31, 35);
+    ASSERT_TRUE(slope.valid);
+    EXPECT_NEAR(slope.height, 72.2f, 0.0001f);
+    EXPECT_NEAR(slope.slope, std::sqrt(0.02f), 0.0001f);
+    EXPECT_FALSE(mesh.sample(-40, 34).valid);
+    EXPECT_FALSE(mesh.sample(-22, 42).valid); // inside the chunk, outside its mesh
+}
+
+TEST(FoliageGroundMesh, RemovedFacesAndNonGroundMaterialsCannotSupportGrass) {
+    using Luminumbra::Rendering::FoliageGroundMesh;
+    std::vector<Luminumbra::VoxelVertex> vertices{{{0, 8, 0}, {0, 1, 0}, 3},
+                                                  {{4, 8, 0}, {0, 1, 0}, 3},
+                                                  {{0, 8, 4}, {0, 1, 0}, 3},
+                                                  {{4, 8, 4}, {0, 1, 0}, 3}};
+    FoliageGroundMesh original(glm::vec3(0), vertices, {0, 2, 3, 0, 3, 1});
+    ASSERT_TRUE(original.sample(3, 1).valid);
+    FoliageGroundMesh removed(glm::vec3(0), vertices, {0, 2, 3});
+    EXPECT_FALSE(removed.sample(3, 1).valid);
+    EXPECT_TRUE(removed.sample(1, 3).valid);
+    for (auto& vertex : vertices)
+        vertex.material_id = 7; // water cannot anchor grass
+    FoliageGroundMesh water(glm::vec3(0), vertices, {0, 2, 3, 0, 3, 1});
+    EXPECT_FALSE(water.sample(1, 1).valid);
+    for (auto& vertex : vertices) {
+        vertex.material_id = 3;
+        vertex.normal = {0, -1, 0}; // ceiling underside
+    }
+    FoliageGroundMesh ceiling(glm::vec3(0), vertices, {0, 2, 3, 0, 3, 1});
+    EXPECT_FALSE(ceiling.sample(1, 1).valid);
+}

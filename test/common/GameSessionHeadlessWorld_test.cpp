@@ -4,11 +4,26 @@
 // must succeed in a root containing nothing but the world preset.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include "luminumbra_client/rendering/TimeOfDayModel.h"
+#include "luminumbra_common/ai/CircadianSystem.h"
+#include "luminumbra_common/ai/EcologyHash.h"
+#include "luminumbra_common/ai/MigrationSystem.h"
+#include "luminumbra_common/ai/StimulusChannels.h"
+#include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/systems/AetherFieldSystem.h"
+#include "luminumbra_common/systems/PlantGrowthSystem.h"
+#include "luminumbra_common/systems/WeatherSystem.h"
+#include "luminumbra_common/systems/WindFieldSystem.h"
 
 #include <nlohmann/json.hpp>
 
@@ -208,7 +223,7 @@ TEST(GameSessionHeadlessWorldTest, CustomPresetEmbedsInSaveAndChangesTerrain) {
 // SDF lattice is QUARANTINED at adoption — the chunk loads with its sdf_data
 // cleared (marked for deterministic regeneration) and is never fed to the
 // unit-step polygonise. A valid full lattice in the same save survives verbatim.
-TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsQuarantinedOnLoad) {
+TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsRefusedOnLoad) {
     namespace P = Luminumbra::Persistence;
     using Luminumbra::Chunk;
     using Luminumbra::ChunkState;
@@ -252,30 +267,772 @@ TEST(GameSessionHeadlessWorldTest, WrongSizedSdfLatticeIsQuarantinedOnLoad) {
         session.SetJobSystem(&jobs);
         session.SetRootPath(root.root_string());
         ASSERT_TRUE(session.CreateWorld("QuarantineWorld", "12345", "default"));
-        ASSERT_TRUE(session.LoadWorldStateFrom(save_dir));
-
-        auto* world = session.GetWorldSystem();
-        ASSERT_NE(world, nullptr);
-        const Chunk* corrupt = nullptr;
-        const Chunk* control = nullptr;
-        for (const Chunk* c : world->get_renderable_chunks()) {
-            if (c->get_coords() == corrupt_coords)
-                corrupt = c;
-            if (c->get_coords() == control_coords)
-                control = c;
-        }
-        ASSERT_NE(corrupt, nullptr) << "the quarantined chunk must still load (mesh intact)";
-        ASSERT_NE(control, nullptr);
-        EXPECT_TRUE(corrupt->sdf_data.empty())
-            << "a wrong-sized SDF lattice must be quarantined (cleared for regeneration), "
-               "not adopted verbatim — got size "
-            << corrupt->sdf_data.size();
-        EXPECT_EQ(control->sdf_data.size(), kFullLattice)
-            << "a valid full lattice in the same save must survive adoption verbatim";
-        EXPECT_FALSE(corrupt->mesh_vertices.empty())
-            << "quarantine must keep the saved mesh renderable while regeneration is pending";
+        EXPECT_FALSE(session.LoadWorldStateFrom(save_dir));
+        EXPECT_EQ(session.GetLastLoadedChunkCount(), 0u);
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+        EXPECT_TRUE(session.GetWorldSystem()->snapshot_streamed_chunks().empty());
+        EXPECT_FALSE(session.SaveWorldStateTo(save_dir));
+        EXPECT_FALSE(session.SaveWorld());
     }
     jobs.shutdown();
 }
 
+} // namespace
+
+namespace {
+namespace P = Luminumbra::Persistence;
+namespace C = Luminumbra::Components;
+namespace F = luminumbra::foliage;
+
+std::string ReadClockTestFile(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << input.rdbuf();
+    return bytes.str();
+}
+
+// Reads a record that production writes through a text-mode stream, so its bytes
+// carry the host's line endings: the energy record (GameSession writes
+// aether_state.efs with a default-mode ofstream) is LF on Linux and CRLF on
+// Windows. That platform difference predates this change; normalising here keeps
+// the assertions about record CONTENT independent of it. Tests that assert exact
+// bytes written by the test itself use binary streams instead.
+std::string ReadClockTestTextRecord(const fs::path& path) {
+    std::string text = ReadClockTestFile(path);
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
+}
+
+std::string SessionWorldHash(GameSession& session) {
+    Luminumbra::WorldStreamingState state;
+    for (const auto& chunk : session.GetWorldSystem()->snapshot_streamed_chunks())
+        state.insert_chunk(chunk);
+    std::string aether = session.GetAetherFieldSystem()->ComputeAetherSubHash();
+    const auto energy = session.ComputeAetherStateSubHash();
+    if (!energy.empty())
+        aether = P::StableChecksum(aether + "|state:" + energy);
+    return P::ComposeWorldHash(P::ComputeWorldStreamingStateHash(state),
+                               session.GetWindFieldSystem()->ComputeWindSubHash(),
+                               session.GetWeatherSystem()->ComputeWeatherSubHash(),
+                               aether,
+                               session.ComputeScentSubHash(),
+                               session.FoldClockIntoEcologyHash(
+                                   luminumbra::ai::ComputeEcologySubHash(session.GetRegistry())),
+                               session.ComputePlantSubHash());
+}
+
+entt::entity ClockTestPlant(entt::registry& registry, const Luminumbra::Vec3& position) {
+    const auto plant = registry.create();
+    registry.emplace<C::PlantTag>(plant);
+    registry.emplace<C::PlantGenomeComponent>(plant).genes.fill(0.5f);
+    registry.emplace<C::PlantGrowthComponent>(plant);
+    registry.emplace<C::TransformComponent>(plant).position = position;
+    return plant;
+}
+
+entt::entity ClockTestCreature(entt::registry& registry) {
+    const auto creature = registry.create();
+    registry.emplace<C::CreatureComponent>(creature);
+    registry.emplace<C::CircadianComponent>(creature);
+    registry.emplace<C::MigratoryComponent>(creature);
+    registry.emplace<C::TransformComponent>(creature).position = Luminumbra::Vec3(0.0f);
+    registry.emplace<C::InstinctAgentComponent>(creature).actor_id = "clock-observer";
+    registry.emplace<C::NeedsComponent>(creature).needs = {{"day", 0.0f, 0.0f},
+                                                           {"year", 0.0f, 0.0f}};
+    registry.emplace<C::StimulusSubscriptionComponent>(creature).subscriptions = {
+        {luminumbra::ai::StimulusChannel::TimeOfDay, "day", 0.001f},
+        {luminumbra::ai::StimulusChannel::Season, "year", 0.001f}};
+    return creature;
+}
+
+TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninterruptedWorldHash) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, control, loaded, absent_energy, wrong_clock;
+    for (auto* session : {&original, &control, &loaded, &absent_energy, &wrong_clock}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetAetherStateEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Clock saved", "1337", "default"));
+    ASSERT_TRUE(control.CreateTransientWorld("Clock control", "1337", "default"));
+    const auto save = original.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const Luminumbra::world::WorldCalendar calendar{120, 4};
+    Luminumbra::world::WorldClock(0, calendar).write_metadata(metadata);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    ASSERT_TRUE(original.LoadWorldStateFrom(save));
+    ASSERT_TRUE(control.LoadWorldStateFrom(save));
+    for (auto* session : {&original, &control}) {
+        ClockTestPlant(session->GetRegistry(), session->GetMetadata().spawnPoint);
+        auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        chunk->mark_voxel_data_dirty();
+        ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+    }
+    constexpr int n = 317, k = 73;
+    const double dt = original.GetSimulationClock().fixed_dt();
+    for (int i = 0; i < n; ++i) {
+        ASSERT_EQ(original.TickSimulation(dt), 1u);
+        ASSERT_EQ(control.TickSimulation(dt), 1u);
+    }
+    ASSERT_FALSE(original.GetWeatherSystem()->StormCells().empty());
+    // Exercise nonempty energy epoch restoration with a deposit on the last tick.
+    for (auto* session : {&original, &control}) {
+        auto* energy = session->GetEnergyFieldState();
+        energy->QueueDeposit(1, 0, 0, 0, 60000);
+        energy->Tick(n);
+    }
+    ASSERT_FALSE(original.ComputeAetherStateSubHash().empty());
+    const auto before_save = SessionWorldHash(original);
+    ASSERT_TRUE(original.SaveWorldState());
+    EXPECT_EQ(SessionWorldHash(original), before_save);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetSimulationTickCount(), n);
+    EXPECT_EQ(SessionWorldHash(loaded), before_save);
+    EXPECT_EQ(loaded.GetWeatherSystem()->ComputeWeatherSubHash(),
+              original.GetWeatherSystem()->ComputeWeatherSubHash());
+    const auto& saved_storms = original.GetWeatherSystem()->StormCells();
+    const auto& loaded_storms = loaded.GetWeatherSystem()->StormCells();
+    ASSERT_EQ(saved_storms.size(), loaded_storms.size());
+    for (std::size_t i = 0; i < saved_storms.size(); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(saved_storms[i].spawn_tick, loaded_storms[i].spawn_tick);
+        EXPECT_EQ(saved_storms[i].center_world, loaded_storms[i].center_world);
+        EXPECT_EQ(saved_storms[i].velocity, loaded_storms[i].velocity);
+        EXPECT_EQ(saved_storms[i].intensity, loaded_storms[i].intensity);
+    }
+    const auto missing_save = root.path() / "missing-energy";
+    const auto wrong_save = root.path() / "wrong-clock";
+    fs::copy(save, missing_save, fs::copy_options::recursive);
+    fs::copy(save, wrong_save, fs::copy_options::recursive);
+    ASSERT_TRUE(fs::remove(missing_save / "aether_state.efs"));
+    metadata = nlohmann::json::parse(ReadClockTestFile(wrong_save / "world_info.json"));
+    Luminumbra::world::WorldClock(n - 1, calendar).write_metadata(metadata);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), wrong_save));
+    ASSERT_TRUE(absent_energy.CreateTransientWorld("Missing energy", "1337", "default"));
+    ASSERT_TRUE(wrong_clock.CreateTransientWorld("Wrong clock", "1337", "default"));
+    ASSERT_TRUE(absent_energy.LoadWorldStateFrom(missing_save));
+    ASSERT_TRUE(wrong_clock.LoadWorldStateFrom(wrong_save));
+    EXPECT_NE(SessionWorldHash(absent_energy), before_save);
+    EXPECT_NE(SessionWorldHash(wrong_clock), before_save);
+
+    // This slice persists plants and energy, not creature records. Attach the same
+    // observing creature to each independently advanced world at the checkpoint.
+    std::vector<entt::entity> creatures;
+    const std::vector<GameSession*> sessions{
+        &original, &control, &loaded, &absent_energy, &wrong_clock};
+    for (auto* session : sessions)
+        creatures.push_back(ClockTestCreature(session->GetRegistry()));
+    for (int i = 0; i < k; ++i) {
+        for (auto* session : sessions)
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+        const auto& reference = control.GetRegistry();
+        for (std::size_t j = 0; j < 3; ++j) {
+            const auto& registry = sessions[j]->GetRegistry();
+            EXPECT_FLOAT_EQ(registry.get<C::CircadianComponent>(creatures[j]).activity,
+                            reference.get<C::CircadianComponent>(creatures[1]).activity);
+            const auto& actual = registry.get<C::MigratoryComponent>(creatures[j]);
+            const auto& expected = reference.get<C::MigratoryComponent>(creatures[1]);
+            EXPECT_FLOAT_EQ(actual.drive, expected.drive);
+            EXPECT_FLOAT_EQ(actual.wish_x, expected.wish_x);
+            EXPECT_FLOAT_EQ(actual.wish_z, expected.wish_z);
+            const auto& needs = registry.get<C::NeedsComponent>(creatures[j]).needs;
+            const auto& expected_needs = reference.get<C::NeedsComponent>(creatures[1]).needs;
+            for (std::size_t need = 0; need < needs.size(); ++need)
+                EXPECT_FLOAT_EQ(needs[need].pressure, expected_needs[need].pressure);
+        }
+    }
+    EXPECT_EQ(loaded.GetSimulationTickCount(), n + k);
+    EXPECT_EQ(loaded.GetWorldClock().calendar(), calendar);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
+    EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(control));
+    EXPECT_NE(SessionWorldHash(absent_energy), SessionWorldHash(control));
+    EXPECT_NE(SessionWorldHash(wrong_clock), SessionWorldHash(control));
+    EXPECT_NE(wrong_clock.GetRegistry().get<C::CircadianComponent>(creatures[4]).activity,
+              control.GetRegistry().get<C::CircadianComponent>(creatures[1]).activity);
+    EXPECT_NE(wrong_clock.GetRegistry().get<C::NeedsComponent>(creatures[4]).needs[0].pressure,
+              control.GetRegistry().get<C::NeedsComponent>(creatures[1]).needs[0].pressure);
+}
+
+TEST(GameSessionHeadlessWorldTest,
+     ActiveClockWritesMetadataWithoutDirtyChunksAndExplicitLoadsRestoreIt) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Empty clock", "1337", "default"));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    const auto alternate = root.path() / "explicit-snapshot";
+    ASSERT_TRUE(session.SaveWorldStateTo(alternate));
+    const auto metadata = nlohmann::json::parse(ReadClockTestFile(alternate / "world_info.json"));
+    EXPECT_EQ(metadata.at("simulationTick"), 1u);
+    EXPECT_FALSE(fs::exists(alternate / "chunks"));
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(session.LoadWorldStateFrom(alternate));
+    EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+    EXPECT_EQ(session.GetWorldClock().calendar(), Luminumbra::world::WorldCalendar{});
+    ASSERT_TRUE(session.SaveWorld());
+    const auto inspected = P::InspectSavedWorld(root.path(), session.GetMetadata().worldId);
+    EXPECT_TRUE(inspected.error.empty());
+    EXPECT_EQ(inspected.clock.tick(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, ActiveClockKeepsAmbientAnchorWhenClientSavesMovedSpawn) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, control, loaded, explicit_load, wrong_anchor;
+    for (auto* session : {&original, &control, &loaded, &explicit_load, &wrong_anchor}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Moving spawn", "1337", "default"));
+    ASSERT_TRUE(control.CreateTransientWorld("Control", "1337", "default"));
+    const auto anchor = original.GetMetadata().spawnPoint;
+    for (auto* session : {&original, &control})
+        ClockTestPlant(session->GetRegistry(), anchor);
+    const double dt = original.GetSimulationClock().fixed_dt();
+    constexpr int n = 317, k = 73;
+    for (int i = 0; i < n; ++i) {
+        ASSERT_EQ(original.TickSimulation(dt), 1u);
+        ASSERT_EQ(control.TickSimulation(dt), 1u);
+    }
+    ASSERT_FALSE(original.GetWeatherSystem()->StormCells().empty());
+    const auto before = SessionWorldHash(original);
+    const auto spawn = anchor + Luminumbra::Vec3(2400.0f, 10.0f, -1200.0f);
+    // The production quit/shutdown path changes the respawn position before saving.
+    original.SetSpawnPoint(spawn);
+    control.SetSpawnPoint(spawn);
+    ASSERT_TRUE(original.SaveWorldState());
+    ASSERT_TRUE(original.SaveWorld());
+    EXPECT_EQ(SessionWorldHash(original), before);
+    const auto save = original.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    EXPECT_EQ(metadata.at("spawnPoint").at("x"), spawn.x);
+    EXPECT_EQ(metadata.at("ambientFieldAnchor").at("x"), anchor.x);
+    EXPECT_EQ(metadata.at("ambientFieldAnchor").at("y"), anchor.y);
+    EXPECT_EQ(metadata.at("ambientFieldAnchor").at("z"), anchor.z);
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetMetadata().spawnPoint, spawn);
+    const auto explicit_save = root.path() / "moved-spawn-snapshot";
+    ASSERT_TRUE(original.SaveWorldStateTo(explicit_save));
+    ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit", "1337", "default"));
+    ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));
+    // Model the bug: using the new respawn position for historical reconstruction.
+    metadata["ambientFieldAnchor"] = metadata.at("spawnPoint");
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), explicit_save));
+    ASSERT_TRUE(wrong_anchor.CreateTransientWorld("Wrong anchor", "1337", "default"));
+    ASSERT_TRUE(wrong_anchor.LoadWorldStateFrom(explicit_save));
+    for (int i = 0; i <= k; ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(control));
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
+        for (auto* session : {&loaded, &explicit_load}) {
+            EXPECT_EQ(session->GetWindFieldSystem()->ComputeWindSubHash(),
+                      control.GetWindFieldSystem()->ComputeWindSubHash());
+            EXPECT_EQ(session->GetWeatherSystem()->ComputeWeatherSubHash(),
+                      control.GetWeatherSystem()->ComputeWeatherSubHash());
+            EXPECT_EQ(session->GetAetherFieldSystem()->ComputeAetherSubHash(),
+                      control.GetAetherFieldSystem()->ComputeAetherSubHash());
+            const auto& storms = session->GetWeatherSystem()->StormCells();
+            const auto& expected = control.GetWeatherSystem()->StormCells();
+            ASSERT_EQ(storms.size(), expected.size());
+            for (std::size_t j = 0; j < storms.size(); ++j) {
+                EXPECT_EQ(storms[j].spawn_tick, expected[j].spawn_tick);
+                EXPECT_EQ(storms[j].center_world, expected[j].center_world);
+                EXPECT_EQ(storms[j].velocity, expected[j].velocity);
+                EXPECT_EQ(storms[j].intensity, expected[j].intensity);
+            }
+        }
+        EXPECT_NE(wrong_anchor.GetWeatherSystem()->ComputeWeatherSubHash(),
+                  control.GetWeatherSystem()->ComputeWeatherSubHash());
+        if (i < k) {
+            for (auto* session : {&original, &control, &loaded, &explicit_load, &wrong_anchor})
+                ASSERT_EQ(session->TickSimulation(dt), 1u);
+        }
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, ClockAnchorMetadataUsesLegacySpawnAndRejectsInvalidAnchors) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Anchor metadata", "1337", "default"));
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    metadata.erase("ambientFieldAnchor");
+    metadata["spawnPoint"] = {{"x", 2400.0f}, {"y", 100.0f}, {"z", -1200.0f}};
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save));
+    ASSERT_TRUE(session.SaveWorld());
+    metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    EXPECT_EQ(metadata.at("ambientFieldAnchor"),
+              (nlohmann::json{{"x", 2400.0f}, {"y", 100.0f}, {"z", -1200.0f}}));
+    const auto valid_bytes = ReadClockTestFile(save / "world_info.json");
+    const std::vector<nlohmann::json> invalid{nullptr,
+                                              true,
+                                              "anchor",
+                                              {{"x", 0.0f}},
+                                              {{"x", 1e100}, {"y", 0.0f}, {"z", 0.0f}},
+                                              {{"x", false}, {"y", 0.0f}, {"z", 0.0f}}};
+    for (const auto& value : invalid) {
+        SCOPED_TRACE(value.dump());
+        metadata["ambientFieldAnchor"] = value;
+        EXPECT_FALSE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+        EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), valid_bytes);
+        // Binary mode: the reader compares exact bytes, and Windows text mode would
+        // translate newlines and make the comparison fail for the wrong reason.
+        std::ofstream(save / "world_info.json", std::ios::binary) << metadata.dump();
+        EXPECT_FALSE(P::WorldSaveService::validate_save(save));
+        EXPECT_FALSE(
+            P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).error.empty());
+        Luminumbra::world::WorldClock clock;
+        bool required = false;
+        EXPECT_FALSE(P::WorldSaveService::read_clock_metadata(save, clock, required));
+        std::ofstream(save / "world_info.json", std::ios::binary) << valid_bytes;
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyEnergyResumeAlignsFirstDepositWithoutReplayingHistory) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession control, loaded, explicit_load;
+    for (auto* session : {&control, &loaded, &explicit_load}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetAetherStateEnabled(true);
+    }
+    ASSERT_TRUE(control.CreateWorld("Empty energy", "1337", "default"));
+    const double dt = control.GetSimulationClock().fixed_dt();
+    for (int i = 0; i < 317; ++i)
+        ASSERT_EQ(control.TickSimulation(dt), 1u);
+    ASSERT_TRUE(control.SaveWorldState());
+    const auto save = control.GetWorldSaveDir();
+    ASSERT_FALSE(fs::exists(save / "aether_state.efs"));
+    ASSERT_TRUE(loaded.LoadWorld(control.GetMetadata().worldId));
+    ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit", "1337", "default"));
+    // An absent record must also clear a reused loader's pages and pending input.
+    auto* previous = explicit_load.GetEnergyFieldState();
+    previous->QueueDeposit(1, 0, 0, 0, 40000);
+    ASSERT_EQ(explicit_load.TickSimulation(dt), 1u);
+    previous->QueueDeposit(2, 0, 0, 0, 1000);
+    ASSERT_TRUE(explicit_load.LoadWorldStateFrom(save));
+    for (auto* session : {&control, &loaded, &explicit_load}) {
+        auto* energy = session->GetEnergyFieldState();
+        ASSERT_EQ(energy->page_count(), 0u);
+        EXPECT_EQ(energy->next_fire_tick(), 320u);
+        const auto fires = energy->fires_completed();
+        energy->QueueDeposit(1, 0, 0, 0, 60000);
+        ASSERT_EQ(session->TickSimulation(dt), 1u);
+        EXPECT_EQ(energy->at_cell(0, 0), 60000u);
+        EXPECT_EQ(energy->fires_completed(), fires);
+    }
+    for (int i = 0; i < 10; ++i) {
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
+        EXPECT_EQ(SessionWorldHash(explicit_load), SessionWorldHash(control));
+        for (auto* session : {&control, &loaded, &explicit_load})
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyLegacyEnergySnapshotPreservesNonAlignedCadence) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession legacy, control, loaded, explicit_load;
+    for (auto* session : {&legacy, &control, &loaded, &explicit_load}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetAetherStateEnabled(true);
+        session->SetActiveRegionsEnabled(session != &legacy);
+    }
+    ASSERT_TRUE(legacy.CreateWorld("Legacy energy", "1337", "default"));
+    const double dt = legacy.GetSimulationClock().fixed_dt();
+    for (int i = 0; i < 5; ++i)
+        ASSERT_EQ(legacy.TickSimulation(dt), 1u);
+    legacy.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 1);
+    legacy.GetEnergyFieldState()->Tick(5);
+    ASSERT_TRUE(legacy.SaveWorldState());
+    const auto save = legacy.GetWorldSaveDir();
+    ASSERT_FALSE(nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"))
+                     .contains("simulationTick"));
+    ASSERT_TRUE(control.LoadWorld(legacy.GetMetadata().worldId));
+    ASSERT_EQ(control.GetSimulationTickCount(), 0u);
+    ASSERT_EQ(control.GetEnergyFieldState()->total_raw(), 1u);
+    ASSERT_EQ(control.GetEnergyFieldState()->next_fire_tick(), 3u);
+    for (int i = 0; i < 7; ++i)
+        ASSERT_EQ(control.TickSimulation(dt), 1u);
+    ASSERT_EQ(control.GetEnergyFieldState()->page_count(), 0u);
+    ASSERT_EQ(control.GetEnergyFieldState()->next_fire_tick(), 11u);
+    const auto explicit_save = root.path() / "empty-offset-snapshot";
+    ASSERT_TRUE(control.SaveWorldStateTo(explicit_save));
+    EXPECT_EQ(ReadClockTestTextRecord(explicit_save / "aether_state.efs"), "EFS1 2 4\n");
+    ASSERT_TRUE(control.SaveWorldState());
+    EXPECT_EQ(ReadClockTestTextRecord(save / "aether_state.efs"), "EFS1 2 4\n");
+    ASSERT_TRUE(loaded.LoadWorld(control.GetMetadata().worldId));
+    ASSERT_TRUE(explicit_load.CreateTransientWorld("Explicit", "1337", "default"));
+    ASSERT_TRUE(explicit_load.LoadWorldStateFrom(explicit_save));
+    for (auto* session : {&control, &loaded, &explicit_load}) {
+        auto* energy = session->GetEnergyFieldState();
+        ASSERT_EQ(energy->page_count(), 0u);
+        EXPECT_EQ(energy->next_fire_tick(), 11u);
+        energy->QueueDeposit(1, 0, 0, 0, 60000);
+    }
+    for (int tick = 8; tick <= 15; ++tick) {
+        SCOPED_TRACE(tick);
+        for (auto* session : {&control, &loaded, &explicit_load}) {
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+            if (tick < 11)
+                EXPECT_EQ(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
+            else
+                EXPECT_LT(session->GetEnergyFieldState()->at_cell(0, 0), 60000u);
+        }
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(control));
+        EXPECT_EQ(SessionWorldHash(explicit_load), SessionWorldHash(control));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EmptyAlignedEnergySaveRemovesStaleRecord) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded;
+    for (auto* session : {&original, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetAetherStateEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Aligned energy", "1337", "default"));
+    const double dt = original.GetSimulationClock().fixed_dt();
+    original.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 1);
+    ASSERT_EQ(original.TickSimulation(dt), 1u);
+    ASSERT_TRUE(original.SaveWorldState());
+    ASSERT_TRUE(fs::exists(original.GetWorldSaveDir() / "aether_state.efs"));
+    for (int i = 1; i < 8; ++i)
+        ASSERT_EQ(original.TickSimulation(dt), 1u);
+    ASSERT_EQ(original.GetEnergyFieldState()->page_count(), 0u);
+    ASSERT_TRUE(original.SaveWorldState());
+    EXPECT_FALSE(fs::exists(original.GetWorldSaveDir() / "aether_state.efs"));
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetEnergyFieldState()->total_raw(), 0u);
+    EXPECT_EQ(loaded.GetEnergyFieldState()->next_fire_tick(), 16u);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+}
+
+TEST(GameSessionHeadlessWorldTest, TransientClockSnapshotRefusesBeforeWritingAnyMember) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, transient;
+    for (auto* session : {&original, &transient}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetAetherStateEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Snapshot owner", "1337", "default"));
+    ClockTestPlant(original.GetRegistry(), original.GetMetadata().spawnPoint);
+    original.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 60000);
+    ASSERT_EQ(original.TickSimulation(original.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto save = original.GetWorldSaveDir();
+    ASSERT_TRUE(transient.CreateTransientWorld("Snapshot reader", "1337", "default"));
+    ASSERT_TRUE(transient.LoadWorldStateFrom(save));
+    // Make every member writer observable if it runs before the refusal.
+    ClockTestPlant(transient.GetRegistry(), transient.GetMetadata().spawnPoint);
+    transient.GetEnergyFieldState()->QueueDeposit(2, 0, 0, 0, 1000);
+    ASSERT_EQ(transient.TickSimulation(transient.GetSimulationClock().fixed_dt()), 1u);
+    const auto snapshot_bytes = [](const fs::path& path) {
+        std::map<fs::path, std::string> bytes;
+        for (const auto& entry : fs::recursive_directory_iterator(path))
+            bytes.emplace(entry.path().lexically_relative(path),
+                          entry.is_regular_file() ? ReadClockTestFile(entry.path()) : "");
+        return bytes;
+    };
+    const auto before = snapshot_bytes(save);
+    const auto missing = root.path() / "refused-transient-snapshot";
+    for (const bool dirty : {false, true}) {
+        SCOPED_TRACE(dirty);
+        if (dirty) {
+            auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+            chunk->set_state(Luminumbra::ChunkState::Idle);
+            chunk->mark_voxel_data_dirty();
+            ASSERT_TRUE(transient.GetWorldSystem()->adopt_streamed_chunk(chunk));
+        }
+        EXPECT_FALSE(transient.SaveWorldStateTo(save));
+        EXPECT_EQ(snapshot_bytes(save), before);
+        EXPECT_FALSE(transient.SaveWorldStateTo(missing));
+        EXPECT_FALSE(fs::exists(missing));
+        EXPECT_FALSE(transient.SaveWorld());
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, EnergyOnlyExplicitSnapshotCreatesDestinationAndRoundTrips) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded;
+    for (auto* session : {&original, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetAetherStateEnabled(true);
+    }
+    ASSERT_TRUE(original.CreateWorld("Energy only", "1337", "default"));
+    original.GetEnergyFieldState()->QueueDeposit(1, 0, 0, 0, 60000);
+    const double dt = original.GetSimulationClock().fixed_dt();
+    ASSERT_EQ(original.TickSimulation(dt), 1u);
+    const auto save = root.path() / "energy-only";
+    ASSERT_FALSE(fs::exists(save));
+    Luminumbra::world::WorldStateSaveReport report;
+    ASSERT_TRUE(original.SaveWorldStateTo(save, &report));
+    EXPECT_EQ(report.chunks_dirty, 0u);
+    EXPECT_FALSE(fs::exists(save / "chunks"));
+    EXPECT_TRUE(fs::exists(save / "aether_state.efs"));
+    ASSERT_TRUE(loaded.CreateTransientWorld("Energy reader", "1337", "default"));
+    ASSERT_TRUE(loaded.LoadWorldStateFrom(save));
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+    for (int i = 0; i < 10; ++i) {
+        ASSERT_EQ(original.TickSimulation(dt), 1u);
+        ASSERT_EQ(loaded.TickSimulation(dt), 1u);
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, DefaultOffCallbacksKeepLegacySavesLoadsAndNestedTicks) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateWorld("Legacy callbacks", "1337", "default"));
+    const auto save = session.GetWorldSaveDir();
+    const auto before = ReadClockTestFile(save / "world_info.json");
+    const double dt = session.GetSimulationClock().fixed_dt();
+    bool called = false;
+    session.GetSimulationEventBus().subscribe([&](const auto&) {
+        called = true;
+        EXPECT_TRUE(session.IsSimulationTickBoundary());
+        EXPECT_TRUE(session.SaveWorld());
+        EXPECT_TRUE(session.SaveWorldState());
+        EXPECT_TRUE(session.SaveWorldStateTo(root.path() / "legacy-explicit"));
+        EXPECT_FALSE(fs::exists(root.path() / "legacy-explicit"));
+        EXPECT_TRUE(session.LoadWorldState());
+        EXPECT_TRUE(session.LoadWorldStateFrom(save));
+        EXPECT_EQ(session.TickSimulation(dt), 1u);
+        EXPECT_EQ(session.GetSimulationTickCount(), 2u);
+        EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), before);
+        // Failed world opens historically reached catalog validation even in a
+        // callback. A successful open clears the bus, so do not mutate its handlers.
+        EXPECT_FALSE(session.LoadWorld("missing-world"));
+        EXPECT_FALSE(session.GetWorldOpenError().empty());
+    });
+    session.GetSimulationEventBus().publish(1, "legacy-callback", "");
+    EXPECT_EQ(session.TickSimulation(dt), 1u);
+    EXPECT_TRUE(called);
+}
+
+TEST(GameSessionHeadlessWorldTest, ClockSnapshotsRefuseInsideCatchUpBatch) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Boundary", "1337", "default"));
+    const auto metadata = session.GetWorldSaveDir() / "world_info.json";
+    const auto before = ReadClockTestFile(metadata);
+    int callbacks = 0;
+    session.GetSimulationEventBus().subscribe([&](const auto& event) {
+        ++callbacks;
+        EXPECT_EQ(session.GetSimulationTickCount(), event.tick);
+        EXPECT_FALSE(session.IsSimulationTickBoundary());
+        EXPECT_FALSE(session.SaveWorld());
+        EXPECT_FALSE(session.SaveWorldState());
+        EXPECT_FALSE(session.SaveWorldStateTo(root.path() / "reentrant-save"));
+        EXPECT_FALSE(session.LoadWorldStateFrom(session.GetWorldSaveDir()));
+        EXPECT_FALSE(session.LoadWorld(session.GetMetadata().worldId));
+        EXPECT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 0u);
+        EXPECT_EQ(ReadClockTestFile(metadata), before);
+    });
+    session.GetSimulationEventBus().publish(1, "save", "");
+    session.GetSimulationEventBus().publish(2, "save", "");
+    EXPECT_EQ(session.TickSimulation(2 * session.GetSimulationClock().fixed_dt()), 2u);
+    EXPECT_EQ(callbacks, 2);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_EQ(nlohmann::json::parse(ReadClockTestFile(metadata)).at("simulationTick"), 2u);
+}
+
+TEST(GameSessionHeadlessWorldTest, DefaultOffKeepsLegacyMetadataBytesAndTickZeroLoad) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session, loaded;
+    for (auto* s : {&session, &loaded}) {
+        s->SetRootPath(root.root_string());
+        s->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(session.CreateWorld("Legacy clock", "1337", "default"));
+    const auto path = session.GetWorldSaveDir() / "world_info.json";
+    const auto before = ReadClockTestFile(path);
+    const auto& m = session.GetMetadata();
+    const nlohmann::json legacy = {
+        {"container_version", 2},
+        {"name", m.name},
+        {"seed", m.seed},
+        {"worldType", m.worldType},
+        {"creationTime", m.creationTime},
+        {"spawnPoint", {{"x", m.spawnPoint.x}, {"y", m.spawnPoint.y}, {"z", m.spawnPoint.z}}},
+        {"waterSimCursor", std::size_t{0}}};
+    EXPECT_EQ(before, legacy.dump(4) + "\n");
+    for (int i = 0; i < 10; ++i)
+        session.TickSimulation(session.GetSimulationClock().fixed_dt());
+    EXPECT_EQ(session.FoldClockIntoEcologyHash("legacy-ecology"), "legacy-ecology");
+    ASSERT_TRUE(session.SaveWorldState());
+    ASSERT_TRUE(session.SaveWorld());
+    EXPECT_EQ(ReadClockTestFile(path), before);
+    ASSERT_TRUE(loaded.LoadWorld(m.worldId));
+    EXPECT_EQ(loaded.GetSimulationTickCount(), 0u);
+    EXPECT_EQ(ReadClockTestFile(path), before);
+}
+
+TEST(GameSessionHeadlessWorldTest, EnabledClockOverflowRefusesWithoutAdvancingEitherClock) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Clock limit", "1337", "default"));
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    const auto last = Luminumbra::world::WorldClock::kTickLimit - 1;
+    Luminumbra::world::WorldClock(last).write_metadata(metadata);
+    ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+    ASSERT_TRUE(session.LoadWorldStateFrom(save));
+    const auto before = SessionWorldHash(session);
+    EXPECT_THROW(session.TickSimulation(session.GetSimulationClock().fixed_dt()),
+                 std::overflow_error);
+    EXPECT_EQ(session.GetSimulationTickCount(), last);
+    EXPECT_EQ(session.GetSimulationClock().tick_count(), last);
+    EXPECT_EQ(session.GetSimulationClock().accumulator(), 0.0);
+    EXPECT_EQ(SessionWorldHash(session), before);
+    EXPECT_TRUE(session.IsSimulationTickBoundary());
+}
+
+TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTickPath) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateWorld("Phases", "1337", "default"));
+    const auto id = session.GetMetadata().worldId;
+    const auto save = session.GetWorldSaveDir();
+    auto metadata = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    struct Pin {
+        std::uint64_t tick;
+        float day, year, daylight, warmth;
+    };
+    for (const auto pin : {Pin{30, .25f, .0625f, .575f, .125f},
+                           Pin{60, .5f, .125f, 1.0f, .25f},
+                           Pin{120, 0.0f, .25f, .15f, .5f},
+                           Pin{240, 0.0f, .5f, .15f, 1.0f},
+                           Pin{360, 0.0f, .75f, .15f, .5f},
+                           Pin{480, 0.0f, 0.0f, .15f, 0.0f}}) {
+        SCOPED_TRACE(pin.tick);
+        Luminumbra::world::WorldClock(pin.tick - 1, {120, 4}).write_metadata(metadata);
+        ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), save));
+        ASSERT_TRUE(session.LoadWorld(id)) << session.GetWorldOpenError();
+        const auto position = session.GetMetadata().spawnPoint;
+        const auto plant = ClockTestPlant(session.GetRegistry(), position);
+        const auto creature = ClockTestCreature(session.GetRegistry());
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+        const auto& clock = session.GetWorldClock();
+        EXPECT_FLOAT_EQ(static_cast<float>(clock.day_phase(pin.tick)), pin.day);
+        EXPECT_FLOAT_EQ(static_cast<float>(clock.year_phase(pin.tick)), pin.year);
+        EXPECT_FLOAT_EQ(session.GetRegistry().get<C::CircadianComponent>(creature).activity,
+                        luminumbra::ai::CircadianActivity(pin.day, false));
+        const float spring = pin.year >= .25f ? pin.year - .25f : pin.year + .75f;
+        const auto target = luminumbra::ai::MigrationTargetAt(spring);
+        const auto& migration = session.GetRegistry().get<C::MigratoryComponent>(creature);
+        EXPECT_FLOAT_EQ(migration.drive, luminumbra::ai::MigrationDriveAt(spring));
+        const auto& creature_position =
+            session.GetRegistry().get<C::TransformComponent>(creature).position;
+        const float dx = target.x - creature_position.x;
+        const float dz = target.z - creature_position.z;
+        const float length = Luminumbra::DeterministicMath::Sqrt(dx * dx + dz * dz);
+        EXPECT_NEAR(migration.wish_x, dx / length * migration.drive, 1e-6f);
+        EXPECT_NEAR(migration.wish_z, dz / length * migration.drive, 1e-6f);
+        const auto& needs = session.GetRegistry().get<C::NeedsComponent>(creature).needs;
+        EXPECT_FLOAT_EQ(needs[0].pressure,
+                        0.001f * luminumbra::ai::CircadianActivity(pin.day, false));
+        const float season_stimulus =
+            0.5f * (1.0f + Luminumbra::DeterministicMath::Sin(
+                               spring * Luminumbra::DeterministicMath::kTwoPi));
+        EXPECT_FLOAT_EQ(needs[1].pressure, 0.001f * season_stimulus);
+        const auto sky = Luminumbra::Rendering::ComputeSeason(clock);
+        EXPECT_FLOAT_EQ(sky.phase, spring);
+        EXPECT_FLOAT_EQ(Luminumbra::Rendering::TimeOfDayFromWorldClock(clock),
+                        pin.day >= .5f ? pin.day - .5f : pin.day + .5f);
+
+        // Independent one-tick plant reference: pinned light/season values,
+        // with the same terrain and rain samples but no session calendar math.
+        F::PlantEnvSample env;
+        auto* world = session.GetWorldSystem();
+        const float height = world->GetTerrainHeightAt(position.x, position.z);
+        switch (world->SurfaceVertexMaterial(position.x, position.z, height)) {
+            case Luminumbra::MaterialType::Grass:
+                env.soil_quality = .95f;
+                break;
+            case Luminumbra::MaterialType::Soil:
+                env.soil_quality = .85f;
+                break;
+            case Luminumbra::MaterialType::Sand:
+                env.soil_quality = .45f;
+                break;
+            case Luminumbra::MaterialType::Stone:
+                env.soil_quality = .30f;
+                break;
+            default:
+                env.soil_quality = .25f;
+                break;
+        }
+        env.temperature = F::clamp01(
+            F::clamp01(.60f - std::max(0.0f, height - static_cast<float>(Luminumbra::SEA_LEVEL)) *
+                                  .00045f) +
+            (pin.warmth - .5f) * .30f);
+        env.light = pin.daylight;
+        env.moisture =
+            F::clamp01(.30f + session.GetWeatherSystem()->PrecipitationAt(position) * .70f);
+        entt::registry expected;
+        const auto reference = ClockTestPlant(expected, position);
+        F::RunPlantGrowthSystemOnTick(expected, pin.tick, [&](const auto&) { return env; });
+        const auto& actual = session.GetRegistry().get<C::PlantGrowthComponent>(plant);
+        const auto& wanted = expected.get<C::PlantGrowthComponent>(reference);
+        EXPECT_EQ(actual.growth_points, wanted.growth_points);
+        EXPECT_EQ(actual.stress_points, wanted.stress_points);
+        EXPECT_EQ(actual.last_tick, pin.tick);
+    }
+}
 } // namespace

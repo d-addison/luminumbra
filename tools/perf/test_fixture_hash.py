@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -95,6 +97,70 @@ class FixtureHashTests(unittest.TestCase):
         # perf.py requires [0-9a-f]{40,64} for a fixture hash.
         self.assertEqual(len(first), 64)
         self.assertTrue(all(c in "0123456789abcdef" for c in first))
+
+    def test_server_scope_omits_scatter_but_default_detects_its_values(self) -> None:
+        write(self.root, "systems.json", '{"water":true}')
+        write(self.root, "foliage/scatter_set.json", '{"height":0.44}')
+        full = module.fixture_hash(self.root)
+        server = module.fixture_hash(self.root, scope="headless-server")
+        write(self.root, "foliage/scatter_set.json", '{"height":0.20}')
+        self.assertNotEqual(full, module.fixture_hash(self.root))
+        self.assertEqual(server, module.fixture_hash(self.root, scope="headless-server"))
+
+    def test_server_scope_omits_only_the_named_precipitation_descriptors(self) -> None:
+        for relative in ("particles/precip_rain.json", "particles/precip_snow.json"):
+            write(self.root, relative, '{"size":0.1}')
+            full = module.fixture_hash(self.root)
+            server = module.fixture_hash(self.root, scope="headless-server")
+            write(self.root, relative, '{"size":0.02}')
+            self.assertNotEqual(full, module.fixture_hash(self.root))
+            self.assertEqual(server, module.fixture_hash(self.root, scope="headless-server"))
+        before = module.fixture_hash(self.root, scope="headless-server")
+        write(self.root, "particles/another.json", '{"size":0.02}')
+        self.assertNotEqual(before, module.fixture_hash(self.root, scope="headless-server"))
+
+    def test_server_scope_keeps_simulation_and_other_foliage_changes(self) -> None:
+        for relative in ("systems.json", "foliage/species/wheat.json", "foliage/new_species.json"):
+            with self.subTest(relative=relative):
+                write(self.root, relative, '{"growth_rate":1}')
+                before = module.fixture_hash(self.root, scope="headless-server")
+                write(self.root, relative, '{"growth_rate":2}')
+                self.assertNotEqual(before, module.fixture_hash(self.root, scope="headless-server"))
+                before = module.fixture_hash(self.root, scope="headless-server")
+                write(self.root, relative, '{malformed')
+                self.assertNotEqual(before, module.fixture_hash(self.root, scope="headless-server"))
+
+    def test_server_scope_still_detects_added_renamed_and_removed_files(self) -> None:
+        before = module.fixture_hash(self.root, scope="headless-server")
+        write(self.root, "foliage/new.json", '{"growth_rate":1}')
+        added = module.fixture_hash(self.root, scope="headless-server")
+        self.assertNotEqual(before, added)
+        (self.root / "foliage/new.json").rename(self.root / "foliage/renamed.json")
+        renamed = module.fixture_hash(self.root, scope="headless-server")
+        self.assertNotEqual(added, renamed)
+        (self.root / "foliage/renamed.json").unlink()
+        self.assertEqual(before, module.fixture_hash(self.root, scope="headless-server"))
+
+    def test_scopes_have_distinct_identities_even_without_scatter_file(self) -> None:
+        write(self.root, "systems.json", '{"water":true}')
+        self.assertNotEqual(
+            module.fixture_hash(self.root),
+            module.fixture_hash(self.root, scope="headless-server"),
+        )
+
+    def test_cli_passes_scope_and_preserves_default(self) -> None:
+        write(self.root, "systems.json", '{"water":true}')
+        for scope_args, expected_scope in (([], "all"), (["--scope", "headless-server"], "headless-server")):
+            with self.subTest(scope=expected_scope), contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(module.main(["fixture_hash.py", str(self.root), *scope_args]), 0)
+                self.assertEqual(output.getvalue().strip(), module.fixture_hash(self.root, scope=expected_scope))
+
+    def test_unknown_scope_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            module.fixture_hash(self.root, scope="typo")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            module.main(["fixture_hash.py", str(self.root), "--scope", "typo"])
+        self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":

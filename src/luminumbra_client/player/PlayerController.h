@@ -2,6 +2,7 @@
 
 #define GLFW_INCLUDE_NONE
 #include "InputActions.h"
+#include "SaveAnchor.h"
 #include "imgui.h"
 #include <GLFW/glfw3.h>
 #include <array>
@@ -65,6 +66,9 @@ public:
     glm::vec3 GetPosition() const {
         return m_position;
     }
+    // Stance-independent position to record as the saved-world spawn point: the
+    // standing eye position over the feet when walking, the camera position otherwise.
+    glm::vec3 SavedSpawnAnchor() const;
     // runtime telemetry (--profile-fly): drive the player forward at a constant noclip speed
     // without reading live input, so the headless moving profiler advances the streaming anchor at
     // a bounded rate.
