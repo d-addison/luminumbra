@@ -1,7 +1,7 @@
 # Render benchmark measurement formats
 
 The distribution-aware measurement implementation of the
-[accepted distant-world contract](distant-world.md#performance-measurement-contract)
+[accepted distant-world contract](distant-world.md)
 is opt-in. It establishes measurement validity, without setting or enforcing
 performance budgets or qualifying the far horizon. Native Windows captures and
 activation evidence remain separate work.
