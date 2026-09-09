@@ -1,5 +1,6 @@
 #include "ModeHelpers.h"
 #include "Modes.h"
+#include "luminumbra_common/replay/RegionScheduleTrace.h"
 
 namespace fs = std::filesystem;
 
@@ -72,6 +73,7 @@ int RunRecord(const ServerCliOptions& options) {
     header.engine_version = std::string(luminumbra::core::GetEngineVersionString());
     header.start_world_hash = runner.ComputeWorldHash();
 
+    Luminumbra::Replay::RegionScheduleTrace schedule_trace;
     Luminumbra::Replay::ReplayWriter writer;
     if (!writer.Open(options.record_path, header)) {
         LUMINUMBRA_CORE_ERROR("record: cannot open replay stream '{}'", options.record_path);
@@ -93,6 +95,8 @@ int RunRecord(const ServerCliOptions& options) {
             LUMINUMBRA_CORE_ERROR("record: tick {} did not advance", executed + 1);
             return 1;
         }
+        if (runner.Session()->ActiveRegionsEnabled())
+            schedule_trace.emplace_back(executed, runner.Session()->GetRegionSchedule().digest);
         if ((executed % kCheckpointIntervalTicks) == 0) {
             writer.RecordCheckpoint(CaptureCheckpoint(executed, runner));
         }
@@ -103,6 +107,14 @@ int RunRecord(const ServerCliOptions& options) {
         return 1;
     }
 
+    if (runner.Session()->ActiveRegionsEnabled()) {
+        std::string error;
+        if (!Luminumbra::Replay::WriteRegionScheduleTrace(
+                options.record_path, schedule_trace, error)) {
+            LUMINUMBRA_CORE_ERROR("record: {}", error);
+            return 1;
+        }
+    }
     const std::string final_hash = runner.ComputeWorldHash();
     const fs::path save_dir = runner.Session()->GetWorldSaveDir();
     runner.Shutdown();
@@ -163,6 +175,20 @@ int RunReplay(const ServerCliOptions& options) {
         return 1;
     }
 
+    Luminumbra::Replay::RegionScheduleTrace schedule_trace;
+    if (runner.Session()->ActiveRegionsEnabled()) {
+        std::string error;
+        if (!Luminumbra::Replay::ReadRegionScheduleTrace(
+                options.replay_path, contents->tick_count, schedule_trace, error)) {
+            LUMINUMBRA_CORE_ERROR("replay: {}", error);
+            return 1;
+        }
+    } else if (fs::exists(options.replay_path + ".regions.json")) {
+        LUMINUMBRA_CORE_ERROR(
+            "replay: incompatible configuration: region trace requires sim.active_regions");
+        return 1;
+    }
+
     // The post-boot hash must match the recorded start_world_hash, else the boot
     // parameters or worldgen drifted before tick 1 (a tick-0 divergence).
     const std::string live_start = runner.ComputeWorldHash();
@@ -198,6 +224,17 @@ int RunReplay(const ServerCliOptions& options) {
             LUMINUMBRA_CORE_ERROR("replay: tick {} did not advance", next_tick);
             runner.Shutdown();
             return 1;
+        }
+
+        if (runner.Session()->ActiveRegionsEnabled() &&
+            runner.Session()->GetRegionSchedule().digest !=
+                schedule_trace.at(executed - 1).second) {
+            diverged = true;
+            divergence_tick = executed;
+            divergence_section = "region_schedule";
+            expected_hash = schedule_trace.at(executed - 1).second;
+            actual_hash = runner.Session()->GetRegionSchedule().digest;
+            break;
         }
 
         if ((executed % kCheckpointIntervalTicks) == 0) {

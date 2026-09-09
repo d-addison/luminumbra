@@ -623,6 +623,12 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                 m_avatars[i].velocity = physics_system->get_avatar_velocity(i);
             }
         }
+        if (m_session->ActiveRegionsEnabled()) {
+            std::vector<Vec3> anchors;
+            for (const auto& avatar : m_avatars)
+                anchors.push_back(avatar.position);
+            m_session->SetReplicatedSimulationAnchors(std::move(anchors));
+        }
         report.ticks_executed += m_session->TickSimulation(fixed_dt);
         report.frames_executed += 1;
         const std::uint64_t simulation_tick = m_session->ActiveRegionsEnabled()

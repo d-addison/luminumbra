@@ -757,6 +757,7 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
     if (ambient_anchor)
         ambient_anchor->reset();
     try {
+        requires_active_regions = std::filesystem::exists(active_regions_path(save_dir));
         const auto path = save_dir / "world_info.json";
         if (!std::filesystem::exists(path))
             return true;
@@ -769,8 +770,8 @@ bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir
             AddError(errors, error);
             return false;
         }
-        requires_active_regions =
-            metadata.contains("simulationTick") || metadata.contains("calendar");
+        requires_active_regions = requires_active_regions || metadata.contains("simulationTick") ||
+                                  metadata.contains("calendar");
         if (ambient_anchor)
             *ambient_anchor = anchor;
         return true;
@@ -852,6 +853,97 @@ bool WorldSaveService::load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapsh
         return false;
     }
     return true;
+}
+
+std::filesystem::path WorldSaveService::active_regions_path(const std::filesystem::path& save_dir) {
+    return region_directory(save_dir) / "active-regions.arl";
+}
+
+bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors) {
+    try {
+        const auto path = active_regions_path(save_dir);
+        if (!std::filesystem::exists(path)) {
+            ledger = world::ActiveRegionLedger{};
+            return true;
+        }
+        const auto length = std::filesystem::file_size(path);
+        if (length > world::ActiveRegionLedger::kMaxFileBytes) {
+            AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+            return false;
+        }
+        std::ifstream input(path, std::ios::binary);
+        std::string bytes(static_cast<std::size_t>(length), '\0');
+        input.read(bytes.data(), static_cast<std::streamsize>(length));
+        std::string error;
+        if (!input || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+            AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
+            return false;
+        }
+        return true;
+    } catch (const std::exception&) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
+}
+
+bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
+                                           const world::WorldClock& clock,
+                                           const std::filesystem::path& save_dir,
+                                           std::vector<std::string>* errors) {
+    if (!validate_save(save_dir, errors))
+        return false;
+    // Keep an anchor-only ledger: it restores last walking feet before activation.
+    if (ledger.records().empty() && !ledger.local_anchor() &&
+        !std::filesystem::exists(active_regions_path(save_dir)))
+        return true;
+    auto saved = ledger;
+    saved.mark_saved(clock);
+    const auto bytes = saved.encode();
+    world::ActiveRegionLedger checked;
+    std::string error;
+    if (!world::ActiveRegionLedger::decode(bytes, checked, error) || ledger.tick() > clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
+    try {
+        const auto path = active_regions_path(save_dir);
+        std::filesystem::create_directories(path.parent_path());
+        std::filesystem::path temp;
+        if (!WriteDurableRegionTemp(path, bytes, temp, errors))
+            return false;
+        if (!ReplaceRegionFileAtomically(temp, path, errors)) {
+            RemoveTemporaryFile(temp);
+            return false;
+        }
+        ledger = std::move(saved);
+        return true;
+    } catch (const std::exception& e) {
+        AddError(errors, std::string("Cannot save active-region ledger: ") + e.what());
+        return false;
+    }
+}
+
+std::uint64_t WorldSaveService::durable_region_digest(const std::filesystem::path& save_dir,
+                                                      world::RegionKey key) {
+    std::vector<ContainerRecord> records;
+    std::vector<std::string> errors;
+    if (!read_container_records(region_file_path(save_dir, key.x, key.z), records, &errors))
+        throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
+                                                : errors.front());
+    std::sort(
+        records.begin(), records.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    std::string bytes = "region_records:v1:";
+    for (const auto& record : records) {
+        if (record.lod_level != 0)
+            continue;
+        AppendU64(bytes, record.id);
+        bytes.push_back(static_cast<char>(record.flags));
+        AppendU64(bytes, record.payload.size());
+        bytes += record.payload;
+    }
+    return std::stoull(StableChecksum(bytes), nullptr, 16);
 }
 
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,
@@ -1120,7 +1212,8 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
             if (!entry.is_regular_file())
                 return reject("corrupt world persistence artifact: " + entry.path().string());
             if (entry.path() == world_manifest_path(save_dir) ||
-                entry.path() == plant_entities_path(save_dir)) {
+                entry.path() == plant_entities_path(save_dir) ||
+                entry.path() == active_regions_path(save_dir)) {
                 present = true;
             } else if (ParseRegionFileName(entry.path(), rx, rz)) {
                 region_files.push_back(entry.path());
@@ -1198,6 +1291,17 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                         return reject("");
                 }
             }
+        }
+        world::ActiveRegionLedger ledger;
+        if (!load_active_regions(ledger, save_dir, &errors))
+            return reject("");
+        if (std::filesystem::exists(active_regions_path(save_dir))) {
+            world::WorldClock clock;
+            bool required = false;
+            if (!read_clock_metadata(save_dir, clock, required, &errors))
+                return reject("");
+            if (ledger.tick() > clock.tick())
+                return reject(world::ActiveRegionLedger::kCorruptMessage);
         }
         Ecs::EntityRegistrySnapshot plants;
         if (stop.stop_requested())

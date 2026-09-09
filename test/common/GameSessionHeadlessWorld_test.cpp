@@ -20,6 +20,7 @@
 #include "luminumbra_common/ai/StimulusChannels.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/replay/RegionScheduleTrace.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/PlantGrowthSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
@@ -410,7 +411,7 @@ TEST(GameSessionHeadlessWorldTest, ActiveClockSaveLoadContinuationMatchesUninter
     fs::copy(save, wrong_save, fs::copy_options::recursive);
     ASSERT_TRUE(fs::remove(missing_save / "aether_state.efs"));
     metadata = nlohmann::json::parse(ReadClockTestFile(wrong_save / "world_info.json"));
-    Luminumbra::world::WorldClock(n - 1, calendar).write_metadata(metadata);
+    Luminumbra::world::WorldClock(n + 1, calendar).write_metadata(metadata);
     ASSERT_TRUE(P::WorldSaveService::save_metadata(metadata.dump(), wrong_save));
     ASSERT_TRUE(absent_energy.CreateTransientWorld("Missing energy", "1337", "default"));
     ASSERT_TRUE(wrong_clock.CreateTransientWorld("Wrong clock", "1337", "default"));
@@ -472,7 +473,7 @@ TEST(GameSessionHeadlessWorldTest,
     ASSERT_TRUE(session.SaveWorldStateTo(alternate));
     const auto metadata = nlohmann::json::parse(ReadClockTestFile(alternate / "world_info.json"));
     EXPECT_EQ(metadata.at("simulationTick"), 1u);
-    EXPECT_FALSE(fs::exists(alternate / "chunks"));
+    EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(alternate)));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
     ASSERT_TRUE(session.LoadWorldStateFrom(alternate));
     EXPECT_EQ(session.GetSimulationTickCount(), 1u);
@@ -801,7 +802,7 @@ TEST(GameSessionHeadlessWorldTest, EnergyOnlyExplicitSnapshotCreatesDestinationA
     Luminumbra::world::WorldStateSaveReport report;
     ASSERT_TRUE(original.SaveWorldStateTo(save, &report));
     EXPECT_EQ(report.chunks_dirty, 0u);
-    EXPECT_FALSE(fs::exists(save / "chunks"));
+    EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(save)));
     EXPECT_TRUE(fs::exists(save / "aether_state.efs"));
     ASSERT_TRUE(loaded.CreateTransientWorld("Energy reader", "1337", "default"));
     ASSERT_TRUE(loaded.LoadWorldStateFrom(save));
@@ -1036,3 +1037,233 @@ TEST(GameSessionHeadlessWorldTest, CalendarConsumersUsePinnedPhasesOnTheRealTick
     }
 }
 } // namespace
+
+TEST(GameSessionHeadlessWorldTest, DisabledRegionsMatchDevelWorldHashAndExactSaveBytes) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    ASSERT_TRUE(session.CreateWorld("Region golden", "1337", "default"));
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->heightmap_data = {8.0f, 8.5f, 9.0f};
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    // Disabled entry points must be inert, including otherwise invalid inputs.
+    session.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(20000, 0, 20000), true);
+    session.PinActiveRegion({123, 45}, true);
+    session.NotifyGroundObjectEdit(Luminumbra::Vec3(5000, 0, 5000));
+    session.RecordActiveRegionWork({{123, 45}, UINT64_MAX, 0, 0, 0});
+    for (int i = 0; i < 7; ++i)
+        ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    const auto save = root.path() / "golden-save";
+    ASSERT_TRUE(session.SaveWorldStateTo(save));
+    EXPECT_EQ(SessionWorldHash(session), "a088c112ee5c428f");
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().empty());
+    const auto fixture =
+        fs::path(LUMINUMBRA_SOURCE_ROOT) / "test/fixtures/active-regions/devel-off";
+    std::size_t files = 0;
+    for (const auto& entry : fs::recursive_directory_iterator(save)) {
+        if (!entry.is_regular_file())
+            continue;
+        ++files;
+        EXPECT_EQ(ReadClockTestFile(entry.path()),
+                  ReadClockTestFile(fixture / entry.path().filename()));
+    }
+    EXPECT_EQ(files, 2u);
+    EXPECT_FALSE(fs::exists(P::WorldSaveService::active_regions_path(save)));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHoldCounters) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, uninterrupted, loaded;
+    for (auto* session : {&original, &uninterrupted, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+        session->SetRegionSchedulerConfig({10, 3, 2});
+    }
+    ASSERT_TRUE(original.CreateWorld("Region resume", "1337", "default"));
+    ASSERT_TRUE(uninterrupted.CreateTransientWorld("Uninterrupted", "1337", "default"));
+    const Luminumbra::world::RegionKey far{40, -40};
+    for (auto* session : {&original, &uninterrupted})
+        session->PinActiveRegion(far, true);
+    const auto dt = original.GetSimulationClock().fixed_dt();
+    for (std::uint64_t tick = 1; tick <= 20; ++tick) {
+        SCOPED_TRACE(tick);
+        for (auto* session : {&original, &uninterrupted}) {
+            session->RecordActiveRegionWork({far, tick <= 9 ? 11u : 10u, 0, 0, 0});
+            ASSERT_EQ(session->TickSimulation(dt), 1u);
+        }
+        EXPECT_EQ(original.GetRegionSchedule(), uninterrupted.GetRegionSchedule());
+        EXPECT_EQ(SessionWorldHash(original), SessionWorldHash(uninterrupted));
+        if (tick >= 4) {
+            loaded.RecordActiveRegionWork({far, tick <= 9 ? 11u : 10u, 0, 0, 0});
+            ASSERT_EQ(loaded.TickSimulation(dt), 1u);
+            EXPECT_EQ(loaded.GetRegionSchedule(), original.GetRegionSchedule());
+            EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(),
+                      original.GetActiveRegionLedger().canonical_bytes());
+            EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+        }
+        if (tick == 3 || tick == 11) {
+            const auto before = SessionWorldHash(original);
+            ASSERT_TRUE(original.SaveWorldState());
+            EXPECT_EQ(SessionWorldHash(original), before);
+            ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId))
+                << loaded.GetWorldOpenError();
+            EXPECT_EQ(loaded.GetActiveRegionLedger().encode(),
+                      original.GetActiveRegionLedger().encode());
+            EXPECT_EQ(SessionWorldHash(loaded), before);
+        }
+    }
+    EXPECT_EQ(loaded.GetSimulationTickCount(), 20u);
+}
+
+TEST(GameSessionHeadlessWorldTest, WalkingAnchorSurvivesNoclipAndReloadWithoutCameraInputs) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession walking, noclip, loaded;
+    for (auto* session : {&walking, &noclip, &loaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+        session->SetActiveRegionsEnabled(true);
+    }
+    ASSERT_TRUE(walking.CreateTransientWorld("Walking", "1337", "default"));
+    ASSERT_TRUE(noclip.CreateWorld("Noclip", "1337", "default"));
+    const Luminumbra::Vec3 feet(-768, 30, 768);
+    walking.SetLocalPlayerSimulationPosition(feet, true);
+    noclip.SetLocalPlayerSimulationPosition(feet, true);
+    for (int tick = 0; tick < 5; ++tick) {
+        noclip.SetLocalPlayerSimulationPosition(Luminumbra::Vec3(10000 + tick * 1000, 500, -20000),
+                                                false);
+        ASSERT_EQ(walking.TickSimulation(walking.GetSimulationClock().fixed_dt()), 1u);
+        ASSERT_EQ(noclip.TickSimulation(noclip.GetSimulationClock().fixed_dt()), 1u);
+        EXPECT_EQ(walking.GetRegionSchedule(), noclip.GetRegionSchedule());
+        EXPECT_EQ(SessionWorldHash(walking), SessionWorldHash(noclip));
+    }
+    ASSERT_TRUE(noclip.SaveWorldState());
+    ASSERT_TRUE(loaded.LoadWorld(noclip.GetMetadata().worldId));
+    EXPECT_EQ(loaded.GetActiveRegionLedger().local_anchor(), std::optional<Luminumbra::Vec3>(feet));
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(noclip));
+    for (auto* session : {&walking, &noclip, &loaded})
+        ASSERT_EQ(session->TickSimulation(session->GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(walking));
+    // Replicated avatars replace the single-player anchor for activation.
+    loaded.SetReplicatedSimulationAnchors({Luminumbra::Vec3(10000, 0, 10000)});
+    ASSERT_EQ(loaded.TickSimulation(loaded.GetSimulationClock().fixed_dt()), 1u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().records().at({-2, 1}).last_proximity, 6u);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().records().at({19, 19}).last_proximity, 7u);
+}
+
+TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledRefusals) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner;
+    owner.SetRootPath(root.root_string());
+    owner.SetJobSystem(&jobs);
+    owner.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(owner.CreateWorld("Ledger refusal", "1337", "default"));
+    ASSERT_EQ(owner.TickSimulation(owner.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(owner.SaveWorldState());
+    const auto save = owner.GetWorldSaveDir();
+    const auto path = P::WorldSaveService::active_regions_path(save);
+    const auto good = ReadClockTestFile(path);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    for (const bool future : {false, true}) {
+        auto bytes = good;
+        bytes[future ? 4 : 8] ^= future ? 3 : 1;
+        std::ofstream(path, std::ios::binary) << bytes;
+        std::vector<std::string> errors;
+        EXPECT_FALSE(P::WorldSaveService::validate_save(save, &errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_EQ(errors.front(),
+                  future ? Luminumbra::world::ActiveRegionLedger::kFutureMessage
+                         : Luminumbra::world::ActiveRegionLedger::kCorruptMessage);
+        EXPECT_FALSE(owner.SaveWorldState());
+        EXPECT_EQ(ReadClockTestFile(path), bytes);
+        GameSession refused;
+        refused.SetRootPath(root.root_string());
+        refused.SetJobSystem(&jobs);
+        refused.SetActiveRegionsEnabled(true);
+        EXPECT_FALSE(refused.LoadWorld(owner.GetMetadata().worldId));
+        EXPECT_EQ(refused.GetWorldOpenError(), errors.front());
+    }
+    std::ofstream(path, std::ios::binary) << good;
+    GameSession disabled;
+    disabled.SetRootPath(root.root_string());
+    disabled.SetJobSystem(&jobs);
+    EXPECT_FALSE(disabled.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_NE(disabled.GetWorldOpenError().find("Incompatible configuration"), std::string::npos);
+    ASSERT_TRUE(fs::remove(path));
+    Luminumbra::world::ActiveRegionLedger empty;
+    EXPECT_TRUE(P::WorldSaveService::load_active_regions(empty, save));
+    EXPECT_TRUE(empty.records().empty());
+    EXPECT_TRUE(P::WorldSaveService::validate_save(save));
+    GameSession legacy;
+    legacy.SetRootPath(root.root_string());
+    legacy.SetJobSystem(&jobs);
+    legacy.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(legacy.LoadWorld(owner.GetMetadata().worldId));
+    EXPECT_TRUE(legacy.GetActiveRegionLedger().records().empty());
+    EXPECT_EQ(legacy.GetSimulationTickCount(), 1u);
+}
+
+TEST(GameSessionHeadlessWorldTest, VoxelGroundObjectAndPinInputsActivateOnlyTheirRegions) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    session.SetRootPath(root.root_string());
+    session.SetJobSystem(&jobs);
+    session.SetActiveRegionsEnabled(true);
+    ASSERT_TRUE(session.CreateTransientWorld("Edit activation", "1337", "default"));
+    auto* world = session.GetWorldSystem();
+    // Adopt an all-air lattice at the far edit, without render-driven activation.
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(320, 0, -320));
+    chunk->set_state(Luminumbra::ChunkState::Idle);
+    chunk->sdf_data.assign(17 * 17 * 17, 1.0f);
+    ASSERT_TRUE(world->adopt_streamed_chunk(chunk));
+    ASSERT_GT(world->EditTerrainVoxel(Luminumbra::Vec3(5128, 8, -5112), 1, true, nullptr), 0);
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().at({10, -10}).edited);
+    session.NotifyGroundObjectEdit(Luminumbra::Vec3(-5121, 0, 5121));
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().at({-11, 10}).edited);
+    session.PinActiveRegion({20, 20}, true);
+    EXPECT_TRUE(session.GetActiveRegionLedger().records().at({20, 20}).pinned);
+    EXPECT_EQ(session.GetActiveRegionLedger().records().size(), 3u);
+}
+
+TEST(GameSessionHeadlessWorldTest, ReplayScheduleCompanionRoundTripsAndRefusesInvalidTraces) {
+    const HeadlessRoot root;
+    const auto path = root.path() / "recording.lrec";
+    using namespace Luminumbra::Replay;
+    const RegionScheduleTrace trace{{1, "0123456789abcdef"}, {2, "fedcba9876543210"}};
+    RegionScheduleTrace restored;
+    std::string error;
+    EXPECT_FALSE(ReadRegionScheduleTrace(path, 2, restored, error));
+    EXPECT_EQ(error, "Missing region schedule trace.");
+    ASSERT_TRUE(WriteRegionScheduleTrace(path, trace, error));
+    ASSERT_TRUE(ReadRegionScheduleTrace(path, 2, restored, error));
+    EXPECT_EQ(restored, trace);
+    EXPECT_FALSE(ReadRegionScheduleTrace(path, 3, restored, error));
+    EXPECT_EQ(error, "Corrupt region schedule trace.");
+    const auto companion = path.string() + ".regions.json";
+    const auto good = nlohmann::json::parse(ReadClockTestFile(companion));
+    auto value = good;
+    value["ticks"][0]["digest"] = "0000000000000000";
+    std::ofstream(companion, std::ios::binary) << value.dump();
+    EXPECT_FALSE(ReadRegionScheduleTrace(path, 2, restored, error));
+    EXPECT_EQ(error, "Corrupt region schedule trace.");
+    EXPECT_EQ(restored, trace);
+    value = good;
+    value["schema"] = "luminumbra.region_schedule_trace.v2";
+    std::ofstream(companion, std::ios::binary) << value.dump();
+    EXPECT_FALSE(ReadRegionScheduleTrace(path, 2, restored, error));
+    EXPECT_EQ(error, "Unsupported future region schedule trace version.");
+    EXPECT_FALSE(WriteRegionScheduleTrace(path, {{2, "0123456789abcdef"}}, error));
+}

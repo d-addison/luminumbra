@@ -170,6 +170,11 @@ void GameSession::ResetWorldSystems() {
     m_irrigationGrid.reset();
     m_simulationClock.reset();
     m_worldClock = WorldClock{};
+    m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
+    m_regionSchedule = {};
+    m_replicatedSimulationAnchors.clear();
+    m_regionWork.clear();
+    m_regionDurableDirectory.clear();
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
 }
@@ -826,6 +831,20 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         }
 
         m_simulationEventBus.drain(current_tick);
+        if (m_activeRegionsEnabled) {
+            m_regionSchedule = m_activeRegionLedger.schedule(
+                m_worldClock, m_replicatedSimulationAnchors, m_regionWork, [this](RegionKey key) {
+                    const auto directory = m_regionDurableDirectory.empty()
+                                               ? GetWorldSaveDir()
+                                               : m_regionDurableDirectory;
+                    return directory.empty()
+                               ? std::stoull(
+                                     Persistence::StableChecksum("region_records:v1:"), nullptr, 16)
+                               : Persistence::WorldSaveService::durable_region_digest(directory,
+                                                                                      key);
+                });
+            m_regionWork.clear();
+        }
     }
     return ticks_executed;
 }
@@ -1011,6 +1030,9 @@ bool GameSession::CreateWorldInternal(const std::string& name,
 
     m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
     m_ambientFieldAnchor = m_metadata.spawnPoint;
+    if (m_activeRegionsEnabled)
+        m_activeRegionLedger.set_local_anchor(m_metadata.spawnPoint);
+    AttachRegionEditObserver();
     InitializeScentField(m_metadata.spawnPoint);
 
     // species definitions load once at world create (content-pure; see the helper).
@@ -1153,6 +1175,7 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     ApplyWeatherRainWiring();
 
     m_worldOpenError.clear();
+    AttachRegionEditObserver();
     if (!LoadWorldState())
         return false;
     LUMINUMBRA_CORE_INFO("World loaded successfully: {}", m_metadata.name);
@@ -1166,9 +1189,45 @@ bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
            (!required || m_activeRegionsEnabled);
 }
 
+void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
+    if (m_worldSystem)
+        throw std::logic_error("Set region scheduler configuration before creating a world");
+    m_activeRegionLedger = ActiveRegionLedger(config);
+    m_regionSchedulerConfig = config;
+}
+void GameSession::SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking) {
+    if (m_activeRegionsEnabled && walking)
+        m_activeRegionLedger.set_local_anchor(feet);
+}
+void GameSession::SetReplicatedSimulationAnchors(std::vector<Vec3> anchors) {
+    if (m_activeRegionsEnabled)
+        m_replicatedSimulationAnchors = std::move(anchors);
+}
+void GameSession::NotifyGroundObjectEdit(const Vec3& position) {
+    if (m_activeRegionsEnabled)
+        m_activeRegionLedger.mark_edited(ActiveRegionLedger::region_at(position), m_worldClock);
+}
+void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
+    if (m_activeRegionsEnabled)
+        m_activeRegionLedger.pin(key, pinned, m_worldClock);
+}
+void GameSession::RecordActiveRegionWork(RegionWork work) {
+    if (m_activeRegionsEnabled)
+        m_regionWork.push_back(work);
+}
+void GameSession::AttachRegionEditObserver() {
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
+            int x = 0, z = 0;
+            Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
+            m_activeRegionLedger.mark_edited({x, z}, m_worldClock);
+        });
+}
+
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
     return m_activeRegionsEnabled
-               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes())
+               ? Persistence::StableChecksum(ecology_hash + m_worldClock.canonical_bytes() +
+                                             m_activeRegionLedger.canonical_bytes())
                : ecology_hash;
 }
 
@@ -1223,7 +1282,15 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
     }
-    return Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n", save_dir);
+    if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n", save_dir))
+        return false;
+    if (m_activeRegionsEnabled) {
+        if (!Persistence::WorldSaveService::save_active_regions(
+                m_activeRegionLedger, m_worldClock, save_dir))
+            return false;
+        m_regionDurableDirectory = save_dir;
+    }
+    return true;
 }
 
 std::filesystem::path GameSession::GetWorldSaveDir() const {
@@ -1417,6 +1484,18 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         return true; // legacy fresh world
     if (m_activeRegionsEnabled) {
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
+        ActiveRegionLedger ledger;
+        if (!Persistence::WorldSaveService::load_active_regions(ledger, save_dir, &clock_errors)) {
+            m_worldOpenError = clock_errors.front();
+            return false;
+        }
+        m_activeRegionLedger = std::move(ledger);
+        if (!m_activeRegionLedger.local_anchor())
+            m_activeRegionLedger.set_local_anchor(m_metadata.spawnPoint);
+        m_regionDurableDirectory = save_dir;
+        m_regionSchedule = {};
+        m_regionWork.clear();
+        m_replicatedSimulationAnchors.clear();
         RestoreWorldClock(saved_clock);
     }
 

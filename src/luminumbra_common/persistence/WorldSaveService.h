@@ -1,5 +1,6 @@
 #pragma once
 
+#include "world/ActiveRegionLedger.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
@@ -61,6 +62,17 @@ public:
     static bool load_plant_entities(Luminumbra::Ecs::EntityRegistrySnapshot& out,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
+
+    static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
+    static bool save_active_regions(world::ActiveRegionLedger& ledger,
+                                    const world::WorldClock& clock,
+                                    const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors = nullptr);
+    static bool load_active_regions(world::ActiveRegionLedger& ledger,
+                                    const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors = nullptr);
+    static std::uint64_t durable_region_digest(const std::filesystem::path& save_dir,
+                                               world::RegionKey key);
 
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;
