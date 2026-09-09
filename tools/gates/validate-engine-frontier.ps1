@@ -3475,12 +3475,15 @@ function Test-PlayerView {
 # run measures the gbuffer GPU time with far-LOD DISABLED (the honest in-run
 # baseline; the committed perf baseline records frame times, not per-pass GPU
 # times); phase B enables far-LOD and sweeps eye-level + elevated stations.
-# Gates (the deterministic runtime contract section 4): zero missing wanted regions to
-# 1536 m after settle; farlod_resident_bytes < 64 MB; gbuffer_gpu_ms delta
+# Gates: zero reported missing regions in the legacy runtime wanted set after
+# settle (no independent radius assertion); farlod_resident_bytes below the
+# artifact's resident_budget_bytes threshold; gbuffer_gpu_ms delta
 # < 1.5 ms; horizon screenshots show terrain to the horizon (below-horizon
 # sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
 # radii) shows no sky-leak band and no strict void clusters (the
 # Distant-Horizons failure mode).
+# FarTierTable.h declares the future volumetric ranges; this gate still reads
+# the legacy artifact and does not qualify coverage of that ladder.
 
 function Test-FarLodHorizon {
     $exe = Get-ClientExe
@@ -3524,7 +3527,10 @@ function Test-FarLodHorizon {
             throw "farlod horizon ($preset) captured $($analysis.aggregates.captured_stations) of $($analysis.aggregates.expected_stations) stations"
         }
 
-        # After settle: zero missing wanted regions out to 1536 m.
+        # After settle: zero reported missing regions in the runtime wanted set.
+        # This does not check thresholds.f2_outer_range_m (legacy metadata) or
+        # compute an expected set independently. See world/FarTierTable.h for
+        # the future volumetric ladder; assertions stay unchanged here.
         if ([int64]$analysis.farlod.regions_missing -gt 0) {
             throw "farlod horizon ($preset) has $($analysis.farlod.regions_missing) missing wanted far regions after settle"
         }
