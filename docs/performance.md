@@ -44,7 +44,7 @@ and an effect larger than three pooled median absolute deviations. Smaller or
 underpowered changes are reported as warnings.
 
 For populated fixed-tick stage measurements on default, mountains and
-archipelago, use the [simulation budget capture command](sim-budget-telemetry.md#repeatable-capture).
+archipelago, use the [simulation budget capture command](sim-budget-telemetry.md).
 It reports deterministic work separately from wall-time distributions and
 leaves the normal server smoke artifact unchanged when disabled.
 

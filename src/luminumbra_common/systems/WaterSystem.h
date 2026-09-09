@@ -343,7 +343,7 @@ private:
     std::size_t m_dbg_awake_water_chunks = 0; // see dbg_awake_water_chunks()
     std::size_t m_dbg_cells_simmed = 0;       // see dbg_cells_simmed()
     std::size_t m_cells_stepped_last_update = 0;
-    DbgWaterTimings m_dbg_water;              // sub-phase telemetry (see dbg_water_timings())
+    DbgWaterTimings m_dbg_water; // sub-phase telemetry (see dbg_water_timings())
 
     std::size_t m_water_sim_cursor = 0;
     // Derived acceleration structure only: entries are reconstructed from persisted integer water
