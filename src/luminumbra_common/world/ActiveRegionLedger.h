@@ -114,8 +114,9 @@ public:
                                                           std::uint64_t system_cap);
     // Inputs are complete for this host tick. Duplicate work entries are summed
     // before any decision; unknown regions and repeated/backward ticks refuse.
+    // nullopt uses the local single-player anchor; an explicit empty span visits nothing.
     RegionSchedule schedule(const WorldClock& clock,
-                            std::span<const Vec3> replicated_anchors = {},
+                            std::optional<std::span<const Vec3>> replicated_anchors = std::nullopt,
                             std::span<const RegionWork> work = {},
                             const DurableDigest& durable_digest = {});
     [[nodiscard]] std::string canonical_bytes() const;
@@ -125,7 +126,7 @@ public:
 
 private:
     RegionSchedule schedule_in_place(const WorldClock& clock,
-                                     std::span<const Vec3> replicated_anchors,
+                                     std::optional<std::span<const Vec3>> replicated_anchors,
                                      std::span<const RegionWork> work,
                                      const DurableDigest& durable_digest);
     ActiveRegionRecord& activate(RegionKey key, const WorldClock& clock);

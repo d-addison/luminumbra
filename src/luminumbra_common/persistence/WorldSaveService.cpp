@@ -925,25 +925,30 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
 }
 
-std::uint64_t WorldSaveService::durable_region_digest(const std::filesystem::path& save_dir,
-                                                      world::RegionKey key) {
-    std::vector<ContainerRecord> records;
-    std::vector<std::string> errors;
-    if (!read_container_records(region_file_path(save_dir, key.x, key.z), records, &errors))
-        throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
-                                                : errors.front());
-    std::sort(
-        records.begin(), records.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
-    std::string bytes = "region_records:v1:";
-    for (const auto& record : records) {
-        if (record.lod_level != 0)
+std::uint64_t
+WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                           world::RegionKey key,
+                                           const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
+    WorldStreamingState region;
+    for (const auto& chunk : live_chunks) {
+        if (!chunk)
             continue;
-        AppendU64(bytes, record.id);
-        bytes.push_back(static_cast<char>(record.flags));
-        AppendU64(bytes, record.payload.size());
-        bytes += record.payload;
+        int rx = 0, rz = 0;
+        region_coords_for_chunk(chunk->get_coords(), rx, rz);
+        if (rx == key.x && rz == key.z)
+            region.insert_chunk(chunk);
     }
-    return std::stoull(StableChecksum(bytes), nullptr, 16);
+    if (!save_dir.empty()) {
+        std::vector<std::shared_ptr<Chunk>> durable_chunks;
+        std::vector<std::string> errors;
+        if (!read_region_chunks(region_file_path(save_dir, key.x, key.z), durable_chunks, &errors))
+            throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
+                                                    : errors.front());
+        // insert_chunk preserves the first record for an id: live simulation wins.
+        for (const auto& chunk : durable_chunks)
+            region.insert_chunk(chunk);
+    }
+    return std::stoull(ComputeWorldStreamingStateHash(region), nullptr, 16);
 }
 
 void WorldSaveService::region_coords_for_chunk(const IVec3& chunk_coords,
@@ -957,6 +962,12 @@ bool WorldSaveService::has_world_save(const std::filesystem::path& save_dir) {
     WorldStreamingState state;
     std::vector<std::string> errors;
     return WorldSaveService{}.load_world(state, save_dir, errors);
+}
+
+bool WorldSaveService::has_chunk_snapshot(const std::filesystem::path& save_dir) {
+    WorldStreamingState state;
+    std::vector<std::string> errors;
+    return WorldSaveService{}.load_world(state, save_dir, errors) && !state.empty();
 }
 
 bool WorldSaveService::validate_save(const std::filesystem::path& save_dir,

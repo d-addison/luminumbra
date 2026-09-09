@@ -1233,6 +1233,20 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 995,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off/r.0.0.lmr",
+      "sha256": "351f81e865582c139a5c8f56294f39eed4b35df7024c4d4bee4447a2dc81d675",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 114,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off/world-manifest.json",
+      "sha256": "8fbfdd8d115f612b7ec3c5c7fe27ce9d18f95af846c5b91906f2f4aba66c6bea",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 168,
       "license": "LicenseRef-Public-Domain",
       "path": "test/fixtures/dem/.gitignore",

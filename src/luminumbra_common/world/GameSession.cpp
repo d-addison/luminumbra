@@ -172,7 +172,7 @@ void GameSession::ResetWorldSystems() {
     m_worldClock = WorldClock{};
     m_activeRegionLedger = ActiveRegionLedger(m_regionSchedulerConfig);
     m_regionSchedule = {};
-    m_replicatedSimulationAnchors.clear();
+    m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
     m_regionDurableDirectory.clear();
     m_simulationEventBus.clear();
@@ -243,7 +243,8 @@ void GameSession::LoadSpeciesDefinitions() {
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
-    if (!IsSimulationTickBoundary())
+    // Queued work belongs to this next tick; only reentrant batches must refuse.
+    if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
     struct BatchGuard {
         bool& active;
@@ -832,16 +833,17 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
 
         m_simulationEventBus.drain(current_tick);
         if (m_activeRegionsEnabled) {
+            const auto anchors =
+                m_replicatedSimulationAnchors
+                    ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
+                    : std::nullopt;
             m_regionSchedule = m_activeRegionLedger.schedule(
-                m_worldClock, m_replicatedSimulationAnchors, m_regionWork, [this](RegionKey key) {
+                m_worldClock, anchors, m_regionWork, [this](RegionKey key) {
                     const auto directory = m_regionDurableDirectory.empty()
                                                ? GetWorldSaveDir()
                                                : m_regionDurableDirectory;
-                    return directory.empty()
-                               ? std::stoull(
-                                     Persistence::StableChecksum("region_records:v1:"), nullptr, 16)
-                               : Persistence::WorldSaveService::durable_region_digest(directory,
-                                                                                      key);
+                    return Persistence::WorldSaveService::region_simulation_digest(
+                        directory, key, m_worldSystem->snapshot_streamed_chunks());
                 });
             m_regionWork.clear();
         }
@@ -1377,7 +1379,7 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     Persistence::WorldSaveService service;
     std::vector<std::string> errors;
     // Subsequent saves rewrite the edited regions of a supported container.
-    const bool has_snapshot = Persistence::WorldSaveService::has_world_save(save_dir);
+    const bool has_snapshot = Persistence::WorldSaveService::has_chunk_snapshot(save_dir);
 
     bool ok = false;
     if (!has_snapshot) {
@@ -1495,7 +1497,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_regionDurableDirectory = save_dir;
         m_regionSchedule = {};
         m_regionWork.clear();
-        m_replicatedSimulationAnchors.clear();
+        m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved_clock);
     }
 

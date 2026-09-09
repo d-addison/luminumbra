@@ -71,8 +71,11 @@ public:
     static bool load_active_regions(world::ActiveRegionLedger& ledger,
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
-    static std::uint64_t durable_region_digest(const std::filesystem::path& save_dir,
-                                               world::RegionKey key);
+    // Simulation-only lod-0 projection; live chunks override durable records by id.
+    static std::uint64_t
+    region_simulation_digest(const std::filesystem::path& save_dir,
+                             world::RegionKey key,
+                             const std::vector<std::shared_ptr<Chunk>>& live_chunks);
 
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;
@@ -80,6 +83,8 @@ public:
 
     // True only for a valid supported save. Obsolete artifacts are still refused by load_world.
     static bool has_world_save(const std::filesystem::path& save_dir);
+    // A ledger or other sibling record alone is not an initial chunk snapshot.
+    static bool has_chunk_snapshot(const std::filesystem::path& save_dir);
 
     // Validates all existing persistence artifacts before a writer may modify them.
     // A missing save is valid. Diagnostics distinguish obsolete, future and corrupt files.

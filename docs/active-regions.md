@@ -17,7 +17,9 @@ position and adaptive streaming radii do not affect membership. Regions remain
 in the ledger after departure. The host's last walking feet position is stored
 as an optional anchor and restored before ticking. Camera movement and noclip
 updates cannot replace it. Replicated server avatar positions are supplied at
-the host tick boundary; avatar persistence remains outside this slice.
+the host tick boundary; avatar persistence remains outside this slice. An absent
+replicated list selects the single-player fallback; an explicitly empty server
+list visits no regions, even when the ledger holds a local anchor.
 
 Voxel edits notify each modified chunk's region. The game has explicit
 `NotifyGroundObjectEdit` and `PinActiveRegion` entry points; ground-object
@@ -41,8 +43,10 @@ otherwise (including equality) it increments under-hold. The opposite counter
 resets. Counters saturate at the configured hold. Near regions and pending wakes
 reset both. After the hold, active becomes reduced, then reduced becomes frozen
 if later pressure persists; recovery reverses those steps after the under-hold.
-Every state change resets both counters. Reduced cadence is 2^shift, with
-shift in [1, 16]. Phase is the low `shift` bits of FNV-1a-64 over LE i32 X and Z.
+Queued work makes a host tick incomplete for snapshot purposes: metadata and
+world saves refuse until the next simulation tick consumes it. The queue is not
+persisted. Every state change resets both counters. Reduced cadence is 2^shift,
+with shift in [1, 16]. Phase is the low `shift` bits of FNV-1a-64 over LE i32 X and Z.
 A region is due when `(absoluteTick & (divisor - 1)) == phase`; active is always
 due, frozen never is. All stamps use WorldClock, with no load-time restart.
 Repeated/backward scheduler ticks refuse. Frozen scheduling metadata can change;
@@ -59,8 +63,9 @@ The record is `<save>/chunks/region/active-regions.arl`, following the accepted
 contract's placement in the region integrity scan. This resolves the slice
 brief's conflicting save-root wording in favour of that contract. ARL1 does
 not alter LMR1 v2, the world manifest, preset revision 6, EFS1, plant payloads,
-FSD2 v3, or canonical chunk serialization. Snapshot transaction publication is
-separate work; this slice uses the existing durable temporary-write and atomic
+FSD2 v3, or canonical chunk serialization. An anchor-only ledger is not a chunk
+snapshot: the first save with dirty chunks writes all resident chunks, including
+clean chunks in other regions. Snapshot transaction publication is separate work; this slice uses the existing durable temporary-write and atomic
 replacement primitive for the ledger, without claiming cross-file atomicity.
 
 Absent means an empty ledger, with unlimited scheduling defaults and no saved
@@ -108,7 +113,7 @@ Each record is exactly 104 bytes, sorted uniquely by signed X then Z:
 | 72 | 8 | u64 per-region pressure |
 | 80 | 8 | u32 over-hold, u32 under-hold |
 | 88 | 8 | u64 water cursor |
-| 96 | 8 | u64 frozen durable-record content digest |
+| 96 | 8 | u64 frozen simulation content digest |
 
 The footer is one LE u64 FNV-1a-64 checksum over every preceding byte (offset
 basis 14695981039346656037, multiplier 1099511628211). Total length must be exactly
@@ -120,10 +125,11 @@ ticked stamp precedes its freeze stamp. The ledger tick cannot exceed the saved
 WorldClock tick. Configuration is stored and hashed with the ledger rather than
 read from an unrecorded machine-local budget.
 
-Frozen content is supplied by the durable-record owner at the transition. The
-current persistence provider hashes canonical lod-0 record payloads in id order,
-including their id and flags, excluding far render records, compression and
-container envelopes. Later durable per-region systems must extend that provider
+Frozen content is supplied at the transition by merging live lod-0 chunks with
+durable region records by id, with live records taking precedence. The provider
+uses the existing canonical simulation-only chunk hash projection in id order,
+excluding render meshes, render bookkeeping, transient dirtiness, far render
+records, compression and container envelopes. Serialization is unchanged. Later durable per-region systems must extend that provider
 with a declared canonical projection before consuming the scheduler.
 
 ## Hash and replay

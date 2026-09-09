@@ -154,7 +154,7 @@ void ActiveRegionLedger::visit(const Vec3& anchor, const WorldClock& clock) {
         }
 }
 RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
-                                            std::span<const Vec3> replicated_anchors,
+                                            std::optional<std::span<const Vec3>> replicated_anchors,
                                             std::span<const RegionWork> work,
                                             const DurableDigest& durable_digest) {
     auto next = *this;
@@ -162,21 +162,23 @@ RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
     *this = std::move(next);
     return result;
 }
-RegionSchedule ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
-                                                     std::span<const Vec3> replicated_anchors,
-                                                     std::span<const RegionWork> work,
-                                                     const DurableDigest& durable_digest) {
+RegionSchedule
+ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
+                                      std::optional<std::span<const Vec3>> replicated_anchors,
+                                      std::span<const RegionWork> work,
+                                      const DurableDigest& durable_digest) {
     if (clock.tick() <= m_tick)
         throw std::invalid_argument("Region schedule requires a new absolute tick");
-    for (const auto& anchor : replicated_anchors)
+    const auto anchors = replicated_anchors.value_or(std::span<const Vec3>{});
+    for (const auto& anchor : anchors)
         if (!ValidAnchor(anchor))
             throw std::invalid_argument("Invalid simulation anchor");
     for (const auto& units : work)
         if (!m_records.contains(units.key))
             throw std::invalid_argument("Work refers to an inactive region");
-    if (m_localAnchor && replicated_anchors.empty())
+    if (m_localAnchor && !replicated_anchors)
         visit(*m_localAnchor, clock);
-    for (const auto& anchor : replicated_anchors)
+    for (const auto& anchor : anchors)
         visit(anchor, clock);
 
     RegionSchedule result;

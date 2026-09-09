@@ -371,7 +371,7 @@ public:
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
     [[nodiscard]] bool IsSimulationTickBoundary() const {
-        return !m_activeRegionsEnabled || !m_simulationBatchInProgress;
+        return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
 
     // --- Fixed-rate simulation ---
@@ -422,7 +422,7 @@ private:
     RegionSchedulerConfig m_regionSchedulerConfig;
     ActiveRegionLedger m_activeRegionLedger;
     RegionSchedule m_regionSchedule;
-    std::vector<Vec3> m_replicatedSimulationAnchors;
+    std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
     std::vector<RegionWork> m_regionWork;
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.

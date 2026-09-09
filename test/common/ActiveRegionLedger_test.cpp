@@ -96,35 +96,69 @@ TEST(ActiveRegionLedgerTest, PrioritySelectsLowestForReductionAndHighestForRecov
     ActiveRegionLedger ledger({0, 1, 1});
     ledger.pin({1, 0}, true, WorldClock{});
     ledger.mark_edited({2, 0}, WorldClock{});
-    const std::array anchors{Vec3(2500, 0, 2500)};
+    const std::array anchors{Vec3(2304, 0, 2304)};
     ledger.schedule(WorldClock(1), anchors);
+    const std::vector<RegionKey> priority{
+        {1, 0}, {2, 0}, {3, 3}, {3, 4}, {3, 5}, {4, 3}, {4, 4}, {4, 5}, {5, 3}, {5, 4}, {5, 5}};
+    ASSERT_EQ(ledger.records().size(), priority.size());
     const std::array work{RegionWork{{1, 0}, 1, 0, 0, 0}};
-    const auto schedule = ledger.schedule(WorldClock(2), {}, work);
-    ASSERT_EQ(schedule.transitions.size(), 1u);
-    EXPECT_EQ(schedule.transitions.front().key, (RegionKey{5, 5}));
-    EXPECT_EQ(ledger.records().at({1, 0}).state, RegionState::Active);
-    EXPECT_EQ(ledger.records().at({2, 0}).state, RegionState::Active);
-    auto next = ledger.schedule(WorldClock(3));
-    ASSERT_EQ(next.transitions.size(), 1u);
-    EXPECT_EQ(next.transitions.front().key, (RegionKey{5, 5}));
-    EXPECT_EQ(next.transitions.front().to, RegionState::Active);
+    std::uint64_t tick = 1;
+    for (auto it = priority.rbegin(); it != priority.rend(); ++it) {
+        for (const auto state : {RegionState::Reduced, RegionState::Frozen}) {
+            const auto schedule =
+                ledger.schedule(WorldClock(++tick), {}, work, [](RegionKey) { return 42u; });
+            ASSERT_EQ(schedule.transitions.size(), 1u);
+            EXPECT_EQ(schedule.transitions.front().key, *it);
+            EXPECT_EQ(schedule.transitions.front().to, state);
+        }
+    }
+    // Every region is eligible at once: recovery must choose forward priority,
+    // including pin/edit rank and signed coordinate tie breaks.
+    for (const auto key : priority) {
+        for (const auto state : {RegionState::Reduced, RegionState::Active}) {
+            const auto schedule = ledger.schedule(WorldClock(++tick));
+            ASSERT_EQ(schedule.transitions.size(), 1u);
+            EXPECT_EQ(schedule.transitions.front().key, key);
+            EXPECT_EQ(schedule.transitions.front().to, state);
+        }
+    }
 }
 
 TEST(ActiveRegionLedgerTest, NearbyRegionsStayFullCadenceAndWakeInPriorityOrder) {
-    auto ledger = Distant({0, 1, 1});
-    Step(ledger, 2, 1);
-    Step(ledger, 3, 1);
-    ASSERT_EQ(ledger.records().at(kFar).state, RegionState::Frozen);
-    ledger.set_local_anchor(Vec3(kFar.x * 512 + 256, 0, kFar.z * 512 + 256));
-    const auto schedule = Step(ledger, 4, 1000);
-    EXPECT_EQ(ledger.records().at(kFar).state, RegionState::Active);
-    EXPECT_EQ(ledger.records().at(kFar).last_ticked, 4u);
-    ASSERT_EQ(schedule.transitions.size(), 1u);
-    EXPECT_EQ(schedule.transitions.front().from, RegionState::Frozen);
-    for (std::uint64_t tick = 5; tick < 9; ++tick) {
-        Step(ledger, tick, 1000);
-        EXPECT_EQ(ledger.records().at(kFar).state, RegionState::Active);
-        EXPECT_EQ(ledger.records().at(kFar).over_hold, 0u);
+    ActiveRegionLedger ledger({0, 1, 1});
+    const Vec3 anchor(2304, 0, 2304);
+    const std::array anchors{anchor};
+    ledger.schedule(WorldClock(1), anchors);
+    const std::array work{RegionWork{{4, 4}, 1, 0, 0, 0}};
+    for (std::uint64_t tick = 2; tick <= 19; ++tick)
+        ledger.schedule(WorldClock(tick), {}, work, [](RegionKey) { return 42u; });
+    for (const auto& [key, record] : ledger.records()) {
+        (void)key;
+        ASSERT_EQ(record.state, RegionState::Frozen);
+    }
+    ledger.pin({4, 4}, true, WorldClock(19));
+    ledger.mark_edited({3, 4}, WorldClock(19));
+    ledger.set_local_anchor(anchor);
+    ledger = Reload(ledger);
+    const auto schedule = ledger.schedule(WorldClock(20), {}, work);
+    const std::vector<RegionKey> priority{
+        {4, 4}, {3, 4}, {3, 3}, {3, 5}, {4, 3}, {4, 5}, {5, 3}, {5, 4}, {5, 5}};
+    ASSERT_EQ(schedule.transitions.size(), priority.size());
+    for (std::size_t i = 0; i < priority.size(); ++i) {
+        EXPECT_EQ(schedule.transitions[i],
+                  (RegionTransition{priority[i], RegionState::Frozen, RegionState::Active}));
+    }
+    EXPECT_EQ(schedule.due, priority);
+    for (std::uint64_t tick = 21; tick < 25; ++tick) {
+        const auto near = ledger.schedule(WorldClock(tick), {}, work);
+        EXPECT_TRUE(near.transitions.empty());
+        EXPECT_EQ(near.due, priority);
+        for (const auto& [key, record] : ledger.records()) {
+            (void)key;
+            EXPECT_EQ(record.state, RegionState::Active);
+            EXPECT_EQ(record.over_hold, 0u);
+            EXPECT_EQ(record.last_ticked, tick);
+        }
     }
 }
 
@@ -177,12 +211,9 @@ TEST(ActiveRegionLedgerTest, UnlimitedDefaultNeverReducesOrFreezes) {
 TEST(ActiveRegionLedgerTest, CadenceAndAbsoluteTickLimitsAreChecked) {
     auto ledger = Distant({0, 1, 3});
     Step(ledger, 2, 1);
-    for (std::uint64_t tick = 3; tick < 9; ++tick) {
-        const auto schedule = Step(ledger, tick, 0);
-        if (ledger.records().at(kFar).state == RegionState::Reduced)
-            EXPECT_EQ(!schedule.due.empty(), (tick & 7u) == ActiveRegionLedger::phase(kFar, 3));
-    }
-    EXPECT_THROW(Step(ledger, 8, 0), std::invalid_argument);
+    // Reduced cadence itself is exercised across two full periods by
+    // CadenceRunsOnlyAtDerivedPhaseAndFailedFreezeLeavesLedgerIntact.
+    EXPECT_THROW(Step(ledger, 2, 0), std::invalid_argument);
     EXPECT_THROW(Step(ledger, 1, 0), std::invalid_argument);
     EXPECT_THROW(ActiveRegionLedger((RegionSchedulerConfig{1, 0, 1})), std::invalid_argument);
     EXPECT_THROW(ActiveRegionLedger((RegionSchedulerConfig{1, 1, 17})), std::invalid_argument);
