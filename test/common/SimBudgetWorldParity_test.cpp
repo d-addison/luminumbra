@@ -10,9 +10,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <map>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 namespace {
 namespace fs = std::filesystem;
@@ -20,8 +22,14 @@ using luminumbra::simulation::SimBudgetStage;
 using luminumbra::simulation::SimBudgetTelemetry;
 
 class SimBudgetWorldParity : public testing::Test {
-protected:
+private:
     fs::path root;
+
+protected:
+    const fs::path& Root() const {
+        return root;
+    }
+
     void SetUp() override {
         root = fs::temp_directory_path() /
                ("sim_budget_parity_" +
@@ -43,7 +51,7 @@ protected:
         for (const auto& entry : fs::recursive_directory_iterator(directory)) {
             if (!entry.is_regular_file())
                 continue;
-            std::ifstream input(entry.path(), std::ios::binary);
+            const std::ifstream input(entry.path(), std::ios::binary);
             std::ostringstream bytes;
             bytes << input.rdbuf();
             result.emplace(entry.path().lexically_relative(directory).generic_string(),
@@ -60,7 +68,7 @@ TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
     for (int pass = 0; pass < 3; ++pass) {
         SCOPED_TRACE(pass);
         Luminumbra::Server::ServerWorldRunnerConfig config;
-        config.root_path = root.generic_string() + "/";
+        config.root_path = Root().generic_string() + "/";
         config.seed = "1337";
         config.surface_radius = 1;
         config.collision_radius = 1;
@@ -104,12 +112,14 @@ TEST_F(SimBudgetWorldParity, Populated3600TicksPreserveWorldHashAndReplayWork) {
                 EXPECT_TRUE(first_trace.WorkMatches(trace));
         }
 
-        // Re-saving the SAME settled world after toggling observation must not
-        // insert telemetry into any supported save bytes (metadata included).
-        ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+        // Exercise the ordinary save path, including live plant persistence and
+        // metadata, across the toggle at the same settled tick.
+        ASSERT_TRUE(runner.Session()->SaveWorldState());
+        ASSERT_TRUE(runner.Session()->SaveWorld());
         const auto before = SavedBytes(runner.Session()->GetWorldSaveDir());
         runner.Session()->SetSimBudgetTelemetryEnabled(!config.sim_budget);
-        ASSERT_GT(runner.SaveFullSnapshot(), 0u);
+        ASSERT_TRUE(runner.Session()->SaveWorldState());
+        ASSERT_TRUE(runner.Session()->SaveWorld());
         EXPECT_EQ(SavedBytes(runner.Session()->GetWorldSaveDir()), before);
         runner.Shutdown();
     }

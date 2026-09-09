@@ -197,8 +197,9 @@ duration-free replay comparisons, artifact separation, and batched tick identiti
 and reset. `SimBudgetWorldParity.Populated3600TicksPreserveWorldHashAndReplayWork`
 runs the real populated server three times (off, on, on), checks world hash
 equality and complete per-tick work replay, pins starting plant/creature and
-wind-cell counts, and checks binary save bytes across a telemetry toggle at
-the same settled tick. `SimBudgetCaptureContract` runs six Python command and
-refusal tests. Both build lanes discover 2,017 tests with manual tests excluded, exactly seven
-more than the 2,010 entries discovered from the devel source archive. Execution
+wind-cell counts, and checks the ordinary save path (including plants and
+metadata) for binary byte equality across a telemetry toggle at the same tick.
+`SimBudgetCaptureContract` runs six Python command and refusal tests. Both build
+lanes discover 2,017 tests with manual tests excluded, exactly seven more than
+the 2,010 entries discovered from the starting devel source archive. Execution
 results and any qualification deviations are recorded in the campaign receipt.
