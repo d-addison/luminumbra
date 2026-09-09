@@ -475,13 +475,58 @@ TEST(GameSessionHeadlessWorldTest,
     EXPECT_EQ(metadata.at("simulationTick"), 1u);
     EXPECT_TRUE(fs::exists(P::WorldSaveService::active_regions_path(alternate)));
     ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(session.SaveWorld());
+    const auto save = session.GetWorldSaveDir();
+    Luminumbra::world::ActiveRegionLedger saved_ledger;
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
+    ASSERT_EQ(saved_ledger.tick(), 2u);
+    ASSERT_EQ(P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).clock.tick(), 2u);
     ASSERT_TRUE(session.LoadWorldStateFrom(alternate));
     EXPECT_EQ(session.GetSimulationTickCount(), 1u);
     EXPECT_EQ(session.GetWorldClock().calendar(), Luminumbra::world::WorldCalendar{});
+    const auto restored_ledger = session.GetActiveRegionLedger().canonical_bytes();
+    const auto newer_metadata = ReadClockTestFile(save / "world_info.json");
+    const auto newer_ledger = ReadClockTestFile(P::WorldSaveService::active_regions_path(save));
+    auto invalid_metadata = metadata;
+    invalid_metadata["simulationTick"] = 3u;
+    auto incoming_ledger = session.GetActiveRegionLedger();
+    EXPECT_FALSE(P::WorldSaveService::save_metadata_and_active_regions(
+        invalid_metadata.dump(), incoming_ledger, save));
+    EXPECT_EQ(ReadClockTestFile(save / "world_info.json"), newer_metadata);
+    EXPECT_EQ(ReadClockTestFile(P::WorldSaveService::active_regions_path(save)), newer_ledger);
     ASSERT_TRUE(session.SaveWorld());
     const auto inspected = P::InspectSavedWorld(root.path(), session.GetMetadata().worldId);
     EXPECT_TRUE(inspected.error.empty());
     EXPECT_EQ(inspected.clock.tick(), 1u);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
+    EXPECT_EQ(saved_ledger.tick(), 1u);
+    EXPECT_EQ(saved_ledger.canonical_bytes(), restored_ledger);
+    const auto restored_hash = SessionWorldHash(session);
+    ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId)) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), restored_ledger);
+    EXPECT_EQ(SessionWorldHash(session), restored_hash);
+    ASSERT_TRUE(session.SaveWorldState());
+    EXPECT_TRUE(P::WorldSaveService::validate_save(save));
+
+    // A failure between the two rewind replacements still leaves a readable pair.
+    ASSERT_EQ(session.TickSimulation(session.GetSimulationClock().fixed_dt()), 1u);
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorldStateFrom(alternate));
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
+    const bool interrupted_save = session.SaveWorld();
+    P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+    EXPECT_FALSE(interrupted_save);
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    EXPECT_EQ(P::InspectSavedWorld(root.path(), session.GetMetadata().worldId).clock.tick(), 2u);
+    ASSERT_TRUE(P::WorldSaveService::load_active_regions(saved_ledger, save));
+    EXPECT_EQ(saved_ledger.tick(), 1u);
+    ASSERT_TRUE(session.SaveWorld());
+    ASSERT_TRUE(session.LoadWorld(session.GetMetadata().worldId)) << session.GetWorldOpenError();
+    EXPECT_EQ(session.GetSimulationTickCount(), 1u);
+    EXPECT_EQ(session.GetActiveRegionLedger().canonical_bytes(), restored_ledger);
+    EXPECT_EQ(SessionWorldHash(session), restored_hash);
 }
 
 TEST(GameSessionHeadlessWorldTest, ActiveClockKeepsAmbientAnchorWhenClientSavesMovedSpawn) {

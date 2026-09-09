@@ -1284,13 +1284,14 @@ bool GameSession::SaveWorldMetadataTo(const fs::path& save_dir) {
                                                {"y", m_ambientFieldAnchor.y},
                                                {"z", m_ambientFieldAnchor.z}};
     }
-    if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n", save_dir))
-        return false;
     if (m_activeRegionsEnabled) {
-        if (!Persistence::WorldSaveService::save_active_regions(
-                m_activeRegionLedger, m_worldClock, save_dir))
+        if (!Persistence::WorldSaveService::save_metadata_and_active_regions(
+                metadata_json.dump(4) + "\n", m_activeRegionLedger, save_dir))
             return false;
         m_regionDurableDirectory = save_dir;
+    } else if (!Persistence::WorldSaveService::save_metadata(metadata_json.dump(4) + "\n",
+                                                             save_dir)) {
+        return false;
     }
     return true;
 }

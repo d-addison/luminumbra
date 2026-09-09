@@ -747,6 +747,40 @@ bool WorldSaveService::save_metadata(const std::string& bytes,
     return true;
 }
 
+bool WorldSaveService::save_metadata_and_active_regions(const std::string& bytes,
+                                                        world::ActiveRegionLedger& ledger,
+                                                        const std::filesystem::path& save_dir,
+                                                        std::vector<std::string>* errors) {
+    const auto metadata = nlohmann::json::parse(bytes, nullptr, false);
+    world::WorldClock clock;
+    std::optional<Vec3> ambient_anchor;
+    std::string error;
+    if (!world::WorldClock::from_metadata(metadata, clock, error) ||
+        !ReadAmbientAnchor(metadata, ambient_anchor, error)) {
+        AddError(errors, error);
+        return false;
+    }
+    auto saved = ledger;
+    saved.mark_saved(clock);
+    world::ActiveRegionLedger checked;
+    if (!world::ActiveRegionLedger::decode(saved.encode(), checked, error) ||
+        ledger.tick() > clock.tick()) {
+        AddError(errors, world::ActiveRegionLedger::kCorruptMessage);
+        return false;
+    }
+    world::WorldClock previous_clock;
+    bool requires_active_regions = false;
+    if (!read_clock_metadata(save_dir, previous_clock, requires_active_regions, errors))
+        return false;
+    // Each writer validates the installed pair. On rewind, replace the ledger
+    // first so it cannot be newer than the clock, even if metadata writing fails.
+    if (clock.tick() < previous_clock.tick())
+        return save_active_regions(ledger, clock, save_dir, errors) &&
+               save_metadata(bytes, save_dir, errors);
+    return save_metadata(bytes, save_dir, errors) &&
+           save_active_regions(ledger, clock, save_dir, errors);
+}
+
 bool WorldSaveService::read_clock_metadata(const std::filesystem::path& save_dir,
                                            world::WorldClock& clock,
                                            bool& requires_active_regions,

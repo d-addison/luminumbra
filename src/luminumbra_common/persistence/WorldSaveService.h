@@ -98,6 +98,12 @@ public:
     static bool save_metadata(const std::string& bytes,
                               const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr);
+    // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
+    // between replacements, including when an explicit snapshot rewinds the clock.
+    static bool save_metadata_and_active_regions(const std::string& bytes,
+                                                 world::ActiveRegionLedger& ledger,
+                                                 const std::filesystem::path& save_dir,
+                                                 std::vector<std::string>* errors = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
     // Missing metadata is a legacy snapshot with a default clock.
