@@ -32,6 +32,11 @@ def main():
           args.isolation_root.resolve()) for value in resources.values()), paths=resources)
     bpy.context.preferences.use_preferences_save = False
     bpy.context.preferences.filepaths.use_auto_save_temporary_files = False
+    bpy.context.preferences.view.show_splash = False
+    initial_window = bpy.context.window_manager.windows[0]
+    initial_window.event_simulate(type="ESC", value="PRESS")
+    initial_window.event_simulate(type="ESC", value="RELEASE")
+    yield 0.2
     repos = bpy.context.preferences.extensions.repos
     while repos:
         repos.remove(repos[0])
@@ -66,9 +71,11 @@ def main():
     original_id = obj["luminumbra.object_id"]
     duplicate = obj.copy()
     duplicate.name = "RecipeDuplicate"
+    duplicate.location.x += 2
     collection.objects.link(duplicate)
     outside = obj.copy()
     outside.name = "OutsideSharedUser"
+    outside.location.x -= 2
     scene.collection.objects.link(outside)
     del obj.data["luminumbra.asset_id"]
     bpy.context.view_layer.update()
@@ -79,6 +86,8 @@ def main():
     region = next(region for region in area.regions if region.type == "WINDOW")
     ui_before = recipes.records(scene, collection)[0]
     previous_plans = set(recipes.state.plans)
+    window.event_simulate(type="MOUSEMOVE", value="NOTHING", x=850, y=650)
+    yield 0.2
     with bpy.context.temp_override(window=window, area=area, region=region):
         dialog = bpy.ops.luminumbra.review_id_repairs("INVOKE_DEFAULT")
     check("review dialog opens without editing", dialog == {"RUNNING_MODAL"}
