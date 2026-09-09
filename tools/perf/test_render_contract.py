@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import perf
@@ -36,7 +37,8 @@ def artifact():
             'excluded_windows': [{'first_frame': 0, 'last_frame': 1, 'reason': 'warmup'},
                                  {'first_frame': 6, 'last_frame': 6, 'reason': 'report and optional screenshot'}],
             'workload': {'kind': 'fixed_view', 'seed': 424242, 'preset': 'default',
-                         'preset_revision': 6, 'expected_frames': len(rows)},
+                         'preset_revision': 6, 'preset_identity': '0000000000000000',
+                         'content_identity': '0', 'expected_frames': len(rows)},
             'avg': {}, 'avg_ms': {}, 'distribution': {}}
     for name in contract.METRICS:
         summary = perf.summarize([row[name] for row in rows], 'ms')
@@ -157,6 +159,26 @@ class RenderContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 contract.validate(data, QUALIFIED)
 
+    def test_float_internal_dimension_boundary(self):
+        data = artifact()
+        # The float product rounds to 25.5; Python's double product is below it.
+        scale = contract.float32(0.51)
+        data.update(width=50, render_scale=scale, internal_width=26, internal_height=367)
+        data['profile'].update(name='legacy', width=50, render_scale=scale)
+        self.assertEqual(contract.validate(data, QUALIFIED)['verdict'], 'PASS')
+
+    def test_v2_missing_arguments_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'v2.json'
+            path.write_text(json.dumps({'schema': 'luminumbra.render_benchmark.v2'}))
+            for supplied, missing in [([], ['--position', '--yaw', '--pitch', '--tod']),
+                                      (['--position', '0', '0', '0', '--yaw', '0'], ['--pitch', '--tod'])]:
+                result = subprocess.run([sys.executable, str(Path(capture.__file__)), str(path)] + supplied,
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stdout)['reason'],
+                                 'v2 capture requires missing arguments: ' + ', '.join(missing))
+
     def test_corrupt_and_future_schema(self):
         for mutation in [lambda d: d.update(schema='luminumbra.render_benchmark.v4'),
                          lambda d: d['frame_samples'][0].update(gpu_frame_ms=float('nan')),
@@ -172,7 +194,7 @@ class RenderContractTests(unittest.TestCase):
             contract.validate(artifact(), QUALIFIED, workload={'seed': 1})
 
     def test_traversal_manifest_and_camera_oracle(self):
-        manifest = contract.traversal_manifest((FIXTURES / 'surface-flight.traversal').read_text())
+        manifest = contract.traversal_manifest((FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8'))
         first = [contract.camera_sample(manifest, tick) for tick in range(1801)]
         second = [contract.camera_sample(manifest, tick) for tick in range(1801)]
         self.assertEqual(first, second)
@@ -180,16 +202,27 @@ class RenderContractTests(unittest.TestCase):
         self.assertEqual(first[900]['position'], [248, 80, 8])
         self.assertEqual(first[1800]['position'], [488, 80, 8])
         with self.assertRaises(ValueError):
-            contract.traversal_manifest((FIXTURES / 'surface-flight.traversal').read_text().replace('expected_ticks 1800', 'expected_ticks 1799'))
+            contract.traversal_manifest((FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8').replace('expected_ticks 1800', 'expected_ticks 1799'))
 
     def test_traversal_capture_and_refusals(self):
-        script = FIXTURES / 'surface-flight.traversal'
-        manifest = contract.traversal_manifest(script.read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            for newline in ('\n', '\r\n'):
+                script = Path(directory) / 'short.traversal'
+                text = (FIXTURES / 'surface-flight.traversal').read_bytes().decode('utf-8')
+                text = text.replace('duration_seconds 60', 'duration_seconds 0.13333333333333333')
+                text = text.replace('expected_ticks 1800', 'expected_ticks 4')
+                script.write_bytes(text.replace('\r\n', '\n').replace('\n', newline).encode('utf-8'))
+                with self.subTest(newline=newline):
+                    self.check_traversal_capture(script)
+
+    def check_traversal_capture(self, script):
+        text = script.read_bytes().decode('utf-8')
+        manifest = contract.traversal_manifest(text)
         data = artifact()
         data['workload'].update({key: value for key, value in manifest.items() if key != 'path'})
-        data['workload'].update(kind='traversal', actual_ticks=1800, measured_duration_seconds=60,
-                                script=script.read_text(), script_path=str(script),
-                                camera_samples=[contract.camera_sample(manifest, tick) for tick in (0, 600, 1200, 1800)])
+        data['workload'].update(kind='traversal', actual_ticks=4, measured_duration_seconds=0.01,
+                                script=text, script_path=str(script),
+                                camera_samples=[contract.camera_sample(manifest, tick) for tick in (1, 2, 3, 4)])
         for row in data['frame_samples']:
             row['frame_wall_ms'] = 15000
         summary = perf.summarize([15000] * 4, 'ms')
@@ -197,7 +230,8 @@ class RenderContractTests(unittest.TestCase):
         data['avg']['frame_wall_ms'] = 15000
         self.assertEqual(contract.validate(data, QUALIFIED, traversal=script)['verdict'], 'PASS')
         for mutate in [lambda d: d['workload'].update(actual_ticks=1799),
-                       lambda d: d['workload'].update(measured_duration_seconds=59),
+                       lambda d: d['workload'].update(preset_identity='1111111111111111'),
+                       lambda d: d['workload'].update(content_identity='1'),
                        lambda d: d['workload'].update(measured_duration_seconds=61),
                        lambda d: d['workload'].update(script='luminumbra.traversal.v2'),
                        lambda d: d['workload']['camera_samples'][1].update(position=[0, 0, 0]),
@@ -229,6 +263,11 @@ class RenderContractTests(unittest.TestCase):
         result = capture.validate(data, args(position=[0, 0, 0], yaw=0, pitch=0, tod=0, qualified_renderer=None))
         self.assertEqual(result['verdict'], 'PASS')
         self.assertEqual(data, before)
+        data.update(artifact())
+        result = capture.validate(data, args(position=[0, 0, 0], yaw=0, pitch=0, tod=0))
+        self.assertEqual(result['measurement']['verdict'], 'PASS')
+        self.assertNotIn('measurement', result['max_absolute_errors'])
+        self.assertTrue(all(isinstance(value, (int, float)) for value in result['max_absolute_errors'].values()))
 
 
 if __name__ == '__main__':

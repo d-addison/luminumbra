@@ -30,7 +30,7 @@ New options are:
   named-profile validation even if declared.
 - `--traversal path` selects the strict script format below and requires v3.
   Its duration owns the measured window; `--render-benchmark-frames` is refused
-  because the number of rendered frames is measured, not fixed. A script owns the camera and declares the world seed/preset;
+  because the script tick count owns the measured frame count. A script owns the camera and declares the world seed/preset;
   conflicting scene, fixed-camera, scenario, debug-goto, profile-fly
   and timelapse modes are refused. Missing or corrupt scripts are fatal (exit 2).
 - `--declare-render-overrides path.json` requires v3 and reads an object of exact
@@ -41,7 +41,7 @@ New options are:
 Capture size and profiles also work with explicitly selected v2. They are inert
 when absent. Other new options require a benchmark output path. V3 automatically
 creates a fresh world unless `--load-world` is supplied, and refuses scenario
-commands. A loaded traversal world must match its script seed and preset before
+commands. A loaded traversal world must match its script seed, preset and content identities before
 measurement starts; disagreement is refused with exit 2. V3 needs
 1..18000 measured frames and 1..18000 warmup frames. It does not silently
 truncate a window, drop overflow samples, or substitute a missing timer with zero.
@@ -61,17 +61,15 @@ python3 tools/perf/validate_render_capture.py build/quality.json \
 
 Add `--traversal tools/perf/fixtures/surface-flight.traversal` to the client
 command (omit the fixed-view frame count), and supply that same `--traversal`
-path to the checker. This example advances 1800 host ticks during a 60-second
-traversal. The monotonic clock selects the due 30 Hz tick independently of the
-uncapped render frame rate. All due simulation ticks execute without dropping
-catch-up work, and the camera is sampled at the due tick before streaming and
-rendering. The final measured frame includes tick 1800, even if rendering or
-simulation takes the wall interval beyond 60 seconds. Warmup and the report frame
-do not advance traversal simulation ticks. Repeated camera ticks at high render
-rates and multiple ticks between slower frames are expected. The runner's path
-samples for each integer tick are deterministic; wall timings and render-frame
-counts are observations. Exceeding the 18000-frame storage capacity before the
-traversal completes produces an invalid diagnostic capture and a failing exit.
+path to the checker. This example advances 1800 host ticks (60 seconds of
+simulation at 30 Hz), one tick per measured frame. The camera is selected from
+the simulation tick count before streaming and rendering. The measured samples
+cover ticks 1 through 1800 in order; warmup holds the tick-zero pose, and neither
+warmup nor the report frame advances traversal simulation. Repeating a script
+therefore produces identical emitted camera samples and tick counts. Achieved
+wall duration is an observation and may be shorter or longer than simulation
+duration; it does not select camera poses or end the traversal. The measured
+frame count equals the expected tick count, within the 18000-frame capacity.
 Streaming transients inside the measured window are included. The example is
 surface flight only; cave-walk and edited-world save/bake qualification are not
 supplied.
@@ -97,9 +95,9 @@ heuristic. The additive keys have these meanings:
 | `profile` | `name` (`legacy`, `quality`, `performance`), actual `render_scale`, output `width`, `height`; consistent with legacy dimensions, scale, and rounded internal extent |
 | `excluded_windows` | Inclusive integer `first_frame`, `last_frame`, nonempty `reason`; exactly warmup and the one report/screenshot frame, no overlapping or hidden measured exclusions |
 | `debug_overrides` | `active` and `declared` maps; exact string values for CLI, environment and observed runtime overrides |
-| `workload` | `kind` (`fixed_view` or `traversal`), actual numeric world `seed`, actual `preset`, `preset_revision` (6), `expected_frames` (actual completed frame count for duration-owned traversal) |
+| `workload` | `kind` (`fixed_view` or `traversal`), actual numeric world `seed`, `preset` provenance name, resolved `preset_revision`, `preset_identity`, loaded `content_identity`, `expected_frames` (completed frame count; equal to expected ticks for traversal) |
 | Traversal workload additions | Verbatim UTF-8 `script`, diagnostic `script_path`, `duration_seconds`, `tick_rate`, `speed_mps`, `expected_ticks`, observed `actual_ticks`, `measured_duration_seconds`, `cold_cache`, observed `camera_samples` |
-| Camera sample | Due script `tick` (nondecreasing, first zero, last expected tick), three-component `position` in metres, `yaw` and `pitch` in degrees, recorded from the rendered camera |
+| Camera sample | Simulation `tick` (consecutive, first 1, last expected tick), three-component `position` in metres, `yaw` and `pitch` in degrees, recorded from the rendered camera |
 
 The whole-frame GPU timestamp pair encloses frame submission from the main-loop
 measurement start through all scene and UI GL work before swap. CPU submit ends
@@ -130,7 +128,7 @@ All unrecognized CLI options are recorded as `cli:<option>` with the following
 argument, or `"true"` for a flag. Benchmark/workload, camera-pose, window-mode,
 auto-create/enter, load-world, no-audio and no-menu-backdrop options are not debug overrides.
 The renderer's environment knobs are recorded as `env:<name>` (including render
-scale, atmosphere, moon, grading, cave AO, cloud/SSAO quality, tree impostors,
+scale, synchronous GL debug output (`LUMIN_GL_DEBUG`), atmosphere, moon, grading, cave AO, cloud/SSAO quality, tree impostors,
 scent decals, backend, visual sweep and job throttle). Runtime wireframe, debug
 view and time scaling observed during measurement are also recorded. Any active
 entry lacking the same declared value invalidates the capture. Declarations
@@ -154,6 +152,8 @@ speed_mps 8
 seed 424242
 preset default
 preset_revision 6
+preset_identity 026f24207a8ffc7e
+content_identity 16636010052247870746
 expected_ticks 1800
 cold_cache true
 points 3
@@ -172,6 +172,19 @@ Seed is a uint32; the preset is a nonempty lowercase identifier using letters,
 digits, underscore or hyphen. There must be 2..1024 points, a path at least as
 long as duration times speed, finite coordinates within ±32000 m, finite yaw,
 and pitch strictly between -90 and 90 degrees. Speed and duration are positive.
+`preset_identity` is the 16-digit lowercase FNV-1a checksum (the existing
+`StableChecksum` algorithm) of the resolved preset's compact, key-sorted
+`nlohmann::json::dump()` UTF-8 representation. `content_identity` is the decimal
+uint64 returned by the existing `ComputeTerrainParamsHash` over the loaded world
+seed and terrain parameters, including loaded biome and structure content hashes.
+The artifact records both identities and the resolved preset's actual `schema_rev`
+as `preset_revision`, for fixed views as well as traversals. A saved world's
+embedded `preset.json` takes precedence exactly as in world loading; its metadata
+preset name is only provenance. The script pins both expected identities, and the
+client refuses any mismatch with exit 2 before measurement. Missing, malformed or
+future-revision identities are refused; no identities are inferred for old scripts
+or artifacts. This adds no world/save fields and changes no existing hash algorithm.
+
 The script is limited to 1 MiB. Unknown trailing fields, incomplete records,
 unsupported versions, invalid values and missing files are refused. Nothing is
 migrated or inferred from another script version.
@@ -180,6 +193,10 @@ migrated or inferred from another script version.
 
 `tools/perf/validate_render_capture.py` continues to accept existing v2 captures
 with the existing requested-position/angles/TOD and optional report-frame checks.
+Omitting any of `--position`, `--yaw`, `--pitch` or `--tod` for v2 fails explicitly
+with the missing argument names. When v3 report-frame checks are requested, the
+checker returns their numeric `max_absolute_errors` alongside a separate top-level
+`measurement` result; measurement-only validation keeps its existing result shape.
 V3 additionally calls `tools/perf/render_contract.py`. A missing, malformed or
 future artifact schema is refused. For v3, absent required keys, corrupt types,
 nonfinite values, incomplete frame/timer coverage, incorrect statistics or means,
@@ -199,7 +216,7 @@ than a performance budget. No frame-time or simulation budget is introduced.
 workload fields; supplied fields must match exactly. A missing/corrupt file is
 refused; absent means only self-consistency checks for a fixed view. Traversals
 also require `--traversal` pointing to the expected script: exact script bytes,
-manifest fields, tick count and every observed camera sample must match. Camera
+manifest fields, content identities, tick count and every observed camera sample must match. Camera
 comparison allows 0.002 m/degrees absolute tolerance for the engine's float
 camera representation (relative tolerance 1e-7). Future traversal versions are
 refused even inside a known v3 artifact. This checker does not certify the future
@@ -225,7 +242,17 @@ Committed and generated evidence has these compatibility rules:
   unsupported timers).
   `tools/perf/test_render_contract.py` is registered as `RenderContractPython`
   and runs in the existing Python CI lane. Its test inputs never become runtime
-  defaults. The intended CTest discovery delta is six.
+  defaults.
+- `tools/perf/test_render_runner.py` launches the shipping client in isolated runtime
+  directories. `RenderTraversalIntegrated` compares two actual captures;
+  `RenderBenchmarkImplicitCreationFailure`, `RenderBenchmarkOverrideCollection`
+  and `RenderTraversalEmbeddedPresetRefusal` exercise the real failure and collection
+  paths. These cases fail rather than skip when rendering or required content is
+  unavailable. The `RenderBenchmarkAssets` CTest fixture uses the existing pinned
+  asset acquisition tool and verified archive cache; absent content is acquired,
+  corrupt content or failed acquisition fails the fixture. No placeholder content
+  or runtime defaults are installed. The intended CTest discovery delta is eleven
+  over the original base (five added in this fix round).
 - `build/campaign-archives-20260907/slice-A2/receipt.json` is generated campaign
   evidence, not runtime input. It records branch, head commit, changed files,
   added tests, both CTest totals, before/after fixture hashes and deviations.

@@ -227,13 +227,16 @@ struct CameraSample {
 };
 
 // Strict, ordered text manifest; no implicit defaults or ignored trailing fields.
-// The script clock advances at 30 Hz independently of the render frame rate.
+// Each measured frame advances one fixed 30 Hz simulation tick.
 struct Traversal {
     double duration = 0.0;
     int tickRate = 0;
     double speed = 0.0;
     std::uint32_t seed = 0;
     std::string preset;
+    int presetRevision = 0;
+    std::string presetIdentity;
+    std::string contentIdentity;
     int expectedTicks = 0;
     std::vector<CameraSample> path;
 
@@ -258,8 +261,11 @@ struct Traversal {
         key("preset");
         in >> result.preset;
         key("preset_revision");
-        int revision = 0;
-        in >> revision;
+        in >> result.presetRevision;
+        key("preset_identity");
+        in >> result.presetIdentity;
+        key("content_identity");
+        in >> result.contentIdentity;
         key("expected_ticks");
         in >> result.expectedTicks;
         key("cold_cache");
@@ -268,9 +274,13 @@ struct Traversal {
         key("points");
         int count = 0;
         in >> count;
-        if (!in || count < 2 || count > 1024 || revision != 6 || coldCache != "true" ||
-            seedValue < 0 || seedValue > UINT32_MAX || result.tickRate != 30 ||
-            !std::isfinite(result.duration) || result.duration <= 0 ||
+        if (!in || count < 2 || count > 1024 || result.presetRevision != 6 ||
+            result.presetIdentity.size() != 16 ||
+            result.presetIdentity.find_first_not_of("0123456789abcdef") != std::string::npos ||
+            result.contentIdentity.empty() || result.contentIdentity.size() > 20 ||
+            result.contentIdentity.find_first_not_of("0123456789") != std::string::npos ||
+            coldCache != "true" || seedValue < 0 || seedValue > UINT32_MAX ||
+            result.tickRate != 30 || !std::isfinite(result.duration) || result.duration <= 0 ||
             !std::isfinite(result.speed) || result.speed <= 0 || result.expectedTicks < 1 ||
             result.expectedTicks > static_cast<int>(kMaxFrames) ||
             std::abs(result.duration * result.tickRate - result.expectedTicks) > 1e-9 ||
@@ -303,13 +313,6 @@ struct Traversal {
         if (length + 1e-9 < result.duration * result.speed)
             throw std::invalid_argument("traversal path shorter than duration times speed");
         return result;
-    }
-    int tick_at(double elapsed) const {
-        if (!std::isfinite(elapsed) || elapsed < 0.0)
-            throw std::invalid_argument("invalid traversal elapsed time");
-        if (elapsed >= duration)
-            return expectedTicks;
-        return std::min(expectedTicks, static_cast<int>(std::floor(elapsed * tickRate)));
     }
     CameraSample sample(int tick) const {
         if (tick < 0 || tick > expectedTicks)

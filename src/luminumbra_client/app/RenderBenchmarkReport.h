@@ -104,7 +104,8 @@ inline nlohmann::json render_overrides(int argc, char** argv) {
         }
         result["cli:" + arg] = hasValue ? std::string(argv[++i]) : "true";
     }
-    for (const char* name : {"LUMIN_RENDER_SCALE",
+    for (const char* name : {"LUMIN_GL_DEBUG",
+                             "LUMIN_RENDER_SCALE",
                              "LUMIN_TREE_IMPOSTORS",
                              "LUMIN_ATMOS",
                              "LUMIN_MOON",

@@ -162,9 +162,6 @@ void traversal_deterministic() {
     const auto a = Traversal::read(first);
     const auto b = Traversal::read(second);
     require(a.expectedTicks == 1800 && a.duration == 60 && a.tickRate == 30);
-    require(a.tick_at(0.0) == 0 && a.tick_at(0.01) == 0 && a.tick_at(0.05) == 1);
-    require(a.tick_at(30.0) == 900 && a.tick_at(60.0) == 1800 && a.tick_at(65.0) == 1800);
-    refuses([&] { a.tick_at(-0.1); });
     for (int tick = 0; tick <= a.expectedTicks; ++tick)
         require(a.sample(tick) == b.sample(tick));
     require(a.sample(0).position == (std::array<double, 3>{8, 80, 8}));

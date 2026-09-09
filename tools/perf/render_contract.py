@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Distribution-aware render measurement validity; contains no performance budgets."""
 import math
+import re
+import struct
 from pathlib import Path
 import perf
 
@@ -40,6 +42,7 @@ def traversal_manifest(text):
         result = {}
         for name, convert in [('duration_seconds', float), ('tick_rate', int), ('speed_mps', float),
                               ('seed', int), ('preset', str), ('preset_revision', int),
+                              ('preset_identity', str), ('content_identity', str),
                               ('expected_ticks', int), ('cold_cache', str)]:
             key(name)
             result[name] = convert(next(tokens))
@@ -60,6 +63,8 @@ def traversal_manifest(text):
     integer(result['seed'], 'seed', 0, 2**32 - 1)
     if (result['tick_rate'] != 30 or result['preset_revision'] != 6 or
         result['cold_cache'] != 'true' or not result['preset'] or
+        not re.fullmatch(r'[0-9a-f]{16}', result['preset_identity']) or
+        not re.fullmatch(r'[0-9]{1,20}', result['content_identity']) or
         any(c not in 'abcdefghijklmnopqrstuvwxyz0123456789_-' for c in result['preset'])):
         raise ValueError('unsupported traversal settings')
     number(result['duration_seconds'], 'duration', 1e-12)
@@ -85,6 +90,10 @@ def camera_sample(manifest, tick):
             return {'tick': tick, 'position': point[:3], 'yaw': point[3], 'pitch': point[4]}
         remaining -= length
     raise ValueError('empty traversal')
+
+
+def float32(value):
+    return struct.unpack('f', struct.pack('f', value))[0]
 
 
 def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=None, workload=None):
@@ -113,7 +122,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
     equal_number(data['render_scale'], scale, 'reported scale')
     for axis in ('width', 'height'):
         size = integer(data[axis], axis, 1, 16384)
-        if profile[axis] != size or data['internal_' + axis] != math.floor(size * scale + 0.5):
+        if profile[axis] != size or data['internal_' + axis] != math.floor(float32(size * float32(scale)) + 0.5):
             raise ValueError('profile/capture dimensions disagree')
     overrides = data['debug_overrides']
     for kind in ('active', 'declared'):
@@ -180,6 +189,11 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
     integer(observed['seed'], 'workload seed', 0, 2**32 - 1)
     if observed['expected_frames'] != count or observed['preset_revision'] != 6 or not isinstance(observed['preset'], str) or not observed['preset']:
         raise ValueError('workload manifest does not match')
+    if (not isinstance(observed.get('preset_identity'), str) or
+        not re.fullmatch(r'[0-9a-f]{16}', observed['preset_identity']) or
+        not isinstance(observed.get('content_identity'), str) or
+        not re.fullmatch(r'[0-9]{1,20}', observed['content_identity'])):
+        raise ValueError('missing or invalid workload content identities')
     if workload is not None:
         if not isinstance(workload, dict):
             raise ValueError('workload manifest must be an object')
@@ -190,21 +204,21 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
         if traversal is None or observed['script'] != Path(traversal).read_bytes().decode('utf-8'):
             raise ValueError('traversal manifest does not match --traversal')
         manifest = traversal_manifest(observed['script'])
-        for key in ('duration_seconds', 'tick_rate', 'speed_mps', 'seed', 'preset', 'preset_revision', 'expected_ticks', 'cold_cache'):
+        for key in ('duration_seconds', 'tick_rate', 'speed_mps', 'seed', 'preset', 'preset_revision', 'preset_identity', 'content_identity', 'expected_ticks', 'cold_cache'):
             if observed[key] != manifest[key]:
                 raise ValueError(f'traversal manifest does not match: {key}')
-        if observed['actual_ticks'] != observed['expected_ticks']:
+        if observed['actual_ticks'] != observed['expected_ticks'] or count != observed['expected_ticks']:
             raise ValueError('traversal tick count mismatch')
         if len(observed['camera_samples']) != count:
             raise ValueError('incomplete traversal camera samples')
         elapsed = number(observed['measured_duration_seconds'], 'measured traversal duration')
         if sum(row['frame_wall_ms'] for row in rows) / 1000 + 1e-6 < elapsed:
             raise ValueError('traversal duration exceeds measured wall coverage')
-        if elapsed < manifest['duration_seconds']:
-            raise ValueError('traversal ended before its declared duration')
         previous_tick = 0
         for actual in observed['camera_samples']:
             tick = integer(actual['tick'], 'camera tick', previous_tick, manifest['expected_ticks'])
+            if tick != previous_tick + 1:
+                raise ValueError('traversal camera must advance one simulation tick per frame')
             expected = camera_sample(manifest, tick)
             previous_tick = tick
             if len(actual['position']) != 3:
@@ -212,7 +226,7 @@ def validate(data, qualified_renderer=None, qualified_vendor=None, traversal=Non
             for a, e in zip(actual['position'] + [actual['yaw'], actual['pitch']], expected['position'] + [expected['yaw'], expected['pitch']]):
                 if not isinstance(a, (float, int)) or not math.isfinite(a) or not math.isclose(a, e, rel_tol=1e-7, abs_tol=0.002):
                     raise ValueError('traversal camera differs from script')
-        if observed['camera_samples'][0]['tick'] != 0 or previous_tick != manifest['expected_ticks']:
+        if observed['camera_samples'][0]['tick'] != 1 or previous_tick != manifest['expected_ticks']:
             raise ValueError('traversal camera samples do not cover the complete path')
     elif observed['kind'] != 'fixed_view' or traversal is not None:
         raise ValueError('unknown or mismatched workload')

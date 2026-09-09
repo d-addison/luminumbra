@@ -68,6 +68,8 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h" // Aether-field sampling.
 #include "luminumbra_common/systems/CreatureProcgen.h" // genome -> body-proportion build (procedural silhouette)
 #include "luminumbra_common/systems/FarmingSystem.h" //  MakePlantFromSpecies + SpeciesRegistry
@@ -78,6 +80,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/KnobLayer.h" //  semantic-knob layer + startup invariant
 #include "nlohmann/json.hpp"
@@ -2239,7 +2242,7 @@ int main(int argc, char* argv[]) {
             g_uiManager->ShowMessage(error);
         g_app.menu.menu_backdrop_active = false;
         g_playerController.reset();
-        scenario_failed = scenario_config.active() ||
+        scenario_failed = benchmark_v3 || scenario_config.active() ||
                           HasCommandLineFlag(argc, argv, "--load-world") ||
                           HasCommandLineFlag(argc, argv, "--auto-create-world");
         scenario_failure_reason = error;
@@ -3050,7 +3053,8 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
     std::uint64_t traversal_ticks = 0;
     int traversal_target_tick = 0;
-    bool traversal_world_checked = false;
+    bool benchmark_world_checked = false;
+    nlohmann::json benchmark_world_identity;
     std::chrono::steady_clock::time_point traversal_start{};
     double traversal_measured_duration = 0.0;
     nlohmann::json traversal_camera_samples = nlohmann::json::array();
@@ -3080,17 +3084,38 @@ int main(int argc, char* argv[]) {
             g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
         const auto measured_frame_id = static_cast<std::uint64_t>(
             g_app.capture.render_benchmark_warmup + g_app.benchmark.measuredFrames);
-        if (traversal && !traversal_world_checked && gameSession &&
+        if (benchmark_v3 && !benchmark_world_checked && gameSession &&
             gameStateManager.GetCurrentState() == GameState::IN_GAME) {
-            if (gameSession->GetMetadata().worldType != traversal->preset ||
-                static_cast<std::uint32_t>(gameSession->GetWorldSystem()->get_seed()) !=
-                    traversal->seed) {
-                LUMINUMBRA_CORE_ERROR(
-                    "Loaded traversal world disagrees with the script seed or preset");
+            try {
+                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+                    root_dir, gameSession->GetMetadata().worldId);
+                if (!saved.error.empty())
+                    throw std::runtime_error(saved.error);
+                std::ifstream input(saved.preset_path, std::ios::binary);
+                const auto preset = nlohmann::json::parse(input);
+                const auto* world = gameSession->GetWorldSystem();
+                benchmark_world_identity = {
+                    {"seed", static_cast<std::uint32_t>(world->get_seed())},
+                    {"preset", gameSession->GetMetadata().worldType},
+                    {"preset_revision", preset.at("schema_rev")},
+                    {"preset_identity", Luminumbra::Persistence::StableChecksum(preset.dump())},
+                    {"content_identity",
+                     std::to_string(Luminumbra::World::ComputeTerrainParamsHash(
+                         world->get_params(), world->get_seed()))}};
+                if (traversal &&
+                    (benchmark_world_identity["seed"] != traversal->seed ||
+                     benchmark_world_identity["preset"] != traversal->preset ||
+                     benchmark_world_identity["preset_revision"] != traversal->presetRevision ||
+                     benchmark_world_identity["preset_identity"] != traversal->presetIdentity ||
+                     benchmark_world_identity["content_identity"] != traversal->contentIdentity))
+                    throw std::runtime_error(
+                        "traversal world seed, preset or content identity mismatch");
+                benchmark_world_checked = true;
+            } catch (const std::exception& error) {
+                LUMINUMBRA_CORE_ERROR("Benchmark world refused: {}", error.what());
                 exit_code = 2;
                 break;
             }
-            traversal_world_checked = true;
         }
         if (measuring_v3) {
             measured_samples->append(measured_frame_id);
@@ -3101,8 +3126,8 @@ int main(int argc, char* argv[]) {
                 const auto now = std::chrono::steady_clock::now();
                 if (traversal_start.time_since_epoch().count() == 0)
                     traversal_start = now;
-                const double elapsed = std::chrono::duration<double>(now - traversal_start).count();
-                traversal_target_tick = traversal->tick_at(elapsed);
+                // One fixed simulation tick per measured frame. Wall time is observation only.
+                traversal_target_tick = static_cast<int>(traversal_ticks) + 1;
             }
             const auto pose = traversal->sample(traversal_target_tick);
             g_app.capture.fixed_cam = true;
@@ -4999,13 +5024,9 @@ int main(int argc, char* argv[]) {
                          {{"first_frame", g_app.capture.render_benchmark_warmup + rb_count},
                           {"last_frame", g_app.capture.render_benchmark_warmup + rb_count},
                           {"reason", "report and optional screenshot"}}});
-                    j["workload"] = {
-                        {"kind", traversal ? "traversal" : "fixed_view"},
-                        {"seed",
-                         static_cast<std::uint32_t>(gameSession->GetWorldSystem()->get_seed())},
-                        {"preset", gameSession->GetMetadata().worldType},
-                        {"preset_revision", 6},
-                        {"expected_frames", g_app.capture.render_benchmark_frames}};
+                    j["workload"] = benchmark_world_identity;
+                    j["workload"]["kind"] = traversal ? "traversal" : "fixed_view";
+                    j["workload"]["expected_frames"] = g_app.capture.render_benchmark_frames;
                     if (traversal) {
                         j["workload"]["script"] = traversal_text;
                         j["workload"]["script_path"] = traversal_path;

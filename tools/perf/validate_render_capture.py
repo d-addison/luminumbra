@@ -56,6 +56,11 @@ def validate(data, args):
     schema = data.get('schema')
     if schema not in ('luminumbra.render_benchmark.v2', render_contract.SCHEMA):
         raise ValueError('unsupported render capture schema')
+    if schema == 'luminumbra.render_benchmark.v2':
+        missing = ['--' + name for name in ('position', 'yaw', 'pitch', 'tod')
+                   if getattr(args, name, None) is None]
+        if missing:
+            raise ValueError('v2 capture requires missing arguments: ' + ', '.join(missing))
     measurement = None
     if schema == render_contract.SCHEMA:
         manifest_path = getattr(args, 'workload_manifest', None)
@@ -140,10 +145,11 @@ def validate(data, args):
                 raise ValueError(f'not settled: {key}={data["streaming"][key]}')
     if args.require_camera_chunk and not data['camera_chunk']['resident']:
         raise ValueError('capture camera chunk is not resident')
-    if measurement is not None:
-        errors['measurement'] = measurement
-    return {'verdict': 'PASS', 'scope': 'report-frame linked uniforms and actual last streaming argument; not per-frame timing or every-program draw proof',
+    result = {'verdict': 'PASS', 'scope': 'report-frame linked uniforms and actual last streaming argument; not per-frame timing or every-program draw proof',
             'observed_sun_time_of_day': observed_tod, 'tod_phase_error': tod_error, 'max_absolute_errors': errors}
+    if measurement is not None:
+        result['measurement'] = measurement
+    return result
 
 
 def main():
@@ -167,7 +173,7 @@ def main():
     try:
         data = json.loads(args.artifact.read_text(encoding='utf-8-sig'))
         result = validate(data, args)
-    except (ValueError, KeyError, TypeError, ZeroDivisionError, OSError, AttributeError) as error:
+    except (ValueError, KeyError, TypeError, ZeroDivisionError, OSError) as error:
         print(json.dumps({'verdict': 'FAIL', 'reason': str(error)}, indent=2))
         return 1
     print(json.dumps(result, indent=2))

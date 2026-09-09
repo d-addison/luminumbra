@@ -5,6 +5,8 @@ speed_mps 8
 seed 424242
 preset default
 preset_revision 6
+preset_identity 026f24207a8ffc7e
+content_identity 16636010052247870746
 expected_ticks 1800
 cold_cache true
 points 3

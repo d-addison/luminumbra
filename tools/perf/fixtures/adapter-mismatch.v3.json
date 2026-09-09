@@ -261,7 +261,9 @@
     "seed": 424242,
     "preset": "default",
     "preset_revision": 6,
-    "expected_frames": 4
+    "expected_frames": 4,
+    "preset_identity": "0000000000000000",
+    "content_identity": "0"
   },
   "avg": {
     "frame_wall_ms": 8.25,

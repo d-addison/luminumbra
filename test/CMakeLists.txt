@@ -1919,3 +1919,26 @@ if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+
+add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
+    ${CMAKE_SOURCE_DIR}/tools/assets/acquire.py
+    --manifest ${CMAKE_SOURCE_DIR}/config/game-asset-packs.json
+    --root ${CMAKE_BINARY_DIR}/test-artifacts/render-assets
+    --cache ${CMAKE_SOURCE_DIR}/build/asset-cache)
+set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 180)
+foreach(case IN ITEMS
+    "RenderTraversalIntegrated;test_traversal_twice"
+    "RenderBenchmarkImplicitCreationFailure;test_implicit_creation_failure"
+    "RenderBenchmarkOverrideCollection;test_gl_debug_override_collection"
+    "RenderTraversalEmbeddedPresetRefusal;test_embedded_preset_refusal")
+    list(GET case 0 test_name)
+    list(GET case 1 test_method)
+    add_test(NAME ${test_name} COMMAND "${Python3_EXECUTABLE}"
+        ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner.py
+        --client $<TARGET_FILE:luminumbra_client_app>
+        --source ${CMAKE_SOURCE_DIR}
+        --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-assets/game-assets
+        --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
+        RenderRunnerTests.${test_method})
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)
+endforeach()
