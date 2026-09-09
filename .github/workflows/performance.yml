@@ -32,6 +32,7 @@ jobs:
         run: |
           python tools/perf/test_perf.py
           python tools/perf/test_fixture_hash.py
+          python tools/perf/test_render_contract.py
           python tools/ci/test_validate_performance_measurement.py
 
   preview-frame:

@@ -2,6 +2,13 @@
 #define NOMINMAX
 #endif
 
+#if defined(_WIN32)
+extern "C" {
+__declspec(dllexport) extern const unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <glad/glad.h>
@@ -17,6 +24,7 @@
 #include "app/InputCallbacks.h"
 #include "app/MenuScreens.h"
 #include "app/ProcgenPalettes.h"
+#include "app/RenderBenchmarkReport.h"
 #include "app/RuntimeRoot.h"
 #include "app/RuntimeStateRecorder.h"
 #include "app/WindowModeControls.h"
@@ -60,6 +68,8 @@
 #include "luminumbra_common/game/Objectives.h" // progression goals surfaced on the HUD
 #include "luminumbra_common/game/PhotoMode.h" // photo-capture feature: photo-mode capture loop (read-only observer)
 #include "luminumbra_common/network/NetworkLoopbackAuthority.h"
+#include "luminumbra_common/persistence/SavedWorldCatalog.h"
+#include "luminumbra_common/persistence/WorldPersistenceRoundtrip.h"
 #include "luminumbra_common/systems/AetherFieldSystem.h" // Aether-field sampling.
 #include "luminumbra_common/systems/CreatureProcgen.h" // genome -> body-proportion build (procedural silhouette)
 #include "luminumbra_common/systems/FarmingSystem.h" //  MakePlantFromSpecies + SpeciesRegistry
@@ -70,6 +80,7 @@
 #include "luminumbra_common/systems/WaterSystem.h"
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
+#include "luminumbra_common/world/FarLodStore.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/KnobLayer.h" //  semantic-knob layer + startup invariant
 #include "nlohmann/json.hpp"
@@ -1416,6 +1427,94 @@ int main(int argc, char* argv[]) {
     }
     g_app.capture.render_benchmark_path =
         GetCommandLineOption(argc, argv, "--render-benchmark", "");
+    namespace Measurement = Luminumbra::Client::Measurement;
+    const std::string benchmark_schema =
+        GetCommandLineOption(argc, argv, "--render-benchmark-schema", "v2");
+    const bool benchmark_v3 = benchmark_schema == "v3";
+    const std::string capture_size = GetCommandLineOption(argc, argv, "--capture-size", "");
+    const std::string perf_profile = GetCommandLineOption(argc, argv, "--perf-profile", "");
+    const std::string traversal_path = GetCommandLineOption(argc, argv, "--traversal", "");
+    std::optional<Measurement::Traversal> traversal;
+    std::string traversal_text;
+    int capture_width = 0, capture_height = 0;
+    nlohmann::json declared_overrides = nlohmann::json::object();
+    try {
+        for (int index = 1; index < argc; ++index) {
+            const std::string option = argv[index];
+            if (option == "--render-benchmark-schema" || option == "--capture-size" ||
+                option == "--perf-profile" || option == "--traversal" ||
+                option == "--declare-render-overrides") {
+                if (index + 1 >= argc || std::string(argv[index + 1]).empty() ||
+                    std::string(argv[index + 1]).rfind("--", 0) == 0)
+                    throw std::invalid_argument("missing value for " + option);
+            }
+        }
+        if (benchmark_schema != "v2" && !benchmark_v3)
+            throw std::invalid_argument("unsupported render benchmark schema");
+        if (benchmark_v3 && scenario_config.active())
+            throw std::invalid_argument(
+                "schema v3 cannot share a scenario-owned measurement window");
+        if (benchmark_v3) {
+            scenario_config.auto_create_world = true;
+            scenario_config.auto_enter_world = true;
+        }
+        if ((!capture_size.empty() || !perf_profile.empty() || !traversal_path.empty() ||
+             benchmark_v3) &&
+            g_app.capture.render_benchmark_path.empty())
+            throw std::invalid_argument("capture options require --render-benchmark");
+        if (!perf_profile.empty() && perf_profile != "quality" && perf_profile != "performance")
+            throw std::invalid_argument("--perf-profile must be quality or performance");
+        if (!capture_size.empty()) {
+            char trailing = 0;
+            if (std::sscanf(
+                    capture_size.c_str(), "%dx%d%c", &capture_width, &capture_height, &trailing) !=
+                    2 ||
+                capture_width < 1 || capture_height < 1 || capture_width > 16384 ||
+                capture_height > 16384)
+                throw std::invalid_argument("--capture-size requires WxH in 1..16384");
+        }
+        const std::string declaration =
+            GetCommandLineOption(argc, argv, "--declare-render-overrides", "");
+        if (!declaration.empty()) {
+            if (!benchmark_v3)
+                throw std::invalid_argument("override declarations require schema v3");
+            std::ifstream input(declaration, std::ios::binary);
+            input >> declared_overrides;
+            if (!declared_overrides.is_object())
+                throw std::invalid_argument("override declaration must be an object");
+            for (const auto& value : declared_overrides)
+                if (!value.is_string())
+                    throw std::invalid_argument("override declaration values must be strings");
+        }
+        if (!traversal_path.empty()) {
+            if (!benchmark_v3 || scenario_config.active() ||
+                HasCommandLineFlag(argc, argv, "--cam-pos") ||
+                HasCommandLineFlag(argc, argv, "--scene-config") ||
+                HasCommandLineFlag(argc, argv, "--debug-goto") ||
+                HasCommandLineFlag(argc, argv, "--profile-fly") ||
+                HasCommandLineFlag(argc, argv, "--timelapse"))
+                throw std::invalid_argument(
+                    "traversal requires v3 and exclusive camera/world ownership");
+            if (std::filesystem::file_size(traversal_path) > 1024u * 1024u)
+                throw std::invalid_argument("traversal manifest exceeds 1 MiB");
+            std::ifstream input(traversal_path, std::ios::binary);
+            if (!input)
+                throw std::invalid_argument("cannot read traversal manifest");
+            traversal_text.assign(std::istreambuf_iterator<char>(input),
+                                  std::istreambuf_iterator<char>());
+            std::istringstream manifest(traversal_text);
+            traversal = Measurement::Traversal::read(manifest);
+            if (!scenario_config.world_preset.empty() &&
+                scenario_config.world_preset != traversal->preset)
+                throw std::invalid_argument("traversal preset disagrees with --world-preset");
+            scenario_config.world_preset = traversal->preset;
+            scenario_config.auto_create_world = true;
+            scenario_config.auto_enter_world = true;
+        }
+    } catch (const std::exception& error) {
+        LUMINUMBRA_CORE_ERROR("Render benchmark: {}", error.what());
+        return 2;
+    }
     // --debug-goto cave|doline|spawn: after the world loads, deterministically locate the
     // feature + set the fixed camera to frame it (pair with --auto-create-world/--timelapse).
     g_app.capture.debug_goto = GetCommandLineOption(argc, argv, "--debug-goto", "");
@@ -1438,6 +1537,23 @@ int main(int argc, char* argv[]) {
         GetCommandLineIntOption(argc, argv, "--render-benchmark-frames", 120);
     g_app.capture.render_benchmark_warmup =
         GetCommandLineIntOption(argc, argv, "--render-benchmark-warmup", 60);
+    if (traversal) {
+        if (HasCommandLineFlag(argc, argv, "--render-benchmark-frames")) {
+            LUMINUMBRA_CORE_ERROR(
+                "Traversal owns the measured duration; omit --render-benchmark-frames");
+            return 2;
+        }
+        g_app.capture.render_benchmark_frames = static_cast<int>(Measurement::kMaxFrames);
+    }
+    if (benchmark_v3 &&
+        (g_app.capture.render_benchmark_frames < 1 ||
+         g_app.capture.render_benchmark_frames > static_cast<int>(Measurement::kMaxFrames) ||
+         g_app.capture.render_benchmark_warmup < 1 ||
+         g_app.capture.render_benchmark_warmup > static_cast<int>(Measurement::kMaxFrames))) {
+        LUMINUMBRA_CORE_ERROR(
+            "Schema v3 requires 1..18000 measured frames and 1..18000 warmup frames");
+        return 2;
+    }
     const std::string terrain_coverage_dir =
         GetCommandLineOption(argc, argv, "--render-benchmark-aovs", "");
     const bool terrain_coverage_bypass_camera_region_guard =
@@ -1786,6 +1902,14 @@ int main(int argc, char* argv[]) {
         create_width = scenario_config.windowed_width;
         create_height = scenario_config.windowed_height;
     }
+    if (!capture_size.empty()) {
+        if (scenario_config.active()) {
+            LUMINUMBRA_CORE_ERROR("--capture-size cannot change a scenario's pinned framebuffer");
+            return 2;
+        }
+        create_width = capture_width;
+        create_height = capture_height;
+    }
     g_windowState.windowedWidth = create_width;
     g_windowState.windowedHeight = create_height;
 
@@ -1824,6 +1948,8 @@ int main(int argc, char* argv[]) {
     g_systemConfig = luminumbra::core::SystemConfig::LoadLayered(
         "data/common/systems.json", luminumbra::core::SystemConfig::DefaultUserOverlayPath());
 
+    if (!capture_size.empty())
+        glfwWindowHint(GLFW_SCALE_FRAMEBUFFER, GLFW_FALSE);
     GLFWwindow* window =
         glfwCreateWindow(create_width, create_height, "Luminumbra", nullptr, nullptr);
     LUMINUMBRA_ASSERT(window, "Failed to create GLFW window!");
@@ -1860,6 +1986,17 @@ int main(int argc, char* argv[]) {
 
     int framebufferWidth, framebufferHeight;
     glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+    if (!capture_size.empty() &&
+        (framebufferWidth != capture_width || framebufferHeight != capture_height)) {
+        LUMINUMBRA_CORE_ERROR("Requested capture framebuffer {}x{} is unavailable (got {}x{})",
+                              capture_width,
+                              capture_height,
+                              framebufferWidth,
+                              framebufferHeight);
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return 2;
+    }
 
     GameStateManager gameStateManager;
     Luminumbra::JobSystem jobSystem;
@@ -1998,7 +2135,9 @@ int main(int argc, char* argv[]) {
     // startup so the scaled G-buffer/lighting/SSAO intermediates are sized on the first frame.
     // The LUMIN_RENDER_SCALE env knob still WINS (startup applies it after this), preserving
     // the A/B capture path. Default 1.0 = byte-identical (internal==output).
-    renderPipeline.set_render_scale(g_systemConfig.user().render_scale);
+    renderPipeline.set_render_scale(perf_profile.empty()        ? g_systemConfig.user().render_scale
+                                    : perf_profile == "quality" ? 1.0f
+                                                                : 0.67f);
     // Render-only sky-dome quality: unset -> 2 (quarter per axis), 1 = half,
     // 0 = full. LUMIN_CLOUD_QUALITY overrides the client default.
     // Applied after startup below once the GL targets exist. Render-only.
@@ -2123,7 +2262,7 @@ int main(int argc, char* argv[]) {
             g_uiManager->ShowMessage(error);
         g_app.menu.menu_backdrop_active = false;
         g_playerController.reset();
-        scenario_failed = scenario_config.active() ||
+        scenario_failed = benchmark_v3 || scenario_config.active() ||
                           HasCommandLineFlag(argc, argv, "--load-world") ||
                           HasCommandLineFlag(argc, argv, "--auto-create-world");
         scenario_failure_reason = error;
@@ -2754,7 +2893,10 @@ int main(int argc, char* argv[]) {
     } else if (scenario_config.auto_create_world ||
                HasCommandLineFlag(argc, argv, "--auto-create-world") ||
                runtime_boot_recorder.enabled()) {
-        start_world_creation("Automated Test World", "424242", scenario_world_type, {});
+        start_world_creation("Automated Test World",
+                             traversal ? std::to_string(traversal->seed) : "424242",
+                             scenario_world_type,
+                             {});
     }
 
     std::unique_ptr<Luminumbra::Client::WorldGenViewer> worldGenViewer;
@@ -2927,6 +3069,25 @@ int main(int argc, char* argv[]) {
     Luminumbra::Vec3 g_rb_last_streaming_position{};
     bool g_rb_has_streaming_position = false;
     const glm::vec3 kRenderBenchmarkCameraPosition(8.0f, 56.0f, 8.0f);
+    std::unique_ptr<Measurement::SampleRing> measured_samples;
+    std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
+    std::uint64_t traversal_ticks = 0;
+    int traversal_target_tick = 0;
+    bool benchmark_world_checked = false;
+    nlohmann::json benchmark_world_identity;
+    std::chrono::steady_clock::time_point traversal_start{};
+    double traversal_measured_duration = 0.0;
+    nlohmann::json traversal_camera_samples = nlohmann::json::array();
+    auto active_overrides =
+        benchmark_v3 ? Measurement::render_overrides(argc, argv) : nlohmann::json::object();
+    if (benchmark_v3) {
+        measured_samples =
+            std::make_unique<Measurement::SampleRing>(g_app.capture.render_benchmark_frames);
+        benchmark_queries =
+            std::make_unique<Luminumbra::Rendering::BenchmarkGpuQueries>(*measured_samples);
+        benchmark_queries->initialize();
+        renderPipeline.set_benchmark_gpu_queries(benchmark_queries.get());
+    }
     while (!glfwWindowShouldClose(window)) {
         MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
@@ -2937,6 +3098,64 @@ int main(int argc, char* argv[]) {
         const bool g_rb_active = !g_app.capture.render_benchmark_path.empty();
         if (g_rb_active)
             g_rb_frame_start = std::chrono::steady_clock::now();
+        const bool measuring_v3 =
+            benchmark_v3 && gameStateManager.GetCurrentState() == GameState::IN_GAME &&
+            gameSession && g_app.benchmark.warmupFrames >= g_app.capture.render_benchmark_warmup &&
+            g_app.benchmark.measuredFrames < g_app.capture.render_benchmark_frames;
+        const auto measured_frame_id = static_cast<std::uint64_t>(
+            g_app.capture.render_benchmark_warmup + g_app.benchmark.measuredFrames);
+        if (benchmark_v3 && !benchmark_world_checked && gameSession &&
+            gameStateManager.GetCurrentState() == GameState::IN_GAME) {
+            try {
+                const auto saved = Luminumbra::Persistence::InspectSavedWorld(
+                    root_dir, gameSession->GetMetadata().worldId);
+                if (!saved.error.empty())
+                    throw std::runtime_error(saved.error);
+                std::ifstream input(saved.preset_path, std::ios::binary);
+                const auto preset = nlohmann::json::parse(input);
+                const auto* world = gameSession->GetWorldSystem();
+                benchmark_world_identity = {
+                    {"seed", static_cast<std::uint32_t>(world->get_seed())},
+                    {"preset", gameSession->GetMetadata().worldType},
+                    {"preset_revision", preset.at("schema_rev")},
+                    {"preset_identity", Luminumbra::Persistence::StableChecksum(preset.dump())},
+                    {"content_identity",
+                     std::to_string(Luminumbra::World::ComputeTerrainParamsHash(
+                         world->get_params(), world->get_seed()))}};
+                if (traversal &&
+                    (benchmark_world_identity["seed"] != traversal->seed ||
+                     benchmark_world_identity["preset"] != traversal->preset ||
+                     benchmark_world_identity["preset_revision"] != traversal->presetRevision ||
+                     benchmark_world_identity["preset_identity"] != traversal->presetIdentity ||
+                     benchmark_world_identity["content_identity"] != traversal->contentIdentity))
+                    throw std::runtime_error(
+                        "traversal world seed, preset or content identity mismatch");
+                benchmark_world_checked = true;
+            } catch (const std::exception& error) {
+                LUMINUMBRA_CORE_ERROR("Benchmark world refused: {}", error.what());
+                exit_code = 2;
+                break;
+            }
+        }
+        if (measuring_v3) {
+            measured_samples->append(measured_frame_id);
+            benchmark_queries->begin_frame(measured_frame_id);
+        }
+        if (traversal && gameSession) {
+            if (measuring_v3) {
+                const auto now = std::chrono::steady_clock::now();
+                if (traversal_start.time_since_epoch().count() == 0)
+                    traversal_start = now;
+                // One fixed simulation tick per measured frame. Wall time is observation only.
+                traversal_target_tick = static_cast<int>(traversal_ticks) + 1;
+            }
+            const auto pose = traversal->sample(traversal_target_tick);
+            g_app.capture.fixed_cam = true;
+            g_app.capture.fixed_cam_pos =
+                glm::vec3(pose.position[0], pose.position[1], pose.position[2]);
+            g_app.capture.fixed_cam_yaw = static_cast<float>(pose.yaw);
+            g_app.capture.fixed_cam_pitch = static_cast<float>(pose.pitch);
+        }
         // runtime telemetry ( implementation note): always-on frame wall to localize
         // slideshow-on-move frames.
         const auto _frameStart = std::chrono::steady_clock::now();
@@ -3512,7 +3731,12 @@ int main(int argc, char* argv[]) {
                 // host, and camera-anchored streaming would diverge the hashed world.
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
-                    if (g_app.capture.timeScale == 1.0f) {
+                    if (traversal) {
+                        while (measuring_v3 &&
+                               traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
+                            traversal_ticks +=
+                                gameSession->TickSimulation(1.0 / traversal->tickRate);
+                    } else if (g_app.capture.timeScale == 1.0f) {
                         gameSession->TickSimulation(static_cast<double>(
                             deltaTime)); // byte-identical default (gates run here)
                     } else if (g_app.capture.timeScale > 0.0f) {
@@ -4449,10 +4673,14 @@ int main(int argc, char* argv[]) {
         //  CPU-submit ends here (all GL work for the frame is
         // queued); present begins. With vsync off the swap drains the driver
         // queue, so its duration is the GPU/present wait.
+        if (measuring_v3)
+            benchmark_queries->end_frame();
         if (g_rb_active)
             g_rb_before_swap = std::chrono::steady_clock::now();
         const auto _beforeSwap = std::chrono::steady_clock::now();
         glfwSwapBuffers(window);
+        const auto benchmark_present_end = benchmark_v3 ? std::chrono::steady_clock::now()
+                                                        : std::chrono::steady_clock::time_point{};
         // runtime telemetry ( implementation note): localize slideshow-on-move frames. Logs the
         // phase split for any frame slower than ~30 fps. sim = TickSimulation
         // (physics+ecology), stream = SHIELD_WorldSystem::update, render = render_frame CPU,
@@ -4500,7 +4728,8 @@ int main(int argc, char* argv[]) {
         // and was blind to the CPU-submit win this path provides; it also ran at idle
         // clock, so it now reports NVML power+clock to prove the GPU is at boost.
         if (g_rb_active && currentState == GameState::IN_GAME && gameSession) {
-            const auto rb_now = std::chrono::steady_clock::now();
+            const auto rb_now =
+                benchmark_v3 ? benchmark_present_end : std::chrono::steady_clock::now();
             const double cpu_submit_ms =
                 std::chrono::duration<double, std::milli>(g_rb_before_swap - g_rb_frame_start)
                     .count();
@@ -4510,6 +4739,29 @@ int main(int argc, char* argv[]) {
             double wall_ms = 0.0;
             if (rb_prev_end.time_since_epoch().count() != 0)
                 wall_ms = std::chrono::duration<double, std::milli>(rb_now - rb_prev_end).count();
+            if (measuring_v3) {
+                auto& sample = measured_samples->at(measured_frame_id);
+                if (rb_prev_end.time_since_epoch().count() != 0)
+                    sample.wall = wall_ms;
+                sample.cpu = cpu_submit_ms;
+                sample.present = present_ms;
+                if (traversal && g_camera) {
+                    traversal_camera_samples.push_back(
+                        {{"tick", traversal_target_tick},
+                         {"position",
+                          {g_camera->Position.x, g_camera->Position.y, g_camera->Position.z}},
+                         {"yaw", g_camera->Yaw},
+                         {"pitch", g_camera->Pitch}});
+                }
+                if (g_app.overlay.wireframe_mode)
+                    active_overrides["runtime:wireframe"] = "true";
+                if (g_app.overlay.debug_view_mode != 0)
+                    active_overrides["runtime:debug_view"] =
+                        std::to_string(g_app.overlay.debug_view_mode);
+                if (g_app.capture.timeScale != 1.0f)
+                    active_overrides["runtime:time_scale"] =
+                        std::to_string(g_app.capture.timeScale);
+            }
             rb_prev_end = rb_now;
 
             if (!g_rb_nvml_tried) {
@@ -4603,6 +4855,17 @@ int main(int argc, char* argv[]) {
                     rb_nv_ever = true;
                 }
                 ++rb_count;
+                if (traversal && measuring_v3) {
+                    traversal_measured_duration =
+                        std::chrono::duration<double>(rb_now - traversal_start).count();
+                    if (traversal_ticks == static_cast<std::uint64_t>(traversal->expectedTicks))
+                        g_app.capture.render_benchmark_frames = rb_count;
+                    else if (rb_count == static_cast<int>(Measurement::kMaxFrames)) {
+                        LUMINUMBRA_CORE_ERROR("Traversal exhausted its 18000-frame measurement "
+                                              "ring before completion");
+                        exit_code = 1;
+                    }
+                }
 
             } else {
                 const double n = static_cast<double>(std::max(1, rb_count));
@@ -4795,13 +5058,59 @@ int main(int argc, char* argv[]) {
                 // Heuristic bound attribution for the log line: CPU-bound if the
                 // CPU submit dominates the GPU pass-timer sum.
                 j["bound"] = (cpu > gpu_sum * 1.1) ? "cpu" : "gpu_or_present";
+                if (benchmark_v3) {
+                    benchmark_queries->drain();
+                    j["schema"] = "luminumbra.render_benchmark.v3";
+                    Measurement::add_distributions(j, *measured_samples);
+                    const auto gl_string = [](GLenum name) -> nlohmann::json {
+                        const auto* value = glGetString(name);
+                        return value ? nlohmann::json(reinterpret_cast<const char*>(value))
+                                     : nlohmann::json(nullptr);
+                    };
+                    j["adapter"] = {{"vendor", gl_string(GL_VENDOR)},
+                                    {"renderer", gl_string(GL_RENDERER)},
+                                    {"version", gl_string(GL_VERSION)}};
+                    j["profile"] = {{"name", perf_profile.empty() ? "legacy" : perf_profile},
+                                    {"render_scale", renderPipeline.render_scale()},
+                                    {"width", renderPipeline.screen_width()},
+                                    {"height", renderPipeline.screen_height()}};
+                    j["debug_overrides"] = {{"active", active_overrides},
+                                            {"declared", declared_overrides}};
+                    j["excluded_windows"] = nlohmann::json::array(
+                        {{{"first_frame", 0},
+                          {"last_frame", g_app.capture.render_benchmark_warmup - 1},
+                          {"reason", "warmup"}},
+                         {{"first_frame", g_app.capture.render_benchmark_warmup + rb_count},
+                          {"last_frame", g_app.capture.render_benchmark_warmup + rb_count},
+                          {"reason", "report and optional screenshot"}}});
+                    j["workload"] = benchmark_world_identity;
+                    j["workload"]["kind"] = traversal ? "traversal" : "fixed_view";
+                    j["workload"]["expected_frames"] = g_app.capture.render_benchmark_frames;
+                    if (traversal) {
+                        j["workload"]["script"] = traversal_text;
+                        j["workload"]["script_path"] = traversal_path;
+                        j["workload"]["duration_seconds"] = traversal->duration;
+                        j["workload"]["tick_rate"] = traversal->tickRate;
+                        j["workload"]["speed_mps"] = traversal->speed;
+                        j["workload"]["expected_ticks"] = traversal->expectedTicks;
+                        j["workload"]["actual_ticks"] = traversal_ticks;
+                        j["workload"]["measured_duration_seconds"] = traversal_measured_duration;
+                        j["workload"]["cold_cache"] = true;
+                        j["workload"]["camera_samples"] = traversal_camera_samples;
+                    }
+                }
                 std::error_code _rb_ec;
                 const std::filesystem::path rb_path(g_app.capture.render_benchmark_path);
                 if (rb_path.has_parent_path())
                     std::filesystem::create_directories(rb_path.parent_path(), _rb_ec);
-                std::ofstream out(rb_path);
+                std::ofstream out(rb_path, benchmark_v3 ? std::ios::binary : std::ios::out);
                 out << j.dump(2);
                 out.close();
+                if (benchmark_v3 && !out) {
+                    LUMINUMBRA_CORE_ERROR("Could not write complete render benchmark artifact {}",
+                                          rb_path.string());
+                    exit_code = 1;
+                }
                 LUMINUMBRA_CORE_INFO("Render benchmark: {} frames -> {} | wall {:.3f} ms ({:.0f} "
                                      "fps) | cpu_submit {:.3f} ms | "
                                      "present {:.3f} ms | gpu_pass_sum {:.3f} ms | power {:.0f} W "
@@ -4857,6 +5166,10 @@ int main(int argc, char* argv[]) {
                 rb_count = g_app.capture.render_benchmark_frames + 1; // latch: stop re-dumping
             }
         }
+    }
+    if (benchmark_queries) {
+        renderPipeline.set_benchmark_gpu_queries(nullptr);
+        benchmark_queries->shutdown();
     }
     g_rb_nvml.shutdown(); //  release NVML if it was loaded
 

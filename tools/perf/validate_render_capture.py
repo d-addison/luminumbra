@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 from pathlib import Path
+import render_contract
 
 
 def finite_vector(value, count, label):
@@ -52,6 +53,28 @@ def camera_basis(yaw, pitch):
 
 
 def validate(data, args):
+    schema = data.get('schema')
+    if schema not in ('luminumbra.render_benchmark.v2', render_contract.SCHEMA):
+        raise ValueError('unsupported render capture schema')
+    if schema == 'luminumbra.render_benchmark.v2':
+        missing = ['--' + name for name in ('position', 'yaw', 'pitch', 'tod')
+                   if getattr(args, name, None) is None]
+        if missing:
+            raise ValueError('v2 capture requires missing arguments: ' + ', '.join(missing))
+    measurement = None
+    if schema == render_contract.SCHEMA:
+        manifest_path = getattr(args, 'workload_manifest', None)
+        workload = json.loads(Path(manifest_path).read_text(encoding='utf-8')) if manifest_path else None
+        measurement = render_contract.validate(data, getattr(args, 'qualified_renderer', None),
+            getattr(args, 'qualified_vendor', None), getattr(args, 'traversal', None), workload)
+        if args.position is None:
+            if any(value is not None for value in (args.yaw, args.pitch, args.tod, args.fov)) or any(
+                    getattr(args, name, False) for name in ('require_controller', 'require_distinct_controller',
+                    'require_geometry', 'require_settled', 'require_camera_chunk')):
+                raise ValueError('report-frame checks require --position, --yaw, --pitch and --tod')
+            return measurement
+    elif getattr(args, 'qualified_renderer', None) or getattr(args, 'qualified_vendor', None):
+        raise ValueError('v2 has no adapter identity; cannot qualify an adapter')
     finite_vector(args.position, 3, 'requested position')
     finite_vector([args.yaw, args.pitch, args.tod], 3, 'requested angles/time')
     if not 0 <= args.tod < 1:
@@ -122,28 +145,35 @@ def validate(data, args):
                 raise ValueError(f'not settled: {key}={data["streaming"][key]}')
     if args.require_camera_chunk and not data['camera_chunk']['resident']:
         raise ValueError('capture camera chunk is not resident')
-    return {'verdict': 'PASS', 'scope': 'report-frame linked uniforms and actual last streaming argument; not per-frame timing or every-program draw proof',
+    result = {'verdict': 'PASS', 'scope': 'report-frame linked uniforms and actual last streaming argument; not per-frame timing or every-program draw proof',
             'observed_sun_time_of_day': observed_tod, 'tod_phase_error': tod_error, 'max_absolute_errors': errors}
+    if measurement is not None:
+        result['measurement'] = measurement
+    return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('artifact', type=Path)
-    parser.add_argument('--position', type=float, nargs=3, required=True)
-    parser.add_argument('--yaw', type=float, required=True)
-    parser.add_argument('--pitch', type=float, required=True)
-    parser.add_argument('--tod', type=float, required=True)
+    parser.add_argument('--position', type=float, nargs=3)
+    parser.add_argument('--yaw', type=float)
+    parser.add_argument('--pitch', type=float)
+    parser.add_argument('--tod', type=float)
     parser.add_argument('--fov', type=float)
     parser.add_argument('--require-controller', action='store_true')
     parser.add_argument('--require-distinct-controller', action='store_true')
     parser.add_argument('--require-geometry', action='store_true')
     parser.add_argument('--require-settled', action='store_true')
     parser.add_argument('--require-camera-chunk', action='store_true')
+    parser.add_argument('--qualified-renderer', help='Exact GL_RENDERER required for v3 qualification')
+    parser.add_argument('--qualified-vendor', help='Optional exact GL_VENDOR')
+    parser.add_argument('--traversal', type=Path, help='Expected committed traversal script')
+    parser.add_argument('--workload-manifest', type=Path, help='Expected workload fields as a JSON object')
     args = parser.parse_args()
     try:
         data = json.loads(args.artifact.read_text(encoding='utf-8-sig'))
         result = validate(data, args)
-    except (ValueError, KeyError, TypeError, ZeroDivisionError) as error:
+    except (ValueError, KeyError, TypeError, ZeroDivisionError, OSError) as error:
         print(json.dumps({'verdict': 'FAIL', 'reason': str(error)}, indent=2))
         return 1
     print(json.dumps(result, indent=2))
