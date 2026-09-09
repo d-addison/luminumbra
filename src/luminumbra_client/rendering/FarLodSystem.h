@@ -54,20 +54,20 @@ FarLodWorkerBuildOutcome BuildFarLodWorkerTile(const Systems::SHIELD_WorldSystem
 
 class FarLodSystem {
 public:
-    // Pinned numbers (the deterministic runtime contract section 4).
+    // Legacy two-tier heightfield ranges, held unchanged until volumetric
+    // streaming adopts the ladder declared in world/FarTierTable.h.
     static constexpr float kF1OuterRangeMeters = 768.0f;
-    // Finite far horizon; a larger configurable hierarchy is future work.
-    // F2 streams to ~3000 m; the camera FAR_PLANE (3200 m) clears it + margin.
+    // F2 streams to 3000 m; the camera FAR_PLANE (3200 m) clears it + margin.
     static constexpr float kF2OuterRangeMeters = 3000.0f;
     static constexpr std::size_t kResidentBudgetBytes = 384ull * 1024ull * 1024ull;
-    // Fragment-level live/far handoff: far-mesh fragments closer than this
+    // Legacy fragment-level live/far handoff: far-mesh fragments closer than this
     // (the guaranteed-renderable LOD0 ring minus one chunk of overlap) are
     // discarded in the G-buffer shader so the under-terrain far fill cannot
     // show through live LOD seam cracks at close range, while everything
     // beyond the live ring keeps far coverage (no gap band: the overlap chunk
     // is drawn by BOTH paths and depth resolves it).
     static constexpr float kFarClipInnerRadiusMeters = 176.0f;
-    // Bound distant geometry inside the 3200 m camera far plane. This is
+    // Bound legacy distant geometry inside the 3200 m camera far plane. This is
     // a finite horizon; elevated views can still see its outer edge.
     static constexpr float kFarClipOuterRadiusMeters = 3050.0f;
     // Far meshes sit slightly below the live surface so live geometry always
@@ -97,8 +97,9 @@ public:
         bool enabled = false;
         std::size_t regions_wanted = 0;
         std::size_t regions_resident = 0;
-        // Wanted regions with no resident mesh yet (the FarLodHorizon gate
-        // requires this to settle to 0 out to 1536 m).
+        // Wanted regions with no resident mesh yet. The FarLodHorizon gate
+        // checks this count settles to 0 for the legacy runtime wanted set
+        // (kF2OuterRangeMeters); it does not independently verify a radius.
         std::size_t regions_missing = 0;
         std::size_t regions_building = 0;
         std::size_t resident_bytes = 0; // tile payload + GPU mesh bytes
