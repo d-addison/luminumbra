@@ -1,0 +1,13 @@
+luminumbra.traversal.v1
+duration_seconds 60
+tick_rate 30
+speed_mps 8
+seed 424242
+preset default
+preset_revision 6
+expected_ticks 1800
+cold_cache true
+points 3
+point 8 80 8 0 -6
+point 248 80 8 0 -6
+point 488 80 8 0 -6

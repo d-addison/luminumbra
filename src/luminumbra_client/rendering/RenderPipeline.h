@@ -1,5 +1,7 @@
 #pragma once
 
+#include "BenchmarkGpuQueries.h"
+
 #include "../../include/luminumbra/core/Types.h"
 #include "FrameBufferObject.h" // FrameBufferObject (extracted)
 #include "GBuffer.h"           // GBuffer (extracted)
@@ -385,6 +387,9 @@ public:
     // after this, for the A/B capture path). Also safe at runtime (a settings change): when
     // already started it reallocates the scaled intermediates like on_resize (the output-res
     // TAAU/backbuffer targets are untouched -- only the internal extent moved).
+    void set_benchmark_gpu_queries(BenchmarkGpuQueries* queries) {
+        m_benchmark_gpu_queries = queries;
+    }
     void set_render_scale(float scale);
 
     //   (ADDITIVE offscreen render-target redirect for the
@@ -1051,6 +1056,7 @@ private:
         std::array<double, kGpuTimerPassCount> last_gpu_ms{};
     };
     GpuPassTimers m_gpu_timers;
+    BenchmarkGpuQueries* m_benchmark_gpu_queries = nullptr;
 
     void init_gpu_pass_timers();
     void destroy_gpu_pass_timers();

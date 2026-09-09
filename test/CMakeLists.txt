@@ -1904,3 +1904,18 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 # test/performance/run_runtime_boot_metrics.ps1. It is intentionally not a
 # required CTest gate because hidden-window event handling is driver-dependent
 # on Windows and can exit inside the renderer without diagnostic output.
+
+# Pure CPU measurement contract, also runnable without a GL context.
+add_executable(render_measurement_test rendering/render_measurement_test.cpp)
+target_include_directories(render_measurement_test PRIVATE ../src)
+target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+luminumbra_configure_first_party_target(render_measurement_test)
+add_test(NAME RenderMeasurementStatistics COMMAND render_measurement_test statistics)
+add_test(NAME RenderTraversalDeterministic COMMAND render_measurement_test traversal)
+add_test(NAME RenderTraversalRefusal COMMAND render_measurement_test refusal)
+add_test(NAME RenderMeasurementFrameRing COMMAND render_measurement_test ring)
+add_test(NAME RenderMeasurementGpuQueries COMMAND render_measurement_test queries)
+if(NOT Python3_FOUND)
+    message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
+endif()
+add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
