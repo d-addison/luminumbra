@@ -128,7 +128,14 @@
 // Main-loop heartbeat for the opt-in hang watchdog (--hang-watchdog-seconds): bumped
 // once per rendered frame and once per shutdown milestone, read from the watchdog
 // thread. Relaxed atomics are enough; the watchdog only needs "did it change".
-static std::atomic<std::uint64_t> g_main_loop_heartbeat{0};
+// A function-local static rather than a file-scope variable: the client is compiled
+// with cppcoreguidelines-avoid-non-const-global-variables as an error.
+namespace {
+std::atomic<std::uint64_t>& MainLoopHeartbeat() {
+    static std::atomic<std::uint64_t> beat{0};
+    return beat;
+}
+} // namespace
 
 using namespace Luminumbra::Client::ScenarioHarness;
 using namespace Luminumbra::Client::App;
@@ -1359,7 +1366,7 @@ int main(int argc, char* argv[]) {
                               scenario_config.crash_dir.string());
     } else if (scenario_config.hang_watchdog_seconds > 0) {
         hang_watchdog = std::make_unique<HangWatchdog>(
-            [] { return g_main_loop_heartbeat.load(std::memory_order_relaxed); },
+            [] { return MainLoopHeartbeat().load(std::memory_order_relaxed); },
             std::chrono::seconds(scenario_config.hang_watchdog_seconds),
             [](std::uint64_t last_heartbeat, double stalled_seconds) {
                 ReportMainThreadHang(last_heartbeat, stalled_seconds);
@@ -2901,7 +2908,7 @@ int main(int argc, char* argv[]) {
     bool g_rb_has_streaming_position = false;
     const glm::vec3 kRenderBenchmarkCameraPosition(8.0f, 56.0f, 8.0f);
     while (!glfwWindowShouldClose(window)) {
-        g_main_loop_heartbeat.fetch_add(1, std::memory_order_relaxed);
+        MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         float currentFrame = (float)glfwGetTime();
         float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
@@ -4805,7 +4812,7 @@ int main(int argc, char* argv[]) {
     const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {
         shutdown_milestones.push_back(milestone);
-        g_main_loop_heartbeat.fetch_add(1, std::memory_order_relaxed);
+        MainLoopHeartbeat().fetch_add(1, std::memory_order_relaxed);
         // With the hang watchdog armed, shutdown.json is rewritten after every stage
         // (complete=false) so a teardown hang localizes to the last stage reached; the
         // final write_shutdown marks it complete. Off by default: the record is then
