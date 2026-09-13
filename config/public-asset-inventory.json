@@ -1198,6 +1198,20 @@
       "source": "Luminumbra first-party runtime data"
     },
     {
+      "bytes": 3341,
+      "license": "MIT",
+      "path": "docs/assets/authoring-recipes/20260909/evidence.json",
+      "sha256": "bba884e64b7ab7686fbd2cb9a7777885a6fc0e5050d8d184039575ceb44b48b5",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 373552,
+      "license": "MIT",
+      "path": "docs/assets/authoring-recipes/20260909/review-dialog.png",
+      "sha256": "2d679234139e3cc17485e07a2842821aff569b84ba96d6807c7644ccd921c82e",
+      "source": "Luminumbra documentation assets"
+    },
+    {
       "bytes": 833,
       "license": "MIT",
       "path": "docs/assets/badges/language-cpp.svg",
