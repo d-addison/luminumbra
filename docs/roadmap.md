@@ -6,18 +6,31 @@ There are no assigned due dates or invented completion percentages.
 
 ## Current state
 
-- **Integration baseline:** engine `devel` at `945ecd295835a838eed0169ff709e7aabc134fa1`
-  and game `main` at `552a26684215542b327a842104864dda14e31652` (verified September 13).
+- **Recovery baseline:** engine `945ecd295835a838eed0169ff709e7aabc134fa1`
+  and game `552a26684215542b327a842104864dda14e31652`. Subsequent verified upstream
+  revisions are engine `devel` at `7b7510d157af9712389b0ffc75fa4892c49089fb`
+  and game `main` at `f266fe4e121b6a29361c70116ad82e89560b21a3` (September 13).
 - **Merged implementation:** repair PR [#56](https://github.com/d-addison/luminumbra/pull/56),
   accepted distance contract, hang instrumentation, reversed-Z depth, persisted clock,
   five-tier declaration, render measurements and simulation telemetry. The original
   Blender stack was superseded by merged [#155](https://github.com/d-addison/luminumbra/pull/155).
+  The optional headless prefab runtime [#165](https://github.com/d-addison/luminumbra/pull/165)
+  has also merged after current-head checks and independent native evidence review.
   These implementations still have the acceptance obligations listed below.
-- **Recovery in progress:** UCRT SBOM repository-path failure, ambient SIMD determinism
-  [#163](https://github.com/d-addison/luminumbra/issues/163), and the conflicted
-  active-region [#161](https://github.com/d-addison/luminumbra/pull/161). The latest
+- **Recovery in progress:** the SBOM repair [#169](https://github.com/d-addison/luminumbra/pull/169)
+  passes the actual MSYS Git/UCRT Python path-disagreement cases. Ambient SIMD
+  [#172](https://github.com/d-addison/luminumbra/pull/172), tracked by
+  [#163](https://github.com/d-addison/luminumbra/issues/163), passes actual Linux
+  Debug/Release controls; native qualification remains pending. Active-region
+  [#161](https://github.com/d-addison/luminumbra/pull/161) has been refreshed against
+  the recovery baseline and its scheduler, persistence, recovery and replay checks
+  pass. These branches are being composed and verified before landing. The separate
+  wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
+  The latest
   promotion UCRT job passed 2,245 of 2,250 cases at its recorded merge revision;
   its surface-loading guard and three render-process timeouts remain unresolved.
+  All three timed-out render processes emitted their captures before termination;
+  the pending shutdown diagnosis must establish the cause.
   Historical results do not qualify a new candidate; discover its tests again.
 - **Verification:** later Debug/ASan and native records supersede the failed
   `ff0362b` baseline. Expanded integrated, native and packaged acceptance is
@@ -43,9 +56,10 @@ There are no assigned due dates or invented completion percentages.
   Audio stays off; the delivered `5daeb03` preview stays unchanged.
 - **Authoring ownership:** generic packages remain in the engine monorepo.
   [#162](https://github.com/d-addison/luminumbra/pull/162) is the Blender identity
-  review/undo package; [#165](https://github.com/d-addison/luminumbra/pull/165) is
-  optional compiled-prefab consumption. Their branch evidence must be refreshed
-  and reviewed before landing. Headless consumption is not graphical qualification.
+  review/undo package. Its refreshed package matches the retained Windows archive
+  byte-for-byte and passes portable tests; integration checks and visual approval
+  remain distinct obligations. Merged [#165](https://github.com/d-addison/luminumbra/pull/165)
+  supplies optional compiled-prefab consumption. Headless consumption is not graphical qualification.
   Full installed SDK delivery and game extraction retain the post-release
   Foundations approval boundary.
 
@@ -192,8 +206,8 @@ verification.
 - [Add Blender geometry authoring through installed tools](https://github.com/d-addison/luminumbra/issues/146)
 - [Preserve inline texture alpha coverage at authored cutoffs](https://github.com/d-addison/luminumbra/issues/147)
 
-- [Refresh Blender asset identity review and undo package (#146)](https://github.com/d-addison/luminumbra/pull/162)
-- [Refresh optional prefab runtime consumption package (#145)](https://github.com/d-addison/luminumbra/pull/165)
+- [Verify and land refreshed Blender asset identity review and undo package (#146)](https://github.com/d-addison/luminumbra/pull/162)
+- [Merged optional prefab runtime consumption package; graphical consumption remains separate (#145)](https://github.com/d-addison/luminumbra/pull/165)
 
 ### v0.4.0 — Continuing-world multiplayer
 
@@ -237,4 +251,3 @@ verification.
 - [Improve scalable raster lighting and shadows](https://github.com/d-addison/luminumbra/issues/101)
 - [Qualify optional hybrid ray tracing and denoising](https://github.com/d-addison/luminumbra/issues/102)
 - [Provide bounded field-to-render effect extension interfaces](https://github.com/d-addison/luminumbra/issues/103)
-
