@@ -11,7 +11,7 @@ import threading
 import time
 
 from protocol import (CAPACITY, Refusal, Slots, StateGate, atomic_write, canonical,
-                      encode, match_frame, read_record, require, safe_path, write_record)
+                      encode, match_frame, read_record, require, safe_path, validation_backend, write_record)
 
 
 def mailbox(path, key):
@@ -184,6 +184,7 @@ class Broker:
                 'published': published, 'dropped': dropped,
                 'child_returncode': self.child.returncode if self.child else None,
                 'child_reaped': self.child is not None and self.child.poll() is not None,
+                'plane_validation': validation_backend(),
                 'qualification': 'transport-only-no-renderer-or-Blender-claim'}))
             atomic_write(self.root / 'host-stderr.log', bytes(self.stderr_tail))
 

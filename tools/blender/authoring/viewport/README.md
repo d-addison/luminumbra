@@ -40,3 +40,9 @@ Stop completes the active request, discards pending work, forwards authenticated
 shutdown, and waits at most five seconds (or the shorter configured deadline).
 It reaps uncooperative children and records failure. Production integration must
 pin the complete installed host before claiming qualification.
+
+When NumPy is installed, frame-plane checks use read-only array views and vector
+operations. The portable implementation remains available; parity tests cover
+nonfinite depth, range, coverage and alpha corruption. The broker receipt records
+which implementation ran. This optimization alone does not qualify presentation
+rate or end-to-end latency.

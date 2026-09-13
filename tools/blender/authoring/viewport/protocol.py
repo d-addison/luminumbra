@@ -11,6 +11,11 @@ import stat
 import struct
 import tempfile
 
+try:
+    import numpy as _numpy
+except ImportError:
+    _numpy = None
+
 HEADER_LIMIT = 1024 * 1024
 PAYLOAD_LIMIT = 1280 * 720 * 9
 PREFIX = struct.Struct('<4sIQ')
@@ -21,6 +26,10 @@ HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 
 class Refusal(ValueError):
     pass
+
+
+def validation_backend():
+    return 'numpy/' + _numpy.__version__ if _numpy is not None else 'portable-python'
 
 
 def require(value, message):
@@ -100,6 +109,16 @@ def validate(header, payload):
     pixels = state['width'] * state['height']
     require(len(payload) == 9 * pixels, 'Plane sizes')
     require(header['planes_sha256'] == hashlib.sha256(payload).hexdigest(), 'Plane digest')
+    if _numpy is not None:
+        # Views retain the immutable bytes while vectorized checks avoid a
+        # Python callback for each pixel. Keep the portable path equivalent.
+        depth = _numpy.frombuffer(payload, dtype='<f4', count=pixels, offset=4*pixels)
+        covered = _numpy.frombuffer(payload, dtype='u1', count=pixels, offset=8*pixels)
+        rgba = _numpy.frombuffer(payload, dtype='u1', count=4*pixels)
+        require(bool(_numpy.isfinite(depth).all() and (depth >= 0).all() and (depth <= 1).all()), 'Depth range')
+        require(bool((covered <= 1).all() and _numpy.array_equal(covered, depth > 0)), 'Coverage depth')
+        require(bool(_numpy.array_equal(rgba[3::4], covered * 255)), 'Coverage alpha')
+        return
     for i, (depth,) in enumerate(struct.iter_unpack('<f', payload[4*pixels:8*pixels])):
         covered = payload[8*pixels+i]
         require(math.isfinite(depth) and 0 <= depth <= 1, 'Depth range')
