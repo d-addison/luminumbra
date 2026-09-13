@@ -30,6 +30,8 @@ See [world format compatibility](engine-guide.md).
   gate and its statistical interpretation.
 - [Visual regression](visual-regression.md) explains maintained captures and
   visual evidence.
+- [Installed static prefab preview](static-preview.md) describes the neutral
+  production renderer, supported materials, camera and capture evidence.
 - [SHIELD signed-distance-field contract](shield/sdf-contract.md) defines the
   terrain sampling and meshing invariants.
 - [Distant world and distant simulation contract](distant-world.md) defines

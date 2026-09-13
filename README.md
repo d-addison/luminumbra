@@ -130,6 +130,7 @@ defined by the [SHIELD SDF contract](docs/shield/sdf-contract.md).
 - [Performance measurement](docs/performance.md)
 - [Visual regression](docs/visual-regression.md)
 - [Blender authoring probes and service mock](tools/blender/authoring/README.md)
+- [Installed static prefab preview and capture API](docs/static-preview.md)
 - [Contributing](CONTRIBUTING.md)
 
 API documentation is built with Doxygen in CI and published from the validated

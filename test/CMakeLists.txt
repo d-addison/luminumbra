@@ -336,6 +336,13 @@ target_link_libraries(forest_perf_budget_test PRIVATE
 # helper is a free template in FoliagePass.h precisely so it can be exercised
 # without a GL context.
 # Final foliage policy and receipt contracts are GL-free and do not link the engine.
+if(NOT TARGET render_view_test)
+    add_executable(render_view_test rendering/render_view_test.cpp
+        ../src/luminumbra_client/rendering/static_preview/RenderView.cpp)
+    target_include_directories(render_view_test PRIVATE ../include)
+    target_link_libraries(render_view_test PRIVATE gtest_main glm)
+endif()
+
 add_executable(foliage_visual_contract_test rendering/foliage_visual_contract_test.cpp)
 target_include_directories(foliage_visual_contract_test PRIVATE ../src/luminumbra_client)
 target_link_libraries(foliage_visual_contract_test PRIVATE gtest_main nlohmann_json)
@@ -1598,6 +1605,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     world_dressing_test
     foliage_cache_prune_test
     foliage_visual_contract_test
+    render_view_test
     render_smoke_test
     render_capture_test
     capture_sdk_trigger_test
@@ -1859,6 +1867,9 @@ if(_vc_python)
     add_test(NAME TerrainAovDepthContract
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/perf/test_terrain_aovs.py)
     set_tests_properties(TerrainAovDepthContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME StaticPreviewCaptureContract COMMAND "${Python3_EXECUTABLE}"
+        ${CMAKE_SOURCE_DIR}/test/static_preview/test_capture_validation.py)
+    set_tests_properties(StaticPreviewCaptureContract PROPERTIES LABELS "authoring;tools" TIMEOUT 90)
     add_test(NAME VisualCritiqueFlags
         COMMAND "${_vc_python}" ${CMAKE_SOURCE_DIR}/tools/test_visual_critique.py)
     set_tests_properties(VisualCritiqueFlags PROPERTIES LABELS "visual;critique" TIMEOUT 120)

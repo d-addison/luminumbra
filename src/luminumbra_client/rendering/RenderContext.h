@@ -34,11 +34,18 @@ class SHIELD_WorldSystem;
 namespace Luminumbra::Rendering {
 
 class Camera;
+class RenderView;
 
 struct RenderContext {
     // Frame / camera / time.
     u64 frame_index = 0;
     const Camera* camera = nullptr;
+    // Validated neutral view used verbatim by the static geometry/lighting path.
+    const RenderView* render_view = nullptr;
+    bool static_studio = false;
+    glm::vec3 studio_background{0.02f, 0.025f, 0.03f};
+    TextureHandle authored_surface{}; // RGB emission, A authored-material selector
+
     float delta_time = 0.0f;
     glm::mat4 view = glm::mat4(1.0f);
     glm::mat4 projection = glm::mat4(1.0f);
