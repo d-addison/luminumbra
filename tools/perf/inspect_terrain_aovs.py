@@ -139,7 +139,10 @@ def inspect(directory, legacy_forward=False):
 
 
 def validate_benchmark(manifest, benchmark):
-    require(benchmark['schema'] == 'luminumbra.render_benchmark.v2', 'Unknown benchmark schema')
+    # v3 preserves the capture-frame attachment contract while adding a separate
+    # measurement contract. This join does not validate its timing distributions.
+    require(benchmark['schema'] in ('luminumbra.render_benchmark.v2',
+                                    'luminumbra.render_benchmark.v3'), 'Unknown benchmark schema')
     require([benchmark['width'], benchmark['height']] == manifest['color_dimensions'] and
             [benchmark['internal_width'], benchmark['internal_height']] == manifest['gbuffer_dimensions'],
             'Benchmark/AOV dimensions mismatch')

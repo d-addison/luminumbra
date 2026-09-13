@@ -91,6 +91,14 @@ elseif(TARGET meshoptimizer::meshoptimizer)
     target_link_libraries(asset_processor_round_trip_test PRIVATE meshoptimizer::meshoptimizer)
 endif()
 
+# Table-driven volume generation has no client, GL or world-service dependency.
+add_executable(far_volume_tile_test
+    common/FarVolumeTile_test.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp)
+target_include_directories(far_volume_tile_test PRIVATE ../src)
+target_link_libraries(far_volume_tile_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_tile_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -1577,6 +1585,7 @@ add_test(
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
 set(LUMINUMBRA_GTEST_TARGETS
+    far_volume_tile_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
@@ -1830,6 +1839,11 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
+        add_test(NAME FoliageEvidenceContract
+            COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)
+        set_tests_properties(FoliageEvidenceContract PROPERTIES LABELS "visual;tools" TIMEOUT 90)
+    endif()
     add_test(NAME GameAssetAcquisition COMMAND "${Python3_EXECUTABLE}" -m unittest discover
         -s "${CMAKE_SOURCE_DIR}/tools/assets" -v)
     add_test(NAME ReleaseSbomInventory
