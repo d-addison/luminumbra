@@ -98,7 +98,28 @@ qualified whole-frame target is established for this view. The foliage
 diagnostic's 0.6 ms target does not transfer to this workload. Follow the
 [performance policy](performance.md) for paired performance acceptance.
 
-## Reproduce the diagnostic
+## Current ownership rule
+
+Ordinary far draws use the existing 176 m camera-relative fragment exclusion for
+both terrain and water. The camera's 512 m region is submitted like its neighbors;
+its outer fragments are not suppressed merely because the camera is inside it.
+The vertex clip band, exact near fragment discard, far horizon and live-winning
+depth biases remain in effect. Authoritative SDF replacement and water derivation
+use the same meshes as before. Preview mode retains its fixed live-slice exclusion.
+
+The near exclusion does not depend on live mesh readiness. If a nearby live mesh
+is missing, that space remains unfilled: substituting a far heightfield could cap
+a cave or erase an edit. This outer-region coverage repair is not a fix for near
+streaming gaps, nor does it turn pristine far heightfields into volumetric caves.
+
+The historical bypass option is accepted for command compatibility but no longer
+changes rendering; `camera_region_guard_bypassed` is false because there is no
+region-wide guard. The two current commands below must therefore agree. To
+measure the production repair, compare ordinary captures from the parent and
+candidate builds with identical runtime inputs and explicit distinct binary/source
+identities. Do not relabel the historical forward-depth captures above.
+
+## Capture ordinary rendering and the compatibility control
 
 Build the shipping client and acquire the public pack as described in
 [Development](development.md) and [Game assets](game-assets.md). Use identical
@@ -121,7 +142,7 @@ foreach ($name in @('APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 try {
-    foreach ($mode in @('guard', 'bypass')) {
+    foreach ($mode in @('ordinary', 'compatibility')) {
         $runDirectory = Join-Path $diagnosticRoot $mode
         New-Item -ItemType Directory $runDirectory | Out-Null
         foreach ($name in $previousEnvironment.Keys) {
@@ -130,7 +151,7 @@ try {
             [Environment]::SetEnvironmentVariable($name, $profileDirectory, 'Process')
         }
         $extra = @()
-        if ($mode -eq 'bypass') {
+        if ($mode -eq 'compatibility') {
             $extra = @('--render-benchmark-aovs-bypass-camera-region-guard')
         }
         & .\build\release\bin\luminumbra_client_app.exe `
@@ -157,7 +178,7 @@ a rerun appear successful. Validate each report's actual render and streaming
 camera before interpreting the images:
 
 ```powershell
-foreach ($mode in @('guard', 'bypass')) {
+foreach ($mode in @('ordinary', 'compatibility')) {
     py -3 tools/perf/validate_render_capture.py `
         "$diagnosticRoot/$mode/benchmark.json" `
         --position 8 56 8 --yaw 35 --pitch -6 --fov 45 --tod 0.04 `
@@ -187,8 +208,8 @@ tool also checks their projection direction and rejects an incompatible label.
 It refuses comparisons between depth conventions.
 
 ```powershell
-py -3 tools/perf/inspect_terrain_aovs.py "$diagnosticRoot/guard/aovs" `
-    --compare "$diagnosticRoot/bypass/aovs"
+py -3 tools/perf/inspect_terrain_aovs.py "$diagnosticRoot/ordinary/aovs" `
+    --compare "$diagnosticRoot/compatibility/aovs"
 if ($LASTEXITCODE -ne 0) { throw 'AOV comparison failed.' }
 ```
 
@@ -197,4 +218,4 @@ Preserve original planes and hashes, and treat PNG conversion as a separate
 artifact. Require the watchdog arm log, complete shutdown with drained jobs and
 all ten headless-profile milestones, and no crash/hang reports before treating
 an automated capture run as complete. None of these checks grants visual
-approval or makes the diagnostic bypass a production fix.
+approval or proves that every streaming, cave, edit or water view is correct.

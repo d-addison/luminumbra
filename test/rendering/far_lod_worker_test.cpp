@@ -552,6 +552,54 @@ TEST(FarLodWorker, SurfaceWaterComesFromHighestAuthoritativeSdfCrossing) {
     EXPECT_EQ(underground_cave.tile.flags[center] & kFarLodSampleFlagWater, 0u);
 }
 
+// These columns lie outside the live sphere but inside camera region [0,0].
+// Submitting that region must use its authoritative mesh, not a new analytic
+// fill that would erase the cavity or restore the edited surface.
+TEST(FarLodWorker, CameraRegionOuterMeshRetainsCavityAndEditedSurface) {
+    SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
+    const auto make_authority = [&](int chunk_x, bool cavity) {
+        auto chunk = std::make_shared<Chunk>(IVec3(chunk_x, 0, 5));
+        world.GenerateChunkData(*chunk, 1);
+        const int side = CHUNK_SIZE_X + 1;
+        for (int z = 0; z <= CHUNK_SIZE_Z; ++z)
+            for (int y = 0; y <= CHUNK_SIZE_Y; ++y)
+                for (int x = 0; x <= CHUNK_SIZE_X; ++x) {
+                    const std::size_t index = static_cast<std::size_t>(x) +
+                                              static_cast<std::size_t>(y) * side +
+                                              static_cast<std::size_t>(z) * side * side;
+                    const float surface = static_cast<float>(y) - (cavity ? 12.0f : 4.0f);
+                    const float pocket = 5.0f - glm::length(glm::vec3(x - 8, y - 6, z - 8));
+                    chunk->sdf_data[index] = cavity ? std::max(surface, pocket) : surface;
+                }
+        chunk->mark_voxel_data_dirty();
+        return chunk;
+    };
+    ASSERT_TRUE(world.adopt_streamed_chunk(make_authority(20, true)));
+    ASSERT_TRUE(world.adopt_streamed_chunk(make_authority(22, false)));
+    const auto snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
+    ASSERT_TRUE(snapshot);
+    const auto outcome = BuildFarLodWorkerTile(world, *snapshot, FarLodTier::F1, 0, 0, {});
+    ASSERT_TRUE(outcome.ok) << outcome.error;
+    bool cavity_ceiling = false, edited_surface = false;
+    for (const auto index : outcome.mesh.indices) {
+        ASSERT_LT(index, outcome.mesh.vertices.size());
+        const auto& vertex = outcome.mesh.vertices[index];
+        const auto& p = vertex.position;
+        if (p.x > 324 && p.x < 332 && p.z > 84 && p.z < 92 && p.y > 6 && p.y < 12 &&
+            vertex.normal.y < -0.1f)
+            cavity_ceiling = true;
+        if (p.x > 356 && p.x < 364 && p.z > 84 && p.z < 92) {
+            EXPECT_LT(p.y, 8.0f) << "analytic surface must not cap the edited column";
+            edited_surface |= std::abs(p.y - 4.0f) < 0.01f;
+        }
+    }
+    EXPECT_TRUE(cavity_ceiling) << "authoritative cavity must retain its inward-facing roof";
+    EXPECT_TRUE(edited_surface);
+    const std::size_t cavity_center = 82u + 22u * outcome.tile.samples_per_side;
+    EXPECT_EQ(outcome.tile.flags[cavity_center] & kFarLodSampleFlagWater, 0u)
+        << "an underground cavity must not acquire a surface-water sheet";
+}
+
 TEST(FarLodWorker, CrossRegionEdgeAndCornerAuthorityRemainTransientForBothTiers) {
     for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
         const TerrainGenParams params = FlatParams();
@@ -1327,9 +1375,10 @@ void main() { color = vec4(1); }
 }
 
 // Uses the production vertex and fragment shaders, the real region scheduler,
-// and a small explicit live patch. This diagnoses one draw predicate; it does
-// not approve enabling analytic far terrain at cave/edited boundaries.
-TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegionBoundaries) {
+// and an optional explicit live patch. Terrain and water outside the live
+// sphere must be covered in every camera region, including negative coordinates;
+// absent live geometry must not admit a far cap inside that sphere.
+TEST(FarLodWorker, CameraRegionCoveragePreservesLiveTerrainAndWaterOwnership) {
     if (!glfwInit())
         GTEST_SKIP() << "glfwInit failed";
     struct GlLifetime {
@@ -1455,97 +1504,134 @@ TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegion
     glClearDepth(0.0);
     JobSystem jobs;
     jobs.startup(1);
-    SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
-    FarLodSystem far;
-    far.attach_job_system(&jobs);
-    far.set_coverage_diagnostics_enabled(true);
-    const glm::mat4 projection =
-        ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);
-    struct Pose {
-        glm::vec3 camera;
-        float yaw;
-    };
-    const std::array<Pose, 4> poses{
-        {{{8, 56, 8}, 35}, {{504, 56, 504}, 215}, {{-8, 56, -8}, 215}, {{-504, 56, -504}, 35}}};
-    for (const auto& pose : poses) {
-        SCOPED_TRACE(::testing::Message()
-                     << pose.camera.x << ',' << pose.camera.z << " yaw " << pose.yaw);
-        const float yaw = glm::radians(pose.yaw), pitch = glm::radians(-6.0f);
-        const glm::vec3 horizontal(std::cos(yaw), 0, std::sin(yaw));
-        const auto view = glm::lookAt(pose.camera,
-                                      pose.camera + horizontal * std::cos(pitch) +
-                                          glm::vec3(0, std::sin(pitch), 0),
-                                      glm::vec3(0, 1, 0));
-        for (int frame = 0; frame < 12; ++frame) {
-            far.update(world, pose.camera);
-            jobs.wait(jobs.dispatch_batch({[] {
-            }}));
-        }
-        const int rx = static_cast<int>(std::floor(pose.camera.x / 512.0f));
-        const int rz = static_cast<int>(std::floor(pose.camera.z / 512.0f));
-        const auto camera_row = [&]() -> const FarLodSystem::RegionCoverage* {
-            for (const auto& r : far.coverage_diagnostics().neighbourhood)
-                if (r.rx == rx && r.rz == rz)
-                    return &r;
-            return nullptr;
-        };
-        const auto& coverage = far.coverage_diagnostics();
-        EXPECT_EQ(coverage.wanted, coverage.resident + coverage.missing);
-        EXPECT_LE(coverage.stale, coverage.resident);
-        EXPECT_EQ(coverage.neighbourhood.size(), 9u);
-        ASSERT_NE(camera_row(), nullptr);
-        ASSERT_TRUE(camera_row()->resident);
-        EXPECT_TRUE(camera_row()->current);
-        const auto sample = [&](float distance) {
-            const auto point = pose.camera + horizontal * distance;
-            const auto clip = projection * view * glm::vec4(point.x, 12, point.z, 1);
-            const int x = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * 128);
-            const int y = static_cast<int>((clip.y / clip.w * 0.5f + 0.5f) * 64);
-            EXPECT_GE(x, 0);
-            EXPECT_LT(x, 128);
-            EXPECT_GE(y, 0);
-            EXPECT_LT(y, 64);
-            float depth = 0;
-            glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
-            return depth;
-        };
-        const auto draw = [&](bool bypass) {
-            far.set_coverage_camera_region_guard_bypass(bypass);
-            glBindFramebuffer(GL_FRAMEBUFFER, gl.fbo);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            shader.use();
-            shader.setMat4("view", view);
-            shader.setMat4("projection", projection);
-            shader.setMat3("u_normalViewMatrix", glm::mat3(view));
-            shader.setMat4(
-                "model", glm::translate(glm::mat4(1), glm::vec3(pose.camera.x, 0, pose.camera.z)));
-            shader.setMat3("normalMatrix", glm::mat3(view));
-            glBindVertexArray(gl.vao);
-            glDrawArrays(GL_TRIANGLES, 0, 6); // the explicit live patch owns the near point
-            const glm::vec4 planes[6]{}; // actual hardware clip, without a synthetic frustum veto
-            std::size_t draws = 0, indices = 0;
-            far.draw_gbuffer(shader, view, planes, draws, indices);
-            return std::array<float, 2>{sample(100), sample(300)};
-        };
-        const auto guarded = draw(false);
-        ASSERT_TRUE(far.coverage_diagnostics().draw_observed);
-        EXPECT_STREQ(camera_row()->terrain_decision, "camera_region_guard");
-        EXPECT_GT(guarded[0], 0.0f) << "live near patch missing";
-        EXPECT_EQ(guarded[1], 0.0f) << "expected diagnostic guard footprint outside live patch";
-        const auto bypassed = draw(true);
-        EXPECT_STREQ(camera_row()->terrain_decision, "submitted");
-        EXPECT_EQ(bypassed[0], guarded[0]) << "176 m production clip must preserve near ownership";
-        EXPECT_GT(bypassed[1], 0.0f) << "production shader should cover the in-region far point";
-        EXPECT_GT(bypassed[0], bypassed[1]) << "reversed depth must keep the live patch nearer";
-        EXPECT_EQ(glGetError(), GL_NO_ERROR);
-        // A bypass request cannot modify ordinary rendering without diagnostics.
-        far.set_coverage_diagnostics_enabled(false);
-        const auto disabled = draw(true);
-        EXPECT_EQ(disabled, guarded);
-        EXPECT_FALSE(far.coverage_diagnostics().enabled);
+    for (const float surface_height : {12.0f, -12.0f}) {
+        SCOPED_TRACE(::testing::Message() << "surface height " << surface_height);
+        auto params = FlatParams();
+        params.height_offset = surface_height;
+        SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+        FarLodSystem far;
+        far.attach_job_system(&jobs);
         far.set_coverage_diagnostics_enabled(true);
+        const glm::mat4 projection =
+            ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);
+        struct Pose {
+            glm::vec3 camera;
+            float yaw;
+        };
+        const std::array<Pose, 8> poses{{
+            {{8, 56, 8}, 35},
+            {{504, 56, 504}, 215},
+            {{-8, 56, -8}, 215},
+            {{-504, 56, -504}, 35},
+            // Cross both positive and negative region boundaries without
+            // rotating the camera. Ownership must not jump with the region ID.
+            {{504, 56, 8}, 35},
+            {{520, 56, 8}, 35},
+            {{-504, 56, -8}, 215},
+            {{-520, 56, -8}, 215},
+        }};
+        for (const auto& pose : poses) {
+            SCOPED_TRACE(::testing::Message()
+                         << pose.camera.x << ',' << pose.camera.z << " yaw " << pose.yaw);
+            const float yaw = glm::radians(pose.yaw), pitch = glm::radians(-6.0f);
+            const glm::vec3 horizontal(std::cos(yaw), 0, std::sin(yaw));
+            const auto view = glm::lookAt(pose.camera,
+                                          pose.camera + horizontal * std::cos(pitch) +
+                                              glm::vec3(0, std::sin(pitch), 0),
+                                          glm::vec3(0, 1, 0));
+            for (int frame = 0; frame < 12; ++frame) {
+                far.update(world, pose.camera);
+                jobs.wait(jobs.dispatch_batch({[] {
+                }}));
+            }
+            const int rx = static_cast<int>(std::floor(pose.camera.x / 512.0f));
+            const int rz = static_cast<int>(std::floor(pose.camera.z / 512.0f));
+            const auto camera_row = [&]() -> const FarLodSystem::RegionCoverage* {
+                for (const auto& r : far.coverage_diagnostics().neighbourhood)
+                    if (r.rx == rx && r.rz == rz)
+                        return &r;
+                return nullptr;
+            };
+            const auto& coverage = far.coverage_diagnostics();
+            EXPECT_EQ(coverage.wanted, coverage.resident + coverage.missing);
+            EXPECT_LE(coverage.stale, coverage.resident);
+            EXPECT_EQ(coverage.neighbourhood.size(), 9u);
+            ASSERT_NE(camera_row(), nullptr);
+            ASSERT_TRUE(camera_row()->resident);
+            EXPECT_TRUE(camera_row()->current);
+            const auto pixel = [&](float distance) {
+                const auto point = pose.camera + horizontal * distance;
+                const auto clip = projection * view * glm::vec4(point.x, 12, point.z, 1);
+                const int x = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * 128);
+                const int y = static_cast<int>((clip.y / clip.w * 0.5f + 0.5f) * 64);
+                EXPECT_GE(x, 0);
+                EXPECT_LT(x, 128);
+                EXPECT_GE(y, 0);
+                EXPECT_LT(y, 64);
+                return std::array<int, 2>{x, y};
+            };
+            const auto sample = [&](float distance) {
+                const auto p = pixel(distance);
+                float depth = 0;
+                glReadPixels(p[0], p[1], 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+                return depth;
+            };
+            const auto draw = [&](bool bypass, bool live_ready = true) {
+                far.set_coverage_camera_region_guard_bypass(bypass);
+                glBindFramebuffer(GL_FRAMEBUFFER, gl.fbo);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                shader.use();
+                shader.setMat4("view", view);
+                shader.setMat4("projection", projection);
+                shader.setMat3("u_normalViewMatrix", glm::mat3(view));
+                shader.setMat4(
+                    "model",
+                    glm::translate(glm::mat4(1), glm::vec3(pose.camera.x, 0, pose.camera.z)));
+                shader.setMat3("normalMatrix", glm::mat3(view));
+                glBindVertexArray(gl.vao);
+                if (live_ready)
+                    glDrawArrays(GL_TRIANGLES, 0, 6); // explicit live patch owns the near point
+                const glm::vec4
+                    planes[6]{}; // actual hardware clip, without a synthetic frustum veto
+                std::size_t draws = 0, indices = 0;
+                far.draw_gbuffer(shader, view, planes, draws, indices);
+                return std::array<float, 2>{sample(100), sample(300)};
+            };
+            const auto ordinary = draw(false);
+            ASSERT_TRUE(far.coverage_diagnostics().draw_observed);
+            EXPECT_STREQ(camera_row()->terrain_decision, "submitted");
+            EXPECT_FALSE(far.coverage_diagnostics().camera_region_guard_bypassed);
+            EXPECT_GT(ordinary[0], 0.0f) << "live near patch missing";
+            EXPECT_GT(ordinary[1], 0.0f)
+                << "camera-region far point must be covered without bypass";
+            EXPECT_GT(ordinary[0], ordinary[1]) << "reversed depth must keep the live patch nearer";
+            if (surface_height < SEA_LEVEL) {
+                EXPECT_STREQ(camera_row()->water_decision, "submitted");
+                const auto p = pixel(300);
+                std::array<float, 4> normal_material{};
+                glReadBuffer(GL_COLOR_ATTACHMENT1);
+                glReadPixels(p[0], p[1], 1, 1, GL_RGBA, GL_FLOAT, normal_material.data());
+                EXPECT_NEAR(normal_material[3] * 255.0f,
+                            static_cast<float>(FarLodSystem::kFarWaterMaterialId),
+                            0.01f)
+                    << "outer water owns the pixel above the submerged terrain";
+            }
+            const auto absent_live = draw(false, false);
+            EXPECT_EQ(absent_live[0], 0.0f)
+                << "missing live mesh must not be filled by a far terrain or water cap";
+            EXPECT_EQ(absent_live[1], ordinary[1]);
+            const auto bypassed = draw(true);
+            EXPECT_EQ(bypassed, ordinary) << "historical bypass must not change fragment ownership";
+            EXPECT_EQ(glGetError(), GL_NO_ERROR);
+            // A bypass request cannot modify ordinary rendering without diagnostics.
+            far.set_coverage_diagnostics_enabled(false);
+            const auto disabled = draw(true);
+            EXPECT_EQ(disabled, ordinary);
+            EXPECT_FALSE(far.coverage_diagnostics().enabled);
+            far.set_coverage_diagnostics_enabled(true);
+        }
+        far.shutdown();
     }
-    far.shutdown();
     jobs.shutdown();
 }
 
@@ -1569,7 +1655,7 @@ TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {
         Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
     ASSERT_TRUE(preset.ok);
     JobSystem jobs;
-    jobs.startup();
+    jobs.startup(2);
     {
         SHIELD_WorldSystem world(&jobs, nullptr, preset.params, 424242);
         world.debug_set_streaming_radius_cap(8);
