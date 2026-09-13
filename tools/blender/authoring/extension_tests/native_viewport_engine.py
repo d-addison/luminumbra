@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import time
@@ -41,6 +42,8 @@ def retain(client, check, report):
     status, retained = client.status, client.session_receipt()
     captured = [entry['frame']['header'] for entry in report['captures']
                 if entry['frame']['header']['session'] == status['session']]
+    # None permits cancelled preflight. "unavailable" means receipt collection
+    # ran after a host attempt; missing native evidence must still fail here.
     if retained is None and not captured and status['state'] == 'closed' and status['error'] is None and status['last_result'] is None:
         check('unused client closed before host startup', status['closed'] and
               status['broker_pid'] is None and status['session_directory'] is None)
@@ -60,8 +63,8 @@ def retain(client, check, report):
         last = max(captured, key=lambda header: header['sequence'])
         check('retained native receipt includes final captured frame', any(
             item['wire_header'] == last and item['planes_sha256'] == last['planes_sha256'] and
-            item['actual_view'] == last['state']['view'] and
-            item['actual_projection'] == last['state']['projection']
+            all(item['actual_' + name] == list(struct.unpack('<16f', struct.pack(
+                '<16f', *last['state'][name]))) for name in ('view', 'projection'))
             for item in native.get('recent_frames', [])) and native['last_sequence'] > last['sequence'])
     report.setdefault('host_sessions', {})[status['session']] = retained
     return retained
