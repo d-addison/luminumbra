@@ -72,3 +72,22 @@ Missing, duplicate, failed, or skipped component cases fail the gate. Artifacts
 retain the installed tool hashes, receipt logs and synthetic compiled generations.
 This ongoing Linux gate does not replace the separately pinned Windows evidence
 above or claim rendered preview coverage.
+
+## Current-base integration qualification
+
+The [September 13 integration record](assets/prefab-runtime/20260913/verification.json)
+qualifies source `d15e62ea669a6bb7ec148da3410ef261fefe5c50`, tree
+`f20f3d4caa1a04c45962f334586cd43b85418630`, after merging the current development
+base. A fresh Linux GCC 13.3.0 release build passed all 20 C++ cases and 19 checks
+through the installed service, compiler and consumer. A fresh Windows UCRT64
+build and installation passed all 19 applicable C++ cases and 23 installed
+checks, including actual NTFS junction refusal. No executed case failed or skipped.
+
+Windows packaged the service from the integrated source and rebuilt the consumer.
+It reused the preserved compiler and runtime libraries after checking their
+pinned identities and the recorded compiler source digests and Git blobs against
+the integrated tree. The native guard and an independent receipt audit verified
+555 input files, tool identities and receipt joins. Both builds used at most two
+workers. This qualifies the headless consumer; no renderer, visual acceptance or
+GPU performance result is claimed. The September 9 evidence above retains its
+original execution identity.
