@@ -108,6 +108,8 @@ add_executable(common_tests
     common/FarLodStore_test.cpp
     common/FarTierTable_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
+    common/SimBudgetTelemetry_test.cpp
+    ../src/luminumbra_server/modes/SmokeArtifact.cpp
     common/JobSystem_test.cpp
     common/JobWatchdog_test.cpp
     audio/AudioBankIntegrity_test.cpp
@@ -1331,6 +1333,7 @@ target_link_libraries(frontier_gates_test PRIVATE
 # Exercise the shipping server runner and the client's GameSession open paths.
 add_executable(world_open_refusal_test
     persistence/world_open_refusal_test.cpp
+    common/SimBudgetWorldParity_test.cpp
     persistence/async_saved_world_catalog_test.cpp
     ../src/luminumbra_server/ServerWorldRunner.cpp
 )
@@ -1693,6 +1696,17 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
         # Keep every case in the required suite and give its measurement the CPU.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RUN_SERIAL TRUE)
+    elseif(_lum_gtest_target STREQUAL world_open_refusal_test)
+        # Carries the populated 3,600-tick telemetry parity runs, which execute
+        # three full simulations per parameter. They take about four minutes each
+        # in Debug and about eight under the sanitizer on a developer machine, so
+        # the workflow's 300-second default expires on a slower runner. The tick
+        # count is the evidence, not the runtime: it is what proves the world hash
+        # is unmoved by telemetry across both switches, so raise the bound rather
+        # than shorten the run. Everything else in this target is fast; the cost of
+        # the wider bound is only that a genuine hang here surfaces later.
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            PROPERTIES TIMEOUT 1800)
     elseif(_lum_gtest_target IN_LIST LUMINUMBRA_GL_GTEST_TARGETS)
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
             PROPERTIES RESOURCE_LOCK luminumbra_gl_context)
@@ -1744,6 +1758,12 @@ add_test(NAME ShieldRtSpike COMMAND shieldrt_spike_bench)
 set_tests_properties(ShieldRtSpike PROPERTIES
     LABELS "manual;perf;spike"
     TIMEOUT 600)
+
+# Simulation telemetry captures require the standard-library Python validator.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME SimBudgetCaptureContract
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/perf/test_capture_sim_budget.py")
+set_tests_properties(SimBudgetCaptureContract PROPERTIES LABELS "simulation;tools" TIMEOUT 60)
 
 # GPU tracer micro-profile. Manual/GPU — needs a real GL context and a
 # hardware GPU (skips gracefully headless; writes the artifact but skips the perf
@@ -1971,3 +1991,41 @@ file(WRITE "${LUMINUMBRA_TEST_ARTIFACT_ROOT}/testing/ctest_manifest.json"
 # test/performance/run_runtime_boot_metrics.ps1. It is intentionally not a
 # required CTest gate because hidden-window event handling is driver-dependent
 # on Windows and can exit inside the renderer without diagnostic output.
+
+# Pure CPU measurement contract, also runnable without a GL context.
+add_executable(render_measurement_test rendering/render_measurement_test.cpp)
+target_include_directories(render_measurement_test PRIVATE ../src)
+target_compile_definitions(render_measurement_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+luminumbra_configure_first_party_target(render_measurement_test)
+add_test(NAME RenderMeasurementStatistics COMMAND render_measurement_test statistics)
+add_test(NAME RenderTraversalDeterministic COMMAND render_measurement_test traversal)
+add_test(NAME RenderTraversalRefusal COMMAND render_measurement_test refusal)
+add_test(NAME RenderMeasurementFrameRing COMMAND render_measurement_test ring)
+add_test(NAME RenderMeasurementGpuQueries COMMAND render_measurement_test queries)
+if(NOT Python3_FOUND)
+    message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
+endif()
+add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+
+# Ordinary test lanes need no downloaded game art. Generate valid synthetic
+# meshes/materials and their manifest solely for the isolated runner roots.
+add_test(NAME RenderBenchmarkAssets COMMAND "${Python3_EXECUTABLE}"
+    ${CMAKE_SOURCE_DIR}/tools/perf/synthetic_render_content.py
+    --root ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content)
+set_tests_properties(RenderBenchmarkAssets PROPERTIES FIXTURES_SETUP render_benchmark_assets TIMEOUT 30)
+foreach(case IN ITEMS
+    "RenderTraversalIntegrated;test_traversal_twice"
+    "RenderBenchmarkImplicitCreationFailure;test_implicit_creation_failure"
+    "RenderBenchmarkOverrideCollection;test_gl_debug_override_collection"
+    "RenderTraversalEmbeddedPresetRefusal;test_embedded_preset_refusal")
+    list(GET case 0 test_name)
+    list(GET case 1 test_method)
+    add_test(NAME ${test_name} COMMAND "${Python3_EXECUTABLE}"
+        ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner.py
+        --client $<TARGET_FILE:luminumbra_client_app>
+        --source ${CMAKE_SOURCE_DIR}
+        --assets ${CMAKE_BINARY_DIR}/test-artifacts/render-synthetic-content
+        --artifacts ${CMAKE_BINARY_DIR}/test-artifacts/render-runner
+        RenderRunnerTests.${test_method})
+    set_tests_properties(${test_name} PROPERTIES TIMEOUT 600 FIXTURES_REQUIRED render_benchmark_assets)
+endforeach()

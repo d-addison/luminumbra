@@ -9,3 +9,6 @@
 # Devel persistence oracle: preserve exact fixture bytes on every platform.
 test/fixtures/active-regions/devel-off/* -text
 test/fixtures/active-regions/devel-off-plant-edit/* -text
+
+# Fixed serializer baseline bytes; the test handles native Windows stream newlines.
+test/fixtures/smoke_artifact/devel-*.json -text

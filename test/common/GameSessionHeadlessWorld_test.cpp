@@ -1401,6 +1401,10 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
         session->SetActiveRegionsEnabled(true);
         session->SetRegionSchedulerConfig({10, 3, 2});
     }
+    // Exercise the merged telemetry path through reduction, freeze, recovery,
+    // and reload. Its observations must not become scheduler pressure or state.
+    original.SetSimBudgetTelemetryEnabled(true);
+    loaded.SetSimBudgetTelemetryEnabled(true);
     ASSERT_TRUE(original.CreateWorld("Region resume", "1337", "default"));
     ASSERT_TRUE(uninterrupted.CreateTransientWorld("Uninterrupted", "1337", "default"));
     ASSERT_TRUE(render_only.CreateWorld("Render variant", "1337", "default"));
@@ -1459,12 +1463,27 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
             EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(),
                       original.GetActiveRegionLedger().canonical_bytes());
             EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
+            const auto& original_samples = original.GetSimBudgetTelemetry().SamplesByStage();
+            const auto& loaded_samples = loaded.GetSimBudgetTelemetry().SamplesByStage();
+            for (std::size_t stage = 0; stage < original_samples.size(); ++stage) {
+                if (original_samples[stage].empty()) {
+                    EXPECT_TRUE(loaded_samples[stage].empty());
+                    continue;
+                }
+                ASSERT_FALSE(loaded_samples[stage].empty());
+                EXPECT_EQ(loaded_samples[stage].back().tick, tick);
+                EXPECT_EQ(loaded_samples[stage].back().work, original_samples[stage].back().work);
+            }
         }
         if (tick == 3 || tick == 11) {
             const auto before = SessionWorldHash(original);
             ASSERT_TRUE(original.SaveWorldState());
             EXPECT_EQ(SessionWorldHash(original), before);
             ASSERT_TRUE(render_only.SaveWorldState());
+            EXPECT_EQ(ReadClockTestFile(
+                          P::WorldSaveService::active_regions_path(original.GetWorldSaveDir())),
+                      ReadClockTestFile(
+                          P::WorldSaveService::active_regions_path(render_only.GetWorldSaveDir())));
             ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId))
                 << loaded.GetWorldOpenError();
             EXPECT_EQ(loaded.GetActiveRegionLedger().encode(),
@@ -1473,6 +1492,14 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
         }
     }
     EXPECT_EQ(loaded.GetSimulationTickCount(), 20u);
+    const auto& combined =
+        original.GetSimBudgetTelemetry().SamplesByStage()[static_cast<std::size_t>(
+            luminumbra::simulation::SimBudgetStage::WindWeather)];
+    ASSERT_EQ(combined.size(), 20u);
+    for (const auto& sample : combined)
+        EXPECT_EQ(sample.work, 2u * 64u * 64u);
+    for (const auto& stage : uninterrupted.GetSimBudgetTelemetry().SamplesByStage())
+        EXPECT_TRUE(stage.empty());
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnly) {

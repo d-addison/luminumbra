@@ -1,0 +1,174 @@
+{
+  "availability_trace": [
+    {
+      "avail": "c00000000000000c",
+      "tick": 1
+    },
+    {
+      "avail": "d00000000000000d",
+      "tick": 2
+    }
+  ],
+  "availability_trace_first_divergent_tick": -1,
+  "availability_trace_match": true,
+  "collision_radius": 1,
+  "deterministic": true,
+  "entity_count_end": 9,
+  "entity_count_end_replay": 9,
+  "entity_count_start": 8,
+  "entity_count_start_replay": 8,
+  "generated_by": "luminumbra_server_app --smoke ()",
+  "main_wait_ms": {
+    "max": 1.0,
+    "p50": 0.125,
+    "p95": 0.25,
+    "p99": 0.5,
+    "total": 1.125
+  },
+  "passed": true,
+  "preset": "fixture-\"preset",
+  "runs": [
+    {
+      "autosave_passes": 4,
+      "autosave_writes": 1,
+      "chunks_streamed": 5,
+      "entity_count_end": 9,
+      "entity_count_start": 8,
+      "frames_executed": 3,
+      "ok": true,
+      "shutdown_save": {
+        "chunks_dirty": 3,
+        "chunks_saved": 2,
+        "chunks_total": 5,
+        "saved": true
+      },
+      "simulated_seconds": 0.0625,
+      "sub_hashes": {
+        "aether": "7000000000000007",
+        "aether_state": "8000000000000008",
+        "ecology": "a00000000000000a",
+        "entities": "4000000000000004",
+        "mesh": "2000000000000002",
+        "plants": "b00000000000000b",
+        "scents": "9000000000000009",
+        "terrain": "1000000000000001",
+        "water": "3000000000000003",
+        "weather": "6000000000000006",
+        "wind": "5000000000000005"
+      },
+      "ticks_executed": 2,
+      "wall_seconds": 1.25,
+      "world_hash": "0123456789abcdef",
+      "world_id": "fixed world\nrun-1"
+    },
+    {
+      "autosave_passes": 4,
+      "autosave_writes": 1,
+      "chunks_streamed": 5,
+      "entity_count_end": 9,
+      "entity_count_start": 8,
+      "frames_executed": 3,
+      "ok": true,
+      "shutdown_save": {
+        "chunks_dirty": 3,
+        "chunks_saved": 2,
+        "chunks_total": 5,
+        "saved": false
+      },
+      "simulated_seconds": 0.0625,
+      "sub_hashes": {
+        "aether": "7000000000000007",
+        "aether_state": "8000000000000008",
+        "ecology": "a00000000000000a",
+        "entities": "4000000000000004",
+        "mesh": "eeeeeeeeeeeeeeee",
+        "plants": "b00000000000000b",
+        "scents": "9000000000000009",
+        "terrain": "1000000000000001",
+        "water": "3000000000000003",
+        "weather": "6000000000000006",
+        "wind": "5000000000000005"
+      },
+      "ticks_executed": 2,
+      "wall_seconds": 2.5,
+      "world_hash": "0123456789abcdef",
+      "world_id": "fixed world\\run-2"
+    }
+  ],
+  "schema": "luminumbra.server_tick.v1",
+  "seed": "1337",
+  "sub_hashes": {
+    "aether": "7000000000000007",
+    "aether_state": "8000000000000008",
+    "ecology": "a00000000000000a",
+    "entities": "4000000000000004",
+    "mesh": "2000000000000002",
+    "scents": "9000000000000009",
+    "terrain": "1000000000000001",
+    "water": "3000000000000003",
+    "weather": "6000000000000006",
+    "wind": "5000000000000005"
+  },
+  "sub_hashes_match": true,
+  "sub_hashes_replay": {
+    "aether": "7000000000000007",
+    "aether_state": "8000000000000008",
+    "ecology": "a00000000000000a",
+    "entities": "4000000000000004",
+    "mesh": "eeeeeeeeeeeeeeee",
+    "scents": "9000000000000009",
+    "terrain": "1000000000000001",
+    "water": "3000000000000003",
+    "weather": "6000000000000006",
+    "wind": "5000000000000005"
+  },
+  "surface_radius": 3,
+  "tick_rate_hz": 30.0,
+  "ticks_requested": 2,
+  "water_awake_chunks_max": 3,
+  "water_cells_simmed_per_tick": 96.0,
+  "water_cells_simmed_total": 192,
+  "water_hash_trace": [
+    {
+      "hash": "0123456789abcdef",
+      "tick": 1
+    },
+    {
+      "hash": "fedcba9876543210",
+      "tick": 2
+    }
+  ],
+  "water_hash_trace_first_divergent_tick": -1,
+  "water_hash_trace_match": true,
+  "water_mass_ok": true,
+  "water_phase_ms": {
+    "bookkeeping": {
+      "max": 3.5,
+      "p50": 3.125,
+      "p95": 3.25
+    },
+    "init": {
+      "max": 0.5,
+      "p50": 0.125,
+      "p95": 0.25
+    },
+    "seam": {
+      "max": 2.5,
+      "p50": 2.125,
+      "p95": 2.25
+    },
+    "sim": {
+      "max": 1.5,
+      "p50": 1.125,
+      "p95": 1.25
+    },
+    "total": {
+      "max": 8.0,
+      "p50": 6.5,
+      "p95": 7.0
+    }
+  },
+  "water_seam_wet_pairs_max": 8,
+  "world_hash": "0123456789abcdef",
+  "world_hash_replay": "0123456789abcdef"
+}

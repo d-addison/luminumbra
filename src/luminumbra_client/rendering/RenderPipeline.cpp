@@ -2049,6 +2049,8 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
     // command-stream annotation: zero effect on rendered pixels (RenderHealth
     // stays byte-stable). Paired with the pop in end_gpu_pass_timer.
     PassGl::push_debug_group(kGpuTimerPassNames[static_cast<size_t>(pass)]);
+    if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
+        m_benchmark_gpu_queries->begin_pass(static_cast<std::size_t>(pass));
     // the harness's second dispatch suppresses timestamp queries (the
     // ring slot records once per frame); the debug-group markers stay balanced.
     if (!m_gpu_timers.supported || m_gpu_timers_suppressed) {
@@ -2059,6 +2061,8 @@ void RenderPipeline::begin_gpu_pass_timer(GpuTimerPass pass) {
 }
 
 void RenderPipeline::end_gpu_pass_timer(GpuTimerPass pass) {
+    if (m_benchmark_gpu_queries && !m_gpu_timers_suppressed)
+        m_benchmark_gpu_queries->end_pass(static_cast<std::size_t>(pass));
     PassGl::pop_debug_group();
     if (!m_gpu_timers.supported || m_gpu_timers_suppressed) {
         return;

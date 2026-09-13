@@ -37,6 +37,10 @@ cells and page updates before any decisions, saturating unsigned 64-bit sums
 rather than wrapping. Duplicate entries are additive and order-independent.
 An unknown region in work input is an error. Work is supplied by the host, never
 by timers or streaming telemetry. No consumer counters are invented here.
+The telemetry v2 `events` timer ends after the ordered event drain, before
+region scheduling. The server's physics timer ends before anchor submission.
+Scheduler measurement remains part of the later diagnostics work; it does not
+change the existing telemetry stage identities or units.
 
 Pressure greater than the configured limit increments consecutive over-hold;
 otherwise (including equality) it increments under-hold. The opposite counter
@@ -134,21 +138,22 @@ ledger. Unknown fields cannot be skipped: extensions require a new version.
 
 All integers are little endian, signed integers use two's complement, floats
 are IEEE binary32 (finite, with positive zero as the sole zero encoding).
-The header is exactly 48 bytes:
+The header is exactly 56 bytes:
 
 | Offset | Bytes | Value |
 |---|---:|---|
 | 0 | 4 | ASCII ARL1 |
 | 4 | 2 | version = 1 |
 | 6 | 2 | reserved zero |
-| 8 | 8 | scheduler clock floor (last scheduled or reconciled restored tick) |
-| 16 | 8 | work limit; UINT64_MAX is unlimited |
-| 24 | 4 | nonzero hold ticks |
-| 28 | 1 | reduced cadence shift, 1 through 16 |
-| 29 | 1 | local anchor present, 0 or 1 |
-| 30 | 2 | reserved zero |
-| 32 | 12 | local walking feet X, Y, Z; all zero if absent |
-| 44 | 4 | record count, at most 1,048,576 |
+| 8 | 8 | canonical scheduler tick; advances only when scheduling runs |
+| 16 | 8 | validation ceiling; observational restored clock bound |
+| 24 | 8 | work limit; UINT64_MAX is unlimited |
+| 32 | 4 | nonzero hold ticks |
+| 36 | 1 | reduced cadence shift, 1 through 16 |
+| 37 | 1 | local anchor present, 0 or 1 |
+| 38 | 2 | reserved zero |
+| 40 | 12 | local walking feet X, Y, Z; all zero if absent |
+| 52 | 4 | record count, at most 1,048,576 |
 
 Each record is exactly 104 bytes, sorted uniquely by signed X then Z:
 
@@ -170,12 +175,13 @@ Each record is exactly 104 bytes, sorted uniquely by signed X then Z:
 
 The footer is one LE u64 FNV-1a-64 checksum over every preceding byte (offset
 basis 14695981039346656037, multiplier 1099511628211). Total length must be exactly
-48 + count * 104 + 8, capped at 109,051,960 bytes before allocation. No trailing
+56 + count * 104 + 8, capped at 109,051,968 bytes before allocation. No trailing
 bytes, padding, native structs, section omission or alternate encodings are
-accepted. Stamps cannot exceed the header tick, counters cannot exceed the hold
+accepted. Stamps cannot exceed the validation ceiling, counters cannot exceed the hold
 or both be nonzero, phases must match the region key, and a frozen region's last
 ticked stamp precedes its freeze stamp. The ledger tick cannot exceed the saved
-WorldClock tick. Configuration is stored and hashed with the ledger rather than
+WorldClock tick, and the canonical tick cannot exceed its validation ceiling.
+Configuration is stored and hashed with the ledger rather than
 read from an unrecorded machine-local budget.
 
 Frozen content is supplied at the transition by merging live lod-0 chunks with
@@ -192,8 +198,9 @@ with a declared canonical projection before consuming the scheduler.
 
 An empty ledger contributes no hash section. Otherwise ASCII
 `active_regions:v1:` precedes the header bytes starting at offset 8 and ordered
-record bytes, omitting each last-save u64. The file magic, version envelope and
-footer are absent. This contribution follows the existing clock bytes within
+record bytes, omitting the validation ceiling u64 at header offset 16 and each
+last-save u64. The file magic, version envelope and footer are absent. This
+contribution follows the existing clock bytes within
 the existing ecology fold. The outer composition remains
 `chunk|wind|weather|aether|scents|ecology|plants`. Storage paths and transaction
 generations are not ledger fields and never enter this projection.
