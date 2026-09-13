@@ -27,6 +27,10 @@ Persistent authoring IDs are not represented in LMS2.
 The output bounding sphere covers the quantized skin in its default bind pose.
 It is not an animated-bounds guarantee. Renderer fidelity under animated scale,
 morphs, sockets, retargeting, IK and physical animation need their own contracts.
+The separate [static morph asset profile](static-morph-assets.md) adds owned
+geometry and CPU weight evaluation. Skinned morphs, animated weights and renderer
+integration remain outside that profile and are still required for a complete
+character baseline.
 
 ## Clip versions
 
