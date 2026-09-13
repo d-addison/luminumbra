@@ -127,7 +127,12 @@ if mode=='crash-tree':
     threading.Timer(.7, lambda: os._exit(9)).start()
 config['command']=[sys.executable, FIXTURE_PATH, WIRE_PATH, mode]
 config['executable_sha256']=hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest()
-Broker(key=bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY')), **config).run()
+try:
+    Broker(key=bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY')), **config).run()
+except BaseException as error:
+    (project/'broker-exception.json').write_text(json.dumps({
+        'type':type(error).__name__,'error':str(error)}))
+    raise
 '''.replace('WIRE_PATH', repr(str(AUTHORING / 'viewport')))
            .replace('FIXTURE_PATH', repr(str(ROOT / 'test/viewport/client_fixture.py'))))
         (self.project / 'mode.txt').write_text('echo')
@@ -222,15 +227,45 @@ Broker(key=bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY')), **config).r
         self.assertNotEqual(header['session'], previous)
 
     def test_frame_timeout_does_not_get_extended_by_flooding_desired_states(self):
-        client = self.client('hang', frame_timeout=.35, startup_timeout=1, shutdown_timeout=.1)
-        for revision in range(1, 50):
-            client.submit(state(revision))
-            if client.status['state'] == 'failed':
-                break
-            time.sleep(.02)
-        wait_for(lambda: client.status['state'] == 'failed')
-        self.assertIn('frame deadline', client.status['error'])
-        self.assertIsNone(client.poll())
+        stopped, stopping = threading.Event(), {}
+        original_stop = ViewportClient._stop
+        def observed_stop(client, *arguments):
+            stopping['at'] = time.monotonic()
+            stopped.set()
+            return original_stop(client, *arguments)
+        with mock.patch.object(ViewportClient, '_stop', observed_stop):
+            client = self.client('hang', frame_timeout=.35, startup_timeout=1, shutdown_timeout=.1)
+            # Warm only fixture process startup. The frame deadline remains .35s.
+            wait_for(lambda: (self.project / 'child.json').exists())
+            child = json.loads((self.project / 'child.json').read_text())
+            broker_pid = client.status['broker_pid']
+            directory = Path(client.status['session_directory'])
+            started, revision = time.monotonic(), 0
+            # Observe the watchdog decision before SDK verification and process
+            # cleanup, whose duration is governed by separate existing bounds.
+            # A .5s scheduling allowance is explicit; flooding cannot defer this
+            # decision indefinitely or to the fixture's 60s response delay.
+            while not stopped.is_set() and time.monotonic() - started < .85:
+                revision += 1
+                client.submit(state(revision))
+                time.sleep(.02)
+            self.assertTrue(stopped.is_set(), client.status)
+            self.assertLessEqual(stopping['at'] - started, .85)
+            self.assertGreater(revision, 1)
+            wait_for(lambda: client.status['state'] == 'failed')
+            error = client.status['error']
+            if 'frame deadline' not in error:
+                # The broker and client share the .35s bound. Either may win;
+                # an unrelated disconnect/parse failure must not pass as timeout.
+                self.assertEqual(error, 'Viewport broker exited: 1')
+                exception = json.loads((self.project / 'broker-exception.json').read_text())
+                self.assertEqual(exception, {'type': 'Refusal', 'error': 'Host deadline/write'})
+                self.assertTrue(client.status['last_result']['child_reaped'])
+                self.assertEqual(client.status['last_result']['status'], 'failed')
+            self.assertIsNone(client.poll())
+            self.assertFalse(running(broker_pid))
+            self.assertFalse(running(child['pid']))
+            self.assertFalse(directory.exists())
 
     def test_hung_shutdown_is_bounded_and_does_not_claim_cooperative_stop(self):
         client = self.client('stop-hang', shutdown_timeout=.15)
