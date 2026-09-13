@@ -130,15 +130,21 @@ class TerrainAovDepth(unittest.TestCase):
         benchmark = dict(schema='luminumbra.render_benchmark.v2', width=2, height=2,
             internal_width=2, internal_height=2, terrain_coverage=dict(capture_complete=True,
                 frame_observations=[dict(render_frame=641, benchmark_phase='capture', far=metadata['far'])]))
-        self.assertEqual(aovs.validate_benchmark(metadata, benchmark)['capture_frame'], 641)
-        bad = copy.deepcopy(benchmark)
-        bad['terrain_coverage']['frame_observations'] *= 2
-        with self.assertRaises(ValueError):
-            aovs.validate_benchmark(metadata, bad)
-        bad = copy.deepcopy(benchmark)
-        bad['terrain_coverage']['frame_observations'][0]['far']['wanted'] = 9
-        with self.assertRaises(ValueError):
-            aovs.validate_benchmark(metadata, bad)
+        for schema in ('luminumbra.render_benchmark.v2', 'luminumbra.render_benchmark.v3'):
+            benchmark['schema'] = schema
+            with self.subTest(schema=schema):
+                self.assertEqual(aovs.validate_benchmark(metadata, benchmark)['capture_frame'], 641)
+                bad = copy.deepcopy(benchmark)
+                bad['terrain_coverage']['frame_observations'] *= 2
+                with self.assertRaises(ValueError):
+                    aovs.validate_benchmark(metadata, bad)
+                bad = copy.deepcopy(benchmark)
+                bad['terrain_coverage']['frame_observations'][0]['far']['wanted'] = 9
+                with self.assertRaises(ValueError):
+                    aovs.validate_benchmark(metadata, bad)
+        benchmark['schema'] = 'luminumbra.render_benchmark.v4'
+        with self.assertRaisesRegex(ValueError, 'Unknown benchmark schema'):
+            aovs.validate_benchmark(metadata, benchmark)
 
 
 if __name__ == '__main__':
