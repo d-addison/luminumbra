@@ -2006,6 +2006,8 @@ if(NOT Python3_FOUND)
     message(FATAL_ERROR "RenderContractPython requires a Python3 interpreter")
 endif()
 add_test(NAME RenderContractPython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_contract.py)
+add_test(NAME RenderRunnerEvidencePython COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_render_runner_evidence.py)
+set_tests_properties(RenderRunnerEvidencePython PROPERTIES TIMEOUT 60)
 
 # Ordinary test lanes need no downloaded game art. Generate valid synthetic
 # meshes/materials and their manifest solely for the isolated runner roots.
