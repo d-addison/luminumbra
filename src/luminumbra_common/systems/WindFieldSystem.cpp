@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../core/DeterministicMath.h"
+#include "AmbientNoiseDispatch.h"
 
 // NOTE: call the wrappers via the fully-qualified DeterministicMath:: name (not
 // a short alias) so the SimDeterminismLint trig allow-check (which looks for the
@@ -78,8 +79,8 @@ WindFieldSystem::WindFieldSystem(int world_seed)
     // Low-frequency FBm simplex, the same family the worldgen climate noises use,
     // so the FastNoise batch path (GenPositionArray2D / GenUniformGrid2D) and the
     // single-sample path (GenSingle2D) produce identical float bits.
-    auto fractal = FastNoise::New<FastNoise::FractalFBm>();
-    fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+    auto fractal = NewAmbientNoise<FastNoise::FractalFBm>();
+    fractal->SetSource(NewAmbientNoise<FastNoise::Simplex>());
     fractal->SetOctaveCount(2);
     m_direction_noise = fractal;
 

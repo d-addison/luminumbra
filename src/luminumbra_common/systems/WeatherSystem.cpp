@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../core/DeterministicMath.h"
+#include "AmbientNoiseDispatch.h"
 #include "WindFieldSystem.h"
 
 // NOTE: call the wrappers via the fully-qualified DeterministicMath:: name (not
@@ -133,18 +134,18 @@ WeatherSystem::WeatherSystem(int world_seed)
     , m_grid_cell_size(kWeatherCellSizeM) {
     // Low-frequency FBm Simplex (same family the wind base + worldgen climate
     // noises use) so the FastNoise batch path matches the single-sample path.
-    auto pressure = FastNoise::New<FastNoise::FractalFBm>();
-    pressure->SetSource(FastNoise::New<FastNoise::Simplex>());
+    auto pressure = NewAmbientNoise<FastNoise::FractalFBm>();
+    pressure->SetSource(NewAmbientNoise<FastNoise::Simplex>());
     pressure->SetOctaveCount(2);
     m_pressure_noise = pressure;
 
-    auto temperature = FastNoise::New<FastNoise::FractalFBm>();
-    temperature->SetSource(FastNoise::New<FastNoise::Simplex>());
+    auto temperature = NewAmbientNoise<FastNoise::FractalFBm>();
+    temperature->SetSource(NewAmbientNoise<FastNoise::Simplex>());
     temperature->SetOctaveCount(2);
     m_temperature_noise = temperature;
 
-    auto humidity = FastNoise::New<FastNoise::FractalFBm>();
-    humidity->SetSource(FastNoise::New<FastNoise::Simplex>());
+    auto humidity = NewAmbientNoise<FastNoise::FractalFBm>();
+    humidity->SetSource(NewAmbientNoise<FastNoise::Simplex>());
     humidity->SetOctaveCount(2);
     m_humidity_noise = humidity;
 
