@@ -1,8 +1,7 @@
 # Third-Party Licenses
 
 Luminumbra is distributed under the MIT License (see `LICENSE`). It builds on the
-third-party projects below, each under its own license. All are permissive and
-compatible with MIT redistribution.
+third-party projects below, each under its own license.
 
 Dependencies are obtained in one of two ways, noted per entry:
 
@@ -76,6 +75,13 @@ the public-domain DEM fixture provenance documented alongside those fixtures.
 ---
 
 ## Notes
+
+**MinGW static-preview SDK runtimes.** The UCRT64 SDK installation also copies
+`libstdc++-6.dll` and `libgcc_s_seh-1.dll` from its configured GCC toolchain, with
+the GCC Runtime Library Exception and accompanying license texts. It copies
+`libwinpthread-1.dll` with its upstream notice. These toolchain notices are
+installed under `share/luminumbra-static/licenses/`; the DLLs retain their own
+licenses and are not covered by this repository's MIT license.
 
 **Fetched dependencies are not redistributed by this repository.** CMake downloads
 them into the build tree at configure time; their source is not committed here and

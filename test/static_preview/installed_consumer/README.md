@@ -43,18 +43,26 @@ if ($LASTEXITCODE -ne 0) { throw 'Consumer configure failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Consumer build failed' }
 $PreviousPath = $env:PATH
 try {
-  # Legacy SDKs still need the three separately pinned MinGW runtime DLLs.
-  $env:PATH = "$Sdk/bin;C:/msys64/ucrt64/bin;$env:SystemRoot/System32"
+  # Installed SDK/bin supplies all three MinGW runtime DLLs.
+  $env:PATH = "$Sdk/bin;$env:SystemRoot/System32"
   & "$ConsumerBuild/installed_consumer.exe" 'C:/acceptance/project with spaces' `
     GENERATION MANIFEST_SHA256 "$Sdk/bin/libluminumbra_render_static.dll"
   if ($LASTEXITCODE -ne 0) { throw 'Consumer acceptance failed' }
 } finally { $env:PATH = $PreviousPath }
 ```
 
-The legacy command is not proof of a self-contained Windows runtime install.
-Once runtime DLL packaging is qualified, remove the compiler directory from the
-run-time PATH and record all actual loaded module paths and hashes. For either
-platform, preserve SDK file hashes before and after, copied consumer source
+Runtime DLL packaging still requires the native lane to execute this restricted
+PATH command and record all actual loaded module paths and hashes. Older SDKs
+without these DLLs must fail this qualification. For either platform, preserve
+SDK file hashes before and after, copied consumer source
 hashes, compiler/CMake identities, compile commands and header dependencies,
 binary hash, command/output/exit code, and the fixture's immutable generation
 pin. A failed process or changed SDK remains a failed receipt.
+
+The MinGW install resolves `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, and
+`libwinpthread-1.dll` through the configured compiler and requires each to be in
+that compiler's `bin` directory. Their toolchain license notices accompany the
+DLLs. It refuses missing, redirected, or ambiguous resolution; it does not copy
+Windows system DLLs. `test_mingw_runtime_install.py` exercises CMake resolution,
+refusal, and the unchanged non-MinGW install with compiler-response fixtures.
+Those portable tests do not qualify native Windows loading.
