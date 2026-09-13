@@ -91,6 +91,14 @@ elseif(TARGET meshoptimizer::meshoptimizer)
     target_link_libraries(asset_processor_round_trip_test PRIVATE meshoptimizer::meshoptimizer)
 endif()
 
+# Table-driven volume generation has no client, GL or world-service dependency.
+add_executable(far_volume_tile_test
+    common/FarVolumeTile_test.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp)
+target_include_directories(far_volume_tile_test PRIVATE ../src)
+target_link_libraries(far_volume_tile_test PRIVATE gtest_main)
+luminumbra_configure_first_party_target(far_volume_tile_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -1577,6 +1585,7 @@ add_test(
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
 set(LUMINUMBRA_GTEST_TARGETS
+    far_volume_tile_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test

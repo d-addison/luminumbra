@@ -10,7 +10,8 @@ format change listed here exists until its slice lands.
 For the September 13 recovered source, see the [implementation and acceptance
 gap map](distant-world-implementation-status.md). It distinguishes landed
 prerequisites from the remaining runtime and evidence work without changing this
-contract.
+contract. The subsequent [bounded volume-generation entry point](far-volume-generation.md)
+implements the first sampler-driven part of DW01; runtime integration remains open.
 
 ## Scope
 
