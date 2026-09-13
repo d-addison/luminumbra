@@ -105,9 +105,9 @@ std::uint64_t Little(std::span<const std::uint8_t> bytes) {
         value |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
     return value;
 }
-void Append(std::vector<std::uint8_t>& bytes, std::uint64_t value, unsigned count) {
-    for (unsigned i = 0; i < count; ++i)
-        bytes.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+void StoreLittle(std::span<std::uint8_t> bytes, std::uint64_t value) {
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+        bytes[i] = static_cast<std::uint8_t>(value >> (8 * i));
 }
 Json Parse(std::span<const std::uint8_t> bytes) {
     std::vector<std::set<std::string>> keys;
@@ -197,11 +197,14 @@ std::vector<std::uint8_t> Encode(const Record& record, const Key& key) {
     const auto text = record.header.dump();
     Require(text.size() <= kHeaderLimit && record.payload.size() <= kPayloadLimit,
             "Viewport encode bounds");
-    std::vector<std::uint8_t> signed_bytes{'L', 'V', 'P', '1'};
-    Append(signed_bytes, text.size(), 4);
-    Append(signed_bytes, record.payload.size(), 8);
-    signed_bytes.insert(signed_bytes.end(), text.begin(), text.end());
-    signed_bytes.insert(signed_bytes.end(), record.payload.begin(), record.payload.end());
+    // Allocate the bounded signed message once. Besides avoiding repeated growth,
+    // this makes every write's extent explicit to GCC's optimized bounds checks.
+    std::vector<std::uint8_t> signed_bytes(16 + text.size() + record.payload.size());
+    std::copy_n("LVP1", 4, signed_bytes.begin());
+    StoreLittle(std::span(signed_bytes).subspan(4, 4), text.size());
+    StoreLittle(std::span(signed_bytes).subspan(8, 8), record.payload.size());
+    std::copy(text.begin(), text.end(), signed_bytes.begin() + 16);
+    std::copy(record.payload.begin(), record.payload.end(), signed_bytes.begin() + 16 + text.size());
     const auto signature = Mac(signed_bytes, key);
     signed_bytes.insert(signed_bytes.begin() + 16, signature.begin(), signature.end());
     return signed_bytes;
