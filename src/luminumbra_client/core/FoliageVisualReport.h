@@ -1,13 +1,15 @@
 #pragma once
 
+#include "core/FoliageQualificationReport.h"
 #include "core/FoliageVisualContract.h"
+#include "rendering/FoliageEvidence.h"
 #include <nlohmann/json.hpp>
 
 namespace Luminumbra::Client::ScenarioHarness {
 
-// Controlled foliage observations. Independent rebuild determinism, rendered
-// displacement and correlated GPU timing are separate, still-open qualifications.
+// Controlled foliage observations and separately validated GPU qualification payloads.
 struct FoliageInstancingResult {
+    Rendering::FoliageQualificationEvidence evidence;
     std::uint64_t world_seed = 0;
     FoliagePhaseEvidence calm;
     FoliagePhaseEvidence windy;
@@ -87,19 +89,11 @@ inline nlohmann::json BuildFoliageInstancingReport(const FoliageInstancingResult
     const bool functional =
         controls && density && fade && result.foliage_draws > 0 &&
         result.foliage_instances_drawn >= FoliageVisualProfile::minimum_instances && gl_errors == 0;
-    const bool timer_value = result.gpu_timers_supported && std::isfinite(result.foliage_gpu_ms) &&
-                             result.foliage_gpu_ms > 0.0;
-    return {
-        {"schema", "luminumbra.foliage_instancing.v2"},
+    auto qualification = BuildFoliageQualification(result.evidence, result.calm, result.windy);
+    nlohmann::json report = {
+        {"schema", "luminumbra.foliage_instancing.v3"},
         {"profile", FoliageVisualProfile::id},
         {"passed", false},
-        {"qualification",
-         {{"status", "incomplete"},
-          {"missing",
-           {"independent rebuild determinism",
-            "rendered geometric wind response",
-            "source-frame-correlated GPU samples"}},
-          {"visual_approved", false}}},
         {"functional_control", {{"passed", functional}, {"final_state_matches_profile", controls}}},
         {"profile_settings",
          {{"fade_start_m", FoliageVisualProfile::fade_start_m},
@@ -110,15 +104,6 @@ inline nlohmann::json BuildFoliageInstancingReport(const FoliageInstancingResult
           {"minimum_instances", FoliageVisualProfile::minimum_instances}}},
         {"phases",
          {{"calm", FoliagePhaseReport(result.calm)}, {"windy", FoliagePhaseReport(result.windy)}}},
-        {"determinism",
-         {{"status", "unevaluated"},
-          {"passed", nullptr},
-          {"reason",
-           "Snapshot hashes describe two different wind phases; no independent reconstruction was "
-           "compared."},
-          {"world_seed", result.world_seed},
-          {"global_rng", false},
-          {"world_hash_written", false}}},
         {"coverage_density",
          {{"passed", density},
           {"instances_within_ring", result.instances_within_ring},
@@ -140,26 +125,14 @@ inline nlohmann::json BuildFoliageInstancingReport(const FoliageInstancingResult
          {{"passed", controls},
           {"units", "wind-field input units"},
           {"meaning", "Per-instance raw wind magnitude, not vertex or tip displacement."}}},
-        {"rendered_motion",
-         {{"status", "unevaluated"},
-          {"tip_displacement_m", nullptr},
-          {"reason", "Ordered stills and input readback do not measure rendered vertex motion."}}},
-        {"gpu_timer",
-         {{"status", timer_value ? "unqualified_observation" : "unavailable"},
-          {"foliage_gpu_ms",
-           timer_value ? nlohmann::json(result.foliage_gpu_ms) : nlohmann::json(nullptr)},
-          {"budget_ms", FoliageVisualProfile::gpu_budget_ms},
-          {"within_budget", nullptr},
-          {"observed_within_budget",
-           timer_value
-               ? nlohmann::json(result.foliage_gpu_ms <= FoliageVisualProfile::gpu_budget_ms)
-               : nlohmann::json(nullptr)},
-          {"supported", result.gpu_timers_supported},
-          {"source_frame", nullptr},
-          {"reason", "Retained timer value has no source-frame identity or unique sample count."}}},
         {"render_pass",
          {{"foliage_draws", result.foliage_draws},
           {"foliage_instances_drawn", result.foliage_instances_drawn}}}};
+    for (const char* key : {"determinism", "rendered_motion", "gpu_timer", "qualification"})
+        report[key] = qualification[key];
+    report["determinism"]["world_seed"] = result.world_seed;
+    report["passed"] = functional && qualification["passed"].get<bool>();
+    return report;
 }
 
 } // namespace Luminumbra::Client::ScenarioHarness

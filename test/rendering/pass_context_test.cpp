@@ -27,6 +27,8 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <cstdlib>
+#include <cstring>
+#include "luminumbra_client/rendering/Shader.h"
 #include <glad/glad.h>
 #include <gtest/gtest.h>
 

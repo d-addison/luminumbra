@@ -1063,7 +1063,23 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
                                               foliage->instance_available_frame(),
                                               scenario_frame_count);
     const std::uint32_t phase = foliage_calm.sampled ? 2u : 1u;
-    const bool capture_due = phase == 1 ? progress >= 0.30 : progress >= 0.85;
+    const auto write_instances = [&](const char* name) {
+        std::ofstream output(scenario_config.artifact_dir / name, std::ios::binary);
+        const auto& records = foliage->instances();
+        output.write(reinterpret_cast<const char*>(records.data()),
+                     static_cast<std::streamsize>(records.size() * sizeof(records[0])));
+        output.close();
+        return bool(output);
+    };
+    if (fresh && progress >= 0.30 && !foliage->qualification_started() && foliage->begin_qualification())
+        foliage_first_rebuild_written = write_instances("foliage-rebuild-first.bin");
+    if (fresh && foliage->qualification_rebuild_complete() && !foliage_calm.sampled &&
+        !foliage_second_rebuild_written)
+        foliage_second_rebuild_written = write_instances("foliage-rebuild-second.bin");
+    // The still is read on the transform-feedback SUBMISSION frame. Delayed GPU
+    // completion never substitutes an image from a later frame.
+    const bool capture_due = foliage && foliage_first_rebuild_written && foliage_second_rebuild_written &&
+        foliage->vertex_submission_frame(phase) == scenario_frame_count;
     if (fresh && capture_due && foliage->build_phase() == phase && stats.foliage_draws > 0 &&
         stats.foliage_instances_drawn > 0 && g_camera && gameSession) {
         FoliagePhaseEvidence sample;
@@ -1105,8 +1121,14 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
         }
         if (sample.sampled && phase == 1) {
             foliage_calm = sample;
-        } else if (sample.sampled) {
+        } else if (sample.sampled && write_instances("foliage-windy.bin")) {
+            foliage_windy = sample;
+        }
+    }
+    if (foliage_windy.sampled && foliage && foliage->vertex_evidence_ready()) {
+            const auto& sample = foliage_windy;
             FoliageInstancingResult result;
+            result.evidence = foliage->qualification_evidence();
             result.calm = foliage_calm;
             result.windy = sample;
             result.density_multiplier = scenario_config.foliage_density_scale;
@@ -1135,7 +1157,6 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
             WriteFoliageInstancingAnalysis(
                 scenario_config.artifact_dir, sample.screenshot, result, stats);
             foliage_capture_written = true;
-        }
     }
     if (!foliage_capture_written && progress >= 0.97) {
         foliage_capture_written = true;
@@ -1144,9 +1165,9 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
             : !foliage->readback_enabled() ? "readback disabled; play-path captures do not qualify"
             : !foliage_calm.sampled        ? "no fresh calm sample and screenshot before deadline"
             : !fresh ? "windy readback generation did not match the rendered build before deadline"
-                     : "windy draw, instance data or screenshot unavailable before deadline";
+                     : "windy draw, vertex proof, instance data or screenshot unavailable before deadline";
         const nlohmann::json refusal = {
-            {"schema", "luminumbra.foliage_instancing.v2"},
+            {"schema", "luminumbra.foliage_instancing.v3"},
             {"profile", FoliageVisualProfile::id},
             {"passed", false},
             {"refusal", reason},
