@@ -140,6 +140,18 @@ def run(args, report, check):
 
     engine, identity = yield from frame('initial', expected_generation=generation)
     first = engine.presented_frame[0]['planes_sha256']
+    original_id = obj['luminumbra.object_id']
+    obj['luminumbra.object_id'] = 'temporarily.invalid'
+    bpy.context.view_layer.update()
+    deadline = time.monotonic() + 3
+    while engine.presentation is not None and time.monotonic() < deadline:
+        yield .03
+    check('invalid snapshot clears presentation', engine.presentation is None)
+    obj['luminumbra.object_id'] = original_id
+    bpy.context.view_layer.update()
+    engine, identity = yield from frame('unchanged-state-recovery', identity, generation)
+    check('identical restored snapshot is requested again without camera motion',
+          engine.presented_frame[0]['planes_sha256'] == first)
     obj.location.x = .4
     bpy.context.view_layer.update()
     engine, identity = yield from frame('transform', identity)

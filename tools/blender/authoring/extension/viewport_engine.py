@@ -71,6 +71,10 @@ class LUMINUMBRA_RenderEngine(bpy.types.RenderEngine):
         main_thread()
         if self.presented_frame is None or self.presentation is None:
             raise ValueError('No current presented frame to capture')
+        status, header = self.client.status, self.presented_frame[0]
+        if (status['state'] != 'ready' or status['session'] != header['session'] or
+                status['sequence'] != header['sequence'] or self.desired != header['state']):
+            raise ValueError('Presented frame is no longer current')
         from .viewport_capture import capture
         return capture(directory, *self.presented_frame)
 
@@ -185,6 +189,9 @@ class LUMINUMBRA_RenderEngine(bpy.types.RenderEngine):
             self.error = str(error)
             self.presentation = None
             self.presented_frame = None
+            # A temporary descriptor or hierarchy failure can resolve to the
+            # identical state. Request it again after recovery even without motion.
+            self.desired = None
             self.update_stats('Luminumbra', self.error)
 
 

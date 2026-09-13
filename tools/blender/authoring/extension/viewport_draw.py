@@ -66,6 +66,7 @@ class FrameDraw:
         x, y, width, height = rectangle
         old = (gpu.state.blend_get(), gpu.state.depth_test_get(), gpu.state.depth_mask_get())
         try:
+            gpu.state.active_framebuffer_get().clear(depth=1.)
             gpu.state.blend_set('NONE')
             gpu.state.depth_test_set('NONE')
             gpu.state.depth_mask_set(False)
