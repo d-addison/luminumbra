@@ -71,9 +71,16 @@ endif()
 
 # Exact source-content identity survives local dirty development builds; the
 # separate Git dirty bit prevents presenting that build as its clean parent.
-execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${STATIC_PREVIEW_ROOT}"
+find_package(Git REQUIRED)
+set(PREVIEW_GIT "${GIT_EXECUTABLE}" --no-optional-locks -c core.untrackedCache=false)
+if(WIN32)
+    # Windows cannot preserve POSIX executable bits in a WSL checkout. Continue
+    # checking every tracked byte and untracked member, as on a Windows clone.
+    list(APPEND PREVIEW_GIT -c core.filemode=false)
+endif()
+execute_process(COMMAND ${PREVIEW_GIT} rev-parse HEAD WORKING_DIRECTORY "${STATIC_PREVIEW_ROOT}"
     OUTPUT_VARIABLE PREVIEW_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-execute_process(COMMAND git status --porcelain WORKING_DIRECTORY "${STATIC_PREVIEW_ROOT}"
+execute_process(COMMAND ${PREVIEW_GIT} status --porcelain --untracked-files=all WORKING_DIRECTORY "${STATIC_PREVIEW_ROOT}"
     OUTPUT_VARIABLE PREVIEW_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 set(PREVIEW_DIRTY false)
 if(NOT PREVIEW_STATUS STREQUAL "")
@@ -103,7 +110,7 @@ list(SORT PREVIEW_IDENTITY_INPUTS)
 list(REMOVE_DUPLICATES PREVIEW_IDENTITY_INPUTS)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${PREVIEW_IDENTITY_INPUTS})
 foreach(git_member IN ITEMS HEAD index logs/HEAD)
-    execute_process(COMMAND git rev-parse --git-path "${git_member}"
+    execute_process(COMMAND ${PREVIEW_GIT} rev-parse --git-path "${git_member}"
         WORKING_DIRECTORY "${STATIC_PREVIEW_ROOT}" OUTPUT_VARIABLE git_path
         OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
     get_filename_component(git_path "${git_path}" ABSOLUTE BASE_DIR "${STATIC_PREVIEW_ROOT}")
@@ -116,7 +123,8 @@ foreach(input IN LISTS PREVIEW_IDENTITY_INPUTS)
     string(APPEND PREVIEW_HASH_INPUT "${relative}:${digest}\n")
 endforeach()
 string(SHA256 PREVIEW_SOURCE_DIGEST "${PREVIEW_HASH_INPUT}")
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/source-inputs.txt" "${PREVIEW_HASH_INPUT}")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/source-inputs.txt"
+    CONTENT "${PREVIEW_HASH_INPUT}" @ONLY NEWLINE_STYLE LF)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/PreviewBuildIdentity.h"
     "#pragma once\ninline constexpr const char* kPreviewCommit = \"${PREVIEW_COMMIT}\";\ninline constexpr bool kPreviewDirty = ${PREVIEW_DIRTY};\ninline constexpr const char* kPreviewSourceDigest = \"${PREVIEW_SOURCE_DIGEST}\";\n")
 add_executable(luminumbra_preview_capture main.cpp)
