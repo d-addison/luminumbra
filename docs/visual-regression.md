@@ -3,6 +3,9 @@
 See the [documented visual baselines](visual-baselines.md) for real engine
 captures with separate numeric findings, visible defects and approval status.
 Those unapproved observations must not be promoted automatically to goldens.
+The [complete visual catalog](visual-catalog.md) accounts for every original group,
+required variant and added authoring/world scenario, with explicit evidence and
+user approval states.
 
 `tools/flip_diff.py` is a perceptual image-diff gate. It compares a **candidate**
 render against a blessed **golden** reference and produces:
