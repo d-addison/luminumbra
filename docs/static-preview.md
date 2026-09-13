@@ -58,15 +58,40 @@ batched instancing or an edit-performance budget.
 ## Camera and material profile
 
 Provide one complete column-major world-to-view matrix and one complete projection
-matrix. The view must be rigid, right-handed and exactly affine. The finite,
-symmetric perspective projection uses zero-to-one reversed depth: near is 1 and
-far/clear is 0. The renderer derives culling planes, eye position and GPU uniforms
+matrix. The view must be rigid, right-handed and exactly affine. Finite symmetric
+perspective and axis-aligned orthographic projections use zero-to-one reversed
+depth: near is 1 and far/clear is 0. Orthographic x/y offsets are preserved; each
+span is 0.002–2,000,000 metres and each center is within ±1,000,000 metres in view
+space. Both profiles require the image aspect ratio. Oblique/sheared projections,
+shifted perspective and hybrid projection conventions are refused.
+The renderer derives culling planes, eye position and GPU uniforms
 from the same validated matrix pair, and records the actual float matrices.
+Orthographic lighting uses the camera's constant direction toward the viewer;
+perspective lighting uses the direction from each fragment to the eye. The wire
+matrix itself selects the camera kind, with no added protocol fields.
+
+Portable `viewport_math.projection()` converts either supported observed Blender
+projection to reversed depth, preserving its x/y entries. The explicit
+`perspective()` and `orthographic()` functions refuse the other camera kind.
+`depth_to_blender()` reprojects either profile with the caller's declared Blender
+clip convention. These numerical helpers do not qualify a Blender adapter.
 
 The initial limits are 1–4096 pixels per axis, near distance at least 0.001 metres,
 far distance at most 1,000,000 metres, and bounded finite GPU inputs. Authored
 deferred positions use RGB32F, including distances beyond binary16's finite range.
 Depth uses D32F. The default world-only target retains its existing position format.
+
+`static_preview_render_test` defaults to requiring the actual llvmpipe renderer.
+The owned software-display runner clears native profile pins and forces llvmpipe.
+To qualify an identified native GPU, set both
+`LUMINUMBRA_PREVIEW_EXPECT_NATIVE_VENDOR` and
+`LUMINUMBRA_PREVIEW_EXPECT_NATIVE_RENDERER` to its complete observed OpenGL strings,
+then run `static_preview_render_test --gtest_output=xml:render-tests.xml` on that
+native display. Both strings must match exactly in every rendering test; partial
+pins, mismatched identities and known software renderers fail. The XML records
+the selected profile and actual vendor/renderer per test. A caller-supplied pin is
+an identity assertion and still requires the campaign's hardware/driver receipt;
+passing the software suite does not qualify native GPU performance.
 
 Static materials support base color, metallic/roughness, tangent-space normals,
 occlusion and RGB emissive bindings. Each binding retains its sampler, authored

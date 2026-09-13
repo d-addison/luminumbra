@@ -53,17 +53,32 @@ RenderView RenderView::Validate(const RenderViewDescription& description) {
             Require(Close(orthogonal[c][r], c == r ? 1 : 0), "Render view matrix must be rigid");
     Require(Close(glm::determinant(rotation), 1), "Render view matrix must preserve handedness");
 
-    // Verify the provided matrix, preserving its exact entries. A finite
-    // reversed perspective has z = near/(far-near) and w = -view_z.
+    // Verify the provided matrix, preserving its exact entries. Orthographic
+    // depth is affine; perspective retains w = -view_z. Do not reinterpret
+    // hybrid/projective or shifted perspective matrices as orthographic.
+    const bool orthographic = projection[2][3] == 0 && projection[3][3] == 1;
     glm::dmat4 expected(0.0);
     expected[0][0] = projection[0][0];
     expected[1][1] = projection[1][1];
-    expected[2][2] = description.near_plane / (description.far_plane - description.near_plane);
-    expected[2][3] = -1;
+    expected[2][2] = (orthographic ? 1.0 : description.near_plane) /
+                     (description.far_plane - description.near_plane);
     expected[3][2] = description.far_plane * expected[2][2];
-    Require(expected[0][0] > 0.01 && expected[0][0] < 1000 && expected[1][1] > 0.01 &&
-                expected[1][1] < 1000,
-            "Unsupported perspective field of view");
+    if (orthographic) {
+        expected[3][3] = 1;
+        for (int axis = 0; axis < 2; ++axis) {
+            Require(expected[axis][axis] >= static_cast<double>(1e-6f) &&
+                        expected[axis][axis] <= 1000,
+                    "Orthographic span must be between 0.002 and 2000000 metres");
+            expected[3][axis] = projection[3][axis];
+            Require(std::abs(expected[3][axis] / expected[axis][axis]) <= 1e6,
+                    "Orthographic center exceeds the static profile bounds");
+        }
+    } else {
+        expected[2][3] = -1;
+        Require(expected[0][0] > 0.01 && expected[0][0] < 1000 && expected[1][1] > 0.01 &&
+                    expected[1][1] < 1000,
+                "Unsupported perspective field of view");
+    }
     Require(Close(expected[1][1] / expected[0][0],
                   static_cast<double>(description.width) / description.height),
             "Render projection aspect differs from the output extent");
@@ -71,10 +86,11 @@ RenderView RenderView::Validate(const RenderViewDescription& description) {
         for (int r = 0; r < 4; ++r)
             Require(std::abs(projection[c][r] - expected[c][r]) <=
                         std::max(1e-12, std::abs(expected[c][r]) * 2e-6),
-                    "Expected the symmetric finite reversed-Z perspective profile");
+                    "Expected finite reversed-Z perspective or orthographic projection");
 
     RenderView result;
     result.m_description = description;
+    result.m_orthographic = orthographic;
     // Derive culling, eye and uniforms from the same matrices after conversion
     // to the actual rendering precision, so capture metadata can retain both.
     const glm::mat4 gpu_view(view);

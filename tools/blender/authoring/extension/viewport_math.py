@@ -73,13 +73,7 @@ def float_matrix(value):
     return tuple(struct.unpack("<16f", struct.pack("<16f", *matrix(value))))
 
 
-def perspective(blender_projection, near, far, width, height):
-    """Preserve the observed x/y projection, replace only its depth convention.
-
-    Shifted, stereo and orthographic views require a later renderer profile.
-    The source matrix's depth convention is independently provided to depth_to_blender.
-    """
-    p = matrix(blender_projection)
+def _parameters(near, far, width, height):
     if (type(width) is not int or type(height) is not int or
             not 1 <= width <= 1280 or not 1 <= height <= 720):
         raise UnsupportedView("Static viewport extent exceeds 1280 by 720")
@@ -87,15 +81,74 @@ def perspective(blender_projection, near, far, width, height):
             not math.isfinite(near) or not math.isfinite(far) or
             not .001 <= near < far <= 1e6):
         raise UnsupportedView("Unsupported viewport clip planes")
+
+
+def _aspect(p, width, height):
+    aspect = width / height
+    if abs(p[5] / p[0] - aspect) > max(aspect, 1.) * 1e-6:
+        raise UnsupportedView("Viewport projection and extent do not match")
+
+
+def _orthographic_bounds(p):
+    # The host receives float32 matrices. Admit the rounded representation of
+    # the inclusive lower bound, matching RenderView exactly.
+    lower = struct.unpack('<f', struct.pack('<f', 1e-6))[0]
+    for scale, offset in ((p[0], p[12]), (p[5], p[13])):
+        if not lower <= scale <= 1000 or abs(offset / scale) > 1e6:
+            raise UnsupportedView("Orthographic span or center exceeds the static profile bounds")
+
+
+def perspective(blender_projection, near, far, width, height):
+    """Preserve x/y; replace only depth for an unshifted perspective camera.
+
+    The source depth convention is independently provided to depth_to_blender.
+    Orthographic views use orthographic() or the projection() dispatcher.
+    """
+    p = matrix(blender_projection)
+    _parameters(near, far, width, height)
     if (p[11] != -1 or p[15] != 0 or p[0] <= 0 or p[5] <= 0 or
             any(p[i] != 0 for i in (1, 2, 3, 4, 6, 7, 8, 9, 12, 13))):
         raise UnsupportedView("Use an unshifted perspective view for static preview")
-    if abs(p[0] * width / height - p[5]) > max(p[5], 1.) * 2e-5:
-        raise UnsupportedView("Viewport projection and extent do not match")
+    if not (.01 < p[0] < 1000 and .01 < p[5] < 1000):
+        raise UnsupportedView("Unsupported perspective field of view")
+    _aspect(p, width, height)
     result = list(p)
     result[10] = near / (far - near)
     result[14] = far * near / (far - near)
-    return float_matrix(result)
+    result = float_matrix(result)
+    _aspect(result, width, height)
+    if not (.01 < result[0] < 1000 and .01 < result[5] < 1000):
+        raise UnsupportedView("Perspective field of view exceeds float32 profile bounds")
+    return result
+
+
+def orthographic(blender_projection, near, far, width, height):
+    """Preserve axis-aligned orthographic scale/offset; replace only depth.
+
+    Each span is 0.002..2000000 metres; each view-space center is within
+    +/-1000000 metres. Oblique/sheared/projective cameras are refused.
+    """
+    p = matrix(blender_projection)
+    _parameters(near, far, width, height)
+    if (p[11] != 0 or p[15] != 1 or
+            any(p[i] != 0 for i in (1, 2, 3, 4, 6, 7, 8, 9))):
+        raise UnsupportedView("Use an axis-aligned orthographic view for static preview")
+    _orthographic_bounds(p)
+    _aspect(p, width, height)
+    result = list(p)
+    result[10] = 1 / (far - near)
+    result[14] = far / (far - near)
+    result = float_matrix(result)
+    _orthographic_bounds(result)
+    _aspect(result, width, height)
+    return result
+
+
+def projection(blender_projection, near, far, width, height):
+    """Select the supported camera kind from its observed matrix, never guess depth."""
+    p = matrix(blender_projection)
+    convert = orthographic if p[11] == 0 and p[15] == 1 else perspective
+    return convert(p, near, far, width, height)
 
 
 def transform(value, point):

@@ -276,6 +276,7 @@ void LightingPass::execute(const RenderContext& ctx) {
     m_lighting_shader->setFloat("u_emissiveLutScale", ctx.emissive_lut_scale);
     m_lighting_shader->setVec3("u_skyAmbientColor", ctx.sky_ambient_color);
     m_lighting_shader->setVec3("u_viewPos", eye);
+    m_lighting_shader->setInt("u_orthographic", ctx.render_view && ctx.render_view->orthographic());
     m_lighting_shader->setVec3("u_sun.direction", ctx.sun.direction);
     m_lighting_shader->setVec3("u_sun.color", ctx.sun.color);
     // moon-shadows: the moon's TOWARD-LIGHT direction (anti-sun, overhead at

@@ -22,7 +22,9 @@ session receipt after clean shutdown. Its engine, shader and source-input hashes
 are checked before and after the session.
 
 The current render profile accepts opaque and cutout static prefabs, rigid camera
-views, and symmetric perspective with finite reversed depth. The wire extent is
+views, and symmetric perspective or axis-aligned orthographic projections with
+finite reversed depth. Orthographic offsets are preserved and the camera kind is
+derived from the supplied projection matrix. The wire extent is
 limited to 1280 by 720. Orthographic and shifted cameras, translucent materials,
 skinning, morph animation, Blender presentation and interactive overlays remain
 unfinished. The portable basis helpers and protocol fixtures do not qualify these

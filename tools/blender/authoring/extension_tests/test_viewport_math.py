@@ -15,6 +15,12 @@ def projection(near=.1, far=100., aspect=4/3):
             0,0,-2*near*far/(far-near),0)
 
 
+def orthographic(near=.1, far=100.):
+    # Off-center volume x [-2,6], y [-2,4], matching a 4:3 image.
+    return (.25,0,0,0, 0,1/3,0,0, 0,0,-2/(far-near),0,
+            -.5,-1/3,-(far+near)/(far-near),1)
+
+
 class ViewportMath(unittest.TestCase):
     def close(self, first, second, places=10):
         for a,b in zip(first, second):
@@ -64,6 +70,46 @@ class ViewportMath(unittest.TestCase):
             hc=v.transform(host,point); bc=v.transform(blender,point)
             actual=v.depth_to_blender(host,blender,hc[0]/hc[3],hc[1]/hc[3],hc[2]/hc[3],clip_zero_to_one=False)
             self.assertAlmostEqual(actual,.5*bc[2]/bc[3]+.5,places=10)
+
+    def test_orthographic_preserves_xy_and_reverses_linear_depth(self):
+        blender=orthographic()
+        host=v.orthographic(blender,.1,100,640,480)
+        self.assertEqual(host,v.projection(blender,.1,100,640,480))
+        for index in range(16):
+            if index not in (10,14):
+                self.assertEqual(host[index],v.float_matrix(blender)[index])
+        for distance,expected in ((.1,1),(50.05,.5),(100,0)):
+            clip=v.transform(host,(2,1,-distance,1))
+            self.close(clip[:2],(0,0),places=7)
+            self.assertEqual(clip[3],1)
+            self.assertAlmostEqual(clip[2],expected,places=7)
+        self.assertEqual(v.projection(projection(),.1,100,640,480),
+                         v.perspective(projection(),.1,100,640,480))
+
+    def test_orthographic_depth_reprojects_both_explicit_backend_conventions(self):
+        blender=orthographic(); host=v.orthographic(blender,.1,100,640,480)
+        for point in ((-1,-1,-.5,1),(2,1,-50,1),(5,3,-90,1)):
+            hc=v.transform(host,point); bc=v.transform(blender,point)
+            actual=v.depth_to_blender(host,blender,hc[0],hc[1],hc[2],clip_zero_to_one=False)
+            self.assertAlmostEqual(actual,.5*bc[2]+.5,places=10)
+            self.assertAlmostEqual(v.depth_to_blender(host,host,hc[0],hc[1],hc[2],
+                                                     clip_zero_to_one=True),hc[2],places=10)
+
+    def test_orthographic_refuses_oblique_hybrid_unbounded_or_wrong_aspect(self):
+        for index,value in ((8,.1),(1,.1),(11,-1),(15,0),(0,0),
+                            (0,1e-7),(5,1001),(12,1e7)):
+            p=list(orthographic());p[index]=value
+            with self.assertRaises(v.UnsupportedView):v.orthographic(p,.1,100,640,480)
+            with self.assertRaises(v.UnsupportedView):v.projection(p,.1,100,640,480)
+        with self.assertRaises(v.UnsupportedView):v.orthographic(orthographic(),.1,100,640,360)
+
+    def test_orthographic_maximum_span_accepts_its_observed_float32_matrix(self):
+        blender=list(orthographic())
+        blender[0],blender[5],blender[12],blender[13]=1e-6,4e-6/3,0,0
+        blender=v.float_matrix(blender)
+        host=v.projection(blender,.1,100,640,480)
+        self.assertEqual(host[0],blender[0])
+        self.assertEqual(host[5],blender[5])
 
     def test_zero_to_one_backend_is_explicit(self):
         host=v.perspective(projection(),.1,100,640,480)
