@@ -110,9 +110,9 @@ bool SafeAccessors(const cgltf_data& data) {
         const auto* view = accessor.buffer_view;
         if (!view || accessor.is_sparse || accessor.extensions_count || !size || !component ||
             !accessor.count || accessor.count > kMorphMaxIndices || accessor.stride < size ||
-            accessor.stride > 256 || accessor.stride % component ||
-            accessor.offset % component || view->offset % component ||
-            accessor.offset > view->size || size > view->size - accessor.offset ||
+            accessor.stride > 256 || accessor.stride % component || accessor.offset % component ||
+            view->offset % component || accessor.offset > view->size ||
+            size > view->size - accessor.offset ||
             accessor.count - 1 > (view->size - accessor.offset - size) / accessor.stride)
             return Refuse("Invalid, sparse, misaligned or overflowing morph accessor");
     }
@@ -233,7 +233,8 @@ bool process_morph_gltf_checked(const std::string& input_path, const std::string
     if (!input || input.peek() != std::char_traits<char>::eof())
         return Refuse("GLB changed or could not be read completely");
     const std::uint32_t declared_size = std::uint32_t(bytes[8]) | (std::uint32_t(bytes[9]) << 8) |
-                                        (std::uint32_t(bytes[10]) << 16) | (std::uint32_t(bytes[11]) << 24);
+                                        (std::uint32_t(bytes[10]) << 16) |
+                                        (std::uint32_t(bytes[11]) << 24);
     if (declared_size != bytes.size())
         return Refuse("GLB declared size must equal the complete source file");
     cgltf_options options{};

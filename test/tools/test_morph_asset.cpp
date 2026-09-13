@@ -428,14 +428,18 @@ TEST_F(MorphAssetTest, RefusesExternalDataExtensionsAndSingularSourceTransforms)
 }
 
 TEST_F(MorphAssetTest, ActualCommandLineSelectsOnlyExplicitMorphProfile) {
-    Fixture fixture; fixture.Write(directory / "source.glb");
-    std::vector<std::string> values{"asset_processor", (directory / "source.glb").string(),
+    Fixture fixture;
+    fixture.Write(directory / "source.glb");
+    std::vector<std::string> values{"asset_processor",
+                                    (directory / "source.glb").string(),
                                     (directory / "command.lmorph").string()};
     std::vector<char*> argv;
-    for (auto& value : values) argv.push_back(value.data());
+    for (auto& value : values)
+        argv.push_back(value.data());
     ASSERT_EQ(asset_processor_main(static_cast<int>(argv.size()), argv.data()), 0);
     const auto before = Read(directory / "command.lmorph");
-    std::string option = "--emit-lods"; argv.push_back(option.data());
+    std::string option = "--emit-lods";
+    argv.push_back(option.data());
     EXPECT_NE(asset_processor_main(static_cast<int>(argv.size()), argv.data()), 0);
     EXPECT_EQ(Read(directory / "command.lmorph"), before);
     EXPECT_FALSE(fs::exists(directory / "command.lod1.lmesh"));
@@ -443,11 +447,21 @@ TEST_F(MorphAssetTest, ActualCommandLineSelectsOnlyExplicitMorphProfile) {
 
 TEST_F(MorphAssetTest, RefusesOverflowingMisalignedSourceExtentsBeforeReadback) {
     for (const char* field : {"byteOffset", "byteStride", "byteLength"}) {
-        Fixture fixture; fixture.document["bufferViews"][0][field] = UINT64_MAX; Refuses(fixture);
+        Fixture fixture;
+        fixture.document["bufferViews"][0][field] = UINT64_MAX;
+        Refuses(fixture);
     }
-    Fixture fixture; fixture.document["accessors"][6]["byteOffset"] = UINT64_MAX; Refuses(fixture);
-    fixture = Fixture{}; fixture.document["accessors"][6]["count"] = UINT64_MAX; Refuses(fixture);
-    fixture = Fixture{}; fixture.document["accessors"][0]["byteOffset"] = 1; Refuses(fixture);
-    fixture = Fixture{}; fixture.document["bufferViews"][0]["byteOffset"] = 1; Refuses(fixture);
+    Fixture fixture;
+    fixture.document["accessors"][6]["byteOffset"] = UINT64_MAX;
+    Refuses(fixture);
+    fixture = Fixture{};
+    fixture.document["accessors"][6]["count"] = UINT64_MAX;
+    Refuses(fixture);
+    fixture = Fixture{};
+    fixture.document["accessors"][0]["byteOffset"] = 1;
+    Refuses(fixture);
+    fixture = Fixture{};
+    fixture.document["bufferViews"][0]["byteOffset"] = 1;
+    Refuses(fixture);
 }
 } // namespace
