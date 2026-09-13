@@ -1,22 +1,24 @@
 """Portable metadata refusal/lifecycle controls; no native or Blender claim."""
 import copy
 import hashlib
-import importlib.util
+import importlib
 import json
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import threading
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest import mock
 
-spec = importlib.util.spec_from_file_location(
-    'viewport_generation', Path(__file__).parents[1] / 'extension/viewport_generation.py')
-v = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(v)
+authoring = Path(__file__).parents[1]
+package = ModuleType('viewport_generation_contract')
+package.__path__ = [str(authoring / 'extension'), str(authoring)]
+sys.modules[package.__name__] = package
+v = importlib.import_module(package.__name__ + '.viewport_generation')
 
 IDENTITY = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
 
@@ -211,6 +213,22 @@ class GenerationMetadata(unittest.TestCase):
         with mock.patch.object(v, '_read_regular', side_effect=change):
             with self.assertRaisesRegex(v.MetadataError, 'manifest changed during'):
                 self.read()
+
+    def test_publication_during_open_reader_succeeds_and_invalidates_old_snapshot(self):
+        from contextlib import contextmanager
+        original = v.open_record_reader
+        self.publish('b' * 32, 8)
+        self.pointer(self.generation)
+        @contextmanager
+        def publish_while_open(path):
+            with original(path) as stream:
+                if path.name == 'current.json':
+                    self.pointer('b' * 32)
+                yield stream
+        with mock.patch.object(v, 'open_record_reader', side_effect=publish_while_open):
+            with self.assertRaisesRegex(v.MetadataError, 'Metadata file (changed|was replaced)'):
+                self.read()
+        self.assertEqual(self.read()['generation_id'], 'b' * 32)
 
     def test_current_schema_job_and_build_identity_controls(self):
         good = json.loads((self.root / 'current.json').read_bytes())

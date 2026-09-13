@@ -16,6 +16,8 @@ import re
 import stat
 import threading
 
+from .viewport.protocol import open_record_reader
+
 
 GENERATION = 'luminumbra.authoring.generation.v1'
 PREFAB = 'luminumbra.asset.prefab.v1'
@@ -91,21 +93,17 @@ def _read_regular(path, limit):
     before = [_checked_stat(part, True) for part in ancestors]
     info = _checked_stat(path, False)
     _require(0 < info.st_size <= limit, 'Metadata file exceeds its byte bound')
-    flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
-    # Prevent a file->FIFO race from blocking open on POSIX. fstat then refuses it.
-    flags |= getattr(os, 'O_NONBLOCK', 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
+    # Allow the service to atomically publish a new current.json while this
+    # worker holds the old snapshot. The shared reader also refuses reparse
+    # handles and nonregular files; identity checks below still reject a swap.
+    with open_record_reader(path) as stream:
+        opened = os.fstat(stream.fileno())
         _require(stat.S_ISREG(opened.st_mode) and _identity(opened) == _identity(info),
                  'Metadata file changed while opening')
-        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
-            raw = stream.read(limit + 1)
+        raw = stream.read(limit + 1)
         _require(0 < len(raw) == info.st_size <= limit and
-                 _identity(os.fstat(descriptor)) == _identity(info),
+                 _identity(os.fstat(stream.fileno())) == _identity(info),
                  'Metadata file changed while reading')
-    finally:
-        os.close(descriptor)
     _require(_identity(_checked_stat(path, False)) == _identity(info),
              'Metadata file was replaced while reading')
     for part, previous in zip(ancestors, before):
