@@ -7,6 +7,11 @@ current shipped behaviour so nothing here reads as implemented. Nothing in this
 document waives the acceptance evidence that each slice must supply, and no
 format change listed here exists until its slice lands.
 
+For the September 13 recovered source, see the [implementation and acceptance
+gap map](distant-world-implementation-status.md). It distinguishes landed
+prerequisites from the remaining runtime and evidence work without changing this
+contract.
+
 ## Scope
 
 - The view radius is **16 km from the camera** and the world has **no fixed
