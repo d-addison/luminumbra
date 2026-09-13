@@ -36,6 +36,8 @@ install(TARGETS luminumbra_render_static EXPORT LuminumbraStaticPreviewTargets
     LIBRARY DESTINATION lib COMPONENT StaticPreview
     RUNTIME DESTINATION bin COMPONENT StaticPreview
     ARCHIVE DESTINATION lib COMPONENT StaticPreview)
+include("${CMAKE_CURRENT_LIST_DIR}/InstallMinGWRuntime.cmake")
+luminumbra_install_static_preview_mingw_runtime()
 install(EXPORT LuminumbraStaticPreviewTargets NAMESPACE Luminumbra::
     DESTINATION lib/cmake/LuminumbraStaticPreview COMPONENT StaticPreview)
 include(CMakePackageConfigHelpers)
@@ -95,6 +97,7 @@ file(GLOB_RECURSE PREVIEW_IDENTITY_INPUTS CONFIGURE_DEPENDS
 list(APPEND PREVIEW_IDENTITY_INPUTS ${PREVIEW_SOURCES} "${CMAKE_CURRENT_LIST_FILE}"
     "${CMAKE_CURRENT_LIST_DIR}/main.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/LuminumbraStaticPreviewConfig.cmake.in"
+    "${CMAKE_CURRENT_LIST_DIR}/InstallMinGWRuntime.cmake"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/core/FilesystemPath.cpp"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/core/FilesystemPath.h"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/core/Log.h"
@@ -140,6 +143,12 @@ endif()
 
 if(BUILD_TESTING)
     find_package(Python3 3.10 COMPONENTS Interpreter REQUIRED)
+    if(UNIX)
+        add_test(NAME StaticPreviewMinGWRuntimeInstallContract COMMAND "${Python3_EXECUTABLE}"
+            "${STATIC_PREVIEW_ROOT}/test/static_preview/test_mingw_runtime_install.py")
+        set_tests_properties(StaticPreviewMinGWRuntimeInstallContract PROPERTIES
+            LABELS "authoring;tools" TIMEOUT 90)
+    endif()
     if(CMAKE_GENERATOR MATCHES "Ninja")
         add_test(NAME StaticPreviewSourceIdentity COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_LIST_DIR}/check_source_identity.py"
