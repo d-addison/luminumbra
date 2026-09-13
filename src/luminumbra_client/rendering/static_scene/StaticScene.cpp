@@ -365,4 +365,25 @@ void StaticScene::Remove(const std::string& instance_id, std::uint64_t expected_
     Require(instances.erase(instance_id) == 1, "Unknown static instance removal");
     m_impl->Commit(std::move(instances));
 }
+void StaticScene::ReplaceAll(std::span<const StaticInstanceDescription> descriptions,
+                             std::uint64_t expected_revision) {
+    m_impl->Check(expected_revision);
+    Require(descriptions.size() <= 64, "Static scene instance budget exceeded");
+    Impl::Instances instances;
+    for (const auto& description : descriptions) {
+        Require(Authoring::Detail::Identifier(description.instance_id) && description.prefab,
+                "Invalid complete static instance");
+        const auto& nodes = description.prefab->m_impl->asset->nodes();
+        Require(description.locals.size() == nodes.size(), "Incomplete static node set");
+        Impl::Instance instance{description.prefab, Matrix(description.placement), {}};
+        for (const auto& local : description.locals)
+            Require(instance.local_overrides.emplace(local.node_id, Matrix(local.local)).second,
+                    "Duplicate complete static node");
+        for (const auto& node : nodes)
+            Require(instance.local_overrides.contains(node.id), "Unknown complete static node");
+        Require(instances.emplace(description.instance_id, std::move(instance)).second,
+                "Duplicate complete static instance");
+    }
+    m_impl->Commit(std::move(instances));
+}
 } // namespace Luminumbra::Rendering

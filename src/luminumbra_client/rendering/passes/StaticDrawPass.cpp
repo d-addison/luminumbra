@@ -173,6 +173,31 @@ struct StaticDrawPass::Impl {
     std::map<SamplerKey, GLuint> samplers;
     std::shared_ptr<const StaticDrawSnapshot> previous;
 
+    // Failed submissions must release their uploads while preserving the last
+    // successful frame's cache. These copies retain handles, not GPU payloads.
+    struct UploadTransaction {
+        Impl& owner;
+        decltype(meshes) meshes_before;
+        decltype(textures) textures_before;
+        decltype(samplers) samplers_before;
+        bool committed = false;
+        explicit UploadTransaction(Impl& value)
+            : owner(value)
+            , meshes_before(value.meshes)
+            , textures_before(value.textures)
+            , samplers_before(value.samplers) {}
+        ~UploadTransaction() {
+            if (committed)
+                return;
+            owner.meshes.swap(meshes_before);
+            owner.textures.swap(textures_before);
+            for (const auto& [key, sampler] : owner.samplers)
+                if (!samplers_before.contains(key))
+                    glDeleteSamplers(1, &sampler);
+            owner.samplers.swap(samplers_before);
+        }
+    };
+
     std::shared_ptr<MeshObject> Mesh(const std::shared_ptr<const StaticMesh>& mesh,
                                      StaticDrawStats& stats) {
         Require(mesh && !mesh->identity.empty(), "Missing immutable static mesh identity");
@@ -354,6 +379,7 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
     glDisable(GL_FRAMEBUFFER_SRGB);
     glCullFace(GL_BACK);
     auto& impl = *m_impl;
+    Impl::UploadTransaction uploads(impl);
     auto& shader = impl.shader;
     shader.use();
     shader.setMat4("u_view", glm::make_mat4(view.view().data()));
@@ -459,6 +485,7 @@ StaticDrawStats StaticDrawPass::Render(const RenderView& view,
     std::erase_if(impl.meshes, [&](const auto& pair) { return !used_meshes.contains(pair.first); });
     std::erase_if(impl.textures,
                   [&](const auto& pair) { return !used_textures.contains(pair.first); });
+    uploads.committed = true;
     return stats;
 }
 } // namespace Luminumbra::Rendering

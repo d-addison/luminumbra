@@ -372,3 +372,63 @@ TEST_F(StaticSceneTest, InstanceBudgetRefusalPreservesLastCompleteSnapshot) {
     EXPECT_EQ(before, scene.Snapshot());
 }
 } // namespace
+
+TEST_F(StaticSceneTest, CompleteReplacementCommitsOnceAndRemovesAbsentInstances) {
+    auto asset = StaticPrefab::Load(project.string(), kGeneration, digest);
+    StaticScene scene;
+    auto description = [&](const std::string& id) {
+        StaticInstanceDescription value{id, asset, kStaticIdentity, {}};
+        for (const auto& node : descriptor.at("nodes"))
+            value.locals.push_back({node.at("id"), node.at("local_matrix").get<StaticMatrix4>()});
+        return value;
+    };
+    std::vector instances{description("one"), description("two")};
+    scene.ReplaceAll(instances, 0);
+    const auto old = scene.Snapshot();
+    ASSERT_EQ(old->revision, 1u);
+    ASSERT_EQ(old->draws.size(), 4u);
+    instances.resize(1);
+    instances[0].locals[0].local[12] += 7;
+    scene.ReplaceAll(instances, 1);
+    const auto next = scene.Snapshot();
+    EXPECT_EQ(next->revision, 2u);
+    ASSERT_EQ(next->draws.size(), 2u);
+    EXPECT_EQ(next->draws[0].mesh, old->draws[0].mesh);
+    EXPECT_NE(next->draws[0].model, old->draws[0].model);
+    scene.ReplaceAll({}, 2);
+    EXPECT_TRUE(scene.Snapshot()->draws.empty());
+    EXPECT_EQ(old->draws.size(), 4u);
+}
+TEST_F(StaticSceneTest,
+       CompleteReplacementRefusesPartialUnknownDuplicateAndInvalidWithoutMutation) {
+    auto asset = StaticPrefab::Load(project.string(), kGeneration, digest);
+    StaticScene scene;
+    scene.Replace("old", asset, kStaticIdentity, 0);
+    const auto old = scene.Snapshot();
+    StaticInstanceDescription description{"new", asset, kStaticIdentity, {}};
+    for (const auto& node : descriptor.at("nodes"))
+        description.locals.push_back({node.at("id"), node.at("local_matrix").get<StaticMatrix4>()});
+    auto check = [&](StaticInstanceDescription bad) {
+        const std::array instances{std::move(bad)};
+        EXPECT_THROW(scene.ReplaceAll(instances, 1), std::exception);
+        EXPECT_EQ(scene.Snapshot(), old);
+    };
+    auto bad = description;
+    bad.locals.pop_back();
+    check(bad);
+    bad = description;
+    bad.locals[0].node_id = "missing";
+    check(bad);
+    bad = description;
+    bad.locals[0].node_id = bad.locals[1].node_id;
+    check(bad);
+    bad = description;
+    bad.locals[0].local[3] = 0.01;
+    check(bad);
+    const std::array duplicate{description, description};
+    EXPECT_THROW(scene.ReplaceAll(duplicate, 1), std::exception);
+    EXPECT_EQ(scene.Snapshot(), old);
+    const std::array valid{description};
+    EXPECT_THROW(scene.ReplaceAll(valid, 0), std::exception);
+    EXPECT_EQ(scene.Snapshot(), old);
+}

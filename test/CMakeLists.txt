@@ -1583,6 +1583,14 @@ add_test(
 # timeout" during the post-build gtest_discover_tests step (no test actually ran).
 # 120 s is generous headroom; it only affects the one-time list-tests probe.
 include(GoogleTest)
+if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
+    add_executable(viewport_protocol_test static_preview/viewport_protocol_test.cpp
+        ../tools/static_preview/ViewportProtocol.cpp)
+    target_include_directories(viewport_protocol_test PRIVATE ../tools/static_preview)
+    target_link_libraries(viewport_protocol_test PRIVATE luminumbra_prefab_runtime gtest_main)
+    luminumbra_configure_first_party_target(viewport_protocol_test)
+    gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
+endif()
 set(LUMINUMBRA_GTEST_TARGETS
     world_generation_test
     worldgen_layer_snapshot_test

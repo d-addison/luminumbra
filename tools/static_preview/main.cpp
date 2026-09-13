@@ -1,4 +1,5 @@
 #include "PreviewBuildIdentity.h"
+#include "ViewportServe.h"
 #include "authoring/PrefabDigest.h"
 #include <algorithm>
 #include <bit>
@@ -135,6 +136,8 @@ Json Parse(const std::vector<std::uint8_t>& bytes) {
 }
 } // namespace
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--serve")
+        return Luminumbra::Viewport::Serve(argc - 1, argv + 1);
     fs::path output;
     bool owns_output = false;
     try {
@@ -144,6 +147,8 @@ int main(int argc, char** argv) {
             const std::string arg = argv[i];
             if (arg == "--help") {
                 std::cout << "luminumbra_preview_capture --request FILE --output FRESH_DIR "
+                             "[--resource-root DIR] [--software-only]\n"
+                             "luminumbra_preview_capture --serve --output FRESH_ABSOLUTE_DIR "
                              "[--resource-root DIR] [--software-only]\n";
                 return 0;
             }
