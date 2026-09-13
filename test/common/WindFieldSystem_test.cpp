@@ -96,7 +96,8 @@ TEST(AmbientNoiseDispatch, FractalAndSimplexMatchTerrainCeiling) {
         reference->GenPositionArray2D(expected.data(), 16, x.data(), z.data(), 0.0f, 0.0f, seed);
         for (std::size_t i = 0; i < x.size(); ++i) {
             EXPECT_EQ(std::bit_cast<std::uint32_t>(actual[i]),
-                      std::bit_cast<std::uint32_t>(expected[i])) << "seed=" << seed << " lane=" << i;
+                      std::bit_cast<std::uint32_t>(expected[i]))
+                << "seed=" << seed << " lane=" << i;
         }
     }
 }
