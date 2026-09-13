@@ -1317,6 +1317,48 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 87,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off-plant-edit/hashes.json",
+      "sha256": "0e02fadeeac13e9bbd943c04af95a995ce1d37488b9231da84e77c26e1f23518",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 1460,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off-plant-edit/plant-entities.json",
+      "sha256": "8b17af02cb5fca7949311e88c8f8755368fb735aa091874fe4ce54b88c5231a6",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 995,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off-plant-edit/r.0.0.lmr",
+      "sha256": "351f81e865582c139a5c8f56294f39eed4b35df7024c4d4bee4447a2dc81d675",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 114,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off-plant-edit/world-manifest.json",
+      "sha256": "8fbfdd8d115f612b7ec3c5c7fe27ce9d18f95af846c5b91906f2f4aba66c6bea",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 995,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off/r.0.0.lmr",
+      "sha256": "351f81e865582c139a5c8f56294f39eed4b35df7024c4d4bee4447a2dc81d675",
+      "source": "Luminumbra test fixtures"
+    },
+    {
+      "bytes": 114,
+      "license": "MIT",
+      "path": "test/fixtures/active-regions/devel-off/world-manifest.json",
+      "sha256": "8fbfdd8d115f612b7ec3c5c7fe27ce9d18f95af846c5b91906f2f4aba66c6bea",
+      "source": "Luminumbra test fixtures"
+    },
+    {
       "bytes": 168,
       "license": "LicenseRef-Public-Domain",
       "path": "test/fixtures/dem/.gitignore",
