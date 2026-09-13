@@ -14,7 +14,7 @@
 
 bool process_morph_gltf_checked(const std::string&, const std::string&);
 bool process_gltf_checked(const std::string&, const std::string&);
-int asset_processor_main(int, char**);
+int asset_processor_main(int argc, char* argv[]);
 
 namespace {
 using namespace luminumbra::animation;
