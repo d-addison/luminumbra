@@ -5185,19 +5185,6 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    if (benchmark_queries) {
-        renderPipeline.set_benchmark_gpu_queries(nullptr);
-        benchmark_queries->shutdown();
-    }
-    g_rb_nvml.shutdown(); //  release NVML if it was loaded
-
-    // Scenario shutdown artifacts (the incomplete-timed-run failure path,
-    // streaming telemetry, the recorder analyses) — every block in the hook
-    // was already a no-op without an active scenario.
-    if (scenario_runner) {
-        scenario_runner->onShutdown();
-    }
-
     std::vector<std::string> shutdown_milestones;
     const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {
@@ -5216,12 +5203,39 @@ int main(int argc, char* argv[]) {
         runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
     }
 
-    prepare_world_entry();
+    auto trace_shutdown = [&](const std::string& milestone) {
+        LUMINUMBRA_CORE_INFO("Shutdown stage: {}", milestone);
+        mark_shutdown(milestone);
+    };
+
+    trace_shutdown("query_cleanup_started");
+    if (benchmark_queries) {
+        renderPipeline.set_benchmark_gpu_queries(nullptr);
+        benchmark_queries->shutdown();
+    }
+    trace_shutdown("query_cleanup_finished");
+    g_rb_nvml.shutdown(); //  release NVML if it was loaded
+
+    // Scenario shutdown artifacts (the incomplete-timed-run failure path,
+    // streaming telemetry, the recorder analyses) — every block in the hook
+    // was already a no-op without an active scenario.
+    if (scenario_runner) {
+        scenario_runner->onShutdown();
+    }
+
+    trace_shutdown("world_readers_drain_started");
+    // Same drain order as prepare_world_entry, with the far-LOD wait visible.
+    renderPipeline.prepare_world_swap();
+    trace_shutdown("far_lod_drained");
+    DrainBackgroundWorldScan(jobSystem);
+    DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
+    trace_shutdown("world_readers_drained");
 
     // persist unsaved voxel edits on the world-exit/shutdown path,
     // before the streamed chunks are torn down. No-op when no world session
     // is active or when no chunk carries unsaved edits.
     // The main loop and its quit callback have returned; keep saving on this thread.
+    trace_shutdown("world_save_started");
     if (gameSession && gameSession->SaveWorldState()) {
         if (!g_app.menu.menu_backdrop_active && g_camera)
             gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()
@@ -5229,6 +5243,9 @@ int main(int argc, char* argv[]) {
         if (gameSession->SaveWorld())
             mark_shutdown("world_state_saved");
     }
+
+    // Finished means the save stage returned; only world_state_saved reports success.
+    trace_shutdown("world_save_finished");
 
     // Drain the  far-field heightfield build before the world is cleared —
     // its worker job reads the world by pointer (else a teardown-time use-after-free).
