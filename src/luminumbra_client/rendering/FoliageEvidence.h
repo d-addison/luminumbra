@@ -1,8 +1,8 @@
 #pragma once
 #include <array>
 #include <cstdint>
-#include <vector>
 #include <string>
+#include <vector>
 
 namespace Luminumbra::Rendering {
 struct FoliageRebuildEvidence {

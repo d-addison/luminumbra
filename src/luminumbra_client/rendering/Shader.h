@@ -3,8 +3,8 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <string>
-#include <vector>
 #include <unordered_map> // Added for the cache
+#include <vector>
 
 #include "ShaderReflection.h" // reflect resource layout at load time
 
@@ -12,7 +12,8 @@ namespace Luminumbra::Rendering {
 
 class Shader {
 public:
-    Shader(const char* vertexPath, const char* fragmentPath,
+    Shader(const char* vertexPath,
+           const char* fragmentPath,
            std::vector<std::string> feedback_varyings = {});
     ~Shader();
 

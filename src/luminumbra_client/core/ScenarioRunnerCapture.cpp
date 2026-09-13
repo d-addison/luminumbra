@@ -1071,15 +1071,17 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
         output.close();
         return bool(output);
     };
-    if (fresh && progress >= 0.30 && !foliage->qualification_started() && foliage->begin_qualification())
+    if (fresh && progress >= 0.30 && !foliage->qualification_started() &&
+        foliage->begin_qualification())
         foliage_first_rebuild_written = write_instances("foliage-rebuild-first.bin");
     if (fresh && foliage->qualification_rebuild_complete() && !foliage_calm.sampled &&
         !foliage_second_rebuild_written)
         foliage_second_rebuild_written = write_instances("foliage-rebuild-second.bin");
     // The still is read on the transform-feedback SUBMISSION frame. Delayed GPU
     // completion never substitutes an image from a later frame.
-    const bool capture_due = foliage && foliage_first_rebuild_written && foliage_second_rebuild_written &&
-        foliage->vertex_submission_frame(phase) == scenario_frame_count;
+    const bool capture_due = foliage && foliage_first_rebuild_written &&
+                             foliage_second_rebuild_written &&
+                             foliage->vertex_submission_frame(phase) == scenario_frame_count;
     if (fresh && capture_due && foliage->build_phase() == phase && stats.foliage_draws > 0 &&
         stats.foliage_instances_drawn > 0 && g_camera && gameSession) {
         FoliagePhaseEvidence sample;
@@ -1126,37 +1128,37 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
         }
     }
     if (foliage_windy.sampled && foliage && foliage->vertex_evidence_ready()) {
-            const auto& sample = foliage_windy;
-            FoliageInstancingResult result;
-            result.evidence = foliage->qualification_evidence();
-            result.calm = foliage_calm;
-            result.windy = sample;
-            result.density_multiplier = scenario_config.foliage_density_scale;
-            if (auto* ws = gameSession->GetWorldSystem()) {
-                result.world_seed =
-                    static_cast<std::uint64_t>(static_cast<std::uint32_t>(ws->get_seed()));
-                const auto biome = ws->BiomeIdAt(g_camera->Position.x, g_camera->Position.z);
-                result.biome_density =
-                    ws->biomes_enabled() ? ws->biome_table().vegetation_for(biome).density : 0.3;
-            }
-            result.instances_total = foliage->instances().size();
-            result.live_ring_radius_m = foliage->fade_end_m();
-            result.fade_start_m = foliage->fade_start_m();
-            result.fade_end_m = foliage->fade_end_m();
-            result.instances_within_ring =
-                foliage->instances_within(g_camera->Position, foliage->fade_end_m());
-            result.instances_beyond_fade =
-                foliage->instances_beyond(g_camera->Position, foliage->fade_end_m());
-            // Historical saturated-workload calibration, not a measured emission fraction.
-            result.measured_density =
-                std::clamp(static_cast<double>(result.instances_within_ring) / 873813.0, 0.0, 1.0);
-            result.foliage_gpu_ms = stats.foliage_gpu_ms;
-            result.gpu_timers_supported = stats.gpu_timers_supported;
-            result.foliage_draws = stats.foliage_draws;
-            result.foliage_instances_drawn = stats.foliage_instances_drawn;
-            WriteFoliageInstancingAnalysis(
-                scenario_config.artifact_dir, sample.screenshot, result, stats);
-            foliage_capture_written = true;
+        const auto& sample = foliage_windy;
+        FoliageInstancingResult result;
+        result.evidence = foliage->qualification_evidence();
+        result.calm = foliage_calm;
+        result.windy = sample;
+        result.density_multiplier = scenario_config.foliage_density_scale;
+        if (auto* ws = gameSession->GetWorldSystem()) {
+            result.world_seed =
+                static_cast<std::uint64_t>(static_cast<std::uint32_t>(ws->get_seed()));
+            const auto biome = ws->BiomeIdAt(g_camera->Position.x, g_camera->Position.z);
+            result.biome_density =
+                ws->biomes_enabled() ? ws->biome_table().vegetation_for(biome).density : 0.3;
+        }
+        result.instances_total = foliage->instances().size();
+        result.live_ring_radius_m = foliage->fade_end_m();
+        result.fade_start_m = foliage->fade_start_m();
+        result.fade_end_m = foliage->fade_end_m();
+        result.instances_within_ring =
+            foliage->instances_within(g_camera->Position, foliage->fade_end_m());
+        result.instances_beyond_fade =
+            foliage->instances_beyond(g_camera->Position, foliage->fade_end_m());
+        // Historical saturated-workload calibration, not a measured emission fraction.
+        result.measured_density =
+            std::clamp(static_cast<double>(result.instances_within_ring) / 873813.0, 0.0, 1.0);
+        result.foliage_gpu_ms = stats.foliage_gpu_ms;
+        result.gpu_timers_supported = stats.gpu_timers_supported;
+        result.foliage_draws = stats.foliage_draws;
+        result.foliage_instances_drawn = stats.foliage_instances_drawn;
+        WriteFoliageInstancingAnalysis(
+            scenario_config.artifact_dir, sample.screenshot, result, stats);
+        foliage_capture_written = true;
     }
     if (!foliage_capture_written && progress >= 0.97) {
         foliage_capture_written = true;
@@ -1165,7 +1167,8 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
             : !foliage->readback_enabled() ? "readback disabled; play-path captures do not qualify"
             : !foliage_calm.sampled        ? "no fresh calm sample and screenshot before deadline"
             : !fresh ? "windy readback generation did not match the rendered build before deadline"
-                     : "windy draw, vertex proof, instance data or screenshot unavailable before deadline";
+                     : "windy draw, vertex proof, instance data or screenshot unavailable before "
+                       "deadline";
         const nlohmann::json refusal = {
             {"schema", "luminumbra.foliage_instancing.v3"},
             {"profile", FoliageVisualProfile::id},
