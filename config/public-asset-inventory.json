@@ -1226,6 +1226,20 @@
       "source": "Luminumbra documentation assets"
     },
     {
+      "bytes": 14304,
+      "license": "MIT",
+      "path": "docs/assets/prefab-runtime/20260909/verification.json",
+      "sha256": "2151fff93ffbfee068bde895473b1eac85d0f3c458a5e885cb706697bf9a052d",
+      "source": "Luminumbra documentation assets"
+    },
+    {
+      "bytes": 12343,
+      "license": "MIT",
+      "path": "docs/assets/prefab-runtime/20260913/verification.json",
+      "sha256": "497575e2d11296aaba999bcdcbe0f0e53f11b52dc2b40e7ac57997b64f413ef8",
+      "source": "Luminumbra documentation assets"
+    },
+    {
       "bytes": 44771,
       "license": "MIT",
       "path": "docs/assets/screenshots/main-menu.png",
