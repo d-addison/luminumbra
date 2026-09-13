@@ -311,6 +311,54 @@ Broker(key=bytes.fromhex(os.environ.pop('LUMINUMBRA_VIEWPORT_KEY')), **config).r
             installation.seal_installation(self.host, self.qualification, self.native_receipt, self.manifest)
         self.assertFalse(self.manifest.exists())
 
+    def test_manifest_snapshot_cannot_mix_pinned_bytes_with_an_alternate_roster(self):
+        original_bytes = self.manifest.read_bytes()
+        original_host = self.host.read_bytes()
+        pin = hashlib.sha256(original_bytes).hexdigest()
+        alternate = json.loads(original_bytes)
+        alternate_host = b'changed SDK executable bytes'
+        alternate['files'][alternate['executable']] = hashlib.sha256(alternate_host).hexdigest()
+        real_hash, calls = installation.file_hash, []
+        def swap(path, *args, **kwargs):
+            if Path(path) == self.manifest:
+                if not calls:
+                    digest = real_hash(path, *args, **kwargs)
+                    calls.append(True)
+                    self.host.write_bytes(alternate_host)
+                    self.manifest.write_text(json.dumps(alternate))
+                    return digest
+                self.manifest.write_bytes(original_bytes)
+            return real_hash(path, *args, **kwargs)
+        try:
+            with mock.patch.object(installation, 'file_hash', side_effect=swap):
+                digest, parsed = installation.verify_installation(
+                    self.manifest, self.host, time.monotonic()+2, expected_manifest=pin)
+            self.assertEqual(digest, pin)
+            self.assertEqual(parsed, json.loads(original_bytes))
+        finally:
+            self.manifest.write_bytes(original_bytes)
+            self.host.write_bytes(original_host)
+
+    def test_seal_cannot_join_one_host_receipt_content_to_another_receipt_hash(self):
+        self.manifest.unlink()
+        native_bytes = self.native_receipt.read_bytes()
+        alternate = json.loads(native_bytes)
+        alternate['source_commit'] = 'f'*40
+        alternate_bytes = json.dumps(alternate).encode()
+        qualification = json.loads(self.qualification.read_text())
+        qualification['session_sha256'] = hashlib.sha256(alternate_bytes).hexdigest()
+        self.qualification.write_text(json.dumps(qualification))
+        real_read = Path.read_bytes
+        def swap(path):
+            raw = real_read(path)
+            if path == self.native_receipt:
+                path.write_bytes(alternate_bytes)
+            return raw
+        with mock.patch.object(Path, 'read_bytes', swap):
+            with self.assertRaisesRegex(ValueError, 'Host receipt identity mismatch'):
+                installation.seal_installation(self.host, self.qualification, self.native_receipt, self.manifest)
+        self.assertFalse(self.manifest.exists())
+
     def test_seal_rejects_missing_shader_without_leaving_partial_manifest(self):
         self.manifest.unlink()
         (self.sdk / next(iter(installation.SHADERS))).unlink()

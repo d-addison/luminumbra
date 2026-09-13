@@ -31,6 +31,12 @@ def main():
     args = parser.parse_args()
     if os.name != 'nt':
         parser.error('Windows ownership qualification must run on Windows')
+    args.receipt.parent.mkdir(parents=True, exist_ok=True)
+    # A fresh output starts failed, before hashing/importing or launching tests.
+    # Aborts cannot leave an earlier successful qualification at this run's path.
+    with args.receipt.open('x') as stream:
+        json.dump({'schema': 'luminumbra.viewport.client.windows.v1',
+                   'passed': False, 'state': 'started'}, stream)
     before, started = inputs(), time.monotonic()
     suite = unittest.TestSuite()
     for name in ('test_client.py', 'test_windows_process.py'):
@@ -44,7 +50,7 @@ def main():
         'errors': [str(test) for test, _ in result.errors],
         'skips': [{'test': str(test), 'reason': reason} for test, reason in result.skipped],
         'elapsed_seconds': time.monotonic()-started, 'inputs_before': before, 'inputs_after': after,
-        'passed': result.wasSuccessful() and before == after and result.testsRun == 22
+        'passed': result.wasSuccessful() and before == after and result.testsRun == 24
             and all(test.id().endswith('test_manifest_escape_and_linked_sdk_inputs_are_refused')
                     and reason == 'Symlink creation unavailable' for test, reason in result.skipped)}
     args.receipt.parent.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,7 @@
 """Complete installed static-preview identity checks, without Blender imports."""
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
@@ -38,6 +39,23 @@ def file_hash(path, deadline, cancelled=None):
             result.update(data)
 
 
+def read_identity(path, bound, deadline, cancelled=None):
+    """Hash and parse the same bounded regular-file snapshot, never two opens."""
+    check_deadline(deadline, cancelled)
+    path = safe_path(path)
+    require(path.is_file() and path.stat().st_size <= bound, 'Identity snapshot size/file')
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+                         | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode) and info.st_size <= bound, 'Identity snapshot regular-file bound')
+        raw = stream.read(bound + 1)
+    require(len(raw) <= bound, 'Identity snapshot read bound')
+    check_deadline(deadline, cancelled)
+    identity = hashlib.sha256(raw).hexdigest()
+    return identity, json.loads(raw, object_pairs_hook=_object)
+
+
 def relative_path(value):
     require(type(value) is str and 0 < len(value) <= 1024 and '\\' not in value and ':' not in value,
             'Manifest repository-relative path')
@@ -65,10 +83,8 @@ def renderer_module(files):
 def verify_installation(manifest, host, deadline, *, expected_manifest=None, cancelled=None):
     """Manifest lives directly in SDK root and is the only self-excluded file."""
     manifest, host = safe_path(manifest), safe_path(host)
-    require(manifest.is_file() and manifest.stat().st_size <= 1024 * 1024, 'Manifest size/file')
-    identity = file_hash(manifest, deadline, cancelled)
+    identity, data = read_identity(manifest, 1024 * 1024, deadline, cancelled)
     require(expected_manifest is None or expected_manifest == identity, 'Installation manifest changed')
-    data = json.loads(manifest.read_bytes(), object_pairs_hook=_object)
     require(type(data) is dict and set(data) == {
         'schema', 'source_commit', 'source_dirty', 'source_input_sha256', 'executable', 'files',
         'identity_receipt_sha256'}, 'Installation manifest members')
@@ -126,14 +142,13 @@ def seal_installation(host, qualification, host_receipt, manifest, timeout=60):
     require(not qualification.is_relative_to(root) and not host_receipt.is_relative_to(root),
             'Qualification receipts must remain outside SDK')
     require(not manifest.exists(), 'Installation manifest already exists')
-    require(qualification.stat().st_size <= 4 * 1024 * 1024 and host_receipt.stat().st_size <= 4 * 1024 * 1024,
-            'Qualification receipt bound')
-    evidence = json.loads(qualification.read_bytes(), object_pairs_hook=_object)
-    native = json.loads(host_receipt.read_bytes(), object_pairs_hook=_object)
+    qualification_sha, evidence = read_identity(qualification, 4 * 1024 * 1024, deadline)
+    native_sha, native = read_identity(host_receipt, 4 * 1024 * 1024, deadline)
+    require(type(evidence) is dict and type(native) is dict, 'Qualification receipt objects')
     require(evidence.get('passed') is True and native.get('schema') == 'luminumbra.viewport.session.v1'
             and native.get('status') == 'complete' and native.get('shutdown_complete') is True,
             'Successful installed host qualification required')
-    require(evidence.get('session_sha256') == file_hash(host_receipt, deadline), 'Host receipt identity mismatch')
+    require(evidence.get('session_sha256') == native_sha, 'Host receipt identity mismatch')
     for field in ('source_commit', 'source_dirty', 'source_input_sha256'):
         require(evidence.get(field) == native.get(field), 'Qualification source identity mismatch')
     files = evidence.get('inputs_before', {}).get('sdk')
@@ -149,7 +164,7 @@ def seal_installation(host, qualification, host_receipt, manifest, timeout=60):
         require(files.get(name) == resources[Path(name).name], 'Qualified shader identity mismatch')
     value = {'schema': 'luminumbra.static_preview.installation.v1', 'source_commit': native['source_commit'],
              'source_dirty': native['source_dirty'], 'source_input_sha256': native['source_input_sha256'],
-             'executable': executable, 'files': files, 'identity_receipt_sha256': file_hash(qualification, deadline)}
+             'executable': executable, 'files': files, 'identity_receipt_sha256': qualification_sha}
     # The fresh output is the only file excluded from the complete SDK roster.
     # Refusal removes only this newly owned output, never an existing manifest.
     owned = False
@@ -158,6 +173,8 @@ def seal_installation(host, qualification, host_receipt, manifest, timeout=60):
             owned = True
             stream.write(canonical(value))
         verify_installation(manifest, host, deadline)
+        require(file_hash(qualification, deadline) == qualification_sha
+                and file_hash(host_receipt, deadline) == native_sha, 'Qualification receipts changed during sealing')
     except BaseException:
         if owned:
             manifest.unlink(missing_ok=True)
