@@ -1,5 +1,6 @@
 """Windows process/ACL checks using real descendants; no renderer acceptance."""
 import ctypes
+import io
 import json
 import os
 from pathlib import Path
@@ -8,11 +9,38 @@ import sys
 import tempfile
 import unittest
 
-from test_client import client_module, running, wait_for
+from test_client import client_module, running, state, wait_for, wire
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows Job Object and protected DACL qualification')
 class WindowsProcessTests(unittest.TestCase):
+    def test_real_reader_contention_preserves_atomic_complete_mailbox_records(self):
+        with tempfile.TemporaryDirectory(prefix='viewport-sharing-test-') as directory:
+            root = Path(directory)
+            key = bytes(range(32))
+            first = {'kind': 'state', 'session': 'a'*32, 'sequence': 1, 'state': state(1)}
+            second = {'kind': 'state', 'session': 'a'*32, 'sequence': 2, 'state': state(2)}
+            records = (wire.encode(first, b'', key), wire.encode(second, b'', key))
+            for name, before, after in (
+                    ('desired.bin', records[0], records[1]),
+                    ('frame-0.json', b'{"sequence":1,"length":128}', b'{"sequence":2,"length":128}')):
+                with self.subTest(mailbox=name):
+                    path = root / name
+                    wire.atomic_write(path, before)
+                    # Negative control: real CRT handle, no mocked Windows API.
+                    with path.open('rb') as legacy:
+                        with self.assertRaises(OSError) as denied:
+                            wire.atomic_write(path, after)
+                        self.assertIn(denied.exception.winerror, (5, 32))
+                        self.assertEqual(legacy.read(), before)
+                    with wire.open_record_reader(path) as reader:
+                        wire.atomic_write(path, after)
+                        self.assertEqual(reader.read(), before)
+                        self.assertEqual(wire.read_record_file(path, wire.CAPACITY), after)
+                    self.assertFalse(list(root.glob('.pending-*')))
+            self.assertEqual(wire.read_record(io.BytesIO(wire.read_record_file(root/'desired.bin', wire.CAPACITY)), key),
+                             (second, b''))
+
     def test_private_directory_has_protected_current_user_only_dacl(self):
         from ctypes import wintypes as w
         process_module = sys.modules[client_module.__package__ + '.viewport_process']

@@ -11,15 +11,16 @@ import threading
 import time
 
 from protocol import (CAPACITY, Refusal, Slots, StateGate, atomic_write, canonical,
-                      encode, match_frame, read_record, require, safe_path, validation_backend, write_record)
+                      encode, match_frame, open_record_reader, read_record, require, safe_path,
+                      validation_backend, write_record)
 
 
 def mailbox(path, key):
     path = safe_path(path)
     if not path.exists():
         return None
-    require(path.stat().st_size <= CAPACITY, 'Mailbox size')
-    with path.open('rb') as stream:
+    with open_record_reader(path) as stream:
+        require(os.fstat(stream.fileno()).st_size <= CAPACITY, 'Mailbox size')
         header, payload = read_record(stream, key)
         require(not stream.read(1), 'Trailing mailbox bytes')
     require(not payload, 'Mailbox payload')

@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import struct
 import sys
 import tempfile
@@ -43,6 +44,19 @@ def signed_raw(raw, payload=b''):
 
 
 class Transport(unittest.TestCase):
+    def test_record_reader_retains_old_complete_record_across_atomic_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'desired.bin'
+            first, second = state(1), state(2)
+            p.atomic_write(path, p.encode(first, b'', KEY))
+            with p.open_record_reader(path) as old:
+                p.atomic_write(path, p.encode(second, b'', KEY))
+                self.assertEqual(p.read_record(old, KEY), (first, b''))
+                self.assertFalse(old.read(1))
+                self.assertEqual(p.read_record(io.BytesIO(p.read_record_file(path, p.CAPACITY)), KEY),
+                                 (second, b''))
+            self.assertFalse(list(Path(directory).glob('.pending-*')))
+
     def test_partial_read_write(self):
         class Reader(io.BytesIO):
             def read(self, count=-1):
@@ -312,9 +326,9 @@ class Transport(unittest.TestCase):
                 records = 0
                 def delayed_read(stream, key):
                     nonlocal records
-                    # Mailbox reads also call this function. Only count the
-                    # response pipe, whose name is an integer file descriptor.
-                    if isinstance(stream.name, int):
+                    # Shared mailbox readers also own integer descriptors.
+                    # Count the actual response pipe, not the stream's label.
+                    if stat.S_ISFIFO(os.fstat(stream.fileno()).st_mode):
                         records += 1
                         if records == 2:
                             # Let the child exit while terminal bytes are still

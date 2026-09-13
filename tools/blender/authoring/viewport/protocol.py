@@ -1,6 +1,7 @@
 """Experimental authenticated viewport transport. No Blender or GPU imports."""
 import hashlib
 import hmac
+from functools import lru_cache
 import json
 import math
 import mmap
@@ -184,6 +185,69 @@ def safe_path(path):
     return path
 
 
+@lru_cache(maxsize=1)
+def _windows_reader_api():
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
+    kernel.GetFileInformationByHandleEx.restype = w.BOOL
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
+    return kernel
+
+
+def open_record_reader(path):
+    """Open one complete record without blocking another atomic publication.
+
+    Windows CRT readers omit FILE_SHARE_DELETE. CreateFileW must explicitly
+    permit replacement while this handle continues reading the old file.
+    No retry, deadline extension, truncation or in-place write is involved.
+    """
+    path = safe_path(path)
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes as w
+        import msvcrt
+        kernel = _windows_reader_api()
+        # GENERIC_READ; SHARE_READ | SHARE_WRITE | SHARE_DELETE; OPEN_EXISTING;
+        # FILE_FLAG_OPEN_REPARSE_POINT. NULL security means no inherited handle.
+        handle = kernel.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x00200000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            class AttributeTag(ctypes.Structure):
+                _fields_ = [('attributes', w.DWORD), ('tag', w.DWORD)]
+            info = AttributeTag()
+            if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            require(not info.attributes & (0x400 | 0x10), 'Reparse or directory record handle')
+            descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT)
+        except BaseException:
+            kernel.CloseHandle(handle)
+            raise
+        # Ownership transferred to the CRT descriptor; never CloseHandle again.
+    else:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                             | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        require(stat.S_ISREG(os.fstat(descriptor).st_mode), 'Record requires a regular file')
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_record_file(path, limit):
+    require(integer(limit, 0, CAPACITY), 'Record file limit')
+    with open_record_reader(path) as stream:
+        require(os.fstat(stream.fileno()).st_size <= limit, 'Record file size')
+        raw = stream.read(limit + 1)
+    require(len(raw) <= limit, 'Record file read bound')
+    return raw
+
+
 def atomic_write(path, value):
     path = safe_path(path)
     fd, temporary = tempfile.mkstemp(prefix='.pending-', dir=path.parent)
@@ -289,8 +353,7 @@ class Slots:
             descriptor = safe_path(self.root / f'frame-{index}.json')
             if not descriptor.exists():
                 return None
-            require(descriptor.stat().st_size <= 128, 'Descriptor size')
-            meta = json.loads(descriptor.read_bytes(), object_pairs_hook=_object)
+            meta = json.loads(read_record_file(descriptor, 128), object_pairs_hook=_object)
             require(set(meta) == {'length', 'sequence'} and integer(meta['length'], 49, CAPACITY), 'Descriptor')
             with safe_path(self.root / f'frame-{index}.bin').open('rb') as stream:
                 require(os.fstat(stream.fileno()).st_size == CAPACITY, 'Slot capacity')

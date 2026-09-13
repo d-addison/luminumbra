@@ -220,8 +220,7 @@ class ViewportClient:
                         descriptor = wire.safe_path(root / f'frame-{index}.json')
                         if not descriptor.exists():
                             continue
-                        wire.require(descriptor.stat().st_size <= 128, 'Frame descriptor bound')
-                        meta = json.loads(descriptor.read_bytes())
+                        meta = json.loads(wire.read_record_file(descriptor, 128))
                         wire.require(type(meta) is dict and set(meta) == {'sequence', 'length'}
                                      and wire.integer(meta['sequence'], 1, 2**53 - 1)
                                      and wire.integer(meta['length'], 49, wire.CAPACITY), 'Frame descriptor')

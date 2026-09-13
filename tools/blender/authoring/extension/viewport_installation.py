@@ -7,7 +7,7 @@ import re
 import stat
 import time
 
-from .viewport.protocol import canonical, require, safe_path
+from .viewport.protocol import canonical, open_record_reader, require, safe_path
 
 
 SOURCE_INPUTS = 'share/luminumbra-static/source-inputs.txt'
@@ -44,9 +44,7 @@ def read_identity(path, bound, deadline, cancelled=None):
     check_deadline(deadline, cancelled)
     path = safe_path(path)
     require(path.is_file() and path.stat().st_size <= bound, 'Identity snapshot size/file')
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0)
-                         | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
-    with os.fdopen(descriptor, 'rb') as stream:
+    with open_record_reader(path) as stream:
         info = os.fstat(stream.fileno())
         require(stat.S_ISREG(info.st_mode) and info.st_size <= bound, 'Identity snapshot regular-file bound')
         raw = stream.read(bound + 1)

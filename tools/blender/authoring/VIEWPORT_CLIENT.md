@@ -26,6 +26,17 @@ There are two fixed transport slots and one completed immutable CPU frame, with
 no frame queue. The caller owns bytes it has consumed and must bound its own
 texture/frame retention.
 
+Mailbox and frame-descriptor readers permit Windows atomic replacement using
+[`FILE_SHARE_DELETE`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew).
+An open reader retains the complete previous file while the next file becomes
+visible at the path. Handles are non-inherited, reject reparse/directory objects,
+and transfer to one owned Python stream. Record-size checks apply to the opened
+file. Writers still publish through one atomic replacement; this adds no retry,
+in-place mutation, weakened error handling or deadline extension. A Windows-only
+negative control holds a real ordinary CRT reader to reproduce sharing denial,
+then verifies successful replacement and complete old/new records using the new
+reader. Both command mailboxes and frame descriptors are covered.
+
 Timeouts are configurable independently: SDK/startup validation defaults to ten
 seconds, outstanding frames to sixty, and cooperative shutdown to five. Each is
 bounded to sixty seconds; at most one automatic fresh-session restart is attempted
@@ -104,6 +115,6 @@ and authenticated transport with synthetic frames; dummy SDK files exercise only
 identity validation. The Windows-only process tests remain separately qualified:
 `python -B test/viewport/probe_windows_client.py --receipt client-windows.json`
 records executable/source hashes, exact test count, explicit skips and results.
-Its protected-DACL and abrupt-owner-death tests cannot pass by being skipped.
+Its protected-DACL, abrupt-owner-death and real file-sharing tests cannot pass by being skipped.
 These tests do not qualify Blender presentation, installed rendering, native GPU
 performance or visual acceptance.

@@ -50,7 +50,7 @@ def main():
         'errors': [str(test) for test, _ in result.errors],
         'skips': [{'test': str(test), 'reason': reason} for test, reason in result.skipped],
         'elapsed_seconds': time.monotonic()-started, 'inputs_before': before, 'inputs_after': after,
-        'passed': result.wasSuccessful() and before == after and result.testsRun == 24
+        'passed': result.wasSuccessful() and before == after and result.testsRun == 25
             and all(test.id().endswith('test_manifest_escape_and_linked_sdk_inputs_are_refused')
                     and reason == 'Symlink creation unavailable' for test, reason in result.skipped)}
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
