@@ -92,6 +92,7 @@ list(APPEND PREVIEW_IDENTITY_INPUTS ${PREVIEW_SOURCES} "${CMAKE_CURRENT_LIST_FIL
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/core/FilesystemPath.h"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/core/Log.h"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/core/Environment.h"
+    "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/components/CoreComponents.h"
     "${STATIC_PREVIEW_ROOT}/include/luminumbra/core/Types.h"
     "${STATIC_PREVIEW_ROOT}/tools/prefab_runtime/CMakeLists.txt"
     "${STATIC_PREVIEW_ROOT}/tools/static_scene/CMakeLists.txt")
@@ -131,6 +132,14 @@ endif()
 
 if(BUILD_TESTING)
     find_package(Python3 3.10 COMPONENTS Interpreter REQUIRED)
+    if(CMAKE_GENERATOR MATCHES "Ninja")
+        add_test(NAME StaticPreviewSourceIdentity COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/check_source_identity.py"
+            --source "${STATIC_PREVIEW_ROOT}" --build "${CMAKE_BINARY_DIR}"
+            --manifest "${CMAKE_CURRENT_BINARY_DIR}/source-inputs.txt"
+            --ninja "${CMAKE_MAKE_PROGRAM}")
+        set_tests_properties(StaticPreviewSourceIdentity PROPERTIES LABELS "authoring;tools" TIMEOUT 90)
+    endif()
     if(NOT CMAKE_SOURCE_DIR STREQUAL STATIC_PREVIEW_ROOT)
         add_test(NAME StaticPreviewCaptureContract COMMAND "${Python3_EXECUTABLE}"
             "${STATIC_PREVIEW_ROOT}/test/static_preview/test_capture_validation.py")

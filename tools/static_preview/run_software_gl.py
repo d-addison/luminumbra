@@ -55,12 +55,12 @@ def main():
                 raise RuntimeError(f'Production software rendering tests exited {result.returncode}')
             root = ET.parse(output / 'tests.xml').getroot()
             cases = root.findall('.//testcase')
-            if len(cases) != 10 or len({(x.get('classname'), x.get('name')) for x in cases}) != 10:
-                raise RuntimeError('Expected exactly ten unique production rendering tests')
+            if len(cases) != 11 or len({(x.get('classname'), x.get('name')) for x in cases}) != 11:
+                raise RuntimeError('Expected exactly eleven unique production rendering tests')
             if any(x.find('skipped') is not None or x.find('failure') is not None or
                    x.get('status') != 'run' for x in cases):
                 raise RuntimeError('Rendering tests contain a skipped, failed or unexecuted case')
-            print(f'Software GL: 10 actual llvmpipe cases passed; artifacts: {output}')
+            print(f'Software GL: 11 actual llvmpipe cases passed; artifacts: {output}')
     finally:
         if write_fd >= 0:
             os.close(write_fd)

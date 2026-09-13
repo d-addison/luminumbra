@@ -261,6 +261,35 @@ TEST_F(StaticPreviewRender, UnsupportedMaterialRefusesAndDoesNotConsumeFrameSequ
     EXPECT_EQ(recovered.sequence, 2u);
     EXPECT_EQ(recovered.rgba8, original.rgba8);
 }
+TEST_F(StaticPreviewRender, RepeatedFailedUploadsReleaseResourcesAndPreserveSuccessfulCache) {
+    const auto scene = Scene();
+    const auto original = renderer->Render(View(), scene);
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        std::weak_ptr<const StaticMesh> rejected_mesh;
+        std::weak_ptr<const StaticTexture> rejected_texture;
+        {
+            auto mesh = Quad();
+            mesh->identity = "rejected-mesh-" + std::to_string(attempt);
+            auto material = Material();
+            material->textures[0].texture =
+                Texture("rejected-texture-" + std::to_string(attempt), {255, 0, 0, 255});
+            // Refuse after uploading the new mesh and base-color texture.
+            material->textures[4].sampler.mag_filter = 0;
+            rejected_mesh = mesh;
+            rejected_texture = material->textures[0].texture;
+            EXPECT_THROW(renderer->Render(View(), Scene(material, mesh)), std::invalid_argument);
+        }
+        EXPECT_TRUE(rejected_mesh.expired());
+        EXPECT_TRUE(rejected_texture.expired());
+    }
+    const auto recovered = renderer->Render(View(), scene);
+    EXPECT_EQ(recovered.sequence, 2u);
+    EXPECT_EQ(recovered.rgba8, original.rgba8);
+    EXPECT_EQ(recovered.depth32f, original.depth32f);
+    EXPECT_EQ(recovered.uploaded_meshes, 0u);
+    EXPECT_EQ(recovered.uploaded_textures, 0u);
+    EXPECT_EQ(recovered.updated_instances, 0u);
+}
 TEST_F(StaticPreviewRender, TerrainSnowPreservesAuthoredMaterialButStillAffectsLegacySurface) {
     RenderResourceRegistry resources;
     GBuffer gbuffer;
