@@ -64,11 +64,14 @@ TEST(WeatherSystem, NoiseDispatchMatchesTerrainCeiling) {
     WeatherSystem field(kSeed);
     RecordProperty("cpu_max_simd", static_cast<int>(FastSIMD::CPUMaxSIMDLevel()));
     RecordProperty("reference_simd", static_cast<int>(reference->GetSIMDLevel()));
-    RecordProperty("pressure_noise_simd_level", static_cast<int>(field.pressure_noise_simd_level()));
+    RecordProperty("pressure_noise_simd_level",
+                   static_cast<int>(field.pressure_noise_simd_level()));
     EXPECT_EQ(field.pressure_noise_simd_level(), reference->GetSIMDLevel());
-    RecordProperty("temperature_noise_simd_level", static_cast<int>(field.temperature_noise_simd_level()));
+    RecordProperty("temperature_noise_simd_level",
+                   static_cast<int>(field.temperature_noise_simd_level()));
     EXPECT_EQ(field.temperature_noise_simd_level(), reference->GetSIMDLevel());
-    RecordProperty("humidity_noise_simd_level", static_cast<int>(field.humidity_noise_simd_level()));
+    RecordProperty("humidity_noise_simd_level",
+                   static_cast<int>(field.humidity_noise_simd_level()));
     EXPECT_EQ(field.humidity_noise_simd_level(), reference->GetSIMDLevel());
     // Keep constructor and evolved hashes in the test receipt. The control and
     // repaired binaries run identical ticks within each build configuration.
