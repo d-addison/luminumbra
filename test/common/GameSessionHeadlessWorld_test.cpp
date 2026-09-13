@@ -1390,6 +1390,22 @@ TEST(GameSessionHeadlessWorldTest, AbsentLedgerAtRestoredTickAllowsEditAndPinBef
     }
 }
 
+void ExpectLatestRegionTelemetry(const GameSession& original,
+                                 const GameSession& loaded,
+                                 std::uint64_t tick) {
+    const auto& original_samples = original.GetSimBudgetTelemetry().SamplesByStage();
+    const auto& loaded_samples = loaded.GetSimBudgetTelemetry().SamplesByStage();
+    for (std::size_t stage = 0; stage < original_samples.size(); ++stage) {
+        if (original_samples[stage].empty()) {
+            EXPECT_TRUE(loaded_samples[stage].empty());
+            continue;
+        }
+        ASSERT_FALSE(loaded_samples[stage].empty());
+        EXPECT_EQ(loaded_samples[stage].back().tick, tick);
+        EXPECT_EQ(loaded_samples[stage].back().work, original_samples[stage].back().work);
+    }
+}
+
 TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHoldCounters) {
     const HeadlessRoot root;
     JobSystem jobs;
@@ -1463,17 +1479,7 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
             EXPECT_EQ(loaded.GetActiveRegionLedger().canonical_bytes(),
                       original.GetActiveRegionLedger().canonical_bytes());
             EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(original));
-            const auto& original_samples = original.GetSimBudgetTelemetry().SamplesByStage();
-            const auto& loaded_samples = loaded.GetSimBudgetTelemetry().SamplesByStage();
-            for (std::size_t stage = 0; stage < original_samples.size(); ++stage) {
-                if (original_samples[stage].empty()) {
-                    EXPECT_TRUE(loaded_samples[stage].empty());
-                    continue;
-                }
-                ASSERT_FALSE(loaded_samples[stage].empty());
-                EXPECT_EQ(loaded_samples[stage].back().tick, tick);
-                EXPECT_EQ(loaded_samples[stage].back().work, original_samples[stage].back().work);
-            }
+            ASSERT_NO_FATAL_FAILURE(ExpectLatestRegionTelemetry(original, loaded, tick));
         }
         if (tick == 3 || tick == 11) {
             const auto before = SessionWorldHash(original);
