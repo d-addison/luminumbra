@@ -10,8 +10,13 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <string>
+
+#include "luminumbra_common/systems/AmbientNoiseDispatch.h"
 
 #include "luminumbra_common/systems/WindFieldSystem.h"
 
@@ -35,6 +40,65 @@ std::string RunWind(int seed, std::uint64_t ticks, const Vec3& anchor) {
         wind.Update(t, anchor);
     }
     return wind.ComputeWindSubHash();
+}
+
+// Compare with terrain's explicit ceiling, independently of the ambient helper.
+// On non-x86 builds the existing native dispatch remains the reference.
+TEST(WindFieldSystem, NoiseDispatchMatchesTerrainCeiling) {
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    const auto reference = FastNoise::New<FastNoise::FractalFBm>(FastSIMD::Level_AVX2);
+#else
+    const auto reference = FastNoise::New<FastNoise::FractalFBm>();
+#endif
+    WindFieldSystem field(kSeed);
+    RecordProperty("cpu_max_simd", static_cast<int>(FastSIMD::CPUMaxSIMDLevel()));
+    RecordProperty("reference_simd", static_cast<int>(reference->GetSIMDLevel()));
+    RecordProperty("noise_simd_level", static_cast<int>(field.noise_simd_level()));
+    EXPECT_EQ(field.noise_simd_level(), reference->GetSIMDLevel());
+    // Keep constructor and evolved hashes in the test receipt. The control and
+    // repaired binaries run identical ticks within each build configuration.
+    RecordProperty("constructor_hash", field.ComputeWindSubHash());
+    for (std::uint64_t tick = 1; tick <= kTicks; ++tick) {
+        field.Update(tick, kAnchor);
+    }
+    RecordProperty("evolved_hash", field.ComputeWindSubHash());
+}
+
+TEST(AmbientNoiseDispatch, FractalAndSimplexMatchTerrainCeiling) {
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    constexpr auto reference_ceiling = FastSIMD::Level_AVX2;
+#else
+    constexpr auto reference_ceiling = FastSIMD::Level_Null;
+#endif
+    auto fractal = Luminumbra::Systems::NewAmbientNoise<FastNoise::FractalFBm>();
+    auto simplex = Luminumbra::Systems::NewAmbientNoise<FastNoise::Simplex>();
+    auto reference = FastNoise::New<FastNoise::FractalFBm>(reference_ceiling);
+    auto reference_simplex = FastNoise::New<FastNoise::Simplex>(reference_ceiling);
+    ASSERT_TRUE(fractal && simplex && reference && reference_simplex);
+    RecordProperty("fractal_simd", static_cast<int>(fractal->GetSIMDLevel()));
+    RecordProperty("simplex_simd", static_cast<int>(simplex->GetSIMDLevel()));
+    ASSERT_EQ(fractal->GetSIMDLevel(), reference->GetSIMDLevel());
+    ASSERT_EQ(simplex->GetSIMDLevel(), reference_simplex->GetSIMDLevel());
+    fractal->SetSource(simplex);
+    reference->SetSource(reference_simplex);
+    fractal->SetOctaveCount(2);
+    reference->SetOctaveCount(2);
+
+    // Full AVX-512-width arrays keep this dispatch test independent of the
+    // separate short-position-array padding defect in WindFieldSystem::Update.
+    std::array<float, 16> x{}, z{}, actual{}, expected{};
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        x[i] = (static_cast<float>(i) - 7.5f) * 0.375f;
+        z[i] = (static_cast<float>(i) + 0.5f) * -0.215f;
+    }
+    for (int seed : {kSeed + 11, kSeed + 12, kSeed + 113, kSeed + 223, kSeed + 14}) {
+        fractal->GenPositionArray2D(actual.data(), 16, x.data(), z.data(), 0.0f, 0.0f, seed);
+        reference->GenPositionArray2D(expected.data(), 16, x.data(), z.data(), 0.0f, 0.0f, seed);
+        for (std::size_t i = 0; i < x.size(); ++i) {
+            EXPECT_EQ(std::bit_cast<std::uint32_t>(actual[i]),
+                      std::bit_cast<std::uint32_t>(expected[i])) << "seed=" << seed << " lane=" << i;
+        }
+    }
 }
 
 TEST(WindFieldSystem, GeometryMatchesPinnedShape) {

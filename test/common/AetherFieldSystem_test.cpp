@@ -11,6 +11,8 @@
 
 #include <string>
 
+#include "luminumbra_common/systems/AmbientNoiseDispatch.h"
+
 #include "luminumbra_common/systems/AetherFieldSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 
@@ -33,6 +35,28 @@ std::string RunAether(int seed, std::uint64_t ticks, const Vec3& anchor) {
         aether.Update(t, anchor);
     }
     return aether.ComputeAetherSubHash();
+}
+
+// Compare with terrain's explicit ceiling, independently of the ambient helper.
+// On non-x86 builds the existing native dispatch remains the reference.
+TEST(AetherFieldSystem, NoiseDispatchMatchesTerrainCeiling) {
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    const auto reference = FastNoise::New<FastNoise::FractalFBm>(FastSIMD::Level_AVX2);
+#else
+    const auto reference = FastNoise::New<FastNoise::FractalFBm>();
+#endif
+    AetherFieldSystem field(kSeed);
+    RecordProperty("cpu_max_simd", static_cast<int>(FastSIMD::CPUMaxSIMDLevel()));
+    RecordProperty("reference_simd", static_cast<int>(reference->GetSIMDLevel()));
+    RecordProperty("noise_simd_level", static_cast<int>(field.noise_simd_level()));
+    EXPECT_EQ(field.noise_simd_level(), reference->GetSIMDLevel());
+    // Keep constructor and evolved hashes in the test receipt. The control and
+    // repaired binaries run identical ticks within each build configuration.
+    RecordProperty("constructor_hash", field.ComputeAetherSubHash());
+    for (std::uint64_t tick = 1; tick <= kTicks; ++tick) {
+        field.Update(tick, kAnchor);
+    }
+    RecordProperty("evolved_hash", field.ComputeAetherSubHash());
 }
 
 TEST(AetherFieldSystem, GeometryMatchesPinnedShape) {
