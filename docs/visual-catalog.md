@@ -152,16 +152,54 @@ original and supporting file. Packet fields are:
 | Field | Required content |
 |---|---|
 | `schema`, `scenario_id` | `luminumbra.visual_review_packet.v1` and exactly one catalog ID |
-| `requirement_sha256` | Digest of current fixture, variants, acceptance checks and shared policy; print with `--requirement-digest R12` |
+| `requirement_sha256` | Digest of current fixture file contents, variants, acceptance checks, scoped performance requirements and shared policy; print with `--requirement-digest R12` |
+| `fixture_files` | Exact map from each declared fixture source path to its current file SHA-256. `identities.fixture_sha256` hashes this map as sorted compact JSON |
 | `source_commit` | Actual executed source commit, separate from documentation revision |
 | `capture_status`, `correctness` | `native_qualified`, `passed` before review-ready state |
 | `reproduction`, `camera_lighting` | Exact commands, inputs, environment and actual frame/tick/pins |
 | `identities` | `engine_binary_sha256`, `fixture_sha256`, `asset_manifest_sha256`, `tool_manifest_sha256`; include installed library hashes and real tool/exporter identities in the manifests |
 | `hardware` | `os`, `cpu`, `gpu`, `driver`, `backend`, `hardware_rendering: true`; include framebuffer/profile/measurement context |
-| `performance` | `status: measured` with scope and `target_status: met` or `not_established`; `not_applicable` requires a reviewed rationale. Missing or missed required targets cannot qualify |
+| `performance` | Accepted metric scopes require `status: measured`, exact scope, complete frozen profiles and `target_status: met`. Other scopes may report `not_established`, or `not_applicable` with a reviewed rationale |
 | `findings`, `aesthetic_review` | Concrete findings, limitations and per-dimension review; never infer a user decision |
-| `artifacts` | Unique IDs, roles, repository paths and SHA-256 digests. Roles include `original`, `functional`, `temporal`, `raw_performance` and `preview` |
+| `artifacts` | Unique IDs, roles, repository paths and SHA-256 digests. Roles include `original`, `functional`, `temporal`, `raw_performance`, `performance_profile`, `capture_manifest` and `preview` |
 | `variants` | Exactly every required variant ID, `status: passed` and references to its lossless `originals`; previews cannot substitute |
+| `capture_manifest` | Artifact ID of a `luminumbra.visual_capture_manifest.v1` record joining each original to its actual scenario variant, run and frame |
+
+The capture manifest repeats the packet's `scenario_id`, `source_commit`,
+`engine_binary_sha256` and `fixture_sha256`. Its `captures` list contains
+`variant_id`, `run_id`, nonnegative integer `frame_id`, `original` artifact ID
+and `original_sha256`. It must join every variant original exactly. A source
+frame or original file cannot satisfy different variants, including different
+sweep cells. Independent captures may have identical pixel hashes; deterministic
+rebuild comparisons rely on that possibility.
+
+Every row declares `performance_requirements`. R24 owns the accepted expanded
+world workload: two distinct frozen configurations, p99 frame time at most
+16.67 ms and the separately reported 8.33 ms target. R14 owns the separate
+0.6 ms foliage draw scope. B09 owns installed authoring presentation and refresh
+targets. Other rows remain `report_only`; this does not waive any requirement of
+their parent or dependent acceptance scope or invent a new target for them.
+
+For a required scope, `performance.profiles` has exactly the required number of
+records, each with a unique `id`, a `manifest` artifact ID and complete `metrics`.
+The manifest has schema `luminumbra.visual_performance_profile.v1`, matching
+`profile_id` and `scope`, a nonempty `configuration` object specifying the actual
+workload/settings, and a `statistics` map from metric ID to its aggregation.
+Review and freeze this profile before capture. World frame time uses p99;
+camera/transform feedback uses p95. Where the accepted target did not specify
+an aggregation, the profile must declare mean, median, p95, p99, min or max;
+human review must establish that it represents the requested workload.
+
+Each metric record has `id`, computed `value` and a `raw_samples` artifact ID.
+World frame time also records `reported_target: 8.33`. The raw JSON record uses
+schema `luminumbra.visual_performance_samples.v1`, repeats the packet's four
+capture identities, and records `profile_id`, `profile_sha256`, `metric_id` and
+nonempty `samples`. Each sample contains a finite nonnegative `value` and actual
+`run_id`/`frame_id`; duplicate sample identities are rejected. The validator
+recomputes the declared statistic (nearest-rank percentiles), checks it against
+the reported value and enforces the metric's strict or inclusive bound.
+Missing profiles, N/A and `not_established` cannot qualify these accepted scopes.
+Retain the full distributions and workload details alongside these compact joins.
 
 For `approved` or `changes_requested`, the row's `approval` records `actor: user`,
 the reviewed `packet_sha256` and a concrete `decision_reference`. The validator

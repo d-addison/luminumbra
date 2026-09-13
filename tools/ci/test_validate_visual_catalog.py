@@ -145,9 +145,13 @@ class CatalogTests(unittest.TestCase):
             finally:
                 link.unlink()
 
-    def packet(self):
+    def packet(self, scenario_id="R12"):
         """Synthetic contract data only; deliberately never native acceptance."""
-        row = self.row("R12")
+        self.packet_scenario = scenario_id
+        row = self.row(scenario_id)
+        if row["fixture"]["status"] == "missing":
+            row["fixture"]["status"] = "source_fixture"
+            row["fixture"]["source_paths"] = self.row("R12")["fixture"]["source_paths"][:]
         packet_root = self.root / "docs/assets/contract-fixture"
         packet_root.mkdir(parents=True, exist_ok=True)
         payloads = {
@@ -164,7 +168,8 @@ class CatalogTests(unittest.TestCase):
                               "sha256": check.digest(content)})
         packet = {
             "schema": "luminumbra.visual_review_packet.v1", "scenario_id": "R12",
-            "requirement_sha256": check.requirement_digest(row, self.data["policy"]),
+            "requirement_sha256": check.requirement_digest(row, self.data["policy"], self.root),
+            "fixture_files": check.fixture_manifest(self.root, row),
             "source_commit": "a" * 40, "capture_status": "native_qualified", "correctness": "passed",
             "reproduction": {"command": "synthetic test only"},
             "hardware": dict.fromkeys(("os", "cpu", "gpu", "driver", "backend"), "synthetic")
@@ -175,21 +180,76 @@ class CatalogTests(unittest.TestCase):
             "performance": {"status": "measured", "target_status": "met", "scope": "synthetic"},
             "findings": {"scope": "synthetic"}, "aesthetic_review": {"scope": "synthetic"},
             "artifacts": artifacts,
-            "variants": [{"id": variant, "status": "passed", "originals": ["original"]}
-                         for variant in row["required_variants"]],
+            "variants": [],
         }
+        packet["scenario_id"] = scenario_id
+        packet["identities"]["fixture_sha256"] = check.manifest_digest(packet["fixture_files"])
+        captures = []
+        for index, variant in enumerate(row["required_variants"]):
+            original = "original" if index == 0 else f"original-{index}"
+            if index:
+                self.artifact(packet, original, "original", payloads["original"], ".png")
+            packet["variants"].append({"id": variant, "status": "passed", "originals": [original]})
+            captures.append({"variant_id": variant, "run_id": "synthetic-run", "frame_id": index,
+                             "original": original, "original_sha256": check.digest(payloads["original"])})
+        manifest = self.identity(packet) | {"schema": "luminumbra.visual_capture_manifest.v1", "captures": captures}
+        self.artifact(packet, "capture_manifest", "capture_manifest", manifest)
+        packet["capture_manifest"] = "capture_manifest"
         row["execution_state"] = "ready_for_review"
         self.save_packet(packet)
         return packet
 
+    def identity(self, packet):
+        return {"scenario_id": packet["scenario_id"], "source_commit": packet["source_commit"],
+                "engine_binary_sha256": packet["identities"]["engine_binary_sha256"],
+                "fixture_sha256": packet["identities"]["fixture_sha256"]}
+
+    def artifact(self, packet, artifact_id, role, value, suffix=".json"):
+        path = self.root / "docs/assets/contract-fixture" / (artifact_id + suffix)
+        content = value if isinstance(value, bytes) else json.dumps(value).encode()
+        path.write_bytes(content)
+        artifact = {"id": artifact_id, "role": role, "path": path.relative_to(self.root).as_posix(),
+                    "sha256": check.digest(content)}
+        packet["artifacts"] = [a for a in packet["artifacts"] if a["id"] != artifact_id] + [artifact]
+        return artifact
+
+    def read_artifact(self, packet, artifact_id):
+        artifact = next(a for a in packet["artifacts"] if a["id"] == artifact_id)
+        return check.read_json(self.root / artifact["path"])
+
+    def measured(self, packet):
+        requirements = self.row(self.packet_scenario)["performance_requirements"]
+        performance = {"status": "measured", "scope": requirements["scope"], "target_status": "met", "profiles": []}
+        for index in range(requirements["profile_count"]):
+            profile_id = f"synthetic-profile-{index}"
+            frozen = {"schema": "luminumbra.visual_performance_profile.v1", "profile_id": profile_id,
+                      "scope": requirements["scope"], "configuration": {"synthetic_profile_index": index},
+                      "statistics": {m["id"]: "mean" if m["statistic"] == "profile" else m["statistic"]
+                                     for m in requirements["metrics"]}}
+            manifest = self.artifact(packet, profile_id, "performance_profile", frozen)
+            profile = {"id": profile_id, "manifest": profile_id, "metrics": []}
+            for metric in requirements["metrics"]:
+                value = metric["target"] + 1 if metric["operator"] == ">=" else metric["target"] / 2
+                raw_id = profile_id + "-" + metric["id"]
+                raw = self.identity(packet) | {"schema": "luminumbra.visual_performance_samples.v1",
+                    "profile_id": profile_id, "profile_sha256": manifest["sha256"], "metric_id": metric["id"],
+                    "samples": [{"value": value, "run_id": "synthetic-run", "frame_id": i} for i in range(100)]}
+                self.artifact(packet, raw_id, "raw_performance", raw)
+                profile["metrics"].append({"id": metric["id"], "raw_samples": raw_id, "value": value}
+                                          | ({"reported_target": metric["reported_target"]}
+                                             if "reported_target" in metric else {}))
+            performance["profiles"].append(profile)
+        packet["performance"] = performance
+        self.save_packet(packet)
+
     def save_packet(self, packet):
         path = self.root / "docs/assets/contract-fixture/packet.json"
         path.write_text(json.dumps(packet))
-        self.row("R12")["review_packet"] = {"path": path.relative_to(self.root).as_posix(),
+        self.row(self.packet_scenario)["review_packet"] = {"path": path.relative_to(self.root).as_posix(),
                                               "sha256": check.digest(path.read_bytes())}
 
     def approve(self):
-        row = self.row("R12")
+        row = self.row(self.packet_scenario)
         row["execution_state"] = "approved"
         row["approval"] = {"state": "approved", "actor": "user",
                            "packet_sha256": row["review_packet"]["sha256"],
@@ -267,6 +327,158 @@ class CatalogTests(unittest.TestCase):
         file.write_text('{"approval":"pending","approval":"approved"}')
         with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
             check.read_json(file)
+
+    def test_changed_fixture_bytes_invalidate_approval_at_same_path(self):
+        self.packet()
+        self.approve()
+        path = self.root / self.row("R12")["fixture"]["source_paths"][0]
+        previous = path.read_bytes()
+        try:
+            path.write_bytes(previous + b"\n// changed fixture\n")
+            self.rejected("does not cover current fixture")
+        finally:
+            path.write_bytes(previous)
+
+    def test_stale_fixture_manifest_cannot_follow_updated_requirement_digest(self):
+        packet = self.packet()
+        packet["fixture_files"] = {}
+        self.save_packet(packet)
+        self.rejected("fixture content manifest is stale")
+
+    def test_capture_receipt_cannot_be_relabelled_to_another_source(self):
+        packet = self.packet()
+        manifest = self.read_artifact(packet, "capture_manifest")
+        manifest["source_commit"] = "c" * 40
+        self.artifact(packet, "capture_manifest", "capture_manifest", manifest)
+        self.save_packet(packet)
+        self.rejected("identity mismatch")
+
+    def test_one_original_cannot_fill_all_96_sweep_cells(self):
+        packet = self.packet("R01")
+        manifest = self.read_artifact(packet, "capture_manifest")
+        for variant in packet["variants"]:
+            variant["originals"] = ["original"]
+        for capture in manifest["captures"]:
+            capture["original"] = "original"
+        self.artifact(packet, "capture_manifest", "capture_manifest", manifest)
+        self.save_packet(packet)
+        self.rejected("original file reused across distinct variants")
+
+    def test_copied_pixels_cannot_relabel_the_same_source_frame(self):
+        packet = self.packet("R01")
+        manifest = self.read_artifact(packet, "capture_manifest")
+        manifest["captures"][1]["frame_id"] = 0
+        self.artifact(packet, "capture_manifest", "capture_manifest", manifest)
+        self.save_packet(packet)
+        self.rejected("source frame reused across distinct variants")
+
+    def test_independent_captures_may_have_identical_deterministic_pixels(self):
+        self.packet("R01")
+        self.assertEqual([], check.validate(self.data, self.root))
+
+    def test_variant_capture_join_cannot_omit_a_cell(self):
+        packet = self.packet()
+        manifest = self.read_artifact(packet, "capture_manifest")
+        manifest["captures"].pop()
+        self.artifact(packet, "capture_manifest", "capture_manifest", manifest)
+        self.save_packet(packet)
+        self.rejected("join every variant original exactly")
+
+    def test_accepted_scope_requirements_cannot_be_dropped(self):
+        self.row("R24")["performance_requirements"] = check.REPORT_ONLY
+        self.rejected("accepted scoped performance requirements changed")
+
+    def test_accepted_world_workload_cannot_claim_performance_not_applicable(self):
+        packet = self.packet("R24")
+        packet["performance"] = {"status": "not_applicable", "rationale": "synthetic skip"}
+        self.save_packet(packet)
+        self.rejected("required performance cannot be N/A")
+
+    def test_established_world_target_cannot_claim_not_established(self):
+        packet = self.packet("R24")
+        self.measured(packet)
+        packet["performance"]["target_status"] = "not_established"
+        self.save_packet(packet)
+        self.rejected("established targets must be met")
+
+    def test_both_distinct_world_profiles_are_required(self):
+        packet = self.packet("R24")
+        self.measured(packet)
+        packet["performance"]["profiles"].pop()
+        self.save_packet(packet)
+        self.rejected("profiles are incomplete")
+
+    def test_duplicate_world_configuration_cannot_count_as_second_profile(self):
+        packet = self.packet("R24")
+        self.measured(packet)
+        profile = self.read_artifact(packet, "synthetic-profile-1")
+        profile["configuration"] = {"synthetic_profile_index": 0}
+        self.artifact(packet, "synthetic-profile-1", "performance_profile", profile)
+        self.save_packet(packet)
+        self.rejected("distinct workload configurations")
+
+    def test_all_accepted_scopes_accept_complete_consistent_measurements(self):
+        for scenario_id in ("R24", "R14", "B09"):
+            with self.subTest(scenario_id=scenario_id):
+                self.setUp()
+                packet = self.packet(scenario_id)
+                self.measured(packet)
+                self.assertEqual([], check.validate(self.data, self.root))
+
+    def test_claimed_metric_value_must_match_raw_samples(self):
+        packet = self.packet("R24")
+        self.measured(packet)
+        packet["performance"]["profiles"][0]["metrics"][0]["value"] = 0
+        self.save_packet(packet)
+        self.rejected("differs from raw samples")
+
+    def test_finite_samples_and_actual_frame_attribution_are_required(self):
+        for field, value, message in (("value", float("nan"), "must be finite"),
+                                      ("frame_id", None, "run/frame identity")):
+            with self.subTest(field=field):
+                self.setUp()
+                packet = self.packet("R24")
+                self.measured(packet)
+                raw_id = "synthetic-profile-0-frame_ms"
+                raw = self.read_artifact(packet, raw_id)
+                raw["samples"][0][field] = value
+                self.artifact(packet, raw_id, "raw_performance", raw)
+                self.save_packet(packet)
+                self.rejected(message)
+
+    def test_raw_metric_cannot_be_attributed_to_different_profile(self):
+        packet = self.packet("R24")
+        self.measured(packet)
+        raw_id = "synthetic-profile-0-frame_ms"
+        raw = self.read_artifact(packet, raw_id)
+        raw["profile_id"] = "synthetic-profile-1"
+        self.artifact(packet, raw_id, "raw_performance", raw)
+        self.save_packet(packet)
+        self.rejected("profile/metric identity mismatch")
+
+    def test_missed_p99_target_cannot_be_hidden_by_low_median(self):
+        packet = self.packet("R24")
+        self.measured(packet)
+        raw_id = "synthetic-profile-0-frame_ms"
+        raw = self.read_artifact(packet, raw_id)
+        for sample in raw["samples"][-2:]:
+            sample["value"] = 20
+        self.artifact(packet, raw_id, "raw_performance", raw)
+        packet["performance"]["profiles"][0]["metrics"][0]["value"] = 20
+        self.save_packet(packet)
+        self.rejected("required metric target missed")
+
+    def test_strict_authoring_latency_bound_cannot_be_relaxed_to_equality(self):
+        packet = self.packet("B09")
+        self.measured(packet)
+        raw_id = "synthetic-profile-0-camera_transform_ms"
+        raw = self.read_artifact(packet, raw_id)
+        for sample in raw["samples"]:
+            sample["value"] = 100
+        self.artifact(packet, raw_id, "raw_performance", raw)
+        packet["performance"]["profiles"][0]["metrics"][1]["value"] = 100
+        self.save_packet(packet)
+        self.rejected("required metric target missed")
 
     def test_completion_mode_refuses_all_unfinished_groups(self):
         result = subprocess.run([sys.executable, str(check.ROOT / "tools/ci/validate_visual_catalog.py"),

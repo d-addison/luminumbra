@@ -792,6 +792,10 @@ Acceptance checks:
 - foliage-instancing.ppm, calm/wind sequence, biome density and instance counts, ground contact, live-ring fade, GPU pass timings where available.
 - Meet the shared packet contract and preserve independent regression checks; each listed variant is required.
 
+Required performance scope: `foliage_draw`; 1 distinct frozen profile(s).
+
+- `foliage_draw_ms` (profile-declared statistic) <= 0.6.
+
 Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Controlled calm/wind v2 capture code and a deliberately incomplete full gate are landed. Independent rebuilds, actual vertex movement and correlated GPU samples still require recovered implementation and native qualification. Historical night-sky baseline is unchanged.
 
 Retained evidence:
@@ -1296,6 +1300,10 @@ Acceptance checks:
 
 - Implement and qualify volumetric generation, meshing, scheduling and independent coverage through 16,384 m, then durable edit authority and residency/upload budgets.
 - Meet the shared packet contract for every required variant and parent mapping.
+
+Required performance scope: `accepted_expanded_world`; 2 distinct frozen profile(s).
+
+- `frame_ms` (p99) <= 16.67; also report target 8.33.
 
 Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 

@@ -215,7 +215,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Run 48-cell summer sweep after camera/foliage fixes; explicitly expand winter to 96 cells and validate every slot; prepare four time-of-day contact sheets with full originals."
+      "next_action": "Run 48-cell summer sweep after camera/foliage fixes; explicitly expand winter to 96 cells and validate every slot; prepare four time-of-day contact sheets with full originals.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R02",
@@ -267,7 +272,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Bind loading/ready stills to actual world entry and readiness event; preserve transient progress and final grounded state instead of only process success."
+      "next_action": "Bind loading/ready stills to actual world entry and readiness event; preserve transient progress and final grounded state instead of only process success.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R03",
@@ -335,7 +345,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Record each named ground-LOD station and intervening transition frames; present labeled near/mid/far sheet with seam metrics."
+      "next_action": "Record each named ground-LOD station and intervening transition frames; present labeled near/mid/far sheet with seam metrics.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R04",
@@ -387,7 +402,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Add retained frame IDs around repeated boundary crossings and aggregate worst seam/flicker events; select stills from measured intervals."
+      "next_action": "Add retained frame IDs around repeated boundary crossings and aggregate worst seam/flicker events; select stills from measured intervals.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R05",
@@ -455,7 +475,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture incoming neighbor states and geometry continuity with arrival order; include worst transient frame in review sheet."
+      "next_action": "Capture incoming neighbor states and geometry continuity with arrival order; include worst transient frame in review sheet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R06",
@@ -523,7 +548,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Run existing water/reflection scene on verified archipelago inputs; frame shore and depth clearly, then expose wet/dry/reference pairs."
+      "next_action": "Run existing water/reflection scene on verified archipelago inputs; frame shore and depth clearly, then expose wet/dry/reference pairs.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R07",
@@ -576,7 +606,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Verify runtime WaterfallVisual helper caller and actual site framing, map active/dammed/recovery states to existing water tests, and retain corresponding stills."
+      "next_action": "Verify runtime WaterfallVisual helper caller and actual site framing, map active/dammed/recovery states to existing water tests, and retain corresponding stills.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R08",
@@ -645,7 +680,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture real material vista and ID heatmap at matched camera; compare close/mid/far material readability against calibration plates."
+      "next_action": "Capture real material vista and ID heatmap at matched camera; compare close/mid/far material readability against calibration plates.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R09",
@@ -715,7 +755,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Run skybox capture at qualified sun/moon projections, attach actual pass times and compare horizon context with R15 daylight/night variants."
+      "next_action": "Run skybox capture at qualified sun/moon projections, attach actual pass times and compare horizon context with R15 daylight/night variants.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R10",
@@ -781,7 +826,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture clear/weather pair with actual shared camera and stable world projections; review terrain and grass-edge readability."
+      "next_action": "Capture clear/weather pair with actual shared camera and stable world projections; review terrain and grass-edge readability.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R11",
@@ -848,7 +898,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Verify strike capture path through weather scenario; retain neighbor/strike/recovery stills and event tick, pulse intensity and clipping evidence."
+      "next_action": "Verify strike capture path through weather scenario; retain neighbor/strike/recovery stills and event tick, pulse intensity and clipping evidence.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R12",
@@ -915,7 +970,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Retain time-indexed moving-shadow frames and matched terrain/grass ROIs; compare observed added cost only to applicable 0.4ms target."
+      "next_action": "Retain time-indexed moving-shadow frames and matched terrain/grass ROIs; compare observed added cost only to applicable 0.4ms target.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R13",
@@ -981,7 +1041,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Run actual emitter fixture, record visible particle ROI and deterministic descriptors; retain ordered samples beyond single presence image."
+      "next_action": "Run actual emitter fixture, record visible particle ROI and deterministic descriptors; retain ordered samples beyond single presence image.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R14",
@@ -1068,7 +1133,19 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Consume terrain/foliage ownership/camera/time/wind fixes; recapture calm/windy diagnostic with final pre-draw state, independent placement evidence and truthful motion measurement."
+      "next_action": "Consume terrain/foliage ownership/camera/time/wind fixes; recapture calm/windy diagnostic with final pre-draw state, independent placement evidence and truthful motion measurement.",
+      "performance_requirements": {
+        "scope": "foliage_draw",
+        "profile_count": 1,
+        "metrics": [
+          {
+            "id": "foliage_draw_ms",
+            "statistic": "profile",
+            "operator": "<=",
+            "target": 0.6
+          }
+        ]
+      }
     },
     {
       "id": "R15",
@@ -1140,7 +1217,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture six summer/winter noon/dusk/night states plus emissive control with exact existing per-state pins and actual shader time proof."
+      "next_action": "Capture six summer/winter noon/dusk/night states plus emissive control with exact existing per-state pins and actual shader time proof.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R16",
@@ -1209,7 +1291,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Verify precipitation state ownership, capture calm/windy/start-stop stills, and measure slant plus scoped storm timing; qualify snow separately."
+      "next_action": "Verify precipitation state ownership, capture calm/windy/start-stop stills, and measure slant plus scoped storm timing; qualify snow separately.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R17",
@@ -1277,7 +1364,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture every existing player-view station at grounded pose across supported presets, checking current terrain support and near-field coverage."
+      "next_action": "Capture every existing player-view station at grounded pose across supported presets, checking current terrain support and near-field coverage.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R18",
@@ -1347,7 +1439,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Pair far-horizon and boundary-water views with depth/material and residency evidence; add transition samples after the independent coverage diagnosis."
+      "next_action": "Pair far-horizon and boundary-water views with depth/material and residency evidence; add transition samples after the independent coverage diagnosis.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R19",
@@ -1414,7 +1511,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture synthetic skinned A/B poses and intermediate deformation samples with texture identity; keep distinct from production character acceptance."
+      "next_action": "Capture synthetic skinned A/B poses and intermediate deformation samples with texture identity; keep distinct from production character acceptance.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R20",
@@ -1484,7 +1586,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Verify currently supported archetype/stimulus assets, capture before/after plus selected measured reaction poses; do not imply game-code extraction or new behavior system."
+      "next_action": "Verify currently supported archetype/stimulus assets, capture before/after plus selected measured reaction poses; do not imply game-code extraction or new behavior system.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R21",
@@ -1537,7 +1644,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Use disposable saved-world fixture and identical before/restart/after camera, attach file/world digests and actual user-flow stills."
+      "next_action": "Use disposable saved-world fixture and identical before/restart/after camera, attach file/world digests and actual user-flow stills.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R22",
@@ -1590,7 +1702,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Confirm actual client image capture wiring for existing network driver; retain matching-tick client views with server/transport state, add capture plumbing if absent."
+      "next_action": "Confirm actual client image capture wiring for existing network driver; retain matching-tick client views with server/transport state, add capture plumbing if absent.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R23",
@@ -1657,7 +1774,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture before/after actual supported window-mode changes and UI layout, recording both native window and pinned framebuffer sizes."
+      "next_action": "Capture before/after actual supported window-mode changes and UI layout, recording both native window and pinned framebuffer sizes.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U01",
@@ -1715,7 +1837,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Refresh main-menu normal/focus/notification states at explicit display scales; submit clean image with typography/contrast and navigation evidence."
+      "next_action": "Refresh main-menu normal/focus/notification states at explicit display scales; submit clean image with typography/contrast and navigation evidence.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U02",
@@ -1778,7 +1905,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture creation form and actual preview for every preset with valid/invalid inputs and small-window action visibility; measure preview changes and latest-wins behavior."
+      "next_action": "Capture creation form and actual preview for every preset with valid/invalid inputs and small-window action visibility; measure preview changes and latest-wins behavior.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U03",
@@ -1840,7 +1972,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Build disposable empty/populated/pending/refused save states; capture actual messages and selection behavior without private user saves."
+      "next_action": "Build disposable empty/populated/pending/refused save states; capture actual messages and selection behavior without private user saves.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U04",
@@ -1896,7 +2033,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture all authored settings sections and disabled-audio state with actual roundtrip values, focus and scale checks."
+      "next_action": "Capture all authored settings sections and disabled-audio state with actual roundtrip values, focus and scale checks.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U05",
@@ -1953,7 +2095,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture real paused gameplay and action/focus states; preserve visible world context and verify resume/settings/save transitions."
+      "next_action": "Capture real paused gameplay and action/focus states; preserve visible world context and verify resume/settings/save transitions.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U06",
@@ -2008,7 +2155,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Trace actual photo-output path, capture control overlay and resulting clean image with camera/exposure settings; verify file and pixel identity."
+      "next_action": "Trace actual photo-output path, capture control overlay and resulting clean image with camera/exposure settings; verify file and pixel identity.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U07",
@@ -2063,7 +2215,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Populate gallery only from captured public fixtures, record empty/populated/selected states and tie each thumbnail to full original."
+      "next_action": "Populate gallery only from captured public fixtures, record empty/populated/selected states and tie each thumbnail to full original.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U08",
@@ -2118,7 +2275,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Enumerate implemented HUD states, then capture bright/dark/busy contexts with triggering game state and readable scale variants."
+      "next_action": "Enumerate implemented HUD states, then capture bright/dark/busy contexts with triggering game state and readable scale variants.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U09",
@@ -2173,7 +2335,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture actual undiscovered/discovered species entries and navigation/scroll state from public content; separate live data from decorative examples."
+      "next_action": "Capture actual undiscovered/discovered species entries and navigation/scroll state from public content; separate live data from decorative examples.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "U10",
@@ -2229,7 +2396,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Map window.rml to actual consumers, capture rename/delete/overwrite/cancel dialogs and focus restoration instead of inventing a standalone screen."
+      "next_action": "Map window.rml to actual consumers, capture rename/delete/overwrite/cancel dialogs and focus restoration instead of inventing a standalone screen.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D01",
@@ -2286,7 +2458,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Retain all five deterministic 256x256 fixture originals and assertions; improve labels/diagnostic readability and link real production scenes rather than prettifying synthetic truth."
+      "next_action": "Retain all five deterministic 256x256 fixture originals and assertions; improve labels/diagnostic readability and link real production scenes rather than prettifying synthetic truth.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D02",
@@ -2347,7 +2524,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture every neutral/lit material and gray/white plate with controlled settings, scales and color/contrast/clipping values; link R08 and G04 defects."
+      "next_action": "Capture every neutral/lit material and gray/white plate with controlled settings, scales and color/contrast/clipping values; link R08 and G04 defects.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D03",
@@ -2400,7 +2582,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture emitter intensity ladder with nonemissive controls and scene context; retain actual monotonicity and material identity."
+      "next_action": "Capture emitter intensity ladder with nonemissive controls and scene context; retain actual monotonicity and material identity.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D04",
@@ -2453,7 +2640,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture procedural leaf alpha closeups on light/dark backgrounds and mips; attach silhouette/color measures and compare authored canopy separately."
+      "next_action": "Capture procedural leaf alpha closeups on light/dark backgrounds and mips; attach silhouette/color measures and compare authored canopy separately.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D05",
@@ -2505,7 +2697,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture matched shaded/full-frame material detail and bright reference with luminance/contrast values; do not conceal current black-band geometry defect through grading."
+      "next_action": "Capture matched shaded/full-frame material detail and bright reference with luminance/contrast values; do not conceal current black-band geometry defect through grading.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D06",
@@ -2557,7 +2754,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture common shadow edge across grass/terrain with matched projection and ordered samples, reusing R12 scene where exact support holds."
+      "next_action": "Capture common shadow edge across grass/terrain with matched projection and ordered samples, reusing R12 scene where exact support holds.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D07",
@@ -2610,7 +2812,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture wet/dry/far-depth caustic controls with normalized target readback; add clear scene-level shoreline context from R06."
+      "next_action": "Capture wet/dry/far-depth caustic controls with normalized target readback; add clear scene-level shoreline context from R06.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D08",
@@ -2663,7 +2870,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture ground/elevated fog and aerial-haze comparisons with terrain/sky ROI classification and actual camera metadata."
+      "next_action": "Capture ground/elevated fog and aerial-haze comparisons with terrain/sky ROI classification and actual camera metadata.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D09",
@@ -2715,7 +2927,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture occluded/unoccluded ray scenes with source attachment and blocker evidence, preserving full-frame context and measured ROI."
+      "next_action": "Capture occluded/unoccluded ray scenes with source attachment and blocker evidence, preserving full-frame context and measured ROI.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D10",
@@ -2767,7 +2984,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture matched weather stationarity and storm soft-edge controls after ownership fixes; confirm projection and normal invariants."
+      "next_action": "Capture matched weather stationarity and storm soft-edge controls after ownership fixes; confirm projection and normal invariants.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D11",
@@ -2820,7 +3042,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Use current bounded-blade tests to distinguish raw wind from actual deformation; capture taper/slope/wind controls and connect to repaired R14."
+      "next_action": "Use current bounded-blade tests to distinguish raw wind from actual deformation; capture taper/slope/wind controls and connect to repaired R14.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D12",
@@ -2872,7 +3099,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture actual roughness/light-direction controls with analytic evidence and material range, without invented off-path shading panels."
+      "next_action": "Capture actual roughness/light-direction controls with analytic evidence and material range, without invented off-path shading panels.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D13",
@@ -2924,7 +3156,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture transmitted colored light with blocker/surface context and Beer-Lambert references, checking clip/color against measurements."
+      "next_action": "Capture transmitted colored light with blocker/surface context and Beer-Lambert references, checking clip/color against measurements.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D14",
@@ -2976,7 +3213,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Qualify enabled froxel path and actual transmittance output before plotting density/depth residuals; mark opt-in quality profile in screenshots and timings."
+      "next_action": "Qualify enabled froxel path and actual transmittance output before plotting density/depth residuals; mark opt-in quality profile in screenshots and timings.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D15",
@@ -3028,7 +3270,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture actual manual/auto exposure pair and settings with monotonic luminance proof, preserving shipped versus opt-in meter distinction."
+      "next_action": "Capture actual manual/auto exposure pair and settings with monotonic luminance proof, preserving shipped versus opt-in meter distinction.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D16",
@@ -3082,7 +3329,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Qualify each existing raw-GL/Diligent/Vulkan pilot on local host, retain reference/current/diff with exact metric version; never claim complete backend parity."
+      "next_action": "Qualify each existing raw-GL/Diligent/Vulkan pilot on local host, retain reference/current/diff with exact metric version; never claim complete backend parity.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D17",
@@ -3135,7 +3387,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Retain actual glass occlusion pixels before/after resize with shared-depth attachment proof; add output retention if assertions currently discard pixels."
+      "next_action": "Retain actual glass occlusion pixels before/after resize with shared-depth attachment proof; add output retention if assertions currently discard pixels.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D18",
@@ -3186,7 +3443,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Produce separate actual albedo and decal/scent-placement diagnostic images with G-buffer/context and world-position proof."
+      "next_action": "Produce separate actual albedo and decal/scent-placement diagnostic images with G-buffer/context and world-position proof.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D19",
@@ -3238,7 +3500,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Retain blocker/grass-mesh lifecycle before/after frames and depth/readback evidence to expose stale shadows or orphan grass."
+      "next_action": "Retain blocker/grass-mesh lifecycle before/after frames and depth/readback evidence to expose stale shadows or orphan grass.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D20",
@@ -3290,7 +3557,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Re-capture 384x384 runtime horizon alongside high-resolution companion and regional coverage, using black-band findings to strengthen per-region diagnosis."
+      "next_action": "Re-capture 384x384 runtime horizon alongside high-resolution companion and regional coverage, using black-band findings to strengthen per-region diagnosis.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D21",
@@ -3346,7 +3618,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Enumerate all layer/preset/biome/river atlas variants, regenerate maps with scales and hashes, then attach matched engine views for interpretation."
+      "next_action": "Enumerate all layer/preset/biome/river atlas variants, regenerate maps with scales and hashes, then attach matched engine views for interpretation.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "D22",
@@ -3402,7 +3679,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Run existing far-field GPU truth/G-buffer/max-mip producers on qualified native backend, retain residual images and timer status; missing platform support stays blocked."
+      "next_action": "Run existing far-field GPU truth/G-buffer/max-mip producers on qualified native backend, retain residual images and timer status; missing platform support stays blocked.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B01",
@@ -3456,7 +3738,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Prepare source prop images and transform/readback evidence now; obtain installed renderer target-preview/standalone render integration before claiming matched compiled engine pixels."
+      "next_action": "Prepare source prop images and transform/readback evidence now; obtain installed renderer target-preview/standalone render integration before claiming matched compiled engine pixels.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B02",
@@ -3512,7 +3799,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture actual eight-leaf Geometry Nodes source/material fixture; attach native/export/readback evidence, then qualify target rendering separately from production canopy."
+      "next_action": "Capture actual eight-leaf Geometry Nodes source/material fixture; attach native/export/readback evidence, then qualify target rendering separately from production canopy.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B03",
@@ -3567,7 +3859,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture supported two-bone source poses and exact sampled animation data; wait for composed target render and general character character scope before target-fidelity approval."
+      "next_action": "Capture supported two-bone source poses and exact sampled animation data; wait for composed target render and general character character scope before target-fidelity approval.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B04",
@@ -3622,7 +3919,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Turn supported STEP/CUBICSPLINE/bind/joint-order data into labeled pose/sample sheets; add actual target pose captures when renderer integration exists."
+      "next_action": "Turn supported STEP/CUBICSPLINE/bind/joint-order data into labeled pose/sample sheets; add actual target pose captures when renderer integration exists.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B05",
@@ -3679,7 +3981,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture actual extension ready/running/cancelled/stale/failed/recovered UI with correct MOCK/compiled labels and held generation identity."
+      "next_action": "Capture actual extension ready/running/cancelled/stale/failed/recovered UI with correct MOCK/compiled labels and held generation identity.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B06",
@@ -3734,7 +4041,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Compose installed service/adapter artifacts at declared integration revision; capture supported UI/build result now and target view only after installed renderer preview delivery."
+      "next_action": "Compose installed service/adapter artifacts at declared integration revision; capture supported UI/build result now and target view only after installed renderer preview delivery.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B07",
@@ -3789,7 +4101,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Locate current texture/cutoff producer in authoring draft integration, create source/compiled UV-alpha chart with exact hashes and capture a real textured result."
+      "next_action": "Locate current texture/cutoff producer in authoring draft integration, create source/compiled UV-alpha chart with exact hashes and capture a real textured result.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B08",
@@ -3846,7 +4163,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Consume runtime prefab composed prefab integration before target placement sheet; preserve landed descriptor/service proof and source hierarchy while marking runtime consumption absent."
+      "next_action": "Consume runtime prefab composed prefab integration before target placement sheet; preserve landed descriptor/service proof and source hierarchy while marking runtime consumption absent.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G01",
@@ -3899,7 +4221,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Capture accepted Tree Small02 source/runtime matched canopy views and exact 30250-surface receipt; preserve frozen packs and distinguish versioned derivatives."
+      "next_action": "Capture accepted Tree Small02 source/runtime matched canopy views and exact 30250-surface receipt; preserve frozen packs and distinguish versioned derivatives.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G02",
@@ -3955,7 +4282,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Move or reproduce existing alpha/impostor diagnostic invocation against owned binaries and accepted pack hashes; keep rejected canopy variants explicitly rejected."
+      "next_action": "Move or reproduce existing alpha/impostor diagnostic invocation against owned binaries and accepted pack hashes; keep rejected canopy variants explicitly rejected.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G03",
@@ -4010,7 +4342,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Requalify transition probe with owned current binary, capture approach/retreat/orbit samples and per-LOD counts; geometry budget does not prove GPU frame time."
+      "next_action": "Requalify transition probe with owned current binary, capture approach/retreat/orbit samples and per-LOD counts; geometry budget does not prove GPU frame time.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G04",
@@ -4107,7 +4444,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Consume terrain/foliage black-band diagnosis/repair, recapture unchanged elevated reference, then add terrain-grounded composed forest hero and meaningful material/coverage proof."
+      "next_action": "Consume terrain/foliage black-band diagnosis/repair, recapture unchanged elevated reference, then add terrain-grounded composed forest hero and meaningful material/coverage proof.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G05",
@@ -4162,7 +4504,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Map named old vegetation/elevated views to new explicit scene manifests; recapture each current preset/camera and diagnose materials/depth before polish."
+      "next_action": "Map named old vegetation/elevated views to new explicit scene manifests; recapture each current preset/camera and diagnose materials/depth before polish.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G06",
@@ -4217,7 +4564,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Recover cave/rain/snow scene inputs from source manifests or replace with documented current inputs; qualify actual cave navigability and supported weather stills."
+      "next_action": "Recover cave/rain/snow scene inputs from source manifests or replace with documented current inputs; qualify actual cave navigability and supported weather stills.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G07",
@@ -4274,7 +4626,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Reproduce existing save/play/restart flow on new disposable public fixture and pinned package; capture edit restoration with exact file hashes and UI state."
+      "next_action": "Reproduce existing save/play/restart flow on new disposable public fixture and pinned package; capture edit restoration with exact file hashes and UI state.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "R24",
@@ -4335,7 +4692,20 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "accepted_expanded_world",
+        "profile_count": 2,
+        "metrics": [
+          {
+            "id": "frame_ms",
+            "statistic": "p99",
+            "operator": "<=",
+            "target": 16.67,
+            "reported_target": 8.33
+          }
+        ]
+      }
     },
     {
       "id": "R25",
@@ -4395,7 +4765,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B09",
@@ -4458,7 +4833,37 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "installed_authoring",
+        "profile_count": 1,
+        "metrics": [
+          {
+            "id": "presentation_fps",
+            "statistic": "profile",
+            "operator": ">=",
+            "target": 30
+          },
+          {
+            "id": "camera_transform_ms",
+            "statistic": "p95",
+            "operator": "<",
+            "target": 100
+          },
+          {
+            "id": "warm_material_refresh_seconds",
+            "statistic": "profile",
+            "operator": "<",
+            "target": 2
+          },
+          {
+            "id": "small_asset_refresh_seconds",
+            "statistic": "profile",
+            "operator": "<",
+            "target": 5
+          }
+        ]
+      }
     },
     {
       "id": "B10",
@@ -4520,7 +4925,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B11",
@@ -4576,7 +4986,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B12",
@@ -4631,7 +5046,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B13",
@@ -4692,7 +5112,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B14",
@@ -4750,7 +5175,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "B15",
@@ -4809,7 +5239,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G08",
@@ -4864,7 +5299,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G09",
@@ -4922,7 +5362,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     },
     {
       "id": "G10",
@@ -4978,7 +5423,12 @@
         "packet_sha256": null,
         "decision_reference": null
       },
-      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet."
+      "next_action": "Identify the concrete missing feature and dependency, implement in dependency order, then prepare an individually reviewable native packet.",
+      "performance_requirements": {
+        "scope": "report_only",
+        "profile_count": 0,
+        "metrics": []
+      }
     }
   ]
 }

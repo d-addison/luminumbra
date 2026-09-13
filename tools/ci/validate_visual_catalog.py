@@ -10,8 +10,10 @@ import argparse
 import hashlib
 import itertools
 import json
+import math
 from pathlib import Path
 import re
+import statistics
 import sys
 
 
@@ -37,6 +39,20 @@ BASELINES = {
             "4c4df138b8cdb3eb668e2aeead13beda3463656cfaf2cbbd23d177f613cae7ac"),
 }
 EVIDENCE_DIR = "docs/assets/visual-baselines/20260908/"
+PERFORMANCE_REQUIREMENTS = {
+    "R24": {"scope": "accepted_expanded_world", "profile_count": 2, "metrics": [
+        {"id": "frame_ms", "statistic": "p99", "operator": "<=", "target": 16.67,
+         "reported_target": 8.33}]},
+    "R14": {"scope": "foliage_draw", "profile_count": 1, "metrics": [
+        {"id": "foliage_draw_ms", "statistic": "profile", "operator": "<=", "target": 0.6}]},
+    "B09": {"scope": "installed_authoring", "profile_count": 1, "metrics": [
+        {"id": "presentation_fps", "statistic": "profile", "operator": ">=", "target": 30},
+        {"id": "camera_transform_ms", "statistic": "p95", "operator": "<", "target": 100},
+        {"id": "warm_material_refresh_seconds", "statistic": "profile", "operator": "<", "target": 2},
+        {"id": "small_asset_refresh_seconds", "statistic": "profile", "operator": "<", "target": 5}]},
+}
+REPORT_ONLY = {"scope": "report_only", "profile_count": 0, "metrics": []}
+STATISTICS = {"mean", "median", "p95", "p99", "min", "max"}
 
 
 def require(condition: bool, message: str) -> None:
@@ -88,13 +104,141 @@ def read_json(path: Path) -> dict:
     return value
 
 
-def requirement_digest(row: dict, policy: dict) -> str:
+def fixture_manifest(root: Path, row: dict) -> dict:
+    return {path: digest(local_file(root, path).read_bytes())
+            for path in sorted(row["fixture"]["source_paths"])}
+
+
+def manifest_digest(value: dict) -> str:
+    return digest(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def requirement_digest(row: dict, policy: dict, root: Path = ROOT) -> str:
     fields = ("id", "name", "visual_goal", "fixture", "required_variants",
-              "temporal_evidence_required", "dependencies", "acceptance_checks")
+              "temporal_evidence_required", "dependencies", "acceptance_checks", "performance_requirements")
     value = {key: row[key] for key in fields}
+    value["fixture_files"] = fixture_manifest(root, row)
     value["policy"] = policy
     return digest(json.dumps(value, sort_keys=True, separators=(",", ":"),
                              ensure_ascii=False).encode("utf-8"))
+
+
+def finite(value: object) -> bool:
+    return type(value) in {int, float} and math.isfinite(value) and value >= 0
+
+
+def statistic(samples: list[float], name: str) -> float:
+    if name in {"p95", "p99"}:
+        return sorted(samples)[math.ceil(len(samples) * int(name[1:]) / 100) - 1]
+    return {"mean": statistics.mean, "median": statistics.median,
+            "min": min, "max": max}[name](samples)
+
+
+def artifact_json(root: Path, by_id: dict, artifact_id: str, role: str) -> dict:
+    require(nonempty(artifact_id) and by_id.get(artifact_id, {}).get("role") == role,
+            f"missing {role} artifact reference")
+    return read_json(local_file(root, by_id[artifact_id]["path"]))
+
+
+def identity_join(document: dict, packet: dict) -> None:
+    require(document.get("scenario_id") == packet["scenario_id"]
+            and document.get("source_commit") == packet["source_commit"]
+            and document.get("engine_binary_sha256") == packet["identities"]["engine_binary_sha256"]
+            and document.get("fixture_sha256") == packet["identities"]["fixture_sha256"],
+            "evidence scenario/source/engine/fixture identity mismatch")
+
+
+def validate_captures(root: Path, row: dict, packet: dict, by_id: dict) -> None:
+    manifest = artifact_json(root, by_id, packet.get("capture_manifest"), "capture_manifest")
+    require(manifest.get("schema") == "luminumbra.visual_capture_manifest.v1", "unknown capture manifest schema")
+    identity_join(manifest, packet)
+    captures = manifest.get("captures")
+    require(isinstance(captures, list) and all(isinstance(c, dict) for c in captures), "invalid capture records")
+    frames, originals, seen = {}, {}, set()
+    variants = {v["id"]: v for v in packet["variants"]}
+    for capture in captures:
+        variant = capture.get("variant_id")
+        require(nonempty(variant) and variant in variants, "unknown capture variant")
+        require(nonempty(capture.get("run_id")) and type(capture.get("frame_id")) is int
+                and capture["frame_id"] >= 0, "capture needs actual run/frame identity")
+        original = capture.get("original")
+        require(nonempty(original) and by_id.get(original, {}).get("role") == "original",
+                "capture original is absent or is a preview")
+        require(capture.get("original_sha256") == by_id[original]["sha256"], "capture pixel identity mismatch")
+        frame = (capture["run_id"], capture["frame_id"])
+        path = local_file(root, by_id[original]["path"]).resolve()
+        require(frame not in frames or frames[frame] == variant, "source frame reused across distinct variants")
+        require(path not in originals or originals[path] == variant, "original file reused across distinct variants")
+        require((variant, original) not in seen, "duplicate capture original")
+        frames[frame], originals[path] = variant, variant
+        seen.add((variant, original))
+    expected = {(v["id"], original) for v in packet["variants"] for original in v["originals"]}
+    require(seen == expected, "capture manifest must join every variant original exactly")
+
+
+def validate_metrics(root: Path, row: dict, packet: dict, by_id: dict, require_qualified: bool) -> None:
+    requirements = row["performance_requirements"]
+    if not requirements["metrics"]:
+        return
+    performance = packet["performance"]
+    if not require_qualified and performance["status"] != "measured":
+        return
+    require(performance["status"] == "measured", "required performance cannot be N/A or unmeasured")
+    require(performance.get("scope") == requirements["scope"], "required performance scope mismatch")
+    profiles = performance.get("profiles")
+    require(isinstance(profiles, list) and len(profiles) == requirements["profile_count"],
+            "required performance profiles are incomplete")
+    ids, configurations = set(), set()
+    for profile in profiles:
+        require(isinstance(profile, dict) and nonempty(profile.get("id")), "invalid performance profile")
+        require(profile["id"] not in ids, "duplicate performance profile")
+        ids.add(profile["id"])
+        frozen = artifact_json(root, by_id, profile.get("manifest"), "performance_profile")
+        require(frozen.get("schema") == "luminumbra.visual_performance_profile.v1"
+                and frozen.get("profile_id") == profile["id"]
+                and frozen.get("scope") == requirements["scope"], "performance profile identity mismatch")
+        require(isinstance(frozen.get("configuration"), dict) and bool(frozen["configuration"]),
+                "profile needs frozen workload/configuration")
+        configuration = manifest_digest(frozen["configuration"])
+        require(configuration not in configurations, "profiles must identify distinct workload configurations")
+        configurations.add(configuration)
+        metrics = profile.get("metrics")
+        require(isinstance(metrics, list) and all(isinstance(m, dict) for m in metrics), "invalid metric records")
+        require(len(metrics) == len(requirements["metrics"])
+                and {m.get("id") for m in metrics} == {m["id"] for m in requirements["metrics"]},
+                "required performance metrics are incomplete")
+        for requirement in requirements["metrics"]:
+            metric = next(m for m in metrics if m["id"] == requirement["id"])
+            aggregation = frozen.get("statistics", {}).get(metric["id"])
+            require(aggregation in STATISTICS and (requirement["statistic"] == "profile"
+                    or aggregation == requirement["statistic"]), "required metric statistic changed or missing")
+            raw = artifact_json(root, by_id, metric.get("raw_samples"), "raw_performance")
+            require(raw.get("schema") == "luminumbra.visual_performance_samples.v1"
+                    and raw.get("profile_id") == profile["id"] and raw.get("metric_id") == metric["id"]
+                    and raw.get("profile_sha256") == by_id[profile["manifest"]]["sha256"],
+                    "raw sample profile/metric identity mismatch")
+            identity_join(raw, packet)
+            samples = raw.get("samples")
+            require(isinstance(samples, list) and bool(samples), "metric needs nonempty raw samples")
+            sample_ids = set()
+            for sample in samples:
+                require(isinstance(sample, dict) and finite(sample.get("value")), "metric samples must be finite")
+                require(nonempty(sample.get("run_id")) and type(sample.get("frame_id")) is int
+                        and sample["frame_id"] >= 0, "sample needs actual run/frame identity")
+                key = (sample["run_id"], sample["frame_id"])
+                require(key not in sample_ids, "duplicate raw sample identity")
+                sample_ids.add(key)
+            actual = statistic([s["value"] for s in samples], aggregation)
+            require(finite(metric.get("value")) and math.isclose(metric["value"], actual, rel_tol=1e-9, abs_tol=1e-9),
+                    "reported metric differs from raw samples")
+            if "reported_target" in requirement:
+                require(metric.get("reported_target") == requirement["reported_target"], "reported target was omitted")
+            if require_qualified:
+                target = requirement["target"]
+                require({"<=": actual <= target, "<": actual < target, ">=": actual >= target}[requirement["operator"]],
+                        f"required metric target missed: {metric['id']}")
+    if require_qualified:
+        require(performance.get("target_status") == "met", "required established targets must be met")
 
 
 def validate_packet(root: Path, row: dict, policy: dict, require_qualified: bool = True) -> None:
@@ -105,19 +249,24 @@ def validate_packet(root: Path, row: dict, policy: dict, require_qualified: bool
     packet = read_json(path)
     require(packet.get("schema") == "luminumbra.visual_review_packet.v1", "unknown packet schema")
     require(packet.get("scenario_id") == row["id"], "packet belongs to a different scenario")
-    require(packet.get("requirement_sha256") == requirement_digest(row, policy),
+    require(packet.get("requirement_sha256") == requirement_digest(row, policy, root),
             "packet does not cover current fixture, variants, acceptance checks and policy")
+    files = fixture_manifest(root, row)
+    require(packet.get("fixture_files") == files, "packet fixture content manifest is stale")
     require(sha(packet.get("source_commit"), 40), "packet needs actual executed source commit")
     require(packet.get("correctness") in {"passed", "failed", "incomplete"}, "unknown correctness state")
     require(packet.get("capture_status") in {"native_qualified", "incomplete", "unavailable"},
             "unknown capture status")
     if require_qualified:
+        require(row["fixture"]["status"] == "source_fixture" and bool(files),
+                "review ready packet needs implemented fixture source")
         require(packet["correctness"] == "passed", "failed correctness cannot be review ready")
         require(packet["capture_status"] == "native_qualified", "actual native capture is required")
     for field in ("reproduction", "hardware", "camera_lighting", "identities", "performance",
                   "findings", "aesthetic_review"):
         require(isinstance(packet.get(field), dict) and bool(packet[field]), f"missing packet {field}")
     identities = packet["identities"]
+    require(identities.get("fixture_sha256") == manifest_digest(files), "fixture digest does not bind source files")
     for field in ("engine_binary_sha256", "fixture_sha256", "asset_manifest_sha256",
                   "tool_manifest_sha256"):
         require(sha(identities.get(field)), f"missing actual {field}")
@@ -173,6 +322,8 @@ def validate_packet(root: Path, row: dict, policy: dict, require_qualified: bool
         require("temporal" in roles, "motion claims need automated temporal evidence")
     if performance["status"] == "measured":
         require("raw_performance" in roles, "measured performance needs raw samples")
+    validate_captures(root, row, packet, by_id)
+    validate_metrics(root, row, packet, by_id, require_qualified)
 
 
 def validate(catalog: dict, root: Path) -> list[str]:
@@ -250,6 +401,8 @@ def validate(catalog: dict, root: Path) -> list[str]:
             for field in ("required_variants", "acceptance_checks", "dependencies"):
                 require(strings(row[field]) and len(row[field]) == len(set(row[field])), f"invalid {field}")
             require(set(row["dependencies"]) <= set(catalog["dependencies"]), "unknown implementation dependency")
+            require(row.get("performance_requirements") == PERFORMANCE_REQUIREMENTS.get(scenario_id, REPORT_ONLY),
+                    "accepted scoped performance requirements changed")
             if scenario_id == "R01":
                 require(set(row["required_variants"]) == set(SWEEP), "R01 must retain all 96 summer/winter cells")
             require(type(row["temporal_evidence_required"]) is bool, "temporal requirement must be boolean")
@@ -340,7 +493,7 @@ def main() -> int:
         if args.requirement_digest:
             row = next((r for r in catalog["rows"] if r["id"] == args.requirement_digest), None)
             require(row is not None, "unknown scenario ID")
-            print(requirement_digest(row, catalog["policy"]))
+            print(requirement_digest(row, catalog["policy"], args.root.resolve()))
         else:
             print("Visual catalog consistency: PASS; " + summary(catalog))
         return 0

@@ -53,6 +53,14 @@ def files(catalog: dict) -> dict[str, str]:
                     page += ["Required environment: `" + json.dumps(row["capture"]["environment"], sort_keys=True) + "`.", ""]
             page += ["Acceptance checks:", ""]
             page += ["- " + check for check in row["acceptance_checks"]]
+            performance = row["performance_requirements"]
+            if performance["metrics"]:
+                page += ["", f"Required performance scope: `{performance['scope']}`; "
+                         f"{performance['profile_count']} distinct frozen profile(s).", ""]
+                for metric in performance["metrics"]:
+                    aggregation = metric["statistic"] if metric["statistic"] != "profile" else "profile-declared statistic"
+                    page += [f"- `{metric['id']}` ({aggregation}) {metric['operator']} {metric['target']}"
+                             + (f"; also report target {metric['reported_target']}." if "reported_target" in metric else ".")]
             page += ["", f"Source reconciliation at `{row['reconciliation']['source_commit']}`: "
                      + row["reconciliation"]["finding"], "", "Retained evidence:", ""]
             if row["evidence"]:

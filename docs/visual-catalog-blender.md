@@ -426,6 +426,13 @@ Acceptance checks:
 - Qualify the actual installed static renderer, persistent native host and RenderEngine adapter with authenticated bounded IPC and main-thread Blender access.
 - Meet the shared packet contract for every required variant and parent mapping.
 
+Required performance scope: `installed_authoring`; 1 distinct frozen profile(s).
+
+- `presentation_fps` (profile-declared statistic) >= 30.
+- `camera_transform_ms` (p95) < 100.
+- `warm_material_refresh_seconds` (profile-declared statistic) < 2.
+- `small_asset_refresh_seconds` (profile-declared statistic) < 5.
+
 Source reconciliation at `945ecd295835a838eed0169ff709e7aabc134fa1`: Authorized September 13 completion scope. This row adds explicit coverage without replacing any original group; implementation and acceptance remain unfinished.
 
 Retained evidence:
