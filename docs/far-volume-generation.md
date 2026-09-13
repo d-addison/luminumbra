@@ -1,11 +1,11 @@
 # Bounded far-volume tile generation
 
 `BuildFarVolumeTile` in
-[FarVolumeTile.h](../src/luminumbra_common/world/FarVolumeTile.h) and
-[FarVolumeTile.cpp](../src/luminumbra_common/world/FarVolumeTile.cpp) is the CPU
+[FarVolumeTile.h](https://github.com/d-addison/luminumbra/blob/3f5076e5974805d00e53200a51c58d66d7dd23d2/src/luminumbra_common/world/FarVolumeTile.h) and
+[FarVolumeTile.cpp](https://github.com/d-addison/luminumbra/blob/3f5076e5974805d00e53200a51c58d66d7dd23d2/src/luminumbra_common/world/FarVolumeTile.cpp) is the CPU
 entry point for the first generation part of DW01. The production
 `luminumbra_common` target includes it. It reads the accepted
-[FarTierTable](../src/luminumbra_common/world/FarTierTable.h) for all five sample,
+[FarTierTable](https://github.com/d-addison/luminumbra/blob/3f5076e5974805d00e53200a51c58d66d7dd23d2/src/luminumbra_common/world/FarTierTable.h) for all five sample,
 brick and tile dimensions; there is no second range table.
 
 The [implementation map](distant-world-implementation-status.md) remains a
@@ -76,7 +76,7 @@ FSD2/LMR1 payloads and runtime defaults are unchanged.
 
 ## Verification
 
-[FarVolumeTile_test.cpp](../test/common/FarVolumeTile_test.cpp) provides ten
+[FarVolumeTile_test.cpp](https://github.com/d-addison/luminumbra/blob/3f5076e5974805d00e53200a51c58d66d7dd23d2/test/common/FarVolumeTile_test.cpp) provides ten
 registered default-CTest cases. Independent literal dimensions and analytic
 fields check all five tiers, negative origins, exact integer endpoints, both
 horizontal and vertical shared borders, cold rebuild density bits/materials,
