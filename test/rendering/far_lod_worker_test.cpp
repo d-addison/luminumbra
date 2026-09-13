@@ -567,7 +567,10 @@ TEST(FarLodWorker, CameraRegionOuterMeshRetainsCavityAndEditedSurface) {
                     const std::size_t index = static_cast<std::size_t>(x) +
                                               static_cast<std::size_t>(y) * side +
                                               static_cast<std::size_t>(z) * side * side;
-                    const float surface = static_cast<float>(y) - (cavity ? 12.0f : 4.0f);
+                    // F1 stores samples every 4 m. Keep a solid sample at y=12
+                    // between this cavity's y=11 roof and the y=16 surface.
+                    // A y=12 surface leaves no sampled solid above the pocket.
+                    const float surface = static_cast<float>(y) - (cavity ? 16.0f : 4.0f);
                     const float pocket = 5.0f - glm::length(glm::vec3(x - 8, y - 6, z - 8));
                     chunk->sdf_data[index] = cavity ? std::max(surface, pocket) : surface;
                 }
@@ -580,6 +583,22 @@ TEST(FarLodWorker, CameraRegionOuterMeshRetainsCavityAndEditedSurface) {
     ASSERT_TRUE(snapshot);
     const auto outcome = BuildFarLodWorkerTile(world, *snapshot, FarLodTier::F1, 0, 0, {});
     ASSERT_TRUE(outcome.ok) << outcome.error;
+    const auto cavity_brick = std::find_if(outcome.tile.sdf_bricks.begin(),
+                                           outcome.tile.sdf_bricks.end(),
+                                           [](const FarLodSdfBrickDescriptor& brick) {
+                                               return brick.local_chunk_x == 20 &&
+                                                      brick.local_chunk_z == 5 &&
+                                                      brick.chunk_y == 0;
+                                           });
+    ASSERT_NE(cavity_brick, outcome.tile.sdf_bricks.end());
+    const std::size_t brick_offset =
+        static_cast<std::size_t>(cavity_brick - outcome.tile.sdf_bricks.begin()) *
+        FarLodSdfBrickSampleCount(FarLodTier::F1);
+    const std::size_t side = FarLodSdfBrickSamplesPerSide(FarLodTier::F1);
+    ASSERT_GT(outcome.tile.sdf_density_q[brick_offset + 2u + 2u * side + 2u * side * side], 0)
+        << "the reduced lattice must contain cavity air at local (8,8,8)";
+    ASSERT_LT(outcome.tile.sdf_density_q[brick_offset + 2u + 3u * side + 2u * side * side], 0)
+        << "the reduced lattice must contain a solid roof at local (8,12,8)";
     bool cavity_ceiling = false, edited_surface = false;
     for (const auto index : outcome.mesh.indices) {
         ASSERT_LT(index, outcome.mesh.vertices.size());

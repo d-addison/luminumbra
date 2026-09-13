@@ -112,6 +112,13 @@ is missing, that space remains unfilled: substituting a far heightfield could ca
 a cave or erase an edit. This outer-region coverage repair is not a fix for near
 streaming gaps, nor does it turn pristine far heightfields into volumetric caves.
 
+Authoritative F1/F2 SDF bricks retain samples at 4/8 m spacing. A cavity roof
+thinner than that spacing can disappear if no retained sample represents its
+solid layer. The ownership regression fixture therefore checks both sampled air
+and solid roof values before requiring an inward-facing ceiling in the mesh.
+Preserving features below that sampling scale requires a separate representation
+or reduction policy; this coverage correction does not provide it.
+
 The historical bypass option is accepted for command compatibility but no longer
 changes rendering; `camera_region_guard_bypassed` is false because there is no
 region-wide guard. The two current commands below must therefore agree. To
