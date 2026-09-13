@@ -258,11 +258,11 @@ save/load sequence under test. Their hashes are computed in the same build.
 `hashes.json` retains the historical capture values; it is not a save member or a
 portable hash oracle. Missing or changed fixture bytes still fail the tests.
 
-### Ambient hash portability investigation
+### Historical ambient hash portability investigation
 
 The historical world-hash literals encode the ambient fields' selected FastNoise
-instruction set. Terrain uses `NewWorldNoise` with an AVX2 cap; wind, weather and
-aether instead use automatic CPU dispatch. With identical GCC ASan objects,
+instruction set. At the time of the C2 investigation, terrain used `NewWorldNoise`
+with an AVX2 cap; wind, weather and aether used automatic CPU dispatch. With identical GCC ASan objects,
 changing only the diagnostic dispatch from native AVX-512 to AVX2 reproduces every
 reported CI value:
 
@@ -273,8 +273,8 @@ reported CI value:
 | Plant edit, loaded | `993b7f0b151dc6c3` | `f3b4b51bad5cbbf8` |
 
 Only `wind`, `weather` and `aether` move. `chunk`, `scents`, `ecology` and `plants`
-are identical. The ambient implementations, their headers and vendored FastNoise
-are byte-identical to the fixture's devel commit. A standalone probe compiled from
+were identical. The investigated ambient implementations, their headers and vendored FastNoise
+were byte-identical to the fixture's devel commit. A standalone probe compiled from
 that commit's ambient sources reproduces the same component hashes for both
 instruction sets. This is a pre-existing cross-CPU determinism gap in ambient
 fields, outside terrain's pinned dispatch, rather than an ASan-induced region
@@ -282,12 +282,20 @@ regression. An identical runner image does not guarantee identical CPU features.
 The dispatch-only reproduction establishes the cause of these failures without
 relying on uninitialized memory or pointer ordering.
 
-The ambient runtime behavior is unchanged here; cross-CPU ambient hash equality
-remains unresolved. These persistence tests now use expected sessions computed in
+That C2 change left ambient runtime behavior unchanged and did not resolve
+cross-CPU ambient hash equality. These persistence tests use expected sessions computed in
 the same build, retain the exact devel save bytes, and print all seven actual and
 expected component hashes on mismatch. Diagnostic sources, component values,
 compiler commands and predecessor source identities accompany the campaign receipt
 under `ci-investigation/`.
+
+The subsequent [ambient dispatch repair](https://github.com/d-addison/luminumbra/pull/172)
+caps both FBm and Simplex nodes in all three ambient systems at terrain's x86
+AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
+Debug/Release controls and native qualification retain their own source identities;
+the historical table above is not relabelled as post-repair evidence. Integrated
+and native acceptance remain tracked by [#163](https://github.com/d-addison/luminumbra/issues/163).
+The separate wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies
