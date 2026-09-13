@@ -1641,7 +1641,9 @@ FarVolumeMesh PolygoniseFarVolume(const FarVolumeTile& tile,
                             {VertexInterp(0.0f, cell.p[a], cell.p[b], cell.val[a], cell.val[b]),
                              materials[cell.val[a] < 0.0f ? a : b]});
                     }
-                    const Vec3 gradient = EstimateDensityGradient(cell);
+                    // This corner order makes the table winding face from negative
+                    // solid toward air. A cell-wide gradient cannot orient separate
+                    // components: opposite corners can have opposite outward normals.
                     const auto& row = triTable[cube];
                     for (int t = 0; row[t] != -1; t += 3) {
                         auto a = vertices[row[t]], b = vertices[row[t + 1]],
@@ -1651,8 +1653,6 @@ FarVolumeMesh PolygoniseFarVolume(const FarVolumeTile& tile,
                                        mesh.vertices[c].position - mesh.vertices[a].position);
                         if (glm::dot(normal, normal) <= 1.0e-10f)
                             continue;
-                        if (glm::dot(normal, gradient) < 0.0f)
-                            std::swap(b, c);
                         if (mesh.indices.size() + 3 > index_capacity)
                             throw std::length_error("Far-volume mesh index budget exceeded");
                         mesh.indices.insert(mesh.indices.end(), {a, b, c});

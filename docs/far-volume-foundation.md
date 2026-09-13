@@ -53,15 +53,26 @@ emitting geometry. It visits each present brick's owned cells once, using the
 existing Marching Cubes tables. It requires neither a heightfield background
 nor absent neighbor/halo records, and adds no skirts. Absolute world lattice
 coordinates and lexicographically ordered interpolation endpoints make shared
-vertices bit-identical even at negative coordinates. Winding follows the cell's estimated density
-gradient; degenerate triangles are omitted. The material comes from the solid
-edge endpoint.
+vertices bit-identical even at negative coordinates. The existing triangle table
+and this corner order define winding from negative solid toward air. Degenerate
+triangles are omitted. The material comes from the solid edge endpoint.
 
 Geometry is returned as positions/materials and indices. Vertices are reused
 within each cell, not welded across cells. Defaults allow two million vertices,
 six million indices and 64 MiB of reserved output buffers; exhaustion throws
 without exposing a partial mesh. Conservative reservations may refuse a dense
 tile even when a more compact implementation could fit it.
+
+The mesher preserves table winding for each component. A single cell-wide
+finite-difference gradient cannot safely choose a triangle's orientation: in
+case 65, corner values `[-2,1,1,1,1,1,-1,1]` make it favor one of two disconnected
+solid components and reverse the other inward. The regression generates this
+valid brick, exchanges component amplitudes, and negates the field to make
+cavities. It checks every triangle against an independent piecewise-trilinear
+field sampled on both sides of its normal and against the component's local
+outward direction. The original gradient override fails this regression in both
+Debug and Release; preserving table winding passes. Material-only corruption on
+an isolated shared edge or corner is also refused with recomputed CRCs.
 
 Plane tests check boundary vertex bits and winding at all tiers. Alternating
 sign fields check actual ambiguous-face segment connectivity on adjacent X/Z
@@ -117,7 +128,7 @@ retaining their field is not a guarantee of visibility at every phase.
 
 ## Recorded Linux comparison
 
-One Release run on an AMD Ryzen 7 9800X3D, GCC 13.3.0 (`-O3 -DNDEBUG`),
+After the winding correction, one Release run on an AMD Ryzen 7 9800X3D, GCC 13.3.0 (`-O3 -DNDEBUG`),
 produced the following full-tile results. The same source also ran under an
 actual Debug configuration. Host activity was not isolated, so these are
 observations rather than latency guarantees. Each row starts a cold world;
@@ -125,12 +136,12 @@ V5 covers a larger horizontal area and pays more terrain-height discovery cost.
 
 | Tier | Mode | Generation ms | Validation/meshing ms | Retained bricks | Indices |
 |---|---|---:|---:|---:|---:|
-| V3 | band | 2447 | 33.4 | 5120 | 1042167 |
-| V3 | box | 2367 | 40.0 | 5120 | 1042167 |
-| V4 | band | 169 | 6.4 | 1052 | 125142 |
-| V4 | box | 1647 | 23.6 | 3072 | 823617 |
-| V5 | band | 487 | 5.7 | 1059 | 99036 |
-| V5 | box | 1514 | 14.4 | 2048 | 522255 |
+| V3 | band | 2461 | 36.0 | 5120 | 1042167 |
+| V3 | box | 2459 | 38.8 | 5120 | 1042167 |
+| V4 | band | 171 | 7.3 | 1052 | 125142 |
+| V4 | box | 1645 | 19.3 | 3072 | 823617 |
+| V5 | band | 471 | 7.2 | 1059 | 99036 |
+| V5 | box | 1545 | 12.7 | 2048 | 522255 |
 
 The V3 modes use the same field and produce equal geometry counts. At V4/V5,
 retaining filtered noise costs more and produces more interior geometry. All

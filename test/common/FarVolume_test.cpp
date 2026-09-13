@@ -139,6 +139,88 @@ TEST(FarVolume, HomogeneousPristineFieldsEmitNoBackgroundOrInventedHalo) {
     }
 }
 
+TEST(FarVolume, DisconnectedComponentsAndCavitiesHaveOutwardWinding) {
+    constexpr float spacing = 16.0f;
+    // Two interior lattice samples produce case 65 in cell (1,1,1),
+    // surrounded by otherwise homogeneous samples. Negation produces case 190.
+    // Unequal magnitudes make the cell-wide gradient favor one component.
+    for (const auto amplitudes : {Vec3(2.0f, 1.0f, 0.0f),
+                                  Vec3(1.0f, 2.0f, 0.0f),
+                                  Vec3(4.0f, 0.5f, 0.0f),
+                                  Vec3(0.5f, 4.0f, 0.0f)}) {
+        for (const float sign : {1.0f, -1.0f}) {
+            SCOPED_TRACE(::testing::Message() << "amplitudes=" << amplitudes.x << ","
+                                              << amplitudes.y << " sign=" << sign);
+            const FarVolumeSamplers field{[](float, float) { return 0.0f; },
+                                          [amplitudes, sign](const Vec3& p, float) {
+                                              const auto q = p / spacing;
+                                              const float value = q == Vec3(1)   ? -amplitudes.x
+                                                                  : q == Vec3(2) ? -amplitudes.y
+                                                                                 : 1.0f;
+                                              return FarVolumeDensity{sign * value, 1};
+                                          }};
+            const auto tile = BuildFarVolumeTile({3, 0, 0}, field);
+            ASSERT_EQ(tile.bricks.size(), 1u);
+            const auto mesh = MarchingCubes::PolygoniseFarVolume(tile);
+            ASSERT_EQ(mesh.indices.size(), 48u); // Eight faces around each component.
+            std::array<std::size_t, 2> component_faces{};
+            // Independent continuous oracle: the lattice's trilinear interpolant
+            // is a constant plus two tensor-product tents. No mesher gradient or
+            // triangle table is used to decide which side is air.
+            const auto density = [amplitudes, sign](const Vec3& p) {
+                const auto tent = [](const Vec3& q) {
+                    return std::max(0.0, 1.0 - std::abs(static_cast<double>(q.x))) *
+                           std::max(0.0, 1.0 - std::abs(static_cast<double>(q.y))) *
+                           std::max(0.0, 1.0 - std::abs(static_cast<double>(q.z)));
+                };
+                return sign * (1.0 - (1.0 + amplitudes.x) * tent(p - Vec3(1)) -
+                               (1.0 + amplitudes.y) * tent(p - Vec3(2)));
+            };
+            for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+                const auto a = mesh.vertices[mesh.indices[i]].position / spacing;
+                const auto b = mesh.vertices[mesh.indices[i + 1]].position / spacing;
+                const auto c = mesh.vertices[mesh.indices[i + 2]].position / spacing;
+                const auto center = (a + b + c) / 3.0f;
+                const auto normal = glm::normalize(glm::cross(b - a, c - a));
+                const auto first_distance = glm::length(center - Vec3(1));
+                const auto second_distance = glm::length(center - Vec3(2));
+                const std::size_t component = first_distance < second_distance ? 0 : 1;
+                ++component_faces[component];
+                EXPECT_GT(density(center + normal * 0.001f), density(center - normal * 0.001f))
+                    << "triangle=" << i / 3 << " component=" << component;
+                // The sign complement makes the same closed surface a cavity;
+                // its outward (toward air) direction is toward the sample.
+                EXPECT_GT(
+                    glm::dot(normal, sign * (center - Vec3(static_cast<float>(component + 1)))),
+                    0.0f);
+            }
+            EXPECT_EQ(component_faces[0], 8u);
+            EXPECT_EQ(component_faces[1], 8u);
+        }
+    }
+}
+
+TEST(FarVolume, MaterialOnlySharedEdgeAndCornerCorruptionFailsClosed) {
+    constexpr float spacing = 16.0f;
+    for (const bool corner : {false, true}) {
+        const Vec3 second(5, corner ? 5 : 1, 5);
+        const FarVolumeSamplers field{[](float, float) { return 0.0f; },
+                                      [second](const Vec3& p, float) {
+                                          const auto q = p / spacing;
+                                          return FarVolumeDensity{
+                                              q == Vec3(1) || q == second ? -1.0f : 1.0f, 1};
+                                      }};
+        auto tile = BuildFarVolumeTile({3, 0, 0, FarVolumeSpan{0, 8 * spacing}}, field);
+        ASSERT_EQ(tile.bricks.size(), 2u);
+        ValidateFarVolumeTile(tile);
+        // The only two retained bricks meet on an edge or a corner, never a face.
+        tile.bricks[0].samples[FarVolumeSampleIndex(4, corner ? 4 : 2, 4)].material = 2;
+        tile.bricks[0].crc32 = FarVolumeBrickCrc(tile.bricks[0]);
+        tile.crc32 = FarVolumeTileCrc(tile);
+        EXPECT_THROW(MarchingCubes::PolygoniseFarVolume(tile), std::invalid_argument);
+    }
+}
+
 using VertexBits = std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint8_t>;
 std::set<VertexBits> Border(const FarVolumeMesh& mesh, float x) {
     std::set<VertexBits> result;
