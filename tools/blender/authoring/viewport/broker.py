@@ -66,7 +66,7 @@ class Broker:
             try:
                 write_record(self.child.stdin, record)
             except (OSError, ValueError) as error:
-                self.writer_error.append(type(error).__name__)
+                self.writer_error.append((type(error).__name__ + ': ' + str(error))[:512])
 
         self.writer = threading.Thread(target=send, daemon=True)
         self.writer.start()
@@ -86,7 +86,7 @@ class Broker:
                 self.reader_eof = True
         except (OSError, ValueError, queue.Full) as error:
             # An unbounded unsolicited producer cannot block this thread forever.
-            self.errors.append(type(error).__name__)
+            self.errors.append((type(error).__name__ + ': ' + str(error))[:512])
 
     def _new(self, filename):
         header = mailbox(self.root / filename, self.key)
@@ -184,6 +184,8 @@ class Broker:
                 'published': published, 'dropped': dropped,
                 'child_returncode': self.child.returncode if self.child else None,
                 'child_reaped': self.child is not None and self.child.poll() is not None,
+                'reader_errors': self.errors[:2],
+                'writer_errors': getattr(self, 'writer_error', [])[:2],
                 'plane_validation': validation_backend(),
                 'qualification': 'transport-only-no-renderer-or-Blender-claim'}))
             atomic_write(self.root / 'host-stderr.log', bytes(self.stderr_tail))

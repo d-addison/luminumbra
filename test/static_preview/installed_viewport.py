@@ -348,6 +348,9 @@ def main():
                            source_input_sha256=report['source_input_sha256'],
                            session_sha256=sha(output / 'host-evidence/session.json'), inputs_before=before, inputs_after=after)
     except Exception as error:
+        receipt['broker_errors'] = [str(value)[:512] for value in broker_errors[:2]]
+        if broker is not None:
+            receipt['broker_reader_errors'] = list(broker.errors[:2])
         receipt['error'] = str(error)
         raise
     finally:

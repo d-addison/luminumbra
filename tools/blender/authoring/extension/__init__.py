@@ -176,6 +176,8 @@ def recipe_will_apply():
 
 @persistent
 def file_changed(_):
+    from . import viewport_engine
+    viewport_engine.stop_all()
     stop()
     blender_recipes.reset_document()
 
@@ -200,8 +202,11 @@ def edited(scene, depsgraph):
             return
         objects = set(collection.all_objects)
         related = objects | {obj.data for obj in objects if obj.data}
-        if any(update.id.original in related or isinstance(update.id, (bpy.types.Material, bpy.types.NodeTree,
-                                                              bpy.types.Action, bpy.types.Image))
+        if any((update.id.original in related and not (
+                    _session.prefab and scene.render.engine == 'LUMINUMBRA_INSTALLED'
+                    and isinstance(update.id, bpy.types.Object) and update.is_updated_transform
+                    and not update.is_updated_geometry))
+               or isinstance(update.id, (bpy.types.Material, bpy.types.NodeTree, bpy.types.Action, bpy.types.Image))
                for update in depsgraph.updates):
             try:
                 _session.changed()
@@ -309,7 +314,13 @@ class LUMINUMBRA_PT_geometry(bpy.types.Panel):
             if _session.state.busy:
                 layout.operator("luminumbra.geometry", text="Cancel Build").operation = "cancel"
             layout.operator("luminumbra.geometry", text="Stop Service").operation = "stop"
-        layout.label(text="Engine viewport and behavior graphs are pending", icon="INFO")
+        layout.separator()
+        for name in ("preview_host", "preview_manifest", "generation"):
+            layout.prop(scene, "lum_author_" + name)
+        layout.operator("luminumbra.viewport")
+        row = layout.row()
+        row.operator("luminumbra.viewport", text="Restart Viewport").operation = "reset"
+        row.operator("luminumbra.viewport", text="Close Viewport").operation = "close"
 
 
 CLASSES = (LUMINUMBRA_OT_mark_geometry, LUMINUMBRA_OT_geometry,
@@ -331,6 +342,11 @@ def register():
     scene.lum_author_toolchain = bpy.props.StringProperty(name="Toolchain manifest", subtype="FILE_PATH")
     scene.lum_author_auto = bpy.props.BoolProperty(name="Rebuild after edits", default=True)
     scene.lum_author_prefab = bpy.props.BoolProperty(name="Preserve static prefab and materials", default=False)
+    scene.lum_author_preview_host = bpy.props.StringProperty(name="Installed preview host", subtype="FILE_PATH")
+    scene.lum_author_preview_manifest = bpy.props.StringProperty(name="Preview SDK manifest", subtype="FILE_PATH")
+    scene.lum_author_generation = bpy.props.StringProperty(name="Held generation", description="Empty follows the latest published generation for this asset")
+    from . import viewport_engine
+    viewport_engine.register()
     for handlers, callback in ((bpy.app.handlers.load_pre, file_changed),
                                (bpy.app.handlers.depsgraph_update_post, edited),
                                (bpy.app.handlers.undo_post, undone), (bpy.app.handlers.redo_post, undone)):
@@ -339,6 +355,8 @@ def register():
 
 
 def unregister():
+    from . import viewport_engine
+    viewport_engine.unregister()
     stop()
     blender_recipes.reset_document()
     blender_recipes.before_apply = None
@@ -349,7 +367,8 @@ def unregister():
                                (bpy.app.handlers.undo_post, undone), (bpy.app.handlers.redo_post, undone)):
         if callback in handlers:
             handlers.remove(callback)
-    for name in ("collection", "project", "python", "service", "toolchain", "auto", "prefab"):
+    for name in ("collection", "project", "python", "service", "toolchain", "auto", "prefab",
+                 "preview_host", "preview_manifest", "generation"):
         delattr(bpy.types.Scene, "lum_author_" + name)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
