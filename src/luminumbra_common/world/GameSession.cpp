@@ -35,6 +35,7 @@
 #include "../components/MortalComponents.h"
 #include "../components/PackHunterComponents.h"
 #include "../components/PlantComponents.h"
+#include "../components/PollinationComponents.h"
 #include "../components/SoilComponents.h"
 #include "../components/TerritoryComponents.h"
 #include "../core/JobSystem.h"
@@ -100,6 +101,13 @@ constexpr double kScentTauMax = 1.0e6;
 // the populated PopulatedWorldReplay gate stays run==replay (deterministic double math), so no
 // literal re-pin.
 constexpr double kScentWindAdvectionScale = 1.0;
+
+// Const views do not instantiate storage or change registry iteration order.
+template<typename... Components>
+std::uint64_t SimParticipantCount(const entt::registry& registry) {
+    const auto view = registry.view<const Components...>();
+    return static_cast<std::uint64_t>(std::distance(view.begin(), view.end()));
+}
 
 void AddValidationError(Luminumbra::world::WorldConfigValidationResult& result, std::string error) {
     result.errors.push_back(std::move(error));
@@ -169,6 +177,7 @@ void GameSession::ResetWorldSystems() {
     m_soilGrid.reset();
     m_irrigationGrid.reset();
     m_simulationClock.reset();
+    m_simBudgetTelemetry.Clear();
     m_worldClock = WorldClock{};
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
@@ -271,15 +280,26 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
     const std::uint64_t first_tick = m_simulationClock.tick_count() - ticks_executed + 1;
     for (std::uint32_t i = 0; i < ticks_executed; ++i) {
         const std::uint64_t current_tick = first_tick + i;
+        using Stage = luminumbra::simulation::SimBudgetStage;
+        namespace TelemetryComp = Luminumbra::Components;
+        luminumbra::simulation::SimBudgetTelemetry::TickScope budget(m_simBudgetTelemetry,
+                                                                     current_tick);
         if (m_activeRegionsEnabled)
             m_worldClock.set_tick(current_tick);
 
         // Deterministic per-tick system order. The ordered event bus drains everything
         // published for this tick after simulation systems finish (tick -> lane -> sequence).
 
+        budget.Next(Stage::Animation, [&] {
+            return SimParticipantCount<luminumbra::animation::AnimationPlayerComponent>(m_registry);
+        });
         // 1. Animation pose sampling: FIRST in the tick order.
         luminumbra::animation::SamplePosesOnTick(m_registry, m_simulationClock.fixed_dt());
 
+        budget.Next(Stage::Instinct, [&] {
+            return SimParticipantCount<TelemetryComp::InstinctAgentComponent,
+                                       TelemetryComp::NeedsComponent>(m_registry);
+        });
         // 2. Instinct planning: need growth + deterministic
         // replanning over the registry.
         //
@@ -328,6 +348,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             luminumbra::ai::RunInstinctSystemOnTick(m_registry, current_tick, &stimulus_registry);
         }
 
+        budget.Next(Stage::Perception, [&] {
+            return SimParticipantCount<TelemetryComp::TransformComponent,
+                                       TelemetryComp::PerceptionComponent,
+                                       TelemetryComp::AwarenessComponent>(m_registry);
+        });
         // 2b.  : perception fusion. Updates each perceiving creature's
         // awareness (vision cone + hearing audiogram over Sensable entities of
         // other factions -> detection meter/state + last-known memory). Runs after
@@ -339,6 +364,14 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         luminumbra::ai::RunPerceptionSystemOnTick(m_registry,
                                                   static_cast<float>(m_simulationClock.fixed_dt()));
 
+        budget.Next(Stage::Scent, [&] {
+            return (m_scentField &&
+                    (HasScentParticipants() ||
+                     SimParticipantCount<TelemetryComp::ForagerComponent>(m_registry) != 0))
+                       ? static_cast<std::uint64_t>(kScentFieldCells) * kScentFieldCells *
+                             kScentFieldChannels
+                       : 0ull;
+        });
         // 2c.: scent stigmergy write/update. Game-data opt-in:
         // no scent emitter/sensor components means no field mutation, while active
         // ecology worlds get deterministic deposit -> diffuse/evaporate -> clamp.
@@ -382,6 +415,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             m_scentField->Clamp(kScentTauMin, kScentTauMax);
         }
 
+        budget.Next(Stage::Locomotion, [&] {
+            return SimParticipantCount<TelemetryComp::ActionPlanComponent,
+                                       TelemetryComp::TransformComponent,
+                                       TelemetryComp::LocomotionProfile>(m_registry);
+        });
         // 2d.: action-plan locomotion, then scent gradient bias.
         // The executor writes only LocomotionIntentComponent; physics/render owners
         // consume that intent in their existing lanes.
@@ -394,6 +432,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                                    kScentCellSize);
         }
 
+        budget.Next(Stage::Creatures, [&] {
+            return SimParticipantCount<TelemetryComp::CreatureComponent,
+                                       TelemetryComp::TransformComponent>(m_registry);
+        });
         // 2e. : Utility-AI creature brain (predator/prey movement). Per-entity opt-in
         // via CreatureComponent -> a world with none is a no-op (canonical roster byte-identical,
         // same discipline as plants/scent). Deterministic (id-ordered, libm-free).
@@ -527,9 +569,24 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         }
 
         if (m_activeRegionsEnabled && m_windFieldSystem && m_weatherSystem) {
+            // A distinct stage owns the whole clock-driven wind/weather sequence.
+            // Count each input field cell once (wind + weather = 8192), not
+            // rebuild passes: UpdateFromClock rebuilds wind twice around weather.
+            // Wind and Weather have no samples on this path; see telemetry v2.
+            budget.Next(Stage::WindWeather, [] {
+                return static_cast<std::uint64_t>(Systems::kWindExtentCells) *
+                           Systems::kWindExtentCells +
+                       static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
+                           Systems::kWeatherExtentCells;
+            });
             m_weatherSystem->UpdateFromClock(
                 current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
         } else {
+            budget.Next(Stage::Wind, [&] {
+                return m_windFieldSystem ? static_cast<std::uint64_t>(Systems::kWindExtentCells) *
+                                               Systems::kWindExtentCells
+                                         : 0ull;
+            });
             // 3.  : wind field update. Deterministic (DeterministicMath +
             // FastNoise batch path; no wall-clock/RNG). Anchored on the spawn/stream
             // anchor so the streamed-region grid follows it. The wind cell values
@@ -550,6 +607,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 m_windFieldSystem->Update(current_tick, m_metadata.spawnPoint);
             }
 
+            budget.Next(Stage::Weather, [&] {
+                return m_weatherSystem ? static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
+                                             Systems::kWeatherExtentCells
+                                       : 0ull;
+            });
             // 4.  : weather core update. Runs AFTER wind so storm cells
             // advect by the freshly-updated wind grid. Deterministic (DeterministicMath
             // + FastNoise batch path; no wall-clock/RNG, no std::random). The weather
@@ -562,6 +624,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             }
         }
 
+        budget.Next(Stage::Aether, [&] {
+            return m_aetherFieldSystem ? static_cast<std::uint64_t>(Systems::kAetherExtentCells) *
+                                             Systems::kAetherExtentCells
+                                       : 0ull;
+        });
         // 5.: Aether scalar field update. Runs AFTER weather so it
         // advects its emission source by the freshly-updated wind grid, keeping
         // same-tick weather coupling current. Deterministic
@@ -576,6 +643,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                         m_windFieldSystem.get());
         }
 
+        budget.Next(Stage::Energy,
+                    [&] { return m_energyFieldState ? m_energyFieldState->page_count() : 0ull; });
         // 5a.: the STATEFUL energy layer ticks directly
         // after the re-derivable field, anchored on the SAME replicated anchor
         // quantized by the shared 24 m cell size (never camera state). Null
@@ -610,6 +679,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         {
             namespace Comp = Luminumbra::Components;
             namespace fol = luminumbra::foliage;
+            budget.Next(Stage::Irrigation, [&] {
+                return SimParticipantCount<TelemetryComp::WaterSourceComponent>(m_registry) != 0
+                           ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+                           : 0ull;
+            });
             if (!m_registry.view<Comp::WaterSourceComponent>().empty()) {
                 if (!m_irrigationGrid)
                     m_irrigationGrid = std::make_unique<fol::IrrigationGrid>(kFoliageFieldCells,
@@ -620,6 +694,11 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                          foliageOriginZ,
                                          kFoliageFieldCell);
             }
+            budget.Next(Stage::Soil, [&] {
+                return SimParticipantCount<TelemetryComp::SoilFeederComponent>(m_registry) != 0
+                           ? static_cast<std::uint64_t>(kFoliageFieldCells) * kFoliageFieldCells
+                           : 0ull;
+            });
             if (!m_registry.view<Comp::SoilFeederComponent>().empty()) {
                 if (!m_soilGrid)
                     m_soilGrid =
@@ -629,6 +708,12 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             }
         }
 
+        budget.Next(Stage::Plants, [&] {
+            return SimParticipantCount<TelemetryComp::PlantTag,
+                                       TelemetryComp::PlantGrowthComponent,
+                                       TelemetryComp::PlantGenomeComponent,
+                                       TelemetryComp::TransformComponent>(m_registry);
+        });
         // 6. : deterministic plant GROWTH. Game-data opt-in (PlantTag):
         // no plants -> the system never runs and world_hash stays byte-identical
         // (same discipline as scent). The environment is ATMOSPHERIC — moisture is
@@ -760,16 +845,38 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 m_windFieldSystem ? m_windFieldSystem->SampleWind(m_metadata.spawnPoint)
                                   : ::Luminumbra::Vec2(0.0f);
 
+            budget.Next(Stage::Pollination, [&] {
+                return SimParticipantCount<TelemetryComp::PollinationTag,
+                                           TelemetryComp::PlantGenomeComponent,
+                                           TelemetryComp::PlantGrowthComponent,
+                                           TelemetryComp::TransformComponent,
+                                           TelemetryComp::PollinationComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::PlantGenomeComponent>().empty())
                 fol::RunPollinationOnTick(m_registry, current_tick, windXZ, 0, m_plantMutationRate);
+            budget.Next(Stage::Disease, [&] {
+                return SimParticipantCount<TelemetryComp::PlantTag,
+                                           TelemetryComp::PlantHealthComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::PlantHealthComponent>().empty())
                 fol::RunPlantDiseaseOnTick(m_registry, current_tick);
             //  germination: ripe plants senesce -> annual dies + reseeds, perennial
             // resets + reseeds (child genome = the pollination cross, computed just above, or
             // self). Runs AFTER pollination so next_genome is fresh. Opt-in via
             // CropLifecycleComponent.
+            budget.Next(Stage::Crops, [&] {
+                return SimParticipantCount<TelemetryComp::CropLifecycleComponent,
+                                           TelemetryComp::PlantGrowthComponent,
+                                           TelemetryComp::PlantGenomeComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::CropLifecycleComponent>().empty())
                 fol::RunCropLifecycleOnTick(m_registry, current_tick);
+            budget.Next(Stage::Fire, [&] {
+                return SimParticipantCount<TelemetryComp::CombustibleComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::CombustibleComponent>().empty()) {
                 std::vector<luminumbra::sim::FireIgnitionSource> weather_ignitions;
                 if (m_weatherSystem) {
@@ -784,21 +891,39 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 luminumbra::sim::RunFireSpreadOnTick(
                     m_registry, current_tick, windXZ, weather_ignitions);
             }
+            budget.Next(Stage::Grazing, [&] {
+                return SimParticipantCount<TelemetryComp::GrazeableComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::GrazeableComponent>().empty())
                 luminumbra::ai::RunWildlifeFoliageOnTick(
                     m_registry, current_tick, m_wildlifeFoliageTuning);
+            budget.Next(Stage::Lifespan, [&] {
+                return SimParticipantCount<TelemetryComp::MortalComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::MortalComponent>().empty())
                 luminumbra::ai::RunLifespanOnTick(m_registry, current_tick);
             // Herd alarm: propagate collective vigilance among same-role creatures. The brain
             // (slot 2e) sets AlarmComponent.alarmed when a prey senses a threat and reads the
             // propagated level to flee with the herd; this maintains the field.
+            budget.Next(Stage::Alarm, [&] {
+                return SimParticipantCount<TelemetryComp::AlarmComponent,
+                                           TelemetryComp::CreatureComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::AlarmComponent>().empty())
                 luminumbra::ai::RunHerdAlarmOnTick(
                     m_registry, static_cast<float>(m_simulationClock.fixed_dt()));
             // Decomposition: dead creatures decay + release nutrient (consumed by the soil loop).
+            budget.Next(Stage::Decay, [&] {
+                return SimParticipantCount<TelemetryComp::DecayComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::DecayComponent>().empty())
                 luminumbra::ai::RunDecompositionOnTick(m_registry, current_tick);
             // Circadian: diurnal/nocturnal activity from a tick-derived day fraction.
+            budget.Next(Stage::Circadian, [&] {
+                return SimParticipantCount<TelemetryComp::CircadianComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::CircadianComponent>().empty()) {
                 constexpr std::uint64_t kTicksPerDay = 30ull * 60ull * 20ull; // 20-min day @30Hz
                 const float tod01 = m_activeRegionsEnabled
@@ -808,12 +933,25 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 luminumbra::ai::RunCircadianOnTick(m_registry, tod01, m_circadianAmplitude);
             }
             // Territory: claim home + emit a homing bias (movement blends it like mate-seeking).
+            budget.Next(Stage::Territory, [&] {
+                return SimParticipantCount<TelemetryComp::TerritoryComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::TerritoryComponent>().empty())
                 luminumbra::ai::RunTerritoryOnTick(m_registry, current_tick);
             // Predator pack: flanking coordination (a pack surrounds the prey).
+            budget.Next(Stage::Packs, [&] {
+                return SimParticipantCount<TelemetryComp::PackHunterComponent,
+                                           TelemetryComp::CreatureComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::PackHunterComponent>().empty())
                 luminumbra::ai::RunPredatorPackOnTick(m_registry, current_tick);
             // Migration: seasonal drive toward a moving target (tick-derived year fraction).
+            budget.Next(Stage::Migration, [&] {
+                return SimParticipantCount<TelemetryComp::MigratoryComponent,
+                                           TelemetryComp::TransformComponent>(m_registry);
+            });
             if (!m_registry.view<Comp::MigratoryComponent>().empty()) {
                 constexpr std::uint64_t kTicksPerYear = 30ull * 60ull * 60ull; // ~1h year @30Hz
                 const float season01 =
@@ -825,6 +963,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             }
         }
 
+        budget.Next(Stage::Events, [&] { return m_simulationEventBus.pending_count(); });
         m_simulationEventBus.drain(current_tick);
     }
     return ticks_executed;

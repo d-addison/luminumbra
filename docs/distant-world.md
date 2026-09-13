@@ -257,6 +257,9 @@ replay trace, and a diagnostic panel shows the ledger, budgets and recent
 transitions.
 
 Budgets are measured on representative worlds before any cap is enforced.
+The opt-in [simulation budget telemetry](sim-budget-telemetry.md) defines the
+observational stage counts, replay comparison and additive headless artifact
+used to collect that evidence; it implements no active-region scheduling.
 
 Dirty state leaving the live disc is parked and written by the next save
 instead of being discarded. Dirtiness is defined per record, not only by voxel
