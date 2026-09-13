@@ -59,6 +59,11 @@ The primary executables are written to `build/<preset>/bin/`:
 See [Development and testing](docs/development.md) for platform dependencies,
 validation lanes, and source-list ownership.
 
+The optional [compiled static prefab runtime](docs/compiled-prefab-runtime.md)
+loads pinned authoring generations into an ECS hierarchy. Its installed headless
+consumer is qualified separately on Linux and Windows; renderer integration is
+separate work.
+
 Before entering a game world, acquire the separately versioned tree pack with
 `python3 tools/assets/acquire.py` (Windows: `py -3 tools/assets/acquire.py`).
 See [Game assets](docs/game-assets.md) for provenance, offline setup and repair.
@@ -84,6 +89,11 @@ links the unretouched full images and provenance.
 | Ordinary guard | Diagnostic bypass |
 |---|---|
 | [![Ordinary guard with a black terrain gap](docs/assets/terrain-coverage/20260908/forest-guard-preview.png)](docs/terrain-coverage-diagnostics.md) | [![Experimental bypass showing recovered terrain coverage](docs/assets/terrain-coverage/20260908/forest-bypass-preview.png)](docs/terrain-coverage-diagnostics.md) |
+
+The optional Blender extension also provides [reviewed ID repairs](docs/authoring-recipes.md)
+with explicit change lists, shared-data disclosure and undo/redo. Its actual
+editor screenshot and 22-check native qualification are documented separately
+from engine rendering and remain pending visual approval.
 
 ## Architecture
 
