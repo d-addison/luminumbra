@@ -16,7 +16,9 @@ indices, sorted lexicographically. Adjacent bricks repeat their shared samples.
 
 Density uses the existing `FarLodStore` quantizer: i16 at 256 units/metre,
 saturation at ±32767, with -32768 reserved for invalid input. Negative means
-solid; zero and positive mean air. Materials are per-sample u8 IDs. CRCs fold
+solid; zero and positive mean air. Finite nonzero inputs that round to zero are
+stored as -1 or +1, preserving their sign; signed zero stays zero. Materials are
+per-sample u8 IDs. CRCs fold
 explicit little-endian fields, never struct padding: brick coordinates, density
 and material; the tile CRC also covers its tier, coordinates, cave mode, complete
 scan interval/count, brick count and every brick including its CRC. These are
@@ -44,6 +46,74 @@ Invalid tiers, modes, coordinates, spans, non-finite samples, or budget overruns
 throw. A failed generation never returns a shortened tile. The limits bound the
 owned buffers, not process RSS, world-height caches, caller callbacks or a
 per-frame latency budget.
+
+## Explicit vertical windows
+
+`DiscoverFarVolumeWindow` performs the same 129×129 height discovery, surface
+minus 256 m, extra-span union and outward rounding, with zero density calls.
+It returns the entire aligned interval without allocating its density lattice.
+Height scratch is released on return. `DiscoverPristineFarVolumeWindow` supplies
+the existing world-height sampler. The original `BuildFarVolumeTile` and
+`BuildPristineFarVolumeTile` still build the complete discovered span or refuse;
+they do not silently return a page when a tall request exceeds their limits.
+
+`FarVolumeWindowRequest` supplies a distinct int64 metre interval to
+`BuildFarVolumeWindow` or `BuildPristineFarVolumeWindow`. Endpoints must be
+brick-aligned, ordered and inside the closed Y range
+`[-2^23 + 1024, 2^23 - 1024]`. Existing XZ and field validity checks remain.
+The window owns half-open brick layers and includes its shared upper sample
+plane. It neither unions the surface band nor adds another layer above the
+explicit upper endpoint. Known invalid bounds and allocation budgets refuse
+before callbacks. Existing exceptions remain transactional; a homogeneous
+window may succeed with no retained bricks, including a zero brick allowance.
+
+`PlanFarVolumeWindows` constructs a fixed-size descriptor, not a vector of jobs
+or results. It chooses the largest layer stride whose shared lattice, heights
+and **every candidate brick** fit the supplied generation limits. This
+conservative admission may refuse a planner request that a known homogeneous
+direct build could satisfy. The search is bounded by the tier's legal coordinate
+span, independently of the wanted interval. Default limits admit 64 layers per
+window on the current target layouts. The default per-plan limit is 4,096
+windows, a configurable fixture guardrail rather than a world-depth claim.
+
+Page interiors lie on global multiples of that stride in brick Y; signed floor
+division handles negative positions, and only outer windows are clipped to the
+wanted interval. `FarVolumeWindowAt` performs constant-work indexed lookup and
+refuses an out-of-range index. The descriptor exposes coverage, stride/count,
+candidate count and total sampling work. For N owned layers in P windows the
+density calls are `129*129*(4*N+P)`, including repeated seam planes. Each window
+also repeats `129*129` height calls; initial discovery takes that many additional
+calls. No height cache or immutable-world identity is retained by the plan.
+
+Pages use the same quantizer, material policy, sparse selection, global X/Y/Z
+keys, CRC format and sampling kernel as complete tiles. Pristine wrappers keep
+V1/V2 live sampling and both existing coarse cave alternatives. Callers must
+keep the field immutable across discovery and pages and use the existing world
+sampling scope at job granularity. The geometry CRC does not establish that
+world/authority promise.
+
+An interval plan establishes a partition, not generated or uploaded coverage.
+Each result is complete only within its encoded window. Page CRCs differ from a
+full-span CRC because their bounds/counts differ. A bounded test aggregate must
+sort bricks by X/Y/Z before comparing a full tile CRC: concatenating Y-page
+vectors is not canonical ordering. Full/page tests compare quantized samples,
+materials, CRCs and oriented triangle bits. Independent page-seam controls check
+faces, edges and corners; the per-tile validator cannot validate an external
+neighbor page. Phase controls retain both sampled and missed subspacing features.
+
+The existing R0 queue continues to use full-span requests. Runtime page identity,
+gap/overlap completeness, cross-page validation, cancellation, backpressure,
+cache/result leases, camera/deep wanted sets and GPU arrival remain separate
+integration work. A caller retaining several pages must account their combined
+capacity, meshes and leases; the plan's per-window limits do not do that. Empty
+pristine pages remain distinct from durable authority tombstones. This extension
+does not choose a cave alternative or qualify continuous descent or rendering.
+
+The explicit-window design and independent analytic control ideas were compared
+with PR177 at `3d77fc9962f03c3385b3b2ec6f4bef1efab5f4fe`. Its conflicting public
+types, float payload and Z/X/Y traversal are not imported. The canonical
+sign-preserving quantizer changes magnitudes/interpolation; it does not erase
+finite nonzero signs merely because they are subnormal.
 
 ## Meshing and validation
 

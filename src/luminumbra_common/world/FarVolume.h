@@ -99,6 +99,82 @@ FarVolumeTile BuildPristineFarVolumeTile(const Systems::SHIELD_WorldSystem& worl
                                          const FarVolumeRequest& request,
                                          const FarVolumeLimits& limits = {});
 
+// Explicit brick-aligned metre endpoints. Owns [min,max); includes the shared
+// upper sample plane. Unlike extra_span, this never unions the surface band.
+struct FarVolumeYWindow {
+    std::int64_t min_y_meters = 0, max_y_meters = 0;
+    bool operator==(const FarVolumeYWindow&) const = default;
+};
+struct FarVolumeWindowRequest {
+    std::uint32_t tier = 1;
+    std::int32_t tile_x = 0, tile_z = 0;
+    FarCaveMode caves = FarCaveMode::BandLimited;
+    FarVolumeYWindow window;
+    bool operator==(const FarVolumeWindowRequest&) const = default;
+};
+
+// Height-only discovery preserves the existing surface/extra-span rounding and
+// validity checks, without allocating the full density lattice or retaining a
+// height cache. A pure immutable field must be shared by discovery and pages.
+FarVolumeWindowRequest DiscoverFarVolumeWindow(const FarVolumeRequest& request,
+                                               const std::function<float(float, float)>& height,
+                                               const FarVolumeLimits& limits = {});
+FarVolumeWindowRequest DiscoverPristineFarVolumeWindow(const Systems::SHIELD_WorldSystem& world,
+                                                       const FarVolumeRequest& request,
+                                                       const FarVolumeLimits& limits = {});
+
+// Constant-size, allocation-free interval plan. It proves a partition, not
+// runtime completion/authority. Only the planner can construct its state.
+class FarVolumeWindowPlan {
+public:
+    const FarVolumeWindowRequest& Coverage() const {
+        return m_coverage;
+    }
+    std::uint32_t LayerStride() const {
+        return m_stride;
+    }
+    std::uint32_t WindowCount() const {
+        return m_count;
+    }
+    std::uint64_t SampledBricks() const {
+        return m_bricks;
+    }
+    std::uint64_t DensitySampleCalls() const {
+        return m_samples;
+    }
+    // Page builds only; separate initial discovery takes 129*129 more calls.
+    std::uint64_t HeightSampleCalls() const {
+        return 16'641ull * m_count;
+    }
+
+private:
+    FarVolumeWindowPlan() = default;
+    FarVolumeWindowRequest m_coverage;
+    std::uint32_t m_stride = 0, m_count = 0;
+    std::uint64_t m_bricks = 0, m_samples = 0;
+    friend FarVolumeWindowPlan
+    PlanFarVolumeWindows(const FarVolumeWindowRequest&, const FarVolumeLimits&, std::uint32_t);
+};
+
+// Conservative admission reserves every candidate brick. If even one full
+// horizontal layer cannot fit, planning refuses (even for a homogeneous field).
+// Interiors lie on global multiples of the admitted layer stride; signed outer
+// windows are clipped to the exact coverage. No list of pending jobs is made.
+FarVolumeWindowPlan PlanFarVolumeWindows(const FarVolumeWindowRequest& coverage,
+                                         const FarVolumeLimits& limits = {},
+                                         std::uint32_t max_windows = 4096);
+FarVolumeWindowRequest FarVolumeWindowAt(const FarVolumeWindowPlan& plan, std::uint32_t index);
+
+// Closed Y endpoint domain: [-2^23+1024, 2^23-1024] metres. Invalid/alignment/
+// budget checks precede callbacks. Existing quantization, material, key order,
+// CRCs and shared lattice are retained; exceptions never return partial output.
+FarVolumeTile BuildFarVolumeWindow(const FarVolumeWindowRequest& request,
+                                   const FarVolumeSamplers& samplers,
+                                   const FarVolumeLimits& limits = {});
+FarVolumeTile BuildPristineFarVolumeWindow(const Systems::SHIELD_WorldSystem& world,
+                                           const FarVolumeWindowRequest& request,
+                                           const FarVolumeLimits& limits = {});
+
 // Geometry only: normals, upload, ownership transitions and runtime shading are
 // separate integration work. Absolute positions make shared edges bit-identical.
 struct FarVolumeVertex {

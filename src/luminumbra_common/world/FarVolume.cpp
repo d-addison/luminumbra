@@ -73,6 +73,163 @@ void CheckLimits(std::uint64_t candidates, const FarVolumeLimits& limits) {
     if (bytes > limits.max_buffer_bytes)
         throw std::length_error("Far-volume sample/brick buffer budget exceeded");
 }
+
+constexpr std::int64_t kWindowCoordinateLimit = kCoordinateLimit - 1024;
+
+void ValidateExtraSpan(const std::optional<FarVolumeSpan>& extra) {
+    if (extra && (!std::isfinite(extra->min_y) || !std::isfinite(extra->max_y) ||
+                  extra->min_y > extra->max_y))
+        throw std::invalid_argument("Invalid far-volume requested span");
+}
+struct SurfaceGrid {
+    std::vector<float> heights;
+    float low = std::numeric_limits<float>::max();
+    float high = std::numeric_limits<float>::lowest();
+};
+SurfaceGrid SampleSurface(FarTierDimensions d,
+                          std::int64_t ox,
+                          std::int64_t oz,
+                          const std::function<float(float, float)>& height,
+                          const FarVolumeLimits& limits) {
+    if (kTileColumns > limits.max_density_samples ||
+        kTileColumns * sizeof(float) > limits.max_buffer_bytes)
+        throw std::length_error("Far-volume surface sampling budget exceeded");
+    SurfaceGrid grid;
+    grid.heights.resize(kTileColumns);
+    for (std::size_t z = 0; z < kTileSide; ++z)
+        for (std::size_t x = 0; x < kTileSide; ++x) {
+            const float h = height(
+                static_cast<float>(ox + static_cast<std::int64_t>(x) * d.sample_spacing_meters),
+                static_cast<float>(oz + static_cast<std::int64_t>(z) * d.sample_spacing_meters));
+            if (!std::isfinite(h) || h <= -kCoordinateLimit + 1024 || h >= kCoordinateLimit - 1024)
+                throw std::invalid_argument("Invalid far-volume surface height");
+            grid.heights[x + z * kTileSide] = h;
+            grid.low = std::min(grid.low, h);
+            grid.high = std::max(grid.high, h);
+        }
+    return grid;
+}
+FarVolumeYWindow SurfaceWindow(const SurfaceGrid& grid,
+                               const std::optional<FarVolumeSpan>& extra,
+                               std::uint32_t edge) {
+    float low = grid.low, high = grid.high;
+    low -= kFarVolumeInteriorDepthMeters;
+    if (extra) {
+        low = std::min(low, extra->min_y);
+        high = std::max(high, extra->max_y);
+    }
+    if (low <= -kCoordinateLimit + 1024 || high >= kCoordinateLimit - 1024)
+        throw std::invalid_argument("Far-volume span exceeds exact sampling range");
+    const auto first = static_cast<std::int32_t>(std::floor(static_cast<double>(low) / edge));
+    // Include an air sample above a surface exactly on a brick plane.
+    const auto last = static_cast<std::int32_t>(std::floor(static_cast<double>(high) / edge)) + 1;
+    return {static_cast<std::int64_t>(first) * edge, static_cast<std::int64_t>(last) * edge};
+}
+FarTierDimensions WindowDimensions(const FarVolumeWindowRequest& request) {
+    const auto d = Dimensions(request.tier, request.caves);
+    TileOrigin(request.tile_x, d.tile_edge_meters);
+    TileOrigin(request.tile_z, d.tile_edge_meters);
+    const auto [first, last] = request.window;
+    // Bound before subtraction/conversion, including INT64_MIN/MAX requests.
+    if (first >= last || first < -kWindowCoordinateLimit || last > kWindowCoordinateLimit ||
+        first % d.brick_edge_meters != 0 || last % d.brick_edge_meters != 0)
+        throw std::invalid_argument("Invalid aligned far-volume window");
+    return d;
+}
+void CheckWindowAllocation(std::uint64_t candidates, const FarVolumeLimits& limits) {
+    CheckLimits(candidates, limits);
+    const auto samples = kTileColumns * (candidates / 1024 * 4 + 1);
+    const auto reserved = std::min<std::uint64_t>(candidates, limits.max_bricks);
+    if (samples > std::vector<FarVolumeSample>().max_size() ||
+        reserved > std::vector<FarVolumeBrick>().max_size())
+        throw std::length_error("Far-volume window exceeds container capacity");
+}
+bool AdmitsAllCandidates(std::uint32_t layers, const FarVolumeLimits& limits) {
+    // layers is bounded by the legal coordinate span before entering this helper.
+    const std::uint64_t candidates = 1024ull * layers;
+    const std::uint64_t samples = kTileColumns * (4ull * layers + 1);
+    if (candidates > limits.max_bricks || samples > limits.max_density_samples ||
+        samples > std::vector<FarVolumeSample>().max_size() ||
+        candidates > std::vector<FarVolumeBrick>().max_size())
+        return false;
+    const auto heights = kTileColumns * sizeof(float);
+    if (heights > limits.max_buffer_bytes)
+        return false;
+    auto remaining = limits.max_buffer_bytes - heights;
+    if (samples > remaining / sizeof(FarVolumeSample))
+        return false;
+    remaining -= static_cast<std::size_t>(samples) * sizeof(FarVolumeSample);
+    return candidates <= remaining / sizeof(FarVolumeBrick);
+}
+std::int64_t FloorDivide(std::int64_t value, std::uint32_t divisor) {
+    const auto quotient = value / divisor;
+    return quotient - (value % divisor < 0 ? 1 : 0);
+}
+FarVolumeTile BuildWindowSamples(const FarVolumeWindowRequest& request,
+                                 const std::vector<float>& heights,
+                                 const FarVolumeSamplers& samplers,
+                                 const FarVolumeLimits& limits) {
+    const auto d = Dimensions(request.tier, request.caves);
+    const auto ox = TileOrigin(request.tile_x, d.tile_edge_meters);
+    const auto oz = TileOrigin(request.tile_z, d.tile_edge_meters);
+    const auto first = static_cast<std::int32_t>(request.window.min_y_meters / d.brick_edge_meters);
+    const auto last = static_cast<std::int32_t>(request.window.max_y_meters / d.brick_edge_meters);
+    const auto candidates = CandidateCount(first, last, d.brick_edge_meters);
+    CheckLimits(candidates, limits);
+    const auto ny = static_cast<std::size_t>((static_cast<std::int64_t>(last) - first) * 4 + 1);
+    const auto grid_index = [ny](std::size_t x, std::size_t y, std::size_t z) {
+        return x + kTileSide * (y + ny * z);
+    };
+    std::vector<FarVolumeSample> lattice(kTileColumns * ny);
+    for (std::size_t z = 0; z < kTileSide; ++z)
+        for (std::size_t y = 0; y < ny; ++y)
+            for (std::size_t x = 0; x < kTileSide; ++x) {
+                const Vec3 position(
+                    static_cast<float>(ox + static_cast<std::int64_t>(x) * d.sample_spacing_meters),
+                    static_cast<float>(static_cast<std::int64_t>(first) * d.brick_edge_meters +
+                                       static_cast<std::int64_t>(y) * d.sample_spacing_meters),
+                    static_cast<float>(oz +
+                                       static_cast<std::int64_t>(z) * d.sample_spacing_meters));
+                const auto sample = samplers.density(position, heights[x + z * kTileSide]);
+                const auto q = QuantizeFarLodSdf(sample.density);
+                if (q == kFarLodSdfInvalid)
+                    throw std::invalid_argument("Non-finite far-volume density");
+                lattice[grid_index(x, y, z)] = {q, sample.material};
+            }
+    FarVolumeTile tile{request.tier,
+                       request.tile_x,
+                       request.tile_z,
+                       request.caves,
+                       first,
+                       last,
+                       candidates,
+                       {},
+                       0};
+    tile.bricks.reserve(
+        static_cast<std::size_t>(std::min<std::uint64_t>(candidates, limits.max_bricks)));
+    for (int x = 0; x < 32; ++x)
+        for (std::int32_t by = first; by < last; ++by)
+            for (int z = 0; z < 32; ++z) {
+                FarVolumeBrick brick;
+                brick.key = {request.tile_x * 32 + x, by, request.tile_z * 32 + z};
+                for (std::size_t sz = 0; sz < 5; ++sz)
+                    for (std::size_t sy = 0; sy < 5; ++sy)
+                        for (std::size_t sx = 0; sx < 5; ++sx)
+                            brick.samples[FarVolumeSampleIndex(sx, sy, sz)] =
+                                lattice[grid_index(x * 4 + sx,
+                                                   static_cast<std::size_t>(by - first) * 4 + sy,
+                                                   z * 4 + sz)];
+                if (!CrossesZero(brick))
+                    continue;
+                if (tile.bricks.size() == limits.max_bricks)
+                    throw std::length_error("Far-volume brick budget exceeded");
+                brick.crc32 = FarVolumeBrickCrc(brick);
+                tile.bricks.push_back(brick);
+            }
+    tile.crc32 = FarVolumeTileCrc(tile);
+    return tile;
+}
+
 } // namespace
 
 float BoxFilterFarVolumeCarve(const Vec3& position,
@@ -182,92 +339,13 @@ FarVolumeTile BuildFarVolumeTile(const FarVolumeRequest& request,
     const auto oz = TileOrigin(request.tile_z, d.tile_edge_meters);
     if (!samplers.height || !samplers.density)
         throw std::invalid_argument("Missing far-volume sampler");
-    if (request.extra_span &&
-        (!std::isfinite(request.extra_span->min_y) || !std::isfinite(request.extra_span->max_y) ||
-         request.extra_span->min_y > request.extra_span->max_y))
-        throw std::invalid_argument("Invalid far-volume requested span");
-    if (kTileColumns > limits.max_density_samples ||
-        kTileColumns * sizeof(float) > limits.max_buffer_bytes)
-        throw std::length_error("Far-volume surface sampling budget exceeded");
-    std::vector<float> heights(kTileColumns);
-    float low = std::numeric_limits<float>::max(), high = std::numeric_limits<float>::lowest();
-    for (std::size_t z = 0; z < kTileSide; ++z)
-        for (std::size_t x = 0; x < kTileSide; ++x) {
-            const float h = samplers.height(
-                static_cast<float>(ox + static_cast<std::int64_t>(x) * d.sample_spacing_meters),
-                static_cast<float>(oz + static_cast<std::int64_t>(z) * d.sample_spacing_meters));
-            if (!std::isfinite(h) || h <= -kCoordinateLimit + 1024 || h >= kCoordinateLimit - 1024)
-                throw std::invalid_argument("Invalid far-volume surface height");
-            heights[x + z * kTileSide] = h;
-            low = std::min(low, h);
-            high = std::max(high, h);
-        }
-    low -= kFarVolumeInteriorDepthMeters;
-    if (request.extra_span) {
-        low = std::min(low, request.extra_span->min_y);
-        high = std::max(high, request.extra_span->max_y);
-    }
-    if (low <= -kCoordinateLimit + 1024 || high >= kCoordinateLimit - 1024)
-        throw std::invalid_argument("Far-volume span exceeds exact sampling range");
-    const auto first =
-        static_cast<std::int32_t>(std::floor(static_cast<double>(low) / d.brick_edge_meters));
-    // Include an air sample above a surface exactly on a brick plane.
-    const auto last =
-        static_cast<std::int32_t>(std::floor(static_cast<double>(high) / d.brick_edge_meters)) + 1;
-    const auto candidates = CandidateCount(first, last, d.brick_edge_meters);
-    CheckLimits(candidates, limits);
-    const auto ny = static_cast<std::size_t>((static_cast<std::int64_t>(last) - first) * 4 + 1);
-    const auto grid_index = [ny](std::size_t x, std::size_t y, std::size_t z) {
-        return x + kTileSide * (y + ny * z);
-    };
-    std::vector<FarVolumeSample> lattice(kTileColumns * ny);
-    for (std::size_t z = 0; z < kTileSide; ++z)
-        for (std::size_t y = 0; y < ny; ++y)
-            for (std::size_t x = 0; x < kTileSide; ++x) {
-                const Vec3 position(
-                    static_cast<float>(ox + static_cast<std::int64_t>(x) * d.sample_spacing_meters),
-                    static_cast<float>(static_cast<std::int64_t>(first) * d.brick_edge_meters +
-                                       static_cast<std::int64_t>(y) * d.sample_spacing_meters),
-                    static_cast<float>(oz +
-                                       static_cast<std::int64_t>(z) * d.sample_spacing_meters));
-                const auto sample = samplers.density(position, heights[x + z * kTileSide]);
-                const auto q = QuantizeFarLodSdf(sample.density);
-                if (q == kFarLodSdfInvalid)
-                    throw std::invalid_argument("Non-finite far-volume density");
-                lattice[grid_index(x, y, z)] = {q, sample.material};
-            }
-    FarVolumeTile tile{request.tier,
-                       request.tile_x,
-                       request.tile_z,
-                       request.caves,
-                       first,
-                       last,
-                       candidates,
-                       {},
-                       0};
-    tile.bricks.reserve(
-        static_cast<std::size_t>(std::min<std::uint64_t>(candidates, limits.max_bricks)));
-    for (int x = 0; x < 32; ++x)
-        for (std::int32_t by = first; by < last; ++by)
-            for (int z = 0; z < 32; ++z) {
-                FarVolumeBrick brick;
-                brick.key = {request.tile_x * 32 + x, by, request.tile_z * 32 + z};
-                for (std::size_t sz = 0; sz < 5; ++sz)
-                    for (std::size_t sy = 0; sy < 5; ++sy)
-                        for (std::size_t sx = 0; sx < 5; ++sx)
-                            brick.samples[FarVolumeSampleIndex(sx, sy, sz)] =
-                                lattice[grid_index(x * 4 + sx,
-                                                   static_cast<std::size_t>(by - first) * 4 + sy,
-                                                   z * 4 + sz)];
-                if (!CrossesZero(brick))
-                    continue;
-                if (tile.bricks.size() == limits.max_bricks)
-                    throw std::length_error("Far-volume brick budget exceeded");
-                brick.crc32 = FarVolumeBrickCrc(brick);
-                tile.bricks.push_back(brick);
-            }
-    tile.crc32 = FarVolumeTileCrc(tile);
-    return tile;
+    ValidateExtraSpan(request.extra_span);
+    const auto surface = SampleSurface(d, ox, oz, samplers.height, limits);
+    const auto window = SurfaceWindow(surface, request.extra_span, d.brick_edge_meters);
+    return BuildWindowSamples({request.tier, request.tile_x, request.tile_z, request.caves, window},
+                              surface.heights,
+                              samplers,
+                              limits);
 }
 
 FarVolumeTile BuildPristineFarVolumeTile(const Systems::SHIELD_WorldSystem& world,
@@ -275,6 +353,109 @@ FarVolumeTile BuildPristineFarVolumeTile(const Systems::SHIELD_WorldSystem& worl
                                          const FarVolumeLimits& limits) {
     const auto d = Dimensions(request.tier, request.caves);
     return BuildFarVolumeTile(
+        request,
+        {[&world](float x, float z) { return world.GetTerrainHeightAt(x, z); },
+         [&world, &request, d](const Vec3& p, float height) {
+             const auto material = p.y < height - 4.0f
+                                       ? MaterialType::Stone
+                                       : world.SurfaceVertexMaterial(p.x, p.z, height);
+             return FarVolumeDensity{
+                 world.SamplePristineFarDensity(p, height, d.sample_spacing_meters, request.caves),
+                 static_cast<std::uint8_t>(material)};
+         }},
+        limits);
+}
+
+FarVolumeWindowRequest DiscoverFarVolumeWindow(const FarVolumeRequest& request,
+                                               const std::function<float(float, float)>& height,
+                                               const FarVolumeLimits& limits) {
+    const auto d = Dimensions(request.tier, request.caves);
+    const auto ox = TileOrigin(request.tile_x, d.tile_edge_meters);
+    const auto oz = TileOrigin(request.tile_z, d.tile_edge_meters);
+    if (!height)
+        throw std::invalid_argument("Missing far-volume sampler");
+    ValidateExtraSpan(request.extra_span);
+    const auto surface = SampleSurface(d, ox, oz, height, limits);
+    return {request.tier,
+            request.tile_x,
+            request.tile_z,
+            request.caves,
+            SurfaceWindow(surface, request.extra_span, d.brick_edge_meters)};
+}
+FarVolumeWindowRequest DiscoverPristineFarVolumeWindow(const Systems::SHIELD_WorldSystem& world,
+                                                       const FarVolumeRequest& request,
+                                                       const FarVolumeLimits& limits) {
+    return DiscoverFarVolumeWindow(
+        request, [&world](float x, float z) { return world.GetTerrainHeightAt(x, z); }, limits);
+}
+FarVolumeWindowPlan PlanFarVolumeWindows(const FarVolumeWindowRequest& coverage,
+                                         const FarVolumeLimits& limits,
+                                         std::uint32_t max_windows) {
+    const auto d = WindowDimensions(coverage);
+    if (max_windows == 0)
+        throw std::invalid_argument("Far-volume window count limit must be positive");
+    std::uint32_t lower = 0;
+    auto upper = static_cast<std::uint32_t>(2 * kWindowCoordinateLimit / d.brick_edge_meters);
+    while (lower < upper) {
+        const auto middle = lower + (upper - lower + 1) / 2;
+        if (AdmitsAllCandidates(middle, limits))
+            lower = middle;
+        else
+            upper = middle - 1;
+    }
+    if (lower == 0)
+        throw std::length_error("Far-volume limits cannot admit one complete window layer");
+    const auto first = coverage.window.min_y_meters / d.brick_edge_meters;
+    const auto last = coverage.window.max_y_meters / d.brick_edge_meters;
+    const auto count = FloorDivide(last - 1, lower) - FloorDivide(first, lower) + 1;
+    if (count > max_windows)
+        throw std::length_error("Far-volume window count budget exceeded");
+    FarVolumeWindowPlan plan;
+    plan.m_coverage = coverage;
+    plan.m_stride = lower;
+    plan.m_count = static_cast<std::uint32_t>(count);
+    const auto layers = static_cast<std::uint64_t>(last - first);
+    plan.m_bricks = 1024ull * layers;
+    plan.m_samples = kTileColumns * (4 * layers + plan.m_count);
+    return plan;
+}
+FarVolumeWindowRequest FarVolumeWindowAt(const FarVolumeWindowPlan& plan, std::uint32_t index) {
+    if (index >= plan.WindowCount())
+        throw std::invalid_argument("Far-volume window index is outside the plan");
+    auto request = plan.Coverage();
+    const auto d = Dimensions(request.tier, request.caves);
+    const auto first = request.window.min_y_meters / d.brick_edge_meters;
+    const auto first_page = FloorDivide(first, plan.LayerStride());
+    // All intermediates fit int64 by the coordinate-domain and layer-stride
+    // bounds established at construction; there is no mutable public plan state.
+    const auto page = first_page + index;
+    request.window.min_y_meters =
+        std::max(request.window.min_y_meters, page * plan.LayerStride() * d.brick_edge_meters);
+    request.window.max_y_meters = std::min(request.window.max_y_meters,
+                                           (page + 1) * plan.LayerStride() * d.brick_edge_meters);
+    return request;
+}
+FarVolumeTile BuildFarVolumeWindow(const FarVolumeWindowRequest& request,
+                                   const FarVolumeSamplers& samplers,
+                                   const FarVolumeLimits& limits) {
+    const auto d = WindowDimensions(request);
+    if (!samplers.height || !samplers.density)
+        throw std::invalid_argument("Missing far-volume sampler");
+    const auto layers = static_cast<std::uint64_t>(
+        (request.window.max_y_meters - request.window.min_y_meters) / d.brick_edge_meters);
+    CheckWindowAllocation(1024ull * layers, limits);
+    const auto surface = SampleSurface(d,
+                                       TileOrigin(request.tile_x, d.tile_edge_meters),
+                                       TileOrigin(request.tile_z, d.tile_edge_meters),
+                                       samplers.height,
+                                       limits);
+    return BuildWindowSamples(request, surface.heights, samplers, limits);
+}
+FarVolumeTile BuildPristineFarVolumeWindow(const Systems::SHIELD_WorldSystem& world,
+                                           const FarVolumeWindowRequest& request,
+                                           const FarVolumeLimits& limits) {
+    const auto d = WindowDimensions(request);
+    return BuildFarVolumeWindow(
         request,
         {[&world](float x, float z) { return world.GetTerrainHeightAt(x, z); },
          [&world, &request, d](const Vec3& p, float height) {
