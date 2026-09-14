@@ -102,9 +102,9 @@ class Broker:
         env = os.environ.copy()
         env['LUMINUMBRA_VIEWPORT_KEY'] = self.key.hex()
         env['LUMINUMBRA_VIEWPORT_PROJECT'] = str(self.project_root)
-        pending = active = None
+        pending = active = completed = None
         shutdown = None
-        started = None
+        started = outstanding = None
         published = dropped = 0
         stopped = False
         try:
@@ -122,6 +122,9 @@ class Broker:
                     shutdown = self._new('stop.bin')
                     require(shutdown is not None and shutdown['kind'] == 'stop', 'Stop kind')
                     pending = None
+                    if completed is not None:
+                        completed = None
+                        dropped += 1
                 if shutdown is not None and active is None:
                     # Complete any in-flight request before sending stop on the
                     # same pipe. A clean stop lets the host persist its receipt.
@@ -140,11 +143,21 @@ class Broker:
                 if desired:
                     require(desired['kind'] == 'state', 'Desired kind')
                     pending = desired
+                    if completed is not None:
+                        completed = None
+                        dropped += 1
+                if shutdown is None and outstanding is not None:
+                    # One delivery deadline survives coalescing and lease retries.
+                    # A desired-state flood cannot keep an unpublished session alive.
+                    require(time.monotonic() - outstanding < self.deadline,
+                            'Frame publication deadline')
                 if active is None and pending is not None:
                     active, pending = pending, None
                     # Small writes happen in a separate thread with the same render deadline.
-                    self._send(active)
                     started = time.monotonic()
+                    if outstanding is None:
+                        outstanding = started
+                    self._send(active)
                 try:
                     frame, payload = self.responses.get_nowait()
                 except queue.Empty:
@@ -153,13 +166,20 @@ class Broker:
                     require(active is not None, 'Unsolicited frame')
                     match_frame(frame, active)
                     if pending is None and shutdown is None:
-                        index = self.slots.publish(frame, payload)
-                        published += index is not None
-                        dropped += index is None
+                        completed = (frame, payload)
                     else:
                         dropped += 1
                     self._finish_write(0.1)
                     active = None
+                    frame = payload = None
+                if completed is not None:
+                    # Both reader leases may be held briefly. Keep exactly this
+                    # latest completed frame until publication or supersession.
+                    require(time.monotonic() - outstanding < self.deadline,
+                            'Frame publication deadline')
+                    if self.slots.publish(*completed) is not None:
+                        published += 1
+                        completed = outstanding = None
                 require(not self.errors and self.child.poll() is None, 'Host disconnected or invalid response')
                 if active:
                     require(not self.writer_error and time.monotonic() - started < self.deadline, 'Host deadline/write')
