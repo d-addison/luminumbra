@@ -14,6 +14,9 @@ contract. The subsequent [bounded volume-generation entry point](far-volume-gene
 implements the first sampler-driven part of DW01; runtime integration remains open.
 The [bounded volume mesher](far-volume-meshing.md) supplies the first CPU kernel
 part of DW03 with same-authority halo normals; runtime integration remains open.
+The [canonical discovery and authority facade](far-volume-convergence.md) adds
+the original surface-span discovery and explicit numeric profiles; queue,
+allocation and renderer integration remain separate.
 
 ## Scope
 

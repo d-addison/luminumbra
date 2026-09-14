@@ -107,6 +107,18 @@ target_include_directories(far_volume_mesher_test PRIVATE ../src)
 target_link_libraries(far_volume_mesher_test PRIVATE gtest_main)
 luminumbra_configure_first_party_target(far_volume_mesher_test)
 
+add_executable(far_volume_facade_test
+    common/FarVolumeFacade_test.cpp
+    ../src/luminumbra_common/world/FarDensityQuantization.cpp
+    ../src/luminumbra_common/world/FarVolume.cpp
+    ../src/luminumbra_common/world/FarVolumeTile.cpp
+    ../src/luminumbra_common/world/FarVolumeMesher.cpp)
+target_include_directories(far_volume_facade_test PRIVATE ../src ../src/luminumbra_common)
+target_compile_definitions(far_volume_facade_test PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(far_volume_facade_test PRIVATE gtest_main glm::glm nlohmann_json::nlohmann_json)
+luminumbra_configure_first_party_target(far_volume_facade_test)
+
 add_executable(common_tests
     common/Crc32_test.cpp
     rendering/shader_compositing_contract_test.cpp
@@ -1595,6 +1607,7 @@ include(GoogleTest)
 set(LUMINUMBRA_GTEST_TARGETS
     far_volume_tile_test
     far_volume_mesher_test
+    far_volume_facade_test
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test

@@ -3,8 +3,8 @@
 The [volume foundation](https://github.com/d-addison/luminumbra/pull/176) and
 [generation kernel](https://github.com/d-addison/luminumbra/pull/177), followed by
 [mesher kernel](https://github.com/d-addison/luminumbra/pull/179), were developed in
-separate campaign lanes. Their production headers declare incompatible types
-with identical names in `Luminumbra::World`. They cannot be combined as two
+separate campaign lanes. Their original production headers declare incompatible types
+with identical names in `Luminumbra::World`. Those original sources cannot be combined as two
 independent runtime APIs: including both produces redefinitions, and using
 different definitions across translation units violates the C++ one-definition
 rule even if a particular link succeeds. Neither a mechanical merge nor a rename
@@ -16,6 +16,15 @@ began at mesher kernel `fd0e1ebc44e808c92577d2d0aa316d7ee056d4d9`.
 The separate release lane also has a prepared R0 asynchronous consumer and
 renderer adapter built around the volume foundation representation. Its queue/lifetime
 work must be reconciled before a shipping runtime caller is added.
+
+The [first canonical convergence slice](far-volume-convergence.md) now selects
+one integer-origin/explicit-span model, ports coverage discovery and the original
+pristine cave authority onto it, and declares the legacy quantization profile
+explicitly. Its facade contains no duplicate tile or mesh types. This resolves
+the header boundary in the new source composition; the separate R0 consumer at
+`6a13b70e95f0c4a152f09e5df3422931c10dccfa` still requires allocator, queue and
+renderer adaptation before it can consume that composition. The original
+branches and their evidence retain their original identities.
 
 ## Concrete conflicts
 
@@ -39,7 +48,7 @@ smooth-normal mesh changes those assumptions and requires new accounting tests.
 Conversely, silently quantizing generation kernel samples breaks its exact-density and
 sampling-phase contract. Neither change is a transparent adapter.
 
-## Proposed convergence, requiring integration review
+## Convergence obligations and remaining integration review
 
 1. Select one canonical internal request/tile/mesh contract and one owner for
    field identity. Preserve the accepted five spacings, brick/tile dimensions,
