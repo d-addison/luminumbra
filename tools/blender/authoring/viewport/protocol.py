@@ -1,6 +1,7 @@
 """Experimental authenticated viewport transport. No Blender or GPU imports."""
 import hashlib
 import hmac
+from functools import lru_cache
 import json
 import math
 import mmap
@@ -10,6 +11,11 @@ import re
 import stat
 import struct
 import tempfile
+
+try:
+    import numpy as _numpy
+except ImportError:
+    _numpy = None
 
 HEADER_LIMIT = 1024 * 1024
 PAYLOAD_LIMIT = 1280 * 720 * 9
@@ -21,6 +27,10 @@ HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 
 class Refusal(ValueError):
     pass
+
+
+def validation_backend():
+    return 'numpy/' + _numpy.__version__ if _numpy is not None else 'portable-python'
 
 
 def require(value, message):
@@ -100,6 +110,16 @@ def validate(header, payload):
     pixels = state['width'] * state['height']
     require(len(payload) == 9 * pixels, 'Plane sizes')
     require(header['planes_sha256'] == hashlib.sha256(payload).hexdigest(), 'Plane digest')
+    if _numpy is not None:
+        # Views retain the immutable bytes while vectorized checks avoid a
+        # Python callback for each pixel. Keep the portable path equivalent.
+        depth = _numpy.frombuffer(payload, dtype='<f4', count=pixels, offset=4*pixels)
+        covered = _numpy.frombuffer(payload, dtype='u1', count=pixels, offset=8*pixels)
+        rgba = _numpy.frombuffer(payload, dtype='u1', count=4*pixels)
+        require(bool(_numpy.isfinite(depth).all() and (depth >= 0).all() and (depth <= 1).all()), 'Depth range')
+        require(bool((covered <= 1).all() and _numpy.array_equal(covered, depth > 0)), 'Coverage depth')
+        require(bool(_numpy.array_equal(rgba[3::4], covered * 255)), 'Coverage alpha')
+        return
     for i, (depth,) in enumerate(struct.iter_unpack('<f', payload[4*pixels:8*pixels])):
         covered = payload[8*pixels+i]
         require(math.isfinite(depth) and 0 <= depth <= 1, 'Depth range')
@@ -163,6 +183,69 @@ def safe_path(path):
         require(not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & 0x400,
                 'Reparse path')
     return path
+
+
+@lru_cache(maxsize=1)
+def _windows_reader_api():
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.LPVOID, w.DWORD, w.DWORD, w.HANDLE]
+    kernel.CreateFileW.restype = w.HANDLE
+    kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
+    kernel.GetFileInformationByHandleEx.restype = w.BOOL
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
+    return kernel
+
+
+def open_record_reader(path):
+    """Open one complete record without blocking another atomic publication.
+
+    Windows CRT readers omit FILE_SHARE_DELETE. CreateFileW must explicitly
+    permit replacement while this handle continues reading the old file.
+    No retry, deadline extension, truncation or in-place write is involved.
+    """
+    path = safe_path(path)
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes as w
+        import msvcrt
+        kernel = _windows_reader_api()
+        # GENERIC_READ; SHARE_READ | SHARE_WRITE | SHARE_DELETE; OPEN_EXISTING;
+        # FILE_FLAG_OPEN_REPARSE_POINT. NULL security means no inherited handle.
+        handle = kernel.CreateFileW(str(path), 0x80000000, 7, None, 3, 0x00200000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            class AttributeTag(ctypes.Structure):
+                _fields_ = [('attributes', w.DWORD), ('tag', w.DWORD)]
+            info = AttributeTag()
+            if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            require(not info.attributes & (0x400 | 0x10), 'Reparse or directory record handle')
+            descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY | os.O_NOINHERIT)
+        except BaseException:
+            kernel.CloseHandle(handle)
+            raise
+        # Ownership transferred to the CRT descriptor; never CloseHandle again.
+    else:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+                             | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        require(stat.S_ISREG(os.fstat(descriptor).st_mode), 'Record requires a regular file')
+        return os.fdopen(descriptor, 'rb')
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def read_record_file(path, limit):
+    require(integer(limit, 0, CAPACITY), 'Record file limit')
+    with open_record_reader(path) as stream:
+        require(os.fstat(stream.fileno()).st_size <= limit, 'Record file size')
+        raw = stream.read(limit + 1)
+    require(len(raw) <= limit, 'Record file read bound')
+    return raw
 
 
 def atomic_write(path, value):
@@ -270,8 +353,7 @@ class Slots:
             descriptor = safe_path(self.root / f'frame-{index}.json')
             if not descriptor.exists():
                 return None
-            require(descriptor.stat().st_size <= 128, 'Descriptor size')
-            meta = json.loads(descriptor.read_bytes(), object_pairs_hook=_object)
+            meta = json.loads(read_record_file(descriptor, 128), object_pairs_hook=_object)
             require(set(meta) == {'length', 'sequence'} and integer(meta['length'], 49, CAPACITY), 'Descriptor')
             with safe_path(self.root / f'frame-{index}.bin').open('rb') as stream:
                 require(os.fstat(stream.fileno()).st_size == CAPACITY, 'Slot capacity')
