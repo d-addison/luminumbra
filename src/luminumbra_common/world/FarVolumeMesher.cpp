@@ -295,17 +295,8 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
                             crossing.vertex.position[static_cast<std::size_t>(axis)] +=
                                 crossing.fraction * static_cast<double>(step);
                         }
-                        // Same density-direction winding correction as production Marching Cubes.
-                        const auto density = [&](std::size_t c) {
-                            return static_cast<double>(values[c].density);
-                        };
-                        const FarVolumeVector cell_gradient{
-                            (density(1) + density(2) + density(5) + density(6)) -
-                                (density(0) + density(3) + density(4) + density(7)),
-                            (density(4) + density(5) + density(6) + density(7)) -
-                                (density(0) + density(1) + density(2) + density(3)),
-                            (density(2) + density(3) + density(6) + density(7)) -
-                                (density(0) + density(1) + density(4) + density(5))};
+                        // Preserve the table's negative-solid winding per component. A
+                        // cell-wide gradient can reverse one disconnected component (case65).
                         for (int t = 0; triTable[configuration][t] != -1; t += 3) {
                             std::array<const Crossing*, 3> triangle{
                                 &crossings[static_cast<std::size_t>(triTable[configuration][t])],
@@ -319,8 +310,6 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
                                                              triangle[0]->vertex.position));
                             if (dot(face, face) == 0.0)
                                 continue;
-                            if (dot(face, cell_gradient) < 0.0)
-                                std::swap(triangle[1], triangle[2]);
                             if (limits.max_indices - mesh.indices.size() < 3)
                                 refuse(FarVolumeMeshError::IndexLimit);
                             for (const auto* crossing : triangle)

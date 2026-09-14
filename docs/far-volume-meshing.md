@@ -11,15 +11,21 @@ requires terrain/cave authority integration, requested-span discovery, runtime
 scheduling, arrival ownership, upload/draw integration, water, persistence and
 measured budgets. The client retains its existing F1/F2 path and formats. This
 addition does not qualify the 16,384 m horizon or any native performance target.
+There is also a [representation integration blocker](far-volume-reconciliation.md)
+with the separately developed volume foundation and its prepared asynchronous
+consumer; the duplicate APIs require one reviewed composition before runtime use.
 
 ## Geometry and identity
 
 Each resident brick owns its 4×4×4 cells. Cells use the existing production
 Marching Cubes topology tables, corner/edge layout, negative-solid sign test,
-solid-endpoint material and density-direction winding correction. Material bytes
+solid-endpoint material and table-defined orientation. Material bytes
 remain opaque, including 255; there is no legacy background-material lookup.
 The existing tables' ambiguous-cell topology is unchanged. This kernel supplies
 neither transition stitching nor a new topology guarantee for ambiguous fields.
+The legacy cell-wide gradient winding override is deliberately omitted: it can
+reverse one of two disconnected components in case 65 and its cavity complement.
+An independent continuous trilinear oracle checks both components' directions.
 
 Input bricks may arrive in any order. The mesher sorts them by `(z,x,y)` origin,
 visits cells in `(z,y,x)` order, and keys vertices by the lower integer world
@@ -83,7 +89,7 @@ cannot preempt a callback that blocks or prove it is pure after caching a value.
 
 ## Verification
 
-`test/common/FarVolumeMesher_test.cpp` registers thirteen default-CTest cases.
+`test/common/FarVolumeMesher_test.cpp` registers fifteen default-CTest cases.
 Independent analytic fixtures cover walls and downward-facing ceilings at all
 five spacings, negative origins, exact rectangular coverage and winding,
 curved shared X/Z borders with exactly equal normals/materials, vertical borders,
@@ -92,13 +98,15 @@ homogeneous and collapsed empty results, exact-zero and subnormal crossings,
 unique-sample accounting, exact/insufficient budgets and transactional refusals.
 Malformed metadata, resident disagreement, signed zero, failed/non-finite halo
 samples, integer-limit halo overflow and zero-gradient controls are explicit.
+Unequal disconnected components/cavities and mixed shared-face connectivity
+across all axes and tiers cover the reproduced winding failure and adjacent cells.
 
 ```sh
 cmake --build build/release --target far_volume_mesher_test --parallel 2
 ctest --test-dir build/release -R '^FarVolumeMesher\.' --no-tests=error --output-on-failure
 ```
 
-The owned Linux Release and ASan/UBSan runs each pass all thirteen mesher cases
+The owned Linux Release and ASan/UBSan runs each pass all fifteen mesher cases
 and the ten generation cases. The production common-library translation unit
 also compiles with warnings treated as errors. Strict Doxygen generation and
 the generated-link check pass. These are CPU correctness results.

@@ -448,4 +448,130 @@ TEST(FarVolumeMesher, ZeroInterpolatedGradientRefusesInsteadOfPublishingSeamNorm
     EXPECT_EQ(error, FarVolumeMeshError::ZeroGradient);
     EXPECT_EQ(output, previous);
 }
+
+TEST(FarVolumeMesher, UnequalDisconnectedComponentsAndCavitiesKeepOutwardWinding) {
+    // Case 65 (and complement 190) in the cell between the two interior samples.
+    // Independent oracle: the continuous trilinear field is two tensor-product tents.
+    for (std::size_t tier = 1; tier <= 5; ++tier) {
+        const auto spacing = steps[tier - 1];
+        for (const auto amplitudes : {std::array<double, 2>{2, 1}, {1, 2}, {4, .5}, {.5, 4}}) {
+            for (double sign : {1.0, -1.0}) {
+                const auto field = [=](const FarVolumePosition& p) {
+                    const double value =
+                        p == FarVolumePosition{spacing, spacing, spacing}
+                            ? -amplitudes[0]
+                            : (p == FarVolumePosition{2 * spacing, 2 * spacing, 2 * spacing}
+                                   ? -amplitudes[1]
+                                   : 1.0);
+                    return FarVolumeSample{static_cast<float>(sign * value), 13};
+                };
+                const auto tile =
+                    build({{tier, 0, 0}, {0, brick_edges[tier - 1]}, identity}, field);
+                ASSERT_EQ(tile.bricks.size(), 1u);
+                const auto result = mesh(tile, field);
+                ASSERT_EQ(result.indices.size(), 48u);
+                const auto density = [=](const FarVolumeVector& p) {
+                    const auto tent = [&](double center) {
+                        return std::max(0.0, 1.0 - std::abs(p[0] - center)) *
+                               std::max(0.0, 1.0 - std::abs(p[1] - center)) *
+                               std::max(0.0, 1.0 - std::abs(p[2] - center));
+                    };
+                    return sign * (1.0 - (1.0 + amplitudes[0]) * tent(1) -
+                                   (1.0 + amplitudes[1]) * tent(2));
+                };
+                std::array<std::size_t, 2> faces{};
+                for (std::size_t i = 0; i < result.indices.size(); i += 3) {
+                    std::array<FarVolumeVector, 3> p{};
+                    for (std::size_t c = 0; c < 3; ++c)
+                        for (std::size_t axis = 0; axis < 3; ++axis)
+                            p[c][axis] = result.vertices[result.indices[i + c]].position[axis] /
+                                         static_cast<double>(spacing);
+                    const FarVolumeVector center{(p[0][0] + p[1][0] + p[2][0]) / 3.0,
+                                                 (p[0][1] + p[1][1] + p[2][1]) / 3.0,
+                                                 (p[0][2] + p[1][2] + p[2][2]) / 3.0};
+                    auto normal = face(p[0], p[1], p[2]);
+                    const double length = std::hypot(normal[0], normal[1], normal[2]);
+                    ASSERT_GT(length, 0.0);
+                    for (auto& v : normal)
+                        v /= length;
+                    auto outside = center, inside = center;
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        outside[axis] += normal[axis] * .001;
+                        inside[axis] -= normal[axis] * .001;
+                    }
+                    const std::size_t component =
+                        std::hypot(center[0] - 1, center[1] - 1, center[2] - 1) <
+                                std::hypot(center[0] - 2, center[1] - 2, center[2] - 2)
+                            ? 0
+                            : 1;
+                    ++faces[component];
+                    EXPECT_GT(density(outside), density(inside))
+                        << "tier=" << tier << " triangle=" << i / 3;
+                    double outward = 0;
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                        outward += normal[axis] * sign *
+                                   (center[axis] - static_cast<double>(component + 1));
+                    EXPECT_GT(outward, 0.0);
+                }
+                EXPECT_EQ(faces, (std::array<std::size_t, 2>{8, 8}));
+            }
+        }
+    }
+}
+
+TEST(FarVolumeMesher, MixedSharedFacesAndComplementsAgreeAcrossAllAxesAndTiers) {
+    using Segment = std::array<FarVolumeVector, 2>;
+    struct Border {
+        std::map<FarVolumeVector, FarVolumeVector> normals;
+        std::map<Segment, std::size_t> segments;
+        bool operator==(const Border&) const = default;
+    };
+    for (std::size_t tier = 1; tier <= 5; ++tier) {
+        const auto spacing = steps[tier - 1], edge = brick_edges[tier - 1];
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            for (const double sign : {1.0, -1.0}) {
+                const FarVolumePosition a{
+                    axis == 0 ? 0 : spacing, axis == 1 ? 0 : spacing, axis == 2 ? 0 : spacing};
+                const FarVolumePosition b{2 * a.x, 2 * a.y, 2 * a.z};
+                const auto field = [=](const FarVolumePosition& p) {
+                    return FarVolumeSample{
+                        static_cast<float>(sign * (p == a ? -2.0 : (p == b ? -1.0 : 1.0))), 31};
+                };
+                FarVolumeRequest left{{tier, axis == 0 ? -1 : 0, axis == 2 ? -1 : 0},
+                                      {axis == 1 ? -edge : 0, axis == 1 ? 0 : edge},
+                                      identity};
+                FarVolumeRequest right{{tier, 0, 0}, {0, edge}, identity};
+                const auto left_mesh = mesh(build(left, field), field);
+                const auto right_mesh = mesh(build(right, field), field);
+                const auto border = [&](const FarVolumeMesh& value) {
+                    Border result;
+                    for (const auto& vertex : value.vertices) {
+                        const auto p = world_position(value, vertex);
+                        if (p[axis] == 0.0) {
+                            EXPECT_EQ(vertex.material, 31u);
+                            result.normals.emplace(p, vertex.normal);
+                        }
+                    }
+                    for (std::size_t i = 0; i < value.indices.size(); i += 3)
+                        for (std::size_t j = 0; j < 3; ++j) {
+                            Segment segment{
+                                world_position(value, value.vertices[value.indices[i + j]]),
+                                world_position(value,
+                                               value.vertices[value.indices[i + (j + 1) % 3]])};
+                            if (segment[0][axis] == 0.0 && segment[1][axis] == 0.0) {
+                                if (segment[1] < segment[0])
+                                    std::swap(segment[0], segment[1]);
+                                ++result.segments[segment];
+                            }
+                        }
+                    return result;
+                };
+                const auto first = border(left_mesh), second = border(right_mesh);
+                EXPECT_GE(first.normals.size(), 6u);
+                EXPECT_GE(first.segments.size(), 4u);
+                EXPECT_EQ(first, second) << "tier=" << tier << " axis=" << axis << " sign=" << sign;
+            }
+        }
+    }
+}
 } // namespace
