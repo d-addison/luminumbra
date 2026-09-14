@@ -40,3 +40,14 @@ Stop completes the active request, discards pending work, forwards authenticated
 shutdown, and waits at most five seconds (or the shorter configured deadline).
 It reaps uncooperative children and records failure. Production integration must
 pin the complete installed host before claiming qualification.
+
+Windows record readers share deletion and publishers use handle-based POSIX
+replacement (`FileRenameInfoEx`, replace-existing plus POSIX-semantics flags).
+An open reader retains the prior complete record while new readers open the
+replacement. This requires Windows 10 RS1 or later and filesystem support; an
+unsupported operation fails closed. Ordinary `os.replace` did not support this
+held-reader publication in the qualified native environment.
+
+If both frame slots are leased, the broker retains one completed latest frame
+and retries within the original delivery deadline. New state supersedes that
+frame; stop discards it. Coalescing and retry do not restart the deadline.
