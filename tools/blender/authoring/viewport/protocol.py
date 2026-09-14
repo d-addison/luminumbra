@@ -217,6 +217,20 @@ def open_record_reader(path):
         raise Refusal(str(error)) from error
 
 
+def record_file_identity(path):
+    try:
+        return _file_io.file_identity(path)
+    except ValueError as error:
+        raise Refusal(str(error)) from error
+
+
+def record_reader_identity(stream):
+    try:
+        return _file_io.reader_identity(stream)
+    except ValueError as error:
+        raise Refusal(str(error)) from error
+
+
 def read_record_file(path, limit):
     require(integer(limit, 0, CAPACITY), 'Record file limit')
     with open_record_reader(path) as stream:

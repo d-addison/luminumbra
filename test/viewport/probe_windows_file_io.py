@@ -54,7 +54,7 @@ def main():
         'inputs_before': before, 'inputs_after': after,
         'python': sys.version, 'platform': platform.platform(), 'executable': sys.executable,
         'elapsed_seconds': time.monotonic() - started,
-        'passed': result.wasSuccessful() and result.testsRun == 12 and before == after and
+        'passed': result.wasSuccessful() and result.testsRun == 16 and before == after and
                   all(allowed.get(test.id().rsplit('.', 1)[1]) == reason for test, reason in result.skipped)}
     args.receipt.write_text(json.dumps(report, indent=2) + '\n')
     return 0 if report['passed'] else 1

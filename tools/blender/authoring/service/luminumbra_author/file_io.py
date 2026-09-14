@@ -6,9 +6,12 @@ explicitly support delete sharing; no retries or in-place writes hide failures.
 This module is packaged byte-for-byte into the optional viewport extension.
 """
 from functools import lru_cache
+from collections import namedtuple
 import os
 from pathlib import Path
 import stat
+
+FileIdentity = namedtuple('FileIdentity', 'volume file_id size modified changed attributes')
 
 
 def require(value, message):
@@ -82,6 +85,44 @@ def open_regular_reader(path):
     except BaseException:
         os.close(descriptor)
         raise
+
+
+def reader_identity(stream):
+    """Return file identity, size, write time and metadata change time consistently.
+
+    Windows path stat and descriptor stat can disagree about whether ctime is
+    creation or change time. Query native handles for both comparisons instead.
+    Times are opaque equality tokens (native ticks on Windows, ns on POSIX).
+    """
+    if os.name != 'nt':
+        info = os.fstat(stream.fileno())
+        require(stat.S_ISREG(info.st_mode), 'Identity requires a regular file')
+        return FileIdentity(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+    import ctypes
+    from ctypes import wintypes as w
+    import msvcrt
+    class Basic(ctypes.Structure):
+        _fields_ = [('creation', ctypes.c_int64), ('access', ctypes.c_int64),
+                    ('write', ctypes.c_int64), ('change', ctypes.c_int64), ('attributes', w.DWORD)]
+    class Standard(ctypes.Structure):
+        _fields_ = [('allocation', ctypes.c_int64), ('end', ctypes.c_int64),
+                    ('links', w.DWORD), ('deleted', ctypes.c_ubyte), ('directory', ctypes.c_ubyte)]
+    class Identity(ctypes.Structure):
+        _fields_ = [('volume', ctypes.c_uint64), ('file_id', ctypes.c_ubyte * 16)]
+    handle = msvcrt.get_osfhandle(stream.fileno())
+    kernel = _windows_reader_api()
+    basic, standard, identity = Basic(), Standard(), Identity()
+    for kind, value in ((0, basic), (1, standard), (18, identity)):
+        if not kernel.GetFileInformationByHandleEx(handle, kind, ctypes.byref(value), ctypes.sizeof(value)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    require(not basic.attributes & (0x400 | 0x10) and not standard.directory and standard.end >= 0,
+            'Identity requires a regular non-reparse file')
+    return FileIdentity(identity.volume, bytes(identity.file_id), standard.end, basic.write, basic.change, basic.attributes)
+
+
+def file_identity(path):
+    with open_regular_reader(path) as stream:
+        return reader_identity(stream)
 
 
 def replace_file(temporary, path):

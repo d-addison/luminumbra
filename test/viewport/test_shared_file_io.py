@@ -1,11 +1,13 @@
 """Actual package and held-reader publication contracts, without Blender/GPU."""
 import hashlib
+from contextlib import contextmanager
 import importlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,6 +30,38 @@ def load(path, name):
     return module
 
 
+def generation_module():
+    name = 'shared_identity_extension'
+    if name not in sys.modules:
+        package = types.ModuleType(name)
+        package.__path__ = [str(AUTHORING / 'extension'), str(AUTHORING)]
+        sys.modules[name] = package
+    return importlib.import_module(name + '.viewport_generation')
+
+
+def change_metadata_time(path, previous):
+    if os.name != 'nt':
+        os.chmod(path, path.stat().st_mode ^ stat.S_IWUSR)
+        return
+    # Actual metadata-only Windows mutation: preserve creation/access/write
+    # times and bytes, and set ChangeTime through a separately owned handle.
+    import ctypes
+    from ctypes import wintypes as w
+    class Basic(ctypes.Structure):
+        _fields_ = [('creation', ctypes.c_int64), ('access', ctypes.c_int64),
+                    ('write', ctypes.c_int64), ('change', ctypes.c_int64), ('attributes', w.DWORD)]
+    kernel = file_io._windows_reader_api()
+    handle = kernel.CreateFileW(str(path), 0x180, 7, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        value = Basic(change=previous.changed + 10_000_000)
+        if not kernel.SetFileInformationByHandle(handle, 0, ctypes.byref(value), ctypes.sizeof(value)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(handle)
+
+
 class SharedFileIOTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix='shared-publication-')
@@ -45,6 +79,84 @@ class SharedFileIOTests(unittest.TestCase):
             self.assertEqual(reader.read(), before)
             self.assertEqual(contracts.read_json(self.target), self.new)
         self.assertEqual(list(self.root.glob('.tmp-*')), [])
+
+    def test_published_metadata_path_and_reader_identity_agree(self):
+        # Publication changes metadata time even when the creation timestamp
+        # survives replacement. Ordinary write-only fixtures hid this defect.
+        contracts.atomic_json(self.target, self.new)
+        identity = file_io.file_identity(self.target)
+        with file_io.open_regular_reader(self.target) as held:
+            self.assertEqual(identity, file_io.reader_identity(held))
+            if os.name == 'nt':
+                birth = os.fstat(held.fileno()).st_birthtime_ns // 100 + 116444736000000000
+                self.assertNotEqual(identity.changed, birth)
+                if 'GCC UCRT' in sys.version:
+                    # This is the exact old failing join on the qualified
+                    # UCRT interpreter, retained as an actual negative control.
+                    self.assertNotEqual(self.target.lstat().st_ctime_ns,
+                                        os.fstat(held.fileno()).st_ctime_ns)
+        self.assertEqual(generation_module()._read_regular(self.target, 1024), self.target.read_bytes())
+
+    def replace_same_bytes_and_mtime(self):
+        before = self.target.stat()
+        temporary = self.target.with_name('replacement.tmp')
+        temporary.write_bytes(self.target.read_bytes())
+        os.utime(temporary, ns=(before.st_atime_ns, before.st_mtime_ns))
+        file_io.replace_file(temporary, self.target)
+
+    def test_identical_same_size_replacement_between_baseline_and_open_is_refused(self):
+        generation = generation_module()
+        original = generation.open_record_reader
+        @contextmanager
+        def swapped(path):
+            self.replace_same_bytes_and_mtime()
+            with original(path) as held:
+                yield held
+        with mock.patch.object(generation, 'open_record_reader', side_effect=swapped):
+            with self.assertRaisesRegex(generation.MetadataError, 'changed while opening'):
+                generation._read_regular(self.target, 1024)
+
+    def test_identical_same_size_replacement_during_read_is_refused(self):
+        generation = generation_module()
+        original = generation.open_record_reader
+        @contextmanager
+        def replaced(path):
+            with original(path) as held:
+                def read(limit):
+                    value = held.read(limit)
+                    self.replace_same_bytes_and_mtime()
+                    return value
+                yield types.SimpleNamespace(fileno=held.fileno, read=read)
+        with mock.patch.object(generation, 'open_record_reader', side_effect=replaced):
+            with self.assertRaisesRegex(generation.MetadataError, '(changed|replaced) while reading'):
+                generation._read_regular(self.target, 1024)
+
+    def test_metadata_only_change_during_read_is_refused(self):
+        generation = generation_module()
+        original = generation.open_record_reader
+        before = file_io.file_identity(self.target)
+        raw = self.target.read_bytes()
+        @contextmanager
+        def changed(path):
+            with original(path) as held:
+                def read(limit):
+                    value = held.read(limit)
+                    change_metadata_time(path, before)
+                    return value
+                yield types.SimpleNamespace(fileno=held.fileno, read=read)
+        with mock.patch.object(generation, 'open_record_reader', side_effect=changed):
+            with self.assertRaisesRegex(generation.MetadataError, 'changed while reading'):
+                generation._read_regular(self.target, 1024)
+        after = file_io.file_identity(self.target)
+        self.assertEqual(before[:4], after[:4])
+        if os.name == 'nt':
+            self.assertEqual(before.attributes, after.attributes)
+            self.assertNotEqual(before.changed, after.changed)
+        else:
+            # A coarse filesystem clock can give chmod the same ctime tick;
+            # the complete identity still detects the mode change itself.
+            self.assertNotEqual(before.attributes, after.attributes)
+        self.assertEqual(self.target.read_bytes(), raw)
 
     def test_failed_publication_keeps_destination_and_cleans_complete_temporary(self):
         before = self.target.read_bytes()

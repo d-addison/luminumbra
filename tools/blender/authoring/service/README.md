@@ -148,6 +148,10 @@ delete-sharing readers and `FileRenameInfoEx` POSIX replacement semantics.
 Unsupported filesystems and non-sharing readers fail without truncating or
 removing the current pointer. The shared helper contributes to service build
 identity and is copied byte-for-byte into the viewport extension archive.
+The generation reader compares native Windows file identifiers, sizes, write
+times and metadata change times consistently across path and held-file checks.
+Creation timestamps cannot substitute for change timestamps. Replacement and
+metadata changes during a read are refused even when file size and bytes match.
 
 Consumers retain a generation ID and read its manifest instead of following the
 current pointer on every access. Published generations are never modified or
@@ -178,7 +182,7 @@ animation or newly authored production-content acceptance.
 
 Windows sharing qualification uses
 `python -B test/viewport/probe_windows_file_io.py --receipt /fresh/receipt.json`.
-Its twelve contracts include an independently packaged service subprocess
+Its sixteen contracts include an independently packaged service subprocess
 publishing `current.json` while the packaged generation reader holds the old
 file, a real non-sharing CRT-reader negative control, and unchanged input pins.
 It does not qualify the native renderer or Blender adapter.

@@ -10,13 +10,12 @@ import copy
 import hashlib
 import json
 import math
-import os
 from pathlib import Path
 import re
 import stat
 import threading
 
-from .viewport.protocol import open_record_reader
+from .viewport.protocol import open_record_reader, record_file_identity, record_reader_identity
 
 
 GENERATION = 'luminumbra.authoring.generation.v1'
@@ -83,28 +82,26 @@ def _checked_stat(path, directory):
     return info
 
 
-def _identity(info):
-    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
-
-
 def _read_regular(path, limit):
     # Check the project ancestors as well: resolving first would hide links.
     ancestors = list(reversed(path.parents))
     before = [_checked_stat(part, True) for part in ancestors]
     info = _checked_stat(path, False)
     _require(0 < info.st_size <= limit, 'Metadata file exceeds its byte bound')
-    # Allow the service to atomically publish a new current.json while this
-    # worker holds the old snapshot. The shared reader also refuses reparse
-    # handles and nonregular files; identity checks below still reject a swap.
+    identity = record_file_identity(path)
+    _require(identity.size == info.st_size, 'Metadata file changed before opening')
+    # Compare the same strong identity API before opening, while reading, and
+    # after reading. Windows path/descriptor ctime may mean different things;
+    # native change time remains part of every identity comparison.
     with open_record_reader(path) as stream:
-        opened = os.fstat(stream.fileno())
-        _require(stat.S_ISREG(opened.st_mode) and _identity(opened) == _identity(info),
+        _require(record_reader_identity(stream) == identity,
                  'Metadata file changed while opening')
         raw = stream.read(limit + 1)
         _require(0 < len(raw) == info.st_size <= limit and
-                 _identity(os.fstat(stream.fileno())) == _identity(info),
+                 record_reader_identity(stream) == identity,
                  'Metadata file changed while reading')
-    _require(_identity(_checked_stat(path, False)) == _identity(info),
+    _checked_stat(path, False)
+    _require(record_file_identity(path) == identity,
              'Metadata file was replaced while reading')
     for part, previous in zip(ancestors, before):
         current = _checked_stat(part, True)
