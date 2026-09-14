@@ -79,8 +79,11 @@ Windows child-process snapshot test. Portable controls do not qualify DLL loadin
 
 The MinGW install resolves `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, and
 `libwinpthread-1.dll` through the configured compiler and requires each to be in
-that compiler's `bin` directory. Their toolchain license notices accompany the
-DLLs. It refuses missing, redirected, or ambiguous resolution; it does not copy
+that compiler's real `bin` directory. When GCC returns the exact requested bare
+filename, only that compiler's sibling file is considered; the current directory
+and PATH are never searched. Other relative responses fail. Their toolchain
+license notices accompany the DLLs. It refuses missing, redirected, or ambiguous
+resolution; it does not copy
 Windows system DLLs. `test_mingw_runtime_install.py` exercises CMake resolution,
 refusal, and the unchanged non-MinGW install with compiler-response fixtures.
 Those portable tests do not qualify native Windows loading.
