@@ -137,7 +137,8 @@ private:
         BeforeSampling,
         AfterSampling,
         AfterMeshing,
-        BeforePublish
+        BeforePublish,
+        AfterPublish // synchronization only; hook must not throw after publication
     };
     using PhaseHook = void (*)(
         void*, Phase, const FarVolumeBuildIdentity&, World::FarVolumeTile*, World::FarVolumeMesh*);

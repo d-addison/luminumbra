@@ -168,6 +168,13 @@ and corruption release, full-span refusal, stale identity, cancellation, drain,
 and same-address re-entry. Deterministic barriers hold real workers; private
 friend-only test seams inject phase faults and synthetic valid empty data.
 These fault/empty fixtures are distinct from real pristine-generator evidence.
+A private post-publication barrier also holds real workers before JobSystem's
+completion decrement: tests consume and release visible leases while both jobs
+remain unfinished and verify that retired slots cannot yet be reused. A separate
+queue-owner thread cannot finish a world swap until its held worker is released.
+The brief future wait checks synchronization, not a performance deadline. Isolated
+premature-reuse and omitted-drain variants fail these assertions; assertion cleanup
+opens the worker gates before joining the owner thread.
 
 Build and run the focused checks in each configuration:
 

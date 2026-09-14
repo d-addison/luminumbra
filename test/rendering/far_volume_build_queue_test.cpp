@@ -60,7 +60,7 @@ struct WorkerGate {
     Fault fault = Fault::None;
     bool hold = false, opened = false, on_owner = false;
     std::size_t entered = 0;
-    std::array<std::size_t, 4> calls{};
+    std::array<std::size_t, 5> calls{};
     const std::thread::id owner = std::this_thread::get_id();
 
     static void invoke(void* context,
@@ -576,18 +576,78 @@ TEST(FarVolumeBuildQueue, SameAddressReentryAndWorldDestructionInvalidateOldLeas
     EXPECT_THROW(moved.result(), std::logic_error);
 }
 
-TEST(FarVolumeBuildQueue, SwapDrainsAHeldRealWorkerBeforeWorldCanBeDestroyed) {
+TEST(FarVolumeBuildQueue, ReleasedResultCannotRecycleAnUnfinishedCompletionHandle) {
     Rig rig;
-    rig.observe(Phase::BeforePublish, true);
-    ASSERT_EQ(rig.queue->submit({1, 0, 0, std::nullopt}).status, FarVolumeSubmitStatus::Queued);
+    rig.observe(Phase::AfterPublish, true);
+    for (int tile = 0; tile < 3; ++tile)
+        ASSERT_EQ(rig.queue->submit({1, tile, 0, std::nullopt}).status,
+                  FarVolumeSubmitStatus::Queued);
     ASSERT_TRUE(rig.queue->pump());
-    ASSERT_TRUE(rig.gate.wait(1));
-    std::jthread release([&] { rig.gate.open(); });
-    rig.queue->prepare_world_swap();
-    EXPECT_EQ(rig.queue->stats().running, 0u);
-    EXPECT_EQ(rig.queue->stats().payload_reserved_bytes, 0u);
+    ASSERT_TRUE(rig.queue->pump());
+    ASSERT_TRUE(rig.gate.wait(2));
+    auto first = rig.queue->take_completed();
+    auto second = rig.queue->take_completed();
+    if (!first.has_value()) {
+        FAIL() << "Expected first published result before JobSystem completion";
+    }
+    if (!second.has_value()) {
+        FAIL() << "Expected second published result before JobSystem completion";
+    }
+    EXPECT_EQ(first.value().result().status, FarVolumeBuildStatus::Ready);
+    EXPECT_EQ(second.value().result().status, FarVolumeBuildStatus::Ready);
+    first.reset();
+    EXPECT_EQ(rig.queue->stats().leased, 1u);
+    EXPECT_EQ(rig.queue->stats().occupied_slots, 2u);
+    EXPECT_EQ(rig.queue->stats().payload_reserved_bytes, kFarVolumeSlotReservation);
     EXPECT_FALSE(rig.queue->pump());
-    EXPECT_FALSE(rig.queue->take_completed().has_value());
+    EXPECT_EQ(rig.queue->stats().dispatches, 2u);
+    rig.gate.open();
+    rig.queue->drain();
+    EXPECT_TRUE(rig.queue->pump());
+    rig.queue->drain();
+    auto third = rig.queue->take_completed();
+    if (!third.has_value()) {
+        FAIL() << "Expected progress after the held completion returned";
+    }
+    EXPECT_EQ(third.value().result().identity.effective_request.tile_x, 2);
+    EXPECT_EQ(third.value().result().status, FarVolumeBuildStatus::Ready);
+}
+
+TEST(FarVolumeBuildQueue, SwapDrainsAHeldRealWorkerBeforeWorldCanBeDestroyed) {
+    WorkerGate gate;
+    gate.phase = Phase::AfterPublish;
+    gate.hold = true;
+    std::promise<void> held, swapped;
+    auto ready = held.get_future();
+    auto swap_finished = swapped.get_future();
+    auto owner = std::async(std::launch::async, [&] {
+        Rig rig;
+        Access::hook(*rig.queue, WorkerGate::invoke, &gate);
+        ASSERT_EQ(rig.queue->submit({1, 0, 0, std::nullopt}).status, FarVolumeSubmitStatus::Queued);
+        ASSERT_TRUE(rig.queue->pump());
+        ASSERT_TRUE(gate.wait(1));
+        held.set_value();
+        rig.queue->prepare_world_swap();
+        swapped.set_value(); // Observe this method, before Rig's later destructor drain.
+        EXPECT_EQ(rig.queue->stats().running, 0u);
+        EXPECT_EQ(rig.queue->stats().payload_reserved_bytes, 0u);
+        EXPECT_FALSE(rig.queue->pump());
+        EXPECT_FALSE(rig.queue->take_completed().has_value());
+    });
+    // Declared after the future: even a fatal main-thread assertion opens the
+    // externally owned gate before the future destructor joins its owner.
+    struct OpenGateOnExit {
+        WorkerGate& gate;
+        ~OpenGateOnExit() {
+            gate.open();
+        }
+    } cleanup{gate};
+    ASSERT_EQ(ready.wait_for(std::chrono::seconds(30)), std::future_status::ready);
+    // The worker is held, not merely slow. This probes required synchronization,
+    // not a performance threshold or a general wall-clock shutdown guarantee.
+    EXPECT_EQ(swap_finished.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    gate.open();
+    owner.get();
 }
 
 TEST(FarVolumeBuildQueue, DeepAndConvertedBudgetRefusalsNeverPublishPartialSuccess) {

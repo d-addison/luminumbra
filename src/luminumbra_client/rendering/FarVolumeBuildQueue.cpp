@@ -333,15 +333,21 @@ struct FarVolumeBuildQueue::Impl {
         } catch (...) {
             Fail(result, FarVolumeBuildStatus::Failed, "Unknown far-volume worker failure");
         }
-        std::lock_guard lock(state->mutex);
-        auto& slot = state->slots[index];
-        if (slot.cancellation.has_value())
-            Fail(result, slot.cancellation.value(), "Far-volume request invalidated");
-        slot.result = std::move(result);
-        slot.reserved = Ready(slot.result.status);
-        slot.state = SlotState::Complete;
-        if (slot.result.status == FarVolumeBuildStatus::Stale)
-            Increment(state->stale_results);
+        {
+            std::lock_guard lock(state->mutex);
+            auto& slot = state->slots[index];
+            if (slot.cancellation.has_value())
+                Fail(result, slot.cancellation.value(), "Far-volume request invalidated");
+            slot.result = std::move(result);
+            slot.reserved = Ready(slot.result.status);
+            slot.state = SlotState::Complete;
+            if (slot.result.status == FarVolumeBuildStatus::Stale)
+                Increment(state->stale_results);
+        }
+        // The private fixture can hold the real JobSystem completion epilogue
+        // while the owner consumes an already-visible result. Never hold the
+        // slot mutex here, and never inspect a result the owner may have released.
+        hooks.call(Phase::AfterPublish, identity);
     }
 };
 
