@@ -10,8 +10,9 @@ brick and tile dimensions; there is no second range table.
 
 The [implementation map](distant-world-implementation-status.md) remains a
 snapshot of the preceding source revision. This slice supplies a buildable
-sampler-driven primitive. Pristine terrain/cave sampler integration, vertical
-request discovery, meshing, scheduling, arrival fallback, rendering and durable
+sampler-driven primitive. A subsequent [bounded meshing kernel](far-volume-meshing.md)
+consumes its results. Pristine terrain/cave sampler integration, vertical
+request discovery, runtime meshing/scheduling, arrival fallback, rendering and durable
 edit baking remain unfinished. The client continues to use its existing F1/F2
 path, camera plane and formats.
 
