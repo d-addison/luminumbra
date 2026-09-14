@@ -107,7 +107,9 @@ private:
 // NOT proof that an arbitrary world or save is pristine.
 //
 // All queue methods belong to the constructing thread; lease destruction may
-// occur elsewhere. The bound world and JobSystem must live through drain().
+// occur elsewhere. JobSystem must outlive the queue, including its destructor.
+// A bound world must live until prepare_world_swap() returns or the queue is
+// destroyed. drain() waits for jobs but does not unbind the world.
 class FarVolumeBuildQueue {
 public:
     explicit FarVolumeBuildQueue(JobSystem& jobs, FarVolumeBuildLimits limits = {});

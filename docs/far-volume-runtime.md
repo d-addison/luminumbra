@@ -19,11 +19,15 @@ later runtime integration.
 
 A caller constructs a queue around an existing JobSystem, explicitly binds a
 fresh controlled world with `bind_fixture_world`, submits `FarVolumeRequest`
-values, pumps dispatch, and takes move-only result leases. The world and
-JobSystem must remain alive until the queue drains. Call `prepare_world_swap`
-before destroying/replacing the world; it cancels queued work, drains actual
-jobs, invalidates the epoch, and discards unleased results. Rebinding the same
-address still advances the epoch. The destructor also cancels/drains workers.
+values, pumps dispatch, and takes move-only result leases. The JobSystem must
+outlive the queue, including its destructor, even after an earlier drain or
+world swap. A bound world must remain alive until `prepare_world_swap` returns
+or the queue is destroyed. `drain` waits for jobs but does not unbind the world.
+
+Call `prepare_world_swap` before destroying/replacing the world; it cancels queued
+work, drains actual jobs, invalidates the epoch, and discards unleased results.
+Rebinding the same address still advances the epoch. The destructor also cancels
+and drains workers.
 
 Every queue method belongs to its constructing thread and rejects other callers.
 Lease release may occur on another thread. A lease contains geometry/metadata
