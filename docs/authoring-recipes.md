@@ -57,3 +57,34 @@ with `python -B -m unittest discover -s tools/blender/authoring/extension_tests 
 The native probe is `tools/blender/authoring/extension_tests/native_recipe_probe.py`;
 it requires an isolated interactive Blender editor with event simulation enabled,
 factory startup, disabled automatic scripts and separate user resources.
+
+## September 13 integration qualification
+
+The integrated source `eb745a4332cbcfdd03d65f30b820521fd2c4fa4f` includes
+`devel` at `7b7510d157af9712389b0ffc75fa4892c49089fb`, after the compiled prefab
+runtime landing. A fresh isolated Windows Blender 5.1.0 editor passed the same
+22 native obligations with the actual packaged extension. The 15 portable
+adapter/recipe tests and 27 service tests also passed on this source. Linux
+native editor qualification remains outstanding.
+
+![September 13 actual Blender review dialog showing the mesh and duplicate object ID repairs](assets/authoring-recipes/20260913/review-dialog.png)
+
+This original 1400×900 screenshot shows the two proposed ID repairs and the
+shared-data users before cancelling that review. The probe then opened a fresh
+plan and exercised application, undo/redo, replay, stale refusal, receipt-failure
+rollback, file load and extension unload. It is a synthetic Blender editor
+fixture, with visual approval **pending**.
+
+The [new evidence record](assets/authoring-recipes/20260913/evidence.json) pins
+the executed source/tree, all packaged source inputs, executable, exporter
+identity, archive, probe, runner, screenshot and retained receipts. The archive
+matches the historical recipe archive byte for byte because its source files
+are unchanged; this record documents a separate fresh execution. The September
+9 screenshot and receipt above keep their original source identity.
+
+The owned process completed in 8.515 seconds under the existing 120-second
+deadline, with two CPU workers. Executable, exporter identity, job and staged
+inputs remained unchanged. That duration covers startup, installation, the
+functional checks and shutdown; it does not establish recipe interaction latency
+or GPU performance. No engine rendering or production-content acceptance is
+claimed by this editor run.
