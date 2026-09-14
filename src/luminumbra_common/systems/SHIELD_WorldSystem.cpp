@@ -4300,6 +4300,8 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
                         }
                 if (changed) {
                     chunk->mark_voxel_data_dirty();
+                    if (m_voxelEditObserver)
+                        m_voxelEditObserver(chunk->get_coords());
                     bump_far_lod_authority_revision(chunk->get_coords());
                     chunk->current_lod.store(-1, std::memory_order_release);
                     ++edited;

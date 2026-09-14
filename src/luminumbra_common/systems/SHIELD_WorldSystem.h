@@ -760,6 +760,9 @@ public:
     // sphere of radius_m into the voxel terrain at world_pos, remesh + rebuild colliders, and
     // couple the water bed (dig drains, fill dams). Deterministic + persisted (edits sdf_data).
     // Returns the number of chunks modified.
+    void SetVoxelEditObserver(std::function<void(const IVec3&)> observer) {
+        m_voxelEditObserver = std::move(observer);
+    }
     int EditTerrainVoxel(const Vec3& world_pos,
                          float radius_m,
                          bool fill,
@@ -986,6 +989,7 @@ private:
     // synchronous-rebuild sites that mutate a settled world.
     std::uint64_t m_dirty_generation = 0;
     std::uint64_t m_last_serviced_generation = 0;
+    std::function<void(const IVec3&)> m_voxelEditObserver;
     std::vector<Vec3> m_last_anchor_positions;
 
     // Elide update_chunk_activation's O(radius^2)
