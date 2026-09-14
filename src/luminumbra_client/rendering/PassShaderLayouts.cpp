@@ -66,6 +66,21 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                          return e;
                      }()});
 
+        v.push_back({"gbuffer_authored",
+                     "res/shaders/static_asset.vert",
+                     "res/shaders/static_asset.frag",
+                     [] {
+                         ExpectedLayout expected;
+                         expected.pass_name = "gbuffer_authored";
+                         for (const char* name : {"u_baseColor",
+                                                  "u_metallicRoughness",
+                                                  "u_normalMap",
+                                                  "u_occlusion",
+                                                  "u_emissive"})
+                             expected.samplers.push_back({name, GL_SAMPLER_2D, -1});
+                         return expected;
+                     }()});
+
         // --- SsaoPass (four programs, all off ssao.vert) ---------------------
         v.push_back({"ssao", "res/shaders/ssao.vert", "res/shaders/ssao.frag", [] {
                          ExpectedLayout e;
@@ -125,6 +140,8 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                      {"u_materialLUT", GL_SAMPLER_2D, -1},
                      {"u_aetherField", GL_SAMPLER_2D, -1},
                      {"u_environmentBrdf", GL_SAMPLER_2D, -1},
+                     {"u_sceneDepth", GL_SAMPLER_2D, -1},
+                     {"u_authoredSurface", GL_SAMPLER_2D, -1},
                      {"u_shadowCascades", GL_SAMPLER_2D_ARRAY, -1},
                  };
                  return e;

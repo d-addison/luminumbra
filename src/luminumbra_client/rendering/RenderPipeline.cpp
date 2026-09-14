@@ -52,7 +52,9 @@
 #include <fstream>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 #include <limits>
+#include <luminumbra/rendering/StaticScene.h>
 #include <nlohmann/json.hpp>
 #include <random>
 #include <stb_image.h>
@@ -823,6 +825,10 @@ RenderContext RenderPipeline::make_foliage_context(const Camera& camera) {
 // Lighting GPU timer leaves the measured GPU work and every pixel unchanged.
 RenderContext RenderPipeline::make_lighting_context(const Camera& camera) {
     RenderContext ctx;
+    ctx.render_view = m_authored_view.get();
+    if (m_gbuffer_pass->gbuffer().authored_texture)
+        ctx.authored_surface = m_render_registry.adopt_texture(
+            "gbuffer_authored", m_gbuffer_pass->gbuffer().authored_texture);
     ctx.camera = &camera;
     ctx.screen_width = m_screen_width;
     ctx.screen_height = m_screen_height;
@@ -1646,7 +1652,8 @@ RenderPipeline::get_render_health_snapshot(bool drain_gl_errors) const {
         // sequence (a stage added/moved/removed in render_frame without updating the graph fails
         // here). Pure CPU; render-neutral; never hashed.
         {
-            const Rendering::RenderGraph frame_graph = Rendering::BuildLuminumbraFrameGraph();
+            const Rendering::RenderGraph frame_graph = Rendering::BuildLuminumbraFrameGraph(
+                m_gbuffer_pass->gbuffer().authored_texture != 0);
             for (const std::string& violation : frame_graph.validate()) {
                 fail("frame graph declaration inconsistent: " + violation);
             }
@@ -1739,7 +1746,11 @@ void RenderPipeline::refresh_render_pass_metadata() {
              "color+depth",
              "store deferred attachments",
              m_last_render_pass_stats.terrain_draws + m_last_render_pass_stats.far_region_draws +
-                 m_last_render_pass_stats.skinned_draws);
+                 m_last_render_pass_stats.skinned_draws + m_last_render_pass_stats.authored_draws);
+    if (m_gbuffer_pass->gbuffer().authored_texture != 0) {
+        m_last_render_pass_metadata.back().inputs.push_back("authored_static_meshes");
+        m_last_render_pass_metadata.back().outputs.push_back("gbuffer.authored_surface");
+    }
     add_pass("ssao",
              {"gbuffer.position", "gbuffer.normal_material", "ssao.noise"},
              {"ssao.raw"},
@@ -2625,6 +2636,29 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
     {
         RenderContext gbuffer_ctx = make_gbuffer_context(camera, frustum_planes);
         GBufferPassInput gbuffer_input;
+        m_authored_view.reset();
+        if (m_authored_draws && !m_authored_draws->draws.empty()) {
+            if (m_taau_enabled || m_render_scale != 1.0f)
+                throw std::invalid_argument(
+                    "Authored static draws require scale 1 and TAAU disabled");
+            RenderViewDescription description;
+            const glm::mat4 view = camera.GetViewMatrix();
+            const glm::mat4 projection =
+                camera.GetProjectionMatrix(m_screen_width, m_screen_height);
+            for (size_t i = 0; i < 16; ++i) {
+                description.view[i] = glm::value_ptr(view)[i];
+                description.projection[i] = glm::value_ptr(projection)[i];
+            }
+            description.width = m_screen_width;
+            description.height = m_screen_height;
+            description.near_plane = camera.GetNearPlane();
+            description.far_plane = camera.GetFarPlane();
+            description.revision =
+                1; // Per-frame value; external capture host owns revision publication.
+            m_authored_view = std::make_unique<RenderView>(RenderView::Validate(description));
+            gbuffer_input.authored_draws = m_authored_draws;
+            gbuffer_input.authored_view = m_authored_view.get();
+        }
         // Live-terrain submit: the Codex-signed-off callback (CullHierarchical +
         // draw_chunks_mdi, byte-identical), shared with ShadowPass.
         gbuffer_input.submit_terrain_chunks = make_terrain_submitter(true);
@@ -2652,6 +2686,8 @@ void RenderPipeline::execute_stage_gbuffer(const Camera& camera) {
         m_last_render_pass_stats.far_indices_drawn += gstats.far_indices;
         m_last_render_pass_stats.skinned_draws += gstats.skinned_draws;
         m_last_render_pass_stats.skinned_indices_drawn += gstats.skinned_indices;
+        m_last_render_pass_stats.authored_draws += gstats.authored_draws;
+        m_last_render_pass_stats.authored_indices_drawn += gstats.authored_indices;
     }
     m_cpu_frame_gbuf = std::chrono::steady_clock::now(); //
 }

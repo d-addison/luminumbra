@@ -22,6 +22,8 @@ struct GBuffer {
     // rigid-object transforms and skinned bone poses still lack previous-frame history.
     u32 motion_vector_texture = 0;
     u32 depth_texture = 0;
+    // Optional RGB emission + authored-material flag; zero for legacy geometry.
+    u32 authored_texture = 0;
 };
 
 } // namespace Luminumbra::Rendering

@@ -10,6 +10,7 @@
 //     (proves gbuffer_position + the scent path run);
 //   * each pass is a true no-op when OFF (mode None / inactive mirror) -> target stays
 //     as cleared.
+#include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
@@ -23,6 +24,9 @@
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
+#include <glm/gtc/type_ptr.hpp>
+#include <luminumbra/rendering/RenderView.h>
+#include <luminumbra/rendering/StaticScene.h>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -743,4 +747,117 @@ TEST(PassContext, CpuAndGpuGrassTrackUploadedMeshReplacementAndRemoval) {
         pass.destroy_buffers();
     }
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST(PassContext, AuthoredStaticDrawsRespectTerrainIsolation) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    namespace SH = Luminumbra::Client::ScenarioHarness;
+    constexpr unsigned extent = 64;
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.reset_shaders();
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_gbuffer(resources);
+        }
+    } cleanup{pass, resources};
+    pass.init_geometry_shader(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_instanced_static_mesh(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(pass.geometry_shader() && pass.geometry_shader()->IsValid());
+    ASSERT_TRUE(pass.instanced_static_mesh_shader() &&
+                pass.instanced_static_mesh_shader()->IsValid());
+    pass.init_gbuffer(resources, extent, extent);
+    ASSERT_NE(pass.gbuffer().fbo_id, 0u);
+
+    Camera camera({0, 0, 0}, {0, 1, 0}, -90, 0);
+    RenderViewDescription description;
+    description.width = description.height = extent;
+    description.revision = 1;
+    description.near_plane = camera.GetNearPlane();
+    description.far_plane = camera.GetFarPlane();
+    const auto view_matrix = camera.GetViewMatrix();
+    const auto projection = camera.GetProjectionMatrix(extent, extent);
+    std::copy_n(glm::value_ptr(view_matrix), 16, description.view.begin());
+    std::copy_n(glm::value_ptr(projection), 16, description.projection.begin());
+    const auto view = RenderView::Validate(description);
+    glm::vec4 planes[6];
+    for (size_t i = 0; i < 6; ++i)
+        planes[i] = glm::make_vec4(view.frustum_planes()[i].data());
+
+    auto mesh = std::make_shared<StaticMesh>();
+    mesh->identity = "isolation-quad";
+    mesh->vertices = {{{-1, -1, -3}, {0, 0, 1}, {0, 0}},
+                      {{1, -1, -3}, {0, 0, 1}, {1, 0}},
+                      {{1, 1, -3}, {0, 0, 1}, {1, 1}},
+                      {{-1, 1, -3}, {0, 0, 1}, {0, 1}}};
+    mesh->indices = {0, 1, 2, 0, 2, 3};
+    auto material = std::make_shared<StaticMaterial>();
+    material->identity = "isolation-material";
+    material->base_color = {.2, .6, .9, 1};
+    auto snapshot = std::make_shared<StaticDrawSnapshot>();
+    snapshot->revision = 1;
+    StaticDraw draw;
+    draw.key = {"placed", "quad", 0};
+    draw.mesh = mesh;
+    draw.material = material;
+    draw.normal = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    snapshot->draws.push_back(std::move(draw));
+
+    entt::registry entities;
+    SH::IsolationConfig isolation;
+    isolation.layer_mask = SH::IsolationLayer::Terrain;
+    RenderContext context;
+    context.camera = &camera;
+    context.registry = &resources;
+    context.screen_width = context.screen_height = extent;
+    context.frustum_planes = planes;
+    context.isolation = &isolation;
+    unsigned terrain_submissions = 0;
+    GBufferPassInput input;
+    input.root_path = LUMINUMBRA_SOURCE_ROOT;
+    input.authored_view = &view;
+    input.authored_draws = snapshot;
+    // No legacy terrain or entities: every covered pixel must come from the
+    // actual authored pass reached through GBufferPass::execute.
+    input.submit_terrain_chunks = [&](const glm::vec4(&)[6]) {
+        ++terrain_submissions;
+        return TerrainSubmitStats{};
+    };
+    glViewport(0, 0, extent, extent);
+    glDisable(GL_BLEND);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0, 0, 0, 0);
+    const auto render = [&] {
+        pass.execute(context, entities, input);
+        std::vector<float> depth(extent * extent), authored(extent * extent * 4);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, pass.gbuffer().fbo_id);
+        glReadPixels(0, 0, extent, extent, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+        glReadBuffer(GL_COLOR_ATTACHMENT5);
+        glReadPixels(0, 0, extent, extent, GL_RGBA, GL_FLOAT, authored.data());
+        for (size_t i = 0; i < depth.size(); ++i)
+            EXPECT_EQ(authored[i * 4 + 3], depth[i] > 0 ? 1.0f : 0.0f);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        return depth;
+    };
+    const auto enabled = render();
+    const auto covered =
+        std::count_if(enabled.begin(), enabled.end(), [](float depth) { return depth > 0; });
+    ASSERT_GT(covered, 256);
+    ASSERT_LT(covered, extent * extent);
+    EXPECT_EQ(terrain_submissions, 1u);
+
+    isolation.layer_mask = SH::IsolationLayer::Foliage;
+    const auto suppressed = render();
+    EXPECT_TRUE(
+        std::all_of(suppressed.begin(), suppressed.end(), [](float depth) { return depth == 0; }));
+    EXPECT_EQ(terrain_submissions, 1u);
+
+    isolation.layer_mask = SH::IsolationLayer::Terrain;
+    EXPECT_EQ(render(), enabled);
+    EXPECT_EQ(terrain_submissions, 2u);
 }
