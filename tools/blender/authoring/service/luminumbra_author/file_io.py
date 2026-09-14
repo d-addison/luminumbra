@@ -50,6 +50,7 @@ def open_regular_reader(path):
     No retry, deadline extension, truncation or in-place write is involved.
     """
     path = safe_path(path)
+    require(stat.S_ISREG(path.lstat().st_mode), 'Record requires a regular file')
     if os.name == 'nt':
         import ctypes
         from ctypes import wintypes as w
