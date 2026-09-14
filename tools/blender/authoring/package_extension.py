@@ -15,6 +15,7 @@ def build(target):
         files[name] = here / "extension" / name
     for name in ("protocol.py", "broker.py"):
         files["viewport/" + name] = here / "viewport" / name
+    files["viewport/file_io.py"] = here / "service/luminumbra_author/file_io.py"
     files["LICENSE"] = here.parents[2] / "LICENSE"
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)

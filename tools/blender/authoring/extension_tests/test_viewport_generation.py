@@ -15,6 +15,8 @@ import unittest
 from unittest import mock
 
 authoring = Path(__file__).parents[1]
+sys.path.insert(0, str(authoring / 'service'))
+from luminumbra_author.contracts import atomic_json
 package = ModuleType('viewport_generation_contract')
 package.__path__ = [str(authoring / 'extension'), str(authoring)]
 sys.modules[package.__name__] = package
@@ -76,10 +78,8 @@ class GenerationMetadata(unittest.TestCase):
         return destination, manifest
 
     def pointer(self, generation):
-        temporary = self.root / 'pointer.tmp'
-        temporary.write_bytes(encoded({'schema': v.GENERATION, 'job_id': generation,
-                                       'build_identity': 'e' * 64}))
-        temporary.replace(self.root / 'current.json')
+        atomic_json(self.root / 'current.json', {'schema': v.GENERATION, 'job_id': generation,
+                                               'build_identity': 'e' * 64})
 
     def read(self, generation='', pins=None):
         return v._read_metadata(self.project, self.asset, generation, pins or {})

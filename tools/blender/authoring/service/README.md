@@ -140,6 +140,15 @@ generation moves into `.luminumbra-author/generations/`. The service rechecks th
 source hashes before atomically replacing `current.json`; failed, cancelled and
 stale work leaves the previous pointer intact.
 
+The service and optional viewport package share one standard-library file I/O
+implementation. JSON publication flushes and fsyncs a complete temporary file
+in the destination directory before replacement. Shared readers keep the old
+complete file; subsequent opens see the replacement. Windows uses explicit
+delete-sharing readers and `FileRenameInfoEx` POSIX replacement semantics.
+Unsupported filesystems and non-sharing readers fail without truncating or
+removing the current pointer. The shared helper contributes to service build
+identity and is copied byte-for-byte into the viewport extension archive.
+
 Consumers retain a generation ID and read its manifest instead of following the
 current pointer on every access. Published generations are never modified or
 automatically deleted. Garbage collection and power-loss durability are future
@@ -157,6 +166,7 @@ network state format changes are introduced by this service.
 
 ```sh
 python -B -m unittest discover -s tools/blender/authoring/service/tests -v
+python -B -m unittest discover -s test/viewport -p test_shared_file_io.py -v
 python tools/blender/authoring/service/tests/native_acceptance.py --service /your/install/luminumbra-author --toolchain /your/install/toolchain.json --output /fresh/evidence/directory --exporter-id blender.gltf.qualified --exporter-sha256 ACTUAL_EXPORTER_SHA256 prop.glb plant.glb character.glb
 ```
 
@@ -165,3 +175,10 @@ runner requires a real installed compiler and caller-provided GLBs, builds each
 twice, compares output hashes, retains old generations, exercises refusals and
 checks unchanged toolchain hashes. Neither lane closes renderer, physical
 animation or newly authored production-content acceptance.
+
+Windows sharing qualification uses
+`python -B test/viewport/probe_windows_file_io.py --receipt /fresh/receipt.json`.
+Its twelve contracts include an independently packaged service subprocess
+publishing `current.json` while the packaged generation reader holds the old
+file, a real non-sharing CRT-reader negative control, and unchanged input pins.
+It does not qualify the native renderer or Blender adapter.

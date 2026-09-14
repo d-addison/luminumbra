@@ -105,6 +105,7 @@ class ClientTests(unittest.TestCase):
         self.broker_root.mkdir()
         self.broker = self.broker_root / 'client_broker.py'
         shutil.copyfile(AUTHORING / 'viewport/protocol.py', self.broker_root / 'protocol.py')
+        shutil.copyfile(AUTHORING / 'service/luminumbra_author/file_io.py', self.broker_root / 'file_io.py')
         # This trusted test wrapper uses the real Broker and real fixture child;
         # the dummy SDK is solely an installation-identity contract fixture.
         self.broker.write_text('''import hashlib,json,os,sys,threading,time

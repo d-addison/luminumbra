@@ -311,7 +311,7 @@ class BuildService:
             # Hash exact service code as well as the executable/library manifest.
             service_hashes = {name: digest(pkgutil.get_data(__package__, name)) for name in (
                 "__init__.py", "__main__.py", "contracts.py", "formats.py",
-                "locking.py", "process.py", "service.py", "prefab.py")}
+                "locking.py", "process.py", "service.py", "prefab.py", "file_io.py")}
             identity = digest(canonical({"inputs": hashes, "toolchain": toolchain,
                                          "service": service_hashes, "profile": asset["profile"],
                                          "host": self.host_profile}))

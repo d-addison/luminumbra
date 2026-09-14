@@ -21,7 +21,8 @@ def inputs():
             'test_client.py', 'test_windows_process.py', 'client_fixture.py')),
         *(root / 'tools/blender/authoring/extension' / name for name in (
             'viewport_client.py', 'viewport_process.py', 'viewport_installation.py')),
-        *(root / 'tools/blender/authoring/viewport' / name for name in ('protocol.py', 'broker.py'))]
+        *(root / 'tools/blender/authoring/viewport' / name for name in ('protocol.py', 'broker.py')),
+        root / 'tools/blender/authoring/service/luminumbra_author/file_io.py']
     return {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
 
 

@@ -284,7 +284,8 @@ class ViewportClient:
             broker, host, project, manifest = [wire.safe_path(path) for path in
                 (self.broker_script, self.host, self.project, self.host_manifest)]
             wire.require(project.is_dir(), 'Viewport project directory')
-            pins = (python, broker, broker.parent / 'protocol.py')
+            pins = (python, broker, broker.parent / 'protocol.py',
+                    wire.file_io_path(broker.parent / 'protocol.py'))
             while not self._closing.is_set():
                 # Consume this attempt's explicit request even if preflight
                 # refuses it. A rejected pin must not create a busy retry loop.
