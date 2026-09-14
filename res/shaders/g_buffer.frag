@@ -1,4 +1,5 @@
 #version 450 core
+layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 layout (location = 0) out vec3 gPosition;          // RGB16F: full view-space position
 layout (location = 1) out vec4 gNormalMaterial;    // RGB10A2: Octahedral normal + material ID
 layout (location = 2) out vec4 gAlbedoRoughness;   // RGBA8: RGB albedo + roughness
@@ -242,6 +243,7 @@ float triplanar_roughness(vec3 worldPos, vec3 weights, float layer, float scale)
 
 void main()
 {
+    gAuthoredSurface = vec4(0.0);
     // Public procedural trees have no leaf-card texture. Give their cards an
     // explicit silhouette instead of drawing opaque rectangular terrain patches.
     bool proceduralLeaf = u_alphaTest == 2;

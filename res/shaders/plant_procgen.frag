@@ -1,4 +1,5 @@
 #version 450 core
+layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 //  render-only PROCEDURAL plant pass (behind render.plant_procgen).
 // Writes the SAME deferred G-buffer layout as g_buffer.frag so the downstream
 // lighting / SSAO / tonemap chain treats procgen plants exactly like the other
@@ -40,6 +41,7 @@ uniform float u_markerEmissive = 0.0;
 
 void main()
 {
+    gAuthoredSurface = vec4(0.0);
     // The CPU bake (PlantProcgenPass) OVERWRITES UV.x with a clean per-vertex
     // class flag: 0.0 for woody branch-ring verts, 1.0 for leaf-card verts. So a
     // simple threshold cleanly separates the brown trunk from the green canopy.

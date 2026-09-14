@@ -20,6 +20,7 @@
 namespace Luminumbra::Rendering {
 
 class Camera;
+class StaticDrawPass;
 class Shader;
 struct Mesh;
 class RenderResourceRegistry;
@@ -115,6 +116,7 @@ private:
                                       GBufferDrawStats& stats);
 
     GBuffer m_gbuffer;
+    std::unique_ptr<StaticDrawPass> m_authored_pass;
     std::unique_ptr<Shader> m_geometry_shader;
     std::unique_ptr<Shader> m_instanced_static_mesh_shader;
     std::unique_ptr<Shader> m_skinned_mesh_shader;

@@ -16,11 +16,14 @@
 #include <filesystem>  // std::filesystem::path (LOD mesh root)
 #include <functional>  // std::function (static_model_tex lookup)
 #include <glm/glm.hpp> // glm::mat4 (WaterDrawItem model)
-#include <string>      // mesh-path lookup key
-#include <vector>      // WaterDrawItem list
+#include <memory>
+#include <string> // mesh-path lookup key
+#include <vector> // WaterDrawItem list
 
 namespace Luminumbra::Rendering {
 
+struct StaticDrawSnapshot;
+class RenderView;
 class FarLodSystem; // far-LOD region meshes drawn with the GBuffer pass's own shader
 
 // ----------------------------------------------------------------------------
@@ -30,6 +33,9 @@ class FarLodSystem; // far-LOD region meshes drawn with the GBuffer pass's own s
 // prev_view_proj/prev_time/material_lut/terrain_*/skinned_*/isolation/
 // frustum_planes) comes from RenderContext. These are the remaining reaches.
 struct GBufferPassInput {
+    std::shared_ptr<const StaticDrawSnapshot> authored_draws;
+    const RenderView* authored_view = nullptr;
+    bool authored_temporal_enabled = false;
     // Live-terrain submit seam: wraps CullHierarchical + draw_chunks_mdi and
     // returns counts (NOT mutated inside the seam). The pass copies
     // ctx.frustum_planes into a local glm::vec4 fp[6] before calling this
@@ -73,6 +79,8 @@ struct GBufferDrawStats {
     std::size_t far_indices = 0;            // call site: '+=' (far_indices_drawn)
     std::size_t skinned_draws = 0;          // call site: '+=' (skinned_draws)
     std::size_t skinned_indices = 0;        // call site: '+=' (skinned_indices_drawn)
+    std::size_t authored_draws = 0;
+    std::size_t authored_indices = 0;
 };
 
 // ----------------------------------------------------------------------------
