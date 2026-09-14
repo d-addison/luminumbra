@@ -1,4 +1,8 @@
 #include "GBufferPass.h"
+#include "../GBufferTargets.h"
+#include "StaticDrawPass.h"
+#include <luminumbra/rendering/StaticScene.h>
+#include <stdexcept>
 
 #include "../FarLodSystem.h"
 #include "../PassShaderLayouts.h"      // enumerable ExpectedLayout registry
@@ -158,101 +162,11 @@ void GBufferPass::init_skinned_mesh(const std::filesystem::path& root_path) {
 }
 
 void GBufferPass::init_gbuffer(RenderResourceRegistry& registry, u32 width, u32 height) {
-    // allocate the FBO + attachments THROUGH the registry.
-    // Every desc reproduces the exact GL parameters of the retired
-    // glTexImage/glTexParameter calls so the migration is byte-neutral
-    // (flip-score-0 on same-pose captures); the struct caches the owned ids.
-    const auto color_desc = [&](u32 internal_format, u32 format, u32 type, const char* label) {
-        TextureDesc d;
-        d.width = width;
-        d.height = height;
-        d.internal_format = internal_format;
-        d.format = format;
-        d.type = type;
-        d.min_filter = GL_NEAREST;
-        d.mag_filter = GL_NEAREST;
-        d.expected_layout = "color_attachment";
-        d.debug_label = label;
-        return d;
-    };
-
-    // Position: full view-space position for deferred lighting, SSAO, and material projection.
-    m_gbuffer.position_texture =
-        registry
-            .create_texture("gbuffer_position",
-                            color_desc(GL_RGB16F, GL_RGB, GL_FLOAT, "gbuffer.position"))
-            .id;
-    // Normal/Material: RGBA8 (octahedral normal + material ID).
-    m_gbuffer.normal_texture =
-        registry
-            .create_texture(
-                "gbuffer_normal",
-                color_desc(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, "gbuffer.normal_material"))
-            .id;
-    // Albedo/Roughness: RGBA8.
-    m_gbuffer.albedo_texture =
-        registry
-            .create_texture(
-                "gbuffer_albedo",
-                color_desc(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, "gbuffer.albedo_roughness"))
-            .id;
-    // Metallic/AO: RG16F.
-    m_gbuffer.material_texture =
-        registry
-            .create_texture("gbuffer_material",
-                            color_desc(GL_RG16F, GL_RG, GL_FLOAT, "gbuffer.metallic_ao"))
-            .id;
-    // Motion vectors: RG16F (signed NDC delta).   TAAU foundation.
-    m_gbuffer.motion_vector_texture =
-        registry
-            .create_texture("gbuffer_motion",
-                            color_desc(GL_RG16F, GL_RG, GL_FLOAT, "gbuffer.motion_vectors"))
-            .id;
-
-    // Depth: DEPTH_COMPONENT32F, reversed-Z, clamp-to-border with cleared sky depth.
-    TextureDesc depth_desc =
-        color_desc(GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT, "gbuffer.depth");
-    depth_desc.wrap_s = GL_CLAMP_TO_BORDER;
-    depth_desc.wrap_t = GL_CLAMP_TO_BORDER;
-    depth_desc.has_border_color = true;
-    depth_desc.border_color[0] = 0.0f;
-    depth_desc.border_color[1] = 0.0f;
-    depth_desc.border_color[2] = 0.0f;
-    depth_desc.border_color[3] = 0.0f;
-    depth_desc.expected_layout = "depth_attachment";
-    m_gbuffer.depth_texture = registry.create_texture("gbuffer_depth", depth_desc).id;
-
-    FboDesc fbo_desc;
-    fbo_desc.attachments = {
-        {GL_COLOR_ATTACHMENT0, "gbuffer_position"},
-        {GL_COLOR_ATTACHMENT1, "gbuffer_normal"},
-        {GL_COLOR_ATTACHMENT2, "gbuffer_albedo"},
-        {GL_COLOR_ATTACHMENT3, "gbuffer_material"},
-        {GL_COLOR_ATTACHMENT4, "gbuffer_motion"},
-        {GL_DEPTH_ATTACHMENT, "gbuffer_depth"},
-    };
-    fbo_desc.draw_buffers = {GL_COLOR_ATTACHMENT0,
-                             GL_COLOR_ATTACHMENT1,
-                             GL_COLOR_ATTACHMENT2,
-                             GL_COLOR_ATTACHMENT3,
-                             GL_COLOR_ATTACHMENT4};
-    fbo_desc.debug_label = "gbuffer.fbo";
-    m_gbuffer.fbo_id = registry.create_fbo("gbuffer_fbo", fbo_desc).id;
-    if (m_gbuffer.fbo_id == 0) {
-        LUMINUMBRA_CORE_ERROR("G-Buffer FBO not complete!");
-    }
+    CreateGBufferTargets(m_gbuffer, registry, width, height);
 }
 
 void GBufferPass::destroy_gbuffer(RenderResourceRegistry& registry) {
-    // Ownership contract: the registry deletes the owned GL objects.
-    registry.destroy_owned("gbuffer_fbo");
-    registry.destroy_owned("gbuffer_position");
-    registry.destroy_owned("gbuffer_normal");
-    registry.destroy_owned("gbuffer_albedo");
-    registry.destroy_owned("gbuffer_material");
-    registry.destroy_owned("gbuffer_motion");
-    registry.destroy_owned("gbuffer_depth");
-    m_gbuffer = GBuffer{};
+    DestroyGBufferTargets(m_gbuffer, registry);
 }
 
 void GBufferPass::destroy_instanced_static_mesh() {
@@ -276,6 +190,7 @@ void GBufferPass::destroy_skinned_mesh() {
 }
 
 void GBufferPass::reset_shaders() {
+    m_authored_pass.reset();
     m_geometry_shader.reset();
     m_instanced_static_mesh_shader.reset();
     m_skinned_mesh_shader.reset();
@@ -285,6 +200,20 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
                                       entt::registry& registry,
                                       const GBufferPassInput& input) {
     GBufferDrawStats stats;
+    const bool authored = input.authored_draws && !input.authored_draws->draws.empty();
+    if (authored) {
+        if (!input.authored_view || input.authored_temporal_enabled ||
+            ctx.internal_w() != ctx.screen_width || ctx.internal_h() != ctx.screen_height)
+            throw std::invalid_argument(
+                "Authored static draws require exact view, scale 1 and TAAU disabled");
+        if (!m_authored_pass)
+            m_authored_pass = std::make_unique<StaticDrawPass>(input.root_path);
+        if (!m_gbuffer.authored_texture) {
+            DestroyGBufferTargets(m_gbuffer, *ctx.registry);
+            CreateGBufferTargets(
+                m_gbuffer, *ctx.registry, ctx.internal_w(), ctx.internal_h(), true);
+        }
+    }
     const Camera& camera = *ctx.camera;
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
@@ -319,6 +248,12 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
 
         // Pass 2: Render all instanced static meshes
         geometry_pass_static_meshes(ctx, input, registry, camera, fp);
+        if (authored) {
+            const auto authored_stats =
+                m_authored_pass->Render(*input.authored_view, input.authored_draws, m_gbuffer);
+            stats.authored_draws += authored_stats.draws;
+            stats.authored_indices += authored_stats.indices;
+        }
     }
 
     // Pass 3: non-instanced skinned meshes (CPU-sampled joint

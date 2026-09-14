@@ -9,6 +9,12 @@ def build(target):
     files = {name: here / "extension" / name for name in (
         "blender_manifest.toml", "__init__.py", "blender_asset.py", "logic.py", "broker.py", "export_worker.py",
         "recipes.py", "blender_recipes.py")}
+    for name in ("viewport_math.py", "viewport_adapter_state.py", "viewport_draw.py", "viewport_engine.py",
+                 "viewport_generation.py", "viewport_client.py", "viewport_installation.py", "viewport_process.py",
+                 "viewport_capture.py"):
+        files[name] = here / "extension" / name
+    for name in ("protocol.py", "broker.py"):
+        files["viewport/" + name] = here / "viewport" / name
     files["LICENSE"] = here.parents[2] / "LICENSE"
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
