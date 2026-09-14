@@ -1,4 +1,5 @@
 import copy
+from contextlib import contextmanager
 import hashlib
 import hmac
 import io
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -348,6 +350,153 @@ class Transport(unittest.TestCase):
         self.assertFalse(errors); self.assertEqual(value[0]['sequence'], 2)
         self.assertEqual(value[0]['state']['locals'][0]['matrix'][12], 3)
         self.assertGreaterEqual(receipt['dropped'], 1)
+
+    def wait_for(self, condition, timeout=2):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if condition():
+                return
+            time.sleep(.005)
+        self.assertTrue(condition(), 'Timed out waiting for fixture condition')
+
+    @contextmanager
+    def contended_broker(self, deadline=.8, mode='echo'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = str(Path(sys.executable).resolve())
+            broker = Broker(root, KEY, SESSION, [executable, '-B',
+                str(Path(__file__).with_name('fixture_child.py')), str(MODULE), mode],
+                hashlib.sha256(Path(executable).read_bytes()).hexdigest(), root, deadline=deadline)
+            leases = [broker.slots._lease(index) for index in (0, 1)]
+            self.assertTrue(all(leases))
+            fixture = SimpleNamespace(root=root, broker=broker, leases=leases,
+                                      attempts=[], errors=[], observed=None)
+            publish = broker.slots.publish
+            def observe_publish(header, payload):
+                index = publish(header, payload)
+                # Observe actual leased-file publication, without mocking lease
+                # failure or synthesizing the child's response.
+                fixture.attempts.append((header['sequence'], index))
+                return index
+            def run():
+                try:
+                    broker.run()
+                except Exception as error:
+                    fixture.errors.append(error)
+            p.atomic_write(root / 'desired.bin', p.encode(state(), b'', KEY))
+            with mock.patch.object(broker.slots, 'publish', side_effect=observe_publish):
+                fixture.thread = threading.Thread(target=run)
+                fixture.thread.start()
+                try:
+                    self.wait_for(lambda: fixture.attempts)
+                    self.assertEqual(fixture.attempts[0], (1, None))
+                    yield fixture
+                finally:
+                    if fixture.thread.is_alive():
+                        p.atomic_write(root / 'stop.bin', p.encode(
+                            {'kind': 'stop', 'session': SESSION, 'sequence': 9999}, b'', KEY))
+                    fixture.thread.join(timeout=4)
+                    self.assertFalse(fixture.thread.is_alive())
+                    fixture.receipt = json.loads((root / 'broker-result.json').read_bytes())
+                    self.assertTrue(fixture.receipt['child_reaped'])
+                    for lease in leases:
+                        lease.unlink(missing_ok=True)
+
+    def release_and_observe(self, fixture):
+        for lease in fixture.leases:
+            lease.unlink()
+        def read():
+            for index in (0, 1):
+                value = fixture.broker.slots.read(index)
+                if value is not None:
+                    fixture.observed = value
+                    return True
+            return False
+        self.wait_for(read)
+
+    def test_completed_frame_retries_after_slot_release_without_new_state(self):
+        with self.contended_broker() as fixture:
+            self.release_and_observe(fixture)
+            self.assertEqual(fixture.observed, frame())
+            time.sleep(.04)
+            self.assertEqual([seq for seq, index in fixture.attempts if index is not None], [1])
+        self.assertFalse(fixture.errors)
+        self.assertEqual(fixture.receipt['status'], 'stopped')
+        self.assertEqual(fixture.receipt['published'], 1)
+        self.assertEqual(fixture.receipt['dropped'], 0)
+
+    def test_permanent_slot_leases_fail_with_original_deadline_and_reap_child(self):
+        with self.contended_broker(deadline=.3) as fixture:
+            fixture.thread.join(timeout=1.5)
+            self.assertFalse(fixture.thread.is_alive(), 'Permanent leases must not leave broker idle forever')
+        self.assertEqual(len(fixture.errors), 1)
+        self.assertRegex(str(fixture.errors[0]), 'publication deadline')
+        self.assertEqual(fixture.receipt['status'], 'failed')
+        self.assertEqual(fixture.receipt['published'], 0)
+
+    def test_newer_state_supersedes_completed_frame_while_slots_are_leased(self):
+        with self.contended_broker() as fixture:
+            newer = state(2)
+            newer['state']['scene_revision'] = 2
+            newer['state']['locals'][0]['matrix'][12] = 3
+            p.atomic_write(fixture.root / 'desired.bin', p.encode(newer, b'', KEY))
+            self.wait_for(lambda: (2, None) in fixture.attempts)
+            self.release_and_observe(fixture)
+            self.assertEqual(fixture.observed, frame(newer))
+            self.assertEqual([seq for seq, index in fixture.attempts if index is not None], [2])
+        self.assertFalse(fixture.errors)
+        self.assertEqual(fixture.receipt['published'], 1)
+        self.assertEqual(fixture.receipt['dropped'], 1)
+
+    def test_stop_discards_completed_frame_without_waiting_for_leases(self):
+        with self.contended_broker() as fixture:
+            p.atomic_write(fixture.root / 'stop.bin', p.encode(
+                {'kind': 'stop', 'session': SESSION, 'sequence': 2}, b'', KEY))
+            fixture.thread.join(timeout=2)
+            self.assertFalse(fixture.thread.is_alive())
+            self.assertTrue(all(lease.exists() for lease in fixture.leases))
+            self.assertFalse(list(fixture.root.glob('frame-*.json')))
+        self.assertFalse(fixture.errors)
+        self.assertEqual(fixture.receipt['status'], 'stopped')
+        self.assertEqual(fixture.receipt['published'], 0)
+        self.assertEqual(fixture.receipt['dropped'], 1)
+        self.assertTrue(fixture.broker.reader_eof)
+
+    def test_desired_flood_does_not_extend_blocked_publication_deadline(self):
+        with self.contended_broker(deadline=.4) as fixture:
+            started = time.monotonic()
+            sequence = 1
+            while fixture.thread.is_alive() and time.monotonic() - started < 1:
+                sequence += 1
+                newer = state(sequence)
+                newer['state']['scene_revision'] = sequence
+                newer['state']['locals'][0]['matrix'][12] = sequence
+                p.atomic_write(fixture.root / 'desired.bin', p.encode(newer, b'', KEY))
+                time.sleep(.025)
+            self.assertFalse(fixture.thread.is_alive(), 'Desired updates must not renew delivery deadline')
+            self.assertLess(time.monotonic() - started, .8)
+            self.assertGreater(max(seq for seq, _ in fixture.attempts), 1)
+        self.assertEqual(len(fixture.errors), 1)
+        self.assertRegex(str(fixture.errors[0]), 'publication deadline')
+        self.assertEqual(fixture.receipt['status'], 'failed')
+        self.assertEqual(fixture.receipt['published'], 0)
+
+    def test_stop_after_supersession_waits_for_inflight_response(self):
+        with self.contended_broker(mode='delay') as fixture:
+            p.atomic_write(fixture.root / 'desired.bin', p.encode(state(2), b'', KEY))
+            self.wait_for(lambda: fixture.broker.gate.last['sequence'] == 2)
+            p.atomic_write(fixture.root / 'stop.bin', p.encode(
+                {'kind': 'stop', 'session': SESSION, 'sequence': 3}, b'', KEY))
+            fixture.thread.join(timeout=2)
+            self.assertFalse(fixture.thread.is_alive())
+            self.assertTrue(all(lease.exists() for lease in fixture.leases))
+        self.assertFalse(fixture.errors)
+        self.assertEqual(fixture.receipt['status'], 'stopped')
+        self.assertEqual(fixture.receipt['child_returncode'], 0)
+        self.assertEqual(fixture.receipt['published'], 0)
+        self.assertEqual(fixture.receipt['dropped'], 2)
+        self.assertTrue(fixture.broker.reader_eof)
+        self.assertTrue(fixture.broker.responses.empty())
 
     def test_timeout_reaps_child(self):
         errors, value, _ = self.run_broker('hang')
