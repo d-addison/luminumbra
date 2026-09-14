@@ -8,6 +8,7 @@ import bpy
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from logic import atomic_json, canonical, digest, read_json
+from blender_asset import validate_collection, validate_prefab_materials
 
 
 def file_hash(path):
@@ -16,6 +17,20 @@ def file_hash(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             checksum.update(block)
     return checksum.hexdigest()
+
+
+def validate_snapshot(scene, collection, request):
+    """Recheck the loaded snapshot at its export frame before invoking glTF."""
+    profile = request["profile"]
+    build_profile = request.get("build_profile", "glb-geometry-v1")
+    if profile not in ("static", "character") or build_profile not in ("glb-geometry-v1", "glb-static-prefab-v1"):
+        raise RuntimeError("Unsupported asset compilation profile")
+    actual_profile, _ = validate_collection(scene, collection)
+    if actual_profile != profile or (build_profile == "glb-static-prefab-v1" and profile != "static"):
+        raise RuntimeError("Snapshot geometry profile differs from the requested build profile")
+    if build_profile == "glb-static-prefab-v1":
+        validate_prefab_materials(collection)
+    return profile, build_profile
 
 
 def main():
@@ -59,6 +74,7 @@ def main():
     layer = next(child for child in bpy.context.view_layer.layer_collection.children
                  if child.collection == collection)
     bpy.context.view_layer.active_layer_collection = layer
+    profile, build_profile = validate_snapshot(scene, collection, request)
     dependencies = {request["guard"]: request["guard_sha256"],
                     snapshot.relative_to(project).as_posix(): file_hash(snapshot)}
     for image in bpy.data.images:
@@ -70,9 +86,6 @@ def main():
         if not path.is_relative_to(project):
             raise RuntimeError("Unpacked image dependencies must stay inside the project")
         dependencies[path.relative_to(project).as_posix()] = file_hash(path)
-    profile = request["profile"]
-    if profile not in ("static", "character"):
-        raise RuntimeError("Unknown export profile")
     output = snapshot.parent / "asset.glb"
     settings = {"export_format": "GLB", "export_yup": True, "export_extras": True,
                 "export_normals": True, "export_texcoords": True, "export_gn_mesh": False,
@@ -96,9 +109,6 @@ def main():
     # canonical record-array digest is pinned by the subsequent file-level audit.
     if exporter["sha256"] != "5fe9f5ede7e5264b0a1045dc3784e243e645a90cb6073fc73ae56bc7a10de447":
         raise RuntimeError("Exporter source differs from the qualified Blender profile")
-    build_profile = request.get("build_profile", "glb-geometry-v1")
-    if build_profile not in ("glb-geometry-v1", "glb-static-prefab-v1") or (build_profile == "glb-static-prefab-v1" and profile != "static"):
-        raise RuntimeError("Unsupported asset compilation profile")
     asset = {"schema": "luminumbra.authoring.asset.v1", "profile": build_profile,
              "asset_id": request["asset_id"], "revision": request["revision"],
              "source": output.relative_to(project).as_posix(), "dependencies": sorted(dependencies),
