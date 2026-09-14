@@ -59,6 +59,24 @@ hashes, compiler/CMake identities, compile commands and header dependencies,
 binary hash, command/output/exit code, and the fixture's immutable generation
 pin. A failed process or changed SDK remains a failed receipt.
 
+On Windows the consumer inspects already loaded dependencies using
+`GetModuleHandleW` and `GetModuleFileNameW`, requires all three runtime DLLs to
+come from the expected renderer module's directory, and prints their exact paths.
+It does not load missing DLLs to satisfy those checks.
+
+For the separate rendering probe, add `--require-sdk-runtime` to
+`test/static_preview/installed_viewport.py` under the same restricted PATH. After
+the first authenticated frame, it takes a bounded, read-only
+[Toolhelp module snapshot](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-createtoolhelp32snapshot)
+of its owned host PID. Six extra checks require Windows and bind the host,
+renderer DLL, and three runtime DLLs to the complete SDK inventory captured before
+launch. Exact paths and SHA256 digests are retained in `acceptance.json`; an
+external, missing, ambiguous, or changed module fails the receipt. The existing
+75-second host deadline and final SDK hash guard remain in force. Omitting the
+flag preserves the existing probe check roster; a flagged non-Windows run fails.
+`test_runtime_closure.py` supplies portable refusal controls plus an actual
+Windows child-process snapshot test. Portable controls do not qualify DLL loading.
+
 The MinGW install resolves `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, and
 `libwinpthread-1.dll` through the configured compiler and requires each to be in
 that compiler's `bin` directory. Their toolchain license notices accompany the

@@ -23,6 +23,90 @@ import protocol as wire
 from broker import Broker
 
 
+SDK_RUNTIME_DLLS = ('libgcc_s_seh-1.dll', 'libstdc++-6.dll', 'libwinpthread-1.dll')
+
+
+def windows_loaded_modules(process):
+    """Snapshot only the live child owned by this probe, without opening others.
+
+    Toolhelp can report ERROR_BAD_LENGTH while the loader changes its tables;
+    retries share one two-second bound. No inherited snapshot handle is created.
+    """
+    wire.require(os.name == 'nt' and process.pid > 0 and process.poll() is None,
+                 'Runtime snapshot requires the live owned Windows host')
+    import ctypes
+    from ctypes import wintypes as w
+
+    class ModuleEntry(ctypes.Structure):
+        _fields_ = [('dwSize', w.DWORD), ('th32ModuleID', w.DWORD),
+                    ('th32ProcessID', w.DWORD), ('GlblcntUsage', w.DWORD),
+                    ('ProccntUsage', w.DWORD), ('modBaseAddr', ctypes.POINTER(w.BYTE)),
+                    ('modBaseSize', w.DWORD), ('hModule', w.HMODULE),
+                    ('szModule', w.WCHAR * 256), ('szExePath', w.WCHAR * 260)]
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = [w.DWORD, w.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = w.HANDLE
+    for name in ('Module32FirstW', 'Module32NextW'):
+        function = getattr(kernel, name)
+        function.argtypes = [w.HANDLE, ctypes.POINTER(ModuleEntry)]
+        function.restype = w.BOOL
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
+    deadline = time.monotonic() + 2
+    while True:
+        # TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, specifically this child PID.
+        snapshot = kernel.CreateToolhelp32Snapshot(0x18, process.pid)
+        if snapshot != ctypes.c_void_p(-1).value:
+            break
+        error = ctypes.get_last_error()
+        if error != 24 or time.monotonic() >= deadline or process.poll() is not None:
+            raise ctypes.WinError(error)
+        time.sleep(.01)
+    try:
+        result = {}
+        entry = ModuleEntry()
+        entry.dwSize = ctypes.sizeof(entry)
+        present = kernel.Module32FirstW(snapshot, ctypes.byref(entry))
+        count = 0
+        while present:
+            count += 1
+            wire.require(count <= 1024 and time.monotonic() < deadline,
+                         'Runtime snapshot module/time bound')
+            wire.require(entry.th32ProcessID == process.pid, 'Runtime snapshot owner differs')
+            name, path = entry.szModule, entry.szExePath
+            wire.require(0 < len(name) < 255 and 0 < len(path) < 259,
+                         'Runtime snapshot contains missing or truncated module paths')
+            result.setdefault(name.casefold(), []).append(path)
+            present = kernel.Module32NextW(snapshot, ctypes.byref(entry))
+        wire.require(ctypes.get_last_error() == 18, 'Runtime snapshot enumeration incomplete')
+        wire.require(count > 0 and process.poll() is None, 'Owned host exited during runtime snapshot')
+        return result
+    finally:
+        kernel.CloseHandle(snapshot)
+
+
+def qualify_sdk_runtime(host, sdk, before, loaded, check):
+    """Join actual loaded paths to the complete SDK inventory taken before launch."""
+    result = {}
+    for name in (host.name.casefold(), 'libluminumbra_render_static.dll', *SDK_RUNTIME_DLLS):
+        paths = loaded.get(name, [])
+        wire.require(len(paths) == 1, 'Missing or ambiguous loaded SDK module: ' + name)
+        path = Path(paths[0])
+        wire.require(path.is_absolute(), 'Loaded SDK module requires an absolute file')
+        path = wire.safe_path(path)
+        wire.require(path.is_file(), 'Loaded SDK module requires a regular file')
+        path = path.resolve(strict=True)
+        wire.require(path.parent == sdk / 'bin', 'Loaded SDK module is outside installed bin: ' + name)
+        relative = path.relative_to(sdk).as_posix()
+        pins = [key for key in before if key.casefold() == relative.casefold()]
+        digest = sha(path)
+        check('loaded SDK runtime pin ' + name,
+              path.name.casefold() == name and len(pins) == 1 and before[pins[0]] == digest and
+              (name != host.name.casefold() or path == host))
+        result[name] = {'path': str(path), 'relative_path': pins[0], 'sha256': digest}
+    return result
+
+
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -110,6 +194,8 @@ def main():
     parser.add_argument('--camera-profile', choices=('perspective', 'orthographic', 'mixed'), default='perspective')
     parser.add_argument('--refusals', action='store_true', help='Run isolated native IPC/state refusals and clean restarts')
     parser.add_argument('--expected-source-commit', help='Require this exact clean installed source commit')
+    parser.add_argument('--require-sdk-runtime', action='store_true',
+                        help='Require Windows host, renderer and three MinGW DLLs loaded from the pinned SDK/bin')
     args = parser.parse_args()
     host, project, output = (getattr(args, name).resolve() for name in ('host', 'project', 'output'))
     generation = project / '.luminumbra-author/generations' / args.generation
@@ -279,6 +365,14 @@ def main():
                                'depth_sha256': hashlib.sha256(payload[4*pixels:8*pixels]).hexdigest(),
                                'covered_pixels': sum(payload[8*pixels:]),
                                'request_to_frame_ms': elapsed_ms})
+                if args.require_sdk_runtime and len(frames) == 1:
+                    check('SDK runtime closure requires Windows', os.name == 'nt')
+                    loaded = windows_loaded_modules(process)
+                    names = (host.name.casefold(), 'libluminumbra_render_static.dll', *SDK_RUNTIME_DLLS)
+                    receipt['sdk_runtime'] = {'owned_pid': process.pid,
+                                              'loaded_paths': {name: loaded.get(name, []) for name in names}}
+                    receipt['sdk_runtime']['modules'] = qualify_sdk_runtime(
+                        host, sdk, before['sdk'], loaded, check)
             stop = {'kind': 'stop', 'session': session, 'sequence': len(states) + 1}
             if args.broker:
                 wire.atomic_write(mailbox / 'stop.bin', wire.encode(stop, b'', key))

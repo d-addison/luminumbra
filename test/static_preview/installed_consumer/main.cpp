@@ -2,11 +2,20 @@
 #include <luminumbra/rendering/StaticRenderer.h>
 #include <luminumbra/rendering/StaticScene.h>
 
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace Luminumbra::Rendering;
 
@@ -45,11 +54,32 @@ std::filesystem::path Utf8Path(const std::string& text) {
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
 }
 
-const StaticDraw& Draw(const StaticDrawSnapshot& snapshot, const std::string& node) {
-    for (const auto& draw : snapshot.draws) {
-        if (draw.key.node_id == node && draw.key.primitive_index == 0) return draw;
+#if defined(_WIN32)
+void RuntimeChecks(const std::filesystem::path& expected_module) {
+    for (const auto* name : {L"libgcc_s_seh-1.dll", L"libstdc++-6.dll", L"libwinpthread-1.dll"}) {
+        // Inspect already loaded dependencies; never load a DLL to satisfy this check.
+        const auto handle = GetModuleHandleW(name);
+        Check(handle != nullptr, "required installed runtime DLL was not loaded");
+        std::array<wchar_t, 32768> buffer{};
+        const auto length =
+            GetModuleFileNameW(handle, buffer.data(), static_cast<DWORD>(buffer.size()));
+        Check(length > 0 && length < buffer.size(), "loaded runtime path missing or truncated");
+        const std::filesystem::path path(std::wstring(buffer.data(), length));
+        Check(std::filesystem::equivalent(path.parent_path(), expected_module.parent_path()) &&
+                  std::filesystem::equivalent(path, expected_module.parent_path() / name),
+              "runtime DLL was loaded outside the explicitly expected installed directory");
+        const auto utf8 = path.u8string();
+        std::cout << "loaded_runtime=" << std::string(utf8.begin(), utf8.end()) << '\n';
     }
-    throw std::runtime_error("fixture draw missing: " + node);
+}
+#endif
+
+const StaticDraw& Draw(const StaticDrawSnapshot& snapshot, std::string_view node) {
+    for (const auto& draw : snapshot.draws) {
+        if (draw.key.node_id == node && draw.key.primitive_index == 0)
+            return draw;
+    }
+    throw std::runtime_error("fixture draw missing: " + std::string(node));
 }
 
 void SceneChecks(const char* project, const char* generation, const char* digest) {
@@ -214,6 +244,9 @@ int main(int argc, char** argv) {
         Check(std::filesystem::equivalent(Utf8Path(module), Utf8Path(argv[4])),
               "loaded module is not the explicitly expected installed library");
         std::cout << "loaded_module=" << module << '\n';
+#if defined(_WIN32)
+        RuntimeChecks(Utf8Path(argv[4]));
+#endif
         SceneChecks(argv[1], argv[2], argv[3]);
         CameraChecks();
         std::cout << "passed=true checks=" << checks << " gpu_constructed=false\n";
