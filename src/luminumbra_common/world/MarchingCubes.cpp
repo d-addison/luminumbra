@@ -19,6 +19,7 @@
 #include <memory>
 #include <new>
 #include <set>
+#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -1563,6 +1564,105 @@ FarLodRegionMeshStats GenerateFarLodRegionMesh(const World::FarLodTile& tile,
     stats.indices = indices.size();
     stats.triangles = indices.size() / 3u;
     return stats;
+}
+
+FarVolumeMesh PolygoniseFarVolume(const FarVolumeTile& tile,
+                                  const FarVolumeLimits& tile_limits,
+                                  const FarVolumeMeshLimits& limits) {
+    ValidateFarVolumeTile(tile, tile_limits);
+    const auto dimensions = FarTierAt(tile.tier);
+    if (!dimensions)
+        throw std::invalid_argument("Invalid far-volume tier or cave mode");
+    const auto d = *dimensions;
+    const std::uint64_t cells = tile.bricks.size() * 64ull;
+    const auto vertex_capacity =
+        static_cast<std::size_t>(std::min<std::uint64_t>(cells * 12, limits.max_vertices));
+    const auto index_capacity =
+        static_cast<std::size_t>(std::min<std::uint64_t>(cells * 15, limits.max_indices));
+    if (vertex_capacity > std::numeric_limits<std::uint32_t>::max() ||
+        vertex_capacity > limits.max_buffer_bytes / sizeof(FarVolumeVertex) ||
+        index_capacity > (limits.max_buffer_bytes - vertex_capacity * sizeof(FarVolumeVertex)) /
+                             sizeof(std::uint32_t))
+        throw std::length_error("Far-volume mesh buffer budget exceeded");
+    FarVolumeMesh mesh;
+    mesh.vertices.reserve(vertex_capacity);
+    mesh.indices.reserve(index_capacity);
+    constexpr int corners[8][3] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1}};
+    constexpr int edges[12][2] = {{0, 1},
+                                  {1, 2},
+                                  {2, 3},
+                                  {3, 0},
+                                  {4, 5},
+                                  {5, 6},
+                                  {6, 7},
+                                  {7, 4},
+                                  {0, 4},
+                                  {1, 5},
+                                  {2, 6},
+                                  {3, 7}};
+    for (const auto& brick : tile.bricks) {
+        for (int z = 0; z < 4; ++z)
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x) {
+                    GridCell cell;
+                    std::array<std::uint8_t, 8> materials{};
+                    int cube = 0;
+                    for (int c = 0; c < 8; ++c) {
+                        const int sx = x + corners[c][0], sy = y + corners[c][1],
+                                  sz = z + corners[c][2];
+                        const auto& sample = brick.samples[FarVolumeSampleIndex(sx, sy, sz)];
+                        cell.val[c] = DequantizeFarLodSdf(sample.density);
+                        materials[c] = sample.material;
+                        cell.p[c] = Vec3(
+                            static_cast<float>((static_cast<std::int64_t>(brick.key.x) * 4 + sx) *
+                                               d.sample_spacing_meters),
+                            static_cast<float>((static_cast<std::int64_t>(brick.key.y) * 4 + sy) *
+                                               d.sample_spacing_meters),
+                            static_cast<float>((static_cast<std::int64_t>(brick.key.z) * 4 + sz) *
+                                               d.sample_spacing_meters));
+                        if (sample.density < 0)
+                            cube |= 1 << c;
+                    }
+                    const auto edge_mask = edgeTable[cube];
+                    if (!edge_mask)
+                        continue;
+                    std::array<std::uint32_t, 12> vertices{};
+                    for (int e = 0; e < 12; ++e) {
+                        if (!(edge_mask & (1u << e)))
+                            continue;
+                        int a = edges[e][0], b = edges[e][1];
+                        // Canonical world endpoint order avoids A+t(B-A) versus B+t(A-B)
+                        // rounding differences at brick/tile boundaries, including negatives.
+                        if (std::tie(cell.p[b].x, cell.p[b].y, cell.p[b].z) <
+                            std::tie(cell.p[a].x, cell.p[a].y, cell.p[a].z))
+                            std::swap(a, b);
+                        if (mesh.vertices.size() == vertex_capacity)
+                            throw std::length_error("Far-volume mesh vertex budget exceeded");
+                        vertices[e] = static_cast<std::uint32_t>(mesh.vertices.size());
+                        mesh.vertices.push_back(
+                            {VertexInterp(0.0f, cell.p[a], cell.p[b], cell.val[a], cell.val[b]),
+                             materials[cell.val[a] < 0.0f ? a : b]});
+                    }
+                    // This corner order makes the table winding face from negative
+                    // solid toward air. A cell-wide gradient cannot orient separate
+                    // components: opposite corners can have opposite outward normals.
+                    const auto& row = triTable[cube];
+                    for (int t = 0; row[t] != -1; t += 3) {
+                        auto a = vertices[row[t]], b = vertices[row[t + 1]],
+                             c = vertices[row[t + 2]];
+                        const auto normal =
+                            glm::cross(mesh.vertices[b].position - mesh.vertices[a].position,
+                                       mesh.vertices[c].position - mesh.vertices[a].position);
+                        if (glm::dot(normal, normal) <= 1.0e-10f)
+                            continue;
+                        if (mesh.indices.size() + 3 > index_capacity)
+                            throw std::length_error("Far-volume mesh index budget exceeded");
+                        mesh.indices.insert(mesh.indices.end(), {a, b, c});
+                    }
+                }
+    }
+    return mesh;
 }
 
 void ResetTerrainMeshBuildStats() {
