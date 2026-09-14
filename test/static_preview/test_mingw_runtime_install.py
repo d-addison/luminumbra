@@ -60,7 +60,7 @@ class RuntimeInstallContract(unittest.TestCase):
             "luminumbra_install_static_preview_mingw_runtime()\n"
             "install(FILES marker.txt DESTINATION share COMPONENT StaticPreview)\n")
         result = subprocess.run([shutil.which("cmake"), "-S", str(source), "-B", str(self.root / "build")],
-                                capture_output=True, text=True, timeout=25)
+                                cwd=self.root, capture_output=True, text=True, timeout=25)
         if expected == 0:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
@@ -91,8 +91,33 @@ class RuntimeInstallContract(unittest.TestCase):
         self.configure(mingw=False)
         self.assertEqual(self.install(), {"share/marker.txt": b"unrelated install survives"})
 
-    def test_unresolved_bare_filename_refused(self):
+    def test_bare_filenames_install_only_the_configured_compiler_siblings(self):
+        self.files = {name: name for name in NAMES}
+        self.configure()
+        actual = self.install()
+        for name in NAMES:
+            self.assertEqual(actual['bin/' + name], (self.compiler_bin / name).read_bytes())
+
+    def test_missing_bare_filename_never_searches_current_directory(self):
+        (self.compiler_bin / NAMES[0]).unlink()
+        (self.root / NAMES[0]).write_bytes(b'unrelated DLL outside the compiler')
         self.files[NAMES[0]] = NAMES[0]
+        self.assertIn("cannot resolve", self.configure(expected=1))
+
+    def test_relative_path_response_is_not_reinterpreted(self):
+        self.files[NAMES[0]] = './' + NAMES[0]
+        self.assertIn("cannot resolve", self.configure(expected=1))
+
+    def test_linked_bare_filename_refused(self):
+        path = self.compiler_bin / NAMES[0]
+        path.unlink()
+        path.symlink_to(self.compiler_bin / NAMES[1])
+        self.files[NAMES[0]] = NAMES[0]
+        self.assertIn("cannot resolve", self.configure(expected=1))
+
+    def test_failed_bare_filename_lookup_is_not_reinterpreted(self):
+        self.files[NAMES[0]] = NAMES[0]
+        self.files['exit_code'] = 1
         self.assertIn("cannot resolve", self.configure(expected=1))
 
     def test_missing_file_refused(self):
