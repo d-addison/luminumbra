@@ -7,6 +7,14 @@ current shipped behaviour so nothing here reads as implemented. Nothing in this
 document waives the acceptance evidence that each slice must supply, and no
 format change listed here exists until its slice lands.
 
+For the September 13 recovered source, see the [implementation and acceptance
+gap map](distant-world-implementation-status.md). It distinguishes landed
+prerequisites from the remaining runtime and evidence work without changing this
+contract. The subsequent [bounded volume-generation entry point](far-volume-generation.md)
+implements the first sampler-driven part of DW01; runtime integration remains open.
+The [bounded volume mesher](far-volume-meshing.md) supplies the first CPU kernel
+part of DW03 with same-authority halo normals; runtime integration remains open.
+
 ## Scope
 
 - The view radius is **16 km from the camera** and the world has **no fixed
