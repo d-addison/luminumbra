@@ -1,4 +1,5 @@
 #include "FoliagePass.h"
+#include "rendering/BenchmarkGpuQueries.h"
 
 #include "GBufferPass.h"
 #include "LightingPass.h"
@@ -21,6 +22,10 @@
 #include <vector>
 
 namespace Luminumbra::Rendering {
+struct FoliagePass::EvidenceQueries {
+    Client::Measurement::SampleRing samples{64};
+    BenchmarkGpuQueries queries{samples};
+};
 
 namespace {
 
@@ -113,8 +118,10 @@ FoliagePass::placement_hash(int chunk_x, int chunk_z, u8 biome_id, uint32_t inst
 }
 
 void FoliagePass::init_shader(const std::filesystem::path& root_path) {
-    m_shader = std::make_unique<Shader>((root_path / "res/shaders/foliage.vert").string().c_str(),
-                                        (root_path / "res/shaders/foliage.frag").string().c_str());
+    m_shader = std::make_unique<Shader>(
+        (root_path / "res/shaders/foliage.vert").string().c_str(),
+        (root_path / "res/shaders/foliage.frag").string().c_str(),
+        std::vector<std::string>{"VS_OUT.worldPos", "VS_OUT.heightT", "gl_Position"});
     PassGl::label_gl_object(GL_PROGRAM, m_shader ? m_shader->Id() : 0u, "shader.foliage");
 }
 
@@ -237,6 +244,7 @@ void FoliagePass::clear_ground_meshes() {
     m_instance_available_frame = 0;
     m_build_phase = 0;
     // Old-world readbacks must never repopulate the new world's instance list.
+    destroy_qualification();
     m_readback_ring.shutdown();
 }
 
@@ -327,7 +335,18 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     if (m_compute_prog == 0) {
         return; // CPU fallback
     }
+    std::ifstream prefix_in(root_path / "res/shaders/grass_compact_prefix.comp");
+    std::stringstream prefix_source;
+    prefix_source << prefix_in.rdbuf();
+    m_prefix_prog = prefix_in ? compile_compute_program(prefix_source.str()) : 0;
+    if (!m_prefix_prog) {
+        glDeleteProgram(m_compute_prog);
+        m_compute_prog = 0;
+        return;
+    }
     PassGl::label_gl_object(GL_PROGRAM, m_compute_prog, "shader.grass_scatter");
+    glGenBuffers(1, &m_group_counts_ssbo);
+    glGenBuffers(1, &m_group_offsets_ssbo);
 
     glGenBuffers(1, &m_chunk_ssbo);
     glGenBuffers(1, &m_surf_ssbo);
@@ -353,12 +372,39 @@ void FoliagePass::init_compute(const std::filesystem::path& root_path) {
     LUMINUMBRA_CORE_INFO("FoliagePass: GPU grass scatter active (compute + SSBO).");
 }
 
+void FoliagePass::destroy_qualification() {
+    if (m_evidence_queries)
+        m_evidence_queries->queries.shutdown();
+    m_evidence_queries.reset();
+    m_vertex_readback.shutdown();
+    if (m_vertex_feedback_buffer)
+        glDeleteBuffers(1, &m_vertex_feedback_buffer);
+    if (m_vertex_feedback_object)
+        glDeleteTransformFeedbacks(1, &m_vertex_feedback_object);
+    m_vertex_feedback_object = 0;
+    m_vertex_feedback_buffer = 0;
+    m_qualification = {};
+    m_phase_query_counts = {};
+    m_vertex_selection_ready = false;
+    m_rebuild_reference.clear();
+}
+
 void FoliagePass::destroy_compute() {
+    destroy_qualification();
     if (m_compute_prog) {
         glDeleteProgram(m_compute_prog);
         m_compute_prog = 0;
     }
-    GLuint bufs[] = {m_chunk_ssbo, m_surf_ssbo, m_blade_ssbo, m_count_ssbo, m_arch_ssbo};
+    if (m_prefix_prog)
+        glDeleteProgram(m_prefix_prog);
+    m_prefix_prog = 0;
+    GLuint bufs[] = {m_chunk_ssbo,
+                     m_surf_ssbo,
+                     m_blade_ssbo,
+                     m_count_ssbo,
+                     m_arch_ssbo,
+                     m_group_counts_ssbo,
+                     m_group_offsets_ssbo};
     for (GLuint& b : bufs) {
         if (b)
             glDeleteBuffers(1, &b);
@@ -369,6 +415,7 @@ void FoliagePass::destroy_compute() {
     // (so the ring's destructor shutdown is a safe no-op even if FoliagePass is
     // destroyed after the GL context is gone).
     m_readback_ring.shutdown();
+    m_group_counts_ssbo = m_group_offsets_ssbo = 0;
     m_gpu_scatter = false;
     m_gpu_active = false;
 }
@@ -433,6 +480,15 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     if (m_readback_enabled && m_gpu_active) {
         // A queued GPU result must not replace a newer CPU fallback instance set.
         poll_foliage_readback();
+    }
+
+    poll_vertex_evidence();
+    if (m_qualification.frozen_inputs) {
+        if (m_uploaded_wind != m_wind_xz)
+            rebuild_frozen_inputs();
+        if (m_readback_submitted_generation != m_build_generation)
+            submit_foliage_readback();
+        return;
     }
 
     // Scatter cache: the instance set is a pure function of the visible chunk-set,
@@ -502,12 +558,26 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         return;
     }
 
+    // Stable chunk order also fixes capped membership in the CPU fallback.
+    auto ordered_chunks = chunks;
+    std::sort(ordered_chunks.begin(), ordered_chunks.end(), [&](const auto& a, const auto& b) {
+        const auto distance = [&](const auto& chunk) {
+            const auto center =
+                chunk.origin + glm::vec3(chunk.extent_m * 0.5f, 0, chunk.extent_m * 0.5f);
+            const auto delta = glm::vec2(center.x - camera_pos.x, center.z - camera_pos.z);
+            return glm::dot(delta, delta);
+        };
+        const auto da = distance(a), db = distance(b);
+        if (da != db)
+            return da < db; // Preserve nearby cover if the fixed pool saturates.
+        return std::tie(a.chunk_xz.x, a.chunk_xz.y) < std::tie(b.chunk_xz.x, b.chunk_xz.y);
+    });
     //  #4: GPU scatter path. Generates the records on the GPU (compute + SSBO);
     // execute draws from the SSBO directly via glDrawArraysIndirect.
     // it submits the blade readback through the async ring, but does NOT
     // populate m_instances itself -- that is the per-frame poll_foliage_readback
     // drain above (stale-safe), so m_instances is deliberately NOT cleared here.
-    if (m_gpu_scatter && rebuild_instances_gpu(chunks, query, query_ctx, camera_pos)) {
+    if (m_gpu_scatter && rebuild_instances_gpu(ordered_chunks, query, query_ctx, camera_pos)) {
         return;
     }
     m_gpu_active = false;
@@ -521,14 +591,15 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     // records are built once (the expensive SurfaceQuery + hashing) and reused as the camera moves;
     // this loop only applies the cheap camera distance-fade culls and a fresh wind sway. The emit
     // order (chunk order, then candidate-index order) and the global kMaxInstances truncation match
-    // the old single-pass loop exactly, so m_instances is byte-identical ->  / gate-safe.
-    // Budget the uncached chunk BUILDS this frame (see m_foliage_build_backlog). Cached chunks are
-    // free to emit; only first-time builds (the SurfaceQuery cost) are rate-limited so a
-    // fast-moving streaming burst fades foliage in over a few frames instead of one ~960ms hitch.
+    // stable nearby-first ordering used by the GPU compaction path.
+    // Budget the uncached chunk BUILDS this frame (see m_foliage_build_backlog). Cached
+    // chunks are free to emit; only first-time builds (the SurfaceQuery cost) are
+    // rate-limited so a fast-moving streaming burst fades foliage in over a few frames instead of
+    // one ~960ms hitch.
     constexpr int kMaxChunkBuildsPerFrame = 4;
     int builds_left = kMaxChunkBuildsPerFrame;
     bool deferred_any = false;
-    for (const ChunkScatter& chunk : chunks) {
+    for (const ChunkScatter& chunk : ordered_chunks) {
         if (chunk.density <= 0.0f) {
             continue;
         }
@@ -544,8 +615,8 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
         }
 
         // Use the cached records if present+current; otherwise build at most
-        // kMaxChunkBuildsPerFrame new chunks this frame and defer the rest (they fade in over
-        // subsequent frames).
+        // kMaxChunkBuildsPerFrame new ordered_chunks this frame and defer the rest (they fade in
+        // over subsequent frames).
         const std::uint64_t key =
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.x))) |
             (static_cast<std::uint64_t>(static_cast<std::uint32_t>(chunk.chunk_xz.y)) << 32);
@@ -596,7 +667,7 @@ void FoliagePass::rebuild_instances(const std::vector<ChunkScatter>& chunks,
     if (m_chunk_cache.size() > 768) {
         for (auto it = m_chunk_cache.begin(); it != m_chunk_cache.end();) {
             bool live = false;
-            for (const ChunkScatter& c : chunks) {
+            for (const ChunkScatter& c : ordered_chunks) {
                 const std::uint64_t k =
                     (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.x))) |
                     (static_cast<std::uint64_t>(static_cast<std::uint32_t>(c.chunk_xz.y)) << 32);
@@ -799,13 +870,13 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         float origin_extent[4];
         float id_density[4];
     };
-    std::vector<GpuChunk> chunk_params;
-    std::vector<glm::vec4> surf_grid;
-    chunk_params.reserve(chunks.size());
-    surf_grid.reserve(chunks.size() * kMaxCandidatesPerChunk);
-    const int kMaxSurfBuildsPerFrame = m_readback_enabled ? std::numeric_limits<int>::max() : 4;
-    int builds_left = kMaxSurfBuildsPerFrame;
-    bool deferred_any = false;
+    // Capacity applies to uploaded columns, after the same density/distance
+    // cull used by scatter. The live surface can contain more than 512 columns
+    // while the foliage horizon fits; counting it first silently forced CPU
+    // fallback and made GPU qualification impossible. Admit before sampling or
+    // allocating per-candidate surface data, retaining the existing hard cap.
+    std::vector<const ChunkScatter*> admitted;
+    admitted.reserve(std::min(chunks.size(), kMaxGpuChunks));
     for (const ChunkScatter& chunk : chunks) {
         if (chunk.density <= 0.0f) {
             continue;
@@ -817,6 +888,20 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         if (cd - chunk.extent_m > m_fade_end_m) {
             continue;
         }
+        if (admitted.size() == kMaxGpuChunks)
+            return false;
+        admitted.push_back(&chunk);
+    }
+
+    std::vector<GpuChunk> chunk_params;
+    std::vector<glm::vec4> surf_grid;
+    chunk_params.reserve(admitted.size());
+    surf_grid.reserve(admitted.size() * kMaxCandidatesPerChunk);
+    const int kMaxSurfBuildsPerFrame = m_readback_enabled ? std::numeric_limits<int>::max() : 4;
+    int builds_left = kMaxSurfBuildsPerFrame;
+    bool deferred_any = false;
+    for (const auto* admitted_chunk : admitted) {
+        const auto& chunk = *admitted_chunk;
 
         const std::uint64_t key =
             detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
@@ -869,7 +954,10 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         });
     }
 
+    if (chunk_params.size() > kMaxGpuChunks)
+        return false;
     const int chunk_count = static_cast<int>(chunk_params.size());
+    m_uploaded_chunk_count = chunk_count;
     if (chunk_count == 0) {
         // Nothing to scatter (all chunks culled). Empty build; gate sees 0.
         const GLuint empty_draw[5] = {0u, 12u, 0u, 0u, 0u};
@@ -900,6 +988,16 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         pal.push_back(a.sways ? 1.0f : 0.0f);
         pal.push_back(0.0f);
     }
+
+    m_uploaded_camera = camera_pos;
+    m_uploaded_input_hash = fnv1a(chunk_params.data(), chunk_params.size() * sizeof(GpuChunk));
+    m_uploaded_input_hash =
+        fnv1a(surf_grid.data(), surf_grid.size() * sizeof(glm::vec4), m_uploaded_input_hash);
+    m_uploaded_input_hash = fnv1a(pal.data(), pal.size() * sizeof(float), m_uploaded_input_hash);
+    for (const float value :
+         {camera_pos.x, camera_pos.z, m_density_scale, m_fade_end_m, total_weight})
+        m_uploaded_input_hash = fnv1a(&value, sizeof(value), m_uploaded_input_hash);
+    m_uploaded_wind = m_wind_xz;
 
     // --- Upload. ---
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_chunk_ssbo);
@@ -937,17 +1035,14 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     glUniform1f(glGetUniformLocation(m_compute_prog, "u_fade_end_m"), m_fade_end_m);
     glUniform2f(glGetUniformLocation(m_compute_prog, "u_wind_xz"), m_wind_xz.x, m_wind_xz.y);
 
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_chunk_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_surf_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_blade_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_count_ssbo);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, m_arch_ssbo);
-
-    const GLuint groups_x = static_cast<GLuint>((kMaxCandidatesPerChunk + 63) / 64);
-    glDispatchCompute(groups_x, static_cast<GLuint>(chunk_count), 1);
-    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
-                    GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
-    glUseProgram(0);
+    const auto group_bytes = static_cast<GLsizeiptr>(
+        chunk_count * ((kMaxCandidatesPerChunk + 63) / 64) * sizeof(GLuint));
+    for (const auto buffer : {m_group_counts_ssbo, m_group_offsets_ssbo}) {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, buffer);
+        glBufferData(GL_SHADER_STORAGE_BUFFER, group_bytes, nullptr, GL_DYNAMIC_DRAW);
+    }
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    dispatch_scatter();
 
     // --- Read the count + the generated blades back into m_instances. This is
     // ONLY needed by the FoliageInstancing gate's instance_hash — execute
@@ -984,6 +1079,34 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
     return true;
 }
 
+void FoliagePass::dispatch_scatter() {
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_chunk_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_surf_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_blade_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, m_count_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, m_arch_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, m_group_counts_ssbo);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, m_group_offsets_ssbo);
+    constexpr GLuint groups_x = (kMaxCandidatesPerChunk + 63) / 64;
+    glUseProgram(m_compute_prog);
+    glUniform1i(glGetUniformLocation(m_compute_prog, "u_emit"), GL_FALSE);
+    glDispatchCompute(groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glUseProgram(m_prefix_prog);
+    glUniform1ui(glGetUniformLocation(m_prefix_prog, "u_group_count"),
+                 groups_x * static_cast<GLuint>(m_uploaded_chunk_count));
+    glUniform1ui(glGetUniformLocation(m_prefix_prog, "u_max_instances"), kMaxInstances);
+    glDispatchCompute(1, 1, 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+    glUseProgram(m_compute_prog);
+    glUniform1i(glGetUniformLocation(m_compute_prog, "u_emit"), GL_TRUE);
+    glUniform2f(glGetUniformLocation(m_compute_prog, "u_wind_xz"), m_wind_xz.x, m_wind_xz.y);
+    glDispatchCompute(groups_x, static_cast<GLuint>(m_uploaded_chunk_count), 1);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT |
+                    GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT | GL_COMMAND_BARRIER_BIT);
+    glUseProgram(0);
+}
+
 void FoliagePass::submit_foliage_readback() {
     constexpr std::size_t kSlotBytes = kReadbackCountBytes + kMaxInstances * sizeof(InstanceRecord);
     if (m_readback_ring.ensure(kSlotBytes, 3) && m_readback_ring.begin()) {
@@ -1015,6 +1138,19 @@ void FoliagePass::poll_foliage_readback() {
     const InstanceRecord* blades = reinterpret_cast<const InstanceRecord*>(
         static_cast<const char*>(slot) + kReadbackCountBytes);
     m_instances.assign(blades, blades + count);
+    if (m_qualification.frozen_inputs && generation == m_qualification.rebuild.second_generation &&
+        !m_qualification.rebuild.completed) {
+        auto& proof = m_qualification.rebuild;
+        proof.second_count = m_instances.size();
+        proof.second_hash = instance_hash();
+        proof.byte_equal = m_rebuild_reference.size() == m_instances.size() &&
+                           !m_instances.empty() &&
+                           std::memcmp(m_rebuild_reference.data(),
+                                       m_instances.data(),
+                                       m_instances.size() * sizeof(InstanceRecord)) == 0;
+        proof.completed = true;
+        m_rebuild_reference.clear();
+    }
     m_instance_generation = generation;
     m_instances_from_gpu_readback = true;
     m_instance_available_frame = m_evidence_frame;
@@ -1038,6 +1174,7 @@ void FoliagePass::map_instances_for_frame() {
 }
 
 std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera) {
+    m_last_draw_calls = 0;
     if (!m_enabled || !m_shader || !m_shader->IsValid() || m_frame_instance_count == 0 ||
         m_vao == 0) {
         return 0;
@@ -1045,6 +1182,29 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
 
     if (!ctx.lit_scene.id) {
         return 0;
+    }
+
+    const bool evidence_fresh = m_qualification.rebuild.completed &&
+                                m_instance_generation == m_build_generation &&
+                                m_evidence_phase >= 1 && m_evidence_phase <= 2;
+    const bool vertex_due = evidence_fresh && m_phase_query_counts[m_evidence_phase - 1] >= 32 &&
+                            m_qualification.vertices[m_evidence_phase - 1].source_frame == 0;
+    const bool query_due =
+        evidence_fresh && !vertex_due && m_phase_query_counts[m_evidence_phase - 1] < 32;
+    if (query_due && m_evidence_queries) {
+        const auto id = m_qualification.gpu.size() + 1;
+        m_evidence_queries->samples.append(id);
+        m_qualification.gpu.push_back({id,
+                                       m_evidence_frame,
+                                       m_build_generation,
+                                       m_instance_generation,
+                                       m_evidence_phase,
+                                       m_instances.size(),
+                                       -1,
+                                       1.0f});
+        ++m_phase_query_counts[m_evidence_phase - 1];
+        m_evidence_queries->queries.begin_frame(id);
+        m_evidence_queries->queries.begin_pass(8); // Foliage pass timestamp index.
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, ctx.lit_scene.id);
@@ -1073,8 +1233,8 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     m_shader->setMat4("u_view", view);
     m_shader->setMat4("u_projection", projection);
     m_shader->setVec3("u_cameraPos", camera.Position);
-    m_last_draw_shader_time = ctx.time_seconds;
-    m_shader->setFloat("u_time", ctx.time_seconds);
+    m_last_draw_shader_time = m_qualification.frozen_inputs ? 1.0f : ctx.time_seconds;
+    m_shader->setFloat("u_time", m_last_draw_shader_time);
     m_shader->setFloat("u_swayAmplitude", m_sway_amplitude);
     m_shader->setFloat("u_swaySpeed", m_sway_speed);
     m_shader->setFloat("u_fadeStart", m_fade_start_m);
@@ -1109,15 +1269,19 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     // fallback path still uses the persistent-mapped ring buffer.
     if (m_gpu_active && m_count_ssbo != 0) {
         glBindVertexBuffer(0, m_blade_ssbo, 0, sizeof(InstanceRecord));
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_count_ssbo);
-        glDrawArraysIndirect(GL_TRIANGLES,
-                             reinterpret_cast<const void*>(kGrassDrawCommandOffsetBytes));
-        glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+        if (!vertex_due || !capture_vertices(projection * view)) {
+            glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_count_ssbo);
+            glDrawArraysIndirect(GL_TRIANGLES,
+                                 reinterpret_cast<const void*>(kGrassDrawCommandOffsetBytes));
+            glBindBuffer(GL_DRAW_INDIRECT_BUFFER, 0);
+            m_last_draw_calls = 1;
+        }
     } else {
         glBindVertexBuffer(0, m_instance_vbo[m_ring_cursor], 0, sizeof(InstanceRecord));
         //  12 verts/instance = two crossed quads (6 verts
         // each) so a blade reads as upright cover from any angle, not a flat decal.
         glDrawArraysInstanced(GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_frame_instance_count));
+        m_last_draw_calls = 1;
     }
     glBindVertexArray(0);
 
@@ -1128,7 +1292,198 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_GREATER);
 
+    if (query_due && m_evidence_queries) {
+        m_evidence_queries->queries.end_pass(8);
+        m_evidence_queries->queries.end_frame();
+    }
     return m_frame_instance_count;
+}
+
+bool FoliagePass::begin_qualification() {
+    if (m_qualification.frozen_inputs)
+        return true;
+    if (qualification_blocker() != nullptr)
+        return false;
+    m_qualification.frozen_inputs = true;
+    const auto identity = [](GLenum name) {
+        const auto* value = glGetString(name);
+        return value ? std::string(reinterpret_cast<const char*>(value)) : std::string();
+    };
+    m_qualification.gl_vendor = identity(GL_VENDOR);
+    m_qualification.gl_renderer = identity(GL_RENDERER);
+    m_qualification.gl_version = identity(GL_VERSION);
+    auto& proof = m_qualification.rebuild;
+    proof.input_hash = fnv1a(&m_wind_xz[0], sizeof(float) * 2, m_uploaded_input_hash);
+    proof.first_generation = m_build_generation;
+    proof.first_frame = m_build_frame;
+    proof.first_hash = instance_hash();
+    proof.first_count = m_instances.size();
+    m_rebuild_reference = m_instances;
+    m_evidence_queries = std::make_unique<EvidenceQueries>();
+    m_evidence_queries->queries.initialize();
+    rebuild_frozen_inputs();
+    proof.second_generation = m_build_generation;
+    proof.second_frame = m_build_frame;
+    proof.output_cleared = true;
+    return true;
+}
+
+const char* FoliagePass::qualification_blocker() const {
+    if (m_qualification.frozen_inputs)
+        return nullptr;
+    if (!m_gpu_active)
+        return "gpu_path_inactive";
+    if (!m_readback_enabled)
+        return "readback_disabled";
+    if (m_instance_generation != m_build_generation)
+        return "instance_generation_stale";
+    if (m_instances.empty())
+        return "instances_empty";
+    if (m_uploaded_chunk_count <= 0)
+        return "uploaded_columns_empty";
+    if (m_foliage_build_backlog)
+        return "surface_build_backlog";
+    if (m_wind_xz != glm::vec2(0.0f))
+        return "wind_not_calm";
+    if (m_evidence_phase != 1)
+        return "phase_not_calm";
+    return nullptr;
+}
+
+void FoliagePass::rebuild_frozen_inputs() {
+    // Reuse only the immutable INPUT buffers. Clear all prior OUTPUT bytes and
+    // counters; both count and emit kernels execute again with a fresh generation.
+    const GLuint zero = 0;
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_blade_ssbo);
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_count_ssbo);
+    glClearBufferData(GL_SHADER_STORAGE_BUFFER, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &zero);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    ++m_build_generation;
+    m_build_frame = m_evidence_frame;
+    m_build_phase = m_evidence_phase;
+    m_uploaded_wind = m_wind_xz;
+    dispatch_scatter();
+    submit_foliage_readback();
+}
+
+bool FoliagePass::capture_vertices(const glm::mat4& view_projection) {
+    if (glIsEnabled(GL_RASTERIZER_DISCARD))
+        return false;
+    GLboolean feedback_active = GL_FALSE;
+    glGetBooleanv(GL_TRANSFORM_FEEDBACK_ACTIVE, &feedback_active);
+    if (feedback_active)
+        return false;
+    constexpr std::size_t sample_count = 64;
+    constexpr std::size_t vertex_bytes = sample_count * 12 * sizeof(std::array<float, 8>);
+    if (!m_vertex_selection_ready) {
+        // Search once, in bounded linear time, for a contiguous real draw range
+        // with visible swaying blades and a non-swaying control. No injected grass.
+        for (std::size_t first = 0; first + sample_count <= m_instances.size();
+             first += sample_count) {
+            std::size_t visible_sway = 0, controls = 0, unfaded = 0;
+            for (std::size_t i = first; i < first + sample_count; ++i) {
+                const auto& blade = m_instances[i];
+                const glm::vec4 clip =
+                    view_projection *
+                    glm::vec4(blade.pos[0], blade.pos[1] + blade.size[1], blade.pos[2], 1.0f);
+                const bool visible = clip.w > 0 && std::abs(clip.x) < clip.w * 0.95f &&
+                                     std::abs(clip.y) < clip.w * 0.95f && clip.z > 0 &&
+                                     clip.z < clip.w;
+                if (glm::distance(glm::vec3(blade.pos[0], blade.pos[1], blade.pos[2]),
+                                  m_uploaded_camera) < m_fade_start_m)
+                    ++unfaded;
+                if (visible && blade.color[3])
+                    ++visible_sway;
+                if (!blade.color[3])
+                    ++controls;
+            }
+            if (visible_sway >= 8 && controls && unfaded == sample_count) {
+                m_vertex_first_instance = static_cast<std::uint32_t>(first);
+                m_vertex_selection_ready = true;
+                break;
+            }
+        }
+    }
+    if (!m_vertex_selection_ready || m_vertex_first_instance + sample_count > m_instances.size() ||
+        !m_vertex_readback.ensure(vertex_bytes, 2) || !m_vertex_readback.begin())
+        return false;
+    if (!m_vertex_feedback_buffer) {
+        glGenBuffers(1, &m_vertex_feedback_buffer);
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, m_vertex_feedback_buffer);
+        glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, vertex_bytes, nullptr, GL_STREAM_READ);
+        glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, 0);
+        glGenTransformFeedbacks(1, &m_vertex_feedback_object);
+    }
+    GLint previous_feedback = 0, previous_buffer = 0;
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_BINDING, &previous_feedback);
+    glGetIntegerv(GL_TRANSFORM_FEEDBACK_BUFFER_BINDING, &previous_buffer);
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, m_vertex_feedback_object);
+    glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, m_vertex_feedback_buffer);
+    const auto first = m_vertex_first_instance;
+    // These three ranges partition the ORIGINAL draw. Rasterization remains ON;
+    // there is no replacement shader, duplicate draw, or synthetic geometry.
+    if (first) {
+        glDrawArraysInstancedBaseInstance(GL_TRIANGLES, 0, 12, first, 0);
+        ++m_last_draw_calls;
+    }
+    glBeginTransformFeedback(GL_TRIANGLES);
+    glDrawArraysInstancedBaseInstance(GL_TRIANGLES, 0, 12, sample_count, first);
+    glEndTransformFeedback();
+    ++m_last_draw_calls;
+    const auto after = first + sample_count;
+    if (after < m_instances.size()) {
+        glDrawArraysInstancedBaseInstance(
+            GL_TRIANGLES, 0, 12, static_cast<GLsizei>(m_instances.size() - after), after);
+        ++m_last_draw_calls;
+    }
+    glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, static_cast<GLuint>(previous_feedback));
+    glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, static_cast<GLuint>(previous_buffer));
+    glMemoryBarrier(GL_TRANSFORM_FEEDBACK_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    m_vertex_readback.copy_region(m_vertex_feedback_buffer, 0, 0, vertex_bytes);
+    m_vertex_readback.submit(m_evidence_frame);
+    auto& result = m_qualification.vertices[m_evidence_phase - 1];
+    result.source_frame = m_evidence_frame;
+    result.generation = m_build_generation;
+    result.instance_hash = instance_hash();
+    result.phase = m_evidence_phase;
+    result.first_instance = first;
+    result.shader_time = m_last_draw_shader_time;
+    std::memcpy(result.view_projection.data(), &view_projection[0][0], sizeof(view_projection));
+    for (std::size_t i = first; i < after; ++i) {
+        result.blade_heights.push_back(m_instances[i].size[1]);
+        result.sways.push_back(m_instances[i].color[3] != 0);
+    }
+    return true;
+}
+
+void FoliagePass::poll_vertex_evidence() {
+    const void* bytes = nullptr;
+    std::size_t count = 0;
+    std::uint64_t frame = 0;
+    if (!m_vertex_readback.consume(&bytes, &count, &frame) || !bytes)
+        return;
+    for (auto& phase : m_qualification.vertices) {
+        if (phase.source_frame != frame || !phase.vertices.empty() ||
+            count != 64 * 12 * sizeof(std::array<float, 8>))
+            continue;
+        phase.vertices.resize(64 * 12);
+        std::memcpy(phase.vertices.data(), bytes, count);
+        phase.available_frame = m_evidence_frame;
+    }
+}
+
+FoliageQualificationEvidence FoliagePass::qualification_evidence() {
+    // At most eight outstanding timestamp pairs. Drain only when writing
+    // the final diagnostic report. Timestamp slot reuse follows the bounded
+    // drain policy; instance/vertex buffers themselves use only async copies.
+    if (m_evidence_queries)
+        m_evidence_queries->queries.drain();
+    for (auto& item : m_qualification.gpu) {
+        const auto& sample = m_evidence_queries->samples.at(item.query_id);
+        item.milliseconds = sample.passes[8].value_or(-1.0);
+    }
+    return m_qualification;
 }
 
 uint64_t FoliagePass::instance_hash() const {

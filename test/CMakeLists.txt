@@ -1830,6 +1830,11 @@ if(DEFINED ENV{VISUAL_SWEEP_PYTHON})
     list(APPEND _vc_candidates "$ENV{VISUAL_SWEEP_PYTHON}")
 endif()
 if(Python3_FOUND)
+    if(Python3_VERSION VERSION_GREATER_EQUAL "3.10")
+        add_test(NAME FoliageEvidenceContract
+            COMMAND "${Python3_EXECUTABLE}" ${CMAKE_SOURCE_DIR}/tools/perf/test_foliage_evidence.py)
+        set_tests_properties(FoliageEvidenceContract PROPERTIES LABELS "visual;tools" TIMEOUT 90)
+    endif()
     add_test(NAME GameAssetAcquisition COMMAND "${Python3_EXECUTABLE}" -m unittest discover
         -s "${CMAKE_SOURCE_DIR}/tools/assets" -v)
     add_test(NAME ReleaseSbomInventory
