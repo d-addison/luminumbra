@@ -121,8 +121,20 @@ the original raw-plane hashes; the complete 40-file, 40,433,246-byte packet is
 archived in the isolated campaign evidence lane. These images are pending
 review and are not composed showcases.
 
-This receipt retains its original source identity. Later framebuffer clearing,
-metadata recovery, Windows file-sharing and integration changes require their
-own runs. No complete RenderEngine workflow, portable Windows DLL closure,
+That receipt retains its original source identity. A later run at source
+`8822fda41e6be1fd389407d4067e339cfe48cd42` passed the same 35 actual GPU
+presentation checks after the framebuffer-clearing change; its
+[original receipt](evidence/blender-presentation-20260913/receipt-8822fda4.json)
+and [process receipt](evidence/blender-presentation-20260913/process-receipt-8822fda4.json)
+retain the new identities. The same run's
+[Windows client receipt](evidence/blender-presentation-20260913/client-8822fda4.json)
+records 25 cases: 24 passed and the explicitly permitted symlink-creation case
+was skipped. Actual process ownership, protected-directory permissions and
+atomic replacement with a held reader passed. The earlier native contention
+failures remain archived; the correction changes Windows publication semantics
+without extending deadlines. The complete later packet contains 42 files and
+40,488,362 bytes, including all original presentation planes.
+
+No complete RenderEngine workflow, portable Windows DLL closure,
 authoring latency/30 FPS target, Linux Blender qualification or visual scenario
 approval follows from this presentation checkpoint.

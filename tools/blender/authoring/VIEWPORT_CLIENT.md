@@ -28,6 +28,10 @@ texture/frame retention.
 
 Mailbox and frame-descriptor readers permit Windows atomic replacement using
 [`FILE_SHARE_DELETE`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew).
+Writers use `FileRenameInfoEx` with replace-existing and
+[`POSIX_SEMANTICS`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
+on Windows 10 version 1607 or later. Ordinary `os.replace` still refused a held
+shared reader in the native control; reader sharing alone was insufficient.
 An open reader retains the complete previous file while the next file becomes
 visible at the path. Handles are non-inherited, reject reparse/directory objects,
 and transfer to one owned Python stream. Record-size checks apply to the opened

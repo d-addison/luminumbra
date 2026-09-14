@@ -1,0 +1,45 @@
+{
+  "schema": "luminumbra.viewport.client.windows.v1",
+  "scope": "synthetic process/protocol contracts",
+  "renderer_qualified": false,
+  "blender_qualified": false,
+  "visual_approval": false,
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.12.11 (main, Jun  7 2025, 12:31:34)  [GCC UCRT 15.1.0 64 bit (AMD64)]",
+  "executable": "C:\\msys64\\ucrt64\\bin\\python.exe",
+  "tests_run": 25,
+  "failures": [],
+  "errors": [],
+  "skips": [
+    {
+      "test": "test_manifest_escape_and_linked_sdk_inputs_are_refused (test_client.ClientTests.test_manifest_escape_and_linked_sdk_inputs_are_refused)",
+      "reason": "Symlink creation unavailable"
+    }
+  ],
+  "elapsed_seconds": 14.296999999998661,
+  "inputs_before": {
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\probe_windows_client.py": "e85730f68c391f03e6b3d47f56ef10c19d56ab006128dd57f52eb53944e68fff",
+    "C:\\msys64\\ucrt64\\bin\\python.exe": "6571a0ca4a65dbfc3dbae701791eba204898b0a5af13723b770dd8b861290e22",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\test_client.py": "b76f71db510a351e57024006de628e814e3cc2ce8c56e8128b10147cd9d2fec9",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\test_windows_process.py": "76d94afd3a7e05828f13ec6e79a347f0de7fc532735c667829f02959186d1621",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\client_fixture.py": "4f831d96c88d14ca510ab55046d30ea3eeacf198c58516b44840543e90bc360b",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_client.py": "04aa7ae1753fe6d3d900a4f34460cd2c885588cd45952461ce131d39bab40c60",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_process.py": "fd1694eab3d7595349b735e6d100fab74ad438bf2db4a1ee91d2f38909816e93",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_installation.py": "de160f9b77c06feab47bac3e502ee10de6dc74d0f679fd8df86ca4e65e09b43e",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\viewport\\protocol.py": "b6b11471da6866431f9440a0b1c1edae5175d714b5610a76fe8fa979472398ea",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\viewport\\broker.py": "6bcc71de1d10d1e57adcdf534bcc0974b125bdf7ba8c0d32bc326db5f1d23f3a"
+  },
+  "inputs_after": {
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\probe_windows_client.py": "e85730f68c391f03e6b3d47f56ef10c19d56ab006128dd57f52eb53944e68fff",
+    "C:\\msys64\\ucrt64\\bin\\python.exe": "6571a0ca4a65dbfc3dbae701791eba204898b0a5af13723b770dd8b861290e22",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\test_client.py": "b76f71db510a351e57024006de628e814e3cc2ce8c56e8128b10147cd9d2fec9",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\test_windows_process.py": "76d94afd3a7e05828f13ec6e79a347f0de7fc532735c667829f02959186d1621",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\test\\viewport\\client_fixture.py": "4f831d96c88d14ca510ab55046d30ea3eeacf198c58516b44840543e90bc360b",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_client.py": "04aa7ae1753fe6d3d900a4f34460cd2c885588cd45952461ce131d39bab40c60",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_process.py": "fd1694eab3d7595349b735e6d100fab74ad438bf2db4a1ee91d2f38909816e93",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_installation.py": "de160f9b77c06feab47bac3e502ee10de6dc74d0f679fd8df86ca4e65e09b43e",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\viewport\\protocol.py": "b6b11471da6866431f9440a0b1c1edae5175d714b5610a76fe8fa979472398ea",
+    "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\viewport\\broker.py": "6bcc71de1d10d1e57adcdf534bcc0974b125bdf7ba8c0d32bc326db5f1d23f3a"
+  },
+  "passed": true
+}

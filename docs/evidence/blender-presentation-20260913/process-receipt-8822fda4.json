@@ -1,0 +1,56 @@
+{
+  "passed": true,
+  "job_sha256": "fb9902cb7879adace606bd0f9b5e67dacba8d94ca233c28b682191c10ae79520",
+  "source_commit": "8822fda41e6be1fd389407d4067e339cfe48cd42",
+  "steps": [
+    {
+      "name": "client",
+      "argv": [
+        "C:/msys64/ucrt64/bin/python.exe",
+        "-B",
+        "//wsl.localhost/Ubuntu-24.04/code/luminumbra/build/authoring-isolated/campaign-20260913/viewport-blender/test/viewport/probe_windows_client.py",
+        "--receipt",
+        "C:/Temp/luminumbra-viewport-checks-1571374ce6b0467d9c8bcaa294da32cb/client.json"
+      ],
+      "passed": true,
+      "pid": 40460,
+      "exit_code": 0,
+      "reaped": true,
+      "seconds": 14.578999999997905,
+      "receipt_sha256": "90c60604343fd4aed984fcc21383bbf210e17033ff477b59ad9335cd642d0ae6"
+    },
+    {
+      "name": "presentation",
+      "argv": [
+        "C:/Program Files/Blender Foundation/Blender 5.1/blender.exe",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--gpu-backend",
+        "opengl",
+        "--threads",
+        "2",
+        "--window-geometry",
+        "0",
+        "0",
+        "1400",
+        "900",
+        "--python-exit-code",
+        "1",
+        "--python",
+        "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source-v3\\tools\\blender\\authoring\\extension_tests\\native_viewport_presentation.py",
+        "--",
+        "--modules",
+        "//wsl.localhost/Ubuntu-24.04/code/luminumbra/build/authoring-isolated/campaign-20260913/viewport-blender/tools/blender/authoring/extension",
+        "--output",
+        "C:/Temp/luminumbra-viewport-checks-1571374ce6b0467d9c8bcaa294da32cb/presentation"
+      ],
+      "passed": true,
+      "pid": 9412,
+      "exit_code": 0,
+      "reaped": true,
+      "seconds": 7.405999999995402,
+      "receipt_sha256": "8cc5e31bf287eafbf9e2dff8338a0018a64c691b1e9d4fa66041ecf7e6c1ace2"
+    }
+  ],
+  "visual_approved": false
+}

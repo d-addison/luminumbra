@@ -65,7 +65,10 @@ Both reader and writer acquire the SAME `frame-N.lease` file with O_CREAT|O_EXCL
 Reader holds it until copy/consume is complete; writer cannot overwrite leased
 bytes. Descriptor read happens after acquiring lease. No expiry/forced stealing:
 crashed consumer requires whole-session teardown/new directory. If both slots
-leased, drop output. Consumer validates record MAC, session, length and descriptor
+are leased, retain at most one completed latest frame and retry publication.
+A newer desired state or stop discards it; the delivery deadline still starts
+at the first outstanding request and is never extended by coalescing or retries.
+Consumer validates record MAC, session, length and descriptor
 sequence; chooses highest sequence and must compare current desired state before
 GPU upload. Slots are bounded and never append. Caller creates a fresh private
 session directory (POSIX0700; Windows caller must apply user-only ACL), never
