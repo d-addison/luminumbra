@@ -194,6 +194,8 @@ def _windows_reader_api():
     kernel.CreateFileW.restype = w.HANDLE
     kernel.GetFileInformationByHandleEx.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
     kernel.GetFileInformationByHandleEx.restype = w.BOOL
+    kernel.SetFileInformationByHandle.argtypes = [w.HANDLE, ctypes.c_int, w.LPVOID, w.DWORD]
+    kernel.SetFileInformationByHandle.restype = w.BOOL
     kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [w.HANDLE], w.BOOL
     return kernel
 
@@ -248,6 +250,49 @@ def read_record_file(path, limit):
     return raw
 
 
+def replace_record(temporary, path):
+    """Publish a complete record while shared readers retain the old file.
+
+    Windows MoveFileExW (os.replace) does not supply POSIX replacement semantics.
+    FileRenameInfoEx does; unsupported filesystems fail without altering the
+    destination. This does not retry, remove the destination or write in place.
+    """
+    if os.name != 'nt':
+        os.replace(temporary, path)
+        return
+    import ctypes
+    from ctypes import wintypes as w
+    temporary, path = safe_path(temporary), safe_path(path)
+    name = str(path).encode('utf-16-le')
+    require(0 < len(name) <= 65534, 'Record path length')
+    class RenameInfo(ctypes.Structure):
+        _fields_ = [('flags', w.DWORD), ('root', w.HANDLE),
+                    ('length', w.DWORD), ('name', w.WCHAR * 1)]
+    storage = ctypes.create_string_buffer(ctypes.sizeof(RenameInfo) + len(name) + 2)
+    info = RenameInfo.from_buffer(storage)
+    # FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS.
+    info.flags, info.root, info.length = 3, None, len(name)
+    ctypes.memmove(ctypes.addressof(storage) + RenameInfo.name.offset, name, len(name))
+    kernel = _windows_reader_api()
+    # DELETE | FILE_READ_ATTRIBUTES on the owned complete temporary file;
+    # OPEN_REPARSE_POINT
+    # prevents following a replaced leaf. Handles are never inherited.
+    handle = kernel.CreateFileW(str(temporary), 0x10080, 7, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        class AttributeTag(ctypes.Structure):
+            _fields_ = [('attributes', w.DWORD), ('tag', w.DWORD)]
+        tag = AttributeTag()
+        if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(tag), ctypes.sizeof(tag)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        require(not tag.attributes & (0x400 | 0x10), 'Reparse or directory publication handle')
+        if not kernel.SetFileInformationByHandle(handle, 22, storage, len(storage)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def atomic_write(path, value):
     path = safe_path(path)
     fd, temporary = tempfile.mkstemp(prefix='.pending-', dir=path.parent)
@@ -255,7 +300,7 @@ def atomic_write(path, value):
         with os.fdopen(fd, 'wb') as stream:
             stream.write(value)
             stream.flush()
-        os.replace(temporary, path)
+        replace_record(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
