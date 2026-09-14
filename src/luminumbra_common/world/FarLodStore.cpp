@@ -172,24 +172,6 @@ float DequantizeFarLodHeight(u16 height_q) {
     return kFarLodHeightQuantMin + static_cast<float>(height_q) / kFarLodHeightQuantScale;
 }
 
-i16 QuantizeFarLodSdf(float density) {
-    if (!std::isfinite(density)) {
-        return kFarLodSdfInvalid;
-    }
-    const float scaled = std::clamp(density * kFarLodSdfQuantScale, -32767.0f, 32767.0f);
-    i16 quantized = static_cast<i16>(std::lround(scaled));
-    if (density < 0.0f && quantized == 0) {
-        quantized = -1;
-    } else if (density > 0.0f && quantized == 0) {
-        quantized = 1;
-    }
-    return quantized;
-}
-
-float DequantizeFarLodSdf(i16 density_q) {
-    return static_cast<float>(density_q) / kFarLodSdfQuantScale;
-}
-
 u64 ComputeTerrainParamsHash(const Systems::TerrainGenParams& params, int seed) {
     u64 hash = kFnvOffsetBasis;
     FnvMixValue(hash, seed);

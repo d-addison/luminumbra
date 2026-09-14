@@ -25,6 +25,7 @@
 // chunk writer preserves them verbatim (merge keyed (lod_level, id)).
 
 #include "Chunk.h"
+#include "FarDensityQuantization.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -61,14 +62,6 @@ constexpr u32 FarLodSamplesPerSide(FarLodTier tier) {
 // representable world heights are [-2048, +2047.9375] m.
 constexpr float kFarLodHeightQuantMin = -2048.0f;
 constexpr float kFarLodHeightQuantScale = 16.0f;
-
-// Far SDF payload quantization. -32768 is deliberately reserved as an
-// on-disk corruption sentinel; valid source density always preserves its sign.
-constexpr float kFarLodSdfQuantScale = 256.0f;
-constexpr i16 kFarLodSdfInvalid = static_cast<i16>(-32768);
-
-i16 QuantizeFarLodSdf(float density);
-float DequantizeFarLodSdf(i16 density_q);
 
 u16 QuantizeFarLodHeight(float world_height);
 float DequantizeFarLodHeight(u16 height_q);

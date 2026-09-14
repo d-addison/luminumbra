@@ -80,6 +80,11 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/BiomeTable.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarLodStore.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarDensityQuantization.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeTile.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeMesher.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarVolume.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarVolumeWorld.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     #  semantic-knob -> generation_params response table + persisted layer.

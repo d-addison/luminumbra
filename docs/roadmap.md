@@ -74,12 +74,13 @@ imply host migration, matchmaking or private Steam relay availability.
 
 ## Limits and acceptance still tracked
 
-- Today surface terrain is finite (approximately 3 km and a 3200 m camera far
-  plane), local full-SDF cave residency is bounded (128 m horizontal/64 m vertical),
-  far tiles omit caves and player edits, and far-tile persistence is never attached
-  at runtime. The accepted v0.3 contract replaces this with a 16 km volumetric
-  ladder over an unbounded world; until those slices land and are verified, the
-  current limits stand.
+- The runtime far horizon remains approximately 3 km with a 3200 m camera far
+  plane. Local full-SDF cave residency is bounded (128 m horizontal/64 m vertical).
+  Pristine far tiles are heightfields; authoritative F1/F2 SDF reconstruction
+  exists, but far persistence is not attached at runtime. The five-tier table
+  and reversed-Z prerequisite are present; the 16 km volumetric runtime, durable
+  all-tier edit overlay and measured budgets remain unfinished. See the
+  [source-pinned implementation and acceptance map](distant-world-implementation-status.md).
 - Simulation today ticks every creature and plant regardless of distance, restarts
   the simulation clock at zero on load, anchors weather/wind/aether on the spawn
   point, does not persist creatures and drops dirty chunks on eviction. The accepted
