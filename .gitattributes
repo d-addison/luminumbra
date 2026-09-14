@@ -9,3 +9,6 @@
 
 # Fixed serializer baseline bytes; the test handles native Windows stream newlines.
 test/fixtures/smoke_artifact/devel-*.json -text
+
+# Original acceptance receipts retain byte identity across platforms.
+docs/evidence/blender-presentation-20260913/*.json -text
