@@ -107,6 +107,7 @@ add_executable(common_tests
     common/ResidencyContract_test.cpp
     common/FarLodStore_test.cpp
     common/FarTierTable_test.cpp
+    common/FarVolume_test.cpp
     common/GameSessionHeadlessWorld_test.cpp
     common/SimBudgetTelemetry_test.cpp
     ../src/luminumbra_server/modes/SmokeArtifact.cpp
@@ -803,6 +804,16 @@ add_executable(far_lod_worker_test
     rendering/texture_file_test.cpp
     rendering/render_clock_test.cpp
 )
+
+# R0 consumes the actual client-library volume worker and adapter without a GL
+# context. This is a controlled pristine fixture, not a production renderer.
+add_executable(far_volume_runtime_test
+    rendering/far_volume_build_queue_test.cpp
+    rendering/far_volume_render_mesh_test.cpp
+)
+target_include_directories(far_volume_runtime_test PRIVATE ../src ../src/luminumbra_client)
+target_link_libraries(far_volume_runtime_test PRIVATE gtest_main luminumbra_client)
+luminumbra_configure_first_party_target(far_volume_runtime_test)
 
 target_include_directories(far_lod_worker_test PRIVATE
 ../src
@@ -1613,6 +1624,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     waterfall_visual_test
     particle_determinism_test
     far_lod_worker_test
+    far_volume_runtime_test
     ui_smoke_test
     ui_page_load_test
     worldgen_preview_test
@@ -1684,7 +1696,10 @@ foreach(_lum_gtest_target ${LUMINUMBRA_GTEST_TARGETS})
     # per-instance unique roots and its socket tests bind ephemeral ports
     # (Listen(0)), so no RESOURCE_LOCK is needed. New tests in the aggregate
     # must keep it that way.
-    if(_lum_gtest_target STREQUAL world_load_bounded_test)
+    if(_lum_gtest_target STREQUAL far_volume_runtime_test)
+        gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120
+            TEST_PREFIX "FarVolumeRuntime.")
+    elseif(_lum_gtest_target STREQUAL world_load_bounded_test)
         # This machine-sensitive latency observation is opt-in. Keep it out of
         # normal correctness lanes; the paired relative workflow is the gate.
         gtest_discover_tests(${_lum_gtest_target} DISCOVERY_TIMEOUT 120

@@ -18,6 +18,7 @@
 #include <limits>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <thread> // opt-in job-wedge watchdog monitor thread
 #include <unordered_map>
 #include <unordered_set>
@@ -1619,6 +1620,85 @@ float SHIELD_WorldSystem::EvaluateCaveDensity(const Vec3& wp,
     }
 
     return density;
+}
+
+float SHIELD_WorldSystem::AnalyticSurfaceOpeningDensity(const Vec3& wp, float surface_h) const {
+    for (float component : {wp.x, wp.y, wp.z, surface_h})
+        if (!std::isfinite(component) ||
+            std::abs(component) >= World::kFarVolumeExactCoordinateLimitMeters - 64)
+            throw std::invalid_argument("Invalid coarse analytic coordinate");
+    float density = wp.y - surface_h;
+    if (!m_params.caves_enabled || !m_params.surface_breaks_enabled ||
+        m_params.feature_cell_size <= 0.0f)
+        return density;
+    const float cs = m_params.feature_cell_size;
+    if (!std::isfinite(cs) || std::abs(static_cast<double>(wp.x) / cs) >= 2147483646.0 ||
+        std::abs(static_cast<double>(wp.z) / cs) >= 2147483646.0)
+        throw std::invalid_argument("Invalid coarse analytic feature cell");
+    // Keep the checked division in double through floor; float can round up to INT_MAX+1.
+    const int cx = static_cast<int>(std::floor(static_cast<double>(wp.x) / cs));
+    const int cz = static_cast<int>(std::floor(static_cast<double>(wp.z) / cs));
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const SurfaceBreakFeature f =
+                DecodeSurfaceBreakCell(m_seed, cx + dx, cz + dz, m_params);
+            if (!f.valid)
+                continue;
+            const float x = wp.x - f.center_x, z = wp.z - f.center_z;
+            const float distance = std::sqrt(x * x + z * z);
+            if (distance >= f.radius)
+                continue;
+            const float depth = surface_h - wp.y;
+            const float sd =
+                f.shaft ? sdVerticalCapsule(distance, depth, 0.0f, f.depth, f.radius * 0.45f)
+                        : sdCappedCone(distance,
+                                       depth - f.depth * 0.5f,
+                                       0.0f,
+                                       f.depth * 0.5f,
+                                       f.radius * 0.15f,
+                                       f.radius);
+            // A negative feature SDF becomes positive air when subtracted from
+            // negative-solid terrain. Do not clamp away the feature's sign.
+            density = std::max(density, -sd);
+        }
+    }
+    return density;
+}
+
+float SHIELD_WorldSystem::SamplePristineFarDensity(const Vec3& wp,
+                                                   float surface_h,
+                                                   std::uint32_t spacing,
+                                                   World::FarCaveMode mode) const {
+    if ((spacing != 4 && spacing != 8 && spacing != 16 && spacing != 32 && spacing != 64) ||
+        (mode != World::FarCaveMode::BandLimited && mode != World::FarCaveMode::BoxFiltered))
+        throw std::invalid_argument("Invalid pristine far density sampling mode");
+    for (float component : {wp.x, wp.y, wp.z, surface_h})
+        if (!std::isfinite(component) ||
+            std::abs(component) >= World::kFarVolumeExactCoordinateLimitMeters - 64)
+            throw std::invalid_argument("Invalid pristine far density coordinate");
+    if (spacing <= 8)
+        return get_density_at_from_precalculated(wp, surface_h);
+    const float terrain = wp.y - surface_h;
+    if (!m_params.caves_enabled)
+        return terrain;
+    const float analytic = AnalyticSurfaceOpeningDensity(wp, surface_h);
+    if (mode == World::FarCaveMode::BandLimited && spacing > 16)
+        return analytic;
+
+    // Fixed 2x2x2 midpoint quadrature of a cell-width box. Filter only the
+    // noise carve contribution: terrain and analytic silhouettes stay at the
+    // shared lattice position. World coordinates make the kernel independent
+    // of tile/brick boundaries. This finite kernel retains residual aliasing;
+    // the qualification compares phases, rather than claiming an ideal low-pass.
+    const float carve = World::BoxFilterFarVolumeCarve(wp, spacing, [this](const Vec3& p) {
+        const float height = GetTerrainHeightAt(p.x, p.z);
+        const float base = p.y - height;
+        const auto surface_break = sample_surface_breaks(p, height);
+        const float carved = EvaluateCaveDensity(p, base, surface_break.effective_cap, 0.0f);
+        return std::max(0.0f, carved - base);
+    });
+    const float filtered = terrain + carve;
+    return std::max(filtered, analytic);
 }
 
 SHIELD_WorldSystem::SurfaceBreakInfo

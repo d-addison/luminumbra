@@ -82,6 +82,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/FarLodStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/ActiveRegionLedger.cpp
     ${CMAKE_CURRENT_LIST_DIR}/replay/RegionScheduleTrace.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarVolume.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     #  semantic-knob -> generation_params response table + persisted layer.
