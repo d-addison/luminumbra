@@ -183,6 +183,11 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
             // (the WaterCrossBuild gate compares debug vs release sequences).
             options.smoke = true;
             options.water_hash_trace = true;
+        } else if (std::strcmp(arg, "--sim-budget") == 0) {
+            options.smoke = true;
+            options.sim_budget = true;
+        } else if (std::strcmp(arg, "--no-audio") == 0) {
+            // The headless executable has no audio subsystem.
         } else if (std::strcmp(arg, "--water-smoke") == 0) {
             // water-heavy measurement workload: wet-anchor walk + water sub-phase
             // timings/counters in the artifact (perf lane; observability only).
@@ -243,7 +248,7 @@ int main(int argc, char* argv[]) {
     ServerCliOptions options = ParseOptions(argc, argv);
     if (options.parse_error) {
         LUMINUMBRA_CORE_ERROR(
-            "Usage: luminumbra_server_app [--smoke] [--water-smoke] "
+            "Usage: luminumbra_server_app [--smoke] [--water-smoke] [--sim-budget] [--no-audio] "
             "[--heavy [--heavy-resim <n>]] "
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "

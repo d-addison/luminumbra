@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -147,7 +148,11 @@ struct ForestBudgetResult {
 // does: LOD3 kicks in at 200 m and every LOD3 tree collapses into a single shared
 // billboard draw. When false, this reproduces the pre-impostor all-real-geometry load.
 ForestBudgetResult
-MeasureForestLoad(int n, float spacing, const TreeLodConfig& baseCfg, bool impostors) {
+MeasureForestLoad(int n,
+                  float spacing,
+                  const TreeLodConfig& baseCfg,
+                  bool impostors,
+                  const std::array<std::uint64_t, kTreeLodCount>* actual_triangles = nullptr) {
     ForestBudgetResult out;
     out.tree_count = n;
 
@@ -155,7 +160,7 @@ MeasureForestLoad(int n, float spacing, const TreeLodConfig& baseCfg, bool impos
     // threshold moves from 620 m in to 200 m so the impostor actually replaces the
     // far-field stand (the wide 620 m cross-billboard added overdraw and was kept far).
     TreeLodConfig cfg = baseCfg;
-    if (impostors && cfg.enabled) {
+    if (impostors && cfg.enabled && actual_triangles == nullptr) {
         cfg.lod3Distance = 200.0f;
     }
 
@@ -180,8 +185,10 @@ MeasureForestLoad(int n, float spacing, const TreeLodConfig& baseCfg, bool impos
         }
         out.instances_by_lod[lod] += static_cast<std::uint64_t>(kPartsPerTree);
         out.total_instances += static_cast<std::uint64_t>(kPartsPerTree);
-        out.foliage_tris +=
-            static_cast<std::uint64_t>(static_cast<double>(kLod0TrisPerTree) * kLodTriFrac[lod]);
+        out.foliage_tris += actual_triangles != nullptr
+                                ? (*actual_triangles)[lod]
+                                : static_cast<std::uint64_t>(static_cast<double>(kLod0TrisPerTree) *
+                                                             kLodTriFrac[lod]);
         // Each of the 3 parts at this LOD is its own (part x LOD) batch group.
         for (int part = 0; part < kPartsPerTree; ++part) {
             const int group_key = lod * kPartsPerTree + part;
@@ -295,6 +302,52 @@ TEST(ForestPerfBudget, GreenAt16kTreeLoadWithImpostors) {
 // Companion GREEN guards that always hold (so the harness's plumbing is itself tested,
 // and the RED test above is the ONLY intended failure). These also document the
 // invariants  must preserve when it flips the budget green.
+
+TEST(ForestPerfBudget, AuthoredPackFitsSamePinnedForestAndBudgets) {
+    std::ifstream input(fs::path(LUMINUMBRA_SOURCE_ROOT) / "config/game-asset-packs.json");
+    ASSERT_TRUE(input.good());
+    const auto manifest = nlohmann::json::parse(input);
+    const auto& pack = manifest.at("packs").at("tree-small-02-runtime");
+    std::array<std::uint64_t, kTreeLodCount> triangles{};
+    std::array<int, 3> parts{};
+    for (const auto& file : pack.at("files")) {
+        const auto path = file.at("path").get<std::string>();
+        if (!path.ends_with(".lmesh"))
+            continue;
+        const int lod = path.find(".lod1.") != std::string::npos   ? 1
+                        : path.find(".lod2.") != std::string::npos ? 2
+                                                                   : 0;
+        triangles[lod] += file.at("triangles").get<std::uint64_t>();
+        ++parts[lod];
+    }
+    for (int lod = 0; lod < 3; ++lod) {
+        ASSERT_EQ(parts[lod], kPartsPerTree);
+        ASSERT_GT(triangles[lod], 0u);
+    }
+    const auto result = MeasureForestLoad(kPinnedTreeCount,
+                                          kPinnedSpacingM,
+                                          Luminumbra::Rendering::AuthoredTreeLodConfig(true),
+                                          true,
+                                          &triangles);
+    EXPECT_LE(result.foliage_tris, kFoliageTriBudgetPerFrame);
+    EXPECT_LE(result.draw_calls, kFoliageDrawCallBudgetPerFrame);
+    EXPECT_EQ(
+        (result.instances_by_lod[0] + result.instances_by_lod[1] + result.instances_by_lod[2]) /
+                kPartsPerTree +
+            result.instances_by_lod[3],
+        static_cast<std::uint64_t>(kPinnedTreeCount));
+    fs::create_directories(ArtifactRoot());
+    std::ofstream output(ArtifactRoot() / "authored_forest_perf_budget.json");
+    output << nlohmann::json({{"pack_version", pack.at("version")},
+                              {"archive_sha256", pack.at("archive").at("sha256")},
+                              {"mesh_triangles_by_lod", triangles},
+                              {"foliage_triangles", result.foliage_tris},
+                              {"draw_calls", result.draw_calls},
+                              {"triangle_budget", kFoliageTriBudgetPerFrame},
+                              {"draw_budget", kFoliageDrawCallBudgetPerFrame}})
+                  .dump(2);
+    ASSERT_TRUE(output.good());
+}
 
 TEST(ForestPerfBudget, ArtifactIsEmittedAndWellFormed) {
     const TreeLodConfig cfg = ProductionConfig();

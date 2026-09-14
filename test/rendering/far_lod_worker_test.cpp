@@ -1,17 +1,26 @@
 #include "gtest/gtest.h"
 
+#include "luminumbra_client/debug/DebugCamera.h"
+#include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/FarLodSystem.h"
+#include "luminumbra_client/rendering/Shader.h"
+#include "luminumbra_common/world/TerrainPresetLoader.h"
+#define GLFW_INCLUDE_NONE
 #include "luminumbra_common/persistence/WorldSaveService.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/MarchingCubes.h"
+#include <GLFW/glfw3.h>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -21,6 +30,14 @@ using namespace Luminumbra;
 using namespace Luminumbra::Rendering;
 using namespace Luminumbra::Systems;
 using namespace Luminumbra::World;
+using Luminumbra::Persistence::WorldSaveService;
+
+std::string ReadFileBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::ostringstream bytes;
+    bytes << input.rdbuf();
+    return bytes.str();
+}
 
 struct TempSaveDir {
     TempSaveDir() {
@@ -340,293 +357,6 @@ CrossRegionBuildResult BuildCrossRegionBoundary(FarLodTier tier,
         SharedPlaneSegments(target.mesh, target_rx, target_rz, axis, world_plane);
     result.ok = true;
     return result;
-}
-
-constexpr u8 kLegacyHaloMaterial = 83u;
-constexpr u8 kLegacyHaloSupersededFaceMaterial = 84u;
-constexpr u8 kLegacyHaloSdfMaterial = 231u;
-constexpr float kLegacyHaloHeight = 18.0f;
-constexpr float kLegacyHaloSupersededFaceHeight = 26.0f;
-constexpr int kLegacyHaloProbeWorldX = 520;
-constexpr int kLegacyHaloProbeWorldZ = 88;
-
-void VerifyLegacyHaloReplay(const std::filesystem::path& save_path,
-                            const TerrainGenParams& params,
-                            FarLodTier tier,
-                            bool home_first,
-                            u64 params_hash,
-                            std::size_t probe_index,
-                            std::size_t face_index) {
-    SHIELD_WorldSystem replay_world(nullptr, nullptr, params, 1337);
-    const auto replay_home_snapshot = replay_world.capture_far_lod_sdf_snapshot(0, 0);
-    const auto replay_target_snapshot = replay_world.capture_far_lod_sdf_snapshot(1, 0);
-    ASSERT_TRUE(replay_home_snapshot);
-    ASSERT_TRUE(replay_target_snapshot);
-    FarLodWorkerBuildOutcome replay_home;
-    FarLodWorkerBuildOutcome replay_target;
-    const auto build_replay_home = [&]() -> bool {
-        replay_home =
-            BuildFarLodWorkerTile(replay_world, *replay_home_snapshot, tier, 0, 0, save_path);
-        return replay_home.ok;
-    };
-    const auto build_replay_target = [&]() -> bool {
-        replay_target =
-            BuildFarLodWorkerTile(replay_world, *replay_target_snapshot, tier, 1, 0, save_path);
-        return replay_target.ok;
-    };
-    if (home_first) {
-        ASSERT_TRUE(build_replay_home()) << replay_home.error;
-        ASSERT_TRUE(build_replay_target()) << replay_target.error;
-    } else {
-        ASSERT_TRUE(build_replay_target()) << replay_target.error;
-        ASSERT_TRUE(build_replay_home()) << replay_home.error;
-    }
-    EXPECT_EQ(CountIndexedWorldVertex(replay_home.mesh,
-                                      0,
-                                      0,
-                                      static_cast<float>(kFarLodRegionSizeMeters),
-                                      kLegacyHaloSupersededFaceHeight,
-                                      static_cast<float>(kLegacyHaloProbeWorldZ),
-                                      kLegacyHaloSupersededFaceMaterial),
-              0u);
-    EXPECT_EQ(CountIndexedWorldPosition(replay_home.mesh,
-                                        0,
-                                        0,
-                                        static_cast<float>(kFarLodRegionSizeMeters),
-                                        kLegacyHaloSupersededFaceHeight,
-                                        static_cast<float>(kLegacyHaloProbeWorldZ)),
-              0u);
-    EXPECT_GT(CountIndexedWorldVertex(replay_target.mesh,
-                                      1,
-                                      0,
-                                      static_cast<float>(kLegacyHaloProbeWorldX),
-                                      kLegacyHaloHeight,
-                                      static_cast<float>(kLegacyHaloProbeWorldZ),
-                                      kLegacyHaloMaterial),
-              0u);
-    EXPECT_EQ(replay_target.tile.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-    const auto replay_home_segments = SharedPlaneSegments(
-        replay_home.mesh, 0, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
-    const auto replay_target_segments = SharedPlaneSegments(
-        replay_target.mesh, 1, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
-    ASSERT_FALSE(replay_home_segments.empty());
-    EXPECT_EQ(replay_home_segments, replay_target_segments);
-    EXPECT_TRUE(PlaneSegmentsContainHeight(replay_home_segments, 7.0f));
-
-    // Persisting the promoted target may retain height-only metadata, but all
-    // synthesized 3D support remains transient.
-    std::vector<std::string> errors;
-    ASSERT_TRUE(FarLodStore(save_path).save_tile(replay_target.tile, &errors));
-    FarLodTile persisted_promoted_target;
-    errors.clear();
-    ASSERT_TRUE(FarLodStore(save_path).load_tile(
-        tier, 1, 0, params_hash, persisted_promoted_target, &errors));
-    EXPECT_TRUE(persisted_promoted_target.sdf_bricks.empty());
-    EXPECT_TRUE(persisted_promoted_target.sdf_density_q.empty());
-    EXPECT_TRUE(persisted_promoted_target.sdf_material.empty());
-    EXPECT_EQ(persisted_promoted_target.flags[probe_index] & kFarLodSampleFlagEdited,
-              kFarLodSampleFlagEdited);
-    EXPECT_EQ(persisted_promoted_target.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-}
-
-void VerifyLegacyHaloSupersession(SHIELD_WorldSystem& world,
-                                  const std::filesystem::path& save_path,
-                                  FarLodTier tier,
-                                  u64 params_hash,
-                                  std::size_t probe_index,
-                                  std::size_t face_index) {
-    // A real chunk-32 SDF is the exact supersession path for the (520,88)
-    // witness. Its x=0 face agrees with chunk 31; the interior surface at x=520
-    // is deliberately different and replaces legacy.
-    auto replacement = std::make_shared<Chunk>(IVec3(32, 0, 5));
-    world.GenerateChunkData(*replacement, 1);
-    ASSERT_TRUE(SetBoundaryRampedAuthority(*replacement, 7.0f, 11.0f, kLegacyHaloSdfMaterial));
-    ASSERT_TRUE(world.adopt_streamed_chunk(replacement));
-    const auto replacement_snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
-    ASSERT_TRUE(replacement_snapshot);
-    const auto superseded =
-        BuildFarLodWorkerTile(world, *replacement_snapshot, tier, 1, 0, save_path);
-    ASSERT_TRUE(superseded.ok) << superseded.error;
-    EXPECT_EQ(superseded.tile.flags[probe_index] & kFarLodSampleFlagEdited, 0u);
-    EXPECT_EQ(CountIndexedWorldVertex(superseded.mesh,
-                                      1,
-                                      0,
-                                      static_cast<float>(kLegacyHaloProbeWorldX),
-                                      kLegacyHaloHeight,
-                                      static_cast<float>(kLegacyHaloProbeWorldZ),
-                                      kLegacyHaloMaterial),
-              0u);
-    EXPECT_EQ(CountIndexedWorldPosition(superseded.mesh,
-                                        1,
-                                        0,
-                                        static_cast<float>(kLegacyHaloProbeWorldX),
-                                        kLegacyHaloHeight,
-                                        static_cast<float>(kLegacyHaloProbeWorldZ)),
-              0u)
-        << "real chunk 32 must remove the old height for every material";
-    EXPECT_GT(CountIndexedWorldVertex(superseded.mesh,
-                                      1,
-                                      0,
-                                      static_cast<float>(kLegacyHaloProbeWorldX),
-                                      11.0f,
-                                      static_cast<float>(kLegacyHaloProbeWorldZ),
-                                      kLegacyHaloSdfMaterial),
-              0u);
-
-    std::vector<std::string> errors;
-    ASSERT_TRUE(FarLodStore(save_path).save_tile(superseded.tile, &errors));
-    FarLodTile persisted_superseded_target;
-    errors.clear();
-    ASSERT_TRUE(FarLodStore(save_path).load_tile(
-        tier, 1, 0, params_hash, persisted_superseded_target, &errors));
-    ASSERT_EQ(persisted_superseded_target.sdf_bricks.size(), 1u);
-    EXPECT_EQ(persisted_superseded_target.sdf_bricks.front().local_chunk_x, 0u);
-    EXPECT_EQ(persisted_superseded_target.sdf_bricks.front().source_kind,
-              FarLodBrickSourceKind::Authoritative);
-    EXPECT_EQ(persisted_superseded_target.flags[probe_index] & kFarLodSampleFlagEdited, 0u);
-    EXPECT_EQ(persisted_superseded_target.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-    EXPECT_FALSE(persisted_superseded_target.legacy_surface_authority);
-    EXPECT_EQ(persisted_superseded_target.sdf_density_q.size(), FarLodSdfBrickSampleCount(tier));
-    EXPECT_EQ(persisted_superseded_target.sdf_material.size(), FarLodSdfBrickSampleCount(tier));
-}
-
-void VerifyLegacyHaloScenario(FarLodTier tier, bool home_first) {
-    const TerrainGenParams params = FlatParams();
-    TempSaveDir save;
-    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
-    const int step = FarLodSampleStepMeters(tier);
-    const u64 params_hash = ComputeTerrainParamsHash(params, 1337);
-
-    // The region-1 sample at (520,88) belongs to chunk 32 and must survive
-    // beside real chunk 31. The region-min sample at x=512 is also stored in
-    // region 1, but is chunk 31's max face and must be superseded by that real
-    // brick regardless of record load order.
-    FarLodTile legacy = BuildPristineFarLodTile(world, tier, 1, 0, params_hash);
-    legacy.edited = true;
-    legacy.legacy_surface_authority = true;
-    const auto set_legacy = [&](int world_x, int world_z, float height, u8 material, u8 flags) {
-        const std::size_t x = static_cast<std::size_t>((world_x - kFarLodRegionSizeMeters) / step);
-        const std::size_t z = static_cast<std::size_t>(world_z / step);
-        const std::size_t index = x + z * legacy.samples_per_side;
-        legacy.height_q[index] = QuantizeFarLodHeight(height);
-        legacy.material[index] = material;
-        legacy.flags[index] = flags;
-        return index;
-    };
-    const std::size_t probe_index = set_legacy(kLegacyHaloProbeWorldX,
-                                               kLegacyHaloProbeWorldZ,
-                                               kLegacyHaloHeight,
-                                               kLegacyHaloMaterial,
-                                               kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
-    const std::size_t face_index = set_legacy(kFarLodRegionSizeMeters,
-                                              kLegacyHaloProbeWorldZ,
-                                              kLegacyHaloSupersededFaceHeight,
-                                              kLegacyHaloSupersededFaceMaterial,
-                                              kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
-    std::vector<std::string> errors;
-    ASSERT_TRUE(FarLodStore(save.path).save_tile(legacy, &errors));
-
-    auto authority = std::make_shared<Chunk>(IVec3(31, 0, 5));
-    world.GenerateChunkData(*authority, 1);
-    ASSERT_TRUE(SetPlanarAuthority(*authority, 7.0f, kLegacyHaloSdfMaterial));
-    ASSERT_TRUE(world.adopt_streamed_chunk(authority));
-    const auto home_snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
-    const auto target_snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
-    ASSERT_TRUE(home_snapshot);
-    ASSERT_TRUE(target_snapshot);
-
-    FarLodWorkerBuildOutcome home;
-    FarLodWorkerBuildOutcome target;
-    const auto build_home = [&]() -> bool {
-        home = BuildFarLodWorkerTile(world, *home_snapshot, tier, 0, 0, save.path);
-        if (!home.ok)
-            return false;
-        errors.clear();
-        return FarLodStore(save.path).save_tile(home.tile, &errors);
-    };
-    const auto build_target = [&]() -> bool {
-        target = BuildFarLodWorkerTile(world, *target_snapshot, tier, 1, 0, save.path);
-        return target.ok;
-    };
-    if (home_first) {
-        ASSERT_TRUE(build_home()) << (home.error.empty()
-                                          ? (errors.empty() ? "home save failed" : errors.front())
-                                          : home.error);
-        ASSERT_TRUE(build_target()) << target.error;
-    } else {
-        ASSERT_TRUE(build_target()) << target.error;
-        ASSERT_TRUE(build_home()) << (home.error.empty()
-                                          ? (errors.empty() ? "home save failed" : errors.front())
-                                          : home.error);
-    }
-
-    ASSERT_EQ(home.tile.sdf_bricks.size(), 1u);
-    EXPECT_EQ(home.tile.sdf_bricks.front().local_chunk_x, 31u);
-    EXPECT_TRUE(target.tile.sdf_bricks.empty())
-        << "foreign chunk 31 must remain transient in region 1";
-    EXPECT_GT(CountIndexedWorldVertex(target.mesh,
-                                      1,
-                                      0,
-                                      static_cast<float>(kLegacyHaloProbeWorldX),
-                                      kLegacyHaloHeight,
-                                      static_cast<float>(kLegacyHaloProbeWorldZ),
-                                      kLegacyHaloMaterial),
-              0u)
-        << "the exact legacy witness must be referenced by an index";
-    EXPECT_EQ(CountIndexedWorldVertex(target.mesh,
-                                      1,
-                                      0,
-                                      static_cast<float>(kFarLodRegionSizeMeters),
-                                      kLegacyHaloSupersededFaceHeight,
-                                      static_cast<float>(kLegacyHaloProbeWorldZ),
-                                      kLegacyHaloSupersededFaceMaterial),
-              0u);
-    EXPECT_EQ(CountIndexedWorldPosition(target.mesh,
-                                        1,
-                                        0,
-                                        static_cast<float>(kFarLodRegionSizeMeters),
-                                        kLegacyHaloSupersededFaceHeight,
-                                        static_cast<float>(kLegacyHaloProbeWorldZ)),
-              0u)
-        << "supersession must remove the legacy plane independent of material";
-    EXPECT_GT(CountIndexedWorldVertex(target.mesh,
-                                      1,
-                                      0,
-                                      static_cast<float>(kFarLodRegionSizeMeters),
-                                      7.0f,
-                                      static_cast<float>(kLegacyHaloProbeWorldZ),
-                                      kLegacyHaloSdfMaterial),
-              0u);
-    EXPECT_EQ(target.tile.flags[probe_index] & (kFarLodSampleFlagEdited | kFarLodSampleFlagWater),
-              kFarLodSampleFlagEdited | kFarLodSampleFlagWater);
-    EXPECT_EQ(target.tile.flags[face_index] & kFarLodSampleFlagEdited, 0u);
-
-    const auto home_segments = SharedPlaneSegments(
-        home.mesh, 0, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
-    const auto target_segments = SharedPlaneSegments(
-        target.mesh, 1, 0, SharedPlaneAxis::X, static_cast<float>(kFarLodRegionSizeMeters));
-    ASSERT_FALSE(home_segments.empty());
-    EXPECT_EQ(home_segments, target_segments);
-    EXPECT_TRUE(PlaneSegmentsContainHeight(home_segments, 7.0f));
-
-    FarLodTile persisted_home;
-    errors.clear();
-    ASSERT_TRUE(FarLodStore(save.path).load_tile(tier, 0, 0, params_hash, persisted_home, &errors));
-    ASSERT_EQ(persisted_home.sdf_bricks.size(), 1u);
-    FarLodTile persisted_target;
-    errors.clear();
-    ASSERT_TRUE(
-        FarLodStore(save.path).load_tile(tier, 1, 0, params_hash, persisted_target, &errors));
-    EXPECT_TRUE(persisted_target.sdf_bricks.empty());
-    EXPECT_EQ(persisted_target.height_q[probe_index], QuantizeFarLodHeight(kLegacyHaloHeight));
-
-    // Replay with no streamed chunks: region 0 loads its persisted authority
-    // before the later region-1 legacy record. The final merge sweep must still
-    // erase x=512 while retaining x=520.
-    ASSERT_NO_FATAL_FAILURE(VerifyLegacyHaloReplay(
-        save.path, params, tier, home_first, params_hash, probe_index, face_index));
-    ASSERT_NO_FATAL_FAILURE(
-        VerifyLegacyHaloSupersession(world, save.path, tier, params_hash, probe_index, face_index));
 }
 
 } // namespace
@@ -1201,204 +931,102 @@ TEST(FarLodWorker, LiveBoundarySnapshotSupersedesPersistedNeighborAuthority) {
     }
 }
 
-TEST(FarLodWorker, FullSdfBoundaryAuthoritySupersedesLegacyNeighborMaterial) {
-    constexpr u8 kLegacyMaterial = 83u;
+TEST(FarLodWorker, ObsoleteHomePayloadRefused) {
     const TerrainGenParams params = FlatParams();
-    for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
-        SCOPED_TRACE(::testing::Message() << "tier=" << static_cast<int>(tier));
-        TempSaveDir save;
-        SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
-
-        FarLodTile legacy =
-            BuildPristineFarLodTile(world, tier, 0, 0, ComputeTerrainParamsHash(params, 1337));
-        legacy.edited = true;
-        legacy.legacy_surface_authority = true;
-        const int sample_step = FarLodSampleStepMeters(tier);
-        for (u32 z = 0; z < legacy.samples_per_side; ++z) {
-            for (u32 x = 0; x < legacy.samples_per_side; ++x) {
-                const int world_x = static_cast<int>(x) * sample_step;
-                const int world_z = static_cast<int>(z) * sample_step;
-                if (world_x < 31 * CHUNK_SIZE_X || world_x > 32 * CHUNK_SIZE_X ||
-                    world_z < 5 * CHUNK_SIZE_Z || world_z > 6 * CHUNK_SIZE_Z) {
-                    continue;
-                }
-                const std::size_t index = static_cast<std::size_t>(x) +
-                                          static_cast<std::size_t>(z) * legacy.samples_per_side;
-                legacy.material[index] = kLegacyMaterial;
-                legacy.flags[index] |= kFarLodSampleFlagEdited;
-            }
-        }
-        std::vector<std::string> errors;
-        ASSERT_TRUE(FarLodStore(save.path).save_tile(legacy, &errors));
-
-        auto chunk = std::make_shared<Chunk>(IVec3(31, 0, 5));
-        world.GenerateChunkData(*chunk, 1);
-        ASSERT_TRUE(SetPlanarAuthority(*chunk, 7.0f, 231u));
-        // An empty authored channel reduces to the analytic-material sentinel;
-        // the fallback must come from current terrain after real SDF authority
-        // supersedes the migrated legacy footprint.
-        chunk->material_data.clear();
-        ASSERT_TRUE(world.adopt_streamed_chunk(chunk));
-        const auto snapshot = world.capture_far_lod_sdf_snapshot(1, 0);
+    TempSaveDir save;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    for (const auto tier : {FarLodTier::F1, FarLodTier::F2}) {
+        const int rx = 1;
+        const auto path = WorldSaveService::region_file_path(save.path, rx, 0);
+        // Raw record seam builds an obsolete/future/corrupt fixture without a migration writer.
+        WorldSaveService::ContainerRecord record;
+        record.id = FarLodStore::tile_record_id(tier, rx, 0);
+        record.lod_level = static_cast<u8>(tier);
+        record.flags = 1u;
+        record.payload = std::string("FSD2", 4) + char(2) + char(0);
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+        const auto bytes = ReadFileBytes(path);
+        const auto snapshot = world.capture_far_lod_sdf_snapshot(rx, 0);
         ASSERT_TRUE(snapshot);
-
-        const auto mixed = BuildFarLodWorkerTile(world, *snapshot, tier, 1, 0, save.path);
-        const auto live_only = BuildFarLodWorkerTile(world, *snapshot, tier, 1, 0, {});
-        ASSERT_TRUE(mixed.ok) << mixed.error;
-        ASSERT_TRUE(live_only.ok) << live_only.error;
-        EXPECT_EQ(HashMesh(mixed.mesh), HashMesh(live_only.mesh));
-        EXPECT_EQ(std::count_if(mixed.mesh.vertices.begin(),
-                                mixed.mesh.vertices.end(),
-                                [](const VoxelVertex& vertex) {
-                                    return vertex.material_id == kLegacyMaterial;
-                                }),
-                  0);
+        const auto outcome = BuildFarLodWorkerTile(world, *snapshot, tier, rx, 0, save.path);
+        EXPECT_FALSE(outcome.ok);
+        EXPECT_FALSE(outcome.error.empty());
+        EXPECT_TRUE(outcome.mesh.vertices.empty());
+        EXPECT_EQ(ReadFileBytes(path), bytes);
     }
 }
 
-TEST(FarLodWorker, LegacyHaloUsesIndexedGeometryAndFinalAuthorityPrecedence) {
-    for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
-        for (const bool home_first : {true, false}) {
-            SCOPED_TRACE(::testing::Message()
-                         << "tier=" << static_cast<int>(tier) << " home_first=" << home_first);
-            ASSERT_NO_FATAL_FAILURE(VerifyLegacyHaloScenario(tier, home_first));
-        }
-    }
-}
-TEST(FarLodWorker, ForeignLegacyMaxFaceAppliesExactSavedWaterBit) {
-    constexpr u8 kLegacyMaterial = 83u;
-    constexpr u8 kSdfMaterial = 231u;
-    constexpr int kWorldX = kFarLodRegionSizeMeters;
-    constexpr int kWorldZ = 88;
-    constexpr float kLegacyHeight = 18.0f;
-
-    for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
-        for (const bool saved_water : {true, false}) {
-            SCOPED_TRACE(::testing::Message()
-                         << "tier=" << static_cast<int>(tier) << " saved_water=" << saved_water);
-            TempSaveDir save;
-            TerrainGenParams params = FlatParams();
-            params.height_offset = saved_water ? SEA_LEVEL + 24.0f : SEA_LEVEL - 24.0f;
-            SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
-            const int step = FarLodSampleStepMeters(tier);
-            const u64 params_hash = ComputeTerrainParamsHash(params, 1337);
-
-            FarLodTile foreign = BuildPristineFarLodTile(world, tier, 1, 0, params_hash);
-            foreign.edited = true;
-            foreign.legacy_surface_authority = true;
-            const std::size_t foreign_index =
-                static_cast<std::size_t>(kWorldZ / step) * foreign.samples_per_side;
-            const std::size_t home_index =
-                static_cast<std::size_t>(kFarLodRegionSizeMeters / step) +
-                static_cast<std::size_t>(kWorldZ / step) * foreign.samples_per_side;
-            const FarLodTile pristine_home =
-                BuildPristineFarLodTile(world, tier, 0, 0, params_hash);
-            EXPECT_EQ((pristine_home.flags[home_index] & kFarLodSampleFlagWater) != 0u,
-                      !saved_water)
-                << "the requested witness must begin with the opposite water state";
-            foreign.height_q[foreign_index] = QuantizeFarLodHeight(kLegacyHeight);
-            foreign.material[foreign_index] = kLegacyMaterial;
-            foreign.flags[foreign_index] = static_cast<u8>(
-                kFarLodSampleFlagEdited | (saved_water ? kFarLodSampleFlagWater : 0u));
-            std::vector<std::string> errors;
-            ASSERT_TRUE(FarLodStore(save.path).save_tile(foreign, &errors));
-
-            // Chunk 30 owns a 3x3 halo ending at chunk 31. World x=512 is the
-            // max face of owned chunk 31 even though floor(512/16) is chunk 32.
-            auto authority = std::make_shared<Chunk>(IVec3(30, 0, 5));
-            world.GenerateChunkData(*authority, 1);
-            ASSERT_TRUE(SetPlanarAuthority(*authority, 7.0f, kSdfMaterial));
-            ASSERT_TRUE(world.adopt_streamed_chunk(authority));
-            const auto snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
-            ASSERT_TRUE(snapshot);
-            const auto outcome = BuildFarLodWorkerTile(world, *snapshot, tier, 0, 0, save.path);
-            ASSERT_TRUE(outcome.ok) << outcome.error;
-            EXPECT_GT(CountIndexedWorldVertex(outcome.mesh,
-                                              0,
-                                              0,
-                                              static_cast<float>(kWorldX),
-                                              kLegacyHeight,
-                                              static_cast<float>(kWorldZ),
-                                              kLegacyMaterial),
-                      0u);
-
-            EXPECT_EQ((outcome.tile.flags[home_index] & kFarLodSampleFlagWater) != 0u, saved_water)
-                << "the saved bit must set or clear, never merely OR";
-            EXPECT_EQ(outcome.tile.flags[home_index] & kFarLodSampleFlagEdited, 0u)
-                << "foreign persistence ownership must never be imported";
-            EXPECT_FALSE(outcome.tile.legacy_surface_authority);
-        }
-    }
-}
-
-TEST(FarLodWorker, NegativeLegacyMaxFaceUsesFloorOwnedCell) {
-    constexpr u8 kLegacyMaterial = 83u;
-    constexpr u8 kSdfMaterial = 231u;
-    constexpr int kHomeRegionX = -2;
-    constexpr int kHomeRegionZ = -1;
-    constexpr int kForeignRegionX = -1;
-    constexpr int kWorldX = -kFarLodRegionSizeMeters;
-    constexpr int kWorldZ = -88;
-    constexpr float kLegacyHeight = 18.0f;
-
-    for (const FarLodTier tier : {FarLodTier::F1, FarLodTier::F2}) {
-        SCOPED_TRACE(::testing::Message() << "tier=" << static_cast<int>(tier));
-        TempSaveDir save;
-        const TerrainGenParams params = FlatParams();
-        SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
-        const int step = FarLodSampleStepMeters(tier);
-        const u64 params_hash = ComputeTerrainParamsHash(params, 1337);
-
-        FarLodTile foreign =
-            BuildPristineFarLodTile(world, tier, kForeignRegionX, kHomeRegionZ, params_hash);
-        foreign.edited = true;
-        foreign.legacy_surface_authority = true;
-        const int foreign_origin_z = kHomeRegionZ * kFarLodRegionSizeMeters;
-        const std::size_t foreign_index =
-            static_cast<std::size_t>((kWorldZ - foreign_origin_z) / step) *
-            foreign.samples_per_side;
-        foreign.height_q[foreign_index] = QuantizeFarLodHeight(kLegacyHeight);
-        foreign.material[foreign_index] = kLegacyMaterial;
-        foreign.flags[foreign_index] = kFarLodSampleFlagEdited | kFarLodSampleFlagWater;
-        std::vector<std::string> errors;
-        ASSERT_TRUE(FarLodStore(save.path).save_tile(foreign, &errors));
-
-        // Chunk -33 ends at x=-512. Authority in chunk -34 owns -33 as
-        // scratch halo, while z=-88 exercises negative non-zero remainder
-        // floor division (the incident z cell belongs to chunk -6).
-        auto authority = std::make_shared<Chunk>(IVec3(-34, 0, -6));
-        world.GenerateChunkData(*authority, 1);
-        ASSERT_TRUE(SetPlanarAuthority(*authority, 7.0f, kSdfMaterial));
-        ASSERT_TRUE(world.adopt_streamed_chunk(authority));
-        const auto snapshot = world.capture_far_lod_sdf_snapshot(kHomeRegionX, kHomeRegionZ);
+TEST(FarLodWorker, ObsoleteHaloPayloadRefused) {
+    const TerrainGenParams params = FlatParams();
+    TempSaveDir save;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    for (const auto tier : {FarLodTier::F1, FarLodTier::F2}) {
+        const int rx = 1;
+        const auto path = WorldSaveService::region_file_path(save.path, rx, 0);
+        // Raw record seam builds an obsolete/future/corrupt fixture without a migration writer.
+        WorldSaveService::ContainerRecord record;
+        record.id = FarLodStore::tile_record_id(tier, rx, 0);
+        record.lod_level = static_cast<u8>(tier);
+        record.flags = 1u;
+        record.payload = std::string("FSD2", 4) + char(2) + char(0);
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+        const auto bytes = ReadFileBytes(path);
+        const auto snapshot = world.capture_far_lod_sdf_snapshot(0, 0);
         ASSERT_TRUE(snapshot);
-        const auto outcome =
-            BuildFarLodWorkerTile(world, *snapshot, tier, kHomeRegionX, kHomeRegionZ, save.path);
-        ASSERT_TRUE(outcome.ok) << outcome.error;
-        EXPECT_GT(CountIndexedWorldVertex(outcome.mesh,
-                                          kHomeRegionX,
-                                          kHomeRegionZ,
-                                          static_cast<float>(kWorldX),
-                                          kLegacyHeight,
-                                          static_cast<float>(kWorldZ),
-                                          kLegacyMaterial),
-                  0u);
-        EXPECT_GT(CountIndexedWorldPosition(outcome.mesh,
-                                            kHomeRegionX,
-                                            kHomeRegionZ,
-                                            static_cast<float>(kWorldX),
-                                            kLegacyHeight,
-                                            static_cast<float>(kWorldZ)),
-                  0u);
+        const auto outcome = BuildFarLodWorkerTile(world, *snapshot, tier, 0, 0, save.path);
+        EXPECT_FALSE(outcome.ok);
+        EXPECT_FALSE(outcome.error.empty());
+        EXPECT_TRUE(outcome.mesh.vertices.empty());
+        EXPECT_EQ(ReadFileBytes(path), bytes);
+    }
+}
+TEST(FarLodWorker, FuturePayloadRefused) {
+    const TerrainGenParams params = FlatParams();
+    TempSaveDir save;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    for (const auto tier : {FarLodTier::F1, FarLodTier::F2}) {
+        const int rx = -1;
+        const auto path = WorldSaveService::region_file_path(save.path, rx, 0);
+        // Raw record seam builds an obsolete/future/corrupt fixture without a migration writer.
+        WorldSaveService::ContainerRecord record;
+        record.id = FarLodStore::tile_record_id(tier, rx, 0);
+        record.lod_level = static_cast<u8>(tier);
+        record.flags = 1u;
+        record.payload = std::string("FSD2", 4) + char(4) + char(0);
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+        const auto bytes = ReadFileBytes(path);
+        const auto snapshot = world.capture_far_lod_sdf_snapshot(rx, 0);
+        ASSERT_TRUE(snapshot);
+        const auto outcome = BuildFarLodWorkerTile(world, *snapshot, tier, rx, 0, save.path);
+        EXPECT_FALSE(outcome.ok);
+        EXPECT_FALSE(outcome.error.empty());
+        EXPECT_TRUE(outcome.mesh.vertices.empty());
+        EXPECT_EQ(ReadFileBytes(path), bytes);
+    }
+}
 
-        const std::size_t home_index =
-            static_cast<std::size_t>(kFarLodRegionSizeMeters / step) +
-            static_cast<std::size_t>((kWorldZ - foreign_origin_z) / step) *
-                outcome.tile.samples_per_side;
-        EXPECT_EQ(outcome.tile.flags[home_index] & kFarLodSampleFlagEdited, 0u);
-        EXPECT_FALSE(outcome.tile.legacy_surface_authority);
-        ASSERT_EQ(outcome.tile.sdf_bricks.size(), 1u);
-        EXPECT_EQ(outcome.tile.sdf_bricks.front().local_chunk_x, 30u);
+TEST(FarLodWorker, CorruptPayloadRefused) {
+    const TerrainGenParams params = FlatParams();
+    TempSaveDir save;
+    SHIELD_WorldSystem world(nullptr, nullptr, params, 1337);
+    for (const auto tier : {FarLodTier::F1, FarLodTier::F2}) {
+        const int rx = -1;
+        const auto path = WorldSaveService::region_file_path(save.path, rx, 0);
+        // Raw record seam builds an obsolete/future/corrupt fixture without a migration writer.
+        WorldSaveService::ContainerRecord record;
+        record.id = FarLodStore::tile_record_id(tier, rx, 0);
+        record.lod_level = static_cast<u8>(tier);
+        record.flags = 1u;
+        record.payload = std::string("FSD2", 4) + char(3) + char(0);
+        ASSERT_TRUE(WorldSaveService::upsert_container_records(path, {record}));
+        const auto bytes = ReadFileBytes(path);
+        const auto snapshot = world.capture_far_lod_sdf_snapshot(rx, 0);
+        ASSERT_TRUE(snapshot);
+        const auto outcome = BuildFarLodWorkerTile(world, *snapshot, tier, rx, 0, save.path);
+        EXPECT_FALSE(outcome.ok);
+        EXPECT_FALSE(outcome.error.empty());
+        EXPECT_TRUE(outcome.mesh.vertices.empty());
+        EXPECT_EQ(ReadFileBytes(path), bytes);
     }
 }
 
@@ -1498,4 +1126,487 @@ TEST(FarLodWorker, DurableChunkTruthRepairsOldFarWithoutAStreamedSnapshot) {
         EXPECT_EQ(durable_after_phase_b.front()->sdf_data, durable_chunk->sdf_data);
         EXPECT_EQ(durable_after_phase_b.front()->material_data, durable_chunk->material_data);
     }
+}
+
+TEST(TreeImpostorMaterial, FilteredLeafEdgesPreserveColorNormalRoughnessAndOcclusion) {
+    if (!glfwInit())
+        GTEST_SKIP() << "glfwInit failed";
+    struct GlLifetime {
+        GLFWwindow* window = nullptr;
+        GLuint fbo = 0, vao = 0;
+        std::array<GLuint, 7> textures{};
+        ~GlLifetime() {
+            if (fbo) {
+                glDeleteFramebuffers(1, &fbo);
+                glDeleteVertexArrays(1, &vao);
+                glDeleteTextures(static_cast<GLsizei>(textures.size()), textures.data());
+            }
+            if (window)
+                glfwDestroyWindow(window);
+            glfwTerminate();
+        }
+    } gl;
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    gl.window = glfwCreateWindow(16, 16, "impostor material", nullptr, nullptr);
+    if (!gl.window)
+        GTEST_SKIP() << "OpenGL 4.5 context unavailable";
+    glfwMakeContextCurrent(gl.window);
+    ASSERT_TRUE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)));
+    TempSaveDir fixture;
+    const auto vertex_path = fixture.path / "impostor.vert";
+    std::ofstream(vertex_path) << R"(#version 450 core
+uniform vec2 sampleUV;
+out vec2 vQuadUV;
+out vec3 vViewDir, vWorldPos, vViewPos;
+flat out mat3 vObjectToWorld;
+flat out vec3 vTint;
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0, 1);
+    vQuadUV = sampleUV; vViewDir = vec3(0, 1, 0);
+    vWorldPos = vec3(0); vViewPos = vec3(0, 0, -10); vTint = vec3(1);
+    vObjectToWorld = mat3(0,0,-1, 0,1,0, 1,0,0); // object +Z becomes world +X
+}
+)";
+    const auto source_root =
+        std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const auto fragment_path = source_root / "res/shaders/tree_impostor.frag";
+    Shader shader(vertex_path.string().c_str(), fragment_path.string().c_str());
+    ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+    glGenFramebuffers(1, &gl.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, gl.fbo);
+    glGenTextures(static_cast<GLsizei>(gl.textures.size()), gl.textures.data());
+    std::array<GLenum, 5> attachments{};
+    for (std::size_t i = 0; i < attachments.size(); ++i) {
+        attachments[i] = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i);
+        glBindTexture(GL_TEXTURE_2D, gl.textures[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, attachments[i], GL_TEXTURE_2D, gl.textures[i], 0);
+    }
+    glDrawBuffers(static_cast<GLsizei>(attachments.size()), attachments.data());
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    // One occupied texel and transparent black beside it, as emitted by the bake.
+    const std::array<float, 8> albedo{0.2f, 0.4f, 0.05f, 1.0f, 0, 0, 0, 0};
+    const std::array<float, 8> normal_surface{0.5f, 0.5f, 0.8f, 0.4f, 0, 0, 0, 0};
+    for (int i = 0; i < 2; ++i) {
+        glActiveTexture(GL_TEXTURE0 + i);
+        glBindTexture(GL_TEXTURE_2D, gl.textures[static_cast<std::size_t>(5 + i)]);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_RGBA32F,
+                     2,
+                     1,
+                     0,
+                     GL_RGBA,
+                     GL_FLOAT,
+                     i == 0 ? albedo.data() : normal_surface.data());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    shader.use();
+    shader.setInt("u_albedo", 0);
+    shader.setInt("u_normal", 1);
+    shader.setFloat("u_grid", 1.0f);
+    shader.setFloat("u_materialId", 3.0f / 255.0f);
+    shader.setMat4("u_view", glm::mat4(1));
+    glGenVertexArrays(1, &gl.vao);
+    glBindVertexArray(gl.vao);
+    glViewport(0, 0, 1, 1);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    const std::array<float, 4> clear{-1, -1, -1, -1};
+    for (float u : {0.25f, 0.375f, 0.625f}) {
+        SCOPED_TRACE(u);
+        for (int i = 0; i < 5; ++i)
+            glClearBufferfv(GL_COLOR, i, clear.data());
+        shader.setVec2("sampleUV", u, 0.5f);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        std::array<float, 4> color{}, normal{}, surface{};
+        glReadBuffer(GL_COLOR_ATTACHMENT2);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, color.data());
+        if (u > 0.5f) {
+            EXPECT_EQ(color, clear) << "low-coverage gaps must remain empty";
+            continue;
+        }
+        for (int i = 0; i < 3; ++i)
+            EXPECT_NEAR(color[i], albedo[i], 0.002f);
+        EXPECT_NEAR(color[3], 0.8f, 0.002f);
+        glReadBuffer(GL_COLOR_ATTACHMENT1);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, normal.data());
+        EXPECT_NEAR(normal[0], 1.0f, 0.002f);
+        EXPECT_NEAR(normal[1], 0.5f, 0.002f);
+        glReadBuffer(GL_COLOR_ATTACHMENT3);
+        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, surface.data());
+        EXPECT_NEAR(surface[0], 0.0f, 0.002f);
+        EXPECT_NEAR(surface[1], 0.4f, 0.002f);
+    }
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+}
+
+TEST(FarLodWorker, ElevatedCameraSeesTerrainInsideItsOwnRegion) {
+    if (!glfwInit())
+        GTEST_SKIP() << "glfwInit failed";
+    struct GlLifetime {
+        GLFWwindow* window = nullptr;
+        ~GlLifetime() {
+            if (window)
+                glfwDestroyWindow(window);
+            glfwTerminate();
+        }
+    } gl;
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    gl.window = glfwCreateWindow(64, 64, "far region coverage", nullptr, nullptr);
+    if (!gl.window)
+        GTEST_SKIP() << "OpenGL 4.5 context unavailable";
+    glfwMakeContextCurrent(gl.window);
+    ASSERT_TRUE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)));
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    TempSaveDir fixture;
+    const auto vertex_path = fixture.path / "coverage.vert";
+    const auto fragment_path = fixture.path / "coverage.frag";
+    std::ofstream(vertex_path) << R"(#version 450 core
+layout(location=0) in vec3 position;
+uniform mat4 model, view, projection;
+out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[1]; };
+void main() { gl_Position = projection * view * model * vec4(position, 1); gl_ClipDistance[0] = 1; }
+)";
+    std::ofstream(fragment_path) << R"(#version 450 core
+out vec4 color;
+void main() { color = vec4(1); }
+)";
+    Shader shader(vertex_path.string().c_str(), fragment_path.string().c_str());
+    ASSERT_TRUE(shader.IsValid());
+    // One FIFO worker lets a queued fence wait for all preceding tile jobs,
+    // without sleeps or exposing scheduler internals to the fixture.
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
+    FarLodSystem far;
+    far.attach_job_system(&jobs);
+    const glm::vec3 camera(256, 1200, 256);
+    for (int frame = 0; frame < 12; ++frame) {
+        far.update(world, camera);
+        jobs.wait(jobs.dispatch_batch({[] {
+        }}));
+    }
+    ASSERT_GT(far.stats().regions_resident, 0u);
+    shader.use();
+    const auto view = glm::lookAt(camera, camera - glm::vec3(0, 1, 0), glm::vec3(0, 0, -1));
+    shader.setMat4("view", view);
+    shader.setMat4("projection",
+                   ReversedZPerspective(glm::radians(15.0f), 1.0f, NEAR_PLANE, FAR_PLANE));
+    const glm::vec4 planes[6]{}; // hardware frustum clips the actual geometry
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, 64, 64);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    std::size_t draws = 0, indices = 0;
+    far.draw_gbuffer(shader, view, planes, draws, indices);
+    std::array<unsigned char, 64 * 64 * 4> pixels{};
+    glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    // This entire narrow view lies in the camera's 512 m region. Other
+    // resident regions cannot fill a missing centre tile from this camera.
+    for (int y : {16, 32, 48})
+        for (int x : {16, 32, 48})
+            EXPECT_EQ(pixels[(y * 64 + x) * 4], 255) << "missing ground at " << x << "," << y;
+    EXPECT_EQ(glGetError(), GL_NO_ERROR);
+    far.shutdown();
+    jobs.shutdown();
+}
+
+// Uses the production vertex and fragment shaders, the real region scheduler,
+// and a small explicit live patch. This diagnoses one draw predicate; it does
+// not approve enabling analytic far terrain at cave/edited boundaries.
+TEST(FarLodWorker, LowCameraCoverageDiagnosticUsesProductionClippingAcrossRegionBoundaries) {
+    if (!glfwInit())
+        GTEST_SKIP() << "glfwInit failed";
+    struct GlLifetime {
+        GLFWwindow* window = nullptr;
+        bool loaded = false;
+        GLuint fbo = 0, depth = 0, vao = 0, vbo = 0, lut = 0, array = 0;
+        std::array<GLuint, 5> attachments{};
+        ~GlLifetime() {
+            if (loaded) {
+                glDeleteFramebuffers(1, &fbo);
+                glDeleteRenderbuffers(1, &depth);
+                glDeleteVertexArrays(1, &vao);
+                glDeleteBuffers(1, &vbo);
+                glDeleteTextures(1, &lut);
+                glDeleteTextures(1, &array);
+                glDeleteTextures(static_cast<GLsizei>(attachments.size()), attachments.data());
+            }
+            if (window)
+                glfwDestroyWindow(window);
+            glfwTerminate();
+        }
+    } gl;
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    gl.window = glfwCreateWindow(128, 64, "low camera coverage diagnostic", nullptr, nullptr);
+    if (!gl.window)
+        GTEST_SKIP() << "OpenGL 4.5 context unavailable";
+    glfwMakeContextCurrent(gl.window);
+    ASSERT_TRUE(gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)));
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    gl.loaded = true;
+    const auto root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const auto vertex = root / "res/shaders/g_buffer.vert";
+    const auto fragment = root / "res/shaders/g_buffer.frag";
+    Shader shader(vertex.string().c_str(), fragment.string().c_str());
+    ASSERT_TRUE(shader.IsValid()) << shader.Diagnostic();
+    glGenFramebuffers(1, &gl.fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, gl.fbo);
+    glGenTextures(static_cast<GLsizei>(gl.attachments.size()), gl.attachments.data());
+    std::array<GLenum, 5> buffers{};
+    for (std::size_t i = 0; i < buffers.size(); ++i) {
+        buffers[i] = GL_COLOR_ATTACHMENT0 + static_cast<GLenum>(i);
+        glBindTexture(GL_TEXTURE_2D, gl.attachments[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 128, 64, 0, GL_RGBA, GL_FLOAT, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, buffers[i], GL_TEXTURE_2D, gl.attachments[i], 0);
+    }
+    glDrawBuffers(static_cast<GLsizei>(buffers.size()), buffers.data());
+    glGenRenderbuffers(1, &gl.depth);
+    glBindRenderbuffer(GL_RENDERBUFFER, gl.depth);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, 128, 64);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, gl.depth);
+    ASSERT_EQ(glCheckFramebufferStatus(GL_FRAMEBUFFER), GL_FRAMEBUFFER_COMPLETE);
+    // All sampler types get distinct compatible bindings even when the flat
+    // material branch does not fetch a texture. No fixture clipping shader.
+    glGenTextures(1, &gl.lut);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gl.lut);
+    const std::array<float, 4> value{0, 0.7f, 1, 0};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 1, 1, 0, GL_RGBA, GL_FLOAT, value.data());
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glGenTextures(1, &gl.array);
+    for (int unit = 1; unit <= 6; ++unit) {
+        glActiveTexture(GL_TEXTURE0 + unit);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, gl.array);
+    }
+    const std::array<unsigned char, 4> texel{128, 128, 255, 255};
+    glTexImage3D(
+        GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, texel.data());
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    shader.use();
+    shader.setInt("u_materialLUT", 0);
+    shader.setInt("u_terrainTextures", 1);
+    shader.setInt("u_terrainNormals", 2);
+    shader.setInt("u_skinnedTextures", 3);
+    shader.setInt("u_terrainRoughness", 4);
+    shader.setInt("u_macroRockOverlay", 0);
+    shader.setInt("u_useInstanceOrigin", 0);
+    shader.setMat4("u_prev_view_proj", glm::mat4(1));
+    shader.setVec2("u_inv_screen_size", 1.0f / 128.0f, 1.0f / 64.0f);
+    glGenVertexArrays(1, &gl.vao);
+    glGenBuffers(1, &gl.vbo);
+    glBindVertexArray(gl.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, gl.vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, position)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1,
+                          3,
+                          GL_FLOAT,
+                          GL_FALSE,
+                          sizeof(VoxelVertex),
+                          reinterpret_cast<void*>(offsetof(VoxelVertex, normal)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribIPointer(2,
+                           1,
+                           GL_UNSIGNED_INT,
+                           sizeof(VoxelVertex),
+                           reinterpret_cast<void*>(offsetof(VoxelVertex, material_id)));
+    std::array<VoxelVertex, 6> live{};
+    const std::array<glm::vec2, 6> corners{
+        {{-128, -128}, {128, -128}, {128, 128}, {-128, -128}, {128, 128}, {-128, 128}}};
+    for (std::size_t i = 0; i < live.size(); ++i) {
+        live[i].position = glm::vec3(corners[i].x, 12, corners[i].y);
+        live[i].normal = glm::vec3(0, 1, 0);
+        live[i].material_id = 1;
+    }
+    glBufferData(GL_ARRAY_BUFFER, sizeof(live), live.data(), GL_STATIC_DRAW);
+    glViewport(0, 0, 128, 64);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_GREATER);
+    glDepthMask(GL_TRUE);
+    glClearDepth(0.0);
+    JobSystem jobs;
+    jobs.startup(1);
+    SHIELD_WorldSystem world(nullptr, nullptr, FlatParams(), 1337);
+    FarLodSystem far;
+    far.attach_job_system(&jobs);
+    far.set_coverage_diagnostics_enabled(true);
+    const glm::mat4 projection =
+        ReversedZPerspective(glm::radians(45.0f), 2.0f, NEAR_PLANE, FAR_PLANE);
+    struct Pose {
+        glm::vec3 camera;
+        float yaw;
+    };
+    const std::array<Pose, 4> poses{
+        {{{8, 56, 8}, 35}, {{504, 56, 504}, 215}, {{-8, 56, -8}, 215}, {{-504, 56, -504}, 35}}};
+    for (const auto& pose : poses) {
+        SCOPED_TRACE(::testing::Message()
+                     << pose.camera.x << ',' << pose.camera.z << " yaw " << pose.yaw);
+        const float yaw = glm::radians(pose.yaw), pitch = glm::radians(-6.0f);
+        const glm::vec3 horizontal(std::cos(yaw), 0, std::sin(yaw));
+        const auto view = glm::lookAt(pose.camera,
+                                      pose.camera + horizontal * std::cos(pitch) +
+                                          glm::vec3(0, std::sin(pitch), 0),
+                                      glm::vec3(0, 1, 0));
+        for (int frame = 0; frame < 12; ++frame) {
+            far.update(world, pose.camera);
+            jobs.wait(jobs.dispatch_batch({[] {
+            }}));
+        }
+        const int rx = static_cast<int>(std::floor(pose.camera.x / 512.0f));
+        const int rz = static_cast<int>(std::floor(pose.camera.z / 512.0f));
+        const auto camera_row = [&]() -> const FarLodSystem::RegionCoverage* {
+            for (const auto& r : far.coverage_diagnostics().neighbourhood)
+                if (r.rx == rx && r.rz == rz)
+                    return &r;
+            return nullptr;
+        };
+        const auto& coverage = far.coverage_diagnostics();
+        EXPECT_EQ(coverage.wanted, coverage.resident + coverage.missing);
+        EXPECT_LE(coverage.stale, coverage.resident);
+        EXPECT_EQ(coverage.neighbourhood.size(), 9u);
+        ASSERT_NE(camera_row(), nullptr);
+        ASSERT_TRUE(camera_row()->resident);
+        EXPECT_TRUE(camera_row()->current);
+        const auto sample = [&](float distance) {
+            const auto point = pose.camera + horizontal * distance;
+            const auto clip = projection * view * glm::vec4(point.x, 12, point.z, 1);
+            const int x = static_cast<int>((clip.x / clip.w * 0.5f + 0.5f) * 128);
+            const int y = static_cast<int>((clip.y / clip.w * 0.5f + 0.5f) * 64);
+            EXPECT_GE(x, 0);
+            EXPECT_LT(x, 128);
+            EXPECT_GE(y, 0);
+            EXPECT_LT(y, 64);
+            float depth = 0;
+            glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+            return depth;
+        };
+        const auto draw = [&](bool bypass) {
+            far.set_coverage_camera_region_guard_bypass(bypass);
+            glBindFramebuffer(GL_FRAMEBUFFER, gl.fbo);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            shader.use();
+            shader.setMat4("view", view);
+            shader.setMat4("projection", projection);
+            shader.setMat3("u_normalViewMatrix", glm::mat3(view));
+            shader.setMat4(
+                "model", glm::translate(glm::mat4(1), glm::vec3(pose.camera.x, 0, pose.camera.z)));
+            shader.setMat3("normalMatrix", glm::mat3(view));
+            glBindVertexArray(gl.vao);
+            glDrawArrays(GL_TRIANGLES, 0, 6); // the explicit live patch owns the near point
+            const glm::vec4 planes[6]{}; // actual hardware clip, without a synthetic frustum veto
+            std::size_t draws = 0, indices = 0;
+            far.draw_gbuffer(shader, view, planes, draws, indices);
+            return std::array<float, 2>{sample(100), sample(300)};
+        };
+        const auto guarded = draw(false);
+        ASSERT_TRUE(far.coverage_diagnostics().draw_observed);
+        EXPECT_STREQ(camera_row()->terrain_decision, "camera_region_guard");
+        EXPECT_GT(guarded[0], 0.0f) << "live near patch missing";
+        EXPECT_EQ(guarded[1], 0.0f) << "expected diagnostic guard footprint outside live patch";
+        const auto bypassed = draw(true);
+        EXPECT_STREQ(camera_row()->terrain_decision, "submitted");
+        EXPECT_EQ(bypassed[0], guarded[0]) << "176 m production clip must preserve near ownership";
+        EXPECT_GT(bypassed[1], 0.0f) << "production shader should cover the in-region far point";
+        EXPECT_GT(bypassed[0], bypassed[1]) << "reversed depth must keep the live patch nearer";
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        // A bypass request cannot modify ordinary rendering without diagnostics.
+        far.set_coverage_diagnostics_enabled(false);
+        const auto disabled = draw(true);
+        EXPECT_EQ(disabled, guarded);
+        EXPECT_FALSE(far.coverage_diagnostics().enabled);
+        far.set_coverage_diagnostics_enabled(true);
+    }
+    far.shutdown();
+    jobs.shutdown();
+}
+
+TEST(FarLodWorker, CaveLocatorReturnsAnAirPositionInTheDefaultPreset) {
+    const auto root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const auto preset =
+        Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(preset.ok);
+    SHIELD_WorldSystem world(nullptr, nullptr, preset.params, 424242);
+    const auto pose = Luminumbra::Debug::FindEnclosedCave(world, glm::vec3(8, 17.15f, 8), 256);
+    ASSERT_TRUE(pose.has_value());
+    if (pose.has_value()) {
+        EXPECT_GE(world.get_density_at(pose.value().pos), 0.0f)
+            << "cave capture must not put the camera inside solid rock";
+    }
+}
+
+TEST(FarLodWorker, DefaultCaveStreamsEveryNeighbouringMesh) {
+    const auto root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+    const auto preset =
+        Luminumbra::world::LoadTerrainPreset(root / "worlds/atlas/presets/default.json");
+    ASSERT_TRUE(preset.ok);
+    JobSystem jobs;
+    jobs.startup();
+    {
+        SHIELD_WorldSystem world(&jobs, nullptr, preset.params, 424242);
+        world.debug_set_streaming_radius_cap(8);
+        entt::registry registry;
+        const Vec3 camera(8.469266f, -46.070644f, 11.695518f);
+        ASSERT_GT(world.get_density_at(camera), 0.0f);
+        for (int frame = 0; frame < 48; ++frame) {
+            world.update(registry, camera, nullptr);
+            world.wait_for_streaming_jobs();
+        }
+        // At the default 110-degree FOV, the leftward cave wall is over 100 m
+        // away. The old 32 m neighbourhood exposed sky inside this air pocket.
+        for (const auto coords : {IVec3(4, -6, -7), IVec3(2, -3, -4)}) {
+            const auto wall = world.find_streamed_chunk(coords);
+            ASSERT_NE(wall, nullptr) << "visible cave wall must be resident";
+            EXPECT_EQ(wall->get_state(), ChunkState::Ready);
+            EXPECT_FALSE(wall->mesh_indices.empty());
+        }
+        EXPECT_LT(world.get_runtime_chunk_stats().total_chunks, 4000u);
+        const auto center = world.world_to_chunk_coords(camera);
+        for (int dz = -2; dz <= 2; ++dz) {
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const auto coords = center + IVec3(dx, dy, dz);
+                    SCOPED_TRACE(::testing::Message()
+                                 << coords.x << ',' << coords.y << ',' << coords.z);
+                    const auto streamed = world.find_streamed_chunk(coords);
+                    ASSERT_NE(streamed, nullptr);
+                    EXPECT_EQ(streamed->get_state(), ChunkState::Ready);
+                    Chunk reference(coords);
+                    world.GenerateChunkData(reference, 1);
+                    MarchingCubes::PolygoniseTerrain(world, reference, 0.0f, 1);
+                    EXPECT_EQ(streamed->sdf_data, reference.sdf_data);
+                    EXPECT_EQ(streamed->mesh_indices, reference.mesh_indices);
+                }
+            }
+        }
+    }
+    jobs.shutdown();
 }

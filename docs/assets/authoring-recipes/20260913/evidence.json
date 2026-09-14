@@ -1,0 +1,191 @@
+{
+  "schema": "luminumbra.authoring.recipe.evidence.v1",
+  "source_commit": "eb745a4332cbcfdd03d65f30b820521fd2c4fa4f",
+  "source_tree": "37537fc7f3879e9da88bf12ab0ec57fcae01732d",
+  "source_dirty": false,
+  "base_commit": "7b7510d157af9712389b0ffc75fa4892c49089fb",
+  "extension_version": "0.3.0",
+  "blender_version": "5.1.0",
+  "blender_build": "adfe2921d5f3",
+  "blender_sha256": "f9d2e744702354e7d182861fb924bc128ea85d8cf0577b91dcb4d92f09cdc287",
+  "exporter_identity": {
+    "version": "5.1.18",
+    "init_sha256": "dd677102fe48abce12303a6ef123d45989073c4ba8f7848b649875bfedd98306",
+    "usage": "Installed exporter source identity checked; this ID recipe does not invoke GLB export."
+  },
+  "archive_sha256": "9bc18cc4333f94e1aee32c6a467446e9253944be5818fcb53d5d63aa05393dd0",
+  "probe_sha256": "7684234b55f9d2161ced9f3f3dee7b9c475215641f7ba83a4bec7a541cc08796",
+  "runner_sha256": "f2b46af50382a9685c61d51207b9a7ce7a4fa70bce90b631c891445b04dd931d",
+  "job_sha256": "58c0e6287048f001594e23e930d221084d18f32d1498da378e037464a1420f2e",
+  "qualification_sha256": "51ba7f9c707b97da72ea9dc9ab813b05a23a44203e912faca831ff1f32a83adc",
+  "native_receipt_sha256": "9709d9a6cae3e523e64b6e9fe6fba46cceacd3fab887d9247b6d044c1825142f",
+  "host_identity_sha256": "eb26374cca87f26bf5f1a255e8215b92a1950b4a25d5582ce94be6d07c18bb9c",
+  "source_inputs": {
+    "LICENSE": {
+      "sha256": "64d4a249869ca138e9e6f6cc525ac6996b6f25af72a03fc2456ff768ed478887",
+      "git_blob": "d2574272d551da39816bf2f8bf8ecbb1a338f399"
+    },
+    "tools/blender/authoring/extension/__init__.py": {
+      "sha256": "22ec7d08fbbb4f0ca16fad6c9936d850f2af7c99af70bbff096746e6427876e2",
+      "git_blob": "528a79bfe2c91d4f02a2cd6c3908de2acb47c1f3"
+    },
+    "tools/blender/authoring/extension/blender_asset.py": {
+      "sha256": "87b4abd29190036173de68d3070d2912f6a1f93881941345cc7b5928f1443d2e",
+      "git_blob": "ab82d5e4531f312b28457b24668c12f81ebd1501"
+    },
+    "tools/blender/authoring/extension/blender_manifest.toml": {
+      "sha256": "44c4f094bb2b0982265e6ef220565b7d09c1ba1c47221f47683bb3e36bae895c",
+      "git_blob": "26dddc6ff171dc93cc53fff8e9344365c4666555"
+    },
+    "tools/blender/authoring/extension/blender_recipes.py": {
+      "sha256": "09206059d7bd433ccb056f1844f57dd8e836bc6253c4b6d531534e9571f51fef",
+      "git_blob": "0ac10c0965f193680c958e83a340da5c6bb84356"
+    },
+    "tools/blender/authoring/extension/broker.py": {
+      "sha256": "3de8db9999f8a8ca93a2b330ea9fa776d241f3142b001f1af5ac9683d71b6ae1",
+      "git_blob": "ecd25c64451ac0a5d88c04957889969821f21ce1"
+    },
+    "tools/blender/authoring/extension/export_worker.py": {
+      "sha256": "a2e02ff27802c29f397c8a4fcff7a6b4e0bd0e7ea999f60d59effd65360d4e82",
+      "git_blob": "6bba4a1413cfd90aa171025f89200040b438658e"
+    },
+    "tools/blender/authoring/extension/logic.py": {
+      "sha256": "9b2b4d8db8e96686db36ea70caaf0f208ea428fc808b5d7636df02f771312ad4",
+      "git_blob": "d593cc13dd79f8f974dcca934cd5bfd0e6a2d4c1"
+    },
+    "tools/blender/authoring/extension/recipes.py": {
+      "sha256": "7e0c1dca23ce8f0b59de250ae7d3021e2ae09dbe4db75227da59343690cc48f8",
+      "git_blob": "8e7f23e933199e09dd472ee6310d266ade506556"
+    },
+    "tools/blender/authoring/package_extension.py": {
+      "sha256": "949671972246279a8c35ad9290cc82cc03f9296c2d6cb08274f295978885a67b",
+      "git_blob": "dfe1cbbc9709fcae953c0d9cefd0c4bd9f736462"
+    },
+    "tools/blender/authoring/extension_tests/native_recipe_probe.py": {
+      "sha256": "7684234b55f9d2161ced9f3f3dee7b9c475215641f7ba83a4bec7a541cc08796",
+      "git_blob": "676a242cb8293f312ebcd97a89d90176064684db"
+    }
+  },
+  "screenshot": {
+    "path": "review-dialog.png",
+    "sha256": "06733ffc3367a2101628cb97f4276fc5e02cc5995127df582673114ee78c0721",
+    "bytes": 373763,
+    "width": 1400,
+    "height": 900,
+    "processing": "Original bpy.ops.screen.screenshot PNG; no resizing or edits"
+  },
+  "interactive": true,
+  "engine_rendered": false,
+  "native_checks": [
+    {
+      "name": "interactive editor",
+      "passed": true
+    },
+    {
+      "name": "isolated resource directories",
+      "passed": true
+    },
+    {
+      "name": "install actual archive",
+      "passed": true
+    },
+    {
+      "name": "recipe operator and callback registered",
+      "passed": true
+    },
+    {
+      "name": "manual marking bootstrap",
+      "passed": true
+    },
+    {
+      "name": "revision exists before any build session",
+      "passed": true
+    },
+    {
+      "name": "review dialog opens without editing",
+      "passed": true
+    },
+    {
+      "name": "actual review dialog screenshot",
+      "passed": true
+    },
+    {
+      "name": "cancel invalidates the dialog plan without editing",
+      "passed": true
+    },
+    {
+      "name": "planning is nonmutating",
+      "passed": true
+    },
+    {
+      "name": "exact duplicate and shared mesh changes",
+      "passed": true
+    },
+    {
+      "name": "apply reviewed operator",
+      "passed": true
+    },
+    {
+      "name": "original stable and duplicate repaired",
+      "passed": true
+    },
+    {
+      "name": "durable receipt matches live result",
+      "passed": true
+    },
+    {
+      "name": "one undo restores complete ID preimage",
+      "passed": true
+    },
+    {
+      "name": "undo advances revision and retains receipt",
+      "passed": true
+    },
+    {
+      "name": "request replay does not reapply undone data",
+      "passed": true
+    },
+    {
+      "name": "redo restores exact reviewed IDs",
+      "passed": true
+    },
+    {
+      "name": "ordinary scene edit invalidates review without build session",
+      "passed": true
+    },
+    {
+      "name": "native receipt failure rolls back scene mutation",
+      "passed": true
+    },
+    {
+      "name": "file load invalidates document and pending plans",
+      "passed": true
+    },
+    {
+      "name": "extension unload removes recipe and timer",
+      "passed": true
+    }
+  ],
+  "native_run_id": "luminumbra-recipe-f52398c284fb4b6db0e8c60cf17adfa9",
+  "process": {
+    "started_at": "2026-09-13T21:48:32.718372+00:00",
+    "exit_code": 0,
+    "elapsed_seconds": 8.514999999999418,
+    "deadline_seconds": 120,
+    "cpu_workers": 2
+  },
+  "unchanged_inputs": {
+    "blender_unchanged": true,
+    "inputs_unchanged": true,
+    "job_unchanged": true,
+    "exporter_unchanged": true
+  },
+  "linux_portable_validation": {
+    "adapter_recipe_tests": 15,
+    "service_tests": 27,
+    "passed": true,
+    "native_editor_qualified": false
+  },
+  "visual_approval": "pending",
+  "scope": "Fresh current-base functional Blender identity-recipe UI. No engine viewport, GPU performance, newly authored production content or visual-quality acceptance claim. Historical September 9 evidence retains its original identities."
+}

@@ -19,6 +19,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineContracts.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EngineVersion.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/EventBus.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/core/FilesystemPath.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/JobSystem.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/Log.cpp
     ${CMAKE_CURRENT_LIST_DIR}/core/SimulationClock.cpp
@@ -47,6 +48,8 @@ set(COMMON_SOURCES
     # Persistence
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldPersistenceRoundtrip.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/SavedWorldCatalog.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/AsyncSavedWorldCatalog.cpp
 
     # Replay (: LREC1 session replay stream; engine-generic)
     ${CMAKE_CURRENT_LIST_DIR}/replay/ReplayStream.cpp
@@ -77,6 +80,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/BiomeTable.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarLodStore.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/GameSession.cpp
     #  semantic-knob -> generation_params response table + persisted layer.
     ${CMAKE_CURRENT_LIST_DIR}/world/KnobLayer.cpp

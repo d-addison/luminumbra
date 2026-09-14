@@ -61,7 +61,7 @@ public:
     bool body_is_active(JPH::BodyID body) const;
     void destroy_body(JPH::BodyID body);
 
-    // --- Player Controller ---
+    // --- Player Controller (positions are feet positions in both stances) ---
     void create_player_controller(const glm::vec3& initial_position);
     void update_player(const glm::vec3& wish_velocity,
                        bool wants_to_jump,
@@ -70,7 +70,8 @@ public:
     void set_player_position(const glm::vec3& position);
     glm::vec3 get_player_position() const;
     bool is_player_grounded() const;
-    void set_player_crouched(bool is_crouched);
+    // Returns false when collision prevents changing shape; the old stance remains.
+    bool set_player_crouched(bool is_crouched);
     bool player_has_space_to_stand() const;
 
     // --- Server-authoritative multiplayer avatars ---

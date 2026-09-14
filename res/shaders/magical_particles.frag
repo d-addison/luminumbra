@@ -50,9 +50,8 @@ uniform sampler2D u_sceneDepth;
 
 // Linearize a hardware depth-buffer sample to view-space depth (positive).
 float linearize_depth(float d) {
-    float z = d * 2.0 - 1.0; // NDC
-    return (2.0 * u_nearPlane * u_farPlane) /
-           (u_farPlane + u_nearPlane - z * (u_farPlane - u_nearPlane));
+    return (u_nearPlane * u_farPlane) /
+           (u_nearPlane + d * (u_farPlane - u_nearPlane));
 }
 
 // Radial soft sprite mask (round flakes / magical sparkles).
@@ -79,6 +78,8 @@ float streak_mask(vec2 uv) {
 void main() {
     vec2 uv = fs_in.texCoord;
     bool isStreak = fs_in.streakAspect > 1.5;
+    bool isRain = abs(fs_in.atlasLayer - 1.0) < 0.25 || isStreak;
+    bool isSnow = abs(fs_in.atlasLayer - 2.0) < 0.25;
     // rain-impact FOAM is tagged with a dedicated atlas
     // layer sentinel (precip_splash.json atlas_layer = 4) so it renders as a clean
     // whitish foam burst rather than a scene-tinted emissive sprite. All other
@@ -111,24 +112,11 @@ void main() {
     }
 
     vec4 finalColor = fs_in.color;
-    if (isStreak) {
-        // CLEAN RAIN. The owner saw "coloured TV static"
-        // -- cyan/teal/pink speckle. Root cause: the streak colour was modulated by
-        // the scene forward-lighting term (`lit` = ambient + sun + up to 4 coloured
-        // point lights), so every streak picked up a per-position hue and the field
-        // read as chromatic noise. The fix: rain is a CONSTANT light blue-white
-        // translucent filament with NO per-particle hue variation and NO scene-light
-        // tint. A single fixed water colour; the only spatial variation is the
-        // soft cross-section mask (spine brighter than edges) and the depth fade --
-        // i.e. shape, not colour. This reads as clean rain, not static.
-        const vec3 kRainColor = vec3(0.82, 0.90, 1.0);   // fixed light blue-white
-        finalColor.rgb = kRainColor;
-        // Brighten the thin spine a touch so the centre of each streak catches a
-        // wet highlight running down the filament (still hue-neutral: white add).
-        finalColor.rgb += vec3(0.10) * shape;
-        // Translucent veil: moderate peak alpha, shaped by the streak mask so it
-        // is soft-edged. Kept well below 1 so the rain stays see-through in motion.
-        finalColor.a = clamp(fs_in.color.a, 0.0, 1.0) * shape * 0.85 * softFade;
+    if (isRain || isSnow) {
+        // Precipitation scatters scene light; it is not a magical emitter.
+        float illumination = clamp(dot(lit, vec3(0.2126, 0.7152, 0.0722)), 0.04, 1.0);
+        finalColor.rgb = (isSnow ? fs_in.color.rgb : vec3(0.82, 0.90, 1.0)) * illumination;
+        finalColor.a = clamp(fs_in.color.a, 0.0, 1.0) * shape * softFade;
     } else if (isFoam) {
         // SPLASH = subtle whitish foam burst, not coloured
         // dots. The impact spray previously ran through the emissive path

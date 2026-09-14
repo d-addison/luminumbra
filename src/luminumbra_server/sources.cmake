@@ -17,6 +17,7 @@ set(SERVER_APP_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/modes/Replicate.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/Server.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/Smoke.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/modes/SmokeArtifact.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/Steam.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/WeatherBench.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/modes/WindBench.cpp"

@@ -127,7 +127,12 @@ private:
     std::unique_ptr<Shader> m_tree_impostor_shader;
     GLuint m_impostorInstanceVBO = 0; // per-instance vec4 (xyz=tree base pos, w=scale)
     GLuint m_impostorVAO = 0;
-    std::vector<glm::vec4> m_impostorInstances; // reused per frame (keep capacity, no realloc)
+    struct ImpostorInstance {
+        glm::mat4 model;
+        glm::vec4 tint;
+    };
+    std::vector<ImpostorInstance>
+        m_impostorInstances; // reused per frame (keep capacity, no realloc)
     GLuint m_jointPaletteSSBO = 0;
     std::size_t m_jointPaletteSSBOCapacityBytes = 0;
 

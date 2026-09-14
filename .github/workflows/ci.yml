@@ -40,7 +40,9 @@ jobs:
           key: linux-x64-gcc-ccache-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**/*.cmake', 'src/**/*.cmake', 'test/CMakeLists.txt', 'tools/CMakeLists.txt', 'vendor/CMakeLists.txt') }}
           restore-keys: linux-x64-gcc-ccache-
       - name: Configure
-        run: cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: >-
+          cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
       - name: Build
         run: cmake --build --preset release --parallel 4
       - name: Test
@@ -49,6 +51,13 @@ jobs:
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
               --parallel 4 --timeout 180 --output-junit ctest.junit.xml
           python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      - name: Qualify installed prefab runtime
+        timeout-minutes: 5
+        run: |
+          python3 tools/ci/test_qualify_prefab_runtime.py
+          python3 tools/ci/qualify_prefab_runtime.py --build build/release \
+            --ctest-report build/release/ctest.junit.xml \
+            --output build/release/test-artifacts/prefab-runtime
       - name: Test over-the-wire networking
         run: |
           ctest --preset release --no-tests=error -R '^NetSoak$' \
@@ -63,6 +72,16 @@ jobs:
             build/release/netsoak.junit.xml
             build/release/Testing/Temporary
             build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload installed prefab generations and receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-gcc-prefab-runtime-${{ github.sha }}
+          path: build/release/test-artifacts/prefab-runtime
+          # Retain the synthetic project's .luminumbra-author generations too.
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
       - name: Validate dormant and enabled Linux packaging
@@ -211,6 +230,30 @@ jobs:
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
           cmake --build --preset release --parallel 4
+          # Retain one CPU-only diagnostic binary with its compiler runtime so a
+          # terrain-hash failure can distinguish compiler output from host effects.
+          # This temporary CI artifact is not a software release or game package.
+          $diagnostic = 'build/release/worldgen-diagnostic'
+          New-Item -ItemType Directory -Force $diagnostic | Out-Null
+          Copy-Item build/release/bin/worldgen_layer_snapshot_test.exe $diagnostic
+          $crt = @(Get-ChildItem (Join-Path $env:VCToolsRedistDir 'x64') -Directory -Filter 'Microsoft.VC*.CRT')
+          if ($crt.Count -ne 1) { throw 'Expected exactly one x64 MSVC CRT directory' }
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
+            Copy-Item (Join-Path $crt[0].FullName $dll) $diagnostic
+          }
+          $files = @{}
+          Get-ChildItem $diagnostic -File | ForEach-Object {
+            $files[$_.Name] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          }
+          @{
+            revision = (git rev-parse HEAD)
+            purpose = 'CPU-only worldgen test diagnosis; not a release'
+            compiler = (Get-Item (Get-Command cl).Source).VersionInfo.FileVersion
+            portable_test_filter = 'WorldGenLayerSnapshotTest.DefaultShapingIsDeterministicAndAllSamplersAgree'
+            diagnostic_output_variable = 'LUMINUMBRA_WORLDGEN_DIAGNOSTIC_DIR'
+            limitation = 'Other cases may require the compile-time source checkout; the portable filter uses five synthetic presets only.'
+            file_sha256 = $files
+          } | ConvertTo-Json -Depth 4 | Set-Content "$diagnostic/identity.json"
           # Deploy the staged Mesa3D llvmpipe runtime next to the test
           # executables so glfwCreateWindow gets a GL 4.5 core context.
           Copy-Item (Join-Path $env:RUNNER_TEMP 'mesa3d/x64/opengl32.dll'), `
@@ -232,6 +275,14 @@ jobs:
             build/release/ctest.junit.xml
             build/release/Testing/Temporary
             build/release/test-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload native worldgen diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-msvc-worldgen-diagnostic-${{ github.sha }}
+          path: build/release/worldgen-diagnostic
           if-no-files-found: warn
           retention-days: 14
       - name: Validate dormant and enabled Windows packaging
@@ -413,6 +464,9 @@ jobs:
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
+          python3 tools/ci/test_validate_visual_catalog.py
+          python3 tools/ci/validate_visual_catalog.py
+          python3 tools/ci/render_visual_catalog.py --check
           python3 tools/ci/validate_public_tree.py
           python3 tools/ci/validate_assets.py --check config/public-asset-inventory.json
           python3 tools/check_runtime_data_manifest.py

@@ -72,9 +72,8 @@ public:
         return m_water_neutral_flow_texture;
     }
     // Shared caustics feed accessor (named for its historical fallback): the
-    // lighting pass binds this as u_causticsTexture and the water shader as
-    // u_caustics_texture. Returns the generated caustics texture when the
-    // offscreen pass is available, the black fallback otherwise.
+    // Water shader binds this as u_caustics_texture. Returns the generated caustics texture when
+    // the offscreen pass is available, the black fallback otherwise.
     u32 black_texture() const {
         return m_caustics_texture != 0 ? m_caustics_texture : m_water_black_texture;
     }

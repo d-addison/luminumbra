@@ -35,7 +35,7 @@ void GodRaysPass::execute(const RenderContext& ctx) {
     const glm::vec2 sun_uv(ctx.sun_uv_x, ctx.sun_uv_y);
     const GLuint lit_fbo = ctx.lit_scene.id;
     const GLuint opaque_tex = ctx.opaque_scene.id;
-    if (sun_visible > 0.002f && lit_fbo && opaque_tex) {
+    if (sun_visible > 0.002f && lit_fbo && opaque_tex && ctx.gbuffer_depth.id) {
         glBindFramebuffer(GL_FRAMEBUFFER, lit_fbo);
         glViewport(0, 0, ctx.internal_w(), ctx.internal_h()); // god-rays into internal lit FBO
         const GLboolean depth_was = glIsEnabled(GL_DEPTH_TEST);
@@ -47,12 +47,17 @@ void GodRaysPass::execute(const RenderContext& ctx) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, opaque_tex);
         m_shader->setInt("u_scene", 0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_depth.id);
+        m_shader->setInt("u_sceneDepth", 1);
         m_shader->setVec2("u_sunUV", sun_uv);
         m_shader->setFloat("u_sunVisible", sun_visible);
         m_shader->setFloat("u_strength", 0.85f);
         glBindVertexArray(ctx.screen_quad_vao);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, 0);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, 0);
         if (!blend_was)

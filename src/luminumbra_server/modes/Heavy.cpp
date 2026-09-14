@@ -18,10 +18,15 @@ struct HeavyHashes {
     std::string world_hash;
     Luminumbra::Persistence::WorldStreamingStateSubHashes sub;
     std::string scent_hash;
+    bool active_regions = false;
+    std::string clock_bytes;
 };
 
 HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     HeavyHashes h;
+    h.active_regions = runner.Session() && runner.Session()->ActiveRegionsEnabled();
+    if (h.active_regions)
+        h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
     h.world_hash = runner.ComputeWorldHash();
     h.sub = runner.ComputeWorldSubHashes();
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
@@ -39,30 +44,14 @@ HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
 // world_hash (which DOES include mesh) is reported but not asserted on across
 // the round-trip for this reason; it is still asserted run==replay in --smoke.
 bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
-    // the heavy oracle compares two sessions at DIFFERENT tick
-    // phases across the save/load boundary (original at tick N vs the freshly
-    // loaded session at tick 0; later original at N+M vs loaded at M). Terrain/
-    // water/entities are spatial state that is invariant once streaming settles,
-    // so they compare exactly. The WIND field is TICK-DEPENDENT by design (it
-    // evolves every tick), so it legitimately differs between two sessions at
-    // different tick counts and is NOT compared here -- exactly like mesh is
-    // excluded for a different reason. Wind's determinism is proven where the
-    // comparison IS same-tick: the smoke (run==replay), WindFieldDeterminism,
-    // and the replay roundtrip (same-tick checkpoint hashes, which include wind
-    // via the composite world_hash).
-    //
-    // WEATHER is excluded for the IDENTICAL reason as wind. The
-    // weather core (region category map + storm cells + precipitation field) is a
-    // pure function of (seed+12, ABSOLUTE tick, anchor) -- it evolves every tick
-    // and the storm-cell schedule keys on the absolute tick-epoch. Across the
-    // save/load boundary the loaded session's tick counter resets to 0, so it has
-    // no concept of the original's absolute tick; persisting the accumulated
-    // weather state could NOT make a cross-phase compare match (original@N+M vs
-    // loaded@M differ in absolute tick), so it is recompute-and-excluded here. Its
-    // determinism is proven where the comparison IS same-tick: the smoke
-    // (run==replay), the WeatherVisual state-hash (resim/replay at the same tick),
-    // and the replay roundtrip / lockstep checkpoints (which include weather via
-    // the composite world_hash).
+    // Legacy loads restart at tick zero. With the persisted clock on, ambient
+    // fields and the clock must also agree at save and after continuation.
+    if (a.active_regions || b.active_regions) {
+        if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
+            a.sub.wind != b.sub.wind || a.sub.weather != b.sub.weather ||
+            a.sub.aether != b.sub.aether || a.sub.aether_state != b.sub.aether_state)
+            return false;
+    }
     return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&
            a.sub.entities == b.sub.entities;
 }

@@ -39,7 +39,7 @@
     {
       "name": "debug-simo0",
       "displayName": "Debug Sim Opt-Parity",
-      "description": "Debug build with GameSession.cpp forced to the sim opt-parity level (-) for the Test-SimOptLevelParity world_hash invariance gate ().",
+      "description": "Debug build enabling LUMINUMBRA_SIM_O0_PARITY for the Test-SimOptLevelParity world_hash invariance gate. The GCC-only alternate GameSession.cpp compile option is defined in src/luminumbra_common/CMakeLists.txt.",
       "inherits": "debug",
       "cacheVariables": {
         "LUMINUMBRA_SIM_O0_PARITY": "ON"

@@ -19,7 +19,7 @@ struct State {
     float cover01 = 0.0f;
 };
 
-// snow_intensity01: the Snow-category precipitation at the camera [0,1].
+// snow_intensity01: the Snow-category precipitation at the ground [0,1].
 // sun_up01: max(sun up-factor, 0) — melts only while the sun is actually up.
 inline void Advance(State& s, float snow_intensity01, float sun_up01, float dt_seconds) {
     const float snow = std::clamp(snow_intensity01, 0.0f, 1.0f);
