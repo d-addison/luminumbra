@@ -1169,18 +1169,36 @@ void ScenarioRunnerImpl::captureFoliageVisual(std::chrono::steady_clock::time_po
             : !fresh ? "windy readback generation did not match the rendered build before deadline"
                      : "windy draw, vertex proof, instance data or screenshot unavailable before "
                        "deadline";
-        const nlohmann::json refusal = {
-            {"schema", "luminumbra.foliage_instancing.v3"},
-            {"profile", FoliageVisualProfile::id},
-            {"passed", false},
-            {"refusal", reason},
-            {"phases",
-             {{"calm", FoliagePhaseReport(foliage_calm)},
-              {"windy", FoliagePhaseReport(FoliagePhaseEvidence{})}}},
-            {"capture_frame", scenario_frame_count},
-            {"render_pass",
-             {{"foliage_draws", stats.foliage_draws},
-              {"foliage_instances_drawn", stats.foliage_instances_drawn}}}};
+        nlohmann::json refusal = {{"schema", "luminumbra.foliage_instancing.v3"},
+                                  {"profile", FoliageVisualProfile::id},
+                                  {"passed", false},
+                                  {"refusal", reason},
+                                  {"phases",
+                                   {{"calm", FoliagePhaseReport(foliage_calm)},
+                                    {"windy", FoliagePhaseReport(FoliagePhaseEvidence{})}}},
+                                  {"capture_frame", scenario_frame_count},
+                                  {"render_pass",
+                                   {{"foliage_draws", stats.foliage_draws},
+                                    {"foliage_instances_drawn", stats.foliage_instances_drawn}}}};
+        if (foliage) {
+            const auto* blocker = foliage->qualification_blocker();
+            refusal["qualification_state"] = {
+                {"start_blocker", blocker ? blocker : "none"},
+                {"started", foliage->qualification_started()},
+                {"rebuild_complete", foliage->qualification_rebuild_complete()},
+                {"first_rebuild_written", foliage_first_rebuild_written},
+                {"second_rebuild_written", foliage_second_rebuild_written},
+                {"fresh_instances", fresh},
+                {"from_gpu_readback", foliage->instances_from_gpu_readback()},
+                {"instance_count", foliage->instances().size()},
+                {"build_generation", foliage->build_generation()},
+                {"instance_generation", foliage->instance_generation()},
+                {"build_frame", foliage->build_frame()},
+                {"available_frame", foliage->instance_available_frame()},
+                {"build_phase", foliage->build_phase()},
+                {"vertex_submission_frame", foliage->vertex_submission_frame(phase)},
+                {"vertex_evidence_ready", foliage->vertex_evidence_ready()}};
+        }
         std::ofstream output(scenario_config.artifact_dir / "foliage-instancing-analysis.json");
         output << std::setw(2) << refusal << '\n';
         LUMINUMBRA_CORE_ERROR("FoliageInstancing: REFUSAL analysis written ({})", reason);

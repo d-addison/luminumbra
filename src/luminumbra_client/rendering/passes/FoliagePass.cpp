@@ -870,15 +870,13 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         float origin_extent[4];
         float id_density[4];
     };
-    std::vector<GpuChunk> chunk_params;
-    std::vector<glm::vec4> surf_grid;
-    if (chunks.size() > kMaxGpuChunks)
-        return false;
-    chunk_params.reserve(chunks.size());
-    surf_grid.reserve(chunks.size() * kMaxCandidatesPerChunk);
-    const int kMaxSurfBuildsPerFrame = m_readback_enabled ? std::numeric_limits<int>::max() : 4;
-    int builds_left = kMaxSurfBuildsPerFrame;
-    bool deferred_any = false;
+    // Capacity applies to uploaded columns, after the same density/distance
+    // cull used by scatter. The live surface can contain more than 512 columns
+    // while the foliage horizon fits; counting it first silently forced CPU
+    // fallback and made GPU qualification impossible. Admit before sampling or
+    // allocating per-candidate surface data, retaining the existing hard cap.
+    std::vector<const ChunkScatter*> admitted;
+    admitted.reserve(std::min(chunks.size(), kMaxGpuChunks));
     for (const ChunkScatter& chunk : chunks) {
         if (chunk.density <= 0.0f) {
             continue;
@@ -890,6 +888,20 @@ bool FoliagePass::rebuild_instances_gpu(const std::vector<ChunkScatter>& chunks,
         if (cd - chunk.extent_m > m_fade_end_m) {
             continue;
         }
+        if (admitted.size() == kMaxGpuChunks)
+            return false;
+        admitted.push_back(&chunk);
+    }
+
+    std::vector<GpuChunk> chunk_params;
+    std::vector<glm::vec4> surf_grid;
+    chunk_params.reserve(admitted.size());
+    surf_grid.reserve(admitted.size() * kMaxCandidatesPerChunk);
+    const int kMaxSurfBuildsPerFrame = m_readback_enabled ? std::numeric_limits<int>::max() : 4;
+    int builds_left = kMaxSurfBuildsPerFrame;
+    bool deferred_any = false;
+    for (const auto* admitted_chunk : admitted) {
+        const auto& chunk = *admitted_chunk;
 
         const std::uint64_t key =
             detail::pack_foliage_chunk_key(chunk.chunk_xz.x, chunk.chunk_xz.y);
@@ -1290,9 +1302,7 @@ std::size_t FoliagePass::execute(const RenderContext& ctx, const Camera& camera)
 bool FoliagePass::begin_qualification() {
     if (m_qualification.frozen_inputs)
         return true;
-    if (!m_gpu_active || !m_readback_enabled || m_instance_generation != m_build_generation ||
-        m_instances.empty() || m_uploaded_chunk_count <= 0 || m_foliage_build_backlog ||
-        m_wind_xz != glm::vec2(0.0f) || m_evidence_phase != 1)
+    if (qualification_blocker() != nullptr)
         return false;
     m_qualification.frozen_inputs = true;
     const auto identity = [](GLenum name) {
@@ -1316,6 +1326,28 @@ bool FoliagePass::begin_qualification() {
     proof.second_frame = m_build_frame;
     proof.output_cleared = true;
     return true;
+}
+
+const char* FoliagePass::qualification_blocker() const {
+    if (m_qualification.frozen_inputs)
+        return nullptr;
+    if (!m_gpu_active)
+        return "gpu_path_inactive";
+    if (!m_readback_enabled)
+        return "readback_disabled";
+    if (m_instance_generation != m_build_generation)
+        return "instance_generation_stale";
+    if (m_instances.empty())
+        return "instances_empty";
+    if (m_uploaded_chunk_count <= 0)
+        return "uploaded_columns_empty";
+    if (m_foliage_build_backlog)
+        return "surface_build_backlog";
+    if (m_wind_xz != glm::vec2(0.0f))
+        return "wind_not_calm";
+    if (m_evidence_phase != 1)
+        return "phase_not_calm";
+    return nullptr;
 }
 
 void FoliagePass::rebuild_frozen_inputs() {

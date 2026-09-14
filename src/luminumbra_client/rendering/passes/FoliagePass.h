@@ -289,6 +289,9 @@ public:
     // Opt-in, same-device qualification. Freezes uploaded public scatter/surface
     // inputs; the output is cleared and independently dispatched before capture.
     bool begin_qualification();
+    // Nonblocking diagnostic of the same admission gates; nullptr means ready
+    // or already started. Does not turn CPU fallback into GPU evidence.
+    const char* qualification_blocker() const;
     bool qualification_started() const {
         return m_qualification.frozen_inputs;
     }

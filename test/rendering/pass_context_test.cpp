@@ -810,6 +810,122 @@ TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
 }
 
+TEST(PassContext, FoliageGpuCapacityCountsOnlyColumnsInsideTheScatterHorizon) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using Luminumbra::Rendering::FoliagePass;
+    const auto ground = +[](void* context, float, float) {
+        ++*static_cast<std::size_t*>(context);
+        return FoliagePass::SurfaceSample{10, 0, 1, true};
+    };
+    std::vector<FoliagePass::InstanceRecord> reference;
+    std::size_t reference_queries = 0;
+    // The live initial surface spans 25 x 25 columns. Its outer columns must
+    // not force CPU fallback when the unchanged foliage horizon fits the GPU.
+    for (const int radius : {6, 12}) {
+        std::vector<FoliagePass::ChunkScatter> chunks;
+        for (int x = -radius; x <= radius; ++x)
+            for (int z = -radius; z <= radius; ++z) {
+                FoliagePass::ChunkScatter chunk;
+                chunk.chunk_xz = {x, z};
+                chunk.origin = {x * 16.0f, 0, z * 16.0f};
+                chunk.extent_m = 16;
+                chunk.density = 1;
+                chunk.biome_id = 1;
+                chunks.push_back(chunk);
+            }
+        if (radius == 12)
+            std::reverse(chunks.begin(), chunks.end());
+        FoliagePass pass;
+        pass.init_buffers();
+        pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+        ASSERT_TRUE(pass.gpu_scatter_active());
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        pass.set_fade_distances(48, 92);
+        pass.set_density_scale(1.6f);
+        pass.set_readback_enabled(true);
+        pass.set_wind({0, 0});
+        std::size_t queries = 0;
+        for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+            pass.set_evidence_frame(frame, 1);
+            pass.rebuild_instances(chunks, ground, &queries, {8, 12.4f, 8});
+            glFinish(); // Test only: retain the production nonblocking ring.
+        }
+        EXPECT_TRUE(pass.instances_from_gpu_readback()) << "surface radius " << radius;
+        EXPECT_TRUE(pass.begin_qualification()) << "surface radius " << radius;
+        EXPECT_EQ(pass.instances().size(), FoliagePass::kMaxInstances);
+        if (radius == 6) {
+            reference = pass.instances();
+            reference_queries = queries;
+        } else {
+            EXPECT_EQ(queries, reference_queries) << "out-of-range columns must not sample ground";
+            ASSERT_EQ(pass.instances().size(), reference.size());
+            EXPECT_EQ(std::memcmp(reference.data(),
+                                  pass.instances().data(),
+                                  reference.size() * sizeof(reference[0])),
+                      0)
+                << "outer columns and reversed input order must preserve capped GPU membership";
+        }
+        pass.destroy_compute();
+        pass.destroy_buffers();
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST(PassContext, FoliageGpuCapacityKeepsTheExistingUploadedColumnLimit) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using Luminumbra::Rendering::FoliagePass;
+    const auto ground = +[](void*, float, float) {
+        return FoliagePass::SurfaceSample{10, 0, 1, true};
+    };
+    for (const int live_columns : {512, 513}) {
+        std::vector<FoliagePass::ChunkScatter> chunks;
+        for (int i = 0; i < live_columns + 600; ++i) {
+            FoliagePass::ChunkScatter chunk;
+            chunk.chunk_xz = {i % 32, i / 32};
+            chunk.origin = {(i % 32) * 16.0f, 0, (i / 32) * 16.0f};
+            chunk.extent_m = 16;
+            chunk.density = i < live_columns ? 1.0f : 0.0f;
+            chunk.biome_id = 1;
+            chunks.push_back(chunk);
+        }
+        FoliagePass pass;
+        pass.init_buffers();
+        pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+        ASSERT_TRUE(pass.gpu_scatter_active());
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        // Deliberately enlarge only this synthetic fixture's horizon so every
+        // positive-density column reaches admission. Production stays at 92 m.
+        pass.set_fade_distances(900, 1000);
+        pass.set_density_scale(1.6f);
+        pass.set_readback_enabled(true);
+        pass.set_wind({0, 0});
+        for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+            pass.set_evidence_frame(frame, 1);
+            pass.rebuild_instances(chunks, ground, nullptr, {8, 12.4f, 8});
+            glFinish();
+        }
+        EXPECT_EQ(pass.instances_from_gpu_readback(), live_columns == 512);
+        if (live_columns == 512) {
+            EXPECT_EQ(pass.qualification_blocker(), nullptr);
+            EXPECT_TRUE(pass.begin_qualification());
+            EXPECT_EQ(pass.instances().size(), FoliagePass::kMaxInstances);
+        } else {
+            EXPECT_STREQ(pass.qualification_blocker(), "gpu_path_inactive");
+            EXPECT_FALSE(pass.begin_qualification());
+            EXPECT_FALSE(pass.instances().empty()) << "over-cap keeps the existing CPU fallback";
+        }
+        pass.destroy_compute();
+        pass.destroy_buffers();
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
 TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdentity) {
     HiddenGlContext gl;
     if (!gl.ready())
