@@ -1,11 +1,57 @@
 """Main-thread collection validation, persistent identities and library snapshots."""
 from pathlib import Path
+from contextlib import contextmanager
 import re
 import uuid
 
 import bpy
 
 IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+@contextmanager
+def static_mesh(obj, graph):
+    """Inspect the same mesh/material sources as the pinned glTF apply profile."""
+    if not obj.modifiers:
+        yield obj.data, tuple(slot.material for slot in obj.material_slots)
+        return
+    evaluated = obj.evaluated_get(graph)
+    try:
+        mesh = evaluated.to_mesh(preserve_all_data_layers=True, depsgraph=graph)
+        if mesh is None:
+            raise ValueError("Static modifier evaluation did not produce a mesh")
+        materials = tuple(mesh.materials)
+        # Blender5.1.18 uses object slots for this exact evaluated fallback.
+        if materials == (None,):
+            materials = tuple(slot.material for slot in obj.material_slots)
+        yield mesh, materials
+    finally:
+        evaluated.to_mesh_clear()
+
+
+def evaluated_static_materials(collection):
+    """Validate evaluated UV/face assignments and retain original material IDs.
+
+    Temporary evaluated material references must not outlive to_mesh_clear.
+    This does not realize instances or change authored meshes and modifiers.
+    """
+    graph = bpy.context.evaluated_depsgraph_get()
+    result = set()
+    for obj in collection.all_objects:
+        if obj.type != "MESH":
+            continue
+        with static_mesh(obj, graph) as (mesh, materials):
+            if not mesh.uv_layers or not any(layer.active_render for layer in mesh.uv_layers):
+                raise ValueError("Add an active render UV map to the evaluated geometry before building")
+            if materials and any(polygon.material_index < 0 or polygon.material_index >= len(materials)
+                                 for polygon in mesh.polygons):
+                raise ValueError("Evaluated geometry contains an invalid face material assignment")
+            # Set Material may retain unused authored slots. Only face-used
+            # slots become glTF primitives; validate those actual assignments.
+            if materials:
+                result.update(materials[polygon.material_index].original for polygon in mesh.polygons
+                              if materials[polygon.material_index] is not None)
+    return result
 
 
 def dependencies(collection):
@@ -60,7 +106,7 @@ def validate_collection(scene, collection, require_ids=True):
         if obj.type == "MESH":
             if obj.data.shape_keys and len(obj.data.shape_keys.key_blocks) > 1:
                 raise ValueError("Morph assets are not supported by this build profile yet")
-            if not obj.data.uv_layers:
+            if rigs and not obj.data.uv_layers:
                 raise ValueError("Add a UV map before building geometry")
             if rigs:
                 if obj.find_armature() not in rigs:
@@ -77,6 +123,8 @@ def validate_collection(scene, collection, require_ids=True):
         for instance in graph.object_instances:
             if instance.is_instance and instance.parent and instance.parent.original in objects:
                 raise ValueError("Realize Geometry Nodes instances before building this profile")
+    if not rigs:
+        evaluated_static_materials(collection)
     return profile, referenced
 
 
@@ -126,7 +174,7 @@ def validate_prefab_materials(collection):
                 "Use Non-Color for normal maps and sRGB for color textures")
         return node
 
-    materials = {slot.material for obj in collection.all_objects for slot in obj.material_slots if slot.material}
+    materials = evaluated_static_materials(collection)
     for material in materials:
         require(material.use_nodes, "Use a Principled material before building a prefab")
         outputs = [node for node in material.node_tree.nodes if node.type == "OUTPUT_MATERIAL" and node.is_active_output]
