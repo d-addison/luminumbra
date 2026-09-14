@@ -1,5 +1,5 @@
 # Keep one shared GCC runtime across the public C++ DLL boundary. Resolve it
-# through this build's compiler, never a DLL found through the ambient PATH.
+# through this build's compiler directory, never the ambient PATH.
 function(luminumbra_install_static_preview_mingw_runtime)
     if(NOT MINGW)
         return()
@@ -11,6 +11,13 @@ function(luminumbra_install_static_preview_mingw_runtime)
         execute_process(COMMAND "${CMAKE_CXX_COMPILER}" "-print-file-name=${name}"
             RESULT_VARIABLE result OUTPUT_VARIABLE resolved ERROR_VARIABLE diagnostic
             OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 15)
+        # MSYS2 GCC can return the unchanged name: runtime DLLs in bin are not
+        # linker inputs in its library search directories. Admit that exact
+        # response only by selecting the named file beside the real compiler.
+        # Other relative paths and failed lookups never trigger this rule.
+        if(result STREQUAL "0" AND resolved STREQUAL name)
+            set(resolved "${compiler_bin}/${name}")
+        endif()
         if(NOT result STREQUAL "0" OR resolved MATCHES "[;\r\n]" OR
            NOT IS_ABSOLUTE "${resolved}" OR NOT EXISTS "${resolved}" OR
            IS_DIRECTORY "${resolved}" OR IS_SYMLINK "${resolved}")
