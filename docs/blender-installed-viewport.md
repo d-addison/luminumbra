@@ -2,16 +2,17 @@
 
 This checkpoint adds a static `RenderEngine` adapter to the optional Blender
 5.1.0 extension. It connects the marked collection to the separately installed
-[persistent native host](persistent-viewport.md). Native Blender presentation and
-the composed editor acceptance are still being qualified. No visual result or
+[persistent native host](persistent-viewport.md). The native GPU presentation
+checkpoint below passed; the composed editor acceptance is still being qualified. No visual result or
 authoring performance target is approved by this document.
 
 ## Installed workflow
 
 1. Install the `StaticPreview` SDK component and qualify that installed image
-   with `test/static_preview/installed_viewport.py`. Windows MinGW installations
-   currently also need their matching runtime DLLs available; include these in
-   the SDK before qualification and sealing for a portable installation.
+   with `test/static_preview/installed_viewport.py`. The MinGW component now
+   installs its three compiler-resolved runtime DLLs and their notices. Qualify
+   their actual loading with the compiler directory removed from runtime PATH
+   before treating a Windows installation as portable.
 2. Run `tools/blender/authoring/seal_viewport_installation.py` with the installed
    host, successful qualification, its native session receipt, and a fresh
    `installation.json` in the SDK root. It binds the source identity and every
@@ -79,7 +80,10 @@ checks support those packets; they do not replace them.
 - `extension_tests/native_viewport_engine.py` installs the actual extension in an
   isolated GUI, builds an authored prefab, drives the installed native host and
   captures transform, camera, material and geometry changes plus crash recovery.
-  It retains the original editor screenshots and records unchanged SDK hashes.
+  It also drives two viewports, resize, selection/gizmo controls, undo, held
+  generations and unloading while hosts are active. It retains original editor
+  screenshots and joins captured frames to area cameras, native receipts and
+  unchanged SDK hashes. Those checks are prepared, not yet passed natively.
 - `test/viewport/probe_windows_client.py` checks Windows ownership and protocol
   failure paths using synthetic children. It writes a fresh failed receipt before
   execution and cannot qualify a renderer or Blender.
@@ -89,3 +93,36 @@ directories, executable/exporter pins and serialized GPU execution. Successful
 process exit alone is insufficient: inspect the exact checks and joined receipts.
 Feedback samples in the editor probe end at texture upload; compositor display
 timing and the authoring targets remain explicitly unqualified.
+
+## Native GPU presentation checkpoint
+
+On September 13, source `bb9e4ce2dea1d5af8bf7cf317d6046dda4f5c5d6`
+passed all 35 presentation checks in actual Windows Blender 5.1.0, OpenGL 4.6,
+on the NVIDIA GeForce RTX 5070 Ti with driver 616.92. The owned Blender process
+exited successfully and was reaped in 7.171 seconds. Exact executable, module,
+probe and artifact identities are preserved in the
+[original receipt](evidence/blender-presentation-20260913/receipt.json) and
+[process receipt](evidence/blender-presentation-20260913/process-receipt.json).
+
+These are synthetic synchronized planes passed through the production
+`FrameDraw` implementation. Perspective, orthographic intervals crossing the
+camera origin, and an odd 1281×721 downsampled region passed color, depth,
+front/behind overlay, clear-coverage and GPU-state controls. An
+[independent review](evidence/blender-presentation-20260913/independent-review.json)
+joined all 36 original artifacts and recomputed every presented pixel: maximum
+RGB error was zero and maximum depth error was below 3.56e-8.
+
+The [perspective](evidence/blender-presentation-20260913/perspective.png),
+[orthographic](evidence/blender-presentation-20260913/orthographic-negative-near.png)
+and [downsampled](evidence/blender-presentation-20260913/odd-downsample.png)
+diagnostic PNGs encode the original RGBA bytes losslessly, reversing row order
+only. Their [joins](evidence/blender-presentation-20260913/png-joins.json) retain
+the original raw-plane hashes; the complete 40-file, 40,433,246-byte packet is
+archived in the isolated campaign evidence lane. These images are pending
+review and are not composed showcases.
+
+This receipt retains its original source identity. Later framebuffer clearing,
+metadata recovery, Windows file-sharing and integration changes require their
+own runs. No complete RenderEngine workflow, portable Windows DLL closure,
+authoring latency/30 FPS target, Linux Blender qualification or visual scenario
+approval follows from this presentation checkpoint.
