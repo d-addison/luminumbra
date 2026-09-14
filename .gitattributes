@@ -12,3 +12,7 @@ test/fixtures/active-regions/devel-off-plant-edit/* -text
 
 # Fixed serializer baseline bytes; the test handles native Windows stream newlines.
 test/fixtures/smoke_artifact/devel-*.json -text
+
+# Catalog and historical receipt identities must survive native Windows checkout.
+docs/visual-catalog*.json text eol=lf
+docs/assets/visual-baselines/20260908/*.json text eol=lf

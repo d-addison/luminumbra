@@ -464,6 +464,9 @@ jobs:
           python3 tools/ci/test_validate_public_tree.py
           python3 tools/ci/test_check_docs.py
           python3 tools/ci/test_check_ctest_junit.py
+          python3 tools/ci/test_validate_visual_catalog.py
+          python3 tools/ci/validate_visual_catalog.py
+          python3 tools/ci/render_visual_catalog.py --check
           python3 tools/ci/validate_public_tree.py
           python3 tools/ci/validate_assets.py --check config/public-asset-inventory.json
           python3 tools/check_runtime_data_manifest.py
