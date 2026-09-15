@@ -89,6 +89,11 @@ public:
     [[nodiscard]] std::uint64_t last_tick() const noexcept {
         return m_last_tick;
     }
+
+    // Actual selected ISA for determinism diagnostics (not just the ceiling).
+    [[nodiscard]] FastSIMD::eLevel noise_simd_level() const noexcept {
+        return m_emission_noise->GetSIMDLevel();
+    }
     [[nodiscard]] int diffuse_iterations() const noexcept {
         return kAetherDiffuseIterations;
     }
