@@ -5,7 +5,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(MESHOPT_BUILD_DEMO OFF CACHE BOOL "" FORCE)
 set(MESHOPT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${PROBE_ROOT}/dependencies/meshoptimizer" meshoptimizer)
-add_executable(asset_processor "${ENGINE_SOURCE}/tools/asset_processor.cpp")
+add_executable(asset_processor "${ENGINE_SOURCE}/tools/asset_processor.cpp"
+    "${ENGINE_SOURCE}/tools/morph_asset_processor.cpp"
+    "${ENGINE_SOURCE}/src/luminumbra_common/animation/MorphMesh.cpp")
 target_include_directories(asset_processor PRIVATE
     "${ENGINE_SOURCE}/src" "${ENGINE_SOURCE}/vendor/cgltf" "${PROBE_ROOT}/dependencies/stb")
 target_link_libraries(asset_processor PRIVATE meshoptimizer)

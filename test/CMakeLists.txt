@@ -47,6 +47,7 @@ add_executable(asset_processor_round_trip_test
     tools/test_asset_processor_round_trip.cpp
     tools/test_skeletal_asset_round_trip.cpp
     "${ASSET_PROCESSOR_SOURCE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/morph_asset_processor.cpp"
 )
 
 target_compile_definitions(asset_processor_round_trip_test PRIVATE
@@ -90,6 +91,17 @@ if(TARGET meshoptimizer)
 elseif(TARGET meshoptimizer::meshoptimizer)
     target_link_libraries(asset_processor_round_trip_test PRIVATE meshoptimizer::meshoptimizer)
 endif()
+
+# This geometry-only compiler/runtime target does not build or start the client.
+add_executable(morph_asset_test
+    tools/test_morph_asset.cpp
+    "${ASSET_PROCESSOR_SOURCE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/morph_asset_processor.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src/luminumbra_common/animation/MorphMesh.cpp")
+target_include_directories(morph_asset_test PRIVATE ../src)
+target_include_directories(morph_asset_test SYSTEM PRIVATE ../vendor/cgltf)
+target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshoptimizer stb_headers)
+luminumbra_configure_first_party_target(morph_asset_test)
 
 add_executable(common_tests
     common/Crc32_test.cpp
@@ -1580,6 +1592,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     world_generation_test
     worldgen_layer_snapshot_test
     asset_processor_round_trip_test
+    morph_asset_test
     game_assets_test
     common_tests
     filesystem_path_test
