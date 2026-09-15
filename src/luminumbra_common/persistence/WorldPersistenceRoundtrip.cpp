@@ -909,6 +909,35 @@ std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state) {
     return Checksum(SerializeWorldStreamingStateSimTruthForHash(state));
 }
 
+std::string ComputeRegionContentHash(const WorldStreamingState& state) {
+    auto chunks = state.snapshot_chunks();
+    std::sort(chunks.begin(), chunks.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs->get_id() < rhs->get_id();
+    });
+    nlohmann::json contents = nlohmann::json::array();
+    for (const auto& chunk : chunks) {
+        // Explicit content projection, independent of the legacy residency
+        // classification (which includes state/state_value/has_collision).
+        contents.push_back(
+            {{"chunk_id", chunk->get_id()},
+             {"coords", IVec3ToJson(chunk->get_coords())},
+             {"sdf_data", chunk->sdf_data},
+             {"heightmap_data", chunk->heightmap_data},
+             {"material_data", chunk->material_data},
+             {"water_depth_mm", chunk->water_depth_mm},
+             {"water_bed_mm", chunk->water_bed_mm},
+             {"water_edge_flux", chunk->water_edge_flux},
+             {"has_water_sim", chunk->has_water_sim.load(std::memory_order_acquire)},
+             {"current_water_resolution",
+              chunk->current_water_resolution.load(std::memory_order_acquire)},
+             {"is_water_sleeping", chunk->is_water_sleeping.load(std::memory_order_acquire)},
+             {"max_water_delta_last_tick", chunk->max_water_delta_last_tick},
+             {"ticks_below_threshold", chunk->ticks_below_threshold}});
+    }
+    return Checksum(StableDump(
+        nlohmann::json{{"hash_scope", "region_content_v1"}, {"chunks", std::move(contents)}}));
+}
+
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {
     // project the SAME canonical snapshot the top-level hash uses into
     // per-subsystem field groups, then checksum each group with the SAME

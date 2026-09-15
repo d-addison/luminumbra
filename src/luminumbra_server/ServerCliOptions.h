@@ -12,6 +12,7 @@ struct ServerCliOptions {
     std::uint64_t ticks = 90;
     int surface_radius = 4;
     int collision_radius = 2;
+    int test_streaming_radius_cap = 0;
     std::uint64_t autosave_ticks = 0;
     //  spawn N deterministic player avatars (phyllotaxis ring
     // around spawn). 0 = none (byte-identical to the zero-avatar lane). With --smoke the
