@@ -14,6 +14,8 @@ the latest published source release is v0.2.1. Interfaces and content formats ma
 still change between releases. See the [coordinated roadmap](docs/roadmap.md) for
 release status and the populated engine/game milestones.
 
+The [September 13 recovery status](docs/roadmap.md#current-state) separates merged implementation, remaining verification and unpublished v0.3.0. The [promotion gate](https://github.com/d-addison/luminumbra/pull/55) remains blocked on expanded acceptance.
+
 ## v0.3.0 world format break
 
 > This world predates the v0.3.0 format and cannot be opened. Create a new world; migration is not supported.
