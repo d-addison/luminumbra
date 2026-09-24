@@ -204,7 +204,8 @@ std::vector<std::uint8_t> Encode(const Record& record, const Key& key) {
     StoreLittle(std::span(signed_bytes).subspan(4, 4), text.size());
     StoreLittle(std::span(signed_bytes).subspan(8, 8), record.payload.size());
     std::copy(text.begin(), text.end(), signed_bytes.begin() + 16);
-    std::copy(record.payload.begin(), record.payload.end(), signed_bytes.begin() + 16 + text.size());
+    std::copy(
+        record.payload.begin(), record.payload.end(), signed_bytes.begin() + 16 + text.size());
     const auto signature = Mac(signed_bytes, key);
     signed_bytes.insert(signed_bytes.begin() + 16, signature.begin(), signature.end());
     return signed_bytes;

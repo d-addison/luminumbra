@@ -23,7 +23,8 @@ namespace {
 unsigned checks = 0;
 
 void Check(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition)
+        throw std::runtime_error(message);
     ++checks;
 }
 
@@ -31,7 +32,7 @@ void Near(double actual, double expected, const char* message) {
     Check(std::isfinite(actual) && std::abs(actual - expected) < 1e-5, message);
 }
 
-template <class Operation>
+template<class Operation>
 void Refuses(Operation operation, const char* message) {
     bool refused = false;
     try {
@@ -115,7 +116,8 @@ void SceneChecks(const char* project, const char* generation, const char* digest
         Near(moved.model[12], 23, "parent edit did not move child");
         Near(Draw(*updated, "fixture.second").model[12], 22, "parent edit did not move sibling");
         Near(first.model[12], 13, "held snapshot changed after edit");
-        Check(moved.key == first.key && moved.mesh == first.mesh && moved.material == first.material,
+        Check(moved.key == first.key && moved.mesh == first.mesh &&
+                  moved.material == first.material,
               "transform edit rebuilt immutable resources or changed draw identity");
 
         auto unchanged_refusal = [&](auto operation, const char* message) {
@@ -195,7 +197,8 @@ void CameraChecks() {
         Near(depth(far), 0, "far depth is not reversed-Z zero");
         for (const auto& plane : view.frustum_planes()) {
             Near(std::sqrt(plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]),
-                 1, "frustum plane is not normalized");
+                 1,
+                 "frustum plane is not normalized");
             Check(plane[0] * 2 + plane[1] * 3 - plane[2] * 6 + plane[3] > 0,
                   "interior world point rejected by supplied-camera frustum");
         }
@@ -217,7 +220,8 @@ void CameraChecks() {
     Check(orthographic.orthographic(), "off-center orthographic camera refused or misclassified");
     common(orthographic);
     Near(-(near + far) * .5 * orthographic.projection()[10] + orthographic.projection()[14],
-         .5, "orthographic depth is not linear");
+         .5,
+         "orthographic depth is not linear");
     auto invalid = description;
     invalid.projection[11] = -1;
     Refuses([&] { RenderView::Validate(invalid); }, "hybrid projection accepted");
@@ -237,7 +241,8 @@ void CameraChecks() {
 int main(int argc, char** argv) {
     try {
         if (argc != 5) {
-            throw std::runtime_error("usage: installed_consumer PROJECT GENERATION MANIFEST_SHA256 EXPECTED_MODULE");
+            throw std::runtime_error(
+                "usage: installed_consumer PROJECT GENERATION MANIFEST_SHA256 EXPECTED_MODULE");
         }
         // This resolves the actual shared library without constructing a renderer or GPU context.
         const auto module = StaticRenderer::ModulePath();
