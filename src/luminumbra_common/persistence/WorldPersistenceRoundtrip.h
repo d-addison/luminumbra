@@ -86,6 +86,11 @@ bool ValidateWorldStreamingChunkFormatJson(const std::string& chunk_json,
 // fnv1a_64_stable_json machinery the WorldHash gate artifact records).
 std::string ComputeWorldStreamingStateHash(const WorldStreamingState& state);
 
+// Active-region freeze identity: voxel/material and water solver contents only.
+// Lifecycle, collider and render bookkeeping are excluded. Legacy hashes and
+// persistence continue to use their existing projections.
+std::string ComputeRegionContentHash(const WorldStreamingState& state);
+
 //  determinism contract: per-system sub-hashes for desync localization.
 // The TOP-LEVEL world_hash (ComputeWorldStreamingStateHash above) is unchanged
 // byte-for-byte; these are ADDITIVE. Each field is an independent
