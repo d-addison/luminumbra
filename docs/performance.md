@@ -232,17 +232,21 @@ endianness declared by the PFM scale sign. Position and normal are view-space;
 normal is decoded from the production octahedral encoding. TAAU state and jitter
 are recorded; keep TAAU disabled for spatial coverage comparisons because its
 color contains history. Depth is OpenGL window
-depth with clear value 1. PPM and PGM use top-down rows; PGM stores the material ID,
+depth with the convention recorded in the manifest: current reversed-Z uses
+clear value 0; historical forward-depth packets use 1. PPM and PGM use top-down
+rows; PGM stores the material ID,
 including clear ID 255. Ignore position/normal/material values where depth is
 clear. These are the deferred attachments from the same rendered frame as color;
 they do not represent all transparent-surface contributions to final color.
 
-For a controlled diagnostic A/B only,
-`--render-benchmark-aovs-bypass-camera-region-guard` suppresses the whole camera
-region's draw guard while retaining the production 176 m near clipping and 3 km
-far range. It requires AOV capture and is recorded in every region receipt. This
-is an experiment control, not a supported terrain-ownership policy or a cave/edit
-correctness claim. Ordinary rendering is unchanged without diagnostics.
+The historical `--render-benchmark-aovs-bypass-camera-region-guard` option now
+remains only for command compatibility and has no rendering effect. Ordinary
+terrain and water use the same 176 m fragment exclusion in all regions, including
+the camera region, instead of suppressing that entire 512 m region. The effective
+`camera_region_guard_bypassed` receipt field is false. Near exclusion still applies
+when live geometry is missing; it does not authorize heightfield fill over caves
+or edits. Compare separate parent/candidate ordinary captures to qualify changes,
+retaining each source/binary identity.
 
 Existing output directories are refused. Successful publication requires every
 attachment and a final complete manifest; a failed capture exits nonzero and

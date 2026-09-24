@@ -60,8 +60,10 @@ foreach ($call in $pinCalls) {
 }
 
 # Exercise the actual foliage consumer with relative and absolute artifact roots.
-# Keep every statement from analysisPath to the function end, omitting setup and
-# launch only. Reject any non-file command before creating the executable block.
+# Keep the shared artifact checks and final qualification refusal. The v3 raw
+# proof branch invokes the separately tested Python file consumer; never execute
+# that branch in this PowerShell-only fixture. Reject any non-file command in
+# every statement that this fixture will execute.
 $foliageFunctions = @($ast.FindAll({ param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -ceq "Test-FoliageInstancing"
@@ -76,7 +78,16 @@ for ($i = 0; $i -lt $statements.Count; $i++) {
         $statement.Left.VariablePath.UserPath -ceq "analysisPath") { $boundaries += $i }
 }
 Assert-Test ($boundaries.Count -eq 1 -and $boundaries[0] -gt 0) "foliage file-consumer boundary is unambiguous"
-$selected = @($statements[$boundaries[0]..($statements.Count - 1)])
+$artifactStatements = @($statements[$boundaries[0]..($statements.Count - 1)])
+$rawProofBranches = @($artifactStatements | Where-Object {
+    $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+    $_.Clauses.Count -eq 1 -and $null -eq $_.ElseClause -and
+    $_.Clauses[0].Item1.Extent.Text.Trim() -ceq '$analysis.schema -ceq "luminumbra.foliage_instancing.v3"'
+})
+Assert-Test ($rawProofBranches.Count -eq 1) "exactly one isolated v3 Python proof branch is present"
+$selected = @($artifactStatements | Where-Object {
+    $_.Extent.StartOffset -ne $rawProofBranches[0].Extent.StartOffset
+})
 $allowed = @("Join-Path", "Test-Path", "Get-Content", "ConvertFrom-Json",
     "Assert-PpmArtifact", "Assert-CapturePinned", "Write-Host")
 $consumerCalls = @()
@@ -287,6 +298,33 @@ try {
     Assert-Rejected { Assert-RunPinned } "last-known-runtime.json" "oversized runtime state"
     Remove-Item -LiteralPath $metadata
     Assert-Rejected { Assert-RunPinned } "last-known-runtime.json" "missing runtime metadata"
+    # Exercise the exact shared reader used by FarLodHorizon and other gates.
+    $readerPath = Join-Path $fixtureRoot "reader.json"
+    [System.IO.File]::WriteAllText($readerPath, '{"schema":"luminumbra.farlod_horizon.v1","value":17}')
+    $read = Read-JsonArtifact -Path $readerPath -Schema "luminumbra.farlod_horizon.v1"
+    Assert-Test ($read.value -eq 17) "JSON reader returns the actual object"
+    $read = Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1"
+    Assert-Test ($read.value -eq 17) "JSON reader retains positional callers"
+    foreach ($invalid in @('', 'null', '[]', '[{"schema":"luminumbra.farlod_horizon.v1"}]',
+        '{', '{"schema":"wrong"}', '{"Schema":"luminumbra.farlod_horizon.v1"}',
+        '{"schema":17}', '{"schema":"LUMINUMBRA.FARLOD_HORIZON.V1"}')) {
+        [System.IO.File]::WriteAllText($readerPath, $invalid)
+        $message = $null
+        try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+        catch { $message = $_.Exception.Message }
+        Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses invalid JSON/schema and identifies its input"
+    }
+    $oversized = [System.IO.File]::OpenWrite($readerPath)
+    try { $oversized.SetLength(16777217) } finally { $oversized.Dispose() }
+    $message = $null
+    try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+    catch { $message = $_.Exception.Message }
+    Assert-Test ($message -like '*16 MiB*') "reader refuses oversized input"
+    Remove-Item -LiteralPath $readerPath
+    $message = $null
+    try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+    catch { $message = $_.Exception.Message }
+    Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses missing input"
     Write-Host "CaptureArtifactValidationContract: $checks assertions passed (file-only; no visual approval)."
 } finally {
     if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
