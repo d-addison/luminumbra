@@ -2336,7 +2336,13 @@ int main(int argc, char* argv[]) {
                 g_systemConfig.user().mouse_sensitivity; // user.video.mouse_sensitivity
             g_camera->Zoom = g_systemConfig.user().fov;  // user.video.fov
             g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
-                window, g_camera.get(), gameSession->GetPhysicsSystem());
+                window,
+                g_camera.get(),
+                gameSession->GetPhysicsSystem(),
+                gameSession->ActiveRegionsEnabled() &&
+                        gameSession->GetActiveRegionLedger().tick() > 0
+                    ? gameSession->GetActiveRegionLedger().local_anchor()
+                    : std::nullopt);
             g_playerController->ApplyKeyBindings(g_systemConfig); // user.controls.* (rebindable)
             if (g_app.loading.world_render_data_initialized) {
                 renderPipeline.clear_all_chunk_data();
@@ -2832,6 +2838,7 @@ int main(int argc, char* argv[]) {
                     gameSession->SetSpawnPoint(g_playerController
                                                    ? g_playerController->SavedSpawnAnchor()
                                                    : g_camera->Position);
+                // Synchronous main-thread save; shutdown cannot overlap this callback.
                 if (!gameSession->SaveWorldState() || !gameSession->SaveWorld()) {
                     if (g_uiManager)
                         g_uiManager->ShowMessage("Could not save this world. Check available disk "
@@ -3498,7 +3505,13 @@ int main(int argc, char* argv[]) {
                         g_loading_visualizer->EndVisualization();
                     }
                     g_playerController = std::make_unique<Luminumbra::Client::PlayerController>(
-                        window, g_camera.get(), gameSession->GetPhysicsSystem());
+                        window,
+                        g_camera.get(),
+                        gameSession->GetPhysicsSystem(),
+                        gameSession->ActiveRegionsEnabled() &&
+                                gameSession->GetActiveRegionLedger().tick() > 0
+                            ? gameSession->GetActiveRegionLedger().local_anchor()
+                            : std::nullopt);
                     g_playerController->ApplyKeyBindings(
                         g_systemConfig); // user.controls.* (rebindable)
                     // (camera created + chunk data cleared + upload backlog drained above, before
@@ -3731,6 +3744,11 @@ int main(int argc, char* argv[]) {
                 // host, and camera-anchored streaming would diverge the hashed world.
                 _rb_sim_t0 = std::chrono::steady_clock::now(); //
                 if (!scenario_config.networked_session_smoke()) {
+                    if (g_playerController)
+                        gameSession->SetLocalPlayerSimulationPosition(
+                            g_playerController->GetPosition(),
+                            g_playerController->GetMovementMode() ==
+                                Luminumbra::Client::MovementMode::Walking);
                     if (traversal) {
                         while (measuring_v3 &&
                                traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
@@ -5167,19 +5185,6 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    if (benchmark_queries) {
-        renderPipeline.set_benchmark_gpu_queries(nullptr);
-        benchmark_queries->shutdown();
-    }
-    g_rb_nvml.shutdown(); //  release NVML if it was loaded
-
-    // Scenario shutdown artifacts (the incomplete-timed-run failure path,
-    // streaming telemetry, the recorder analyses) — every block in the hook
-    // was already a no-op without an active scenario.
-    if (scenario_runner) {
-        scenario_runner->onShutdown();
-    }
-
     std::vector<std::string> shutdown_milestones;
     const bool incremental_shutdown_record = scenario_config.hang_watchdog_seconds > 0;
     auto mark_shutdown = [&](const std::string& milestone) {
@@ -5198,11 +5203,39 @@ int main(int argc, char* argv[]) {
         runtime_state_recorder.write_shutdown_progress(shutdown_milestones);
     }
 
-    prepare_world_entry();
+    auto trace_shutdown = [&](const std::string& milestone) {
+        LUMINUMBRA_CORE_INFO("Shutdown stage: {}", milestone);
+        mark_shutdown(milestone);
+    };
+
+    trace_shutdown("query_cleanup_started");
+    if (benchmark_queries) {
+        renderPipeline.set_benchmark_gpu_queries(nullptr);
+        benchmark_queries->shutdown();
+    }
+    trace_shutdown("query_cleanup_finished");
+    g_rb_nvml.shutdown(); //  release NVML if it was loaded
+
+    // Scenario shutdown artifacts (the incomplete-timed-run failure path,
+    // streaming telemetry, the recorder analyses) — every block in the hook
+    // was already a no-op without an active scenario.
+    if (scenario_runner) {
+        scenario_runner->onShutdown();
+    }
+
+    trace_shutdown("world_readers_drain_started");
+    // Same drain order as prepare_world_entry, with the far-LOD wait visible.
+    renderPipeline.prepare_world_swap();
+    trace_shutdown("far_lod_drained");
+    DrainBackgroundWorldScan(jobSystem);
+    DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
+    trace_shutdown("world_readers_drained");
 
     // persist unsaved voxel edits on the world-exit/shutdown path,
     // before the streamed chunks are torn down. No-op when no world session
     // is active or when no chunk carries unsaved edits.
+    // The main loop and its quit callback have returned; keep saving on this thread.
+    trace_shutdown("world_save_started");
     if (gameSession && gameSession->SaveWorldState()) {
         if (!g_app.menu.menu_backdrop_active && g_camera)
             gameSession->SetSpawnPoint(g_playerController ? g_playerController->SavedSpawnAnchor()
@@ -5210,6 +5243,9 @@ int main(int argc, char* argv[]) {
         if (gameSession->SaveWorld())
             mark_shutdown("world_state_saved");
     }
+
+    // Finished means the save stage returned; only world_state_saved reports success.
+    trace_shutdown("world_save_finished");
 
     // Drain the  far-field heightfield build before the world is cleared —
     // its worker job reads the world by pointer (else a teardown-time use-after-free).

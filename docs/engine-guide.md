@@ -55,6 +55,15 @@ Unversioned metadata is refused even alongside current containers. A higher
 metadata version reports `unsupported future world metadata container version`;
 invalid JSON or invalid version types are corruption failures.
 
+### Active-region ledger
+
+The enabled host persists `chunks/region/active-regions.arl` through the same
+atomic replacement primitive as region containers. Its complete ARL1 version-1
+byte layout, allocation limits, checksum, absent/corrupt/future refusal rules,
+activation inputs, scheduler ordering, ecology projection and replay companion
+are specified in [Active-region ledger and scheduler](active-regions.md).
+No measured caps or distant system consumers are activated by this foundation.
+
 ### Simulation clock metadata
 
 The hashed `sim.active_regions` key is off by default. When enabled, every

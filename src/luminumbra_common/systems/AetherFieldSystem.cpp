@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../core/DeterministicMath.h"
+#include "AmbientNoiseDispatch.h"
 #include "WindFieldSystem.h"
 
 // Call DeterministicMath via the fully-qualified name so SimDeterminismLint's
@@ -53,8 +54,8 @@ AetherFieldSystem::AetherFieldSystem(int world_seed)
     , m_grid(kAetherExtentCells, kAetherCellSizeM) {
     // Low-frequency FBm simplex (same family as the worldgen/wind noises) so the
     // FastNoise batch path produces bit-stable floats.
-    auto fractal = FastNoise::New<FastNoise::FractalFBm>();
-    fractal->SetSource(FastNoise::New<FastNoise::Simplex>());
+    auto fractal = NewAmbientNoise<FastNoise::FractalFBm>();
+    fractal->SetSource(NewAmbientNoise<FastNoise::Simplex>());
     fractal->SetOctaveCount(2);
     m_emission_noise = fractal;
 

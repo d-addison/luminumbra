@@ -20,13 +20,16 @@ struct HeavyHashes {
     std::string scent_hash;
     bool active_regions = false;
     std::string clock_bytes;
+    std::string ledger_bytes;
 };
 
 HeavyHashes CaptureHashes(Luminumbra::Server::ServerWorldRunner& runner) {
     HeavyHashes h;
     h.active_regions = runner.Session() && runner.Session()->ActiveRegionsEnabled();
-    if (h.active_regions)
+    if (h.active_regions) {
         h.clock_bytes = runner.Session()->GetWorldClock().canonical_bytes();
+        h.ledger_bytes = runner.Session()->GetActiveRegionLedger().canonical_bytes();
+    }
     h.world_hash = runner.ComputeWorldHash();
     h.sub = runner.ComputeWorldSubHashes();
     h.scent_hash = runner.Session() ? runner.Session()->ComputeScentSubHash() : std::string();
@@ -48,8 +51,9 @@ bool AuthoritativeStateEqual(const HeavyHashes& a, const HeavyHashes& b) {
     // fields and the clock must also agree at save and after continuation.
     if (a.active_regions || b.active_regions) {
         if (a.active_regions != b.active_regions || a.clock_bytes != b.clock_bytes ||
-            a.sub.wind != b.sub.wind || a.sub.weather != b.sub.weather ||
-            a.sub.aether != b.sub.aether || a.sub.aether_state != b.sub.aether_state)
+            a.ledger_bytes != b.ledger_bytes || a.sub.wind != b.sub.wind ||
+            a.sub.weather != b.sub.weather || a.sub.aether != b.sub.aether ||
+            a.sub.aether_state != b.sub.aether_state)
             return false;
     }
     return a.sub.terrain == b.sub.terrain && a.sub.water == b.sub.water &&

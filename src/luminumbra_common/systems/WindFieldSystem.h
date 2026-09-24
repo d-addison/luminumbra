@@ -112,6 +112,11 @@ public:
         return m_last_tick;
     }
 
+    // Actual selected ISA for determinism diagnostics (not just the ceiling).
+    [[nodiscard]] FastSIMD::eLevel noise_simd_level() const noexcept {
+        return m_direction_noise->GetSIMDLevel();
+    }
+
 private:
     // Resolve world_pos.y to a layer band.
     [[nodiscard]] static WindLayer LayerForHeight(float world_y) noexcept;
