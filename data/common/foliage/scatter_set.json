@@ -1,50 +1,74 @@
 {
   "schema": "luminumbra.foliage_scatter.v1",
-  "description": "  instanced foliage scatter set. Game content: the engine knows only the schema (archetype card size, tint, sway flag, density weight). Per-instance PLACEMENT is a deterministic pure hash of (chunk coords, biome id, slope, moisture, instance index); the per-column DENSITY comes from the biome table's vegetation block (data/common/biomes.json), modulated render-side by slope/moisture.: nothing here feeds the sim or world_hash. The sway flag is per-archetype: grass/canopy  the  wind field; pebbles/clutter do not. : colours DESATURATED toward natural olive/khaki (green no longer overpowers red/blue by the speckle-detector margin) with DARKER, lower-value bases, and the card SIZES shrunk so a dense scatter of small crossed blades reads as continuous ground cover rather than a few big flat neon decals. The frag stage adds a per-instance hue/value gradient (darker root, slightly lighter tip) so the field is not a flat single hue.",
+  "description": "Render-only ground-cover scatter. Dimensions are metres before deterministic 0.8\u20131.2 size variation. Grass uses narrow, tapered blades; fern and sprig cards remain modestly taller. Placement and density are deterministic and do not feed simulation state.",
   "archetypes": [
     {
       "name": "grass_tuft",
-      "color": [0.19, 0.34, 0.11],
-      "half_width": 0.19,
-      "height": 0.44,
+      "color": [
+        0.19,
+        0.34,
+        0.11
+      ],
+      "half_width": 0.035,
+      "height": 0.2,
       "sways": true,
       "density_weight": 11.0
     },
     {
       "name": "grass_short",
-      "color": [0.22, 0.37, 0.13],
-      "half_width": 0.17,
-      "height": 0.33,
+      "color": [
+        0.22,
+        0.37,
+        0.13
+      ],
+      "half_width": 0.025,
+      "height": 0.12,
       "sways": true,
       "density_weight": 8.0
     },
     {
       "name": "fern",
-      "color": [0.15, 0.31, 0.12],
-      "half_width": 0.21,
-      "height": 0.52,
+      "color": [
+        0.15,
+        0.31,
+        0.12
+      ],
+      "half_width": 0.07,
+      "height": 0.28,
       "sways": true,
       "density_weight": 2.5
     },
     {
       "name": "canopy_sprig",
-      "color": [0.14, 0.28, 0.10],
-      "half_width": 0.27,
-      "height": 0.72,
+      "color": [
+        0.14,
+        0.28,
+        0.1
+      ],
+      "half_width": 0.08,
+      "height": 0.35,
       "sways": true,
       "density_weight": 0.5
     },
     {
       "name": "pebble",
-      "color": [0.33, 0.31, 0.27],
-      "half_width": 0.10,
+      "color": [
+        0.33,
+        0.31,
+        0.27
+      ],
+      "half_width": 0.1,
       "height": 0.07,
       "sways": false,
       "density_weight": 0.4
     },
     {
       "name": "clutter_twig",
-      "color": [0.28, 0.24, 0.16],
+      "color": [
+        0.28,
+        0.24,
+        0.16
+      ],
       "half_width": 0.11,
       "height": 0.12,
       "sways": false,

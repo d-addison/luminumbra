@@ -17,10 +17,17 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
     static const std::vector<PassShaderLayout> kLayouts = [] {
         std::vector<PassShaderLayout> v;
 
+        v.push_back({"god_rays", "res/shaders/ssao.vert", "res/shaders/god_rays.frag", [] {
+                         ExpectedLayout e;
+                         e.pass_name = "god_rays";
+                         e.samplers = {{"u_scene", GL_SAMPLER_2D, -1},
+                                       {"u_sceneDepth", GL_SAMPLER_2D, -1}};
+                         return e;
+                     }()});
+
         // --- GBufferPass ----------------------------------------------------
-        // g_buffer.frag is shared by three programs (chunk / static-mesh / skinned-
-        // mesh verts); the sampler set is fragment-determined and identical across
-        // them, so one entry validates the layout for all three.
+        // Constant terrain UVs eliminate the derivative normal-map branch. Validate
+        // the mesh programs separately so their authored normal maps remain active.
         v.push_back(
             {"gbuffer_geometry", "res/shaders/g_buffer.vert", "res/shaders/g_buffer.frag", [] {
                  ExpectedLayout e;
@@ -30,10 +37,22 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                      {"u_terrainTextures", GL_SAMPLER_2D_ARRAY, -1},
                      {"u_terrainNormals", GL_SAMPLER_2D_ARRAY, -1},
                      {"u_skinnedTextures", GL_SAMPLER_2D_ARRAY, -1},
+                     {"u_staticSurface", GL_SAMPLER_2D_ARRAY, 6},
                      {"u_terrainRoughness", GL_SAMPLER_2D_ARRAY, -1},
                  };
                  return e;
              }()});
+        const auto terrainLayout = v.back();
+        for (const auto& mesh : {std::pair{"gbuffer_static", "res/shaders/instanced_mesh.vert"},
+                                 std::pair{"gbuffer_skinned", "res/shaders/skinned_mesh.vert"}}) {
+            auto entry = terrainLayout;
+            // Both variants derive from the terrain layout, with real interpolated UVs.
+            entry.layout_name = mesh.first;
+            entry.vert = mesh.second;
+            entry.expected.pass_name = mesh.first;
+            entry.expected.samplers.push_back({"u_staticNormals", GL_SAMPLER_2D_ARRAY, 5});
+            v.push_back(std::move(entry));
+        }
         v.push_back({"gbuffer_impostor",
                      "res/shaders/tree_impostor.vert",
                      "res/shaders/tree_impostor.frag",
@@ -105,7 +124,7 @@ const std::vector<PassShaderLayout>& AllPassShaderLayouts() {
                      {"u_ssao", GL_SAMPLER_2D, -1},
                      {"u_materialLUT", GL_SAMPLER_2D, -1},
                      {"u_aetherField", GL_SAMPLER_2D, -1},
-                     {"u_causticsTexture", GL_SAMPLER_2D, -1},
+                     {"u_environmentBrdf", GL_SAMPLER_2D, -1},
                      {"u_shadowCascades", GL_SAMPLER_2D_ARRAY, -1},
                  };
                  return e;

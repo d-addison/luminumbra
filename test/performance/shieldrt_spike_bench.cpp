@@ -310,9 +310,9 @@ SphereTraceResult SphereTrace(const SdfMipChain& c,
 TEST(ShieldRtSpike, HeightfieldMarchVsSdfSphereTrace) {
     fs::create_directories(ArtifactRoot());
 
-    // 3 region block (~1536 m, the far-tile horizon) at the  (4 m) tier, the
-    // far band the research targets. Origin offset away from spawn so we sample
-    // genuine far terrain.
+    // This probe uses a 3-region block (1536 m wide) at F1 (4 m) spacing.
+    // The legacy runtime streams F2 to 3000 m; FarTierTable.h declares future
+    // far ranges. Offset the probe away from spawn to sample far terrain.
     constexpr i32 kRx0 = 4, kRz0 = 4, kRegions = 3;
     constexpr double kBlockSpan = kRegions * 512.0;
     const double cx = (kRx0 + kRegions * 0.5) * 512.0;

@@ -575,6 +575,7 @@ Vec3 WaterSystem::get_camera_position(entt::registry& registry) const {
 
 void WaterSystem::update(entt::registry& registry,
                          const std::unordered_map<ChunkID, std::shared_ptr<Chunk>>& active_chunks) {
+    m_cells_stepped_last_update = 0;
     // (water-kernel perf) sub-phase wall timers — RUNTIME TELEMETRY ONLY (never hashed),
     // the _dbg_split pattern from SHIELD_WorldSystem::update.
     m_dbg_water = {};
@@ -680,8 +681,7 @@ void WaterSystem::update(entt::registry& registry,
     // (re)written by the main-thread LOD publish (process_completed_meshing_jobs); off-thread
     // meshing writes scratch/pending, never the live array. So this read cannot race, and the
     // workers below get a PRIVATE copy (never touch heightmap_data) — unlike the old worker-side
-    // read. When shaping is disabled, workers fall back to the analytic sampler, preserving
-    // identical water-bed values.
+    // read. Workers use the analytic sampler when no reusable heightmap is available.
     const int hm_stride = CHUNK_SIZE_X + 1; // heightmap is (CHUNK_SIZE_X+1)^2, x-fastest
     // The heightmap-node reuse below requires each water-cell CENTRE to land on an
     // integer heightmap node: centre = step*x + step/2 with step = CHUNK_SIZE_X /
@@ -692,8 +692,7 @@ void WaterSystem::update(entt::registry& registry,
     const int hm_step = (m_sim_resolution > 0 && CHUNK_SIZE_X % m_sim_resolution == 0)
                             ? CHUNK_SIZE_X / m_sim_resolution
                             : 0;
-    const bool reuse_heightmap =
-        m_shield_system->get_params().shaping_enabled && hm_step > 0 && hm_step % 2 == 0;
+    const bool reuse_heightmap = hm_step > 0 && hm_step % 2 == 0;
     std::vector<std::vector<float>> terrain_seed(
         to_init.size()); // [i] empty => worker samples the sampler
     if (reuse_heightmap) {
@@ -1027,6 +1026,7 @@ void WaterSystem::update(entt::registry& registry,
         chunks_to_sim.swap(window);
     }
     m_dbg_cells_simmed = chunks_to_sim.size() * water_cells_per_chunk;
+    m_cells_stepped_last_update = m_dbg_cells_simmed;
 
     // --- Step 4:  — INTEGER virtual-pipes. Per chunk: internal-edge flux + sources/sinks
     // (StepChunkWaterFixed). Then a CROSS-CHUNK owner-edge shared-flux pass so rivers/lakes are

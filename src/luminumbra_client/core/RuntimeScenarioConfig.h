@@ -49,6 +49,11 @@ struct RuntimeScenarioConfig {
     bool auto_create_world = false;
     bool auto_enter_world = false;
     bool no_audio = false;
+    // Temporary release policy: only an explicit diagnostic opt-in can start audio.
+    bool enable_audio = false;
+    bool audio_playback_enabled() const {
+        return enable_audio && !no_audio;
+    }
     bool no_ui = false;
     bool hidden_window = false;
     //  isolation/layer render mode (--isolation-layers <csv>, --isolation-backdrop
@@ -82,6 +87,10 @@ struct RuntimeScenarioConfig {
     std::filesystem::path artifact_dir;
     std::filesystem::path audio_telemetry_path;
     std::filesystem::path crash_dir;
+    // Opt-in main-loop stall detector (--hang-watchdog-seconds N, 0 = off): when the
+    // frame/shutdown heartbeat does not advance for N seconds, write a symbolized
+    // main-thread stack and a minidump into crash_dir and mark the runtime state.
+    int hang_watchdog_seconds = 0;
     // Persistence runtime roundtrip: which half of the roundtrip
     // this process runs ("save" or "load") and the shared session directory
     // the world snapshot travels through.

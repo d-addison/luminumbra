@@ -1,5 +1,6 @@
 #include "Shader.h"
 #include "core/Log.h"
+#include "luminumbra_common/core/FilesystemPath.h"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -16,8 +17,9 @@ bool LoadShaderSourceRecursive(const std::filesystem::path& path,
                                std::unordered_set<std::string>& include_stack,
                                std::string& output,
                                std::string& diagnostic) {
-    const std::filesystem::path normalized = std::filesystem::absolute(path).lexically_normal();
-    const std::string key = normalized.generic_string();
+    const std::filesystem::path normalized =
+        Filesystem::LexicallyNormalPath(Filesystem::AbsolutePath(path));
+    const std::string key = Filesystem::GenericPathString(normalized);
     if (!include_stack.insert(key).second) {
         diagnostic = "cyclic shader include: " + key;
         return false;

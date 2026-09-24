@@ -18,18 +18,14 @@
 // the ground so the card  from the root.: the sway never feeds
 // the sim/world_hash (one-way, regression contract).
 //
-// SKY / HORIZON CULL (, GREEN_SKY_SPECKLE): ground cover
-// must never render against the sky. A blade whose tip projects ABOVE the
-// horizon line (camera eye height) is a distant card poking over the terrain
-// silhouette -- it is collapsed to a degenerate point so it cannot speckle the
-// sky. Combined with a steeper quadratic distance fade so the far half of the
-// live ring is already nearly gone before the horizon.
+// Visibility comes from the camera frustum, distance fade, and scene depth.
+// Uphill and down-pitched terrain can occupy any part of the screen.
 //
 // Per-instance attributes come from the 36-byte FoliageInstance:
 //   0: pos (vec3)        ground anchor (world)
 //   1: size (vec2)       half-width / height (world units)
 //   2: color (rgba8)     albedo tint (a = sway flag scale 0..1)
-//   3: sway (vec2)       per-instance wind displacement (world XZ at the tip)
+//   3: sway (vec2)       per-instance raw wind input (world XZ)
 //   4: phase (f16)       per-instance sway phase offset (radians)
 //   5: facing (f16)      yaw of the card in the XZ plane (radians)
 // ===========================================================================
@@ -116,6 +112,10 @@ void main() {
     float bend = cornerY * cornerY; // 0 at base, 1 at tip
     float osc = sin(u_time * u_swaySpeed + aPhase);
     vec2 windDisp = aSway * u_swayAmplitude * swayScale * bend * (0.6 + 0.4 * osc);
+    // Wind is a field velocity, not a blade-size multiplier. Bound displacement
+    // by this blade's height so short ground cover cannot stretch into long spikes.
+    float maxBend = max(aSize.y, 0.0) * 0.45;
+    windDisp *= min(1.0, maxBend / max(length(windDisp), 0.0001));
     local.x += windDisp.x;
     local.z += windDisp.y;
 
@@ -132,51 +132,6 @@ void main() {
     // Collapse fully-faded instances to a degenerate point (zero pixels) so the
     // live-ring boundary is hard (gate: no foliage beyond the live ring).
     if (fade <= 0.001) {
-        emitCulled(worldPos);
-        return;
-    }
-
-    // SKY / HORIZON CULL: a ground-cover blade must never poke above the horizon
-    // line and speckle the sky. The horizon (for an eye-level/down-pitched view)
-    // sits at the camera eye height; any blade whose tip approaches the camera
-    // eye is, by construction, a distant card seen over the terrain silhouette
-    // (nearby ground cover sits a person-height below the eye). Cull with a 1 m
-    // margin BELOW the eye so even cards on ground that rises toward the horizon
-    // are removed before they can speckle the sky/storm dome. Pure world-space
-    // test (no screen-space feedback) -> deterministic.
-    if (worldPos.y > u_cameraPos.y - 1.0) {
-        emitCulled(worldPos);
-        return;
-    }
-
-    // SCREEN-BAND CULL (the airtight sky/horizon guard): ground cover must never
-    // appear in the UPPER part of the frame -- that band is the distant horizon /
-    // sky where a green card reads as a firefly speckle (GREEN_SKY_SPECKLE) or a
-    // false aurora (AURORA_AT_DUSK). The objective critique samples the TOP THIRD,
-    // i.e. NDC y > +0.33. We test the per-instance TIP (anchor + full blade
-    // height) -- shared by all 12 verts so the whole blade is culled together (no
-    // torn triangles). : testing the TIP (not just the
-    // anchor) closes the gap where a blade rooted just under the old anchor line
-    // poked its now-brighter GREEN tip into the top third at the dawn/storm
-    // horizon (GREEN_SKY_SPECKLE). Cull when the TIP projects above y = +0.10,
-    // comfortably below the top-third window with margin. Two clip-space tests
-    // (anchor for the near floor, tip for the horizon) -> deterministic.
-    //  coverage: the objective sky-speckle sample is the TOP THIRD (NDC y > 0.33).
-    // The previous thresholds (anchor 0.05 / tip 0.10) were far below that window, so a
-    // DOWN-PITCHED view (horizon high in frame) culled most below-horizon ground cover
-    // and the foreground read as sparse tufts. Raise the cull to just BELOW the sky
-    // window (anchor 0.26 / tip 0.30) so ground cover fills the lower ~two-thirds while
-    // the top-third sky sample stays foliage-free (the geometric above-horizon cull at
-    // worldPos.y > eye-1 above is the primary sky guard; this is the screen-band backstop
-    // with margin to y=0.33). Re-validated against GREEN_SKY_SPECKLE/AURORA_AT_DUSK.
-    vec4 anchorClip = u_projection * (u_view * vec4(aPos, 1.0));
-    if (anchorClip.w > 0.0 && (anchorClip.y / anchorClip.w) > 0.26) {
-        emitCulled(worldPos);
-        return;
-    }
-    vec3 tipWorld = aPos + vec3(0.0, aSize.y, 0.0);
-    vec4 tipClip = u_projection * (u_view * vec4(tipWorld, 1.0));
-    if (tipClip.w > 0.0 && (tipClip.y / tipClip.w) > 0.30) {
         emitCulled(worldPos);
         return;
     }

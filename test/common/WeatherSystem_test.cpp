@@ -14,6 +14,8 @@
 #include <cmath>
 #include <string>
 
+#include "luminumbra_common/systems/AmbientNoiseDispatch.h"
+
 #include "luminumbra_common/systems/WeatherSystem.h"
 #include "luminumbra_common/systems/WindFieldSystem.h"
 
@@ -49,6 +51,35 @@ RunResult RunWeather(int seed, std::uint64_t ticks, const Vec3& anchor) {
     }
     result.sub_hash = weather.ComputeWeatherSubHash();
     return result;
+}
+
+// Compare with terrain's explicit ceiling, independently of the ambient helper.
+// On non-x86 builds the existing native dispatch remains the reference.
+TEST(WeatherSystem, NoiseDispatchMatchesTerrainCeiling) {
+#if defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)
+    const auto reference = FastNoise::New<FastNoise::FractalFBm>(FastSIMD::Level_AVX2);
+#else
+    const auto reference = FastNoise::New<FastNoise::FractalFBm>();
+#endif
+    WeatherSystem field(kSeed);
+    RecordProperty("cpu_max_simd", static_cast<int>(FastSIMD::CPUMaxSIMDLevel()));
+    RecordProperty("reference_simd", static_cast<int>(reference->GetSIMDLevel()));
+    RecordProperty("pressure_noise_simd_level",
+                   static_cast<int>(field.pressure_noise_simd_level()));
+    EXPECT_EQ(field.pressure_noise_simd_level(), reference->GetSIMDLevel());
+    RecordProperty("temperature_noise_simd_level",
+                   static_cast<int>(field.temperature_noise_simd_level()));
+    EXPECT_EQ(field.temperature_noise_simd_level(), reference->GetSIMDLevel());
+    RecordProperty("humidity_noise_simd_level",
+                   static_cast<int>(field.humidity_noise_simd_level()));
+    EXPECT_EQ(field.humidity_noise_simd_level(), reference->GetSIMDLevel());
+    // Keep constructor and evolved hashes in the test receipt. The control and
+    // repaired binaries run identical ticks within each build configuration.
+    RecordProperty("constructor_hash", field.ComputeWeatherSubHash());
+    for (std::uint64_t tick = 1; tick <= kTicks; ++tick) {
+        field.Update(tick, kAnchor, nullptr);
+    }
+    RecordProperty("evolved_hash", field.ComputeWeatherSubHash());
 }
 
 TEST(WeatherSystem, GeometryMatchesPinnedShape) {

@@ -46,6 +46,7 @@ public:
     InGameDrive onGameStateInGame(float deltaTime) override;
     void onPreRenderWorldSweep() override;
     void onPreRenderCapturePins() override;
+    bool onPreRenderFoliage() override;
     void onPostRenderCapture(float deltaTime) override;
     void onShutdown() override;
 
@@ -62,6 +63,7 @@ private:
     bool driveCloudShadow();
     bool driveParticleDeterminism();
     bool driveFoliageVisual();
+    void applyFoliageVisualCamera();
     bool drivePrecipitation();
     bool driveTimeOfDaySweep();
     bool driveLodBoundaryOscillation();
@@ -167,15 +169,14 @@ private:
     //  particle determinism scenario state.
     bool particle_emitter_spawned = false;
     bool particle_determinism_capture_written = false;
-    // foliage instancing scenario state. The run loads the scatter
-    // set once, builds the deterministic per-chunk scatter over the visible live
-    // ring each frame (sampling the  wind field at the camera), runs a CALM
-    // phase (zero wind -> no sway) then a WINDY phase (strong wind -> sway), and
-    // captures + snapshots the instance set for the FoliageInstancing gate.
+    // Foliage QA owns final scatter controls. The calm still must be retained
+    // before requesting the windy phase; neither phase mutates simulation state.
     bool foliage_scatter_loaded = false;
     bool foliage_capture_written = false;
-    double foliage_calm_max_sway = 0.0;
-    bool foliage_calm_sampled = false;
+    FoliagePhaseEvidence foliage_calm;
+    float foliage_terrain_height = 0.0f;
+    bool foliage_camera_initialized = false;
+    Luminumbra::Vec3 foliage_camera_position{};
     // precipitation scenario state. The run spawns the rain emitter
     // (driven by the replicated weather state) and captures TWO frames -- a CALM
     // phase (no wind) and a WINDY phase (wind-advected slant) -- so the gate can

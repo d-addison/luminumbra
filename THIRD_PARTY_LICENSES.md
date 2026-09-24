@@ -15,8 +15,13 @@ Dependencies are obtained in one of two ways, noted per entry:
 
 | Project | Use | License |
 | --- | --- | --- |
-| [FastNoiseLite](https://github.com/Auburn/FastNoiseLite) | Coherent noise for terrain generation | MIT |
+| [FastNoise2](https://github.com/Auburn/FastNoise2) | Coherent noise for terrain generation | MIT |
 | [RenderDoc](https://github.com/baldurk/renderdoc) (`renderdoc_app.h` only) | In-application graphics capture API | MIT |
+
+The FastNoise2 copy in `vendor/fastnoise` includes a local correction to AVX
+reciprocal and reciprocal-square-root evaluation. A separate translation unit
+uses precise operations so CPU-specific estimates cannot change cave occupancy.
+The upstream generator expressions and explicit fused operations are retained.
 
 ## Fetched at configure time
 
@@ -41,6 +46,13 @@ Dependencies are obtained in one of two ways, noted per entry:
 | [stb](https://github.com/nothings/stb) | Image loading and utility headers | MIT or public domain |
 | [GoogleTest](https://github.com/google/googletest) | Unit and integration test framework | BSD-3-Clause |
 | [LZ4](https://github.com/lz4/lz4) | Fast compression | BSD-2-Clause |
+
+The stb resize header receives a local coefficient-copy correction in a private
+generated build header. `cmake/stb_resize.cmake` checks the pinned upstream header
+and replaces two unaligned integer-copy macros with overlap-safe byte copies.
+It also applies the SIMD lookup-table offset to each index instead of forming a
+pointer before the table.
+The fetched source, filtering arithmetic and SIMD paths are retained.
 
 ---
 

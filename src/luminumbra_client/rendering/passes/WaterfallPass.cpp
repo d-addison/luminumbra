@@ -82,6 +82,7 @@ void WaterfallPass::execute(const RenderContext& ctx) {
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthFunc(GL_GREATER);
         glEnable(GL_DEPTH_TEST); // self-sufficient: don't rely on the water pass leaving it on
         glDepthMask(GL_FALSE);   // translucent veil: don't occlude
         glDisable(GL_CULL_FACE); // double-sided sheet
@@ -89,7 +90,7 @@ void WaterfallPass::execute(const RenderContext& ctx) {
         // draws), so pull it slightly toward the camera in depth to avoid z-fighting /
         // being hidden behind the toe of the drop.
         glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(-1.0f, -1.0f);
+        glPolygonOffset(1.0f, 1.0f);
 
         glBindVertexArray(m_vao);
         for (std::size_t i = 0; i < m_sheet_sites.size(); ++i) {

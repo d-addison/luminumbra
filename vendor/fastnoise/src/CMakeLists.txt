@@ -36,6 +36,7 @@ else()
     set(FastSIMD_sources
         FastSIMD/FastSIMD.cpp
         FastSIMD/FastSIMD_Level_AVX2.cpp
+        FastSIMD/PreciseAVX.cpp
         FastSIMD/FastSIMD_Level_AVX512.cpp
         FastSIMD/FastSIMD_Level_Scalar.cpp
         FastSIMD/FastSIMD_Level_SSE2.cpp
@@ -112,6 +113,8 @@ if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
             set_source_files_properties(FastSIMD/FastSIMD_Level_SSE42.cpp PROPERTIES COMPILE_FLAGS "/arch:SSE2")
         endif()
         set_source_files_properties(FastSIMD/FastSIMD_Level_AVX2.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX2")
+        set_source_files_properties(FastSIMD/PreciseAVX.cpp PROPERTIES
+            COMPILE_FLAGS "/arch:AVX2 /fp:precise /GL-")
         set_source_files_properties(FastSIMD/FastSIMD_Level_AVX512.cpp PROPERTIES COMPILE_FLAGS "/arch:AVX512")
     
     elseif(FASTSIMD_COMPILE_ARMV7)
@@ -136,6 +139,11 @@ elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" OR "${CMAKE_CXX_COMPILER_ID}"
         set_source_files_properties(FastSIMD/FastSIMD_Level_SSE41.cpp PROPERTIES COMPILE_FLAGS "-msse4.1")
         set_source_files_properties(FastSIMD/FastSIMD_Level_SSE42.cpp PROPERTIES COMPILE_FLAGS "-msse4.2")
         set_source_files_properties(FastSIMD/FastSIMD_Level_AVX2.cpp PROPERTIES COMPILE_FLAGS "-mavx2 -mfma")
+        # Source options follow FastNoise's -ffast-math target option. Disable
+        # approximate rewrites and LTO for this boundary, retaining the existing
+        # operation ordering and explicit FMA in every noise generator.
+        set_source_files_properties(FastSIMD/PreciseAVX.cpp PROPERTIES
+            COMPILE_FLAGS "-mavx2 -fno-fast-math -ffp-contract=off -fno-lto")
         set_source_files_properties(FastSIMD/FastSIMD_Level_AVX512.cpp PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512dq -mfma")
     
     elseif(FASTSIMD_COMPILE_ARMV7)
@@ -144,4 +152,3 @@ elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" OR "${CMAKE_CXX_COMPILER_ID}"
     
     
 endif()
-

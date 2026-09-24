@@ -28,7 +28,7 @@ public:
     // (tick_count - returned + 1).. tick_count.
     std::uint32_t advance(double frame_dt);
 
-    void reset();
+    void reset(std::uint64_t base_tick = 0);
 
     [[nodiscard]] double fixed_dt() const noexcept {
         return fixed_dt_;
@@ -40,7 +40,7 @@ public:
         return max_catch_up_ticks_;
     }
 
-    // Total fixed ticks produced since construction/reset. Tick ids are
+    // Absolute tick base plus fixed ticks produced since construction/reset. Tick ids are
     // 1-based: the first executed tick is tick 1.
     [[nodiscard]] std::uint64_t tick_count() const noexcept {
         return tick_count_;

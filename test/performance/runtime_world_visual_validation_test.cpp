@@ -25,6 +25,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include "core/JobSystem.h"
+#include "luminumbra_client/core/RuntimeScenarioHarness.h"
 #include "systems/PhysicsSystem.h"
 #include "systems/SHIELD_WorldSystem.h"
 #include "world/Chunk.h"
@@ -34,6 +35,31 @@ namespace fs = std::filesystem;
 
 using namespace Luminumbra;
 using namespace Luminumbra::Systems;
+
+TEST(PrecipitationAnalysis, CrosswindRaisesSlantWithoutLengtheningStreaks) {
+    constexpr int width = 160;
+    constexpr int height = 120;
+    auto fixture = [](int lean) {
+        std::vector<unsigned char> pixels(width * height * 3, 30);
+        for (int row : {24, 62}) {
+            for (int column : {24, 56, 88, 120}) {
+                for (int y = 0; y < 24; ++y) {
+                    const int x = column + lean * y / 3;
+                    for (int dx = 0; dx < 2; ++dx) {
+                        const auto offset = ((row + y) * width + x + dx) * 3;
+                        std::fill_n(pixels.begin() + offset, 3, 230);
+                    }
+                }
+            }
+        }
+        return Client::ScenarioHarness::AnalyzePrecipPixels(pixels, width, height);
+    };
+    const auto calm = fixture(0);
+    const auto windy = fixture(1);
+    EXPECT_EQ(calm.bright_particle_pixels, windy.bright_particle_pixels);
+    EXPECT_GT(calm.slant_ratio, 0.0);
+    EXPECT_GT(windy.slant_ratio, calm.slant_ratio * 1.2);
+}
 
 namespace {
 

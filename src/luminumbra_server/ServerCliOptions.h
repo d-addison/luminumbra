@@ -12,6 +12,7 @@ struct ServerCliOptions {
     std::uint64_t ticks = 90;
     int surface_radius = 4;
     int collision_radius = 2;
+    int test_streaming_radius_cap = 0;
     std::uint64_t autosave_ticks = 0;
     //  spawn N deterministic player avatars (phyllotaxis ring
     // around spawn). 0 = none (byte-identical to the zero-avatar lane). With --smoke the
@@ -44,6 +45,7 @@ struct ServerCliOptions {
     // percentiles and sim-load counters in the smoke artifact (see
     // ServerWorldRunnerConfig::water_smoke). Observability only; implies --smoke.
     bool water_smoke = false;
+    bool sim_budget = false; // Opt-in simulation stage observation; default artifact unchanged.
 
     //  --replicate runs the authoritative server + an in-process loopback
     // ReplicationClient, broadcasts the avatar states each tick, and asserts the client

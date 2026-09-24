@@ -131,7 +131,7 @@ void AsyncReadbackRing::copy_region(unsigned int src_buffer,
     slot.payload_bytes = std::max(slot.payload_bytes, end);
 }
 
-void AsyncReadbackRing::submit() {
+void AsyncReadbackRing::submit(std::uint64_t user_tag) {
     if (m_open_slot < 0) {
         return;
     }
@@ -140,6 +140,7 @@ void AsyncReadbackRing::submit() {
     glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
     slot.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     slot.seq = m_next_seq++;
+    slot.user_tag = user_tag;
     slot.completed = false;
     m_open_slot = -1;
     m_cursor = (m_cursor + 1) % m_num_slots;
@@ -180,7 +181,9 @@ bool AsyncReadbackRing::poll() {
     return scan_newest() >= 0;
 }
 
-bool AsyncReadbackRing::consume(const void** out_ptr, std::size_t* out_bytes) {
+bool AsyncReadbackRing::consume(const void** out_ptr,
+                                std::size_t* out_bytes,
+                                std::uint64_t* out_tag) {
     if (!m_initialized) {
         return false;
     }
@@ -195,6 +198,9 @@ bool AsyncReadbackRing::consume(const void** out_ptr, std::size_t* out_bytes) {
     }
     if (out_bytes != nullptr) {
         *out_bytes = slot.payload_bytes;
+    }
+    if (out_tag != nullptr) {
+        *out_tag = slot.user_tag;
     }
     return true;
 }

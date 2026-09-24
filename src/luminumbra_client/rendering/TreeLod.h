@@ -15,6 +15,7 @@
 // test/rendering/tree_lod_test.cpp).
 
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -49,6 +50,18 @@ struct TreeLodConfig {
     // instead of branch geometry, so a vast forest stays in budget out to the horizon.
     float lod3Distance = 620.0f;
 };
+
+// Preserve all source leaf surfaces in each mesh LOD, reducing only the wooden
+// geometry. The 384-pixel atlas tiles replace the complete tree beyond 65 m.
+// These distances and actual pack triangle counts share the 16k-tree budget gate.
+inline TreeLodConfig AuthoredTreeLodConfig(bool impostors) {
+    TreeLodConfig config;
+    config.lod1Distance = 30.0f;
+    config.lod2Distance = 50.0f;
+    // Without the atlas, retain the coarsest required mesh at any distance.
+    config.lod3Distance = impostors ? 65.0f : std::numeric_limits<float>::infinity();
+    return config;
+}
 
 // Returns the LOD bucket index [0.. kTreeLodCount-1] for a tree instance at the
 // given camera distance. Monotonic non-decreasing in distance. Negative or NaN

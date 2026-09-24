@@ -33,9 +33,9 @@ inline WeatherRenderState BuildWeatherRenderState(const Systems::WeatherSample& 
     // precip field says so), which reads as rain.
     w.rain_intensity = (s.category == WeatherCategory::Snow) ? 0.0f : precip;
     w.snow_intensity = (s.category == WeatherCategory::Snow) ? precip : 0.0f;
-    // The scenario's fog constants: a thick veil under Fog, a light ambient haze
-    // otherwise (the aerial pass owns true distance fog; this is the overlay's).
-    w.fog_density = (s.category == WeatherCategory::Fog) ? 0.4f : 0.1f;
+    // The aerial pass already supplies clear-air haze. Add the lowland weather
+    // layer only for actual fog; an unconditional veil whitened dry terrain.
+    w.fog_density = (s.category == WeatherCategory::Fog) ? 0.4f : 0.0f;
     w.storm_intensity = std::clamp(s.storm_intensity, 0.0f, 1.0f);
     w.wetness = precip;
     const float wlen = std::sqrt(s.wind.x * s.wind.x + s.wind.y * s.wind.y);

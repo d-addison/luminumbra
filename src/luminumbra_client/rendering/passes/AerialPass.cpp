@@ -68,10 +68,10 @@ void AerialPass::execute(const RenderContext& ctx) {
     m_shader->setInt("gDepth", 0);
     m_shader->setInt("u_skyViewLut", 1);
     m_shader->setInt("u_transmittanceLut", 2);
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom),
-                                            (float)ctx.screen_width / (float)ctx.screen_height,
-                                            camera.GetNearPlane(),
-                                            camera.GetFarPlane());
+    glm::mat4 projection = ReversedZPerspective(glm::radians(camera.Zoom),
+                                                (float)ctx.screen_width / (float)ctx.screen_height,
+                                                camera.GetNearPlane(),
+                                                camera.GetFarPlane());
     m_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
     m_shader->setMat4("u_inverseProjection", glm::inverse(projection));
     m_shader->setVec3("u_viewPos", camera.Position);

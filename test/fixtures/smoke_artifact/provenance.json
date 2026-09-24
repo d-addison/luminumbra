@@ -1,0 +1,12 @@
+{
+  "revision": "f2895388cd14fda8591ed571f87c0ffe026db15d",
+  "source": "src/luminumbra_server/modes/Smoke.cpp",
+  "source_sha256": "5caeb31b0e33e7c4e1096c6fc948e7b633ed133e3f4c947fca37bed218348276",
+  "fixed_inputs_sha256": "85a67a9181f191c6e4c2fb187775fb15468cc6c44b2d9d39aa587a6f8adc86da",
+  "baselines": {
+    "devel-0.json": "bbc4acd5b749d65b11c8364ef3b599f3ae2d9edb7cef0017fce193a97c1ba1ef",
+    "devel-1.json": "1f816e2789c16335e21551c40c884f85812c9a93164e2e0914dec14da362f753",
+    "devel-2.json": "b43660ba245a25b812565ecdb42def58f4ebdff030c8f662e40de846f41fc276"
+  },
+  "method": "Pinned devel Smoke.cpp with only RunSmokeOnce replaced by FixedSmokeInputs; complete production serializer and text-mode writer unchanged; Linux LF output."
+}

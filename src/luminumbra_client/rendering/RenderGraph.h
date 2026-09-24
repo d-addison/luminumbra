@@ -1,14 +1,8 @@
 #pragma once
 
-//   ( , ): the DECLARATIVE FRAME GRAPH.
-//
-// RenderPipeline::render_frame dispatches ~23 GPU stages in a hand-scripted sequence whose
-// ordering is IMPLICIT -- each stage's GL writes happen to be read (or blended onto) by a later
-// stage, and the correctness of the whole frame rests on a human keeping those ~600 lines in the
-// right order. This header promotes that sequence to DATA: an ordered list of nodes, each
-// declaring the named render resources it READS and WRITES, plus the one ordering fact the
-// resource-flow can't express on its own -- the god-rays "latest opaque snapshot" (it samples
-// whichever of the two post-sky snapshots executed most recently). A scheduler topologically
+// Declarative frame graph used by RenderPipeline's stage dispatcher. Nodes declare the named
+// render resources they read and write, including the snapshots consumed by water, god rays
+// and weather. A scheduler topologically
 // orders the nodes from those declared dependencies; a validator proves the declaration is
 // internally consistent (no read-before-write; every latest-writer edge resolves to a real prior
 // writer).
@@ -16,7 +10,7 @@
 // The graph drives render_frame through the executor table. Runtime stage tracing
 // asserts that the scheduled declaration and executed order stay identical;
 // validation catches missing resource dependencies, and the god-rays contract
-// verifies its latest opaque snapshot under both weather branches.
+// verifies that god rays use their pre-foliage snapshot under both weather branches.
 //
 // DETERMINISM. Pure CPU ordering logic over resource NAME strings. No GL, no sim, no readback.
 // Render-only observability -- it can never feed world_hash; the server never
@@ -31,8 +25,8 @@ namespace Luminumbra::Rendering {
 
 // One frame-graph stage: its stable id, the named resources it consumes/produces, and whether its
 // GL work is runtime-gated. `latest_writer_reads` is a read whose ORDERING pins to the LAST prior
-// writer of the resource (the god-rays post-sky opaque snapshot: snapshot #2 if the weather
-// overlay ran, else #1) -- distinct from a plain `reads`, which only requires *some* prior writer.
+// writer of the resource (for example the dedicated pre-foliage god-ray snapshot), distinct
+// from a plain `reads`, which only requires some prior writer.
 struct RenderGraphNode {
     std::string name;
     std::vector<std::string> reads;
@@ -258,9 +252,25 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
            {},
            true});
     g.add({"glass_oit_resolve", {"oit.accum", "oit.reveal"}, {"lighting.color"}, {}, true});
+    // Preserve resolved scene colors for ray-source sampling independently of weather.
+    // Reuse the existing snapshot texture; grass then alpha-occludes shafts before grading.
+    g.add({"god_rays_opaque_snapshot", {"lighting.color"}, {"lighting.opaque_color"}, {}, true});
+    g.add({"god_rays",
+           {"lighting.color", "gbuffer.depth"},
+           {"lighting.color"},
+           {"lighting.opaque_color"},
+           false});
+    // Ground-cover color must receive weather and aerial composition with the terrain.
+    // Short blades use the underlying G-buffer surface for fog/wetness reconstruction.
+    // Their depth writes still occlude subsequent depth-tested particles.
+    g.add({"foliage", {"lighting.depth"}, {"lighting.color", "lighting.depth"}, {}, true});
     // 7a: snapshot #2 (only when the weather overlay runs), then the weather overlay reads it.
     g.add({"weather_opaque_snapshot", {"lighting.color"}, {"lighting.opaque_color"}, {}, true});
-    g.add({"weather_overlay", {"lighting.opaque_color"}, {"lighting.color"}, {}, false});
+    g.add({"weather_overlay",
+           {"lighting.opaque_color", "gbuffer.depth", "gbuffer.normal_material"},
+           {"lighting.color"},
+           {},
+           false});
     //  rendering (,  ): the froxel media volume — inject
     // (density + in-scatter per froxel, sampling the shadow depth AND the  tint
     // cascade for colored shafts) then front-to-back integrate. The aerial stage
@@ -274,14 +284,10 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     g.add({"froxel_integrate", {"froxel.scatter"}, {"froxel.integrated"}, {}, true});
     // 7b: aerial-perspective in-scatter over the lit scene (+ the froxel compose).
     g.add({"aerial",
-           {"lighting.color", "lighting.depth", "froxel.integrated"},
+           {"lighting.color", "gbuffer.depth", "froxel.integrated"},
            {"lighting.color"},
            {},
            true});
-    // 7b2: god rays sample the LATEST opaque snapshot (#2 if weather ran, else #1) + composite.
-    g.add({"god_rays", {"lighting.color"}, {"lighting.color"}, {"lighting.opaque_color"}, false});
-    // 7c: foliage cards blend into the lit target, depth-tested.
-    g.add({"foliage", {"lighting.depth"}, {"lighting.color"}, {}, true});
     // TAAU resolve of the opaque lit color before the transparent particle/lightning composite.
     g.add({"taau_resolve", {"lighting.color"}, {"lighting.color"}, {}, true});
     // mean-log-luminance meter of the resolved lit scene ->
