@@ -12,3 +12,7 @@ test/fixtures/smoke_artifact/devel-*.json -text
 
 # Original acceptance receipts retain byte identity across platforms.
 docs/evidence/blender-presentation-20260913/*.json -text
+
+# Catalog and historical receipt identities must survive native Windows checkout.
+docs/visual-catalog*.json text eol=lf
+docs/assets/visual-baselines/20260908/*.json text eol=lf
