@@ -16,6 +16,7 @@
 #include "luminumbra_client/rendering/RenderPipeline.h"
 #include "luminumbra_client/rendering/RenderResourceRegistry.h"
 #include "luminumbra_client/rendering/ScentFieldRenderMirror.h"
+#include "luminumbra_client/rendering/Shader.h"
 #include "luminumbra_client/rendering/passes/DebugViewPass.h"
 #include "luminumbra_client/rendering/passes/FoliagePass.h"
 #include "luminumbra_client/rendering/passes/GBufferPass.h"
