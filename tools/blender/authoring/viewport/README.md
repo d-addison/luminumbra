@@ -46,3 +46,14 @@ operations. The portable implementation remains available; parity tests cover
 nonfinite depth, range, coverage and alpha corruption. The broker receipt records
 which implementation ran. This optimization alone does not qualify presentation
 rate or end-to-end latency.
+
+Windows record readers share deletion and publishers use handle-based POSIX
+replacement (`FileRenameInfoEx`, replace-existing plus POSIX-semantics flags).
+An open reader retains the prior complete record while new readers open the
+replacement. This requires Windows 10 RS1 or later and filesystem support; an
+unsupported operation fails closed. Ordinary `os.replace` did not support this
+held-reader publication in the qualified native environment.
+
+If both frame slots are leased, the broker retains one completed latest frame
+and retries within the original delivery deadline. New state supersedes that
+frame; stop discards it. Coalescing and retry do not restart the deadline.

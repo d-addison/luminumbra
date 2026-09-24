@@ -58,6 +58,42 @@ struct FoliagePhaseEvidence {
     std::string screenshot;
 };
 
+// GL-free reconstruction of Camera.h's finite RH reversed-Z projection. This
+// joins the actual captured matrix to the reported camera, rather than accepting
+// a self-consistent matrix/vertex pair from a different view.
+inline std::array<double, 16> FoliageExpectedViewProjection(const FoliagePhaseEvidence& sample) {
+    constexpr double radians = 3.14159265358979323846 / 180.0;
+    const double yaw = sample.yaw_degrees * radians, pitch = sample.pitch_degrees * radians;
+    const std::array<double, 3> front{
+        std::cos(yaw) * std::cos(pitch), std::sin(pitch), std::sin(yaw) * std::cos(pitch)};
+    const std::array<double, 3> right{-std::sin(yaw), 0, std::cos(yaw)};
+    const std::array<double, 3> up{
+        -std::cos(yaw) * std::sin(pitch), std::cos(pitch), -std::sin(yaw) * std::sin(pitch)};
+    const auto dot = [&](const auto& vector) {
+        return vector[0] * sample.camera[0] + vector[1] * sample.camera[1] +
+               vector[2] * sample.camera[2];
+    };
+    const double view[4][4] = {{right[0], right[1], right[2], -dot(right)},
+                               {up[0], up[1], up[2], -dot(up)},
+                               {-front[0], -front[1], -front[2], dot(front)},
+                               {0, 0, 0, 1}};
+    const double scale = 1 / std::tan(sample.fov_degrees * radians / 2);
+    constexpr double near_plane = .1, far_plane = 3200;
+    const double projection[4][4] = {{scale / (3840.0 / 1600.0), 0, 0, 0},
+                                     {0, scale, 0, 0},
+                                     {0,
+                                      0,
+                                      near_plane / (far_plane - near_plane),
+                                      far_plane * near_plane / (far_plane - near_plane)},
+                                     {0, 0, -1, 0}};
+    std::array<double, 16> result{};
+    for (std::size_t col = 0; col < 4; ++col)
+        for (std::size_t row = 0; row < 4; ++row)
+            for (std::size_t k = 0; k < 4; ++k)
+                result[col * 4 + row] += projection[row][k] * view[k][col];
+    return result;
+}
+
 inline bool FoliageInstanceMatches(std::uint64_t build_generation,
                                    std::uint64_t instance_generation,
                                    std::uint64_t build_frame,
