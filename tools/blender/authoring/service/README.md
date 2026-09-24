@@ -8,9 +8,12 @@ and publishes a generation only after the build succeeds. This optional Python
 The `glb-geometry-v1` profile produces flattened LMSH geometry or one-skin LMS2
 geometry with LANM clips, according to the installed compiler's qualified profile.
 The optional [static prefab profile](PREFABS.md) preserves hierarchy and instances
-with material bindings and compiled textures. Runtime prefab instantiation,
-components, graphs and engine preview frames remain unavailable. `capabilities`
-reports those limits separately from asset compilation.
+with material bindings and compiled textures. The optional
+[compiled prefab runtime](../../../prefab_runtime/README.md) provides ECS
+instantiation and an installed headless inspector for retained generations.
+The service itself does not instantiate prefabs. Components, graphs, rendering
+and engine preview frames remain unavailable; `capabilities` describes the
+service's operations separately from the optional runtime consumer.
 Compiler fidelity must be qualified with the exact installed executable: pinning
 a hash does not establish that an older compiler supports a new asset feature.
 
