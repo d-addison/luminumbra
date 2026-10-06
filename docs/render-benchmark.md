@@ -265,11 +265,61 @@ Committed and generated evidence has these compatibility rules:
   successful captures also assert mesh loading and all three material registrations
   to rule out fallback-only success. These are explicit generic renderer test
   inputs, not authored-art or performance qualification evidence, and never change
-  the shipping manifest or runtime defaults. The CTest discovery delta remains
-  eleven over the original base.
+  the shipping manifest or runtime defaults. `RenderRunnerEvidencePython` exercises
+  the runner's evidence handling with tiny Python child processes and requires no
+  graphics device. Including this case, the CTest discovery delta is twelve over
+  the original measurement base.
 - `build/campaign-archives-20260907/slice-A2/receipt.json` is generated campaign
   evidence, not runtime input. It records branch, head commit, changed files,
   added tests, both CTest totals, before/after fixture hashes and deviations.
   Unavailable verification results are explicit nulls, not passing totals. A
   missing, corrupt or incompatible receipt supplies no acceptance evidence and
   must not be treated as proof of completion.
+
+## Process failure and shutdown evidence
+
+Each `test_render_runner.py` child keeps its original 180-second process deadline,
+which includes startup, capture and shutdown. A complete capture does not establish
+that the process exited or that validation passed. Before its temporary runtime
+root is removed, the harness retains parseable capture JSON verbatim as
+`<test-method>-<case>.json`, including when the process times out or returns an
+unexpected exit code. Existing exit/refusal, loader and capture checks still run;
+missing or incomplete JSON is not promoted to a complete capture. Only that case's
+old outputs are retired before another invocation, preventing stale evidence.
+
+The adjacent `<test-method>-<case>.process.json` has schema
+`luminumbra.render_runner_process.v1`. It records the exact command array, cwd,
+binary path and SHA-256, the 180-second limit, monotonic process elapsed seconds,
+and outcome `returned`, `timed_out` or `spawn_error`. `return_code` is null when no
+exit status was returned; exception type/message describe timeout or launch
+failure. Binary identity is null if the executable could not be read, and elapsed
+time is null if execution was never attempted. Hashing and evidence finalization
+are outside the recorded process interval. No capture-completion timestamp or
+teardown duration is inferred from these receipts.
+
+`capture_status` is `retained`, `missing`, `invalid_json`, `read_error` or
+`write_error`; retained bytes have a path and SHA-256. A retained document with an
+unsupported schema remains diagnostic evidence and still fails normal validation.
+`evidence_errors` records persistence failures where a receipt can be written;
+receipt-write failures are reported to stderr. Evidence errors never replace the
+original timeout, launch error or validation assertion. A normally returning
+process cannot silently succeed when required evidence persistence failed.
+Capture and receipt writes use sibling temporary files followed by replacement.
+The receipt describes a process outcome, not a passing test or qualified benchmark.
+
+Terminal shutdown now emits seven timestamped `Shutdown stage:` breadcrumbs:
+`query_cleanup_started`, `query_cleanup_finished`, `world_readers_drain_started`,
+`far_lod_drained`, `world_readers_drained`, `world_save_started` and
+`world_save_finished`. They expose query cleanup, the first far-LOD drain, other
+world-reader drains and the save stage without changing their order. A finished
+stage means its call returned, including a save refusal. The existing
+`world_state_saved` milestone retains its successful-save condition.
+
+These strings also join the existing `luminumbra.shutdown.v1` milestone list.
+With the existing hang watchdog enabled, the incomplete record begins before
+query cleanup and updates as stages advance; otherwise the record is still
+written only at final shutdown. Its existing final `jobs_drained` and optional
+`complete` fields keep their meanings. No runtime artifact format, watchdog
+default, workload, timeout, queue policy or save behavior changes. These
+diagnostics localize a future wait; they do not establish the cause of the UCRT
+timeouts or a fix for the original `0xCFFFFFFF` incident.

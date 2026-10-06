@@ -204,6 +204,17 @@ public:
         return m_last_tick;
     }
 
+    // Actual selected ISAs for all three climate channels.
+    [[nodiscard]] FastSIMD::eLevel pressure_noise_simd_level() const noexcept {
+        return m_pressure_noise->GetSIMDLevel();
+    }
+    [[nodiscard]] FastSIMD::eLevel temperature_noise_simd_level() const noexcept {
+        return m_temperature_noise->GetSIMDLevel();
+    }
+    [[nodiscard]] FastSIMD::eLevel humidity_noise_simd_level() const noexcept {
+        return m_humidity_noise->GetSIMDLevel();
+    }
+
 private:
     // Map a world position to a local cell (clamped result reported via in_region).
     void LocalCell(const Vec3& world_pos, int& out_lx, int& out_lz, bool& in_region) const;
