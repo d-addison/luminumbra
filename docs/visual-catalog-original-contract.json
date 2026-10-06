@@ -1,0 +1,1386 @@
+{
+  "schema": "luminumbra.visual_original_contract.v1",
+  "original_group_count": 70,
+  "rows": [
+    {
+      "id": "R01",
+      "family": "runtime",
+      "name": "Whole-world seasonal/time/weather visual sweep",
+      "visual_goal": "Make every required cell readable and visually intentional: coherent horizon composition, legible foreground, distinguishable lighting/weather, no blank or hidden cells.",
+      "required_variants": [
+        "summer/dawn/yaw000/clear",
+        "summer/dawn/yaw000/storm",
+        "summer/dawn/yaw120/clear",
+        "summer/dawn/yaw120/storm",
+        "summer/dawn/yaw240/clear",
+        "summer/dawn/yaw240/storm",
+        "summer/dawn/down35/clear",
+        "summer/dawn/down35/storm",
+        "summer/dawn/up25/clear",
+        "summer/dawn/up25/storm",
+        "summer/dawn/water/clear",
+        "summer/dawn/water/storm",
+        "summer/noon/yaw000/clear",
+        "summer/noon/yaw000/storm",
+        "summer/noon/yaw120/clear",
+        "summer/noon/yaw120/storm",
+        "summer/noon/yaw240/clear",
+        "summer/noon/yaw240/storm",
+        "summer/noon/down35/clear",
+        "summer/noon/down35/storm",
+        "summer/noon/up25/clear",
+        "summer/noon/up25/storm",
+        "summer/noon/water/clear",
+        "summer/noon/water/storm",
+        "summer/dusk/yaw000/clear",
+        "summer/dusk/yaw000/storm",
+        "summer/dusk/yaw120/clear",
+        "summer/dusk/yaw120/storm",
+        "summer/dusk/yaw240/clear",
+        "summer/dusk/yaw240/storm",
+        "summer/dusk/down35/clear",
+        "summer/dusk/down35/storm",
+        "summer/dusk/up25/clear",
+        "summer/dusk/up25/storm",
+        "summer/dusk/water/clear",
+        "summer/dusk/water/storm",
+        "summer/night/yaw000/clear",
+        "summer/night/yaw000/storm",
+        "summer/night/yaw120/clear",
+        "summer/night/yaw120/storm",
+        "summer/night/yaw240/clear",
+        "summer/night/yaw240/storm",
+        "summer/night/down35/clear",
+        "summer/night/down35/storm",
+        "summer/night/up25/clear",
+        "summer/night/up25/storm",
+        "summer/night/water/clear",
+        "summer/night/water/storm",
+        "winter/dawn/yaw000/clear",
+        "winter/dawn/yaw000/storm",
+        "winter/dawn/yaw120/clear",
+        "winter/dawn/yaw120/storm",
+        "winter/dawn/yaw240/clear",
+        "winter/dawn/yaw240/storm",
+        "winter/dawn/down35/clear",
+        "winter/dawn/down35/storm",
+        "winter/dawn/up25/clear",
+        "winter/dawn/up25/storm",
+        "winter/dawn/water/clear",
+        "winter/dawn/water/storm",
+        "winter/noon/yaw000/clear",
+        "winter/noon/yaw000/storm",
+        "winter/noon/yaw120/clear",
+        "winter/noon/yaw120/storm",
+        "winter/noon/yaw240/clear",
+        "winter/noon/yaw240/storm",
+        "winter/noon/down35/clear",
+        "winter/noon/down35/storm",
+        "winter/noon/up25/clear",
+        "winter/noon/up25/storm",
+        "winter/noon/water/clear",
+        "winter/noon/water/storm",
+        "winter/dusk/yaw000/clear",
+        "winter/dusk/yaw000/storm",
+        "winter/dusk/yaw120/clear",
+        "winter/dusk/yaw120/storm",
+        "winter/dusk/yaw240/clear",
+        "winter/dusk/yaw240/storm",
+        "winter/dusk/down35/clear",
+        "winter/dusk/down35/storm",
+        "winter/dusk/up25/clear",
+        "winter/dusk/up25/storm",
+        "winter/dusk/water/clear",
+        "winter/dusk/water/storm",
+        "winter/night/yaw000/clear",
+        "winter/night/yaw000/storm",
+        "winter/night/yaw120/clear",
+        "winter/night/yaw120/storm",
+        "winter/night/yaw240/clear",
+        "winter/night/yaw240/storm",
+        "winter/night/down35/clear",
+        "winter/night/down35/storm",
+        "winter/night/up25/clear",
+        "winter/night/up25/storm",
+        "winter/night/water/clear",
+        "winter/night/water/storm"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make every required cell readable and visually intentional: coherent horizon composition, legible foreground, distinguishable lighting/weather, no blank or hidden cells.",
+        "48 summer cells;96 with winter: dawn/noon/dusk/night × yaw000/yaw120/yaw240/down35/up25/water × clear/storm. Original frames, exact per-cell pins and feature metrics; missing cells displayed as failures.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R02",
+      "family": "runtime",
+      "name": "Initial world / auto_world_smoke",
+      "visual_goal": "Present a convincing completed world entry with a visible grounded player view and understandable loading transition.",
+      "required_variants": [
+        "creation",
+        "loading",
+        "grounded-ready"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Present a convincing completed world entry with a visible grounded player view and understandable loading transition.",
+        "Capture creation/loading/ready sequence and ready-state frame; tie world hash, collider and streaming readiness to frame. Verify exact entry orchestration before scripting.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R03",
+      "family": "runtime",
+      "name": "Ground LOD camera path / lod_ground_smoke",
+      "visual_goal": "Keep ground detail and silhouette coherent through the existing near/mid/far path.",
+      "required_variants": [
+        "near",
+        "mid",
+        "far",
+        "transition-path"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Keep ground detail and silhouette coherent through the existing near/mid/far path.",
+        "Existing lod-ground named frames plus continuous path samples, camera positions, LOD selection/triangle counts and image difference around transitions.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R04",
+      "family": "runtime",
+      "name": "LOD boundary oscillation",
+      "visual_goal": "Cross the same boundary repeatedly without flicker, holes or unstable geometry.",
+      "required_variants": [
+        "repeated-crossings",
+        "worst-transition-frame"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Cross the same boundary repeatedly without flicker, holes or unstable geometry.",
+        "Frame sequence plus transition recorder, queue/residency state and repeated crossing timestamps; still alone cannot qualify.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R05",
+      "family": "runtime",
+      "name": "LOD seam arrival",
+      "visual_goal": "Show newly arriving neighboring geometry joining without exposed cracks or transient voids.",
+      "required_variants": [
+        "before-arrival",
+        "arrival",
+        "joined",
+        "worst-seam"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show newly arriving neighboring geometry joining without exposed cracks or transient voids.",
+        "Existing lod-seam captures, arrival order/frame IDs and screen-space seam evidence; retain worst transition frame.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R06",
+      "family": "runtime",
+      "name": "Water surface, shore and reflection",
+      "visual_goal": "Make the shoreline, depth and reflected scene legible and materially distinct without hiding dry-ground errors.",
+      "required_variants": [
+        "surface",
+        "underwater",
+        "shore",
+        "reflection-motion"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make the shoreline, depth and reflected scene legible and materially distinct without hiding dry-ground errors.",
+        "water-visual.ppm and water-reflection.ppm plus camera/depth/shore ROI, underwater/surface variants and short motion path for reflection stability.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R07",
+      "family": "runtime",
+      "name": "Waterfall sheet/spray/foam and dam response",
+      "visual_goal": "Show a coherent waterfall connected to actual upstream water, with readable sheet, spray, foam and surrounding scale.",
+      "required_variants": [
+        "active",
+        "dammed",
+        "recovered"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show a coherent waterfall connected to actual upstream water, with readable sheet, spray, foam and surrounding scale.",
+        "Link test/rendering/waterfall_visual_test.cpp detected-site fixture and dam-extinguish assertions; capture active/blocked/recovered site and particle/state counts. Verify runtime trigger wiring; producer helper alone is not a runnable scenario.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R08",
+      "family": "runtime",
+      "name": "Terrain material vista and ID heatmap",
+      "visual_goal": "Demonstrate identifiable sand/grass/stone/soil with natural scale, shaded detail and transitions in a well-framed real scene.",
+      "required_variants": [
+        "close",
+        "mid",
+        "distant",
+        "material-id-heatmap"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Demonstrate identifiable sand/grass/stone/soil with natural scale, shaded detail and transitions in a well-framed real scene.",
+        "material-visual.ppm plus material-id-heatmap.ppm; material ROI identities, camera and color/light settings, comparable close/mid/distant views.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R09",
+      "family": "runtime",
+      "name": "Skybox and celestial view",
+      "visual_goal": "Compose a convincing sky that retains horizon integration and identifiable celestial features across intended views.",
+      "required_variants": [
+        "dawn",
+        "day",
+        "dusk",
+        "night",
+        "sun",
+        "moon"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Compose a convincing sky that retains horizon integration and identifiable celestial features across intended views.",
+        "skybox-visual.ppm, sun/moon projection and visibility measures; dawn/day/dusk/night variants linked to R15.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R10",
+      "family": "runtime",
+      "name": "Clear/weather comparison",
+      "visual_goal": "Show mood and depth changes with readable terrain and stationary geometry, not an indiscriminate full-frame tint.",
+      "required_variants": [
+        "matched-clear",
+        "matched-weather"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show mood and depth changes with readable terrain and stationary geometry, not an indiscriminate full-frame tint.",
+        "weather-baseline.ppm and weather-visual.ppm; actual weather bridge state, matched camera and ROI changes; composited grass/terrain edges.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R11",
+      "family": "runtime",
+      "name": "Lightning strike",
+      "visual_goal": "Make the bolt and localized illumination clearly visible without clipping the whole scene.",
+      "required_variants": [
+        "neighbor",
+        "strike",
+        "recovery"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make the bolt and localized illumination clearly visible without clipping the whole scene.",
+        "lightning-neighbor.ppm/strike.ppm plus timed sequence and active-strike metadata, luminance regions; verify runtime trigger wiring.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R12",
+      "family": "runtime",
+      "name": "Moving cloud shadows",
+      "visual_goal": "Show coherent shadow movement across terrain and foliage beneath readable sky clouds.",
+      "required_variants": [
+        "t0",
+        "t1",
+        "moving-shadow-path"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show coherent shadow movement across terrain and foliage beneath readable sky clouds.",
+        "cloud-shadow-t0/t1.ppm plus path sequence, cloud/wind/time pins, terrain/grass matched projected shadow ROIs.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R13",
+      "family": "runtime",
+      "name": "Deterministic particle emitter",
+      "visual_goal": "Display the actual effect at a useful scale and contrast, with stable motion rather than barely detectable particles.",
+      "required_variants": [
+        "visible-emitter",
+        "ordered-particle-samples"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Display the actual effect at a useful scale and contrast, with stable motion rather than barely detectable particles.",
+        "particle-determinism.ppm and frame sequence; descriptor hashes, seed, particle presence/count and actual render stage.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R14",
+      "family": "runtime",
+      "name": "Instanced foliage calm/wind",
+      "visual_goal": "Create rich but readable ground vegetation with grounded bases, plausible density and bounded wind sway.",
+      "required_variants": [
+        "calm",
+        "windy",
+        "independent-rebuild-a",
+        "independent-rebuild-b",
+        "vertex-displacement",
+        "correlated-gpu-samples"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Create rich but readable ground vegetation with grounded bases, plausible density and bounded wind sway.",
+        "foliage-instancing.ppm, calm/wind sequence, biome density and instance counts, ground contact, live-ring fade, GPU pass timings where available.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R15",
+      "family": "runtime",
+      "name": "Time of day and season sweep",
+      "visual_goal": "Deliver distinct noon/dusk/night and summer/winter moods while preserving material readability and believable emissive response.",
+      "required_variants": [
+        "summer-noon",
+        "summer-dusk",
+        "summer-night",
+        "winter-noon",
+        "winter-dusk",
+        "winter-night",
+        "night-emissive",
+        "progression"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Deliver distinct noon/dusk/night and summer/winter moods while preserving material readability and believable emissive response.",
+        "Six existing timeofday frames plus night-emissive frame; canonical sim tick/time pins, luminance/hue assertions, automated progression samples with captioned still contact sheets.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R16",
+      "family": "runtime",
+      "name": "Precipitation calm/crosswind/start-stop",
+      "visual_goal": "Show readable rain/slant and snow where supported, integrated into scene depth without screen-space artifacts.",
+      "required_variants": [
+        "calm-rain",
+        "crosswind-rain",
+        "start",
+        "stop",
+        "snow"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show readable rain/slant and snow where supported, integrated into scene depth without screen-space artifacts.",
+        "precip-calm/windy.ppm plus start/stop sequence, wind vectors and streak metrics; snow requires qualified runtime variant, not inference from a rain fixture.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R17",
+      "family": "runtime",
+      "name": "Grounded player-view stations",
+      "visual_goal": "Make each existing station a compelling human-height scene showing useful near ground and horizon.",
+      "required_variants": [
+        "all-named-stations-small-relief",
+        "all-named-stations-large-relief"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make each existing station a compelling human-height scene showing useful near ground and horizon.",
+        "Every named player-view station capture, controller/feet/eye pose, real terrain ray support, renderable near field and water coverage; small/large relief presets.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R18",
+      "family": "runtime",
+      "name": "Far terrain horizon and water seam",
+      "visual_goal": "Show a coherent long-distance world whose near/far terrain, fog and water join convincingly.",
+      "required_variants": [
+        "ground",
+        "elevated",
+        "water-boundary",
+        "transition-path"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show a coherent long-distance world whose near/far terrain, fog and water join convincingly.",
+        "Existing far-horizon station captures and boundary-band water analysis, camera/coverage, elevated and ground views, transition path.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R19",
+      "family": "runtime",
+      "name": "Skinned mesh two-pose visual",
+      "visual_goal": "Make silhouette, UVs/normals and actual deformation unambiguous under good lighting.",
+      "required_variants": [
+        "pose-a",
+        "pose-b",
+        "intermediate-poses"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make silhouette, UVs/normals and actual deformation unambiguous under good lighting.",
+        "skinned-mesh-a/b.ppm, fixed poses and animation samples, mesh/texture identities, world placement, animation palette assertions; synthetic fixture labeled diagnostic.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R20",
+      "family": "runtime",
+      "name": "Creature gameplay slice",
+      "visual_goal": "Present an actual recognizable game creature reacting visibly to the implemented stimulus in a composed environment.",
+      "required_variants": [
+        "before",
+        "stimulus",
+        "reaction",
+        "state-trajectory"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Present an actual recognizable game creature reacting visibly to the implemented stimulus in a composed environment.",
+        "creature-slice-before/after.ppm and existing motion sequence, archetype/content hashes, stimulus/AI-state/pose/position timeline; no claim of unimplemented game-code extraction.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R21",
+      "family": "runtime",
+      "name": "Persistence visible roundtrip",
+      "visual_goal": "Show a clearly recognizable terrain edit surviving a real restart without confusing camera changes.",
+      "required_variants": [
+        "edited-before-save",
+        "restart",
+        "loaded-matched-camera"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show a clearly recognizable terrain edit surviving a real restart without confusing camera changes.",
+        "Save/load phase frames with identical framing, file hashes and world identity; UI sequence from campaign separately qualified; corruption refusal UI captured in U03.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R22",
+      "family": "runtime",
+      "name": "Rendered network session",
+      "visual_goal": "Show the same server-owned world/state visibly in participating clients with clear identities.",
+      "required_variants": [
+        "client-a-matched-tick",
+        "client-b-matched-tick",
+        "replicated-action"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show the same server-owned world/state visibly in participating clients with clear identities.",
+        "Matched tick client frames and movement/action sequence, server/client hashes and transport proof. Driver presence is not confirmation of an existing image producer; add capture wiring if absent.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "R23",
+      "family": "runtime",
+      "name": "Window-mode transition",
+      "visual_goal": "Keep UI/world crisp and correctly laid out through supported window arrangements and resize.",
+      "required_variants": [
+        "before",
+        "during",
+        "after",
+        "interactive-resolution"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Keep UI/world crisp and correctly laid out through supported window arrangements and resize.",
+        "window-mode-stress-final.ppm plus before/during/after framebuffer/window dimensions and layout captures; prove interactive resolution separately because scenario capture pins framebuffer.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U01",
+      "family": "ui",
+      "name": "Main menu",
+      "visual_goal": "Create a compelling legible entry screen with finished composition, hierarchy, focus and notification states.",
+      "required_variants": [
+        "normal",
+        "keyboard-focus",
+        "notification",
+        "small-window",
+        "standard-window"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Create a compelling legible entry screen with finished composition, hierarchy, focus and notification states.",
+        "Refresh maintained PNG from actual UI; normal/keyboard-focus/notification variants, small and standard windows. Existing docs PNG is historical until requalified.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U02",
+      "family": "ui",
+      "name": "World creation and diorama",
+      "visual_goal": "Make controls and preview feel coherent; clearly communicate seed/preset changes and keep Create reachable.",
+      "required_variants": [
+        "empty",
+        "valid",
+        "invalid",
+        "every-authored-preset",
+        "orbit",
+        "weather",
+        "time",
+        "latest-wins",
+        "small-window",
+        "create"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make controls and preview feel coherent; clearly communicate seed/preset changes and keep Create reachable.",
+        "Empty/valid/invalid input, every authored preset preview, orbit/weather/time changes, debounce latest-wins, small-window scroll and create action. Use worldgen_preview_test.cpp and ui_page_load_test.cpp.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U03",
+      "family": "ui",
+      "name": "World selection",
+      "visual_goal": "Make populated, empty, validating and refused saves understandable with responsive layout.",
+      "required_variants": [
+        "empty",
+        "populated",
+        "selected",
+        "pending",
+        "corrupt",
+        "missing",
+        "obsolete",
+        "future",
+        "error"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make populated, empty, validating and refused saves understandable with responsive layout.",
+        "Empty/populated/selected/pending/corrupt/missing/obsolete/future/error states; actual IDs, refusal reason and live navigation proof. Existing maintained screenshot covers only one state.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U04",
+      "family": "ui",
+      "name": "Settings",
+      "visual_goal": "Make setting groups, current values, disabled controls and keyboard focus visually clear.",
+      "required_variants": [
+        "all-sections",
+        "enabled-audio",
+        "disabled-audio",
+        "roundtrip",
+        "focus",
+        "supported-scales"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make setting groups, current values, disabled controls and keyboard focus visually clear.",
+        "All sections/tabs, enabled and audio-disabled variants, roundtrip values and dependent controls; screenshots at supported scale profiles.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U05",
+      "family": "ui",
+      "name": "Pause",
+      "visual_goal": "Produce a legible in-game overlay that preserves scene context and clear action hierarchy.",
+      "required_variants": [
+        "paused",
+        "hover",
+        "focus",
+        "resume",
+        "settings",
+        "save",
+        "quit"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Produce a legible in-game overlay that preserves scene context and clear action hierarchy.",
+        "Actual paused scene, focus/hover, resume/settings/save/quit transitions supported by authored callbacks.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U06",
+      "family": "ui",
+      "name": "Photo mode",
+      "visual_goal": "Show a usable photographic composition workflow with legible camera controls and genuine output.",
+      "required_variants": [
+        "control-overlay",
+        "clean-output",
+        "exposure",
+        "fov",
+        "filter"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show a usable photographic composition workflow with legible camera controls and genuine output.",
+        "Control overlay and clean saved image, exposure/FOV/filter variants, before/after actual framebuffer; wire to photo-mode tests and emitted file identity.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U07",
+      "family": "ui",
+      "name": "Gallery",
+      "visual_goal": "Make browsing actual captured photos attractive and readable with sensible empty/failure states.",
+      "required_variants": [
+        "empty",
+        "populated",
+        "selected",
+        "back",
+        "missing-image"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make browsing actual captured photos attractive and readable with sensible empty/failure states.",
+        "Empty/populated/selected/back navigation, thumbnails tied to actual full images; loading/missing states if implemented.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U08",
+      "family": "ui",
+      "name": "HUD",
+      "visual_goal": "Keep vital gameplay information legible over bright, dark and busy backgrounds without obscuring play.",
+      "required_variants": [
+        "each-implemented-component",
+        "bright",
+        "night",
+        "busy",
+        "scaled-window"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Keep vital gameplay information legible over bright, dark and busy backgrounds without obscuring play.",
+        "Actual gameplay capture with each implemented HUD component/state; bright/day/night and scaled-window variants, event/state assertions.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U09",
+      "family": "ui",
+      "name": "Codex",
+      "visual_goal": "Show well-organized readable discovery content and meaningful locked/unlocked states.",
+      "required_variants": [
+        "undiscovered",
+        "discovered",
+        "scroll",
+        "focus",
+        "open-close"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show well-organized readable discovery content and meaningful locked/unlocked states.",
+        "Populated and undiscovered states, actual species/content identity, scrolling/focus and opening/closing behavior.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "U10",
+      "family": "ui",
+      "name": "Shared window/modal components",
+      "visual_goal": "Ensure shared chrome, dialogs and destructive confirmations are consistent and accessible.",
+      "required_variants": [
+        "actual-consumers",
+        "rename",
+        "delete",
+        "overwrite",
+        "cancel",
+        "focus-restoration"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Ensure shared chrome, dialogs and destructive confirmations are consistent and accessible.",
+        "Discover whether window.rml is standalone or template; capture actual consumers for rename/delete/overwrite/cancel/focus restoration rather than inventing a screen.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D01",
+      "family": "diagnostic",
+      "name": "Five deterministic mesh scene fixtures",
+      "visual_goal": "Make diagnostic geometry/features obvious while preserving minimal deterministic fixtures.",
+      "required_variants": [
+        "terrain_caves",
+        "water_submerged",
+        "sky_gradient",
+        "ui_overlay",
+        "loading_visualizer"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make diagnostic geometry/features obvious while preserving minimal deterministic fixtures.",
+        "Separate terrain_caves,water_submerged,sky_gradient,ui_overlay,loading_visualizer at256²; caption synthetic scope, preserve hashes/ROIs and attach production scenario links.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D02",
+      "family": "diagnostic",
+      "name": "Material calibration plates",
+      "visual_goal": "Provide professionally readable neutral/lit material comparison with visible texture scale and shaded detail.",
+      "required_variants": [
+        "soil",
+        "stone",
+        "grass",
+        "sand",
+        "deepslate",
+        "gray-reference",
+        "white-reference",
+        "neutral",
+        "lit"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Provide professionally readable neutral/lit material comparison with visible texture scale and shaded detail.",
+        "Every authored plate including soil,stone,grass,sand,deepslate and gray/white references; albedo/normal/light settings, clipping/contrast measures.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D03",
+      "family": "diagnostic",
+      "name": "Emissive and aether materials",
+      "visual_goal": "Show controlled emissive response against dark and lit surroundings without making ordinary terrain glow.",
+      "required_variants": [
+        "emissive-intensity-ladder",
+        "nonemissive-controls",
+        "lit",
+        "dark"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show controlled emissive response against dark and lit surroundings without making ordinary terrain glow.",
+        "Actual sampled intensity sequence, emissive/nonemissive controls, monotonic data, matching clean scene and diagnostic plates.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D04",
+      "family": "diagnostic",
+      "name": "Procedural leaf cutout and albedo",
+      "visual_goal": "Show clean leaf silhouette and retained color through alpha edges at readable scale.",
+      "required_variants": [
+        "bright-background",
+        "dark-background",
+        "mips",
+        "distance"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Show clean leaf silhouette and retained color through alpha edges at readable scale.",
+        "Alpha/albedo ROIs, close-up on bright/dark backgrounds, mip/distance variants and fixture identity; connect to authored tree rather than substitute for it.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D05",
+      "family": "diagnostic",
+      "name": "Shaded material contrast",
+      "visual_goal": "Preserve subtle material detail in shade while keeping balanced global contrast.",
+      "required_variants": [
+        "shade",
+        "bright-reference",
+        "full-frame"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Preserve subtle material detail in shade while keeping balanced global contrast.",
+        "Matched shaded detail crop and full frame, luminance/contrast metrics, bright reference control.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D06",
+      "family": "diagnostic",
+      "name": "Grass/cloud shadow alignment",
+      "visual_goal": "Show one continuous shadow across grass and terrain.",
+      "required_variants": [
+        "grass-shadow",
+        "terrain-shadow",
+        "ordered-motion"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show one continuous shadow across grass and terrain.",
+        "Same projected shadow ROI in both surfaces, timed movement sequence, full scene with clear shadow edge.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D07",
+      "family": "diagnostic",
+      "name": "Water caustics and dry-ground rejection",
+      "visual_goal": "Make submerged light patterns readable and keep dry terrain free of false water tint.",
+      "required_variants": [
+        "wet",
+        "dry",
+        "depth",
+        "far"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make submerged light patterns readable and keep dry terrain free of false water tint.",
+        "Wet/dry/depth/far variants, normalized target readback and caustic structure metric, surface-context shot.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D08",
+      "family": "diagnostic",
+      "name": "Aerial haze and elevated fog",
+      "visual_goal": "Keep depth cues continuous across distant terrain while distinguishing sky and ground layers.",
+      "required_variants": [
+        "ground",
+        "elevated",
+        "terrain-roi",
+        "sky-roi"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Keep depth cues continuous across distant terrain while distinguishing sky and ground layers.",
+        "Ground/elevated matched views, reconstructed world/camera data, terrain/sky fog ROIs, no hidden empty-air shortcut.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D09",
+      "family": "diagnostic",
+      "name": "God rays and sky occlusion",
+      "visual_goal": "Show volumetric light shafts with plausible blockers and visibility in air.",
+      "required_variants": [
+        "occluded",
+        "unoccluded",
+        "full-context"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Show volumetric light shafts with plausible blockers and visibility in air.",
+        "Occluded/unoccluded pair, ray-source attachment and sky occlusion evidence, full composition plus targeted crop.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D10",
+      "family": "diagnostic",
+      "name": "Weather stationarity and storm grass edges",
+      "visual_goal": "Make weather atmospheric without shifting terrain or breaking soft grass edges.",
+      "required_variants": [
+        "baseline",
+        "weather",
+        "grass-edge"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make weather atmospheric without shifting terrain or breaking soft grass edges.",
+        "Matched base/weather frames, stationary geometry projection, world normals and grass-edge composites.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D11",
+      "family": "diagnostic",
+      "name": "Grass silhouette, slope and wind shape",
+      "visual_goal": "Give blades a convincing tapered silhouette, correct sloped grounding and natural bounded wind motion.",
+      "required_variants": [
+        "upper-frame",
+        "rising-ground",
+        "wind-phases",
+        "tip-width"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Give blades a convincing tapered silhouette, correct sloped grounding and natural bounded wind motion.",
+        "Upper-frame/rising-ground/wind phase fixtures, silhouette width and displacement measurements, actual ground-level scene sequence.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D12",
+      "family": "diagnostic",
+      "name": "Rough reflection and light direction",
+      "visual_goal": "Make roughness/light response legible across a controlled material range.",
+      "required_variants": [
+        "roughness-range",
+        "facing-light-controls",
+        "real-scene"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make roughness/light response legible across a controlled material range.",
+        "Measured GGX integration and facing-surface controls, material sphere/plate strip only if rendered by actual path, real scene companion.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D13",
+      "family": "diagnostic",
+      "name": "Colored translucent shadows",
+      "visual_goal": "Show convincing colored transmitted sunlight with readable blocker/surface relationship.",
+      "required_variants": [
+        "transmitted-light",
+        "blocker-context",
+        "beer-lambert-controls"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Show convincing colored transmitted sunlight with readable blocker/surface relationship.",
+        "Actual colored-shadow frames, Beer-Lambert controls, intensity/tint measurements and unclipped full context.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D14",
+      "family": "diagnostic",
+      "name": "Froxel transmittance",
+      "visual_goal": "Explain and show density/depth attenuation without passing a featureless fog frame as a finished scene.",
+      "required_variants": [
+        "analytic-medium",
+        "sample-plot",
+        "layered-scene"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Explain and show density/depth attenuation without passing a featureless fog frame as a finished scene.",
+        "Uniform-medium analytic comparison and plotted actual samples, plus real layered atmospheric scene; diagnostic explicitly labeled.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D15",
+      "family": "diagnostic",
+      "name": "Exposure response",
+      "visual_goal": "Show readable scene response over exposure changes with controllable highlight/shadow tradeoffs.",
+      "required_variants": [
+        "gpu-exposure-low",
+        "gpu-exposure-high",
+        "manual-auto-precedence"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show readable scene response over exposure changes with controllable highlight/shadow tradeoffs.",
+        "At least two actual GPU exposures and luminance monotonicity; manual/auto precedence and exact lens values, full-frame sequence.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D16",
+      "family": "diagnostic",
+      "name": "GL/Diligent/Vulkan pilot parity",
+      "visual_goal": "Make backend differences inspectable with crisp reference/current/heatmap presentation.",
+      "required_variants": [
+        "raw-gl",
+        "diligent",
+        "vulkan",
+        "reference-current-heatmap"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make backend differences inspectable with crisp reference/current/heatmap presentation.",
+        "Actual qualified pilot frames per backend, exact metric identity and calibration, hardware/software label; no whole-engine Vulkan claim from a pilot.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D17",
+      "family": "diagnostic",
+      "name": "Glass shared depth and resize",
+      "visual_goal": "Show correct glass occlusion and stable output after framebuffer recreation.",
+      "required_variants": [
+        "before-resize",
+        "after-resize",
+        "front-opaque",
+        "behind-opaque"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show correct glass occlusion and stable output after framebuffer recreation.",
+        "Before/after resize, front/behind opaque geometry views and attachment/depth evidence; add retained pixels where test currently only asserts.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D18",
+      "family": "diagnostic",
+      "name": "Debug albedo and ground decal",
+      "visual_goal": "Make diagnostic albedo truthful and scent/decal placement legible.",
+      "required_variants": [
+        "debug-albedo",
+        "ground-decal"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make diagnostic albedo truthful and scent/decal placement legible.",
+        "Separate albedo and ground-decal subcases with actual G-buffer/context identity, world position and sampled tint; diagnostic vs beauty captions.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D19",
+      "family": "diagnostic",
+      "name": "Shadow cascades and grass mesh lifecycle",
+      "visual_goal": "Show moving shadows without stale silhouettes and grass following replacement/removal geometry.",
+      "required_variants": [
+        "blocker-before-after",
+        "grass-replacement",
+        "grass-removal"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show moving shadows without stale silhouettes and grass following replacement/removal geometry.",
+        "Frame pairs before/after blocker and mesh changes, depth/readback assertions; no orphan grass/previous-frame shadows.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D20",
+      "family": "diagnostic",
+      "name": "Runtime horizon and mixed LOD topology",
+      "visual_goal": "Turn a broad but small diagnostic horizon into an intelligible coverage proof linked to a composed world view.",
+      "required_variants": [
+        "spawn-horizon-384",
+        "high-resolution-companion",
+        "mixed-lod-seams"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Turn a broad but small diagnostic horizon into an intelligible coverage proof linked to a composed world view.",
+        "Existing384²spawn_horizon plus mesh quadrant/collider/LOD counts, seam visualization and qualified high-resolution companion.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D21",
+      "family": "diagnostic",
+      "name": "Worldgen layer, biome, river and preset atlases",
+      "visual_goal": "Make every layer/preset map easy to interpret and show how it appears in the actual world.",
+      "required_variants": [
+        "all-named-layers",
+        "sdf-slices",
+        "all-presets",
+        "biomes",
+        "rivers",
+        "matched-engine-views"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make every layer/preset map easy to interpret and show how it appears in the actual world.",
+        "Named layer height/SDF slices; all authored presets/biome/river atlas; scales, legend, seed/hash, spawn/topology metrics and matched engine views. Maps are visualizations, not engine screenshots.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "D22",
+      "family": "diagnostic",
+      "name": "Far-field GPU ground truth/G-buffer/max-mip",
+      "visual_goal": "Provide precise interpretable hit/depth/normal/material-error views with a real far-field companion.",
+      "required_variants": [
+        "ground-truth",
+        "gbuffer",
+        "max-mip",
+        "residuals"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Provide precise interpretable hit/depth/normal/material-error views with a real far-field companion.",
+        "Actual hardware-qualified outputs vs analytic/CPU truth, residual images/scales and timings; missing GPU explicitly unevaluated.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B01",
+      "family": "blender",
+      "name": "Transformed prop hierarchy and linked instances",
+      "visual_goal": "Show source and compiled placements clearly with asymmetric scale/rotation and shared-mesh instances.",
+      "required_variants": [
+        "source",
+        "compiled-target",
+        "asymmetric-transform",
+        "linked-instances"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Show source and compiled placements clearly with asymmetric scale/rotation and shared-mesh instances.",
+        "Blender source viewport, object IDs/transforms and matched actual target render; compiled bounds/instance readback; current fixture export alone is not viewport fidelity.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B02",
+      "family": "blender",
+      "name": "Geometry Nodes leaves and alpha material",
+      "visual_goal": "Show a clearly readable procedural plant with correct material assignment and clean cutouts.",
+      "required_variants": [
+        "source",
+        "evaluated",
+        "compiled-target",
+        "material-indices",
+        "alpha-chart"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Show a clearly readable procedural plant with correct material assignment and clean cutouts.",
+        "Eight-leaf fixture source/evaluated/result views, GN seed/counts/material indices, alpha chart, matching compiled readback; production canopy is G01-G03.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B03",
+      "family": "blender",
+      "name": "Two-bone animated character",
+      "visual_goal": "Make deformation and material fidelity obvious in both source and target at matched frames.",
+      "required_variants": [
+        "frame-1",
+        "frame-12",
+        "frame-24",
+        "intermediate-samples",
+        "source-target"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make deformation and material fidelity obvious in both source and target at matched frames.",
+        "Frames 1/12/24 and intermediate animation samples, source Blender capture and actual engine render, clip/palette/mesh hashes; native engine viewport may be blocked.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B04",
+      "family": "blender",
+      "name": "STEP/CUBICSPLINE and bind/joint-order diagnostics",
+      "visual_goal": "Explain interpolation and bind fixes with readable matched poses rather than opaque numeric success.",
+      "required_variants": [
+        "step",
+        "cubicspline",
+        "bind-matrix",
+        "joint-order",
+        "endpoints",
+        "intermediate-poses"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Explain interpolation and bind fixes with readable matched poses rather than opaque numeric success.",
+        "Each named fixture pose sequence and actual palette samples including endpoints/intermediate values; diagnostic plots labeled, compile/readback scope distinct from rendering.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B05",
+      "family": "blender",
+      "name": "Extension panel and job lifecycle",
+      "visual_goal": "Make job status, cancellation, errors and preview generation understandable in actual Blender UI.",
+      "required_variants": [
+        "ready",
+        "running",
+        "cancelled",
+        "stale",
+        "failed",
+        "recovered",
+        "extension-unload"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make job status, cancellation, errors and preview generation understandable in actual Blender UI.",
+        "Owned-window screenshots for ready/running/cancelled/stale/failed/recovered states and generation identity; mock/current-capability labels visible, no fabricated engine viewport.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B06",
+      "family": "blender",
+      "name": "Installed service/geometry adapter integration",
+      "visual_goal": "Show an authentic installed authoring workflow from source edit through supported compiled result.",
+      "required_variants": [
+        "source-edit",
+        "installed-build",
+        "ui-progress",
+        "actual-target-pixels"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show an authentic installed authoring workflow from source edit through supported compiled result.",
+        "Fresh isolated native Blender capture, installed build/tool hashes, compilation/mesh/material readback and UI progress; each integration source remains separately identified.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B07",
+      "family": "blender",
+      "name": "Texture conversion and alpha cutoff",
+      "visual_goal": "Demonstrate texture orientation/color/alpha boundaries on a useful chart and actual textured object.",
+      "required_variants": [
+        "uv-orientation",
+        "color-profile",
+        "alpha-cutoff",
+        "bright-edge",
+        "dark-edge"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Demonstrate texture orientation/color/alpha boundaries on a useful chart and actual textured object.",
+        "Source texture/profile and compiled image hashes, exact cutoff, bright/dark edge closeups, UV orientation and material readback. Exact capture producer not verified in this audit.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "B08",
+      "family": "blender",
+      "name": "Static prefab nested instances",
+      "visual_goal": "Show the supported prefab preserving a recognizable multi-object arrangement through revisions.",
+      "required_variants": [
+        "source",
+        "compiled-target",
+        "nested-hierarchy",
+        "revision",
+        "cancel",
+        "rollback"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show the supported prefab preserving a recognizable multi-object arrangement through revisions.",
+        "Source/compiled placement views, hierarchy/world matrices, shared resources, revision cancellation/rollback and actual build receipt; current integration and immutable build receipts must be identified separately.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "G01",
+      "family": "game/campaign",
+      "name": "Tree Small02 source vs runtime canopy",
+      "visual_goal": "Present a convincing full tree silhouette and canopy volume while preserving the exact accepted source-derived content.",
+      "required_variants": [
+        "above-canopy",
+        "below-canopy",
+        "orbit",
+        "source-runtime-matched"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Present a convincing full tree silhouette and canopy volume while preserving the exact accepted source-derived content.",
+        "Source/runtime matched views above/below/around canopy, pack hashes and 30,250 leaf surfaces, original source identity, derivative labeling; verify helper binary/working-pack identity before reuse.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "G02",
+      "family": "game/campaign",
+      "name": "Tree alpha/material/impostor atlas",
+      "visual_goal": "Show clean leaf alpha, coherent normals/roughness and view-dependent canopy shape at diagnostic and scene scales.",
+      "required_variants": [
+        "source",
+        "cards",
+        "full-atlas",
+        "tiles",
+        "cutoff",
+        "mips"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Show clean leaf alpha, coherent normals/roughness and view-dependent canopy shape at diagnostic and scene scales.",
+        "Source/cards/full atlas and tile views, exact pack variant/hash and camera, cutoff/mip readback; historical rejected variants remain labeled rejected.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "G03",
+      "family": "game/campaign",
+      "name": "Tree LOD/impostor transition",
+      "visual_goal": "Make every distance transition visually stable and preserve recognizable canopy at forest scale.",
+      "required_variants": [
+        "approach",
+        "retreat",
+        "orbit",
+        "all-lod-endpoints"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Make every distance transition visually stable and preserve recognizable canopy at forest scale.",
+        "Continuous approach/retreat and orbit sequence, transition endpoints and pixel differences, per-LOD triangles and fixed forest workload; CPU budget is supporting proof only.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "G04",
+      "family": "game/campaign",
+      "name": "Authored forest gameplay vista",
+      "visual_goal": "Compose a lush readable forest with scale, ground/understory/canopy relationships and convincing lighting separation.",
+      "required_variants": [
+        "elevated-reference",
+        "human-height-forest",
+        "wide-vista",
+        "material-coverage-controls"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Compose a lush readable forest with scale, ground/understory/canopy relationships and convincing lighting separation.",
+        "Fresh identified engine capture at actual controlled camera/time with controller/settled proof, wide and human-height views; old filename does not identify current renderer or pack.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "G05",
+      "family": "game/campaign",
+      "name": "Terrain/vegetation and elevated vistas",
+      "visual_goal": "Make each established vista read as a coherent environment with convincing ground cover, relief and depth.",
+      "required_variants": [
+        "vegetation",
+        "temperate-forest",
+        "elevated-relief",
+        "matched-debug-views"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Make each established vista read as a coherent environment with convincing ground cover, relief and depth.",
+        "Recover sidecar/producer/revision for each named shot or recapture; matched terrain/material/lighting debug views plus clean frame and actual preset/pack identity.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "G06",
+      "family": "game/campaign",
+      "name": "Cave interior and weather campaign captures",
+      "visual_goal": "Show cave navigability/material lighting and supported precipitation with clear spatial context.",
+      "required_variants": [
+        "cave",
+        "rain",
+        "snow",
+        "gbuffer-controls"
+      ],
+      "temporal_evidence_required": false,
+      "acceptance_checks": [
+        "Show cave navigability/material lighting and supported precipitation with clear spatial context.",
+        "Recover exact scene/producer, qualify current cave and weather captures, attach G-buffer/camera/terrain support where available; snow variant stays unqualified until actual execution.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    },
+    {
+      "id": "G07",
+      "family": "game/campaign",
+      "name": "Real saved-world UI play/restart sequence",
+      "visual_goal": "Show a meaningful authored edit surviving a recognizable real user flow.",
+      "required_variants": [
+        "create",
+        "play",
+        "edit",
+        "save",
+        "menu",
+        "restart",
+        "load"
+      ],
+      "temporal_evidence_required": true,
+      "acceptance_checks": [
+        "Show a meaningful authored edit surviving a recognizable real user flow.",
+        "Use actual create/play/edit/save/menu/restart/load captures and file receipts from a newly pinned package; historical narrative does not substitute for published screenshot provenance.",
+        "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
+      ]
+    }
+  ]
+}
