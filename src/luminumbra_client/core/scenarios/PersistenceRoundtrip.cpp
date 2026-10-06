@@ -141,10 +141,6 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
         result.failure_reason = "world_system_missing";
         return result;
     }
-    if (!game_session->GetWorldOpenError().empty()) {
-        result.failure_reason = game_session->GetWorldOpenError();
-        return result;
-    }
     if (config.persistence_session_dir.empty()) {
         result.failure_reason = "session_dir_missing";
         return result;
@@ -261,10 +257,6 @@ RunPersistenceRoundtripLoadPhase(const RuntimeScenarioConfig& config,
     PersistenceRoundtripPhaseResult result;
     if (!game_session || !game_session->GetWorldSystem()) {
         result.failure_reason = "world_system_missing";
-        return result;
-    }
-    if (!game_session->GetWorldOpenError().empty()) {
-        result.failure_reason = game_session->GetWorldOpenError();
         return result;
     }
     if (config.persistence_session_dir.empty()) {

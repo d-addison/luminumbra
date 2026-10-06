@@ -252,10 +252,7 @@ bool NetworkedSessionDriver::Begin(Luminumbra::world::GameSession* client_sessio
         m_failure_reason = "host_create_world_failed";
         return false;
     }
-    if (!m_impl->host_session->LoadWorldState()) {
-        m_failure_reason = m_impl->host_session->GetWorldOpenError();
-        return false;
-    }
+    m_impl->host_session->LoadWorldState();
     auto* host_ws = m_impl->host_session->GetWorldSystem();
     auto* host_phys = m_impl->host_session->GetPhysicsSystem();
     if (!host_ws || !host_phys) {

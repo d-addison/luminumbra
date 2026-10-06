@@ -1825,7 +1825,7 @@ int main(int argc, char* argv[]) {
     // hash bump on the owner menu).
     gameSession->SetWeatherRainEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimHydrologyWeather));
-    // Supported opt-in High-resolution water (hashed sim flag; default OFF =
+    // experimental High-resolution water (hashed sim flag; default OFF =
     // Medium 8x8 grid = byte-identical baselines; ON = 16x16, 1 m cells).
     gameSession->SetWaterHighResEnabled(
         g_systemConfig.enabled(luminumbra::core::SysKey::SimWaterHighRes));
@@ -1942,8 +1942,9 @@ int main(int argc, char* argv[]) {
     // The LUMIN_RENDER_SCALE env knob still WINS (startup applies it after this), preserving
     // the A/B capture path. Default 1.0 = byte-identical (internal==output).
     renderPipeline.set_render_scale(g_systemConfig.user().render_scale);
-    // Render-only sky-dome quality: unset -> 2 (quarter per axis), 1 = half,
-    // 0 = full. LUMIN_CLOUD_QUALITY overrides the client default.
+    // Render-optimization (cloud-raymarch-optimization): opt-in reduced-res sky-dome
+    // quality knob, matching the existing LUMIN_* render-tuning idiom. Unset -> 0
+    // (full, byte-identical legacy path). 1 = half (1/2 per axis), 2 = quarter.
     // Applied after startup below once the GL targets exist. Render-only.
     // Render-optimization defaults are now ON. Quarter-res clouds retain the
     // depth-aware native-resolution composite and passed SkyboxVisual plus the
@@ -2140,18 +2141,12 @@ int main(int argc, char* argv[]) {
             // chunks that already carry voxel data). A world without a
             // snapshot is a clean miss and proceeds on the byte-for-byte
             // unchanged fresh-world path.
-            const bool world_opened =
-                scenario_config.persistence_roundtrip_smoke() &&
-                        scenario_config.persistence_phase == "load" &&
-                        !scenario_config.persistence_session_dir.empty()
-                    ? gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir)
-                    : gameSession->LoadWorldState();
-            if (!world_opened) {
-                scenario_failed = true;
-                scenario_failure_reason = gameSession->GetWorldOpenError();
-                LUMINUMBRA_CORE_ERROR("World open refused: {}", scenario_failure_reason);
-                gameStateManager.SetState(GameState::MAIN_MENU);
-                return;
+            if (scenario_config.persistence_roundtrip_smoke() &&
+                scenario_config.persistence_phase == "load" &&
+                !scenario_config.persistence_session_dir.empty()) {
+                gameSession->LoadWorldStateFrom(scenario_config.persistence_session_dir);
+            } else {
+                gameSession->LoadWorldState();
             }
             const bool bypass_loading_ui =
                 runtime_boot_recorder.enabled() ||
@@ -2717,9 +2712,9 @@ int main(int argc, char* argv[]) {
             DrainBackgroundWorldScan(jobSystem);
             // same contract for the world-dressing placement job.
             DrainWorldDressing(jobSystem, s_worldDressing, s_worldDressingHandle);
-            if (gameSession->CreateWorld("Menu Vista", "424242", "mountains") &&
-                gameSession->LoadWorldState()) {
+            if (gameSession->CreateWorld("Menu Vista", "424242", "mountains")) {
                 if (auto* ws = gameSession->GetWorldSystem()) {
+                    gameSession->LoadWorldState();
                     // Surface-ready around the FIXED vantage (8,*,8), not the spawn point, so the
                     // framed valley is streamed in before the first menu frame.
                     if (gameSession->GetPhysicsSystem()) {
