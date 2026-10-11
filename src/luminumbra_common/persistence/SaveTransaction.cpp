@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -904,6 +905,12 @@ bool SaveTransaction::write_journal(std::vector<std::string>* errors) {
         journal_directory(m_save_dir) / "txn.json", bytes, errors);
 }
 
+void SaveTransaction::defer_until_commit(std::function<void()> action) {
+    if (m_state != State::Open)
+        throw std::logic_error("cannot defer acknowledgement on a closed save transaction");
+    m_committed_actions.push_back(std::move(action));
+}
+
 bool SaveTransaction::commit(std::vector<std::string>* errors) {
     if (m_state != State::Open) {
         AddError(errors, "save transaction is not open");
@@ -1051,11 +1058,23 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
             return false;
         }
         m_state = State::Committed;
+        auto actions = std::move(m_committed_actions);
+        for (auto& action : actions) {
+            try {
+                action();
+            } catch (const std::exception& error) {
+                AddError(errors,
+                         std::string("snapshot committed but memory acknowledgement failed: ") +
+                             error.what());
+            }
+        }
         report_snapshot_step("commit-point", index_path);
         FinishJournal(m_save_dir);
         return true;
     } catch (const std::exception& ex) {
         AddError(errors, std::string("snapshot commit failed: ") + ex.what());
+        if (m_state == State::Committed)
+            return true; // cleanup faults cannot undo a published durable index
         abort(errors);
         return false;
     }
@@ -1085,6 +1104,7 @@ void SaveTransaction::abort(std::vector<std::string>* errors) {
         AddError(errors, std::string("snapshot rollback failed: ") + ex.what());
     }
     m_state = State::RolledBack;
+    m_committed_actions.clear();
 }
 
 } // namespace Luminumbra::Persistence

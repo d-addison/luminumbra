@@ -36,6 +36,7 @@ struct WorldSaveDirtyReport {
 struct RegionDigestInputs {
     std::vector<std::shared_ptr<Chunk>> live;
     std::vector<std::shared_ptr<Chunk>> parked;
+    std::vector<IVec3> durable;
 };
 
 // Persists WorldStreamingState snapshots beneath a world save directory.
@@ -162,6 +163,25 @@ public:
                                                  int max_chunk_z,
                                                  std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                                  std::vector<std::string>* errors = nullptr);
+    enum class ChunkReadStatus {
+        Found,
+        Absent,
+        Error
+    };
+    struct ChunkReadResult {
+        ChunkReadStatus status = ChunkReadStatus::Absent;
+        std::shared_ptr<Chunk> chunk;
+        std::string error;
+    };
+    // Reads the exact lod-0 identity only. Indexed membership is checked before decoding;
+    // missing records are distinct from corrupt/unreadable expected authority.
+    static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
+                                      const IVec3& coords,
+                                      bool require_index = false);
+    // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
+    // or saturated revision retains its dirty obligation.
+    static std::function<void()>
+    chunk_save_acknowledgement(const std::vector<std::shared_ptr<Chunk>>& chunks);
     // Inserts/replaces the given records keyed (lod_level, id), preserving
     // all other records of the file verbatim.
     static bool upsert_container_records(const std::filesystem::path& region_file,
@@ -265,7 +285,9 @@ public:
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
-                    const std::stop_token& stop = {}) const;
+                    const std::stop_token& stop = {},
+                    const std::function<bool(const IVec3&)>& retain_chunk = {},
+                    std::vector<IVec3>* authoritative_inventory = nullptr) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

@@ -966,7 +966,8 @@ std::string ServerWorldRunner::ComputeWorldHash() {
     // into the top-level hash. The chunk hash itself is unchanged; the composite
     // deliberately is not.
     return Persistence::ComposeWorldHash(
-        service.world_hash(state),
+        m_session->ActiveRegionsEnabled() ? m_session->ComputeChunkStateHash()
+                                          : service.world_hash(state),
         WindSubHash(m_session.get()),
         WeatherSubHash(m_session.get()),
         AetherSubHash(m_session.get()),
@@ -1051,7 +1052,9 @@ void ServerWorldRunner::ComputeWorldHashAndSubHashes(
     //   +   +  + gate-populated-world-replay +
     // hash revisionS: composite world_hash (chunk + wind + weather + aether + scents + ecology +
     // plants).
-    out_world_hash = Persistence::ComposeWorldHash(service.world_hash(state),
+    out_world_hash = Persistence::ComposeWorldHash(m_session->ActiveRegionsEnabled()
+                                                       ? m_session->ComputeChunkStateHash()
+                                                       : service.world_hash(state),
                                                    wind_hash,
                                                    weather_hash,
                                                    aether_hash,

@@ -420,6 +420,9 @@ public:
 
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
+    // Enabled chunk slot hashes authoritative truth across residency/save history. The default
+    // path retains the existing streamed-state projection and wire/checkpoint slots.
+    [[nodiscard]] std::string ComputeChunkStateHash();
     [[nodiscard]] bool IsSimulationTickBoundary() const {
         return !m_activeRegionsEnabled || (!m_simulationBatchInProgress && m_regionWork.empty());
     }
