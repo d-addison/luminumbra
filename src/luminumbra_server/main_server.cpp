@@ -13,6 +13,7 @@
 //                  world_hash == world_hash_replay.
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -21,6 +22,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "nlohmann/json.hpp"
@@ -189,6 +191,17 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--sim-budget") == 0) {
             options.smoke = true;
             options.sim_budget = true;
+        } else if (std::strcmp(arg, "--sim-budget-profile") == 0) {
+            // A profile only constrains the sim_budget artifact, which exists only in smoke.
+            options.smoke = true;
+            options.sim_budget = true;
+            if (const char* v = next_value(i)) {
+                options.sim_budget_profile_path = v;
+                if (options.sim_budget_profile_path.empty()) {
+                    LUMINUMBRA_CORE_ERROR("--sim-budget-profile requires a non-empty path");
+                    options.parse_error = true;
+                }
+            }
         } else if (std::strcmp(arg, "--no-audio") == 0) {
             // The headless executable has no audio subsystem.
         } else if (std::strcmp(arg, "--water-smoke") == 0) {
@@ -244,6 +257,39 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
     return options;
 }
 
+// Loads and validates --sim-budget-profile before any world is created. Returns 0 when no
+// profile was requested or it was accepted, 2 when it could not be read or was refused.
+int LoadSimBudgetProfileOption(ServerCliOptions& options) {
+    if (options.sim_budget_profile_path.empty()) {
+        return 0;
+    }
+    const std::string& path = options.sim_budget_profile_path;
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile unreadable: cannot open '{}'", path);
+        return 2;
+    }
+    // One byte past the limit lets the parser report TooLarge for oversized files.
+    std::string text(luminumbra::simulation::kMaxProfileBytes + 1, '\0');
+    in.read(text.data(), static_cast<std::streamsize>(text.size()));
+    if (in.bad() || (in.fail() && !in.eof())) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile unreadable: read failed for '{}'", path);
+        return 2;
+    }
+    text.resize(static_cast<std::size_t>(in.gcount()));
+    luminumbra::simulation::ProfileParse parsed =
+        luminumbra::simulation::ParseSimBudgetProfile(text);
+    if (parsed.error != luminumbra::simulation::ProfileError::None) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile refused: {}: {}",
+                              luminumbra::simulation::ProfileErrorName(parsed.error),
+                              parsed.detail);
+        return 2;
+    }
+    options.sim_budget_profile = std::move(parsed.profile);
+    options.sim_budget_profile_bytes = static_cast<std::uint64_t>(text.size());
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     Log::Init();
     LUMINUMBRA_CORE_INFO("Luminumbra headless server");
@@ -252,6 +298,7 @@ int main(int argc, char* argv[]) {
     if (options.parse_error) {
         LUMINUMBRA_CORE_ERROR(
             "Usage: luminumbra_server_app [--smoke] [--water-smoke] [--sim-budget] [--no-audio] "
+            "[--sim-budget-profile <path>] "
             "[--heavy [--heavy-resim <n>]] "
             "[--record <path>] [--replay <path>] [--mutate-replay-fixture <path>] "
             "[--lockstep-loopback [--lockstep-delay-input <n>] [--lockstep-corrupt-tick <t>] "
@@ -261,6 +308,9 @@ int main(int argc, char* argv[]) {
             "[--collision-radius <chunks>] [--autosave-ticks <n>] [--clients <n>] "
             "[--player-id <id>] [--server-mode] [--artifact <path>]");
         return 2;
+    }
+    if (const int profile_status = LoadSimBudgetProfileOption(options); profile_status != 0) {
+        return profile_status;
     }
 
     if (options.root.empty()) {
