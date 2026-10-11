@@ -159,10 +159,9 @@ public:
         if (!enabled)
             m_coverage = {};
     }
-    // Causal A/B only. Has no effect unless coverage diagnostics are enabled.
-    void set_coverage_camera_region_guard_bypass(bool bypass) {
-        m_coverage_camera_region_guard_bypass = bypass;
-    }
+    // Compatibility with historical capture commands. Region-wide suppression
+    // was replaced by fragment ownership; there is no region guard to bypass.
+    void set_coverage_camera_region_guard_bypass(bool /*bypass*/) {}
     const CoverageDiagnostics& coverage_diagnostics() const {
         return m_coverage;
     }
@@ -336,7 +335,6 @@ private:
     std::unordered_map<u64, ResidentRegion> m_residents;
 
     bool m_coverage_enabled = false;
-    bool m_coverage_camera_region_guard_bypass = false;
     CoverageDiagnostics m_coverage;
     FrameStats m_stats;
 };
