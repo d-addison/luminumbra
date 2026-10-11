@@ -327,6 +327,96 @@ class AcceptanceMatrixTests(unittest.TestCase):
         ]
         self.assertErrorContains(matrix, "ctest not found: Multi.Three")
 
+    def test_commented_add_test_is_not_indexed(self) -> None:
+        (self.root / "tools" / "extra.cmake").write_text(
+            "# add_test(NAME CommentedLine COMMAND x)\n"
+            "#[[ add_test(NAME BlockCommented COMMAND x) ]]\n"
+            "#[==[\n"
+            "add_test(NAME BracketCommented COMMAND x)\n"
+            "]==]\n"
+            'message("# not a comment") add_test(NAME QuotedHashLive COMMAND x)\n'
+            "add_test(NAME LiveOne COMMAND x) # add_test(NAME TrailingCommented COMMAND x)\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in ("CommentedLine", "BlockCommented", "BracketCommented", "TrailingCommented"):
+            self.assertNotIn(ghost, index.ctest_names)
+        self.assertIn("QuotedHashLive", index.ctest_names)
+        self.assertIn("LiveOne", index.ctest_names)
+
+    def test_commented_test_macros_are_not_indexed(self) -> None:
+        (self.root / "test" / "comments_test.cpp").write_text(
+            "// TEST(Ghost, LineComment) {}\n"
+            "/* TEST(Ghost, BlockComment) {}\n"
+            "   TEST_F(Ghost, MultiBlock) {} */\n"
+            "TEST(Live, Real) {} // TEST(Ghost, Trailing) {}\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in (("Ghost", "LineComment"), ("Ghost", "BlockComment"),
+                      ("Ghost", "MultiBlock"), ("Ghost", "Trailing")):
+            self.assertNotIn(ghost, index.gtest_cases)
+        self.assertIn(("Live", "Real"), index.gtest_cases)
+        self.assertNotIn("Ghost", index.gtest_suites)
+
+        matrix = baseline_matrix()
+        row_of(matrix, "alpha.covered")["evidence"] = [
+            {"kind": "ctest", "ref": "Ghost.LineComment"},
+            {"kind": "script", "ref": "tools/script.py"},
+        ]
+        self.assertErrorContains(matrix, "ctest not found: Ghost.LineComment")
+
+    def test_add_test_with_cmake_variable_name_is_not_indexed_as_prefix(self) -> None:
+        (self.root / "tools" / "suffix.cmake").write_text(
+            "add_test(NAME Foo${suffix} COMMAND x)\n"
+            'add_test(NAME "Bar${suffix}" COMMAND x)\n',
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn("Foo", index.ctest_names)
+        self.assertNotIn("Bar", index.ctest_names)
+        self.assertNotIn("Foo${suffix}", index.ctest_names)
+
+        matrix = baseline_matrix()
+        row_of(matrix, "alpha.covered")["evidence"] = [
+            {"kind": "ctest", "ref": "Foo"},
+            {"kind": "script", "ref": "tools/script.py"},
+        ]
+        errors = MODULE.validate(matrix, index, self.root, False)
+        self.assertEqual(errors, ["alpha.covered: ctest not found: Foo"])
+
+    def test_quoted_add_test_name_is_indexed(self) -> None:
+        (self.root / "tools" / "quoted.cmake").write_text(
+            'add_test(NAME "QuotedName" COMMAND x)\n',
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertIn("QuotedName", index.ctest_names)
+
+        matrix = baseline_matrix()
+        row_of(matrix, "alpha.covered")["evidence"] = [
+            {"kind": "ctest", "ref": "QuotedName"},
+            {"kind": "script", "ref": "tools/script.py"},
+        ]
+        self.assertEqual(MODULE.validate(matrix, index, self.root, False), [])
+
+    def test_covered_with_native_evidence_is_rejected(self) -> None:
+        matrix = baseline_matrix()
+        self.assertEqual(self.errors(matrix), [])
+        row_of(matrix, "alpha.covered")["evidence"].append(
+            {
+                "kind": "native",
+                "ref": "tools/run.ps1",
+                "command": NATIVE_COMMAND,
+                "receipt_schema": RECEIPT,
+            }
+        )
+        self.assertErrorContains(
+            matrix,
+            "alpha.covered: status covered inconsistent with evidence: "
+            "native evidence requires needs-native-run",
+        )
+
     def test_render_doc_is_deterministic_and_complete(self) -> None:
         matrix = baseline_matrix()
         first = MODULE.render_doc(matrix)

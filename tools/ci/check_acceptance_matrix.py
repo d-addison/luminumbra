@@ -20,7 +20,12 @@ EVIDENCE_KINDS = frozenset({"ctest", "script", "native", "doc"})
 
 ROW_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 RECEIPT_RE = re.compile(r"^luminumbra\.[a-z0-9_]+\.v[0-9]+$")
-ADD_TEST_RE = re.compile(r"add_test\(\s*NAME\s+([A-Za-z0-9_.-]+)", re.IGNORECASE)
+ADD_TEST_RE = re.compile(
+    r'add_test\(\s*NAME\s+(?:"(?P<quoted>[^"]*)"|(?P<bare>[^\s"()]+))', re.IGNORECASE
+)
+CTEST_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+")
+CMAKE_BRACKET_OPEN_RE = re.compile(r"#\[(=*)\[")
+C_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 GTEST_RE = re.compile(r"\bTEST(?:_F|_P)?\s*\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)")
 SUITE_REF_RE = re.compile(r"^([A-Za-z_]\w*)\.(\*|[A-Za-z_]\w*)$")
 
@@ -78,15 +83,59 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _strip_cmake(text: str) -> str:
+    """Remove CMake comments; '#' inside a quoted argument is not a comment."""
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] not in '"\n':
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[i : j + 1])
+            i = j + 1
+            continue
+        if ch == "#":
+            bracket = CMAKE_BRACKET_OPEN_RE.match(text, i)
+            if bracket:
+                closer = "]" + bracket.group(1) + "]"
+                end = text.find(closer, bracket.end())
+                i = n if end == -1 else end + len(closer)
+                out.append(" ")
+                continue
+            end = text.find("\n", i)
+            i = n if end == -1 else end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_c(text: str) -> str:
+    """Remove C/C++ block and line comments (approximate: ignores string literals)."""
+    return C_COMMENT_RE.sub(" ", text)
+
+
+def _is_ctest_name(name: str | None) -> bool:
+    # Names containing '$' are CMake variables or generator expressions; their
+    # truncated prefix is not the real test name, so they are never indexed.
+    return name is not None and "$" not in name and CTEST_NAME_RE.fullmatch(name) is not None
+
+
 def index_tests(root: Path) -> TestIndex:
     ctest_names: set[str] = set()
     for path in _cmake_files(root):
-        ctest_names.update(match.group(1) for match in ADD_TEST_RE.finditer(_read_text(path)))
+        text = _strip_cmake(_read_text(path))
+        for match in ADD_TEST_RE.finditer(text):
+            name = match.group("quoted") if match.group("quoted") is not None else match.group("bare")
+            if _is_ctest_name(name):
+                ctest_names.add(name)
     gtest_cases: set[tuple[str, str]] = set()
     for path in _gtest_sources(root):
-        gtest_cases.update(
-            (match.group(1), match.group(2)) for match in GTEST_RE.finditer(_read_text(path))
-        )
+        text = _strip_c(_read_text(path))
+        gtest_cases.update((match.group(1), match.group(2)) for match in GTEST_RE.finditer(text))
     return TestIndex(
         frozenset(ctest_names),
         frozenset(gtest_cases),
@@ -196,6 +245,8 @@ def _check_status(add: Any, status: str, items: list[dict[str, Any]]) -> None:
             fail("planned items are not allowed")
         if not kinds & {"ctest", "script"}:
             fail("at least one ctest or script item is required")
+        if "native" in kinds:
+            fail("native evidence requires needs-native-run")
     elif status == "needs-native-run":
         if "native" not in kinds:
             fail("at least one native item is required")

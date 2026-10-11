@@ -97,11 +97,12 @@
       "id": "perf.invalid-capture",
       "source": "docs/distant-world.md#performance-measurement-contract",
       "statement": "A capture is invalid, independent of thresholds, on incomplete timers, an undeclared calendar or render debug override, a workload manifest mismatch, or an unsettled far ladder.",
-      "status": "covered",
+      "status": "partial",
       "evidence": [
         {"kind": "ctest", "ref": "RenderContractPython"},
         {"kind": "ctest", "ref": "RenderRunnerEvidencePython"},
-        {"kind": "script", "ref": "tools/perf/validate_render_capture.py"}
+        {"kind": "script", "ref": "tools/perf/validate_render_capture.py"},
+        {"kind": "script", "ref": "tools/perf/far_settle_check.py", "planned": {"owner": "fw", "note": "far ladder settle evidence (90 s limit) is not yet in the artifact or validator"}}
       ]
     },
     {
@@ -204,7 +205,7 @@
     {
       "id": "em.client-hang",
       "source": "docs/distant-world.md#evidence-map",
-      "statement": "The client hang watchdog fires once per stall and its reports are archived with the campaign evidence.",
+      "statement": "The client hang watchdog fires once per stall, never fires while the heartbeat advances, and re-arms after the heartbeat resumes (report archival is campaign evidence, not covered here).",
       "status": "covered",
       "evidence": [
         {"kind": "ctest", "ref": "HangWatchdog.StalledHeartbeatFiresOnce"},
