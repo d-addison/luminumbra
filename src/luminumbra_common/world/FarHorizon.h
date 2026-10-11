@@ -5,7 +5,7 @@
 // tested; the runtime camera keeps the legacy plane until the ladder renders
 // (see docs/distant-world.md, Depth, fog, shadows, horizon).
 
-#include "luminumbra_common/world/FarTierTable.h"
+#include "FarTierTable.h"
 
 #include <cstdint>
 
