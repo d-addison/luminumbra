@@ -48,6 +48,12 @@ if(BUILD_TESTING)
     set_tests_properties(PublicAssetInventory
         PROPERTIES LABELS "hygiene;assets;tools" TIMEOUT 60)
     add_test(
+        NAME SaveReceiptContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/persistence/test_save_receipt.py")
+    set_tests_properties(SaveReceiptContract
+        PROPERTIES LABELS "persistence;tools" TIMEOUT 30)
+    add_test(
         NAME DocumentationLinkValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_docs.py")

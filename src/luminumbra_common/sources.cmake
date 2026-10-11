@@ -50,6 +50,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/persistence/WorldSaveService.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/SavedWorldCatalog.cpp
     ${CMAKE_CURRENT_LIST_DIR}/persistence/AsyncSavedWorldCatalog.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/persistence/SyntheticSaveFixture.cpp
 
     # Replay (: LREC1 session replay stream; engine-generic)
     ${CMAKE_CURRENT_LIST_DIR}/replay/ReplayStream.cpp

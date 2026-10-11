@@ -148,6 +148,7 @@ add_executable(common_tests
     common/world_streaming_hardening_test.cpp
     common/HydraulicErosion_test.cpp
     common/WorldStreamingState_test.cpp
+    persistence/synthetic_save_fixture_test.cpp
     sim/fire_spread_test.cpp
     sim/soil_nutrient_test.cpp
     sim/pollination_test.cpp
@@ -1340,6 +1341,10 @@ add_executable(world_open_refusal_test
 target_include_directories(world_open_refusal_test PRIVATE ../src ../src/luminumbra_common)
 target_compile_definitions(world_open_refusal_test PRIVATE LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}")
 target_link_libraries(world_open_refusal_test PRIVATE gtest_main luminumbra_common)
+
+add_executable(luminumbra_save_fixture ../tools/persistence/save_fixture_main.cpp)
+target_include_directories(luminumbra_save_fixture PRIVATE ../src ../src/luminumbra_common)
+target_link_libraries(luminumbra_save_fixture PRIVATE luminumbra_common)
 
 # Second-class adversarial pass: Jolt tunneling / penetration test. A fast
 # dynamic sphere fired at a thin static heightfield floor must not pass through it.
