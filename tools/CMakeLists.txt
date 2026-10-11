@@ -53,4 +53,10 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_docs.py")
     set_tests_properties(DocumentationLinkValidatorContract
         PROPERTIES LABELS "docs;hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME ReleaseVerifyScriptContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/release/test_verify_release.py")
+    set_tests_properties(ReleaseVerifyScriptContract
+        PROPERTIES LABELS "release;tools" TIMEOUT 60)
 endif()
