@@ -12,10 +12,12 @@
 #include "luminumbra_server/ServerWorldRunner.h"
 
 #include <algorithm>
-#include <chrono>
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <random>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -49,15 +51,32 @@ std::map<std::string, std::string> DiskBytes(const fs::path& root) {
     return result;
 }
 
+// Parallel ctest runs one process per parameterisation, and a coarse clock can hand two of
+// them the same tick, so the name combines random entropy with a per-process counter and the
+// directory is claimed atomically: create_directory reports false when it already existed.
+fs::path UniqueRoot() {
+    static std::atomic<std::uint64_t> counter{0};
+    std::random_device entropy;
+    for (;;) {
+        const std::uint64_t suffix = (static_cast<std::uint64_t>(entropy()) << 32) ^ entropy();
+        const fs::path candidate =
+            fs::temp_directory_path() / ("world_open_refusal_" + std::to_string(suffix) + "_" +
+                                         std::to_string(counter.fetch_add(1)));
+        std::error_code ec;
+        if (fs::create_directory(candidate, ec))
+            return candidate;
+        if (ec)
+            throw fs::filesystem_error("create_directory", candidate, ec);
+    }
+}
+
 class WorldOpenRefusal : public testing::TestWithParam<std::tuple<int, int>> {
 protected:
     fs::path root;
     fs::path save;
     JobSystem jobs;
     void SetUp() override {
-        root = fs::temp_directory_path() /
-               ("world_open_refusal_" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        root = UniqueRoot();
         fs::create_directories(root / "worlds/atlas/presets");
         fs::copy_file(fs::path(LUMINUMBRA_SOURCE_ROOT) / "worlds/atlas/presets/default.json",
                       root / "worlds/atlas/presets/default.json");
