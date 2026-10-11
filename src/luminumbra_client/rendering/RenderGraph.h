@@ -198,14 +198,16 @@ private:
 /// Resource names are the load-bearing render targets; external inputs such as meshes, LUTs,
 /// and the camera are intentionally omitted from reads so validation checks graph-internal
 /// producer/consumer ordering.
-inline RenderGraph BuildLuminumbraFrameGraph() {
+inline RenderGraph BuildLuminumbraFrameGraph(bool authored_static = false) {
     RenderGraph g;
     // The four G-buffer color attachments, written by the geometry stage and any stage that draws
     // into the same G-buffer afterward (plant / far-field), read by SSAO + lighting.
     const std::vector<std::string> gbuf_color = {
         "gbuffer.position", "gbuffer.normal_material", "gbuffer.albedo", "gbuffer.metallic_ao"};
-    auto gbuf_all = [&]() {
+    auto gbuf_all = [&](bool include_authored = true) {
         std::vector<std::string> v = gbuf_color;
+        if (authored_static && include_authored)
+            v.push_back("gbuffer.authored_surface");
         v.push_back("gbuffer.depth");
         return v;
     };
@@ -227,6 +229,8 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     // 4: Lighting consumes the G-buffer + shadows + AO, writes the lit color + its own depth.
     {
         std::vector<std::string> reads = gbuf_color;
+        if (authored_static)
+            reads.push_back("gbuffer.authored_surface");
         reads.push_back("shadow.depth_array");
         reads.push_back("shadow.tint_array"); //  the glass transmission multiply
         reads.push_back("ssao.blur");
@@ -300,7 +304,7 @@ inline RenderGraph BuildLuminumbraFrameGraph() {
     // 9: final blit of the lit color to the swapchain (or offscreen preview target).
     g.add({"final_blit", {"lighting.color"}, {"swapchain.color"}, {}, false});
     // Debug-view override (default-OFF) re-writes the swapchain with a single G-buffer channel.
-    g.add({"debug_view", gbuf_all(), {"swapchain.color"}, {}, true});
+    g.add({"debug_view", gbuf_all(false), {"swapchain.color"}, {}, true});
     return g;
 }
 

@@ -10,6 +10,7 @@
 //     (proves gbuffer_position + the scent path run);
 //   * each pass is a true no-op when OFF (mode None / inactive mirror) -> target stays
 //     as cleared.
+#include "luminumbra_client/core/IsolationConfig.h"
 #include "luminumbra_client/rendering/Camera.h"
 #include "luminumbra_client/rendering/RenderContext.h"
 #include "luminumbra_client/rendering/RenderPipeline.h"
@@ -23,10 +24,15 @@
 #include "luminumbra_client/rendering/passes/LightingPass.h"
 #include "luminumbra_client/rendering/passes/ParticlePass.h"
 #include "luminumbra_client/rendering/passes/ShadowPass.h"
+#include <glm/gtc/type_ptr.hpp>
+#include <luminumbra/rendering/RenderView.h>
+#include <luminumbra/rendering/StaticScene.h>
 
 #define GLFW_INCLUDE_NONE
+#include "luminumbra_client/rendering/Shader.h"
 #include <GLFW/glfw3.h>
 #include <cstdlib>
+#include <cstring>
 #include <glad/glad.h>
 #include <gtest/gtest.h>
 
@@ -743,4 +749,389 @@ TEST(PassContext, CpuAndGpuGrassTrackUploadedMeshReplacementAndRemoval) {
         pass.destroy_buffers();
     }
     EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST(PassContext, AuthoredStaticDrawsRespectTerrainIsolation) {
+    HiddenGlContext gl;
+    ASSERT_TRUE(gl.ready()) << gl.error();
+    using namespace Luminumbra::Rendering;
+    namespace SH = Luminumbra::Client::ScenarioHarness;
+    constexpr unsigned extent = 64;
+    RenderResourceRegistry resources;
+    GBufferPass pass;
+    struct Cleanup {
+        GBufferPass& pass;
+        RenderResourceRegistry& resources;
+        ~Cleanup() {
+            pass.reset_shaders();
+            pass.destroy_instanced_static_mesh();
+            pass.destroy_gbuffer(resources);
+        }
+    } cleanup{pass, resources};
+    pass.init_geometry_shader(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_instanced_static_mesh(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(pass.geometry_shader() && pass.geometry_shader()->IsValid());
+    ASSERT_TRUE(pass.instanced_static_mesh_shader() &&
+                pass.instanced_static_mesh_shader()->IsValid());
+    pass.init_gbuffer(resources, extent, extent);
+    ASSERT_NE(pass.gbuffer().fbo_id, 0u);
+
+    Camera camera({0, 0, 0}, {0, 1, 0}, -90, 0);
+    RenderViewDescription description;
+    description.width = description.height = extent;
+    description.revision = 1;
+    description.near_plane = camera.GetNearPlane();
+    description.far_plane = camera.GetFarPlane();
+    const auto view_matrix = camera.GetViewMatrix();
+    const auto projection = camera.GetProjectionMatrix(extent, extent);
+    std::copy_n(glm::value_ptr(view_matrix), 16, description.view.begin());
+    std::copy_n(glm::value_ptr(projection), 16, description.projection.begin());
+    const auto view = RenderView::Validate(description);
+    glm::vec4 planes[6];
+    for (size_t i = 0; i < 6; ++i)
+        planes[i] = glm::make_vec4(view.frustum_planes()[i].data());
+
+    auto mesh = std::make_shared<StaticMesh>();
+    mesh->identity = "isolation-quad";
+    mesh->vertices = {{{-1, -1, -3}, {0, 0, 1}, {0, 0}},
+                      {{1, -1, -3}, {0, 0, 1}, {1, 0}},
+                      {{1, 1, -3}, {0, 0, 1}, {1, 1}},
+                      {{-1, 1, -3}, {0, 0, 1}, {0, 1}}};
+    mesh->indices = {0, 1, 2, 0, 2, 3};
+    auto material = std::make_shared<StaticMaterial>();
+    material->identity = "isolation-material";
+    material->base_color = {.2, .6, .9, 1};
+    auto snapshot = std::make_shared<StaticDrawSnapshot>();
+    snapshot->revision = 1;
+    StaticDraw draw;
+    draw.key = {"placed", "quad", 0};
+    draw.mesh = mesh;
+    draw.material = material;
+    draw.normal = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    snapshot->draws.push_back(std::move(draw));
+
+    entt::registry entities;
+    SH::IsolationConfig isolation;
+    isolation.layer_mask = SH::IsolationLayer::Terrain;
+    RenderContext context;
+    context.camera = &camera;
+    context.registry = &resources;
+    context.screen_width = context.screen_height = extent;
+    context.frustum_planes = planes;
+    context.isolation = &isolation;
+    unsigned terrain_submissions = 0;
+    GBufferPassInput input;
+    input.root_path = LUMINUMBRA_SOURCE_ROOT;
+    input.authored_view = &view;
+    input.authored_draws = snapshot;
+    // No legacy terrain or entities: every covered pixel must come from the
+    // actual authored pass reached through GBufferPass::execute.
+    input.submit_terrain_chunks = [&](const glm::vec4(&)[6]) {
+        ++terrain_submissions;
+        return TerrainSubmitStats{};
+    };
+    glViewport(0, 0, extent, extent);
+    glDisable(GL_BLEND);
+    glDisable(GL_SCISSOR_TEST);
+    glClearColor(0, 0, 0, 0);
+    const auto render = [&] {
+        pass.execute(context, entities, input);
+        std::vector<float> depth(extent * extent), authored(extent * extent * 4);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, pass.gbuffer().fbo_id);
+        glReadPixels(0, 0, extent, extent, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+        glReadBuffer(GL_COLOR_ATTACHMENT5);
+        glReadPixels(0, 0, extent, extent, GL_RGBA, GL_FLOAT, authored.data());
+        for (size_t i = 0; i < depth.size(); ++i)
+            EXPECT_EQ(authored[i * 4 + 3], depth[i] > 0 ? 1.0f : 0.0f);
+        EXPECT_EQ(glGetError(), GL_NO_ERROR);
+        return depth;
+    };
+    const auto enabled = render();
+    const auto covered =
+        std::count_if(enabled.begin(), enabled.end(), [](float depth) { return depth > 0; });
+    ASSERT_GT(covered, 256);
+    ASSERT_LT(covered, extent * extent);
+    EXPECT_EQ(terrain_submissions, 1u);
+
+    isolation.layer_mask = SH::IsolationLayer::Foliage;
+    const auto suppressed = render();
+    EXPECT_TRUE(
+        std::all_of(suppressed.begin(), suppressed.end(), [](float depth) { return depth == 0; }));
+    EXPECT_EQ(terrain_submissions, 1u);
+
+    isolation.layer_mask = SH::IsolationLayer::Terrain;
+    EXPECT_EQ(render(), enabled);
+    EXPECT_EQ(terrain_submissions, 2u);
+}
+
+TEST(PassContext, FoliageCappedCompactionAndIndependentRebuildAreByteStable) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using Luminumbra::Rendering::FoliagePass;
+    const auto ground = +[](void*, float, float) {
+        return FoliagePass::SurfaceSample{10, 0, 1, true};
+    };
+    std::vector<FoliagePass::ChunkScatter> chunks;
+    for (int x = -3; x <= 3; ++x)
+        for (int z = -3; z <= 3; ++z) {
+            FoliagePass::ChunkScatter chunk;
+            chunk.chunk_xz = {x, z};
+            chunk.origin = {x * 32.0f, 0, z * 32.0f};
+            chunk.density = 1;
+            chunk.biome_id = 1;
+            chunks.push_back(chunk);
+        }
+    std::vector<FoliagePass::InstanceRecord> reference;
+    for (int run = 0; run < 2; ++run) {
+        FoliagePass pass;
+        pass.init_buffers();
+        pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+        ASSERT_TRUE(pass.gpu_scatter_active());
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        pass.set_fade_distances(100, 200);
+        pass.set_density_scale(1.6f);
+        pass.set_wind({0, 0});
+        pass.set_readback_enabled(true);
+        for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+            pass.set_evidence_frame(frame, 1);
+            pass.rebuild_instances(chunks, ground, nullptr, {8, 12.4f, 8});
+            glFinish(); // Native test only: next loop consumes the actual async result.
+        }
+        ASSERT_EQ(pass.instances().size(), FoliagePass::kMaxInstances)
+            << "must exercise saturation";
+        if (run == 0)
+            reference = pass.instances();
+        else
+            ASSERT_EQ(std::memcmp(reference.data(),
+                                  pass.instances().data(),
+                                  reference.size() * sizeof(reference[0])),
+                      0)
+                << "fresh output allocation and reversed chunk input order must preserve capped "
+                   "bytes";
+        ASSERT_TRUE(pass.begin_qualification());
+        glFinish();
+        pass.set_evidence_frame(5, 1);
+        pass.rebuild_instances(chunks, ground, nullptr, {8, 12.4f, 8});
+        const auto proof = pass.qualification_evidence().rebuild;
+        EXPECT_TRUE(proof.completed);
+        EXPECT_TRUE(proof.output_cleared);
+        EXPECT_TRUE(proof.byte_equal);
+        EXPECT_LT(proof.first_generation, proof.second_generation);
+        EXPECT_EQ(proof.first_hash, proof.second_hash);
+        pass.destroy_compute();
+        pass.destroy_buffers();
+        std::reverse(chunks.begin(), chunks.end());
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST(PassContext, FoliageGpuCapacityCountsOnlyColumnsInsideTheScatterHorizon) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using Luminumbra::Rendering::FoliagePass;
+    const auto ground = +[](void* context, float, float) {
+        ++*static_cast<std::size_t*>(context);
+        return FoliagePass::SurfaceSample{10, 0, 1, true};
+    };
+    std::vector<FoliagePass::InstanceRecord> reference;
+    std::size_t reference_queries = 0;
+    // The live initial surface spans 25 x 25 columns. Its outer columns must
+    // not force CPU fallback when the unchanged foliage horizon fits the GPU.
+    for (const int radius : {6, 12}) {
+        std::vector<FoliagePass::ChunkScatter> chunks;
+        for (int x = -radius; x <= radius; ++x)
+            for (int z = -radius; z <= radius; ++z) {
+                FoliagePass::ChunkScatter chunk;
+                chunk.chunk_xz = {x, z};
+                chunk.origin = {x * 16.0f, 0, z * 16.0f};
+                chunk.extent_m = 16;
+                chunk.density = 1;
+                chunk.biome_id = 1;
+                chunks.push_back(chunk);
+            }
+        if (radius == 12)
+            std::reverse(chunks.begin(), chunks.end());
+        FoliagePass pass;
+        pass.init_buffers();
+        pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+        ASSERT_TRUE(pass.gpu_scatter_active());
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        pass.set_fade_distances(48, 92);
+        pass.set_density_scale(1.6f);
+        pass.set_readback_enabled(true);
+        pass.set_wind({0, 0});
+        std::size_t queries = 0;
+        for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+            pass.set_evidence_frame(frame, 1);
+            pass.rebuild_instances(chunks, ground, &queries, {8, 12.4f, 8});
+            glFinish(); // Test only: retain the production nonblocking ring.
+        }
+        EXPECT_TRUE(pass.instances_from_gpu_readback()) << "surface radius " << radius;
+        EXPECT_TRUE(pass.begin_qualification()) << "surface radius " << radius;
+        EXPECT_EQ(pass.instances().size(), FoliagePass::kMaxInstances);
+        if (radius == 6) {
+            reference = pass.instances();
+            reference_queries = queries;
+        } else {
+            EXPECT_EQ(queries, reference_queries) << "out-of-range columns must not sample ground";
+            ASSERT_EQ(pass.instances().size(), reference.size());
+            EXPECT_EQ(std::memcmp(reference.data(),
+                                  pass.instances().data(),
+                                  reference.size() * sizeof(reference[0])),
+                      0)
+                << "outer columns and reversed input order must preserve capped GPU membership";
+        }
+        pass.destroy_compute();
+        pass.destroy_buffers();
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST(PassContext, FoliageGpuCapacityKeepsTheExistingUploadedColumnLimit) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using Luminumbra::Rendering::FoliagePass;
+    const auto ground = +[](void*, float, float) {
+        return FoliagePass::SurfaceSample{10, 0, 1, true};
+    };
+    for (const int live_columns : {512, 513}) {
+        std::vector<FoliagePass::ChunkScatter> chunks;
+        for (int i = 0; i < live_columns + 600; ++i) {
+            FoliagePass::ChunkScatter chunk;
+            chunk.chunk_xz = {i % 32, i / 32};
+            chunk.origin = {(i % 32) * 16.0f, 0, (i / 32) * 16.0f};
+            chunk.extent_m = 16;
+            chunk.density = i < live_columns ? 1.0f : 0.0f;
+            chunk.biome_id = 1;
+            chunks.push_back(chunk);
+        }
+        FoliagePass pass;
+        pass.init_buffers();
+        pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+        ASSERT_TRUE(pass.gpu_scatter_active());
+        ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                          "data/common/foliage/scatter_set.json"));
+        // Deliberately enlarge only this synthetic fixture's horizon so every
+        // positive-density column reaches admission. Production stays at 92 m.
+        pass.set_fade_distances(900, 1000);
+        pass.set_density_scale(1.6f);
+        pass.set_readback_enabled(true);
+        pass.set_wind({0, 0});
+        for (std::uint64_t frame = 1; frame <= 4; ++frame) {
+            pass.set_evidence_frame(frame, 1);
+            pass.rebuild_instances(chunks, ground, nullptr, {8, 12.4f, 8});
+            glFinish();
+        }
+        EXPECT_EQ(pass.instances_from_gpu_readback(), live_columns == 512);
+        if (live_columns == 512) {
+            EXPECT_EQ(pass.qualification_blocker(), nullptr);
+            EXPECT_TRUE(pass.begin_qualification());
+            EXPECT_EQ(pass.instances().size(), FoliagePass::kMaxInstances);
+        } else {
+            EXPECT_STREQ(pass.qualification_blocker(), "gpu_path_inactive");
+            EXPECT_FALSE(pass.begin_qualification());
+            EXPECT_FALSE(pass.instances().empty()) << "over-cap keeps the existing CPU fallback";
+        }
+        pass.destroy_compute();
+        pass.destroy_buffers();
+    }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+}
+
+TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdentity) {
+    HiddenGlContext gl;
+    if (!gl.ready())
+        GTEST_SKIP() << gl.error();
+    using namespace Luminumbra::Rendering;
+    FoliagePass pass;
+    pass.init_shader(LUMINUMBRA_SOURCE_ROOT);
+    pass.init_buffers();
+    pass.init_compute(LUMINUMBRA_SOURCE_ROOT);
+    ASSERT_TRUE(pass.shader()->IsValid());
+    ASSERT_TRUE(pass.shader()->Reload());
+    ASSERT_TRUE(pass.gpu_scatter_active());
+    ASSERT_TRUE(pass.load_scatter_set(std::filesystem::path(LUMINUMBRA_SOURCE_ROOT) /
+                                      "data/common/foliage/scatter_set.json"));
+    pass.set_fade_distances(48, 92);
+    pass.set_density_scale(1.6f);
+    pass.set_readback_enabled(true);
+    Camera camera({8, 12.4f, 8}, {0, 1, 0}, 35, -18);
+    camera.Zoom = 60;
+    const auto ground = +[](void*, float, float) {
+        return FoliagePass::SurfaceSample{10, 0, 1, true};
+    };
+    std::vector<FoliagePass::ChunkScatter> chunks;
+    for (int x = -3; x <= 3; ++x)
+        for (int z = -3; z <= 3; ++z) {
+            FoliagePass::ChunkScatter chunk;
+            chunk.chunk_xz = {x, z};
+            chunk.origin = {x * 32.0f, 0, z * 32.0f};
+            chunk.density = 1;
+            chunk.biome_id = 1;
+            chunks.push_back(chunk);
+        }
+    const auto target = MakeTarget(64, 64);
+    glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+    RenderContext ctx;
+    ctx.screen_width = ctx.screen_height = 64;
+    ctx.lit_scene = FboHandle{target.fbo};
+    ctx.sun.direction = {0, -1, 0};
+    ctx.sun.color = {1, 1, 1};
+    ctx.sun.intensity = 1;
+    ctx.sky_ambient_color = {.2f, .2f, .2f};
+    std::uint32_t phase = 1;
+    for (std::uint64_t frame = 1; frame <= 100; ++frame) {
+        pass.set_evidence_frame(frame, phase);
+        pass.set_wind(phase == 1 ? glm::vec2(0) : glm::vec2(6, 0));
+        pass.rebuild_instances(chunks, ground, nullptr, camera.Position);
+        ctx.time_seconds = static_cast<float>(frame); // Gate pins actual shader time independently.
+        const auto drawn = pass.execute(ctx, camera);
+        if (pass.vertex_submission_frame(phase) == frame) {
+            EXPECT_GE(pass.last_draw_calls(), 2u);
+            EXPECT_GT(drawn, 100000u);
+            if (phase == 1)
+                phase = 2;
+        }
+        glFinish();
+        if (frame == 4)
+            ASSERT_TRUE(pass.begin_qualification());
+        if (pass.vertex_evidence_ready())
+            break;
+    }
+    const auto proof = pass.qualification_evidence();
+    ASSERT_TRUE(proof.rebuild.byte_equal);
+    ASSERT_EQ(proof.vertices[0].vertices.size(), 768u);
+    ASSERT_EQ(proof.vertices[1].vertices.size(), 768u);
+    ASSERT_EQ(proof.gpu.size(), 64u);
+    EXPECT_LT(proof.vertices[0].source_frame, proof.vertices[1].source_frame);
+    for (std::size_t i = 0; i < proof.gpu.size(); ++i) {
+        EXPECT_GT(proof.gpu[i].milliseconds, 0);
+        EXPECT_EQ(proof.gpu[i].query_id, i + 1);
+        EXPECT_NE(proof.gpu[i].source_frame, proof.vertices[0].source_frame);
+        EXPECT_NE(proof.gpu[i].source_frame, proof.vertices[1].source_frame);
+    }
+    for (std::size_t blade = 0; blade < 64; ++blade)
+        for (std::size_t j = 0; j < 12; ++j) {
+            const auto& a = proof.vertices[0].vertices[blade * 12 + j];
+            const auto& b = proof.vertices[1].vertices[blade * 12 + j];
+            const double displacement =
+                glm::distance(glm::dvec3(a[0], a[1], a[2]), glm::dvec3(b[0], b[1], b[2]));
+            if (a[3] == 0 || !proof.vertices[0].sways[blade])
+                EXPECT_LE(displacement, .00001);
+            else {
+                EXPECT_GT(displacement, .00001);
+                EXPECT_LE(displacement, proof.vertices[0].blade_heights[blade] * .45 + .0001);
+            }
+        }
+    EXPECT_EQ(glGetError(), static_cast<GLenum>(GL_NO_ERROR));
+    pass.destroy_compute();
+    pass.destroy_buffers();
+    pass.reset_shader();
+    glDeleteFramebuffers(1, &target.fbo);
+    glDeleteTextures(1, &target.tex);
 }
