@@ -441,6 +441,41 @@ jobs:
             build/release/test-artifacts
           if-no-files-found: warn
           retention-days: 14
+      - name: Record toolchain identity
+        if: always()
+        continue-on-error: true
+        shell: msys2 {0}
+        run: |
+          # Diagnostic only. No command may fail this step, so none uses set -e.
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          {
+            echo "## UCRT64 toolchain identity"
+            echo ""
+            echo "- Runner image: \`${ImageVersion:-unknown}\`"
+            echo "- uname: \`$(uname -a 2>/dev/null || echo unknown)\`"
+            echo "- g++ path: \`$(which g++ 2>/dev/null || echo not-found)\`"
+            echo "- g++ version: \`$(g++ --version 2>/dev/null | head -1)\`"
+            echo "- cmake version: \`$(cmake --version 2>/dev/null | head -1)\`"
+            echo ""
+            echo "<details><summary>Full package manifest</summary>"
+            echo ""
+            echo '```text'
+            pacman -Q 2>/dev/null || true
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "Key packages:"
+            echo ""
+            echo '```text'
+            pacman -Q 2>/dev/null | grep -E '^mingw-w64-ucrt-x86_64-(gcc|binutils|crt|headers|winpthreads|libwinpthread|cmake|ninja|python) ' || true
+            echo '```'
+            echo ""
+          } >> "$summary" || true
+      - name: Report slowest tests
+        if: always()
+        continue-on-error: true
+        shell: msys2 {0}
+        run: python tools/ci/slowest_tests.py build/release/ctest.junit.xml --summary-file "$GITHUB_STEP_SUMMARY"
 
   lint:
     name: Format changed files
