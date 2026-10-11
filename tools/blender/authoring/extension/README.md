@@ -90,6 +90,16 @@ modifier object in the asset collection. Supported object types are mesh,
 armature and empty. Objects sharing mesh data are supported. Realize collection
 and Geometry Nodes instances first; experimental instance export is disabled.
 
+Static export validates the evaluated mesh's active render UV map and face
+material assignments, including materials introduced by Geometry Nodes. It uses
+the pinned exporter's evaluated material slots and original material identities;
+unsupported evaluated shaders are refused before capture and again after the
+private worker loads its snapshot. Temporary meshes are released on success and
+refusal. Geometry Nodes may supply the UV map; removing it during evaluation is
+refused even when the authored mesh still has UVs.
+The [evaluated foliage input report](../../../../docs/foliage-authoring-evaluated-inputs.md)
+records portable checks and the still-pending native fixture.
+
 Static export evaluates modifiers. Character export preserves skinning and samples
 clips over the scene range; apply non-armature modifiers beforehand. Each
 character asset contains one rig; export unskinned attachments separately.
