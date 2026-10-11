@@ -4,11 +4,13 @@
 // Deterministic procedural patterns (no external source art). Built and run
 // once to (re)produce the committed PNGs; NOT part of the CMake build. To
 // regenerate:
-//   g++ -std=c++17 -I vendor/stb tools/generate_creature_textures.cpp -o gen_creature
+//   (configure first so FetchContent populates build/<preset>/_deps/stb-src)
+//   g++ -std=c++17 -I build/<preset>/_deps/stb-src tools/generate_creature_textures.cpp -o
+//   gen_creature
 //./gen_creature
-//   build/.../asset_processor grovestrider_albedo.png grovestrider_albedo_256.ltex 256
-//   --preview-png build/.../asset_processor grovestrider_normal.png grovestrider_normal_256.ltex
-//   256 --preview-png
+//   build/<preset>/tools/asset_processor grovestrider_albedo.png grovestrider_albedo_256.ltex 256
+//   --preview-png build/<preset>/tools/asset_processor grovestrider_normal.png
+//   grovestrider_normal_256.ltex 256 --preview-png
 //
 // The grovestrider's box UVs map each face to [0,1]^2, so the albedo carries
 // a recognisable creature read: a mossy green body gradient, darker dorsal
