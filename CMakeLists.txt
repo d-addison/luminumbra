@@ -303,6 +303,7 @@ foreach(FIRST_PARTY_TARGET IN ITEMS
 )
   luminumbra_configure_first_party_target(${FIRST_PARTY_TARGET})
 endforeach()
+luminumbra_pin_fp_determinism(asset_processor)
 
 # coverage-instrumentation slice: the client library (rendering / ui / audio
 # source) was historically NOT routed through
