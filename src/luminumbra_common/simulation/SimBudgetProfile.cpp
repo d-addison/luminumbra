@@ -294,7 +294,13 @@ ProfileParse ParseSimBudgetProfile(std::string_view json) noexcept {
         }
         return ParseBody(std::string(json));
     } catch (...) {
-        Reject(result, ProfileError::Malformed, "profile could not be parsed");
+        // Building the detail string may itself fail; fall back to a value-only error.
+        try {
+            Reject(result, ProfileError::Malformed, "profile could not be parsed");
+        } catch (...) {
+            result = ProfileParse{};
+            result.error = ProfileError::Malformed;
+        }
         return result;
     }
 }

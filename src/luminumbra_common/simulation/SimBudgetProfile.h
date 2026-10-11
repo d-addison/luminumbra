@@ -14,7 +14,8 @@
 namespace luminumbra::simulation {
 
 // Budget profiles are operator-supplied limits. They never affect simulation output, saves,
-// simulation hashes or LREC1 checkpoints. Parsing and evaluation never throw.
+// simulation hashes or LREC1 checkpoints. ParseSimBudgetProfile never throws (it is noexcept).
+// EvaluateSimBudget is otherwise total: its only possible exception is std::bad_alloc.
 enum class ProfileError : std::uint8_t {
     None,
     Malformed,

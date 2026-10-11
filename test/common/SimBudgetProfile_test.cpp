@@ -151,8 +151,9 @@ TEST(SimBudgetProfileTest, RefusesBadNames) {
 TEST(SimBudgetProfileTest, RefusesTooManyStages) {
     std::string body = R"("stages":{)";
     for (int i = 0; i < 65; ++i) {
-        if (i)
+        if (i) {
             body += ",";
+        }
         body += "\"s" + std::to_string(i) + "\":1";
     }
     body += "}";
@@ -162,8 +163,9 @@ TEST(SimBudgetProfileTest, RefusesTooManyStages) {
 TEST(SimBudgetProfileTest, RefusesTooManyResidencyClasses) {
     std::string body = R"("residency":{)";
     for (int i = 0; i < 33; ++i) {
-        if (i)
+        if (i) {
             body += ",";
+        }
         body += "\"c" + std::to_string(i) + "\":1";
     }
     body += "}";
@@ -267,10 +269,12 @@ TEST(SimBudgetProfileTest, SchedulerReductionFollowsConfiguredProfile) {
     for (std::uint64_t tick = 2; tick <= 5; ++tick) {
         SCOPED_TRACE(tick);
         Step(ledger, tick, tick <= 6 ? 11u : 10u);
-        if (tick == 3)
+        if (tick == 3) {
             EXPECT_EQ(ledger.records().at(kFar).state, RegionState::Reduced);
-        if (tick == 5)
+        }
+        if (tick == 5) {
             EXPECT_EQ(ledger.records().at(kFar).state, RegionState::Frozen);
+        }
     }
 }
 

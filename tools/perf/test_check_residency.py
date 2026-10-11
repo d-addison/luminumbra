@@ -89,10 +89,55 @@ class ResidencyCheckerTest(unittest.TestCase):
         entry = self.verdict(result)["classes"][0]
         self.assertEqual((entry["verdict"], entry["reason"]), ("fail", "budget_mismatch"))
 
-    def test_null_budget_accepted(self) -> None:
-        result = self.run_cli(self.profile(), self.artifact([row("a", budget_bytes=None)]))
+    def test_budget_equal_to_cap_passes(self) -> None:
+        result = self.run_cli(self.profile(), self.artifact([row("a", budget_bytes=100)]))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.verdict(result)["classes"][0]["verdict"], "pass")
+
+    def test_null_budget_is_budget_mismatch(self) -> None:
+        result = self.run_cli(self.profile(), self.artifact([row("a", budget_bytes=None)]))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        entry = self.verdict(result)["classes"][0]
+        self.assertEqual((entry["verdict"], entry["reason"]), ("fail", "budget_mismatch"))
+
+    def test_misspelt_profile_key_invalid(self) -> None:
+        self.assert_invalid(self.profile(raw=(
+            '{"schema": "%s", "residncy": {"a": 1}}' % PROFILE_SCHEMA)), self.artifact([row("a")]))
+
+    def test_unknown_region_scheduler_key_invalid(self) -> None:
+        self.assert_invalid(self.profile(raw=(
+            '{"schema": "%s", "region_scheduler": {"speed": 1}}' % PROFILE_SCHEMA)),
+            self.artifact([row("a")]))
+
+    def test_bad_scheduler_ranges_invalid(self) -> None:
+        for body in ('"hold_ticks": 0', '"hold_ticks": 4294967296', '"reduced_shift": 0',
+                     '"reduced_shift": 17', '"work_limit": -1', '"hold_ticks": true'):
+            with self.subTest(body=body):
+                self.assert_invalid(self.profile(raw=(
+                    '{"schema": "%s", "region_scheduler": {%s}}' % (PROFILE_SCHEMA, body))),
+                    self.artifact([row("a")]))
+
+    def test_bad_profile_name_invalid(self) -> None:
+        self.assert_invalid(self.profile({"Upper": 1}), self.artifact([row("Upper")]))
+
+    def test_too_many_residency_classes_invalid(self) -> None:
+        caps = {f"c{i}": 1 for i in range(33)}
+        self.assert_invalid(self.profile(caps), self.artifact([row("c0")]))
+
+    def test_oversize_profile_invalid(self) -> None:
+        head = '{"schema": "%s", "residency": {}}' % PROFILE_SCHEMA
+        raw = head + " " * (64 * 1024 + 1 - len(head))
+        self.assert_invalid(self.profile(raw=raw), self.artifact([row("a")]))
+
+    def test_count_above_uint64_invalid(self) -> None:
+        self.assert_invalid(self.profile(), self.artifact([row("a", count=2**64)]))
+
+    def test_max_uint64_count_accepted(self) -> None:
+        result = self.run_cli(self.profile(), self.artifact([row("a", count=2**64 - 1)]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bytes_cpu_checked_without_gpu(self) -> None:
+        self.assert_invalid(self.profile(), self.artifact([row("a", bytes_cpu="bad")]))
 
     def test_missing_row_is_unevaluated(self) -> None:
         result = self.run_cli(self.profile({"a": 100, "b": 5}), self.artifact([row("a")]))
