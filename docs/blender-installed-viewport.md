@@ -101,22 +101,22 @@ passed all 35 presentation checks in actual Windows Blender 5.1.0, OpenGL 4.6,
 on the NVIDIA GeForce RTX 5070 Ti with driver 616.92. The owned Blender process
 exited successfully and was reaped in 7.171 seconds. Exact executable, module,
 probe and artifact identities are preserved in the
-[original receipt](evidence/blender-presentation-20260913/receipt.json) and
-[process receipt](evidence/blender-presentation-20260913/process-receipt.json).
+[original receipt](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/receipt.json) and
+[process receipt](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/process-receipt.json).
 
 These are synthetic synchronized planes passed through the production
 `FrameDraw` implementation. Perspective, orthographic intervals crossing the
 camera origin, and an odd 1281×721 downsampled region passed color, depth,
 front/behind overlay, clear-coverage and GPU-state controls. An
-[independent review](evidence/blender-presentation-20260913/independent-review.json)
+[independent review](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/independent-review.json)
 joined all 36 original artifacts and recomputed every presented pixel: maximum
 RGB error was zero and maximum depth error was below 3.56e-8.
 
-The [perspective](evidence/blender-presentation-20260913/perspective.png),
-[orthographic](evidence/blender-presentation-20260913/orthographic-negative-near.png)
-and [downsampled](evidence/blender-presentation-20260913/odd-downsample.png)
+The [perspective](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/perspective.png),
+[orthographic](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/orthographic-negative-near.png)
+and [downsampled](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/odd-downsample.png)
 diagnostic PNGs encode the original RGBA bytes losslessly, reversing row order
-only. Their [joins](evidence/blender-presentation-20260913/png-joins.json) retain
+only. Their [joins](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/png-joins.json) retain
 the original raw-plane hashes; the complete 40-file, 40,433,246-byte packet is
 archived in the isolated campaign evidence lane. These images are pending
 review and are not composed showcases.
@@ -124,10 +124,10 @@ review and are not composed showcases.
 That receipt retains its original source identity. A later run at source
 `8822fda41e6be1fd389407d4067e339cfe48cd42` passed the same 35 actual GPU
 presentation checks after the framebuffer-clearing change; its
-[original receipt](evidence/blender-presentation-20260913/receipt-8822fda4.json)
-and [process receipt](evidence/blender-presentation-20260913/process-receipt-8822fda4.json)
+[original receipt](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/receipt-8822fda4.json)
+and [process receipt](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/process-receipt-8822fda4.json)
 retain the new identities. The same run's
-[Windows client receipt](evidence/blender-presentation-20260913/client-8822fda4.json)
+[Windows client receipt](https://github.com/d-addison/luminumbra/blob/devel/docs/evidence/blender-presentation-20260913/client-8822fda4.json)
 records 25 cases: 24 passed and the explicitly permitted symlink-creation case
 was skipped. Actual process ownership, protected-directory permissions and
 atomic replacement with a held reader passed. The earlier native contention
