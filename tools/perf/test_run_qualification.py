@@ -593,7 +593,7 @@ class CheckCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index('--fov') + 1], '45.0')
         self.assertEqual(command[1], str(Path('/chk/validate.py')))
         self.assertEqual(command[-3:], ['--enforce-floor', '--verdict-out',
-                                        '/out/cells/x.verdict.json'])
+                                        str(Path('/out/cells/x.verdict.json'))])
 
     def test_traversal_gets_no_fixed_view_flags(self):
         command = self.command(SURFACE_CELL)
@@ -601,7 +601,7 @@ class CheckCommandTests(unittest.TestCase):
                      '--fov'):
             self.assertNotIn(flag, command)
         self.assertEqual(command[-3:], ['--enforce-floor', '--verdict-out',
-                                        '/out/cells/x.verdict.json'])
+                                        str(Path('/out/cells/x.verdict.json'))])
 
 
 class SettingsResetTests(RunnerTestBase):
