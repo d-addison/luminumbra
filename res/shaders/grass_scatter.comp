@@ -7,7 +7,7 @@
 // Ports the CPU FoliagePass::rebuild_instances scatter loop to a compute pass:
 // one thread per candidate slot, deterministic splitmix64 placement (bit-exact
 // 64-bit integer math), sea-level + slope hard gates, density*slope*moisture
-// accept, weighted archetype pick. Surviving candidates are atomic-appended to
+// accept, weighted archetype pick. Surviving candidates are stably compacted into
 // the GrassBlades SSBO as the SAME packed 36-byte InstanceRecord the CPU path
 // emits (9 uint words/record), so foliage.vert/.frag + the VAO format are
 // UNCHANGED -- only WHERE generation happens moves to the GPU, removing the
@@ -34,11 +34,10 @@ layout(std430, binding = 0) readonly buffer ChunkParams { GpuChunk chunks[]; };
 // Exact (height, moisture, slope, valid) for every candidate in every chunk.
 layout(std430, binding = 1) readonly buffer SurfaceGrid { vec4 surf[]; };
 layout(std430, binding = 2) writeonly buffer GrassBlades { uint blades[]; };
-// One append counter followed by DrawArraysIndirectCommand:
+// Total accepted count followed by DrawArraysIndirectCommand:
 //   [0] append_count, [1] vertex_count, [2] instance_count, [3] first_vertex,
-//   [4] base_instance. The CPU initializes this to {0,12,0,0,0}; each accepted
-// blade reserves a storage slot with append_count and increments instance_count
-// only if the slot fits inside the fixed pool.
+//   [4] base_instance. The prefix dispatch writes the capped instance count.
+// Stable chunk/candidate order determines which blades survive pool saturation.
 layout(std430, binding = 3) buffer BladeCount {
     uint append_count;
     uint draw_vertex_count;
@@ -50,6 +49,11 @@ layout(std430, binding = 3) buffer BladeCount {
 //   pal0 = (color.r, color.g, color.b, density_weight)
 //   pal1 = (half_width, height, sways?1:0, 0)
 layout(std430, binding = 4) readonly buffer Archetypes { vec4 pal[]; };
+
+layout(std430, binding = 5) buffer GroupCounts { uint group_counts[]; };
+layout(std430, binding = 6) readonly buffer GroupOffsets { uint group_offsets[]; };
+uniform bool u_emit;
+shared uint accepted_prefix[64];
 
 uniform int   u_chunk_count;
 uniform int   u_archetype_count;
@@ -97,10 +101,8 @@ uint encode_f16(float value) {
     return sign | (uint(exponent) << 10) | (mantissa >> 13);
 }
 
-void main() {
-    uint cand = gl_GlobalInvocationID.x;
-    uint c = gl_GlobalInvocationID.y;
-    if (int(c) >= u_chunk_count) return;
+bool candidate(uint cand, uint c, out uint record[9]) {
+    if (int(c) >= u_chunk_count) return false;
 
     GpuChunk ch = chunks[c];
     vec3 origin = ch.origin_extent.xyz;
@@ -109,11 +111,11 @@ void main() {
     int cz = int(ch.id_density.y);
     uint biome = uint(ch.id_density.z);
     float density = ch.id_density.w;
-    if (density <= 0.0) return;
+    if (density <= 0.0) return false;
 
     uint candidates = uint(round(density * float(u_max_candidates) * u_density_scale));
     candidates = min(candidates, uint(u_max_candidates));
-    if (cand >= candidates) return;
+    if (cand >= candidates) return false;
 
     uint64_t h0 = placement_hash(cx, cz, biome, cand);
     uint64_t h1 = sm64(h0 ^ 0x2545F4914F6CDD1DUL);
@@ -127,21 +129,21 @@ void main() {
 
     // Ring cull (gate: no foliage past the fade end).
     float inst_dist = length(vec2(wx - u_camera_xz.x, wz - u_camera_xz.y));
-    if (inst_dist > u_fade_end_m) return;
+    if (inst_dist > u_fade_end_m) return false;
 
     vec4 surface = surf[c * uint(u_max_candidates) + cand];
-    if (surface.w < 0.5) return;
+    if (surface.w < 0.5) return false;
     float height = surface.x;
     float moisture = surface.y;
     float slope = surface.z;
-    if (height <= kSeaLevel + kWaterMargin) return;
-    if (slope >= kMaxFoliageSlope) return;
+    if (height <= kSeaLevel + kWaterMargin) return false;
+    if (slope >= kMaxFoliageSlope) return false;
 
     float slope_head = clamp(1.0 - slope / kMaxFoliageSlope, 0.0, 1.0);
     float slope_factor = slope_head * slope_head;
     float moisture_factor = clamp(0.78 + 0.22 * moisture, 0.0, 1.0);
     float accept = clamp(density * 2.4 * u_density_scale * slope_factor * moisture_factor, 0.0, 1.0);
-    if (hash_unit(h2) > accept) return;
+    if (hash_unit(h2) > accept) return false;
 
     // Weighted archetype pick (matches the CPU linear scan).
     float pick = hash_unit(h3) * u_total_weight;
@@ -165,23 +167,41 @@ void main() {
 
     vec2 sway = u_wind_xz * sway_scale;
 
-    // Reserve a slot. Atomic append; respect the global pool cap. The draw
-    // command counts only valid in-pool blades, so overflow candidates never
-    // overdraw stale SSBO records.
-    uint slot = atomicAdd(append_count, 1u);
-    if (slot >= u_max_instances) return;
-    atomicAdd(draw_instance_count, 1u);
-    uint o = slot * kWordsPerBlade;
-
-    blades[o + 0u] = floatBitsToUint(wx);
-    blades[o + 1u] = floatBitsToUint(height);
-    blades[o + 2u] = floatBitsToUint(wz);
-    blades[o + 3u] = floatBitsToUint(ahw * size_jit);
-    blades[o + 4u] = floatBitsToUint(aht * size_jit);
-    blades[o + 5u] = pack_unorm8(vec4(cr, cg, cb, sway_scale));
-    blades[o + 6u] = floatBitsToUint(sway.x);
-    blades[o + 7u] = floatBitsToUint(sway.y);
+    record[0u] = floatBitsToUint(wx);
+    record[1u] = floatBitsToUint(height);
+    record[2u] = floatBitsToUint(wz);
+    record[3u] = floatBitsToUint(ahw * size_jit);
+    record[4u] = floatBitsToUint(aht * size_jit);
+    record[5u] = pack_unorm8(vec4(cr, cg, cb, sway_scale));
+    record[6u] = floatBitsToUint(sway.x);
+    record[7u] = floatBitsToUint(sway.y);
     uint phase  = encode_f16(hash_unit(h1) * 6.2831853);
     uint facing = encode_f16(hash_unit(h0) * 6.2831853);
-    blades[o + 8u] = phase | (facing << 16);
+    record[8u] = phase | (facing << 16);
+    return true;
+}
+
+void main() {
+    uint record[9];
+    uint lane = gl_LocalInvocationID.x;
+    bool accepted = candidate(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, record);
+    accepted_prefix[lane] = accepted ? 1u : 0u;
+    barrier();
+    // Inclusive scan; every lane participates, including rejected candidates.
+    for (uint step = 1u; step < 64u; step *= 2u) {
+        uint add = lane >= step ? accepted_prefix[lane - step] : 0u;
+        barrier();
+        accepted_prefix[lane] += add;
+        barrier();
+    }
+    uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (!u_emit) {
+        if (lane == 63u) group_counts[group] = accepted_prefix[63];
+        return;
+    }
+    if (!accepted) return;
+    uint slot = group_offsets[group] + accepted_prefix[lane] - 1u;
+    if (slot >= u_max_instances) return;
+    for (uint word = 0u; word < kWordsPerBlade; ++word)
+        blades[slot * kWordsPerBlade + word] = record[word];
 }

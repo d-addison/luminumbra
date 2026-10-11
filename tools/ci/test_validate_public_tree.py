@@ -65,6 +65,52 @@ class PublicTreeValidatorTests(unittest.TestCase):
         )
         self.assertEqual(MODULE.inspect_text("src/example.cpp", text), [])
 
+    def test_accepts_only_actual_index_and_tuple_member_tokens(self):
+        for path, text in (
+            ("src/example.h", "++counts[q.phase - 1];\nreturn values[phase - 1].source_frame;"),
+            ("tools/example.ps1", "$_.Clauses[0].Item1.Extent.Text.Trim()"),
+        ):
+            self.assertEqual(MODULE.inspect_text(path, text), [])
+
+    def test_token_exemption_does_not_skip_same_line_findings(self):
+        text = "auto x = counts[phase - 1]; // phase 2; phase 3; PR160; PR161; AKIAABCDEFGHIJKLMNOP"
+        findings = MODULE.inspect_text("src/example.cpp", text)
+        self.assertEqual([f.detail for f in findings if f.rule == "implementation-history-reference"],
+                         ["phase 2", "phase 3"])
+        self.assertEqual([f.detail for f in findings if f.rule == "numbered-pr-reference"],
+                         ["PR160", "PR161"])
+        self.assertEqual(sum(f.rule == "aws-access-key" for f in findings), 1)
+        ps = MODULE.inspect_text("tools/example.ps1", "$x.Item1; # Item2; Item3; PR160")
+        self.assertEqual([f.detail for f in ps if f.rule == "implementation-history-reference"],
+                         ["Item2", "Item3"])
+
+    def test_code_looking_comments_and_literals_remain_findings(self):
+        cases = (
+            ("src/x.cpp", '// counts[phase - 1]'),
+            ("src/x.cpp", '/* counts[phase - 1] */'),
+            ("src/x.cpp", 'const char* s = "counts[phase - 1]";'),
+            ("src/x.cpp", 'auto s = R"tag(\ncounts[phase - 1]\n)tag";'),
+            ("src/x.cpp", '// continued \\\ncounts[phase - 1]'),
+            ("tools/x.ps1", '# $x.Item1'),
+            ("tools/x.ps1", '<# outer <# inner #> $x.Item1 #>'),
+            ("tools/x.ps1", "'$x.Item1'"),
+            ("tools/x.ps1", "'backslash\\' + '$x.Item1'"),
+            ("tools/x.ps1", "@'\n$x.Item1\n'@"),
+            ("tools/x.ps1", '"$x.Item1"'),
+            ("docs/x.md", 'counts[phase - 1]; $x.Item1'),
+        )
+        for path, text in cases:
+            with self.subTest(path=path, text=text):
+                self.assertTrue(any(f.rule == "implementation-history-reference"
+                                    for f in MODULE.inspect_text(path, text)))
+
+    def test_exemptions_are_exact_tokens_and_keep_line_numbers(self):
+        text = "auto a = counts[phase - 1];\r\n// phase 2; phase 3\r\n"
+        findings = MODULE.inspect_text("src/x.cpp", text)
+        self.assertEqual([(f.detail, f.line) for f in findings], [("phase 2", 2), ("phase 3", 2)])
+        self.assertTrue(MODULE.inspect_text("src/x.cpp", "auto a = counts[phase - 10];"))
+        self.assertTrue(MODULE.inspect_text("src/x.cpp", "// Item1"))
+
     def test_rejects_private_paths_and_credentials(self):
         text = "/home/alice/project\nC:\\Users\\alice\\repo\nAKIAABCDEFGHIJKLMNOP\n"
         rules = {finding.rule for finding in MODULE.inspect_text("notes.txt", text)}

@@ -33,6 +33,7 @@ __declspec(dllexport) extern const int AmdPowerXpressRequestHighPerformance = 1;
 #include "audio/EnvironmentalAudioSystem.h" // /09: day/night beds + biome/weather reverb
 #include "audio/IAudioManager.h"
 #include "audio/NullAudioManager.h"
+#include "core/BenchmarkPose.h"
 #include "core/Debug.h"
 #include "core/GameState.h"
 #include "core/IsolationConfig.h" // ScenarioHarness::ParseIsolationConfig (render-only layer isolation)
@@ -3075,7 +3076,9 @@ int main(int argc, char* argv[]) {
     std::chrono::steady_clock::time_point g_rb_before_swap{};
     Luminumbra::Vec3 g_rb_last_streaming_position{};
     bool g_rb_has_streaming_position = false;
-    const glm::vec3 kRenderBenchmarkCameraPosition(8.0f, 56.0f, 8.0f);
+    const glm::vec3 kRenderBenchmarkCameraPosition(Luminumbra::BenchmarkPose::kPosX,
+                                                   Luminumbra::BenchmarkPose::kPosY,
+                                                   Luminumbra::BenchmarkPose::kPosZ);
     std::unique_ptr<Measurement::SampleRing> measured_samples;
     std::unique_ptr<Luminumbra::Rendering::BenchmarkGpuQueries> benchmark_queries;
     std::uint64_t traversal_ticks = 0;
@@ -3809,15 +3812,19 @@ int main(int argc, char* argv[]) {
                         // PlayerController::Update may have moved g_camera back to
                         // the player this frame; the capture pose is reapplied later
                         // for rendering. Stream that same position now as well.
+                        Luminumbra::BenchmarkPose::StreamingInputs streaming_in{};
+                        streaming_in.fixed_cam = g_app.capture.fixed_cam;
+                        streaming_in.fixed_cam_pos = g_app.capture.fixed_cam_pos;
+                        streaming_in.benchmark_active = g_rb_active;
+                        streaming_in.has_camera = g_camera != nullptr;
+                        streaming_in.camera_pos = g_camera ? g_camera->Position : glm::vec3(0.0f);
+                        streaming_in.cam_anchored = cam_anchored;
+                        streaming_in.has_player = g_playerController != nullptr;
+                        streaming_in.player_pos = g_playerController
+                                                      ? g_playerController->GetPosition()
+                                                      : glm::vec3(0.0f);
                         const Luminumbra::Vec3 streaming_position =
-                            g_app.capture.fixed_cam ? Luminumbra::Vec3(g_app.capture.fixed_cam_pos)
-                            : g_rb_active && g_camera
-                                ? Luminumbra::Vec3(kRenderBenchmarkCameraPosition)
-                            : cam_anchored
-                                ? Luminumbra::Vec3(g_camera->Position)
-                                : (g_playerController
-                                       ? Luminumbra::Vec3(g_playerController->GetPosition())
-                                       : Luminumbra::Vec3(g_camera->Position));
+                            Luminumbra::BenchmarkPose::SelectStreamingPosition(streaming_in);
                         if (g_rb_active) {
                             g_rb_last_streaming_position = streaming_position;
                             g_rb_has_streaming_position = true;
@@ -4216,11 +4223,11 @@ int main(int argc, char* argv[]) {
                     if (g_rb_active) {
                         if (!g_app.capture.fixed_cam) {
                             g_camera->Position = kRenderBenchmarkCameraPosition;
-                            g_camera->Yaw = 35.0f;
-                            g_camera->Pitch = -6.0f;
+                            g_camera->Yaw = Luminumbra::BenchmarkPose::kYaw;
+                            g_camera->Pitch = Luminumbra::BenchmarkPose::kPitch;
                             g_camera->updateCameraVectors();
                         }
-                        renderPipeline.set_time_of_day(0.04f);
+                        renderPipeline.set_time_of_day(Luminumbra::BenchmarkPose::kTimeOfDay);
                     }
                     if (g_app.capture.fixed_cam && g_camera) {
                         g_camera->Position = g_app.capture.fixed_cam_pos;

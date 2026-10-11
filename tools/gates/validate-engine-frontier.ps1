@@ -2781,7 +2781,7 @@ function Test-FoliageInstancing {
     }
 
     $analysis = Get-Content $analysisPath -Raw | ConvertFrom-Json
-    if ($analysis.schema -ne "luminumbra.foliage_instancing.v2" -or
+    if ($analysis.schema -cnotin @("luminumbra.foliage_instancing.v2", "luminumbra.foliage_instancing.v3") -or
         $analysis.profile -ne "luminumbra.foliage_control.v2") {
         throw "Unexpected foliage analysis schema/profile '$($analysis.schema)' / '$($analysis.profile)'"
     }
@@ -2813,6 +2813,18 @@ function Test-FoliageInstancing {
         $analysis.coverage_density.instances_within_ring, `
         $analysis.phases.calm.maximum_instance_wind_magnitude, `
         $analysis.phases.windy.maximum_instance_wind_magnitude, $analysis.gpu_timer.status)
+    if ($analysis.schema -ceq "luminumbra.foliage_instancing.v3") {
+        $foliagePython = $null
+        foreach ($candidate in @($env:VISUAL_SWEEP_PYTHON, "python", "python3", "py")) {
+            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+            if (-not (Get-Command $candidate -ErrorAction SilentlyContinue)) { continue }
+            & $candidate -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) { $foliagePython = $candidate; break }
+        }
+        if (-not $foliagePython) { throw "Foliage v3 proof requires Python 3.10+ (standard library only)" }
+        & $foliagePython (Join-Path $PSScriptRoot "../perf/validate_foliage_evidence.py") $visualDir
+        if ($LASTEXITCODE -ne 0) { throw "Foliage raw rebuild/vertex/GPU proof validation refused" }
+    }
     # Do not replace the old full gate with a weaker green control-only gate.
     # Snapshot equality and wind-input magnitude cannot close the original requirements.
     if ($analysis.qualification.status -ne "complete" -or $analysis.passed -isnot [bool] -or
