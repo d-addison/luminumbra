@@ -190,8 +190,21 @@ class InterruptSeamGuard {
 public:
     ~InterruptSeamGuard() {
         P::WorldSaveService::set_interrupt_before_region_replace_for_testing(false);
+        P::WorldSaveService::set_directory_flush_failure_for_testing(-1);
     }
 };
+
+// Number of ancestor-entry flushes write_file_durably performs for `destination`
+// before the post-rename flush: one per ancestor directory below the root.
+int AncestorFlushCount(const std::filesystem::path& destination) {
+    int count = 0;
+    for (std::filesystem::path ancestor = destination.parent_path();
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path()) {
+        ++count;
+    }
+    return count;
+}
 
 constexpr std::optional<std::uint64_t> Gen(std::uint64_t value) {
     return value;
@@ -432,6 +445,67 @@ TEST(FarOverlayFiles, InterruptedWriteKeepsPreviousFile) {
         EXPECT_TRUE(entry.is_regular_file());
     }
     EXPECT_EQ(entries, 1u);
+}
+
+TEST(FarOverlayFiles, FlushFailureAfterReplaceLeavesTheNewCompleteFile) {
+#if defined(_WIN32)
+    GTEST_SKIP() << "POSIX directory flush seam";
+#else
+    const TempDir temp;
+    FarOverlayTile tile = MakeTile();
+    tile.generation = 1;
+    ASSERT_TRUE(WriteFarOverlay(temp.path(), tile));
+
+    tile.generation = 2;
+    const InterruptSeamGuard guard;
+    const int ancestors = AncestorFlushCount(FarOverlayPath(temp.path(), tile.key));
+    P::WorldSaveService::set_directory_flush_failure_for_testing(ancestors);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(WriteFarOverlay(temp.path(), tile, &errors));
+    EXPECT_EQ(errors.size(), 1u);
+
+    // The rename already happened: the file is the new complete overlay, never partial.
+    const FarOverlayDecodeResult read = ReadFarOverlay(temp.path(), tile.key);
+    ASSERT_EQ(read.error, FarOverlayError::None);
+    EXPECT_EQ(read.tile.generation, 2u);
+    std::size_t entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(temp.path() / "far")) {
+        ++entries;
+        EXPECT_TRUE(entry.is_regular_file());
+    }
+    EXPECT_EQ(entries, 1u);
+
+    // The seam fires once; a retry succeeds.
+    EXPECT_TRUE(WriteFarOverlay(temp.path(), tile));
+#endif
+}
+
+TEST(FarOverlayFiles, RetryAfterAncestorFlushFailureFlushesTheMissingEntries) {
+#if defined(_WIN32)
+    GTEST_SKIP() << "POSIX directory flush seam";
+#else
+    const TempDir temp;
+    const std::filesystem::path destination = temp.path() / "a" / "b" / "file.bin";
+    const InterruptSeamGuard guard;
+
+    // Ancestor flushes run deepest first: the entry of `b` in `a`, then of `a` in the
+    // temp directory. Fail the second one so `a` and `b` exist but `a` is unflushed.
+    P::WorldSaveService::set_directory_flush_failure_for_testing(1);
+    std::vector<std::string> errors;
+    EXPECT_FALSE(P::WorldSaveService::write_file_durably(destination, "first", &errors));
+    EXPECT_EQ(errors.size(), 1u);
+    EXPECT_TRUE(std::filesystem::is_directory(temp.path() / "a" / "b"));
+
+    // The retry finds both directories present yet must still flush the same entry.
+    P::WorldSaveService::set_directory_flush_failure_for_testing(1);
+    errors.clear();
+    EXPECT_FALSE(P::WorldSaveService::write_file_durably(destination, "second", &errors));
+    EXPECT_EQ(errors.size(), 1u);
+
+    P::WorldSaveService::set_directory_flush_failure_for_testing(-1);
+    EXPECT_TRUE(P::WorldSaveService::write_file_durably(destination, "third"));
+    EXPECT_EQ(ReadBytes(destination), "third");
+#endif
 }
 
 TEST(FarOverlayFiles, ValidateDirectory) {

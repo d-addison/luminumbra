@@ -82,8 +82,8 @@ A corrupt or newer-format file is refused and is never treated as absent.
 `WriteFarOverlay` encodes the tile and writes it through
 `WorldSaveService::write_file_durably`: the parent directory is created, a
 unique temporary file is flushed and then atomically replaces the destination.
-Directories the call creates, and the destination directory's own entry, are
-flushed through their parents. The save directory must already exist. A failed or
+On POSIX every ancestor directory entry is flushed on every call, so a retry
+after a failed flush repeats the missing flushes. A failed or
 interrupted write never leaves a partial file: the destination is the previous
 complete file, or the new complete file when only the final directory flush
 failed.

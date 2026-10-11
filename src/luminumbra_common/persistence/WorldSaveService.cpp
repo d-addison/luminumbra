@@ -72,6 +72,27 @@ std::atomic<bool>& InterruptBeforeRegionReplaceForTesting() {
     return interrupt;
 }
 
+// Number of POSIX directory flushes to let succeed before the next one fails;
+// negative disables the seam.
+std::atomic<int>& DirectoryFlushFailureCountdownForTesting() {
+    static std::atomic<int> countdown{-1};
+    return countdown;
+}
+
+// True when the injected flush failure fires on this flush.
+bool ConsumeDirectoryFlushFailureForTesting() {
+    std::atomic<int>& countdown = DirectoryFlushFailureCountdownForTesting();
+    int current = countdown.load(std::memory_order_acquire);
+    while (current >= 0) {
+        const int next = current == 0 ? -1 : current - 1;
+        if (countdown.compare_exchange_weak(
+                current, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return current == 0;
+        }
+    }
+    return false;
+}
+
 using ActiveRegionsReplaceHook = bool (*)();
 ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {
     static ActiveRegionsReplaceHook hook = nullptr;
@@ -444,6 +465,12 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     // power loss may resurrect the prior directory entry on some filesystems.
     const std::filesystem::path parent =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
+    if (ConsumeDirectoryFlushFailureForTesting()) {
+        AddError(errors,
+                 "region file was replaced but its directory flush failed (test seam): " +
+                     parent.string());
+        return false;
+    }
     int directory_flags = O_RDONLY;
 #if defined(O_DIRECTORY)
     directory_flags |= O_DIRECTORY;
@@ -481,6 +508,10 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
 // power loss.
 bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
                          std::vector<std::string>* errors) {
+    if (ConsumeDirectoryFlushFailureForTesting()) {
+        AddError(errors, "directory flush failed (test seam): " + directory_path.string());
+        return false;
+    }
     int directory_flags = O_RDONLY;
 #if defined(O_DIRECTORY)
     directory_flags |= O_DIRECTORY;
@@ -1293,25 +1324,9 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
                                           std::vector<std::string>* errors) {
-    // Directories this call creates are recorded so their parents can be flushed:
-    // the replacement helper only flushes the destination's own directory.
-    std::vector<std::filesystem::path> created_directories;
     std::error_code directory_error;
     if (destination.has_parent_path()) {
-        const std::filesystem::path parent = destination.parent_path();
-        for (std::filesystem::path probe = parent; !probe.empty(); probe = probe.parent_path()) {
-            const bool exists = std::filesystem::exists(probe, directory_error);
-            if (directory_error || exists) {
-                break;
-            }
-            created_directories.push_back(probe);
-            if (probe == probe.parent_path()) {
-                break;
-            }
-        }
-        if (!directory_error) {
-            std::filesystem::create_directories(parent, directory_error);
-        }
+        std::filesystem::create_directories(destination.parent_path(), directory_error);
     }
     if (directory_error) {
         AddError(errors,
@@ -1320,15 +1335,16 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         return false;
     }
 #if !defined(_WIN32)
-    // A retry after a failed flush finds the directories already present, so the
-    // destination directory's own parent entry is always flushed too.
-    if (destination.has_parent_path()) {
-        created_directories.push_back(destination.parent_path());
-    }
-    for (const std::filesystem::path& created : created_directories) {
-        if (!FlushDirectoryEntry(created.has_parent_path() ? created.parent_path()
-                                                           : std::filesystem::path("."),
-                                 errors)) {
+    // Flush the entry of every ancestor directory, deepest first. A retry after a
+    // failed flush finds the directories already present, so the chain is flushed
+    // on every call rather than only for directories this call created. The
+    // replacement helper flushes the destination directory itself.
+    for (std::filesystem::path ancestor = destination.parent_path();
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path()) {
+        const std::filesystem::path holder =
+            ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
+        if (!FlushDirectoryEntry(holder, errors)) {
             return false;
         }
     }
@@ -1349,6 +1365,10 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
         return false;
     }
     return true;
+}
+
+void WorldSaveService::set_directory_flush_failure_for_testing(int flushes_to_skip) {
+    DirectoryFlushFailureCountdownForTesting().store(flushes_to_skip, std::memory_order_release);
 }
 
 void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook)()) {
