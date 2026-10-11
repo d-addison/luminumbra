@@ -5,7 +5,11 @@ What changed
   campaign (a WSL UNC path and a WSL-style absolute path) in their "path"
   fields. Every such prefix was replaced with the neutral placeholder
   <build-root>; the remainder of each path (authoring-isolated/campaign-
-  20260913/...) is unchanged. No measurement, identity, source hash, case
+  20260913/...) is unchanged. The randomly named per-run temporary roots
+  (C:/Temp/luminumbra-viewport-checks-<32 hex>) in the two process receipts
+  were likewise replaced with <temp-root>. Standard tool install locations
+  (the Blender and MSYS2 Python executables) contain no user-specific data
+  and were left as recorded. No measurement, identity, source hash, case
   result or timestamp was altered.
 
 Why
