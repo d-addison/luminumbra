@@ -11,6 +11,11 @@ add_executable(asset_processor "${ENGINE_SOURCE}/tools/asset_processor.cpp"
 target_include_directories(asset_processor PRIVATE
     "${ENGINE_SOURCE}/src" "${ENGINE_SOURCE}/vendor/cgltf" "${PROBE_ROOT}/dependencies/stb")
 target_link_libraries(asset_processor PRIVATE meshoptimizer)
+if(MSVC)
+    target_compile_options(asset_processor PRIVATE /fp:strict)
+else()
+    target_compile_options(asset_processor PRIVATE -ffp-contract=off)
+endif()
 add_executable(animation_readback animation_readback.cpp
     "${ENGINE_SOURCE}/src/luminumbra_common/animation/AnimationRuntime.cpp")
 target_include_directories(animation_readback PRIVATE "${ENGINE_SOURCE}/src" "${PROBE_ROOT}/dependencies/entt/single_include")

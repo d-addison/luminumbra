@@ -7,6 +7,8 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -15,6 +17,24 @@ using namespace luminumbra::animation;
 bool Refuse(const char* message) {
     std::cerr << "morph.profile: " << message << '\n';
     return false;
+}
+
+// cgltf maps unknown spellings (e.g. POSITION_BOGUS) onto supported types with index 0,
+// so require the exact canonical glTF name for the accepted attribute type.
+bool CanonicalName(const cgltf_attribute& attribute) {
+    if (!attribute.name)
+        return false;
+    const std::string_view name = attribute.name;
+    switch (attribute.type) {
+        case cgltf_attribute_type_position:
+            return name == "POSITION";
+        case cgltf_attribute_type_normal:
+            return name == "NORMAL";
+        case cgltf_attribute_type_texcoord:
+            return name == "TEXCOORD_" + std::to_string(attribute.index);
+        default:
+            return false;
+    }
 }
 
 bool Compose(const MorphMatrix& parent, const cgltf_node& node, MorphMatrix& world) {
@@ -134,6 +154,8 @@ bool Import(const cgltf_data& data, MorphMeshData& out) {
     const cgltf_accessor *positions = nullptr, *normals = nullptr, *uv = nullptr;
     for (std::size_t i = 0; i < primitive.attributes_count; ++i) {
         const auto& attribute = primitive.attributes[i];
+        if (!CanonicalName(attribute))
+            return Refuse("Unknown attribute name");
         const cgltf_accessor** destination = nullptr;
         if (attribute.index == 0 && attribute.type == cgltf_attribute_type_position)
             destination = &positions;
@@ -188,6 +210,8 @@ bool Import(const cgltf_data& data, MorphMeshData& out) {
             return Refuse("Morph targets must contain a supported delta attribute");
         for (std::size_t a = 0; a < target.attributes_count; ++a) {
             const auto& attribute = target.attributes[a];
+            if (!CanonicalName(attribute))
+                return Refuse("Unknown attribute name");
             const bool position = attribute.type == cgltf_attribute_type_position;
             const bool normal = attribute.type == cgltf_attribute_type_normal;
             if (attribute.index != 0 || (!position && !normal) || (position && position_seen) ||

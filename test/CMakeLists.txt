@@ -91,6 +91,7 @@ if(TARGET meshoptimizer)
 elseif(TARGET meshoptimizer::meshoptimizer)
     target_link_libraries(asset_processor_round_trip_test PRIVATE meshoptimizer::meshoptimizer)
 endif()
+luminumbra_pin_fp_determinism(asset_processor_round_trip_test)
 
 # This geometry-only compiler/runtime target does not build or start the client.
 add_executable(morph_asset_test
@@ -102,6 +103,7 @@ target_include_directories(morph_asset_test PRIVATE ../src)
 target_include_directories(morph_asset_test SYSTEM PRIVATE ../vendor/cgltf)
 target_link_libraries(morph_asset_test PRIVATE gtest_main nlohmann_json meshoptimizer stb_headers)
 luminumbra_configure_first_party_target(morph_asset_test)
+luminumbra_pin_fp_determinism(morph_asset_test)
 
 add_executable(common_tests
     common/Crc32_test.cpp

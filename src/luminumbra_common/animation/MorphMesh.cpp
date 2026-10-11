@@ -41,7 +41,13 @@ bool NormalTransform(const Matrix& m, NormalMatrix& normal, bool& mirrored) {
         normal[col * 3 + 2] = m[a * 4] * m[b * 4 + 1] - m[a * 4 + 1] * m[b * 4];
     }
     const double determinant = m[0] * normal[0] + m[1] * normal[1] + m[2] * normal[2];
-    if (!std::isfinite(determinant) || determinant == 0)
+    // Relative singularity test: rounding can leave a nonzero determinant for a singular matrix.
+    const double n0 = std::hypot(m[0], m[1], m[2]);
+    const double n1 = std::hypot(m[4], m[5], m[6]);
+    const double n2 = std::hypot(m[8], m[9], m[10]);
+    const double scale = n0 * n1 * n2;
+    if (!std::isfinite(determinant) || !std::isfinite(scale) || !(scale > 0) ||
+        std::abs(determinant) <= scale * 1e-12)
         return false;
     mirrored = determinant < 0;
     for (double& value : normal)
@@ -121,9 +127,11 @@ MorphMeshAsset::MorphMeshAsset(MorphMeshData data)
 bool CreateMorphMeshAsset(MorphMeshData data,
                           std::shared_ptr<const MorphMeshAsset>& out,
                           std::string* error) {
-    if (!Validate(data, error))
+    // Deep copy: published storage is never aliased by the caller's retained references.
+    MorphMeshData owned = data;
+    if (!Validate(owned, error))
         return false;
-    auto candidate = std::shared_ptr<const MorphMeshAsset>(new MorphMeshAsset(std::move(data)));
+    auto candidate = std::shared_ptr<const MorphMeshAsset>(new MorphMeshAsset(std::move(owned)));
     out = std::move(candidate);
     return true;
 }

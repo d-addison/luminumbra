@@ -298,6 +298,33 @@ TEST_F(MorphAssetTest, BuilderCannotPublishInvalidMutableTopology) {
     static_assert(!std::is_move_constructible_v<MorphMeshAsset>);
 }
 
+TEST_F(MorphAssetTest, RejectsNumericallySingularSourceWorld) {
+    Fixture fixture;
+    ASSERT_TRUE(Compile(fixture));
+    auto asset = Load();
+    const auto original = asset;
+    auto data = original->Data();
+    // Column-major; the third column is exactly the sum of the first two (all exact in float32).
+    data.source_world = {2578989.0f,
+                         3646633.0f,
+                         3689415.0f,
+                         0.0f,
+                         2870062.0f,
+                         3026721.0f,
+                         2894238.0f,
+                         0.0f,
+                         5449051.0f,
+                         6673354.0f,
+                         6583653.0f,
+                         0.0f,
+                         0.0f,
+                         0.0f,
+                         0.0f,
+                         1.0f};
+    EXPECT_FALSE(CreateMorphMeshAsset(std::move(data), asset));
+    EXPECT_EQ(asset, original);
+}
+
 TEST_F(MorphAssetTest, FailedEvaluationPreservesFrameAndOwnedAsset) {
     Fixture fixture;
     ASSERT_TRUE(Compile(fixture));
