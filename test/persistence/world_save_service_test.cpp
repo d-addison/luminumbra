@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include "persistence/SaveTransaction.h"
 #include "persistence/WorldPersistenceRoundtrip.h"
 #include "persistence/WorldSaveService.h"
 #include "systems/SHIELD_WorldSystem.h"
@@ -324,8 +325,28 @@ TEST(WorldSaveService, GroundObjectsSaveLoadRoundTripAndEmptyStoreRemovesFile) {
     ASSERT_TRUE(store.insert(MakeGroundObject(1, 100, 0)));
     ASSERT_TRUE(store.insert(MakeGroundObject(5, -600000, 2)));
     std::vector<std::string> errors;
-    ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &errors))
-        << JoinErrors(errors);
+    const Luminumbra::world::WorldClock clock(2);
+    Luminumbra::world::ActiveRegionLedger ledger({}, clock);
+    std::uint64_t allocated = 0;
+    for (int id = 0; id < 5; ++id)
+        ASSERT_TRUE(ledger.allocate_persistent_id(allocated));
+    for (const auto& [id, object] : store.objects()) {
+        (void)id;
+        ledger.mark_edited(GroundObjectStore::region_of(object), clock);
+    }
+    nlohmann::json metadata;
+    clock.write_metadata(metadata);
+    {
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save_dir.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_ground_objects(store, save_dir.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
     EXPECT_TRUE(fs::exists(WorldSaveService::ground_objects_path(save_dir.path)));
 
     GroundObjectStore loaded;

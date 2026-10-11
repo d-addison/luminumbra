@@ -1960,7 +1960,7 @@ namespace {
 constexpr Luminumbra::world::RegionKey kFaultRegion{40, -40};
 
 // Arms a scheduler fault at tick k. The pinned far region gets work over the
-// limit on ticks k-1 and k: Active->Reduced at k-1, then Reduced->Frozen at k,
+// limit in completed ticks k-2 and k-1: Active->Reduced at k-1, then Frozen at k,
 // where the durable digest provider reads the corrupt region file and throws.
 void ArmSchedulerFault(GameSession& session,
                        const HeadlessRoot& root,
@@ -1977,7 +1977,7 @@ void ArmSchedulerFault(GameSession& session,
     fs::create_directories(region.parent_path());
     std::ofstream(region, std::ios::binary) << "not a region file";
     session.GetSimulationEventBus().subscribe([&session, k](const auto& event) {
-        if (event.tick == k || event.tick == k - 1)
+        if (event.tick == k - 2 || event.tick == k - 1)
             session.RecordActiveRegionWork({kFaultRegion, 5, 0, 0, 0});
     });
     for (std::uint64_t t = 1; t <= k + 1; ++t)
@@ -2467,9 +2467,11 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionDoesNotAgeItsGroundObjects) {
     ASSERT_TRUE(session.CreateWorld("Ground frozen", "1337", "default"));
     const auto id = SpawnGround(session, 5200, -1500);
     ASSERT_EQ(id, 1u);
+    session.SetReplicatedSimulationAnchors({}); // No proximity protection for this pressure case.
     std::size_t frozen_ticks = 0;
     for (int i = 0; i < 10; ++i) {
         const auto before = session.GetGroundObjects().objects().at(id).active_age;
+        session.RecordActiveRegionWork({kGroundRegion, 100, 0, 0, 0});
         TickOnce(session);
         // Frozen after a tick means it was not due in that tick, so its objects did not age.
         if (session.GetActiveRegionLedger().records().at(kGroundRegion).state ==
@@ -2551,7 +2553,6 @@ TEST(GameSessionHeadlessWorldTest, CorruptGroundObjectsFileRefusesToOpen) {
     ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
     ASSERT_TRUE(owner.SaveWorldState());
     const auto save = owner.GetWorldSaveDir();
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     EnableSnapshotSession(control, root, jobs);
     ASSERT_TRUE(control.LoadWorld(owner.GetMetadata().worldId)) << control.GetWorldOpenError();
     std::ofstream(P::WorldSaveService::ground_objects_path(save), std::ios::binary) << "not json\n";
@@ -2603,7 +2604,7 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndProbesEditedTerrainBef
     GameSession session;
     CreateGroundWorld(session, root, jobs, "Edited ground probe");
     auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
-    chunk->set_state(Luminumbra::ChunkState::Meshed);
+    chunk->set_state(Luminumbra::ChunkState::Ready);
     constexpr int side = CHUNK_SIZE_X + 1;
     chunk->sdf_data.resize(side * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1));
     for (int z = 0; z <= CHUNK_SIZE_Z; ++z)
@@ -2619,6 +2620,12 @@ TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndProbesEditedTerrainBef
     ASSERT_NE(landed, nullptr);
     EXPECT_TRUE(landed->settled());
     EXPECT_EQ(landed->y_mm, 4000);
+    const auto contact = session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{8, 4, 8}, 0, 0);
+    ASSERT_NE(contact, 0u);
+    const auto* touching = session.GetGroundObjects().find(contact);
+    ASSERT_NE(touching, nullptr);
+    EXPECT_TRUE(touching->settled());
+    EXPECT_EQ(touching->y_mm, 4000);
     // The owner-thread query neither loads another column nor substitutes procedural terrain.
     const auto absent =
         session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{320, 12, 320}, 0, 0);

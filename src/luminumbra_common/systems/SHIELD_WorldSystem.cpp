@@ -4018,6 +4018,12 @@ std::optional<float> SHIELD_WorldSystem::ProbeTerrainBelow(const Vec3& requested
         const int lower = std::min(static_cast<int>(previous_y), CHUNK_SIZE_Y - 1);
         const float fraction = previous_y - static_cast<float>(lower);
         float previous = plane(lower) * (1.0f - fraction) + plane(lower + 1) * fraction;
+        if (std::isfinite(previous) && previous == 0.0f) {
+            const float surface = bottom + previous_y;
+            if (!hit || surface > *hit)
+                hit = surface;
+            continue;
+        }
         for (int y = lower; y >= 0; --y) {
             const float density = plane(y);
             if (std::isfinite(previous) && std::isfinite(density) && previous > 0 && density <= 0) {
