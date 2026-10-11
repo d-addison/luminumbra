@@ -39,6 +39,11 @@ if(BUILD_TESTING)
     set_tests_properties(PerformanceMeasurementValidatorContract
         PROPERTIES LABELS "perf;tools" TIMEOUT 30)
     add_test(
+        NAME RenderBudgetPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_render_budget.py")
+    set_tests_properties(RenderBudgetPython PROPERTIES LABELS "perf;tools" TIMEOUT 30)
+    add_test(
         NAME PublicTreeValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_public_tree.py")
@@ -58,4 +63,9 @@ if(BUILD_TESTING)
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_check_docs.py")
     set_tests_properties(DocumentationLinkValidatorContract
         PROPERTIES LABELS "docs;hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME SlowestTestsScriptContract
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
+    set_tests_properties(SlowestTestsScriptContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 endif()
