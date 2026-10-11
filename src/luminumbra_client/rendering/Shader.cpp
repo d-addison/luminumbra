@@ -102,6 +102,13 @@ GLuint Shader::buildProgram(const char* vertexPath, const char* fragmentPath) {
     GLuint program = glCreateProgram();
     glAttachShader(program, vertex);
     glAttachShader(program, fragment);
+    if (!m_feedback_varyings.empty()) {
+        std::vector<const char*> names;
+        for (const auto& name : m_feedback_varyings)
+            names.push_back(name.c_str());
+        glTransformFeedbackVaryings(
+            program, static_cast<GLsizei>(names.size()), names.data(), GL_INTERLEAVED_ATTRIBS);
+    }
     glLinkProgram(program);
     const bool program_ok = checkCompileErrors(program, "PROGRAM");
 
@@ -116,7 +123,10 @@ GLuint Shader::buildProgram(const char* vertexPath, const char* fragmentPath) {
     return program;
 }
 
-Shader::Shader(const char* vertexPath, const char* fragmentPath) {
+Shader::Shader(const char* vertexPath,
+               const char* fragmentPath,
+               std::vector<std::string> feedback_varyings)
+    : m_feedback_varyings(std::move(feedback_varyings)) {
     m_debug_name = std::string(vertexPath) + " | " + fragmentPath;
     m_vertex_path = vertexPath;
     m_fragment_path = fragmentPath;
