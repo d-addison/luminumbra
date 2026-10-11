@@ -295,7 +295,7 @@ class VerifyReleaseTests(unittest.TestCase):
         args = verifier.parse_args([
             "--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT, "--out", str(self.out),
         ])
-        plan = [" ".join(cmd) for cmd in verifier.plan_commands(args)]
+        plan = [" ".join(cmd).replace("\\", "/") for cmd in verifier.plan_commands(args)]
         self.assertIn(f"git archive --format=tar --prefix=luminumbra-{VERSION}/ "
                       f"--output=<tmp>/source.tar {COMMIT}", plan)
         self.assertIn("gzip -n -c <tmp>/source.tar", plan)
