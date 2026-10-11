@@ -22,6 +22,14 @@ def _finite_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def target_block(profile, p50, p99):
+    """Quality reports p50 against the target; every other profile reports p50 and p99."""
+    block = {'limit_ms': TARGET_MS, 'p50_ms': p50, 'p50_met': p50 <= TARGET_MS}
+    if profile != 'quality':
+        block.update(p99_ms=p99, p99_met=p99 <= TARGET_MS)
+    return block
+
+
 def evaluate(data):
     if data.get('schema') != render_contract.SCHEMA:
         raise BudgetInputError('floor requires a v3 render capture')
@@ -42,8 +50,7 @@ def evaluate(data):
         'frames': data['frames'],
         'floor': {'limit_ms': FLOOR_MS, 'p99_ms': p99,
                   'verdict': 'pass' if p99 <= FLOOR_MS else 'fail'},
-        'target': {'limit_ms': TARGET_MS, 'p50_ms': p50, 'p99_ms': p99,
-                   'p50_met': p50 <= TARGET_MS, 'p99_met': p99 <= TARGET_MS},
+        'target': target_block(data['profile']['name'], p50, p99),
     }
 
 

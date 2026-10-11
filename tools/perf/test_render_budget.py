@@ -48,11 +48,17 @@ class RenderBudgetTests(unittest.TestCase):
         slow = budget.evaluate(with_wall([9.0, 9.0, 9.0, 9.0]))
         self.assertEqual(slow['floor']['verdict'], 'pass')
         self.assertFalse(slow['target']['p50_met'])
-        self.assertFalse(slow['target']['p99_met'])
+        self.assertNotIn('p99_met', slow['target'])  # quality reports p50 only
         fast = budget.evaluate(with_wall([8.0, 8.0, 8.0, 8.0]))
         self.assertEqual(fast['floor']['verdict'], 'pass')
         self.assertTrue(fast['target']['p50_met'])
-        self.assertTrue(fast['target']['p99_met'])
+
+    def test_performance_profile_reports_p50_and_p99_target(self):
+        block = budget.target_block('performance', 8.0, 9.0)
+        self.assertTrue(block['p50_met'])
+        self.assertFalse(block['p99_met'])
+        self.assertEqual(block['p99_ms'], 9.0)
+        self.assertNotIn('p99_met', budget.target_block('quality', 8.0, 9.0))
 
     def test_verdict_shape(self):
         verdict = budget.evaluate(base.artifact())
