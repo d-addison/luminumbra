@@ -49,7 +49,16 @@ def visit(path):
     if path in seen:
         return
     seen.add(path); order.append(path)
+    active = True
     for line in open(path, encoding="utf-8"):
+        if line.startswith("#ifdef __clang_analyzer__"):
+            active = "-D__clang_analyzer__" in args
+            continue
+        if line.startswith("#endif"):
+            active = True
+            continue
+        if not active:
+            continue
         m = re.match(r'\\s*#include\\s+([<"])([^>"]+)[>"]', line)
         if not m:
             continue
@@ -74,6 +83,10 @@ if args == ["--version"]:
 target = args[-1]
 with open(os.environ["FAKE_TIDY_LOG"], "a", encoding="utf-8") as log:
     log.write(target + "\\n")
+swap = os.environ.get("FAKE_TIDY_DB_FROM")
+if swap:
+    import shutil
+    shutil.copyfile(swap, os.environ["FAKE_TIDY_DB"])
 mutate = os.environ.get("FAKE_TIDY_MUTATE")
 if mutate:
     with open(mutate, "a", encoding="utf-8") as handle:
@@ -262,6 +275,56 @@ class TidyCacheTests(unittest.TestCase):
         self.assertRan(self.run_cache(mode="writeonly"), 2)
         self.assertRan(self.run_cache(mode="readwrite"), 2)
 
+    def test_header_only_visible_to_the_analyzer_is_part_of_the_key(self):
+        guarded = self.src / "analyzer_only.h"
+        guarded.write_text("int analyzer_only();\n", encoding="utf-8")
+        self.main.write_text(
+            self.main.read_text(encoding="utf-8")
+            + '#ifdef __clang_analyzer__\n#include "analyzer_only.h"\n#endif\n',
+            encoding="utf-8",
+        )
+        self.assertRan(self.run_cache(), 1)
+        guarded.write_text("int analyzer_only(int);\n", encoding="utf-8")
+        self.assertRan(self.run_cache(), 2)
+
+    def test_response_files_are_never_cached(self):
+        rsp = self.root / "flags.rsp"
+        rsp.write_text("-DONE\n", encoding="utf-8")
+        entry = self.entry([f"@{rsp}"])
+        self.entries = [entry]
+        self.write_db()
+        self.assertRan(self.run_cache(), 1)
+        self.assertRan(self.run_cache(), 2)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
+
+    def test_same_version_banner_but_different_tool_binary_misses(self):
+        self.assertRan(self.run_cache(), 1)
+        with open(self.tidy, "a", encoding="utf-8") as handle:
+            handle.write("# a different build with the same --version banner\n")
+        self.assertRan(self.run_cache(), 2)
+        with open(self.cc, "a", encoding="utf-8") as handle:
+            handle.write("# a different compiler build, same banner\n")
+        self.assertRan(self.run_cache(), 3)
+
+    def test_compile_database_changing_during_analysis_is_not_recorded(self):
+        replacement = self.root / "replacement_db.json"
+        replacement.write_text(json.dumps([self.entry(["-DOTHER"])]), encoding="utf-8")
+        self.env["FAKE_TIDY_DB_FROM"] = str(replacement)
+        self.env["FAKE_TIDY_DB"] = str(self.build / "compile_commands.json")
+        self.assertRan(self.run_cache(), 1)
+        self.assertEqual(list(self.cache.rglob("*.json")), [])
+
+    def test_boolean_or_float_success_status_is_not_a_hit(self):
+        self.assertRan(self.run_cache(), 1)
+        record = list(self.cache.rglob("*.json"))[0]
+        original = json.loads(record.read_text(encoding="utf-8"))
+        runs = 1
+        for bad in (False, 0.0):
+            tampered = dict(original, tidy_exit=bad)
+            record.write_text(json.dumps(tampered), encoding="utf-8")
+            runs += 1
+            self.assertRan(self.run_cache(), runs)
+
     def test_prune_removes_records_not_used_since_the_cutoff(self):
         self.assertRan(self.run_cache(), 1)
         record = list(self.cache.rglob("*.json"))[0]
@@ -293,11 +356,15 @@ class MakeDependencyParserTests(unittest.TestCase):
             with self.assertRaises(MODULE.CacheMiss, msg=text):
                 MODULE.parse_make_deps(text)
 
+    def test_rejects_tab_in_file_name(self):
+        with self.assertRaises(MODULE.CacheMiss):
+            MODULE.parse_make_deps("main.o: /a/with\ttab.h /a/b.cpp\n")
+
     def test_dependency_command_strips_outputs_and_adds_m(self):
         command = MODULE.dependency_command(
             ["cc", "-DX", "-MD", "-MT", "t", "-MF", "t.d", "-o", "a.o", "-c", "a.cpp"]
         )
-        self.assertEqual(command, ["cc", "-DX", "a.cpp", "-M"])
+        self.assertEqual(command, ["cc", "-DX", "a.cpp", "-D__clang_analyzer__", "-M"])
 
 
 if __name__ == "__main__":

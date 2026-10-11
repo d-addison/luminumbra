@@ -11,13 +11,20 @@ The analysis input of one translation unit (the cache key) is the SHA-256 of:
   * FORMAT_VERSION, the contents of this script and of every --tool-file
     (scripts/tidy.sh by default, which also carries the check list);
   * the exact --config JSON handed to clang-tidy for this unit;
-  * the clang-tidy executable (resolved path and --version output) and the
-    version output of every compiler named in the compile database;
+  * the clang-tidy executable and every compiler named in the compile
+    database: resolved path, SHA-256 of the executable's content, and its
+    --version output;
   * for EVERY compile-database entry of the unit: the working directory, the
     full argument vector, and the path and content hash of every file the
     preprocessor reads, obtained by re-running the entry's own compiler
-    command with -M in this very run (so system headers, compiler builtin
-    headers, generated headers, and a newly shadowing header are all seen).
+    command, plus clang-tidy's own -D__clang_analyzer__, with -M in this very
+    run (so system headers, compiler builtin headers, generated headers, and
+    a newly shadowing header are all seen). Response files (@file) are not
+    expanded, so a unit that uses one is always a miss.
+
+Every dependency is hashed afresh for every key (no memoization across units),
+and the key is recomputed from a freshly loaded compile database after the
+analysis; a record is written only if both keys are equal.
 
 Source edits, NOLINT comments, header edits, flag changes, config changes and
 toolchain changes therefore all change the key.  Anything this script cannot
@@ -32,6 +39,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +77,8 @@ def parse_make_deps(text: str) -> list[str]:
     Returns the prerequisites.  Raises CacheMiss for anything that does not
     look like exactly "target: prerequisite..." output.
     """
+    if "\t" in text:
+        raise CacheMiss("ambiguous dependency output (tab in a file name)")
     joined = text.replace("\\\r\n", " ").replace("\\\n", " ")
     tokens: list[str] = []
     current: list[str] = []
@@ -125,6 +135,8 @@ def dependency_command(arguments: list[str]) -> list[str]:
     result = [arguments[0]]
     skip_next = False
     for argument in arguments[1:]:
+        if argument.startswith("@"):
+            raise CacheMiss("response files are not supported by the cache")
         if skip_next:
             skip_next = False
             continue
@@ -138,58 +150,63 @@ def dependency_command(arguments: list[str]) -> list[str]:
         if argument.startswith("-o") and len(argument) > 2:
             continue
         result.append(argument)
+    # clang-tidy predefines this macro; headers guarded by it must be seen.
+    result.append("-D__clang_analyzer__")
     result.append("-M")
     return result
 
 
-class KeyBuilder:
-    def __init__(self, tool_hash: str, clang_tidy: str):
-        self._tool_hash = tool_hash
-        self._clang_tidy = clang_tidy
-        self._file_hashes: dict[str, str] = {}
-        self._version_cache: dict[str, str] = {}
+class ToolIdentity:
+    """Executable identity (path, content hash, --version), computed once per run."""
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
 
-    def reset_file_hashes(self) -> None:
+    def describe(self, executable: str, directory: str) -> str:
+        probe = executable
+        if os.sep in probe and not os.path.isabs(probe):
+            probe = os.path.join(directory, probe)
+        resolved = probe if os.sep in probe else (shutil.which(probe) or "")
+        if not resolved or not os.path.isfile(resolved):
+            raise CacheMiss(f"cannot resolve executable {executable}")
+        resolved = os.path.realpath(resolved)
         with self._lock:
-            self._file_hashes = {}
-
-    def _version(self, executable: str) -> str:
-        with self._lock:
-            cached = self._version_cache.get(executable)
-        if cached is not None:
-            return cached
+            known = self._cache.get((resolved, directory))
+        if known is not None:
+            return known
         try:
+            content = sha256_file(resolved)
             completed = subprocess.run(
-                [executable, "--version"],
+                [resolved, "--version"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=60,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise CacheMiss(f"cannot query {executable} --version: {error}") from error
+            raise CacheMiss(f"cannot identify {executable}: {error}") from error
         if completed.returncode != 0 or not completed.stdout:
             raise CacheMiss(f"{executable} --version failed")
         text = completed.stdout.decode("utf-8", "replace")
-        resolved = os.path.realpath(executable) if os.sep in executable else executable
-        value = f"{resolved}\n{text}"
+        value = f"{resolved}\n{content}\n{text}"
         with self._lock:
-            self._version_cache[executable] = value
+            self._cache[(resolved, directory)] = value
         return value
 
-    def _hash_dependency(self, path: str) -> str:
-        with self._lock:
-            known = self._file_hashes.get(path)
-        if known is not None:
-            return known
+
+class KeyBuilder:
+    def __init__(self, tool_hash: str, clang_tidy: str, tools: ToolIdentity):
+        self._tool_hash = tool_hash
+        self._clang_tidy = clang_tidy
+        self._tools = tools
+
+    @staticmethod
+    def _hash_dependency(path: str) -> str:
         try:
-            digest = sha256_file(path)
+            return sha256_file(path)
         except OSError as error:
             raise CacheMiss(f"cannot read dependency {path}: {error}") from error
-        with self._lock:
-            self._file_hashes[path] = digest
-        return digest
 
     def key_for(self, tu: str, entries: list[dict], config: str) -> str:
         if not entries:
@@ -198,7 +215,7 @@ class KeyBuilder:
             FORMAT_VERSION,
             self._tool_hash,
             f"config:{config}",
-            f"clang-tidy:{self._version(self._clang_tidy)}",
+            f"clang-tidy:{self._tools.describe(self._clang_tidy, os.getcwd())}",
             f"tu:{tu}",
         ]
         entry_parts = []
@@ -207,7 +224,7 @@ class KeyBuilder:
             if not isinstance(directory, str) or not os.path.isdir(directory):
                 raise CacheMiss("compile database directory is missing")
             arguments = entry_arguments(entry)
-            compiler_version = self._version(arguments[0])
+            compiler_version = self._tools.describe(arguments[0], directory)
             command = dependency_command(arguments)
             try:
                 completed = subprocess.run(
@@ -273,7 +290,10 @@ def lookup(cache_dir: str, key: str) -> bool:
         return False
     if record.get("format") != FORMAT_VERSION or record.get("key") != key:
         return False
-    if record.get("tidy_exit") != 0:
+    exit_code = record.get("tidy_exit")
+    if type(exit_code) is not int or exit_code != 0:
+        return False
+    if not isinstance(record.get("tu"), str):
         return False
     try:
         os.utime(path)  # mark as used so prune keeps it
@@ -310,7 +330,8 @@ def combined_tool_hash(tool_files: list[str]) -> str:
 def run_command(args: argparse.Namespace) -> int:
     files = [os.path.normpath(os.path.abspath(path)) for path in args.files]
     tool_hash = combined_tool_hash(args.tool_file)
-    builder = KeyBuilder(tool_hash, args.clang_tidy)
+    tools = ToolIdentity()
+    builder = KeyBuilder(tool_hash, args.clang_tidy, tools)
     try:
         entries_by_file = load_entries(args.build_dir)
     except (OSError, ValueError, KeyError) as error:
@@ -367,10 +388,11 @@ def run_command(args: argparse.Namespace) -> int:
             return
         # The inputs must be unchanged after the analysis, or the record could
         # describe a different input than the one that was analyzed.
-        verifier = KeyBuilder(tool_hash, args.clang_tidy)
+        verifier = KeyBuilder(tool_hash, args.clang_tidy, tools)
         try:
-            after = verifier.key_for(tu, entries_by_file.get(tu, []), args.config)
-        except (CacheMiss, OSError, ValueError):
+            fresh_entries = load_entries(args.build_dir)
+            after = verifier.key_for(tu, fresh_entries.get(tu, []), args.config)
+        except (CacheMiss, OSError, ValueError, KeyError):
             return
         if after != key:
             return
