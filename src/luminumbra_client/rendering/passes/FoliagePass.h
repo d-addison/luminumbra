@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../AsyncReadbackRing.h"
+#include "../FoliageEvidence.h"
 #include "../FoliageGroundMesh.h"
 #include "../RenderContext.h"
 
@@ -53,7 +54,8 @@ class Shader;
 // (twigs/shells) and canopy, drawn per visible chunk from a fixed-capacity,
 // persistent-mapped instance pool (the SAME glBufferStorage +
 // GL_MAP_PERSISTENT|COHERENT pattern as the  ParticlePass /  chunk
-// pool). NOT compute / transform feedback.
+// pool). GPU scatter uses stable bounded compaction; CPU scatter is the fallback.
+// Transform feedback is enabled only for the opt-in qualification draws.
 //
 // PLACEMENT (PINNED, documented design): a DETERMINISTIC PURE FUNCTION of
 // (chunk coords, biome id, slope, moisture, instance index) via a splitmix64
@@ -230,8 +232,8 @@ public:
     }
     // the GPU scatter path reads the generated blades back to the CPU
     // (m_instances) ONLY so the FoliageInstancing gate's instance_hash works.
-    // That readback is a synchronous glGetBufferSubData -> a ~5 ms CPU stall on
-    // the hot path. execute draws straight from the SSBO via glDrawArraysIndirect,
+    // Async copies carry their originating build generation. execute draws
+    // straight from the SSBO via glDrawArraysIndirect,
     // so normal play / the budget benchmark disable the readback (default ON keeps
     // the gate exact)..
     void set_readback_enabled(bool e) {
@@ -284,7 +286,28 @@ public:
     // the instance count drawn so the call site owns the stat bump.
     std::size_t execute(const RenderContext& ctx, const Camera& camera);
 
-    // --- Gate hooks (FoliageInstancing). All PURE; never touch GL. ---
+    // Opt-in, same-device qualification. Freezes uploaded public scatter/surface
+    // inputs; the output is cleared and independently dispatched before capture.
+    bool begin_qualification();
+    bool qualification_started() const {
+        return m_qualification.frozen_inputs;
+    }
+    bool qualification_rebuild_complete() const {
+        return m_qualification.rebuild.completed;
+    }
+    std::uint64_t vertex_submission_frame(std::uint32_t phase) const {
+        return phase >= 1 && phase <= 2 ? m_qualification.vertices[phase - 1].source_frame : 0;
+    }
+    bool vertex_evidence_ready() const {
+        return m_qualification.vertices[0].available_frame != 0 &&
+               m_qualification.vertices[1].available_frame != 0;
+    }
+    FoliageQualificationEvidence qualification_evidence();
+    std::size_t last_draw_calls() const {
+        return m_last_draw_calls;
+    }
+
+    // --- Gate hooks (FoliageInstancing). ---
     // The deterministic placement hash, exposed so the gate can assert the
     // scatter is reproducible (same inputs -> same hash) independently.
     static uint64_t placement_hash(int chunk_x, int chunk_z, u8 biome_id, uint32_t instance_index);
@@ -373,7 +396,31 @@ private:
     // false the CPU loop runs. m_gpu_active is true once a GPU build populated
     // m_blade_ssbo this session (execute then draws from it directly through
     // the command stored in m_count_ssbo).
+    void dispatch_scatter();
+    void poll_vertex_evidence();
+    void destroy_qualification();
+    bool capture_vertices(const glm::mat4& view_projection);
+    void rebuild_frozen_inputs();
+    FoliageQualificationEvidence m_qualification;
+    std::vector<InstanceRecord> m_rebuild_reference;
+    std::uint64_t m_uploaded_input_hash = 0;
+    glm::vec2 m_uploaded_wind{0.0f};
+    glm::vec3 m_uploaded_camera{0.0f};
+    AsyncReadbackRing m_vertex_readback;
+    u32 m_vertex_feedback_buffer = 0;
+    u32 m_vertex_feedback_object = 0;
+    std::uint32_t m_vertex_first_instance = 0;
+    bool m_vertex_selection_ready = false;
+    struct EvidenceQueries;
+    std::unique_ptr<EvidenceQueries> m_evidence_queries;
+    std::array<std::size_t, 2> m_phase_query_counts{};
+    std::size_t m_last_draw_calls = 0;
     u32 m_compute_prog = 0;
+    u32 m_prefix_prog = 0;
+    u32 m_group_counts_ssbo = 0;
+    u32 m_group_offsets_ssbo = 0;
+    int m_uploaded_chunk_count = 0;
+    static constexpr std::size_t kMaxGpuChunks = 512;
     u32 m_chunk_ssbo = 0;
     u32 m_surf_ssbo = 0;
     u32 m_blade_ssbo = 0;
