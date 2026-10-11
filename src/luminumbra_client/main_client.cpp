@@ -3750,7 +3750,7 @@ int main(int argc, char* argv[]) {
                             g_playerController->GetMovementMode() ==
                                 Luminumbra::Client::MovementMode::Walking);
                     if (traversal) {
-                        while (measuring_v3 &&
+                        while (measuring_v3 && !gameSession->GetRegionSchedulerFault() &&
                                traversal_ticks < static_cast<std::uint64_t>(traversal_target_tick))
                             traversal_ticks +=
                                 gameSession->TickSimulation(1.0 / traversal->tickRate);
@@ -3777,6 +3777,13 @@ int main(int argc, char* argv[]) {
                         }
                     } // g_app.capture.timeScale == 0 -> paused (no sim ticks; render/streaming
                       // continue)
+                    if (const auto& region_fault = gameSession->GetRegionSchedulerFault()) {
+                        LUMINUMBRA_CORE_ERROR(
+                            "Region scheduler fault at tick {}: {}; saving and quitting",
+                            region_fault->tick,
+                            region_fault->message);
+                        glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    }
                     rb_sim_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - _rb_sim_t0)
                                     .count();                         //

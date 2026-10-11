@@ -19,6 +19,7 @@
 #include <ctime>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -361,6 +362,23 @@ public:
     [[nodiscard]] const RegionSchedule& GetRegionSchedule() const {
         return m_regionSchedule;
     }
+    // A fatal scheduler/obligation fault. Once latched the session is fail-stop: the
+    // simulation clock is rewound to the faulting tick, no further ticks run, and hosts
+    // are expected to save and stop. Saving a faulted session is allowed.
+    struct RegionSchedulerFault {
+        std::uint64_t tick = 0;
+        std::string message;
+    };
+    // Observational counters of rejected host inputs; never hashed, digested or saved.
+    struct RegionInputRejections {
+        std::uint32_t anchors = 0, edits = 0, pins = 0;
+    };
+    [[nodiscard]] const std::optional<RegionSchedulerFault>& GetRegionSchedulerFault() const {
+        return m_regionFault;
+    }
+    [[nodiscard]] const RegionInputRejections& GetRegionInputRejections() const {
+        return m_regionInputRejections;
+    }
     // Set before world creation. Loaded worlds restore their persisted configuration.
     void SetRegionSchedulerConfig(RegionSchedulerConfig config);
     void SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking);
@@ -437,6 +455,9 @@ private:
     RegionSchedule m_regionSchedule;
     std::optional<std::vector<Vec3>> m_replicatedSimulationAnchors;
     std::vector<RegionWork> m_regionWork;
+    std::optional<RegionSchedulerFault> m_regionFault;
+    RegionInputRejections m_regionInputRejections;
+    void LatchRegionFault(std::uint64_t tick, std::string message);
     std::filesystem::path m_regionDurableDirectory;
     // Stable only in the clock slice; world-anchored pages replace this grid in C4.
     Vec3 m_ambientFieldAnchor{};

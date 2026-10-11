@@ -4,7 +4,10 @@
 #include "luminumbra_common/world/ActiveRegionLedger.h"
 
 #include <array>
+#include <cstdint>
 #include <limits>
+#include <span>
+#include <string>
 
 namespace {
 using namespace Luminumbra::world;
@@ -382,6 +385,124 @@ TEST(ActiveRegionLedgerTest, CadenceRunsOnlyAtDerivedPhaseAndFailedFreezeLeavesL
                         [](RegionKey) -> std::uint64_t { throw std::runtime_error("IO failure"); }),
         std::runtime_error);
     EXPECT_EQ(ledger.encode(), before);
+}
+
+TEST(ActiveRegionLedgerTest, ValidAnchorBoundaries) {
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    const auto inf = std::numeric_limits<float>::infinity();
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(-16777216.0f, 0, -16777216.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(16777215.0f, 5, 16777215.0f)));
+    EXPECT_TRUE(ActiveRegionLedger::valid_anchor(Vec3(0, -1e30f, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(16777216.0f, 0, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, 16777216.0f)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(-16777218.0f, 0, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(nan, 0, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, 0, inf)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, nan, 0)));
+    EXPECT_FALSE(ActiveRegionLedger::valid_anchor(Vec3(0, -inf, 0)));
+}
+
+TEST(ActiveRegionLedgerTest, TrySetLocalAnchorDoesNotThrowAndKeepsPreviousAnchor) {
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    const auto inf = std::numeric_limits<float>::infinity();
+    ActiveRegionLedger ledger;
+    EXPECT_TRUE(ledger.try_set_local_anchor(Vec3(256, 0, 256)));
+    EXPECT_FALSE(ledger.try_set_local_anchor(Vec3(nan, 0, 0)));
+    EXPECT_FALSE(ledger.try_set_local_anchor(Vec3(inf, 0, 0)));
+    ASSERT_TRUE(ledger.local_anchor().has_value());
+    EXPECT_EQ(ledger.local_anchor()->x, 256.0f);
+    EXPECT_EQ(ledger.local_anchor()->z, 256.0f);
+}
+
+TEST(ActiveRegionLedgerTest, AcknowledgeWorldClockRaisesOnlyTheCeiling) {
+    ActiveRegionLedger ledger;
+    ledger.mark_edited(kFar, WorldClock{});
+    ledger.schedule(WorldClock(1));
+    const auto before = ledger.canonical_bytes();
+    ledger.acknowledge_world_clock(WorldClock(9));
+    EXPECT_EQ(ledger.header_tick(), 9u);
+    EXPECT_EQ(ledger.tick(), 1u);
+    EXPECT_EQ(ledger.canonical_bytes(), before);
+    ledger.acknowledge_world_clock(WorldClock(3));
+    EXPECT_EQ(ledger.header_tick(), 9u);
+    EXPECT_THROW(ledger.schedule(WorldClock(9)), std::invalid_argument);
+    EXPECT_NO_THROW(ledger.schedule(WorldClock(10)));
+}
+
+TEST(ActiveRegionLedgerTest, InvalidSchedulerInputsAreSkippedAndCounted) {
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    const std::array anchors{Vec3(256, 0, 256), Vec3(nan, 0, 0), Vec3(0, 0, 1e30f)};
+    const std::array work{RegionWork{kFar, 3, 0, 0, 0}, RegionWork{{999, 999}, 5, 0, 0, 0}};
+    const std::array clean{Vec3(256, 0, 256)};
+
+    ActiveRegionLedger ledger;
+    ledger.mark_edited(kFar, WorldClock{});
+    const auto first = ledger.schedule(WorldClock(1), std::span<const Vec3>(anchors), work);
+    EXPECT_EQ(first.rejected.anchors, 2u);
+    EXPECT_EQ(first.rejected.work, 1u);
+    EXPECT_EQ(first.rejected.capacity, 0u);
+    EXPECT_EQ(first.work, 3u);
+    EXPECT_TRUE(ledger.records().contains({0, 0}));
+    const auto next = ledger.schedule(WorldClock(2), std::span<const Vec3>(clean));
+    EXPECT_EQ(next.rejected, RegionRejections{});
+
+    ActiveRegionLedger twin;
+    twin.mark_edited(kFar, WorldClock{});
+    twin.schedule(WorldClock(1), std::span<const Vec3>(anchors), work);
+    const auto twin_next = twin.schedule(WorldClock(2), std::span<const Vec3>(clean));
+    EXPECT_EQ(next.digest, twin_next.digest);
+}
+
+TEST(ActiveRegionLedgerTest, RejectedCountsAreAppendedToTheTraceOnlyWhenNonZero) {
+    const std::array nan_anchor{Vec3(std::numeric_limits<float>::quiet_NaN(), 0, 0)};
+    ActiveRegionLedger a, b;
+    a.mark_edited(kFar, WorldClock{});
+    b.mark_edited(kFar, WorldClock{});
+    const auto clean = a.schedule(WorldClock(1), std::span<const Vec3>{});
+    const auto dirty = b.schedule(WorldClock(1), std::span<const Vec3>(nan_anchor));
+    EXPECT_NE(clean.digest, dirty.digest);
+    EXPECT_FALSE(clean.rejected.any());
+    EXPECT_EQ(dirty.rejected.anchors, 1u);
+    EXPECT_EQ(a.canonical_bytes(), b.canonical_bytes());
+}
+
+TEST(ActiveRegionLedgerTest, ScheduleTraceMatchesTheHandBuiltByteOracle) {
+    const auto put = [](std::string& out, std::uint64_t value, unsigned width) {
+        for (unsigned i = 0; i < width; ++i)
+            out.push_back(static_cast<char>((value >> (i * 8)) & 255));
+    };
+    // Expected trace: header, tick, work, one Active region at (0,0) ticked
+    // this tick, no transitions, then (only when rejected) three LE u32 counts.
+    const auto oracle = [&put](bool rejected_anchor) {
+        std::string trace = "region_schedule:v1:";
+        put(trace, 1, 8);
+        put(trace, 0, 8);
+        put(trace, 1, 4);
+        put(trace, 0, 4);
+        put(trace, 0, 4);
+        put(trace, 0, 1);
+        put(trace, 1, 1);
+        put(trace, 0, 4);
+        if (rejected_anchor) {
+            put(trace, 1, 4);
+            put(trace, 0, 4);
+            put(trace, 0, 4);
+        }
+        return Luminumbra::Persistence::StableChecksum(trace);
+    };
+    ActiveRegionLedger ledger;
+    ledger.pin({0, 0}, true, WorldClock{});
+    const auto s = ledger.schedule(WorldClock(1));
+    ASSERT_EQ(s.due.size(), 1u);
+    EXPECT_EQ(s.digest, oracle(false));
+
+    const std::array nan_anchor{Vec3(std::numeric_limits<float>::quiet_NaN(), 0, 0)};
+    ActiveRegionLedger rejected;
+    rejected.pin({0, 0}, true, WorldClock{});
+    const auto dirty = rejected.schedule(WorldClock(1), std::span<const Vec3>(nan_anchor));
+    ASSERT_EQ(dirty.due.size(), 1u);
+    EXPECT_EQ(dirty.rejected.anchors, 1u);
+    EXPECT_EQ(dirty.digest, oracle(true));
 }
 
 } // namespace

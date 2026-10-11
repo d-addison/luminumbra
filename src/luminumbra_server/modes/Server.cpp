@@ -18,5 +18,10 @@ int RunServer(const ServerCliOptions& options) {
                          report.autosave_passes);
 
     runner.Shutdown();
+    if (report.region_fault) {
+        LUMINUMBRA_CORE_ERROR("Headless server stopped by a region scheduler fault: {}",
+                              report.region_fault_message);
+        return 3;
+    }
     return report.ticks_executed == options.ticks ? 0 : 1;
 }
