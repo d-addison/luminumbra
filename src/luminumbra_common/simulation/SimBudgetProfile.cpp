@@ -38,8 +38,7 @@ bool IsName(std::string_view name) {
     if (name.empty() || name.size() > kMaxNameLength)
         return false;
     return std::all_of(name.begin(), name.end(), [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
-               c == '-';
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
     });
 }
 
@@ -102,8 +101,7 @@ public:
     bool end_array() override {
         return Fail(ProfileError::Malformed, "arrays are not allowed");
     }
-    bool parse_error(std::size_t, const std::string&,
-                     const nlohmann::detail::exception&) override {
+    bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception&) override {
         return Fail(ProfileError::Malformed, "invalid JSON");
     }
 
@@ -122,8 +120,11 @@ private:
 };
 
 // Reads a section of name -> unsigned integer members (stages or residency).
-bool ParseNamedCaps(const Json& node, std::string_view section, std::size_t max_entries,
-                    std::map<std::string, std::uint64_t>& out, ProfileParse& result) {
+bool ParseNamedCaps(const Json& node,
+                    std::string_view section,
+                    std::size_t max_entries,
+                    std::map<std::string, std::uint64_t>& out,
+                    ProfileParse& result) {
     if (!node.is_object()) {
         Reject(result, ProfileError::Malformed, std::string(section) + " must be an object");
         return false;
@@ -131,29 +132,35 @@ bool ParseNamedCaps(const Json& node, std::string_view section, std::size_t max_
     for (const auto& item : node.items()) {
         const std::string& name = item.key();
         if (!item.value().is_number_unsigned()) {
-            Reject(result, ProfileError::Malformed,
+            Reject(result,
+                   ProfileError::Malformed,
                    Quoted(name) + " in " + std::string(section) + " must be an unsigned integer");
             return false;
         }
         if (!IsName(name)) {
-            Reject(result, ProfileError::OutOfRange,
+            Reject(result,
+                   ProfileError::OutOfRange,
                    "invalid name " + Quoted(name) + " in " + std::string(section));
             return false;
         }
         out.emplace(name, item.value().get<std::uint64_t>());
     }
     if (out.size() > max_entries) {
-        Reject(result, ProfileError::TooLarge,
-               std::string(section) + " has more than " + std::to_string(max_entries) +
-                   " entries");
+        Reject(result,
+               ProfileError::TooLarge,
+               std::string(section) + " has more than " + std::to_string(max_entries) + " entries");
         return false;
     }
     return true;
 }
 
 // Reads one optional region_scheduler member. Returns false (with result set) on failure.
-bool ReadSchedulerMember(const Json& node, const char* key, std::uint64_t max_value,
-                         std::uint64_t min_value, std::uint64_t& out, ProfileParse& result) {
+bool ReadSchedulerMember(const Json& node,
+                         const char* key,
+                         std::uint64_t max_value,
+                         std::uint64_t min_value,
+                         std::uint64_t& out,
+                         ProfileParse& result) {
     const auto member = node.find(key);
     if (member == node.end())
         return true;
@@ -164,7 +171,8 @@ bool ReadSchedulerMember(const Json& node, const char* key, std::uint64_t max_va
     }
     const auto value = member->get<std::uint64_t>();
     if (value < min_value || value > max_value) {
-        Reject(result, ProfileError::OutOfRange,
+        Reject(result,
+               ProfileError::OutOfRange,
                name + " is outside " + std::to_string(min_value) + ".." +
                    std::to_string(max_value));
         return false;
@@ -205,8 +213,7 @@ ProfileParse ParseBody(const std::string& text) {
     const std::string_view version = schema->get_ref<const std::string&>();
     if (version != kSchemaV1) {
         if (version.starts_with(kSchemaPrefix))
-            Reject(result, ProfileError::FutureVersion,
-                   "unsupported schema " + Quoted(version));
+            Reject(result, ProfileError::FutureVersion, "unsupported schema " + Quoted(version));
         else
             Reject(result, ProfileError::Malformed, "unknown schema " + Quoted(version));
         return result;
@@ -214,8 +221,7 @@ ProfileParse ParseBody(const std::string& text) {
 
     for (const auto& item : doc.items()) {
         const std::string& key = item.key();
-        if (key != "schema" && key != "region_scheduler" && key != "stages" &&
-            key != "residency") {
+        if (key != "schema" && key != "region_scheduler" && key != "stages" && key != "residency") {
             Reject(result, ProfileError::UnknownKey, "unknown key " + Quoted(key));
             return result;
         }
@@ -229,58 +235,66 @@ ProfileParse ParseBody(const std::string& text) {
         for (const auto& item : node->items()) {
             const std::string& key = item.key();
             if (key != "work_limit" && key != "hold_ticks" && key != "reduced_shift") {
-                Reject(result, ProfileError::UnknownKey,
+                Reject(result,
+                       ProfileError::UnknownKey,
                        "unknown region_scheduler key " + Quoted(key));
                 return result;
             }
         }
         RegionSchedulerConfig config;
-        if (!ReadSchedulerMember(*node, "work_limit", std::numeric_limits<std::uint64_t>::max(),
-                                 0, config.work_limit, result))
+        if (!ReadSchedulerMember(*node,
+                                 "work_limit",
+                                 std::numeric_limits<std::uint64_t>::max(),
+                                 0,
+                                 config.work_limit,
+                                 result))
             return result;
         std::uint64_t hold_ticks = config.hold_ticks;
         if (!ReadSchedulerMember(*node, "hold_ticks", kMaxHoldTicks, 1, hold_ticks, result))
             return result;
         config.hold_ticks = static_cast<std::uint32_t>(hold_ticks);
         std::uint64_t reduced_shift = config.reduced_shift;
-        if (!ReadSchedulerMember(*node, "reduced_shift", kMaxReducedShift, 1, reduced_shift,
-                                 result))
+        if (!ReadSchedulerMember(
+                *node, "reduced_shift", kMaxReducedShift, 1, reduced_shift, result))
             return result;
         config.reduced_shift = static_cast<std::uint8_t>(reduced_shift);
         result.profile.region_scheduler = config;
     }
 
     if (const auto node = doc.find("stages"); node != doc.end()) {
-        if (!ParseNamedCaps(*node, "stages", kMaxProfileStages, result.profile.stage_max_work,
-                            result))
+        if (!ParseNamedCaps(
+                *node, "stages", kMaxProfileStages, result.profile.stage_max_work, result))
             return result;
     }
     if (const auto node = doc.find("residency"); node != doc.end()) {
-        if (!ParseNamedCaps(*node, "residency", kMaxProfileResidencyClasses,
-                            result.profile.residency_max_bytes, result))
+        if (!ParseNamedCaps(*node,
+                            "residency",
+                            kMaxProfileResidencyClasses,
+                            result.profile.residency_max_bytes,
+                            result))
             return result;
     }
     return result;
 }
 
-}  // namespace
+} // namespace
 
 std::string_view ProfileErrorName(ProfileError error) {
     switch (error) {
-    case ProfileError::None:
-        return "none";
-    case ProfileError::Malformed:
-        return "malformed";
-    case ProfileError::UnknownKey:
-        return "unknown_key";
-    case ProfileError::OutOfRange:
-        return "out_of_range";
-    case ProfileError::Duplicate:
-        return "duplicate";
-    case ProfileError::TooLarge:
-        return "too_large";
-    case ProfileError::FutureVersion:
-        return "future_version";
+        case ProfileError::None:
+            return "none";
+        case ProfileError::Malformed:
+            return "malformed";
+        case ProfileError::UnknownKey:
+            return "unknown_key";
+        case ProfileError::OutOfRange:
+            return "out_of_range";
+        case ProfileError::Duplicate:
+            return "duplicate";
+        case ProfileError::TooLarge:
+            return "too_large";
+        case ProfileError::FutureVersion:
+            return "future_version";
     }
     return "malformed";
 }
@@ -311,7 +325,8 @@ RegionSchedulerConfig ToRegionSchedulerConfig(const SimBudgetProfile& profile) {
     return RegionSchedulerConfig{};
 }
 
-BudgetVerdict EvaluateSimBudget(const SimBudgetProfile& profile, std::span<const StageTick> ticks,
+BudgetVerdict EvaluateSimBudget(const SimBudgetProfile& profile,
+                                std::span<const StageTick> ticks,
                                 std::span<const ResidencySample> samples) {
     BudgetVerdict verdict;
     std::set<std::string> observed_stages;
@@ -328,10 +343,11 @@ BudgetVerdict EvaluateSimBudget(const SimBudgetProfile& profile, std::span<const
         observed_classes.insert(sample.cls);
         const auto cap = profile.residency_max_bytes.find(sample.cls);
         if (cap != profile.residency_max_bytes.end() && sample.peak_bytes > cap->second)
-            verdict.violations.push_back({BudgetViolation::Kind::Residency, sample.cls, 0,
-                                          sample.peak_bytes, cap->second});
+            verdict.violations.push_back(
+                {BudgetViolation::Kind::Residency, sample.cls, 0, sample.peak_bytes, cap->second});
     }
-    std::sort(verdict.violations.begin(), verdict.violations.end(),
+    std::sort(verdict.violations.begin(),
+              verdict.violations.end(),
               [](const BudgetViolation& a, const BudgetViolation& b) {
                   return std::tie(a.kind, a.name, a.tick, a.observed, a.limit) <
                          std::tie(b.kind, b.name, b.tick, b.observed, b.limit);
@@ -352,4 +368,4 @@ BudgetVerdict EvaluateSimBudget(const SimBudgetProfile& profile, std::span<const
     return verdict;
 }
 
-}  // namespace luminumbra::simulation
+} // namespace luminumbra::simulation

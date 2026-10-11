@@ -30,13 +30,13 @@ std::string_view ProfileErrorName(ProfileError error);
 
 struct SimBudgetProfile {
     std::optional<Luminumbra::world::RegionSchedulerConfig> region_scheduler;
-    std::map<std::string, std::uint64_t> stage_max_work;       // stage name -> per-tick work cap
-    std::map<std::string, std::uint64_t> residency_max_bytes;  // class name -> peak byte cap
+    std::map<std::string, std::uint64_t> stage_max_work;      // stage name -> per-tick work cap
+    std::map<std::string, std::uint64_t> residency_max_bytes; // class name -> peak byte cap
 };
 
 struct ProfileParse {
     ProfileError error = ProfileError::None;
-    std::string detail;  // short human message naming the offending key when there is one
+    std::string detail; // short human message naming the offending key when there is one
     SimBudgetProfile profile;
 };
 
@@ -61,22 +61,26 @@ struct ResidencySample {
 };
 
 struct BudgetViolation {
-    enum class Kind : std::uint8_t { Stage, Residency };
+    enum class Kind : std::uint8_t {
+        Stage,
+        Residency
+    };
     Kind kind;
     std::string name;
-    std::uint64_t tick = 0;  // always 0 for Residency
+    std::uint64_t tick = 0; // always 0 for Residency
     std::uint64_t observed = 0;
     std::uint64_t limit = 0;
 };
 
 struct BudgetVerdict {
-    bool no_violation = true;       // no observed value exceeded a cap
-    bool coverage_complete = true;  // every profile stage and residency class was observed
-    std::vector<BudgetViolation> violations;  // sorted by (kind, name, tick)
-    std::vector<std::string> unevaluated;     // "stage:<name>" / "residency:<class>", sorted
+    bool no_violation = true;                // no observed value exceeded a cap
+    bool coverage_complete = true;           // every profile stage and residency class was observed
+    std::vector<BudgetViolation> violations; // sorted by (kind, name, tick)
+    std::vector<std::string> unevaluated;    // "stage:<name>" / "residency:<class>", sorted
 };
 
-BudgetVerdict EvaluateSimBudget(const SimBudgetProfile& profile, std::span<const StageTick> ticks,
+BudgetVerdict EvaluateSimBudget(const SimBudgetProfile& profile,
+                                std::span<const StageTick> ticks,
                                 std::span<const ResidencySample> samples);
 
-}  // namespace luminumbra::simulation
+} // namespace luminumbra::simulation

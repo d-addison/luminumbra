@@ -65,8 +65,7 @@ TEST(SimBudgetProfileTest, SchemaOnlyProfileParsesEmpty) {
 }
 
 TEST(SimBudgetProfileTest, OmittedWorkLimitIsUnlimitedAndAbsentSchedulerIsDefault) {
-    const auto partial = ParseSimBudgetProfile(
-        Profile(R"("region_scheduler":{"hold_ticks":4})"));
+    const auto partial = ParseSimBudgetProfile(Profile(R"("region_scheduler":{"hold_ticks":4})"));
     ASSERT_EQ(partial.error, ProfileError::None) << partial.detail;
     const auto config = ToRegionSchedulerConfig(partial.profile);
     EXPECT_EQ(config.work_limit, std::numeric_limits<std::uint64_t>::max());
@@ -97,19 +96,21 @@ TEST(SimBudgetProfileTest, RefusesMissingOrWrongSchema) {
 
 TEST(SimBudgetProfileTest, RefusesFutureVersion) {
     ExpectRefused(R"({"schema":"luminumbra.sim_budget_profile.v2"})",
-                  ProfileError::FutureVersion, "future_version");
+                  ProfileError::FutureVersion,
+                  "future_version");
 }
 
 TEST(SimBudgetProfileTest, RefusesUnknownKeys) {
     ExpectRefused(Profile(R"("extra":1)"), ProfileError::UnknownKey, "unknown_key");
-    ExpectRefused(Profile(R"("region_scheduler":{"speed":1})"), ProfileError::UnknownKey,
-                  "unknown_key");
+    ExpectRefused(
+        Profile(R"("region_scheduler":{"speed":1})"), ProfileError::UnknownKey, "unknown_key");
 }
 
 TEST(SimBudgetProfileTest, RefusesDuplicateKeys) {
     ExpectRefused(R"({"schema":"luminumbra.sim_budget_profile.v1",)"
                   R"("schema":"luminumbra.sim_budget_profile.v1"})",
-                  ProfileError::Duplicate, "duplicate");
+                  ProfileError::Duplicate,
+                  "duplicate");
     ExpectRefused(Profile(R"("stages":{"a":1,"a":2})"), ProfileError::Duplicate, "duplicate");
 }
 
@@ -132,19 +133,23 @@ TEST(SimBudgetProfileTest, RefusesArrays) {
 }
 
 TEST(SimBudgetProfileTest, RefusesOutOfRangeSchedulerValues) {
-    ExpectRefused(Profile(R"("region_scheduler":{"hold_ticks":0})"), ProfileError::OutOfRange,
+    ExpectRefused(Profile(R"("region_scheduler":{"hold_ticks":0})"),
+                  ProfileError::OutOfRange,
                   "out_of_range");
     ExpectRefused(Profile(R"("region_scheduler":{"reduced_shift":0})"),
-                  ProfileError::OutOfRange, "out_of_range");
+                  ProfileError::OutOfRange,
+                  "out_of_range");
     ExpectRefused(Profile(R"("region_scheduler":{"reduced_shift":17})"),
-                  ProfileError::OutOfRange, "out_of_range");
+                  ProfileError::OutOfRange,
+                  "out_of_range");
 }
 
 TEST(SimBudgetProfileTest, RefusesBadNames) {
     ExpectRefused(Profile(R"("stages":{"Upper":1})"), ProfileError::OutOfRange, "out_of_range");
     ExpectRefused(Profile(R"("stages":{"":1})"), ProfileError::OutOfRange, "out_of_range");
     const std::string longName(65, 'a');
-    ExpectRefused(Profile(R"("residency":{")" + longName + R"(":1})"), ProfileError::OutOfRange,
+    ExpectRefused(Profile(R"("residency":{")" + longName + R"(":1})"),
+                  ProfileError::OutOfRange,
                   "out_of_range");
 }
 
@@ -237,8 +242,7 @@ TEST(SimBudgetProfileTest, MissingStageAndClassAreUnevaluatedWithoutViolation) {
     const auto verdict = EvaluateSimBudget(profile, ticks, {});
     EXPECT_TRUE(verdict.no_violation);
     EXPECT_FALSE(verdict.coverage_complete);
-    EXPECT_EQ(verdict.unevaluated,
-              (std::vector<std::string>{"residency:c", "stage:b"}));
+    EXPECT_EQ(verdict.unevaluated, (std::vector<std::string>{"residency:c", "stage:b"}));
 }
 
 TEST(SimBudgetProfileTest, UnknownObservationNamesAreIgnored) {
@@ -279,8 +283,8 @@ TEST(SimBudgetProfileTest, SchedulerReductionFollowsConfiguredProfile) {
 }
 
 TEST(SimBudgetProfileTest, UnlimitedProfileNeverReducesSameTicks) {
-    const auto parsed = ParseSimBudgetProfile(
-        Profile(R"("region_scheduler":{"hold_ticks":2,"reduced_shift":2})"));
+    const auto parsed =
+        ParseSimBudgetProfile(Profile(R"("region_scheduler":{"hold_ticks":2,"reduced_shift":2})"));
     ASSERT_EQ(parsed.error, ProfileError::None) << parsed.detail;
     auto ledger = Distant(ToRegionSchedulerConfig(parsed.profile));
     for (std::uint64_t tick = 2; tick <= 5; ++tick) {
