@@ -1484,6 +1484,25 @@ bool FieldPagesMatchLedger(const world::FieldPageState& state,
             }
         }
     }
+    for (const auto& storm : state.storms()) {
+        if (ledger.records().count(storm.owner) == 0) {
+            AddError(errors, "corrupt field pages: orphaned storm");
+            return false;
+        }
+    }
+    for (const auto& strike : state.strikes()) {
+        if (ledger.records().count(strike.owner) == 0) {
+            AddError(errors, "corrupt field pages: orphaned strike");
+            return false;
+        }
+    }
+    for (const auto& [key, scent] : state.scent_cells()) {
+        (void)scent;
+        if (ledger.records().count(world::FieldPageState::region_of_scent_cell(key)) == 0) {
+            AddError(errors, "corrupt field pages: orphaned scent");
+            return false;
+        }
+    }
     return true;
 }
 } // namespace

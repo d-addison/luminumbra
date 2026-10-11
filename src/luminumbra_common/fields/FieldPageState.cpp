@@ -1,6 +1,8 @@
 #include "FieldPageState.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -8,6 +10,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -24,10 +27,11 @@ constexpr std::int64_t kPageSpan = FieldPageState::kPageCells;
 constexpr std::int64_t kMinCellIndex = FieldPageState::kMinCell;
 constexpr std::int64_t kMaxCellIndex = FieldPageState::kMaxCell;
 
-// FPG1 layout: header (magic, version, channel count, page count), pages, FNV-1a footer.
+// FPG1 v2: magic/version/channel mask/section count, ascending typed sections, FNV footer.
 constexpr const char* kMagic = "FPG1";
-constexpr std::uint64_t kFormatVersion = 1;
+constexpr std::uint64_t kFormatVersion = 2;
 constexpr std::uint64_t kChannelCount = 5;
+constexpr std::uint64_t kChannelMask = 31;
 constexpr std::size_t kHeaderBytes = 12;
 constexpr std::size_t kFooterBytes = 8;
 // key (i32 x, i32 z) + 4 x u64 mask + 5 x 256 x u16 cells.
@@ -39,9 +43,6 @@ constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
 
 static_assert(FieldPageState::kChannels == static_cast<int>(kChannelCount));
 static_assert(kPageBytes == 2600);
-static_assert(FieldPageState::kMaxFileBytes ==
-              kHeaderBytes + FieldPageState::kMaxPages * kPageBytes + kFooterBytes);
-
 // A cell's page and its bit / slot position inside that page.
 struct CellSlot {
     FieldPageKey key;
@@ -210,53 +211,6 @@ void AppendPage(std::string& out, const FieldPageKey& key, const FieldPage& page
     AppendCells(out, page);
 }
 
-// Header checks: size cap, magic, version, channel count and page count cap.
-bool CheckHeader(const std::string& bytes, std::uint64_t& page_count, std::string& error) {
-    if (bytes.empty()) {
-        error = "field pages: empty input";
-        return false;
-    }
-    if (bytes.size() > FieldPageState::kMaxFileBytes) {
-        error = "field pages: file exceeds size cap";
-        return false;
-    }
-    if (bytes.size() < kHeaderBytes + kFooterBytes) {
-        error = "field pages: truncated";
-        return false;
-    }
-    if (bytes.compare(0, 4, kMagic) != 0) {
-        error = "field pages: wrong magic";
-        return false;
-    }
-    if (ReadLe(bytes, 4, 2) != kFormatVersion || ReadLe(bytes, 6, 2) != kChannelCount) {
-        error = "field pages: wrong version or channel count";
-        return false;
-    }
-    page_count = ReadLe(bytes, 8, 4);
-    if (page_count > FieldPageState::kMaxPages) {
-        error = "field pages: page count exceeds cap";
-        return false;
-    }
-    return true;
-}
-
-// Exact length for the declared page count, then the FNV-1a footer over everything before it.
-bool CheckLengthAndFooter(const std::string& bytes, std::uint64_t page_count, std::string& error) {
-    const std::size_t expected =
-        kHeaderBytes + static_cast<std::size_t>(page_count) * kPageBytes + kFooterBytes;
-    if (bytes.size() != expected) {
-        error = "field pages: length does not match page count";
-        return false;
-    }
-    const std::size_t footer_at = bytes.size() - kFooterBytes;
-    const std::string_view body = std::string_view(bytes).substr(0, footer_at);
-    if (ReadLe(bytes, footer_at, 8) != Fnv1a64(body)) {
-        error = "field pages: footer mismatch";
-        return false;
-    }
-    return true;
-}
-
 // Pure decode of one page record at `offset`. Validation happens separately.
 void DecodePage(const std::string& bytes, std::size_t offset, FieldPageKey& key, FieldPage& page) {
     key.x = static_cast<std::int32_t>(static_cast<std::uint32_t>(ReadLe(bytes, offset, 4)));
@@ -335,13 +289,14 @@ bool CheckPage(const FieldPageKey& key, const FieldPage& page, std::string& erro
 // Decodes and validates every page record in key order into `pages`.
 bool DecodePages(const std::string& bytes,
                  std::size_t page_count,
+                 std::size_t records_at,
                  PageMap& pages,
                  std::string& error) {
     FieldPageKey previous;
     for (std::size_t index = 0; index < page_count; ++index) {
         FieldPageKey key;
         FieldPage page;
-        DecodePage(bytes, kHeaderBytes + index * kPageBytes, key, page);
+        DecodePage(bytes, records_at + index * kPageBytes, key, page);
         if (index > 0 && key <= previous) {
             error = "field pages: keys not strictly ascending";
             return false;
@@ -355,16 +310,105 @@ bool DecodePages(const std::string& bytes,
     return true;
 }
 
-bool DecodeFile(const std::string& bytes, PageMap& pages, std::string& error) {
-    std::uint64_t page_count = 0;
-    if (!CheckHeader(bytes, page_count, error)) {
-        return false;
-    }
-    if (!CheckLengthAndFooter(bytes, page_count, error)) {
-        return false;
-    }
-    return DecodePages(bytes, static_cast<std::size_t>(page_count), pages, error);
+bool ValidOwner(RegionKey key) {
+    return key.x >= -32768 && key.x < 32768 && key.z >= -32768 && key.z < 32768;
 }
+bool ValidPosition(std::uint32_t bits) {
+    const float value = std::bit_cast<float>(bits);
+    return std::isfinite(value) && value >= -16777216.0f && value < 16777216.0f;
+}
+bool ValidUnit(std::uint32_t bits) {
+    const float value = std::bit_cast<float>(bits);
+    return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+}
+bool ValidStorm(const RegionalStorm& storm) {
+    return ValidOwner(storm.owner) && ValidPosition(storm.center_x) &&
+           ValidPosition(storm.center_z) && std::isfinite(std::bit_cast<float>(storm.velocity_x)) &&
+           std::isfinite(std::bit_cast<float>(storm.velocity_z)) && ValidUnit(storm.intensity) &&
+           storm.lifetime_ticks != 0 && storm.active_age < storm.lifetime_ticks &&
+           storm.spawn_tick < WorldClock::kTickLimit;
+}
+bool ValidStrike(const RegionalStrike& strike) {
+    return ValidOwner(strike.owner) && ValidPosition(strike.world_x) &&
+           ValidPosition(strike.world_z) && ValidUnit(strike.magnitude) &&
+           strike.strike_tick < WorldClock::kTickLimit;
+}
+auto StormOrder(const RegionalStorm& storm) {
+    return std::tuple(storm.spawn_tick, storm.owner, storm.seed_salt);
+}
+auto StrikeOrder(const RegionalStrike& strike) {
+    return std::tuple(
+        strike.strike_tick, strike.owner, strike.storm_salt, strike.world_x, strike.world_z);
+}
+bool ValidScent(ScentCellKey key, const ScentCell& cell) {
+    if (key.x < -16777216 || key.x >= 16777216 || key.z < -16777216 || key.z >= 16777216)
+        return false;
+    for (const auto bits : cell) {
+        const double value = std::bit_cast<double>(bits);
+        // Negative zero is an alternate empty encoding, so refuse it explicitly.
+        if (!std::isfinite(value) || value < 0 || value > 1.0e6 || (value == 0 && bits != 0))
+            return false;
+    }
+    return true;
+}
+void AppendOwner(std::string& out, RegionKey key) {
+    AppendLe(out, static_cast<std::uint32_t>(key.x), 4);
+    AppendLe(out, static_cast<std::uint32_t>(key.z), 4);
+}
+void AppendStorm(std::string& out, const RegionalStorm& storm) {
+    AppendOwner(out, storm.owner);
+    for (const auto bits :
+         {storm.center_x, storm.center_z, storm.velocity_x, storm.velocity_z, storm.intensity})
+        AppendLe(out, bits, 4);
+    AppendLe(out, storm.spawn_tick, 8);
+    for (const auto value : {storm.lifetime_ticks, storm.seed_salt, storm.active_age})
+        AppendLe(out, value, 4);
+}
+void AppendStrike(std::string& out, const RegionalStrike& strike) {
+    AppendOwner(out, strike.owner);
+    AppendLe(out, strike.strike_tick, 8);
+    for (const auto value :
+         {strike.world_x, strike.world_z, strike.magnitude, strike.storm_salt, strike.active_age})
+        AppendLe(out, value, 4);
+}
+void AppendScent(std::string& out, ScentCellKey key, const ScentCell& cell) {
+    AppendLe(out, static_cast<std::uint32_t>(key.x), 4);
+    AppendLe(out, static_cast<std::uint32_t>(key.z), 4);
+    for (const auto bits : cell)
+        AppendLe(out, bits, 8);
+}
+void AppendSection(std::string& out,
+                   std::uint16_t type,
+                   std::size_t count,
+                   const std::string& records) {
+    if (count == 0)
+        return;
+    AppendLe(out, type, 2);
+    AppendLe(out, records.size() + 4, 4);
+    AppendLe(out, count, 4);
+    out += records;
+}
+class SectionReader {
+public:
+    SectionReader(const std::string& bytes, std::size_t at)
+        : m_bytes(bytes)
+        , m_at(at) {}
+    std::uint64_t read(std::size_t width) {
+        const auto result = ReadLe(m_bytes, m_at, width);
+        m_at += width;
+        return result;
+    }
+    std::uint32_t word() {
+        return static_cast<std::uint32_t>(read(4));
+    }
+    RegionKey owner() {
+        return {std::bit_cast<std::int32_t>(word()), std::bit_cast<std::int32_t>(word())};
+    }
+
+private:
+    const std::string& m_bytes;
+    std::size_t m_at;
+};
 
 } // namespace
 
@@ -465,45 +509,264 @@ FieldPageState::step_region(RegionKey key, std::uint64_t world_seed, std::uint64
     return stepped;
 }
 
-std::string FieldPageState::serialize() const {
-    if (m_pages.empty()) {
-        return {};
+std::map<RegionKey, std::uint64_t>
+FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& records,
+                               std::span<const RegionKey> due,
+                               std::uint64_t world_seed,
+                               std::uint64_t tick) {
+    const PageMap previous = m_pages;
+    const std::set<RegionKey> due_keys(due.begin(), due.end());
+    std::map<RegionKey, std::uint64_t> work;
+    const auto eligible = [&records](RegionKey owner) {
+        const auto found = records.find(owner);
+        return found != records.end() && found->second.state != RegionState::Frozen;
+    };
+    // Seed relaxation uses only the sealed old values, even when an adjacent region's
+    // interior phase differs. No consumer observes a partially updated neighbour.
+    for (const auto& [page_key, old_page] : previous) {
+        for (std::size_t i = 0; i < FieldPage::kCells; ++i) {
+            if (!CellBit(old_page, i))
+                continue;
+            const auto x = page_key.x * kPageCells + static_cast<std::int32_t>(i % kPageCells);
+            const auto z = page_key.z * kPageCells + static_cast<std::int32_t>(i / kPageCells);
+            const RegionKey owner = region_of_cell(x, z);
+            if (!eligible(owner) || !due_keys.contains(owner))
+                continue;
+            FieldPage& page = m_pages.at(page_key);
+            for (int channel = 0; channel < kChannels; ++channel)
+                page.cells[channel][i] =
+                    RelaxToward(old_page.cells[channel][i],
+                                seed_value(world_seed, channel, x, z, tick / kCadenceTicks));
+            ++work[owner];
+        }
     }
-    std::string out = kMagic;
-    AppendLe(out, kFormatVersion, 2);
-    AppendLe(out, kChannelCount, 2);
-    AppendLe(out, static_cast<std::uint64_t>(m_pages.size()), 4);
-    for (const auto& [key, page] : m_pages) {
-        AppendPage(out, key, page);
+    // Visit every undirected edge once, in page/cell order, and transfer equal/opposite
+    // integer fluxes. The 1/32 edge coefficient plus 1/16 relaxation is a bounded convex
+    // update, so all intermediate and final concentrations remain representable as u16.
+    for (const auto& [page_key, old_page] : previous) {
+        for (std::size_t i = 0; i < FieldPage::kCells; ++i) {
+            if (!CellBit(old_page, i))
+                continue;
+            const auto x = page_key.x * kPageCells + static_cast<std::int32_t>(i % kPageCells);
+            const auto z = page_key.z * kPageCells + static_cast<std::int32_t>(i / kPageCells);
+            const RegionKey owner = region_of_cell(x, z);
+            if (!eligible(owner))
+                continue;
+            for (const auto [dx, dz] : {std::pair{1, 0}, std::pair{0, 1}}) {
+                const CellSlot neighbour = CellSlotOf(x + dx, z + dz);
+                const auto* old_neighbour = InitializedPage(previous, neighbour);
+                const RegionKey other = region_of_cell(x + dx, z + dz);
+                if (!old_neighbour || !eligible(other))
+                    continue;
+                if (owner == other) {
+                    if (!due_keys.contains(owner))
+                        continue;
+                } else {
+                    const auto shift =
+                        std::max(records.at(owner).cadence_shift, records.at(other).cadence_shift);
+                    if (shift >= 63 || (tick & ((std::uint64_t{1} << shift) - 1)) != 0)
+                        continue;
+                }
+                auto& here = m_pages.at(page_key);
+                auto& there = m_pages.at(neighbour.key);
+                for (int channel = 0; channel < kChannels; ++channel) {
+                    const auto difference =
+                        static_cast<std::int32_t>(old_neighbour->cells[channel][neighbour.index]) -
+                        static_cast<std::int32_t>(old_page.cells[channel][i]);
+                    const auto flux = difference / 32;
+                    here.cells[channel][i] =
+                        static_cast<std::uint16_t>(here.cells[channel][i] + flux);
+                    there.cells[channel][neighbour.index] =
+                        static_cast<std::uint16_t>(there.cells[channel][neighbour.index] - flux);
+                }
+                ++work[owner];
+                ++work[other];
+            }
+        }
     }
-    const std::uint64_t footer = Fnv1a64(out);
-    AppendLe(out, footer, 8);
-    return out;
+    return work;
 }
 
+bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
+                                     std::vector<RegionalStrike> strikes) {
+    if (storms.size() > kMaxStorms || strikes.size() > kMaxStrikes ||
+        !std::all_of(storms.begin(), storms.end(), ValidStorm) ||
+        !std::all_of(strikes.begin(), strikes.end(), ValidStrike))
+        return false;
+    std::sort(storms.begin(), storms.end(), [](const auto& a, const auto& b) {
+        return StormOrder(a) < StormOrder(b);
+    });
+    std::sort(strikes.begin(), strikes.end(), [](const auto& a, const auto& b) {
+        return StrikeOrder(a) < StrikeOrder(b);
+    });
+    for (std::size_t i = 1; i < storms.size(); ++i)
+        if (StormOrder(storms[i - 1]) == StormOrder(storms[i]))
+            return false;
+    for (std::size_t i = 1; i < strikes.size(); ++i)
+        if (StrikeOrder(strikes[i - 1]) == StrikeOrder(strikes[i]))
+            return false;
+    m_storms = std::move(storms);
+    m_strikes = std::move(strikes);
+    return true;
+}
+bool FieldPageState::set_scent(ScentCellKey key, const ScentCell& values) {
+    if (!ValidScent(key, values))
+        return false;
+    const bool zero =
+        std::all_of(values.begin(), values.end(), [](auto bits) { return bits == 0; });
+    if (zero) {
+        m_scent.erase(key);
+        return true;
+    }
+    if (!m_scent.contains(key) && m_scent.size() == kMaxScentCells)
+        return false;
+    m_scent[key] = values;
+    return true;
+}
+RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
+    return {static_cast<std::int32_t>(
+                FloorDiv(static_cast<std::int64_t>(key.x) * 1000 + 500, kRegionMm)),
+            static_cast<std::int32_t>(
+                FloorDiv(static_cast<std::int64_t>(key.z) * 1000 + 500, kRegionMm))};
+}
+bool FieldPageState::owns_evolution_state(RegionKey key) const {
+    for (const auto& storm : m_storms)
+        if (storm.owner == key)
+            return true;
+    for (const auto& strike : m_strikes)
+        if (strike.owner == key)
+            return true;
+    for (const auto& [cell, values] : m_scent) {
+        (void)values;
+        if (region_of_scent_cell(cell) == key)
+            return true;
+    }
+    return false;
+}
+std::string FieldPageState::serialize() const {
+    if (empty())
+        return {};
+    std::string out = kMagic;
+    AppendLe(out, kFormatVersion, 2);
+    AppendLe(out, kChannelMask, 2);
+    AppendLe(out,
+             static_cast<unsigned>(!m_pages.empty()) + static_cast<unsigned>(!m_storms.empty()) +
+                 static_cast<unsigned>(!m_strikes.empty()) +
+                 static_cast<unsigned>(!m_scent.empty()),
+             4);
+    std::string records;
+    for (const auto& [key, page] : m_pages)
+        AppendPage(records, key, page);
+    AppendSection(out, 1, m_pages.size(), records);
+    records.clear();
+    for (const auto& storm : m_storms)
+        AppendStorm(records, storm);
+    AppendSection(out, 2, m_storms.size(), records);
+    records.clear();
+    for (const auto& strike : m_strikes)
+        AppendStrike(records, strike);
+    AppendSection(out, 3, m_strikes.size(), records);
+    records.clear();
+    for (const auto& [key, cell] : m_scent)
+        AppendScent(records, key, cell);
+    AppendSection(out, 4, m_scent.size(), records);
+    AppendLe(out, Fnv1a64(out), 8);
+    return out;
+}
 bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::string& error) {
+    error = "field pages: corrupt typed record";
     try {
+        if (bytes.size() < kHeaderBytes + kFooterBytes || bytes.size() > kMaxFileBytes ||
+            bytes.compare(0, 4, kMagic) != 0 || ReadLe(bytes, 4, 2) != kFormatVersion ||
+            ReadLe(bytes, 6, 2) != kChannelMask)
+            return false;
+        const auto footer = bytes.size() - kFooterBytes;
+        if (ReadLe(bytes, footer, 8) != Fnv1a64(std::string_view(bytes).substr(0, footer)))
+            return false;
+        const auto sections = ReadLe(bytes, 8, 4);
+        if (sections == 0 || sections > 4)
+            return false;
         FieldPageState temporary;
-        if (!DecodeFile(bytes, temporary.m_pages, error)) {
-            return false;
+        std::size_t at = kHeaderBytes;
+        std::uint64_t previous = 0;
+        for (std::uint64_t section = 0; section < sections; ++section) {
+            if (footer - at < 10)
+                return false;
+            const auto type = ReadLe(bytes, at, 2), length = ReadLe(bytes, at + 2, 4),
+                       count = ReadLe(bytes, at + 6, 4);
+            if (type <= previous || type > 4 || length < 4 || length > footer - at - 6 ||
+                count == 0)
+                return false;
+            previous = type;
+            const std::size_t width = type == 1 ? kPageBytes : type == 2 ? 48 : type == 3 ? 36 : 40;
+            const std::size_t cap = type == 1   ? kMaxPages
+                                    : type == 2 ? kMaxStorms
+                                    : type == 3 ? kMaxStrikes
+                                                : kMaxScentCells;
+            if (count > cap || length != 4 + count * width)
+                return false;
+            const auto records_at = at + 10;
+            if (type == 1) {
+                if (!DecodePages(bytes,
+                                 static_cast<std::size_t>(count),
+                                 records_at,
+                                 temporary.m_pages,
+                                 error))
+                    return false;
+            } else {
+                SectionReader reader(bytes, records_at);
+                for (std::uint64_t entry = 0; entry < count; ++entry) {
+                    if (type == 2) {
+                        RegionalStorm storm;
+                        storm.owner = reader.owner();
+                        storm.center_x = reader.word();
+                        storm.center_z = reader.word();
+                        storm.velocity_x = reader.word();
+                        storm.velocity_z = reader.word();
+                        storm.intensity = reader.word();
+                        storm.spawn_tick = reader.read(8);
+                        storm.lifetime_ticks = reader.word();
+                        storm.seed_salt = reader.word();
+                        storm.active_age = reader.word();
+                        temporary.m_storms.push_back(storm);
+                    } else if (type == 3) {
+                        RegionalStrike strike;
+                        strike.owner = reader.owner();
+                        strike.strike_tick = reader.read(8);
+                        strike.world_x = reader.word();
+                        strike.world_z = reader.word();
+                        strike.magnitude = reader.word();
+                        strike.storm_salt = reader.word();
+                        strike.active_age = reader.word();
+                        temporary.m_strikes.push_back(strike);
+                    } else {
+                        const ScentCellKey key{std::bit_cast<std::int32_t>(reader.word()),
+                                               std::bit_cast<std::int32_t>(reader.word())};
+                        ScentCell values{};
+                        for (auto& value : values)
+                            value = reader.read(8);
+                        if (!temporary.set_scent(key, values))
+                            return false;
+                    }
+                }
+            }
+            at += 6 + static_cast<std::size_t>(length);
         }
-        if (temporary.serialize() != bytes) {
-            error = "field pages: bytes are not canonical";
+        if (at != footer || !temporary.replace_weather(temporary.m_storms, temporary.m_strikes) ||
+            temporary.serialize() != bytes)
             return false;
-        }
         out = std::move(temporary);
+        error.clear();
         return true;
     } catch (const std::exception&) {
-        error = "field pages: parse exception";
         return false;
     }
 }
 
 std::string FieldPageState::canonical_bytes() const {
-    if (m_pages.empty()) {
+    if (empty())
         return {};
-    }
-    return "field_pages:v1:" + serialize();
+    return "field_pages:v2:" + serialize();
 }
 
 std::string FieldPageState::region_bytes(RegionKey key) const {
@@ -519,6 +782,29 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
         for (const auto& channel : page->cells) {
             AppendLe(out, channel[slot.index], 2);
         }
+    }
+    std::string storms, strikes, scent;
+    std::size_t storm_count = 0, strike_count = 0, scent_count = 0;
+    for (const auto& storm : m_storms)
+        if (storm.owner == key) {
+            AppendStorm(storms, storm);
+            ++storm_count;
+        }
+    for (const auto& strike : m_strikes)
+        if (strike.owner == key) {
+            AppendStrike(strikes, strike);
+            ++strike_count;
+        }
+    for (const auto& [cell, values] : m_scent)
+        if (region_of_scent_cell(cell) == key) {
+            AppendScent(scent, cell, values);
+            ++scent_count;
+        }
+    if (storm_count + strike_count + scent_count != 0) {
+        out += "|evolution:v2:";
+        AppendSection(out, 2, storm_count, storms);
+        AppendSection(out, 3, strike_count, strikes);
+        AppendSection(out, 4, scent_count, scent);
     }
     return out;
 }

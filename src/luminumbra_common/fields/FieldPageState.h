@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +32,27 @@ struct FieldPage {
     bool operator==(const FieldPage&) const = default;
 };
 
+// Exact evolution state. Binary32/binary64 bits are encoded explicitly; no compiler struct layout
+// appears in the file. Owners and active ages keep frozen state independent of absolute time.
+struct RegionalStorm {
+    RegionKey owner;
+    std::uint32_t center_x = 0, center_z = 0, velocity_x = 0, velocity_z = 0, intensity = 0;
+    std::uint64_t spawn_tick = 0;
+    std::uint32_t lifetime_ticks = 0, seed_salt = 0, active_age = 0;
+    bool operator==(const RegionalStorm&) const = default;
+};
+struct RegionalStrike {
+    RegionKey owner;
+    std::uint64_t strike_tick = 0;
+    std::uint32_t world_x = 0, world_z = 0, magnitude = 0, storm_salt = 0, active_age = 0;
+    bool operator==(const RegionalStrike&) const = default;
+};
+struct ScentCellKey {
+    std::int32_t x = 0, z = 0; // Existing scent geometry: one-metre world cells.
+    auto operator<=>(const ScentCellKey&) const = default;
+};
+using ScentCell = std::array<std::uint64_t, 4>; // exact finite, nonnegative binary64 concentrations
+
 class FieldPageState {
 public:
     static constexpr std::int64_t kCellMm = 24'000;
@@ -41,8 +63,8 @@ public:
     static constexpr std::uint64_t kSeedOffset = 39;
     static constexpr unsigned kRelaxShift = 4;
     static constexpr std::size_t kMaxPages = 16384;
-    // header 12 + pages * 2600 + footer 8
-    static constexpr std::size_t kMaxFileBytes = 12 + kMaxPages * 2600 + 8;
+    static constexpr std::size_t kMaxStorms = 16, kMaxStrikes = 32, kMaxScentCells = 65536;
+    static constexpr std::size_t kMaxFileBytes = 64u * 1024u * 1024u;
     // Valid cell indices (interval intersection, never per-endpoint clamping): the centre must
     // satisfy -16'777'216'000 <= centre_mm < 16'777'216'000.
     static constexpr std::int32_t kMinCell = -699'051;
@@ -63,7 +85,7 @@ public:
                                                   std::uint64_t epoch);
 
     [[nodiscard]] bool empty() const {
-        return m_pages.empty();
+        return m_pages.empty() && m_storms.empty() && m_strikes.empty() && m_scent.empty();
     }
     [[nodiscard]] std::size_t page_count() const {
         return m_pages.size();
@@ -73,7 +95,25 @@ public:
     }
     void clear() {
         m_pages.clear();
+        m_storms.clear();
+        m_strikes.clear();
+        m_scent.clear();
     }
+
+    [[nodiscard]] const std::vector<RegionalStorm>& storms() const {
+        return m_storms;
+    }
+    [[nodiscard]] const std::vector<RegionalStrike>& strikes() const {
+        return m_strikes;
+    }
+    [[nodiscard]] const std::map<ScentCellKey, ScentCell>& scent_cells() const {
+        return m_scent;
+    }
+    // Transactional admission, canonical ordering and bounded exact-state validation.
+    bool replace_weather(std::vector<RegionalStorm> storms, std::vector<RegionalStrike> strikes);
+    bool set_scent(ScentCellKey key, const ScentCell& values);
+    [[nodiscard]] static RegionKey region_of_scent_cell(ScentCellKey key);
+    [[nodiscard]] bool owns_evolution_state(RegionKey key) const;
 
     // True when the cell exists and is initialized.
     [[nodiscard]] bool initialized(std::int32_t cell_x, std::int32_t cell_z) const;
@@ -83,7 +123,7 @@ public:
     // Number of initialized cells owned by `key`.
     [[nodiscard]] std::size_t owned_initialized_cells(RegionKey key) const;
     [[nodiscard]] bool owns_region(RegionKey key) const {
-        return owned_initialized_cells(key) != 0;
+        return owned_initialized_cells(key) != 0 || owns_evolution_state(key);
     }
 
     // Seeds every uninitialized cell owned by `key` with seed_value(.., tick / kCadenceTicks).
@@ -96,12 +136,21 @@ public:
     // seed_value(.., tick / kCadenceTicks). Returns the number of cells stepped.
     std::uint64_t step_region(RegionKey key, std::uint64_t world_seed, std::uint64_t tick);
 
+    // One sealed previous-state pass. Interiors follow the due list; cross-owner edges follow
+    // global common phase independently of each owner's interior phase. Frozen or absent
+    // neighbours never exchange. Counts include each actual interior/edge update per owner.
+    [[nodiscard]] std::map<RegionKey, std::uint64_t>
+    step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& records,
+                   std::span<const RegionKey> due,
+                   std::uint64_t world_seed,
+                   std::uint64_t tick);
+
     // FPG1 file bytes. Empty string for an empty store (an empty store writes no file).
     [[nodiscard]] std::string serialize() const;
     // Strict transactional parse; `out` is untouched and `error` set on any failure. Every
     // initialized cell must lie in [kMinCell, kMaxCell] in both axes.
     static bool parse(const std::string& bytes, FieldPageState& out, std::string& error);
-    // "" when empty, otherwise "field_pages:v1:" + serialize().
+    // "" when empty, otherwise "field_pages:v2:" + serialize().
     [[nodiscard]] std::string canonical_bytes() const;
     // "" when `key` owns no initialized cell, otherwise for every owned initialized cell in
     // cells_of_region order: i32 cell_x, i32 cell_z, then kChannels u16 (all little endian).
@@ -109,6 +158,9 @@ public:
 
 private:
     std::map<FieldPageKey, FieldPage> m_pages;
+    std::vector<RegionalStorm> m_storms;
+    std::vector<RegionalStrike> m_strikes;
+    std::map<ScentCellKey, ScentCell> m_scent;
 };
 
 } // namespace Luminumbra::world

@@ -2,8 +2,10 @@
 
 #include "luminumbra_common/fields/FieldPageState.h"
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <set>
 #include <string>
 #include <string_view>
@@ -18,10 +20,10 @@ using Cell = std::pair<std::int32_t, std::int32_t>;
 constexpr std::uint64_t kSeed = 1337;
 constexpr std::int32_t kMin = FieldPageState::kMinCell;
 constexpr std::int32_t kMax = FieldPageState::kMaxCell;
-// Offsets inside an FPG1 file: 12-byte header, then 2600-byte page records.
+// FPG1 v2 ambient section: 12-byte file header + 10-byte typed section header.
 constexpr std::size_t kHeaderBytes = 12;
 constexpr std::size_t kPageBytes = 2600;
-constexpr std::size_t kPage0 = kHeaderBytes;
+constexpr std::size_t kPage0 = kHeaderBytes + 10;
 constexpr std::size_t kMaskOffset = 8;
 constexpr std::size_t kChannelCount = static_cast<std::size_t>(FieldPageState::kChannels);
 
@@ -342,7 +344,7 @@ TEST(FieldPageStateTest, EmptyStoreWritesNothing) {
 TEST(FieldPageStateTest, CanonicalAndRegionBytesAreStableAndFollowCellChanges) {
     FieldPageState store = ActivatedStore();
     const std::string canonical = store.canonical_bytes();
-    EXPECT_EQ(canonical, std::string("field_pages:v1:") + store.serialize());
+    EXPECT_EQ(canonical, std::string("field_pages:v2:") + store.serialize());
     EXPECT_EQ(store.canonical_bytes(), canonical);
 
     const std::string region = store.region_bytes(RegionKey{0, 0});
@@ -367,7 +369,7 @@ TEST(FieldPageStateTest, ParseRefusesWrongMagicVersionAndChannelCount) {
     EXPECT_TRUE(RefusedUntouched(bytes));
 
     bytes = FourPageFile();
-    WriteU(bytes, 4, 2, 2);
+    WriteU(bytes, 4, 1, 2);
     Reseal(bytes);
     EXPECT_TRUE(RefusedUntouched(bytes));
 
@@ -379,7 +381,7 @@ TEST(FieldPageStateTest, ParseRefusesWrongMagicVersionAndChannelCount) {
 
 TEST(FieldPageStateTest, ParseRefusesPageCountAboveCap) {
     std::string bytes = FourPageFile();
-    WriteU(bytes, 8, FieldPageState::kMaxPages + 1, 4);
+    WriteU(bytes, kHeaderBytes + 6, FieldPageState::kMaxPages + 1, 4);
     Reseal(bytes);
     EXPECT_TRUE(RefusedUntouched(bytes));
 }
@@ -430,7 +432,7 @@ TEST(FieldPageStateTest, ParseRefusesAnInitializedCellOutsideTheValidRange) {
 }
 
 TEST(FieldPageStateTest, ParseRefusesAZeroPageFile) {
-    const char header[] = {'F', 'P', 'G', '1', 1, 0, 5, 0, 0, 0, 0, 0};
+    const char header[] = {'F', 'P', 'G', '1', 2, 0, 31, 0, 0, 0, 0, 0};
     std::string bytes(header, sizeof(header));
     bytes.append(8, '\0');
     Reseal(bytes);
@@ -443,4 +445,107 @@ TEST(FieldPageStateTest, ParseAcceptsTheUntouchedFourPageFile) {
     std::string error;
     EXPECT_TRUE(FieldPageState::parse(bytes, loaded, error)) << error;
     EXPECT_EQ(loaded.page_count(), 4u);
+}
+
+TEST(FieldPageStateTest, TypedEvolutionSectionsRoundTripExactBitsWithoutAmbientPages) {
+    FieldPageState store;
+    RegionalStorm storm;
+    storm.owner = {3, -4};
+    storm.center_x = std::bit_cast<std::uint32_t>(1600.25f);
+    storm.center_z = std::bit_cast<std::uint32_t>(-1800.5f);
+    storm.velocity_x = std::bit_cast<std::uint32_t>(-3.125f);
+    storm.velocity_z = std::bit_cast<std::uint32_t>(2.5f);
+    storm.intensity = std::bit_cast<std::uint32_t>(0.75f);
+    storm.spawn_tick = 20;
+    storm.lifetime_ticks = 100;
+    storm.active_age = 9;
+    storm.seed_salt = 31;
+    RegionalStrike strike;
+    strike.owner = storm.owner;
+    strike.strike_tick = 29;
+    strike.world_x = storm.center_x;
+    strike.world_z = storm.center_z;
+    strike.magnitude = std::bit_cast<std::uint32_t>(0.5f);
+    strike.storm_salt = 31;
+    strike.active_age = 1;
+    ASSERT_TRUE(store.replace_weather({storm}, {strike}));
+    const ScentCell values{
+        std::bit_cast<std::uint64_t>(0.125), std::bit_cast<std::uint64_t>(100.5), 0, 0};
+    ASSERT_TRUE(store.set_scent({-1, 512}, values));
+    EXPECT_TRUE(store.owns_region(storm.owner));
+    EXPECT_TRUE(store.owns_region({-1, 1}));
+    const auto bytes = store.serialize();
+    EXPECT_EQ(ReadU(bytes, 4, 2), 2u);
+    EXPECT_EQ(ReadU(bytes, 8, 4), 3u);
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(bytes, restored, error)) << error;
+    EXPECT_EQ(restored.storms(), store.storms());
+    EXPECT_EQ(restored.strikes(), store.strikes());
+    EXPECT_EQ(restored.scent_cells(), store.scent_cells());
+    EXPECT_EQ(restored.serialize(), bytes);
+    EXPECT_EQ(restored.region_bytes(storm.owner), store.region_bytes(storm.owner));
+    EXPECT_FALSE(restored.region_bytes({-1, 1}).empty());
+}
+
+TEST(FieldPageStateTest, TypedSectionsRefuseUnsupportedTypesAndInvalidEvolutionAtomically) {
+    FieldPageState store;
+    ScentCell valid{std::bit_cast<std::uint64_t>(1.0), 0, 0, 0};
+    ASSERT_TRUE(store.set_scent({0, 0}, valid));
+    const auto bytes = store.serialize();
+    for (const auto type : {0u, 5u, 6u}) {
+        auto corrupt = bytes;
+        WriteU(corrupt, 12, type, 2);
+        Reseal(corrupt);
+        EXPECT_TRUE(RefusedUntouched(corrupt));
+    }
+    auto nonfinite = bytes;
+    WriteU(nonfinite, 30, std::bit_cast<std::uint64_t>(std::numeric_limits<double>::infinity()), 8);
+    Reseal(nonfinite);
+    EXPECT_TRUE(RefusedUntouched(nonfinite));
+    EXPECT_FALSE(store.set_scent({0, 0}, {std::bit_cast<std::uint64_t>(-0.0), 0, 0, 0}));
+    EXPECT_EQ(store.serialize(), bytes);
+    EXPECT_TRUE(store.set_scent({0, 0}, {}));
+    EXPECT_TRUE(store.empty());
+}
+
+TEST(FieldPageStateTest, BorderExchangeUsesGlobalCommonPhaseAndChargesBothOwners) {
+    FieldPageState store;
+    const RegionKey left{0, 0}, right{1, 0};
+    ASSERT_TRUE(store.activate_region(left, kSeed, 0));
+    ASSERT_TRUE(store.activate_region(right, kSeed, 0));
+    std::map<RegionKey, ActiveRegionRecord> records;
+    records[left].state = records[right].state = RegionState::Reduced;
+    records[left].cadence_shift = 1;
+    records[left].cadence_phase = 1;
+    records[right].cadence_shift = 2;
+    records[right].cadence_phase = 3;
+    const auto before = store.serialize();
+    // Neither interior is due, yet the edge runs at t mod 4 == 0.
+    EXPECT_TRUE(store.step_scheduled(records, {}, kSeed, 2).empty());
+    EXPECT_EQ(store.serialize(), before);
+    std::array<std::uint64_t, FieldPageState::kChannels> sum_before{};
+    for (const auto& [key, page] : store.pages()) {
+        (void)key;
+        for (int c = 0; c < FieldPageState::kChannels; ++c)
+            for (const auto value : page.cells[c])
+                sum_before[c] += value;
+    }
+    const auto work = store.step_scheduled(records, {}, kSeed, 4);
+    ASSERT_EQ(work.size(), 2u);
+    EXPECT_EQ(work.at(left), 21u);
+    EXPECT_EQ(work.at(right), 21u);
+    EXPECT_NE(store.serialize(), before);
+    std::array<std::uint64_t, FieldPageState::kChannels> sum_after{};
+    for (const auto& [key, page] : store.pages()) {
+        (void)key;
+        for (int c = 0; c < FieldPageState::kChannels; ++c)
+            for (const auto value : page.cells[c])
+                sum_after[c] += value;
+    }
+    EXPECT_EQ(sum_after, sum_before);
+    records[right].state = RegionState::Frozen;
+    const auto sealed = store.serialize();
+    EXPECT_TRUE(store.step_scheduled(records, {}, kSeed, 8).empty());
+    EXPECT_EQ(store.serialize(), sealed);
 }
