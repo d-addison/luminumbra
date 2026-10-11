@@ -111,15 +111,113 @@ def inspect_path(path: str) -> list[Finding]:
     return findings
 
 
+def code_mask(text: str, powershell: bool) -> str:
+    """Preserve offsets while blanking comments and literals for token exemptions.
+
+    This mask never suppresses findings itself. Only a specifically recognized
+    code token can be exempted, and all rules still inspect the original text.
+    """
+    masked = list(text)
+    index, size = 0, len(text)
+
+    def blank(start: int, end: int) -> None:
+        for offset in range(start, end):
+            if masked[offset] != "\n":
+                masked[offset] = " "
+
+    while index < size:
+        start = index
+        if powershell and text.startswith("<#", index):
+            index += 2
+            depth = 1
+            while index < size and depth:
+                if text.startswith("<#", index):
+                    depth += 1
+                    index += 2
+                elif text.startswith("#>", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    index += 1
+        elif (powershell and text[index] == "#") or (not powershell and text.startswith("//", index)):
+            end = text.find("\n", index)
+            while not powershell and end != -1 and text[index:end].rstrip("\r").endswith("\\"):
+                end = text.find("\n", end + 1)
+            index = size if end == -1 else end
+        elif not powershell and text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = size if end == -1 else end + 2
+        elif powershell and text[index:index + 2] in ("@'", '@"'):
+            quote = text[index + 1]
+            end = re.search(r"(?m)^" + re.escape(quote + "@"), text[index + 2:])
+            index = size if end is None else index + 2 + end.end()
+        elif not powershell and text.startswith('R"', index):
+            raw = re.match(r'R"([^\s()\\]{0,16})\(', text[index:])
+            if raw is None:
+                index += 1
+                continue
+            close = ")" + raw.group(1) + '"'
+            end = text.find(close, index + raw.end())
+            index = size if end == -1 else end + len(close)
+        elif text[index] in ("'", '"'):
+            quote = text[index]
+            index += 1
+            while index < size:
+                if powershell and quote == "'" and text.startswith("''", index):
+                    index += 2
+                elif (not powershell and text[index] == "\\") or (
+                        powershell and quote == '"' and text[index] == "`"):
+                    index += 2
+                elif text[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            index = min(index, size)
+        elif powershell and text[index] == "`":
+            index = min(index + 2, size)
+        else:
+            index += 1
+            continue
+        blank(start, index)
+    return "".join(masked)
+
+
+CPP_INDEX = re.compile(
+    r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\[\s*"
+    r"(?:[A-Za-z_]\w*\.)?(?P<token>phase\s*-\s*1)\s*\]"
+)
+PS_TUPLE_MEMBER = re.compile(
+    r"(?:\]|\)|\$[A-Za-z_]\w*)\s*\.\s*(?P<token>Item[1-9]\d*)\b"
+)
+
+
+def code_token_exemptions(path: str, text: str) -> set[tuple[int, int]]:
+    suffix = PurePosixPath(path).suffix.lower()
+    if suffix in {".cpp", ".cc", ".cxx", ".h", ".hpp"}:
+        pattern, powershell = CPP_INDEX, False
+    elif suffix in {".ps1", ".psm1"}:
+        pattern, powershell = PS_TUPLE_MEMBER, True
+    else:
+        return set()
+    return {match.span("token") for match in pattern.finditer(code_mask(text, powershell))}
+
+
 def inspect_text(path: str, text: str) -> list[Finding]:
     if path in TEXT_EXCLUDED_FILES or path.startswith(TEXT_EXCLUDED_PREFIXES):
         return []
     findings: list[Finding] = []
-    for line_number, line in enumerate(text.splitlines(), 1):
+    exemptions = code_token_exemptions(path, text)
+    offset = 0
+    for line_number, full_line in enumerate(text.splitlines(keepends=True), 1):
+        line = full_line.rstrip("\r\n")
         for rule, pattern in TEXT_RULES:
-            match = pattern.search(line)
-            if match:
+            for match in pattern.finditer(line):
+                span = (offset + match.start(), offset + match.end())
+                if rule == "implementation-history-reference" and span in exemptions:
+                    continue
                 findings.append(Finding(rule, path, match.group(0), line_number))
+        offset += len(full_line)
     return findings
 
 
