@@ -61,7 +61,8 @@ def build_proposal(capture: dict[str, Any], num: int, den: int) -> dict[str, Any
     return {
         "schema": PROPOSAL_SCHEMA,
         "identity": {key: manifest[key] for key in (
-            "revision", "fixture_hash", "seed", "ticks", "binary_sha256", "source_dirty")},
+            "revision", "fixture_hash", "seed", "ticks", "binary_sha256", "source_dirty",
+            "surface_radius", "collision_radius")},
         "headroom": {"num": num, "den": den},
         "presets": presets,
         "region_scheduler": {"work_limit": None, "reason": REGION_SCHEDULER_REASON},
@@ -72,7 +73,8 @@ def build_budgets(proposal: dict[str, Any]) -> dict[str, Any]:
     identity = proposal["identity"]
     return {
         "schema": BUDGETS_SCHEMA,
-        "identity": {key: identity[key] for key in ("revision", "fixture_hash", "seed", "ticks")},
+        "identity": {key: identity[key] for key in (
+            "revision", "fixture_hash", "seed", "ticks", "surface_radius", "collision_radius")},
         "headroom": dict(proposal["headroom"]),
         "presets": {
             preset: {

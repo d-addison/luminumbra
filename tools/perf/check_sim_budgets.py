@@ -45,7 +45,7 @@ def load_budgets(path: Path) -> dict[str, Any]:
 
 
 def identity_mismatch(identity: dict[str, Any], manifest: dict[str, Any]) -> str | None:
-    for key in ("seed", "ticks", "fixture_hash"):
+    for key in ("seed", "ticks", "fixture_hash", "surface_radius", "collision_radius"):
         expected = identity.get(key)
         if expected is not None and manifest.get(key) != expected:
             return f"budgets {key} {expected!r} differs from capture {manifest.get(key)!r}"

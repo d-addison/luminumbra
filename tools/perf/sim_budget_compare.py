@@ -28,7 +28,7 @@ def build_comparison(before: dict[str, Any], after: dict[str, Any],
     for key in WORKLOAD_KEYS:
         if before["manifest"].get(key) != after["manifest"].get(key):
             raise ValueError(f"captures differ in {key}")
-    if list(before["presets"]) != list(after["presets"]):
+    if sorted(before["presets"]) != sorted(after["presets"]):
         raise ValueError("captures have different preset lists")
     unknown = sorted(expected - set(capture_sim_budget.STAGES))
     if unknown:

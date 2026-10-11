@@ -4,9 +4,11 @@
     "num": 3
   },
   "identity": {
+    "collision_radius": null,
     "fixture_hash": null,
     "revision": null,
     "seed": "1337",
+    "surface_radius": null,
     "ticks": 600
   },
   "presets": {

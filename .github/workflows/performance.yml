@@ -366,14 +366,35 @@ jobs:
             --limit 5 --min-samples 20 \
             --output build/water-smoke-comparison.json
       - name: Capture simulation budget evidence
+        timeout-minutes: 20
+        # switch to --require-complete once baselines are pinned
         run: |
           python3 head/tools/perf/capture_sim_budget.py \
             --binary build/head/bin/luminumbra_server_app \
             --evidence-dir build/head/sim-budget-capture --ticks 600
           python3 head/tools/perf/propose_sim_budgets.py build/head/sim-budget-capture \
             --output build/head/sim-budget-proposal.json
+          check_rc=0
           python3 head/tools/perf/check_sim_budgets.py build/head/sim-budget-capture \
-            head/tools/perf/baselines/sim-budgets.json --output build/head/sim-budget-check.json
+            head/tools/perf/baselines/sim-budgets.json --output build/head/sim-budget-check.json \
+            || check_rc=$?
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          verdicts = ("pass", "fail", "unpinned", "unbudgeted", "inactive", "missing")
+          path = Path("build/head/sim-budget-check.json")
+          if path.is_file():
+              summary = json.loads(path.read_text(encoding="utf-8"))["summary"]
+              counts = " ".join(f"{name}={summary[name]}" for name in verdicts)
+              line = f"Sim budget check: {counts}"
+          else:
+              line = "Sim budget check: unevaluated"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write(line + "\n")
+          PY
+          exit $check_rc
       - name: Publish comparison summary
         if: always()
         run: |
