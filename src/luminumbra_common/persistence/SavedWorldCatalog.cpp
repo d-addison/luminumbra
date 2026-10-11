@@ -38,15 +38,29 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
         if (!fs::is_directory(save) || fs::is_symlink(save))
             return result;
         const auto metadata_path = save / "world_info.json";
-        if (!fs::is_regular_file(metadata_path))
+        // Metadata written by an interrupted transaction may be missing or unreadable until
+        // LoadWorld recovers the directory: a pending journal keeps the entry selectable.
+        const auto pending_entry = [&result, &save]() {
+            if (!journal_pending(save))
+                return false;
+            result.pending_recovery = true;
+            result.error.clear();
+            return true;
+        };
+        if (!fs::is_regular_file(metadata_path)) {
+            pending_entry();
             return result;
+        }
         if (fs::file_size(metadata_path) > 1024 * 1024) {
-            result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
+            if (!pending_entry())
+                result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
             return result;
         }
         std::ifstream input(metadata_path);
-        if (!input)
+        if (!input) {
+            pending_entry();
             return result;
+        }
         const auto json = nlohmann::json::parse(input);
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();

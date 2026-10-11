@@ -1398,6 +1398,15 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 }
 
 bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
+    // An interrupted save may have left uncommitted clock-bearing metadata: recover before reading
+    // the clock so the compatibility verdict describes the committed snapshot.
+    std::vector<std::string> recovery_errors;
+    if (Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
+        Persistence::RecoveryOutcome::Failed) {
+        for (const std::string& error : recovery_errors)
+            LUMINUMBRA_CORE_ERROR("World save recovery failed: {}", error);
+        return false;
+    }
     WorldClock clock;
     bool required = false;
     return Persistence::WorldSaveService::read_clock_metadata(save_dir, clock, required) &&
@@ -1626,6 +1635,22 @@ StartOuterSave(const fs::path& save_dir, std::uint64_t tick, const std::optional
 
 } // namespace
 
+bool GameSession::RunInSnapshotTransaction(const std::function<bool()>& body) {
+    const fs::path save_dir = GetWorldSaveDir();
+    if (!m_activeRegionsEnabled || save_dir.empty() || m_transientWorld ||
+        m_metadata.worldId.empty() || !m_worldOpenError.empty() || !IsSimulationTickBoundary() ||
+        !ClockConfigurationCompatible(save_dir) ||
+        Persistence::SaveTransaction::active_for(save_dir)) {
+        return body(); // nothing to wrap: the writers keep their own commits
+    }
+    auto outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
+    if (!outer)
+        return false;
+    if (!body())
+        return false; // the destructor rolls the whole snapshot back
+    return outer->Commit();
+}
+
 bool GameSession::SaveWorld() {
     return SaveWorldMetadataTo(GetWorldSaveDir());
 }
@@ -1730,10 +1755,15 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // passed). Flag off keeps today's per-writer validation.
     std::unique_ptr<OuterSaveTransaction> outer;
     if (m_activeRegionsEnabled) {
-        outer = StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
-        if (!outer) {
-            RecordPersistenceSaveOutcome(false, elapsed_ms());
-            return false;
+        // A caller-owned transaction (RunInSnapshotTransaction) already recovered, validated and
+        // opened the journal; this save joins it and the owner commits.
+        if (!Persistence::SaveTransaction::active_for(save_dir)) {
+            outer =
+                StartOuterSave(save_dir, m_worldClock.tick(), m_activeRegionLedger.local_anchor());
+            if (!outer) {
+                RecordPersistenceSaveOutcome(false, elapsed_ms());
+                return false;
+            }
         }
     } else if (!Persistence::WorldSaveService::validate_save(save_dir)) {
         RecordPersistenceSaveOutcome(false, elapsed_ms());
@@ -2227,8 +2257,9 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
         // The existing header alone preserves it without adding zero pages.
     }
     const std::string record = m_energyFieldState->SerializeRecord(GetSimulationTickCount());
-    if (m_activeRegionsEnabled) {
-        // Flag-on lane: durable binary replace inside the save transaction.
+    if (m_activeRegionsEnabled || Persistence::SaveTransaction::active_for(save_dir) ||
+        Persistence::snapshot_index_exists(save_dir)) {
+        // Flag-on (or indexed-directory) lane: durable binary replace inside the save transaction.
         std::vector<std::string> errors;
         const bool written = Persistence::WorldSaveService::write_member_bytes(
             save_dir, "aether_state.efs", record, &errors);

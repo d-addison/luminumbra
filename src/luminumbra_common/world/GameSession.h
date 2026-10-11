@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -118,6 +119,10 @@ public:
 
     // Save the current world state
     bool SaveWorld();
+    // Flag on: runs `body` (which may call SaveWorldState/SaveWorld and indexed-member writers)
+    // inside ONE snapshot transaction published with a single index. Otherwise just runs `body`.
+    // Owner thread only; returns the body's verdict, and false when the commit fails.
+    bool RunInSnapshotTransaction(const std::function<bool()>& body);
 
     // --- Runtime world-state persistence ---
     // Persists streamed chunk voxel state under the canonical world save dir

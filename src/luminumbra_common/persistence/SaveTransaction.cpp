@@ -280,8 +280,23 @@ std::string EncodeJournal(std::uint64_t txn_id,
 bool RollbackEntries(const fs::path& save_dir,
                      const std::vector<JournalEntry>& entries,
                      std::vector<std::string>* errors) {
+    // The index goes first: a half-visible new index must never survive a partially completed
+    // rollback, or recovery would mistake the transaction for a committed one and drop the undo
+    // copies. Remaining entries follow in reverse order.
+    std::vector<const JournalEntry*> order;
+    order.reserve(entries.size());
+    for (const JournalEntry& entry : entries) {
+        if (entry.path == kSnapshotIndexRelativePath) {
+            order.push_back(&entry);
+        }
+    }
     for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
-        const JournalEntry& entry = *it;
+        if (it->path != kSnapshotIndexRelativePath) {
+            order.push_back(&*it);
+        }
+    }
+    for (const JournalEntry* entry_ptr : order) {
+        const JournalEntry& entry = *entry_ptr;
         const fs::path destination = save_dir / entry.path;
         if (entry.action == "replace") {
             std::uint64_t bytes = 0;
@@ -321,6 +336,23 @@ bool RollbackEntries(const fs::path& save_dir,
             return false;
         }
         report_snapshot_step("rollback-entry", destination);
+    }
+    // Flush every affected directory (including entries a replay found already restored) before
+    // the caller retires the journal.
+    std::vector<fs::path> flushed;
+    for (const JournalEntry& entry : entries) {
+        const fs::path directory = (save_dir / entry.path).parent_path();
+        bool seen = false;
+        for (const fs::path& done : flushed) {
+            seen = seen || done == directory;
+        }
+        if (seen) {
+            continue;
+        }
+        flushed.push_back(directory);
+        if (!WorldSaveService::durable_flush_directory(directory, errors)) {
+            return false;
+        }
     }
     return true;
 }
@@ -610,6 +642,12 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             return RecoveryOutcome::Failed;
         }
         if (!journal_exists) {
+            // Far-only upserts run without a transaction; a crash can leave their staging file
+            // behind, which an indexed directory would refuse at load. Legacy directories keep
+            // their historical behaviour.
+            if (snapshot_index_exists(save_dir)) {
+                SweepTemporaries(save_dir);
+            }
             return RecoveryOutcome::NothingToDo;
         }
         const fs::path txn_path = journal / "txn.json";
@@ -949,6 +987,17 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
         const fs::path index_path = snapshot_index_path(m_save_dir);
         std::error_code directory_error;
         fs::create_directories(index_path.parent_path(), directory_error);
+        // First saves create chunks/region (and possibly the save directory itself): persist each
+        // new directory entry through its parent before the index can become the commit point.
+        for (const fs::path& directory :
+             {index_path.parent_path().parent_path(), m_save_dir, m_save_dir.parent_path()}) {
+            std::error_code exists_error;
+            if (!directory.empty() && fs::exists(directory, exists_error) &&
+                !WorldSaveService::durable_flush_directory(directory, errors)) {
+                abort(errors);
+                return false;
+            }
+        }
         if (!WorldSaveService::durable_write_file(index_path, encoded, errors)) {
             abort(errors);
             return false;

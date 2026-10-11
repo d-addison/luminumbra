@@ -910,7 +910,10 @@ public:
         m_transaction = std::make_unique<SaveTransaction>(
             save_dir, previous.tick, previous.anchors, &WorldSaveService::member_digest);
         m_engaged = true;
-        m_ok = m_transaction->begin(errors) && m_transaction->protect(relative_paths, errors);
+        // Recover first (begin), then refuse to bless a corrupt baseline: an implicit writer must
+        // not overwrite a checksum-mismatched member and publish an index that conceals it.
+        m_ok = m_transaction->begin(errors) && m_facts->validate(errors) &&
+               m_transaction->protect(relative_paths, errors);
     }
     TransactionScope(const TransactionScope&) = delete;
     TransactionScope& operator=(const TransactionScope&) = delete;
@@ -1802,6 +1805,19 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 error = message;
                 return false;
             }
+            // The installed ledger may never be ahead of the metadata clock (load_world refuses
+            // that pair), so a standalone metadata rewrite must not publish it.
+            if (std::filesystem::exists(active_regions_path(save_dir))) {
+                world::ActiveRegionLedger ledger;
+                world::WorldClock clock;
+                bool required = false;
+                if (load_active_regions(ledger, save_dir, &diagnostics) &&
+                    read_clock_metadata(save_dir, clock, required, &diagnostics) &&
+                    ledger.header_tick() > clock.tick()) {
+                    error = world::ActiveRegionLedger::kCorruptMessage;
+                    return false;
+                }
+            }
         } else if (relative == "chunks/region/world-manifest.json") {
             const std::string message = CheckManifestFile(path);
             if (!message.empty()) {
@@ -1988,8 +2004,16 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 return reject("corrupt or unknown region file: " + entry.path().string());
             }
         }
-        if (!present)
+        if (!present) {
+            // An index-only region directory is still an indexed snapshot: verify it before
+            // reporting a clean miss, or tampered metadata/energy would go unnoticed.
+            if (indexed) {
+                const std::string mismatch = VerifySnapshotIndex(save_dir, snapshot_index, {});
+                if (!mismatch.empty())
+                    return reject("inconsistent snapshot: " + mismatch);
+            }
             return false;
+        }
         if (const std::string manifest_error = CheckManifestFile(world_manifest_path(save_dir));
             !manifest_error.empty())
             return reject(manifest_error);
