@@ -38,9 +38,20 @@ Scatter compaction counts candidates in 64-lane groups, scans the bounded group
 counts, then emits accepted candidates in stable order. Chunks sort by distance
 from the camera, then X/Z coordinates; candidates retain their index order.
 This keeps nearby cover when the fixed 262,144-instance pool saturates. The GPU
-path accepts at most 512 input chunks (64 MiB of exact candidate surfaces and
-512 KiB of compaction scratch); larger inputs use the existing CPU fallback.
-Normal cached frames do not repeat this work.
+path accepts at most 512 columns remaining after its density and distance cull
+(64 MiB of exact candidate surfaces and 512 KiB of compaction scratch). A larger
+eligible set uses the existing CPU fallback. Admission happens before surface
+sampling; outer terrain columns and zero-density columns do not consume these
+slots. Normal cached frames do not repeat this work.
+
+An earlier native control run at source `983e6abc338637a226d623ef20ffafc10f07e920`
+refused without a calm screenshot. The implementation counted the complete
+renderable column list before culling: the initial 25×25 surface already
+exceeded 512 even though the 92-metre scatter horizon fit. CPU fallback cannot
+start GPU qualification. The corresponding software GL regression reproduces
+that refusal and compares the corrected 25×25 result with a smaller identical
+in-range set, including reversed input order. Its software result does not
+qualify a new native capture, and the original refusal remains a failed result.
 
 ## Actual draw and timing evidence
 
@@ -106,6 +117,10 @@ wind input, not metres of tip displacement.
 have complete evidence while `passed` is false. `visual_approved` remains false.
 Native failures, timeouts, missing readbacks and inadequate sample selection
 must remain visible as refusals.
+The refusal's `qualification_state` records the actual start blocker, whether
+the raw rebuild files were written, build/readback identities and vertex-frame
+availability. Reading this diagnostic does not wait for GPU work or change
+the scenario's 30-second limit.
 
 ## Verification
 
@@ -120,3 +135,6 @@ tests exercise actual compute, capped membership, fresh allocations, reversed
 chunk input order, shader reload, rasterized vertex feedback and source-correlated
 queries. Existing root/height-bound and async-readback tests remain required.
 A skipped GL test cannot qualify the renderer; both real stills need inspection.
+The GPU capacity tests also exercise the complete initial surface footprint,
+zero-density admission, the accepted 512-column boundary and 513-column CPU
+fallback. They preserve the production fade, density and timing thresholds.
