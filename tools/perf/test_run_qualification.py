@@ -168,6 +168,13 @@ PLACEHOLDER_BINDINGS = {workload: placeholder_script(workload)
                         for workload in ('cave-walk', 'edited-world-tour')}
 
 
+@contextlib.contextmanager
+def placeholder_bindings():
+    """Bind the blocked traversals to placeholder scripts for the duration of the block."""
+    with mock.patch.dict(rq.BOUND_TRAVERSAL_SCRIPTS, PLACEHOLDER_BINDINGS):
+        yield
+
+
 def passing_results(matrix, renderer=RENDERER):
     """Synthetic all-pass results with a complete adapter, artifact and verdict.
 
@@ -646,8 +653,17 @@ class AggregateTests(unittest.TestCase):
         return rq.aggregate(matrix or self.matrix, results, partial=partial,
                             declared_refresh=self.declared if declared is None else declared)
 
+    def baseline(self, matrix=None):
+        """Fresh unmodified all-pass results; asserts they qualify before a defect is added.
+
+        Call inside placeholder_bindings() so the traversal bindings under test are in force.
+        """
+        results = passing_results(matrix or self.matrix)
+        self.assertTrue(self.aggregate(results, matrix=matrix)['render_floor_qualified'])
+        return results
+
     def test_all_pass_with_declared_refresh_is_qualified(self):
-        with mock.patch.dict(rq.BOUND_TRAVERSAL_SCRIPTS, PLACEHOLDER_BINDINGS):
+        with placeholder_bindings():
             document = self.aggregate(passing_results(self.matrix))
         self.assertEqual(document['summary']['pass'], 36)
         self.assertTrue(document['render_floor_qualified'])
@@ -662,81 +678,96 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(document['displays'][0]['refresh_source'], 'matrix')
 
     def test_one_differing_adapter_breaks_identity(self):
-        results = passing_results(self.matrix)
-        results[5]['adapter'] = adapter('Mesa llvmpipe')
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            results[5]['adapter'] = adapter('Mesa llvmpipe')
+            document = self.aggregate(results)
         self.assertFalse(document['adapter_identical'])
         self.assertFalse(document['adapter_matches_qualified'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_one_cell_adapter_none_breaks_identity_and_qualification(self):
-        results = passing_results(self.matrix)
-        results[3] = dict(results[3], adapter=None)
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            results[3] = dict(results[3], adapter=None)
+            document = self.aggregate(results)
         self.assertFalse(document['adapter_identical'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_one_cell_verdict_none_breaks_qualification(self):
-        results = passing_results(self.matrix)
-        results[4] = dict(results[4], verdict=None)
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            results[4] = dict(results[4], verdict=None)
+            document = self.aggregate(results)
         self.assertTrue(document['adapter_identical'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_one_cell_artifact_none_breaks_qualification(self):
-        results = passing_results(self.matrix)
-        results[6] = dict(results[6], artifact=None)
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            results[6] = dict(results[6], artifact=None)
+            document = self.aggregate(results)
         self.assertFalse(document['render_floor_qualified'])
 
     def test_one_cell_verdict_not_pass_breaks_qualification(self):
-        results = passing_results(self.matrix)
-        results[7] = dict(results[7], verdict=verdict('fail'))
-        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+        with placeholder_bindings():
+            results = self.baseline()
+            results[7] = dict(results[7], verdict=verdict('fail'))
+            self.assertFalse(self.aggregate(results)['render_floor_qualified'])
 
     def test_empty_adapter_field_breaks_qualification(self):
-        results = passing_results(self.matrix)
-        results[2] = dict(results[2], adapter=dict(vendor='', renderer=RENDERER,
-                                                   version='4.6'))
-        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+        with placeholder_bindings():
+            results = self.baseline()
+            results[2] = dict(results[2], adapter=dict(vendor='', renderer=RENDERER,
+                                                       version='4.6'))
+            self.assertFalse(self.aggregate(results)['render_floor_qualified'])
 
     def test_one_cell_not_pass_breaks_qualification(self):
-        results = passing_results(self.matrix)
-        results[0] = dict(results[0], state='fail', reason='floor')
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            results[0] = dict(results[0], state='fail', reason='floor')
+            document = self.aggregate(results)
         self.assertEqual(document['summary']['fail'], 1)
         self.assertFalse(document['render_floor_qualified'])
         self.assertTrue(document['harness_complete'])
 
     def test_invalid_cell_breaks_harness_completeness(self):
-        results = passing_results(self.matrix)
-        results[0] = dict(results[0], state='invalid', reason='checker exit 1')
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            results[0] = dict(results[0], state='invalid', reason='checker exit 1')
+            document = self.aggregate(results)
         self.assertFalse(document['harness_complete'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_undeclared_display_breaks_qualification(self):
-        document = self.aggregate(passing_results(self.matrix), declared={})
+        with placeholder_bindings():
+            results = self.baseline()
+            document = self.aggregate(results, declared={})
         self.assertEqual(document['displays'][1]['refresh_source'], 'undeclared')
         self.assertIsNone(document['displays'][1]['refresh_hz'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_partial_run_is_never_qualified(self):
-        document = self.aggregate(passing_results(self.matrix), partial=True)
+        with placeholder_bindings():
+            results = self.baseline()
+            document = self.aggregate(results, partial=True)
         self.assertTrue(document['partial'])
         self.assertFalse(document['harness_complete'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_missing_canonical_cell_breaks_qualification(self):
-        document = self.aggregate(passing_results(self.matrix)[1:])
+        with placeholder_bindings():
+            results = self.baseline()
+            document = self.aggregate(results[1:])
         self.assertEqual(document['summary']['pass'], 35)
         self.assertFalse(document['render_floor_qualified'])
 
     def test_unevaluated_cells_allowed_for_harness_but_not_qualification(self):
-        results = passing_results(self.matrix)
-        results[1] = dict(results[1], state='unevaluated', reason='pose-unrecorded',
-                          adapter=None, artifact=None, verdict=None)
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            results[1] = dict(results[1], state='unevaluated', reason='pose-unrecorded',
+                              adapter=None, artifact=None, verdict=None)
+            document = self.aggregate(results)
         self.assertTrue(document['harness_complete'])
         self.assertFalse(document['render_floor_qualified'])
 
@@ -744,55 +775,82 @@ class AggregateTests(unittest.TestCase):
         small = copy.deepcopy(self.matrix)
         small['workloads'] = [w for w in small['workloads'] if w['id'] == 'surface-flight']
         small['displays'] = small['displays'][:1]
-        document = self.aggregate(passing_results(small), matrix=small)
+        with placeholder_bindings():
+            self.baseline()
+            document = self.aggregate(passing_results(small), matrix=small)
         self.assertEqual(document['summary']['pass'], 2)
         self.assertTrue(document['harness_complete'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_non_canonical_qualified_renderer_never_qualifies(self):
-        matrix = copy.deepcopy(self.matrix)
-        matrix['qualified_renderer'] = 'Mesa llvmpipe'
-        document = self.aggregate(passing_results(matrix, renderer='Mesa llvmpipe'),
-                                  matrix=matrix)
+        with placeholder_bindings():
+            self.baseline()
+            matrix = copy.deepcopy(self.matrix)
+            matrix['qualified_renderer'] = 'Mesa llvmpipe'
+            document = self.aggregate(passing_results(matrix, renderer='Mesa llvmpipe'),
+                                      matrix=matrix)
         self.assertEqual(document['summary']['pass'], 36)
         self.assertTrue(document['adapter_identical'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_fixed_view_with_short_warmup_and_frames_never_qualifies(self):
-        results = passing_results(self.matrix)
-        index = index_of(results, FOREST_CELL)
-        results[index] = dict(results[index], warmup_frames=2, measured_frames=4)
-        document = self.aggregate(results)
+        with placeholder_bindings():
+            results = self.baseline()
+            index = index_of(results, FOREST_CELL)
+            results[index] = dict(results[index], warmup_frames=2, measured_frames=4)
+            document = self.aggregate(results)
         self.assertEqual(document['summary']['pass'], 36)
         self.assertFalse(document['render_floor_qualified'])
 
     def test_cave_walk_recorded_as_fixed_view_never_qualifies(self):
-        results = passing_results(self.matrix)
-        index = index_of(results, 'cave-walk.quality.3840x1600')
-        results[index] = dict(results[index], kind='fixed_view', measured_frames=240,
-                              script=None)
-        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+        with placeholder_bindings():
+            results = self.baseline()
+            index = index_of(results, 'cave-walk.quality.3840x1600')
+            results[index] = dict(results[index], kind='fixed_view', measured_frames=240,
+                                  script=None)
+            self.assertFalse(self.aggregate(results)['render_floor_qualified'])
 
     def test_surface_flight_with_other_script_never_qualifies(self):
-        results = passing_results(self.matrix)
-        index = index_of(results, SURFACE_CELL)
-        results[index] = dict(results[index], script='tools/perf/fixtures/other.traversal')
-        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+        with placeholder_bindings():
+            results = self.baseline()
+            index = index_of(results, SURFACE_CELL)
+            results[index] = dict(results[index],
+                                  script='tools/perf/fixtures/other.traversal')
+            self.assertFalse(self.aggregate(results)['render_floor_qualified'])
 
-    def test_unbound_traversals_carrying_surface_script_never_qualify(self):
-        # Everything else is perfect, so only the missing traversal bindings can block it.
-        results = passing_results(self.matrix)
-        for result in results:
-            if result['workload'] in ('cave-walk', 'edited-world-tour'):
-                result['script'] = rq.CANONICAL_SURFACE_SCRIPT
-        document = self.aggregate(results)
+    def test_traversals_carrying_surface_script_never_qualify(self):
+        # Baseline binds cave-walk and edited-world-tour to placeholders; the surface script
+        # then disagrees with those bindings, and that alone must block qualification.
+        with placeholder_bindings():
+            results = self.baseline()
+            for result in results:
+                if result['workload'] in ('cave-walk', 'edited-world-tour'):
+                    result['script'] = rq.CANONICAL_SURFACE_SCRIPT
+            document = self.aggregate(results)
+        self.assertEqual(document['summary']['pass'], 36)
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_unbound_traversals_never_qualify(self):
+        # Without placeholder bindings cave-walk and edited-world-tour have no canonical script.
+        document = self.aggregate(passing_results(self.matrix))
+        self.assertEqual(document['summary']['pass'], 36)
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_traversal_records_rebound_to_surface_flight_never_qualify(self):
+        # Ids still name cave-walk / edited-world-tour, so the record is not bound to its id.
+        with placeholder_bindings():
+            results = self.baseline()
+            for result in results:
+                if result['workload'] in ('cave-walk', 'edited-world-tour'):
+                    result['workload'] = 'surface-flight'
+                    result['script'] = rq.CANONICAL_SURFACE_SCRIPT
+            document = self.aggregate(results)
         self.assertEqual(document['summary']['pass'], 36)
         self.assertFalse(document['render_floor_qualified'])
 
     def test_result_from_replacement_checker_never_qualifies(self):
-        with mock.patch.dict(rq.BOUND_TRAVERSAL_SCRIPTS, PLACEHOLDER_BINDINGS):
-            results = passing_results(self.matrix)
-            self.assertTrue(self.aggregate(results)['render_floor_qualified'])
+        with placeholder_bindings():
+            results = self.baseline()
             results[0] = dict(results[0], checker_canonical=False)
             document = self.aggregate(results)
         self.assertFalse(document['render_floor_qualified'])

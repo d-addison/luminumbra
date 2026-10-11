@@ -214,7 +214,16 @@ def valid_adapter(adapter):
 
 
 def canonical_record(result):
-    """True when the cell carries exactly the canonical workload semantics."""
+    """True when the cell is bound to its id and carries exactly the canonical semantics."""
+    cell_id = result['id']
+    parts = cell_id.split('.') if isinstance(cell_id, str) else []
+    if len(parts) != 3 or cell_id not in canonical_cell_ids():
+        return False
+    workload, profile, display = parts
+    if result['workload'] != workload:
+        return False
+    if result.get('profile', profile) != profile or result.get('display', display) != display:
+        return False
     if CANONICAL_KINDS.get(result['workload']) != result['kind']:
         return False
     if result['warmup_frames'] != CANONICAL_WARMUP:
