@@ -1512,47 +1512,109 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
         EXPECT_TRUE(stage.empty());
 }
 
-TEST(GameSessionHeadlessWorldTest, RegionDigestMergesLiveAndDurableSimulationOnly) {
+static std::uint64_t Digest(const std::filesystem::path& save,
+                            Luminumbra::world::RegionKey key,
+                            std::vector<std::shared_ptr<Luminumbra::Chunk>> live,
+                            std::vector<std::shared_ptr<Luminumbra::Chunk>> parked = {}) {
+    return P::WorldSaveService::region_simulation_digest(
+        save, key, P::RegionDigestInputs{std::move(live), std::move(parked)});
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestExcludesPristineAndLoadingChunks) {
+    const auto empty = Digest({}, {0, 0}, {});
+    const auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    chunk->heightmap_data = {1.0f};
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->heightmap_data = {2.0f};
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->mark_voxel_data_dirty();
+    EXPECT_NE(Digest({}, {0, 0}, {chunk}), empty);
+    chunk->set_state(Luminumbra::ChunkState::Loading);
+    EXPECT_EQ(Digest({}, {0, 0}, {chunk}), empty);
+    const auto other = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(32, 0, 0));
+    other->heightmap_data = {3.0f};
+    other->mark_voxel_data_dirty();
+    EXPECT_EQ(Digest({}, {0, 0}, {other}), empty);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIsIndependentOfResidencyAndSaveHistory) {
+    const HeadlessRoot root;
+    const auto x = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    x->heightmap_data = {4.0f};
+    x->mark_voxel_data_dirty();
+    const auto live_only = Digest({}, {0, 0}, {x});
+    EXPECT_EQ(Digest({}, {0, 0}, {}, {x}), live_only);
+    Luminumbra::WorldStreamingState durable;
+    const auto stored = durable.get_or_create_chunk({0, 0, 0});
+    stored->heightmap_data = {4.0f};
+    stored->mark_voxel_data_dirty();
+    const auto save = root.path() / "digest-history";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    EXPECT_EQ(Digest(save, {0, 0}, {}), live_only);
+    EXPECT_EQ(Digest(save, {0, 0}, {x}), live_only);
+    x->clear_voxel_data_dirty();
+    EXPECT_EQ(Digest(save, {0, 0}, {x}), live_only);
+    EXPECT_EQ(Digest({}, {0, 0}, {x}), live_only);
+    x->heightmap_data[0] = 5.0f;
+    EXPECT_NE(Digest({}, {0, 0}, {x}), live_only);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestPriorityIsLiveThenParkedThenDurable) {
     const HeadlessRoot root;
     Luminumbra::WorldStreamingState durable;
-    const auto old = durable.get_or_create_chunk({0, 0, 0});
-    old->heightmap_data = {1.0f};
-    const auto unloaded = durable.get_or_create_chunk({1, 0, 0});
-    unloaded->heightmap_data = {2.0f};
-    durable.get_or_create_chunk({32, 0, 0})->heightmap_data = {3.0f};
-    const auto save = root.path() / "digest";
+    const auto stored = durable.get_or_create_chunk({0, 0, 0});
+    stored->heightmap_data = {1.0f};
+    stored->mark_voxel_data_dirty();
+    const auto save = root.path() / "digest-priority";
     ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    const auto parked = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    parked->heightmap_data = {2.0f};
+    parked->mark_voxel_data_dirty();
+    const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
+    live->heightmap_data = {3.0f};
+    live->mark_voxel_data_dirty();
+    EXPECT_EQ(Digest(save, {0, 0}, {live}, {parked}), Digest({}, {0, 0}, {live}));
+    EXPECT_EQ(Digest(save, {0, 0}, {}, {parked}), Digest({}, {0, 0}, {}, {parked}));
+    const auto durable_only = Digest(save, {0, 0}, {});
+    EXPECT_NE(Digest(save, {0, 0}, {}, {parked}), durable_only);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), Digest({}, {0, 0}, {parked}));
+    EXPECT_NE(Digest({}, {0, 0}, {live}), durable_only);
+    EXPECT_NE(Digest({}, {0, 0}, {parked}), durable_only);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresUnflaggedDurableRecords) {
+    const HeadlessRoot root;
+    Luminumbra::WorldStreamingState durable;
+    durable.get_or_create_chunk({0, 0, 0})->heightmap_data = {1.0f};
+    const auto save = root.path() / "digest-unflagged";
+    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    EXPECT_EQ(Digest(save, {0, 0}, {}), Digest({}, {0, 0}, {}));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresRenderAndResidencyState) {
     const auto live = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3(0, 0, 0));
     live->heightmap_data = {4.0f};
     live->mark_voxel_data_dirty();
-    const auto digest = P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live});
-    EXPECT_EQ(digest, P::WorldSaveService::region_simulation_digest({}, {0, 0}, {unloaded, live}));
-    EXPECT_NE(digest, P::WorldSaveService::region_simulation_digest(save, {0, 0}, {}));
-    // Both durable render data and live render data are outside the projection.
-    unloaded->mesh_vertices.resize(3);
-    unloaded->mesh_indices = {0, 1, 2};
-    unloaded->water_mesh_generated.store(true);
-    unloaded->water_mesh_dirty_ticks = 11;
-    ASSERT_TRUE(P::WorldSaveService{}.save_world(durable, save));
+    const auto digest = Digest({}, {0, 0}, {live});
     live->mesh_vertices.resize(3);
     live->mesh_indices = {2, 1, 0};
     live->water_mesh_dirty_ticks = 29;
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_EQ(Digest({}, {0, 0}, {live}), digest);
     for (const auto state : {Luminumbra::ChunkState::Meshing, Luminumbra::ChunkState::Ready}) {
         live->set_state(state);
         for (const bool collision : {true, false}) {
             live->has_collision.store(collision);
-            EXPECT_EQ(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+            EXPECT_EQ(Digest({}, {0, 0}, {live}), digest);
         }
     }
     live->heightmap_data[0] = 5.0f;
-    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
     live->heightmap_data[0] = 4.0f;
     live->material_data = {1};
-    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
     live->material_data.clear();
     live->water_depth_mm = {1};
-    EXPECT_NE(P::WorldSaveService::region_simulation_digest(save, {0, 0}, {live}), digest);
+    EXPECT_NE(Digest({}, {0, 0}, {live}), digest);
 }
 
 TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormalization) {
@@ -1572,16 +1634,15 @@ TEST(GameSessionHeadlessWorldTest, RegionDigestIgnoresLoadTimeCollisionNormaliza
     chunk->heightmap_data = {8.0f};
     chunk->mark_voxel_data_dirty();
     ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
-    const auto digest = P::WorldSaveService::region_simulation_digest({}, {0, 0}, {chunk});
+    const auto digest = Digest({}, {0, 0}, {chunk});
     ASSERT_TRUE(session.SaveWorldState());
     ASSERT_TRUE(loaded.LoadWorld(session.GetMetadata().worldId));
     const auto chunks = loaded.GetWorldSystem()->snapshot_streamed_chunks();
     ASSERT_EQ(chunks.size(), 1u);
     EXPECT_FALSE(chunks.front()->has_collision.load());
     EXPECT_EQ(chunks.front()->get_state(), Luminumbra::ChunkState::Idle);
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest({}, {0, 0}, chunks), digest);
-    EXPECT_EQ(P::WorldSaveService::region_simulation_digest(session.GetWorldSaveDir(), {0, 0}, {}),
-              digest);
+    EXPECT_EQ(Digest({}, {0, 0}, chunks), digest);
+    EXPECT_EQ(Digest(session.GetWorldSaveDir(), {0, 0}, {}), digest);
 }
 
 TEST(GameSessionHeadlessWorldTest, FirstEnabledChunkSaveIncludesCleanResidentRegions) {
@@ -1753,7 +1814,10 @@ TEST(GameSessionHeadlessWorldTest, LedgerFileAbsenceCorruptionFutureAndDisabledR
     ASSERT_TRUE(P::WorldSaveService::validate_save(save));
     for (const bool future : {false, true}) {
         auto bytes = good;
-        bytes[future ? 4 : 8] ^= future ? 3 : 1;
+        if (future)
+            bytes[4] = 3;
+        else
+            bytes[8] ^= 1;
         std::ofstream(path, std::ios::binary) << bytes;
         std::vector<std::string> errors;
         EXPECT_FALSE(P::WorldSaveService::validate_save(save, &errors));

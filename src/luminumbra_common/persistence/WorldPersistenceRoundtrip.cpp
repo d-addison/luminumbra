@@ -916,8 +916,13 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
     });
     nlohmann::json contents = nlohmann::json::array();
     for (const auto& chunk : chunks) {
-        // Explicit content projection, independent of the legacy residency
-        // classification (which includes state/state_value/has_collision).
+        // Pristine (generated) and Loading chunks are absent by construction, so
+        // residency and save history cannot change the result. Only edited SDF
+        // content is projected, independent of the legacy residency classification
+        // (which includes state/state_value/has_collision).
+        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited ||
+            chunk->get_state() == ChunkState::Loading)
+            continue;
         contents.push_back(
             {{"chunk_id", chunk->get_id()},
              {"coords", IVec3ToJson(chunk->get_coords())},
@@ -935,7 +940,7 @@ std::string ComputeRegionContentHash(const WorldStreamingState& state) {
              {"ticks_below_threshold", chunk->ticks_below_threshold}});
     }
     return Checksum(StableDump(
-        nlohmann::json{{"hash_scope", "region_content_v1"}, {"chunks", std::move(contents)}}));
+        nlohmann::json{{"hash_scope", "region_content_v2"}, {"chunks", std::move(contents)}}));
 }
 
 WorldStreamingStateSubHashes ComputeWorldStreamingStateSubHashes(const WorldStreamingState& state) {

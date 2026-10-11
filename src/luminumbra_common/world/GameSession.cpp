@@ -990,7 +990,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                                    ? GetWorldSaveDir()
                                                    : m_regionDurableDirectory;
                         return Persistence::WorldSaveService::region_simulation_digest(
-                            directory, key, m_worldSystem->snapshot_streamed_chunks());
+                            directory,
+                            key,
+                            Persistence::RegionDigestInputs{
+                                m_worldSystem->snapshot_streamed_chunks(), {}});
                     });
                 m_regionWork.clear();
             } catch (const std::exception& error) {

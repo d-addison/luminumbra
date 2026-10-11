@@ -26,6 +26,14 @@ struct WorldSaveDirtyReport {
     bool saved = false;
 };
 
+// Inputs of the region simulation digest. Priority when ids collide: live over
+// parked over durable edited records. Parked is the dirty-chunk parking area
+// introduced by a later slice; it is empty until then.
+struct RegionDigestInputs {
+    std::vector<std::shared_ptr<Chunk>> live;
+    std::vector<std::shared_ptr<Chunk>> parked;
+};
+
 // Persists WorldStreamingState snapshots beneath a world save directory.
 //
 // Current layout: chunks/region/r.<rx>.<rz>.lmr and world-manifest.json.
@@ -72,11 +80,11 @@ public:
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr,
                                     const world::WorldClock& absent_clock = world::WorldClock{});
-    // Content-only lod-0 projection; live chunks override durable records by id.
-    static std::uint64_t
-    region_simulation_digest(const std::filesystem::path& save_dir,
-                             world::RegionKey key,
-                             const std::vector<std::shared_ptr<Chunk>>& live_chunks);
+    // Content-only projection region_content_v2: live over parked over durable records flagged
+    // edited; pristine and Loading chunks excluded.
+    static std::uint64_t region_simulation_digest(const std::filesystem::path& save_dir,
+                                                  world::RegionKey key,
+                                                  const RegionDigestInputs& inputs);
 
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;

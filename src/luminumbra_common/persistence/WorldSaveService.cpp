@@ -1031,28 +1031,44 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     }
 }
 
-std::uint64_t
-WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
-                                           world::RegionKey key,
-                                           const std::vector<std::shared_ptr<Chunk>>& live_chunks) {
+std::uint64_t WorldSaveService::region_simulation_digest(const std::filesystem::path& save_dir,
+                                                         world::RegionKey key,
+                                                         const RegionDigestInputs& inputs) {
     WorldStreamingState region;
-    for (const auto& chunk : live_chunks) {
-        if (!chunk)
-            continue;
+    // Filtering precedes insertion: a live pristine or Loading chunk must not shadow a durable
+    // edited record with the same id. insert_chunk preserves the first record per id.
+    const auto qualifies = [&key](const std::shared_ptr<Chunk>& chunk) {
+        if (!chunk || chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited ||
+            chunk->get_state() == ChunkState::Loading)
+            return false;
         int rx = 0, rz = 0;
         region_coords_for_chunk(chunk->get_coords(), rx, rz);
-        if (rx == key.x && rz == key.z)
+        return rx == key.x && rz == key.z;
+    };
+    for (const auto& chunk : inputs.live) {
+        if (qualifies(chunk))
+            region.insert_chunk(chunk);
+    }
+    for (const auto& chunk : inputs.parked) {
+        if (qualifies(chunk))
             region.insert_chunk(chunk);
     }
     if (!save_dir.empty()) {
         std::vector<std::shared_ptr<Chunk>> durable_chunks;
         std::vector<std::string> errors;
-        if (!read_region_chunks(region_file_path(save_dir, key.x, key.z), durable_chunks, &errors))
+        if (!read_authoritative_region_chunks(region_file_path(save_dir, key.x, key.z),
+                                              key.x * kRegionChunkSpan,
+                                              key.x * kRegionChunkSpan + kRegionChunkSpan - 1,
+                                              key.z * kRegionChunkSpan,
+                                              key.z * kRegionChunkSpan + kRegionChunkSpan - 1,
+                                              durable_chunks,
+                                              &errors))
             throw std::runtime_error(errors.empty() ? "Cannot read durable region records"
                                                     : errors.front());
-        // insert_chunk preserves the first record for an id: live simulation wins.
-        for (const auto& chunk : durable_chunks)
-            region.insert_chunk(chunk);
+        for (const auto& chunk : durable_chunks) {
+            if (qualifies(chunk))
+                region.insert_chunk(chunk);
+        }
     }
     return std::stoull(ComputeRegionContentHash(region), nullptr, 16);
 }
