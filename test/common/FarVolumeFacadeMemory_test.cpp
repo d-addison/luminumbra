@@ -106,19 +106,40 @@ void MemChargedEqualsUnbounded(FarVolumeNumericProfile profile) {
     EXPECT_EQ(pool.used(), retained.bytes());
 }
 
+// Refusal is about ownership/unwinding rather than full-tile mesh throughput.
+// V5 still has the canonical 128x128 horizontal lattice, height discovery/cache,
+// checksum, generation, gradient halo and mixed-mesh pipeline. Its 256m default
+// band plus inclusive top plane is two V5 bricks tall; two small columns retain a mesh
+// in each of two distinct tiles. Sweeping full V1 planes repeats millions of
+// samples/large meshes ~100 times per profile and exceeded ASan's 300s limit.
+FarVolumeAuthority MemSweepAuthority(FarVolumeNumericProfile profile) {
+    return {
+        42,
+        FarCaveMode::BandLimited,
+        profile,
+        [](std::int64_t, std::int64_t) { return 0.0f; },
+        [](const FarVolumePosition& p, float, std::uint32_t, FarCaveMode) {
+            const bool column_x = (p.x >= 0 && p.x <= 256) || (p.x >= 8192 && p.x <= 8192 + 256);
+            const bool column_z = p.z >= 0 && p.z <= 256;
+            return FarVolumeSample{column_x && column_z ? static_cast<float>(p.y) + .25f : 3.0f, 7};
+        }};
+}
+
 void MemRefusalSweep(FarVolumeNumericProfile profile) {
-    const auto authority = MemPlane(profile);
-    const auto clean = MemMeasureRun(MemIntentA(), authority);
+    const auto authority = MemSweepAuthority(profile);
+    const FarVolumeCoverageIntent intent_a{{5, 0, 0}, {}};
+    const FarVolumeCoverageIntent intent_b{{5, 1, 0}, {}};
+    const auto clean = MemMeasureRun(intent_a, authority);
     ASSERT_GT(clean.attempts, 0u);
+    ASSERT_EQ(clean.compilation.mesh.content, FarVolumeContent::Mixed);
+    ASSERT_FALSE(clean.compilation.mesh.vertices.empty());
+    ASSERT_FALSE(clean.compilation.mesh.indices.empty());
 
     FarVolumeMemoryPool pool(kMemLargeLimit);
     FarVolumeMemoryLease retained(pool);
     FarVolumeCompilation previous;
-    ASSERT_TRUE(CompileFarVolumeCharged(MemIntentB(),
-                                        authority,
-                                        MemLimits(),
-                                        FarVolumeMemory{&pool, &retained, nullptr},
-                                        previous));
+    ASSERT_TRUE(CompileFarVolumeCharged(
+        intent_b, authority, MemLimits(), FarVolumeMemory{&pool, &retained, nullptr}, previous));
     const FarVolumeCompilation saved = previous;
     const std::uint64_t held_bytes = retained.bytes();
     const std::uint64_t baseline_used = pool.used();
@@ -131,7 +152,7 @@ void MemRefusalSweep(FarVolumeNumericProfile profile) {
         // Relative to the current counter: refused runs also advance it.
         pool.RefuseAttemptsFrom(pool.attempts() + k);
         FarVolumeFacadeFailure failure;
-        EXPECT_FALSE(CompileFarVolumeCharged(MemIntentA(),
+        EXPECT_FALSE(CompileFarVolumeCharged(intent_a,
                                              authority,
                                              MemLimits(),
                                              FarVolumeMemory{&pool, &retained, nullptr},
@@ -144,11 +165,8 @@ void MemRefusalSweep(FarVolumeNumericProfile profile) {
     }
 
     pool.RefuseAttemptsFrom(kMemNoFailure);
-    ASSERT_TRUE(CompileFarVolumeCharged(MemIntentA(),
-                                        authority,
-                                        MemLimits(),
-                                        FarVolumeMemory{&pool, &retained, nullptr},
-                                        previous));
+    ASSERT_TRUE(CompileFarVolumeCharged(
+        intent_a, authority, MemLimits(), FarVolumeMemory{&pool, &retained, nullptr}, previous));
     EXPECT_TRUE(previous == clean.compilation);
     EXPECT_EQ(retained.bytes(), FarVolumeCompilationRetainedBytes(previous));
     EXPECT_EQ(pool.used(), retained.bytes());
