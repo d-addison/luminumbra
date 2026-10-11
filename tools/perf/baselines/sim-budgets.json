@@ -1,0 +1,308 @@
+{
+  "headroom": {
+    "den": 2,
+    "num": 3
+  },
+  "identity": {
+    "collision_radius": null,
+    "fixture_hash": null,
+    "revision": null,
+    "seed": "1337",
+    "surface_radius": null,
+    "ticks": 600
+  },
+  "presets": {
+    "archipelago": {
+      "stages": {
+        "aether": {
+          "max_work_per_tick": null
+        },
+        "alarm": {
+          "max_work_per_tick": null
+        },
+        "animation": {
+          "max_work_per_tick": null
+        },
+        "circadian": {
+          "max_work_per_tick": null
+        },
+        "creatures": {
+          "max_work_per_tick": null
+        },
+        "crops": {
+          "max_work_per_tick": null
+        },
+        "decay": {
+          "max_work_per_tick": null
+        },
+        "disease": {
+          "max_work_per_tick": null
+        },
+        "energy": {
+          "max_work_per_tick": null
+        },
+        "events": {
+          "max_work_per_tick": null
+        },
+        "fire": {
+          "max_work_per_tick": null
+        },
+        "grazing": {
+          "max_work_per_tick": null
+        },
+        "instinct": {
+          "max_work_per_tick": null
+        },
+        "irrigation": {
+          "max_work_per_tick": null
+        },
+        "lifespan": {
+          "max_work_per_tick": null
+        },
+        "locomotion": {
+          "max_work_per_tick": null
+        },
+        "migration": {
+          "max_work_per_tick": null
+        },
+        "packs": {
+          "max_work_per_tick": null
+        },
+        "perception": {
+          "max_work_per_tick": null
+        },
+        "plants": {
+          "max_work_per_tick": null
+        },
+        "pollination": {
+          "max_work_per_tick": null
+        },
+        "scent": {
+          "max_work_per_tick": null
+        },
+        "server_physics": {
+          "max_work_per_tick": null
+        },
+        "server_streaming": {
+          "max_work_per_tick": null
+        },
+        "server_water": {
+          "max_work_per_tick": null
+        },
+        "soil": {
+          "max_work_per_tick": null
+        },
+        "territory": {
+          "max_work_per_tick": null
+        },
+        "weather": {
+          "max_work_per_tick": null
+        },
+        "wind": {
+          "max_work_per_tick": null
+        },
+        "wind_weather": {
+          "max_work_per_tick": null
+        }
+      },
+      "total": {
+        "max_work_per_tick": null
+      }
+    },
+    "default": {
+      "stages": {
+        "aether": {
+          "max_work_per_tick": null
+        },
+        "alarm": {
+          "max_work_per_tick": null
+        },
+        "animation": {
+          "max_work_per_tick": null
+        },
+        "circadian": {
+          "max_work_per_tick": null
+        },
+        "creatures": {
+          "max_work_per_tick": null
+        },
+        "crops": {
+          "max_work_per_tick": null
+        },
+        "decay": {
+          "max_work_per_tick": null
+        },
+        "disease": {
+          "max_work_per_tick": null
+        },
+        "energy": {
+          "max_work_per_tick": null
+        },
+        "events": {
+          "max_work_per_tick": null
+        },
+        "fire": {
+          "max_work_per_tick": null
+        },
+        "grazing": {
+          "max_work_per_tick": null
+        },
+        "instinct": {
+          "max_work_per_tick": null
+        },
+        "irrigation": {
+          "max_work_per_tick": null
+        },
+        "lifespan": {
+          "max_work_per_tick": null
+        },
+        "locomotion": {
+          "max_work_per_tick": null
+        },
+        "migration": {
+          "max_work_per_tick": null
+        },
+        "packs": {
+          "max_work_per_tick": null
+        },
+        "perception": {
+          "max_work_per_tick": null
+        },
+        "plants": {
+          "max_work_per_tick": null
+        },
+        "pollination": {
+          "max_work_per_tick": null
+        },
+        "scent": {
+          "max_work_per_tick": null
+        },
+        "server_physics": {
+          "max_work_per_tick": null
+        },
+        "server_streaming": {
+          "max_work_per_tick": null
+        },
+        "server_water": {
+          "max_work_per_tick": null
+        },
+        "soil": {
+          "max_work_per_tick": null
+        },
+        "territory": {
+          "max_work_per_tick": null
+        },
+        "weather": {
+          "max_work_per_tick": null
+        },
+        "wind": {
+          "max_work_per_tick": null
+        },
+        "wind_weather": {
+          "max_work_per_tick": null
+        }
+      },
+      "total": {
+        "max_work_per_tick": null
+      }
+    },
+    "mountains": {
+      "stages": {
+        "aether": {
+          "max_work_per_tick": null
+        },
+        "alarm": {
+          "max_work_per_tick": null
+        },
+        "animation": {
+          "max_work_per_tick": null
+        },
+        "circadian": {
+          "max_work_per_tick": null
+        },
+        "creatures": {
+          "max_work_per_tick": null
+        },
+        "crops": {
+          "max_work_per_tick": null
+        },
+        "decay": {
+          "max_work_per_tick": null
+        },
+        "disease": {
+          "max_work_per_tick": null
+        },
+        "energy": {
+          "max_work_per_tick": null
+        },
+        "events": {
+          "max_work_per_tick": null
+        },
+        "fire": {
+          "max_work_per_tick": null
+        },
+        "grazing": {
+          "max_work_per_tick": null
+        },
+        "instinct": {
+          "max_work_per_tick": null
+        },
+        "irrigation": {
+          "max_work_per_tick": null
+        },
+        "lifespan": {
+          "max_work_per_tick": null
+        },
+        "locomotion": {
+          "max_work_per_tick": null
+        },
+        "migration": {
+          "max_work_per_tick": null
+        },
+        "packs": {
+          "max_work_per_tick": null
+        },
+        "perception": {
+          "max_work_per_tick": null
+        },
+        "plants": {
+          "max_work_per_tick": null
+        },
+        "pollination": {
+          "max_work_per_tick": null
+        },
+        "scent": {
+          "max_work_per_tick": null
+        },
+        "server_physics": {
+          "max_work_per_tick": null
+        },
+        "server_streaming": {
+          "max_work_per_tick": null
+        },
+        "server_water": {
+          "max_work_per_tick": null
+        },
+        "soil": {
+          "max_work_per_tick": null
+        },
+        "territory": {
+          "max_work_per_tick": null
+        },
+        "weather": {
+          "max_work_per_tick": null
+        },
+        "wind": {
+          "max_work_per_tick": null
+        },
+        "wind_weather": {
+          "max_work_per_tick": null
+        }
+      },
+      "total": {
+        "max_work_per_tick": null
+      }
+    }
+  },
+  "schema": "luminumbra.sim_budgets.v1"
+}
