@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -447,9 +448,10 @@ TEST(ActiveRegionLedgerTest, TrySetLocalAnchorDoesNotThrowAndKeepsPreviousAnchor
     EXPECT_TRUE(ledger.try_set_local_anchor(Vec3(256, 0, 256)));
     EXPECT_FALSE(ledger.try_set_local_anchor(Vec3(nan, 0, 0)));
     EXPECT_FALSE(ledger.try_set_local_anchor(Vec3(inf, 0, 0)));
-    ASSERT_TRUE(ledger.local_anchor().has_value());
-    EXPECT_EQ(ledger.local_anchor()->x, 256.0f);
-    EXPECT_EQ(ledger.local_anchor()->z, 256.0f);
+    const std::optional<Vec3> anchor = ledger.local_anchor();
+    ASSERT_TRUE(anchor.has_value());
+    EXPECT_EQ(anchor.value().x, 256.0f);
+    EXPECT_EQ(anchor.value().z, 256.0f);
 }
 
 TEST(ActiveRegionLedgerTest, AcknowledgeWorldClockRaisesOnlyTheCeiling) {

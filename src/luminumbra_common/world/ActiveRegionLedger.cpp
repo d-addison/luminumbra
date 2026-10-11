@@ -571,7 +571,8 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
             const std::string_view extension = bytes.substr(extension_begin, extension_length);
             // Each TLV is u16 type, u32 length, value. The TLVs must exactly fill the block.
             std::size_t at = 0;
-            std::optional<std::uint64_t> previous_type;
+            bool have_previous = false;
+            std::uint64_t previous_type = 0;
             while (at < extension.size()) {
                 if (extension.size() - at < 6)
                     return false;
@@ -585,8 +586,9 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                 at += length;
                 // Strictly ascending types refuse duplicates; types 1 and 2 are the only known
                 // types.
-                if ((previous_type && type <= *previous_type) || (type != 1 && type != 2))
+                if ((have_previous && type <= previous_type) || (type != 1 && type != 2))
                     return false;
+                have_previous = true;
                 previous_type = type;
                 if (type == 1) {
                     // Persistent id allocator: the next id, in [2, 2^63].
