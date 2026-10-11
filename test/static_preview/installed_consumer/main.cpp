@@ -55,7 +55,7 @@ std::filesystem::path Utf8Path(const std::string& text) {
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
 }
 
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(__MINGW32__)
 void RuntimeChecks(const std::filesystem::path& expected_module) {
     for (const auto* name : {L"libgcc_s_seh-1.dll", L"libstdc++-6.dll", L"libwinpthread-1.dll"}) {
         // Inspect already loaded dependencies; never load a DLL to satisfy this check.
@@ -167,12 +167,12 @@ void CameraChecks() {
     description.far_plane = 100;
     description.view = Translation(-2, -3, -4);
     auto& projection = description.projection;
-    const double near = description.near_plane, far = description.far_plane;
+    const double near_plane = description.near_plane, far_plane = description.far_plane;
     projection[0] = 1.5;
     projection[5] = 2;
-    projection[10] = near / (far - near);
+    projection[10] = near_plane / (far_plane - near_plane);
     projection[11] = -1;
-    projection[14] = far * near / (far - near);
+    projection[14] = far_plane * near_plane / (far_plane - near_plane);
     const auto perspective = RenderView::Validate(description);
     Check(!perspective.orthographic() && perspective.description().revision == 17,
           "perspective type or revision differs");
@@ -193,8 +193,8 @@ void CameraChecks() {
             const auto& p = view.projection();
             return (-distance * p[10] + p[14]) / (-distance * p[11] + p[15]);
         };
-        Near(depth(near), 1, "near depth is not reversed-Z one");
-        Near(depth(far), 0, "far depth is not reversed-Z zero");
+        Near(depth(near_plane), 1, "near_plane depth is not reversed-Z one");
+        Near(depth(far_plane), 0, "far_plane depth is not reversed-Z zero");
         for (const auto& plane : view.frustum_planes()) {
             Near(std::sqrt(plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]),
                  1,
@@ -211,15 +211,16 @@ void CameraChecks() {
     projection = {};
     projection[0] = .25;
     projection[5] = 1. / 3;
-    projection[10] = 1 / (far - near);
+    projection[10] = 1 / (far_plane - near_plane);
     projection[12] = -.5;
     projection[13] = -1. / 3;
-    projection[14] = far / (far - near);
+    projection[14] = far_plane / (far_plane - near_plane);
     projection[15] = 1;
     const auto orthographic = RenderView::Validate(description);
     Check(orthographic.orthographic(), "off-center orthographic camera refused or misclassified");
     common(orthographic);
-    Near(-(near + far) * .5 * orthographic.projection()[10] + orthographic.projection()[14],
+    Near(-(near_plane + far_plane) * .5 * orthographic.projection()[10] +
+             orthographic.projection()[14],
          .5,
          "orthographic depth is not linear");
     auto invalid = description;
@@ -232,8 +233,8 @@ void CameraChecks() {
     invalid.width = 0;
     Refuses([&] { RenderView::Validate(invalid); }, "empty camera extent accepted");
     invalid = description;
-    invalid.projection[10] = -1 / (far - near);
-    invalid.projection[14] = -near / (far - near);
+    invalid.projection[10] = -1 / (far_plane - near_plane);
+    invalid.projection[14] = -near_plane / (far_plane - near_plane);
     Refuses([&] { RenderView::Validate(invalid); }, "forward-Z projection accepted");
 }
 } // namespace
@@ -249,7 +250,7 @@ int main(int argc, char** argv) {
         Check(std::filesystem::equivalent(Utf8Path(module), Utf8Path(argv[4])),
               "loaded module is not the explicitly expected installed library");
         std::cout << "loaded_module=" << module << '\n';
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(__MINGW32__)
         RuntimeChecks(Utf8Path(argv[4]));
 #endif
         SceneChecks(argv[1], argv[2], argv[3]);

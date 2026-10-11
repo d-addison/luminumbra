@@ -217,6 +217,17 @@ GBufferDrawStats GBufferPass::execute(const RenderContext& ctx,
     const Camera& camera = *ctx.camera;
 
     glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer.fbo_id);
+    {
+        GLenum buffers[6] = {GL_COLOR_ATTACHMENT0,
+                             GL_COLOR_ATTACHMENT1,
+                             GL_COLOR_ATTACHMENT2,
+                             GL_COLOR_ATTACHMENT3,
+                             GL_COLOR_ATTACHMENT4,
+                             GL_COLOR_ATTACHMENT5};
+        // Plant/decal stages narrow the draw buffers; restore the full set before the clear so
+        // attachments 4 (motion) and 5 (authored surface) are cleared and written every frame.
+        glDrawBuffers(m_gbuffer.authored_texture ? 6 : 5, buffers);
+    }
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_GREATER);
     glDepthMask(GL_TRUE);

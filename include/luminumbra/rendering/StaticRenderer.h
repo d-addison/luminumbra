@@ -38,7 +38,8 @@ public:
     static std::string ModulePath(); // Actual loaded renderer module, for executable-byte receipts.
     StaticRenderer(const StaticRenderer&) = delete;
     StaticRenderer& operator=(const StaticRenderer&) = delete;
-    StaticFrame Render(const RenderView& view, std::shared_ptr<const StaticDrawSnapshot> scene);
+    StaticFrame Render(const RenderView& view,
+                       const std::shared_ptr<const StaticDrawSnapshot>& scene);
 
 private:
     struct Impl;
