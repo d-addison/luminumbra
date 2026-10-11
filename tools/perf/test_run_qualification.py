@@ -95,7 +95,8 @@ FAKE_CHECKER = '''#!/usr/bin/env python3
 """Fake checker: echoes the capture into a floor verdict and exits FAKE_CHECKER_EXIT.
 
 FAKE_CHECKER_VERDICT: auto (default), none, malformed, disagree.
-FAKE_CHECKER_TAMPER: profile, adapter, frames or p99 alters that verdict field.
+FAKE_CHECKER_TAMPER: profile, adapter, frames, kind, p99 (99.0) or p99_low (11.0)
+alters that verdict field.
 """
 import json
 import os
@@ -130,6 +131,10 @@ if tamper == 'frames':
     document['frames'] = (frames or 0) + 1
 if tamper == 'p99':
     document['floor']['p99_ms'] = 99.0
+if tamper == 'p99_low':
+    document['floor']['p99_ms'] = 11.0
+if tamper == 'kind':
+    document['workload_kind'] = 'fixed_view' if frames is None else 'traversal'
 if mode == 'malformed':
     path.write_text('not json', encoding='utf-8')
 elif mode != 'none':
@@ -146,22 +151,40 @@ def verdict(value='pass'):
     return dict(schema=VERDICT_SCHEMA, floor=dict(verdict=value))
 
 
+def verdict_for(workload_kind, p99=12.0):
+    """A complete checker verdict for a quality traversal capture with the given kind."""
+    return dict(schema=VERDICT_SCHEMA, workload_kind=workload_kind, profile='quality',
+                adapter=adapter(), frames=None,
+                floor=dict(limit_ms=rq.render_budget.FLOOR_MS, p99_ms=p99, verdict='pass'),
+                target=dict(limit_ms=8.33))
+
+
+def placeholder_script(workload):
+    return f'synthetic/{workload}.traversal'
+
+
+# Binding for the blocked traversals, used only by tests that need an all-pass path.
+PLACEHOLDER_BINDINGS = {workload: placeholder_script(workload)
+                        for workload in ('cave-walk', 'edited-world-tour')}
+
+
 def passing_results(matrix, renderer=RENDERER):
     """Synthetic all-pass results with a complete adapter, artifact and verdict.
 
     Traversal cells without a recorded script get a placeholder script, so the canonical
-    record check sees a script for every traversal workload.
+    record check sees a script for every traversal workload. Every result came from the
+    canonical checker.
     """
     results = []
     for cell in matrix_lib.cells(matrix):
         script = None
         if cell['kind'] == 'traversal':
-            script = cell['script'] or f"synthetic/{cell['workload']}.traversal"
+            script = cell['script'] or placeholder_script(cell['workload'])
         results.append(dict(
             id=cell['id'], workload=cell['workload'], kind=cell['kind'],
             warmup_frames=cell['warmup_frames'], measured_frames=cell['measured_frames'],
             script=script, state='pass', reason=None, adapter=adapter(renderer),
-            artifact=f"cells/{cell['id']}.json", verdict=verdict()))
+            artifact=f"cells/{cell['id']}.json", verdict=verdict(), checker_canonical=True))
     return results
 
 
@@ -328,6 +351,8 @@ class SelectionTests(RunnerTestBase):
         self.assertEqual(cell['state'], 'pass')
         self.assertTrue(Path(cell['artifact']).is_absolute())
         self.assertTrue(cell['artifact'].startswith(str(out)), cell['artifact'])
+        self.assertFalse(cell['checker_canonical'])
+        self.assertFalse(document['render_floor_qualified'])
 
 
 class ProcessFailureTests(RunnerTestBase):
@@ -510,12 +535,32 @@ class VerdictReconciliationTests(RunnerTestBase):
         self.assert_invalid({'FAKE_CLIENT_MODE': 'nop99'},
                             'capture-lacks-frame-wall-p99')
 
+    def test_verdict_p99_differing_from_capture_is_invalid_when_in_range(self):
+        # Capture p99 is 12.0; the verdict's 11.0 passes the limit, so only reconciliation
+        # can reject it.
+        self.assert_invalid({'FAKE_CHECKER_TAMPER': 'p99_low'},
+                            'verdict-does-not-match-capture: p99_ms')
+
+    def test_verdict_workload_kind_mismatch_is_invalid(self):
+        self.assert_invalid({'FAKE_CHECKER_TAMPER': 'kind'},
+                            'verdict-does-not-match-capture: workload_kind')
+
+    def test_capture_workload_kind_mismatch_is_invalid(self):
+        verdict_document = verdict_for(workload_kind='traversal')
+        capture = dict(profile=dict(name='quality'), adapter=adapter(),
+                       frames=None, distribution=dict(frame_wall_ms=dict(p99=12.0)),
+                       workload=dict(kind='fixed_view'))
+        reason = rq.verdict_reason(verdict_document, capture, dict(kind='traversal'))
+        self.assertEqual(reason, 'verdict-does-not-match-capture: workload_kind')
+
     def test_reconciled_verdict_passes(self):
         code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
         self.assertEqual(code, 0)
-        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
+        document = self.load_qualification()
+        cell = self.cell_of(document, SURFACE_CELL)
         self.assertEqual(cell['state'], 'pass')
         self.assertEqual(cell['verdict']['floor']['p99_ms'], 12.0)
+        self.assertFalse(document['render_floor_qualified'])
 
 
 class CheckCommandTests(unittest.TestCase):
@@ -584,8 +629,12 @@ class RealCheckerTests(RunnerTestBase):
         self.assertEqual(code, 1)
         cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
         self.assertEqual(cell['state'], 'invalid')
-        self.assertTrue(cell['reason'].startswith('checker exit '), cell['reason'])
-        self.assertTrue((self.out / 'cells' / f'{SURFACE_CELL}.check.log').is_file())
+        # Exact reason: argparse usage errors exit 2 and must not satisfy this test.
+        self.assertEqual(cell['reason'], 'checker exit 1')
+        self.assertTrue(cell['checker_canonical'])
+        log = (self.out / 'cells' / f'{SURFACE_CELL}.check.log').read_text(encoding='utf-8')
+        self.assertIn('"verdict": "FAIL"', log)
+        self.assertNotIn('usage:', log)
 
 
 class AggregateTests(unittest.TestCase):
@@ -598,7 +647,8 @@ class AggregateTests(unittest.TestCase):
                             declared_refresh=self.declared if declared is None else declared)
 
     def test_all_pass_with_declared_refresh_is_qualified(self):
-        document = self.aggregate(passing_results(self.matrix))
+        with mock.patch.dict(rq.BOUND_TRAVERSAL_SCRIPTS, PLACEHOLDER_BINDINGS):
+            document = self.aggregate(passing_results(self.matrix))
         self.assertEqual(document['summary']['pass'], 36)
         self.assertTrue(document['render_floor_qualified'])
         self.assertTrue(document['harness_complete'])
@@ -728,6 +778,25 @@ class AggregateTests(unittest.TestCase):
         index = index_of(results, SURFACE_CELL)
         results[index] = dict(results[index], script='tools/perf/fixtures/other.traversal')
         self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+
+    def test_unbound_traversals_carrying_surface_script_never_qualify(self):
+        # Everything else is perfect, so only the missing traversal bindings can block it.
+        results = passing_results(self.matrix)
+        for result in results:
+            if result['workload'] in ('cave-walk', 'edited-world-tour'):
+                result['script'] = rq.CANONICAL_SURFACE_SCRIPT
+        document = self.aggregate(results)
+        self.assertEqual(document['summary']['pass'], 36)
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_result_from_replacement_checker_never_qualifies(self):
+        with mock.patch.dict(rq.BOUND_TRAVERSAL_SCRIPTS, PLACEHOLDER_BINDINGS):
+            results = passing_results(self.matrix)
+            self.assertTrue(self.aggregate(results)['render_floor_qualified'])
+            results[0] = dict(results[0], checker_canonical=False)
+            document = self.aggregate(results)
+        self.assertFalse(document['render_floor_qualified'])
+        self.assertFalse(self.cell_of_document(document, results[0]['id'])['checker_canonical'])
 
     def test_cells_carry_canonical_fields(self):
         document = self.aggregate(passing_results(self.matrix))

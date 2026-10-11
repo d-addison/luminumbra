@@ -61,6 +61,10 @@ CANONICAL_DISPLAYS = ('3840x1600', '3440x1440')
 CANONICAL_WARMUP = 400
 CANONICAL_FIXED_FRAMES = 240
 CANONICAL_SURFACE_SCRIPT = 'tools/perf/fixtures/surface-flight.traversal'
+# The traversal script each traversal workload must carry to be canonical. cave-walk and
+# edited-world-tour are deliberately absent: they stay non-canonical (never qualify) until
+# AC8 commits their scripts and binds them here.
+BOUND_TRAVERSAL_SCRIPTS = {'surface-flight': CANONICAL_SURFACE_SCRIPT}
 
 
 class UsageError(ValueError):
@@ -130,14 +134,15 @@ def adapter_triple(data):
     return {key: adapter.get(key) for key in ('vendor', 'renderer', 'version')}
 
 
-def finish(cell, state, reason, artifact, verdict=None):
+def finish(cell, state, reason, artifact, verdict=None, *, checker_canonical):
     """Cell result; the artifact path and adapter are reported only when the file exists."""
     present = Path(artifact).is_file()
     return dict(id=cell['id'], workload=cell['workload'], kind=cell['kind'],
                 warmup_frames=cell['warmup_frames'], measured_frames=cell['measured_frames'],
                 script=cell['script'], state=state, reason=reason,
                 adapter=adapter_triple(read_json_object(artifact)) if present else None,
-                artifact=str(artifact) if present else None, verdict=verdict)
+                artifact=str(artifact) if present else None, verdict=verdict,
+                checker_canonical=checker_canonical)
 
 
 def binding_mismatch(cell, data):
@@ -156,8 +161,8 @@ def binding_mismatch(cell, data):
     return None
 
 
-def verdict_reason(verdict, data):
-    """None when a checker-passed verdict reconciles with the capture, else the reason."""
+def verdict_reason(verdict, data, cell):
+    """None when a checker-passed verdict reconciles with the capture and cell, else the reason."""
     if not isinstance(verdict, dict) or any(key not in verdict for key in VERDICT_KEYS):
         return 'verdict missing/malformed'
     floor = verdict['floor']
@@ -181,6 +186,12 @@ def verdict_reason(verdict, data):
     name = profile.get('name') if isinstance(profile, dict) else None
     if verdict['profile'] != name:
         return 'verdict-does-not-match-capture: profile'
+    # The checker's workload_kind is the capture's workload.kind, which uses the same
+    # 'fixed_view' / 'traversal' vocabulary as the matrix cell kind, so no mapping is needed.
+    capture_workload = data.get('workload')
+    capture_kind = capture_workload.get('kind') if isinstance(capture_workload, dict) else None
+    if verdict['workload_kind'] != cell['kind'] or capture_kind not in (None, cell['kind']):
+        return 'verdict-does-not-match-capture: workload_kind'
     if verdict['adapter'] != adapter_triple(data):
         return 'verdict-does-not-match-capture: adapter'
     if verdict['frames'] != data.get('frames'):
@@ -210,17 +221,17 @@ def canonical_record(result):
         return False
     if result['kind'] == 'fixed_view':
         return result['measured_frames'] == CANONICAL_FIXED_FRAMES
-    if result['workload'] == 'surface-flight':
-        return result['script'] == CANONICAL_SURFACE_SCRIPT
-    return result['script'] is not None
+    return (result['script'] is not None
+            and BOUND_TRAVERSAL_SCRIPTS.get(result['workload']) == result['script'])
 
 
 def cell_qualifies(result):
-    """A cell counts toward qualification only with a complete, canonical, passing record."""
+    """A cell counts toward qualification only with a complete, canonical, passing record
+    that was checked by the canonical checker."""
     return (result['state'] == 'pass' and valid_adapter(result['adapter'])
             and result['adapter']['renderer'] == CANONICAL_RENDERER
             and result['artifact'] is not None and verdict_passes(result['verdict'])
-            and canonical_record(result))
+            and result['checker_canonical'] is True and canonical_record(result))
 
 
 def check_command(cell, *, matrix, artifact, verdict_path, root, python, checker):
@@ -235,13 +246,14 @@ def check_command(cell, *, matrix, artifact, verdict_path, root, python, checker
 
 
 def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_seconds,
-             environment):
+             environment, checker_canonical):
     state, reason = matrix_lib.readiness(cell, root)
     cells_dir = out_dir / 'cells'
     cell_id = cell['id']
     artifact = cells_dir / f'{cell_id}.json'
+    canonical = checker_canonical
     if state != 'ready':
-        return finish(cell, 'unevaluated', reason, artifact)
+        return finish(cell, 'unevaluated', reason, artifact, checker_canonical=canonical)
     work = out_dir / 'work' / cell_id
     work.mkdir(parents=True, exist_ok=True)
     cells_dir.mkdir(parents=True, exist_ok=True)
@@ -256,19 +268,24 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
             receipt_path=cells_dir / f'{cell_id}.process.json',
             timeout_seconds=timeout_seconds)
     except subprocess.TimeoutExpired:
-        return finish(cell, 'process_failed', 'timed_out', artifact)
+        return finish(cell, 'process_failed', 'timed_out', artifact, checker_canonical=canonical)
     except OSError as error:
-        return finish(cell, 'process_failed', f'spawn-failed: {error}', artifact)
+        return finish(cell, 'process_failed', f'spawn-failed: {error}', artifact,
+                      checker_canonical=canonical)
     if completed.returncode != 0:
-        return finish(cell, 'process_failed', f'exit {completed.returncode}', artifact)
+        return finish(cell, 'process_failed', f'exit {completed.returncode}', artifact,
+                      checker_canonical=canonical)
     if evidence:
-        return finish(cell, 'process_failed', 'evidence: ' + '; '.join(evidence), artifact)
+        return finish(cell, 'process_failed', 'evidence: ' + '; '.join(evidence), artifact,
+                      checker_canonical=canonical)
     if not artifact.is_file():
-        return finish(cell, 'process_failed', 'no-artifact', artifact)
+        return finish(cell, 'process_failed', 'no-artifact', artifact,
+                      checker_canonical=canonical)
     data = read_json_object(artifact)
     field = None if data is None else binding_mismatch(cell, data)
     if field is not None:
-        return finish(cell, 'invalid', f'capture-does-not-match-cell: {field}', artifact)
+        return finish(cell, 'invalid', f'capture-does-not-match-cell: {field}', artifact,
+                      checker_canonical=canonical)
     verdict_path = cells_dir / f'{cell_id}.verdict.json'
     set_aside(verdict_path)
     check = check_command(cell, matrix=matrix, artifact=artifact, verdict_path=verdict_path,
@@ -280,18 +297,22 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
                                      timeout=CHECKER_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
         return finish(cell, 'invalid',
-                      f'checker timed out after {CHECKER_TIMEOUT_SECONDS} s', artifact)
+                      f'checker timed out after {CHECKER_TIMEOUT_SECONDS} s', artifact,
+                      checker_canonical=canonical)
     except OSError as error:
-        return finish(cell, 'invalid', f'checker spawn-failed: {error}', artifact)
+        return finish(cell, 'invalid', f'checker spawn-failed: {error}', artifact,
+                      checker_canonical=canonical)
     verdict = read_json_object(verdict_path)
     if checked.returncode == 0:
-        reason = verdict_reason(verdict, data or {})
+        reason = verdict_reason(verdict, data or {}, cell)
         if reason is not None:
-            return finish(cell, 'invalid', reason, artifact, verdict)
-        return finish(cell, 'pass', None, artifact, verdict)
+            return finish(cell, 'invalid', reason, artifact, verdict,
+                          checker_canonical=canonical)
+        return finish(cell, 'pass', None, artifact, verdict, checker_canonical=canonical)
     if checked.returncode == FLOOR_FAILURE_EXIT:
-        return finish(cell, 'fail', 'floor', artifact, verdict)
-    return finish(cell, 'invalid', f'checker exit {checked.returncode}', artifact, verdict)
+        return finish(cell, 'fail', 'floor', artifact, verdict, checker_canonical=canonical)
+    return finish(cell, 'invalid', f'checker exit {checked.returncode}', artifact, verdict,
+                  checker_canonical=canonical)
 
 
 def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executable,
@@ -301,11 +322,13 @@ def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executab
     out_dir = Path(out_dir)
     if checker is None:
         checker = Path(root) / matrix_lib.VALIDATOR
+    # A replacement checker may run, but its results never count toward qualification.
+    checker_canonical = Path(checker).resolve() == (Path(root) / matrix_lib.VALIDATOR).resolve()
     reset_settings(out_dir)
     environment = isolated_environment(out_dir, environment)
     return [run_cell(cell, matrix, client=client, out_dir=out_dir, root=root, python=python,
                      checker=checker, timeout_seconds=timeout_seconds,
-                     environment=environment)
+                     environment=environment, checker_canonical=checker_canonical)
             for cell in planner.select(matrix_lib.cells(matrix), only)]
 
 
@@ -355,7 +378,8 @@ def aggregate(matrix, results, *, partial, declared_refresh):
                     measured_frames=result['measured_frames'], script=result['script'],
                     state=result['state'], reason=result['reason'],
                     adapter=result['adapter'], artifact=result['artifact'],
-                    verdict=result['verdict']) for result in results],
+                    verdict=result['verdict'], checker_canonical=result['checker_canonical'])
+               for result in results],
         summary=summary, adapter_identical=adapter_identical,
         adapter_matches_qualified=adapter_matches, harness_complete=harness_complete,
         render_floor_qualified=render_floor, expanded_qualified=False,
