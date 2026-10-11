@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../include/luminumbra/core/Types.h"
+#include "FarVolume.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,13 @@ struct TerrainMeshBuildStats {
     std::size_t triangles = 0;
     std::uint64_t elapsed_us = 0;
 };
+
+// Sparse pristine-volume geometry, with no heightfield background or skirts.
+// Corrupt/shared-sample mismatches and resource exhaustion throw without exposing
+// a partial mesh. The legacy far mesher and all its callers are unchanged.
+FarVolumeMesh PolygoniseFarVolume(const FarVolumeTile& tile,
+                                  const FarVolumeLimits& tile_limits = {},
+                                  const FarVolumeMeshLimits& mesh_limits = {});
 
 void ResetTerrainMeshBuildStats();
 TerrainMeshBuildStats GetTerrainMeshBuildStats();

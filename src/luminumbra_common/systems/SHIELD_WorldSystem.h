@@ -5,6 +5,7 @@
 #include "../world/BiomeTable.h"
 #include "../world/Chunk.h"
 #include "../world/FarLodStore.h"
+#include "../world/FarVolume.h"
 #include "../world/StructurePlacement.h"
 #include "FastNoise/FastNoise.h"
 #include "entt/entt.hpp"
@@ -440,6 +441,16 @@ public:
                               float effective_cap,
                               float feature_carve,
                               const float* precomputed_cheese = nullptr) const;
+    // Pristine-volume experiment only. Spacings 4/8 dispatch to the live router
+    // without altering a float operation; coarser samples use the selected
+    // bounded noise kernel and signed analytic openings. No live caller uses it.
+    float SamplePristineFarDensity(const Vec3& world_pos,
+                                   float surface_height,
+                                   std::uint32_t spacing_meters,
+                                   World::FarCaveMode mode) const;
+    // Signed coarse analytic CSG: negative solid, positive inside an opening.
+    // Kept separate because the historical live carve loses its signed distance.
+    float AnalyticSurfaceOpeningDensity(const Vec3& world_pos, float surface_height) const;
     //  locate the LARGEST doline / surface-break (cave mouth) within
     // `scan_radius_m` of a point. Pure read of the deterministic placement; used to aim a
     // camera at a dramatic cave opening (dolines follow a power-law, so most are small).
