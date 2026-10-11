@@ -30,6 +30,9 @@ def command(args, cwd=None):
 
 def identity(blender_root=None):
     paths = ["tools/asset_processor.cpp", "tools/blender/validate_glb.py",
+             "tools/morph_asset_processor.cpp",
+             "src/luminumbra_common/animation/MorphMesh.cpp",
+             "src/luminumbra_common/animation/MorphMesh.h",
              "tools/blender/fixtures/make_fixtures.py", "tools/blender/geonodes_bake.py",
              "src/luminumbra_common/animation/SkinnedMeshFormat.h",
              "src/luminumbra_common/animation/AnimationRuntime.cpp"]

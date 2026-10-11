@@ -38,6 +38,8 @@
 
 #include "luminumbra_common/animation/SkinnedMeshFormat.h"
 
+bool process_morph_gltf_checked(const std::string& input_path, const std::string& output_path);
+
 struct Vertex {
     float pos[3];
     float norm[3];
@@ -1519,7 +1521,8 @@ int main(int argc, char* argv[]) {
     g_only_primitive = -1;
     g_max_tris = 0;
     if (argc < 3) {
-        std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> <output.lmesh|output.ltex> "
+        std::cerr << "Usage: AssetProcessor.exe <input.glb|input.png> "
+                     "<output.lmesh|output.ltex|output.lmorph> "
                      "[target_size] [--preview-png] [--max-tris N]"
                   << std::endl;
         std::cerr << "  --max-tris N: for.lmesh output, simplify toward N triangles, bounded by "
@@ -1557,6 +1560,15 @@ int main(int argc, char* argv[]) {
                    std::tolower(static_cast<unsigned char>(b));
         });
     };
+
+    if (ends_with(output_path, ".lmorph")) {
+        if (argc != 3) {
+            std::cerr
+                << "Error: The static morph profile accepts no LOD/texture/primitive switches\n";
+            return 1;
+        }
+        return process_morph_gltf_checked(argv[1], output_path) ? 0 : 1;
+    }
 
     if (ends_with(output_path, ".ltex")) {
         uint32_t target_size = 0;
