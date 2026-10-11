@@ -354,7 +354,7 @@ TEST(FarVolumeMesher, MalformedMetadataAndResidentSamplesRefuseTransactionally) 
             tile.bricks.back() = tile.bricks.front();
         if (mode == 9)
             tile.request.key.x = std::numeric_limits<std::int64_t>::max();
-        check(std::move(tile), FarVolumeMeshError::InvalidTile);
+        check(tile, FarVolumeMeshError::InvalidTile);
     }
     auto tile = original;
     tile.bricks.back().samples[0].density += 1.0f; // Shared sample conflicts with cached neighbour.
