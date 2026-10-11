@@ -27,7 +27,10 @@
 
 namespace Luminumbra::Rendering {
 namespace {
-std::atomic<bool> active{false};
+std::atomic<bool>& ActiveFlag() {
+    static std::atomic<bool> flag{false};
+    return flag;
+}
 std::string GlText(GLenum name) {
     const auto* value = glGetString(name);
     if (!value)
@@ -52,7 +55,7 @@ struct StaticRenderer::Impl {
     std::string vendor, renderer, version;
     Impl(const std::string& root, bool software) {
         bool expected = false;
-        if (!active.compare_exchange_strong(expected, true))
+        if (!ActiveFlag().compare_exchange_strong(expected, true))
             throw std::runtime_error(
                 "Static inspection currently supports one owning view/context");
         try {
@@ -128,7 +131,7 @@ struct StaticRenderer::Impl {
             glfwTerminate();
             initialized = false;
         }
-        active = false;
+        ActiveFlag() = false;
     }
     ~Impl() {
         Cleanup();
@@ -154,25 +157,26 @@ std::string StaticRenderer::ModulePath() {
     HMODULE module = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&active),
+                            reinterpret_cast<LPCWSTR>(&ActiveFlag),
                             &module))
         throw std::runtime_error("Cannot locate renderer module");
     std::wstring path(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(module, path.data(), path.size());
-    if (!length || length >= path.size())
+    const DWORD capacity = static_cast<DWORD>(path.size());
+    const DWORD length = GetModuleFileNameW(module, path.data(), capacity);
+    if (!length || length >= capacity)
         throw std::runtime_error("Cannot locate renderer module path");
     path.resize(length);
     const auto utf8 = std::filesystem::path(path).u8string();
     return {utf8.begin(), utf8.end()};
 #else
     Dl_info info{};
-    if (!dladdr(&active, &info) || !info.dli_fname)
+    if (!dladdr(reinterpret_cast<const void*>(&ActiveFlag), &info) || !info.dli_fname)
         throw std::runtime_error("Cannot locate renderer module path");
     return std::filesystem::canonical(info.dli_fname).string();
 #endif
 }
 StaticFrame StaticRenderer::Render(const RenderView& view,
-                                   std::shared_ptr<const StaticDrawSnapshot> scene) {
+                                   const std::shared_ptr<const StaticDrawSnapshot>& scene) {
     auto& impl = *m_impl;
     if (std::this_thread::get_id() != impl.owner)
         throw std::runtime_error("Static renderer must be used on its owning thread");

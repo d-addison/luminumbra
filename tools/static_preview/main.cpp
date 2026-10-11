@@ -74,8 +74,9 @@ void Fields(const Json& value, std::initializer_list<const char*> allowed) {
 fs::path Executable() {
 #ifdef _WIN32
     std::wstring path(32768, L'\0');
-    const DWORD n = GetModuleFileNameW(nullptr, path.data(), path.size());
-    Require(n && n < path.size(), "Cannot resolve running executable");
+    const DWORD capacity = static_cast<DWORD>(path.size());
+    const DWORD n = GetModuleFileNameW(nullptr, path.data(), capacity);
+    Require(n && n < capacity, "Cannot resolve running executable");
     path.resize(n);
     return fs::path(path);
 #else

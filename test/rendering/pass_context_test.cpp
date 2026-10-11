@@ -1098,8 +1098,9 @@ TEST(PassContext, FoliageActualDrawFeedbackSurvivesReloadAndPreservesFrameIdenti
                 phase = 2;
         }
         glFinish();
-        if (frame == 4)
+        if (frame == 4) {
             ASSERT_TRUE(pass.begin_qualification());
+        }
         if (pass.vertex_evidence_ready())
             break;
     }
