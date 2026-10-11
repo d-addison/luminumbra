@@ -165,7 +165,20 @@ jobs:
           cmake --preset release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DLUMINUMBRA_ENABLE_DILIGENT=ON
       - name: Build with Diligent RHI
-        run: cmake --build --preset release --parallel 4
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Pull requests build only the targets the two Diligent suites need
+          # (plus copy_data, which the whole-tree build also ran). Pushes to
+          # devel/main still build the whole tree so DiligentCore's other targets
+          # (for example Diligent-Archiver-static) keep their compile and link
+          # coverage after every merge.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            cmake --build --preset release --parallel 4 \
+              --target rhi_device_bringup_test rhi_pilot_flip_test copy_data
+          else
+            cmake --build --preset release --parallel 4
+          fi
       - name: Test Diligent RHI with software GL
         run: |
           # gtest_discover_tests registers ctest names as Suite.Test, NOT the CMake
