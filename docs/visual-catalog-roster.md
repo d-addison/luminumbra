@@ -57,7 +57,7 @@ A catalog consistency pass establishes bookkeeping only. Every original and adde
 |---|---|---|---|
 | [D01](visual-catalog-diagnostic.md) | Five deterministic mesh scene fixtures | existing_subset | not_captured / pending |
 | [D02](visual-catalog-diagnostic.md) | Material calibration plates | existing_subset | not_captured / pending |
-| [D03](visual-catalog-diagnostic.md) | Emissive and aether materials | missing | not_captured / pending |
+| [D03](visual-catalog-diagnostic.md) | Emissive and aether materials | existing_subset | not_captured / pending |
 | [D04](visual-catalog-diagnostic.md) | Procedural leaf cutout and albedo | missing | not_captured / pending |
 | [D05](visual-catalog-diagnostic.md) | Shaded material contrast | missing | not_captured / pending |
 | [D06](visual-catalog-diagnostic.md) | Grass/cloud shadow alignment | missing | not_captured / pending |
@@ -74,8 +74,8 @@ A catalog consistency pass establishes bookkeeping only. Every original and adde
 | [D17](visual-catalog-diagnostic.md) | Glass shared depth and resize | missing | not_captured / pending |
 | [D18](visual-catalog-diagnostic.md) | Debug albedo and ground decal | missing | not_captured / pending |
 | [D19](visual-catalog-diagnostic.md) | Shadow cascades and grass mesh lifecycle | missing | not_captured / pending |
-| [D20](visual-catalog-diagnostic.md) | Runtime horizon and mixed LOD topology | missing | not_captured / pending |
-| [D21](visual-catalog-diagnostic.md) | Worldgen layer, biome, river and preset atlases | missing | not_captured / pending |
+| [D20](visual-catalog-diagnostic.md) | Runtime horizon and mixed LOD topology | existing_subset | not_captured / pending |
+| [D21](visual-catalog-diagnostic.md) | Worldgen layer, biome, river and preset atlases | existing_subset | not_captured / pending |
 | [D22](visual-catalog-diagnostic.md) | Far-field GPU ground truth/G-buffer/max-mip | missing | not_captured / pending |
 
 ## blender

@@ -139,7 +139,13 @@ Implementation dependencies:
 - S2: Serialized native capture and source-correlated measurement on freshly identified local hardware.
 - S3: Current lighting, material, water and weather paths; diagnose existing defects first.
 
-Capture: **missing**. No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap.
+Capture: **existing_subset**. Writes emissive-calibration.json (intensity-to-luminance table and monotonic flag) to the build-defined artifact directory. No retained image, no nonemissive control scene, no temporal packet; GL-skips without a context, so a zero-test or skipped exit 0 is not evidence.
+
+Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
+
+```text
+<build>/bin/render_smoke_test --gtest_filter=RenderSmokeTest.EmissiveCalibrationMonotonic
+```
 
 Acceptance checks:
 
@@ -893,7 +899,13 @@ Implementation dependencies:
 - S2: Serialized native capture and source-correlated measurement on freshly identified local hardware.
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 
-Capture: **missing**. No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap.
+Capture: **existing_subset**. Writes spawn_horizon.ppm and runtime_world_visual.json (horizon coverage metrics) and lod_seams.json (mixed-LOD seam metrics) to the build-defined artifact directory. No high-resolution companion or per-region diagnosis; GL-skips without a context, so a skipped exit 0 is not evidence.
+
+Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
+
+```text
+<build>/bin/runtime_world_visual_validation_test --gtest_filter=RuntimeWorldVisualValidationTest.SpawnHorizonRendersBroadVisibleCoverage:RuntimeWorldVisualValidationTest.MixedLodBoundariesAreContinuousAndReported
+```
 
 Acceptance checks:
 
@@ -941,7 +953,13 @@ Implementation dependencies:
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 - S8: Diagnostic atlas/backend outputs with honest native versus supporting evidence labels.
 
-Capture: **missing**. No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap.
+Capture: **existing_subset**. Writes the named layer snapshot maps and metrics to the build-defined artifact directory. Biome, river and preset atlases are produced by separate tests in the same binary and are not claimed here; no matched engine views.
+
+Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
+
+```text
+<build>/bin/worldgen_layer_snapshot_test --gtest_filter=WorldGenLayerSnapshotTest.ExportsLayerMetricsAndImages
+```
 
 Acceptance checks:
 
