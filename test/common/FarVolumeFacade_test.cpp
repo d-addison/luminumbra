@@ -42,14 +42,18 @@ Plane(FarVolumeNumericProfile profile = FarVolumeNumericProfile::LegacySigned16)
 TEST(FarVolumeFacade, ResolvesEveryTierNegativeOriginsAndExactTopPlane) {
     for (std::size_t tier = 1; tier <= 5; ++tier) {
         SCOPED_TRACE(tier);
-        const auto dimensions = *FarTierAt(tier);
+        const auto dimensions = FarTierAt(tier);
+        if (!dimensions.has_value()) {
+            ADD_FAILURE() << "missing tier " << tier;
+            continue;
+        }
         FarVolumeRequest request;
         FarVolumeFacadeFailure failure;
         ASSERT_TRUE(ResolveFarVolumeCoverage(
             {{tier, -2, -1}, {}}, Plane(), FixtureLimits().authority, request, &failure));
         EXPECT_EQ(request.key, (FarVolumeTileKey{tier, -2, -1}));
         EXPECT_EQ(request.span.min_y, -256);
-        EXPECT_EQ(request.span.max_y, dimensions.brick_edge_meters);
+        EXPECT_EQ(request.span.max_y, dimensions->brick_edge_meters);
         EXPECT_EQ(request.field_identity, 42u);
         EXPECT_EQ(failure.work.height_samples, 129u * 129u);
         EXPECT_EQ(failure.work.density_samples, 0u);
@@ -151,6 +155,10 @@ TEST(FarVolumeFacade, SameAuthorityCompilesAllTiersAndNegativeCoordinates) {
         EXPECT_EQ(result.mesh.vertices.size(), 129u * 129u);
         EXPECT_EQ(result.mesh.indices.size(), 128u * 128u * 6u);
         ASSERT_TRUE(result.mesh.bounds);
+        if (!result.mesh.bounds.has_value()) {
+            ADD_FAILURE() << "mesh bounds missing";
+            return;
+        }
         EXPECT_EQ(result.mesh.origin_meters.y + result.mesh.bounds->min[1], -.25);
         EXPECT_GT(result.work.height_samples, 129u * 129u) << "actual normal halo must be sampled";
         EXPECT_LE(result.work.height_samples, 131u * 131u);
@@ -186,6 +194,10 @@ TEST(FarVolumeFacade, NumericProfilesStayExplicitAndUseTheOriginalCodec) {
     EXPECT_TRUE(quantized.legacy_checksum);
     ASSERT_TRUE(raw.mesh.bounds);
     ASSERT_TRUE(quantized.mesh.bounds);
+    if (!raw.mesh.bounds.has_value() || !quantized.mesh.bounds.has_value()) {
+        ADD_FAILURE() << "mesh bounds missing";
+        return;
+    }
     EXPECT_GT(std::abs(raw.mesh.bounds->min[1] - quantized.mesh.bounds->min[1]), .002);
     std::uint32_t checksum = 123;
     EXPECT_FALSE(FarVolumeLegacyChecksum(raw.tile, raw.caves, checksum));
@@ -234,7 +246,7 @@ TEST(FarVolumeFacade, ChangedAuthorityAndMissingHaloCannotBecomeReadyEmpty) {
     EXPECT_EQ(output, prior);
     authority = Plane();
     authority.height = [](std::int64_t x, std::int64_t) -> std::optional<float> {
-        return x < 0 ? std::nullopt : std::optional<float>(0);
+        return x < 0 ? std::nullopt : std::optional<float>(0.0f);
     };
     EXPECT_FALSE(CompileFarVolume({{1, 0, 0}, {}}, authority, FixtureLimits(), output, &failure));
     EXPECT_EQ(failure.mesh, FarVolumeMeshError::SamplerFailure);
@@ -249,7 +261,7 @@ TEST(FarVolumeFacade, AuthorityExceptionsAndNonFiniteDensityAreTransactional) {
         }
         ThrowOnCopy(ThrowOnCopy&&) = default;
         std::optional<float> operator()(std::int64_t, std::int64_t) const {
-            return 0;
+            return 0.0f;
         }
     };
     auto authority = Plane();
@@ -375,7 +387,12 @@ TEST(FarVolumeFacade,
         const auto caves = static_cast<FarCaveMode>(original.at("caves").get<unsigned>());
         const auto field = original.at("field").get<unsigned>();
         SCOPED_TRACE(original.dump());
-        const auto d = *FarTierAt(tier);
+        const auto tier_dims = FarTierAt(tier);
+        if (!tier_dims.has_value()) {
+            ADD_FAILURE() << "missing tier " << tier;
+            continue;
+        }
+        const auto& d = *tier_dims;
         const FarVolumeTileKey key{tier, original.at("tile_x"), original.at("tile_z")};
         const auto origin_x = key.x * d.tile_edge_meters;
         const auto origin_z = key.z * d.tile_edge_meters;
@@ -439,6 +456,10 @@ TEST(FarVolumeFacade,
         EXPECT_EQ(result.tile.candidates_visited, original.at("candidates").get<std::uint64_t>());
         EXPECT_EQ(result.tile.bricks.size(), original.at("sparse_bricks").get<std::size_t>());
         ASSERT_TRUE(result.legacy_checksum);
+        if (!result.legacy_checksum.has_value()) {
+            ADD_FAILURE() << "legacy checksum missing";
+            continue;
+        }
         EXPECT_EQ(*result.legacy_checksum, original.at("tile_crc32").get<std::uint32_t>());
         EXPECT_EQ(heights.Value(), original.at("height_crc32").get<std::uint32_t>());
         EXPECT_EQ(lattice.size(), original.at("density_count").get<std::size_t>());

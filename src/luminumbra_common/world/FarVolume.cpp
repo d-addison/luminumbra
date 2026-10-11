@@ -389,7 +389,10 @@ bool FarVolumeLegacyChecksum(const FarVolumeTile& tile, FarCaveMode caves, std::
     try {
         if (!ValidCompatibilityTile(tile, caves))
             return false;
-        const auto edge = FarTierAt(tile.request.key.tier)->brick_edge_meters;
+        const auto tier = FarTierAt(tile.request.key.tier);
+        if (!tier.has_value())
+            return false;
+        const auto edge = tier->brick_edge_meters;
         std::vector<const FarVolumeBrick*> ordered;
         ordered.reserve(tile.bricks.size());
         for (const auto& brick : tile.bricks)
