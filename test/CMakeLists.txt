@@ -139,6 +139,8 @@ add_executable(common_tests
     common/WindFieldSystem_test.cpp
     common/WeatherSystem_test.cpp
     common/AetherFieldSystem_test.cpp
+    common/AmbientDeterminismReceipt_test.cpp
+    common/AmbientInputBounds_test.cpp
     common/fields_hardening_test.cpp
     common/replication_hardening_test.cpp
     common/replication_scale_test.cpp

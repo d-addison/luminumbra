@@ -17,6 +17,10 @@ namespace DeterministicMath = Luminumbra::DeterministicMath;
 
 namespace Luminumbra::Systems {
 
+static_assert((kAetherExtentCells * kAetherExtentCells) % 16 == 0,
+              "ambient position-array inputs must be whole 16-float vectors: FastNoise tail "
+              "loads read a full SIMD vector");
+
 namespace {
 
 // fnv1a-64 over raw bytes (identical algorithm to WindFieldSystem / persistence).
