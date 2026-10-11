@@ -51,6 +51,9 @@ def valid_receipt() -> dict:
             {"label": "after_save", "tree_digest": HEX_E, "file_count": 13},
             {"label": "after_reload", "tree_digest": HEX_E, "file_count": 13},
         ],
+        "edit_roundtrip": {
+            "save_world_hash": HEX_A, "load_world_hash": HEX_A, "edited_chunk_count": 2,
+        },
         "reload_changes": {"added": [], "removed": [], "changed": []},
         "fixture_changes": {"added": [], "removed": [], "changed": []},
         "switches": switches,
@@ -111,7 +114,7 @@ class AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "pass")
         self.assertEqual(verdict["schema"], "luminumbra.saved_world_acceptance_verdict.v1")
         self.assertEqual(verdict["min_switches"], 6)
-        self.assertEqual(len(verdict["checks"]), 9)
+        self.assertEqual(len(verdict["checks"]), 10)
         path = self._write_obj(valid_receipt())
         code, out, err = _run([str(path)])
         self.assertEqual(code, 0, err)
@@ -423,6 +426,26 @@ class AcceptanceReceiptContract(unittest.TestCase):
 
     # Check 6: switch_count
 
+    def test_edit_roundtrip_checks(self) -> None:
+        self._assert_baseline("edit_roundtrip")
+        receipt = valid_receipt()
+        del receipt["edit_roundtrip"]
+        self._expect(receipt, "edit_roundtrip", "unevaluated")
+        receipt = valid_receipt()
+        receipt["edit_roundtrip"]["load_world_hash"] = HEX_B
+        self._expect(receipt, "edit_roundtrip", "fail")
+        receipt = valid_receipt()
+        receipt["edit_roundtrip"]["edited_chunk_count"] = 0
+        self._expect(receipt, "edit_roundtrip", "fail")
+        for bad in ({"save_world_hash": ""}, {"load_world_hash": None}, {"edited_chunk_count": True},
+                    {"edited_chunk_count": "2"}):
+            receipt = valid_receipt()
+            receipt["edit_roundtrip"].update(bad)
+            self._expect(receipt, "edit_roundtrip", "fail")
+        receipt = valid_receipt()
+        receipt["edit_roundtrip"] = "yes"
+        self._expect(receipt, "edit_roundtrip", "fail")
+
     def test_switch_count_checks(self) -> None:
         self._assert_baseline("switch_count")
         receipt = valid_receipt()
@@ -619,7 +642,7 @@ class AcceptanceReceiptContract(unittest.TestCase):
         ids = [check["id"] for check in _verdict(valid_receipt())["checks"]]
         self.assertEqual(ids, [
             "package_identity", "fixture_identity", "sessions_present", "sessions_clean",
-            "save_tree_changes", "switch_count", "switch_captures_identical", "switch_probes",
+            "save_tree_changes", "edit_roundtrip", "switch_count", "switch_captures_identical", "switch_probes",
             "refusal_matrix",
         ])
 

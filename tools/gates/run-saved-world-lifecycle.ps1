@@ -17,12 +17,14 @@
 # directory (artifacts\persistence) because the load phase reads the save-phase
 # marker file from there.
 #
-# Edit persistence scope (receipt field edit_persistence_scope = scenario_session_snapshot):
-# the create_edit_save / restart_select_load pair runs the client's own
-# persistence_roundtrip_smoke scenario, which asserts the edit survives in its session
-# snapshot. The world-directory receipts prove that production loads (the switch_back
-# sessions and --load-world) leave saved bytes unchanged except world_info.json. Visual
-# confirmation of the edit in the production UI stays a manual checklist item.
+# Edit persistence evidence (receipt field edit_roundtrip): the create_edit_save and
+# restart_select_load pair runs the client's own persistence_roundtrip_smoke scenario. Its
+# save phase records the hash of the edited chunks and its load phase re-hashes the same
+# chunks after a fresh load; this driver reads both phase artifacts and the checker fails
+# unless the hashes match and at least one chunk was edited. The scenario works in its own
+# session directory; the world-directory receipts prove that production loads (the
+# switch_back sessions and --load-world) leave saved bytes unchanged except world_info.json.
+# Visual confirmation of the edit in the production UI stays a manual checklist item.
 #
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\gates\run-saved-world-lifecycle.ps1 `
@@ -161,6 +163,42 @@ function Get-PrimaryWorld {
     return $candidates[0].Name
 }
 
+function Get-EditRoundtrip {
+    # Reads the save and load phase artifacts of persistence_roundtrip_smoke. Returns $null
+    # (checker: unevaluated) when either is missing or unparseable.
+    param([Parameter(Mandatory = $true)][string]$ArtifactDir)
+    $docs = @{}
+    foreach ($phase in @("save", "load")) {
+        $path = Join-Path $ArtifactDir ("persistence-runtime-roundtrip-phase-" + $phase + ".json")
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+        try {
+            $docs[$phase] = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8))
+        } catch {
+            return $null
+        }
+    }
+    foreach ($phase in @("save", "load")) {
+        if (-not (Test-JsonProperty -Object $docs[$phase] -Name "world_hash")) { return $null }
+    }
+    if (-not (Test-JsonProperty -Object $docs["save"] -Name "edited_chunk_ids")) { return $null }
+    return [ordered]@{
+        save_world_hash = [string]$docs["save"].world_hash
+        load_world_hash = [string]$docs["load"].world_hash
+        edited_chunk_count = [int]@($docs["save"].edited_chunk_ids).Count
+    }
+}
+
+function Test-ProbeNumberArray {
+    param($Value, [int]$Length)
+    if ($Value -isnot [System.Array]) { return $false }
+    $items = @($Value)
+    if ($items.Count -ne $Length) { return $false }
+    foreach ($item in $items) {
+        if ($item -isnot [double] -and $item -isnot [int] -and $item -isnot [long]) { return $false }
+    }
+    return $true
+}
+
 function Test-GBufferProbeDocument {
     # True only when benchmark.json exists, parses, and has a non-empty gbuffer_probes array.
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -172,7 +210,19 @@ function Test-GBufferProbeDocument {
     }
     if (-not (Test-JsonProperty -Object $doc -Name "gbuffer_probes")) { return $false }
     if ($doc.gbuffer_probes -isnot [System.Array]) { return $false }
-    return (@($doc.gbuffer_probes).Count -gt 0)
+    $probes = @($doc.gbuffer_probes)
+    if ($probes.Count -eq 0) { return $false }
+    foreach ($probe in $probes) {
+        foreach ($name in @("uv", "depth", "view_position", "material", "albedo")) {
+            if (-not (Test-JsonProperty -Object $probe -Name $name)) { return $false }
+        }
+        if (-not (Test-ProbeNumberArray -Value $probe.uv -Length 2)) { return $false }
+        if (-not (Test-ProbeNumberArray -Value $probe.view_position -Length 3)) { return $false }
+        if (-not (Test-ProbeNumberArray -Value $probe.albedo -Length 3)) { return $false }
+        if ($probe.depth -isnot [double] -and $probe.depth -isnot [int] -and $probe.depth -isnot [long]) { return $false }
+        if ($probe.material -isnot [double] -and $probe.material -isnot [int] -and $probe.material -isnot [long]) { return $false }
+    }
+    return $true
 }
 
 function Get-RefusalDiagnostic {
@@ -262,6 +312,8 @@ try {
     # 3. restart_select_load (reads the save-phase marker from the shared artifact dir)
     $sessions += Invoke-Session -Name "restart_select_load" -Kind "restart_select_load" -ArtifactDir $persistenceArtifact `
         -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "load", "--persistence-session-dir", $sessionDir) + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
+
+    $editRoundtrip = Get-EditRoundtrip -ArtifactDir $persistenceArtifact
 
     # 4. second_seed (a second freshly created world)
     $sessions += Invoke-Session -Name "second_seed" -Kind "second_seed" -ArtifactDir $secondArtifact `
@@ -374,7 +426,7 @@ try {
         }
         fixture_world_id = $fixtureWorldId
         primary_world_id = $primaryWorld
-        edit_persistence_scope = "scenario_session_snapshot"
+        edit_roundtrip = $editRoundtrip
         sessions = @($sessions)
         save_receipts = @($beforeEdit, $fixtureAfterLoads, $afterSave, $afterReload)
         reload_changes = $reloadChanges

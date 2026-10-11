@@ -340,6 +340,31 @@ def _check_switch_probes(receipt: dict) -> dict:
     return _result(check_id, PASS, f"g_buffer_probe recorded for {len(switches)} switches")
 
 
+def _check_edit_roundtrip(receipt: dict) -> dict:
+    check_id = "edit_roundtrip"
+    trip = receipt.get("edit_roundtrip")
+    if trip is None:
+        return _missing(check_id, "edit_roundtrip")
+    if (
+        not isinstance(trip, dict)
+        or not _is_nonempty_str(trip.get("save_world_hash"))
+        or not _is_nonempty_str(trip.get("load_world_hash"))
+        or not _is_int(trip.get("edited_chunk_count"))
+    ):
+        return _malformed(check_id, "edit_roundtrip")
+    if trip["edited_chunk_count"] < 1:
+        return _result(check_id, FAIL, "save phase recorded no edited chunks")
+    if trip["save_world_hash"] != trip["load_world_hash"]:
+        return _result(
+            check_id, FAIL, "edited chunk hash after reload differs from the hash at save"
+        )
+    return _result(
+        check_id,
+        PASS,
+        f"edited chunk hash identical after reload ({trip['edited_chunk_count']} chunks)",
+    )
+
+
 def _refusal_ok(refusal) -> bool:
     return (
         isinstance(refusal, dict)
@@ -429,6 +454,7 @@ def evaluate(
         _check_sessions_present(receipt),
         _check_sessions_clean(receipt),
         _check_save_tree_changes(receipt),
+        _check_edit_roundtrip(receipt),
         _check_switch_count(receipt, min_switches),
         _check_switch_captures(receipt),
         _check_switch_probes(receipt),
