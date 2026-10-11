@@ -12,17 +12,40 @@ function Get-AbsolutePath {
 }
 
 function Join-ProcessArguments {
-    # Start-Process joins an array with bare spaces, so quote every value that
-    # contains whitespace or a double quote (and empty values).
+    # Start-Process joins an array with bare spaces, so each value is turned into one
+    # command-line word using the standard Windows (MSVCRT) quoting rules:
+    #  - values that are non-empty and contain no whitespace or double quote are emitted as is;
+    #  - every other value is wrapped in double quotes;
+    #  - a run of backslashes before a double quote, or before the closing quote, is doubled;
+    #  - each double quote is written as \" (and a backslash run before it is doubled first).
     param([string[]]$Values)
     $parts = @()
     foreach ($value in $Values) {
         $text = [string]$value
-        if ($text.Length -eq 0 -or $text -match '[\s"]') {
-            $parts += ('"' + ($text -replace '"', '\"') + '"')
-        } else {
+        if ($text.Length -gt 0 -and $text -notmatch '[\s"]') {
             $parts += $text
+            continue
         }
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.Append([char]'"')
+        $pending = 0
+        foreach ($ch in $text.ToCharArray()) {
+            if ($ch -eq [char]'\') {
+                $pending++
+                continue
+            }
+            if ($ch -eq [char]'"') {
+                [void]$sb.Append([string]([char]'\') * ($pending * 2 + 1))
+                [void]$sb.Append([char]'"')
+            } else {
+                [void]$sb.Append([string]([char]'\') * $pending)
+                [void]$sb.Append($ch)
+            }
+            $pending = 0
+        }
+        [void]$sb.Append([string]([char]'\') * ($pending * 2))
+        [void]$sb.Append([char]'"')
+        $parts += $sb.ToString()
     }
     return ($parts -join " ")
 }

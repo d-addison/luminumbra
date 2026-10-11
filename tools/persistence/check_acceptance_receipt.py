@@ -2,6 +2,7 @@
 """Evaluate a saved-world acceptance receipt and print a verdict.
 
 Usage: check_acceptance_receipt.py RECEIPT.json [--min-switches N] [--verdict-out PATH]
+                                   [--refusal-variants a,b,c]
 
 Input schema "luminumbra.saved_world_acceptance.v1". Every check yields "pass",
 "fail" or "unevaluated"; absence of evidence is never a pass. Overall verdict is
@@ -23,7 +24,18 @@ VERDICT_SCHEMA = "luminumbra.saved_world_acceptance_verdict.v1"
 SHUTDOWN_SCHEMA = "luminumbra.shutdown.v1"
 DEFAULT_MIN_SWITCHES = 6
 REQUIRED_KINDS = ("create_edit_save", "restart_select_load", "second_seed", "switch_back")
-REQUIRED_LABELS = ("before_edit", "after_save", "after_reload")
+# before_edit and fixture_after_loads snapshot the FIXTURE world (before any session
+# and after all loads); after_save and after_reload snapshot the PRIMARY created world
+# (after create/edit/save, and after the restart and switching sequence).
+REQUIRED_LABELS = ("before_edit", "fixture_after_loads", "after_save", "after_reload")
+REQUIRED_REFUSAL_VARIANTS = (
+    "obsolete-metadata",
+    "future-metadata",
+    "corrupt-metadata",
+    "missing-metadata",
+    "missing-preset",
+    "truncated-region",
+)
 WORLD_INFO = "world_info.json"
 
 PASS = "pass"
@@ -43,6 +55,7 @@ _TOP_LEVEL_TYPES = {
     "sessions": list,
     "save_receipts": list,
     "reload_changes": dict,
+    "fixture_changes": dict,
     "switches": list,
     "refusals": list,
 }
@@ -195,6 +208,28 @@ def _changes_ok(changes: dict) -> bool:
     return True
 
 
+def _judge_pair(name: str, before: str, after: str, changes: dict) -> tuple:
+    """Apply the change rule to one before/after pair. Returns (ok, detail)."""
+    total = sum(len(changes[key]) for key in ("added", "removed", "changed"))
+    if before == after:
+        if total:
+            return False, f"{name}: changes listed but tree digests match"
+        return True, f"{name}: tree unchanged"
+    if total == 0:
+        return False, f"{name}: digest differs without change evidence"
+    problems = []
+    if changes["added"]:
+        problems.append("added: " + ", ".join(changes["added"]))
+    if changes["removed"]:
+        problems.append("removed: " + ", ".join(changes["removed"]))
+    unexpected = [path for path in changes["changed"] if path != WORLD_INFO]
+    if unexpected:
+        problems.append("changed: " + ", ".join(unexpected))
+    if problems:
+        return False, f"{name}: unexpected paths; " + "; ".join(problems)
+    return True, f"{name}: differs only in world_info.json"
+
+
 def _check_save_tree_changes(receipt: dict) -> dict:
     check_id = "save_tree_changes"
     if "save_receipts" not in receipt:
@@ -210,31 +245,30 @@ def _check_save_tree_changes(receipt: dict) -> dict:
     absent = [label for label in REQUIRED_LABELS if label not in by_label]
     if absent:
         return _result(check_id, UNEVALUATED, "missing save_receipts labels: " + ", ".join(absent))
-    before = by_label["before_edit"]["tree_digest"]
-    after_save = by_label["after_save"]["tree_digest"]
-    after_reload = by_label["after_reload"]["tree_digest"]
-    if before == after_save:
-        return _result(check_id, FAIL, "edit and save did not change the tree")
-    if "reload_changes" not in receipt:
-        return _missing(check_id, "reload_changes")
-    changes = receipt["reload_changes"]
-    if not _changes_ok(changes):
-        return _malformed(check_id, "reload_changes")
-    if after_save != after_reload:
-        problems = []
-        if changes["added"]:
-            problems.append("added: " + ", ".join(changes["added"]))
-        if changes["removed"]:
-            problems.append("removed: " + ", ".join(changes["removed"]))
-        unexpected = [path for path in changes["changed"] if path != WORLD_INFO]
-        if unexpected:
-            problems.append("changed: " + ", ".join(unexpected))
-        if problems:
-            return _result(check_id, FAIL, "reload changed unexpected paths; " + "; ".join(problems))
-        return _result(check_id, PASS, "reload differs only in world_info.json")
-    if any(changes[key] for key in ("added", "removed", "changed")):
-        return _result(check_id, FAIL, "reload_changes not empty but tree digests match")
-    return _result(check_id, PASS, "reload leaves the tree unchanged")
+    for field in ("reload_changes", "fixture_changes"):
+        if field not in receipt:
+            return _missing(check_id, field)
+    for field in ("reload_changes", "fixture_changes"):
+        if not _changes_ok(receipt[field]):
+            return _malformed(check_id, field)
+    if by_label["after_save"]["file_count"] < 1:
+        return _result(check_id, FAIL, "primary world has no files after save")
+    primary_ok, primary_detail = _judge_pair(
+        "primary",
+        by_label["after_save"]["tree_digest"],
+        by_label["after_reload"]["tree_digest"],
+        receipt["reload_changes"],
+    )
+    fixture_ok, fixture_detail = _judge_pair(
+        "fixture",
+        by_label["before_edit"]["tree_digest"],
+        by_label["fixture_after_loads"]["tree_digest"],
+        receipt["fixture_changes"],
+    )
+    detail = primary_detail + "; " + fixture_detail
+    if not (primary_ok and fixture_ok):
+        return _result(check_id, FAIL, detail)
+    return _result(check_id, PASS, detail)
 
 
 def _switch_ok(switch) -> bool:
@@ -286,30 +320,66 @@ def _check_switch_captures(receipt: dict) -> dict:
     return _result(check_id, PASS, f"captures identical within each of {len(captures)} worlds")
 
 
+def _check_switch_probes(receipt: dict) -> dict:
+    check_id = "switch_probes"
+    switches = receipt.get("switches")
+    if not switches:
+        return _missing(check_id, "switches")
+    if not all(_switch_ok(switch) for switch in switches):
+        return _malformed(check_id, "switches")
+    null_indices = [str(s["index"]) for s in switches if not isinstance(s.get("g_buffer_probe"), str)]
+    if null_indices:
+        return _result(
+            check_id, UNEVALUATED, "g_buffer_probe missing for switch index " + ", ".join(null_indices)
+        )
+    empty_indices = [str(s["index"]) for s in switches if s["g_buffer_probe"] == ""]
+    if empty_indices:
+        return _result(
+            check_id, FAIL, "empty g_buffer_probe for switch index " + ", ".join(empty_indices)
+        )
+    return _result(check_id, PASS, f"g_buffer_probe recorded for {len(switches)} switches")
+
+
 def _refusal_ok(refusal) -> bool:
     return (
         isinstance(refusal, dict)
         and isinstance(refusal.get("variant"), str)
         and _is_int(refusal.get("exit_code"))
         and isinstance(refusal.get("diagnostic"), bool)
+        and ("timed_out" not in refusal or isinstance(refusal["timed_out"], bool))
     )
 
 
-def _check_refusals(receipt: dict) -> dict:
+def _check_refusals(receipt: dict, required: tuple) -> dict:
     check_id = "refusal_matrix"
     refusals = receipt.get("refusals")
     if not refusals:
         return _missing(check_id, "refusals")
     if not all(_refusal_ok(refusal) for refusal in refusals):
         return _malformed(check_id, "refusals")
-    bad = [
-        refusal["variant"]
-        for refusal in refusals
-        if refusal["exit_code"] == 0 or refusal["diagnostic"] is not True
-    ]
-    if bad:
-        return _result(check_id, FAIL, "refusals not clean: " + ", ".join(bad))
-    return _result(check_id, PASS, f"{len(refusals)} refusals exit nonzero with diagnostics")
+    failed = []
+    for refusal in refusals:
+        reasons = []
+        if refusal["exit_code"] == 0:
+            reasons.append("exit code 0")
+        if refusal["diagnostic"] is not True:
+            reasons.append("no diagnostic")
+        if refusal.get("timed_out") is True:
+            reasons.append("timed out")
+        if reasons:
+            failed.append(f"{refusal['variant']} ({', '.join(reasons)})")
+    present = {refusal["variant"] for refusal in refusals}
+    missing = [variant for variant in required if variant not in present]
+    if failed:
+        detail = "refusals not clean: " + "; ".join(failed)
+        if missing:
+            detail += "; missing variants: " + ", ".join(missing)
+        return _result(check_id, FAIL, detail)
+    if missing:
+        return _result(check_id, UNEVALUATED, "missing variants: " + ", ".join(missing))
+    return _result(
+        check_id, PASS, f"{len(refusals)} refusals exit nonzero with diagnostics; all required variants present"
+    )
 
 
 def _top_level_problem(receipt) -> str | None:
@@ -332,7 +402,11 @@ def _overall(checks: list) -> str:
     return PASS
 
 
-def evaluate(receipt: dict, min_switches: int = DEFAULT_MIN_SWITCHES) -> dict:
+def evaluate(
+    receipt: dict,
+    min_switches: int = DEFAULT_MIN_SWITCHES,
+    refusal_variants: tuple = REQUIRED_REFUSAL_VARIANTS,
+) -> dict:
     """Return the verdict dict for a parsed receipt.
 
     Raises InputError when the top level is not a valid receipt object.
@@ -348,7 +422,8 @@ def evaluate(receipt: dict, min_switches: int = DEFAULT_MIN_SWITCHES) -> dict:
         _check_save_tree_changes(receipt),
         _check_switch_count(receipt, min_switches),
         _check_switch_captures(receipt),
-        _check_refusals(receipt),
+        _check_switch_probes(receipt),
+        _check_refusals(receipt, refusal_variants),
     ]
     return {
         "schema": VERDICT_SCHEMA,
@@ -380,6 +455,11 @@ def main(argv=None) -> int:
     parser.add_argument("receipt")
     parser.add_argument("--min-switches", type=int, default=DEFAULT_MIN_SWITCHES)
     parser.add_argument("--verdict-out")
+    parser.add_argument(
+        "--refusal-variants",
+        help="comma-separated required refusal variants (default: "
+        + ",".join(REQUIRED_REFUSAL_VARIANTS) + ")",
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
@@ -387,8 +467,14 @@ def main(argv=None) -> int:
     if args.min_switches < 0:
         print("error: --min-switches must be >= 0", file=sys.stderr)
         return EXIT_INVALID
+    refusal_variants = REQUIRED_REFUSAL_VARIANTS
+    if args.refusal_variants is not None:
+        refusal_variants = tuple(v.strip() for v in args.refusal_variants.split(",") if v.strip())
+        if not refusal_variants:
+            print("error: --refusal-variants must name at least one variant", file=sys.stderr)
+            return EXIT_INVALID
     try:
-        verdict = evaluate(load_receipt(args.receipt), args.min_switches)
+        verdict = evaluate(load_receipt(args.receipt), args.min_switches, refusal_variants)
     except InputError as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INVALID

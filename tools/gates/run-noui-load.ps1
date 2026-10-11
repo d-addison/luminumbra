@@ -154,6 +154,8 @@ try {
         }
     }
 
+    if (-not $captureContextPresent) { $reasons += "capture_context absent from benchmark.json" }
+
     if ($reasons.Count -eq 0) { $verdict = "pass" }
 } catch {
     $reasons += $_.Exception.Message

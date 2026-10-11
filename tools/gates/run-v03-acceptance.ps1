@@ -49,12 +49,16 @@ $receiptPath = Join-Path $OutAbs "v03-acceptance-receipt.json"
 $verdictPath = Join-Path $OutAbs "v03-verdict.json"
 
 function New-Section {
+    # $Extra carries optional section keys (for example required_tests, discovered_tests, skipped_tests).
     param(
         [Parameter(Mandatory = $true)][string]$Status,
         [string]$Evidence = "",
-        [string]$Detail = ""
+        [string]$Detail = "",
+        [hashtable]$Extra = @{}
     )
-    return [ordered]@{ status = $Status; evidence = $Evidence; detail = $Detail }
+    $section = [ordered]@{ status = $Status; evidence = $Evidence; detail = $Detail }
+    foreach ($key in $Extra.Keys) { $section[$key] = $Extra[$key] }
+    return $section
 }
 
 function Invoke-SiblingScript {
@@ -76,7 +80,7 @@ if ($DryRun) {
     Write-Host ("[dry-run] saved_world_lifecycle: {0} -Package {1} -FixtureDir {2} -OutDir {3}" -f (Join-Path $PSScriptRoot "run-saved-world-lifecycle.ps1"), $PackageAbs, $FixtureAbs, (Join-Path $OutAbs "lifecycle"))
     Write-Host ("[dry-run] noui_load: {0} -Package {1} -WorldId <fixture_world_id> -OutDir {2}" -f (Join-Path $PSScriptRoot "run-noui-load.ps1"), $PackageAbs, (Join-Path $OutAbs "noui-load"))
     Write-Host ("[dry-run] serial_load_20: 20 x {0} --load-world <fixture_world_id> --no-ui --hidden-window --render-benchmark ..." -f (Join-Path $PackageAbs "luminumbra_client_qa_app.exe"))
-    Write-Host "[dry-run] net_soak: ctest --test-dir <BuildDir> -R NetSoak (only with -BuildDir)"
+    Write-Host "[dry-run] net_soak: ctest --test-dir <BuildDir> -N -R NetSoak (discovery), then ctest --test-dir <BuildDir> -R NetSoak (only with -BuildDir)"
     Write-Host "[dry-run] perf_pointer: pass only with -PerfEvidence pointing at an existing file"
     Write-Host "[dry-run] audio_off: read -AudioChecklist JSON (three boolean fields)"
     Write-Host ("[dry-run] python {0} {1} --verdict-out {2}" -f $checkerPy, $receiptPath, $verdictPath)
@@ -266,6 +270,21 @@ try {
             $sections["net_soak"] = New-Section -Status "fail" -Detail "ctest not found on PATH"
         } else {
             $buildAbs = Get-AbsolutePath $BuildDir
+
+            # Discovery before the run: which NetSoak tests does this build list?
+            $listRun = Invoke-ClientSession -Exe $ctest.Source `
+                -ArgumentList @("--test-dir", $buildAbs, "-N", "-R", "NetSoak") `
+                -WorkingDirectory $OutAbs `
+                -StdoutPath (Join-Path $netOut "ctest-list.stdout.log") `
+                -StderrPath (Join-Path $netOut "ctest-list.stderr.log") `
+                -TimeoutSeconds 300
+            $listText = Read-TextOrEmpty -Path (Join-Path $netOut "ctest-list.stdout.log")
+            $discoveredNames = @()
+            foreach ($line in ($listText -split '\r?\n')) {
+                if ($line -match '^\s*Test\s+#\d+:\s+(\S+)') { $discoveredNames += $Matches[1] }
+            }
+            $discoveredNames = @($discoveredNames)
+
             $netRun = Invoke-ClientSession -Exe $ctest.Source `
                 -ArgumentList @("--test-dir", $buildAbs, "-R", "NetSoak") `
                 -WorkingDirectory $OutAbs `
@@ -275,18 +294,40 @@ try {
             $netText = (Read-TextOrEmpty -Path (Join-Path $netOut "ctest.stdout.log")) + "`n" + (Read-TextOrEmpty -Path (Join-Path $netOut "ctest.stderr.log"))
             $netEvidence = "net-soak/ctest.stdout.log"
             $summary = [regex]::Match($netText, '(\d+)% tests passed, (\d+) tests? failed out of (\d+)')
+
+            # Tests reported Skipped / Not Run / Disabled, from per-test result lines and the
+            # "did not run" summary block. Keyed by name so one test counted twice is still one.
+            $notRunNames = @{}
+            foreach ($line in ($netText -split '\r?\n')) {
+                if ($line -match 'Test\s+#\d+:\s+(\S+).*\*\*\*(Skipped|Not Run|Disabled)') {
+                    $notRunNames[$Matches[1]] = $true
+                } elseif ($line -match '^\s*\d+\s+-\s+(\S+)\s+\((Skipped|Not Run|Disabled)\)') {
+                    $notRunNames[$Matches[1]] = $true
+                }
+            }
+            $skippedTests = [int]$notRunNames.Count
+            $netExtra = @{
+                required_tests = @("NetSoak")
+                discovered_tests = $discoveredNames
+                skipped_tests = $skippedTests
+            }
+
             if ($netRun.timed_out) {
-                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail "ctest NetSoak timed out"
+                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail "ctest NetSoak timed out" -Extra $netExtra
             } elseif ([int]$netRun.exit_code -ne 0) {
-                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail ("ctest exit " + [int]$netRun.exit_code)
+                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail ("ctest exit " + [int]$netRun.exit_code) -Extra $netExtra
+            } elseif (-not ($discoveredNames -contains "NetSoak")) {
+                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail "NetSoak not among discovered tests" -Extra $netExtra
+            } elseif ($skippedTests -gt 0) {
+                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail ("skipped, not run or disabled tests: " + $skippedTests) -Extra $netExtra
             } elseif ($netText -match 'No tests were found') {
-                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail "zero NetSoak tests discovered"
+                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail "zero NetSoak tests discovered" -Extra $netExtra
             } elseif (-not $summary.Success) {
-                $sections["net_soak"] = New-Section -Status "unevaluated" -Evidence $netEvidence -Detail "ctest summary line not found"
+                $sections["net_soak"] = New-Section -Status "unevaluated" -Evidence $netEvidence -Detail "ctest summary line not found" -Extra $netExtra
             } elseif ([int]$summary.Groups[2].Value -ne 0 -or [int]$summary.Groups[3].Value -lt 1) {
-                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail ("ctest: " + $summary.Value)
+                $sections["net_soak"] = New-Section -Status "fail" -Evidence $netEvidence -Detail ("ctest: " + $summary.Value) -Extra $netExtra
             } else {
-                $sections["net_soak"] = New-Section -Status "pass" -Evidence $netEvidence -Detail ("ctest: " + $summary.Value)
+                $sections["net_soak"] = New-Section -Status "pass" -Evidence $netEvidence -Detail ("ctest: " + $summary.Value) -Extra $netExtra
             }
         }
     }

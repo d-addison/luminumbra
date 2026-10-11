@@ -9,6 +9,14 @@
 # -OutDir must be empty or absent (fresh run). Exit codes: 0 pass, 1 fail,
 # 2 invalid input to the checker, 3 unevaluated (from check_acceptance_receipt.py).
 #
+# Refusal variant directories under FixtureDir\refusals must be named exactly
+# obsolete-metadata, future-metadata, corrupt-metadata, missing-metadata,
+# missing-preset, truncated-region; otherwise the checker reports unevaluated.
+#
+# The create_edit_save and restart_select_load sessions share one runtime artifact
+# directory (artifacts\persistence) because the load phase reads the save-phase
+# marker file from there.
+#
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\gates\run-saved-world-lifecycle.ps1 `
 #       -Package D:\accept\package-copy -FixtureDir D:\accept\fixture `
@@ -156,18 +164,16 @@ function Get-RefusalDiagnostic {
 # ---------------------------------------------------------------------------
 $fixtureWorldPlaceholder = "<fixture_world_id>"
 $primaryPlaceholder = "<primary_world_id>"
-$createArtifact = Join-Path $artifactsDir "create_edit_save"
-$restartArtifact = Join-Path $artifactsDir "restart_select_load"
+$persistenceArtifact = Join-Path $artifactsDir "persistence"
 $secondArtifact = Join-Path $artifactsDir "second_seed"
 
 if ($DryRun) {
     Write-Host "[dry-run] no files will be written"
     Write-Host ("[dry-run] stage: copy {0}\* into {1} (refuse if a target exists)" -f $fixtureSaves, $savesRoot)
     Show-PlannedCommand -Label "snapshot before_edit" -Exe "python" -Arguments @($saveReceiptPy, "snapshot", (Join-Path $savesRoot $fixtureWorldPlaceholder), "--out", (Join-Path $receiptsDir "before_edit.json"))
-    Show-PlannedCommand -Label "create_edit_save" -Exe $exePath -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "save", "--persistence-session-dir", $sessionDir, "--auto-create-world", "--auto-enter-world") + (Get-CommonFlags -ArtifactDir $createArtifact))
-    Write-Host ("[dry-run] snapshot after_save: {0}" -f (Join-Path $savesRoot $primaryPlaceholder))
-    Show-PlannedCommand -Label "restart_select_load" -Exe $exePath -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "load", "--persistence-session-dir", $sessionDir) + (Get-CommonFlags -ArtifactDir $restartArtifact))
-    Write-Host ("[dry-run] snapshot after_reload, then diff after_save.json after_reload.json")
+    Show-PlannedCommand -Label "create_edit_save" -Exe $exePath -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "save", "--persistence-session-dir", $sessionDir, "--auto-create-world", "--auto-enter-world") + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
+    Write-Host ("[dry-run] snapshot after_save (primary): {0}" -f (Join-Path $savesRoot $primaryPlaceholder))
+    Show-PlannedCommand -Label "restart_select_load" -Exe $exePath -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "load", "--persistence-session-dir", $sessionDir) + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
     Show-PlannedCommand -Label "second_seed" -Exe $exePath -Arguments (@("--scenario", "auto_world_smoke", "--auto-create-world", "--auto-enter-world", "--world-preset", $Preset) + (Get-CommonFlags -ArtifactDir $secondArtifact))
     for ($i = 1; $i -le $SwitchCount; $i++) {
         if ($i % 2 -eq 1) { $switchWorld = $fixtureWorldPlaceholder } else { $switchWorld = $primaryPlaceholder }
@@ -177,6 +183,8 @@ if ($DryRun) {
         $switchArgs = @("--load-world", $switchWorld, "--cam-pos", "0,120,0", "--cam-yaw", "0", "--cam-pitch", "-0.2", "--capture-size", "1280x720", "--render-benchmark", $switchBench, "--render-benchmark-schema", "v3", "--render-benchmark-warmup", "30", "--render-benchmark-frames", "8", "--render-benchmark-screenshot", $switchFrame) + (Get-CommonFlags -ArtifactDir $switchArtifact)
         Show-PlannedCommand -Label ("switch_back_" + $i) -Exe $exePath -Arguments $switchArgs
     }
+    Write-Host "[dry-run] after the switch_back sessions: snapshot after_reload (primary) and fixture_after_loads (fixture)"
+    Write-Host "[dry-run] reload_changes = diff after_save.json after_reload.json; fixture_changes = diff before_edit.json fixture_after_loads.json"
     Write-Host ("[dry-run] refusals: each directory under {0} is copied into {1} and run with --load-world <dir name> (120 s)" -f $refusalsRoot, $savesRoot)
     Write-Host "[dry-run] package identity, acceptance-receipt.json, then check_acceptance_receipt.py"
     exit 0
@@ -224,23 +232,22 @@ try {
 
     $sessions = @()
 
-    # 2. create_edit_save
-    $sessions += Invoke-Session -Name "create_edit_save" -Kind "create_edit_save" -ArtifactDir $createArtifact `
-        -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "save", "--persistence-session-dir", $sessionDir, "--auto-create-world", "--auto-enter-world") + (Get-CommonFlags -ArtifactDir $createArtifact))
+    # 2. create_edit_save (shutdown record is read inside Invoke-Session, right after the session)
+    $sessions += Invoke-Session -Name "create_edit_save" -Kind "create_edit_save" -ArtifactDir $persistenceArtifact `
+        -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "save", "--persistence-session-dir", $sessionDir, "--auto-create-world", "--auto-enter-world") + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
     $primaryWorld = Get-PrimaryWorld
     $afterSave = Invoke-Snapshot -WorldDir (Join-Path $savesRoot $primaryWorld) -OutFile (Join-Path $receiptsDir "after_save.json") -Label "after_save"
 
-    # 3. restart_select_load, then diff after_save against after_reload
-    $sessions += Invoke-Session -Name "restart_select_load" -Kind "restart_select_load" -ArtifactDir $restartArtifact `
-        -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "load", "--persistence-session-dir", $sessionDir) + (Get-CommonFlags -ArtifactDir $restartArtifact))
-    $afterReload = Invoke-Snapshot -WorldDir (Join-Path $savesRoot $primaryWorld) -OutFile (Join-Path $receiptsDir "after_reload.json") -Label "after_reload"
-    $reloadChanges = Get-DiffChanges -AFile (Join-Path $receiptsDir "after_save.json") -BFile (Join-Path $receiptsDir "after_reload.json")
+    # 3. restart_select_load (reads the save-phase marker from the shared artifact dir)
+    $sessions += Invoke-Session -Name "restart_select_load" -Kind "restart_select_load" -ArtifactDir $persistenceArtifact `
+        -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "load", "--persistence-session-dir", $sessionDir) + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
 
     # 4. second_seed (a second freshly created world)
     $sessions += Invoke-Session -Name "second_seed" -Kind "second_seed" -ArtifactDir $secondArtifact `
         -Arguments (@("--scenario", "auto_world_smoke", "--auto-create-world", "--auto-enter-world", "--world-preset", $Preset) + (Get-CommonFlags -ArtifactDir $secondArtifact))
 
     # 5. switch_back: fixed-pose render benchmark, alternating worlds (fixture first)
+    #    (after_reload and fixture_after_loads are snapshotted after this loop)
     $switches = @()
     for ($i = 1; $i -le $SwitchCount; $i++) {
         if ($i % 2 -eq 1) { $switchWorld = $fixtureWorldId } else { $switchWorld = $primaryWorld }
@@ -274,6 +281,12 @@ try {
         }
     }
 
+    # 5b. Snapshots after all loads: primary world (reload) and fixture world (fixture pair).
+    $afterReload = Invoke-Snapshot -WorldDir (Join-Path $savesRoot $primaryWorld) -OutFile (Join-Path $receiptsDir "after_reload.json") -Label "after_reload"
+    $reloadChanges = Get-DiffChanges -AFile (Join-Path $receiptsDir "after_save.json") -BFile (Join-Path $receiptsDir "after_reload.json")
+    $fixtureAfterLoads = Invoke-Snapshot -WorldDir $stagedFixture -OutFile (Join-Path $receiptsDir "fixture_after_loads.json") -Label "fixture_after_loads"
+    $fixtureChanges = Get-DiffChanges -AFile (Join-Path $receiptsDir "before_edit.json") -BFile (Join-Path $receiptsDir "fixture_after_loads.json")
+
     # 6. Refusal matrix: each FixtureDir\refusals\<variant> must fail cleanly and leave bytes unchanged.
     $refusals = @()
     if (Test-Path -LiteralPath $refusalsRoot -PathType Container) {
@@ -303,6 +316,7 @@ try {
                 variant = $variant
                 exit_code = [int]$run.exit_code
                 diagnostic = $diagnostic
+                timed_out = [bool]$run.timed_out
             }
 
             $postEntry = Invoke-Snapshot -WorldDir $target -OutFile $postFile -Label ("refusal_" + $variant + "_after")
@@ -340,8 +354,9 @@ try {
         fixture_world_id = $fixtureWorldId
         primary_world_id = $primaryWorld
         sessions = @($sessions)
-        save_receipts = @($beforeEdit, $afterSave, $afterReload)
+        save_receipts = @($beforeEdit, $fixtureAfterLoads, $afterSave, $afterReload)
         reload_changes = $reloadChanges
+        fixture_changes = $fixtureChanges
         switches = @($switches)
         refusals = @($refusals)
     }

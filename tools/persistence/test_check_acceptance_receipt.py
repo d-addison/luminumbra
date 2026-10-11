@@ -47,14 +47,16 @@ def valid_receipt() -> dict:
         "sessions": sessions,
         "save_receipts": [
             {"label": "before_edit", "tree_digest": HEX_B, "file_count": 12},
+            {"label": "fixture_after_loads", "tree_digest": HEX_B, "file_count": 12},
             {"label": "after_save", "tree_digest": HEX_E, "file_count": 13},
             {"label": "after_reload", "tree_digest": HEX_E, "file_count": 13},
         ],
         "reload_changes": {"added": [], "removed": [], "changed": []},
+        "fixture_changes": {"added": [], "removed": [], "changed": []},
         "switches": switches,
         "refusals": [
-            {"variant": "missing_manifest", "exit_code": 2, "diagnostic": True},
-            {"variant": "bad_header", "exit_code": 3, "diagnostic": True},
+            {"variant": variant, "exit_code": 2 + index, "diagnostic": True, "timed_out": False}
+            for index, variant in enumerate(tool.REQUIRED_REFUSAL_VARIANTS)
         ],
     }
 
@@ -109,7 +111,7 @@ class AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "pass")
         self.assertEqual(verdict["schema"], "luminumbra.saved_world_acceptance_verdict.v1")
         self.assertEqual(verdict["min_switches"], 6)
-        self.assertEqual(len(verdict["checks"]), 8)
+        self.assertEqual(len(verdict["checks"]), 9)
         path = self._write_obj(valid_receipt())
         code, out, err = _run([str(path)])
         self.assertEqual(code, 0, err)
@@ -308,64 +310,116 @@ class AcceptanceReceiptContract(unittest.TestCase):
 
     def test_save_tree_changes_missing_labels_unevaluated(self) -> None:
         self._assert_baseline("save_tree_changes")
-        receipt = valid_receipt()
-        receipt["save_receipts"] = [e for e in receipt["save_receipts"] if e["label"] != "after_reload"]
-        self._expect(receipt, "save_tree_changes", "unevaluated")
+        for label in tool.REQUIRED_LABELS:
+            receipt = valid_receipt()
+            receipt["save_receipts"] = [e for e in receipt["save_receipts"] if e["label"] != label]
+            self._expect(receipt, "save_tree_changes", "unevaluated")
+            self.assertIn(label, _check(_verdict(receipt), "save_tree_changes")["detail"])
 
         receipt = valid_receipt()
         del receipt["save_receipts"]
         self._expect(receipt, "save_tree_changes", "unevaluated")
 
-    def test_save_tree_changes_edit_must_change_tree(self) -> None:
-        self._assert_baseline("save_tree_changes")
-        receipt = valid_receipt()
-        receipt["save_receipts"][1]["tree_digest"] = HEX_B
-        receipt["save_receipts"][2]["tree_digest"] = HEX_B
-        self._expect(receipt, "save_tree_changes", "fail")
-
-    def test_save_tree_changes_reload_changes_absent_unevaluated(self) -> None:
+    def test_save_tree_changes_missing_change_dicts_unevaluated(self) -> None:
         self._assert_baseline("save_tree_changes")
         receipt = valid_receipt()
         del receipt["reload_changes"]
         self._expect(receipt, "save_tree_changes", "unevaluated")
+        self.assertIn("reload_changes", _check(_verdict(receipt), "save_tree_changes")["detail"])
 
-    def test_save_tree_changes_reload_only_world_info_allowed(self) -> None:
+        receipt = valid_receipt()
+        del receipt["fixture_changes"]
+        self._expect(receipt, "save_tree_changes", "unevaluated")
+        self.assertIn("fixture_changes", _check(_verdict(receipt), "save_tree_changes")["detail"])
+
+    def test_save_tree_changes_does_not_require_edit_to_change_tree(self) -> None:
+        # before_edit and after_save snapshot different worlds, so equal digests are fine.
         self._assert_baseline("save_tree_changes")
         receipt = valid_receipt()
-        receipt["save_receipts"][2]["tree_digest"] = HEX_D
+        receipt["save_receipts"][2]["tree_digest"] = HEX_B
+        receipt["save_receipts"][3]["tree_digest"] = HEX_B
+        self._expect(receipt, "save_tree_changes", "pass")
+
+    def test_save_tree_changes_primary_needs_files_after_save(self) -> None:
+        self._assert_baseline("save_tree_changes")
+        receipt = valid_receipt()
+        receipt["save_receipts"][2]["file_count"] = 0
+        self._expect(receipt, "save_tree_changes", "fail")
+
+    def test_save_tree_changes_primary_only_world_info_allowed(self) -> None:
+        self._assert_baseline("save_tree_changes")
+        receipt = valid_receipt()
+        receipt["save_receipts"][3]["tree_digest"] = HEX_D
         receipt["reload_changes"] = {"added": [], "removed": [], "changed": ["world_info.json"]}
         self.assertEqual(_check(_verdict(receipt), "save_tree_changes")["verdict"], "pass")
 
         receipt["reload_changes"]["changed"] = ["world_info.json", "worlds/a.lmr"]
         self._expect(receipt, "save_tree_changes", "fail")
 
-        receipt["reload_changes"] = {"added": [], "removed": [], "changed": ["world_info.json"]}
-        receipt["reload_changes"]["changed"] = ["world_info.json "]
+        receipt["reload_changes"] = {"added": [], "removed": [], "changed": ["world_info.json "]}
         self._expect(receipt, "save_tree_changes", "fail")
 
-    def test_save_tree_changes_added_or_removed_fail(self) -> None:
+    def test_save_tree_changes_primary_added_or_removed_fail(self) -> None:
         self._assert_baseline("save_tree_changes")
         receipt = valid_receipt()
-        receipt["save_receipts"][2]["tree_digest"] = HEX_D
-        receipt["reload_changes"] = {"added": ["extra.bin"], "removed": [], "changed": []}
+        receipt["save_receipts"][3]["tree_digest"] = HEX_D
+        receipt["reload_changes"] = {"added": ["extra.bin"], "removed": [], "changed": ["world_info.json"]}
         self._expect(receipt, "save_tree_changes", "fail")
 
         receipt["reload_changes"] = {"added": [], "removed": ["world_info.json"], "changed": []}
         self._expect(receipt, "save_tree_changes", "fail")
 
-    def test_save_tree_changes_equal_digests_need_empty_changes(self) -> None:
+    def test_save_tree_changes_primary_equal_digests_need_empty_changes(self) -> None:
         self._assert_baseline("save_tree_changes")
         receipt = valid_receipt()
         receipt["reload_changes"]["changed"] = ["world_info.json"]
         self._expect(receipt, "save_tree_changes", "fail")
 
-    def test_save_tree_changes_malformed_reload_changes_fail(self) -> None:
+    def test_save_tree_changes_primary_differs_without_evidence_fail(self) -> None:
+        self._assert_baseline("save_tree_changes")
+        receipt = valid_receipt()
+        receipt["save_receipts"][3]["tree_digest"] = HEX_D
+        receipt["reload_changes"] = {"added": [], "removed": [], "changed": []}
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "save_tree_changes")["verdict"], "fail")
+        self.assertIn("digest differs without change evidence", _check(verdict, "save_tree_changes")["detail"])
+
+    def test_save_tree_changes_fixture_pair_rules(self) -> None:
+        self._assert_baseline("save_tree_changes")
+        receipt = valid_receipt()
+        receipt["save_receipts"][1]["tree_digest"] = HEX_C
+        receipt["fixture_changes"] = {"added": [], "removed": [], "changed": ["world_info.json"]}
+        self._expect(receipt, "save_tree_changes", "pass")
+
+        receipt["fixture_changes"] = {"added": [], "removed": [], "changed": []}
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "save_tree_changes")["verdict"], "fail")
+        self.assertIn("fixture: digest differs without change evidence",
+                      _check(verdict, "save_tree_changes")["detail"])
+
+        receipt["fixture_changes"] = {"added": [], "removed": [], "changed": ["fixture/a.lmr"]}
+        self._expect(receipt, "save_tree_changes", "fail")
+
+        receipt["fixture_changes"] = {"added": ["x.bin"], "removed": [], "changed": ["world_info.json"]}
+        self._expect(receipt, "save_tree_changes", "fail")
+
+        receipt = valid_receipt()
+        receipt["fixture_changes"] = {"added": [], "removed": [], "changed": ["world_info.json"]}
+        self._expect(receipt, "save_tree_changes", "fail")
+
+    def test_save_tree_changes_malformed_change_dicts_fail(self) -> None:
         self._assert_baseline("save_tree_changes")
         receipt = valid_receipt()
         receipt["reload_changes"] = {"added": "none", "removed": [], "changed": []}
         verdict = _verdict(receipt)
         self.assertEqual(_check(verdict, "save_tree_changes")["verdict"], "fail")
         self.assertEqual(_check(verdict, "save_tree_changes")["detail"], "malformed reload_changes")
+
+        receipt = valid_receipt()
+        receipt["fixture_changes"] = {"added": [], "removed": [], "changed": [3]}
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "save_tree_changes")["verdict"], "fail")
+        self.assertEqual(_check(verdict, "save_tree_changes")["detail"], "malformed fixture_changes")
 
     # Check 6: switch_count
 
@@ -415,6 +469,37 @@ class AcceptanceReceiptContract(unittest.TestCase):
                             receipt["switches"][1]["capture_sha256"])
         self.assertEqual(_check(_verdict(receipt), "switch_captures_identical")["verdict"], "pass")
 
+    # Check 7b: switch_probes
+
+    def test_switch_probes_baseline_and_unevaluated(self) -> None:
+        self._assert_baseline("switch_probes")
+        receipt = valid_receipt()
+        receipt["switches"][2]["g_buffer_probe"] = None
+        self._expect(receipt, "switch_probes", "unevaluated")
+        self.assertIn("2", _check(_verdict(receipt), "switch_probes")["detail"])
+
+        receipt = valid_receipt()
+        del receipt["switches"][5]["g_buffer_probe"]
+        self._expect(receipt, "switch_probes", "unevaluated")
+
+        receipt = valid_receipt()
+        del receipt["switches"]
+        self._expect(receipt, "switch_probes", "unevaluated")
+
+    def test_switch_probes_empty_string_fails(self) -> None:
+        self._assert_baseline("switch_probes")
+        receipt = valid_receipt()
+        receipt["switches"][0]["g_buffer_probe"] = ""
+        self._expect(receipt, "switch_probes", "fail")
+
+    def test_switch_probes_non_string_is_malformed(self) -> None:
+        self._assert_baseline("switch_probes")
+        receipt = valid_receipt()
+        receipt["switches"][0]["g_buffer_probe"] = 1
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "switch_probes")["verdict"], "fail")
+        self.assertEqual(_check(verdict, "switch_probes")["detail"], "malformed switches")
+
     # Check 8: refusal_matrix
 
     def test_refusal_matrix_checks(self) -> None:
@@ -440,11 +525,76 @@ class AcceptanceReceiptContract(unittest.TestCase):
         verdict = _verdict(receipt)
         self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "malformed refusals")
 
+        receipt = valid_receipt()
+        receipt["refusals"][0]["timed_out"] = "no"
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "malformed refusals")
+
+    def test_refusal_timed_out_fails(self) -> None:
+        self._assert_baseline("refusal_matrix")
+        receipt = valid_receipt()
+        receipt["refusals"][4]["timed_out"] = True
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "fail")
+        self.assertIn("missing-preset", _check(verdict, "refusal_matrix")["detail"])
+
+    def test_refusal_timed_out_key_is_optional(self) -> None:
+        receipt = valid_receipt()
+        for refusal in receipt["refusals"]:
+            del refusal["timed_out"]
+        self._expect(receipt, "refusal_matrix", "pass")
+
+    def test_refusal_missing_required_variant_unevaluated(self) -> None:
+        self._assert_baseline("refusal_matrix")
+        receipt = valid_receipt()
+        receipt["refusals"] = [r for r in receipt["refusals"] if r["variant"] != "truncated-region"]
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "unevaluated")
+        self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "missing variants: truncated-region")
+
+    def test_refusal_old_variant_names_are_not_accepted(self) -> None:
+        receipt = valid_receipt()
+        receipt["refusals"] = [
+            {"variant": "missing_manifest", "exit_code": 2, "diagnostic": True, "timed_out": False},
+        ]
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "unevaluated")
+        self.assertIn("obsolete-metadata", _check(verdict, "refusal_matrix")["detail"])
+
+    def test_refusal_failure_beats_missing_variants(self) -> None:
+        receipt = valid_receipt()
+        receipt["refusals"] = [
+            {"variant": "obsolete-metadata", "exit_code": 0, "diagnostic": True, "timed_out": False},
+        ]
+        verdict = _verdict(receipt)
+        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "fail")
+        self.assertIn("missing variants", _check(verdict, "refusal_matrix")["detail"])
+
+    def test_refusal_variants_option_overrides_required_list(self) -> None:
+        receipt = valid_receipt()
+        receipt["refusals"] = [
+            {"variant": "alpha", "exit_code": 2, "diagnostic": True},
+            {"variant": "beta", "exit_code": 3, "diagnostic": True},
+        ]
+        verdict = tool.evaluate(receipt, 6, ("alpha", "beta"))
+        self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "pass")
+        verdict = tool.evaluate(receipt, 6, ("alpha", "beta", "gamma"))
+        self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "missing variants: gamma")
+
+        path = self._write_obj(receipt)
+        self.assertEqual(_run([str(path), "--refusal-variants", "alpha,beta"])[0], 0)
+        code, out, _ = _run([str(path), "--refusal-variants", "alpha, beta ,gamma"])
+        self.assertEqual(code, 3)
+        self.assertIn("missing variants: gamma", out)
+        self.assertEqual(_run([str(path)])[0], 3)
+        self.assertEqual(_run([str(path), "--refusal-variants", " , "])[0], 2)
+
     def test_every_check_id_is_present_in_order(self) -> None:
         ids = [check["id"] for check in _verdict(valid_receipt())["checks"]]
         self.assertEqual(ids, [
             "package_identity", "fixture_identity", "sessions_present", "sessions_clean",
-            "save_tree_changes", "switch_count", "switch_captures_identical", "refusal_matrix",
+            "save_tree_changes", "switch_count", "switch_captures_identical", "switch_probes",
+            "refusal_matrix",
         ])
 
     def test_fully_absent_optional_fields_never_pass(self) -> None:
