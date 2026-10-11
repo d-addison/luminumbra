@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <new>
 #include <string>
@@ -20,9 +21,12 @@
 #else
 #include <cerrno>
 #include <csignal>
-#include <execinfo.h>
 #include <fcntl.h>
 #include <unistd.h>
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+#include <sys/ucontext.h>
+#define LUMINUMBRA_CRASH_HAS_CONTEXT_REGS 1
+#endif
 #endif
 
 namespace luminumbra::crash {
@@ -31,7 +35,6 @@ namespace {
 
 constexpr std::string_view kReportHeader = "luminumbra-crash-report v1";
 constexpr std::size_t kSinkCapacity = 1024;
-[[maybe_unused]] constexpr int kMaxFrames = 64;
 
 #if defined(_WIN32)
 using Target = HANDLE;
@@ -74,6 +77,15 @@ public:
         while (count > 0) {
             const char digit = digits[--count];
             Append(&digit, 1);
+        }
+    }
+
+    void Signed(std::int64_t value) {
+        if (value < 0) {
+            Text("-");
+            Dec(0u - static_cast<std::uint64_t>(value));
+        } else {
+            Dec(static_cast<std::uint64_t>(value));
         }
     }
 
@@ -157,6 +169,11 @@ bool WriteHeader(Target target, std::string_view program_name, std::uint64_t pid
 #if !defined(_WIN32)
 
 std::atomic<int> g_report_fd{-1};
+static_assert(std::atomic<int>::is_always_lock_free, "handler state must be lock-free");
+
+// Set by the first fatal signal. Any later entry, on this thread or another, skips the
+// report and terminates the process.
+std::atomic_flag g_handler_entered{};
 
 const char* SignalName(int signo) {
     switch (signo) {
@@ -175,25 +192,70 @@ const char* SignalName(int signo) {
     }
 }
 
-void HandleFatalSignal(int signo, siginfo_t* info, void*) {
-    const int fd = g_report_fd.load();
-    if (fd < 0) {
+#if defined(LUMINUMBRA_CRASH_HAS_CONTEXT_REGS)
+void ContextPcAndSp(const ucontext_t& context, std::uint64_t& pc, std::uint64_t& sp) {
+#if defined(__x86_64__)
+    pc = static_cast<std::uint64_t>(context.uc_mcontext.gregs[REG_RIP]);
+    sp = static_cast<std::uint64_t>(context.uc_mcontext.gregs[REG_RSP]);
+#else
+    pc = static_cast<std::uint64_t>(context.uc_mcontext.pc);
+    sp = static_cast<std::uint64_t>(context.uc_mcontext.sp);
+#endif
+}
+#endif
+
+void WriteFaultRecord(int fd,
+                      int signo,
+                      const siginfo_t* info,
+                      [[maybe_unused]] const void* context) {
+    CrashSink sink(fd);
+    sink.Text("signal ");
+    sink.Dec(static_cast<std::uint64_t>(signo));
+    sink.Text(" ");
+    sink.Text(SignalName(signo));
+    sink.Text("\nsi_code ");
+    sink.Signed(info != nullptr ? static_cast<std::int64_t>(info->si_code) : 0);
+    const auto fault_address =
+        info != nullptr ? reinterpret_cast<std::uintptr_t>(info->si_addr) : 0u;
+    sink.Text("\nfault_address ");
+    sink.Hex(static_cast<std::uint64_t>(fault_address));
+#if defined(LUMINUMBRA_CRASH_HAS_CONTEXT_REGS)
+    if (context != nullptr) {
+        std::uint64_t pc = 0;
+        std::uint64_t sp = 0;
+        ContextPcAndSp(*static_cast<const ucontext_t*>(context), pc, sp);
+        sink.Text("\npc ");
+        sink.Hex(pc);
+        sink.Text("\nsp ");
+        sink.Hex(sp);
+    }
+#endif
+    sink.Text("\n");
+    sink.Flush();
+}
+
+// Restores the default action for signo, unblocks it, and raises it again, so the
+// process terminates with the original signal. signal(), sigprocmask() and raise()
+// are async-signal-safe.
+void ReraiseWithDefaultAction(int signo) {
+    std::signal(signo, SIG_DFL);
+    sigset_t only{};
+    sigemptyset(&only);
+    sigaddset(&only, signo);
+    sigprocmask(SIG_UNBLOCK, &only, nullptr);
+    std::raise(signo);
+}
+
+void HandleFatalSignal(int signo, siginfo_t* info, void* context) {
+    if (g_handler_entered.test_and_set()) {
+        ReraiseWithDefaultAction(signo);
         return;
     }
-    {
-        CrashSink sink(fd);
-        sink.Text("signal ");
-        sink.Dec(static_cast<std::uint64_t>(signo));
-        sink.Text(" ");
-        sink.Text(SignalName(signo));
-        sink.Text("\nfault_address ");
-        sink.Hex(static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(info->si_addr)));
-        sink.Text("\nframes\n");
-        sink.Flush();
+    const int fd = g_report_fd.load();
+    if (fd >= 0) {
+        WriteFaultRecord(fd, signo, info, context);
     }
-    void* frames[kMaxFrames];
-    const int count = backtrace(frames, kMaxFrames);
-    backtrace_symbols_fd(frames, count, fd);
+    ReraiseWithDefaultAction(signo);
 }
 
 bool InstallAlternateStack() {
@@ -217,7 +279,10 @@ bool InstallSignalHandlers() {
     struct sigaction action {};
     action.sa_sigaction = &HandleFatalSignal;
     sigemptyset(&action.sa_mask);
-    action.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
+    for (const int signo : kFatalSignals) {
+        sigaddset(&action.sa_mask, signo);
+    }
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     bool ok = true;
     for (const int signo : kFatalSignals) {
         ok = (::sigaction(signo, &action, nullptr) == 0) && ok;
@@ -227,20 +292,59 @@ bool InstallSignalHandlers() {
 
 #else
 
-using RtlLookupFunctionEntryFn = PRUNTIME_FUNCTION(NTAPI*)(DWORD64,
-                                                           PDWORD64,
-                                                           PUNWIND_HISTORY_TABLE);
-using RtlVirtualUnwindFn = PEXCEPTION_ROUTINE(NTAPI*)(DWORD,
-                                                      DWORD64,
-                                                      DWORD64,
-                                                      PRUNTIME_FUNCTION,
-                                                      PCONTEXT,
-                                                      PVOID*,
-                                                      PDWORD64,
-                                                      PKNONVOLATILE_CONTEXT_POINTERS);
+constexpr DWORD kMaxModulePathChars = 32767;
 
 std::atomic<HANDLE> g_report{nullptr};
 LONG g_handler_entered = 0;
+
+// Main-module facts captured at install time. The fault path reads only these values,
+// so it never calls into the loader.
+std::uintptr_t g_module_base = 0;
+std::uintptr_t g_module_end = 0;
+char g_module_path[kMaxModulePathChars] = {};
+DWORD g_module_path_length = 0;
+
+void CacheMainModule() {
+    g_module_base = 0;
+    g_module_end = 0;
+    g_module_path_length = 0;
+    const HMODULE module = GetModuleHandleW(nullptr);
+    if (module == nullptr) {
+        return;
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+        return;
+    }
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        reinterpret_cast<const std::uint8_t*>(module) + dos->e_lfanew);
+    g_module_base = reinterpret_cast<std::uintptr_t>(module);
+    g_module_end = g_module_base + nt->OptionalHeader.SizeOfImage;
+    const DWORD length = GetModuleFileNameA(module, g_module_path, kMaxModulePathChars);
+    if (length > 0 && length < kMaxModulePathChars) {
+        g_module_path_length = length;
+    }
+}
+
+#if defined(_WIN64) && defined(_AMD64_)
+
+// GetProcAddress returns FARPROC, which is not the function type we need. Copying the
+// bytes into a typed pointer avoids a function-type-punning cast that -Wcast-function-type
+// rejects.
+template<typename Fn>
+Fn ResolveNtdllEntry(HMODULE module, const char* name) {
+    static_assert(sizeof(Fn) == sizeof(FARPROC), "function pointer size mismatch");
+    Fn result = nullptr;
+    const FARPROC proc = GetProcAddress(module, name);
+    if (proc != nullptr) {
+        std::memcpy(&result, &proc, sizeof(result));
+    }
+    return result;
+}
+
+using RtlLookupFunctionEntryFn = decltype(&RtlLookupFunctionEntry);
+using RtlVirtualUnwindFn = decltype(&RtlVirtualUnwind);
+
 RtlLookupFunctionEntryFn g_lookup_function_entry = nullptr;
 RtlVirtualUnwindFn g_virtual_unwind = nullptr;
 
@@ -250,13 +354,12 @@ void ResolveNtdllEntryPoints() {
         return;
     }
     g_lookup_function_entry =
-        reinterpret_cast<RtlLookupFunctionEntryFn>(GetProcAddress(ntdll, "RtlLookupFunctionEntry"));
-    g_virtual_unwind =
-        reinterpret_cast<RtlVirtualUnwindFn>(GetProcAddress(ntdll, "RtlVirtualUnwind"));
+        ResolveNtdllEntry<RtlLookupFunctionEntryFn>(ntdll, "RtlLookupFunctionEntry");
+    g_virtual_unwind = ResolveNtdllEntry<RtlVirtualUnwindFn>(ntdll, "RtlVirtualUnwind");
 }
 
-#if defined(_WIN64) && defined(_AMD64_)
 void WriteFrames(CrashSink& sink, const CONTEXT& source) {
+    constexpr int kMaxFrames = 64;
     sink.Text("frames\n");
     if (g_lookup_function_entry == nullptr || g_virtual_unwind == nullptr) {
         sink.Text("unavailable\n");
@@ -290,10 +393,15 @@ void WriteFrames(CrashSink& sink, const CONTEXT& source) {
                          nullptr);
     }
 }
+
 #else
+
+void ResolveNtdllEntryPoints() {}
+
 void WriteFrames(CrashSink& sink, const CONTEXT&) {
     sink.Text("frames\nunavailable\n");
 }
+
 #endif
 
 void WriteFaultReport(HANDLE target, const EXCEPTION_POINTERS& pointers) {
@@ -304,30 +412,24 @@ void WriteFaultReport(HANDLE target, const EXCEPTION_POINTERS& pointers) {
     sink.Hex(static_cast<std::uint64_t>(record->ExceptionCode));
     sink.Text("\nexception_address ");
     sink.Hex(static_cast<std::uint64_t>(address));
+    sink.Text("\nthread_id ");
+    sink.Dec(static_cast<std::uint64_t>(GetCurrentThreadId()));
 
-    HMODULE module = nullptr;
-    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCSTR>(record->ExceptionAddress),
-                           &module) &&
-        module != nullptr) {
-        char name[MAX_PATH] = {};
-        const DWORD length = GetModuleFileNameA(module, name, MAX_PATH);
-        const std::string_view name_text =
-            length > 0 ? std::string_view(name, length) : std::string_view("unknown");
-        const auto base = reinterpret_cast<std::uintptr_t>(module);
+    if (g_module_base != 0 && address >= g_module_base && address < g_module_end) {
+        const std::string_view name = g_module_path_length > 0
+                                          ? std::string_view(g_module_path, g_module_path_length)
+                                          : std::string_view("unknown");
         sink.Text("\nmodule ");
-        sink.Text(name_text);
+        sink.Text(name);
         sink.Text(" base ");
-        sink.Hex(static_cast<std::uint64_t>(base));
+        sink.Hex(static_cast<std::uint64_t>(g_module_base));
         sink.Text(" rva ");
-        sink.Hex(static_cast<std::uint64_t>(address - base));
+        sink.Hex(static_cast<std::uint64_t>(address - g_module_base));
     } else {
         sink.Text("\nmodule unknown");
     }
-    sink.Text("\nthread_id ");
-    sink.Dec(static_cast<std::uint64_t>(GetCurrentThreadId()));
     sink.Text("\n");
+    // The basic record is on disk before any unwinding starts.
     sink.Flush();
 
     if (pointers.ContextRecord != nullptr) {
@@ -363,9 +465,15 @@ bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_vie
 #if defined(_WIN32)
     const auto pid = static_cast<std::uint64_t>(GetCurrentProcessId());
     const std::filesystem::path report = crash_dir / ("crash-" + std::to_string(pid) + ".txt");
+    // The previous report handle does not allow other writers, so it must be closed before
+    // the same path can be recreated. Capture stays disabled if the recreate fails.
+    const HANDLE previous = g_report.exchange(nullptr);
+    if (previous != nullptr && previous != INVALID_HANDLE_VALUE) {
+        CloseHandle(previous);
+    }
     const HANDLE file = CreateFileW(report.c_str(),
                                     GENERIC_WRITE,
-                                    FILE_SHARE_READ,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE,
                                     nullptr,
                                     CREATE_ALWAYS,
                                     FILE_ATTRIBUTE_NORMAL,
@@ -377,16 +485,13 @@ bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_vie
         CloseHandle(file);
         return false;
     }
-    const HANDLE previous = g_report.exchange(file);
-    if (previous != nullptr && previous != INVALID_HANDLE_VALUE) {
-        CloseHandle(previous);
-    }
+    CacheMainModule();
+    g_report.store(file);
     ResolveNtdllEntryPoints();
     SetUnhandledExceptionFilter(&HandleUnhandledException);
     ReportPathStorage() = report;
     return true;
 #else
-    static bool backtrace_primed = false;
     const auto pid = static_cast<std::uint64_t>(::getpid());
     const std::filesystem::path report = crash_dir / ("crash-" + std::to_string(pid) + ".txt");
     const int fd = ::open(report.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
@@ -396,13 +501,6 @@ bool InstallCrashCapture(const std::filesystem::path& crash_dir, std::string_vie
     if (!WriteHeader(fd, program_name, pid)) {
         ::close(fd);
         return false;
-    }
-    if (!backtrace_primed) {
-        // The first backtrace call loads libgcc's unwinder; doing it here keeps that
-        // work out of the signal handler.
-        void* warmup[1];
-        (void)backtrace(warmup, 1);
-        backtrace_primed = true;
     }
     if (!InstallAlternateStack() || !InstallSignalHandlers()) {
         ::close(fd);

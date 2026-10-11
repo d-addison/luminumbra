@@ -9,9 +9,11 @@
 #include <iterator>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #if !defined(_WIN32)
+#include <csignal>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -45,6 +47,11 @@ std::string FirstLine(const fs::path& file) {
     return line;
 }
 
+std::string ReadAll(const fs::path& file) {
+    std::ifstream in(file);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 } // namespace
 
 TEST(CrashReportTest, InstallCreatesDirectoryAndOpenableReportFile) {
@@ -72,23 +79,66 @@ TEST(CrashReportTest, InstallReturnsFalseWhenDirectoryCannotBeCreated) {
     EXPECT_FALSE(luminumbra::crash::InstallCrashCapture(blocker / "crash", "crash_report_test"));
 }
 
-#ifndef _WIN32
+TEST(CrashReportTest, ReinstallIntoSameDirectoryReplacesReport) {
+    ScopedDirectory scratch(UniqueScratchDir("reinstall"));
+    const fs::path dir = scratch.path / "crash";
 
-constexpr const char* kChildEnv = "LUMINUMBRA_CRASH_CHILD";
+    ASSERT_TRUE(luminumbra::crash::InstallCrashCapture(dir, "crash_report_test"));
+    const fs::path first = luminumbra::crash::CrashReportPath();
 
-// Runs only as a child process spawned by CrashReportTest.ChildProcessDiesBySignalAndWritesReport.
-// Without the environment variable it passes immediately, so it is harmless in a normal run.
+    ASSERT_TRUE(luminumbra::crash::InstallCrashCapture(dir, "crash_report_test"));
+    const fs::path second = luminumbra::crash::CrashReportPath();
+
+    EXPECT_EQ(first, second);
+    EXPECT_TRUE(fs::is_regular_file(second));
+    EXPECT_EQ(FirstLine(second), kReportHeader);
+}
+
+#if !defined(_WIN32)
+
+constexpr const char* kChildDirEnv = "LUMINUMBRA_CRASH_CHILD";
+constexpr const char* kChildModeEnv = "LUMINUMBRA_CRASH_CHILD_MODE";
+constexpr const char* kChildSegv = "segv";
+constexpr const char* kChildAbort = "abort";
+
+// Runs only as a child process spawned by the parent tests below. Without the
+// environment variables it passes immediately, so it is harmless in a normal run.
 TEST(CrashReportChild, CrashesWhenRequested) {
-    const char* crash_dir = std::getenv(kChildEnv);
-    if (crash_dir == nullptr) {
+    const char* crash_dir = std::getenv(kChildDirEnv);
+    const char* mode = std::getenv(kChildModeEnv);
+    if (crash_dir == nullptr || mode == nullptr) {
         return;
     }
     ASSERT_TRUE(luminumbra::crash::InstallCrashCapture(crash_dir, "crash_report_child"));
+    if (std::string(mode) == kChildAbort) {
+        std::raise(SIGABRT);
+        return;
+    }
     int* volatile null_pointer = nullptr;
     *null_pointer = 1;
 }
 
-TEST(CrashReportTest, ChildProcessDiesBySignalAndWritesReport) {
+// Waits for the child with a deadline. On expiry the child is killed and false is returned.
+bool WaitForChild(pid_t pid, int& status) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    for (;;) {
+        const pid_t waited = ::waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            return true;
+        }
+        if (waited < 0) {
+            return false;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            ::kill(pid, SIGKILL);
+            ::waitpid(pid, &status, 0);
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+void ExpectChildCrashReport(const char* mode, int expected_signal, const char* signal_name) {
     std::string self(4096, '\0');
     const ssize_t length = ::readlink("/proc/self/exe", self.data(), self.size());
     ASSERT_GT(length, 0);
@@ -99,7 +149,8 @@ TEST(CrashReportTest, ChildProcessDiesBySignalAndWritesReport) {
     const std::string child_dir = scratch.path.string();
     const std::string filter_arg = "--gtest_filter=CrashReportChild.*";
 
-    ASSERT_EQ(::setenv(kChildEnv, child_dir.c_str(), 1), 0);
+    ASSERT_EQ(::setenv(kChildDirEnv, child_dir.c_str(), 1), 0);
+    ASSERT_EQ(::setenv(kChildModeEnv, mode, 1), 0);
     const pid_t pid = ::fork();
     ASSERT_GE(pid, 0);
     if (pid == 0) {
@@ -107,25 +158,36 @@ TEST(CrashReportTest, ChildProcessDiesBySignalAndWritesReport) {
         ::_exit(127);
     }
     int status = 0;
-    const pid_t waited = ::waitpid(pid, &status, 0);
-    ::unsetenv(kChildEnv);
-    ASSERT_EQ(waited, pid);
+    const bool exited = WaitForChild(pid, status);
+    ::unsetenv(kChildDirEnv);
+    ::unsetenv(kChildModeEnv);
+    ASSERT_TRUE(exited) << "child did not exit within 30 seconds; it was killed";
 
     ASSERT_TRUE(WIFSIGNALED(status)) << "child exited normally with status " << WEXITSTATUS(status);
+    EXPECT_EQ(WTERMSIG(status), expected_signal);
 
-    fs::path report;
-    for (const auto& entry : fs::directory_iterator(scratch.path)) {
-        if (entry.path().filename().string().rfind("crash-", 0) == 0) {
-            report = entry.path();
-        }
-    }
-    ASSERT_FALSE(report.empty());
+    // Only the report named for the child's own pid counts.
+    const fs::path report = scratch.path / ("crash-" + std::to_string(pid) + ".txt");
+    ASSERT_TRUE(fs::is_regular_file(report)) << "no report for child pid " << pid;
     EXPECT_EQ(FirstLine(report), kReportHeader);
 
-    std::ifstream in(report);
-    const std::string contents((std::istreambuf_iterator<char>(in)),
-                               std::istreambuf_iterator<char>());
-    EXPECT_NE(contents.find("signal"), std::string::npos);
+    const std::string contents = ReadAll(report);
+    const std::string signal_line =
+        "\nsignal " + std::to_string(expected_signal) + " " + signal_name + "\n";
+    EXPECT_NE(contents.find(signal_line), std::string::npos) << contents;
+    EXPECT_NE(contents.find("\nfault_address 0x"), std::string::npos) << contents;
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+    EXPECT_NE(contents.find("\npc 0x"), std::string::npos) << contents;
+    EXPECT_NE(contents.find("\nsp 0x"), std::string::npos) << contents;
+#endif
+}
+
+TEST(CrashReportTest, ChildSegfaultWritesSignalRecordAndDiesBySigsegv) {
+    ExpectChildCrashReport(kChildSegv, SIGSEGV, "SIGSEGV");
+}
+
+TEST(CrashReportTest, ChildRaisedSigabrtWritesSignalRecordAndDiesBySigabrt) {
+    ExpectChildCrashReport(kChildAbort, SIGABRT, "SIGABRT");
 }
 
 #endif
