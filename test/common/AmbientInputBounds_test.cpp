@@ -42,7 +42,10 @@ constexpr bool kUnderAddressSanitizer = false;
 
 #if defined(__linux__)
 
+// The SIGSEGV handler can only reach the jump target through process-global state.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 sigjmp_buf g_jump;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 volatile sig_atomic_t g_armed = 0;
 
 void OnSegv(int) {
