@@ -1,7 +1,9 @@
+#include "core/Environment.h"
 #include "rendering/GBufferTargets.h"
 #include "rendering/RenderResourceRegistry.h"
 #include "rendering/passes/LightingPass.h"
 #include <algorithm>
+#include <cctype>
 #include <glad/glad.h>
 #include <glm/ext/matrix_clip_space.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -67,6 +69,44 @@ RenderView View() {
     std::copy_n(glm::value_ptr(projection), 16, d.projection.begin());
     return RenderView::Validate(d);
 }
+RenderView OrthographicView(double half_height = 2, double center_x = 0) {
+    auto d = View().description();
+    const double half_width = half_height * d.width / d.height;
+    const auto projection = glm::orthoRH_ZO(center_x - half_width,
+                                            center_x + half_width,
+                                            -half_height,
+                                            half_height,
+                                            d.far_plane,
+                                            d.near_plane);
+    std::copy_n(glm::value_ptr(projection), 16, d.projection.begin());
+    return RenderView::Validate(d);
+}
+bool RendererMatches(bool native,
+                     const std::string& expected_vendor,
+                     const std::string& expected_renderer,
+                     const std::string& vendor,
+                     const std::string& renderer) {
+    if (!native)
+        return renderer.find("llvmpipe") != std::string::npos;
+    if (expected_vendor.empty() || expected_renderer.empty() || vendor != expected_vendor ||
+        renderer != expected_renderer)
+        return false;
+    std::string lower = vendor + " " + renderer;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    for (const auto software : {"llvmpipe",
+                                "softpipe",
+                                "swrast",
+                                "swiftshader",
+                                "lavapipe",
+                                "software",
+                                "gdi generic",
+                                "microsoft basic"})
+        if (lower.find(software) != std::string::npos)
+            return false;
+    return true;
+}
 size_t Coverage(const StaticFrame& frame) {
     return std::count(frame.coverage8.begin(), frame.coverage8.end(), 1);
 }
@@ -81,20 +121,140 @@ class StaticPreviewRender : public ::testing::Test {
 protected:
     std::unique_ptr<StaticRenderer> renderer;
     void SetUp() override {
-        renderer = std::make_unique<StaticRenderer>(STATIC_PREVIEW_RESOURCE_ROOT, true);
+        const auto expected_vendor =
+            Luminumbra::Core::ReadEnvironment("LUMINUMBRA_PREVIEW_EXPECT_NATIVE_VENDOR");
+        const auto expected_renderer =
+            Luminumbra::Core::ReadEnvironment("LUMINUMBRA_PREVIEW_EXPECT_NATIVE_RENDERER");
+        const bool native = expected_vendor.has_value() || expected_renderer.has_value();
+        if (native) {
+            ASSERT_TRUE(expected_vendor && !expected_vendor->empty());
+            ASSERT_TRUE(expected_renderer && !expected_renderer->empty());
+        }
+        renderer = std::make_unique<StaticRenderer>(STATIC_PREVIEW_RESOURCE_ROOT, !native);
+        const auto* vendor = glGetString(GL_VENDOR);
+        const auto* actual = glGetString(GL_RENDERER);
+        ASSERT_NE(vendor, nullptr);
+        ASSERT_NE(actual, nullptr);
+        const std::string vendor_text(reinterpret_cast<const char*>(vendor));
+        const std::string renderer_text(reinterpret_cast<const char*>(actual));
+        RecordProperty("renderer_profile", native ? "native-exact-pins" : "forced-llvmpipe");
+        RecordProperty("gpu_vendor", vendor_text);
+        RecordProperty("gpu_renderer", renderer_text);
+        ASSERT_TRUE(RendererMatches(native,
+                                    expected_vendor.value_or(""),
+                                    expected_renderer.value_or(""),
+                                    vendor_text,
+                                    renderer_text))
+            << "Unexpected GPU identity: " << vendor_text << " / " << renderer_text;
     }
 };
+TEST(StaticPreviewRendererProfile, NativeRequiresExactPinsAndRefusesSoftwareIdentities) {
+    const std::string vendor = "NVIDIA Corporation", gpu = "NVIDIA GeForce RTX 5090/PCIe/SSE2";
+    EXPECT_TRUE(RendererMatches(true, vendor, gpu, vendor, gpu));
+    EXPECT_FALSE(RendererMatches(true, "", gpu, vendor, gpu));
+    EXPECT_FALSE(RendererMatches(true, vendor, "", vendor, gpu));
+    EXPECT_FALSE(RendererMatches(true, vendor, gpu, "unknown vendor", gpu));
+    EXPECT_FALSE(RendererMatches(true, vendor, gpu, vendor, "unknown renderer"));
+    for (const std::string software : {"llvmpipe (LLVM)",
+                                       "softpipe",
+                                       "SwiftShader Device",
+                                       "GDI Generic",
+                                       "Microsoft Basic Render Driver"})
+        EXPECT_FALSE(RendererMatches(true, "pinned vendor", software, "pinned vendor", software));
+    EXPECT_TRUE(RendererMatches(false, "", "", "Mesa", "llvmpipe (LLVM)"));
+    EXPECT_FALSE(RendererMatches(false, "", "", vendor, gpu));
+}
 TEST_F(StaticPreviewRender, ProductionBackgroundDepthCoverageAndShaderBindingsAgree) {
     const auto frame = renderer->Render(View(), Scene());
     EXPECT_GT(Coverage(frame), 1000u);
     EXPECT_LT(Coverage(frame), frame.coverage8.size());
-    EXPECT_NE(frame.renderer.find("llvmpipe"), std::string::npos);
     EXPECT_EQ(frame.draw_count, 1u);
     EXPECT_EQ(frame.index_count, 6u);
     for (size_t i = 0; i < frame.coverage8.size(); ++i) {
         EXPECT_EQ(frame.coverage8[i] != 0, frame.depth32f[i] > 0);
         EXPECT_EQ(frame.rgba8[i * 4 + 3], frame.coverage8[i] ? 255 : 0);
     }
+}
+TEST_F(StaticPreviewRender, OrthographicDepthKeepsApparentSizeAndNearestSurfaceWins) {
+    const auto view = OrthographicView();
+    const auto scene = Scene();
+    const auto near = renderer->Render(view, scene);
+    ASSERT_GT(Coverage(near), 1000u);
+    auto moved = std::make_shared<StaticDrawSnapshot>(*scene);
+    moved->revision = 2;
+    moved->draws[0].model[14] = -27;
+    const auto far = renderer->Render(view, moved);
+    EXPECT_EQ(near.coverage8, far.coverage8);
+    EXPECT_EQ(near.actual_projection, view.projection());
+    for (size_t i = 0; i < near.coverage8.size(); ++i) {
+        if (near.coverage8[i]) {
+            EXPECT_NEAR(near.depth32f[i], (100.0 - 3) / 99.9, 2e-7);
+            EXPECT_NEAR(far.depth32f[i], (100.0 - 30) / 99.9, 2e-7);
+            EXPECT_GT(near.depth32f[i], far.depth32f[i]);
+        } else {
+            EXPECT_EQ(near.depth32f[i], 0);
+            EXPECT_EQ(far.depth32f[i], 0);
+        }
+        EXPECT_EQ(far.rgba8[i * 4 + 3], far.coverage8[i] ? 255 : 0);
+    }
+    auto combined = std::make_shared<StaticDrawSnapshot>(*scene);
+    auto behind = moved->draws[0];
+    behind.key.node_id = "behind";
+    auto emission = Material();
+    emission->emissive = {1, 0, 0};
+    behind.material = emission;
+    combined->draws.push_back(behind);
+    combined->revision = 3;
+    const auto first = renderer->Render(view, combined);
+    EXPECT_EQ(first.rgba8, near.rgba8);
+    EXPECT_EQ(first.depth32f, near.depth32f);
+    combined = std::make_shared<StaticDrawSnapshot>(*combined);
+    std::reverse(combined->draws.begin(), combined->draws.end());
+    combined->revision = 4;
+    EXPECT_EQ(renderer->Render(view, combined).rgba8, near.rgba8);
+    moved = std::make_shared<StaticDrawSnapshot>(*moved);
+    moved->draws[0].model[14] = -100;
+    moved->revision = 5;
+    EXPECT_EQ(Coverage(renderer->Render(view, moved)), 0u);
+}
+TEST_F(StaticPreviewRender, OrthographicPanZoomAndResizeChangeActualCoverage) {
+    const auto scene = Scene();
+    const auto baseline = renderer->Render(OrthographicView(), scene);
+    const auto shifted_view = OrthographicView(2, .5);
+    const auto shifted = renderer->Render(shifted_view, scene);
+    EXPECT_EQ(Coverage(shifted), Coverage(baseline));
+    EXPECT_NE(shifted.coverage8, baseline.coverage8);
+    EXPECT_EQ(shifted.actual_projection, shifted_view.projection());
+    const auto zoomed = renderer->Render(OrthographicView(1), scene);
+    EXPECT_EQ(Coverage(zoomed), 4 * Coverage(baseline));
+    auto resized = OrthographicView().description();
+    resized.width *= 2;
+    resized.height *= 2;
+    const auto larger = renderer->Render(RenderView::Validate(resized), scene);
+    EXPECT_EQ(Coverage(larger), 4 * Coverage(baseline));
+    EXPECT_EQ(larger.coverage8.size(), 4 * baseline.coverage8.size());
+}
+TEST_F(StaticPreviewRender, OrthographicSpecularUsesParallelRaysAndPerspectiveRestoresPointEye) {
+    auto material = Material();
+    material->metallic = 1;
+    material->roughness = .25;
+    const auto scene = Scene(material);
+    const auto before = renderer->Render(View(), scene);
+    const auto orthographic = renderer->Render(OrthographicView(), scene);
+    const auto variation = [](const StaticFrame& frame) {
+        unsigned low = 255, high = 0;
+        for (size_t i = 0; i < frame.coverage8.size(); ++i) {
+            if (!frame.coverage8[i])
+                continue;
+            low = std::min(low, unsigned(frame.rgba8[i * 4]));
+            high = std::max(high, unsigned(frame.rgba8[i * 4]));
+        }
+        return high - low;
+    };
+    ASSERT_GT(Coverage(orthographic), 1000u);
+    EXPECT_LE(variation(orthographic), 1u);
+    EXPECT_GT(variation(before), 5u); // Negative control for the previous point-eye lighting.
+    EXPECT_EQ(renderer->Render(View(), scene).rgba8, before.rgba8);
 }
 TEST_F(StaticPreviewRender, DistantAuthoredPositionsRemainFiniteBeyondBinary16Range) {
     const auto near = renderer->Render(View(), Scene());

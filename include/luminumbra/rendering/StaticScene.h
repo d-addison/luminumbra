@@ -115,6 +115,16 @@ struct StaticLocalMatrixUpdate {
     std::string instance_id, node_id;
     StaticMatrix4 local = kStaticIdentity;
 };
+struct StaticNodeMatrix {
+    std::string node_id;
+    StaticMatrix4 local = kStaticIdentity;
+};
+struct StaticInstanceDescription {
+    std::string instance_id;
+    std::shared_ptr<const StaticPrefab> prefab;
+    StaticMatrix4 placement = kStaticIdentity;
+    std::vector<StaticNodeMatrix> locals; // Every descriptor node exactly once.
+};
 
 // Single owning thread. Snapshots/resources are immutable and can outlive the scene.
 // Every mutation requires the current revision; failure preserves snapshot identity.
@@ -133,6 +143,10 @@ public:
     void UpdateLocalMatrices(std::span<const StaticLocalMatrixUpdate> updates,
                              std::uint64_t expected_revision);
     void Remove(const std::string& instance_id, std::uint64_t expected_revision);
+    // Complete replacement, including removals, commits once after all instances
+    // and exact node membership validate. Decoded immutable resources are reused.
+    void ReplaceAll(std::span<const StaticInstanceDescription> instances,
+                    std::uint64_t expected_revision);
 
 private:
     struct Impl;

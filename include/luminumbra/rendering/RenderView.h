@@ -19,8 +19,9 @@ struct RenderViewDescription {
     double far_plane = 1000.0;
 };
 
-// The initial static inspection profile accepts finite symmetric perspective
-// projections with zero-to-one reversed depth (near 1, far/clear 0), rigid view
+// The static inspection profile accepts finite symmetric perspective or
+// axis-aligned orthographic projections with zero-to-one reversed depth
+// (near 1, far/clear 0), rigid view
 // matrices, one output extent and no jitter. Unsupported projections throw;
 // neither the renderer nor culling may silently reconstruct a different camera.
 class RenderView {
@@ -45,6 +46,9 @@ public:
     const std::array<float, 3>& eye() const {
         return m_eye;
     }
+    bool orthographic() const {
+        return m_orthographic;
+    }
     const std::array<std::array<float, 4>, 6>& frustum_planes() const {
         return m_planes;
     }
@@ -52,6 +56,7 @@ public:
 private:
     RenderView() = default;
     RenderViewDescription m_description;
+    bool m_orthographic = false;
     std::array<float, 16> m_view{};
     std::array<float, 16> m_projection{};
     std::array<float, 16> m_inverse_view{};

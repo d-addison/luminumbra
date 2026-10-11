@@ -96,6 +96,10 @@ file(GLOB_RECURSE PREVIEW_IDENTITY_INPUTS CONFIGURE_DEPENDS
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_client/rendering/*.h")
 list(APPEND PREVIEW_IDENTITY_INPUTS ${PREVIEW_SOURCES} "${CMAKE_CURRENT_LIST_FILE}"
     "${CMAKE_CURRENT_LIST_DIR}/main.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ViewportProtocol.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ViewportProtocol.h"
+    "${CMAKE_CURRENT_LIST_DIR}/ViewportServe.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ViewportServe.h"
     "${CMAKE_CURRENT_LIST_DIR}/LuminumbraStaticPreviewConfig.cmake.in"
     "${CMAKE_CURRENT_LIST_DIR}/InstallMinGWRuntime.cmake"
     "${STATIC_PREVIEW_ROOT}/src/luminumbra_common/core/FilesystemPath.cpp"
@@ -130,7 +134,7 @@ file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/source-inputs.txt"
     CONTENT "${PREVIEW_HASH_INPUT}" @ONLY NEWLINE_STYLE LF)
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/PreviewBuildIdentity.h"
     "#pragma once\ninline constexpr const char* kPreviewCommit = \"${PREVIEW_COMMIT}\";\ninline constexpr bool kPreviewDirty = ${PREVIEW_DIRTY};\ninline constexpr const char* kPreviewSourceDigest = \"${PREVIEW_SOURCE_DIGEST}\";\n")
-add_executable(luminumbra_preview_capture main.cpp)
+add_executable(luminumbra_preview_capture main.cpp ViewportProtocol.cpp ViewportServe.cpp)
 target_include_directories(luminumbra_preview_capture PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(luminumbra_preview_capture PRIVATE luminumbra_render_static luminumbra_prefab_runtime)
 set_target_properties(luminumbra_preview_capture PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
@@ -142,6 +146,16 @@ if(COMMAND luminumbra_configure_first_party_target)
 endif()
 
 if(BUILD_TESTING)
+    if(NOT CMAKE_SOURCE_DIR STREQUAL STATIC_PREVIEW_ROOT)
+        add_executable(viewport_protocol_test
+            "${STATIC_PREVIEW_ROOT}/test/static_preview/viewport_protocol_test.cpp" ViewportProtocol.cpp)
+        target_include_directories(viewport_protocol_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+        target_link_libraries(viewport_protocol_test PRIVATE luminumbra_prefab_runtime gtest_main)
+        gtest_discover_tests(viewport_protocol_test PROPERTIES LABELS "authoring;tools" TIMEOUT 30)
+        if(COMMAND luminumbra_configure_first_party_target)
+            luminumbra_configure_first_party_target(viewport_protocol_test)
+        endif()
+    endif()
     find_package(Python3 3.10 COMPONENTS Interpreter REQUIRED)
     if(UNIX)
         add_test(NAME StaticPreviewMinGWRuntimeInstallContract COMMAND "${Python3_EXECUTABLE}"

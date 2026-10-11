@@ -21,6 +21,8 @@ def main():
     if args.output:
         output.mkdir(parents=False, exist_ok=False)
     env = dict(os.environ)
+    for pin in ('LUMINUMBRA_PREVIEW_EXPECT_NATIVE_VENDOR', 'LUMINUMBRA_PREVIEW_EXPECT_NATIVE_RENDERER'):
+        env.pop(pin, None)
     env.update(LIBGL_ALWAYS_SOFTWARE='1', GALLIUM_DRIVER='llvmpipe',
                MESA_LOADER_DRIVER_OVERRIDE='swrast', __GLX_VENDOR_LIBRARY_NAME='mesa',
                LP_NUM_THREADS='2', MESA_GLTHREAD='false')
@@ -55,12 +57,12 @@ def main():
                 raise RuntimeError(f'Production software rendering tests exited {result.returncode}')
             root = ET.parse(output / 'tests.xml').getroot()
             cases = root.findall('.//testcase')
-            if len(cases) != 11 or len({(x.get('classname'), x.get('name')) for x in cases}) != 11:
-                raise RuntimeError('Expected exactly eleven unique production rendering tests')
+            if len(cases) != 15 or len({(x.get('classname'), x.get('name')) for x in cases}) != 15:
+                raise RuntimeError('Expected fourteen production rendering tests and one renderer-profile test')
             if any(x.find('skipped') is not None or x.find('failure') is not None or
                    x.get('status') != 'run' for x in cases):
                 raise RuntimeError('Rendering tests contain a skipped, failed or unexecuted case')
-            print(f'Software GL: 11 actual llvmpipe cases passed; artifacts: {output}')
+            print(f'Software GL: 14 actual llvmpipe cases and one profile test passed; artifacts: {output}')
     finally:
         if write_fd >= 0:
             os.close(write_fd)

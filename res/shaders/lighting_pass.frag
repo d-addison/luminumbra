@@ -85,6 +85,7 @@ uniform float u_time;
 
 uniform vec3 u_terrainOrigin;
 uniform vec3 u_viewPos;
+uniform int u_orthographic;
 uniform mat4 u_inverseView;
 uniform vec3 u_skyAmbientColor;
 struct SunLight {
@@ -473,7 +474,10 @@ void main() {
         Roughness = mix(Roughness, 0.95, snowAmt);
     }
 
-    vec3 V = normalize(u_viewPos - FragPos);
+    // Orthographic rays are parallel: camera-space +Z points toward the
+    // viewer at every fragment, including off-center orthographic views.
+    vec3 V = u_orthographic != 0 ? normalize(u_inverseView[2].xyz)
+                                 : normalize(u_viewPos - FragPos);
     vec3 F0 = mix(vec3(0.04), Albedo, Metallic);
     // the far-water sheet (material 200) is a flat
     // albedo-only sky-reflection-tint approximation. With ANY F0, grazing-angle
