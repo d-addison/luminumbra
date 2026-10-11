@@ -36,6 +36,8 @@ jobs:
           python tools/perf/test_plan_qualification.py
           python tools/perf/test_run_qualification.py
           python tools/perf/test_render_budget.py
+          python tools/perf/test_check_gl_debug_log.py
+          python tools/perf/test_summarize_process_receipts.py
           python tools/ci/test_validate_performance_measurement.py
 
   preview-frame:

@@ -40,6 +40,18 @@ if(BUILD_TESTING)
     set_tests_properties(QualificationRunnerPython
         PROPERTIES LABELS "perf;tools" TIMEOUT 120)
     add_test(
+        NAME GlDebugLogCheckerPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_check_gl_debug_log.py")
+    set_tests_properties(GlDebugLogCheckerPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 60)
+    add_test(
+        NAME ProcessReceiptSummaryPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_summarize_process_receipts.py")
+    set_tests_properties(ProcessReceiptSummaryPython
+        PROPERTIES LABELS "perf;tools" TIMEOUT 60)
+    add_test(
         NAME PerformanceMeasurementValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_performance_measurement.py")
