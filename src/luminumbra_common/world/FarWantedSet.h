@@ -103,9 +103,9 @@ struct FarBuildIdentity {
 };
 
 // True when a coarse tile's surface may be suppressed: the coarse tile is tier
-// 2..5, at least one wanted tier-(t-1) tile has it as parent, and every such
-// wanted child has a resident entry that IsFarTileCovering. Tier 1 and an empty
-// child set return false (nothing replaces the surface).
+// 2..5 and all four tier-(t-1) tiles that tile its footprint are in `wanted` and
+// have a resident entry that IsFarTileCovering. A partly wanted footprint keeps
+// the coarse surface, so tier 1 and any missing child return false.
 bool CoarseSurfaceMayYield(const FarTileKey& coarse,
                            std::span<const FarTileKey> wanted,
                            std::span<const FarResidentTile> resident);
@@ -121,6 +121,9 @@ struct FarEvictionPlan {
     bool horizon_overflow = false;    // tier 5 alone exceeds its budget
 };
 
+// Ordering functions below (PlanFarEviction, SelectFar*) treat a non-finite camera
+// coordinate as 0 so the order stays a strict weak order. A parent that this plan
+// already evicts does not count as covering underlay for a budget eviction.
 FarEvictionPlan PlanFarEviction(double camera_x,
                                 double camera_z,
                                 std::span<const FarResidentTile> resident,
@@ -128,8 +131,8 @@ FarEvictionPlan PlanFarEviction(double camera_x,
                                 const FarTierBudgets& budgets);
 
 // Wanted tiles that need a build started: no resident entry, or an entry in state
-// Wanted, or an entry that is not current and not Building. Rejected and Building
-// entries are skipped. Order: tier descending (coarsest first), then nearest-point
+// Wanted, or a Ready/Uploaded/Empty entry that is not current or lacks the span. Rejected and
+// Building entries are skipped. Order: tier descending (coarsest first), then nearest-point
 // distance ascending, then key. At most max_start entries.
 std::vector<FarTileKey> SelectFarBuilds(double camera_x,
                                         double camera_z,

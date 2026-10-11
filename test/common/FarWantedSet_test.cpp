@@ -259,14 +259,26 @@ TEST(FarArrival, CoarseSurfaceMayYieldFalseForTierOneAndEmptyChildSet) {
     EXPECT_FALSE(CoarseSurfaceMayYield(Key(2, 0, 0), none, covering));
 }
 
-TEST(FarArrival, CoarseSurfaceMayYieldIgnoresUnwantedSiblings) {
+TEST(FarArrival, CoarseSurfaceMayYieldKeepsPartlyWantedFootprint) {
+    // Only two of the four finer tiles are wanted: the other half of the coarse
+    // footprint has no finer replacement, so the coarse surface must stay.
     const std::vector<FarTileKey> wanted = {Key(1, 0, 0), Key(1, 1, 0)};
     const std::vector<FarResidentTile> resident = {
         MakeResident(Key(1, 0, 0), FarTileState::Uploaded),
         MakeResident(Key(1, 1, 0), FarTileState::Empty),
-        MakeResident(Key(1, 0, 1), FarTileState::Ready),
+        MakeResident(Key(1, 0, 1), FarTileState::Uploaded),
+        MakeResident(Key(1, 1, 1), FarTileState::Uploaded),
     };
-    EXPECT_TRUE(CoarseSurfaceMayYield(Key(2, 0, 0), wanted, resident));
+    EXPECT_FALSE(CoarseSurfaceMayYield(Key(2, 0, 0), wanted, resident));
+}
+
+TEST(FarArrival, CoarseSurfaceMayYieldUsesNegativeChildKeys) {
+    const std::vector<FarTileKey> wanted = {
+        Key(1, -2, -2), Key(1, -1, -2), Key(1, -2, -1), Key(1, -1, -1)};
+    EXPECT_TRUE(
+        CoarseSurfaceMayYield(Key(2, -1, -1), wanted, ResidentFor(wanted, FarTileState::Uploaded)));
+    EXPECT_FALSE(
+        CoarseSurfaceMayYield(Key(2, -1, 0), wanted, ResidentFor(wanted, FarTileState::Uploaded)));
 }
 
 TEST(FarArrival, IsFarTileCoveringTruthTable) {
@@ -588,4 +600,44 @@ TEST(FarSelection, FarBuildIdentityEqualityUsesEveryField) {
         changed.span_generation = 12;
         EXPECT_FALSE(base == changed) << "span_generation";
     }
+}
+
+TEST(FarEviction, ParentScheduledForEvictionDoesNotCountAsUnderlay) {
+    // The parent is resident and covering but not wanted, so it is evicted first;
+    // no child may then be evicted for budget on the strength of that parent.
+    const std::vector<FarTileKey> wanted = {Key(1, 0, 0), Key(1, 1, 0)};
+    const std::vector<FarResidentTile> resident = {
+        MakeResident(Key(1, 0, 0), FarTileState::Ready, 100),
+        MakeResident(Key(1, 1, 0), FarTileState::Ready, 100),
+        MakeResident(Key(2, 0, 0), FarTileState::Uploaded),
+    };
+    FarTierBudgets budgets;
+    budgets.bytes[0] = 100;
+    const FarEvictionPlan plan = PlanWith(resident, wanted, budgets);
+    const std::vector<FarTileKey> expected = {Key(2, 0, 0)};
+    EXPECT_EQ(plan.evict, expected);
+    EXPECT_TRUE(plan.rejected.empty());
+}
+
+TEST(FarSelection, SelectFarBuildsRebuildsWhenSpanIsInsufficient) {
+    const std::vector<FarTileKey> wanted = {Key(1, 0, 0), Key(1, 1, 0)};
+    const std::vector<FarResidentTile> resident = {
+        MakeResident(Key(1, 0, 0), FarTileState::Uploaded, 0, 0, true, false),
+        MakeResident(Key(1, 1, 0), FarTileState::Uploaded, 0, 0, true, true),
+    };
+    const std::vector<FarTileKey> expected = {Key(1, 0, 0)};
+    EXPECT_EQ(SelectFarBuilds(0.0, 0.0, wanted, resident, 8), expected);
+}
+
+TEST(FarSelection, NonFiniteCameraOrdersLikeTheOrigin) {
+    const std::vector<FarTileKey> wanted = {
+        Key(1, 3, 0), Key(1, 0, 0), Key(6, 0, 0), Key(0, 0, 0), Key(1, -4, 1)};
+    const std::vector<FarResidentTile> none;
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(SelectFarBuilds(nan, nan, wanted, none, 16),
+              SelectFarBuilds(0.0, 0.0, wanted, none, 16));
+    const std::vector<FarResidentTile> resident = ResidentFor(wanted, FarTileState::Ready);
+    EXPECT_EQ(
+        PlanFarEviction(nan, 0.0, resident, std::vector<FarTileKey>{}, FarTierBudgets{}).evict,
+        PlanFarEviction(0.0, 0.0, resident, std::vector<FarTileKey>{}, FarTierBudgets{}).evict);
 }

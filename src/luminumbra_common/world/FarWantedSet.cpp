@@ -1,6 +1,9 @@
 #include "luminumbra_common/world/FarWantedSet.h"
 
+#include "luminumbra_common/world/FarTierTable.h"
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -67,8 +70,15 @@ bool EvictRankBefore(const RankedTile& a, const RankedTile& b) {
     return a.key < b.key;
 }
 
+// Ordering needs a strict weak order, so a non-finite camera coordinate is
+// treated as the origin instead of producing NaN distances.
+double FiniteOrZero(double value) {
+    return std::isfinite(value) ? value : 0.0;
+}
+
 RankedTile Rank(const FarTileKey& key, double camera_x, double camera_z, std::uint64_t bytes = 0) {
-    return RankedTile{key, FarTileNearestDistance(key, camera_x, camera_z), bytes};
+    return RankedTile{
+        key, FarTileNearestDistance(key, FiniteOrZero(camera_x), FiniteOrZero(camera_z)), bytes};
 }
 
 // Whether a resident tile needs a build started under the SelectFarBuilds rule.
@@ -86,7 +96,7 @@ bool NeedsBuild(const FarTileKey& key, std::span<const FarResidentTile> resident
         case FarTileState::Ready:
         case FarTileState::Uploaded:
         case FarTileState::Empty:
-            return !entry->status.current;
+            return !entry->status.current || !entry->status.span_ok;
     }
     return false;
 }
@@ -184,18 +194,24 @@ bool CoarseSurfaceMayYield(const FarTileKey& coarse,
         return false;
     }
 
-    bool has_child = false;
-    for (const FarTileKey& child : wanted) {
-        if (TierOf(child) + 1 != coarse_tier || !(FarTileParent(child) == coarse)) {
-            continue;
-        }
-        has_child = true;
-        const FarResidentTile* entry = FindResident(resident, child);
-        if (entry == nullptr || !IsFarTileCovering(entry->status)) {
-            return false;
+    // The coarse footprint is replaced only when all four finer tiles that tile it
+    // are wanted and covering; a partly wanted footprint keeps the coarse surface.
+    for (std::int64_t dz = 0; dz < 2; ++dz) {
+        for (std::int64_t dx = 0; dx < 2; ++dx) {
+            FarTileKey child;
+            child.tier = static_cast<std::uint8_t>(coarse_tier - 1);
+            child.tx = coarse.tx * 2 + dx;
+            child.tz = coarse.tz * 2 + dz;
+            if (std::find(wanted.begin(), wanted.end(), child) == wanted.end()) {
+                return false;
+            }
+            const FarResidentTile* entry = FindResident(resident, child);
+            if (entry == nullptr || !IsFarTileCovering(entry->status)) {
+                return false;
+            }
         }
     }
-    return has_child;
+    return true;
 }
 
 FarEvictionPlan PlanFarEviction(double camera_x,
@@ -248,8 +264,10 @@ FarEvictionPlan PlanFarEviction(double camera_x,
             }
             const FarTileKey parent = FarTileParent(entry.key);
             const auto parent_covering = std::find_if(
-                resident.begin(), resident.end(), [&parent](const FarResidentTile& other) {
-                    return other.key == parent && IsFarTileCovering(other.status);
+                resident.begin(), resident.end(), [&parent, &plan](const FarResidentTile& other) {
+                    return other.key == parent && IsFarTileCovering(other.status) &&
+                           std::find(plan.evict.begin(), plan.evict.end(), parent) ==
+                               plan.evict.end();
                 });
             if (parent_covering != resident.end()) {
                 candidates.push_back(Rank(entry.key, camera_x, camera_z, ResidentBytes(entry)));
