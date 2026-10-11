@@ -2063,15 +2063,15 @@
   "scope": "Actual Blender GPU FrameDraw presentation of synthetic planes; not native host or RenderEngine acceptance",
   "source_modules": {
     "viewport_adapter_state.py": {
-      "path": "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension\\viewport_adapter_state.py",
+      "path": "<build-root>\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension\\viewport_adapter_state.py",
       "sha256": "23f094883b933956c5ead1ccd054a1924452e1c5ddb1ed3a788958d52e5cbb7a"
     },
     "viewport_draw.py": {
-      "path": "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension\\viewport_draw.py",
+      "path": "<build-root>\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension\\viewport_draw.py",
       "sha256": "90405051240730b1305dcc46d88f901279e52a0859cd1d4eb9d63cb0642028e2"
     },
     "viewport_math.py": {
-      "path": "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension\\viewport_math.py",
+      "path": "<build-root>\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension\\viewport_math.py",
       "sha256": "957705b658ecc1c84219829a4dce6a4fe451458866cdf3640dc3542c64e88dfc"
     }
   },

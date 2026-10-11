@@ -8,7 +8,7 @@
       "argv": [
         "C:/msys64/ucrt64/bin/python.exe",
         "-B",
-        "//wsl.localhost/Ubuntu-24.04/code/luminumbra/build/authoring-isolated/campaign-20260913/viewport-blender/test/viewport/probe_windows_client.py",
+        "<build-root>/authoring-isolated/campaign-20260913/viewport-blender/test/viewport/probe_windows_client.py",
         "--receipt",
         "C:/Temp/luminumbra-viewport-checks-1571374ce6b0467d9c8bcaa294da32cb/client.json"
       ],
@@ -17,7 +17,7 @@
       "exit_code": 0,
       "reaped": true,
       "seconds": 14.578999999997905,
-      "receipt_sha256": "90c60604343fd4aed984fcc21383bbf210e17033ff477b59ad9335cd642d0ae6"
+      "receipt_sha256": "e9e420d179693491bc2df1edff08747ff30a8fb691cb41cb04702ea76da6a171"
     },
     {
       "name": "presentation",
@@ -37,10 +37,10 @@
         "--python-exit-code",
         "1",
         "--python",
-        "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source-v3\\tools\\blender\\authoring\\extension_tests\\native_viewport_presentation.py",
+        "<build-root>\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source-v3\\tools\\blender\\authoring\\extension_tests\\native_viewport_presentation.py",
         "--",
         "--modules",
-        "//wsl.localhost/Ubuntu-24.04/code/luminumbra/build/authoring-isolated/campaign-20260913/viewport-blender/tools/blender/authoring/extension",
+        "<build-root>/authoring-isolated/campaign-20260913/viewport-blender/tools/blender/authoring/extension",
         "--output",
         "C:/Temp/luminumbra-viewport-checks-1571374ce6b0467d9c8bcaa294da32cb/presentation"
       ],
@@ -49,7 +49,7 @@
       "exit_code": 0,
       "reaped": true,
       "seconds": 7.405999999995402,
-      "receipt_sha256": "8cc5e31bf287eafbf9e2dff8338a0018a64c691b1e9d4fa66041ecf7e6c1ace2"
+      "receipt_sha256": "779a63d0ae40b2dfb2096b8c7e49d4b757e4fd64ca763910934668643e7076db"
     }
   ],
   "visual_approved": false

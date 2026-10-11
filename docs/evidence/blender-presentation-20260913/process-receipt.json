@@ -21,10 +21,10 @@
         "--python-exit-code",
         "1",
         "--python",
-        "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension_tests\\native_viewport_presentation.py",
+        "<build-root>\\authoring-isolated\\campaign-20260913\\viewport-blender-native-source\\tools\\blender\\authoring\\extension_tests\\native_viewport_presentation.py",
         "--",
         "--modules",
-        "//wsl.localhost/Ubuntu-24.04/code/luminumbra/build/authoring-isolated/campaign-20260913/viewport-blender-native-source/tools/blender/authoring/extension",
+        "<build-root>/authoring-isolated/campaign-20260913/viewport-blender-native-source/tools/blender/authoring/extension",
         "--output",
         "C:/Temp/luminumbra-viewport-checks-5754b9b7c8bb4314afd18fdae3144134/presentation"
       ],
@@ -33,7 +33,7 @@
       "exit_code": 0,
       "reaped": true,
       "seconds": 7.1709999999984575,
-      "receipt_sha256": "45cfdc2a4bf6a65238a4a5f7d86c61ed8428b5c648b3e4f56921b58b9567ba14"
+      "receipt_sha256": "9fefbb14e75e3a1c09f1f2cca1c02797ae81d70e4f55493e2ae797b7b09116f0"
     }
   ],
   "visual_approved": false
