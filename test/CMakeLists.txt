@@ -155,7 +155,9 @@ add_executable(common_tests
     common/FarVolumeTierMemory_test.cpp
     rendering/FarVolumeRenderMesh_test.cpp
     rendering/FarVolumeBuildQueue_test.cpp
+    rendering/FarVolumeUpload_test.cpp
     ../src/luminumbra_client/rendering/FarVolumeBuildQueue.cpp
+    ../src/luminumbra_client/rendering/FarVolumeUpload.cpp
     ../src/luminumbra_client/rendering/FarVolumeRenderMesh.cpp
     common/FarTierTable_test.cpp
     common/FarWantedSet_test.cpp

@@ -66,6 +66,9 @@ public:
     FarVolumeRenderError conversion_failure() const noexcept {
         return conversion_failure_;
     }
+    const World::FarVolumeMemoryPool* memory_pool() const noexcept {
+        return retained_.pool();
+    }
     std::uint64_t retained_bytes() const noexcept {
         return retained_.bytes();
     }
