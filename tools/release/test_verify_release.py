@@ -100,7 +100,7 @@ def build_scenario() -> Dict[str, object]:
     }
 
 
-class FakeRunner:
+class FakeRunner(verifier.Runner):
     """Answers the commands verify_release issues from a scenario dictionary."""
 
     def __init__(self, scenario: Dict[str, object]) -> None:
