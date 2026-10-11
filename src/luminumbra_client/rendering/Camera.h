@@ -5,6 +5,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include "luminumbra_common/world/FarHorizon.h"
+
 #include <vector>
 
 namespace Luminumbra::Rendering {
@@ -25,12 +27,12 @@ const float SPEED = 2.5f;
 const float SENSITIVITY = 0.1f;
 const float ZOOM = 45.0f;
 const float NEAR_PLANE = 0.1f;
-// Legacy two-tier heightfield path: F2 streams to 3000 m and fragments clip
-// at 3050 m; the 3200 m far plane leaves projection margin. Far-region
-// triangles straddling that plane can rasterize as sky-crossing slivers.
-// The volumetric FarTierTable.h ladder supersedes these ranges when it lands;
-// its camera far-plane change is separate from the declaration.
-const float FAR_PLANE = 3200.0f;
+// Legacy two-tier heightfield path: the legacy path streams F2 to 3000 m and
+// fragments clip at 3050 m; the 3200 m far plane leaves projection margin.
+// Far-region triangles straddling that plane can rasterize as sky-crossing
+// slivers. The ladder plane is Luminumbra::World::kFarPlaneMeters and is
+// selected only when the ladder renders.
+const float FAR_PLANE = Luminumbra::World::kLegacyFarPlaneMeters;
 
 // Right-handed, finite reversed-Z projection for GL_ZERO_TO_ONE: near -> 1,
 // far -> 0. Swapping the planes avoids subtracting conventional depth from 1,
