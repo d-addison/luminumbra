@@ -1,4 +1,5 @@
 #include "Log.h"
+#include "BoundedConsoleSink.h"
 #include <chrono>
 #include <filesystem>
 #include <mutex>
@@ -22,7 +23,19 @@ std::shared_ptr<spdlog::logger> create_default_logger() {
     }
 
     std::vector<spdlog::sink_ptr> sinks;
-    auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    // A terminal keeps the synchronous coloured sink. Redirected output (pipe, file)
+    // goes through the bounded sink so a stalled reader cannot block logging callers.
+    std::shared_ptr<ConsoleOutput> bounded_output;
+    if (!BoundedConsoleSink::StdoutIsCharacterDevice()) {
+        bounded_output = BoundedConsoleSink::MakeStdoutOutput();
+    }
+    std::shared_ptr<spdlog::sinks::sink> console;
+    if (bounded_output) {
+        console =
+            std::make_shared<BoundedConsoleSink>(bounded_output, BoundedConsoleSink::Limits{});
+    } else {
+        console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    }
     console->set_pattern("%^[%T] %n: %v%$");
     sinks.push_back(console);
 

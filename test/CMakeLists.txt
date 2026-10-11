@@ -1468,6 +1468,23 @@ target_link_libraries(hang_watchdog_test PRIVATE
     Threads::Threads
 )
 
+# Bounded console sink: separate executable so the logging-stall cases can run
+# without the rest of common_tests. Fake outputs are stalled on purpose; the
+# tests release them before returning.
+add_executable(bounded_console_sink_test
+    common/bounded_console_sink_test.cpp
+)
+target_include_directories(bounded_console_sink_test PRIVATE
+../src
+../src/luminumbra_common
+)
+target_link_libraries(bounded_console_sink_test PRIVATE
+    gtest_main
+    luminumbra_common
+    Threads::Threads
+)
+luminumbra_configure_first_party_target(bounded_console_sink_test)
+
 #  implementation note: occlusion read-back onto ma_sound volume. Pure test of the
 # ComputeFinalVolume helper; includes MiniaudioManager.h so needs miniaudio + nlohmann_json.
 add_executable(audio_volume_readback_test
@@ -1631,6 +1648,7 @@ set(LUMINUMBRA_GTEST_TARGETS
     client_policy_test
     audio_physics_binding_test
     hang_watchdog_test
+    bounded_console_sink_test
     audio_volume_readback_test
     audio_disabled_test
     capture_scale_test
