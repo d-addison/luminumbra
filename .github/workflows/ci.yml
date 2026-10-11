@@ -218,18 +218,54 @@ jobs:
               throw "Mesa3D archive is missing x64/$dll"
             }
           }
+      - name: Install ccache
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Pinned release, verified by sha256 (same pattern as the Mesa3D download).
+          $version = '4.14.1'
+          $sha256 = '6219f3865ca59aec41ee4b678df171d5d35855ecb2b6dbbbd20690b3a68af7b4'
+          $archive = "ccache-$version-windows-x86_64.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archive
+          Invoke-WebRequest -Uri "https://github.com/ccache/ccache/releases/download/v$version/$archive" -OutFile $archivePath
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($actual -ne $sha256) {
+            throw "ccache archive sha256 mismatch: expected $sha256, got $actual"
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'ccache-bin'
+          Expand-Archive -Path $archivePath -DestinationPath $root
+          $dir = Join-Path $root "ccache-$version-windows-x86_64"
+          if (-not (Test-Path (Join-Path $dir 'ccache.exe'))) {
+            throw 'ccache archive is missing ccache.exe'
+          }
+          $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Restore compiler cache
+        id: ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\ccache-msvc
+          key: ccache-msvc-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-msvc-${{ runner.os }}-
       - name: Configure, build, and test
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          # content: hash cl.exe itself, so a runner image upgrade misses instead of replaying objects from another compiler.
+          $env:CCACHE_DIR = Join-Path $env:RUNNER_TEMP 'ccache-msvc'
+          $env:CCACHE_COMPILERCHECK = 'content'
+          $env:CCACHE_MAXSIZE = '600M'
           $installPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath
           Import-Module "$installPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $installPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
-          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl
+          ccache --zero-stats
+          cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build --preset release --parallel 4
+          ccache --show-stats --verbose
+          @('### ccache (msvc)', '```', (ccache --show-stats --verbose | Out-String), '```') | Add-Content -Path $env:GITHUB_STEP_SUMMARY
           # Retain one CPU-only diagnostic binary with its compiler runtime so a
           # terrain-hash failure can distinguish compiler output from host effects.
           # This temporary CI artifact is not a software release or game package.
@@ -266,6 +302,15 @@ jobs:
           # Linux software-GL lane: no GL-related skip is acceptable, and any
           # remaining skip is a hard failure.
           python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+      # Saved even when a later test failed (the objects are still valid) and skipped
+      # after an exact-key hit, because cache keys are immutable. The cache only
+      # speeds up compilation; the job still compiles and tests everything it misses.
+      - name: Save compiler cache
+        if: ${{ !cancelled() && steps.ccache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}\ccache-msvc
+          key: ccache-msvc-${{ runner.os }}-${{ github.sha }}
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
