@@ -33,6 +33,7 @@ jobs:
           python tools/perf/test_perf.py
           python tools/perf/test_fixture_hash.py
           python tools/perf/test_render_contract.py
+          python tools/perf/test_render_budget.py
           python tools/ci/test_validate_performance_measurement.py
 
   preview-frame:
@@ -90,13 +91,18 @@ jobs:
 
   server-smoke-comparison:
     name: Server smoke observation / base versus head
-    # Run on devel PRs so the water verdict is available before promotion to
-    # main. The water lane reuses this job's paired builds, and the combined
-    # server/water workload remains bounded by the existing 90-minute timeout.
+    # Runs on pull requests that target main (the promotion gate, where the water
+    # verdict is required before release) and on pushes to main and devel (so merged
+    # devel tips get a verdict after the fact; a newer push to the same branch can
+    # still cancel an in-flight run until the devel push concurrency change lands). It is skipped on
+    # pull requests that target devel: it is not a required devel check and costs
+    # about 48 runner-minutes per push. The event.before guard stays because a
+    # first push to a branch has no base to compare against; schedule and manual
+    # events are excluded on purpose (they define no base/candidate SHA pair).
     if: >-
-      (github.event_name == 'pull_request' &&
-      (github.base_ref == 'main' || github.base_ref == 'devel')) ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/devel') &&
       github.event.before != '0000000000000000000000000000000000000000')
     runs-on: ubuntu-24.04
     timeout-minutes: 90

@@ -76,7 +76,11 @@ jobs:
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error -LE manual \
               --parallel 4 --timeout 180 --output-junit ctest.junit.xml
-          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+          # Inventory floor: measured 2301 tests on devel b56cdba1, minus ~1% margin.
+          # It exists to catch whole suites silently vanishing (a CMake guard flipping,
+          # discovery failing), not to be an exact inventory. Raise it when tests are
+          # added in bulk; lowering it needs a justification in the PR description.
+          python3 tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2280
       - name: Qualify installed prefab runtime
         timeout-minutes: 5
         run: |
@@ -201,7 +205,20 @@ jobs:
             -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DLUMINUMBRA_ENABLE_DILIGENT=ON
       - name: Build with Diligent RHI
-        run: cmake --build --preset release --parallel 4
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          # Pull requests build only the targets the two Diligent suites need
+          # (plus copy_data, which the whole-tree build also ran). Pushes to
+          # devel/main still build the whole tree so DiligentCore's other targets
+          # (for example Diligent-Archiver-static) keep their compile and link
+          # coverage after every merge.
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            cmake --build --preset release --parallel 4 \
+              --target rhi_device_bringup_test rhi_pilot_flip_test copy_data
+          else
+            cmake --build --preset release --parallel 4
+          fi
       - name: Compiler cache statistics
         if: ${{ !cancelled() }}
         run: |
@@ -227,11 +244,26 @@ jobs:
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error \
               -R '^RhiDeviceBringupGpu\.' --parallel 1 --timeout 180 \
-              --output-on-failure
+              --output-on-failure --output-junit ctest-bringup.junit.xml
+          # check_ctest_junit.py rejects any skipped test: these suites GTEST_SKIP when no
+          # GL context can be created, and a skip must not read as a green required check.
+          # ctest's own non-zero exit still fails the step first (bash -e).
+          python3 tools/ci/check_ctest_junit.py build/release/ctest-bringup.junit.xml --minimum-tests 3
           env -u WAYLAND_DISPLAY XDG_SESSION_TYPE=x11 LIBGL_ALWAYS_SOFTWARE=1 \
             xvfb-run -a ctest --preset release --no-tests=error \
               -R '^RhiPilotParityGpu\.' --parallel 1 --timeout 180 \
-              --output-on-failure
+              --output-on-failure --output-junit ctest-pilot.junit.xml
+          python3 tools/ci/check_ctest_junit.py build/release/ctest-pilot.junit.xml --minimum-tests 2
+      - name: Upload Diligent test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: diligent-rhi-test-evidence-${{ github.sha }}
+          path: |
+            build/release/ctest-bringup.junit.xml
+            build/release/ctest-pilot.junit.xml
+          if-no-files-found: warn
+          retention-days: 14
 
   windows-msvc:
     name: Windows / MSVC
@@ -318,7 +350,8 @@ jobs:
           # With llvmpipe deployed this lane holds the same standard as the
           # Linux software-GL lane: no GL-related skip is acceptable, and any
           # remaining skip is a hard failure.
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+          # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -357,7 +390,11 @@ jobs:
 
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
-    if: github.ref_name == 'main' || github.base_ref == 'main'
+    # Runs on every pull request (devel- and main-bound) and on pushes to main, so a
+    # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
+    # not a required devel context, so it informs rather than blocks there; it stays
+    # required on main. Pushes to devel do not run it (the PR already did).
+    if: github.event_name == 'pull_request' || github.ref_name == 'main'
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
@@ -444,7 +481,8 @@ jobs:
           # With llvmpipe deployed this lane holds the same standard as the
           # other software-GL lanes: no GL-related skip is acceptable, and
           # any remaining skip is a hard failure.
-          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 1700
+          # Inventory floor: measured 2284 tests on devel b56cdba1, minus ~1% margin (see the Linux lane for the policy).
+          python tools/ci/check_ctest_junit.py build/release/ctest.junit.xml --minimum-tests 2260
       - name: Upload test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -476,7 +514,7 @@ jobs:
   tidy:
     name: Static analysis / clang-tidy
     runs-on: ubuntu-24.04
-    # The gate analyses 351 translation units across src/ and test/, and since it
+    # The gate analyses 351 translation units across src/, test/ and tools/, and since it
     # gained a real HeaderFilterRegex it also analyses first-party headers on every
     # one of them. That is a large multiple of the src/-only, headers-excluded scope
     # this job was originally sized for, and it overran the previous 30-minute limit
