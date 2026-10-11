@@ -174,6 +174,9 @@ private:
     bool foliage_scatter_loaded = false;
     bool foliage_capture_written = false;
     FoliagePhaseEvidence foliage_calm;
+    FoliagePhaseEvidence foliage_windy;
+    bool foliage_first_rebuild_written = false;
+    bool foliage_second_rebuild_written = false;
     float foliage_terrain_height = 0.0f;
     bool foliage_camera_initialized = false;
     Luminumbra::Vec3 foliage_camera_position{};
