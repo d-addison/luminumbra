@@ -13,10 +13,14 @@ set -euo pipefail
 #   scripts/tidy.sh --changed-from REF    # analyze TUs changed since REF
 #   scripts/tidy.sh --build-dir DIR       # compile db location (default build/tidy)
 #   scripts/tidy.sh --jobs N              # parallel clang-tidy processes
+#   scripts/tidy.sh --cache-dir DIR       # skip units proven identical to a passing run
+#   scripts/tidy.sh --cache-mode MODE     # readwrite (default) or writeonly (never skip)
 
 build_dir="build/tidy"
 changed_from=""
 jobs="$(nproc)"
+cache_dir=""
+cache_mode="readwrite"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,6 +34,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --jobs)
             jobs="$2"
+            shift 2
+            ;;
+        --cache-dir)
+            cache_dir="$2"
+            shift 2
+            ;;
+        --cache-mode)
+            cache_mode="$2"
             shift 2
             ;;
         *)
@@ -205,10 +217,28 @@ run_tidy_batch() {
     if [[ "$#" -eq 0 ]]; then
         return 0
     fi
+    if [[ -n "$cache_dir" ]]; then
+        # Cached mode: tools/ci/test_tidy_cache.py documents why a hit can
+        # only ever stand in for a previous passing run of identical inputs.
+        python3 "$script_dir/tidy_cache.py" run \
+            --build-dir "$repo_root/$build_dir" --cache-dir "$cache_dir" \
+            --mode "$cache_mode" --jobs "$jobs" --clang-tidy "$clang_tidy" \
+            --config "$config" --tool-file "$script_dir/tidy.sh" -- "$@"
+        return $?
+    fi
     printf '%s\0' "$@" |
         xargs -0 -n 4 -P "$jobs" \
             "$clang_tidy" -p "$repo_root/$build_dir" -quiet --config="$config"
 }
+
+case "$cache_mode" in
+    readwrite | writeonly) ;;
+    *)
+        echo "Unknown --cache-mode: $cache_mode" >&2
+        exit 2
+        ;;
+esac
+cache_started="$(date +%s)"
 
 set +e
 run_tidy_batch "$gate_config" "${regular_tidy_files[@]}"
@@ -220,6 +250,12 @@ set -e
 if [[ "$tidy_status" -ne 0 || "$tracked_global_tidy_status" -ne 0 ]]; then
     echo "clang-tidy gate failed (status $tidy_status). Fix the diagnostics above; the checks in scripts/tidy.sh are blocking." >&2
     exit 1
+fi
+
+if [[ -n "$cache_dir" ]]; then
+    # Keep only the records this run used, so the saved cache tracks the
+    # current tree instead of growing with every commit.
+    python3 "$script_dir/tidy_cache.py" prune --cache-dir "$cache_dir" --before "$cache_started"
 fi
 
 echo "clang-tidy gate passed."
