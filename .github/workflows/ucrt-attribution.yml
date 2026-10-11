@@ -1,0 +1,70 @@
+name: UCRT64 package attribution
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [devel]
+    paths:
+      - .github/workflows/ucrt-attribution.yml
+      - tools/ci/ucrt_attribution.sh
+      - test/diagnostics/worldgen_probe.cpp
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ucrt-attribution-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  attribution:
+    name: Toolchain package cohorts (UCRT64)
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            curl
+            git
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-numpy
+            mingw-w64-ucrt-x86_64-python-pillow
+      - name: Record revisions and runner image
+        shell: pwsh
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MERGE_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $imageVersion = if ($env:ImageVersion) { $env:ImageVersion } else { 'unknown' }
+          $headSha = if ($env:HEAD_SHA) { $env:HEAD_SHA } else { 'not a pull request' }
+          "IMAGE_VERSION=$imageVersion" | Add-Content -Path $env:GITHUB_ENV
+          @(
+            '## Revisions',
+            '',
+            '| Field | Value |',
+            '| --- | --- |',
+            "| pull request head sha | $headSha |",
+            "| checked out sha | $env:MERGE_SHA |",
+            "| runner image version | $imageVersion |"
+          ) | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+      - name: Run package cohort cells
+        shell: msys2 {0}
+        run: bash tools/ci/ucrt_attribution.sh
+      - name: Upload attribution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ucrt-attribution-${{ github.run_id }}
+          path: diag/
+          if-no-files-found: warn
+          retention-days: 14
