@@ -3007,7 +3007,7 @@ void RenderPipeline::execute_stage_foliage(const Camera& camera) {
         // the pass actually drew (return > 0), so a disabled/empty no-op frame does
         // not corrupt foliage_draws/foliage_instances_drawn.
         if (foliage_drawn > 0) {
-            m_last_render_pass_stats.foliage_draws++;
+            m_last_render_pass_stats.foliage_draws += m_foliage_pass->last_draw_calls();
             m_last_render_pass_stats.foliage_instances_drawn += foliage_drawn;
         }
         end_gpu_pass_timer(GpuTimerPass::Foliage);
