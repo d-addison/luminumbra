@@ -188,6 +188,10 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "snapshot":
+            root = os.path.realpath(args.world_dir)
+            destination = os.path.realpath(args.out)
+            if destination == root or destination.startswith(root + os.sep):
+                raise ReceiptError("--out must be outside the snapshotted tree")
             receipt = snapshot(args.world_dir)
             with open(args.out, "w", encoding="utf-8") as handle:
                 json.dump(receipt, handle, indent=2)
@@ -198,7 +202,7 @@ def main(argv=None) -> int:
             result = verify(args.world_dir, args.receipt)
         else:
             result = diff(args.a, args.b)
-    except ReceiptError as error:
+    except (ReceiptError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return EXIT_INVALID
     if _has_differences(result):

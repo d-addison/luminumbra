@@ -122,6 +122,18 @@ class SaveReceiptContract(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertTrue(err)
 
+    def test_out_inside_tree_is_invalid_input(self) -> None:
+        inside = self.tree / "receipt.json"
+        code, _, err = _run(["snapshot", str(self.tree), "--out", str(inside)])
+        self.assertEqual(code, 2)
+        self.assertIn("outside", err)
+        self.assertFalse(inside.exists())
+
+    def test_unwritable_out_is_invalid_input(self) -> None:
+        missing_parent = self.base / "no_such_dir" / "receipt.json"
+        code, _, _ = _run(["snapshot", str(self.tree), "--out", str(missing_parent)])
+        self.assertEqual(code, 2)
+
     def test_symlink_is_rejected(self) -> None:
         link = self.tree / "link.bin"
         try:

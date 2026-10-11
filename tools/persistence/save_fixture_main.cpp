@@ -37,9 +37,11 @@ void PrintUsage() {
 
 std::optional<std::uint64_t> ParseUnsigned(const std::string& text) {
     try {
+        if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
+            return std::nullopt;
         std::size_t used = 0;
         const auto value = std::stoull(text, &used);
-        if (used != text.size() || (!text.empty() && text.front() == '-'))
+        if (used != text.size())
             return std::nullopt;
         return value;
     } catch (const std::exception&) {
@@ -119,8 +121,14 @@ int main(int argc, char** argv) {
     }
     if (const auto it = values.find("--world-id"); it != values.end())
         spec.world_id = it->second;
-    if (const auto it = values.find("--preset"); it != values.end())
-        spec.preset_source = it->second;
+    const auto preset = values.find("--preset");
+    if (preset == values.end()) {
+        std::cerr << "--preset is required: without an embedded preset the world is not "
+                     "catalog-valid\n";
+        PrintUsage();
+        return kUsageExit;
+    }
+    spec.preset_source = preset->second;
 
     const auto report = Persistence::WriteSyntheticSave(spec, out->second);
     if (!report.ok) {
