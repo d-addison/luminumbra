@@ -146,7 +146,7 @@ std::string Patched(std::string bytes,
 }
 
 std::string ReadBytes(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    const std::ifstream input(path, std::ios::binary);
     std::ostringstream bytes;
     bytes << input.rdbuf();
     return bytes.str();
@@ -383,7 +383,7 @@ TEST(FarOverlayFiles, PathAndNameRoundTrip) {
 }
 
 TEST(FarOverlayFiles, WriteReadRoundTrip) {
-    TempDir temp;
+    const TempDir temp;
     const FarOverlayTile tile = MakeTile();
     ASSERT_TRUE(WriteFarOverlay(temp.path(), tile));
     EXPECT_TRUE(std::filesystem::is_directory(temp.path() / "far"));
@@ -396,7 +396,7 @@ TEST(FarOverlayFiles, WriteReadRoundTrip) {
 }
 
 TEST(FarOverlayFiles, OverwriteReplacesPreviousGeneration) {
-    TempDir temp;
+    const TempDir temp;
     FarOverlayTile tile = MakeTile();
     tile.generation = 1;
     ASSERT_TRUE(WriteFarOverlay(temp.path(), tile));
@@ -409,13 +409,13 @@ TEST(FarOverlayFiles, OverwriteReplacesPreviousGeneration) {
 }
 
 TEST(FarOverlayFiles, InterruptedWriteKeepsPreviousFile) {
-    TempDir temp;
+    const TempDir temp;
     FarOverlayTile tile = MakeTile();
     tile.generation = 1;
     ASSERT_TRUE(WriteFarOverlay(temp.path(), tile));
 
     tile.generation = 2;
-    InterruptSeamGuard guard;
+    const InterruptSeamGuard guard;
     P::WorldSaveService::set_interrupt_before_region_replace_for_testing(true);
     std::vector<std::string> errors;
     EXPECT_FALSE(WriteFarOverlay(temp.path(), tile, &errors));
@@ -436,13 +436,13 @@ TEST(FarOverlayFiles, InterruptedWriteKeepsPreviousFile) {
 
 TEST(FarOverlayFiles, ValidateDirectory) {
     {
-        TempDir temp;
+        const TempDir temp;
         std::vector<std::string> errors;
         EXPECT_TRUE(ValidateFarOverlayDirectory(temp.path(), &errors));
         EXPECT_TRUE(errors.empty());
     }
     {
-        TempDir temp;
+        const TempDir temp;
         std::vector<std::string> errors;
         WriteValidTree(temp.path());
         EXPECT_TRUE(ValidateFarOverlayDirectory(temp.path(), &errors));
@@ -455,7 +455,7 @@ TEST(FarOverlayFiles, ValidateDirectory) {
         EXPECT_TRUE(errors.empty());
     }
     {
-        TempDir temp;
+        const TempDir temp;
         WriteValidTree(temp.path());
         const std::filesystem::path file = FarOverlayPath(temp.path(), Key(2, -1, 3));
         std::string bytes = ReadBytes(file);
@@ -467,7 +467,7 @@ TEST(FarOverlayFiles, ValidateDirectory) {
         EXPECT_EQ(errors.size(), 1u);
     }
     {
-        TempDir temp;
+        const TempDir temp;
         WriteValidTree(temp.path());
         WriteBytes(FarOverlayPath(temp.path(), Key(2, 0, 3)),
                    ReadBytes(FarOverlayPath(temp.path(), Key(2, -1, 3))));
@@ -477,7 +477,7 @@ TEST(FarOverlayFiles, ValidateDirectory) {
         EXPECT_EQ(errors.size(), 1u);
     }
     {
-        TempDir temp;
+        const TempDir temp;
         WriteValidTree(temp.path());
         const std::filesystem::path file = FarOverlayPath(temp.path(), Key(2, -1, 3));
         WriteBytes(file, Patched(ReadBytes(file), 4, 2, 2, false));
@@ -488,7 +488,7 @@ TEST(FarOverlayFiles, ValidateDirectory) {
     }
     {
         // A directory that carries an overlay name cannot be read as an overlay.
-        TempDir temp;
+        const TempDir temp;
         std::filesystem::create_directories(temp.path() / "far" / "v1.0.0.lmr");
 
         std::vector<std::string> errors;
@@ -497,7 +497,7 @@ TEST(FarOverlayFiles, ValidateDirectory) {
     }
     {
         // `far` existing as a regular file is a corrupt save layout.
-        TempDir temp;
+        const TempDir temp;
         WriteBytes(temp.path() / "far", "not a directory");
 
         std::vector<std::string> errors;

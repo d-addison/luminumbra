@@ -83,7 +83,7 @@ A corrupt or newer-format file is refused and is never treated as absent.
 `WorldSaveService::write_file_durably`: the parent directory is created, a
 unique temporary file is flushed and then atomically replaces the destination.
 Directories the call creates, and the destination directory's own entry, are
-flushed through their parents. A failed or
+flushed through their parents. The save directory must already exist. A failed or
 interrupted write never leaves a partial file: the destination is the previous
 complete file, or the new complete file when only the final directory flush
 failed.

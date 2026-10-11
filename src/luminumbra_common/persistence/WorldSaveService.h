@@ -173,7 +173,9 @@ public:
     // destination is then the previous complete file, or on POSIX the new complete
     // file when only the final directory flush failed, never a partial file. Used
     // for derived files that live beside the save, such as the far authority
-    // overlay.
+    // overlay. The destination's grandparent (the save directory for overlay files)
+    // must already exist and be durable; the call flushes entries it creates and the
+    // destination directory's own entry.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
                                    std::vector<std::string>* errors = nullptr);
