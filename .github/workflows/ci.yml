@@ -295,9 +295,11 @@ jobs:
           ccache --zero-stats
           # ccache does not support MSVC precompiled-header translation units (RmlUi and Jolt use them: about a third of
           # calls were uncacheable on the first run), so the PCH is disabled; this changes how headers are compiled only.
+          # Jolt appends /Zi to its own flags (GENERATE_DEBUG_SYMBOLS, default ON), which ccache rejects (133 uncacheable calls on
+          # the PCH-disabled run); this CI-only build does not ship Jolt PDBs.
           cmake --preset release -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl `
             -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
-            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON -DGENERATE_DEBUG_SYMBOLS=OFF
           cmake --build --preset release --parallel 4
           ccache --show-stats --verbose
           @('### ccache (msvc)', '```', (ccache --show-stats --verbose | Out-String), '```') | Add-Content -Path $env:GITHUB_STEP_SUMMARY
