@@ -2,7 +2,7 @@
 """Tests for the qualification execution runner, its aggregate and exit codes.
 
 The client and checker are fake scripts written into a temporary directory, so no
-GPU is needed. One test runs the real validate_render_capture.py checker.
+GPU is needed. Some tests run the real validate_render_capture.py checker.
 """
 import contextlib
 import copy
@@ -25,6 +25,7 @@ MATRIX_PATH = planner.DEFAULT_MATRIX
 FIXTURE_PATH = Path(__file__).resolve().parent / 'fixtures' / 'adapter-mismatch.v3.json'
 RENDERER = 'NVIDIA GeForce RTX 5070 Ti'
 VENDOR = 'NVIDIA Corporation'
+VERDICT_SCHEMA = 'luminumbra.render_verdict.v1'
 POSE = {'x': 1.0, 'y': 2.0, 'z': 3.0, 'yaw': 4.0, 'pitch': 5.0}
 SURFACE_CELL = 'surface-flight.quality.3840x1600'
 FOREST_CELL = 'forest-settled.quality.3840x1600'
@@ -40,30 +41,57 @@ import time
 
 mode = os.environ.get('FAKE_CLIENT_MODE', 'ok')
 argv = sys.argv[1:]
+
+
+def value(flag):
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
 if mode == 'exit3':
     sys.exit(3)
 if mode == 'hang':
     time.sleep(30)
     sys.exit(0)
-artifact = Path(argv[argv.index('--render-benchmark') + 1])
+artifact = Path(value('--render-benchmark'))
 if mode == 'noartifact':
     sys.exit(0)
 if mode == 'copyfixture':
     artifact.write_bytes(Path(os.environ['FAKE_CLIENT_FIXTURE']).read_bytes())
     sys.exit(0)
-renderer = 'Mesa llvmpipe' if mode == 'wrongadapter' else 'NVIDIA GeForce RTX 5070 Ti'
+width, height = (int(part) for part in value('--capture-size').split('x'))
 payload = {'schema': 'luminumbra.render_benchmark.v3',
-           'adapter': {'vendor': 'NVIDIA Corporation', 'renderer': renderer,
+           'profile': {'name': value('--perf-profile')},
+           'width': width, 'height': height,
+           'warmup_frames': int(value('--render-benchmark-warmup')),
+           'adapter': {'vendor': 'NVIDIA Corporation',
+                       'renderer': ('Mesa llvmpipe' if mode == 'wrongadapter'
+                                    else 'NVIDIA GeForce RTX 5070 Ti'),
                        'version': '4.6'}}
+if value('--render-benchmark-frames') is not None:
+    payload['frames'] = int(value('--render-benchmark-frames'))
+if mode == 'wrongprofile':
+    other = 'performance' if payload['profile']['name'] == 'quality' else 'quality'
+    payload['profile']['name'] = other
+if mode == 'wrongsize':
+    payload['width'] += 1
+if mode == 'wrongwarmup':
+    payload['warmup_frames'] += 1
+if mode == 'wrongframes':
+    payload['frames'] += 1
 if mode == 'dumpenv':
     payload['saw_lumin_env'] = any(key.startswith(('LUMIN_', 'LUMINUMBRA_'))
                                    for key in os.environ)
+    payload['seen'] = {key: os.environ.get(key)
+                       for key in ('HOME', 'APPDATA', 'XDG_CONFIG_HOME')}
 artifact.write_text(json.dumps(payload), encoding='utf-8')
 sys.exit(0)
 '''
 
 FAKE_CHECKER = '''#!/usr/bin/env python3
-"""Fake checker: writes a minimal floor verdict and exits with FAKE_CHECKER_EXIT."""
+"""Fake checker: writes a floor verdict and exits with FAKE_CHECKER_EXIT.
+
+FAKE_CHECKER_VERDICT: auto (default), none, malformed, disagree.
+"""
 import json
 import os
 from pathlib import Path
@@ -71,10 +99,16 @@ import sys
 
 argv = sys.argv[1:]
 code = int(os.environ.get('FAKE_CHECKER_EXIT', '0'))
-verdict = 'pass' if code == 0 else 'fail'
-Path(argv[argv.index('--verdict-out') + 1]).write_text(
-    json.dumps({'schema': 'luminumbra.render_verdict.v1', 'floor': {'verdict': verdict}}),
-    encoding='utf-8')
+mode = os.environ.get('FAKE_CHECKER_VERDICT', 'auto')
+path = Path(argv[argv.index('--verdict-out') + 1])
+if mode == 'malformed':
+    path.write_text('not json', encoding='utf-8')
+elif mode != 'none':
+    verdict = 'pass' if code == 0 else 'fail'
+    if mode == 'disagree':
+        verdict = 'fail'
+    path.write_text(json.dumps({'schema': 'luminumbra.render_verdict.v1',
+                                'floor': {'verdict': verdict}}), encoding='utf-8')
 sys.exit(code)
 '''
 
@@ -83,9 +117,15 @@ def adapter(renderer=RENDERER):
     return dict(vendor=VENDOR, renderer=renderer, version='4.6')
 
 
-def passing_results(matrix):
-    return [dict(id=cell['id'], state='pass', reason=None, adapter=adapter(),
-                 artifact=None, verdict=None) for cell in matrix_lib.cells(matrix)]
+def verdict(value='pass'):
+    return dict(schema=VERDICT_SCHEMA, floor=dict(verdict=value))
+
+
+def passing_results(matrix, renderer=RENDERER):
+    """Synthetic all-pass results with a complete adapter, artifact and verdict."""
+    return [dict(id=cell['id'], state='pass', reason=None, adapter=adapter(renderer),
+                 artifact=f"cells/{cell['id']}.json", verdict=verdict())
+            for cell in matrix_lib.cells(matrix)]
 
 
 class RunnerTestBase(unittest.TestCase):
@@ -119,7 +159,8 @@ class RunnerTestBase(unittest.TestCase):
 
     def run_main(self, args, env=None):
         stdout, stderr = io.StringIO(), io.StringIO()
-        base = {'FAKE_CLIENT_MODE': 'ok', 'FAKE_CHECKER_EXIT': '0'}
+        base = {'FAKE_CLIENT_MODE': 'ok', 'FAKE_CHECKER_EXIT': '0',
+                'FAKE_CHECKER_VERDICT': 'auto'}
         base.update(env or {})
         with mock.patch.dict(os.environ, base), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -146,6 +187,13 @@ class DryRunTests(RunnerTestBase):
         self.assertEqual(plan['summary'], {'ready': 28, 'unevaluated': 8})
         self.assertIn('qualification plan: 36 cells', out)
 
+    def test_dry_run_does_not_touch_existing_aggregate(self):
+        self.out.mkdir(parents=True)
+        (self.out / 'qualification.json').write_text('keep', encoding='utf-8')
+        self.assertEqual(self.run_main(self.argv('--dry-run'))[0], 0)
+        self.assertEqual((self.out / 'qualification.json').read_text(encoding='utf-8'),
+                         'keep')
+
 
 class FullMatrixTests(RunnerTestBase):
     def test_full_matrix_with_recorded_poses(self):
@@ -157,7 +205,7 @@ class FullMatrixTests(RunnerTestBase):
                                                'process_failed': 0, 'unevaluated': 8})
         self.assertFalse(document['partial'])
         self.assertTrue(document['harness_complete'])
-        self.assertTrue(document['adapter_identical'])
+        self.assertFalse(document['adapter_identical'])  # unevaluated cells have none
         self.assertTrue(document['adapter_matches_qualified'])
         self.assertFalse(document['render_floor_qualified'])
         self.assertFalse(document['expanded_qualified'])
@@ -222,42 +270,64 @@ class SelectionTests(RunnerTestBase):
         self.assertEqual(code, 2)
         self.assertIn('cannot write', err)
 
+    def test_relative_paths_resolve_from_caller_cwd(self):
+        previous = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            args = ['--client', './fake_client.py', '--out-dir', 'rel-out',
+                    '--matrix', str(self.matrix_path), '--checker', './fake_checker.py',
+                    '--only', SURFACE_CELL]
+            code, _, _ = self.run_main(args)
+        finally:
+            os.chdir(previous)
+        self.assertEqual(code, 0)
+        out = (self.tmp / 'rel-out').resolve()
+        document = json.loads((out / 'qualification.json').read_text(encoding='utf-8'))
+        cell = self.cell_of(document, SURFACE_CELL)
+        self.assertEqual(cell['state'], 'pass')
+        self.assertTrue(Path(cell['artifact']).is_absolute())
+        self.assertTrue(cell['artifact'].startswith(str(out)), cell['artifact'])
+
 
 class ProcessFailureTests(RunnerTestBase):
     def run_surface(self, env, *extra):
         return self.run_main(self.argv('--only', SURFACE_CELL, *extra), env=env)
 
-    def test_checker_floor_failure_is_fail_and_exit_1(self):
-        code, _, _ = self.run_surface({'FAKE_CHECKER_EXIT': '4'})
-        self.assertEqual(code, 1)
+    def assert_cell(self, state, reason, env, *extra, code=1):
+        exit_status, _, _ = self.run_surface(env, *extra)
+        self.assertEqual(exit_status, code)
         cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
-        self.assertEqual((cell['state'], cell['reason']), ('fail', 'floor'))
+        self.assertEqual((cell['state'], cell['reason']), (state, reason))
+        return cell
+
+    def test_checker_floor_failure_is_fail_and_exit_1(self):
+        cell = self.assert_cell('fail', 'floor', {'FAKE_CHECKER_EXIT': '4'})
         self.assertEqual(cell['verdict']['floor']['verdict'], 'fail')
 
     def test_checker_exit_1_is_invalid(self):
-        code, _, _ = self.run_surface({'FAKE_CHECKER_EXIT': '1'})
-        self.assertEqual(code, 1)
-        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
-        self.assertEqual((cell['state'], cell['reason']), ('invalid', 'checker exit 1'))
+        self.assert_cell('invalid', 'checker exit 1', {'FAKE_CHECKER_EXIT': '1'})
+
+    def test_checker_exit_0_without_verdict_is_invalid(self):
+        self.assert_cell('invalid', 'verdict missing/malformed',
+                         {'FAKE_CHECKER_VERDICT': 'none'})
+
+    def test_checker_exit_0_with_malformed_verdict_is_invalid(self):
+        self.assert_cell('invalid', 'verdict missing/malformed',
+                         {'FAKE_CHECKER_VERDICT': 'malformed'})
+
+    def test_checker_exit_0_with_failing_verdict_is_invalid(self):
+        self.assert_cell('invalid', 'verdict-disagrees-with-checker',
+                         {'FAKE_CHECKER_VERDICT': 'disagree'})
 
     def test_client_exit_3_is_process_failed(self):
-        code, _, _ = self.run_surface({'FAKE_CLIENT_MODE': 'exit3'})
-        self.assertEqual(code, 1)
-        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
-        self.assertEqual((cell['state'], cell['reason']), ('process_failed', 'exit 3'))
+        self.assert_cell('process_failed', 'exit 3', {'FAKE_CLIENT_MODE': 'exit3'})
 
     def test_client_without_artifact_is_process_failed(self):
-        code, _, _ = self.run_surface({'FAKE_CLIENT_MODE': 'noartifact'})
-        self.assertEqual(code, 1)
-        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
-        self.assertEqual((cell['state'], cell['reason']), ('process_failed', 'no-artifact'))
+        self.assert_cell('process_failed', 'no-artifact', {'FAKE_CLIENT_MODE': 'noartifact'})
 
     def test_hang_times_out_and_writes_receipt(self):
-        code, _, _ = self.run_surface({'FAKE_CLIENT_MODE': 'hang'},
-                                      '--timeout-seconds', '1')
-        self.assertEqual(code, 1)
-        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
-        self.assertEqual((cell['state'], cell['reason']), ('process_failed', 'timed_out'))
+        self.assert_cell('process_failed', 'timed_out', {'FAKE_CLIENT_MODE': 'hang'},
+                         '--timeout-seconds', '1')
         receipt = json.loads((self.out / 'cells' / f'{SURFACE_CELL}.process.json')
                              .read_text(encoding='utf-8'))
         self.assertEqual(receipt['outcome'], 'timed_out')
@@ -284,6 +354,36 @@ class ProcessFailureTests(RunnerTestBase):
         self.assertFalse(document['render_floor_qualified'])
 
 
+class CaptureBindingTests(RunnerTestBase):
+    def test_wrong_profile_is_refused(self):
+        self.run_main(self.argv('--only', SURFACE_CELL),
+                      env={'FAKE_CLIENT_MODE': 'wrongprofile'})
+        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'capture-does-not-match-cell: profile'))
+
+    def test_wrong_size_is_refused(self):
+        self.run_main(self.argv('--only', SURFACE_CELL),
+                      env={'FAKE_CLIENT_MODE': 'wrongsize'})
+        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'capture-does-not-match-cell: width'))
+
+    def test_wrong_warmup_is_refused(self):
+        self.run_main(self.argv('--only', SURFACE_CELL),
+                      env={'FAKE_CLIENT_MODE': 'wrongwarmup'})
+        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'capture-does-not-match-cell: warmup_frames'))
+
+    def test_wrong_frames_is_refused_for_fixed_view(self):
+        self.run_main(self.argv('--only', FOREST_CELL),
+                      env={'FAKE_CLIENT_MODE': 'wrongframes'})
+        cell = self.cell_of(self.load_qualification(), FOREST_CELL)
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'capture-does-not-match-cell: frames'))
+
+
 class ArtifactHandlingTests(RunnerTestBase):
     def test_prior_artifact_is_moved_aside_not_overwritten(self):
         cells = self.out / 'cells'
@@ -298,6 +398,31 @@ class ArtifactHandlingTests(RunnerTestBase):
         self.assertTrue((cells / f'{SURFACE_CELL}.json.prev-2').is_file())
         self.assertFalse((cells / f'{SURFACE_CELL}.json.prev-3').exists())
 
+    def test_prior_aggregate_is_moved_aside_before_launch(self):
+        self.out.mkdir(parents=True)
+        (self.out / 'qualification.json').write_text('{"render_floor_qualified": true}',
+                                                     encoding='utf-8')
+        self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
+        self.assertEqual(
+            (self.out / 'qualification.json.prev-1').read_text(encoding='utf-8'),
+            '{"render_floor_qualified": true}')
+        self.assertFalse(self.load_qualification()['render_floor_qualified'])
+
+    def test_forced_exception_leaves_unqualified_error_aggregate(self):
+        self.out.mkdir(parents=True)
+        (self.out / 'qualification.json').write_text('old', encoding='utf-8')
+        with mock.patch.object(rq, 'run_cells', side_effect=RuntimeError('boom')):
+            code, _, err = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 1)
+        self.assertIn('boom', err)
+        document = self.load_qualification()
+        self.assertEqual(document['error'], 'boom')
+        self.assertFalse(document['render_floor_qualified'])
+        self.assertFalse(document['harness_complete'])
+        self.assertFalse(document['expanded_qualified'])
+        self.assertEqual((self.out / 'qualification.json.prev-1').read_text(encoding='utf-8'),
+                         'old')
+
     def test_lumin_variables_are_not_seen_by_client(self):
         env = {'FAKE_CLIENT_MODE': 'dumpenv', 'LUMIN_GL_DEBUG': '1',
                'LUMINUMBRA_TEST_FLAG': '1'}
@@ -306,13 +431,36 @@ class ArtifactHandlingTests(RunnerTestBase):
                               .read_text(encoding='utf-8'))
         self.assertIs(artifact['saw_lumin_env'], False)
 
+    def test_client_settings_are_redirected_into_out_dir(self):
+        env = {'FAKE_CLIENT_MODE': 'dumpenv'}
+        self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL), env=env)[0], 0)
+        artifact = json.loads((self.out / 'cells' / f'{SURFACE_CELL}.json')
+                              .read_text(encoding='utf-8'))
+        settings = (self.out / 'settings').resolve()
+        self.assertTrue(settings.is_dir())
+        for key in ('HOME', 'APPDATA', 'XDG_CONFIG_HOME'):
+            self.assertEqual(Path(artifact['seen'][key]).resolve(), settings, key)
+
 
 class RealCheckerTests(RunnerTestBase):
-    def test_real_checker_refuses_adapter_mismatch_fixture(self):
-        env = {'FAKE_CLIENT_MODE': 'copyfixture',
-               'FAKE_CLIENT_FIXTURE': str(FIXTURE_PATH)}
+    def run_real(self, fixture):
+        env = {'FAKE_CLIENT_MODE': 'copyfixture', 'FAKE_CLIENT_FIXTURE': str(fixture)}
         args = self.argv('--only', SURFACE_CELL, checker=False)
-        code, _, _ = self.run_main(args, env=env)
+        return self.run_main(args, env=env)
+
+    def test_committed_fixture_is_refused_by_capture_binding(self):
+        code, _, _ = self.run_real(FIXTURE_PATH)
+        self.assertEqual(code, 1)
+        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
+        self.assertEqual((cell['state'], cell['reason']),
+                         ('invalid', 'capture-does-not-match-cell: width'))
+
+    def test_real_checker_refuses_bound_adapter_mismatch_fixture(self):
+        data = json.loads(FIXTURE_PATH.read_text(encoding='utf-8'))
+        data.update(width=3840, height=1600, warmup_frames=400)
+        bound = self.tmp / 'bound-fixture.json'
+        bound.write_text(json.dumps(data), encoding='utf-8')
+        code, _, _ = self.run_real(bound)
         self.assertEqual(code, 1)
         cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
         self.assertEqual(cell['state'], 'invalid')
@@ -325,8 +473,8 @@ class AggregateTests(unittest.TestCase):
         self.matrix = matrix_lib.load_matrix(MATRIX_PATH)
         self.declared = {'3440x1440': 60}
 
-    def aggregate(self, results, partial=False, declared=None):
-        return rq.aggregate(self.matrix, results, partial=partial,
+    def aggregate(self, results, partial=False, declared=None, matrix=None):
+        return rq.aggregate(matrix or self.matrix, results, partial=partial,
                             declared_refresh=self.declared if declared is None else declared)
 
     def test_all_pass_with_declared_refresh_is_qualified(self):
@@ -350,6 +498,37 @@ class AggregateTests(unittest.TestCase):
         self.assertFalse(document['adapter_identical'])
         self.assertFalse(document['adapter_matches_qualified'])
         self.assertFalse(document['render_floor_qualified'])
+
+    def test_one_cell_adapter_none_breaks_identity_and_qualification(self):
+        results = passing_results(self.matrix)
+        results[3] = dict(results[3], adapter=None)
+        document = self.aggregate(results)
+        self.assertFalse(document['adapter_identical'])
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_one_cell_verdict_none_breaks_qualification(self):
+        results = passing_results(self.matrix)
+        results[4] = dict(results[4], verdict=None)
+        document = self.aggregate(results)
+        self.assertTrue(document['adapter_identical'])
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_one_cell_artifact_none_breaks_qualification(self):
+        results = passing_results(self.matrix)
+        results[6] = dict(results[6], artifact=None)
+        document = self.aggregate(results)
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_one_cell_verdict_not_pass_breaks_qualification(self):
+        results = passing_results(self.matrix)
+        results[7] = dict(results[7], verdict=verdict('fail'))
+        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+
+    def test_empty_adapter_field_breaks_qualification(self):
+        results = passing_results(self.matrix)
+        results[2] = dict(results[2], adapter=dict(vendor='', renderer=RENDERER,
+                                                   version='4.6'))
+        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
 
     def test_one_cell_not_pass_breaks_qualification(self):
         results = passing_results(self.matrix)
@@ -378,12 +557,35 @@ class AggregateTests(unittest.TestCase):
         self.assertFalse(document['harness_complete'])
         self.assertFalse(document['render_floor_qualified'])
 
+    def test_missing_canonical_cell_breaks_qualification(self):
+        document = self.aggregate(passing_results(self.matrix)[1:])
+        self.assertEqual(document['summary']['pass'], 35)
+        self.assertFalse(document['render_floor_qualified'])
+
     def test_unevaluated_cells_allowed_for_harness_but_not_qualification(self):
         results = passing_results(self.matrix)
         results[1] = dict(results[1], state='unevaluated', reason='pose-unrecorded',
-                          adapter=None)
+                          adapter=None, artifact=None, verdict=None)
         document = self.aggregate(results)
         self.assertTrue(document['harness_complete'])
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_two_cell_matrix_never_qualifies(self):
+        small = copy.deepcopy(self.matrix)
+        small['workloads'] = [w for w in small['workloads'] if w['id'] == 'surface-flight']
+        small['displays'] = small['displays'][:1]
+        document = self.aggregate(passing_results(small), matrix=small)
+        self.assertEqual(document['summary']['pass'], 2)
+        self.assertTrue(document['harness_complete'])
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_non_canonical_qualified_renderer_never_qualifies(self):
+        matrix = copy.deepcopy(self.matrix)
+        matrix['qualified_renderer'] = 'Mesa llvmpipe'
+        document = self.aggregate(passing_results(matrix, renderer='Mesa llvmpipe'),
+                                  matrix=matrix)
+        self.assertEqual(document['summary']['pass'], 36)
+        self.assertTrue(document['adapter_identical'])
         self.assertFalse(document['render_floor_qualified'])
 
     def test_matrix_refresh_is_not_overridden(self):
