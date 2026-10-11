@@ -40,7 +40,32 @@ const HeavySubsystem* FindRow(std::span<const HeavySubsystem> table, const std::
     return nullptr;
 }
 
+// Compile-time guard: these structured bindings only compile while the structs have exactly
+// this many members, so adding a hashed field without revisiting HeavySubsystemTable (and this
+// function) fails the build instead of passing silently.
+void ExpectFieldArityMatchesTable(const HeavyHashes& hashes, std::size_t table_rows) {
+    [[maybe_unused]] const auto& [world_hash,
+                                  sub,
+                                  scent_hash,
+                                  active_regions,
+                                  clock_bytes,
+                                  ledger_bytes] = hashes;
+    [[maybe_unused]] const auto& [terrain,
+                                  mesh,
+                                  water,
+                                  entities,
+                                  wind,
+                                  weather,
+                                  aether,
+                                  aether_state] = hashes.sub;
+    constexpr std::size_t kTopLevelFields = 6;
+    constexpr std::size_t kSubFields = 8;
+    // One table row per leaf field; `sub` is a container of the kSubFields rows.
+    EXPECT_EQ(table_rows, kTopLevelFields - 1 + kSubFields);
+}
+
 TEST(HeavyComparison, TableCoversEveryHashField) {
+    ExpectFieldArityMatchesTable(HeavyHashes{}, HeavySubsystemTable().size());
     const auto table = HeavySubsystemTable();
     const std::set<std::string> expected{"terrain",
                                          "water",

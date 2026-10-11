@@ -125,7 +125,8 @@ inline std::span<const HeavySubsystem> HeavySubsystemTable() {
         {"scents",
          false,
          false,
-         "reported in the artifact but not asserted by the heavy oracle today",
+         "persisted scent state is reported but not yet asserted by the heavy oracle; the "
+         "activation-slice oracle owns its comparison and negative control",
          [](HeavyHashes& h) {
              h.scent_hash += "x";
          }},
