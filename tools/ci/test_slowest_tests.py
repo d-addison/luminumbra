@@ -150,5 +150,30 @@ class SlowestTestsTests(unittest.TestCase):
         self.assertIn("Total: 4 tests, 2.5 s; 1 skipped, 2 failed", out)
 
 
+    def test_unknown_xml_encoding_is_not_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "ctest.junit.xml"
+            report.write_bytes(b'<?xml version="1.0" encoding="no-such-codec"?><Site/>')
+            code, _, err = run_main(str(report))
+        self.assertEqual(code, 0)
+        self.assertIn("slowest_tests", err)
+
+    def test_unwritable_summary_file_is_not_fatal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = write_report(Path(directory), '<testcase name="A" time="1.0"/>')
+            code, out, err = run_main(str(report), "--summary-file", directory)
+        self.assertEqual(code, 0)
+        self.assertIn("Slowest 1 tests", out)
+        self.assertIn("could not write summary", err)
+
+    def test_non_ascii_name_is_not_fatal_on_a_narrow_stdout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            report = write_report(Path(directory), '<testcase name="Caf\u00e9\u2603" time="1.0"/>')
+            narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+            with contextlib.redirect_stdout(narrow):
+                code = MODULE.main([str(report)])
+        self.assertEqual(code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

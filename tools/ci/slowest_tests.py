@@ -90,12 +90,19 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         summary = parse_report(args.report)
-    except (ET.ParseError, OSError) as error:
+    except (ET.ParseError, OSError, LookupError, ValueError) as error:
         print(f"slowest_tests: could not parse {args.report}: {error}", file=sys.stderr)
         return 0
 
     markdown = render_markdown(summary, max(0, args.count))
-    sys.stdout.write(markdown)
+    try:
+        reconfigure = getattr(sys.stdout, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(errors="replace")
+        sys.stdout.write(markdown)
+        sys.stdout.flush()
+    except (OSError, ValueError, UnicodeError) as error:
+        print(f"slowest_tests: could not print report: {error}", file=sys.stderr)
 
     if args.summary_file is not None:
         try:

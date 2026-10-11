@@ -405,6 +405,7 @@ jobs:
           retention-days: 14
       - name: Record toolchain identity
         if: always()
+        continue-on-error: true
         shell: msys2 {0}
         run: |
           # Diagnostic only. No command may fail this step, so none uses set -e.
@@ -434,6 +435,7 @@ jobs:
           } >> "$summary" || true
       - name: Report slowest tests
         if: always()
+        continue-on-error: true
         shell: msys2 {0}
         run: python tools/ci/slowest_tests.py build/release/ctest.junit.xml --summary-file "$GITHUB_STEP_SUMMARY"
 
