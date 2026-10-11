@@ -548,5 +548,15 @@ class VerifyReleaseTests(unittest.TestCase):
         self.assertEqual(json.loads(report.read_text(encoding="utf-8"))["overall"], "PASS")
 
 
+class RunnerDecodingTests(unittest.TestCase):
+    def test_undecodable_output_is_replaced_not_raised(self) -> None:
+        code = "import sys; sys.stdout.buffer.write(b'bad \\xff byte'); sys.stderr.buffer.write(b'\\xfe')"
+        rc, out, err = verifier.Runner().run([sys.executable, "-I", "-c", code])
+        self.assertEqual(rc, 0)
+        self.assertIn("bad", out)
+        self.assertIn("\ufffd", out)
+        self.assertIn("\ufffd", err)
+
+
 if __name__ == "__main__":
     unittest.main()
