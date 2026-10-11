@@ -79,6 +79,7 @@ std::atomic<int>& DirectoryFlushFailureCountdownForTesting() {
     return countdown;
 }
 
+#if !defined(_WIN32)
 // True when the injected flush failure fires on this flush.
 bool ConsumeDirectoryFlushFailureForTesting() {
     std::atomic<int>& countdown = DirectoryFlushFailureCountdownForTesting();
@@ -92,6 +93,7 @@ bool ConsumeDirectoryFlushFailureForTesting() {
     }
     return false;
 }
+#endif
 
 using ActiveRegionsReplaceHook = bool (*)();
 ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {

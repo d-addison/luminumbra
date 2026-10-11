@@ -194,6 +194,7 @@ public:
     }
 };
 
+#if !defined(_WIN32)
 // Number of ancestor-entry flushes write_file_durably performs for `destination`
 // before the post-rename flush: one per ancestor directory below the root.
 int AncestorFlushCount(const std::filesystem::path& destination) {
@@ -205,6 +206,7 @@ int AncestorFlushCount(const std::filesystem::path& destination) {
     }
     return count;
 }
+#endif
 
 constexpr std::optional<std::uint64_t> Gen(std::uint64_t value) {
     return value;
@@ -372,11 +374,11 @@ TEST(FarOverlayFiles, PathAndNameRoundTrip) {
     EXPECT_EQ(path.parent_path(), dir / "far");
 
     const auto minimal = ParseFarOverlayFileName("v1.0.0.lmr");
-    ASSERT_TRUE(minimal.has_value());
-    EXPECT_EQ(*minimal, Key(1, 0, 0));
+    EXPECT_TRUE(minimal.has_value());
+    EXPECT_EQ(minimal.value_or(Key(0, 0, 0)), Key(1, 0, 0));
     const auto negative = ParseFarOverlayFileName("v5.-12.34.lmr");
-    ASSERT_TRUE(negative.has_value());
-    EXPECT_EQ(*negative, Key(5, -12, 34));
+    EXPECT_TRUE(negative.has_value());
+    EXPECT_EQ(negative.value_or(Key(0, 0, 0)), Key(5, -12, 34));
 
     const char* const kRejected[] = {
         "v0.1.1.lmr",
@@ -447,10 +449,8 @@ TEST(FarOverlayFiles, InterruptedWriteKeepsPreviousFile) {
     EXPECT_EQ(entries, 1u);
 }
 
+#if !defined(_WIN32)
 TEST(FarOverlayFiles, FlushFailureAfterReplaceLeavesTheNewCompleteFile) {
-#if defined(_WIN32)
-    GTEST_SKIP() << "POSIX directory flush seam";
-#else
     const TempDir temp;
     FarOverlayTile tile = MakeTile();
     tile.generation = 1;
@@ -477,13 +477,9 @@ TEST(FarOverlayFiles, FlushFailureAfterReplaceLeavesTheNewCompleteFile) {
 
     // The seam fires once; a retry succeeds.
     EXPECT_TRUE(WriteFarOverlay(temp.path(), tile));
-#endif
 }
 
 TEST(FarOverlayFiles, RetryAfterAncestorFlushFailureFlushesTheMissingEntries) {
-#if defined(_WIN32)
-    GTEST_SKIP() << "POSIX directory flush seam";
-#else
     const TempDir temp;
     const std::filesystem::path destination = temp.path() / "a" / "b" / "file.bin";
     const InterruptSeamGuard guard;
@@ -493,20 +489,25 @@ TEST(FarOverlayFiles, RetryAfterAncestorFlushFailureFlushesTheMissingEntries) {
     P::WorldSaveService::set_directory_flush_failure_for_testing(1);
     std::vector<std::string> errors;
     EXPECT_FALSE(P::WorldSaveService::write_file_durably(destination, "first", &errors));
-    EXPECT_EQ(errors.size(), 1u);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_EQ(errors.front(), "directory flush failed (test seam): " + temp.path().string());
     EXPECT_TRUE(std::filesystem::is_directory(temp.path() / "a" / "b"));
+    EXPECT_FALSE(std::filesystem::exists(destination));
 
     // The retry finds both directories present yet must still flush the same entry.
     P::WorldSaveService::set_directory_flush_failure_for_testing(1);
     errors.clear();
     EXPECT_FALSE(P::WorldSaveService::write_file_durably(destination, "second", &errors));
-    EXPECT_EQ(errors.size(), 1u);
+    ASSERT_EQ(errors.size(), 1u);
+    // The failure is the ancestor flush, before any temp file or rename happens.
+    EXPECT_EQ(errors.front(), "directory flush failed (test seam): " + temp.path().string());
+    EXPECT_FALSE(std::filesystem::exists(destination));
 
     P::WorldSaveService::set_directory_flush_failure_for_testing(-1);
     EXPECT_TRUE(P::WorldSaveService::write_file_durably(destination, "third"));
     EXPECT_EQ(ReadBytes(destination), "third");
-#endif
 }
+#endif
 
 TEST(FarOverlayFiles, ValidateDirectory) {
     {
