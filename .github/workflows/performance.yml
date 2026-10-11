@@ -34,6 +34,7 @@ jobs:
           python tools/perf/test_fixture_hash.py
           python tools/perf/test_render_contract.py
           python tools/perf/test_plan_qualification.py
+          python tools/perf/test_run_qualification.py
           python tools/perf/test_render_budget.py
           python tools/ci/test_validate_performance_measurement.py
 
