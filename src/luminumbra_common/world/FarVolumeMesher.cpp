@@ -226,7 +226,11 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
                                ? b[axis]
                                : a[axis] + crossing.fraction * (b[axis] - a[axis]));
             }
-            const double length = std::hypot(vertex.normal[0], vertex.normal[1], vertex.normal[2]);
+            // Gradients derive from float densities, so these squares cannot overflow or
+            // underflow in double; sqrt is correctly rounded (hypot is not, across libms).
+            const double length = std::sqrt(vertex.normal[0] * vertex.normal[0] +
+                                            vertex.normal[1] * vertex.normal[1] +
+                                            vertex.normal[2] * vertex.normal[2]);
             if (length == 0.0)
                 refuse(FarVolumeMeshError::ZeroGradient);
             for (auto& v : vertex.normal)
