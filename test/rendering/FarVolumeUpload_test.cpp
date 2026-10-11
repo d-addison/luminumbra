@@ -176,6 +176,64 @@ TEST(FarVolumeUpload, ReplacementAndBackendFailureKeepOldChargeUntilGpuDeletion)
     EXPECT_EQ(output.resource(), old_resource);
     EXPECT_EQ(Observe(memory, 1).bytes_total, cpu + bytes);
     EXPECT_EQ(deletions, 0u);
+    auto current = request.identity;
+    auto intent = request.intent;
+    FarVolumeUploadBackend changing_identity = [&](const FarVolumeRenderMesh&) {
+        ++current.world_epoch;
+        return std::make_unique<FakeGpu>(bytes);
+    };
+    FarVolumeUploadError error;
+    EXPECT_FALSE(UploadFarVolume(
+        *completion, current, intent, memory, bytes, changing_identity, output, &error));
+    EXPECT_EQ(error, FarVolumeUploadError::Stale);
+    EXPECT_EQ(output.resource(), old_resource);
+    EXPECT_EQ(Observe(memory, 1).bytes_total, cpu + bytes);
+    current = request.identity;
+    FarVolumeUploadBackend growing_span = [&](const FarVolumeRenderMesh&) {
+        intent.extra_span = FarVolumeCoverageSpan{-1024, 32};
+        return std::make_unique<FakeGpu>(bytes);
+    };
+    EXPECT_FALSE(
+        UploadFarVolume(*completion, current, intent, memory, bytes, growing_span, output, &error));
+    EXPECT_EQ(error, FarVolumeUploadError::Stale);
+    EXPECT_EQ(output.resource(), old_resource);
+    EXPECT_EQ(Observe(memory, 1).bytes_total, cpu + bytes);
+    FarVolumeUploadBackend null_backend = [](const FarVolumeRenderMesh&) {
+        return std::unique_ptr<FarVolumeGpuAllocation>{};
+    };
+    EXPECT_FALSE(UploadFarVolume(*completion,
+                                 request.identity,
+                                 request.intent,
+                                 memory,
+                                 bytes,
+                                 null_backend,
+                                 output,
+                                 &error));
+    EXPECT_EQ(error, FarVolumeUploadError::BackendFailure);
+    std::size_t partial_deletions = 0;
+    FarVolumeUploadBackend wrong_size = [&](const FarVolumeRenderMesh&) {
+        return std::make_unique<FakeGpu>(bytes + 1, [&] { ++partial_deletions; });
+    };
+    EXPECT_FALSE(UploadFarVolume(
+        *completion, request.identity, request.intent, memory, bytes, wrong_size, output, &error));
+    EXPECT_EQ(error, FarVolumeUploadError::BackendFailure);
+    EXPECT_EQ(partial_deletions, 1u);
+    FarVolumeUploadBackend partial_throw =
+        [&](const FarVolumeRenderMesh&) -> std::unique_ptr<FarVolumeGpuAllocation> {
+        auto partial = std::make_unique<FakeGpu>(bytes, [&] { ++partial_deletions; });
+        throw std::runtime_error("fixture partial upload refusal");
+    };
+    EXPECT_FALSE(UploadFarVolume(*completion,
+                                 request.identity,
+                                 request.intent,
+                                 memory,
+                                 bytes,
+                                 partial_throw,
+                                 output,
+                                 &error));
+    EXPECT_EQ(partial_deletions, 2u);
+    EXPECT_EQ(output.resource(), old_resource);
+    EXPECT_EQ(Observe(memory, 1).bytes_total, cpu + bytes);
     ASSERT_TRUE(UploadFarVolume(
         *completion, request.identity, request.intent, memory, bytes, backend, output));
     EXPECT_EQ(deletions, 1u);

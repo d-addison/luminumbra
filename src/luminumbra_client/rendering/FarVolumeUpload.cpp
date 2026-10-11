@@ -102,6 +102,11 @@ bool UploadFarVolume(const FarVolumeQueueCompletion& completion,
         if (!staged.resource_ || staged.resource_->bytes() != bytes)
             return fail(FarVolumeUploadError::BackendFailure);
     }
+    // Owner backend may change the current binding/intent before it returns.
+    if (!ValidIntent(intent))
+        return fail(FarVolumeUploadError::InvalidIntent);
+    if (staged.identity_ != expected || !Covers(staged.request_, intent))
+        return fail(FarVolumeUploadError::Stale);
     output = std::move(staged);
     return true;
 }
