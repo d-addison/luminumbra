@@ -33,6 +33,7 @@ jobs:
           python tools/perf/test_perf.py
           python tools/perf/test_fixture_hash.py
           python tools/perf/test_render_contract.py
+          python tools/perf/test_sim_budget_gate.py
           python tools/ci/test_validate_performance_measurement.py
 
   preview-frame:
@@ -364,6 +365,15 @@ jobs:
             --candidate build/head/water-smoke-run.json \
             --limit 5 --min-samples 20 \
             --output build/water-smoke-comparison.json
+      - name: Capture simulation budget evidence
+        run: |
+          python3 head/tools/perf/capture_sim_budget.py \
+            --binary build/head/bin/luminumbra_server_app \
+            --evidence-dir build/head/sim-budget-capture --ticks 600
+          python3 head/tools/perf/propose_sim_budgets.py build/head/sim-budget-capture \
+            --output build/head/sim-budget-proposal.json
+          python3 head/tools/perf/check_sim_budgets.py build/head/sim-budget-capture \
+            head/tools/perf/baselines/sim-budgets.json --output build/head/sim-budget-check.json
       - name: Publish comparison summary
         if: always()
         run: |
@@ -392,6 +402,17 @@ jobs:
             build/head/server-smoke-evidence-*.json
             build/server-smoke-comparison.json
           if-no-files-found: error
+          retention-days: 30
+      - name: Upload simulation budget evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sim-budget-evidence-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            build/head/sim-budget-capture
+            build/head/sim-budget-proposal.json
+            build/head/sim-budget-check.json
+          if-no-files-found: warn
           retention-days: 30
       - name: Upload water paired evidence
         if: always()
