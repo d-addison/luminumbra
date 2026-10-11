@@ -36,8 +36,15 @@ def stop_all(wait=False):
             _retired.remove(client)
 
 
+def prune_retired():
+    for client in tuple(_retired):
+        if client.close():
+            _retired.remove(client)
+
+
 def redraw():
     main_thread()
+    prune_retired()
     if _engines:
         for window in bpy.context.window_manager.windows:
             for area in window.screen.areas:
