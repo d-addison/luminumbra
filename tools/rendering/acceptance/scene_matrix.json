@@ -1,0 +1,82 @@
+{
+  "schema": "luminumbra.scene_matrix.v1",
+  "issue": 64,
+  "title": "Settled terrain/weather/cave/water acceptance matrix",
+  "world": {
+    "preset": "default",
+    "world_seed_implied": 424242
+  },
+  "full_layers": ["terrain", "farfield", "water", "foliage", "particles", "skinned", "skybox", "aerial", "lightning"],
+  "expected_report_fields": [
+    "camera.position",
+    "camera.yaw",
+    "camera.pitch",
+    "camera.fov",
+    "capture_context.time_of_day_at_report",
+    "capture_context.last_world_streaming_position",
+    "streaming.generation_pending",
+    "streaming.meshing_pending",
+    "streaming.terrain_uploads_pending",
+    "streaming.terrain_draws",
+    "camera_chunk.resident",
+    "render_uniforms"
+  ],
+  "settled_proof": "tools/perf/validate_render_capture.py --require-settled checks streaming generation_pending, meshing_pending and terrain_uploads_pending == 0 at the report frame only. It does not prove that the whole measured window was settled; scenario-owned capture windows are VR-4 (design D4).",
+  "scenes": [
+    {
+      "id": "elevated",
+      "issue_refs": [64],
+      "pose_source": "explicit",
+      "description": "Elevated overview; pose from G04.",
+      "scene": {
+        "camera": {"pos": [8, 56, 8], "yaw": 35, "pitch": -6, "fov": 110},
+        "time_of_day": 0.04
+      },
+      "base_layers": null,
+      "variants": [
+        {"id": "clear", "weather": {"type": "none", "intensity": 0.0}},
+        {"id": "storm", "weather": {"type": "storm", "intensity": 1.0}},
+        {"id": "no-aerial", "exclude_layers": ["aerial"]},
+        {"id": "no-particles", "exclude_layers": ["particles"]},
+        {"id": "no-water", "exclude_layers": ["water"]},
+        {"id": "terrain-only", "layers": ["terrain"]}
+      ]
+    },
+    {
+      "id": "ground",
+      "issue_refs": [64],
+      "pose_source": "recorded-evidence",
+      "pose_note": "Pose lives in a private archive; unresolved (Q2).",
+      "scene": {
+        "camera": {"pos": null, "yaw": null, "pitch": null, "fov": 110},
+        "time_of_day": null
+      },
+      "base_layers": null,
+      "variants": []
+    },
+    {
+      "id": "high",
+      "issue_refs": [64],
+      "pose_source": "recorded-evidence",
+      "pose_note": "Pose lives in a private archive; unresolved (Q2).",
+      "scene": {
+        "camera": {"pos": null, "yaw": null, "pitch": null, "fov": 110},
+        "time_of_day": null
+      },
+      "base_layers": null,
+      "variants": []
+    },
+    {
+      "id": "cave_air",
+      "issue_refs": [64],
+      "pose_source": "recorded-evidence",
+      "pose_note": "Pose lives in a private archive; unresolved (Q2).",
+      "scene": {
+        "camera": {"pos": null, "yaw": null, "pitch": null, "fov": 110},
+        "time_of_day": null
+      },
+      "base_layers": null,
+      "variants": []
+    }
+  ]
+}
