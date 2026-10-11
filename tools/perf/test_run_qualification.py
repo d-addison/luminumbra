@@ -69,6 +69,10 @@ payload = {'schema': 'luminumbra.render_benchmark.v3',
                        'version': '4.6'}}
 if value('--render-benchmark-frames') is not None:
     payload['frames'] = int(value('--render-benchmark-frames'))
+if mode != 'nop99':
+    payload['distribution'] = {'frame_wall_ms': {'p50': 8.0, 'p99': 12.0,
+                                                 'sample_count': 240,
+                                                 'unavailable_count': 0}}
 if mode == 'wrongprofile':
     other = 'performance' if payload['profile']['name'] == 'quality' else 'quality'
     payload['profile']['name'] = other
@@ -88,9 +92,10 @@ sys.exit(0)
 '''
 
 FAKE_CHECKER = '''#!/usr/bin/env python3
-"""Fake checker: writes a floor verdict and exits with FAKE_CHECKER_EXIT.
+"""Fake checker: echoes the capture into a floor verdict and exits FAKE_CHECKER_EXIT.
 
 FAKE_CHECKER_VERDICT: auto (default), none, malformed, disagree.
+FAKE_CHECKER_TAMPER: profile, adapter, frames or p99 alters that verdict field.
 """
 import json
 import os
@@ -100,15 +105,35 @@ import sys
 argv = sys.argv[1:]
 code = int(os.environ.get('FAKE_CHECKER_EXIT', '0'))
 mode = os.environ.get('FAKE_CHECKER_VERDICT', 'auto')
+tamper = os.environ.get('FAKE_CHECKER_TAMPER', '')
 path = Path(argv[argv.index('--verdict-out') + 1])
+data = json.loads(Path(argv[0]).read_text(encoding='utf-8'))
+frames = data.get('frames')
+p99 = data.get('distribution', {}).get('frame_wall_ms', {}).get('p99', 0.0)
+document = {
+    'schema': 'luminumbra.render_verdict.v1',
+    'workload_kind': 'fixed_view' if frames is not None else 'traversal',
+    'profile': data['profile']['name'],
+    'adapter': dict(data['adapter']),
+    'frames': frames,
+    'floor': {'limit_ms': 16.67, 'p99_ms': p99,
+              'verdict': 'pass' if p99 <= 16.67 else 'fail'},
+    'target': {'target_ms': 8.33},
+}
+if code != 0 or mode == 'disagree':
+    document['floor']['verdict'] = 'fail'
+if tamper == 'profile':
+    document['profile'] = 'performance' if document['profile'] == 'quality' else 'quality'
+if tamper == 'adapter':
+    document['adapter']['renderer'] = 'Mesa llvmpipe'
+if tamper == 'frames':
+    document['frames'] = (frames or 0) + 1
+if tamper == 'p99':
+    document['floor']['p99_ms'] = 99.0
 if mode == 'malformed':
     path.write_text('not json', encoding='utf-8')
 elif mode != 'none':
-    verdict = 'pass' if code == 0 else 'fail'
-    if mode == 'disagree':
-        verdict = 'fail'
-    path.write_text(json.dumps({'schema': 'luminumbra.render_verdict.v1',
-                                'floor': {'verdict': verdict}}), encoding='utf-8')
+    path.write_text(json.dumps(document), encoding='utf-8')
 sys.exit(code)
 '''
 
@@ -122,10 +147,26 @@ def verdict(value='pass'):
 
 
 def passing_results(matrix, renderer=RENDERER):
-    """Synthetic all-pass results with a complete adapter, artifact and verdict."""
-    return [dict(id=cell['id'], state='pass', reason=None, adapter=adapter(renderer),
-                 artifact=f"cells/{cell['id']}.json", verdict=verdict())
-            for cell in matrix_lib.cells(matrix)]
+    """Synthetic all-pass results with a complete adapter, artifact and verdict.
+
+    Traversal cells without a recorded script get a placeholder script, so the canonical
+    record check sees a script for every traversal workload.
+    """
+    results = []
+    for cell in matrix_lib.cells(matrix):
+        script = None
+        if cell['kind'] == 'traversal':
+            script = cell['script'] or f"synthetic/{cell['workload']}.traversal"
+        results.append(dict(
+            id=cell['id'], workload=cell['workload'], kind=cell['kind'],
+            warmup_frames=cell['warmup_frames'], measured_frames=cell['measured_frames'],
+            script=script, state='pass', reason=None, adapter=adapter(renderer),
+            artifact=f"cells/{cell['id']}.json", verdict=verdict()))
+    return results
+
+
+def index_of(results, cell_id):
+    return next(index for index, result in enumerate(results) if result['id'] == cell_id)
 
 
 class RunnerTestBase(unittest.TestCase):
@@ -442,6 +483,85 @@ class ArtifactHandlingTests(RunnerTestBase):
             self.assertEqual(Path(artifact['seen'][key]).resolve(), settings, key)
 
 
+class VerdictReconciliationTests(RunnerTestBase):
+    def assert_invalid(self, env, reason, cell_id=SURFACE_CELL):
+        code, _, _ = self.run_main(self.argv('--only', cell_id), env=env)
+        self.assertEqual(code, 1)
+        cell = self.cell_of(self.load_qualification(), cell_id)
+        self.assertEqual((cell['state'], cell['reason']), ('invalid', reason))
+
+    def test_pass_verdict_with_p99_over_limit_is_invalid(self):
+        self.assert_invalid({'FAKE_CHECKER_TAMPER': 'p99'},
+                            'verdict-does-not-match-capture: p99_ms')
+
+    def test_verdict_profile_mismatch_is_invalid(self):
+        self.assert_invalid({'FAKE_CHECKER_TAMPER': 'profile'},
+                            'verdict-does-not-match-capture: profile')
+
+    def test_verdict_adapter_mismatch_is_invalid(self):
+        self.assert_invalid({'FAKE_CHECKER_TAMPER': 'adapter'},
+                            'verdict-does-not-match-capture: adapter')
+
+    def test_verdict_frames_mismatch_is_invalid_for_fixed_view(self):
+        self.assert_invalid({'FAKE_CHECKER_TAMPER': 'frames'},
+                            'verdict-does-not-match-capture: frames', cell_id=FOREST_CELL)
+
+    def test_capture_without_frame_wall_p99_is_invalid(self):
+        self.assert_invalid({'FAKE_CLIENT_MODE': 'nop99'},
+                            'capture-lacks-frame-wall-p99')
+
+    def test_reconciled_verdict_passes(self):
+        code, _, _ = self.run_main(self.argv('--only', SURFACE_CELL))
+        self.assertEqual(code, 0)
+        cell = self.cell_of(self.load_qualification(), SURFACE_CELL)
+        self.assertEqual(cell['state'], 'pass')
+        self.assertEqual(cell['verdict']['floor']['p99_ms'], 12.0)
+
+
+class CheckCommandTests(unittest.TestCase):
+    def setUp(self):
+        matrix = matrix_lib.load_matrix(MATRIX_PATH)
+        for workload in matrix['workloads']:
+            if workload['kind'] == 'fixed_view':
+                workload['pose'] = dict(POSE)
+        self.matrix = matrix
+        self.cells = {cell['id']: cell for cell in matrix_lib.cells(matrix)}
+
+    def command(self, cell_id):
+        return rq.check_command(self.cells[cell_id], matrix=self.matrix,
+                                artifact=Path('/out/cells/x.json'),
+                                verdict_path=Path('/out/cells/x.verdict.json'),
+                                root=planner.ROOT, python='python3',
+                                checker=Path('/chk/validate.py'))
+
+    def test_fixed_view_gets_settled_geometry_camera_and_fov_flags(self):
+        command = self.command(FOREST_CELL)
+        for flag in ('--require-settled', '--require-geometry', '--require-camera-chunk'):
+            self.assertIn(flag, command)
+        self.assertEqual(command[command.index('--fov') + 1], '45.0')
+        self.assertEqual(command[1], str(Path('/chk/validate.py')))
+        self.assertEqual(command[-3:], ['--enforce-floor', '--verdict-out',
+                                        '/out/cells/x.verdict.json'])
+
+    def test_traversal_gets_no_fixed_view_flags(self):
+        command = self.command(SURFACE_CELL)
+        for flag in ('--require-settled', '--require-geometry', '--require-camera-chunk',
+                     '--fov'):
+            self.assertNotIn(flag, command)
+        self.assertEqual(command[-3:], ['--enforce-floor', '--verdict-out',
+                                        '/out/cells/x.verdict.json'])
+
+
+class SettingsResetTests(RunnerTestBase):
+    def test_overlay_from_earlier_run_is_removed(self):
+        overlay = self.out / 'settings' / 'overlay.cfg'
+        overlay.parent.mkdir(parents=True)
+        overlay.write_text('stale', encoding='utf-8')
+        self.assertEqual(self.run_main(self.argv('--only', SURFACE_CELL))[0], 0)
+        self.assertFalse(overlay.exists())
+        self.assertEqual(list((self.out / 'settings').iterdir()), [])
+
+
 class RealCheckerTests(RunnerTestBase):
     def run_real(self, fixture):
         env = {'FAKE_CLIENT_MODE': 'copyfixture', 'FAKE_CLIENT_FIXTURE': str(fixture)}
@@ -587,6 +707,39 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(document['summary']['pass'], 36)
         self.assertTrue(document['adapter_identical'])
         self.assertFalse(document['render_floor_qualified'])
+
+    def test_fixed_view_with_short_warmup_and_frames_never_qualifies(self):
+        results = passing_results(self.matrix)
+        index = index_of(results, FOREST_CELL)
+        results[index] = dict(results[index], warmup_frames=2, measured_frames=4)
+        document = self.aggregate(results)
+        self.assertEqual(document['summary']['pass'], 36)
+        self.assertFalse(document['render_floor_qualified'])
+
+    def test_cave_walk_recorded_as_fixed_view_never_qualifies(self):
+        results = passing_results(self.matrix)
+        index = index_of(results, 'cave-walk.quality.3840x1600')
+        results[index] = dict(results[index], kind='fixed_view', measured_frames=240,
+                              script=None)
+        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+
+    def test_surface_flight_with_other_script_never_qualifies(self):
+        results = passing_results(self.matrix)
+        index = index_of(results, SURFACE_CELL)
+        results[index] = dict(results[index], script='tools/perf/fixtures/other.traversal')
+        self.assertFalse(self.aggregate(results)['render_floor_qualified'])
+
+    def test_cells_carry_canonical_fields(self):
+        document = self.aggregate(passing_results(self.matrix))
+        cell = self.cell_of_document(document, FOREST_CELL)
+        self.assertEqual((cell['kind'], cell['warmup_frames'], cell['measured_frames']),
+                         ('fixed_view', 400, 240))
+        cell = self.cell_of_document(document, SURFACE_CELL)
+        self.assertEqual((cell['kind'], cell['script']),
+                         ('traversal', 'tools/perf/fixtures/surface-flight.traversal'))
+
+    def cell_of_document(self, document, cell_id):
+        return next(cell for cell in document['cells'] if cell['id'] == cell_id)
 
     def test_matrix_refresh_is_not_overridden(self):
         matrix = copy.deepcopy(self.matrix)

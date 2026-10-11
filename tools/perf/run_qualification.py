@@ -3,27 +3,33 @@
 
 Cells run in matrix order. A ready cell is launched through
 render_runner_process.run_process, its capture is bound to the cell, and then it is
-judged by validate_render_capture.py with --enforce-floor; an unready cell is recorded
-as unevaluated and never launched. The result is written to
-<out-dir>/qualification.json (luminumbra.render_qualification.v1).
+judged by validate_render_capture.py with --enforce-floor; the checker's verdict must
+reconcile with the capture. An unready cell is recorded as unevaluated and never
+launched. The result is written to <out-dir>/qualification.json
+(luminumbra.render_qualification.v1).
 
 A --client path ending in .py runs with the current interpreter; the tests use this
 to drive a fake client. Importing this module has no side effects.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
 import plan_qualification as planner
 import qualification_matrix as matrix_lib
+import render_budget
 import render_runner_process as runner
 
 SCHEMA = 'luminumbra.render_qualification.v1'
 VERDICT_SCHEMA = 'luminumbra.render_verdict.v1'
+VERDICT_KEYS = ('schema', 'workload_kind', 'profile', 'adapter', 'frames', 'floor', 'target')
+FLOOR_KEYS = ('limit_ms', 'p99_ms', 'verdict')
 STATES = ('pass', 'fail', 'invalid', 'process_failed', 'unevaluated')
 DEFAULT_TIMEOUT_SECONDS = 900
 CHECKER_TIMEOUT_SECONDS = 120
@@ -33,14 +39,28 @@ EXPANDED_REASON = 'requires far_coverage evidence from the far-world runtime wor
 REFRESH_TEXT = re.compile(r'[0-9]{1,4}')
 SETTINGS_NAME = 'settings'
 SETTINGS_KEYS = ('HOME', 'USERPROFILE', 'APPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME')
+EXPECTED_FOV = 45.0  # The client default from SystemConfig.
+FIXED_VIEW_CHECK_FLAGS = ('--require-settled', '--require-geometry', '--require-camera-chunk')
 
 # The canonical qualification universe. A run qualifies only against exactly these.
 CANONICAL_RENDERER = 'NVIDIA GeForce RTX 5070 Ti'
-CANONICAL_WORKLOADS = ('forest-settled', 'ground-settled', 'high-altitude-settled',
-                       'cave-air-settled', 'shoreline-settled', 'mountain-vista-settled',
-                       'surface-flight', 'cave-walk', 'edited-world-tour')
+CANONICAL_KINDS = {
+    'forest-settled': 'fixed_view',
+    'ground-settled': 'fixed_view',
+    'high-altitude-settled': 'fixed_view',
+    'cave-air-settled': 'fixed_view',
+    'shoreline-settled': 'fixed_view',
+    'mountain-vista-settled': 'fixed_view',
+    'surface-flight': 'traversal',
+    'cave-walk': 'traversal',
+    'edited-world-tour': 'traversal',
+}
+CANONICAL_WORKLOADS = tuple(CANONICAL_KINDS)
 CANONICAL_PROFILES = ('quality', 'performance')
 CANONICAL_DISPLAYS = ('3840x1600', '3440x1440')
+CANONICAL_WARMUP = 400
+CANONICAL_FIXED_FRAMES = 240
+CANONICAL_SURFACE_SCRIPT = 'tools/perf/fixtures/surface-flight.traversal'
 
 
 class UsageError(ValueError):
@@ -63,11 +83,20 @@ def sanitized_environment():
 def isolated_environment(out_dir, environment=None):
     """Client environment with user-settings locations redirected into out-dir/settings."""
     settings = Path(out_dir) / SETTINGS_NAME
-    settings.mkdir(parents=True, exist_ok=True)
     result = sanitized_environment() if environment is None else dict(environment)
     for key in SETTINGS_KEYS:
         result[key] = str(settings)
     return result
+
+
+def reset_settings(out_dir):
+    """Remove whatever an earlier run left in out-dir/settings, then recreate it empty."""
+    settings = Path(out_dir) / SETTINGS_NAME
+    if settings.is_dir():
+        shutil.rmtree(settings, ignore_errors=False)
+    elif settings.exists():
+        settings.unlink()
+    settings.mkdir(parents=True)
 
 
 def set_aside(path):
@@ -89,19 +118,25 @@ def read_json_object(path):
     return data if isinstance(data, dict) else None
 
 
-def adapter_of(artifact):
-    data = read_json_object(artifact)
-    adapter = None if data is None else data.get('adapter')
+def finite(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def adapter_triple(data):
+    adapter = data.get('adapter') if isinstance(data, dict) else None
     if not isinstance(adapter, dict):
         return None
     return {key: adapter.get(key) for key in ('vendor', 'renderer', 'version')}
 
 
-def finish(cell_id, state, reason, artifact, verdict=None):
+def finish(cell, state, reason, artifact, verdict=None):
     """Cell result; the artifact path and adapter are reported only when the file exists."""
     present = Path(artifact).is_file()
-    return dict(id=cell_id, state=state, reason=reason,
-                adapter=adapter_of(artifact) if present else None,
+    return dict(id=cell['id'], workload=cell['workload'], kind=cell['kind'],
+                warmup_frames=cell['warmup_frames'], measured_frames=cell['measured_frames'],
+                script=cell['script'], state=state, reason=reason,
+                adapter=adapter_triple(read_json_object(artifact)) if present else None,
                 artifact=str(artifact) if present else None, verdict=verdict)
 
 
@@ -121,6 +156,40 @@ def binding_mismatch(cell, data):
     return None
 
 
+def verdict_reason(verdict, data):
+    """None when a checker-passed verdict reconciles with the capture, else the reason."""
+    if not isinstance(verdict, dict) or any(key not in verdict for key in VERDICT_KEYS):
+        return 'verdict missing/malformed'
+    floor = verdict['floor']
+    if (verdict['schema'] != VERDICT_SCHEMA or not isinstance(floor, dict)
+            or any(key not in floor for key in FLOOR_KEYS)
+            or not isinstance(verdict['target'], dict)):
+        return 'verdict missing/malformed'
+    if (floor['verdict'] not in ('pass', 'fail') or floor['limit_ms'] != render_budget.FLOOR_MS
+            or not finite(floor['p99_ms'])):
+        return 'verdict missing/malformed'
+    if floor['verdict'] == 'fail':
+        return 'verdict-disagrees-with-checker'
+    if floor['p99_ms'] > floor['limit_ms']:
+        return 'verdict-does-not-match-capture: p99_ms'
+    distribution = data.get('distribution')
+    block = distribution.get('frame_wall_ms') if isinstance(distribution, dict) else None
+    capture_p99 = block.get('p99') if isinstance(block, dict) else None
+    if not finite(capture_p99):
+        return 'capture-lacks-frame-wall-p99'
+    profile = data.get('profile')
+    name = profile.get('name') if isinstance(profile, dict) else None
+    if verdict['profile'] != name:
+        return 'verdict-does-not-match-capture: profile'
+    if verdict['adapter'] != adapter_triple(data):
+        return 'verdict-does-not-match-capture: adapter'
+    if verdict['frames'] != data.get('frames'):
+        return 'verdict-does-not-match-capture: frames'
+    if floor['p99_ms'] != capture_p99:
+        return 'verdict-does-not-match-capture: p99_ms'
+    return None
+
+
 def verdict_passes(verdict):
     return (isinstance(verdict, dict) and verdict.get('schema') == VERDICT_SCHEMA
             and isinstance(verdict.get('floor'), dict)
@@ -133,21 +202,46 @@ def valid_adapter(adapter):
                     for key in ('vendor', 'renderer', 'version')))
 
 
+def canonical_record(result):
+    """True when the cell carries exactly the canonical workload semantics."""
+    if CANONICAL_KINDS.get(result['workload']) != result['kind']:
+        return False
+    if result['warmup_frames'] != CANONICAL_WARMUP:
+        return False
+    if result['kind'] == 'fixed_view':
+        return result['measured_frames'] == CANONICAL_FIXED_FRAMES
+    if result['workload'] == 'surface-flight':
+        return result['script'] == CANONICAL_SURFACE_SCRIPT
+    return result['script'] is not None
+
+
 def cell_qualifies(result):
     """A cell counts toward qualification only with a complete, canonical, passing record."""
     return (result['state'] == 'pass' and valid_adapter(result['adapter'])
             and result['adapter']['renderer'] == CANONICAL_RENDERER
-            and result['artifact'] is not None and verdict_passes(result['verdict']))
+            and result['artifact'] is not None and verdict_passes(result['verdict'])
+            and canonical_record(result))
+
+
+def check_command(cell, *, matrix, artifact, verdict_path, root, python, checker):
+    """Checker argv: the matrix checker command with the script swapped and floor flags."""
+    command = matrix_lib.checker_command(
+        cell, artifact=artifact, qualified_renderer=matrix['qualified_renderer'],
+        root=root, python=python)
+    command[1] = str(checker)
+    if cell['kind'] == 'fixed_view':
+        command += list(FIXED_VIEW_CHECK_FLAGS) + ['--fov', str(EXPECTED_FOV)]
+    return command + ['--enforce-floor', '--verdict-out', str(verdict_path)]
 
 
 def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_seconds,
              environment):
-    cell_id = cell['id']
     state, reason = matrix_lib.readiness(cell, root)
     cells_dir = out_dir / 'cells'
+    cell_id = cell['id']
     artifact = cells_dir / f'{cell_id}.json'
     if state != 'ready':
-        return finish(cell_id, 'unevaluated', reason, artifact)
+        return finish(cell, 'unevaluated', reason, artifact)
     work = out_dir / 'work' / cell_id
     work.mkdir(parents=True, exist_ok=True)
     cells_dir.mkdir(parents=True, exist_ok=True)
@@ -162,49 +256,42 @@ def run_cell(cell, matrix, *, client, out_dir, root, python, checker, timeout_se
             receipt_path=cells_dir / f'{cell_id}.process.json',
             timeout_seconds=timeout_seconds)
     except subprocess.TimeoutExpired:
-        return finish(cell_id, 'process_failed', 'timed_out', artifact)
+        return finish(cell, 'process_failed', 'timed_out', artifact)
     except OSError as error:
-        return finish(cell_id, 'process_failed', f'spawn-failed: {error}', artifact)
+        return finish(cell, 'process_failed', f'spawn-failed: {error}', artifact)
     if completed.returncode != 0:
-        return finish(cell_id, 'process_failed', f'exit {completed.returncode}', artifact)
+        return finish(cell, 'process_failed', f'exit {completed.returncode}', artifact)
     if evidence:
-        return finish(cell_id, 'process_failed', 'evidence: ' + '; '.join(evidence), artifact)
+        return finish(cell, 'process_failed', 'evidence: ' + '; '.join(evidence), artifact)
     if not artifact.is_file():
-        return finish(cell_id, 'process_failed', 'no-artifact', artifact)
+        return finish(cell, 'process_failed', 'no-artifact', artifact)
     data = read_json_object(artifact)
     field = None if data is None else binding_mismatch(cell, data)
     if field is not None:
-        return finish(cell_id, 'invalid', f'capture-does-not-match-cell: {field}', artifact)
+        return finish(cell, 'invalid', f'capture-does-not-match-cell: {field}', artifact)
     verdict_path = cells_dir / f'{cell_id}.verdict.json'
     set_aside(verdict_path)
-    check = matrix_lib.checker_command(
-        cell, artifact=artifact, qualified_renderer=matrix['qualified_renderer'],
-        root=root, python=python)
-    check[1] = str(checker)
-    check += ['--enforce-floor', '--verdict-out', str(verdict_path)]
+    check = check_command(cell, matrix=matrix, artifact=artifact, verdict_path=verdict_path,
+                          root=root, python=python, checker=checker)
     try:
         with (cells_dir / f'{cell_id}.check.log').open('wb') as log:
             checked = subprocess.run(check, cwd=work, env=environment, stdout=log,
                                      stderr=subprocess.STDOUT,
                                      timeout=CHECKER_TIMEOUT_SECONDS, check=False)
     except subprocess.TimeoutExpired:
-        return finish(cell_id, 'invalid',
+        return finish(cell, 'invalid',
                       f'checker timed out after {CHECKER_TIMEOUT_SECONDS} s', artifact)
     except OSError as error:
-        return finish(cell_id, 'invalid', f'checker spawn-failed: {error}', artifact)
+        return finish(cell, 'invalid', f'checker spawn-failed: {error}', artifact)
     verdict = read_json_object(verdict_path)
     if checked.returncode == 0:
-        if not isinstance(verdict, dict) or verdict.get('schema') != VERDICT_SCHEMA \
-                or not isinstance(verdict.get('floor'), dict) \
-                or verdict['floor'].get('verdict') not in ('pass', 'fail'):
-            return finish(cell_id, 'invalid', 'verdict missing/malformed', artifact, verdict)
-        if not verdict_passes(verdict):
-            return finish(cell_id, 'invalid', 'verdict-disagrees-with-checker', artifact,
-                          verdict)
-        return finish(cell_id, 'pass', None, artifact, verdict)
+        reason = verdict_reason(verdict, data or {})
+        if reason is not None:
+            return finish(cell, 'invalid', reason, artifact, verdict)
+        return finish(cell, 'pass', None, artifact, verdict)
     if checked.returncode == FLOOR_FAILURE_EXIT:
-        return finish(cell_id, 'fail', 'floor', artifact, verdict)
-    return finish(cell_id, 'invalid', f'checker exit {checked.returncode}', artifact, verdict)
+        return finish(cell, 'fail', 'floor', artifact, verdict)
+    return finish(cell, 'invalid', f'checker exit {checked.returncode}', artifact, verdict)
 
 
 def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executable,
@@ -214,6 +301,7 @@ def run_cells(matrix, *, client, out_dir, root=planner.ROOT, python=sys.executab
     out_dir = Path(out_dir)
     if checker is None:
         checker = Path(root) / matrix_lib.VALIDATOR
+    reset_settings(out_dir)
     environment = isolated_environment(out_dir, environment)
     return [run_cell(cell, matrix, client=client, out_dir=out_dir, root=root, python=python,
                      checker=checker, timeout_seconds=timeout_seconds,
@@ -262,7 +350,10 @@ def aggregate(matrix, results, *, partial, declared_refresh):
     return dict(
         schema=SCHEMA, matrix_schema=matrix['schema'], partial=partial,
         qualified_renderer=qualified, declared_refresh=declared, displays=displays,
-        cells=[dict(id=result['id'], state=result['state'], reason=result['reason'],
+        cells=[dict(id=result['id'], workload=result['workload'], kind=result['kind'],
+                    warmup_frames=result['warmup_frames'],
+                    measured_frames=result['measured_frames'], script=result['script'],
+                    state=result['state'], reason=result['reason'],
                     adapter=result['adapter'], artifact=result['artifact'],
                     verdict=result['verdict']) for result in results],
         summary=summary, adapter_identical=adapter_identical,
