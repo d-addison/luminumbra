@@ -263,6 +263,16 @@ int LoadSimBudgetProfileOption(ServerCliOptions& options) {
     if (options.sim_budget_profile_path.empty()) {
         return 0;
     }
+    // Only the smoke lane evaluates a profile; refuse modes that dispatch earlier or elsewhere
+    // rather than accepting the flag and silently not enforcing it.
+    if (!options.mutate_replay_fixture.empty() || options.lockstep_loopback ||
+        !options.replay_path.empty() || !options.record_path.empty() || options.heavy ||
+        options.weather_bench || options.aether_bench || options.wind_bench || options.net_soak ||
+        options.net_soak_client || options.net_host || options.net_join || options.replicate) {
+        LUMINUMBRA_CORE_ERROR("sim-budget-profile refused: only the smoke lane enforces a "
+                              "profile; remove the incompatible mode flag");
+        return 2;
+    }
     const std::string& path = options.sim_budget_profile_path;
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) {
