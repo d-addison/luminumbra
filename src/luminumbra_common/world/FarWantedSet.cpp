@@ -1,6 +1,6 @@
-#include "luminumbra_common/world/FarWantedSet.h"
+#include "FarWantedSet.h"
 
-#include "luminumbra_common/world/FarTierTable.h"
+#include "FarTierTable.h"
 
 #include <algorithm>
 #include <array>
@@ -192,6 +192,12 @@ bool CoarseSurfaceMayYield(const FarTileKey& coarse,
     const std::size_t coarse_tier = TierOf(coarse);
     if (!IsValidTier(coarse_tier) || coarse_tier < 2) {
         return false;
+    }
+
+    constexpr std::int64_t kMaxCoarseCoordinate = std::numeric_limits<std::int64_t>::max() / 2 - 1;
+    if (coarse.tx > kMaxCoarseCoordinate || coarse.tx < -kMaxCoarseCoordinate ||
+        coarse.tz > kMaxCoarseCoordinate || coarse.tz < -kMaxCoarseCoordinate) {
+        return false; // children would not be representable
     }
 
     // The coarse footprint is replaced only when all four finer tiles that tile it

@@ -1,3 +1,4 @@
+#include "luminumbra_common/world/FarTierTable.h"
 #include "luminumbra_common/world/FarWantedSet.h"
 
 #include <gtest/gtest.h>
@@ -74,6 +75,7 @@ std::vector<FarTileKey> FourChildren() {
 
 std::vector<FarResidentTile> ResidentFor(const std::vector<FarTileKey>& keys, FarTileState state) {
     std::vector<FarResidentTile> resident;
+    resident.reserve(keys.size());
     for (const FarTileKey& key : keys) {
         resident.push_back(MakeResident(key, state));
     }
@@ -370,7 +372,7 @@ TEST(FarEviction, ZeroBudgetMeansUnlimited) {
 }
 
 TEST(FarEviction, FinestTierEvictedBeforeCoarserTier) {
-    std::vector<FarResidentTile> resident = {
+    const std::vector<FarResidentTile> resident = {
         MakeResident(Key(1, 0, 0), FarTileState::Ready, 100),
         MakeResident(Key(1, 1, 0), FarTileState::Ready, 100),
         MakeResident(Key(1, 0, 1), FarTileState::Ready, 100),

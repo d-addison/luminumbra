@@ -4,7 +4,7 @@
 // declared in FarTierTable.h; see docs/distant-world.md. No GL, no I/O and no
 // scheduler state: results depend only on the arguments and the tier table.
 
-#include "luminumbra_common/world/FarTierTable.h"
+#include "FarTierTable.h"
 
 #include <array>
 #include <cstddef>
