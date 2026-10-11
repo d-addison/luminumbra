@@ -29,6 +29,9 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          # The action clears its package cache at the end; restores come from
+          # the archives the script stages itself, so the cache stays off.
+          cache: false
           install: >-
             curl
             git

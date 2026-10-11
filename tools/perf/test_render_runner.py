@@ -90,10 +90,15 @@ def _report_timeout(receipt, log):
               if SURFACE_READY_PHASE.search(line)]
     last_phase = phases[-1].strip() if phases else None
     receipt.update(log_tail=tail, last_observed_phase=last_phase)
-    print(f"render runner: timed out after {receipt['timeout_seconds']} s", file=sys.stderr)
-    print(tail, file=sys.stderr)
-    print('last EnsureSurfaceReadyNear phase: ' + (last_phase or '(none observed)'),
-          file=sys.stderr)
+    # Diagnostics are best effort: a closed or failing stderr must not replace
+    # the TimeoutExpired or prevent receipt retention.
+    try:
+        print(f"render runner: timed out after {receipt['timeout_seconds']} s", file=sys.stderr)
+        print(tail, file=sys.stderr)
+        print('last EnsureSurfaceReadyNear phase: ' + (last_phase or '(none observed)'),
+              file=sys.stderr)
+    except (OSError, ValueError):
+        pass
 
 
 def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path):
@@ -121,9 +126,11 @@ def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_
         receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
                        else receipt['outcome'], exception_type=type(error).__name__,
                        exception_message=str(error))
-        if isinstance(error, subprocess.TimeoutExpired):
-            _report_timeout(receipt, log)
-        _retain_process_evidence(receipt, artifact, retained, receipt_path)
+        try:
+            if isinstance(error, subprocess.TimeoutExpired):
+                _report_timeout(receipt, log)
+        finally:
+            _retain_process_evidence(receipt, artifact, retained, receipt_path)
         raise
     errors = _retain_process_evidence(receipt, artifact, retained, receipt_path)
     return result, errors

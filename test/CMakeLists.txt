@@ -1015,6 +1015,30 @@ target_link_libraries(initial_world_loading_perf_test PRIVATE
     luminumbra_common
 )
 
+# Gtest-free worldgen timing probe. Uses public engine APIs only. It is not a
+# gtest target, so its smoke run is a direct add_test rather than discovery.
+add_executable(worldgen_probe
+    diagnostics/worldgen_probe.cpp
+)
+
+target_compile_definitions(worldgen_probe PRIVATE
+    LUMINUMBRA_SOURCE_ROOT="${CMAKE_SOURCE_DIR}"
+)
+
+target_include_directories(worldgen_probe PRIVATE
+../src
+)
+
+target_link_libraries(worldgen_probe PRIVATE
+    luminumbra_common
+)
+
+luminumbra_configure_first_party_target(worldgen_probe)
+
+add_test(NAME WorldgenProbeSmoke
+    COMMAND worldgen_probe --smoke --json ${CMAKE_CURRENT_BINARY_DIR}/worldgen_probe_smoke.json)
+set_tests_properties(WorldgenProbeSmoke PROPERTIES LABELS "perf" TIMEOUT 120)
+
 # Manual cold-load latency diagnostic. It exercises twenty interactive loads at
 # radius 12/4 with the watchdog armed, but deliberately makes no machine-speed
 # claim. The required performance workflow uses paired relative observations.

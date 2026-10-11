@@ -265,6 +265,24 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'Static-model textures'):
                 self.case.run_client('capture')
 
+    def test_closed_or_failing_stderr_cannot_mask_timeout(self):
+        closed = io.StringIO()
+        closed.close()
+
+        class FailingStream(io.StringIO):
+            def write(self, text):
+                raise OSError('fixture stderr write refused')
+
+        for stream in (closed, FailingStream()):
+            with self.subTest(stream=type(stream).__name__), redirect_stderr(stream):
+                self.assert_timeout()
+            receipt = self.receipt()
+            self.assertEqual(receipt['outcome'], 'timed_out')
+            self.assertEqual(receipt['capture_status'], 'retained')
+            self.assertEqual(receipt['evidence_errors'], [])
+            self.assertIn('log_tail', receipt)
+            self.assertTrue(self.paths()[0].is_file())
+
     def test_process_elapsed_excludes_evidence_finalization(self):
         # Use a private clock object so subprocess's real deadline clock stays real.
         clock = mock.Mock()
