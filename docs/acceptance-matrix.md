@@ -2,6 +2,8 @@
 
 This file is generated from `tools/ci/acceptance_matrix.json` by `tools/ci/check_acceptance_matrix.py --write-doc`. Do not edit it by hand; change the matrix and regenerate.
 
+Statuses declare the available evidence. Static validation checks references; it does not prove execution. JUnit mode checks every referenced CTest identity in the supplied discovery roster, including parameter instances. Scripts, documents and native commands need separate evidence; a passing CTest gate does not qualify the full acceptance contract.
+
 | Status | Rows |
 | --- | ---: |
 | covered | 8 |

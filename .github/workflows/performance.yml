@@ -35,6 +35,8 @@ jobs:
           python tools/perf/test_render_contract.py
           python tools/perf/test_render_budget.py
           python tools/ci/test_validate_performance_measurement.py
+      - name: Test acceptance matrix execution contract
+        run: python tools/ci/test_check_acceptance_matrix.py
 
   preview-frame:
     name: Preview frame / software OpenGL

@@ -7,9 +7,12 @@ import copy
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -713,7 +716,7 @@ class AcceptanceMatrixTests(unittest.TestCase):
         doc = self.root / "docs" / "acceptance-matrix.md"
         code, out, err = self.run_main(*self.base_args(), "--write-doc", str(doc))
         self.assertEqual(code, 0, err)
-        self.assertIn("acceptance matrix ok: 4 rows", out)
+        self.assertIn("static references ok: 4 rows; execution unevaluated", out)
         self.assertNotIn(b"\r", doc.read_bytes())
         code, _, err = self.run_main(*self.base_args(), "--check-doc", str(doc))
         self.assertEqual(code, 0, err)
@@ -775,6 +778,168 @@ class AcceptanceMatrixTests(unittest.TestCase):
         code, _, err = self.run_main(*self.base_args())
         self.assertEqual(code, 2)
         self.assertTrue(err.startswith("error: "), err)
+
+    def execution_inputs(self, cases: list[dict[str, Any]] | None = None) -> tuple[Path, Path]:
+        discovery = self.tmp / "discovery.json"
+        discovery.write_text(json.dumps({"kind": "ctestInfo", "tests": [
+            {"name": name} for name in ("AlphaContract", "Alpha.One", "Instances/Param.Three/0",
+                                        "Instances/Param.Three/1", "Unrelated")
+        ]}), encoding="utf-8")
+        report = self.tmp / "ctest.junit.xml"
+        if cases is None:
+            cases = [{"name": name, "status": "run"} for name in
+                     ("AlphaContract", "Alpha.One", "Instances/Param.Three/0", "Instances/Param.Three/1")]
+        self.write_junit(report, cases)
+        return discovery, report
+
+    def write_junit(self, path: Path, cases: list[dict[str, Any]]) -> None:
+        suite = ET.Element("testsuite")
+        for spec in cases:
+            spec = dict(spec)
+            adverse = spec.pop("adverse", None)
+            case = ET.SubElement(suite, "testcase", spec)
+            if adverse:
+                ET.SubElement(case, adverse)
+        ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
+
+    def execution(self, discovery: Path, *reports: Path, matrix: dict[str, Any] | None = None) -> dict[str, Any]:
+        return MODULE.validate_execution(matrix or baseline_matrix(), self.index, list(reports), discovery)
+
+    def test_execution_uses_every_discovered_parameter_and_scopes_other_evidence(self) -> None:
+        discovery, report = self.execution_inputs()
+        receipt = self.execution(discovery, report)
+        self.assertTrue(receipt["ctest_references_passed"])
+        self.assertFalse(receipt["full_acceptance_qualified"])
+        parameter = next(ref for ref in receipt["references"] if ref["ref"] == "Param.*")
+        self.assertEqual(parameter["expected"], ["Instances/Param.Three/0", "Instances/Param.Three/1"])
+        self.assertEqual({entry["kind"] for entry in receipt["unevaluated"]}, {"script", "native", "doc"})
+        self.assertEqual({entry["reason"] for entry in receipt["unevaluated"]},
+                         {"planned", "separate-evidence-required"})
+        self.assertEqual(len(receipt["discovery_sha256"]), 64)
+        self.assertEqual(receipt["reports"][0]["name"], report.name)
+
+    def test_execution_cannot_hide_an_omitted_parameter_instance(self) -> None:
+        discovery, report = self.execution_inputs()
+        tree = ET.parse(report)
+        tree.getroot().remove(tree.getroot()[-1])
+        tree.write(report, encoding="utf-8")
+        receipt = self.execution(discovery, report)
+        self.assertFalse(receipt["ctest_references_passed"])
+        parameter = next(ref for ref in receipt["references"] if ref["ref"] == "Param.*")
+        self.assertEqual(parameter["missing"], ["Instances/Param.Three/1"])
+
+    def test_execution_refuses_adverse_and_nonexecuted_statuses(self) -> None:
+        for status, result, adverse in (("run", None, "failure"), ("run", None, "error"),
+                                        ("run", None, "skipped"), ("notrun", None, None),
+                                        ("disabled", None, None), (None, None, None),
+                                        ("run", "suppressed", None)):
+            with self.subTest(status=status, result=result, adverse=adverse):
+                discovery, report = self.execution_inputs()
+                tree = ET.parse(report)
+                first = tree.getroot()[0]
+                first.attrib.pop("status")
+                if status is not None:
+                    first.set("status", status)
+                if result is not None:
+                    first.set("result", result)
+                if adverse:
+                    ET.SubElement(first, adverse)
+                tree.write(report, encoding="utf-8")
+                receipt = self.execution(discovery, report)
+                self.assertFalse(receipt["ctest_references_passed"])
+                self.assertEqual(receipt["references"][0]["adverse"], ["AlphaContract"])
+
+    def test_successful_duplicate_cannot_mask_a_failure_in_another_report(self) -> None:
+        discovery, report = self.execution_inputs()
+        duplicate = self.tmp / "second.xml"
+        self.write_junit(duplicate, [{"name": "AlphaContract", "status": "run", "adverse": "failure"}])
+        receipt = self.execution(discovery, report, duplicate)
+        self.assertFalse(receipt["ctest_references_passed"])
+        self.assertEqual(receipt["references"][0]["adverse"], ["AlphaContract"])
+
+    def test_extra_report_supplies_separately_run_manual_test(self) -> None:
+        (self.root / "test" / "manual.cmake").write_text("add_test(NAME ManualSoak COMMAND soak)\n", encoding="utf-8")
+        self.index = MODULE.index_tests(self.root)
+        matrix = baseline_matrix()
+        matrix["rows"][0]["evidence"].append({"kind": "ctest", "ref": "ManualSoak"})
+        discovery, report = self.execution_inputs()
+        inventory = json.loads(discovery.read_text(encoding="utf-8"))
+        inventory["tests"].append({"name": "ManualSoak"})
+        discovery.write_text(json.dumps(inventory), encoding="utf-8")
+        self.assertFalse(self.execution(discovery, report, matrix=matrix)["ctest_references_passed"])
+        soak = self.tmp / "soak.xml"
+        self.write_junit(soak, [{"name": "ManualSoak", "status": "run"}])
+        self.assertTrue(self.execution(discovery, report, soak, matrix=matrix)["ctest_references_passed"])
+
+    def test_execution_rejects_undiscovered_matching_identity_and_classname_guess(self) -> None:
+        discovery, report = self.execution_inputs()
+        wrong = self.tmp / "wrong.xml"
+        self.write_junit(wrong, [{"name": "Instances/Param.Three/2", "status": "run"}])
+        receipt = self.execution(discovery, report, wrong)
+        self.assertFalse(receipt["ctest_references_passed"])
+        parameter = next(ref for ref in receipt["references"] if ref["ref"] == "Param.*")
+        self.assertEqual(parameter["unexpected"], ["Instances/Param.Three/2"])
+        self.write_junit(report, [{"name": "One", "classname": "Alpha", "status": "run"}])
+        self.assertFalse(self.execution(discovery, report)["ctest_references_passed"])
+
+    def test_execution_rejects_empty_or_invalid_discovery_and_reports(self) -> None:
+        for document in ({"kind": "ctestInfo", "tests": []}, {"kind": "wrong", "tests": [{"name": "AlphaContract"}]},
+                         {"kind": "ctestInfo", "tests": [{"name": "AlphaContract"}, {"name": "AlphaContract"}]}, []):
+            with self.subTest(document=document):
+                discovery, report = self.execution_inputs()
+                discovery.write_text(json.dumps(document), encoding="utf-8")
+                with self.assertRaises(MODULE.MatrixError):
+                    self.execution(discovery, report)
+        for document in ("<testsuite/>", "<not-junit><testcase name='AlphaContract'/></not-junit>", "<invalid"):
+            with self.subTest(document=document):
+                discovery, report = self.execution_inputs()
+                report.write_text(document, encoding="utf-8")
+                with self.assertRaises(MODULE.MatrixError):
+                    self.execution(discovery, report)
+
+    def test_script_only_matrix_is_execution_unevaluated(self) -> None:
+        matrix = baseline_matrix()
+        matrix["rows"] = [matrix["rows"][0]]
+        matrix["rows"][0]["evidence"] = [{"kind": "script", "ref": "tools/script.py"}]
+        discovery, report = self.execution_inputs()
+        receipt = self.execution(discovery, report, matrix=matrix)
+        self.assertFalse(receipt["ctest_references_passed"])
+        self.assertEqual(receipt["references"], [])
+        self.assertFalse(receipt["full_acceptance_qualified"])
+
+    def test_execution_cli_writes_scoped_receipt_and_requires_discovery(self) -> None:
+        self.write_matrix(baseline_matrix())
+        discovery, report = self.execution_inputs()
+        code, _, err = self.run_main(*self.base_args(), "--junit", str(report))
+        self.assertEqual(code, 2, err)
+        receipt = self.tmp / "output" / "receipt.json"
+        code, out, err = self.run_main(*self.base_args(), "--junit", str(report), "--discovery", str(discovery),
+                                       "--execution-receipt", str(receipt))
+        self.assertEqual(code, 0, err)
+        self.assertIn("full acceptance remains unqualified", out)
+        data = json.loads(receipt.read_text(encoding="utf-8"))
+        self.assertIsNone(data["identity"])
+        self.assertEqual(len(data["matrix_sha256"]), 64)
+
+    def test_ci_identity_binds_checkout_and_candidate_and_refuses_bad_context(self) -> None:
+        checkout, candidate = "a" * 40, "b" * 40
+        event = self.tmp / "event.json"
+        event.write_text(json.dumps({"pull_request": {"head": {"sha": candidate}}}), encoding="utf-8")
+        environment = {"CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_EVENT_PATH": str(event),
+                       "GITHUB_SHA": checkout, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+                       "GITHUB_JOB": "linux-gcc"}
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(MODULE.subprocess, "check_output", return_value=checkout + "\n"):
+            identity = MODULE._ci_identity(self.root)
+            self.assertEqual((identity["checkout_sha"], identity["candidate_sha"]), (checkout, candidate))
+            for key, bad in (("GITHUB_SHA", candidate), ("GITHUB_RUN_ATTEMPT", "0"), ("GITHUB_ACTIONS", "false")):
+                with self.subTest(key=key), mock.patch.dict(os.environ, {key: bad}):
+                    with self.assertRaises(MODULE.MatrixError):
+                        MODULE._ci_identity(self.root)
+            for invalid in ([], {"pull_request": {}}, {"pull_request": {"head": {"sha": "short"}}}):
+                event.write_text(json.dumps(invalid), encoding="utf-8")
+                with self.subTest(event=invalid), self.assertRaises(MODULE.MatrixError):
+                    MODULE._ci_identity(self.root)
 
 
 if __name__ == "__main__":

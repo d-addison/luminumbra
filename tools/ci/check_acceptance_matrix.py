@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -449,6 +453,120 @@ def validate(
     return [f"{label}: {message}" for label, message in sorted(problems)]
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _discovered_names(path: Path) -> frozenset[str]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        tests = document["tests"]
+        if document.get("kind") != "ctestInfo" or not isinstance(tests, list) or not tests:
+            raise ValueError("expected a nonempty CTest discovery inventory")
+        names = [test["name"] for test in tests]
+        if any(not _is_nonempty_str(name) for name in names) or len(set(names)) != len(names):
+            raise ValueError("invalid or duplicate discovered test identity")
+        return frozenset(names)
+    except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as exc:
+        raise MatrixError(f"cannot read CTest discovery {path}: {exc}") from exc
+
+
+def _executed_cases(paths: list[Path]) -> dict[str, list[bool]]:
+    """Preserve every occurrence; a successful duplicate cannot hide a failure."""
+    cases: dict[str, list[bool]] = {}
+    for path in paths:
+        try:
+            root = ET.parse(path).getroot()
+            elements = list(root.iter("testcase"))
+            if root.tag not in {"testsuite", "testsuites"} or not elements:
+                raise ValueError("expected nonempty CTest JUnit")
+            for case in elements:
+                name = case.get("name")
+                if not _is_nonempty_str(name):
+                    raise ValueError("testcase has no identity")
+                passed = (
+                    case.get("status") == "run"
+                    and case.get("result") in {None, "completed"}
+                    and all(case.find(tag) is None for tag in ("failure", "error", "skipped"))
+                )
+                cases.setdefault(name, []).append(passed)
+        except (OSError, ET.ParseError, ValueError) as exc:
+            raise MatrixError(f"cannot read CTest JUnit {path}: {exc}") from exc
+    return cases
+
+
+def _execution_match(ref: str, name: str, index: TestIndex) -> bool:
+    if ref in index.ctest_names:
+        return name == ref
+    match = SUITE_REF_RE.fullmatch(ref)
+    if match is None:
+        return False
+    suite, case = match.groups()
+    case_pattern = r"[A-Za-z_]\w*" if case == "*" else re.escape(case)
+    # CTest's parameterized names use Instantiation/Suite.Case/pretty-value.
+    # Match the complete identity; classname is not a CTest suite prefix.
+    return re.fullmatch(
+        r"(?:[^/]+/)*" + re.escape(suite) + r"\." + case_pattern + r"(?:/.*)?", name
+    ) is not None
+
+
+def validate_execution(
+    matrix: dict[str, Any], index: TestIndex, reports: list[Path], discovery: Path
+) -> dict[str, Any]:
+    names = _discovered_names(discovery)
+    cases = _executed_cases(reports)
+    results: list[dict[str, Any]] = []
+    unevaluated: list[dict[str, str]] = []
+    for row in matrix["rows"]:
+        for item in row["evidence"]:
+            if "planned" in item or item["kind"] != "ctest":
+                unevaluated.append({"row": row["id"], "kind": item["kind"], "ref": item["ref"],
+                                    "reason": "planned" if "planned" in item else "separate-evidence-required"})
+                continue
+            ref = item["ref"]
+            expected = sorted(name for name in names if _execution_match(ref, name, index))
+            observed = sorted(name for name in cases if _execution_match(ref, name, index))
+            missing = [name for name in expected if name not in cases]
+            adverse = [name for name in observed if not all(cases[name])]
+            unexpected = sorted(set(observed) - set(expected))
+            passed = bool(expected) and not missing and not adverse and not unexpected
+            results.append({"row": row["id"], "ref": ref, "passed": passed,
+                            "expected": expected, "observed": observed, "missing": missing,
+                            "adverse": adverse, "unexpected": unexpected})
+    return {"schema": "luminumbra.acceptance_execution.v1", "scope": "ctest-references-only",
+            "ctest_references_passed": bool(results) and all(result["passed"] for result in results),
+            "full_acceptance_qualified": False, "references": results, "unevaluated": unevaluated,
+            "discovery_sha256": _sha256(discovery),
+            "reports": [{"name": path.name, "sha256": _sha256(path)} for path in reports]}
+
+
+def _ci_identity(root: Path) -> dict[str, Any]:
+    """Bind job-local reports to the actual checkout; raw reports stay unbound."""
+    if os.environ.get("CI") != "true" or os.environ.get("GITHUB_ACTIONS") != "true":
+        raise MatrixError("--ci-context requires a GitHub Actions job")
+    try:
+        checkout = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+        if not isinstance(event, dict):
+            raise ValueError("workflow event must be an object")
+        if checkout != os.environ["GITHUB_SHA"] or re.fullmatch(r"[0-9a-f]{40}", checkout) is None:
+            raise ValueError("checkout differs from the workflow revision")
+        if "pull_request" in event:
+            head = event["pull_request"]["head"]["sha"]
+        else:
+            head = checkout
+        if not isinstance(head, str) or re.fullmatch(r"[0-9a-f]{40}", head) is None:
+            raise ValueError("invalid candidate identity")
+        run_id, attempt, job = (os.environ[key] for key in
+                                ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB"))
+        if not run_id.isdecimal() or int(run_id) <= 0 or not attempt.isdecimal() or int(attempt) <= 0 or not job:
+            raise ValueError("invalid workflow run identity")
+        return {"checkout_sha": checkout, "candidate_sha": head, "run_id": run_id,
+                "run_attempt": attempt, "job": job}
+    except (OSError, subprocess.CalledProcessError, KeyError, ValueError, TypeError) as exc:
+        raise MatrixError(f"cannot bind CI execution identity: {exc}") from exc
+
+
 def _escape_cell(text: str) -> str:
     return text.replace("|", "\\|")
 
@@ -483,6 +601,11 @@ def render_doc(matrix: dict[str, Any]) -> str:
         "This file is generated from `tools/ci/acceptance_matrix.json` by "
         "`tools/ci/check_acceptance_matrix.py --write-doc`. Do not edit it by hand; "
         "change the matrix and regenerate.",
+        "",
+        "Statuses declare the available evidence. Static validation checks references; it does not "
+        "prove execution. JUnit mode checks every referenced CTest identity in the supplied discovery "
+        "roster, including parameter instances. Scripts, documents and native commands need separate "
+        "evidence; a passing CTest gate does not qualify the full acceptance contract.",
         "",
         "| Status | Rows |",
         "| --- | ---: |",
@@ -524,12 +647,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check-doc", type=Path, default=None)
     parser.add_argument("--write-doc", type=Path, default=None)
     parser.add_argument("--require-landed", action="store_true")
+    parser.add_argument("--junit", type=Path, action="append", default=[])
+    parser.add_argument("--discovery", type=Path)
+    parser.add_argument("--execution-receipt", type=Path)
+    parser.add_argument("--ci-context", action="store_true")
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 0)
 
     root = args.root.resolve()
+    if bool(args.junit) != bool(args.discovery) or ((args.execution_receipt or args.ci_context) and not args.junit):
+        print("error: --junit and --discovery are required together for execution evidence", file=sys.stderr)
+        return 2
     matrix_path = args.matrix if args.matrix is not None else root / "tools" / "ci" / "acceptance_matrix.json"
     try:
         matrix = load_matrix(matrix_path)
@@ -537,7 +667,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    errors = validate(matrix, index_tests(root), root, args.require_landed)
+    index = index_tests(root)
+    errors = validate(matrix, index, root, args.require_landed)
     if errors:
         for message in errors:
             print(f"error: {message}", file=sys.stderr)
@@ -558,7 +689,25 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    print(f"acceptance matrix ok: {len(matrix['rows'])} rows")
+    if args.junit:
+        try:
+            receipt = validate_execution(matrix, index, args.junit, args.discovery)
+            receipt["matrix_sha256"] = _sha256(matrix_path)
+            receipt["identity"] = _ci_identity(root) if args.ci_context else None
+            if args.execution_receipt:
+                args.execution_receipt.parent.mkdir(parents=True, exist_ok=True)
+                args.execution_receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except (MatrixError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        for reference in receipt["references"]:
+            if not reference["passed"]:
+                print(f"error: {reference['row']}: CTest execution incomplete or failing: {reference['ref']}", file=sys.stderr)
+        if not receipt["ctest_references_passed"]:
+            return 1
+        print(f"acceptance CTest references passed: {len(receipt['references'])}; full acceptance remains unqualified")
+    else:
+        print(f"acceptance matrix static references ok: {len(matrix['rows'])} rows; execution unevaluated")
     return 0
 
 
