@@ -4,16 +4,21 @@
 #include "persistence/WorldSaveService.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
+#include <ios>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 namespace Luminumbra::World {
 namespace {
@@ -425,7 +430,7 @@ FarOverlayDecodeResult DecodeFarOverlay(std::string_view bytes, const FarTileKey
             return fail(brick_error);
         }
         previous = OrderKey(bx, by, bz);
-        tile.bricks.push_back(std::move(brick));
+        tile.bricks.push_back(brick);
 
         cursor += kFsv1BodyHeaderBytes + (present ? kFsv1PresentPayloadBytes : 0);
     }
@@ -565,7 +570,8 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
         return false;
     }
     if (!is_directory) {
-        return true;
+        Report(errors, "far overlay directory: not a directory");
+        return false;
     }
 
     struct Candidate {
@@ -573,6 +579,7 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
         FarTileKey key;
     };
     std::vector<Candidate> candidates;
+    bool failed = false;
 
     std::filesystem::directory_iterator iterator(dir, ec);
     if (ec) {
@@ -588,9 +595,12 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
             Report(errors, "far overlay directory: IoError");
             return false;
         }
-        if (regular) {
-            const std::string file_name = entry.path().filename().string();
-            if (const auto key = ParseFarOverlayFileName(file_name)) {
+        const std::string file_name = entry.path().filename().string();
+        if (const auto key = ParseFarOverlayFileName(file_name)) {
+            if (!regular) {
+                Report(errors, "far overlay " + file_name + ": not a regular file");
+                failed = true;
+            } else {
                 candidates.push_back(Candidate{file_name, *key});
             }
         }
@@ -605,7 +615,6 @@ bool ValidateFarOverlayDirectory(const std::filesystem::path& save_dir,
         return a.file_name < b.file_name;
     });
 
-    bool failed = false;
     for (const Candidate& candidate : candidates) {
         const FarOverlayDecodeResult decoded = ReadFarOverlay(save_dir, candidate.key);
         if (decoded.error != FarOverlayError::None) {

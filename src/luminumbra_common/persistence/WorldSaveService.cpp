@@ -477,6 +477,43 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     return true;
 }
 
+// Flushes the directory that holds a newly created entry so the entry survives
+// power loss.
+bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
+                         std::vector<std::string>* errors) {
+    int directory_flags = O_RDONLY;
+#if defined(O_DIRECTORY)
+    directory_flags |= O_DIRECTORY;
+#endif
+    const int directory = ::open(directory_path.c_str(), directory_flags);
+    if (directory < 0) {
+        const int error = errno;
+        AddError(errors,
+                 "cannot open directory for durable flush: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    while (::fsync(directory) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        const int error = errno;
+        ::close(directory);
+        AddError(errors,
+                 "directory flush failed: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    if (::close(directory) != 0) {
+        const int error = errno;
+        AddError(errors,
+                 "directory close failed after flush: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    return true;
+}
+
 #endif
 
 bool CompressPayload(const std::string& payload,
@@ -1256,9 +1293,25 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
 bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
                                           const std::string& bytes,
                                           std::vector<std::string>* errors) {
+    // Directories this call creates are recorded so their parents can be flushed:
+    // the replacement helper only flushes the destination's own directory.
+    std::vector<std::filesystem::path> created_directories;
     std::error_code directory_error;
     if (destination.has_parent_path()) {
-        std::filesystem::create_directories(destination.parent_path(), directory_error);
+        const std::filesystem::path parent = destination.parent_path();
+        for (std::filesystem::path probe = parent; !probe.empty(); probe = probe.parent_path()) {
+            const bool exists = std::filesystem::exists(probe, directory_error);
+            if (directory_error || exists) {
+                break;
+            }
+            created_directories.push_back(probe);
+            if (probe == probe.parent_path()) {
+                break;
+            }
+        }
+        if (!directory_error) {
+            std::filesystem::create_directories(parent, directory_error);
+        }
     }
     if (directory_error) {
         AddError(errors,
@@ -1266,6 +1319,15 @@ bool WorldSaveService::write_file_durably(const std::filesystem::path& destinati
                      directory_error.message());
         return false;
     }
+#if !defined(_WIN32)
+    for (const std::filesystem::path& created : created_directories) {
+        if (!FlushDirectoryEntry(created.has_parent_path() ? created.parent_path()
+                                                           : std::filesystem::path("."),
+                                 errors)) {
+            return false;
+        }
+    }
+#endif
     std::filesystem::path temp_path;
     if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
         return false;

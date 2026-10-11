@@ -193,7 +193,7 @@ public:
     }
 };
 
-std::optional<std::uint64_t> Gen(std::uint64_t value) {
+constexpr std::optional<std::uint64_t> Gen(std::uint64_t value) {
     return value;
 }
 
@@ -481,6 +481,24 @@ TEST(FarOverlayFiles, ValidateDirectory) {
         WriteValidTree(temp.path());
         const std::filesystem::path file = FarOverlayPath(temp.path(), Key(2, -1, 3));
         WriteBytes(file, Patched(ReadBytes(file), 4, 2, 2, false));
+
+        std::vector<std::string> errors;
+        EXPECT_FALSE(ValidateFarOverlayDirectory(temp.path(), &errors));
+        EXPECT_EQ(errors.size(), 1u);
+    }
+    {
+        // A directory that carries an overlay name cannot be read as an overlay.
+        TempDir temp;
+        std::filesystem::create_directories(temp.path() / "far" / "v1.0.0.lmr");
+
+        std::vector<std::string> errors;
+        EXPECT_FALSE(ValidateFarOverlayDirectory(temp.path(), &errors));
+        EXPECT_EQ(errors.size(), 1u);
+    }
+    {
+        // `far` existing as a regular file is a corrupt save layout.
+        TempDir temp;
+        WriteBytes(temp.path() / "far", "not a directory");
 
         std::vector<std::string> errors;
         EXPECT_FALSE(ValidateFarOverlayDirectory(temp.path(), &errors));

@@ -167,10 +167,13 @@ public:
     // Writes `bytes` to `destination` with the same durability contract as an LMR1
     // region rewrite: the parent directory is created, a unique temporary file in
     // the destination directory is flushed to stable storage, and it atomically
-    // replaces the destination. A failed or interrupted write (including the
-    // interrupt-before-replace test seam above) removes the temporary file and
-    // leaves any previous destination untouched. Used for derived files that live
-    // beside the save, such as the far authority overlay.
+    // replaces the destination. Directories created by the call are flushed through
+    // their parents. A failed or interrupted write (including the
+    // interrupt-before-replace test seam above) removes the temporary file; the
+    // destination is then the previous complete file, or on POSIX the new complete
+    // file when only the final directory flush failed, never a partial file. Used
+    // for derived files that live beside the save, such as the far authority
+    // overlay.
     static bool write_file_durably(const std::filesystem::path& destination,
                                    const std::string& bytes,
                                    std::vector<std::string>* errors = nullptr);
