@@ -24,7 +24,7 @@ readonly SUMMARY_FILE="$DIAG_DIR/summary.md"
 readonly RUNTIME_DLLS=(libwinpthread-1.dll libstdc++-6.dll libgcc_s_seh-1.dll)
 readonly BUILD_PROCESS_NAMES=(ninja cmake cc1plus cc1 collect2 ld as gcc g++)
 # Native Windows build tools that procps cannot see; matched through tasklist.exe.
-readonly WIN_BUILD_IMAGES=(cmake.exe ninja.exe cc1plus.exe g++.exe gcc.exe ld.exe collect2.exe ctest.exe)
+readonly WIN_BUILD_IMAGES=(cmake.exe ninja.exe cc1plus.exe cc1.exe g++.exe gcc.exe ld.exe as.exe ar.exe ranlib.exe windres.exe lto-wrapper.exe lto1.exe collect2.exe ctest.exe worldgen_probe.exe)
 
 CELLS="${CELLS:-0 1 2 3 4 5}"
 STEP_TIMEOUT_MINUTES="${STEP_TIMEOUT_MINUTES:-25}"
@@ -191,10 +191,11 @@ retire_path() {
 }
 
 # native_build_pids: print "PID IMAGE" for each native Windows process that is a
-# known build tool or a test binary built under $PWD/build. Prints nothing when
-# tasklist.exe is absent (non-Windows hosts).
+# known build tool or a test binary built under $PWD/build. Prints nothing and
+# succeeds when tasklist.exe is absent (non-Windows hosts). Fails when tasklist.exe
+# exits nonzero or prints output that is not CSV process rows.
 native_build_pids() {
-    local name pid image
+    local name pid image listing rc=0
     local -a targets=("${WIN_BUILD_IMAGES[@]}")
     if ! command -v tasklist.exe >/dev/null 2>&1; then
         return 0
@@ -202,7 +203,15 @@ native_build_pids() {
     while IFS= read -r name; do
         targets+=("$(basename "$name")")
     done < <(find "$PWD/build" -type f \( -name '*_test.exe' -o -name 'luminumbra*test*.exe' \) 2>/dev/null)
-    tasklist.exe //FO CSV //NH 2>/dev/null | tr -d '\r' \
+    listing="$(tasklist.exe //FO CSV //NH 2>/dev/null)" || rc=$?
+    if (( rc != 0 )); then
+        return 1
+    fi
+    listing="$(printf '%s\n' "$listing" | tr -d '\r')"
+    if ! grep -qE '^"[^"]+","[0-9]+"' <<< "$listing"; then
+        return 1
+    fi
+    printf '%s\n' "$listing" \
         | awk -F'","' '{ sub(/^"/, "", $1); print $2 " " $1 }' \
         | while read -r pid image; do
             for name in "${targets[@]}"; do
@@ -217,10 +226,15 @@ native_build_pids() {
 
 # ensure_no_native_build_processes: terminate surviving native build processes
 # with their child trees, then poll for up to about 30 s until none remain.
+# A failed enumeration is a failure, never an empty process list.
 ensure_no_native_build_processes() {
     local attempt pid image survivors
     for (( attempt = 0; attempt < 15; attempt++ )); do
-        survivors="$(native_build_pids)"
+        if ! survivors="$(native_build_pids)"; then
+            PKG_REASON="native process enumeration failed"
+            echo "$PKG_REASON" >&2
+            return 1
+        fi
         if [[ -z "$survivors" ]]; then
             return 0
         fi
@@ -229,7 +243,11 @@ ensure_no_native_build_processes() {
         done <<< "$survivors"
         sleep 2
     done
-    survivors="$(native_build_pids)"
+    if ! survivors="$(native_build_pids)"; then
+        PKG_REASON="native process enumeration failed"
+        echo "$PKG_REASON" >&2
+        return 1
+    fi
     if [[ -z "$survivors" ]]; then
         return 0
     fi
@@ -239,6 +257,7 @@ ensure_no_native_build_processes() {
 
 # ensure_no_build_descendants: no compiler, linker or build-tool process may
 # survive before a package swap. Fails closed when the process tools are absent.
+# Both the procps pass and the native pass always run; either failing fails the check.
 ensure_no_build_descendants() {
     local name attempt remaining
     if ! command -v pgrep >/dev/null 2>&1 || ! command -v pkill >/dev/null 2>&1; then
@@ -255,7 +274,7 @@ ensure_no_build_descendants() {
             fi
         done
         if (( remaining == 0 )); then
-            return 0
+            break
         fi
         sleep 2
     done
@@ -266,7 +285,9 @@ ensure_no_build_descendants() {
             return 1
         fi
     done
-    ensure_no_native_build_processes || return 1
+    if ! ensure_no_native_build_processes; then
+        return 1
+    fi
     return 0
 }
 
@@ -717,13 +738,21 @@ write_summary() {
 
 # skip_cell CELL: record a cell the script budget did not allow to run.
 skip_cell() {
+    local dir
     CELL="$1"
     CELL_PROBE=NOT_RUN
     CELL_PERF=NOT_RUN
     CELL_PREP=""
     CELL_WALL=""
-    mkdir -p "$DIAG_DIR/cell-$CELL" || return 1
-    finish_cell "$DIAG_DIR/cell-$CELL" SKIPPED_BUDGET
+    dir="$DIAG_DIR/cell-$CELL"
+    # Retire any evidence left by an earlier run so a skip never ships stale probe or log files.
+    if ! retire_path "$dir"; then
+        mkdir -p "$dir" || return 1
+        finish_cell "$dir" CLEANUP_FAILED
+        return 1
+    fi
+    mkdir -p "$dir" || return 1
+    finish_cell "$dir" SKIPPED_BUDGET
 }
 
 # finalize: EXIT trap. Restores the baseline when a package swap is pending,
