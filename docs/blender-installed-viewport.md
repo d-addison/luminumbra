@@ -45,7 +45,7 @@ invalid revisions are refused. Each viewport owns a broker process tree; Windows
 uses a kill-on-close Job Object created atomically with its broker, and private
 session directories have a protected current-user ACL. POSIX uses an owned
 process group and mode-0700 directories. Reset, file load and unload close these
-owned clients. See the [client contract](../tools/blender/authoring/VIEWPORT_CLIENT.md)
+owned clients. See the [client contract](https://github.com/d-addison/luminumbra/blob/devel/tools/blender/authoring/VIEWPORT_CLIENT.md)
 for bounds, failure handling and shutdown receipts.
 
 The adapter currently targets Blender's OpenGL backend and the host's static

@@ -64,7 +64,12 @@ class WindowsProcessTests(unittest.TestCase):
                                                      ctypes.byref(descriptor)), 0)
             api.check(a.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4,
                                                                               ctypes.byref(rendered), None))
-            self.assertEqual(rendered.value, 'D:P(A;OICI;FA;;;' + sid.value + ')')
+            # SDDL renders well-known account RIDs as aliases (the hosted runner is the built-in
+            # Administrator, rendered as LA), so accept the alias for the current user's own SID.
+            aliases = {'500': 'LA', '501': 'LG', '512': 'DA'}
+            trustee = aliases.get(sid.value.rsplit('-', 1)[-1]) if sid.value.startswith('S-1-5-21-') else None
+            self.assertIn(rendered.value, tuple('D:P(A;OICI;FA;;;' + name + ')'
+                                                for name in (sid.value, trustee) if name))
         finally:
             for allocation in (sid, descriptor, rendered):
                 if allocation:
