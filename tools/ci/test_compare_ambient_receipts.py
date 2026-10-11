@@ -40,19 +40,32 @@ def receipt_line(**overrides):
     return "AMBIENT_RECEIPT " + " ".join(ordered)
 
 
-def write_junit(directory, name, system_out_lines=(), property_values=()):
+def write_junit(
+    directory,
+    name,
+    system_out_lines=(),
+    property_values=(),
+    attribute_value=None,
+    failed=False,
+):
+    """Write a synthetic CTest JUnit file with optional receipt carriers."""
+    quote = {'"': "&quot;"}
     body = "\n".join(escape(line) for line in system_out_lines)
     properties = "".join(
-        '<property name="ambient_receipt" value="{}"/>'.format(
-            escape(value, {'"': "&quot;"})
-        )
+        '<property name="ambient_receipt" value="{}"/>'.format(escape(value, quote))
         for value in property_values
     )
+    attribute = ""
+    if attribute_value is not None:
+        attribute = ' ambient_receipt="{}"'.format(escape(attribute_value, quote))
+    failure = '<failure message="synthetic failure"/>' if failed else ""
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<testsuites><testsuite name="common_tests" tests="1" failures="0">'
-        '<testcase name="EmitsConstructorAndEvolvedHashes" classname="AmbientDeterminismReceipt">'
+        '<testcase name="EmitsConstructorAndEvolvedHashes" '
+        f'classname="AmbientDeterminismReceipt"{attribute}>'
         f"<properties>{properties}</properties>"
+        f"{failure}"
         "</testcase>"
         f"<system-out>{body}</system-out>"
         "</testsuite></testsuites>\n"
@@ -178,6 +191,58 @@ class CompareAmbientReceiptsTests(unittest.TestCase):
             code, _out, err = run_main([f"a={lane}"])
         self.assertEqual(code, 2)
         self.assertIn("version", err)
+
+    def test_empty_hash_value_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = write_junit(directory, "a.xml", [receipt_line(wind_ctor="")])
+            code, out, err = run_main([f"a={lane}"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("wind_ctor", err)
+
+    def test_non_hex_hash_value_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = write_junit(directory, "a.xml", [receipt_line(wind_evolved="xyz!")])
+            code, _out, err = run_main([f"a={lane}"])
+        self.assertEqual(code, 2)
+        self.assertIn("wind_evolved", err)
+
+    def test_non_integer_seed_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = write_junit(directory, "a.xml", [receipt_line(seed="4x")])
+            code, _out, err = run_main([f"a={lane}"])
+        self.assertEqual(code, 2)
+        self.assertIn("seed", err)
+
+    def test_receipt_from_failed_testcase_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane = write_junit(
+                directory,
+                "a.xml",
+                [],
+                [receipt_line()],
+                attribute_value=receipt_line(),
+                failed=True,
+            )
+            code, out, err = run_main([f"a={lane}"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("failed, errored or skipped", err)
+
+    def test_attribute_form_receipt_is_accepted_and_compared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lane_a = write_junit(directory, "a.xml", attribute_value=receipt_line())
+            lane_b = write_junit(
+                directory,
+                "b.xml",
+                attribute_value=receipt_line(wind_evolved="0badc0de"),
+            )
+            code, out, err = run_main([f"a={lane_a}", f"b={lane_b}"])
+        self.assertEqual(code, 1, err)
+        document = json.loads(out)
+        self.assertEqual(document["labels"]["a"]["wind_evolved"], "bb22")
+        self.assertEqual(len(document["mismatches"]), 1)
+        self.assertEqual(document["mismatches"][0]["key"], "wind_evolved")
 
     def test_unreadable_file_is_an_input_error(self):
         with tempfile.TemporaryDirectory() as directory:

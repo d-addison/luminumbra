@@ -4,7 +4,9 @@
 // input whose length is not a whole vector can read past its end. The probe places each input so
 // it ends exactly at a page boundary, with the following page unmapped. The vendored tail load is
 // expected to fault for an exact-size 2-element input, and a 16-element padded input must not.
-// Linux only, and skipped under AddressSanitizer, which intercepts the out-of-bounds read itself.
+// Linux only. The fault test is not applicable under AddressSanitizer, which intercepts the
+// out-of-bounds read itself. Non-applicable cases pass and record a probe_status property, because
+// CI rejects skipped tests.
 
 #include <gtest/gtest.h>
 
@@ -15,9 +17,11 @@
 #include "luminumbra_common/systems/AmbientNoiseDispatch.h"
 
 #if defined(__linux__)
+#include <cerrno>
 #include <csetjmp>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -59,28 +63,36 @@ bool VectorTailLoadsBeyondCount() {
 }
 
 // Places each input so it ends at a page boundary with the next page unmapped, then runs the
-// fractal batch call. Returns true when the call faulted.
+// fractal batch call. Returns true when the call faulted, and false when the probe itself could
+// not be set up (the failure is reported with ADD_FAILURE).
 bool ProbeFaults(std::size_t buffer_floats, int count) {
     const std::size_t page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
     const std::size_t bytes = 2 * page;
     void* mem[2] = {MAP_FAILED, MAP_FAILED};
-    for (void*& region : mem) {
-        region = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    }
-    if (mem[0] == MAP_FAILED || mem[1] == MAP_FAILED) {
+    const auto release = [&]() {
         for (void* region : mem) {
             if (region != MAP_FAILED) {
                 munmap(region, bytes);
             }
         }
-        ADD_FAILURE() << "mmap failed for the guard-page probe";
-        return false;
+    };
+    for (void*& region : mem) {
+        region = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (region == MAP_FAILED) {
+            ADD_FAILURE() << "mmap failed for the guard-page probe: " << std::strerror(errno);
+            release();
+            return false;
+        }
     }
 
     float* inputs[2] = {nullptr, nullptr};
     for (int k = 0; k < 2; ++k) {
         char* base = static_cast<char*>(mem[k]);
-        mprotect(base + page, page, PROT_NONE);
+        if (mprotect(base + page, page, PROT_NONE) != 0) {
+            ADD_FAILURE() << "mprotect failed for the guard page: " << std::strerror(errno);
+            release();
+            return false;
+        }
         float* in = reinterpret_cast<float*>(base + page) - buffer_floats;
         for (std::size_t i = 0; i < buffer_floats; ++i) {
             in[i] = i < static_cast<std::size_t>(count) ? 0.37f * static_cast<float>(i + 1) : 0.0f;
@@ -99,7 +111,12 @@ bool ProbeFaults(std::size_t buffer_floats, int count) {
     action.sa_handler = OnSegv;
     sigemptyset(&action.sa_mask);
     action.sa_flags = SA_NODEFER;
-    sigaction(SIGSEGV, &action, &previous);
+    if (sigaction(SIGSEGV, &action, &previous) != 0) {
+        ADD_FAILURE() << "sigaction install failed for the guard-page probe: "
+                      << std::strerror(errno);
+        release();
+        return false;
+    }
 
     volatile bool faulted = false;
     if (sigsetjmp(g_jump, 1) == 0) {
@@ -112,19 +129,20 @@ bool ProbeFaults(std::size_t buffer_floats, int count) {
         faulted = true;
     }
 
-    sigaction(SIGSEGV, &previous, nullptr);
-    for (void* region : mem) {
-        munmap(region, bytes);
+    if (sigaction(SIGSEGV, &previous, nullptr) != 0) {
+        ADD_FAILURE() << "sigaction restore failed after the guard-page probe: "
+                      << std::strerror(errno);
     }
+    release();
     return faulted;
 }
 
 #endif // defined(__linux__)
 
-// Empty when the probe can run on this build and ISA; otherwise the reason it is skipped.
-std::string ProbeSkipReason() {
+// Empty when the fault probe applies to this build and ISA; otherwise the reason it does not.
+std::string ProbeNotApplicableReason() {
     if (kUnderAddressSanitizer) {
-        return "guard-page probe is not run under AddressSanitizer";
+        return "guard-page fault probe is not run under AddressSanitizer";
     }
 #if defined(__linux__)
     if (!VectorTailLoadsBeyondCount()) {
@@ -137,26 +155,29 @@ std::string ProbeSkipReason() {
 }
 
 TEST(AmbientInputBounds, UnpaddedTwoElementInputFaultsAtActiveIsa) {
-    const std::string reason = ProbeSkipReason();
+    const std::string reason = ProbeNotApplicableReason();
     if (!reason.empty()) {
-        GTEST_SKIP() << reason;
+        RecordProperty("probe_status", "not_applicable: " + reason);
+        return;
     }
 #if defined(__linux__)
     RecordProperty("noise_simd_level", static_cast<int>(ActiveSimdLevel()));
+    RecordProperty("probe_status", "ran");
     EXPECT_TRUE(ProbeFaults(2, 2))
         << "the vendored tail load is expected to read past an exact-size input";
 #endif
 }
 
 TEST(AmbientInputBounds, SixteenElementPaddedInputDoesNotFault) {
-    const std::string reason = ProbeSkipReason();
-    if (!reason.empty()) {
-        GTEST_SKIP() << reason;
-    }
+    // Runs on every Linux build, including AddressSanitizer and scalar levels: a padded input
+    // never faults, so there is no reason to exclude it.
 #if defined(__linux__)
     RecordProperty("noise_simd_level", static_cast<int>(ActiveSimdLevel()));
+    RecordProperty("probe_status", "ran");
     EXPECT_FALSE(ProbeFaults(16, 2))
         << "a whole-vector padded input must not fault on the tail load";
+#else
+    RecordProperty("probe_status", "not_applicable: guard-page probe is Linux only");
 #endif
 }
 
