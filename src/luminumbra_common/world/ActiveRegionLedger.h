@@ -95,9 +95,11 @@ public:
     // Magic, version, reserved, canonical tick, validation ceiling, config,
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
-    // Version 2 adds u32 extension length and one TLV (type 2, length 1, value 2 = 7 bytes).
+    // Version 2 adds a u32 extension length, then up to two TLVs: type 1 (persistent id
+    // allocator, u64 value, 14 bytes) and type 2 (digest projection, length 1, value 2,
+    // 7 bytes), then the checksum.
     static constexpr std::size_t kMaxFileBytes =
-        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 8;
+        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
     static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
@@ -107,6 +109,8 @@ public:
     using OwnershipProbe = std::function<bool(RegionKey)>;
     // Idle ticks before an unowned record is dropped (one hour at 30 Hz).
     static constexpr std::uint64_t kIdleEvictionTicks = 108000;
+    // Persistent ids are allocated from 1 and never reach 2^63.
+    static constexpr std::uint64_t kPersistentIdLimit = 1ull << 63;
 
     // An absent ledger starts at the restored clock without scheduling a tick.
     explicit ActiveRegionLedger(RegionSchedulerConfig config = {},
@@ -132,6 +136,11 @@ public:
     [[nodiscard]] const std::optional<Vec3>& local_anchor() const {
         return m_localAnchor;
     }
+    [[nodiscard]] std::uint64_t next_persistent_id() const {
+        return m_nextPersistentId;
+    }
+    // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
+    bool allocate_persistent_id(std::uint64_t& id);
     // Finite, and -2^24 <= x,z < 2^24 (exactly -2^24 is valid). y must be finite.
     [[nodiscard]] static bool valid_anchor(const Vec3& position) noexcept;
     // Non-throwing form: returns false and leaves the anchor untouched when invalid.
@@ -186,6 +195,7 @@ private:
     std::optional<Vec3> m_localAnchor;
     std::uint64_t m_tick = 0;
     std::uint64_t m_headerTick = 0;
+    std::uint64_t m_nextPersistentId = 1;
 };
 
 } // namespace Luminumbra::world

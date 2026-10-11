@@ -131,6 +131,7 @@ add_executable(common_tests
     common/ServerHeadlessHygiene_test.cpp
     common/SimulationClock_test.cpp
     common/ActiveRegionLedger_test.cpp
+    common/GroundObjectStore_test.cpp
     common/WorldClock_test.cpp
     common/StructurePlacement_test.cpp
     common/StructureStamping_test.cpp

@@ -138,6 +138,12 @@ void ActiveRegionLedger::restore_clock(const WorldClock& clock) {
 void ActiveRegionLedger::acknowledge_world_clock(const WorldClock& clock) noexcept {
     m_headerTick = std::max(m_headerTick, clock.tick());
 }
+bool ActiveRegionLedger::allocate_persistent_id(std::uint64_t& id) {
+    if (m_nextPersistentId >= kPersistentIdLimit)
+        return false;
+    id = m_nextPersistentId++;
+    return true;
+}
 std::uint32_t ActiveRegionLedger::phase(RegionKey key, std::uint8_t shift) {
     if (shift > 16)
         throw std::invalid_argument("Invalid region cadence shift");
@@ -413,7 +419,12 @@ std::string ActiveRegionLedger::payload(bool observational) const {
     return bytes;
 }
 std::string ActiveRegionLedger::canonical_bytes() const {
-    return m_records.empty() ? std::string{} : "active_regions:v1:" + payload(false);
+    if (m_records.empty() && m_nextPersistentId == 1)
+        return {};
+    std::string bytes = "active_regions:v1:" + payload(false);
+    if (m_nextPersistentId != 1)
+        bytes += "|next_id:" + std::to_string(m_nextPersistentId);
+    return bytes;
 }
 bool ActiveRegionLedger::any_frozen_history() const {
     for (const auto& [key, r] : m_records) {
@@ -426,16 +437,27 @@ bool ActiveRegionLedger::any_frozen_history() const {
 std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool frozen_history = any_frozen_history();
+    const bool allocator_advanced = m_nextPersistentId != 1;
+    const bool extension = frozen_history || allocator_advanced;
     std::string bytes = "ARL1";
-    Append(bytes, frozen_history ? 2 : 1, 2);
+    Append(bytes, extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
     bytes += payload(true);
-    if (frozen_history) {
-        // Extension block: u32 length, then one TLV (u16 type, u32 length, value).
-        Append(bytes, 7, 4);
-        Append(bytes, 2, 2);
-        Append(bytes, 1, 4);
-        Append(bytes, kDigestProjection, 1);
+    if (extension) {
+        // Extension block: u32 length, then ascending TLVs (u16 type, u32 length, value).
+        std::string tlvs;
+        if (allocator_advanced) {
+            Append(tlvs, 1, 2);
+            Append(tlvs, 8, 4);
+            Append(tlvs, m_nextPersistentId, 8);
+        }
+        if (frozen_history) {
+            Append(tlvs, 2, 2);
+            Append(tlvs, 1, 4);
+            Append(tlvs, kDigestProjection, 1);
+        }
+        Append(bytes, tlvs.size(), 4);
+        bytes += tlvs;
     }
     Append(bytes, Hash(bytes), 8);
     return bytes;
@@ -561,10 +583,24 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     return false;
                 const auto value = extension.substr(at, length);
                 at += length;
-                // Strictly ascending types refuse duplicates; type 2 is the only known type.
-                if ((previous_type && type <= *previous_type) || type != 2 || length != 1)
+                // Strictly ascending types refuse duplicates; types 1 and 2 are the only known
+                // types.
+                if ((previous_type && type <= *previous_type) || (type != 1 && type != 2))
                     return false;
                 previous_type = type;
+                if (type == 1) {
+                    // Persistent id allocator: the next id, in [2, 2^63].
+                    if (length != 8)
+                        return false;
+                    Reader next_id(value);
+                    const auto next = next_id.read(8);
+                    if (next < 2 || next > kPersistentIdLimit)
+                        return false;
+                    result.m_nextPersistentId = next;
+                    continue;
+                }
+                if (length != 1)
+                    return false;
                 const auto projection = static_cast<unsigned char>(value[0]);
                 if (projection > 2) {
                     error = kProjectionMessage;

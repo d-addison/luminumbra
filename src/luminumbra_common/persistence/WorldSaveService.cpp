@@ -1274,7 +1274,7 @@ bool WorldSaveService::save_active_regions(world::ActiveRegionLedger& ledger,
     if (!validate_save(save_dir, errors))
         return false;
     // Keep an anchor-only ledger: it restores last walking feet before activation.
-    if (ledger.records().empty() && !ledger.local_anchor() &&
+    if (ledger.records().empty() && !ledger.local_anchor() && ledger.next_persistent_id() == 1 &&
         !std::filesystem::exists(active_regions_path(save_dir)))
         return true;
     auto saved = ledger;
