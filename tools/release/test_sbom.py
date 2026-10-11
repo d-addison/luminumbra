@@ -381,11 +381,74 @@ class GitArchiveTests(SbomFixture):
         self.output = self.root / "sidecar.json"
         self.cli("--root", self.root, "--tracked")
         first = self.output.read_bytes()
+        document = json.loads(first)
+        files = {item["fileName"]: item for item in document["files"]}
+        self.assertEqual(set(files), {"./.gitattributes", "./a.txt", "./excluded.txt", "./substitute.txt"})
+        self.assertEqual(files["./a.txt"]["checksums"][1]["checksumValue"],
+                         hashlib.sha256(b"hello\r\n").hexdigest())
+        validator.validate_semantics(document)
         self.cli("--root", self.root, "--tracked")
         self.assertEqual(first, self.output.read_bytes())
         self.git("add", "sidecar.json")
-        self.cli("--root", self.root, "--tracked", success=False)
+        result = self.cli("--root", self.root, "--tracked", success=False)
+        self.assertIn("SBOM output must not replace an inventoried file", result.stderr)
         self.assertEqual(first, self.output.read_bytes())
+
+    def test_tracked_root_with_foreign_git_absolute_path(self):
+        # Reproduce MSYS Git/native Python disagreement without requiring Windows:
+        # Git's absolute path is not a path in Python's filesystem namespace.
+        original = subprocess.check_output
+
+        def foreign_top(command, *args, **kwargs):
+            if "--show-toplevel" in command:
+                return str(self.base / "msys-only-mount" / "stage") + "\n"
+            return original(command, *args, **kwargs)
+
+        with patch.object(subprocess, "check_output", foreign_top):
+            inventory = generator.root_inventory(self.root, True, self.output)
+        self.assertEqual(set(inventory), {".gitattributes", "a.txt", "excluded.txt", "substitute.txt"})
+        self.assertEqual(inventory["a.txt"][1]["checksumValue"], hashlib.sha256(b"hello\r\n").hexdigest())
+
+    def test_tracked_subdirectories_and_bare_repository_rejected(self):
+        for name in ("nested", "nested with spaces"):
+            nested = self.root / name
+            nested.mkdir()
+            (nested / "child.txt").write_bytes(b"child")
+            self.git("add", f"{name}/child.txt")
+            with self.subTest(name=name):
+                result = self.cli("--root", nested, "--tracked", success=False)
+                self.assertIn("--tracked requires the repository root", result.stderr)
+                self.assertFalse(self.output.exists())
+        bare = self.base / "bare.git"
+        self.git("init", "--bare", "-q", str(bare))
+        for root in (bare, self.root / ".git"):
+            with self.subTest(root=root):
+                result = self.cli("--root", root, "--tracked", success=False)
+                self.assertIn("--tracked requires the repository root", result.stderr)
+                self.assertFalse(self.output.exists())
+
+    def test_tracked_replaced_symlink_and_parent_junction_rejected(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        tracked = nested / "child.txt"
+        tracked.write_bytes(b"tracked bytes")
+        self.git("add", "nested/child.txt")
+        original = Path.lstat
+        for target, mode, attributes in (
+                (tracked, stat.S_IFLNK, 0),
+                (nested, stat.S_IFDIR, stat.FILE_ATTRIBUTE_REPARSE_POINT)):
+            intercepted = []
+
+            def link_lstat(path, *args, **kwargs):
+                if path == target:
+                    intercepted.append(path)
+                    return SimpleNamespace(st_mode=mode, st_file_attributes=attributes)
+                return original(path, *args, **kwargs)
+
+            with self.subTest(target=target), patch.object(Path, "lstat", link_lstat):
+                with self.assertRaisesRegex(ValueError, "unsupported package entry"):
+                    generator.root_inventory(self.root, True, self.output)
+                self.assertEqual(intercepted, [target])
 
     def test_tracked_gitlink_and_link_modes_rejected(self):
         commit = self.git("rev-parse", "HEAD").strip().decode("ascii")
