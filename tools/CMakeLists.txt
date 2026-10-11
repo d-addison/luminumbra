@@ -17,8 +17,13 @@ target_include_directories(asset_processor SYSTEM PRIVATE
 target_link_libraries(asset_processor PRIVATE meshoptimizer stb_headers)
 
 option(LUMINUMBRA_ENABLE_PREFAB_RUNTIME "Build the optional compiled prefab ECS runtime and inspector" OFF)
-if(LUMINUMBRA_ENABLE_PREFAB_RUNTIME)
+option(LUMINUMBRA_ENABLE_STATIC_PREVIEW "Build the neutral production static renderer and installed capture host" OFF)
+if(LUMINUMBRA_ENABLE_PREFAB_RUNTIME OR LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     add_subdirectory(prefab_runtime)
+endif()
+if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
+    add_subdirectory(static_scene)
+    add_subdirectory(static_preview)
 endif()
 
 if(BUILD_TESTING)
@@ -34,11 +39,22 @@ if(BUILD_TESTING)
     set_tests_properties(PerformanceMeasurementValidatorContract
         PROPERTIES LABELS "perf;tools" TIMEOUT 30)
     add_test(
+        NAME RenderBudgetPython
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/perf/test_render_budget.py")
+    set_tests_properties(RenderBudgetPython PROPERTIES LABELS "perf;tools" TIMEOUT 30)
+    add_test(
         NAME PublicTreeValidatorContract
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_validate_public_tree.py")
     set_tests_properties(PublicTreeValidatorContract
         PROPERTIES LABELS "hygiene;tools" TIMEOUT 30)
+    add_test(
+        NAME RepeatQualificationContract
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/qualify/test_repeat_qualification.py")
+    set_tests_properties(RepeatQualificationContract
+        PROPERTIES LABELS "tools;persistence" TIMEOUT 300)
     add_test(
         NAME PublicAssetInventory
         COMMAND "${Python3_EXECUTABLE}"
@@ -54,9 +70,8 @@ if(BUILD_TESTING)
     set_tests_properties(DocumentationLinkValidatorContract
         PROPERTIES LABELS "docs;hygiene;tools" TIMEOUT 30)
     add_test(
-        NAME RepeatQualificationContract
-        COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/qualify/test_repeat_qualification.py")
-    set_tests_properties(RepeatQualificationContract
-        PROPERTIES LABELS "tools;persistence" TIMEOUT 300)
+        NAME SlowestTestsScriptContract
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/ci/test_slowest_tests.py")
+    set_tests_properties(SlowestTestsScriptContract
+        PROPERTIES LABELS "ci;tools" TIMEOUT 30)
 endif()
