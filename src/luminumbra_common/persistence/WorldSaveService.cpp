@@ -72,6 +72,29 @@ std::atomic<bool>& InterruptBeforeRegionReplaceForTesting() {
     return interrupt;
 }
 
+// Number of POSIX directory flushes to let succeed before the next one fails;
+// negative disables the seam.
+std::atomic<int>& DirectoryFlushFailureCountdownForTesting() {
+    static std::atomic<int> countdown{-1};
+    return countdown;
+}
+
+#if !defined(_WIN32)
+// True when the injected flush failure fires on this flush.
+bool ConsumeDirectoryFlushFailureForTesting() {
+    std::atomic<int>& countdown = DirectoryFlushFailureCountdownForTesting();
+    int current = countdown.load(std::memory_order_acquire);
+    while (current >= 0) {
+        const int next = current == 0 ? -1 : current - 1;
+        if (countdown.compare_exchange_weak(
+                current, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return current == 0;
+        }
+    }
+    return false;
+}
+#endif
+
 using ActiveRegionsReplaceHook = bool (*)();
 ActiveRegionsReplaceHook& BeforeActiveRegionsReplaceForTesting() {
     static ActiveRegionsReplaceHook hook = nullptr;
@@ -444,6 +467,12 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
     // power loss may resurrect the prior directory entry on some filesystems.
     const std::filesystem::path parent =
         destination.has_parent_path() ? destination.parent_path() : std::filesystem::path(".");
+    if (ConsumeDirectoryFlushFailureForTesting()) {
+        AddError(errors,
+                 "region file was replaced but its directory flush failed (test seam): " +
+                     parent.string());
+        return false;
+    }
     int directory_flags = O_RDONLY;
 #if defined(O_DIRECTORY)
     directory_flags |= O_DIRECTORY;
@@ -472,6 +501,47 @@ bool ReplaceRegionFileAtomically(const std::filesystem::path& temp,
         AddError(errors,
                  "region directory close failed after durable replacement: " + parent.string() +
                      ": " + PosixErrorMessage(error));
+        return false;
+    }
+    return true;
+}
+
+// Flushes the directory that holds a newly created entry so the entry survives
+// power loss.
+bool FlushDirectoryEntry(const std::filesystem::path& directory_path,
+                         std::vector<std::string>* errors) {
+    if (ConsumeDirectoryFlushFailureForTesting()) {
+        AddError(errors, "directory flush failed (test seam): " + directory_path.string());
+        return false;
+    }
+    int directory_flags = O_RDONLY;
+#if defined(O_DIRECTORY)
+    directory_flags |= O_DIRECTORY;
+#endif
+    const int directory = ::open(directory_path.c_str(), directory_flags);
+    if (directory < 0) {
+        const int error = errno;
+        AddError(errors,
+                 "cannot open directory for durable flush: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    while (::fsync(directory) != 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        const int error = errno;
+        ::close(directory);
+        AddError(errors,
+                 "directory flush failed: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
+        return false;
+    }
+    if (::close(directory) != 0) {
+        const int error = errno;
+        AddError(errors,
+                 "directory close failed after flush: " + directory_path.string() + ": " +
+                     PosixErrorMessage(error));
         return false;
     }
     return true;
@@ -1267,6 +1337,56 @@ bool WorldSaveService::upsert_container_records(const std::filesystem::path& reg
 
 void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enabled) {
     InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
+}
+
+bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
+                                          const std::string& bytes,
+                                          std::vector<std::string>* errors) {
+    std::error_code directory_error;
+    if (destination.has_parent_path()) {
+        std::filesystem::create_directories(destination.parent_path(), directory_error);
+    }
+    if (directory_error) {
+        AddError(errors,
+                 "cannot create directory " + destination.parent_path().string() + ": " +
+                     directory_error.message());
+        return false;
+    }
+#if !defined(_WIN32)
+    // Flush the entry of every ancestor directory, deepest first. A retry after a
+    // failed flush finds the directories already present, so the chain is flushed
+    // on every call rather than only for directories this call created. The
+    // replacement helper flushes the destination directory itself.
+    for (std::filesystem::path ancestor = destination.parent_path();
+         !ancestor.empty() && ancestor != ancestor.root_path();
+         ancestor = ancestor.parent_path()) {
+        const std::filesystem::path holder =
+            ancestor.has_parent_path() ? ancestor.parent_path() : std::filesystem::path(".");
+        if (!FlushDirectoryEntry(holder, errors)) {
+            return false;
+        }
+    }
+#endif
+    std::filesystem::path temp_path;
+    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
+        return false;
+    }
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp_path);
+        AddError(errors,
+                 "file replacement interrupted by test seam before replacing: " +
+                     destination.string());
+        return false;
+    }
+    if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
+        RemoveTemporaryFile(temp_path);
+        return false;
+    }
+    return true;
+}
+
+void WorldSaveService::set_directory_flush_failure_for_testing(int flushes_to_skip) {
+    DirectoryFlushFailureCountdownForTesting().store(flushes_to_skip, std::memory_order_release);
 }
 
 void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook)()) {

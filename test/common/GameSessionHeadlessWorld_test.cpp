@@ -39,6 +39,8 @@
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarAuthorityOverlay.h"
+#include "luminumbra_common/world/FarWantedSet.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -2000,10 +2002,13 @@ void RunSchedulerFaultCase(std::uint64_t k, std::uint64_t start) {
     // Half a tick of slack keeps the clock from rounding the frame down. A fault
     // on the first tick of the frame stops the second tick from running.
     ASSERT_EQ(session.TickSimulation(2.5 * dt), k - start + 1);
-    ASSERT_TRUE(session.GetRegionSchedulerFault().has_value());
-    const auto& fault = session.GetRegionSchedulerFault().value();
-    EXPECT_EQ(fault.tick, k);
-    EXPECT_FALSE(fault.message.empty());
+    const auto fault = session.GetRegionSchedulerFault();
+    ASSERT_TRUE(fault.has_value());
+    if (fault.has_value()) {
+        const auto snapshot = fault.value();
+        EXPECT_EQ(snapshot.tick, k);
+        EXPECT_FALSE(snapshot.message.empty());
+    }
     EXPECT_EQ(session.GetSimulationTickCount(), k);
     EXPECT_LT(session.GetActiveRegionLedger().tick(), k);
     EXPECT_EQ(session.GetActiveRegionLedger().header_tick(), k);
@@ -2082,4 +2087,44 @@ TEST(GameSessionHeadlessWorldTest, CorruptLedgerLoadClearsTheWorld) {
     EXPECT_FALSE(victim.LoadWorldStateFrom(save));
     EXPECT_TRUE(victim.GetWorldSystem()->snapshot_streamed_chunks().empty());
     EXPECT_EQ(victim.GetWorldOpenError(), Luminumbra::world::ActiveRegionLedger::kCorruptMessage);
+}
+
+TEST(GameSessionHeadlessWorldTest, FarOverlayFilesDoNotChangeTheWorldHash) {
+    using Luminumbra::World::FarBrickState;
+    using Luminumbra::World::FarOverlayBrick;
+    using Luminumbra::World::FarOverlayTile;
+    using Luminumbra::World::FarTileKey;
+
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded, reloaded;
+    for (auto* session : {&original, &loaded, &reloaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(original.CreateWorld("Far overlay", "1337", "default"));
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto save = original.GetWorldSaveDir();
+    const auto before = SessionWorldHash(original);
+
+    FarOverlayTile near_tile;
+    near_tile.key = FarTileKey{1, 0, 0};
+    near_tile.generation = 1;
+    near_tile.bricks.push_back(FarOverlayBrick{0, 0, 0, FarBrickState::HomogeneousAir});
+    FarOverlayTile coarse_tile;
+    coarse_tile.key = FarTileKey{3, -1, -1};
+    coarse_tile.generation = 1;
+    coarse_tile.bricks.push_back(FarOverlayBrick{-32, 1, -32, FarBrickState::HomogeneousSolid});
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, near_tile));
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, coarse_tile));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    ASSERT_TRUE(Luminumbra::World::ValidateFarOverlayDirectory(save));
+
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), before);
+
+    fs::remove_all(save / "far");
+    ASSERT_TRUE(reloaded.LoadWorld(original.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(reloaded), before);
 }

@@ -1,0 +1,24 @@
+#version 450 core
+// One bounded scan of at most 512 * 128 group counts. No candidate records or
+// atomics: capped membership and output order are independent of scheduling.
+layout(local_size_x = 1) in;
+layout(std430, binding = 3) buffer BladeCount {
+    uint accepted_count; uint vertex_count; uint instance_count;
+    uint first_vertex; uint base_instance;
+};
+layout(std430, binding = 5) readonly buffer GroupCounts { uint counts[]; };
+layout(std430, binding = 6) writeonly buffer GroupOffsets { uint offsets[]; };
+uniform uint u_group_count;
+uniform uint u_max_instances;
+void main() {
+    uint total = 0u;
+    for (uint group = 0u; group < u_group_count; ++group) {
+        offsets[group] = total;
+        total += counts[group];
+    }
+    accepted_count = total;
+    vertex_count = 12u;
+    instance_count = min(total, u_max_instances);
+    first_vertex = 0u;
+    base_instance = 0u;
+}
