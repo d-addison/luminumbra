@@ -85,7 +85,7 @@ void FillChunk(Chunk& chunk, const SyntheticSaveSpec& spec, std::uint64_t index)
 std::vector<IVec3> SyntheticChunkCoords(std::uint32_t count) {
     constexpr int dx[4] = {1, 0, -1, 0};
     constexpr int dz[4] = {0, 1, 0, -1};
-    const std::size_t columns = (static_cast<std::size_t>(count) + 1) / 2;
+    const std::size_t columns = static_cast<std::size_t>(count / 2) + (count % 2);
     std::vector<std::pair<int, int>> cols;
     cols.reserve(columns);
     if (columns > 0)
@@ -135,6 +135,13 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
     fs::create_directories(report.save_dir, ec);
     if (ec)
         return Fail(std::move(report), "cannot create save directory: " + ec.message());
+    // From here on the directory belongs to this call: a failure removes it so a retry with the
+    // same world id is not refused as an existing save.
+    const auto fail_and_clean = [&report](const std::string& message) {
+        std::error_code ignored;
+        fs::remove_all(report.save_dir, ignored);
+        return Fail(std::move(report), message);
+    };
 
     const json metadata = {
         {"container_version", WorldSaveService::kContainerVersion},
@@ -147,13 +154,12 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
     };
     std::vector<std::string> errors;
     if (!WorldSaveService::save_metadata(metadata.dump(4) + "\n", report.save_dir, &errors))
-        return Fail(std::move(report), errors.empty() ? "metadata write failed" : errors.front());
+        return fail_and_clean(errors.empty() ? "metadata write failed" : errors.front());
 
     if (!spec.preset_source.empty()) {
         if (!fs::copy_file(spec.preset_source, report.save_dir / "preset.json", ec))
-            return Fail(std::move(report),
-                        "cannot copy preset: " + spec.preset_source.generic_string() + " (" +
-                            ec.message() + ")");
+            return fail_and_clean("cannot copy preset: " + spec.preset_source.generic_string() +
+                                  " (" + ec.message() + ")");
     }
 
     WorldStreamingState state;
@@ -165,18 +171,32 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
     }
     std::vector<std::string> save_errors;
     if (!WorldSaveService{}.save_world(state, report.save_dir, &save_errors))
-        return Fail(std::move(report),
-                    save_errors.empty() ? "world save failed" : save_errors.front());
+        return fail_and_clean(save_errors.empty() ? "world save failed" : save_errors.front());
     report.chunks_written = spec.chunk_count;
 
     const auto region_dir = WorldSaveService::region_directory(report.save_dir);
-    for (const auto& entry : fs::directory_iterator(region_dir, ec)) {
-        const auto name = entry.path().filename().string();
-        if (!name.ends_with(".lmr") || !entry.is_regular_file(ec))
+    fs::directory_iterator it(region_dir, ec);
+    if (ec)
+        return fail_and_clean("cannot list region directory: " + ec.message());
+    for (; it != fs::directory_iterator{}; it.increment(ec)) {
+        if (ec)
+            break;
+        const auto name = it->path().filename().string();
+        if (!name.ends_with(".lmr"))
             continue;
+        const bool regular = it->is_regular_file(ec);
+        if (ec)
+            break;
+        if (!regular)
+            continue;
+        const std::uintmax_t bytes = it->file_size(ec);
+        if (ec)
+            break;
         ++report.region_files;
-        report.region_bytes += entry.file_size(ec);
+        report.region_bytes += bytes;
     }
+    if (ec)
+        return fail_and_clean("cannot measure region files: " + ec.message());
     report.ok = true;
     return report;
 }

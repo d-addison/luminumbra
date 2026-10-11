@@ -197,4 +197,16 @@ TEST_F(SyntheticSaveFixture, RefusesBadSpecAndExistingSave) {
     EXPECT_EQ(DiskBytes(first.save_dir), before);
 }
 
+TEST_F(SyntheticSaveFixture, FailedWriteRemovesPartialSaveAndAllowsRetry) {
+    const auto root = NewRoot("cleanup");
+    SyntheticSaveSpec bad_preset = Spec("retry_id", 8);
+    bad_preset.preset_source = root / "does-not-exist.json";
+    const auto failed = WriteSyntheticSave(bad_preset, root);
+    ASSERT_FALSE(failed.ok);
+    EXPECT_FALSE(fs::exists(failed.save_dir));
+
+    const auto retried = WriteSyntheticSave(Spec("retry_id", 8), root);
+    EXPECT_TRUE(retried.ok) << retried.error;
+}
+
 } // namespace
