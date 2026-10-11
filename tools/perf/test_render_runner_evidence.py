@@ -40,6 +40,16 @@ sys.exit(int(code))
 '''
 
 
+SLOW_CHILD = r'''
+import sys, time
+print('A' * 20000, flush=True)
+print('EnsureSurfaceReadyNear: draining generation jobs (near 0,0)...', flush=True)
+print('EnsureSurfaceReadyNear/surface-build batch 3', flush=True)
+print('unrelated trailing line', flush=True)
+time.sleep(30)
+'''
+
+
 class RenderRunnerEvidenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -255,6 +265,24 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'Static-model textures'):
                 self.case.run_client('capture')
 
+    def test_closed_or_failing_stderr_cannot_mask_timeout(self):
+        closed = io.StringIO()
+        closed.close()
+
+        class FailingStream(io.StringIO):
+            def write(self, text):
+                raise OSError('fixture stderr write refused')
+
+        for stream in (closed, FailingStream()):
+            with self.subTest(stream=type(stream).__name__), redirect_stderr(stream):
+                self.assert_timeout()
+            receipt = self.receipt()
+            self.assertEqual(receipt['outcome'], 'timed_out')
+            self.assertEqual(receipt['capture_status'], 'retained')
+            self.assertEqual(receipt['evidence_errors'], [])
+            self.assertIn('log_tail', receipt)
+            self.assertTrue(self.paths()[0].is_file())
+
     def test_process_elapsed_excludes_evidence_finalization(self):
         # Use a private clock object so subprocess's real deadline clock stays real.
         clock = mock.Mock()
@@ -264,6 +292,38 @@ class RenderRunnerEvidenceTests(unittest.TestCase):
         self.assertEqual(self.receipt()['elapsed_seconds'], 2.5)
         self.assertEqual(clock.monotonic.call_count, 2)
         self.assertFalse(list(self.artifacts.glob('*.tmp')))
+
+    def test_timeout_reports_log_tail_and_last_observed_phase(self):
+        slow = self.root / 'slow_child.py'
+        slow.write_text(SLOW_CHILD)
+        log = self.root / 'timeout.log'
+        artifact = self.root / 'timeout-capture.json'
+        retained = self.root / 'timeout-retained.json'
+        receipt_path = self.root / 'timeout-process.json'
+        original_run = self.original_run
+
+        def short_run(command, **kwargs):
+            kwargs['timeout'] = 2
+            return original_run(command, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(runner.subprocess, 'run', side_effect=short_run), \
+                redirect_stderr(stderr):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                runner._run_process([sys.executable, str(slow)], cwd=self.root,
+                                    environment=os.environ.copy(), log=log,
+                                    artifact=artifact, retained=retained,
+                                    receipt_path=receipt_path)
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt['outcome'], 'timed_out')
+        self.assertEqual(receipt['last_observed_phase'],
+                         'EnsureSurfaceReadyNear/surface-build batch 3')
+        self.assertEqual(len(receipt['log_tail'].encode('utf-8')), 8 * 1024)
+        self.assertIn('unrelated trailing line', receipt['log_tail'])
+        message = stderr.getvalue()
+        self.assertIn('render runner: timed out after', message)
+        self.assertIn('unrelated trailing line', message)
+        self.assertIn('EnsureSurfaceReadyNear/surface-build batch 3', message)
 
 
 if __name__ == '__main__':
