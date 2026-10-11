@@ -502,6 +502,168 @@ class AcceptanceMatrixTests(unittest.TestCase):
             self.assertNotIn(ghost, index.gtest_suites)
         self.assertIn(("LiveAfterZero", "E"), index.gtest_cases)
 
+    def test_cmake_if_false_elseif_false_branches_are_not_indexed(self) -> None:
+        (self.root / "tools" / "elseif_false.cmake").write_text(
+            "if(FALSE)\n"
+            "  add_test(NAME ChainDeadIf COMMAND x)\n"
+            "elseif(FALSE)\n"
+            "  add_test(NAME ChainDeadElseif COMMAND x)\n"
+            "endif()\n"
+            "if(OFF)\n"
+            "  add_test(NAME ChainOffIf COMMAND x)\n"
+            "ELSEIF(0)\n"
+            "  add_test(NAME ChainOffElseif COMMAND x)\n"
+            "endif()\n"
+            "add_test(NAME ChainAfter COMMAND x)\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in ("ChainDeadIf", "ChainDeadElseif", "ChainOffIf", "ChainOffElseif"):
+            self.assertNotIn(ghost, index.ctest_names)
+        self.assertIn("ChainAfter", index.ctest_names)
+
+    def test_cmake_if_false_elseif_unknown_branch_is_indexed(self) -> None:
+        (self.root / "tools" / "elseif_var.cmake").write_text(
+            "if(FALSE)\n"
+            "  add_test(NAME VarDeadIf COMMAND x)\n"
+            "elseif(SOMEVAR)\n"
+            "  add_test(NAME VarLiveElseif COMMAND x)\n"
+            "endif()\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn("VarDeadIf", index.ctest_names)
+        self.assertIn("VarLiveElseif", index.ctest_names)
+
+    def test_cmake_if_false_elseif_false_else_branch_is_indexed(self) -> None:
+        (self.root / "tools" / "elseif_else.cmake").write_text(
+            "if(FALSE)\n"
+            "  add_test(NAME ElseChainDeadIf COMMAND x)\n"
+            "elseif(FALSE)\n"
+            "  add_test(NAME ElseChainDeadElseif COMMAND x)\n"
+            "else()\n"
+            "  add_test(NAME ElseChainLive COMMAND x)\n"
+            "endif()\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn("ElseChainDeadIf", index.ctest_names)
+        self.assertNotIn("ElseChainDeadElseif", index.ctest_names)
+        self.assertIn("ElseChainLive", index.ctest_names)
+
+    def test_cmake_static_false_elseif_after_live_branch_is_dead(self) -> None:
+        (self.root / "tools" / "live_chain.cmake").write_text(
+            "if(SOMEVAR)\n"
+            "  add_test(NAME LiveFirst COMMAND x)\n"
+            "elseif(FALSE)\n"
+            "  add_test(NAME LiveAfterLive COMMAND x)\n"
+            "endif()\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertIn("LiveFirst", index.ctest_names)
+        self.assertNotIn("LiveAfterLive", index.ctest_names)
+
+    def test_cmake_nested_elseif_chain_inside_disabled_block(self) -> None:
+        (self.root / "tools" / "nested_chain.cmake").write_text(
+            "if(FALSE)\n"
+            "  if(A)\n"
+            "    add_test(NAME NestedChainDeadA COMMAND x)\n"
+            "  elseif(FALSE)\n"
+            "    add_test(NAME NestedChainDeadB COMMAND x)\n"
+            "  else()\n"
+            "    add_test(NAME NestedChainDeadC COMMAND x)\n"
+            "  endif()\n"
+            "  add_test(NAME NestedChainDeadD COMMAND x)\n"
+            "elseif(SOMEVAR)\n"
+            "  if(FALSE)\n"
+            "    add_test(NAME NestedChainDeadE COMMAND x)\n"
+            "  elseif(B)\n"
+            "    add_test(NAME NestedChainLiveF COMMAND x)\n"
+            "  endif()\n"
+            "endif()\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in (
+            "NestedChainDeadA",
+            "NestedChainDeadB",
+            "NestedChainDeadC",
+            "NestedChainDeadD",
+            "NestedChainDeadE",
+        ):
+            self.assertNotIn(ghost, index.ctest_names)
+        self.assertIn("NestedChainLiveF", index.ctest_names)
+
+    def test_c_if_zero_elif_zero_branches_are_not_indexed(self) -> None:
+        (self.root / "test" / "elif_zero.cpp").write_text(
+            "#if 0\n"
+            "TEST(ElifZeroDeadIf, A) {}\n"
+            "#elif 0\n"
+            "TEST(ElifZeroDeadElif, B) {}\n"
+            "#elif (0)\n"
+            "TEST(ElifZeroDeadParen, C) {}\n"
+            "#endif\n"
+            "TEST(ElifZeroAfter, D) {}\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in ("ElifZeroDeadIf", "ElifZeroDeadElif", "ElifZeroDeadParen"):
+            self.assertNotIn(ghost, index.gtest_suites)
+        self.assertIn(("ElifZeroAfter", "D"), index.gtest_cases)
+
+    def test_c_if_zero_elif_unknown_and_else_branches_are_indexed(self) -> None:
+        (self.root / "test" / "elif_foo.cpp").write_text(
+            "#if 0\n"
+            "TEST(ElifFooDeadIf, A) {}\n"
+            "#elif FOO\n"
+            "TEST(ElifFooLive, B) {}\n"
+            "#else\n"
+            "TEST(ElifFooElseLive, C) {}\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn(("ElifFooDeadIf", "A"), index.gtest_cases)
+        self.assertIn(("ElifFooLive", "B"), index.gtest_cases)
+        self.assertIn(("ElifFooElseLive", "C"), index.gtest_cases)
+
+    def test_c_if_zero_elif_zero_else_branch_is_indexed(self) -> None:
+        (self.root / "test" / "elif_zero_else.cpp").write_text(
+            "#if 0\n"
+            "TEST(ZeroChainDeadIf, A) {}\n"
+            "#elif 0\n"
+            "TEST(ZeroChainDeadElif, B) {}\n"
+            "#else\n"
+            "TEST(ZeroChainElseLive, C) {}\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        self.assertNotIn(("ZeroChainDeadIf", "A"), index.gtest_cases)
+        self.assertNotIn(("ZeroChainDeadElif", "B"), index.gtest_cases)
+        self.assertIn(("ZeroChainElseLive", "C"), index.gtest_cases)
+
+    def test_c_nested_conditionals_inside_elif_zero(self) -> None:
+        (self.root / "test" / "nested_elif.cpp").write_text(
+            "#if 0\n"
+            "TEST(NestedElifDeadIf, A) {}\n"
+            "#elif 0\n"
+            "#if FOO\n"
+            "TEST(NestedElifDeadInner, B) {}\n"
+            "#elif BAR\n"
+            "TEST(NestedElifDeadInnerElif, C) {}\n"
+            "#endif\n"
+            "#elif FOO\n"
+            "TEST(NestedElifLive, D) {}\n"
+            "#endif\n",
+            encoding="utf-8",
+        )
+        index = MODULE.index_tests(self.root)
+        for ghost in ("NestedElifDeadIf", "NestedElifDeadInner", "NestedElifDeadInnerElif"):
+            self.assertNotIn(ghost, index.gtest_suites)
+        self.assertIn(("NestedElifLive", "D"), index.gtest_cases)
+
     def test_covered_with_native_evidence_is_rejected(self) -> None:
         matrix = baseline_matrix()
         self.assertEqual(self.errors(matrix), [])

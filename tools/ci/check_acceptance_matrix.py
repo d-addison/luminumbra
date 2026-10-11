@@ -132,9 +132,13 @@ def _strip_c(text: str) -> str:
 
 
 def _drop_disabled_c(text: str) -> str:
-    """Drop lines inside `#if 0` blocks; the `#else`/`#elif` branch of such a block is kept."""
+    """Drop lines inside statically disabled branches of `#if`/`#elif` chains.
+
+    A branch is disabled when its own condition is `0`/`(0)`, whatever the earlier
+    branches were. Any other `#elif`, `#elifdef`, `#elifndef` or `#else` branch is live.
+    """
     out: list[str] = []
-    # One entry per open conditional: [is_if_zero, branch_is_disabled].
+    # One entry per open conditional: [chain_is_static_false, branch_is_disabled].
     stack: list[list[bool]] = []
     for line in text.splitlines(keepends=True):
         match = C_DIRECTIVE_RE.match(line)
@@ -149,8 +153,12 @@ def _drop_disabled_c(text: str) -> str:
         elif kind == "endif":
             if stack:
                 stack.pop()
-        elif stack and stack[-1][0]:
-            stack[-1][1] = False
+        elif stack:
+            if kind == "elif":
+                zero = rest in C_STATIC_FALSE
+                stack[-1] = [zero, zero]
+            else:
+                stack[-1] = [False, False]
         if not any(dead for _, dead in stack):
             out.append(line)
     return "".join(out)
@@ -199,8 +207,12 @@ def _cmake_flow_commands(text: str) -> list[tuple[str, str, int, int]]:
 
 
 def _drop_disabled_cmake(text: str) -> str:
-    """Drop if(FALSE)/if(0)/if(OFF) branches; an else()/elseif() branch of such an if is kept."""
-    # One entry per open if(): [is_static_false, branch_is_disabled].
+    """Drop statically disabled branches of an if() chain.
+
+    A branch is disabled when its own condition is FALSE/0/OFF (case-insensitive),
+    whatever the earlier branches were. Any other elseif() condition and every else() is live.
+    """
+    # One entry per open if(): [chain_is_static_false, branch_is_disabled].
     stack: list[list[bool]] = []
     spans: list[tuple[int, int]] = []
     dead_from = 0
@@ -212,8 +224,12 @@ def _drop_disabled_cmake(text: str) -> str:
         elif name == "endif":
             if stack:
                 stack.pop()
-        elif stack and stack[-1][0]:
-            stack[-1][1] = False
+        elif name == "elseif":
+            if stack:
+                zero = args.upper() in CMAKE_STATIC_FALSE
+                stack[-1] = [zero, zero]
+        elif stack:
+            stack[-1] = [False, False]
         is_dead = any(dead for _, dead in stack)
         if is_dead and not was_dead:
             dead_from = end
