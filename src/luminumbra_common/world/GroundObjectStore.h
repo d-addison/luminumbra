@@ -22,9 +22,9 @@ struct GroundObject {
     std::int64_t x_mm = 0, y_mm = 0, z_mm = 0;
     std::uint64_t spawn_tick = 0;
     // Ticks this object has aged while its region was due. Never advances for a frozen region.
-    std::uint64_t active_age = 0;
+    std::uint32_t active_age = 0;
     // 0 = never despawns; otherwise the object is removed when active_age reaches it.
-    std::uint64_t despawn_after = 0;
+    std::uint32_t despawn_after = 0;
     std::uint32_t payload = 0;
     std::uint16_t flags = 0;
     [[nodiscard]] bool settled() const {
@@ -36,13 +36,14 @@ struct GroundObject {
 // Ordered, bounded store of ground objects keyed by id. Pure data: no IO, no engine access.
 class GroundObjectStore {
 public:
-    // 16,384 objects at the worst-case serialized record (~300 bytes) stay under the file cap.
-    static constexpr std::size_t kMaxObjects = 16384;
-    static constexpr std::size_t kMaxFileBytes = 8u * 1024u * 1024u;
-    // x and z must satisfy -kMaxCoordinateMm <= v < kMaxCoordinateMm (the simulation anchor
-    // bound, half open: +2^24 m would fall in a region the ledger refuses). y must satisfy
-    // |y| <= kMaxCoordinateMm.
+    // Both limits apply independently. Admission reserves enough bytes for future settling and
+    // ageing, so a successful spawn cannot later make its store unsaveable.
+    static constexpr std::size_t kMaxObjects = 65536;
+    static constexpr std::size_t kMaxFileBytes = 4u * 1024u * 1024u;
+    // Horizontal coordinates satisfy |v| < 2^24 metres; vertical coordinates satisfy
+    // |y| < 2^20 metres. Bounds apply to the quantized integer millimetres.
     static constexpr std::int64_t kMaxCoordinateMm = 16'777'216'000;
+    static constexpr std::int64_t kMaxVerticalMm = 1'048'576'000;
     static constexpr std::int64_t kRegionSizeMm = 512'000;
     static constexpr const char* kSchema = "luminumbra.ground_objects.v1";
     static constexpr const char* kRelativePath = "chunks/region/ground-objects.json";
@@ -86,7 +87,7 @@ public:
         std::vector<GroundObject> despawned; // ascending id, final state at removal
     };
     // One tick of ageing for one due region, in ascending id order: unsettled objects try
-    // `settle` first, then active_age += 1 (saturating at UINT64_MAX), then an object with
+    // `settle` first, then active_age += 1 (saturating at UINT32_MAX), then an object with
     // despawn_after != 0 and active_age >= despawn_after is removed and reported.
     AgeResult age_region(RegionKey key, const SettleFn& settle);
 
@@ -119,6 +120,7 @@ public:
 private:
     std::map<std::uint64_t, GroundObject> m_objects;
     std::map<RegionKey, std::set<std::uint64_t>> m_byRegion;
+    std::size_t m_reserved_bytes = 0;
 };
 
 } // namespace Luminumbra::world

@@ -30,11 +30,17 @@ See [world format compatibility](engine-guide.md).
   gate and its statistical interpretation.
 - [Visual regression](visual-regression.md) explains maintained captures and
   visual evidence.
+- [Installed static prefab preview](static-preview.md) describes the neutral
+  production renderer, supported materials, camera and capture evidence.
+- [Persistent viewport host](persistent-viewport.md) describes authenticated
+  complete-state updates and installed-host acceptance, with remaining Blender work.
 - [SHIELD signed-distance-field contract](shield/sdf-contract.md) defines the
   terrain sampling and meshing invariants.
 - [Distant world and distant simulation contract](distant-world.md) defines
   the 16 km volumetric far representation, persistent active regions, the
   per-system distant policy, format additions and the performance contract.
+- [Far authority overlay](far-authority-overlay.md) documents the FSV1 byte
+  layout, limits and refusal table for edit-baked far bricks.
 - [Known limitations](known-limitations.md) is an honest inventory of the
   engine's current boundaries.
 

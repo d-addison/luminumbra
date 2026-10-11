@@ -237,6 +237,51 @@ TEST(WorldDurableResidency, EditedChunkParksAndReturnsIdentically) {
     EXPECT_EQ(HashVec(edited->sdf_data), recorded_hash);
 }
 
+TEST(WorldDurableResidency, WholeSnapshotCommitReleasesParkedPayloadAndReturnRestoresTruth) {
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_NE(edited, nullptr);
+    const auto coords = edited->get_coords();
+    const auto sdf_hash = HashVec(edited->sdf_data);
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    ASSERT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    const auto before = fx.session->ComputeChunkStateHash();
+    const auto parked_bytes = fx.world->parking_status().parked_bytes;
+    ASSERT_TRUE(fx.session->SaveWorldState());
+    EXPECT_FALSE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    EXPECT_LT(fx.world->parking_status().parked_bytes, parked_bytes);
+    EXPECT_EQ(fx.session->ComputeChunkStateHash(), before);
+    EXPECT_FALSE(fx.world->find_streamed_chunk(coords));
+    ASSERT_TRUE(fx.world->restore_authoritative_chunk(coords));
+    const auto restored = fx.world->find_streamed_chunk(coords);
+    ASSERT_NE(restored, nullptr);
+    EXPECT_NE(restored, edited);
+    EXPECT_EQ(HashVec(restored->sdf_data), sdf_hash);
+    EXPECT_EQ(restored->sdf_provenance(), ChunkSdfProvenance::LoadedOrEdited);
+}
+
+TEST(WorldDurableResidency, FailedWholeSaveRetainsDirtyParkedPayloadAndInventory) {
+    DurableFixture fx(/*durable=*/true, /*active_regions=*/true);
+    ASSERT_TRUE(fx.created) << fx.error;
+    fx.Settle(fx.SpawnAnchor(), kSettleIterations);
+    const auto edited = fx.EditAtSpawnAndFindEdited();
+    ASSERT_NE(edited, nullptr);
+    fx.Settle(fx.FarAnchor(), kSettleIterations);
+    ASSERT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    const auto inventory = fx.world->durable_chunk_inventory();
+    Luminumbra::Persistence::WorldSaveService::set_before_active_regions_replace_for_testing(
+        [] { return false; });
+    const bool saved = fx.session->SaveWorldState();
+    Luminumbra::Persistence::WorldSaveService::set_before_active_regions_replace_for_testing(
+        nullptr);
+    EXPECT_FALSE(saved);
+    EXPECT_TRUE(edited->is_voxel_data_dirty());
+    EXPECT_TRUE(Contains(fx.world->snapshot_parked_chunks(), edited.get()));
+    EXPECT_EQ(fx.world->durable_chunk_inventory(), inventory);
+}
+
 TEST(WorldDurableResidency, OnlyAuthoritativeChunksAreParked) {
     DurableFixture fx(/*durable=*/true);
     ASSERT_TRUE(fx.created) << fx.error;

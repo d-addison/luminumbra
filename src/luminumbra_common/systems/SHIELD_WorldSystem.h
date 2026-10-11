@@ -432,6 +432,9 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    // Owner-thread downward probe over available terrain truth. Never generates or performs IO;
+    // edited resident SDF supersedes the procedural surface in its vertical band.
+    std::optional<float> ProbeTerrainBelow(const Vec3& requested) const;
     // the single cave-carve composition point. Samples the cheese BODY noise
     // and adds spaghetti EDGE tunnels and Worley caverns via order-free max. Called identically
     // by every density site (mesh / collision / query) so they cannot disagree.
@@ -926,6 +929,18 @@ public:
     void sync_water_authority();
     // Moves a parked chunk back into the resident map. Returns true iff the id was parked.
     bool unpark_chunk(ChunkID id);
+    // Owner-thread committed identity inventory. Durable payloads are loaded only when wanted;
+    // the loader must return the exact identity or throw (never regenerate expected authority).
+    void set_durable_chunk_loader(std::function<std::shared_ptr<Chunk>(const IVec3&)> loader,
+                                  std::function<void(std::string)> fault);
+    void remember_durable_chunks(const std::vector<IVec3>& coords);
+    std::vector<IVec3> durable_chunk_inventory() const;
+    bool restore_authoritative_chunk(const IVec3& coords);
+    void release_clean_parked_chunks();
+    void note_persistence_outcome(bool ok) {
+        m_evictions_suspended = !ok;
+        ++m_dirty_generation;
+    }
 
 private:
     struct StreamingState {
@@ -1040,6 +1055,12 @@ private:
         std::int64_t tick = -1;
     };
     std::unordered_map<ChunkID, ParkedChunk> m_parked;
+    std::map<ChunkID, IVec3> m_durable_chunks;
+    std::function<std::shared_ptr<Chunk>(const IVec3&)> m_durable_chunk_loader;
+    std::function<void(std::string)> m_durable_chunk_fault;
+    mutable bool m_durable_read_failed = false;
+    bool m_evictions_suspended = false;
+    std::shared_ptr<Chunk> read_committed_chunk(const IVec3& coords) const;
     std::size_t m_parked_bytes = 0;
     bool m_durable_residency = false;
     std::size_t m_parked_bytes_limit = static_cast<std::size_t>(256) * 1024u * 1024u;

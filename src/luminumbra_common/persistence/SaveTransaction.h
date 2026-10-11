@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -135,6 +136,9 @@ public:
     // index (durable commit point), then deletes the journal. Failure before the commit point rolls
     // back.
     bool commit(std::vector<std::string>* errors);
+    // Joined writers acknowledge memory only at this transaction's durable commit point.
+    // Aborted transactions discard their callbacks.
+    void defer_until_commit(std::function<void()> action);
     // Rolls back (Open -> RolledBack). No-op after commit.
     void abort(std::vector<std::string>* errors);
 
@@ -177,6 +181,7 @@ private:
     std::uint64_t m_txn_id = 0;
     std::uint64_t m_new_generation = 0;
     std::vector<Entry> m_entries;
+    std::vector<std::function<void()>> m_committed_actions;
     std::uint64_t m_next_undo = 0;
     bool m_registered = false;
 };

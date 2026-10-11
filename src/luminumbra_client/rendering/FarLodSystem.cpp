@@ -1500,7 +1500,7 @@ void FarLodSystem::update(const Systems::SHIELD_WorldSystem& world_system,
         m_coverage.update_frame = m_frame;
         m_coverage.camera = camera_position;
         m_coverage.preview_anchored = m_preview_mode;
-        m_coverage.camera_region_guard_bypassed = m_coverage_camera_region_guard_bypass;
+        m_coverage.camera_region_guard_bypassed = false;
         m_coverage.preview_anchor = m_preview_anchor;
         m_coverage.preview_inner_radius = m_preview_inner_radius;
     }
@@ -1812,9 +1812,12 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // (gl_ClipDistance[0]) to a radial band. The near radius removes the camera-
     // straddling triangles; the far radius removes the far-plane/frustum-edge
     // triangles - both rasterized as the horizon sky-sliver. The clipped band is
-    // invisible (inside the live ring / beyond the far draw radius), so nothing is
-    // lost. Camera-region skip also drops the one region the camera sits in,
-    // whose near triangles straddle the camera even after the radial clip.
+    // invisible (inside the live ring / beyond the far draw radius). Ownership
+    // is per fragment, not per 512 m region: the camera region extends well
+    // beyond the 176 m live sphere and must supply its outer terrain and water.
+    // Keep the exact fragment discard as well as this interpolated vertex clip;
+    // absent live meshes are not permission to fill near caves or edits with far
+    // geometry. Their readiness remains the live streaming path's responsibility.
     glEnable(GL_CLIP_DISTANCE0);
     geometry_shader.setFloat("u_farClipNearRadius", kFarClipInnerRadiusMeters);
     geometry_shader.setFloat("u_farClipFarRadius", kFarClipOuterRadiusMeters);
@@ -1834,22 +1837,9 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     } else {
         geometry_shader.setFloat("u_farPreviewInnerRadius", 0.0f);
     }
-    const int camera_rx = static_cast<int>(std::floor(m_last_camera_position.x / kRegionSize));
-    const int camera_rz = static_cast<int>(std::floor(m_last_camera_position.z / kRegionSize));
-    const auto is_camera_region = [&](const ResidentRegion& region) {
-        // Preview mode (external orbit camera over a fixed sub-region slice): skip
-        // no region — the centre region carries the diorama's far field.
-        // The first-person near-plane guard applies only near this region's
-        // vertical bounds. Flying above it must retain its ground and water.
-        return !(m_coverage_enabled && m_coverage_camera_region_guard_bypass) && !m_preview_mode &&
-               region.rx == camera_rx && region.rz == camera_rz &&
-               m_last_camera_position.y >= region.aabb_min.y - kFarClipInnerRadiusMeters &&
-               m_last_camera_position.y <= region.aabb_max.y + kFarClipInnerRadiusMeters;
-    };
-
     if (m_coverage_enabled) {
         m_coverage.draw_observed = true;
-        m_coverage.camera_region_guard_bypassed = m_coverage_camera_region_guard_bypass;
+        m_coverage.camera_region_guard_bypassed = false;
         // Same predicates, priority and frustum used by the two draw loops below.
         for (auto& row : m_coverage.neighbourhood) {
             const auto found = m_residents.find(region_key(row.rx, row.rz));
@@ -1859,8 +1849,6 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
             const auto decision = [&](u32 count) {
                 if (count == 0)
                     return "empty_mesh";
-                if (is_camera_region(region))
-                    return "camera_region_guard";
                 if (aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes))
                     return "outside_frustum";
                 return "submitted";
@@ -1874,7 +1862,7 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     std::size_t water_indices = 0;
     for (const auto& [key, region] : m_residents) {
         (void)key;
-        if (region.element_count == 0 || is_camera_region(region) ||
+        if (region.element_count == 0 ||
             aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes)) {
             continue;
         }
@@ -1900,13 +1888,11 @@ void FarLodSystem::draw_gbuffer(Shader& geometry_shader,
     // deep water in the G-buffer (no live water.frag reflections far out).
     for (const auto& [key, region] : m_residents) {
         (void)key;
-        //  note: drawing the camera region's sheet
-        // here (to cover the live-disc sea where the live water sim does not
-        // reach) was tried and reverted - the pale sheet behind the live
-        // transparent water shifts water.frag's blend result enough to break
-        // the boundary-band blue-dominance classifier. Who renders the
-        // live-disc sea is the live-water-coverage task's design question.
-        if (region.water_element_count == 0 || is_camera_region(region) ||
+        // The same exact near discard used for terrain protects the live
+        // transparent water blend, including when its live mesh is not ready.
+        // Outside that sphere the camera region has the same water ownership
+        // as every neighboring region; skipping it leaves an unowned band.
+        if (region.water_element_count == 0 ||
             aabb_outside_frustum(region.aabb_min, region.aabb_max, frustum_planes)) {
             continue;
         }

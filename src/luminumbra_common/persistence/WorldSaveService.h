@@ -38,6 +38,7 @@ struct WorldSaveDirtyReport {
 struct RegionDigestInputs {
     std::vector<std::shared_ptr<Chunk>> live;
     std::vector<std::shared_ptr<Chunk>> parked;
+    std::vector<IVec3> durable;
     // Opaque ground object projection of the region (GroundObjectStore::region_bytes); empty when
     // the region holds no ground objects, which keeps the digest of such regions unchanged.
     std::string ground_object_bytes;
@@ -201,6 +202,25 @@ public:
                                                  int max_chunk_z,
                                                  std::vector<std::shared_ptr<Chunk>>& out_chunks,
                                                  std::vector<std::string>* errors = nullptr);
+    enum class ChunkReadStatus {
+        Found,
+        Absent,
+        Error
+    };
+    struct ChunkReadResult {
+        ChunkReadStatus status = ChunkReadStatus::Absent;
+        std::shared_ptr<Chunk> chunk;
+        std::string error;
+    };
+    // Reads the exact lod-0 identity only. Indexed membership is checked before decoding;
+    // missing records are distinct from corrupt/unreadable expected authority.
+    static ChunkReadResult read_chunk(const std::filesystem::path& save_dir,
+                                      const IVec3& coords,
+                                      bool require_index = false);
+    // Capture BEFORE serialization; call only after the complete snapshot commits. A changed
+    // or saturated revision retains its dirty obligation.
+    static std::function<void()>
+    chunk_save_acknowledgement(const std::vector<std::shared_ptr<Chunk>>& chunks);
     // Inserts/replaces the given records keyed (lod_level, id), preserving
     // all other records of the file verbatim.
     static bool upsert_container_records(const std::filesystem::path& region_file,
@@ -214,6 +234,27 @@ public:
     // process-global and must only be used by single-threaded persistence
     // tests.
     static void set_interrupt_before_region_replace_for_testing(bool enabled);
+
+    // Test seam for POSIX directory flushes: the next flush after `flushes_to_skip`
+    // successful ones fails once, then the seam disarms. A negative value disarms it.
+    // Flushes covered are the ancestor-entry flushes of write_file_durably and the
+    // post-rename destination-directory flush of every region replacement; Windows
+    // builds never consult it. Process-global; single-threaded persistence tests only.
+    static void set_directory_flush_failure_for_testing(int flushes_to_skip);
+
+    // Writes `bytes` to `destination` with the same durability contract as an LMR1
+    // region rewrite: the parent directory is created, a unique temporary file in
+    // the destination directory is flushed to stable storage, and it atomically
+    // replaces the destination. On POSIX the entry of every ancestor directory is
+    // flushed on every call, so a retry after a failed flush repeats the missing
+    // flushes. A failed or interrupted write (including the interrupt-before-replace
+    // test seam above) removes the temporary file; the destination is then the
+    // previous complete file, or on POSIX the new complete file when only the final
+    // directory flush failed, never a partial file. Used for derived files that live
+    // beside the save, such as the far authority overlay.
+    static bool write_file_durably(const std::filesystem::path& destination,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr);
 
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
@@ -304,7 +345,9 @@ public:
     bool load_world(WorldStreamingState& state,
                     const std::filesystem::path& save_dir,
                     std::vector<std::string>& errors,
-                    const std::stop_token& stop = {}) const;
+                    const std::stop_token& stop = {},
+                    const std::function<bool(const IVec3&)>& retain_chunk = {},
+                    std::vector<IVec3>* authoritative_inventory = nullptr) const;
 
     // Deterministic hash of the streaming state, reusing the persistence hash
     // machinery (fnv1a_64 over the canonical snapshot bytes). Format

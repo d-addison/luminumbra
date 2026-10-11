@@ -1,3 +1,4 @@
+#include "luminumbra_common/fields/EnergyFieldState.h"
 #include "luminumbra_common/persistence/SaveTransaction.h"
 #include "luminumbra_common/persistence/WorldSaveService.h"
 
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -20,11 +22,75 @@
 #ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 namespace fs = std::filesystem;
 
 namespace Luminumbra::Persistence {
+
+TEST(SaveTransaction, IndexedEnergyValidationRejectsCanonicalFingerprintOfMalformedContents) {
+    const auto remaining = std::to_string(luminumbra::fields::kEnergyCadenceTicks);
+    const std::string header = "EFS1 1 " + remaining + "\n";
+    std::vector<std::string> invalid{
+        "not an EFS record",
+        "EFS1 2147483647 " + remaining + "\n",
+        header + "P 0 0 0:1 0:2\n",
+        header + "P 0 0 0:1\nP 0 0 0:2\n",
+        header + "P 0 0 256:1\n",
+        header + "P 0 0 0:1junk\n",
+    };
+    std::string oversized = "EFS1 64 " + remaining + "\n";
+    for (int page = 0; page <= 2048; ++page)
+        oversized += "P " + std::to_string(page) + " 0\n";
+    invalid.push_back(std::move(oversized));
+    for (const auto& bytes : invalid) {
+        SCOPED_TRACE(bytes.substr(0, 128));
+        const auto dir =
+            fs::temp_directory_path() /
+            ("lum_bad_energy_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        fs::create_directories(dir);
+        {
+            // Seal using raw fingerprints to model a correctly fingerprinted malformed
+            // external member. The reader must validate structure as well as its hash.
+            SaveTransaction transaction(
+                dir,
+                1,
+                {},
+                +[](const fs::path& root,
+                    std::string_view relative,
+                    MemberDigest& out,
+                    std::string& error) {
+                    bool exists = false;
+                    std::vector<std::string> diagnostics;
+                    if (!hash_file(root / std::string(relative),
+                                   out.bytes,
+                                   out.fnv64,
+                                   exists,
+                                   &diagnostics)) {
+                        error = diagnostics.empty() ? "read failed" : diagnostics.front();
+                        return false;
+                    }
+                    out.present = exists;
+                    return true;
+                });
+            ASSERT_TRUE(transaction.begin(nullptr));
+            ASSERT_TRUE(WorldSaveService::write_member_bytes(dir, "aether_state.efs", bytes));
+            ASSERT_TRUE(transaction.commit(nullptr));
+        }
+        std::vector<std::string> errors;
+        EXPECT_FALSE(WorldSaveService::validate_save(dir, &errors));
+        ASSERT_FALSE(errors.empty());
+        EXPECT_NE(errors.front().find("energy field"), std::string::npos);
+        std::error_code remove_error;
+        fs::remove_all(dir, remove_error);
+    }
+}
 
 namespace {
 
@@ -670,6 +736,161 @@ TEST(SaveTransactionDeathTest, RecoveryItselfSurvivesKillAtEachRollbackEntry) {
     EXPECT_GE(recovery_kills, 1);
 }
 
+#endif
+
+#if defined(_WIN32)
+namespace {
+int g_windows_cut = 0;
+int g_windows_calls = 0;
+void WindowsKillHook(const char*, const fs::path&) {
+    if (++g_windows_calls == g_windows_cut)
+        std::_Exit(7);
+}
+
+std::wstring WindowsTestEnv(const wchar_t* name) {
+    const DWORD count = ::GetEnvironmentVariableW(name, nullptr, 0);
+    if (count == 0)
+        return {};
+    std::wstring value(count, L'\0');
+    const DWORD copied = ::GetEnvironmentVariableW(name, value.data(), count);
+    value.resize(copied);
+    return value;
+}
+
+bool WindowsScenario(const fs::path& dir) {
+    SaveTransaction txn(dir, 5, {}, &RawDigest);
+    if (!txn.begin(nullptr) || !txn.protect({"world_info.json",
+                                             "aether_state.efs",
+                                             "chunks/region/plant-entities.json",
+                                             "chunks/region/active-regions.arl"},
+                                            nullptr))
+        return false;
+    return WorldSaveService::write_member_bytes(dir, "world_info.json", "w1") &&
+           WorldSaveService::write_member_bytes(dir, "aether_state.efs", "e1") &&
+           WorldSaveService::write_member_bytes(dir, "chunks/region/plant-entities.json", "p1") &&
+           WorldSaveService::remove_member(dir, "chunks/region/active-regions.arl") &&
+           txn.commit(nullptr);
+}
+
+std::optional<DWORD> WindowsTxnChild(const fs::path& dir, int cut, bool recovery) {
+    std::wstring executable(32768, L'\0');
+    const DWORD count =
+        ::GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
+    if (count == 0 || count == executable.size())
+        return std::nullopt;
+    executable.resize(count);
+    const auto previous_dir = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DIR");
+    const auto previous_cut = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT");
+    const auto previous_mode = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_RECOVER");
+    const auto cut_text = std::to_wstring(cut);
+    const bool configured =
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DIR", dir.c_str()) &&
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_CUT", cut_text.c_str()) &&
+        ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER", recovery ? L"1" : L"0");
+    std::wstring command =
+        L"\"" + executable +
+        L"\" --gtest_filter=SaveTransaction.WindowsInterruptionChild --gtest_color=no";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    const bool started = configured && ::CreateProcessW(executable.c_str(),
+                                                        command.data(),
+                                                        nullptr,
+                                                        nullptr,
+                                                        FALSE,
+                                                        CREATE_NO_WINDOW,
+                                                        nullptr,
+                                                        nullptr,
+                                                        &startup,
+                                                        &process) != FALSE;
+    ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_DIR",
+                              previous_dir.empty() ? nullptr : previous_dir.c_str());
+    ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_CUT",
+                              previous_cut.empty() ? nullptr : previous_cut.c_str());
+    ::SetEnvironmentVariableW(L"LUM_TXN_TEST_CHILD_RECOVER",
+                              previous_mode.empty() ? nullptr : previous_mode.c_str());
+    if (!started)
+        return std::nullopt;
+    const DWORD waited = ::WaitForSingleObject(process.hProcess, 30000);
+    if (waited != WAIT_OBJECT_0) {
+        ::TerminateProcess(process.hProcess, 9);
+        ::WaitForSingleObject(process.hProcess, 30000);
+    }
+    DWORD code = 9;
+    const bool got_exit = ::GetExitCodeProcess(process.hProcess, &code) != FALSE;
+    ::CloseHandle(process.hThread);
+    ::CloseHandle(process.hProcess);
+    return got_exit && waited == WAIT_OBJECT_0 ? std::optional<DWORD>(code) : std::nullopt;
+}
+} // namespace
+
+TEST(SaveTransaction, WindowsInterruptionChild) {
+    const auto dir = WindowsTestEnv(L"LUM_TXN_TEST_CHILD_DIR");
+    if (dir.empty())
+        GTEST_SKIP() << "invoked only by the Windows interruption matrix";
+    g_windows_cut = std::stoi(WindowsTestEnv(L"LUM_TXN_TEST_CHILD_CUT"));
+    g_windows_calls = 0;
+    set_snapshot_step_hook_for_testing(&WindowsKillHook);
+    if (WindowsTestEnv(L"LUM_TXN_TEST_CHILD_RECOVER") == L"1")
+        std::_Exit(recover_pending_journal(fs::path(dir), nullptr) == RecoveryOutcome::Failed ? 9
+                                                                                              : 0);
+    std::_Exit(WindowsScenario(fs::path(dir)) ? 0 : 9);
+}
+
+TEST(SaveTransaction, WindowsKillAtEveryPublicationAndRecoveryStepIsIdempotent) {
+    TempSave base, final, work, interrupted;
+    ASSERT_TRUE(CommitOnce(base.path(),
+                           1,
+                           {{"world_info.json", "w0"},
+                            {"aether_state.efs", "e0"},
+                            {"chunks/region/active-regions.arl", "a0"}}));
+    const auto baseline = Tree(base.path());
+    CopyTree(base.path(), final.path());
+    ASSERT_TRUE(WindowsScenario(final.path()));
+    const auto finished_tree = Tree(final.path());
+    bool complete = false;
+    bool have_interrupted = false;
+    for (int cut = 1; cut <= 200 && !complete; ++cut) {
+        SCOPED_TRACE(cut);
+        CopyTree(base.path(), work.path());
+        const auto exit_code = WindowsTxnChild(work.path(), cut, false);
+        ASSERT_TRUE(exit_code.has_value());
+        if (!exit_code.has_value())
+            return;
+        const DWORD code = exit_code.value();
+        ASSERT_TRUE(code == 0 || code == 7) << code;
+        if (!have_interrupted && journal_pending(work.path()) &&
+            Get(work.path() / "aether_state.efs") != "e0") {
+            CopyTree(work.path(), interrupted.path());
+            have_interrupted = true;
+        }
+        std::vector<std::string> errors;
+        ASSERT_NE(recover_pending_journal(work.path(), &errors), RecoveryOutcome::Failed);
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+        const auto recovered = Tree(work.path());
+        EXPECT_TRUE(recovered == baseline || recovered == finished_tree);
+        complete = code == 0;
+    }
+    ASSERT_TRUE(complete);
+    ASSERT_TRUE(have_interrupted);
+    complete = false;
+    for (int cut = 1; cut <= 200 && !complete; ++cut) {
+        SCOPED_TRACE(cut);
+        CopyTree(interrupted.path(), work.path());
+        const auto exit_code = WindowsTxnChild(work.path(), cut, true);
+        ASSERT_TRUE(exit_code.has_value());
+        if (!exit_code.has_value())
+            return;
+        const DWORD code = exit_code.value();
+        ASSERT_TRUE(code == 0 || code == 7) << code;
+        ASSERT_NE(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::Failed);
+        EXPECT_EQ(recover_pending_journal(work.path(), nullptr), RecoveryOutcome::NothingToDo);
+        const auto recovered = Tree(work.path());
+        EXPECT_TRUE(recovered == baseline || recovered == finished_tree);
+        complete = code == 0;
+    }
+    EXPECT_TRUE(complete);
+}
 #endif
 
 } // namespace Luminumbra::Persistence

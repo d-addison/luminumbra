@@ -198,7 +198,7 @@ void ActiveRegionLedger::evict_idle(const WorldClock& clock, const OwnershipProb
         const bool idle = clock.tick() >= r.last_proximity &&
                           clock.tick() - r.last_proximity >= kIdleEvictionTicks;
         if (!r.pinned && !r.edited && !r.populated && r.water_cursor == 0 && idle &&
-            !owned(it->first))
+            !m_completedWork.contains(it->first) && !owned(it->first))
             it = m_records.erase(it);
         else
             ++it;
@@ -210,7 +210,14 @@ RegionSchedule ActiveRegionLedger::schedule(const WorldClock& clock,
                                             const DurableDigest& durable_digest,
                                             const OwnershipProbe& owned) {
     auto next = *this;
-    auto result = next.schedule_in_place(clock, replicated_anchors, work, durable_digest, owned);
+    std::vector<RegionWork> combined(work.begin(), work.end());
+    // Restored clock gaps expire stale work only after this schedule commits successfully.
+    if (m_tick + 1 == clock.tick())
+        for (const auto& [key, total] : m_completedWork)
+            combined.push_back(RegionWork{key, total, 0, 0, 0});
+    auto result =
+        next.schedule_in_place(clock, replicated_anchors, combined, durable_digest, owned);
+    next.m_completedWork.clear();
     *this = std::move(next);
     return result;
 }
@@ -378,6 +385,19 @@ ActiveRegionLedger::schedule_in_place(const WorldClock& clock,
     return result;
 }
 
+void ActiveRegionLedger::publish_completed_work(std::span<const RegionWork> work) {
+    std::map<RegionKey, std::uint64_t> completed;
+    for (const auto& units : work) {
+        if (!m_records.contains(units.key))
+            throw std::invalid_argument("Completed work requires an owned ledger record");
+        const auto total = Sum(Sum(units.region_ticks, units.entity_updates),
+                               Sum(units.water_cells, units.page_updates));
+        if (total != 0)
+            completed[units.key] = Sum(completed[units.key], total);
+    }
+    m_completedWork = std::move(completed);
+}
+
 std::string ActiveRegionLedger::payload(bool observational) const {
     std::string bytes;
     Append(bytes, m_tick, 8);
@@ -424,6 +444,15 @@ std::string ActiveRegionLedger::canonical_bytes() const {
     std::string bytes = "active_regions:v1:" + payload(false);
     if (m_nextPersistentId != 1)
         bytes += "|next_id:" + std::to_string(m_nextPersistentId);
+    if (!m_completedWork.empty()) {
+        bytes += "|completed_work:";
+        Append(bytes, m_completedWork.size(), 4);
+        for (const auto& [key, total] : m_completedWork) {
+            Append(bytes, static_cast<std::uint32_t>(key.x), 4);
+            Append(bytes, static_cast<std::uint32_t>(key.z), 4);
+            Append(bytes, total, 8);
+        }
+    }
     return bytes;
 }
 bool ActiveRegionLedger::any_frozen_history() const {
@@ -438,7 +467,7 @@ std::string ActiveRegionLedger::encode() const {
     constexpr std::uint8_t kDigestProjection = 2;
     const bool frozen_history = any_frozen_history();
     const bool allocator_advanced = m_nextPersistentId != 1;
-    const bool extension = frozen_history || allocator_advanced;
+    const bool extension = frozen_history || allocator_advanced || !m_completedWork.empty();
     std::string bytes = "ARL1";
     Append(bytes, extension ? 2 : 1, 2);
     Append(bytes, 0, 2);
@@ -455,6 +484,16 @@ std::string ActiveRegionLedger::encode() const {
             Append(tlvs, 2, 2);
             Append(tlvs, 1, 4);
             Append(tlvs, kDigestProjection, 1);
+        }
+        if (!m_completedWork.empty()) {
+            Append(tlvs, 6, 2);
+            Append(tlvs, 4 + 16 * m_completedWork.size(), 4);
+            Append(tlvs, m_completedWork.size(), 4);
+            for (const auto& [key, total] : m_completedWork) {
+                Append(tlvs, static_cast<std::uint32_t>(key.x), 4);
+                Append(tlvs, static_cast<std::uint32_t>(key.z), 4);
+                Append(tlvs, total, 8);
+            }
         }
         Append(bytes, tlvs.size(), 4);
         bytes += tlvs;
@@ -584,9 +623,9 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     return false;
                 const auto value = extension.substr(at, length);
                 at += length;
-                // Strictly ascending types refuse duplicates; types 1 and 2 are the only known
-                // types.
-                if ((have_previous && type <= previous_type) || (type != 1 && type != 2))
+                // Types 3/4 remain reserved until their consumer decoders exist.
+                if ((have_previous && type <= previous_type) ||
+                    (type != 1 && type != 2 && type != 6))
                     return false;
                 have_previous = true;
                 previous_type = type;
@@ -599,6 +638,28 @@ bool ActiveRegionLedger::decode(std::string_view bytes,
                     if (next < 2 || next > kPersistentIdLimit)
                         return false;
                     result.m_nextPersistentId = next;
+                    continue;
+                }
+                if (type == 6) {
+                    if (length < 4)
+                        return false;
+                    Reader completed(value);
+                    const auto count = completed.read(4);
+                    if (count == 0 || count > result.m_records.size() || length != 4 + 16 * count)
+                        return false;
+                    std::optional<RegionKey> prior;
+                    for (std::uint64_t entry = 0; entry < count; ++entry) {
+                        const RegionKey key{std::bit_cast<std::int32_t>(
+                                                static_cast<std::uint32_t>(completed.read(4))),
+                                            std::bit_cast<std::int32_t>(
+                                                static_cast<std::uint32_t>(completed.read(4)))};
+                        const auto total = completed.read(8);
+                        if (!result.m_records.contains(key) || (prior && key <= *prior) ||
+                            total == 0)
+                            return false;
+                        result.m_completedWork.emplace(key, total);
+                        prior = key;
+                    }
                     continue;
                 }
                 if (length != 1)
