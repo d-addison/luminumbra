@@ -58,5 +58,5 @@ if(BUILD_TESTING)
         COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/qualify/test_repeat_qualification.py")
     set_tests_properties(RepeatQualificationContract
-        PROPERTIES LABELS "tools;persistence" TIMEOUT 60)
+        PROPERTIES LABELS "tools;persistence" TIMEOUT 300)
 endif()

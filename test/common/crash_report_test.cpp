@@ -116,7 +116,8 @@ TEST(CrashReportChild, CrashesWhenRequested) {
         std::raise(SIGABRT);
         return;
     }
-    int* volatile null_pointer = nullptr;
+    // A volatile store cannot be removed or reordered away by the optimizer.
+    volatile int* volatile null_pointer = nullptr;
     *null_pointer = 1;
 }
 

@@ -168,11 +168,13 @@ bool WriteHeader(Target target, std::string_view program_name, std::uint64_t pid
 
 #if !defined(_WIN32)
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<int> g_report_fd{-1};
 static_assert(std::atomic<int>::is_always_lock_free, "handler state must be lock-free");
 
 // Set by the first fatal signal. Any later entry, on this thread or another, skips the
 // report and terminates the process.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic_flag g_handler_entered{};
 
 const char* SignalName(int signo) {
@@ -294,14 +296,20 @@ bool InstallSignalHandlers() {
 
 constexpr DWORD kMaxModulePathChars = 32767;
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<HANDLE> g_report{nullptr};
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 LONG g_handler_entered = 0;
 
 // Main-module facts captured at install time. The fault path reads only these values,
 // so it never calls into the loader.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::uintptr_t g_module_base = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::uintptr_t g_module_end = 0;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 char g_module_path[kMaxModulePathChars] = {};
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 DWORD g_module_path_length = 0;
 
 void CacheMainModule() {
@@ -345,7 +353,9 @@ Fn ResolveNtdllEntry(HMODULE module, const char* name) {
 using RtlLookupFunctionEntryFn = decltype(&RtlLookupFunctionEntry);
 using RtlVirtualUnwindFn = decltype(&RtlVirtualUnwind);
 
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 RtlLookupFunctionEntryFn g_lookup_function_entry = nullptr;
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 RtlVirtualUnwindFn g_virtual_unwind = nullptr;
 
 void ResolveNtdllEntryPoints() {
