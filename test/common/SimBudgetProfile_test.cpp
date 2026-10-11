@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -47,8 +48,8 @@ TEST(SimBudgetProfileTest, FullProfileRoundTripsIntoStruct) {
         Profile(R"("region_scheduler":{"work_limit":10,"hold_ticks":2,"reduced_shift":2},)"
                 R"("stages":{"instinct":5,"wind.gust-1":7},"residency":{"terrain_cache":1024})"));
     ASSERT_EQ(result.error, ProfileError::None) << result.detail;
-    ASSERT_TRUE(result.profile.region_scheduler.has_value());
-    EXPECT_EQ(*result.profile.region_scheduler, (RegionSchedulerConfig{10, 2, 2}));
+    EXPECT_EQ(result.profile.region_scheduler,
+              std::optional<RegionSchedulerConfig>(RegionSchedulerConfig{10, 2, 2}));
     EXPECT_EQ(result.profile.stage_max_work.size(), 2u);
     EXPECT_EQ(result.profile.stage_max_work.at("instinct"), 5u);
     EXPECT_EQ(result.profile.stage_max_work.at("wind.gust-1"), 7u);
