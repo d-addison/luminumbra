@@ -10,7 +10,7 @@
         "-B",
         "<build-root>/authoring-isolated/campaign-20260913/viewport-blender/test/viewport/probe_windows_client.py",
         "--receipt",
-        "C:/Temp/luminumbra-viewport-checks-1571374ce6b0467d9c8bcaa294da32cb/client.json"
+        "<temp-root>/client.json"
       ],
       "passed": true,
       "pid": 40460,
@@ -42,7 +42,7 @@
         "--modules",
         "<build-root>/authoring-isolated/campaign-20260913/viewport-blender/tools/blender/authoring/extension",
         "--output",
-        "C:/Temp/luminumbra-viewport-checks-1571374ce6b0467d9c8bcaa294da32cb/presentation"
+        "<temp-root>/presentation"
       ],
       "passed": true,
       "pid": 9412,

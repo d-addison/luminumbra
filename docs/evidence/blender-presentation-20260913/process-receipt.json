@@ -26,7 +26,7 @@
         "--modules",
         "<build-root>/authoring-isolated/campaign-20260913/viewport-blender-native-source/tools/blender/authoring/extension",
         "--output",
-        "C:/Temp/luminumbra-viewport-checks-5754b9b7c8bb4314afd18fdae3144134/presentation"
+        "<temp-root>/presentation"
       ],
       "passed": true,
       "pid": 2324,
