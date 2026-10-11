@@ -613,9 +613,10 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
 
     const auto wall_start = std::chrono::steady_clock::now();
     while (report.ticks_executed < tick_count) {
-        if (m_session->GetRegionSchedulerFault()) {
+        if (const auto& region_fault = m_session->GetRegionSchedulerFault();
+            region_fault.has_value()) {
             report.region_fault = true;
-            report.region_fault_message = m_session->GetRegionSchedulerFault()->message;
+            report.region_fault_message = region_fault.value().message;
             break;
         }
         LUMIN_PROFILE_ZONE_N("server_tick"); // no-op unless LUMINUMBRA_ENABLE_TRACY
