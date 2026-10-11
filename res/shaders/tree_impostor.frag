@@ -1,4 +1,5 @@
 #version 450 core
+layout (location = 5) out vec4 gAuthoredSurface; // RGB emission, A material lane
 //  far-field tree impostor fragment. Selects the octahedral atlas tile from the world view
 // direction (matching OctaImpostor.h / OctaEncode), samples the albedo + normal atlases, applies
 // the silhouette cutout (atlas alpha), and writes the SAME deferred G-buffer attachments as
@@ -39,6 +40,7 @@ vec2 octaEncode(vec3 d) {
 }
 
 void main() {
+    gAuthoredSurface = vec4(0.0);
     // Pick the octa tile for this view direction, then sample within it at the billboard UV. A half-texel
     // inset keeps bilinear filtering from bleeding into neighbouring tiles.
     vec2 tuv = clamp(octaEncode(normalize(vViewDir)), 0.0, 1.0);

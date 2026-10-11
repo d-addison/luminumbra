@@ -1,4 +1,5 @@
 #pragma once
+#include <luminumbra/rendering/RenderView.h>
 
 #include "BenchmarkGpuQueries.h"
 #include "luminumbra_common/world/WorldClock.h"
@@ -46,6 +47,8 @@ class SHIELD_WorldSystem;
 struct TerrainGenParams;
 } // namespace Luminumbra::Systems
 namespace Luminumbra::Rendering {
+struct StaticDrawSnapshot;
+
 class Shader;
 class Camera;
 class ShadowPass;
@@ -188,6 +191,8 @@ public:
         // Skinned (animated) meshes drawn in the G-buffer pass.
         size_t skinned_draws = 0;
         size_t skinned_indices_drawn = 0;
+        size_t authored_draws = 0;
+        size_t authored_indices_drawn = 0;
         std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_visible_chunks{};
         std::array<size_t, ShadowMap::CASCADE_COUNT> shadow_cascade_draws{};
         size_t shadow_draws = 0;
@@ -452,6 +457,9 @@ public:
     float prev_time() const {
         return m_prev_time;
     } //  TAAU: prev-frame wind wall-clock
+    void set_authored_static_draws(std::shared_ptr<const StaticDrawSnapshot> draws) {
+        m_authored_draws = std::move(draws);
+    }
     void set_taau_enabled(bool e) {
         m_taau_enabled = e;
     } // render.taau (client wires from SystemConfig)
@@ -1266,6 +1274,8 @@ private:
     // color with a 3x3 neighborhood-clamp anti-ghost; ping-pong history. Flag OFF -> the pass never
     // runs and the lighting color blits through unchanged (byte-identical default render).
     bool m_taau_enabled = false;
+    std::shared_ptr<const StaticDrawSnapshot> m_authored_draws;
+    std::unique_ptr<RenderView> m_authored_view;
     glm::vec2 m_taau_jitter_ndc =
         glm::vec2(0.0f);        // current-frame sub-pixel projection jitter (NDC); (0,0) when OFF
     unsigned m_taau_frame = 0u; // Halton sequence index
