@@ -124,7 +124,7 @@ void ReadFloats(std::span<const std::uint8_t> bytes, std::size_t& offset, Values
 MorphMeshAsset::MorphMeshAsset(MorphMeshData data)
     : m_data(std::move(data)) {}
 
-bool CreateMorphMeshAsset(MorphMeshData data,
+bool CreateMorphMeshAsset(const MorphMeshData& data,
                           std::shared_ptr<const MorphMeshAsset>& out,
                           std::string* error) {
     // Deep copy: published storage is never aliased by the caller's retained references.
@@ -207,7 +207,7 @@ bool DecodeMorphMeshAsset(std::span<const std::uint8_t> bytes,
             ReadFloats(bytes, offset, delta.normal);
         }
     }
-    return CreateMorphMeshAsset(std::move(data), out, error);
+    return CreateMorphMeshAsset(data, out, error);
 }
 
 bool LoadMorphMeshAsset(const std::filesystem::path& path,

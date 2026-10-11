@@ -51,13 +51,14 @@ public:
 private:
     explicit MorphMeshAsset(MorphMeshData data);
     MorphMeshData m_data;
-    friend bool
-    CreateMorphMeshAsset(MorphMeshData, std::shared_ptr<const MorphMeshAsset>&, std::string*);
+    friend bool CreateMorphMeshAsset(const MorphMeshData&,
+                                     std::shared_ptr<const MorphMeshAsset>&,
+                                     std::string*);
 };
 
 // Every operation replaces out only after complete success. Published assets are
 // immutable; failed decode/evaluation retains the caller's previous asset/frame.
-bool CreateMorphMeshAsset(MorphMeshData data,
+bool CreateMorphMeshAsset(const MorphMeshData& data,
                           std::shared_ptr<const MorphMeshAsset>& out,
                           std::string* error = nullptr);
 bool DecodeMorphMeshAsset(std::span<const std::uint8_t> bytes,

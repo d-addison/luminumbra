@@ -286,7 +286,7 @@ bool process_morph_gltf_checked(const std::string& input_path, const std::string
         return false;
     std::shared_ptr<const MorphMeshAsset> asset;
     std::string error;
-    if (!CreateMorphMeshAsset(std::move(builder), asset, &error)) {
+    if (!CreateMorphMeshAsset(builder, asset, &error)) {
         std::cerr << "morph.asset: " << error << '\n';
         return false;
     }

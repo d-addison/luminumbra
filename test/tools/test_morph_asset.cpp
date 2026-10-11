@@ -291,7 +291,7 @@ TEST_F(MorphAssetTest, BuilderCannotPublishInvalidMutableTopology) {
             data.targets.resize(65);
         if (kind == 4)
             data.vertices[0].normal = {0, 0, 0};
-        EXPECT_FALSE(CreateMorphMeshAsset(std::move(data), asset));
+        EXPECT_FALSE(CreateMorphMeshAsset(data, asset));
         EXPECT_EQ(asset, original);
     }
     static_assert(!std::is_copy_constructible_v<MorphMeshAsset>);
@@ -321,7 +321,7 @@ TEST_F(MorphAssetTest, RejectsNumericallySingularSourceWorld) {
                          0.0f,
                          0.0f,
                          1.0f};
-    EXPECT_FALSE(CreateMorphMeshAsset(std::move(data), asset));
+    EXPECT_FALSE(CreateMorphMeshAsset(data, asset));
     EXPECT_EQ(asset, original);
 }
 
