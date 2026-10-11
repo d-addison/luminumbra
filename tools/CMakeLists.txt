@@ -17,8 +17,13 @@ target_include_directories(asset_processor SYSTEM PRIVATE
 target_link_libraries(asset_processor PRIVATE meshoptimizer stb_headers)
 
 option(LUMINUMBRA_ENABLE_PREFAB_RUNTIME "Build the optional compiled prefab ECS runtime and inspector" OFF)
-if(LUMINUMBRA_ENABLE_PREFAB_RUNTIME)
+option(LUMINUMBRA_ENABLE_STATIC_PREVIEW "Build the neutral production static renderer and installed capture host" OFF)
+if(LUMINUMBRA_ENABLE_PREFAB_RUNTIME OR LUMINUMBRA_ENABLE_STATIC_PREVIEW)
     add_subdirectory(prefab_runtime)
+endif()
+if(LUMINUMBRA_ENABLE_STATIC_PREVIEW)
+    add_subdirectory(static_scene)
+    add_subdirectory(static_preview)
 endif()
 
 if(BUILD_TESTING)

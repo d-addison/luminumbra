@@ -8,7 +8,6 @@
 #include "PassGlHelpers.h"
 #include "core/Log.h"
 #include "luminumbra_common/core/Environment.h"
-#include "luminumbra_common/world/Chunk.h"
 #include "rendering/Camera.h"
 #include "rendering/Shader.h"
 
@@ -17,6 +16,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+#include <luminumbra/rendering/RenderView.h>
 #include <stdexcept>
 #include <string>
 
@@ -172,7 +173,22 @@ void LightingPass::copy_lighting_color_to_opaque_texture(const RenderContext& ct
 }
 
 void LightingPass::execute(const RenderContext& ctx) {
-    const Camera& camera = *ctx.camera;
+    if (!ctx.render_view && !ctx.camera)
+        throw std::invalid_argument("Lighting requires a validated view or production camera");
+    if (ctx.static_studio && (!ctx.render_view || ctx.authored_surface.id == 0))
+        throw std::invalid_argument(
+            "Static studio requires its exact view and material attachment");
+    const glm::mat4 view = ctx.render_view ? glm::make_mat4(ctx.render_view->view().data())
+                                           : ctx.camera->GetViewMatrix();
+    const glm::mat4 projection =
+        ctx.render_view ? glm::make_mat4(ctx.render_view->projection().data())
+                        : ctx.camera->GetProjectionMatrix(static_cast<int>(ctx.screen_width),
+                                                          static_cast<int>(ctx.screen_height));
+    const glm::vec3 eye =
+        ctx.render_view ? glm::make_vec3(ctx.render_view->eye().data()) : ctx.camera->Position;
+    const float far_plane = ctx.render_view
+                                ? static_cast<float>(ctx.render_view->description().far_plane)
+                                : ctx.camera->GetFarPlane();
     const GLboolean depth_was_enabled = glIsEnabled(GL_DEPTH_TEST);
     // The fullscreen quad lies at clip depth zero. Scene visibility comes from
     // the G-buffer, and its depth is blitted here after deferred lighting.
@@ -183,6 +199,13 @@ void LightingPass::execute(const RenderContext& ctx) {
     glClearDepth(0.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     m_lighting_shader->use();
+    m_lighting_shader->setInt("u_staticStudio", ctx.static_studio ? 1 : 0);
+    m_lighting_shader->setVec3("u_studioBackground", ctx.studio_background);
+    m_lighting_shader->setInt("u_authoredEnabled", ctx.authored_surface.id != 0 ? 1 : 0);
+    m_lighting_shader->setInt("u_authoredSurface", 13);
+    m_lighting_shader->setInt("u_sceneDepth", 4);
+    glActiveTexture(GL_TEXTURE13);
+    glBindTexture(GL_TEXTURE_2D, ctx.authored_surface.id);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx.gbuffer_position.id); // View-space position
     glActiveTexture(GL_TEXTURE1);
@@ -240,7 +263,7 @@ void LightingPass::execute(const RenderContext& ctx) {
     // the render-only snow cover (0 default = byte-identical).
     m_lighting_shader->setFloat("u_snowCover", ctx.snow_cover);
     glActiveTexture(GL_TEXTURE0);
-    m_lighting_shader->setMat4("u_inverseView", glm::inverse(camera.GetViewMatrix()));
+    m_lighting_shader->setMat4("u_inverseView", glm::inverse(view));
     m_lighting_shader->setInt("gPosition", 0);
     m_lighting_shader->setInt("gNormalMaterial", 1);  // Octahedral normal + material
     m_lighting_shader->setInt("gAlbedoRoughness", 2); // Albedo + roughness
@@ -252,7 +275,7 @@ void LightingPass::execute(const RenderContext& ctx) {
     m_lighting_shader->setInt("u_materialLUT", 8);
     m_lighting_shader->setFloat("u_emissiveLutScale", ctx.emissive_lut_scale);
     m_lighting_shader->setVec3("u_skyAmbientColor", ctx.sky_ambient_color);
-    m_lighting_shader->setVec3("u_viewPos", camera.Position);
+    m_lighting_shader->setVec3("u_viewPos", eye);
     m_lighting_shader->setVec3("u_sun.direction", ctx.sun.direction);
     m_lighting_shader->setVec3("u_sun.color", ctx.sun.color);
     // moon-shadows: the moon's TOWARD-LIGHT direction (anti-sun, overhead at
@@ -263,53 +286,71 @@ void LightingPass::execute(const RenderContext& ctx) {
     m_lighting_shader->setFloat("u_moonIllum", ctx.moon_illumination); // rendering: lunar phase
     m_lighting_shader->setVec3("u_moonRadiance",
                                ctx.moon_radiance); // rendering : dedicated moon radiance channel
-    // LUMIN_MOON_WRAP_FLOOR is a supported photo-grade override for the moon
-    // wrap floor. It is parsed once; 0.25 is the shipped navigable-night default.
-    static const float s_moon_wrap_floor = [] {
-        if (const auto value = Core::ReadEnvironment("LUMIN_MOON_WRAP_FLOOR")) {
-            try {
-                return std::stof(*value);
-            } catch (...) {}
-        }
-        return 0.25f;
-    }();
-    m_lighting_shader->setFloat("u_moonWrapFloor", s_moon_wrap_floor);
+    if (ctx.static_studio) {
+        m_lighting_shader->setFloat("u_moonWrapFloor", 0.25f);
+        m_lighting_shader->setFloat("u_exposure", ctx.exposure > 0 ? ctx.exposure : 1.0f);
+        m_lighting_shader->setFloat("u_saturation", 1.0f);
+        m_lighting_shader->setFloat("u_contrast", 1.0f);
+        m_lighting_shader->setVec3("u_lightWarmth", glm::vec3(1));
+        m_lighting_shader->setVec3("u_shadowTint", glm::vec3(1));
+        m_lighting_shader->setVec3("u_highlightTint", glm::vec3(1));
+        m_lighting_shader->setFloat("u_splitToneStrength", 0.0f);
+    } else {
+        // LUMIN_MOON_WRAP_FLOOR is a supported photo-grade override for the moon
+        // wrap floor. It is parsed once; 0.25 is the shipped navigable-night default.
+        static const float s_moon_wrap_floor = [] {
+            if (const auto value = Core::ReadEnvironment("LUMIN_MOON_WRAP_FLOOR")) {
+                try {
+                    return std::stof(*value);
+                } catch (...) {}
+            }
+            return 0.25f;
+        }();
+        m_lighting_shader->setFloat("u_moonWrapFloor", s_moon_wrap_floor);
 
-    //  cinematic grade (-style): BOLD default — lifted exposure, rich
-    // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone
-    // (the key/fill cue). Tunable via LUMIN_GRADE="exposure,saturation,contrast,
-    // warmR,warmG,warmB" (parsed once); the split-tone is fixed cinematic.
-    struct Grade {
-        float exposure, saturation, contrast, wr, wg, wb;
-    };
-    static const Grade s_grade = [] {
-        Grade g{
-            1.12f, 1.30f, 1.42f, 1.06f, 1.0f, 0.92f}; // richer sat + punchier contrast (de-wash
-                                                      // noon; owner "white filter" pass 2026-07-07)
-        if (const auto env = Core::ReadEnvironment("LUMIN_GRADE")) {
-            std::sscanf(env->c_str(),
-                        "%f,%f,%f,%f,%f,%f",
-                        &g.exposure,
-                        &g.saturation,
-                        &g.contrast,
-                        &g.wr,
-                        &g.wg,
-                        &g.wb);
-        }
-        return g;
-    }();
-    //  rendering: the RenderContext exposure seam slot wins when set; the
-    // sentinel 0 falls back to the static LUMIN_GRADE exposure (byte-identical until ).
-    m_lighting_shader->setFloat("u_exposure",
-                                ctx.exposure > 0.0f ? ctx.exposure : s_grade.exposure);
-    m_lighting_shader->setFloat("u_saturation", s_grade.saturation);
-    m_lighting_shader->setFloat("u_contrast", s_grade.contrast);
-    m_lighting_shader->setVec3("u_lightWarmth", glm::vec3(s_grade.wr, s_grade.wg, s_grade.wb));
-    m_lighting_shader->setVec3("u_shadowTint", glm::vec3(0.88f, 0.96f, 1.14f));    // cool
-    m_lighting_shader->setVec3("u_highlightTint", glm::vec3(1.14f, 1.04f, 0.84f)); // warm
-    m_lighting_shader->setFloat("u_splitToneStrength", 0.55f);
-    m_lighting_shader->setInt("u_pointLightCount", static_cast<int>(ctx.point_lights->size()));
-    for (size_t i = 0; i < ctx.point_lights->size(); ++i) {
+        //  cinematic grade (-style): BOLD default — lifted exposure, rich
+        // saturation, strong contrast, and a cool-shadow / warm-highlight split-tone
+        // (the key/fill cue). Tunable via LUMIN_GRADE="exposure,saturation,contrast,
+        // warmR,warmG,warmB" (parsed once); the split-tone is fixed cinematic.
+        struct Grade {
+            float exposure, saturation, contrast, wr, wg, wb;
+        };
+        static const Grade s_grade = [] {
+            Grade g{1.12f,
+                    1.30f,
+                    1.42f,
+                    1.06f,
+                    1.0f,
+                    0.92f}; // richer sat + punchier contrast (de-wash
+                            // noon; owner "white filter" pass 2026-07-07)
+            if (const auto env = Core::ReadEnvironment("LUMIN_GRADE")) {
+                std::sscanf(env->c_str(),
+                            "%f,%f,%f,%f,%f,%f",
+                            &g.exposure,
+                            &g.saturation,
+                            &g.contrast,
+                            &g.wr,
+                            &g.wg,
+                            &g.wb);
+            }
+            return g;
+        }();
+        //  rendering: the RenderContext exposure seam slot wins when set; the
+        // sentinel 0 falls back to the static LUMIN_GRADE exposure (byte-identical until ).
+        m_lighting_shader->setFloat("u_exposure",
+                                    ctx.exposure > 0.0f ? ctx.exposure : s_grade.exposure);
+        m_lighting_shader->setFloat("u_saturation", s_grade.saturation);
+        m_lighting_shader->setFloat("u_contrast", s_grade.contrast);
+        m_lighting_shader->setVec3("u_lightWarmth", glm::vec3(s_grade.wr, s_grade.wg, s_grade.wb));
+        m_lighting_shader->setVec3("u_shadowTint", glm::vec3(0.88f, 0.96f, 1.14f));    // cool
+        m_lighting_shader->setVec3("u_highlightTint", glm::vec3(1.14f, 1.04f, 0.84f)); // warm
+        m_lighting_shader->setFloat("u_splitToneStrength", 0.55f);
+    }
+    const size_t point_light_count = ctx.point_lights ? ctx.point_lights->size() : 0;
+    if (point_light_count > 32)
+        throw std::invalid_argument("Lighting point-light count exceeds shader capacity");
+    m_lighting_shader->setInt("u_pointLightCount", static_cast<int>(point_light_count));
+    for (size_t i = 0; i < point_light_count; ++i) {
         std::string prefix = "u_pointLights[" + std::to_string(i) + "].";
         m_lighting_shader->setVec3(prefix + "position", (*ctx.point_lights)[i].position);
         m_lighting_shader->setVec3(prefix + "color", (*ctx.point_lights)[i].color);
@@ -322,54 +363,61 @@ void LightingPass::execute(const RenderContext& ctx) {
     // env knob ("enabled,maxDist,floor,steps,thickness"). The probe needs the
     // same projection the SSAO pass builds, plus the screen size.
     {
-        const glm::mat4 cave_proj = ReversedZPerspective(glm::radians(camera.Zoom),
-                                                         static_cast<float>(ctx.screen_width) /
-                                                             static_cast<float>(ctx.screen_height),
-                                                         camera.GetNearPlane(),
-                                                         camera.GetFarPlane());
-        m_lighting_shader->setMat4("u_projection", cave_proj);
+        m_lighting_shader->setMat4("u_projection", projection);
         m_lighting_shader->setVec2(
             "u_screenSize",
             glm::vec2(ctx.internal_w(), ctx.internal_h())); // cave AO marches the internal G-buffer
 
-        struct CaveAO {
-            float enabled, maxDist, floor, thickness;
-            int steps;
-        };
-        static const CaveAO s_caveAO = [] {
-            CaveAO c{0.0f, 24.0f, 0.06f, 1.5f, 8}; // DEFAULT OFF (enabled=0)
-            if (const auto env = Core::ReadEnvironment("LUMIN_CAVE_AO")) {
-                // "enabled,maxDist,floor,steps,thickness"
-                float en = 0, md = 24, fl = 0.06f, th = 1.5f;
-                int st = 8;
-                std::sscanf(env->c_str(), "%f,%f,%f,%d,%f", &en, &md, &fl, &st, &th);
-                c = CaveAO{en, md, fl, th, st};
-            }
-            return c;
-        }();
-        m_lighting_shader->setFloat("u_caveAmbientOcclusion", s_caveAO.enabled);
-        m_lighting_shader->setFloat("u_caveSkyMaxDist", s_caveAO.maxDist);
-        m_lighting_shader->setInt("u_caveSkySteps", s_caveAO.steps);
-        m_lighting_shader->setFloat("u_caveAmbientFloor", s_caveAO.floor);
-        m_lighting_shader->setFloat("u_caveThickness", s_caveAO.thickness);
+        if (ctx.static_studio) {
+            m_lighting_shader->setFloat("u_caveAmbientOcclusion", 0.0f);
+        } else {
+            struct CaveAO {
+                float enabled, maxDist, floor, thickness;
+                int steps;
+            };
+            static const CaveAO s_caveAO = [] {
+                CaveAO c{0.0f, 24.0f, 0.06f, 1.5f, 8}; // DEFAULT OFF (enabled=0)
+                if (const auto env = Core::ReadEnvironment("LUMIN_CAVE_AO")) {
+                    // "enabled,maxDist,floor,steps,thickness"
+                    float en = 0, md = 24, fl = 0.06f, th = 1.5f;
+                    int st = 8;
+                    std::sscanf(env->c_str(), "%f,%f,%f,%d,%f", &en, &md, &fl, &st, &th);
+                    c = CaveAO{en, md, fl, th, st};
+                }
+                return c;
+            }();
+            m_lighting_shader->setFloat("u_caveAmbientOcclusion", s_caveAO.enabled);
+            m_lighting_shader->setFloat("u_caveSkyMaxDist", s_caveAO.maxDist);
+            m_lighting_shader->setInt("u_caveSkySteps", s_caveAO.steps);
+            m_lighting_shader->setFloat("u_caveAmbientFloor", s_caveAO.floor);
+            m_lighting_shader->setFloat("u_caveThickness", s_caveAO.thickness);
+        }
         // Optional point-light punch (shader Patch 4, not applied); defaults keep
         // legacy behaviour. setFloat on an absent uniform is a harmless no-op.
         m_lighting_shader->setFloat("u_pointLightFalloff", 0.05f);
         m_lighting_shader->setFloat("u_pointLightInvSqMix", 0.0f);
     }
-    m_lighting_shader->setFloat("u_farPlane", camera.GetFarPlane());
+    m_lighting_shader->setFloat("u_farPlane", far_plane);
     // -T12: the shadow-cascade validity/refresh fixup (which MUTATES the
     // shared ShadowMap private state + calls the pipeline-private
     // get_light_space_matrices) is hoisted to make_lighting_context; the resolved
     // splits + matrices arrive via ctx.cascade_splits + ctx.light_space_matrices.
     m_lighting_shader->setVec4("u_cascadeSplits", ctx.cascade_splits);
     for (int i = 0; i < ShadowMap::CASCADE_COUNT; ++i) {
+        if (!ctx.light_space_matrices ||
+            ctx.light_space_matrices->size() <= static_cast<size_t>(i)) {
+            if (!ctx.static_studio)
+                throw std::invalid_argument("Missing lighting cascade matrices");
+            m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
+                                       glm::mat4(1));
+            continue;
+        }
         m_lighting_shader->setMat4("u_lightSpaceMatrices[" + std::to_string(i) + "]",
                                    (*ctx.light_space_matrices)[i]);
     }
-    glm::vec3 terrainOrigin(floor(camera.Position.x / CHUNK_SIZE_X) * CHUNK_SIZE_X,
+    glm::vec3 terrainOrigin(floor(eye.x / CHUNK_SIZE_X) * CHUNK_SIZE_X,
                             0.0f,
-                            floor(camera.Position.z / CHUNK_SIZE_Z) * CHUNK_SIZE_Z);
+                            floor(eye.z / CHUNK_SIZE_Z) * CHUNK_SIZE_Z);
     m_lighting_shader->setVec3("u_terrainOrigin", terrainOrigin);
     // project the wind-advected cloud coverage onto the terrain as a
     // crawling cast shadow (directSun *= 1 - cloudShadow). The uniforms must match
