@@ -2191,9 +2191,10 @@ TEST(GameSessionHeadlessWorldTest, SnapshotTamperedMemberIsRefused) {
     ASSERT_TRUE(owner.SaveWorldState());
     const auto save = owner.GetWorldSaveDir();
     const auto worldId = owner.GetMetadata().worldId;
-    const auto efs = save / "aether_state.efs";
-    const auto target = fs::exists(efs) ? efs : P::WorldSaveService::active_regions_path(save);
-    std::ofstream(target, std::ios::binary | std::ios::app) << 'x';
+    // Rewrite valid metadata behind the index: the member keeps its format but not its fingerprint.
+    auto info = nlohmann::json::parse(ReadClockTestFile(save / "world_info.json"));
+    info["name"] = "tampered behind the index";
+    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << info.dump(2);
     GameSession refused;
     EnableSnapshotSession(refused, root, jobs);
     EXPECT_FALSE(refused.LoadWorld(worldId));
@@ -2238,9 +2239,25 @@ TEST(GameSessionHeadlessWorldTest, SnapshotPendingJournalIsRolledBackAtOpen) {
     const auto save = owner.GetWorldSaveDir();
     const auto worldId = owner.GetMetadata().worldId;
     const auto info_bytes = ReadClockTestFile(save / "world_info.json");
-    fs::create_directories(P::journal_directory(save));
+    // Stage a PUBLISHED transaction: protect the metadata (journal + undo copy), keep a copy of
+    // the journal, roll the transaction back, then modify the metadata and restore the journal.
+    // The directory now looks like a crash between "member replaced" and "index published".
+    const auto side = root.path() / "journal-copy";
+    {
+        P::SaveTransaction txn(save, 0, {}, &P::WorldSaveService::member_digest);
+        ASSERT_TRUE(txn.begin(nullptr));
+        ASSERT_TRUE(txn.protect({"world_info.json"}, nullptr));
+        fs::copy(P::journal_directory(save), side, fs::copy_options::recursive);
+        txn.abort(nullptr);
+    }
+    ASSERT_FALSE(P::journal_pending(save));
+    auto info = nlohmann::json::parse(info_bytes);
+    info["name"] = "half written";
+    std::ofstream(save / "world_info.json", std::ios::binary | std::ios::trunc) << info.dump(2);
+    fs::copy(side, P::journal_directory(save), fs::copy_options::recursive);
     const auto entry = Luminumbra::Persistence::InspectSavedWorld(root.path(), worldId);
     EXPECT_TRUE(entry.pending_recovery);
+    EXPECT_TRUE(entry.error.empty());
     EXPECT_TRUE(P::journal_pending(save));
     GameSession reopened;
     EnableSnapshotSession(reopened, root, jobs);

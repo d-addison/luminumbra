@@ -146,7 +146,9 @@ bool SamePath(const fs::path& lhs, const fs::path& rhs) {
 }
 
 // Removes stale staging files (names containing ".tmp.") directly in save_dir and chunks/region.
-void SweepTemporaries(const fs::path& save_dir) {
+// Returns false when a listed temporary could not be removed. Affected directories are flushed.
+bool SweepTemporaries(const fs::path& save_dir) {
+    bool ok = true;
     const std::array<fs::path, 2> directories = {save_dir, save_dir / "chunks" / "region"};
     for (const fs::path& directory : directories) {
         std::error_code ec;
@@ -154,9 +156,11 @@ void SweepTemporaries(const fs::path& save_dir) {
         if (ec) {
             continue;
         }
+        bool removed_any = false;
         const fs::directory_iterator end;
         for (; it != end; it.increment(ec)) {
             if (ec) {
+                ok = false;
                 break;
             }
             std::error_code status_ec;
@@ -169,8 +173,31 @@ void SweepTemporaries(const fs::path& save_dir) {
             }
             std::error_code remove_ec;
             fs::remove(entry.path(), remove_ec);
+            if (remove_ec) {
+                ok = false;
+            } else {
+                removed_any = true;
+            }
+        }
+        if (removed_any) {
+            WorldSaveService::durable_flush_directory(directory, nullptr);
         }
     }
+    return ok;
+}
+
+// Nearest ancestor of `directory` (inclusive) that exists, for flushing entries under directories
+// that a crashed first transaction never created.
+fs::path NearestExistingDirectory(fs::path directory) {
+    std::error_code ec;
+    while (!directory.empty() && !fs::exists(directory, ec)) {
+        const fs::path parent = directory.parent_path();
+        if (parent == directory) {
+            break;
+        }
+        directory = parent;
+    }
+    return directory;
 }
 
 struct JournalEntry {
@@ -336,12 +363,20 @@ bool RollbackEntries(const fs::path& save_dir,
             return false;
         }
         report_snapshot_step("rollback-entry", destination);
+        if (entry.path == kSnapshotIndexRelativePath) {
+            // The restored (or already restored/absent) index must be durable before any other
+            // member is touched, or a power loss could resurrect the new generation.
+            if (!WorldSaveService::durable_flush_directory(
+                    NearestExistingDirectory(destination.parent_path()), errors)) {
+                return false;
+            }
+        }
     }
     // Flush every affected directory (including entries a replay found already restored) before
     // the caller retires the journal.
     std::vector<fs::path> flushed;
     for (const JournalEntry& entry : entries) {
-        const fs::path directory = (save_dir / entry.path).parent_path();
+        const fs::path directory = NearestExistingDirectory((save_dir / entry.path).parent_path());
         bool seen = false;
         for (const fs::path& done : flushed) {
             seen = seen || done == directory;
@@ -645,8 +680,9 @@ RecoveryOutcome recover_pending_journal(const fs::path& save_dir,
             // Far-only upserts run without a transaction; a crash can leave their staging file
             // behind, which an indexed directory would refuse at load. Legacy directories keep
             // their historical behaviour.
-            if (snapshot_index_exists(save_dir)) {
-                SweepTemporaries(save_dir);
+            if (snapshot_index_exists(save_dir) && !SweepTemporaries(save_dir)) {
+                AddError(errors, "cannot remove stale staging files under " + save_dir.string());
+                return RecoveryOutcome::Failed;
             }
             return RecoveryOutcome::NothingToDo;
         }
@@ -996,6 +1032,18 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
                 !WorldSaveService::durable_flush_directory(directory, errors)) {
                 abort(errors);
                 return false;
+            }
+        }
+        // Best effort for the ancestors above the save directory (a first world may have created
+        // worlds/saves): a failure there cannot be repaired by rolling back.
+        {
+            fs::path ancestor = m_save_dir.parent_path();
+            for (int level = 0; level < 3 && !ancestor.empty(); ++level) {
+                WorldSaveService::durable_flush_directory(ancestor.parent_path(), nullptr);
+                const fs::path next = ancestor.parent_path();
+                if (next == ancestor)
+                    break;
+                ancestor = next;
             }
         }
         if (!WorldSaveService::durable_write_file(index_path, encoded, errors)) {

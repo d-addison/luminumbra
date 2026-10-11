@@ -38,38 +38,45 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
         if (!fs::is_directory(save) || fs::is_symlink(save))
             return result;
         const auto metadata_path = save / "world_info.json";
-        // Metadata written by an interrupted transaction may be missing or unreadable until
-        // LoadWorld recovers the directory: a pending journal keeps the entry selectable.
-        const auto pending_entry = [&result, &save]() {
-            if (!journal_pending(save))
-                return false;
+        // A pending journal means the directory may be mid-transaction: its metadata can be
+        // missing, half-written or inconsistent until LoadWorld recovers it, so the entry stays
+        // selectable and is described best-effort without validation.
+        if (journal_pending(save)) {
             result.pending_recovery = true;
             result.error.clear();
-            return true;
-        };
-        if (!fs::is_regular_file(metadata_path)) {
-            pending_entry();
+            try {
+                std::error_code size_ec;
+                if (fs::is_regular_file(metadata_path) &&
+                    fs::file_size(metadata_path, size_ec) <= 1024 * 1024 && !size_ec) {
+                    std::ifstream pending_input(metadata_path);
+                    const auto pending_json = nlohmann::json::parse(pending_input);
+                    if (pending_json.is_object()) {
+                        if (pending_json.contains("name") && pending_json.at("name").is_string())
+                            result.metadata.name = pending_json.at("name").get<std::string>();
+                        if (pending_json.contains("seed") && pending_json.at("seed").is_string())
+                            result.metadata.seed = pending_json.at("seed").get<std::string>();
+                    }
+                }
+            } catch (const std::exception&) {
+                // Best effort only.
+            }
             return result;
         }
+        if (!fs::is_regular_file(metadata_path))
+            return result;
         if (fs::file_size(metadata_path) > 1024 * 1024) {
-            if (!pending_entry())
-                result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
+            result.error = "Corrupt world metadata: exceeds the 1 MiB limit.";
             return result;
         }
         std::ifstream input(metadata_path);
-        if (!input) {
-            pending_entry();
+        if (!input)
             return result;
-        }
         const auto json = nlohmann::json::parse(input);
         if (json.is_object() && json.contains("name") && json.at("name").is_string())
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.
         std::vector<std::string> errors;
-        // A pending journal means the directory may be mid-transaction: it cannot be validated
-        // until LoadWorld recovers it, so the listing stays metadata-only.
-        result.pending_recovery = journal_pending(save);
-        if (!result.pending_recovery && !WorldSaveService::validate_save(save, &errors, stop)) {
+        if (!WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }

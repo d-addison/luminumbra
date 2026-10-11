@@ -1400,9 +1400,12 @@ bool GameSession::LoadWorld(const std::string& worldId) {
 bool GameSession::ClockConfigurationCompatible(const fs::path& save_dir) const {
     // An interrupted save may have left uncommitted clock-bearing metadata: recover before reading
     // the clock so the compatibility verdict describes the committed snapshot.
+    // Never during a live transaction on this directory (its journal is the active one), and
+    // never for an empty destination (a relative join would resolve against the cwd).
     std::vector<std::string> recovery_errors;
-    if (Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
-        Persistence::RecoveryOutcome::Failed) {
+    if (!save_dir.empty() && !Persistence::SaveTransaction::active_for(save_dir) &&
+        Persistence::recover_pending_journal(save_dir, &recovery_errors) ==
+            Persistence::RecoveryOutcome::Failed) {
         for (const std::string& error : recovery_errors)
             LUMINUMBRA_CORE_ERROR("World save recovery failed: {}", error);
         return false;

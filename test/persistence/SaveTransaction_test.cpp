@@ -536,6 +536,18 @@ TEST(SaveTransaction, RecoveryDiscardsJournalWithoutTxnFile) {
     EXPECT_FALSE(fs::exists(journal_directory(save.path())));
 }
 
+TEST(SaveTransaction, RecoverySweepsStagingTemporariesOfAnIndexedDirectoryWithoutJournal) {
+    TempSave dir;
+    ASSERT_TRUE(CommitOnce(dir.path(), 1, {{"world_info.json", "w"}}));
+    Put(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4", "partial");
+    Put(dir.path() / "world_info.json.tmp.5.6", "partial");
+    std::vector<std::string> errors;
+    EXPECT_EQ(recover_pending_journal(dir.path(), &errors), RecoveryOutcome::NothingToDo);
+    EXPECT_FALSE(fs::exists(dir.path() / "chunks/region/r.0.0.lmr.tmp.123.4"));
+    EXPECT_FALSE(fs::exists(dir.path() / "world_info.json.tmp.5.6"));
+    EXPECT_EQ(Get(dir.path() / "world_info.json"), "w");
+}
+
 TEST(SaveTransaction, RecoverySweepsStagingTemporaries) {
     TempSave save;
     ASSERT_TRUE(CommitOnce(save.path(), 1, {{"world_info.json", "w"}}));
