@@ -1817,6 +1817,10 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-capture-artifact-validation.ps1")
     set_tests_properties(CaptureArtifactValidationContract PROPERTIES LABELS "visual;tools" TIMEOUT 60)
+    add_test(NAME FarLadderOracleContract
+        COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/test-far-ladder-oracle.ps1")
+    set_tests_properties(FarLadderOracleContract PROPERTIES LABELS "tools" TIMEOUT 60)
     add_test(NAME LuaApiManifestSourceContract
         COMMAND "${CAPTURE_VALIDATION_POWERSHELL}" -NoLogo -NoProfile -NonInteractive
             -ExecutionPolicy Bypass -File "${CMAKE_SOURCE_DIR}/tools/gates/validate-engine-frontier.ps1"
@@ -1825,6 +1829,7 @@ if(CAPTURE_VALIDATION_POWERSHELL)
         LABELS "scripting;tools" TIMEOUT 60 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 else()
     message(STATUS "PowerShell unavailable: CaptureArtifactValidationContract is not registered")
+    message(STATUS "PowerShell unavailable: FarLadderOracleContract is not registered")
     message(STATUS "PowerShell unavailable: LuaApiManifestSourceContract is not registered")
 endif()
 set(_vc_candidates "")

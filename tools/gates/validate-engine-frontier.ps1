@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir "nightly-provenance.ps1")
 . (Join-Path $ScriptDir "capture-artifact-validation.ps1")
+. (Join-Path $ScriptDir "far-ladder-oracle.ps1")
 
 $ArtifactDir = "tools/gates/baselines"
 
@@ -3439,8 +3440,10 @@ function Test-PlayerView {
 # sky ratio bounded); the live/far boundary band ROI (~192 m at the smoke
 # radii) shows no sky-leak band and no strict void clusters (the
 # Distant-Horizons failure mode).
-# FarTierTable.h declares the future volumetric ranges; this gate still reads
-# the legacy artifact and does not qualify coverage of that ladder.
+# The legacy scheduler is checked against an independent legacy oracle
+# (far-ladder-oracle.ps1, from the v2 oracle artifact). The volumetric ladder is
+# checked only when the artifact mode is ladder; otherwise ladder_checked is
+# reported false.
 
 function Test-FarLodHorizon {
     $exe = Get-ClientExe
@@ -3473,6 +3476,14 @@ function Test-FarLodHorizon {
 
         $analysisPath = Join-Path $viewDir "farlod-horizon-analysis.json"
         $analysis = Read-JsonArtifact -Path $analysisPath -Schema "luminumbra.farlod_horizon.v1"
+        $oracle = Read-JsonArtifact -Path (Join-Path $viewDir "farlod-horizon-ladder-oracle.json") -Schema "luminumbra.farlod_horizon.v2"
+        $oracleResult = Assert-FarLadderOracleArtifact -Artifact $oracle -Name "farlod horizon ($preset) oracle"
+        if ([int64]$oracle.legacy.regions_wanted -ne [int64]$analysis.farlod.regions_wanted) {
+            throw "farlod horizon ($preset) oracle legacy.regions_wanted $($oracle.legacy.regions_wanted) differs from runtime farlod.regions_wanted $($analysis.farlod.regions_wanted)"
+        }
+        $ladderCheckedText = "false"
+        if ($oracleResult.LadderChecked) { $ladderCheckedText = "true" }
+        Write-Host "  ladder_checked: $ladderCheckedText (mode $($oracle.mode))"
 
         if ($analysis.world_preset -ne $preset) {
             throw "farlod horizon ($preset) artifact has unexpected world_preset '$($analysis.world_preset)'"
