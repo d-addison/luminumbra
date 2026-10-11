@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import gzip
 import hashlib
 import io
 import json
@@ -41,9 +42,18 @@ def source_tar() -> bytes:
     return buffer.getvalue()
 
 
+def gzip_n(data: bytes) -> bytes:
+    """Fake for `gzip -n`: no name, mtime 0. Byte-equal to GNU gzip only by accident; the
+    fake runner uses it for both the downloaded archive and the regeneration, so they agree."""
+    buffer = io.BytesIO()
+    with gzip.GzipFile(filename="", mode="wb", fileobj=buffer, mtime=0, compresslevel=6) as gz:
+        gz.write(data)
+    return buffer.getvalue()
+
+
 def build_scenario() -> Dict[str, object]:
     tar = source_tar()
-    archive = verifier.gzip_deterministic(tar)
+    archive = gzip_n(tar)
     spdx_doc = {"spdxVersion": "SPDX-2.3", "name": f"luminumbra-source-{VERSION}"}
     spdx = (json.dumps(spdx_doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
     sums = (f"{hashlib.sha256(archive).hexdigest()}  {ARCHIVE}\n"
@@ -83,11 +93,25 @@ class FakeRunner:
         self.s = scenario
         self.calls: List[List[str]] = []
 
+    def run_bytes(self, argv: Sequence[str], cwd: Optional[Path] = None) -> Tuple[int, bytes, str]:
+        argv = list(argv)
+        self.calls.append(argv)
+        if argv[:3] == ["gzip", "-n", "-c"] and len(argv) == 4:
+            if self.s.get("gzip_rc", 0) != 0:
+                return self.s["gzip_rc"], b"", "gzip failed"
+            return 0, gzip_n(Path(argv[3]).read_bytes()), ""
+        return 1, b"", f"unexpected binary command: {argv}"
+
     def run(self, argv: Sequence[str], cwd: Optional[Path] = None) -> Tuple[int, str, str]:
         argv = list(argv)
         self.calls.append(argv)
         if argv[0] == "git":
-            Path(argv[argv.index("--output") + 1]).write_bytes(self.s["tar"])
+            if argv[1] != "archive" or argv[-1] != COMMIT:
+                return 1, "", f"git archive must target the expected commit: {argv}"
+            output = [a for a in argv if a.startswith("--output=")]
+            if len(output) != 1:
+                return 1, "", "missing --output="
+            Path(output[0].split("=", 1)[1]).write_bytes(self.s["tar"])
             return self.s["git_rc"], "", "" if self.s["git_rc"] == 0 else "git failed"
         if argv[:2] == ["gh", "api"]:
             path = argv[2]
@@ -225,10 +249,44 @@ class VerifyReleaseTests(unittest.TestCase):
         self.assertTrue(any("attestation" in cmd for cmd in plan))
         self.assertFalse(self.out.exists())
 
-    def test_gzip_is_deterministic(self) -> None:
-        data = source_tar()
-        self.assertEqual(verifier.gzip_deterministic(data), verifier.gzip_deterministic(data))
-        self.assertEqual(verifier.gzip_deterministic(data)[4:8], b"\0\0\0\0")
+    def test_archive_regeneration_uses_expected_commit_and_gzip_n(self) -> None:
+        runner = FakeRunner(self.scenario)
+        args = verifier.parse_args([
+            "--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT,
+            "--out", str(self.out), "--source-root", self.tmp.name, "--python", "/usr/bin/true",
+        ])
+        checks = {c.name: c for c in verifier.run_checks(args, runner)[0]}
+        self.assertEqual(checks["archive-regenerated"].status, "PASS", checks["archive-regenerated"].detail)
+        git_calls = [c for c in runner.calls if c[0] == "git"]
+        self.assertEqual(len(git_calls), 1)
+        self.assertEqual(git_calls[0][-1], COMMIT)
+        self.assertIn(["gzip", "-n", "-c", git_calls[0][-2].split("=", 1)[1]], runner.calls)
+
+    def test_regenerated_mismatch_reports_both_hashes(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["tar"] = source_tar() + b"\0" * 512
+        results = self.run_with(scenario)
+        check = results["archive-regenerated"]
+        self.assertEqual(check.status, "FAIL")
+        regenerated = hashlib.sha256(gzip_n(scenario["tar"])).hexdigest()
+        downloaded = hashlib.sha256(scenario["assets"][ARCHIVE]).hexdigest()
+        self.assertIn(f"regenerated sha256={regenerated}", check.detail)
+        self.assertIn(f"downloaded sha256={downloaded}", check.detail)
+        self.assertIn("gzip build matching", check.detail)
+
+    def test_gzip_failure_fails(self) -> None:
+        scenario = copy.deepcopy(self.scenario)
+        scenario["gzip_rc"] = 2
+        self.assertFailed(self.run_with(scenario), "archive-regenerated")
+
+    def test_dry_run_plan_shows_regeneration_commands(self) -> None:
+        args = verifier.parse_args([
+            "--repo", REPO, "--tag", TAG, "--expected-commit", COMMIT, "--out", str(self.out),
+        ])
+        plan = [" ".join(cmd) for cmd in verifier.plan_commands(args)]
+        self.assertIn(f"git archive --format=tar --prefix=luminumbra-{VERSION}/ "
+                      f"--output=<tmp>/source.tar {COMMIT}", plan)
+        self.assertIn("gzip -n -c <tmp>/source.tar", plan)
 
     def test_bad_arguments_rejected(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

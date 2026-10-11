@@ -10,9 +10,7 @@ every check passes. A JSON report and a text table are written to --out.
 from __future__ import annotations
 
 import argparse
-import gzip
 import hashlib
-import io
 import json
 import re
 import shlex
@@ -56,6 +54,22 @@ class Runner:
             return 127, "", str(exc)
         return proc.returncode, proc.stdout, proc.stderr
 
+    def run_bytes(self, argv: Sequence[str], cwd: Optional[Path] = None) -> Tuple[int, bytes, str]:
+        """Like run(), but stdout is returned as raw bytes for binary-safe output."""
+        try:
+            proc = subprocess.run(
+                list(argv),
+                cwd=str(cwd) if cwd is not None else None,
+                capture_output=True,
+                check=False,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, b"", "command timed out"
+        except OSError as exc:
+            return 127, b"", str(exc)
+        return proc.returncode, proc.stdout, proc.stderr.decode("utf-8", "replace")
+
 
 @dataclass
 class Check:
@@ -79,18 +93,6 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def gzip_deterministic(data: bytes) -> bytes:
-    """Equivalent of `gzip -n` at level 6: no name, mtime 0.
-
-    The stream is written through a file object because GzipFile with an empty
-    filename and no file object would try to open a file named ''.
-    """
-    buffer = io.BytesIO()
-    with gzip.GzipFile(filename="", mode="wb", fileobj=buffer, mtime=0, compresslevel=6) as gz:
-        gz.write(data)
-    return buffer.getvalue()
 
 
 def parse_sums(text: str) -> Optional[List[Tuple[str, str]]]:
@@ -146,9 +148,16 @@ def cmd_download(repo: str, tag: str, out: Path, name: str) -> List[str]:
             "--clobber", "--pattern", name]
 
 
-def cmd_git_archive(tar_path: Path, tag: str, version: str) -> List[str]:
+def cmd_git_archive(tar_path: Path, commit: str, version: str) -> List[str]:
+    # Same tree as release.yml's `git archive ... HEAD` on the tag checkout; the commit is
+    # the one the signed tag points at, so it is pinned explicitly here.
     return ["git", "archive", "--format=tar", f"--prefix=luminumbra-{version}/",
-            "--output", str(tar_path), tag]
+            f"--output={tar_path}", commit]
+
+
+def cmd_gzip(tar_path: Path) -> List[str]:
+    # Mirrors `... | gzip -n` in release.yml, reading the tar from a file instead of a pipe.
+    return ["gzip", "-n", "-c", str(tar_path)]
 
 
 def cmd_attest(repo: str, subject: Path, predicate: str, signer_workflow: bool) -> List[str]:
@@ -179,7 +188,8 @@ def plan_commands(args: argparse.Namespace) -> List[List[str]]:
     plan = [cmd_tag_ref(args.repo, args.tag), cmd_tag_object(args.repo, "<tag-object-sha>"),
             cmd_release(args.repo, args.tag)]
     plan += [cmd_download(args.repo, args.tag, out, name) for name in (archive_name, spdx_name, SUMS_NAME)]
-    plan.append(cmd_git_archive(Path("<tmp>/source.tar"), args.tag, version))
+    plan.append(cmd_git_archive(Path("<tmp>/source.tar"), args.expected_commit, version))
+    plan.append(cmd_gzip(Path("<tmp>/source.tar")))
     plan.append(cmd_validate_package(archive))
     plan.append(cmd_validate_sbom(python, spdx, archive))
     plan.append(cmd_attest(args.repo, archive, SLSA_PREDICATE, True))
@@ -261,21 +271,28 @@ def run_checks(args: argparse.Namespace, runner: Runner) -> Tuple[List[Check], D
                   f"listed={listed}; mismatched={mismatches or 'none'}; "
                   + ", ".join(f"{n}={d}" for n, d in sorted(digests.items())))
 
-    # The archive must be byte-identical to a regeneration from the tagged tree.
+    # The archive must be byte-identical to `git archive | gzip -n` run on the expected commit.
     archive_path, spdx_path = paths[archive_name], paths[spdx_name]
     if present[archive_name]:
         with tempfile.TemporaryDirectory() as tmp:
             tar_path = Path(tmp) / "source.tar"
-            rc, _, gerr = runner.run(cmd_git_archive(tar_path, tag, version), cwd=source_root)
+            rc, _, gerr = runner.run(cmd_git_archive(tar_path, expected, version), cwd=source_root)
             if rc != 0 or not tar_path.is_file():
                 add_check(checks, "archive-regenerated", False,
                           f"git archive failed rc={rc} {gerr.strip()[:200]}")
             else:
-                regenerated = sha256_bytes(gzip_deterministic(tar_path.read_bytes()))
-                downloaded = digests[archive_name]
-                add_check(checks, "archive-regenerated", regenerated == downloaded,
-                          f"regenerated sha256={regenerated}; downloaded sha256={downloaded}; "
-                          "gzip -n equivalence assumes zlib level 6 and matching header bytes")
+                zrc, regenerated_bytes, zerr = runner.run_bytes(cmd_gzip(tar_path), cwd=source_root)
+                if zrc != 0:
+                    add_check(checks, "archive-regenerated", False,
+                              f"gzip -n failed rc={zrc} {zerr.strip()[:200]}")
+                else:
+                    regenerated = sha256_bytes(regenerated_bytes)
+                    downloaded = digests[archive_name]
+                    add_check(checks, "archive-regenerated", regenerated == downloaded,
+                              f"regenerated sha256={regenerated}; downloaded sha256={downloaded}; "
+                              f"equality depends on this verifier's gzip build matching the "
+                              f"runner's (both GNU gzip -n; header OS byte and deflate output "
+                              f"must agree)")
     else:
         add_check(checks, "archive-regenerated", False, "archive not downloaded")
 
