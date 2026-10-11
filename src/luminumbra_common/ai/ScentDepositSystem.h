@@ -53,6 +53,8 @@ inline ScentDepositStats RunScentDepositOnTick(
         const auto& tf = registry.get<const TransformComponent>(e);
         const int cx = WorldToCell(tf.position.x, origin_x, cell_size);
         const int cz = WorldToCell(tf.position.z, origin_z, cell_size);
+        if (!field.SimulationCellAllowed(cx, cz))
+            continue;
         field.Deposit(s.scent_channel, cx, cz, static_cast<double>(s.scent_deposit));
         ++stats.emitters;
     }

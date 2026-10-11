@@ -155,6 +155,10 @@ std::uint16_t RelaxToward(std::uint16_t value, std::uint16_t target) {
     const std::int32_t next = current + ((goal - current) >> FieldPageState::kRelaxShift);
     return static_cast<std::uint16_t>(next);
 }
+std::int32_t ChannelValue(int channel, std::uint16_t word) {
+    return channel < 2 ? static_cast<std::int32_t>(std::bit_cast<std::int16_t>(word))
+                       : static_cast<std::int32_t>(word);
+}
 
 void StepCell(FieldPage& page,
               std::size_t index,
@@ -321,24 +325,32 @@ bool ValidUnit(std::uint32_t bits) {
     const float value = std::bit_cast<float>(bits);
     return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
 }
+RegionKey PositionOwner(std::uint32_t x, std::uint32_t z) {
+    return {
+        static_cast<std::int32_t>(std::floor(static_cast<double>(std::bit_cast<float>(x)) / 512.0)),
+        static_cast<std::int32_t>(
+            std::floor(static_cast<double>(std::bit_cast<float>(z)) / 512.0))};
+}
 bool ValidStorm(const RegionalStorm& storm) {
     return ValidOwner(storm.owner) && ValidPosition(storm.center_x) &&
            ValidPosition(storm.center_z) && std::isfinite(std::bit_cast<float>(storm.velocity_x)) &&
            std::isfinite(std::bit_cast<float>(storm.velocity_z)) && ValidUnit(storm.intensity) &&
-           storm.lifetime_ticks != 0 && storm.active_age < storm.lifetime_ticks &&
-           storm.spawn_tick < WorldClock::kTickLimit;
+           std::abs(std::bit_cast<float>(storm.velocity_x)) <= 32.0f &&
+           std::abs(std::bit_cast<float>(storm.velocity_z)) <= 32.0f && storm.lifetime_ticks != 0 &&
+           storm.active_age < storm.lifetime_ticks && storm.spawn_tick < WorldClock::kTickLimit &&
+           PositionOwner(storm.center_x, storm.center_z) == storm.owner;
 }
 bool ValidStrike(const RegionalStrike& strike) {
     return ValidOwner(strike.owner) && ValidPosition(strike.world_x) &&
            ValidPosition(strike.world_z) && ValidUnit(strike.magnitude) &&
-           strike.strike_tick < WorldClock::kTickLimit;
+           strike.strike_tick < WorldClock::kTickLimit && strike.active_age <= 1 &&
+           PositionOwner(strike.world_x, strike.world_z) == strike.owner;
 }
 auto StormOrder(const RegionalStorm& storm) {
-    return std::tuple(storm.spawn_tick, storm.owner, storm.seed_salt);
+    return std::tuple(storm.spawn_tick, storm.seed_salt);
 }
 auto StrikeOrder(const RegionalStrike& strike) {
-    return std::tuple(
-        strike.strike_tick, strike.owner, strike.storm_salt, strike.world_x, strike.world_z);
+    return std::tuple(strike.strike_tick, strike.storm_salt, strike.world_x, strike.world_z);
 }
 bool ValidScent(ScentCellKey key, const ScentCell& cell) {
     if (key.x < -16777216 || key.x >= 16777216 || key.z < -16777216 || key.z >= 16777216)
@@ -513,8 +525,9 @@ std::map<RegionKey, std::uint64_t>
 FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& records,
                                std::span<const RegionKey> due,
                                std::uint64_t world_seed,
-                               std::uint64_t tick) {
-    const PageMap previous = m_pages;
+                               std::uint64_t tick,
+                               const FieldPageState* previous_tick) {
+    const PageMap previous = previous_tick ? previous_tick->m_pages : m_pages;
     const std::set<RegionKey> due_keys(due.begin(), due.end());
     std::map<RegionKey, std::uint64_t> work;
     const auto eligible = [&records](RegionKey owner) {
@@ -534,9 +547,12 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
                 continue;
             FieldPage& page = m_pages.at(page_key);
             for (int channel = 0; channel < kChannels; ++channel)
-                page.cells[channel][i] =
-                    RelaxToward(old_page.cells[channel][i],
-                                seed_value(world_seed, channel, x, z, tick / kCadenceTicks));
+                page.cells[channel][i] = static_cast<std::uint16_t>(
+                    ChannelValue(channel, old_page.cells[channel][i]) +
+                    ((ChannelValue(channel,
+                                   seed_value(world_seed, channel, x, z, tick / kCadenceTicks)) -
+                      ChannelValue(channel, old_page.cells[channel][i])) >>
+                     kRelaxShift));
             ++work[owner];
         }
     }
@@ -571,8 +587,8 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
                 auto& there = m_pages.at(neighbour.key);
                 for (int channel = 0; channel < kChannels; ++channel) {
                     const auto difference =
-                        static_cast<std::int32_t>(old_neighbour->cells[channel][neighbour.index]) -
-                        static_cast<std::int32_t>(old_page.cells[channel][i]);
+                        ChannelValue(channel, old_neighbour->cells[channel][neighbour.index]) -
+                        ChannelValue(channel, old_page.cells[channel][i]);
                     const auto flux = difference / 32;
                     here.cells[channel][i] =
                         static_cast<std::uint16_t>(here.cells[channel][i] + flux);
@@ -630,6 +646,8 @@ RegionKey FieldPageState::region_of_scent_cell(ScentCellKey key) {
                 FloorDiv(static_cast<std::int64_t>(key.z) * 1000 + 500, kRegionMm))};
 }
 bool FieldPageState::owns_evolution_state(RegionKey key) const {
+    if (m_weatherClocks.contains(key))
+        return true;
     for (const auto& storm : m_storms)
         if (storm.owner == key)
             return true;
@@ -643,6 +661,13 @@ bool FieldPageState::owns_evolution_state(RegionKey key) const {
     }
     return false;
 }
+bool FieldPageState::set_weather_age(RegionKey owner, std::uint64_t active_age) {
+    if (!ValidOwner(owner) || active_age >= WorldClock::kTickLimit ||
+        (!m_weatherClocks.contains(owner) && m_weatherClocks.size() == kMaxWeatherClocks))
+        return false;
+    m_weatherClocks[owner] = active_age;
+    return true;
+}
 std::string FieldPageState::serialize() const {
     if (empty())
         return {};
@@ -652,7 +677,8 @@ std::string FieldPageState::serialize() const {
     AppendLe(out,
              static_cast<unsigned>(!m_pages.empty()) + static_cast<unsigned>(!m_storms.empty()) +
                  static_cast<unsigned>(!m_strikes.empty()) +
-                 static_cast<unsigned>(!m_scent.empty()),
+                 static_cast<unsigned>(!m_scent.empty()) +
+                 static_cast<unsigned>(!m_weatherClocks.empty()),
              4);
     std::string records;
     for (const auto& [key, page] : m_pages)
@@ -670,6 +696,13 @@ std::string FieldPageState::serialize() const {
     for (const auto& [key, cell] : m_scent)
         AppendScent(records, key, cell);
     AppendSection(out, 4, m_scent.size(), records);
+    records.clear();
+    for (const auto& [owner, active_age] : m_weatherClocks) {
+        AppendLe(records, static_cast<std::uint32_t>(owner.x), 4);
+        AppendLe(records, static_cast<std::uint32_t>(owner.z), 4);
+        AppendLe(records, active_age, 8);
+    }
+    AppendSection(out, 7, m_weatherClocks.size(), records);
     AppendLe(out, Fnv1a64(out), 8);
     return out;
 }
@@ -684,7 +717,7 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
         if (ReadLe(bytes, footer, 8) != Fnv1a64(std::string_view(bytes).substr(0, footer)))
             return false;
         const auto sections = ReadLe(bytes, 8, 4);
-        if (sections == 0 || sections > 4)
+        if (sections == 0 || sections > 5)
             return false;
         FieldPageState temporary;
         std::size_t at = kHeaderBytes;
@@ -694,15 +727,20 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                 return false;
             const auto type = ReadLe(bytes, at, 2), length = ReadLe(bytes, at + 2, 4),
                        count = ReadLe(bytes, at + 6, 4);
-            if (type <= previous || type > 4 || length < 4 || length > footer - at - 6 ||
-                count == 0)
+            if (type <= previous || (type > 4 && type != 7) || length < 4 ||
+                length > footer - at - 6 || count == 0)
                 return false;
             previous = type;
-            const std::size_t width = type == 1 ? kPageBytes : type == 2 ? 48 : type == 3 ? 36 : 40;
+            const std::size_t width = type == 1   ? kPageBytes
+                                      : type == 2 ? 48
+                                      : type == 3 ? 36
+                                      : type == 4 ? 40
+                                                  : 16;
             const std::size_t cap = type == 1   ? kMaxPages
                                     : type == 2 ? kMaxStorms
                                     : type == 3 ? kMaxStrikes
-                                                : kMaxScentCells;
+                                    : type == 4 ? kMaxScentCells
+                                                : kMaxWeatherClocks;
             if (count > cap || length != 4 + count * width)
                 return false;
             const auto records_at = at + 10;
@@ -739,6 +777,11 @@ bool FieldPageState::parse(const std::string& bytes, FieldPageState& out, std::s
                         strike.storm_salt = reader.word();
                         strike.active_age = reader.word();
                         temporary.m_strikes.push_back(strike);
+                    } else if (type == 7) {
+                        const RegionKey owner = reader.owner();
+                        const auto age = reader.read(8);
+                        if (!temporary.set_weather_age(owner, age))
+                            return false;
                     } else {
                         const ScentCellKey key{std::bit_cast<std::int32_t>(reader.word()),
                                                std::bit_cast<std::int32_t>(reader.word())};
@@ -767,6 +810,38 @@ std::string FieldPageState::canonical_bytes() const {
     if (empty())
         return {};
     return "field_pages:v2:" + serialize();
+}
+
+std::string FieldPageState::ambient_bytes(std::uint8_t channels, bool weather) const {
+    std::string out;
+    for (const auto& [key, page] : m_pages) {
+        AppendLe(out, static_cast<std::uint32_t>(key.x), 4);
+        AppendLe(out, static_cast<std::uint32_t>(key.z), 4);
+        for (const auto mask : page.mask)
+            AppendLe(out, mask, 8);
+        for (int channel = 0; channel < kChannels; ++channel)
+            if ((channels & (1u << channel)) != 0)
+                for (const auto word : page.cells[channel])
+                    AppendLe(out, word, 2);
+    }
+    if (weather) {
+        std::string records;
+        for (const auto& storm : m_storms)
+            AppendStorm(records, storm);
+        AppendSection(out, 2, m_storms.size(), records);
+        records.clear();
+        for (const auto& strike : m_strikes)
+            AppendStrike(records, strike);
+        AppendSection(out, 3, m_strikes.size(), records);
+        records.clear();
+        for (const auto& [owner, age] : m_weatherClocks) {
+            AppendLe(records, static_cast<std::uint32_t>(owner.x), 4);
+            AppendLe(records, static_cast<std::uint32_t>(owner.z), 4);
+            AppendLe(records, age, 8);
+        }
+        AppendSection(out, 7, m_weatherClocks.size(), records);
+    }
+    return out;
 }
 
 std::string FieldPageState::region_bytes(RegionKey key) const {
@@ -800,11 +875,19 @@ std::string FieldPageState::region_bytes(RegionKey key) const {
             AppendScent(scent, cell, values);
             ++scent_count;
         }
-    if (storm_count + strike_count + scent_count != 0) {
+    const auto clock = m_weatherClocks.find(key);
+    if (storm_count + strike_count + scent_count != 0 || clock != m_weatherClocks.end()) {
         out += "|evolution:v2:";
         AppendSection(out, 2, storm_count, storms);
         AppendSection(out, 3, strike_count, strikes);
         AppendSection(out, 4, scent_count, scent);
+        if (clock != m_weatherClocks.end()) {
+            std::string age;
+            AppendLe(age, static_cast<std::uint32_t>(key.x), 4);
+            AppendLe(age, static_cast<std::uint32_t>(key.z), 4);
+            AppendLe(age, clock->second, 8);
+            AppendSection(out, 7, 1, age);
+        }
     }
     return out;
 }

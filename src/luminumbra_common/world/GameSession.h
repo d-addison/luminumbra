@@ -532,6 +532,18 @@ private:
     void AdvanceGroundObjects(std::uint64_t tick);
     // Activates and steps the due, ledger-backed regions' field pages by one tick.
     void AdvanceFieldPages(std::uint64_t tick);
+    void BindRegionalFieldQueries();
+    [[nodiscard]] std::uint16_t SampleRegionalChannel(int channel, const Vec3& position) const;
+    [[nodiscard]] std::string RegionalAmbientHash(std::uint8_t channels, bool weather) const;
+    void ProjectRegionalWeather(bool restoring = false);
+    [[nodiscard]] std::string RegionalFieldProjection(RegionKey key) const;
+    void AdvanceRegionalWeather(std::uint64_t tick);
+    [[nodiscard]] float ScentDomainOrigin(bool x_axis) const;
+    [[nodiscard]] RegionKey ScentCellOwner(int x, int z) const;
+    [[nodiscard]] bool ScentCellDue(int x, int z) const;
+    [[nodiscard]] bool ScentEdgeOpen(int x, int z, int nx, int nz) const;
+    void RestoreRegionalScent();
+    void CaptureRegionalScent();
     // Ledger edit mark for a ground object's region. False when refused (fault or counted reject).
     bool MarkGroundRegionEdited(const GroundObject& object);
     std::filesystem::path m_regionDurableDirectory;

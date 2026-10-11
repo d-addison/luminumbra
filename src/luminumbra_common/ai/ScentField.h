@@ -24,8 +24,10 @@
 // scent steering in its canonical tick when participants exist. Active scent state
 // contributes a scent sub-hash; sessions without participants remain empty-neutral.
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <vector>
 
 #include "../fields/ScalarFieldDiffusion.h"
@@ -34,6 +36,19 @@ namespace luminumbra::ai {
 
 class ScentField {
 public:
+    using CellGate = std::function<bool(int, int)>;
+    using EdgeGate = std::function<bool(int, int, int, int)>;
+    void BindDepositGate(CellGate gate) {
+        m_deposit_gate = std::move(gate);
+    }
+    [[nodiscard]] bool SimulationCellAllowed(int x, int z) const {
+        return !m_deposit_gate || m_deposit_gate(x, z);
+    }
+    void RestoreCell(int ch, int x, int z, double value) {
+        if (valid(ch, x, z) && std::isfinite(value) && value >= 0)
+            m_ch[static_cast<std::size_t>(ch)].set(
+                static_cast<std::size_t>(x), static_cast<std::size_t>(z), value);
+    }
     // `channels` independent scent species (e.g. 0 = prey, 1 = predator, 2 =
     // food-trail, 3 = home-trail). All share the grid dimensions.
     ScentField(int width, int height, int channels = 1)
@@ -63,7 +78,7 @@ public:
     // Lay scent: an agent deposits `amount` of species `ch` at its cell (trail-
     // laying / scent-marking). Out-of-bounds or unknown channel is a no-op.
     void Deposit(int ch, int x, int z, double amount) {
-        if (!valid(ch, x, z) || amount == 0.0)
+        if (!valid(ch, x, z) || amount == 0.0 || (m_deposit_gate && !m_deposit_gate(x, z)))
             return;
         m_ch[static_cast<std::size_t>(ch)].add_impulse(
             static_cast<std::size_t>(x), static_cast<std::size_t>(z), amount);
@@ -87,7 +102,9 @@ public:
               std::size_t diffusion_iters,
               double evaporation,
               double wind_cx = 0.0,
-              double wind_cz = 0.0) {
+              double wind_cz = 0.0,
+              const CellGate& participants = {},
+              const EdgeGate& exchange = {}) {
         const double keep =
             1.0 - (evaporation < 0.0 ? 0.0 : (evaporation > 1.0 ? 1.0 : evaporation));
         const bool did_diffuse = diffusion_iters > 0 && diffusion_rate > 0.0;
@@ -103,16 +120,36 @@ public:
                         src[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
+                        if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
+                            continue;
                         field.set(x,
                                   y,
-                                  BilinearClamped(src,
-                                                  static_cast<double>(x) - wind_cx,
-                                                  static_cast<double>(y) - wind_cz));
+                                  exchange ? BilinearSealed(src,
+                                                            static_cast<int>(x),
+                                                            static_cast<int>(y),
+                                                            static_cast<double>(x) - wind_cx,
+                                                            static_cast<double>(y) - wind_cz,
+                                                            exchange)
+                                           : BilinearClamped(src,
+                                                             static_cast<double>(x) - wind_cx,
+                                                             static_cast<double>(y) - wind_cz));
                     }
                 }
             }
             if (did_diffuse) {
-                (void)field.diffuse(diffusion_iters, diffusion_rate);
+                (void)field.diffuse(
+                    diffusion_iters,
+                    diffusion_rate,
+                    exchange
+                        ? luminumbra::fields::ScalarFieldDiffusion::EdgeGate(
+                              [&exchange](
+                                  std::size_t x, std::size_t z, std::size_t nx, std::size_t nz) {
+                                  return exchange(static_cast<int>(x),
+                                                  static_cast<int>(z),
+                                                  static_cast<int>(nx),
+                                                  static_cast<int>(nz));
+                              })
+                        : luminumbra::fields::ScalarFieldDiffusion::EdgeGate{});
                 // The conservative 4-neighbour solver leaves a parity (checkerboard)
                 // artifact — after even iterations, odd-Manhattan-distance cells are
                 // exactly 0 — which makes a central-difference gradient read 0 at
@@ -127,21 +164,23 @@ public:
                         tmp[y * W + x] = field.at(x, y);
                 for (std::size_t y = 0; y < H; ++y) {
                     for (std::size_t x = 0; x < W; ++x) {
+                        if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
+                            continue;
                         double acc = 0.5 * tmp[y * W + x];
                         double wsum = 0.5;
-                        if (x > 0) {
+                        if (x > 0 && (!exchange || exchange(x, y, x - 1, y))) {
                             acc += 0.125 * tmp[y * W + (x - 1)];
                             wsum += 0.125;
                         }
-                        if (x + 1 < W) {
+                        if (x + 1 < W && (!exchange || exchange(x, y, x + 1, y))) {
                             acc += 0.125 * tmp[y * W + (x + 1)];
                             wsum += 0.125;
                         }
-                        if (y > 0) {
+                        if (y > 0 && (!exchange || exchange(x, y, x, y - 1))) {
                             acc += 0.125 * tmp[(y - 1) * W + x];
                             wsum += 0.125;
                         }
-                        if (y + 1 < H) {
+                        if (y + 1 < H && (!exchange || exchange(x, y, x, y + 1))) {
                             acc += 0.125 * tmp[(y + 1) * W + x];
                             wsum += 0.125;
                         }
@@ -151,7 +190,8 @@ public:
             } else if (keep < 1.0) {
                 for (std::size_t y = 0; y < H; ++y)
                     for (std::size_t x = 0; x < W; ++x)
-                        field.set(x, y, field.at(x, y) * keep);
+                        if (!participants || participants(static_cast<int>(x), static_cast<int>(y)))
+                            field.set(x, y, field.at(x, y) * keep);
             }
         }
     }
@@ -161,10 +201,12 @@ public:
     // follow-probability strictly above zero so agents never lock permanently onto
     // one trail (prevents premature convergence); tau_max caps unbounded deposit
     // buildup. Apply AFTER Step. Deterministic. Default args = no-op.
-    void Clamp(double tau_min = 0.0, double tau_max = 1.0e300) {
+    void Clamp(double tau_min = 0.0, double tau_max = 1.0e300, const CellGate& participants = {}) {
         for (auto& field : m_ch) {
             for (std::size_t y = 0; y < static_cast<std::size_t>(m_h); ++y) {
                 for (std::size_t x = 0; x < static_cast<std::size_t>(m_w); ++x) {
+                    if (participants && !participants(static_cast<int>(x), static_cast<int>(y)))
+                        continue;
                     double v = field.at(x, y);
                     if (v < tau_min)
                         v = tau_min;
@@ -239,8 +281,41 @@ public:
     }
 
 private:
+    CellGate m_deposit_gate;
     [[nodiscard]] bool valid(int ch, int x, int z) const {
         return ch >= 0 && ch < static_cast<int>(m_ch.size()) && in_bounds(x, z);
+    }
+    [[nodiscard]] double BilinearSealed(const std::vector<double>& values,
+                                        int x,
+                                        int z,
+                                        double fx,
+                                        double fz,
+                                        const EdgeGate& exchange) const {
+        fx = std::clamp(fx, 0.0, static_cast<double>(m_w - 1));
+        fz = std::clamp(fz, 0.0, static_cast<double>(m_h - 1));
+        const int x0 = static_cast<int>(fx), z0 = static_cast<int>(fz);
+        const int x1 = std::min(x0 + 1, m_w - 1), z1 = std::min(z0 + 1, m_h - 1);
+        const auto sample = [&](int sx, int sz) {
+            int px = x, pz = z;
+            while (px != sx) {
+                const int nx = px + (sx > px ? 1 : -1);
+                if (!exchange(px, pz, nx, pz))
+                    return values[static_cast<std::size_t>(z * m_w + x)];
+                px = nx;
+            }
+            while (pz != sz) {
+                const int nz = pz + (sz > pz ? 1 : -1);
+                if (!exchange(px, pz, px, nz))
+                    return values[static_cast<std::size_t>(z * m_w + x)];
+                pz = nz;
+            }
+            return values[static_cast<std::size_t>(sz * m_w + sx)];
+        };
+        const double tx = fx - x0, tz = fz - z0;
+        const double v00 = sample(x0, z0), v10 = sample(x1, z0);
+        const double v01 = sample(x0, z1), v11 = sample(x1, z1);
+        const double a = v00 + (v10 - v00) * tx, b = v01 + (v11 - v01) * tx;
+        return a + (b - a) * tz;
     }
 
     // Bilinear sample of a row-major W*H buffer at (fx,fz), edge-clamped. Used by the

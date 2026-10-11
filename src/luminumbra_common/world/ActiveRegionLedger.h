@@ -96,10 +96,10 @@ public:
     // anchor presence and anchor.
     static constexpr std::size_t kHeaderBytes = 56;
     // Version 2 adds a u32 extension length and ascending TLVs: type 1 allocator (14 bytes),
-    // type 2 digest projection (7 bytes), type 6 completed work (10 + 16 bytes per owned key).
-    // Types 3/4 are reserved for water/energy; all unsupported types refuse.
+    // type 2 digest projection (7 bytes), type 4 energy ages and type 6 completed work
+    // (each 10 + 16 bytes per owned key). Types 3/5 remain reserved and refuse.
     static constexpr std::size_t kMaxFileBytes =
-        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 6 + 4 + 16 * kMaxRegions + 8;
+        kHeaderBytes + kMaxRegions * kRecordBytes + 4 + 7 + 14 + 2 * (6 + 4 + 16 * kMaxRegions) + 8;
     static constexpr const char* kCorruptMessage = "Corrupt active-region ledger.";
     static constexpr const char* kProjectionMessage = "Unsupported frozen digest projection.";
     static constexpr const char* kFutureMessage =
@@ -141,6 +141,19 @@ public:
     }
     // Returns false and changes nothing once next_persistent_id() reaches kPersistentIdLimit.
     bool allocate_persistent_id(std::uint64_t& id);
+    using EnergyAges = std::map<RegionKey, std::uint64_t>;
+    [[nodiscard]] const EnergyAges& energy_ages() const noexcept {
+        return m_energyAges;
+    }
+    // Missing register returns false without changing age.
+    bool energy_age(RegionKey key, std::uint64_t& age) const noexcept;
+    // Ages are durable even at zero energy. Both setters refuse unknown owners
+    // and ages >= WorldClock::kTickLimit without changing any register.
+    bool set_energy_age(RegionKey key, std::uint64_t age);
+    bool set_energy_ages(const EnergyAges& ages);
+    void reset_energy_ages() noexcept {
+        m_energyAges.clear();
+    }
     // Finite, and -2^24 <= x,z < 2^24 (exactly -2^24 is valid). y must be finite.
     [[nodiscard]] static bool valid_anchor(const Vec3& position) noexcept;
     // Non-throwing form: returns false and leaves the anchor untouched when invalid.
@@ -200,6 +213,7 @@ private:
     // True when any record has been frozen (now or in the past), which requires version 2.
     bool any_frozen_history() const;
     std::map<RegionKey, std::uint64_t> m_completedWork;
+    EnergyAges m_energyAges;
     RegionSchedulerConfig m_config;
     std::map<RegionKey, ActiveRegionRecord> m_records;
     std::optional<Vec3> m_localAnchor;

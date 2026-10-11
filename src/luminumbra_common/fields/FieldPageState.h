@@ -64,6 +64,7 @@ public:
     static constexpr unsigned kRelaxShift = 4;
     static constexpr std::size_t kMaxPages = 16384;
     static constexpr std::size_t kMaxStorms = 16, kMaxStrikes = 32, kMaxScentCells = 65536;
+    static constexpr std::size_t kMaxWeatherClocks = 65536;
     static constexpr std::size_t kMaxFileBytes = 64u * 1024u * 1024u;
     // Valid cell indices (interval intersection, never per-endpoint clamping): the centre must
     // satisfy -16'777'216'000 <= centre_mm < 16'777'216'000.
@@ -85,7 +86,8 @@ public:
                                                   std::uint64_t epoch);
 
     [[nodiscard]] bool empty() const {
-        return m_pages.empty() && m_storms.empty() && m_strikes.empty() && m_scent.empty();
+        return m_pages.empty() && m_storms.empty() && m_strikes.empty() && m_scent.empty() &&
+               m_weatherClocks.empty();
     }
     [[nodiscard]] std::size_t page_count() const {
         return m_pages.size();
@@ -98,6 +100,7 @@ public:
         m_storms.clear();
         m_strikes.clear();
         m_scent.clear();
+        m_weatherClocks.clear();
     }
 
     [[nodiscard]] const std::vector<RegionalStorm>& storms() const {
@@ -109,6 +112,10 @@ public:
     [[nodiscard]] const std::map<ScentCellKey, ScentCell>& scent_cells() const {
         return m_scent;
     }
+    [[nodiscard]] const std::map<RegionKey, std::uint64_t>& weather_clocks() const {
+        return m_weatherClocks;
+    }
+    bool set_weather_age(RegionKey owner, std::uint64_t active_age);
     // Transactional admission, canonical ordering and bounded exact-state validation.
     bool replace_weather(std::vector<RegionalStorm> storms, std::vector<RegionalStrike> strikes);
     bool set_scent(ScentCellKey key, const ScentCell& values);
@@ -143,7 +150,8 @@ public:
     step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& records,
                    std::span<const RegionKey> due,
                    std::uint64_t world_seed,
-                   std::uint64_t tick);
+                   std::uint64_t tick,
+                   const FieldPageState* previous_tick = nullptr);
 
     // FPG1 file bytes. Empty string for an empty store (an empty store writes no file).
     [[nodiscard]] std::string serialize() const;
@@ -152,6 +160,7 @@ public:
     static bool parse(const std::string& bytes, FieldPageState& out, std::string& error);
     // "" when empty, otherwise "field_pages:v2:" + serialize().
     [[nodiscard]] std::string canonical_bytes() const;
+    [[nodiscard]] std::string ambient_bytes(std::uint8_t channels, bool weather = false) const;
     // "" when `key` owns no initialized cell, otherwise for every owned initialized cell in
     // cells_of_region order: i32 cell_x, i32 cell_z, then kChannels u16 (all little endian).
     [[nodiscard]] std::string region_bytes(RegionKey key) const;
@@ -161,6 +170,7 @@ private:
     std::vector<RegionalStorm> m_storms;
     std::vector<RegionalStrike> m_strikes;
     std::map<ScentCellKey, ScentCell> m_scent;
+    std::map<RegionKey, std::uint64_t> m_weatherClocks;
 };
 
 } // namespace Luminumbra::world

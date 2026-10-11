@@ -1640,6 +1640,13 @@ bool FieldPagesMatchLedger(const world::FieldPageState& state,
             return false;
         }
     }
+    for (const auto& [owner, age] : state.weather_clocks()) {
+        (void)age;
+        if (ledger.records().count(owner) == 0) {
+            AddError(errors, "corrupt field pages: orphaned weather clock");
+            return false;
+        }
+    }
     for (const auto& [key, scent] : state.scent_cells()) {
         (void)scent;
         if (ledger.records().count(world::FieldPageState::region_of_scent_cell(key)) == 0) {
@@ -1675,6 +1682,29 @@ bool WorldSaveService::validate_field_pages(const std::filesystem::path& save_di
     world::FieldPageState state;
     if (!load_field_pages(state, save_dir, errors))
         return false;
+    world::WorldClock clock;
+    bool required = false;
+    if (!read_clock_metadata(save_dir, clock, required, errors))
+        return false;
+    for (const auto& [owner, age] : state.weather_clocks()) {
+        (void)owner;
+        if (age > clock.tick()) {
+            AddError(errors, "corrupt field pages: future weather age");
+            return false;
+        }
+    }
+    for (const auto& storm : state.storms()) {
+        if (storm.spawn_tick > clock.tick() || storm.active_age > clock.tick() - storm.spawn_tick) {
+            AddError(errors, "corrupt field pages: future storm age");
+            return false;
+        }
+    }
+    for (const auto& strike : state.strikes()) {
+        if (strike.strike_tick > clock.tick()) {
+            AddError(errors, "corrupt field pages: future strike");
+            return false;
+        }
+    }
     return FieldPagesMatchLedger(state, ledger, errors);
 }
 
@@ -2372,7 +2402,28 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                     return false;
                 }
             luminumbra::fields::EnergyFieldState energy;
-            if (!energy.DeserializeRecord(bytes, 0) || energy.SerializeRecord(0) != bytes) {
+            world::WorldClock clock;
+            bool regional = false;
+            if (!read_clock_metadata(save_dir, clock, regional, &diagnostics)) {
+                error = first_error("corrupt world metadata");
+                return false;
+            }
+            if (regional) {
+                world::ActiveRegionLedger ledger;
+                if (!energy.DeserializeRegionalRecord(bytes) ||
+                    !load_active_regions(ledger, save_dir, &diagnostics) ||
+                    !energy.ValidateRegionalOwners(ledger.records(), ledger.energy_ages())) {
+                    error = "corrupt regional energy field record or ownership";
+                    return false;
+                }
+                for (const auto& [owner, age] : ledger.energy_ages()) {
+                    (void)owner;
+                    if (age > clock.tick()) {
+                        error = "corrupt regional energy field age";
+                        return false;
+                    }
+                }
+            } else if (!energy.DeserializeRecord(bytes, 0) || energy.SerializeRecord(0) != bytes) {
                 error = "corrupt energy field record";
                 return false;
             }
@@ -2391,6 +2442,13 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
             if (ledger.header_tick() > clock.tick()) {
                 error = world::ActiveRegionLedger::kCorruptMessage;
                 return false;
+            }
+            for (const auto& [owner, age] : ledger.energy_ages()) {
+                (void)owner;
+                if (age > clock.tick()) {
+                    error = "corrupt regional energy field age";
+                    return false;
+                }
             }
         }
 

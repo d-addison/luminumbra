@@ -66,6 +66,7 @@
 #include "WorldStreamingState.h"
 #include "nlohmann/json.hpp" // For parsing JSON
 #include <array>
+#include <bit>
 #include <cmath> // std::floor (energy-layer anchor quantization)
 
 #include <algorithm> // explicit: stabilise std template instantiation for entt storage helpers
@@ -419,13 +420,22 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             // Integer/id-ordered/libm-free.
             const auto foragers_view =
                 m_registry.view<const Luminumbra::Components::ForagerComponent>();
-            const bool foraging_active = foragers_view.begin() != foragers_view.end();
+            const bool foraging_active = std::any_of(
+                foragers_view.begin(),
+                foragers_view.end(),
+                [this, &foragers_view](const auto entity) {
+                    if (!m_activeRegionsEnabled)
+                        return true;
+                    const auto& forager =
+                        foragers_view.get<const Luminumbra::Components::ForagerComponent>(entity);
+                    return ScentCellDue(forager.cell_x, forager.cell_z);
+                });
             if ((scent_active || foraging_active) && m_scentField) {
                 if (scent_active) {
                     luminumbra::ai::RunScentDepositOnTick(m_registry,
                                                           *m_scentField,
-                                                          ScentOriginFor(m_metadata.spawnPoint.x),
-                                                          ScentOriginFor(m_metadata.spawnPoint.z),
+                                                          ScentDomainOrigin(true),
+                                                          ScentDomainOrigin(false),
                                                           kScentCellSize);
                 }
                 if (foraging_active) {
@@ -447,8 +457,25 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                    kScentDiffusionIterations,
                                    kScentEvaporation,
                                    wind_cx,
-                                   wind_cz);
-                m_scentField->Clamp(kScentTauMin, kScentTauMax);
+                                   wind_cz,
+                                   m_activeRegionsEnabled
+                                       ? luminumbra::ai::ScentField::CellGate(
+                                             [this](int x, int z) { return ScentCellDue(x, z); })
+                                       : luminumbra::ai::ScentField::CellGate{},
+                                   m_activeRegionsEnabled
+                                       ? luminumbra::ai::ScentField::EdgeGate(
+                                             [this](int x, int z, int nx, int nz) {
+                                                 return ScentEdgeOpen(x, z, nx, nz);
+                                             })
+                                       : luminumbra::ai::ScentField::EdgeGate{});
+                m_scentField->Clamp(kScentTauMin,
+                                    kScentTauMax,
+                                    m_activeRegionsEnabled
+                                        ? luminumbra::ai::ScentField::CellGate(
+                                              [this](int x, int z) { return ScentCellDue(x, z); })
+                                        : luminumbra::ai::ScentField::CellGate{});
+                if (m_activeRegionsEnabled)
+                    CaptureRegionalScent();
             }
 
             budget.Next(Stage::Locomotion, [&] {
@@ -463,8 +490,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
             if (scent_active && m_scentField) {
                 luminumbra::ai::RunScentSteeringOnTick(m_registry,
                                                        *m_scentField,
-                                                       ScentOriginFor(m_metadata.spawnPoint.x),
-                                                       ScentOriginFor(m_metadata.spawnPoint.z),
+                                                       ScentDomainOrigin(true),
+                                                       ScentDomainOrigin(false),
                                                        kScentCellSize);
             }
 
@@ -487,8 +514,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                         static_cast<float>(m_simulationClock.fixed_dt()),
                         m_ecologyTuning,
                         m_scentField.get(),
-                        ScentOriginFor(m_metadata.spawnPoint.x),
-                        ScentOriginFor(m_metadata.spawnPoint.z),
+                        ScentDomainOrigin(true),
+                        ScentDomainOrigin(false),
                         kScentCellSize,
                         true,
                         m_speciesTable.get());
@@ -622,8 +649,7 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                            static_cast<std::uint64_t>(Systems::kWeatherExtentCells) *
                                Systems::kWeatherExtentCells;
                 });
-                m_weatherSystem->UpdateFromClock(
-                    current_tick, m_ambientFieldAnchor, *m_windFieldSystem);
+                AdvanceRegionalWeather(current_tick);
             } else {
                 budget.Next(Stage::Wind, [&] {
                     return m_windFieldSystem
@@ -708,7 +734,21 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                 // (id-sorted, two-phase) into the layer before it ticks.
                 // Participant-gated: no emitter component, no deposits, no bytes.
                 Systems::GatherFieldEmitterDeposits(m_registry, *m_energyFieldState);
-                m_energyFieldState->Tick(current_tick);
+                if (m_activeRegionsEnabled) {
+                    luminumbra::fields::EnergyFieldState::RegionalResult result;
+                    const auto due = SortedDueRegions();
+                    if (!m_energyFieldState->TickRegional(current_tick,
+                                                          m_activeRegionLedger.records(),
+                                                          due,
+                                                          m_activeRegionLedger.energy_ages(),
+                                                          result) ||
+                        !m_activeRegionLedger.set_energy_ages(result.ages))
+                        throw std::runtime_error("Regional energy tick refused");
+                    for (const auto& work : result.work)
+                        RecordActiveRegionWork(work);
+                } else {
+                    m_energyFieldState->Tick(current_tick);
+                }
             }
 
             // 5b.: the soil-nutrient + irrigation-moisture FIELDS update BEFORE plant
@@ -1217,6 +1257,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     //    world seed (uses seed+14 for its emission noise); updated per tick AFTER
     //    weather, advected by the wind grid. Feeds the world_hash `aether` slot.
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+    BindRegionalFieldQueries();
     LUMINUMBRA_CORE_INFO("Aether field system initialized.");
 
     // the stateful energy layer, constructed ONLY when
@@ -1348,13 +1389,14 @@ bool GameSession::LoadWorld(const std::string& worldId) {
     m_windFieldSystem = std::make_unique<Systems::WindFieldSystem>(world_seed);
     m_weatherSystem = std::make_unique<Systems::WeatherSystem>(world_seed);
     m_aetherFieldSystem = std::make_unique<Systems::AetherFieldSystem>(world_seed);
+    BindRegionalFieldQueries();
 
     // unlike the re-derivable trio above, the stateful
     // energy layer is AUTHORITATIVE state — when enabled, a persisted record
     // restores it (epoch-rebased onto the session clock); an absent
     // record is all-zeros by contract. OFF -> null -> byte-identical.
     InitializeEnergyFieldState();
-    if (m_energyFieldState) {
+    if (m_energyFieldState && !m_activeRegionsEnabled) {
         const std::string recordPath = worldPath + "/aether_state.efs";
         std::ifstream recordFile(recordPath);
         if (recordFile) {
@@ -1449,7 +1491,7 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                                                         m_worldSystem->snapshot_parked_chunks(),
                                                         m_worldSystem->durable_chunk_inventory(),
                                                         m_groundObjects.region_bytes(key),
-                                                        m_fieldPages.region_bytes(key)});
+                                                        RegionalFieldProjection(key)});
                 },
                 // Later slices extend this probe with creatures, plants and water debt.
                 [this, &resident_regions](RegionKey key) {
@@ -1459,6 +1501,9 @@ void GameSession::RunRegionScheduler(std::uint64_t current_tick) {
                     if (m_groundObjects.owns_region(key))
                         return true;
                     if (m_fieldPages.owns_region(key))
+                        return true;
+                    if (m_activeRegionLedger.energy_ages().contains(key) ||
+                        (m_energyFieldState && m_energyFieldState->OwnsRegion(key)))
                         return true;
                     if (!resident_regions) {
                         resident_regions.emplace();
@@ -1499,15 +1544,293 @@ void GameSession::AdvanceFieldPages(std::uint64_t tick) {
     const std::uint64_t seed =
         static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
     const auto& records = m_activeRegionLedger.records();
+    const auto previous = m_fieldPages;
     const auto due = SortedDueRegions();
     for (const RegionKey key : due) {
         if (records.find(key) == records.end())
             continue;
         if (!m_fieldPages.activate_region(key, seed, tick))
             ++m_regionInputRejections.field_pages;
+        const auto initialized =
+            m_fieldPages.owned_initialized_cells(key) - previous.owned_initialized_cells(key);
+        if (initialized)
+            m_regionCompletedWork.push_back(RegionWork{key, 0, 0, 0, initialized});
     }
-    for (const auto& [key, updates] : m_fieldPages.step_scheduled(records, due, seed, tick))
+    for (const auto& [key, updates] :
+         m_fieldPages.step_scheduled(records, due, seed, tick, &previous))
         m_regionCompletedWork.push_back(RegionWork{key, 0, 0, 0, updates});
+}
+
+std::uint16_t GameSession::SampleRegionalChannel(int channel, const Vec3& position) const {
+    if (!std::isfinite(position.x) || !std::isfinite(position.z) || position.x < -16777216.0f ||
+        position.x >= 16777216.0f || position.z < -16777216.0f || position.z >= 16777216.0f)
+        return 0;
+    const auto x = static_cast<std::int32_t>(std::floor(static_cast<double>(position.x) / 24.0));
+    const auto z = static_cast<std::int32_t>(std::floor(static_cast<double>(position.z) / 24.0));
+    const auto owner = FieldPageState::region_of_cell(x, z);
+    const auto found = m_activeRegionLedger.records().find(owner);
+    std::uint16_t value = 0;
+    if (found != m_activeRegionLedger.records().end() &&
+        found->second.state != RegionState::Frozen && m_fieldPages.sample(channel, x, z, value))
+        return value;
+    const auto seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    return FieldPageState::seed_value(
+        seed, channel, x, z, m_worldClock.tick() / FieldPageState::kCadenceTicks);
+}
+
+std::string GameSession::RegionalAmbientHash(std::uint8_t channels, bool weather) const {
+    return Persistence::StableChecksum(m_fieldPages.ambient_bytes(channels, weather));
+}
+
+void GameSession::BindRegionalFieldQueries() {
+    if (!m_activeRegionsEnabled)
+        return;
+    m_windFieldSystem->BindRegionalBackend(
+        [this](const Vec3& position, Systems::WindLayer layer) {
+            // Stored signed words are 1/1024 m/s. Higher layers use exact powers of two.
+            const float scale = layer == Systems::WindLayer::Ground ? 1.0f
+                                : layer == Systems::WindLayer::Mid  ? 2.0f
+                                                                    : 4.0f;
+            return Vec2(static_cast<float>(
+                            std::bit_cast<std::int16_t>(SampleRegionalChannel(0, position))) *
+                            (scale / 1024.0f),
+                        static_cast<float>(
+                            std::bit_cast<std::int16_t>(SampleRegionalChannel(1, position))) *
+                            (scale / 1024.0f));
+        },
+        [this] { return RegionalAmbientHash(3, false); });
+    m_weatherSystem->BindRegionalBackend(
+        [this](const Vec3& position) {
+            Systems::WeatherSample sample;
+            const auto moisture = SampleRegionalChannel(2, position);
+            const auto front = SampleRegionalChannel(3, position);
+            sample.category = front < 13107   ? Systems::WeatherCategory::Clear
+                              : front < 26214 ? Systems::WeatherCategory::Overcast
+                              : front < 39321 ? Systems::WeatherCategory::Rain
+                              : front < 52428 ? Systems::WeatherCategory::Snow
+                                              : Systems::WeatherCategory::Fog;
+            sample.precip_intensity = sample.category == Systems::WeatherCategory::Rain ||
+                                              sample.category == Systems::WeatherCategory::Snow
+                                          ? static_cast<float>(moisture) / 65535.0f
+                                          : 0.0f;
+            sample.wind = m_windFieldSystem->SampleWind(position);
+            return sample;
+        },
+        [this] { return RegionalAmbientHash(12, true); });
+    m_aetherFieldSystem->BindRegionalBackend(
+        [this](const Vec3& position) {
+            return static_cast<float>(SampleRegionalChannel(4, position)) / 65535.0f;
+        },
+        [this] { return RegionalAmbientHash(16, false); });
+}
+
+std::string GameSession::RegionalFieldProjection(RegionKey key) const {
+    auto bytes = m_fieldPages.region_bytes(key);
+    if (m_energyFieldState)
+        bytes += m_energyFieldState->RegionBytes(key);
+    const auto age = m_activeRegionLedger.energy_ages().find(key);
+    if (age != m_activeRegionLedger.energy_ages().end()) {
+        bytes += "|energy_age:";
+        for (int i = 0; i < 8; ++i)
+            bytes.push_back(static_cast<char>((age->second >> (8 * i)) & 255));
+    }
+    return bytes;
+}
+void GameSession::ProjectRegionalWeather(bool restoring) {
+    if (!m_activeRegionsEnabled || !m_weatherSystem)
+        return;
+    std::vector<Systems::StormCell> storms;
+    for (const auto& storm : m_fieldPages.storms())
+        storms.push_back(
+            {Vec2(std::bit_cast<float>(storm.center_x), std::bit_cast<float>(storm.center_z)),
+             Vec2(std::bit_cast<float>(storm.velocity_x), std::bit_cast<float>(storm.velocity_z)),
+             std::bit_cast<float>(storm.intensity),
+             storm.spawn_tick,
+             storm.lifetime_ticks,
+             storm.seed_salt});
+    std::vector<Systems::StrikeEvent> strikes;
+    for (const auto& strike : m_fieldPages.strikes()) {
+        if (restoring && strike.strike_tick <= m_worldClock.tick())
+            continue;
+        strikes.push_back({strike.strike_tick,
+                           std::bit_cast<float>(strike.world_x),
+                           std::bit_cast<float>(strike.world_z),
+                           std::bit_cast<float>(strike.magnitude),
+                           strike.storm_salt});
+    }
+    m_weatherSystem->AdoptRegionalWeather(
+        m_worldClock.tick(), m_ambientFieldAnchor, std::move(storms), std::move(strikes));
+}
+
+void GameSession::AdvanceRegionalWeather(std::uint64_t tick) {
+    auto next = m_fieldPages;
+    const auto& records = m_activeRegionLedger.records();
+    const auto due_list = SortedDueRegions();
+    const std::set<RegionKey> due(due_list.begin(), due_list.end());
+    const auto eligible = [&records](RegionKey owner) {
+        const auto found = records.find(owner);
+        return found != records.end() && found->second.state != RegionState::Frozen;
+    };
+    const auto common = [&records, &eligible, tick](RegionKey source, RegionKey destination) {
+        if (!eligible(source) || !eligible(destination))
+            return false;
+        const auto shift =
+            std::max(records.at(source).cadence_shift, records.at(destination).cadence_shift);
+        return shift < 63 && (tick & ((std::uint64_t{1} << shift) - 1)) == 0;
+    };
+    const auto owner_of = [](float x, float z) {
+        return RegionKey{static_cast<std::int32_t>(std::floor(static_cast<double>(x) / 512.0)),
+                         static_cast<std::int32_t>(std::floor(static_cast<double>(z) / 512.0))};
+    };
+    const auto mix = [](std::uint64_t value) {
+        value += 0x9e3779b97f4a7c15ull;
+        value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+        value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+        return value ^ (value >> 31);
+    };
+    const auto unit = [&mix](std::uint64_t key) {
+        return static_cast<float>(mix(key) >> 40) / 16777216.0f;
+    };
+    const auto seed =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(StringToSeed(m_metadata.seed)));
+    std::map<RegionKey, std::uint64_t> work;
+    for (const auto owner : due_list) {
+        const auto found = next.weather_clocks().find(owner);
+        const auto age = found == next.weather_clocks().end() ? 0 : found->second;
+        if (age + 1 >= WorldClock::kTickLimit || !next.set_weather_age(owner, age + 1))
+            throw std::overflow_error("Regional weather clock admission failed");
+        ++work[owner];
+    }
+    std::vector<RegionalStrike> strikes;
+    // Same-tick events have already been delivered at the saved boundary. Frozen strikes stay
+    // as stored and never re-emit because their absolute provenance tick is immutable.
+    for (const auto& strike : next.strikes())
+        if (!due.contains(strike.owner))
+            strikes.push_back(strike);
+        else
+            ++work[strike.owner];
+    std::vector<RegionalStorm> storms;
+    for (auto storm : next.storms()) {
+        const auto source = storm.owner;
+        if (!eligible(source)) {
+            storms.push_back(storm);
+            continue;
+        }
+        const bool interior_due = due.contains(source);
+        float x = std::bit_cast<float>(storm.center_x), z = std::bit_cast<float>(storm.center_z);
+        float vx = std::bit_cast<float>(storm.velocity_x),
+              vz = std::bit_cast<float>(storm.velocity_z);
+        if (interior_due) {
+            ++storm.active_age;
+            ++work[source];
+            if (storm.active_age >= storm.lifetime_ticks)
+                continue;
+            const auto wind =
+                m_windFieldSystem->SampleWind(Vec3{x, 5, z}, Systems::WindLayer::Ground);
+            vx = wind.x;
+            vz = wind.y;
+            storm.velocity_x = std::bit_cast<std::uint32_t>(vx);
+            storm.velocity_z = std::bit_cast<std::uint32_t>(vz);
+            const auto remaining = storm.lifetime_ticks - storm.active_age;
+            const float intensity =
+                std::min(1.0f, static_cast<float>(std::min(storm.active_age, remaining)) / 45.0f);
+            storm.intensity = std::bit_cast<std::uint32_t>(intensity);
+        }
+        float px = x + vx * (1.0f / 30.0f), pz = z + vz * (1.0f / 30.0f);
+        // Discard blocked displacement; no hidden accumulated motion. World limits are sealed.
+        const bool valid_position = std::isfinite(px) && std::isfinite(pz) && px >= -16777216.0f &&
+                                    px < 16777216.0f && pz >= -16777216.0f && pz < 16777216.0f;
+        const auto destination = valid_position ? owner_of(px, pz) : source;
+        bool transfer = valid_position && destination != source && common(source, destination);
+        if (transfer && destination.x != source.x && destination.z != source.z)
+            transfer = common(source, {destination.x, source.z}) &&
+                       common(source, {source.x, destination.z});
+        if (transfer) {
+            storm.owner = destination;
+            ++work[source];
+            ++work[destination];
+        } else if (interior_due) {
+            const float low_x = static_cast<float>(source.x) * 512.0f;
+            const float low_z = static_cast<float>(source.z) * 512.0f;
+            px = valid_position ? std::clamp(px, low_x, std::nextafter(low_x + 512.0f, low_x)) : x;
+            pz = valid_position ? std::clamp(pz, low_z, std::nextafter(low_z + 512.0f, low_z)) : z;
+        } else {
+            px = x;
+            pz = z;
+        }
+        storm.center_x = std::bit_cast<std::uint32_t>(px);
+        storm.center_z = std::bit_cast<std::uint32_t>(pz);
+        // Strike cadence follows the storm's own active age, not elapsed absolute ticks.
+        const float intensity = std::bit_cast<float>(storm.intensity);
+        if (interior_due && storm.active_age % 18 == 0 && intensity >= 0.45f &&
+            strikes.size() < FieldPageState::kMaxStrikes) {
+            auto key = mix((seed + 13) ^
+                           (static_cast<std::uint64_t>(storm.seed_salt) * 0x9e3779b97f4a7c15ull));
+            key = mix(key ^ ((storm.active_age / 18) * 0xff51afd7ed558ccdull));
+            if (unit(key) < 0.4f * intensity) {
+                const float sx = px + (unit(key ^ 0x1111222233334444ull) * 2.0f - 1.0f) * 180.0f;
+                const float sz = pz + (unit(key ^ 0x5555666677778888ull) * 2.0f - 1.0f) * 180.0f;
+                if (std::isfinite(sx) && std::isfinite(sz) && sx >= -16777216.0f &&
+                    sx < 16777216.0f && sz >= -16777216.0f && sz < 16777216.0f) {
+                    const auto target = owner_of(sx, sz);
+                    if (eligible(target) &&
+                        (target == storm.owner || common(storm.owner, target))) {
+                        const float magnitude = std::min(
+                            1.0f, 0.55f * intensity + 0.45f * unit(key ^ 0x99990000aaaabbbbull));
+                        strikes.push_back({target,
+                                           tick,
+                                           std::bit_cast<std::uint32_t>(sx),
+                                           std::bit_cast<std::uint32_t>(sz),
+                                           std::bit_cast<std::uint32_t>(magnitude),
+                                           storm.seed_salt,
+                                           0});
+                        ++work[storm.owner];
+                        if (target != storm.owner)
+                            ++work[target];
+                    }
+                }
+            }
+        }
+        storms.push_back(storm);
+    }
+    for (const auto owner : due_list) {
+        const auto age = next.weather_clocks().at(owner);
+        if (age % 45 != 0 || storms.size() >= FieldPageState::kMaxStorms)
+            continue;
+        auto key = mix((seed + 12) ^ ((age / 45) * 0x100000001b3ull));
+        key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.x)) * 0x9e3779b1u;
+        key ^= static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner.z)) * 0x85ebca77u;
+        if (unit(key) >= 0.55f)
+            continue;
+        const float x = static_cast<float>(owner.x) * 512.0f + 256.0f +
+                        (unit(key ^ 0xaaaa5555ull) * 2.0f - 1.0f) * 204.8f;
+        const float z = static_cast<float>(owner.z) * 512.0f + 256.0f +
+                        (unit(key ^ 0x5555aaaaull) * 2.0f - 1.0f) * 204.8f;
+        const auto wind = m_windFieldSystem->SampleWind(Vec3{x, 5, z}, Systems::WindLayer::Ground);
+        const auto salt = static_cast<std::uint32_t>(mix(key ^ 0xc0ffeeull));
+        if (std::any_of(storms.begin(), storms.end(), [tick, salt](const auto& storm) {
+                return storm.spawn_tick == tick && storm.seed_salt == salt;
+            }))
+            continue;
+        storms.push_back({owner,
+                          std::bit_cast<std::uint32_t>(x),
+                          std::bit_cast<std::uint32_t>(z),
+                          std::bit_cast<std::uint32_t>(wind.x),
+                          std::bit_cast<std::uint32_t>(wind.y),
+                          0,
+                          tick,
+                          240,
+                          salt,
+                          0});
+        ++work[owner];
+    }
+    if (!next.replace_weather(std::move(storms), std::move(strikes)))
+        throw std::runtime_error("Regional weather state admission failed");
+    m_fieldPages = std::move(next);
+    ProjectRegionalWeather();
+    for (const auto& [owner, updates] : work)
+        RecordActiveRegionWork({owner, 0, 0, 0, updates});
 }
 
 void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
@@ -1890,8 +2213,12 @@ void GameSession::RestoreWorldClock(const WorldClock& clock) {
     m_simulationClock.reset(clock.tick());
     if (m_energyFieldState)
         m_energyFieldState->ResetEmptyAtTick(clock.tick());
+    if (m_activeRegionsEnabled)
+        m_windFieldSystem->Update(clock.tick(), m_ambientFieldAnchor);
+    ProjectRegionalWeather(true);
     m_weatherSystem->RestoreAtTick(clock.tick(), m_ambientFieldAnchor, *m_windFieldSystem);
     m_aetherFieldSystem->Update(clock.tick(), m_ambientFieldAnchor, m_windFieldSystem.get());
+    RestoreRegionalScent();
 }
 
 namespace {
@@ -2438,6 +2765,39 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
             m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
+        std::optional<luminumbra::fields::EnergyFieldState> energy;
+        std::error_code energy_ec;
+        const auto energy_path = save_dir / "aether_state.efs";
+        const bool has_energy = fs::exists(energy_path, energy_ec);
+        if (energy_ec || ((has_energy || !ledger.energy_ages().empty()) && !m_energyFieldState)) {
+            m_worldOpenError = energy_ec ? "Unreadable regional energy record."
+                                         : "Incompatible configuration: regional energy state "
+                                           "requires sim.aether_state.";
+            m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldSystem->clear_world(m_physicsSystem.get());
+            return false;
+        }
+        if (m_energyFieldState) {
+            energy.emplace(m_energyFieldState->channels());
+            bool valid = true;
+            if (has_energy) {
+                const auto length = fs::file_size(energy_path, energy_ec);
+                valid = !energy_ec &&
+                        length <= luminumbra::fields::EnergyFieldState::kMaxRegionalRecordBytes;
+                if (valid) {
+                    std::ifstream input(energy_path, std::ios::binary);
+                    const std::string bytes(std::istreambuf_iterator<char>{input}, {});
+                    valid = input.good() && energy->DeserializeRegionalRecord(bytes);
+                }
+            }
+            valid = valid && energy->ValidateRegionalOwners(ledger.records(), ledger.energy_ages());
+            if (!valid) {
+                m_worldOpenError = "Corrupt regional energy record.";
+                m_ambientFieldAnchor = previous_ambient_anchor;
+                m_worldSystem->clear_world(m_physicsSystem.get());
+                return false;
+            }
+        }
         m_groundObjects = std::move(ground_objects);
         m_fieldPages = std::move(field_pages);
         m_activeRegionLedger = std::move(ledger);
@@ -2451,6 +2811,8 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         m_regionFault.reset();
         m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved_clock);
+        if (energy)
+            *m_energyFieldState = std::move(*energy);
     }
 
     // Validate every chunk before adopting any state. A malformed lattice must
@@ -2536,7 +2898,7 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     // restore the stateful energy layer's record (a
     // missing file is a clean miss == all zeros by contract). Epoch-rebased
     // onto the loaded session's tick stream (-4).
-    if (m_energyFieldState) {
+    if (m_energyFieldState && !m_activeRegionsEnabled) {
         const fs::path recordPath = save_dir / "aether_state.efs";
         std::ifstream recordFile(recordPath);
         if (recordFile) {
@@ -2599,23 +2961,23 @@ int GameSession::ScentFieldCells() const {
     return kScentFieldCells;
 }
 int GameSession::ScentWorldToCellX(float world_x) const {
-    return static_cast<int>(
-        std::lround((world_x - ScentOriginFor(m_metadata.spawnPoint.x)) / kScentCellSize));
+    return static_cast<int>(std::lround((world_x - ScentDomainOrigin(true)) / kScentCellSize));
 }
 int GameSession::ScentWorldToCellZ(float world_z) const {
-    return static_cast<int>(
-        std::lround((world_z - ScentOriginFor(m_metadata.spawnPoint.z)) / kScentCellSize));
+    return static_cast<int>(std::lround((world_z - ScentDomainOrigin(false)) / kScentCellSize));
 }
 float GameSession::ScentCellToWorldX(int cell_x) const {
-    return ScentOriginFor(m_metadata.spawnPoint.x) + static_cast<float>(cell_x) * kScentCellSize;
+    return ScentDomainOrigin(true) + static_cast<float>(cell_x) * kScentCellSize;
 }
 float GameSession::ScentCellToWorldZ(int cell_z) const {
-    return ScentOriginFor(m_metadata.spawnPoint.z) + static_cast<float>(cell_z) * kScentCellSize;
+    return ScentDomainOrigin(false) + static_cast<float>(cell_z) * kScentCellSize;
 }
 
 void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
     m_scentField = std::make_unique<luminumbra::ai::ScentField>(
         kScentFieldCells, kScentFieldCells, kScentFieldChannels);
+    if (m_activeRegionsEnabled)
+        m_scentField->BindDepositGate([this](int x, int z) { return ScentCellDue(x, z); });
     LUMINUMBRA_CORE_INFO("Scent field initialized: {}x{} cells, {} channel(s), cell_size={}",
                          kScentFieldCells,
                          kScentFieldCells,
@@ -2623,11 +2985,92 @@ void GameSession::InitializeScentField(const Vec3& /*anchor*/) {
                          kScentCellSize);
 }
 
+float GameSession::ScentDomainOrigin(bool x_axis) const {
+    const float anchor = m_activeRegionsEnabled
+                             ? (x_axis ? m_ambientFieldAnchor.x : m_ambientFieldAnchor.z)
+                             : (x_axis ? m_metadata.spawnPoint.x : m_metadata.spawnPoint.z);
+    return ScentOriginFor(m_activeRegionsEnabled ? std::floor(anchor) : anchor);
+}
+RegionKey GameSession::ScentCellOwner(int x, int z) const {
+    return FieldPageState::region_of_scent_cell(
+        {static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
+         static_cast<std::int32_t>(ScentDomainOrigin(false)) + z});
+}
+bool GameSession::ScentCellDue(int x, int z) const {
+    if (m_regionFault || x < 0 || z < 0 || x >= kScentFieldCells || z >= kScentFieldCells)
+        return false;
+    const auto owner = ScentCellOwner(x, z);
+    return std::find(m_regionSchedule.due.begin(), m_regionSchedule.due.end(), owner) !=
+           m_regionSchedule.due.end();
+}
+bool GameSession::ScentEdgeOpen(int x, int z, int nx, int nz) const {
+    const auto source = ScentCellOwner(x, z), destination = ScentCellOwner(nx, nz);
+    if (source == destination)
+        return ScentCellDue(x, z);
+    const auto& records = m_activeRegionLedger.records();
+    const auto a = records.find(source), b = records.find(destination);
+    if (a == records.end() || b == records.end() || a->second.state == RegionState::Frozen ||
+        b->second.state == RegionState::Frozen)
+        return false;
+    const auto shift = std::max(a->second.cadence_shift, b->second.cadence_shift);
+    return shift < 63 && (m_worldClock.tick() & ((std::uint64_t{1} << shift) - 1)) == 0;
+}
+void GameSession::RestoreRegionalScent() {
+    if (!m_activeRegionsEnabled || !m_scentField)
+        return;
+    for (int z = 0; z < kScentFieldCells; ++z)
+        for (int x = 0; x < kScentFieldCells; ++x) {
+            const ScentCellKey key{static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
+                                   static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
+            const auto found = m_fieldPages.scent_cells().find(key);
+            for (int channel = 0; channel < kScentFieldChannels; ++channel)
+                m_scentField->RestoreCell(channel,
+                                          x,
+                                          z,
+                                          found == m_fieldPages.scent_cells().end()
+                                              ? 0.0
+                                              : std::bit_cast<double>(found->second[channel]));
+        }
+}
+void GameSession::CaptureRegionalScent() {
+    auto next = m_fieldPages;
+    std::map<RegionKey, std::uint64_t> work;
+    for (int z = 0; z < kScentFieldCells; ++z)
+        for (int x = 0; x < kScentFieldCells; ++x) {
+            const ScentCellKey key{static_cast<std::int32_t>(ScentDomainOrigin(true)) + x,
+                                   static_cast<std::int32_t>(ScentDomainOrigin(false)) + z};
+            ScentCell values{};
+            for (int channel = 0; channel < kScentFieldChannels; ++channel)
+                values[channel] = std::bit_cast<std::uint64_t>(m_scentField->Sample(channel, x, z));
+            const auto found = next.scent_cells().find(key);
+            const ScentCell old = found == next.scent_cells().end() ? ScentCell{} : found->second;
+            if (values == old)
+                continue;
+            if (!next.set_scent(key, values))
+                throw std::runtime_error("Regional scent admission failed");
+            ++work[FieldPageState::region_of_scent_cell(key)];
+        }
+    m_fieldPages = std::move(next);
+    for (const auto& [owner, updates] : work)
+        RecordActiveRegionWork({owner, 0, 0, 0, updates});
+}
+
 bool GameSession::HasScentParticipants() const {
+    const auto near_due = [this](const Vec3& position) {
+        if (!m_activeRegionsEnabled)
+            return true;
+        const float x = position.x - ScentDomainOrigin(true),
+                    z = position.z - ScentDomainOrigin(false);
+        return std::isfinite(x) && std::isfinite(z) && x >= 0 && z >= 0 && x < kScentFieldCells &&
+               z < kScentFieldCells && ScentCellDue(static_cast<int>(x), static_cast<int>(z));
+    };
     {
         auto emitters = m_registry.view<const Luminumbra::Components::TransformComponent,
                                         const Luminumbra::Components::SensableComponent>();
         for (auto e : emitters) {
+            if (!near_due(
+                    emitters.get<const Luminumbra::Components::TransformComponent>(e).position))
+                continue;
             const auto& s = emitters.get<const Luminumbra::Components::SensableComponent>(e);
             if (s.scent_channel >= 0 && s.scent_deposit > 0.0f) {
                 return true;
@@ -2638,6 +3081,9 @@ bool GameSession::HasScentParticipants() const {
         auto sensors = m_registry.view<const Luminumbra::Components::TransformComponent,
                                        const Luminumbra::Components::ScentSenseComponent>();
         for (auto e : sensors) {
+            if (!near_due(
+                    sensors.get<const Luminumbra::Components::TransformComponent>(e).position))
+                continue;
             const auto& s = sensors.get<const Luminumbra::Components::ScentSenseComponent>(e);
             if (s.channel >= 0) {
                 return true;
@@ -2648,6 +3094,22 @@ bool GameSession::HasScentParticipants() const {
 }
 
 std::string GameSession::ComputeScentSubHash() const {
+    if (m_activeRegionsEnabled) {
+        if (m_fieldPages.scent_cells().empty())
+            return {};
+        std::string bytes = "regional_scent:v2:";
+        for (const auto& [cell, values] : m_fieldPages.scent_cells()) {
+            const auto append = [&bytes](std::uint64_t value, int count) {
+                for (int i = 0; i < count; ++i)
+                    bytes.push_back(static_cast<char>((value >> (8 * i)) & 255));
+            };
+            append(static_cast<std::uint32_t>(cell.x), 4);
+            append(static_cast<std::uint32_t>(cell.z), 4);
+            for (const auto value : values)
+                append(value, 8);
+        }
+        return Persistence::StableChecksum(bytes);
+    }
     if (!m_scentField || !HasScentParticipants()) {
         return {};
     }
@@ -2693,6 +3155,17 @@ bool GameSession::SaveEnergyFieldRecord(const std::filesystem::path& save_dir) {
         return false;
     if (!m_energyFieldState || save_dir.empty())
         return true;
+    if (m_activeRegionsEnabled) {
+        const auto record = m_energyFieldState->SerializeRegionalRecord();
+        std::vector<std::string> errors;
+        const bool saved = record.empty() ? Persistence::WorldSaveService::remove_member(
+                                                save_dir, "aether_state.efs", &errors)
+                                          : Persistence::WorldSaveService::write_member_bytes(
+                                                save_dir, "aether_state.efs", record, &errors);
+        for (const auto& error : errors)
+            LUMINUMBRA_CORE_ERROR("Failed to save regional energy: {}", error);
+        return saved;
+    }
     if (m_energyFieldState->page_count() == 0) {
         if (!m_activeRegionsEnabled)
             return true; // Preserve legacy empty-layer save behavior.
@@ -2736,7 +3209,8 @@ std::string GameSession::ComputeAetherStateSubHash() const {
     if (!m_energyFieldState) {
         return {};
     }
-    const std::string bytes = m_energyFieldState->CanonicalBytes();
+    const std::string bytes = m_activeRegionsEnabled ? m_energyFieldState->CanonicalRegionalBytes()
+                                                     : m_energyFieldState->CanonicalBytes();
     if (bytes.empty()) {
         return {}; // all-zero == absent (the scent/plant empty-neutral contract)
     }

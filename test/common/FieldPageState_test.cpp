@@ -524,28 +524,63 @@ TEST(FieldPageStateTest, BorderExchangeUsesGlobalCommonPhaseAndChargesBothOwners
     // Neither interior is due, yet the edge runs at t mod 4 == 0.
     EXPECT_TRUE(store.step_scheduled(records, {}, kSeed, 2).empty());
     EXPECT_EQ(store.serialize(), before);
-    std::array<std::uint64_t, FieldPageState::kChannels> sum_before{};
+    std::array<std::int64_t, FieldPageState::kChannels> sum_before{};
     for (const auto& [key, page] : store.pages()) {
         (void)key;
         for (int c = 0; c < FieldPageState::kChannels; ++c)
             for (const auto value : page.cells[c])
-                sum_before[c] += value;
+                sum_before[c] +=
+                    c < 2 ? static_cast<std::int64_t>(std::bit_cast<std::int16_t>(value)) : value;
     }
     const auto work = store.step_scheduled(records, {}, kSeed, 4);
     ASSERT_EQ(work.size(), 2u);
     EXPECT_EQ(work.at(left), 21u);
     EXPECT_EQ(work.at(right), 21u);
     EXPECT_NE(store.serialize(), before);
-    std::array<std::uint64_t, FieldPageState::kChannels> sum_after{};
+    std::array<std::int64_t, FieldPageState::kChannels> sum_after{};
     for (const auto& [key, page] : store.pages()) {
         (void)key;
         for (int c = 0; c < FieldPageState::kChannels; ++c)
             for (const auto value : page.cells[c])
-                sum_after[c] += value;
+                sum_after[c] +=
+                    c < 2 ? static_cast<std::int64_t>(std::bit_cast<std::int16_t>(value)) : value;
     }
     EXPECT_EQ(sum_after, sum_before);
     records[right].state = RegionState::Frozen;
     const auto sealed = store.serialize();
     EXPECT_TRUE(store.step_scheduled(records, {}, kSeed, 8).empty());
     EXPECT_EQ(store.serialize(), sealed);
+}
+
+TEST(FieldPageStateTest, WeatherClockPersistsWithoutStormsAndRefusesInvalidAges) {
+    FieldPageState store;
+    ASSERT_TRUE(store.set_weather_age({0, 0}, 44));
+    EXPECT_FALSE(store.empty());
+    EXPECT_TRUE(store.owns_region({0, 0}));
+    EXPECT_TRUE(store.storms().empty());
+    const auto bytes = store.serialize();
+    EXPECT_EQ(ReadU(bytes, 12, 2), 7u);
+    FieldPageState restored;
+    std::string error;
+    ASSERT_TRUE(FieldPageState::parse(bytes, restored, error)) << error;
+    EXPECT_EQ(restored.weather_clocks(), store.weather_clocks());
+    EXPECT_EQ(restored.region_bytes({0, 0}), store.region_bytes({0, 0}));
+    auto corrupt = bytes;
+    WriteU(corrupt, 30, WorldClock::kTickLimit, 8);
+    Reseal(corrupt);
+    EXPECT_TRUE(RefusedUntouched(corrupt));
+    EXPECT_FALSE(store.set_weather_age({0, 0}, WorldClock::kTickLimit));
+    EXPECT_EQ(store.serialize(), bytes);
+}
+
+TEST(FieldPageStateTest, NewActivationCannotSupplyPreviousTickBorderExchange) {
+    FieldPageState store;
+    const RegionKey left{0, 0}, right{1, 0};
+    ASSERT_TRUE(store.activate_region(left, kSeed, 0));
+    const auto previous = store;
+    ASSERT_TRUE(store.activate_region(right, kSeed, 4));
+    std::map<RegionKey, ActiveRegionRecord> records{{left, {}}, {right, {}}};
+    const auto before = store.serialize();
+    EXPECT_TRUE(store.step_scheduled(records, {}, kSeed, 4, &previous).empty());
+    EXPECT_EQ(store.serialize(), before);
 }

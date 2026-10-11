@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -23,6 +25,7 @@
 #include "luminumbra_common/ai/CircadianSystem.h"
 #include "luminumbra_common/ai/EcologyHash.h"
 #include "luminumbra_common/ai/MigrationSystem.h"
+#include "luminumbra_common/ai/ScentField.h"
 #include "luminumbra_common/ai/StimulusChannels.h"
 #include "luminumbra_common/components/InstinctComponents.h"
 #include "luminumbra_common/persistence/SavedWorldCatalog.h"
@@ -3055,7 +3058,12 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     ASSERT_EQ(SpawnGround(owner, 5200, -1500, 1), 1u);
     TickOnce(owner);
     EXPECT_TRUE(owner.GetGroundObjects().empty());
-    EXPECT_EQ(owner.GetActiveRegionLedger().completed_work().at(kGroundRegion), 1u);
+    EXPECT_GE(owner.GetActiveRegionLedger().completed_work().at(kGroundRegion), 1u);
+    std::uint64_t pending = 0;
+    for (const auto& [key, work] : owner.GetActiveRegionLedger().completed_work()) {
+        (void)key;
+        pending += work;
+    }
     EXPECT_TRUE(owner.IsSimulationTickBoundary());
     ASSERT_TRUE(owner.SaveWorldState());
     ASSERT_TRUE(owner.SaveWorld());
@@ -3063,12 +3071,22 @@ TEST(GameSessionHeadlessWorldTest, DespawnedGroundWorkSurvivesBoundarySaveAndReo
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
     TickOnce(loaded);
-    EXPECT_EQ(owner.GetRegionSchedule().work, 1u);
+    EXPECT_EQ(owner.GetRegionSchedule().work, pending);
     EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
-    EXPECT_TRUE(owner.GetActiveRegionLedger().completed_work().empty());
+    EXPECT_TRUE(owner.GetGroundObjects().empty());
+    pending = 0;
+    for (const auto& [key, work] : owner.GetActiveRegionLedger().completed_work()) {
+        (void)key;
+        pending += work;
+    }
     EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
     TickOnce(owner);
-    EXPECT_EQ(owner.GetRegionSchedule().work, 0u);
+    TickOnce(loaded);
+    // Ongoing ambient work replaces the despawn tick's register; ARL unit cases check empty
+    // replacement independently. Reopening must neither lose nor duplicate either register.
+    EXPECT_EQ(owner.GetRegionSchedule().work, pending);
+    EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
 }
 
 TEST(GameSessionHeadlessWorldTest, EventConsumerFaultStopsDeliveryAndClearsCompletedWork) {
@@ -3089,4 +3107,132 @@ TEST(GameSessionHeadlessWorldTest, EventConsumerFaultStopsDeliveryAndClearsCompl
     EXPECT_TRUE(owner.GetActiveRegionLedger().completed_work().empty());
     EXPECT_TRUE(owner.IsSimulationTickBoundary());
     EXPECT_EQ(owner.TickSimulation(owner.GetSimulationClock().fixed_dt()), 0u);
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalQueriesReadStoredFieldsAndSurviveReopen) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Stored regional queries");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    TickOnce(owner);
+    const Luminumbra::Vec3 position{5.2f, 5.0f, -1.5f};
+    std::array<std::uint16_t, 5> values{};
+    for (int channel = 0; channel < 5; ++channel)
+        ASSERT_TRUE(owner.GetFieldPages().sample(channel, 0, -1, values[channel]));
+    const auto wind =
+        owner.GetWindFieldSystem()->SampleWind(position, Luminumbra::Systems::WindLayer::Ground);
+    EXPECT_FLOAT_EQ(wind.x, static_cast<float>(std::bit_cast<std::int16_t>(values[0])) / 1024.0f);
+    EXPECT_FLOAT_EQ(wind.y, static_cast<float>(std::bit_cast<std::int16_t>(values[1])) / 1024.0f);
+    EXPECT_FLOAT_EQ(owner.GetAetherFieldSystem()->SampleAether(position), values[4] / 65535.0f);
+    const auto before = SessionWorldHash(owner);
+    ASSERT_TRUE(owner.SaveWorld());
+    EXPECT_EQ(SessionWorldHash(owner), before);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), before);
+    const auto restored = loaded.GetWindFieldSystem()->SampleWind(position);
+    EXPECT_EQ(restored, wind);
+    EXPECT_EQ(loaded.GetWeatherSystem()->SampleAt(position).category,
+              owner.GetWeatherSystem()->SampleAt(position).category);
+    EXPECT_FLOAT_EQ(loaded.GetAetherFieldSystem()->SampleAether(position),
+                    owner.GetAetherFieldSystem()->SampleAether(position));
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalWeatherOpportunityClockContinuesAcrossReopen) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Regional weather opportunity");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    for (int tick = 0; tick < 44; ++tick)
+        TickOnce(owner);
+    ASSERT_EQ(owner.GetFieldPages().weather_clocks().at(kGroundRegion), 44u);
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetFieldPages().weather_clocks(), owner.GetFieldPages().weather_clocks());
+    for (int tick = 0; tick < 4; ++tick) {
+        TickOnce(owner);
+        TickOnce(loaded);
+        EXPECT_EQ(loaded.GetFieldPages().serialize(), owner.GetFieldPages().serialize());
+        EXPECT_EQ(loaded.GetRegionSchedule(), owner.GetRegionSchedule());
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
+    }
+}
+
+TEST(GameSessionHeadlessWorldTest, RegionalEnergySaveIsObservationalAndContinuesOwnerCadence) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    owner.SetAetherStateEnabled(true);
+    loaded.SetAetherStateEnabled(true);
+    CreateGroundWorld(owner, root, jobs, "Regional energy cadence");
+    ASSERT_EQ(SpawnGround(owner, 5200, -1500), 1u);
+    ASSERT_TRUE(owner.GetEnergyFieldState()->QueueRegionalDeposit(1, 0, -1, 0, 60000));
+    TickOnce(owner);
+    ASSERT_GT(owner.GetEnergyFieldState()->total_raw(), 0u);
+    const auto before = owner.GetEnergyFieldState()->SerializeRegionalRecord();
+    const auto ages = owner.GetActiveRegionLedger().energy_ages();
+    ASSERT_EQ(ages.at(kGroundRegion), 1u);
+    ASSERT_TRUE(owner.SaveWorld());
+    EXPECT_EQ(owner.GetEnergyFieldState()->SerializeRegionalRecord(), before);
+    EXPECT_EQ(owner.GetActiveRegionLedger().energy_ages(), ages);
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetEnergyFieldState()->SerializeRegionalRecord(), before);
+    EXPECT_EQ(loaded.GetActiveRegionLedger().energy_ages(), ages);
+    for (int tick = 0; tick < 5; ++tick) {
+        TickOnce(owner);
+        TickOnce(loaded);
+        EXPECT_EQ(loaded.GetEnergyFieldState()->CanonicalRegionalBytes(),
+                  owner.GetEnergyFieldState()->CanonicalRegionalBytes());
+        EXPECT_EQ(loaded.GetActiveRegionLedger().energy_ages(),
+                  owner.GetActiveRegionLedger().energy_ages());
+        EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
+    }
+    // A legacy phase-bearing EFS is incompatible with this indexed regional snapshot.
+    std::string incompatible = owner.GetEnergyFieldState()->SerializeRegionalRecord();
+    ASSERT_FALSE(incompatible.empty());
+    const auto phase = incompatible.find(" 0\n");
+    ASSERT_NE(phase, std::string::npos);
+    incompatible.replace(phase, 3, " 1\n");
+    const auto save = owner.GetWorldSaveDir();
+    std::ofstream(save / "aether_state.efs", std::ios::binary) << incompatible;
+    P::MemberDigest digest;
+    std::string error;
+    EXPECT_FALSE(P::WorldSaveService::member_digest(save, "aether_state.efs", digest, error));
+    EXPECT_FALSE(error.empty());
+}
+
+TEST(GameSessionHeadlessWorldTest, HistoricalRegionalScentSurvivesEmitterRemovalAndReopen) {
+    using namespace Luminumbra::Components;
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession owner, loaded;
+    CreateGroundWorld(owner, root, jobs, "Historical regional scent");
+    const auto emitter = owner.GetRegistry().create();
+    owner.GetRegistry().emplace<TransformComponent>(emitter).position =
+        owner.GetMetadata().spawnPoint;
+    auto& sensable = owner.GetRegistry().emplace<SensableComponent>(emitter);
+    sensable.scent_channel = 0;
+    sensable.scent_deposit = 10.0f;
+    TickOnce(owner);
+    ASSERT_FALSE(owner.GetFieldPages().scent_cells().empty());
+    owner.GetRegistry().destroy(emitter);
+    const auto persisted = owner.GetFieldPages().scent_cells();
+    ASSERT_TRUE(owner.SaveWorld());
+    EnableSnapshotSession(loaded, root, jobs);
+    ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(loaded.GetFieldPages().scent_cells(), persisted);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
+    TickOnce(owner);
+    TickOnce(loaded);
+    EXPECT_EQ(owner.GetFieldPages().scent_cells(), persisted);
+    EXPECT_EQ(loaded.GetFieldPages().scent_cells(), persisted);
+    EXPECT_EQ(SessionWorldHash(loaded), SessionWorldHash(owner));
 }
