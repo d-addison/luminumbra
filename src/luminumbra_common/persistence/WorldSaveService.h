@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SaveTransaction.h"
 #include "world/ActiveRegionLedger.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
@@ -7,9 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Luminumbra::Ecs {
@@ -194,6 +198,59 @@ public:
                                         std::vector<std::string>* errors = nullptr);
     // Number of full load_world decodes since process start (single-decode contract tests).
     static std::uint64_t decode_count_for_testing();
+
+    // Validates one snapshot member and computes its index fingerprint (MemberDigestFn-compatible).
+    // Region files hash their lod-0 record stream and are reported absent when they hold no lod-0
+    // record; every other member hashes its raw bytes after a format check.
+    static bool member_digest(const std::filesystem::path& save_dir,
+                              std::string_view relative_path,
+                              MemberDigest& out,
+                              std::string& error);
+    // Durable single-member writers for flag-on GameSession members (plants, energy). They join the
+    // active transaction for save_dir, else run an implicit one when the directory is indexed, else
+    // just replace the file durably. relative_path must satisfy member_path_allowed.
+    static bool write_member_bytes(const std::filesystem::path& save_dir,
+                                   std::string_view relative_path,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr);
+    static bool remove_member(const std::filesystem::path& save_dir,
+                              std::string_view relative_path,
+                              std::vector<std::string>* errors = nullptr);
+    // Test-only: deletes snapshot.json and strips "snapshotFormat" from world_info.json so a test
+    // can express legacy (pre-index) semantics for a directory a flag-on session created.
+    static bool forget_snapshot_index_for_testing(const std::filesystem::path& save_dir);
+
+    // Thread-local per-save facts. While live for a directory, validate_save / has_world_save /
+    // has_chunk_snapshot reuse the first load_world result instead of decoding the world again, and
+    // post-commit actions (dirty-flag clearing) are deferred until the owning transaction commits.
+    class SaveFactsScope {
+    public:
+        explicit SaveFactsScope(const std::filesystem::path& save_dir);
+        SaveFactsScope(const SaveFactsScope&) = delete;
+        SaveFactsScope& operator=(const SaveFactsScope&) = delete;
+        ~SaveFactsScope();
+        static SaveFactsScope* active_for(const std::filesystem::path& save_dir);
+        // First call decodes the world once; later calls return the cached verdict.
+        bool validate(std::vector<std::string>* errors);
+        void defer_until_commit(std::function<void()> action);
+        // Runs and clears the deferred actions (after a successful commit).
+        void run_deferred();
+        // Drops the deferred actions (rollback).
+        void discard_deferred();
+        void invalidate_presence_facts();
+
+    private:
+        friend class WorldSaveService;
+        std::filesystem::path m_save_dir;
+        SaveFactsScope* m_previous = nullptr;
+        bool m_validated = false;
+        bool m_validated_ok = false;
+        std::vector<std::string> m_diagnostics;
+        bool m_presence_known = false;
+        bool m_snapshot_present = false;
+        bool m_chunk_snapshot_present = false;
+        std::vector<std::function<void()>> m_deferred;
+    };
 
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in
