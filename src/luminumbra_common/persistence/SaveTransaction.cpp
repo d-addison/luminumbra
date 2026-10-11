@@ -947,6 +947,8 @@ bool SaveTransaction::commit(std::vector<std::string>* errors) {
 
         m_state = State::Committing;
         const fs::path index_path = snapshot_index_path(m_save_dir);
+        std::error_code directory_error;
+        fs::create_directories(index_path.parent_path(), directory_error);
         if (!WorldSaveService::durable_write_file(index_path, encoded, errors)) {
             abort(errors);
             return false;

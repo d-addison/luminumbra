@@ -1,5 +1,6 @@
 #include "SavedWorldCatalog.h"
 
+#include "SaveTransaction.h"
 #include "WorldSaveService.h"
 #include "world/TerrainPresetLoader.h"
 
@@ -51,7 +52,10 @@ InspectSavedWorld(const fs::path& root, const std::string& world_id, const std::
             result.metadata.name = json.at("name").get<std::string>();
         // Preserve the persistence service's exact obsolete/future/corrupt diagnostics.
         std::vector<std::string> errors;
-        if (!WorldSaveService::validate_save(save, &errors, stop)) {
+        // A pending journal means the directory may be mid-transaction: it cannot be validated
+        // until LoadWorld recovers it, so the listing stays metadata-only.
+        result.pending_recovery = journal_pending(save);
+        if (!result.pending_recovery && !WorldSaveService::validate_save(save, &errors, stop)) {
             result.error = errors.empty() ? "Corrupt world save." : errors.front();
             return result;
         }
