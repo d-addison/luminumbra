@@ -1728,12 +1728,11 @@ bool WorldSaveService::load_active_regions(world::ActiveRegionLedger& ledger,
             return false;
         }
         std::ifstream input(path, std::ios::binary);
-        // One spare byte so a file that grew since the stat is parsed whole and refused as
-        // malformed.
-        std::string bytes(static_cast<std::size_t>(length) + 1, '\0');
+        std::string bytes(static_cast<std::size_t>(length), '\0');
         input.read(bytes.data(), static_cast<std::streamsize>(length));
         std::string error;
-        if (!input || !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
+        if (!input || input.peek() != std::char_traits<char>::eof() || input.bad() ||
+            !world::ActiveRegionLedger::decode(bytes, ledger, error)) {
             AddError(errors, error.empty() ? world::ActiveRegionLedger::kCorruptMessage : error);
             return false;
         }
@@ -2341,9 +2340,12 @@ bool WorldSaveService::member_digest(const std::filesystem::path& save_dir,
                 world::ActiveRegionLedger ledger;
                 world::WorldClock clock;
                 bool required = false;
-                if (load_active_regions(ledger, save_dir, &diagnostics) &&
-                    read_clock_metadata(save_dir, clock, required, &diagnostics) &&
-                    ledger.header_tick() > clock.tick()) {
+                if (!load_active_regions(ledger, save_dir, &diagnostics) ||
+                    !read_clock_metadata(save_dir, clock, required, &diagnostics)) {
+                    error = first_error(world::ActiveRegionLedger::kCorruptMessage);
+                    return false;
+                }
+                if (ledger.header_tick() > clock.tick()) {
                     error = world::ActiveRegionLedger::kCorruptMessage;
                     return false;
                 }
@@ -2832,6 +2834,11 @@ bool WorldSaveService::load_world(WorldStreamingState& state,
                 return reject("");
             if (ledger.header_tick() > clock.tick())
                 return reject(world::ActiveRegionLedger::kCorruptMessage);
+            for (const auto& [owner, age] : ledger.energy_ages()) {
+                (void)owner;
+                if (age > clock.tick())
+                    return reject("corrupt regional energy field age");
+            }
         }
         if (!validate_ground_objects(save_dir, ledger, &errors))
             return reject("");

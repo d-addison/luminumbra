@@ -149,15 +149,14 @@ void SeedCell(FieldPage& page,
     }
 }
 
-std::uint16_t RelaxToward(std::uint16_t value, std::uint16_t target) {
-    const auto current = static_cast<std::int32_t>(value);
-    const auto goal = static_cast<std::int32_t>(target);
-    const std::int32_t next = current + ((goal - current) >> FieldPageState::kRelaxShift);
-    return static_cast<std::uint16_t>(next);
-}
 std::int32_t ChannelValue(int channel, std::uint16_t word) {
     return channel < 2 ? static_cast<std::int32_t>(std::bit_cast<std::int16_t>(word))
                        : static_cast<std::int32_t>(word);
+}
+std::uint16_t RelaxToward(int channel, std::uint16_t value, std::uint16_t target) {
+    const auto current = ChannelValue(channel, value);
+    const auto goal = ChannelValue(channel, target);
+    return static_cast<std::uint16_t>(current + ((goal - current) >> FieldPageState::kRelaxShift));
 }
 
 void StepCell(FieldPage& page,
@@ -170,7 +169,7 @@ void StepCell(FieldPage& page,
         std::uint16_t& value = page.cells[static_cast<std::size_t>(channel)][index];
         const std::uint16_t target =
             FieldPageState::seed_value(world_seed, channel, cell_x, cell_z, epoch);
-        value = RelaxToward(value, target);
+        value = RelaxToward(channel, value, target);
     }
 }
 
@@ -605,6 +604,13 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
 
 bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
                                      std::vector<RegionalStrike> strikes) {
+    std::map<RegionKey, std::size_t> owner_storms, owner_strikes;
+    for (const auto& storm : storms)
+        if (++owner_storms[storm.owner] > kMaxOwnerStorms)
+            return false;
+    for (const auto& strike : strikes)
+        if (++owner_strikes[strike.owner] > kMaxOwnerStrikes)
+            return false;
     if (storms.size() > kMaxStorms || strikes.size() > kMaxStrikes ||
         !std::all_of(storms.begin(), storms.end(), ValidStorm) ||
         !std::all_of(strikes.begin(), strikes.end(), ValidStrike))

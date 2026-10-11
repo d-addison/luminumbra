@@ -947,6 +947,8 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
     if (!staged.ValidateRegionalOwners(records, result.ages) || !staged.RegionalRecordFits())
         return false;
     std::map<RegionKey, std::uint64_t> counts;
+    for (const auto owner : due)
+        ++counts[owner]; // actual persistent age-register increment, including empty owners
     for (const auto& [owner, page] : touched) {
         (void)page;
         ++counts[owner];

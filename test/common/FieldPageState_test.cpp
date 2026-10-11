@@ -82,9 +82,12 @@ std::vector<std::uint16_t> Values(const FieldPageState& store, const std::vector
     return values;
 }
 
-std::int32_t Gap(std::uint16_t target, std::uint16_t value) {
-    const std::int32_t difference =
-        static_cast<std::int32_t>(target) - static_cast<std::int32_t>(value);
+std::int32_t Gap(std::size_t channel, std::uint16_t target, std::uint16_t value) {
+    const auto numeric = [channel](std::uint16_t word) {
+        return channel < 2 ? static_cast<std::int32_t>(std::bit_cast<std::int16_t>(word))
+                           : static_cast<std::int32_t>(word);
+    };
+    const std::int32_t difference = numeric(target) - numeric(value);
     return difference < 0 ? -difference : difference;
 }
 
@@ -251,7 +254,7 @@ TEST(FieldPageStateTest, StepMovesEveryOwnedCellTowardItsEpochTarget) {
                 const std::size_t i = c * kChannelCount + channel;
                 const std::uint16_t target = FieldPageState::seed_value(
                     kSeed, static_cast<int>(channel), cells[c].first, cells[c].second, epoch);
-                EXPECT_LE(Gap(target, after[i]), Gap(target, before[i]));
+                EXPECT_LE(Gap(channel, target, after[i]), Gap(channel, target, before[i]));
             }
         }
     }
@@ -279,8 +282,8 @@ TEST(FieldPageStateTest, TwoStepsInOneEpochConvergeMonotonically) {
             const std::size_t i = c * kChannelCount + channel;
             const std::uint16_t target = FieldPageState::seed_value(
                 kSeed, static_cast<int>(channel), cells[c].first, cells[c].second, 1);
-            EXPECT_LE(Gap(target, v1[i]), Gap(target, v0[i]));
-            EXPECT_LE(Gap(target, v2[i]), Gap(target, v1[i]));
+            EXPECT_LE(Gap(channel, target, v1[i]), Gap(channel, target, v0[i]));
+            EXPECT_LE(Gap(channel, target, v2[i]), Gap(channel, target, v1[i]));
         }
     }
 }

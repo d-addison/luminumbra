@@ -63,7 +63,8 @@ public:
     static constexpr std::uint64_t kSeedOffset = 39;
     static constexpr unsigned kRelaxShift = 4;
     static constexpr std::size_t kMaxPages = 16384;
-    static constexpr std::size_t kMaxStorms = 16, kMaxStrikes = 32, kMaxScentCells = 65536;
+    static constexpr std::size_t kMaxStorms = 65536, kMaxStrikes = 65536, kMaxScentCells = 65536;
+    static constexpr std::size_t kMaxOwnerStorms = 16, kMaxOwnerStrikes = 32;
     static constexpr std::size_t kMaxWeatherClocks = 65536;
     static constexpr std::size_t kMaxFileBytes = 64u * 1024u * 1024u;
     // Valid cell indices (interval intersection, never per-endpoint clamping): the centre must

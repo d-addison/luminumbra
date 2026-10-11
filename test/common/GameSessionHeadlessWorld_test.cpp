@@ -2480,7 +2480,7 @@ TEST(GameSessionHeadlessWorldTest, FrozenRegionDoesNotAgeItsGroundObjects) {
     std::size_t frozen_ticks = 0;
     for (int i = 0; i < 10; ++i) {
         const auto before = session.GetGroundObjects().objects().at(id).active_age;
-        session.RecordActiveRegionWork({kGroundRegion, 100, 0, 0, 0});
+        ASSERT_TRUE(session.RecordActiveRegionWork({kFarGroundRegion, 100, 0, 0, 0}));
         TickOnce(session);
         // Frozen after a tick means it was not due in that tick, so its objects did not age.
         if (session.GetActiveRegionLedger().records().at(kFarGroundRegion).state ==
@@ -2753,7 +2753,6 @@ TEST(GameSessionHeadlessWorldTest, FieldPagesCorruptFileRefusesToOpen) {
     ASSERT_NO_FATAL_FAILURE(TickOnce(owner));
     ASSERT_TRUE(owner.SaveWorldState());
     const auto save = owner.GetWorldSaveDir();
-    ASSERT_TRUE(P::WorldSaveService::forget_snapshot_index_for_testing(save));
     EnableSnapshotSession(control, root, jobs);
     ASSERT_TRUE(control.LoadWorld(owner.GetMetadata().worldId)) << control.GetWorldOpenError();
     std::ofstream(FieldPagePath(save), std::ios::binary) << "FPG1";

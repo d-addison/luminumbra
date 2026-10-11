@@ -611,7 +611,8 @@ private:
     bool m_weatherRainEnabled = false;      // See SetWeatherRainEnabled.
     std::int32_t m_weatherRainScaleMm = 25; // Millimetres per tick at full precipitation.
     bool m_weatherEventsEnabled = false;    // See SetWeatherEventsEnabled.
-    bool HasScentParticipants() const;
+    bool HasScentParticipants(bool require_due = true) const;
+    bool HasScentBorderWork() const;
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
 };
