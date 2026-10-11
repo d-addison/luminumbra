@@ -782,7 +782,7 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
         return false;
     RegionalResult result;
     result.ages = ages;
-    std::set<RegionKey> firing;
+    std::set<RegionKey> firing, age_updates;
     std::optional<RegionKey> previous;
     for (const auto key : due) {
         const auto owner = records.find(key);
@@ -794,6 +794,7 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
         if (age->second >= WorldClock::kTickLimit - 1)
             return false;
         ++age->second;
+        age_updates.insert(key);
         if (age->second % kEnergyCadenceTicks == 0)
             firing.insert(key);
         previous = key;
@@ -924,8 +925,10 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
                             // A common border can deliver energy to an owner
                             // before its first interior due tick. Its age starts
                             // at zero; border work never increments active age.
-                            result.ages.try_emplace(owner_a, 0);
-                            result.ages.try_emplace(owner_b, 0);
+                            if (result.ages.try_emplace(owner_a, 0).second)
+                                age_updates.insert(owner_a);
+                            if (result.ages.try_emplace(owner_b, 0).second)
+                                age_updates.insert(owner_b);
                             touched.emplace(owner_a, key);
                             touched.emplace(owner_b, neighbor_key);
                         }
@@ -947,8 +950,8 @@ bool EnergyFieldState::TickRegional(std::uint64_t tick,
     if (!staged.ValidateRegionalOwners(records, result.ages) || !staged.RegionalRecordFits())
         return false;
     std::map<RegionKey, std::uint64_t> counts;
-    for (const auto owner : due)
-        ++counts[owner]; // actual persistent age-register increment, including empty owners
+    for (const auto owner : age_updates)
+        ++counts[owner]; // persistent increments and first border acquisitions, even at zero
     for (const auto& [owner, page] : touched) {
         (void)page;
         ++counts[owner];

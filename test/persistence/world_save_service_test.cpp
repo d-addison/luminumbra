@@ -9,6 +9,7 @@
 #include "world/MarchingCubes.h"
 #include "world/WorldStreamingState.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -484,8 +485,25 @@ TEST(WorldSaveService, FieldPagesSaveLoadRoundTripAndEmptyStateRemovesFile) {
     const FieldPageState state = MakeFieldState();
     ASSERT_TRUE(state.owns_region({0, 0}));
     std::vector<std::string> errors;
-    ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path, &errors))
-        << JoinErrors(errors);
+    const Luminumbra::world::WorldClock clock(16);
+    Luminumbra::world::ActiveRegionLedger ledger({}, clock);
+    ledger.mark_edited({0, 0}, clock);
+    ledger.mark_edited({1, 0}, clock);
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    {
+        WorldSaveService::SaveFactsScope facts(save_dir.path);
+        Luminumbra::Persistence::SaveTransaction transaction(
+            save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save_dir.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_field_pages(state, save_dir.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors)) << JoinErrors(errors);
     EXPECT_TRUE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
 
     FieldPageState loaded;
@@ -494,11 +512,18 @@ TEST(WorldSaveService, FieldPagesSaveLoadRoundTripAndEmptyStateRemovesFile) {
     EXPECT_EQ(loaded.page_count(), state.page_count());
     EXPECT_EQ(loaded.serialize(), state.serialize());
 
-    // A stale file without a ledger is an orphan that validate_save refuses to write over, so the
-    // empty-state lane is exercised on a directory without the file.
-    ASSERT_TRUE(fs::remove(WorldSaveService::field_pages_path(save_dir.path)));
+    // The writer must retire the existing indexed member, preserving a valid ledger/clock pair.
+    ASSERT_TRUE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
     ASSERT_TRUE(WorldSaveService::save_field_pages(FieldPageState{}, save_dir.path, &errors))
         << JoinErrors(errors);
+    ASSERT_TRUE(WorldSaveService::validate_save(save_dir.path, &errors)) << JoinErrors(errors);
+    Luminumbra::Persistence::SnapshotIndex index;
+    ASSERT_TRUE(Luminumbra::Persistence::read_snapshot_index(save_dir.path, index, &errors));
+    const auto member = std::find_if(index.members.begin(), index.members.end(), [](const auto& m) {
+        return m.path == FieldPageState::kRelativePath;
+    });
+    ASSERT_NE(member, index.members.end());
+    EXPECT_FALSE(member->present);
     EXPECT_FALSE(fs::exists(WorldSaveService::field_pages_path(save_dir.path)));
     FieldPageState absent = MakeFieldState();
     ASSERT_TRUE(WorldSaveService::load_field_pages(absent, save_dir.path, &errors));
@@ -617,4 +642,65 @@ TEST(WorldSaveService, FieldPageDigestCompositionTable) {
     EXPECT_NE(ground_only, pages_only);
     EXPECT_NE(both, ground_only);
     EXPECT_NE(both, pages_only);
+}
+
+TEST(WorldSaveService, IndexedAbsentEnergyRefusesResealedAgeBeyondSavedClock) {
+    using namespace Luminumbra::world;
+    namespace P = Luminumbra::Persistence;
+    TempSaveDir save_dir("indexed_absent_energy_future_age");
+    const WorldClock clock(16);
+    ActiveRegionLedger ledger({}, clock);
+    ledger.mark_edited({0, 0}, clock);
+    ASSERT_TRUE(ledger.set_energy_age({0, 0}, 16));
+    nlohmann::json metadata = {{"container_version", 2}};
+    clock.write_metadata(metadata);
+    std::vector<std::string> errors;
+    {
+        WorldSaveService::SaveFactsScope facts(save_dir.path);
+        P::SaveTransaction transaction(
+            save_dir.path, clock.tick(), {}, WorldSaveService::member_digest);
+        ASSERT_TRUE(transaction.begin(&errors)) << JoinErrors(errors);
+        ASSERT_TRUE(WorldSaveService::save_metadata_and_active_regions(
+            metadata.dump(), ledger, save_dir.path, &errors))
+            << JoinErrors(errors);
+        ASSERT_TRUE(transaction.commit(&errors)) << JoinErrors(errors);
+    }
+    WorldSaveService service;
+    WorldStreamingState control;
+    ASSERT_TRUE(service.load_world(control, save_dir.path, errors)) << JoinErrors(errors);
+    P::SnapshotIndex index;
+    ASSERT_TRUE(P::read_snapshot_index(save_dir.path, index, &errors));
+    const auto energy =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
+            return member.path == "aether_state.efs";
+        });
+    ASSERT_NE(energy, index.members.end());
+    ASSERT_FALSE(energy->present);
+    ASSERT_FALSE(std::filesystem::exists(save_dir.path / "aether_state.efs"));
+    // Keep owner, ARL header and saved clock valid; only the semantic ARL4 age is future.
+    ASSERT_TRUE(ledger.set_energy_age({0, 0}, 17));
+    const auto corrupt = ledger.encode(); // codec reseals the exact ARL bytes
+    ActiveRegionLedger decoded;
+    std::string error;
+    ASSERT_TRUE(ActiveRegionLedger::decode(corrupt, decoded, error)) << error;
+    ASSERT_EQ(decoded.header_tick(), clock.tick());
+    const auto arl =
+        std::find_if(index.members.begin(), index.members.end(), [](const auto& member) {
+            return member.path == "chunks/region/active-regions.arl";
+        });
+    ASSERT_NE(arl, index.members.end());
+    arl->bytes = corrupt.size();
+    arl->fnv64 = P::fnv1a64_bytes(corrupt.data(), corrupt.size());
+    std::ofstream(WorldSaveService::active_regions_path(save_dir.path),
+                  std::ios::binary | std::ios::trunc)
+        << corrupt;
+    std::ofstream(P::snapshot_index_path(save_dir.path), std::ios::binary | std::ios::trunc)
+        << P::encode_snapshot_index(index);
+    WorldStreamingState refused;
+    AddFixtureChunk(refused, {0, 0, 0}, ChunkState::Idle, 1);
+    errors.clear();
+    EXPECT_FALSE(service.load_world(refused, save_dir.path, errors));
+    EXPECT_NE(JoinErrors(errors).find("corrupt regional energy field age"), std::string::npos)
+        << JoinErrors(errors);
+    EXPECT_TRUE(refused.snapshot_chunks().empty());
 }

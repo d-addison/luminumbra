@@ -613,6 +613,7 @@ private:
     bool m_weatherEventsEnabled = false;    // See SetWeatherEventsEnabled.
     bool HasScentParticipants(bool require_due = true) const;
     bool HasScentBorderWork() const;
+    void AdvanceNearScent();
     bool HasPlantParticipants() const; //  opt-in gate
     std::string m_rootPath;
 };

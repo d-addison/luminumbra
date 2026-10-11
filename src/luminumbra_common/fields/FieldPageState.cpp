@@ -604,6 +604,8 @@ FieldPageState::step_scheduled(const std::map<RegionKey, ActiveRegionRecord>& re
 
 bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
                                      std::vector<RegionalStrike> strikes) {
+    if (storms.size() > kMaxStorms || strikes.size() > kMaxStrikes)
+        return false;
     std::map<RegionKey, std::size_t> owner_storms, owner_strikes;
     for (const auto& storm : storms)
         if (++owner_storms[storm.owner] > kMaxOwnerStorms)
@@ -611,8 +613,7 @@ bool FieldPageState::replace_weather(std::vector<RegionalStorm> storms,
     for (const auto& strike : strikes)
         if (++owner_strikes[strike.owner] > kMaxOwnerStrikes)
             return false;
-    if (storms.size() > kMaxStorms || strikes.size() > kMaxStrikes ||
-        !std::all_of(storms.begin(), storms.end(), ValidStorm) ||
+    if (!std::all_of(storms.begin(), storms.end(), ValidStorm) ||
         !std::all_of(strikes.begin(), strikes.end(), ValidStrike))
         return false;
     std::sort(storms.begin(), storms.end(), [](const auto& a, const auto& b) {
