@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <glm/glm.hpp>
+#include <optional>
 
 namespace Luminumbra::Rendering {
 class Camera;
@@ -52,7 +53,8 @@ class PlayerController {
 public:
     PlayerController(GLFWwindow* window,
                      Rendering::Camera* camera,
-                     Systems::PhysicsSystem* physicsSystem);
+                     Systems::PhysicsSystem* physicsSystem,
+                     std::optional<glm::vec3> restored_walking_feet = std::nullopt);
 
     void Update(float deltaTime);
     void ApplyReplayInput(float deltaTime, const PlayerReplayInputFrame& inputFrame);

@@ -37,10 +37,13 @@ by the source archive validator. Git submodule contents are not materialized by
 `git archive` and are outside a source archive inventory.
 
 `--root` inventories a staged directory and requires output outside that
-directory. `--tracked --root` inventories tracked **checkout bytes**, rejects
-links/gitlinks and conflicts, and allows an untracked sidecar. It is not the
-source-release path: Git text normalization and export attributes can make
-checkout files differ from the archive. Existing dormant binary jobs retain
+directory. `--tracked --root` requires the repository's worktree root, inventories
+tracked **checkout bytes**, rejects links/gitlinks and conflicts, and allows an
+untracked sidecar. Subdirectories, Git metadata directories, and bare repositories
+are refused. The root check uses Git's worktree status and relative prefix, so
+MSYS Git and native Windows Python need not share an absolute path spelling.
+This is not the source-release path: Git text normalization and export attributes
+can make checkout files differ from the archive. Existing dormant binary jobs retain
 their staged-directory inventory; exact binary archive membership is outside
 the source validation gate. Binary release activation remains a separate gate.
 

@@ -1,15 +1,113 @@
 #!/usr/bin/env python3
 """Client-process regression tests for the opt-in render measurement runner."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 import render_contract as contract
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _atomic_write(path, payload):
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + '.',
+                                         suffix='.tmp', delete=False) as output:
+            temporary = Path(output.name)
+            output.write(payload)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass  # Cleanup must not replace the original write/replace error.
+
+
+def _retain_process_evidence(receipt, artifact, retained, receipt_path):
+    errors = receipt['evidence_errors']
+    try:
+        payload = artifact.read_bytes()
+    except FileNotFoundError:
+        receipt['capture_status'] = 'missing'
+    except OSError as error:
+        receipt['capture_status'] = 'read_error'
+        errors.append(f'capture read: {error}')
+    else:
+        try:
+            json.loads(payload)
+        except (ValueError, UnicodeError, RecursionError):
+            receipt['capture_status'] = 'invalid_json'
+        else:
+            try:
+                _atomic_write(retained, payload)
+            except OSError as error:
+                receipt['capture_status'] = 'write_error'
+                errors.append(f'capture retention: {error}')
+            else:
+                receipt.update(capture_status='retained', capture_path=str(retained),
+                               capture_sha256=hashlib.sha256(payload).hexdigest())
+    try:
+        _atomic_write(receipt_path, (json.dumps(receipt, indent=2) + '\n').encode('utf-8'))
+    except OSError as error:
+        errors.append(f'process receipt: {error}')
+    if errors:
+        try:
+            print('Render runner evidence error: ' + '; '.join(errors), file=sys.stderr)
+        except (OSError, ValueError):
+            pass  # A closed diagnostic stream must not hide a process failure.
+    return errors
+
+
+def _run_process(command, *, cwd, environment, log, artifact, retained, receipt_path):
+    # Retire only this case's exact outputs, including a repeated invocation in
+    # the same runtime root. Never let an earlier capture appear current.
+    for path in (artifact, retained, receipt_path, log):
+        path.unlink(missing_ok=True)
+    receipt = dict(schema='luminumbra.render_runner_process.v1', command=command,
+                   cwd=str(cwd), binary_path=command[0], binary_sha256=None,
+                   timeout_seconds=180, elapsed_seconds=None, outcome='spawn_error',
+                   return_code=None, capture_status='missing', capture_path=None,
+                   capture_sha256=None, evidence_errors=[])
+    try:
+        receipt['binary_sha256'] = _file_sha256(Path(command[0]))
+        with log.open('wb') as output:
+            started = time.monotonic()
+            try:
+                result = subprocess.run(command, cwd=cwd, env=environment,
+                                        stdout=output, stderr=subprocess.STDOUT,
+                                        timeout=180, check=False)
+            finally:
+                receipt['elapsed_seconds'] = time.monotonic() - started
+            receipt.update(outcome='returned', return_code=result.returncode)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        receipt.update(outcome='timed_out' if isinstance(error, subprocess.TimeoutExpired)
+                       else receipt['outcome'], exception_type=type(error).__name__,
+                       exception_message=str(error))
+        _retain_process_evidence(receipt, artifact, retained, receipt_path)
+        raise
+    errors = _retain_process_evidence(receipt, artifact, retained, receipt_path)
+    return result, errors
+
+
+def _require_evidence(errors):
+    if errors:
+        raise RuntimeError('Render runner evidence could not be retained: ' + '; '.join(errors))
 
 
 class RenderRunnerTests(unittest.TestCase):
@@ -54,12 +152,15 @@ class RenderRunnerTests(unittest.TestCase):
                    '--render-benchmark', str(artifact), '--render-benchmark-schema', 'v3',
                    '--capture-size', '160x90', '--perf-profile', 'quality',
                    '--render-benchmark-warmup', '2', *extra]
-        with log.open('wb') as output:
-            result = subprocess.run(command, cwd=self.root, env=environment or self.environment,
-                                    stdout=output, stderr=subprocess.STDOUT, timeout=180, check=False)
+        retained = OPTIONS.artifacts / (self._testMethodName + '-' + name + '.json')
+        receipt_path = retained.with_suffix('.process.json')
+        result, evidence_errors = _run_process(
+            command, cwd=self.root, environment=environment or self.environment,
+            log=log, artifact=artifact, retained=retained, receipt_path=receipt_path)
         self.assertEqual(result.returncode, expected_exit, log.read_text(errors='replace')[-6000:])
         if expected_exit:
             self.assertFalse(artifact.exists())
+            _require_evidence(evidence_errors)
             return log.read_text(errors='replace')
         # A completed capture alone could hide a mesh/material fallback. Require
         # the real loaders to accept the synthetic inputs on every success path.
@@ -68,7 +169,7 @@ class RenderRunnerTests(unittest.TestCase):
         for part in ('trunk', 'branches', 'leaves'):
             self.assertIn(f"tree_small_02_{part}.lmesh' (3 verts, 3 indices)", output)
         data = json.loads(artifact.read_bytes())
-        (OPTIONS.artifacts / (self._testMethodName + '-' + name + '.json')).write_bytes(artifact.read_bytes())
+        _require_evidence(evidence_errors)
         return data
 
     def test_traversal_twice(self):

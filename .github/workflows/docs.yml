@@ -37,6 +37,7 @@ jobs:
           doxygen Doxyfile
           mkdir -p build/docs/html/assets
           cp -R docs/assets/. build/docs/html/assets/
+          cp docs/visual-catalog.json docs/visual-catalog-original-contract.json build/docs/html/
           test -f build/docs/html/index.html
           python3 tools/ci/check_docs.py --html build/docs/html
 

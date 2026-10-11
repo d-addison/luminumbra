@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "luminumbra_geometry_author"
-version = "0.2.0"
+version = "0.3.0"
 name = "Luminumbra Geometry Author"
 tagline = "Build marked geometry assets with installed engine tools"
 maintainer = "David Addison"
@@ -10,4 +10,4 @@ blender_version_max = "5.1.1"
 license = ["SPDX:MIT"]
 
 [permissions]
-files = "Capture geometry snapshots and use the configured local authoring service"
+files = "Capture geometry snapshots, retain reviewed recipe receipts and use the local authoring service"

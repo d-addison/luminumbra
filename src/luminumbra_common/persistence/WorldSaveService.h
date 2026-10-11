@@ -1,5 +1,6 @@
 #pragma once
 
+#include "world/ActiveRegionLedger.h"
 #include "world/WorldClock.h"
 #include "world/WorldStreamingState.h"
 
@@ -62,12 +63,29 @@ public:
                                     const std::filesystem::path& save_dir,
                                     std::vector<std::string>* errors = nullptr);
 
+    static std::filesystem::path active_regions_path(const std::filesystem::path& save_dir);
+    static bool save_active_regions(world::ActiveRegionLedger& ledger,
+                                    const world::WorldClock& clock,
+                                    const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors = nullptr);
+    static bool load_active_regions(world::ActiveRegionLedger& ledger,
+                                    const std::filesystem::path& save_dir,
+                                    std::vector<std::string>* errors = nullptr,
+                                    const world::WorldClock& absent_clock = world::WorldClock{});
+    // Content-only lod-0 projection; live chunks override durable records by id.
+    static std::uint64_t
+    region_simulation_digest(const std::filesystem::path& save_dir,
+                             world::RegionKey key,
+                             const std::vector<std::shared_ptr<Chunk>>& live_chunks);
+
     // Region addressing: rx = floor(chunk_x / 32), rz = floor(chunk_z / 32).
     static constexpr int kRegionChunkSpan = 32;
     static void region_coords_for_chunk(const IVec3& chunk_coords, int& out_rx, int& out_rz);
 
     // True only for a valid supported save. Obsolete artifacts are still refused by load_world.
     static bool has_world_save(const std::filesystem::path& save_dir);
+    // A ledger or other sibling record alone is not an initial chunk snapshot.
+    static bool has_chunk_snapshot(const std::filesystem::path& save_dir);
 
     // Validates all existing persistence artifacts before a writer may modify them.
     // A missing save is valid. Diagnostics distinguish obsolete, future and corrupt files.
@@ -80,6 +98,14 @@ public:
     static bool save_metadata(const std::string& bytes,
                               const std::filesystem::path& save_dir,
                               std::vector<std::string>* errors = nullptr);
+    // Prevalidate the incoming pair and keep the installed ledger tick <= clock tick
+    // between replacements, including when an explicit snapshot rewinds the clock.
+    // Host-thread-only, synchronous and non-reentrant across sessions. Production
+    // callers own one save destination; debug builds assert if pair saves overlap.
+    static bool save_metadata_and_active_regions(const std::string& bytes,
+                                                 world::ActiveRegionLedger& ledger,
+                                                 const std::filesystem::path& save_dir,
+                                                 std::vector<std::string>* errors = nullptr);
 
     // Shared read-only clock validation for catalog, explicit snapshots and writers.
     // Missing metadata is a legacy snapshot with a default clock.
@@ -137,6 +163,12 @@ public:
     // process-global and must only be used by single-threaded persistence
     // tests.
     static void set_interrupt_before_region_replace_for_testing(bool enabled);
+
+    // Called after ledger staging is flushed/closed, before replacement. Returning
+    // false fails the write and cleans up; a test subprocess may terminate here
+    // to leave real crash debris. Single-threaded persistence tests only; nullptr
+    // disables the hook.
+    static void set_before_active_regions_replace_for_testing(bool (*hook)());
 
     // Serializes the full streaming state into the save directory, creating
     // intermediate directories as needed. Returns false (with diagnostics in

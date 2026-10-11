@@ -216,6 +216,7 @@ RunPersistenceRoundtripSavePhase(const RuntimeScenarioConfig& config,
     const std::string world_hash = save_service.world_hash(restricted);
 
     Luminumbra::world::WorldStateSaveReport save_report;
+    // This scenario runs synchronously on the client host thread, like quit saves.
     if (!game_session->SaveWorldStateTo(config.persistence_session_dir, &save_report) ||
         !save_report.saved) {
         result.failure_reason = "world_state_save_failed";
