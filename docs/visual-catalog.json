@@ -64,7 +64,7 @@
       "visual_goal": "Make every required cell readable and visually intentional: coherent horizon composition, legible foreground, distinguishable lighting/weather, no blank or hidden cells.",
       "fixture": {
         "status": "source_fixture",
-        "description": "48 summer cells;96 with winter: dawn/noon/dusk/night × yaw000/yaw120/yaw240/down35/up25/water × clear/storm. Original frames, exact per-cell pins and feature metrics; missing cells displayed as failures.",
+        "description": "48 summer cells;96 with winter: dawn/noon/dusk/night \u00d7 yaw000/yaw120/yaw240/down35/up25/water \u00d7 clear/storm. Original frames, exact per-cell pins and feature metrics; missing cells displayed as failures.",
         "source_paths": [
           "src/luminumbra_client/core/scenarios/WorldVisualSweep.cpp",
           "src/luminumbra_client/core/ScenarioRunnerCapture.cpp"
@@ -199,7 +199,7 @@
       },
       "acceptance_checks": [
         "Make every required cell readable and visually intentional: coherent horizon composition, legible foreground, distinguishable lighting/weather, no blank or hidden cells.",
-        "48 summer cells;96 with winter: dawn/noon/dusk/night × yaw000/yaw120/yaw240/down35/up25/water × clear/storm. Original frames, exact per-cell pins and feature metrics; missing cells displayed as failures.",
+        "48 summer cells;96 with winter: dawn/noon/dusk/night \u00d7 yaw000/yaw120/yaw240/down35/up25/water \u00d7 clear/storm. Original frames, exact per-cell pins and feature metrics; missing cells displayed as failures.",
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
@@ -2413,7 +2413,7 @@
       "visual_goal": "Make diagnostic geometry/features obvious while preserving minimal deterministic fixtures.",
       "fixture": {
         "status": "source_fixture",
-        "description": "Separate terrain_caves,water_submerged,sky_gradient,ui_overlay,loading_visualizer at256²; caption synthetic scope, preserve hashes/ROIs and attach production scenario links.",
+        "description": "Separate terrain_caves,water_submerged,sky_gradient,ui_overlay,loading_visualizer at256\u00b2; caption synthetic scope, preserve hashes/ROIs and attach production scenario links.",
         "source_paths": [
           "test/rendering/render_capture_test.cpp"
         ]
@@ -2442,7 +2442,7 @@
       },
       "acceptance_checks": [
         "Make diagnostic geometry/features obvious while preserving minimal deterministic fixtures.",
-        "Separate terrain_caves,water_submerged,sky_gradient,ui_overlay,loading_visualizer at256²; caption synthetic scope, preserve hashes/ROIs and attach production scenario links.",
+        "Separate terrain_caves,water_submerged,sky_gradient,ui_overlay,loading_visualizer at256\u00b2; caption synthetic scope, preserve hashes/ROIs and attach production scenario links.",
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
@@ -2559,10 +2559,13 @@
         "S3"
       ],
       "capture": {
-        "state": "missing",
-        "command": null,
+        "state": "existing_subset",
+        "command": [
+          "<build>/bin/render_smoke_test",
+          "--gtest_filter=RenderSmokeTest.EmissiveCalibrationMonotonic"
+        ],
         "environment": {},
-        "scope": "No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap."
+        "scope": "Writes emissive-calibration.json (intensity-to-luminance table and monotonic flag) to the build-defined artifact directory. No retained image, no nonemissive control scene, no temporal packet; GL-skips without a context, so a zero-test or skipped exit 0 is not evidence."
       },
       "acceptance_checks": [
         "Show controlled emissive response against dark and lit surroundings without making ordinary terrain glow.",
@@ -3517,7 +3520,7 @@
       "visual_goal": "Turn a broad but small diagnostic horizon into an intelligible coverage proof linked to a composed world view.",
       "fixture": {
         "status": "source_fixture",
-        "description": "Existing384²spawn_horizon plus mesh quadrant/collider/LOD counts, seam visualization and qualified high-resolution companion.",
+        "description": "Existing384\u00b2spawn_horizon plus mesh quadrant/collider/LOD counts, seam visualization and qualified high-resolution companion.",
         "source_paths": [
           "test/performance/runtime_world_visual_validation_test.cpp"
         ]
@@ -3534,14 +3537,17 @@
         "S6"
       ],
       "capture": {
-        "state": "missing",
-        "command": null,
+        "state": "existing_subset",
+        "command": [
+          "<build>/bin/runtime_world_visual_validation_test",
+          "--gtest_filter=RuntimeWorldVisualValidationTest.SpawnHorizonRendersBroadVisibleCoverage:RuntimeWorldVisualValidationTest.MixedLodBoundariesAreContinuousAndReported"
+        ],
         "environment": {},
-        "scope": "No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap."
+        "scope": "Writes spawn_horizon.ppm and runtime_world_visual.json (horizon coverage metrics) and lod_seams.json (mixed-LOD seam metrics) to the build-defined artifact directory. No high-resolution companion or per-region diagnosis; GL-skips without a context, so a skipped exit 0 is not evidence."
       },
       "acceptance_checks": [
         "Turn a broad but small diagnostic horizon into an intelligible coverage proof linked to a composed world view.",
-        "Existing384²spawn_horizon plus mesh quadrant/collider/LOD counts, seam visualization and qualified high-resolution companion.",
+        "Existing384\u00b2spawn_horizon plus mesh quadrant/collider/LOD counts, seam visualization and qualified high-resolution companion.",
         "Meet the shared packet contract and preserve independent regression checks; each listed variant is required."
       ],
       "reconciliation": {
@@ -3595,10 +3601,13 @@
         "S8"
       ],
       "capture": {
-        "state": "missing",
-        "command": null,
+        "state": "existing_subset",
+        "command": [
+          "<build>/bin/worldgen_layer_snapshot_test",
+          "--gtest_filter=WorldGenLayerSnapshotTest.ExportsLayerMetricsAndImages"
+        ],
         "environment": {},
-        "scope": "No reviewed command retaining the complete required image/temporal packet has been established. Supporting source tests do not fill this gap."
+        "scope": "Writes the named layer snapshot maps and metrics to the build-defined artifact directory. Biome and river tests in the same binary retain only aggregate metrics JSON and the preset test produces its own atlas; none of those are claimed here; no matched engine views."
       },
       "acceptance_checks": [
         "Make every layer/preset map easy to interpret and show how it appears in the actual world.",
