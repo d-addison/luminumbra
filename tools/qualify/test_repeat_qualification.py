@@ -79,6 +79,12 @@ if kind == "kill":
     os.kill(os.getpid(), signal.SIGKILL)
 if kind == "abort":
     os.kill(os.getpid(), signal.SIGABRT)
+if kind == "segv":
+    os.kill(os.getpid(), signal.SIGSEGV)
+if kind == "segv_core":
+    # Stands in for the kernel: a core named core.<pid> appears in the child's working directory.
+    Path(f"core.{os.getpid()}").write_bytes(b"core")
+    os.kill(os.getpid(), signal.SIGSEGV)
 if kind == "hang":
     grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
     (crash_dir / "grandchild.pid").write_text(str(grandchild.pid))
@@ -439,6 +445,57 @@ if os.name == "posix":
                 self.assertTrue(Path(artifact).is_file(), artifact)
                 self.assertTrue(artifact.startswith(str(self.run_dir())), artifact)
 
+        def test_missing_core_directory_under_cwd_is_created_and_run_passes(self) -> None:
+            args = self.in_process_args(1)
+            code = rq.run_qualification(
+                args,
+                ["--fake=pass"],
+                core_limits=lambda: (4096, 4096),
+                read_pattern=lambda: "cores/core.%p",
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue((self.work / "cores").is_dir())
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["environment"]["core_problems"], [])
+            self.assertTrue(receipt["environment"]["core_directory_preflight"]["created"])
+
+        def test_missing_core_directory_outside_cwd_is_a_preflight_failure(self) -> None:
+            outside = self.root / "missing-outside" / "core.%p"
+            args = self.in_process_args(1)
+            code = rq.run_qualification(
+                args,
+                ["--fake=pass"],
+                core_limits=lambda: (4096, 4096),
+                read_pattern=lambda: str(outside),
+            )
+            self.assertEqual(code, rq.PREFLIGHT_EXIT_CODE)
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["status"], "PREFLIGHT_FAILED")
+            self.assertIn("outside the child working directory", receipt["failure_reason"])
+            self.assertFalse((self.root / "missing-outside").exists())
+
+        def test_core_file_copy_failure_keeps_the_classified_iteration(self) -> None:
+            args = self.in_process_args(1)
+            with mock.patch.object(rq.shutil, "copy2", side_effect=OSError("disk full")):
+                code = rq.run_qualification(
+                    args,
+                    ["--fake=segv_core"],
+                    core_limits=lambda: (4096, 4096),
+                    read_pattern=lambda: "core.%p",
+                )
+            self.assertEqual(code, 1)
+            receipt = self.load_receipt()
+            self.assertEqual(receipt["status"], "failed")
+            self.assertNotIn("abort_reason", receipt)
+            self.assertEqual(len(receipt["iterations"]), 1)
+            iteration = receipt["iterations"][0]
+            self.assertEqual(iteration["signal"], "SIGSEGV")
+            self.assertEqual(iteration["status"], "signal:SIGSEGV")
+            self.assertTrue(iteration["failed"])
+            self.assertTrue(any("disk full" in error for error in iteration["collection_errors"]))
+            self.assertEqual(receipt["collection_error_count"], len(iteration["collection_errors"]))
+            self.assertEqual(receipt["first_failure"]["index"], 1)
+
         def in_process_args(self, count: int, *extra: str) -> object:
             return rq.parse_args(
                 [
@@ -696,6 +753,83 @@ class CorePatternTest(unittest.TestCase):
     def test_bare_relative_pattern_uses_child_cwd(self) -> None:
         self.assertEqual(rq.core_directory_for_pattern("core.%p", self.work), os.path.normpath(str(self.work)))
 
+    def test_core_name_regex_matches_only_names_the_pattern_can_produce(self) -> None:
+        names = rq.core_name_regex("cores/core.%p")
+        self.assertIsNotNone(names.fullmatch("core.123"))
+        self.assertIsNone(names.fullmatch("chunk.bin"))
+        self.assertIsNone(names.fullmatch("core.123.bak"))
+        self.assertIsNone(names.fullmatch("core"))
+
+        default = rq.core_name_regex("core")
+        self.assertIsNotNone(default.fullmatch("core"))
+        self.assertIsNotNone(default.fullmatch("core.42"))
+        self.assertIsNone(default.fullmatch("core.x"))
+        self.assertIsNone(default.fullmatch("chunk.bin"))
+
+        executable = rq.core_name_regex("/var/crash/%e.core.%p")
+        self.assertIsNotNone(executable.fullmatch("world.exe.core.9"))
+        self.assertIsNone(executable.fullmatch("world.exe.dump"))
+
+        literal = rq.core_name_regex("100%%.core")
+        self.assertIsNotNone(literal.fullmatch("100%.core"))
+
+    def test_core_collection_copies_only_core_named_files(self) -> None:
+        skip = rq.core_collection_skip(self.root / "run", self.root / "out" / "receipt.json", "core.%p")
+        before = rq.snapshot_files(self.work, recursive=True, skip=skip)
+        (self.work / "core.123").write_bytes(b"core")
+        (self.work / "world").mkdir()
+        (self.work / "world" / "chunk.bin").write_bytes(b"chunk")
+        copies = rq.copy_changed_files(self.work, before, self.root / "iter-1" / "core", recursive=True, skip=skip)
+        self.assertEqual([Path(copy).name for copy in copies], ["core.123"])
+
+    def test_copy_failure_is_reported_per_file_when_errors_are_collected(self) -> None:
+        (self.work / "core.1").write_bytes(b"first")
+        before = rq.snapshot_files(self.work, recursive=True)
+        (self.work / "core.2").write_bytes(b"second")
+        (self.work / "core.3").write_bytes(b"third")
+        errors: list[str] = []
+        with mock.patch.object(rq.shutil, "copy2", side_effect=OSError("disk full")):
+            copies = rq.copy_changed_files(
+                self.work, before, self.root / "iter-1" / "core", recursive=True, errors=errors
+            )
+        self.assertEqual(copies, [])
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(all("disk full" in error for error in errors))
+
+    def test_copy_failure_propagates_without_an_error_list(self) -> None:
+        before = rq.snapshot_files(self.work, recursive=True)
+        (self.work / "core.2").write_bytes(b"second")
+        with mock.patch.object(rq.shutil, "copy2", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                rq.copy_changed_files(self.work, before, self.root / "iter-1" / "core", recursive=True)
+
+    def test_core_directory_outside_cwd_that_is_missing_fails(self) -> None:
+        missing = self.root / "nowhere" / "cores"
+        check = rq.core_directory_preflight(missing, self.work)
+        self.assertIn("outside the child working directory", check["problem"])
+        self.assertFalse(check["created"])
+        self.assertFalse(missing.exists())
+
+    def test_missing_relative_core_directory_under_cwd_is_created(self) -> None:
+        directory = Path(rq.core_directory_for_pattern("cores/core.%p", self.work))
+        check = rq.core_directory_preflight(directory, self.work)
+        self.assertIsNone(check["problem"])
+        self.assertTrue(check["created"])
+        self.assertTrue(check["writable"])
+        self.assertTrue(directory.is_dir())
+
+    def test_unwritable_core_directory_fails(self) -> None:
+        cores = self.work / "cores"
+        cores.mkdir()
+        check = rq.core_directory_preflight(cores, self.work, access=lambda path, mode: False)
+        self.assertIn("not writable", check["problem"])
+        self.assertFalse(check["writable"])
+
+    def test_core_directory_that_cannot_be_created_fails(self) -> None:
+        (self.work / "blocker").write_text("a file, not a directory")
+        check = rq.core_directory_preflight(self.work / "blocker" / "cores", self.work)
+        self.assertIn("could not be created", check["problem"])
+
     def test_absolute_parent_is_used_as_is(self) -> None:
         absolute = self.root / "abs" / "core.%p"
         self.assertEqual(
@@ -761,9 +895,38 @@ class WindowsCommandTest(unittest.TestCase):
             target = rq.spawn_target(rq.build_command(exe, "Fake.Filter", [], json_path))
         self.assertEqual(
             target,
-            'cmd.exe /d /s /c ""C:\\Test Bin\\fake child.cmd" --gtest_filter=Fake.Filter '
-            '"--gtest_output=json:C:\\Out Dir\\run 1\\iter-1\\gtest.json" --gtest_catch_exceptions=0"',
+            'cmd.exe /d /s /c ""C:\\Test Bin\\fake child.cmd" "--gtest_filter=Fake.Filter" '
+            '"--gtest_output=json:C:\\Out Dir\\run 1\\iter-1\\gtest.json" "--gtest_catch_exceptions=0""',
         )
+
+    def test_batch_launcher_quotes_metacharacter_paths(self) -> None:
+        exe = Path(r"C:\A&B\child.cmd")
+        json_path = Path(r"C:\R&D\gtest.json")
+        with mock.patch.object(rq, "IS_WINDOWS", True):
+            target = rq.spawn_target(rq.build_command(exe, "Fake.Filter", [], json_path))
+        self.assertEqual(
+            target,
+            'cmd.exe /d /s /c ""C:\\A&B\\child.cmd" "--gtest_filter=Fake.Filter" '
+            '"--gtest_output=json:C:\\R&D\\gtest.json" "--gtest_catch_exceptions=0""',
+        )
+
+    def test_batch_launcher_rejects_percent_in_an_argument(self) -> None:
+        with mock.patch.object(rq, "IS_WINDOWS", True):
+            with self.assertRaises(ValueError):
+                rq.spawn_target(rq.build_command(Path(r"C:\100%\child.cmd"), "Fake.Filter", [], Path("g.json")))
+
+    def test_quote_cmd_argument(self) -> None:
+        self.assertEqual(rq.quote_cmd_argument(r"C:\plain\x.exe"), r"C:\plain\x.exe")
+        self.assertEqual(rq.quote_cmd_argument(r"C:\A&B\child.cmd"), r'"C:\A&B\child.cmd"')
+        self.assertEqual(rq.quote_cmd_argument(r"C:\R&D\gtest.json"), r'"C:\R&D\gtest.json"')
+        self.assertEqual(rq.quote_cmd_argument(r"C:\Test Bin\x.exe"), r'"C:\Test Bin\x.exe"')
+        self.assertEqual(rq.quote_cmd_argument("a|b<c>d^e(f)g!h,i;j=k"), '"a|b<c>d^e(f)g!h,i;j=k"')
+        with self.assertRaises(ValueError):
+            rq.quote_cmd_argument(r"C:\100%\x.exe")
+        with self.assertRaises(ValueError):
+            rq.quote_cmd_argument('say "hi"')
+        with self.assertRaises(ValueError):
+            rq.quote_cmd_argument("C:\\dir with space\\")
 
     def test_executable_launcher_is_passed_as_an_argument_list(self) -> None:
         with mock.patch.object(rq, "IS_WINDOWS", True):

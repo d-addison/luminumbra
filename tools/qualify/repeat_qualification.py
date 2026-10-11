@@ -14,7 +14,9 @@ iteration, and the script exits non-zero when any iteration failed.
 Crash capture: the child receives LUMINUMBRA_CRASH_DIR pointing at its iteration's crash
 directory. On POSIX the child's RLIMIT_CORE soft limit is raised to its hard limit (the hard limit
 is never changed), and new core files under the directory the kernel writes to, resolved
-against the child's working directory, are copied into the iteration. A piped core_pattern or
+against the child's working directory, and whose names match core_pattern, are copied into the
+iteration. A missing core directory is created only when it lies under the child's working
+directory, and it must be writable. A piped core_pattern or
 an undeterminable core directory is a preflight failure. On Windows the executable must have
 a WER LocalDumps DumpFolder that matches --wer-dump-folder, and new dumps are copied into the
 iteration. Without that setup the run fails closed with status PREFLIGHT_FAILED, unless
@@ -216,6 +218,48 @@ def harness_output_skip(run_dir: Path, receipt: Path) -> Callable[[Path], bool]:
     return skip
 
 
+def core_name_regex(pattern: str) -> re.Pattern[str]:
+    """Regex for the file names core_pattern can produce, matched against the pattern's basename.
+
+    %p becomes digits, %% a literal percent sign, and every other % specifier one path-free run of
+    characters. A pattern without any % is Linux's default naming: the name itself, optionally
+    followed by .<pid> when core_uses_pid is set.
+    """
+    name = pattern.rsplit("/", 1)[-1]
+    if "%" not in name:
+        return re.compile(re.escape(name) + r"(?:\.\d+)?")
+    parts: list[str] = []
+    index = 0
+    while index < len(name):
+        char = name[index]
+        if char == "%" and index + 1 < len(name):
+            specifier = name[index + 1]
+            index += 2
+            if specifier == "%":
+                parts.append(re.escape("%"))
+            elif specifier == "p":
+                parts.append(r"\d+")
+            else:
+                parts.append(r"[^/]+")
+            continue
+        parts.append(re.escape(char))
+        index += 1
+    return re.compile("".join(parts))
+
+
+def core_collection_skip(
+    run_dir: Path, receipt: Path, pattern: str
+) -> Callable[[Path], bool]:
+    """Skip harness output, and any file whose name core_pattern cannot produce."""
+    harness_skip = harness_output_skip(run_dir, receipt)
+    names = core_name_regex(pattern)
+
+    def skip(path: Path) -> bool:
+        return harness_skip(path) or names.fullmatch(path.name) is None
+
+    return skip
+
+
 def changed_files(before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]) -> list[str]:
     return sorted(path for path, stamp in after.items() if before.get(path) != stamp)
 
@@ -226,14 +270,25 @@ def copy_changed_files(
     destination: Path,
     recursive: bool = False,
     skip: Callable[[Path], bool] | None = None,
+    errors: list[str] | None = None,
 ) -> list[str]:
-    """Copy new or rewritten files under root, keeping their path relative to root."""
+    """Copy new or rewritten files under root, keeping their path relative to root.
+
+    A file that cannot be copied is left out and described in errors when a list is given, so one
+    unreadable file does not discard the rest of the iteration. Without a list the error propagates.
+    """
     copies: list[str] = []
     for source in changed_files(before, snapshot_files(root, recursive, skip)):
         relative = Path(source).relative_to(root) if root is not None else Path(source).name
         target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        except OSError as exc:
+            if errors is None:
+                raise
+            errors.append(f"{source}: {type(exc).__name__}: {exc}")
+            continue
         copies.append(str(target))
     return copies
 
@@ -315,6 +370,41 @@ def posix_preflight_problems(posix: dict[str, Any], child_soft: int) -> list[str
     if child_soft == 0:
         problems.append("the child's effective core soft limit is 0 because the RLIMIT_CORE hard limit is 0")
     return problems
+
+
+def core_directory_preflight(
+    directory: Path,
+    cwd: Path,
+    access: Callable[[str, int], bool] = os.access,
+) -> dict[str, Any]:
+    """Make sure the kernel's core directory exists and is writable before any child runs.
+
+    A missing directory is created only when it lies under the child's working directory, which
+    the harness controls. Anywhere else a missing directory is reported as a problem.
+    """
+    result: dict[str, Any] = {"path": str(directory), "created": False, "writable": False, "problem": None}
+    if not directory.exists():
+        try:
+            directory.relative_to(cwd)
+        except ValueError:
+            result["problem"] = (
+                f"core directory {directory} does not exist and is outside the child working directory {cwd}"
+            )
+            return result
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as exc:
+            result["problem"] = f"core directory {directory} could not be created: {type(exc).__name__}: {exc}"
+            return result
+        result["created"] = True
+    if not directory.is_dir():
+        result["problem"] = f"core directory {directory} is not a directory"
+        return result
+    if not access(str(directory), os.W_OK | os.X_OK):
+        result["problem"] = f"core directory {directory} is not writable"
+        return result
+    result["writable"] = True
+    return result
 
 
 def parse_reg_values(output: str) -> dict[str, str]:
@@ -439,14 +529,38 @@ def build_command(exe: Path, gtest_filter: str, extra: list[str], json_path: Pat
     ]
 
 
+CMD_SPECIAL_CHARACTERS = frozenset("&|<>^()%!,;=")
+
+
+def quote_cmd_argument(argument: str) -> str:
+    """Quote one argument for a line that cmd.exe parses under /s /c.
+
+    list2cmdline leaves characters such as & | < > ^ unquoted, and cmd.exe would then split or
+    redirect the command. An argument containing whitespace or any of those characters is wrapped
+    in double quotes, which cmd.exe keeps literal. A percent sign, a double quote, or a trailing
+    backslash cannot be escaped reliably in a batch invocation, so they are rejected.
+    """
+    if "%" in argument:
+        raise ValueError(f"cannot pass a percent sign through cmd.exe reliably: {argument!r}")
+    if '"' in argument:
+        raise ValueError(f"cannot pass a double quote through cmd.exe reliably: {argument!r}")
+    if argument and not any(ch.isspace() or ch in CMD_SPECIAL_CHARACTERS for ch in argument):
+        return argument
+    if argument.endswith("\\"):
+        raise ValueError(f"a trailing backslash cannot be quoted reliably: {argument!r}")
+    return f'"{argument}"'
+
+
 def spawn_target(command: list[str]) -> str | list[str]:
     """What Popen receives. A batch launcher must run through cmd.exe as one command string.
 
     Passing a list would make subprocess quote the cmd.exe /c text a second time, and cmd.exe
     cannot parse that. With /s and one enclosing quote pair, cmd.exe strips exactly that pair.
+    Raises ValueError when an argument cannot be passed through cmd.exe.
     """
     if IS_WINDOWS and Path(command[0]).suffix.lower() in (".cmd", ".bat"):
-        return f'cmd.exe /d /s /c "{subprocess.list2cmdline(command)}"'
+        line = " ".join(quote_cmd_argument(argument) for argument in command)
+        return f'cmd.exe /d /s /c "{line}"'
     return command
 
 
@@ -677,14 +791,25 @@ def run_indexed_iteration(
         if problem is not None:
             result["status"] = "gtest_invalid"
 
-    artifacts = sorted(str(path) for path in crash_dir.rglob("*") if path.is_file())
+    # Collection problems are recorded on the iteration, which keeps its classification.
+    collection_errors: list[str] = []
+    artifacts: list[str] = []
+    try:
+        artifacts = sorted(str(path) for path in crash_dir.rglob("*") if path.is_file())
+    except OSError as exc:
+        collection_errors.append(f"crash directory listing: {type(exc).__name__}: {exc}")
     if IS_WINDOWS and dump_folder is not None and result["status"] not in ("exit:0", "timeout"):
         wait_for_dump_settle(dump_folder, dump_before, DUMP_SETTLE_SECONDS)
-    artifacts += copy_changed_files(dump_folder, dump_before, iter_dir / "wer")
     artifacts += copy_changed_files(
-        core_directory, core_before, iter_dir / "core", recursive=True, skip=core_skip
+        dump_folder, dump_before, iter_dir / "wer", errors=collection_errors
     )
-    return build_entry(index, log_path, gtest_json, crash_dir, sorted(artifacts), result, problem)
+    artifacts += copy_changed_files(
+        core_directory, core_before, iter_dir / "core", recursive=True, skip=core_skip,
+        errors=collection_errors,
+    )
+    return build_entry(
+        index, log_path, gtest_json, crash_dir, sorted(artifacts), result, problem, collection_errors
+    )
 
 
 def wait_for_dump_settle(folder: Path, before: dict[str, tuple[int, int]], timeout: float) -> None:
@@ -707,7 +832,9 @@ def build_entry(
     artifacts: list[str],
     result: dict[str, Any],
     problem: str | None,
+    collection_errors: list[str] | None = None,
 ) -> dict[str, Any]:
+    # Collection errors never turn a passing iteration into a failure, and never change a failure's reason.
     reason = failure_reason(result, problem)
     return {
         "index": index,
@@ -715,6 +842,7 @@ def build_entry(
         "gtest_json": str(gtest_json),
         "crash_dir": str(crash_dir),
         "crash_artifacts": artifacts,
+        "collection_errors": list(collection_errors or []),
         "failed": reason is not None,
         "failure_reason": reason,
         **result,
@@ -726,6 +854,7 @@ def run_qualification(
     extra: list[str],
     query: Callable[[str], tuple[int, str]] = query_registry_key,
     core_limits: Callable[[], tuple[int, int]] | None = None,
+    read_pattern: Callable[[], str | None] | None = None,
 ) -> int:
     exe = Path(os.path.abspath(args.exe))
     if not exe.is_file():
@@ -767,9 +896,15 @@ def run_qualification(
     else:
         current = core_limits() if core_limits is not None else resource.getrlimit(resource.RLIMIT_CORE)
         core_target = core_limit_target(current)
-        posix = posix_crash_environment(base_cwd, read_core_pattern(), current, core_target)
+        pattern = (read_pattern or read_core_pattern)()
+        posix = posix_crash_environment(base_cwd, pattern, current, core_target)
         environment.update(posix)
         problems = posix_preflight_problems(posix, core_target[0])
+        if posix["core_directory"] is not None:
+            directory_check = core_directory_preflight(Path(posix["core_directory"]), base_cwd)
+            environment["core_directory_preflight"] = directory_check
+            if directory_check["problem"] is not None:
+                problems.append(directory_check["problem"])
         environment["core_problems"] = problems
         if problems and not args.allow_no_dumps:
             preflight_reason = "; ".join(problems) + (
@@ -777,7 +912,7 @@ def run_qualification(
             )
         if posix["core_directory"] is not None:
             core_directory = Path(posix["core_directory"])
-            core_skip = harness_output_skip(run_dir, receipt_path)
+            core_skip = core_collection_skip(run_dir, receipt_path, pattern)
 
     receipt: dict[str, Any] = {
         "schema": SCHEMA,
@@ -802,6 +937,7 @@ def run_qualification(
         "iterations": [],
         "exit_code_histogram": {},
         "failure_count": 0,
+        "collection_error_count": 0,
         "first_failure": None,
     }
     if preflight_reason is not None:
@@ -845,6 +981,7 @@ def run_qualification(
                         "failure_reason": entry["failure_reason"],
                     }
             receipt["failure_count"] = failures
+            receipt["collection_error_count"] = sum(len(item["collection_errors"]) for item in receipt["iterations"])
             write_receipt(receipt_path, receipt)
         receipt["status"] = "failed" if failures else "passed"
     except BaseException as exc:
@@ -856,8 +993,12 @@ def run_qualification(
         write_receipt(receipt_path, receipt)
 
     summary = "failed" if failures else "passed"
+    collection_note = ""
+    if receipt["collection_error_count"]:
+        collection_note = f"; {receipt['collection_error_count']} artifact collection error(s) recorded"
     print(
-        f"{LABEL}: {summary} ({args.count - failures}/{args.count} iterations clean), receipt {receipt_path}"
+        f"{LABEL}: {summary} ({args.count - failures}/{args.count} iterations clean), "
+        f"receipt {receipt_path}{collection_note}"
     )
     return 1 if failures else 0
 
