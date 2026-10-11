@@ -432,6 +432,9 @@ public:
     std::vector<::Luminumbra::Chunk*> get_renderable_chunks();
     float get_density_at(const Vec3& world_pos) const;
     float GetTerrainHeightAt(float world_x, float world_z) const;
+    // Owner-thread downward probe over available terrain truth. Never generates or performs IO;
+    // edited resident SDF supersedes the procedural surface in its vertical band.
+    std::optional<float> ProbeTerrainBelow(const Vec3& requested) const;
     // the single cave-carve composition point. Samples the cheese BODY noise
     // and adds spaghetti EDGE tunnels and Worley caverns via order-free max. Called identically
     // by every density site (mesh / collision / query) so they cannot disagree.

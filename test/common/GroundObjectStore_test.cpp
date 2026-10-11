@@ -55,7 +55,8 @@ bool RefusedUntouched(std::string_view bytes, std::uint64_t next_id = 100) {
 
 TEST(GroundObjectStoreTest, ValidAcceptsBoundaryCoordinates) {
     EXPECT_TRUE(GroundObjectStore::valid(MakeObject(1)));
-    EXPECT_TRUE(GroundObjectStore::valid(MakeObject(1, -kMax, -kMax)));
+    EXPECT_FALSE(GroundObjectStore::valid(MakeObject(1, -kMax, -kMax)));
+    EXPECT_TRUE(GroundObjectStore::valid(MakeObject(1, -kMax + 1, -kMax + 1)));
     EXPECT_TRUE(GroundObjectStore::valid(MakeObject(1, kMax - 1, kMax - 1)));
     EXPECT_FALSE(GroundObjectStore::valid(MakeObject(1, kMax, 0)));
     EXPECT_FALSE(GroundObjectStore::valid(MakeObject(1, 0, kMax)));
@@ -63,9 +64,9 @@ TEST(GroundObjectStoreTest, ValidAcceptsBoundaryCoordinates) {
     EXPECT_FALSE(GroundObjectStore::valid(MakeObject(1, 0, -kMax - 1)));
 
     GroundObject top = MakeObject(1);
-    top.y_mm = kMax;
+    top.y_mm = GroundObjectStore::kMaxVerticalMm - 1;
     EXPECT_TRUE(GroundObjectStore::valid(top));
-    top.y_mm = -kMax;
+    top.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
     EXPECT_TRUE(GroundObjectStore::valid(top));
     top.y_mm = kMax + 1;
     EXPECT_FALSE(GroundObjectStore::valid(top));
@@ -120,12 +121,16 @@ TEST(GroundObjectStoreTest, InsertRefusesInvalidDuplicateAndFullStore) {
     EXPECT_EQ(store.find(2), nullptr);
 
     GroundObjectStore full;
-    for (std::uint64_t id = 1; id <= GroundObjectStore::kMaxObjects; ++id) {
-        ASSERT_TRUE(full.insert(MakeObject(id)));
-    }
-    EXPECT_EQ(full.size(), GroundObjectStore::kMaxObjects);
-    EXPECT_FALSE(full.insert(MakeObject(GroundObjectStore::kMaxObjects + 1)));
-    EXPECT_EQ(full.size(), GroundObjectStore::kMaxObjects);
+    std::uint64_t refused_id = 1;
+    while (refused_id <= GroundObjectStore::kMaxObjects && full.insert(MakeObject(refused_id)))
+        ++refused_id;
+    EXPECT_LT(full.size(), GroundObjectStore::kMaxObjects); // file budget also binds
+    const auto unchanged = full.canonical_bytes();
+    EXPECT_FALSE(full.insert(MakeObject(refused_id)));
+    EXPECT_EQ(full.canonical_bytes(), unchanged);
+    EXPECT_LE(full.serialize().size(), GroundObjectStore::kMaxFileBytes);
+    EXPECT_TRUE(full.erase(1));
+    EXPECT_TRUE(full.insert(MakeObject(refused_id)));
 }
 
 TEST(GroundObjectStoreTest, OwnsRegionInRegionAndRegionsAreOrdered) {
@@ -198,27 +203,32 @@ TEST(GroundObjectStoreTest, SerializeParseRoundTrip) {
 
 TEST(GroundObjectStoreTest, WorstCaseRecordsRoundTripUnderFileCap) {
     GroundObjectStore store;
+    std::uint64_t admitted = 0;
     for (std::uint64_t i = 0; i < GroundObjectStore::kMaxObjects; ++i) {
         GroundObject object;
-        object.id = 10'000'000'000'000'000'000ull + i;
+        object.id = ActiveRegionLedger::kPersistentIdLimit - GroundObjectStore::kMaxObjects + i;
         object.type = std::numeric_limits<std::uint32_t>::max();
         object.x_mm = kMax - 1;
-        object.y_mm = -kMax;
-        object.z_mm = -kMax;
+        object.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
+        object.z_mm = -kMax + 1;
         object.spawn_tick = kU64Max;
-        object.active_age = kU64Max - 1;
-        object.despawn_after = kU64Max;
+        object.active_age = std::numeric_limits<std::uint32_t>::max() - 1;
+        object.despawn_after = std::numeric_limits<std::uint32_t>::max();
         object.payload = std::numeric_limits<std::uint32_t>::max();
         object.flags = GroundObject::kSettled;
-        ASSERT_TRUE(store.insert(object));
+        if (!store.insert(object))
+            break;
+        ++admitted;
     }
+    ASSERT_GT(admitted, 0u);
     const std::string bytes = store.serialize();
-    EXPECT_LT(bytes.size(), GroundObjectStore::kMaxFileBytes);
-
+    EXPECT_LE(bytes.size(), GroundObjectStore::kMaxFileBytes);
     GroundObjectStore parsed;
     std::string error;
-    ASSERT_TRUE(GroundObjectStore::parse(bytes, kU64Max, parsed, error)) << error;
-    EXPECT_EQ(parsed.size(), GroundObjectStore::kMaxObjects);
+    ASSERT_TRUE(
+        GroundObjectStore::parse(bytes, ActiveRegionLedger::kPersistentIdLimit, parsed, error))
+        << error;
+    EXPECT_EQ(parsed.size(), admitted);
     EXPECT_EQ(parsed.serialize(), bytes);
 }
 
@@ -288,7 +298,7 @@ TEST(GroundObjectStoreTest, AgeRegionDespawnOrderAndCounts) {
 TEST(GroundObjectStoreTest, AgeRegionSkipsAbsentRegionAndSaturates) {
     GroundObjectStore store;
     GroundObject saturated = MakeObject(4);
-    saturated.active_age = kU64Max;
+    saturated.active_age = std::numeric_limits<std::uint32_t>::max();
     ASSERT_TRUE(store.insert(saturated));
 
     const GroundObjectStore::SettleFn noSettle = [](GroundObject&) {
@@ -300,7 +310,7 @@ TEST(GroundObjectStoreTest, AgeRegionSkipsAbsentRegionAndSaturates) {
 
     store.age_region(RegionKey{0, 0}, noSettle);
     ASSERT_NE(store.find(4), nullptr);
-    EXPECT_EQ(store.find(4)->active_age, kU64Max);
+    EXPECT_EQ(store.find(4)->active_age, std::numeric_limits<std::uint32_t>::max());
 }
 
 TEST(GroundObjectStoreTest, AgeRegionRevertsSettleThatMovesObject) {

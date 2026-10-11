@@ -2591,3 +2591,45 @@ TEST(GameSessionHeadlessWorldTest, FlagOnIndexedSaveWithGroundObjectsReloadsThro
     ASSERT_TRUE(loaded.LoadWorld(owner.GetMetadata().worldId)) << loaded.GetWorldOpenError();
     EXPECT_EQ(loaded.GetGroundObjects().size(), 2u);
 }
+
+TEST(GameSessionHeadlessWorldTest, GroundSpawnQuantizesAndProbesEditedTerrainBeforePublishing) {
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession session;
+    CreateGroundWorld(session, root, jobs, "Edited ground probe");
+    auto chunk = std::make_shared<Luminumbra::Chunk>(Luminumbra::IVec3{0, 0, 0});
+    chunk->set_state(Luminumbra::ChunkState::Meshed);
+    constexpr int side = CHUNK_SIZE_X + 1;
+    chunk->sdf_data.resize(side * (CHUNK_SIZE_Y + 1) * (CHUNK_SIZE_Z + 1));
+    for (int z = 0; z <= CHUNK_SIZE_Z; ++z)
+        for (int y = 0; y <= CHUNK_SIZE_Y; ++y)
+            for (int x = 0; x <= CHUNK_SIZE_X; ++x)
+                chunk->sdf_data[static_cast<std::size_t>(x + side * (y + (CHUNK_SIZE_Y + 1) * z))] =
+                    static_cast<float>(y) - 4.0f;
+    chunk->mark_voxel_data_dirty();
+    ASSERT_TRUE(session.GetWorldSystem()->adopt_streamed_chunk(chunk));
+    const auto id = session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{8, 12, 8}, 0, 0);
+    ASSERT_NE(id, 0u);
+    const auto* landed = session.GetGroundObjects().find(id);
+    ASSERT_NE(landed, nullptr);
+    EXPECT_TRUE(landed->settled());
+    EXPECT_EQ(landed->y_mm, 4000);
+    // The owner-thread query neither loads another column nor substitutes procedural terrain.
+    const auto absent =
+        session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{320, 12, 320}, 0, 0);
+    ASSERT_NE(absent, 0u);
+    const auto* waiting = session.GetGroundObjects().find(absent);
+    ASSERT_NE(waiting, nullptr);
+    EXPECT_FALSE(waiting->settled());
+    EXPECT_EQ(waiting->y_mm, 12000);
+    const auto rounded =
+        session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{320.0005f, -0.0015f, 320}, 0, 0);
+    ASSERT_NE(rounded, 0u);
+    const auto* quantized = session.GetGroundObjects().find(rounded);
+    ASSERT_NE(quantized, nullptr);
+    // -0.0015f is slightly below the half-millimetre tie in binary32.
+    EXPECT_EQ(quantized->y_mm, -2);
+    EXPECT_EQ(session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{16777216, 0, 0}, 0, 0), 0u);
+    EXPECT_EQ(session.SpawnGroundObject(kGroundType, Luminumbra::Vec3{0, -1048576, 0}, 0, 0), 0u);
+}

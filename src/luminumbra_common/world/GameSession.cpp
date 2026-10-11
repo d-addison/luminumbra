@@ -1524,7 +1524,7 @@ ResidentChunkColumns(const std::vector<std::shared_ptr<Luminumbra::Chunk>>& chun
     return columns;
 }
 
-// Settles an unsettled object onto the procedural terrain height (voxel edits are ignored, D6).
+// Settles an unsettled object with an owner-thread downward terrain probe.
 // Returns false, leaving the object unchanged, when its chunk column is not resident or the
 // height is not finite.
 bool SettleGroundObjectOnTerrain(GroundObject& object,
@@ -1538,11 +1538,14 @@ bool SettleGroundObjectOnTerrain(GroundObject& object,
                                      static_cast<int>(FloorDivide(object.z_mm, column_z_mm))};
     if (!columns.contains(column))
         return false;
-    const float height = world.GetTerrainHeightAt(static_cast<float>(object.x_mm) / 1000.0f,
-                                                  static_cast<float>(object.z_mm) / 1000.0f);
-    if (!std::isfinite(height))
+    const auto height = world.ProbeTerrainBelow({static_cast<float>(object.x_mm) / 1000.0f,
+                                                 static_cast<float>(object.y_mm) / 1000.0f,
+                                                 static_cast<float>(object.z_mm) / 1000.0f});
+    if (!height || !std::isfinite(*height))
         return false;
-    const double y_mm = std::clamp(static_cast<double>(height) * 1000.0, -1.6e10, 1.6e10);
+    const double y_mm = static_cast<double>(*height) * 1000.0;
+    if (std::abs(y_mm) >= static_cast<double>(GroundObjectStore::kMaxVerticalMm))
+        return false;
     object.y_mm = std::llround(y_mm);
     object.flags = static_cast<std::uint16_t>(object.flags | GroundObject::kSettled);
     return true;
@@ -1558,6 +1561,10 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
                                              std::uint32_t payload) {
     if (!m_activeRegionsEnabled)
         return 0;
+    if (despawn_after > std::numeric_limits<std::uint32_t>::max()) {
+        ++m_regionInputRejections.ground_spawns;
+        return 0;
+    }
     const std::uint64_t tick = m_worldClock.tick();
     // Probe candidate: the real id is allocated only once the candidate is accepted.
     GroundObject candidate;
@@ -1567,7 +1574,7 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
     candidate.y_mm = y_mm;
     candidate.z_mm = z_mm;
     candidate.spawn_tick = tick;
-    candidate.despawn_after = despawn_after;
+    candidate.despawn_after = static_cast<std::uint32_t>(despawn_after);
     candidate.payload = payload;
     if (!m_worldSystem || m_regionFault.has_value() ||
         m_groundObjects.size() >= GroundObjectStore::kMaxObjects ||
@@ -1582,6 +1589,8 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
     }
     // A failure from here on still consumes the id.
     candidate.id = id;
+    SettleGroundObjectOnTerrain(
+        candidate, ResidentChunkColumns(m_worldSystem->snapshot_streamed_chunks()), *m_worldSystem);
     if (!m_groundObjects.insert(candidate))
         return 0;
     if (!MarkGroundRegionEdited(candidate)) {
@@ -1590,6 +1599,27 @@ std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
     }
     m_simulationEventBus.publish(tick, "ground.spawned", GroundEventPayload(candidate));
     return id;
+}
+
+std::uint64_t GameSession::SpawnGroundObject(std::uint32_t type,
+                                             Vec3 position,
+                                             std::uint32_t despawn_after,
+                                             std::uint32_t payload) {
+    if (!m_activeRegionsEnabled)
+        return 0;
+    if (!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+        std::abs(static_cast<double>(position.x)) >= 16777216.0 ||
+        std::abs(static_cast<double>(position.z)) >= 16777216.0 ||
+        std::abs(static_cast<double>(position.y)) >= 1048576.0) {
+        ++m_regionInputRejections.ground_spawns;
+        return 0;
+    }
+    return SpawnGroundObject(type,
+                             std::llround(static_cast<double>(position.x) * 1000.0),
+                             std::llround(static_cast<double>(position.y) * 1000.0),
+                             std::llround(static_cast<double>(position.z) * 1000.0),
+                             despawn_after,
+                             payload);
 }
 
 bool GameSession::MarkGroundRegionEdited(const GroundObject& object) {

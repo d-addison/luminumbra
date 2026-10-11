@@ -51,6 +51,15 @@ std::string ObjectText(const GroundObject& object) {
            std::to_string(object.payload) + ',' + std::to_string(object.flags) + ';';
 }
 
+std::size_t ReservedBytes(GroundObject object) {
+    object.active_age = std::numeric_limits<std::uint32_t>::max();
+    object.y_mm = -GroundObjectStore::kMaxVerticalMm + 1;
+    object.flags = GroundObject::kSettled;
+    // ObjectText has ten punctuation bytes; JSON has 104 (keys, quotes, braces,
+    // colons and separators). Reserve the per-object array comma as well.
+    return ObjectText(object).size() + 95;
+}
+
 void AppendField(std::string& out, const char* name, const std::string& value) {
     out += '"';
     out += name;
@@ -112,19 +121,19 @@ bool ReadSigned(const Json& object, const char* key, std::int64_t& value) {
 
 bool GroundObjectStore::valid(const GroundObject& object) {
     constexpr std::int64_t kMax = kMaxCoordinateMm;
-    if (object.id == 0 || object.type == 0) {
+    if (object.id == 0 || object.id >= ActiveRegionLedger::kPersistentIdLimit || object.type == 0) {
         return false;
     }
     if ((object.flags & static_cast<std::uint16_t>(~GroundObject::kSettled)) != 0) {
         return false;
     }
-    if (object.x_mm < -kMax || object.x_mm >= kMax) {
+    if (object.x_mm <= -kMax || object.x_mm >= kMax) {
         return false;
     }
-    if (object.z_mm < -kMax || object.z_mm >= kMax) {
+    if (object.z_mm <= -kMax || object.z_mm >= kMax) {
         return false;
     }
-    if (object.y_mm < -kMax || object.y_mm > kMax) {
+    if (object.y_mm <= -kMaxVerticalMm || object.y_mm >= kMaxVerticalMm) {
         return false;
     }
     if (object.despawn_after != 0 && object.active_age >= object.despawn_after) {
@@ -144,8 +153,13 @@ bool GroundObjectStore::insert(const GroundObject& object) {
     if (m_objects.find(object.id) != m_objects.end()) {
         return false;
     }
+    const auto reserved = ReservedBytes(object);
+    constexpr std::size_t kEnvelopeBytes = 128;
+    if (reserved > kMaxFileBytes - kEnvelopeBytes - m_reserved_bytes)
+        return false;
     m_objects.emplace(object.id, object);
     m_byRegion[region_of(object)].insert(object.id);
+    m_reserved_bytes += reserved;
     return true;
 }
 
@@ -155,6 +169,7 @@ bool GroundObjectStore::erase(std::uint64_t id) {
         return false;
     }
     Detach(m_byRegion, region_of(it->second), id);
+    m_reserved_bytes -= ReservedBytes(it->second);
     m_objects.erase(it);
     return true;
 }
@@ -167,6 +182,7 @@ const GroundObject* GroundObjectStore::find(std::uint64_t id) const {
 void GroundObjectStore::clear() {
     m_objects.clear();
     m_byRegion.clear();
+    m_reserved_bytes = 0;
 }
 
 bool GroundObjectStore::owns_region(RegionKey key) const {
@@ -220,7 +236,7 @@ GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const 
             }
         }
 
-        if (live.active_age != kU64Max) {
+        if (live.active_age != std::numeric_limits<std::uint32_t>::max()) {
             ++live.active_age;
             ++result.aged;
         }
@@ -228,6 +244,7 @@ GroundObjectStore::AgeResult GroundObjectStore::age_region(RegionKey key, const 
         if (live.despawn_after != 0 && live.active_age >= live.despawn_after) {
             result.despawned.push_back(live);
             Detach(m_byRegion, key, id);
+            m_reserved_bytes -= ReservedBytes(live);
             m_objects.erase(objectIt);
         }
     }
@@ -321,14 +338,19 @@ bool GroundObjectStore::parse(std::string_view bytes,
             std::uint64_t type = 0;
             std::uint64_t payload = 0;
             std::uint64_t flags = 0;
+            std::uint64_t active_age = 0, despawn_after = 0;
             const bool numbers =
                 ReadUnsigned(entry, "id", kU64Max, object.id) &&
                 ReadUnsigned(entry, "type", std::numeric_limits<std::uint32_t>::max(), type) &&
                 ReadSigned(entry, "x_mm", object.x_mm) && ReadSigned(entry, "y_mm", object.y_mm) &&
                 ReadSigned(entry, "z_mm", object.z_mm) &&
                 ReadUnsigned(entry, "spawn_tick", kU64Max, object.spawn_tick) &&
-                ReadUnsigned(entry, "active_age", kU64Max, object.active_age) &&
-                ReadUnsigned(entry, "despawn_after", kU64Max, object.despawn_after) &&
+                ReadUnsigned(
+                    entry, "active_age", std::numeric_limits<std::uint32_t>::max(), active_age) &&
+                ReadUnsigned(entry,
+                             "despawn_after",
+                             std::numeric_limits<std::uint32_t>::max(),
+                             despawn_after) &&
                 ReadUnsigned(
                     entry, "payload", std::numeric_limits<std::uint32_t>::max(), payload) &&
                 ReadUnsigned(entry, "flags", std::numeric_limits<std::uint16_t>::max(), flags);
@@ -337,6 +359,8 @@ bool GroundObjectStore::parse(std::string_view bytes,
                 return false;
             }
             object.type = static_cast<std::uint32_t>(type);
+            object.active_age = static_cast<std::uint32_t>(active_age);
+            object.despawn_after = static_cast<std::uint32_t>(despawn_after);
             object.payload = static_cast<std::uint32_t>(payload);
             object.flags = static_cast<std::uint16_t>(flags);
 

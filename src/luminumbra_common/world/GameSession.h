@@ -430,6 +430,10 @@ public:
                                     std::int64_t z_mm,
                                     std::uint64_t despawn_after,
                                     std::uint32_t payload);
+    std::uint64_t SpawnGroundObject(std::uint32_t type,
+                                    Vec3 position,
+                                    std::uint32_t despawn_after,
+                                    std::uint32_t payload);
 
     // Fold only when enabled, inside the existing ecology hash slot.
     [[nodiscard]] std::string FoldClockIntoEcologyHash(const std::string& ecology_hash) const;
