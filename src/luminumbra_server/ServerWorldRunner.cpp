@@ -265,6 +265,7 @@ bool ServerWorldRunner::Boot() {
         const auto sys_cfg = luminumbra::core::SystemConfig::LoadFromFile(systems_json.string());
         m_session->SetActiveRegionsEnabled(
             sys_cfg.enabled(luminumbra::core::SysKey::SimActiveRegions));
+        m_session->SetParkedBytesLimit(static_cast<std::size_t>(m_config.parked_bytes_limit));
         m_session->SetWaterHighResEnabled(
             sys_cfg.enabled(luminumbra::core::SysKey::SimWaterHighRes));
     }
@@ -767,13 +768,29 @@ ServerTickReport ServerWorldRunner::RunFixedTicks(std::uint64_t tick_count) {
                                             world_system->debug_water_state_hash().hash);
         }
 
-        if (m_config.autosave_interval_ticks > 0 && simulation_tick > 0 &&
-            (simulation_tick % m_config.autosave_interval_ticks) == 0) {
+        std::uint64_t autosave_interval = m_config.autosave_interval_ticks;
+        if (autosave_interval == 0 && m_config.autosave_default_when_unset &&
+            m_session->ActiveRegionsEnabled()) {
+            autosave_interval = kDefaultActiveRegionsAutosaveTicks;
+        }
+        if (autosave_interval > 0 && simulation_tick > 0 &&
+            (simulation_tick % autosave_interval) == 0) {
             // Synchronous host-thread save. Snapshot/shutdown run between RunFixedTicks calls.
             world::WorldStateSaveReport save_report;
             if (m_session->SaveWorldState(&save_report)) {
                 report.autosave_passes += 1;
                 if (save_report.saved && save_report.chunks_dirty > 0) {
+                    report.autosave_writes += 1;
+                }
+            }
+        }
+
+        // Byte-limit pressure: a dirty authoritative chunk could not be parked, so persist now.
+        if (m_session->PersistenceSaveRequested()) {
+            world::WorldStateSaveReport pressure_report;
+            if (m_session->SaveWorldState(&pressure_report)) {
+                report.autosave_passes += 1;
+                if (pressure_report.saved && pressure_report.chunks_dirty > 0) {
                     report.autosave_writes += 1;
                 }
             }

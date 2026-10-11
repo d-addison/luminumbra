@@ -981,6 +981,9 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // has no telemetry stage or consumer work counter in this foundation.
         budget.Finish();
         if (m_activeRegionsEnabled && !m_regionFault) {
+            // Water divergence becomes LoadedOrEdited authority BEFORE any digest or ownership
+            // probe.
+            m_worldSystem->sync_water_authority();
             const auto anchors =
                 m_replicatedSimulationAnchors
                     ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
@@ -1000,9 +1003,10 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                             directory,
                             key,
                             Persistence::RegionDigestInputs{
-                                m_worldSystem->snapshot_streamed_chunks(), {}});
+                                m_worldSystem->snapshot_streamed_chunks(),
+                                m_worldSystem->snapshot_parked_chunks()});
                     },
-                    // Later slices extend this probe with parked chunks, ground objects,
+                    // Later slices extend this probe with ground objects,
                     // pages, creatures, plants and water debt.
                     [this, &resident_regions](RegionKey key) {
                         for (const auto& entry : m_regionWork)
@@ -1010,7 +1014,8 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
                                 return true;
                         if (!resident_regions) {
                             resident_regions.emplace();
-                            for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+                            for (const auto& chunk :
+                                 m_worldSystem->snapshot_authoritative_chunks()) {
                                 if (!chunk ||
                                     chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited)
                                     continue;
@@ -1427,7 +1432,9 @@ void GameSession::RecordActiveRegionWork(RegionWork work) {
         m_regionWork.push_back(work);
 }
 void GameSession::AttachRegionEditObserver() {
-    if (m_activeRegionsEnabled && m_worldSystem)
+    if (m_activeRegionsEnabled && m_worldSystem) {
+        m_worldSystem->set_durable_residency(true);
+        m_worldSystem->set_parked_bytes_limit(m_parkedBytesLimit);
         m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
             int x = 0, z = 0;
             Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
@@ -1439,6 +1446,59 @@ void GameSession::AttachRegionEditObserver() {
                 ++m_regionInputRejections.edits;
             }
         });
+    }
+}
+
+PersistenceStatus GameSession::GetPersistenceStatus() const {
+    PersistenceStatus status;
+    if (!m_activeRegionsEnabled || !m_worldSystem)
+        return status;
+    const auto parking = m_worldSystem->parking_status();
+    status.parked_count = parking.parked_count;
+    status.parked_bytes = parking.parked_bytes;
+    status.oldest_parked_tick = parking.oldest_parked_tick;
+    status.last_save_tick = m_lastSaveTick;
+    status.last_save_ms = m_lastSaveMs;
+    status.failures = m_saveFailures;
+    status.save_requested = parking.save_requested;
+    return status;
+}
+
+bool GameSession::PersistenceSaveRequested() const {
+    if (!m_activeRegionsEnabled || !m_worldSystem || !m_worldSystem->persistence_save_requested())
+        return false;
+    if (m_lastSaveFailureTick >= 0 &&
+        static_cast<std::int64_t>(GetSimulationTickCount()) <
+            m_lastSaveFailureTick + static_cast<std::int64_t>(kSaveRetryTicks))
+        return false;
+    return true;
+}
+
+void GameSession::ClearPersistenceSaveRequest() {
+    if (m_worldSystem)
+        m_worldSystem->clear_persistence_save_request();
+}
+
+void GameSession::SetParkedBytesLimit(std::size_t bytes) {
+    m_parkedBytesLimit = bytes;
+    if (m_activeRegionsEnabled && m_worldSystem)
+        m_worldSystem->set_parked_bytes_limit(bytes);
+}
+
+void GameSession::RecordPersistenceSaveOutcome(bool ok, double elapsed_ms) {
+    if (!m_activeRegionsEnabled)
+        return;
+    const auto tick = static_cast<std::int64_t>(GetSimulationTickCount());
+    if (ok) {
+        m_lastSaveTick = tick;
+        m_lastSaveMs = elapsed_ms;
+        m_lastSaveFailureTick = -1;
+        if (m_worldSystem)
+            m_worldSystem->clear_persistence_save_request();
+    } else {
+        ++m_saveFailures;
+        m_lastSaveFailureTick = tick;
+    }
 }
 
 std::string GameSession::FoldClockIntoEcologyHash(const std::string& ecology_hash) const {
@@ -1535,6 +1595,12 @@ bool GameSession::SaveWorldState(WorldStateSaveReport* report) {
 
 bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                                    WorldStateSaveReport* report) {
+    const auto save_started = std::chrono::steady_clock::now();
+    const auto elapsed_ms = [&save_started]() {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                         save_started)
+            .count();
+    };
     WorldStateSaveReport result;
     if (report) {
         *report = result;
@@ -1567,8 +1633,13 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
     // so the saved bytes are identical to the old publishing barrier's.
     m_worldSystem->quiesce_streaming_jobs_for_save();
 
+    if (m_activeRegionsEnabled) {
+        // After the quiesce: a finishing generation worker can no longer erase the obligation.
+        m_worldSystem->sync_water_authority();
+    }
     WorldStreamingState state;
-    for (const auto& chunk : m_worldSystem->snapshot_streamed_chunks()) {
+    for (const auto& chunk : m_activeRegionsEnabled ? m_worldSystem->snapshot_authoritative_chunks()
+                                                    : m_worldSystem->snapshot_streamed_chunks()) {
         state.insert_chunk(chunk);
     }
     result.chunks_total = state.size();
@@ -1587,12 +1658,16 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
         const bool plants_ok =
             Persistence::WorldSaveService::save_plant_entities(plant_snapshot, save_dir, nullptr);
         const bool energy_ok = SaveEnergyFieldRecord(save_dir);
-        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok))
+        if (m_activeRegionsEnabled && (!plants_ok || !energy_ok)) {
+            RecordPersistenceSaveOutcome(false, elapsed_ms());
             return false;
+        }
         if (report) {
             *report = result;
         }
-        return !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
+        const bool empty_ok = !m_activeRegionsEnabled || SaveWorldMetadataTo(save_dir);
+        RecordPersistenceSaveOutcome(empty_ok, elapsed_ms());
+        return empty_ok;
     }
 
     Persistence::WorldSaveService service;
@@ -1655,6 +1730,18 @@ bool GameSession::SaveWorldStateTo(const std::filesystem::path& save_dir,
                              result.chunks_total,
                              result.chunks_dirty,
                              save_dir.string());
+    }
+    if (m_activeRegionsEnabled) {
+        if (!ok) {
+            // The whole save failed after chunk dirty bits may have been acknowledged: re-arm
+            // every chunk this save covered so the retry rewrites it (no revision bump).
+            for (const ChunkID id : dirty_ids) {
+                if (const auto chunk = state.find_chunk(id)) {
+                    chunk->mark_dirty_for_save();
+                }
+            }
+        }
+        RecordPersistenceSaveOutcome(ok, elapsed_ms());
     }
     if (report) {
         *report = result;

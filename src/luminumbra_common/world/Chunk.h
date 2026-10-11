@@ -178,6 +178,22 @@ public:
         bytes += water_src_mm.capacity() * sizeof(std::int32_t);
         return bytes;
     }
+    // Sim-truth footprint only (what a parked chunk keeps after normalize_for_park()).
+    std::size_t estimated_sim_bytes() const {
+        std::size_t bytes = 0;
+        bytes += sdf_data.capacity() * sizeof(f32);
+        bytes += heightmap_data.capacity() * sizeof(f32);
+        bytes += material_data.capacity() * sizeof(u8);
+        bytes += water_level_data.capacity() * sizeof(f32);
+        bytes += water_flow_data.capacity() * sizeof(Vec2);
+        bytes += water_sim_terrain_height.capacity() * sizeof(f32);
+        bytes += water_rest_level.capacity() * sizeof(f32);
+        bytes += water_depth_mm.capacity() * sizeof(std::int32_t);
+        bytes += water_bed_mm.capacity() * sizeof(std::int32_t);
+        bytes += water_edge_flux.capacity() * sizeof(std::int32_t);
+        bytes += water_src_mm.capacity() * sizeof(std::int32_t);
+        return bytes;
+    }
     // Drops every render-side buffer and transient pipeline marker so a quiescent chunk can sit in
     // the parked store. Sim truth (sdf/heightmap/material/water state) is untouched. The caller
     // guarantees no job owns the chunk.

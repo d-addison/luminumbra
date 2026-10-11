@@ -118,6 +118,7 @@ add_executable(common_tests
     common/WorldgenPreviewReinitRace_test.cpp
     common/MultiAnchorStreaming_test.cpp
     common/PromotionSimTruthDecoupling_test.cpp
+    common/WorldDurableResidency_test.cpp
     common/WaterDeterminism_test.cpp
     common/PlayerAvatar_test.cpp
     common/ReplicationProtocol_test.cpp

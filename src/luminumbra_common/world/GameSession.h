@@ -15,6 +15,7 @@
 #include "WorldClock.h"
 #include "WorldMetadata.h"
 #include "entt/entt.hpp"
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <filesystem>
@@ -75,6 +76,16 @@ struct WorldStateSaveReport {
     bool saved = false;
 };
 
+struct PersistenceStatus {
+    std::size_t parked_count = 0;
+    std::size_t parked_bytes = 0;
+    std::int64_t oldest_parked_tick = -1;
+    std::int64_t last_save_tick = -1;
+    double last_save_ms = 0.0;
+    std::uint32_t failures = 0;
+    bool save_requested = false;
+};
+
 class GameSession {
 public:
     GameSession();
@@ -118,6 +129,16 @@ public:
     bool SaveWorldState(WorldStateSaveReport* report = nullptr);
     bool SaveWorldStateTo(const std::filesystem::path& save_dir,
                           WorldStateSaveReport* report = nullptr);
+
+    // Durable residency (sim.active_regions only). All zero/false when the flag is off.
+    [[nodiscard]] PersistenceStatus GetPersistenceStatus() const;
+    // True when the world asked for a save (a dirty authoritative chunk hit the parked byte
+    // limit) and the retry back-off after a failed save has elapsed.
+    [[nodiscard]] bool PersistenceSaveRequested() const;
+    void ClearPersistenceSaveRequest();
+    // 0 = unlimited. Applied when the world system is wired (and immediately if it exists).
+    void SetParkedBytesLimit(std::size_t bytes);
+    static constexpr std::uint64_t kSaveRetryTicks = 300;
 
     // Loads a previously saved snapshot into the live streaming state. Must be
     // called AFTER the world systems initialize but BEFORE chunk streaming
@@ -450,6 +471,12 @@ private:
     bool ClockConfigurationCompatible(const std::filesystem::path& save_dir) const;
     WorldClock m_worldClock;
     void AttachRegionEditObserver();
+    void RecordPersistenceSaveOutcome(bool ok, double elapsed_ms);
+    std::size_t m_parkedBytesLimit = static_cast<std::size_t>(256) * 1024u * 1024u;
+    std::int64_t m_lastSaveTick = -1;
+    double m_lastSaveMs = 0.0;
+    std::uint32_t m_saveFailures = 0;
+    std::int64_t m_lastSaveFailureTick = -1;
     RegionSchedulerConfig m_regionSchedulerConfig;
     ActiveRegionLedger m_activeRegionLedger;
     RegionSchedule m_regionSchedule;

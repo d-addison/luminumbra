@@ -3452,6 +3452,9 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
             std::min(std::min(to_create.size(), budget_headroom),
                      static_cast<std::size_t>(m_last_streaming_budget_stats.generation_budget));
         for (std::size_t i = 0; i < budget; ++i) {
+            if (m_durable_residency && unpark_chunk(Chunk::calculate_id(to_create[i].coords))) {
+                continue; // a parked chunk re-entered range: it keeps its authoritative data
+            }
             generate_now.push_back({to_create[i].coords, to_create[i].target_step});
             if (to_create[i].surface) {
                 ++m_last_streaming_budget_stats.surface_generation_scheduled;
@@ -3523,7 +3526,77 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     }
 
     m_last_streaming_budget_stats.unloaded_chunks = to_unload.size();
+    m_parking_deferred = 0;
+    m_parking_blocked_dirty = 0;
+    // Chunks owned by a generation/meshing/promotion job; built lazily, once per pass, and only
+    // when an authoritative eviction candidate exists.
+    std::unordered_set<ChunkID> in_flight_ids;
+    bool in_flight_built = false;
+    const auto build_in_flight = [&]() {
+        in_flight_built = true;
+        for (const auto& batch : m_streaming_state.generation_batches) {
+            for (const auto& c : batch.chunks) {
+                if (c)
+                    in_flight_ids.insert(c->get_id());
+            }
+        }
+        for (const auto& batch : m_streaming_state.meshing_batches) {
+            for (const auto& job : batch.chunks) {
+                if (job.chunk)
+                    in_flight_ids.insert(job.chunk->get_id());
+            }
+        }
+        for (const auto& job : m_streaming_state.promotion_job_chunks) {
+            if (job.chunk)
+                in_flight_ids.insert(job.chunk->get_id());
+        }
+        for (const auto& job : m_streaming_state.pending_promotion_mesh) {
+            if (job.chunk)
+                in_flight_ids.insert(job.chunk->get_id());
+        }
+    };
     for (ChunkID id : to_unload) {
+        if (m_durable_residency) {
+            const auto found = m_streaming_state.chunks.find(id);
+            if (found != m_streaming_state.chunks.end() && found->second &&
+                found->second->needs_authority()) {
+                const std::shared_ptr<::Luminumbra::Chunk> chunk = found->second;
+                if (!in_flight_built) {
+                    build_in_flight();
+                }
+                const Luminumbra::ChunkState st = chunk->get_state();
+                const bool quiescent =
+                    (st == Luminumbra::ChunkState::Idle || st == Luminumbra::ChunkState::Ready) &&
+                    chunk->pending_lod.load(std::memory_order_acquire) < 0 &&
+                    !chunk->pending_generation_ready.load(std::memory_order_acquire) &&
+                    !chunk->pending_mesh_ready.load(std::memory_order_acquire) &&
+                    !chunk->pending_mesh_failed.load(std::memory_order_acquire) &&
+                    !chunk->pending_promotion_ready.load(std::memory_order_acquire) &&
+                    !chunk->pending_promotion_failed.load(std::memory_order_acquire) &&
+                    in_flight_ids.find(id) == in_flight_ids.end();
+                if (!quiescent) {
+                    ++m_parking_deferred; // retried next pass; keeps activation elision open
+                    continue;
+                }
+                const std::size_t bytes = chunk->estimated_sim_bytes();
+                if (m_parked_bytes_limit > 0 && m_parked_bytes + bytes > m_parked_bytes_limit) {
+                    if (chunk->is_voxel_data_dirty() || chunk->is_water_state_dirty()) {
+                        ++m_parking_blocked_dirty;
+                        m_persistence_save_requested = true;
+                    }
+                    continue; // stays resident
+                }
+                if (physics_system) {
+                    physics_system->remove_chunk_collision(id);
+                }
+                chunk->normalize_for_park();
+                m_parked[id] = ParkedChunk{chunk, bytes, m_current_sim_tick};
+                m_parked_bytes += bytes;
+                m_streaming_state.chunks.erase(id);
+                shadow_note_evicted(id);
+                continue;
+            }
+        }
         if (physics_system) {
             physics_system->remove_chunk_collision(id);
         }
@@ -3539,7 +3612,8 @@ bool SHIELD_WorldSystem::update_chunk_activation(const std::vector<Vec3>& anchor
     m_last_activation_camera_chunks = camera_chunks;
     m_last_activation_dirty_generation = m_dirty_generation;
     m_last_activation_pending = m_last_streaming_budget_stats.scheduled_generation +
-                                m_last_streaming_budget_stats.deferred_generation;
+                                m_last_streaming_budget_stats.deferred_generation +
+                                m_parking_deferred;
     return true;
 }
 
@@ -3637,6 +3711,10 @@ bool SHIELD_WorldSystem::EnsureSurfaceReadyNear(const Vec3& world_pos,
                 const ChunkID id = Chunk::calculate_id(coords);
 
                 auto it = m_streaming_state.chunks.find(id);
+                if (it == m_streaming_state.chunks.end() && m_durable_residency &&
+                    unpark_chunk(id)) {
+                    it = m_streaming_state.chunks.find(id);
+                }
                 if (it == m_streaming_state.chunks.end()) {
                     auto chunk = std::make_shared<Luminumbra::Chunk>(coords);
                     it = m_streaming_state.chunks.emplace(id, std::move(chunk)).first;
@@ -4260,6 +4338,9 @@ int SHIELD_WorldSystem::EditTerrainVoxel(const Vec3& world_pos,
     for (int cz = lo.z; cz <= hi.z; ++cz)
         for (int cy = lo.y; cy <= hi.y; ++cy)
             for (int cx = lo.x; cx <= hi.x; ++cx) {
+                if (m_durable_residency) {
+                    unpark_chunk(Chunk::calculate_id(IVec3(cx, cy, cz)));
+                }
                 const auto chunk = find_streamed_chunk(IVec3(cx, cy, cz));
                 if (!chunk || chunk->sdf_data.size() != expected)
                     continue;
@@ -4896,6 +4977,9 @@ JobHandle SHIELD_WorldSystem::dispatch_generation_jobs(
     std::vector<Luminumbra::Job> jobs;
     for (const auto& request : chunks_to_generate) {
         const IVec3 coords = request.coords;
+        if (m_durable_residency) {
+            unpark_chunk(Chunk::calculate_id(coords)); // parked data must not be regenerated
+        }
         // Chunks restored from a world save (or already generated) carry
         // populated voxel data, possibly with player edits; regeneration would
         // clobber those edits. Generation is a pure function of seed/params,
@@ -5313,6 +5397,11 @@ void SHIELD_WorldSystem::clear_world(PhysicsSystem* physics_system) {
         }
     }
     m_streaming_state.chunks.clear();
+    m_parked.clear();
+    m_parked_bytes = 0;
+    m_parking_blocked_dirty = 0;
+    m_parking_deferred = 0;
+    m_persistence_save_requested = false;
     m_shadow_generation_dispatch_tick.clear();
     m_shadow_promotion_dispatch_tick.clear();
     LUMINUMBRA_CORE_INFO("World cleared.");
@@ -5452,8 +5541,7 @@ SHIELD_WorldSystem::capture_far_lod_sdf_snapshot(i32 rx, i32 rz) const {
     // This capture runs after the owner thread's normal streaming publication
     // point. Copying here is the ownership boundary: workers receive only the
     // owned value vectors below, never a Chunk or a borrowed vector span.
-    for (const auto& [id, chunk] : m_streaming_state.chunks) {
-        (void)id;
+    for (const auto& chunk : snapshot_authoritative_chunks()) {
         if (!chunk || chunk->sdf_data.size() != kFullSdfLatticeSize ||
             (!chunk->material_data.empty() && chunk->material_data.size() != kFullSdfLatticeSize)) {
             continue;
@@ -5496,7 +5584,7 @@ bool SHIELD_WorldSystem::is_far_lod_sdf_snapshot_current(const FarLodSdfSnapshot
     // Eviction is safe because snapshot owns its bytes. A still-resident
     // chunk with a changed local revision/provenance, however, supersedes it.
     for (const FarLodSdfSnapshotEntry& entry : snapshot.entries) {
-        const auto current = find_streamed_chunk(entry.coords);
+        const auto current = find_authoritative_chunk(entry.coords);
         if (current && (current->voxel_revision() != entry.voxel_revision ||
                         current->sdf_provenance() != entry.provenance)) {
             return false;
@@ -5509,6 +5597,107 @@ std::shared_ptr<Luminumbra::Chunk>
 SHIELD_WorldSystem::find_streamed_chunk(const IVec3& coords) const {
     const auto it = m_streaming_state.chunks.find(Chunk::calculate_id(coords));
     return it != m_streaming_state.chunks.end() ? it->second : nullptr;
+}
+
+SHIELD_WorldSystem::ParkingStatus SHIELD_WorldSystem::parking_status() const {
+    ParkingStatus status;
+    status.parked_count = m_parked.size();
+    status.parked_bytes = m_parked_bytes;
+    status.blocked_dirty = m_parking_blocked_dirty;
+    status.save_requested = m_persistence_save_requested;
+    for (const auto& [id, parked] : m_parked) {
+        (void)id;
+        if (status.oldest_parked_tick < 0 ||
+            (parked.tick >= 0 && parked.tick < status.oldest_parked_tick)) {
+            status.oldest_parked_tick = parked.tick;
+        }
+    }
+    return status;
+}
+
+std::shared_ptr<Luminumbra::Chunk>
+SHIELD_WorldSystem::find_authoritative_chunk(const IVec3& coords) const {
+    const ChunkID id = Chunk::calculate_id(coords);
+    const auto it = m_streaming_state.chunks.find(id);
+    if (it != m_streaming_state.chunks.end()) {
+        return it->second;
+    }
+    const auto parked = m_parked.find(id);
+    return parked != m_parked.end() ? parked->second.chunk : nullptr;
+}
+
+std::vector<std::shared_ptr<Luminumbra::Chunk>> SHIELD_WorldSystem::snapshot_parked_chunks() const {
+    std::vector<std::pair<ChunkID, std::shared_ptr<Luminumbra::Chunk>>> ordered;
+    ordered.reserve(m_parked.size());
+    for (const auto& [id, parked] : m_parked) {
+        if (parked.chunk) {
+            ordered.emplace_back(id, parked.chunk);
+        }
+    }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.first < rhs.first;
+    });
+    std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks;
+    chunks.reserve(ordered.size());
+    for (auto& entry : ordered) {
+        chunks.push_back(std::move(entry.second));
+    }
+    return chunks;
+}
+
+std::vector<std::shared_ptr<Luminumbra::Chunk>>
+SHIELD_WorldSystem::snapshot_authoritative_chunks() const {
+    std::vector<std::shared_ptr<Luminumbra::Chunk>> chunks = snapshot_streamed_chunks();
+    if (!m_parked.empty()) {
+        std::vector<std::shared_ptr<Luminumbra::Chunk>> parked = snapshot_parked_chunks();
+        chunks.insert(chunks.end(), parked.begin(), parked.end());
+    }
+    return chunks;
+}
+
+bool SHIELD_WorldSystem::unpark_chunk(ChunkID id) {
+    const auto it = m_parked.find(id);
+    if (it == m_parked.end()) {
+        return false;
+    }
+    std::shared_ptr<Luminumbra::Chunk> chunk = std::move(it->second.chunk);
+    m_parked_bytes = m_parked_bytes >= it->second.bytes ? m_parked_bytes - it->second.bytes : 0u;
+    m_parked.erase(it);
+    if (m_streaming_state.chunks.find(id) != m_streaming_state.chunks.end()) {
+        LUMINUMBRA_CORE_ERROR("unpark_chunk: id {} is both parked and resident; keeping resident",
+                              id);
+        return true;
+    }
+    if (chunk) {
+        chunk->current_lod.store(-1, std::memory_order_release);
+        chunk->set_state(Luminumbra::ChunkState::Idle);
+        m_streaming_state.chunks.emplace(id, std::move(chunk));
+        ++m_dirty_generation;
+    }
+    return true;
+}
+
+void SHIELD_WorldSystem::sync_water_authority() {
+    const auto promote = [this](const std::shared_ptr<Luminumbra::Chunk>& chunk) {
+        if (!chunk || !chunk->is_water_state_dirty()) {
+            return;
+        }
+        chunk->set_water_authority();
+        if (chunk->sdf_provenance() != ChunkSdfProvenance::LoadedOrEdited) {
+            chunk->mark_sdf_loaded_or_edited();
+            bump_far_lod_authority_revision(chunk->get_coords());
+        }
+        chunk->mark_dirty_for_save();
+        chunk->clear_water_state_dirty();
+    };
+    for (const auto& [id, chunk] : m_streaming_state.chunks) {
+        (void)id;
+        promote(chunk);
+    }
+    for (const auto& [id, parked] : m_parked) {
+        (void)id;
+        promote(parked.chunk);
+    }
 }
 
 bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::Chunk>& chunk) {
@@ -5524,6 +5713,15 @@ bool SHIELD_WorldSystem::adopt_streamed_chunk(const std::shared_ptr<Luminumbra::
     if (chunk->get_state() == Luminumbra::ChunkState::Loading &&
         (!chunk->sdf_data.empty() || !chunk->heightmap_data.empty())) {
         chunk->set_state(Luminumbra::ChunkState::Idle);
+    }
+    if (!m_parked.empty()) {
+        const auto parked = m_parked.find(chunk->get_id());
+        if (parked != m_parked.end()) {
+            // The loaded record replaces any parked session state for the same id.
+            m_parked_bytes =
+                m_parked_bytes >= parked->second.bytes ? m_parked_bytes - parked->second.bytes : 0u;
+            m_parked.erase(parked);
+        }
     }
     const bool adopted = m_streaming_state.chunks.emplace(chunk->get_id(), chunk).second;
     if (adopted && chunk->sdf_provenance() == ChunkSdfProvenance::LoadedOrEdited) {
