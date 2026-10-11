@@ -30,6 +30,7 @@
 #include "luminumbra_common/ai/InstinctLocomotionSystem.h"
 #include "luminumbra_common/components/CoreComponents.h"
 #include "luminumbra_common/components/InstinctComponents.h"
+#include "luminumbra_common/core/CrashReport.h"
 #include "luminumbra_common/core/Log.h"
 #include "luminumbra_common/net/GnsTransport.h" // body #ifdef LUMINUMBRA_ENABLE_GNS
 #include "luminumbra_common/net/LockstepSession.h"
@@ -236,6 +237,9 @@ ServerCliOptions ParseOptions(int argc, char* argv[]) {
         } else if (std::strcmp(arg, "--artifact") == 0) {
             if (const char* v = next_value(i))
                 options.artifact_path = v;
+        } else if (std::strcmp(arg, "--crash-dir") == 0) {
+            if (const char* v = next_value(i))
+                options.crash_dir = v;
         } else {
             LUMINUMBRA_CORE_ERROR("Unknown argument '{}'", arg);
             options.parse_error = true;
@@ -259,8 +263,19 @@ int main(int argc, char* argv[]) {
             "[--root <path>] [--preset <name>] "
             "[--seed <seed>] [--world-id <id>] [--ticks <n>] [--radius <chunks>] "
             "[--collision-radius <chunks>] [--autosave-ticks <n>] [--clients <n>] "
-            "[--player-id <id>] [--server-mode] [--artifact <path>]");
+            "[--player-id <id>] [--server-mode] [--crash-dir <path>] [--artifact <path>]");
         return 2;
+    }
+
+    {
+        const fs::path crash_dir =
+            options.crash_dir.empty() ? fs::path("logs") / "crash" : fs::path(options.crash_dir);
+        if (luminumbra::crash::InstallCrashCapture(crash_dir, "luminumbra_server_app")) {
+            LUMINUMBRA_CORE_INFO("Crash report path: {}",
+                                 luminumbra::crash::CrashReportPath().string());
+        } else {
+            LUMINUMBRA_CORE_ERROR("Could not install crash capture in '{}'", crash_dir.string());
+        }
     }
 
     if (options.root.empty()) {

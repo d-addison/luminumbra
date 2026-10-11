@@ -135,6 +135,9 @@ struct ServerCliOptions {
     std::uint64_t lockstep_delay_input = 0;
     std::uint64_t lockstep_corrupt_tick = 0;
     std::string lockstep_dump_path;
+    // --crash-dir: where the crash report is written. Empty = logs/crash under the working
+    // directory.
+    std::string crash_dir;
     bool parse_error = false;
 };
 
