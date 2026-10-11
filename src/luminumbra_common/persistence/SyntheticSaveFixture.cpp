@@ -128,8 +128,10 @@ SyntheticSaveReport WriteSyntheticSave(const SyntheticSaveSpec& spec, const fs::
     const bool exists = fs::exists(report.save_dir, ec);
     if (ec)
         return Fail(std::move(report), "cannot inspect save directory: " + ec.message());
-    if (exists)
-        return Fail(std::move(report), "save already exists: " + report.save_dir.generic_string());
+    if (exists) {
+        std::string message = "save already exists: " + report.save_dir.generic_string();
+        return Fail(std::move(report), std::move(message));
+    }
     fs::create_directories(report.save_dir, ec);
     if (ec)
         return Fail(std::move(report), "cannot create save directory: " + ec.message());
