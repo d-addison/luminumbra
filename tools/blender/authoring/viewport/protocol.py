@@ -260,6 +260,26 @@ def atomic_write(path, value):
             os.unlink(temporary)
 
 
+def read_readiness(path, session, *, pid=None, broker_pid=None):
+    """Bounded private startup metadata, independent of authenticated LVP1 records."""
+    path = safe_path(path)
+    if not path.exists():
+        return None
+    value = json.loads(read_record_file(path, 512), object_pairs_hook=_object)
+    members = {'schema', 'session', 'pid'}
+    if broker_pid is not None:
+        members.add('broker_pid')
+    require(type(value) is dict and set(value) == members, 'Readiness members')
+    require(value['schema'] == 'luminumbra.viewport.ready.v1'
+            and value['session'] == session, 'Readiness session/schema')
+    require(integer(value['pid'], 1, 2**32 - 1)
+            and (pid is None or value['pid'] == pid), 'Readiness child identity')
+    if broker_pid is not None:
+        require(integer(value['broker_pid'], 1, 2**32 - 1)
+                and value['broker_pid'] == broker_pid, 'Readiness broker identity')
+    return value
+
+
 class StateGate:
     """Admission order; immutable deep copies prevent caller mutation after validation."""
     def __init__(self, session):

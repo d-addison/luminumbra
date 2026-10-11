@@ -178,7 +178,8 @@ class ViewportClient:
         config = {'root': str(root), 'session': session,
                   'command': [str(host), '--serve', '--output', str(root / 'host-evidence')],
                   'executable_sha256': self._installation['files'][self._installation['executable']],
-                  'project_root': str(project), 'deadline': self.frame_timeout}
+                  'project_root': str(project), 'deadline': self.frame_timeout,
+                  'startup_deadline': self.startup_timeout}
         wire.atomic_write(root / 'config.json', wire.canonical(config))
         env = os.environ.copy()
         env['LUMINUMBRA_VIEWPORT_KEY'] = key.hex()
@@ -192,6 +193,7 @@ class ViewportClient:
                 self._broker_pid = process.pid
             slots = wire.Slots(root, key, session)
             started, sent, received, outstanding = time.monotonic(), 0, 0, None
+            ready = None
             while not self._closing.is_set():
                 with self._lock:
                     desired, restart = self._desired, self._restart_requested
@@ -200,11 +202,12 @@ class ViewportClient:
                 code = process.poll()
                 if code is not None:
                     raise RuntimeError('Viewport broker exited: ' + str(code))
-                ready = all((root / f'frame-{index}.bin').exists() for index in range(2))
                 if not ready:
                     if time.monotonic() - started >= self.startup_timeout:
-                        raise TimeoutError('Viewport broker startup deadline')
-                elif desired is not None and desired['sequence'] > sent:
+                        raise TimeoutError('Viewport host startup deadline')
+                    ready = wire.read_readiness(root / 'broker-ready.json', session,
+                                                broker_pid=process.pid)
+                if ready and desired is not None and desired['sequence'] > sent:
                     wire.atomic_write(root / 'desired.bin', wire.encode(desired, b'', key))
                     sent = desired['sequence']
                     if outstanding is None:
@@ -243,8 +246,7 @@ class ViewportClient:
                                 outstanding = None
                         del frame
                 if outstanding is not None:
-                    limit = self.frame_timeout if received else min(self.startup_timeout, self.frame_timeout)
-                    if time.monotonic() - outstanding >= limit:
+                    if time.monotonic() - outstanding >= self.frame_timeout:
                         raise TimeoutError('Viewport frame deadline')
                 self._wake.wait(0.01)
                 self._wake.clear()
@@ -262,6 +264,9 @@ class ViewportClient:
                 try:
                     value = json.loads(result.read_bytes())
                     wire.require(type(value) is dict, 'Broker shutdown receipt object')
+                    wire.require(value.get('session') == session
+                                 and value.get('broker_pid') == process.pid,
+                                 'Broker shutdown receipt identity')
                     with self._lock:
                         self._last_result = value
                     if value.get('status') != 'stopped' or value.get('child_reaped') is not True:
