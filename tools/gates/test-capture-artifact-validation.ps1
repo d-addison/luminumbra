@@ -287,6 +287,33 @@ try {
     Assert-Rejected { Assert-RunPinned } "last-known-runtime.json" "oversized runtime state"
     Remove-Item -LiteralPath $metadata
     Assert-Rejected { Assert-RunPinned } "last-known-runtime.json" "missing runtime metadata"
+    # Exercise the exact shared reader used by FarLodHorizon and other gates.
+    $readerPath = Join-Path $fixtureRoot "reader.json"
+    [System.IO.File]::WriteAllText($readerPath, '{"schema":"luminumbra.farlod_horizon.v1","value":17}')
+    $read = Read-JsonArtifact -Path $readerPath -Schema "luminumbra.farlod_horizon.v1"
+    Assert-Test ($read.value -eq 17) "JSON reader returns the actual object"
+    $read = Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1"
+    Assert-Test ($read.value -eq 17) "JSON reader retains positional callers"
+    foreach ($invalid in @('', 'null', '[]', '[{"schema":"luminumbra.farlod_horizon.v1"}]',
+        '{', '{"schema":"wrong"}', '{"Schema":"luminumbra.farlod_horizon.v1"}',
+        '{"schema":17}', '{"schema":"LUMINUMBRA.FARLOD_HORIZON.V1"}')) {
+        [System.IO.File]::WriteAllText($readerPath, $invalid)
+        $message = $null
+        try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+        catch { $message = $_.Exception.Message }
+        Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses invalid JSON/schema and identifies its input"
+    }
+    $oversized = [System.IO.File]::OpenWrite($readerPath)
+    try { $oversized.SetLength(16777217) } finally { $oversized.Dispose() }
+    $message = $null
+    try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+    catch { $message = $_.Exception.Message }
+    Assert-Test ($message -like '*16 MiB*') "reader refuses oversized input"
+    Remove-Item -LiteralPath $readerPath
+    $message = $null
+    try { Read-JsonArtifact $readerPath "luminumbra.farlod_horizon.v1" | Out-Null }
+    catch { $message = $_.Exception.Message }
+    Assert-Test ($null -ne $message -and $message.Contains($readerPath)) "reader refuses missing input"
     Write-Host "CaptureArtifactValidationContract: $checks assertions passed (file-only; no visual approval)."
 } finally {
     if (Test-Path -LiteralPath $fixtureRoot) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
