@@ -23,12 +23,23 @@ readonly ROWS_FILE="$DIAG_DIR/rows.md"
 readonly SUMMARY_FILE="$DIAG_DIR/summary.md"
 readonly RUNTIME_DLLS=(libwinpthread-1.dll libstdc++-6.dll libgcc_s_seh-1.dll)
 readonly BUILD_PROCESS_NAMES=(ninja cmake cc1plus cc1 collect2 ld as gcc g++)
+# Native Windows build tools that procps cannot see; matched through tasklist.exe.
+readonly WIN_BUILD_IMAGES=(cmake.exe ninja.exe cc1plus.exe g++.exe gcc.exe ld.exe collect2.exe ctest.exe)
 
 CELLS="${CELLS:-0 1 2 3 4 5}"
 STEP_TIMEOUT_MINUTES="${STEP_TIMEOUT_MINUTES:-25}"
 # Total budget for one cell (or the baseline staging pass). Every download,
 # package transaction, configure, build and test runs under the remaining budget.
 CELL_TIMEOUT_MINUTES="${CELL_TIMEOUT_MINUTES:-45}"
+# Whole-script budget, inside the 150 minute job limit. The reserve keeps time
+# for the final restore and the artifact upload; only the final restore uses it.
+readonly TOTAL_BUDGET_SECONDS=8100
+readonly RESERVE_SECONDS=900
+# A cell is started only when at least this much budget remains above the reserve.
+readonly CELL_MIN_SECONDS=1800
+SCRIPT_START="$SECONDS"
+RESTORE_PHASE=0
+PKG_REASON=""
 
 # Downgrade targets. Only packages that are installed in the baseline are changed.
 CRT_NAMES=(crt headers winpthreads libwinpthread)
@@ -91,20 +102,34 @@ begin_deadline() {
     CELL_START="$(date +%s)"
 }
 
-# cell_budget: print the time limit for one operation, capped by the cell
-# budget that remains. Fails when the budget is exhausted.
+# budget_left: seconds left in the whole-script budget. Cells and staging keep
+# the restore reserve back; the final restore may spend it.
+budget_left() {
+    local left=$(( SCRIPT_START + TOTAL_BUDGET_SECONDS - SECONDS ))
+    if (( RESTORE_PHASE == 0 )); then
+        left=$(( left - RESERVE_SECONDS ))
+    fi
+    printf '%s' "$left"
+}
+
+# cell_budget: print the time limit for one operation: the configured step limit,
+# capped by the cell budget and the script budget that remain. Fails when either
+# is exhausted.
 cell_budget() {
-    local left step
+    local left overall limit
     left=$(( CELL_START + CELL_TIMEOUT_MINUTES * 60 - $(date +%s) ))
-    if (( left <= 0 )); then
+    overall="$(budget_left)"
+    if (( left <= 0 || overall <= 0 )); then
         return 1
     fi
-    step=$(( STEP_TIMEOUT_MINUTES * 60 ))
-    if (( left < step )); then
-        printf '%ss' "$left"
-    else
-        printf '%sm' "$STEP_TIMEOUT_MINUTES"
+    limit=$(( STEP_TIMEOUT_MINUTES * 60 ))
+    if (( left < limit )); then
+        limit=$left
     fi
+    if (( overall < limit )); then
+        limit=$overall
+    fi
+    printf '%ss' "$limit"
 }
 
 # bounded COMMAND...: run under the cell deadline, with a forced kill 30 s after
@@ -130,6 +155,27 @@ classify_rc() {
     fi
 }
 
+# op_failure_status RC FAILURE: TIMED_OUT for a timed-out operation, else FAILURE.
+op_failure_status() {
+    if is_timeout_rc "$1"; then
+        echo TIMED_OUT
+    else
+        echo "$2"
+    fi
+}
+
+# record_reason DIR: write the last package failure reason beside the cell status.
+record_reason() {
+    printf '%s\n' "${PKG_REASON:-package operation failed}" > "$1/reason.txt" || true
+}
+
+# cell_can_start: true when the budget, less the restore reserve, can fund a cell.
+cell_can_start() {
+    local overall
+    overall="$(budget_left)"
+    (( overall >= CELL_MIN_SECONDS ))
+}
+
 # retire_path PATH: remove a tree and verify it is gone, retrying briefly.
 retire_path() {
     local path="$1" attempt
@@ -144,12 +190,60 @@ retire_path() {
     return 1
 }
 
+# native_build_pids: print "PID IMAGE" for each native Windows process that is a
+# known build tool or a test binary built under $PWD/build. Prints nothing when
+# tasklist.exe is absent (non-Windows hosts).
+native_build_pids() {
+    local name pid image
+    local -a targets=("${WIN_BUILD_IMAGES[@]}")
+    if ! command -v tasklist.exe >/dev/null 2>&1; then
+        return 0
+    fi
+    while IFS= read -r name; do
+        targets+=("$(basename "$name")")
+    done < <(find "$PWD/build" -type f \( -name '*_test.exe' -o -name 'luminumbra*test*.exe' \) 2>/dev/null)
+    tasklist.exe //FO CSV //NH 2>/dev/null | tr -d '\r' \
+        | awk -F'","' '{ sub(/^"/, "", $1); print $2 " " $1 }' \
+        | while read -r pid image; do
+            for name in "${targets[@]}"; do
+                if [[ "${image,,}" == "${name,,}" ]]; then
+                    printf '%s %s\n' "$pid" "$image"
+                    break
+                fi
+            done
+        done
+    return 0
+}
+
+# ensure_no_native_build_processes: terminate surviving native build processes
+# with their child trees, then poll for up to about 30 s until none remain.
+ensure_no_native_build_processes() {
+    local attempt pid image survivors
+    for (( attempt = 0; attempt < 15; attempt++ )); do
+        survivors="$(native_build_pids)"
+        if [[ -z "$survivors" ]]; then
+            return 0
+        fi
+        while read -r pid image; do
+            taskkill.exe //F //T //PID "$pid" >/dev/null 2>&1 || true
+        done <<< "$survivors"
+        sleep 2
+    done
+    survivors="$(native_build_pids)"
+    if [[ -z "$survivors" ]]; then
+        return 0
+    fi
+    PKG_REASON="native build process survived termination: ${survivors%%$'\n'*}"
+    return 1
+}
+
 # ensure_no_build_descendants: no compiler, linker or build-tool process may
 # survive before a package swap. Fails closed when the process tools are absent.
 ensure_no_build_descendants() {
     local name attempt remaining
     if ! command -v pgrep >/dev/null 2>&1 || ! command -v pkill >/dev/null 2>&1; then
-        echo "pgrep/pkill unavailable; cannot verify build descendants" >&2
+        PKG_REASON="pgrep/pkill unavailable; cannot verify build descendants"
+        echo "$PKG_REASON" >&2
         return 1
     fi
     for attempt in 1 2 3; do
@@ -167,22 +261,25 @@ ensure_no_build_descendants() {
     done
     for name in "${BUILD_PROCESS_NAMES[@]}"; do
         if pgrep -x "$name" >/dev/null 2>&1; then
-            echo "build process still running: $name" >&2
+            PKG_REASON="build process still running: $name"
+            echo "$PKG_REASON" >&2
             return 1
         fi
     done
+    ensure_no_native_build_processes || return 1
     return 0
 }
 
-# fetch_url URL DEST: download to DEST via a partial file, or fail cleanly.
+# fetch_url URL DEST: download to DEST via a partial file. Returns the download
+# status unchanged, so a timeout (124/137) stays visible to the caller.
 fetch_url() {
-    local url="$1" dest="$2"
-    if bounded curl -fsSL --retry 3 -o "$dest.part" "$url"; then
-        mv -f "$dest.part" "$dest" || return 1
-    else
+    local url="$1" dest="$2" rc=0
+    bounded curl -fsSL --retry 3 -o "$dest.part" "$url" || rc=$?
+    if (( rc != 0 )); then
         rm -f "$dest.part"
-        return 1
+        return "$rc"
     fi
+    mv -f "$dest.part" "$dest" || return 1
 }
 
 # package_path MODE NAME VERSION: print the local archive path. MODE "restore"
@@ -197,8 +294,8 @@ package_path() {
         return 0
     fi
     mkdir -p "$CACHE_DIR" || return 1
-    fetch_url "$REPO_BASE/$file" "$CACHE_DIR/$file" || return 1
-    fetch_url "$REPO_BASE/$file.sig" "$CACHE_DIR/$file.sig" || return 1
+    fetch_url "$REPO_BASE/$file" "$CACHE_DIR/$file" || return $?
+    fetch_url "$REPO_BASE/$file.sig" "$CACHE_DIR/$file.sig" || return $?
     printf '%s\n' "$CACHE_DIR/$file"
 }
 
@@ -240,30 +337,41 @@ stage_baseline() {
 
 # install_pairs MODE NAME=VERSION...: one pacman -U transaction, then verify.
 install_pairs() {
-    local mode="$1" pair name version path
+    local mode="$1" pair name version path rc=0
     shift
     local files=()
     if [[ $# -eq 0 ]]; then
         return 0
     fi
+    PKG_REASON=""
     if ! ensure_no_build_descendants; then
-        echo "package swap refused: build processes still present" >&2
+        echo "package swap refused: ${PKG_REASON:-build processes still present}" >&2
         return 1
     fi
     for pair in "$@"; do
         name="${pair%%=*}"
         version="${pair#*=}"
-        if ! path="$(package_path "$mode" "$name" "$version")"; then
-            echo "package unavailable ($mode): $PKG_PREFIX-$name-$version" >&2
-            return 1
+        rc=0
+        path="$(package_path "$mode" "$name" "$version")" || rc=$?
+        if (( rc != 0 )); then
+            PKG_REASON="package unavailable ($mode, status $rc): $PKG_PREFIX-$name-$version"
+            echo "$PKG_REASON" >&2
+            return "$rc"
         fi
         files+=("$path")
     done
-    if ! bounded pacman -U --noconfirm "${files[@]}"; then
-        echo "pacman -U failed or timed out" >&2
+    rc=0
+    bounded pacman -U --noconfirm "${files[@]}" || rc=$?
+    if (( rc != 0 )); then
+        PKG_REASON="pacman -U failed or timed out (status $rc)"
+        echo "$PKG_REASON" >&2
+        return "$rc"
+    fi
+    if ! verify_pairs "$@"; then
+        PKG_REASON="installed versions do not match the requested pairs"
         return 1
     fi
-    verify_pairs "$@"
+    return 0
 }
 
 # verify_pairs NAME=VERSION...: every named package must report that version.
@@ -293,7 +401,8 @@ downgrade_cohort() {
         fi
     done
     if (( ${#pairs[@]} == 0 )); then
-        echo "no installed cohort members to downgrade" >&2
+        PKG_REASON="no installed cohort members to downgrade"
+        echo "$PKG_REASON" >&2
         return 1
     fi
     DIRTY=1
@@ -313,11 +422,9 @@ restore_baseline() {
             pairs+=("$name=${BASELINE_VERSION[$name]}")
         fi
     done
-    if install_pairs restore "${pairs[@]}"; then
-        DIRTY=0
-        return 0
-    fi
-    return 1
+    install_pairs restore "${pairs[@]}" || return $?
+    DIRTY=0
+    return 0
 }
 
 verify_baseline() {
@@ -451,14 +558,6 @@ resolve_exe() {
     fi
 }
 
-build_failure_status() {
-    if is_timeout_rc "$1"; then
-        echo TIMED_OUT
-    else
-        echo BUILD_FAILED
-    fi
-}
-
 # apply_intervention ACTION: apply one package cohort downgrade, if the action is one.
 apply_intervention() {
     case "$1" in
@@ -483,6 +582,7 @@ run_cell() {
     local has_probe=0 perf_exe="" probe_exe="" candidate="" bindir="" rc=0 status
     local -a exes=()
 
+    PKG_REASON=""
     begin_deadline
     if ! retire_path "$dir" || ! retire_path "$bdir"; then
         mkdir -p "$dir" || return 1
@@ -494,22 +594,25 @@ run_cell() {
     # Every intervention is preceded by a verified restore, whatever cells were
     # selected. Cells 0 and 5 only verify the baseline.
     if [[ "$action" == none ]]; then
-        if ! verify_baseline; then
-            finish_cell "$dir" RESTORE_FAILED || return 1
-            ABORT_RUN=1
-            return 0
-        fi
-    elif ! restore_to_baseline; then
-        finish_cell "$dir" RESTORE_FAILED || return 1
+        verify_baseline || rc=$?
+    else
+        restore_to_baseline || rc=$?
+    fi
+    if (( rc != 0 )); then
+        record_reason "$dir"
+        finish_cell "$dir" "$(op_failure_status "$rc" RESTORE_FAILED)" || return 1
         ABORT_RUN=1
         return 0
     fi
 
-    if ! apply_intervention "$action"; then
+    rc=0
+    apply_intervention "$action" || rc=$?
+    if (( rc != 0 )); then
         if ! restore_to_baseline; then
             ABORT_RUN=1
         fi
-        finish_cell "$dir" INSTALL_FAILED || return 1
+        record_reason "$dir"
+        finish_cell "$dir" "$(op_failure_status "$rc" INSTALL_FAILED)" || return 1
         return 0
     fi
 
@@ -518,7 +621,7 @@ run_cell() {
     rc=0
     bounded cmake --preset release -B "$bdir" > "$dir/configure.log" 2>&1 || rc=$?
     if (( rc != 0 )); then
-        finish_cell "$dir" "$(build_failure_status "$rc")" || return 1
+        finish_cell "$dir" "$(op_failure_status "$rc" BUILD_FAILED)" || return 1
         return 0
     fi
 
@@ -535,7 +638,7 @@ run_cell() {
     bounded cmake --build "$bdir" --target initial_world_loading_perf_test --parallel 4 \
         > "$dir/build.log" 2>&1 || rc=$?
     if (( rc != 0 )); then
-        CELL_PERF="$(build_failure_status "$rc")"
+        CELL_PERF="$(op_failure_status "$rc" BUILD_FAILED)"
     else
         candidate="$(resolve_exe "$bdir/bin/initial_world_loading_perf_test")"
         if [[ -f "$candidate" ]]; then
@@ -550,7 +653,7 @@ run_cell() {
         bounded cmake --build "$bdir" --target worldgen_probe --parallel 4 \
             > "$dir/probe-build.log" 2>&1 || rc=$?
         if (( rc != 0 )); then
-            CELL_PROBE="$(build_failure_status "$rc")"
+            CELL_PROBE="$(op_failure_status "$rc" BUILD_FAILED)"
         else
             candidate="$(resolve_exe "$bdir/bin/worldgen_probe")"
             if [[ -f "$candidate" ]]; then
@@ -612,6 +715,17 @@ write_summary() {
     } > "$SUMMARY_FILE"
 }
 
+# skip_cell CELL: record a cell the script budget did not allow to run.
+skip_cell() {
+    CELL="$1"
+    CELL_PROBE=NOT_RUN
+    CELL_PERF=NOT_RUN
+    CELL_PREP=""
+    CELL_WALL=""
+    mkdir -p "$DIAG_DIR/cell-$CELL" || return 1
+    finish_cell "$DIAG_DIR/cell-$CELL" SKIPPED_BUDGET
+}
+
 # finalize: EXIT trap. Restores the baseline when a package swap is pending,
 # records a cell that did not finish, and writes the summary from the rows
 # that exist.
@@ -630,6 +744,7 @@ finalize() {
         EXPERIMENT_STATUS=INCOMPLETE
     fi
     if (( DIRTY )); then
+        RESTORE_PHASE=1
         begin_deadline
         if ! restore_to_baseline; then
             echo "final restore to baseline failed" >&2
@@ -664,7 +779,18 @@ main() {
         echo "baseline staging failed; no intervention was attempted" >&2
         exit 0
     fi
+    local skipping=0
     for cell in $CELLS; do
+        if (( skipping == 0 )) && ! cell_can_start; then
+            skipping=1
+            EXPERIMENT_STATUS=BUDGET_EXHAUSTED
+            echo "script budget exhausted; skipping cell $cell and the cells after it" >&2
+        fi
+        if (( skipping )); then
+            skip_cell "$cell" || true
+            write_summary
+            continue
+        fi
         run_cell "$cell"
         write_summary
         if (( ABORT_RUN )); then
