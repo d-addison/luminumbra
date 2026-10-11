@@ -42,7 +42,10 @@ retained lease should hold.
 
 ## Transactional guarantees
 
-- A refused admission allocates nothing and fails with `AllocationFailure`.
+- A refused admission allocates nothing and fails with `AllocationFailure`. The one exception
+  is a standard library whose `reserve(n)` returns more than `n` elements of capacity: the
+  surplus is charged after the allocation, and a refusal then frees the buffer first. The
+  supported libraries reserve exactly, and a test pins that.
 - On success, `retained` is replaced with the new output's bytes and the output is assigned.
 - On any failure, including cancellation by a callback, the caller's output, its
   `retained` lease and the pool's `used` value are unchanged.

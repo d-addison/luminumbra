@@ -167,6 +167,10 @@ TEST(FarVolumeMemory, ReserveChargedRefusalLeavesVectorAndLeaseUnchanged) {
     pool.RefuseAttemptsFrom(memMax);
     ASSERT_TRUE(FarVolumeReserveCharged(values, 1, 1000, &lease));
     EXPECT_GE(values.capacity(), 1u);
+    // The no-allocation-on-refusal guarantee relies on reserve(n) giving capacity n.
+    std::vector<std::uint64_t> exact;
+    exact.reserve(16);
+    EXPECT_EQ(exact.capacity(), 16u);
     EXPECT_EQ(lease.bytes(), values.capacity() * sizeof(std::uint64_t));
     EXPECT_EQ(pool.used(), lease.bytes());
 }

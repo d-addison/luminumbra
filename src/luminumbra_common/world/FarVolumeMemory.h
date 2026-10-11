@@ -293,8 +293,11 @@ private:
 // The replacement is built in a separate buffer, so a refusal or an exception leaves
 // the vector and the lease exactly as they were. Peak charge is old + new. If an
 // implementation rounds reserve() up, the surplus is charged immediately after the
-// allocation and rolled back (buffer discarded) on refusal; the standard libraries
-// used here reserve exactly. Returns false on refusal.
+// allocation and rolled back (buffer freed before the charge is released) on refusal.
+// That is the one case where a system allocation precedes a refusal, so the guarantee
+// "no allocation on refusal" is narrowed to implementations whose reserve(n) yields
+// capacity n: libstdc++, libc++ and the MSVC STL do, and a test pins it.
+// Returns false on refusal.
 template<class T>
 bool FarVolumeReserveCharged(std::vector<T>& vector,
                              std::size_t needed,
