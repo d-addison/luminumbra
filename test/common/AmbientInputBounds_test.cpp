@@ -4,15 +4,18 @@
 // input whose length is not a whole vector can read past its end. The probe places each input so
 // it ends exactly at a page boundary, with the following page unmapped. The vendored tail load is
 // expected to fault for an exact-size 2-element input, and a 16-element padded input must not.
-// Linux only. The fault test is not applicable under AddressSanitizer, which intercepts the
-// out-of-bounds read itself. Non-applicable cases pass and record a probe_status property, because
-// CI rejects skipped tests.
+// The fault probe is Linux only (other platforms run the padded call without a guard page). The
+// fault test is not applicable under AddressSanitizer, which intercepts the out-of-bounds read
+// itself; the asan lane instead runs the padded call (design decision recorded with the slice).
+// Non-applicable cases pass and record a probe_status property, because CI rejects skipped tests.
 
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "luminumbra_common/systems/AmbientNoiseDispatch.h"
 
@@ -180,7 +183,25 @@ TEST(AmbientInputBounds, SixteenElementPaddedInputDoesNotFault) {
     EXPECT_FALSE(ProbeFaults(16, 2))
         << "a whole-vector padded input must not fault on the tail load";
 #else
-    RecordProperty("probe_status", "not_applicable: guard-page probe is Linux only");
+    // No guard-page probe off Linux: still run the padded call pattern on heap inputs so the
+    // padded regression covers every lane, and require finite output.
+    RecordProperty("probe_status", "ran_without_guard_page");
+    constexpr int kCount = 2;
+    std::vector<float> xs(16, 0.0f);
+    std::vector<float> ys(16, 0.0f);
+    for (int i = 0; i < kCount; ++i) {
+        xs[static_cast<std::size_t>(i)] = 0.37f * static_cast<float>(i + 1);
+        ys[static_cast<std::size_t>(i)] = 0.53f * static_cast<float>(i + 1);
+    }
+    auto fractal = Luminumbra::Systems::NewAmbientNoise<FastNoise::FractalFBm>();
+    auto simplex = Luminumbra::Systems::NewAmbientNoise<FastNoise::Simplex>();
+    fractal->SetSource(simplex);
+    fractal->SetOctaveCount(2);
+    std::array<float, 16> out{};
+    fractal->GenPositionArray2D(out.data(), kCount, xs.data(), ys.data(), 0.0f, 0.0f, 424242);
+    for (int i = 0; i < kCount; ++i) {
+        EXPECT_TRUE(std::isfinite(out[static_cast<std::size_t>(i)]));
+    }
 #endif
 }
 
