@@ -277,7 +277,7 @@ TEST(ReversedZProjection, LadderPlaneEndpointsAndMonotonicDepth) {
     EXPECT_NEAR(ndc_z_at(NEAR_PLANE), 1.0f, 1e-4f);
     EXPECT_NEAR(ndc_z_at(Luminumbra::World::kFarPlaneMeters), 0.0f, 1e-5f);
     float previous = std::numeric_limits<float>::max();
-    for (float distance : {1.0f, 30.0f, 3000.0f, 3200.0f, 16000.0f, 16384.0f, 17000.0f}) {
+    for (const float distance : {1.0f, 30.0f, 3000.0f, 3200.0f, 16000.0f, 16384.0f, 17000.0f}) {
         SCOPED_TRACE(distance);
         const float ndc_z = ndc_z_at(distance);
         EXPECT_TRUE(std::isfinite(ndc_z));
@@ -289,7 +289,7 @@ TEST(ReversedZProjection, LadderPlaneEndpointsAndMonotonicDepth) {
 }
 
 TEST(ReversedZProjection, LegacyAndLadderPlanesKeepTheSameNearEndpoint) {
-    for (float far_plane :
+    for (const float far_plane :
          {Luminumbra::World::kLegacyFarPlaneMeters, Luminumbra::World::kFarPlaneMeters}) {
         SCOPED_TRACE(far_plane);
         const glm::mat4 m = ReversedZPerspective(glm::radians(90.0f), 1.0f, NEAR_PLANE, far_plane);

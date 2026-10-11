@@ -1,8 +1,7 @@
 #include "luminumbra_common/world/FarHorizon.h"
+#include "luminumbra_common/world/FarTierTable.h"
 
 #include <gtest/gtest.h>
-
-#include <cstdint>
 
 namespace {
 
