@@ -8,13 +8,28 @@ on:
   schedule:
     - cron: "17 7 * * *"
   workflow_dispatch:
+    inputs:
+      qualification_capture:
+        description: 'Explicit same-head AC2/AC4 artifact capture'
+        type: boolean
+        default: false
+      expected_sha:
+        description: 'Full candidate SHA; required when qualification capture is enabled'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Manual qualification attempts cannot cancel one another or ordinary runs.
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.qualification_capture && format('{0}-qualification-{1}', github.workflow, github.run_id) || format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.qualification_capture) }}
+
+env:
+  QUALIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+  QUALIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
+  QUALIFICATION_EXPECTED_SHA: ${{ inputs.expected_sha }}
 
 jobs:
   runner-contract:
@@ -35,6 +50,7 @@ jobs:
           python tools/perf/test_render_contract.py
           python tools/perf/test_render_budget.py
           python tools/ci/test_validate_performance_measurement.py
+          python tools/ci/test_qualification_capture.py
 
   preview-frame:
     name: Preview frame / software OpenGL
@@ -412,5 +428,86 @@ jobs:
             build/head/water-smoke-run-*.json
             build/head/water-smoke-evidence-*.json
             build/water-smoke-comparison.json
+          if-no-files-found: error
+          retention-days: 30
+
+  qualification-capture:
+    name: Simulation budget qualification / candidate
+    # Independent candidate-only path: a missing/incompatible comparison base
+    # never prevents AC2 source evidence. Routine paired routing stays above.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualification_capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact dispatched candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify manual qualification identity and dependencies
+        id: identity
+        run: python3 tools/ci/qualification_capture.py preflight --lane server-capture --expected-sha "$QUALIFICATION_EXPECTED_SHA"
+      - name: Install candidate build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake extra-cmake-modules libfreetype6-dev \
+            libgl1-mesa-dev libglu1-mesa-dev libwayland-dev libxkbcommon-dev \
+            ninja-build pkg-config python3-numpy python3-pil wayland-protocols xorg-dev
+      - name: Restore candidate compiler cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: qualification-server-linux-x64-gcc-${{ github.sha }}
+          restore-keys: qualification-server-linux-x64-gcc-
+      - name: Configure candidate
+        id: configure
+        run: |
+          cmake -S . -B build/qualification-build -G Ninja \
+            -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -g -DNDEBUG -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DLUMINUMBRA_ENABLE_ASAN=OFF -DLUMINUMBRA_ENABLE_COVERAGE=OFF \
+            -DLUMINUMBRA_ENABLE_DILIGENT=OFF -DLUMINUMBRA_ENABLE_FRAME_POINTERS=ON \
+            -DLUMINUMBRA_ENABLE_TRACY=OFF -DLUMINUMBRA_WARNINGS_AS_ERRORS=ON
+      - name: Build candidate server
+        id: build
+        run: cmake --build build/qualification-build --target luminumbra_server_app --parallel 4
+      - name: Capture candidate simulation evidence
+        id: capture
+        timeout-minutes: 20
+        run: |
+          mkdir -p build/qualification
+          python3 tools/perf/capture_sim_budget.py \
+            --binary build/qualification-build/bin/luminumbra_server_app \
+            --evidence-dir build/qualification/sim-budget-capture \
+            --ticks 600 --seed 1337 --radius 1 --collision-radius 1
+      - name: Propose candidate simulation budgets
+        id: proposal
+        run: python3 tools/perf/propose_sim_budgets.py build/qualification/sim-budget-capture --output build/qualification/sim-budget-proposal.json
+      - name: Record existing budget check separately
+        id: check
+        run: |
+          cp tools/perf/baselines/sim-budgets.json build/qualification/sim-budget-baseline.json
+          python3 tools/perf/check_sim_budgets.py build/qualification/sim-budget-capture \
+            build/qualification/sim-budget-baseline.json --output build/qualification/sim-budget-check.json
+      - name: Bind candidate qualification evidence
+        if: always()
+        env:
+          QUALIFICATION_PRODUCERS: '{"identity":"${{ steps.identity.outcome }}","configure":"${{ steps.configure.outcome }}","build":"${{ steps.build.outcome }}","capture":"${{ steps.capture.outcome }}","proposal":"${{ steps.proposal.outcome }}","check":"${{ steps.check.outcome }}"}'
+        run: |
+          python3 tools/ci/qualification_capture.py write --lane server-capture \
+            --expected-sha "$QUALIFICATION_EXPECTED_SHA" \
+            --binary build/qualification-build/bin/luminumbra_server_app \
+            --capture build/qualification/sim-budget-capture \
+            --proposal build/qualification/sim-budget-proposal.json \
+            --check build/qualification/sim-budget-check.json \
+            --baseline build/qualification/sim-budget-baseline.json \
+            --output build/qualification/qualification-capture.json
+      - name: Upload candidate qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualification-server-capture-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/qualification
           if-no-files-found: error
           retention-days: 30
