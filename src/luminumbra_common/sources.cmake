@@ -81,6 +81,7 @@ set(COMMON_SOURCES
     ${CMAKE_CURRENT_LIST_DIR}/world/Chunk.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarLodStore.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/FarWantedSet.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/world/FarAuthorityOverlay.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/ActiveRegionLedger.cpp
     ${CMAKE_CURRENT_LIST_DIR}/replay/RegionScheduleTrace.cpp
     ${CMAKE_CURRENT_LIST_DIR}/world/WorldClock.cpp

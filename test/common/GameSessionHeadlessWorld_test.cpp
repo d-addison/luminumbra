@@ -35,6 +35,7 @@
 #include "luminumbra_common/scripting/LuaState.h"
 #include "luminumbra_common/systems/SHIELD_WorldSystem.h"
 #include "luminumbra_common/world/Chunk.h"
+#include "luminumbra_common/world/FarAuthorityOverlay.h"
 #include "luminumbra_common/world/GameSession.h"
 #include "luminumbra_common/world/WorldStreamingState.h"
 
@@ -1838,4 +1839,44 @@ TEST(GameSessionHeadlessWorldTest, ReplayScheduleCompanionRoundTripsAndRefusesIn
     EXPECT_FALSE(ReadRegionScheduleTrace(path, 2, restored, error));
     EXPECT_EQ(error, "Unsupported future region schedule trace version.");
     EXPECT_FALSE(WriteRegionScheduleTrace(path, {{2, "0123456789abcdef"}}, error));
+}
+
+TEST(GameSessionHeadlessWorldTest, FarOverlayFilesDoNotChangeTheWorldHash) {
+    using Luminumbra::World::FarBrickState;
+    using Luminumbra::World::FarOverlayBrick;
+    using Luminumbra::World::FarOverlayTile;
+    using Luminumbra::World::FarTileKey;
+
+    const HeadlessRoot root;
+    JobSystem jobs;
+    jobs.startup(1);
+    GameSession original, loaded, reloaded;
+    for (auto* session : {&original, &loaded, &reloaded}) {
+        session->SetRootPath(root.root_string());
+        session->SetJobSystem(&jobs);
+    }
+    ASSERT_TRUE(original.CreateWorld("Far overlay", "1337", "default"));
+    ASSERT_TRUE(original.SaveWorldState());
+    const auto save = original.GetWorldSaveDir();
+    const auto before = SessionWorldHash(original);
+
+    FarOverlayTile near_tile;
+    near_tile.key = FarTileKey{1, 0, 0};
+    near_tile.generation = 1;
+    near_tile.bricks.push_back(FarOverlayBrick{0, 0, 0, FarBrickState::HomogeneousAir});
+    FarOverlayTile coarse_tile;
+    coarse_tile.key = FarTileKey{3, -1, -1};
+    coarse_tile.generation = 1;
+    coarse_tile.bricks.push_back(FarOverlayBrick{-32, 1, -32, FarBrickState::HomogeneousSolid});
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, near_tile));
+    ASSERT_TRUE(Luminumbra::World::WriteFarOverlay(save, coarse_tile));
+    ASSERT_TRUE(P::WorldSaveService::validate_save(save));
+    ASSERT_TRUE(Luminumbra::World::ValidateFarOverlayDirectory(save));
+
+    ASSERT_TRUE(loaded.LoadWorld(original.GetMetadata().worldId)) << loaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(loaded), before);
+
+    fs::remove_all(save / "far");
+    ASSERT_TRUE(reloaded.LoadWorld(original.GetMetadata().worldId)) << reloaded.GetWorldOpenError();
+    EXPECT_EQ(SessionWorldHash(reloaded), before);
 }

@@ -164,6 +164,17 @@ public:
     // tests.
     static void set_interrupt_before_region_replace_for_testing(bool enabled);
 
+    // Writes `bytes` to `destination` with the same durability contract as an LMR1
+    // region rewrite: the parent directory is created, a unique temporary file in
+    // the destination directory is flushed to stable storage, and it atomically
+    // replaces the destination. A failed or interrupted write (including the
+    // interrupt-before-replace test seam above) removes the temporary file and
+    // leaves any previous destination untouched. Used for derived files that live
+    // beside the save, such as the far authority overlay.
+    static bool write_file_durably(const std::filesystem::path& destination,
+                                   const std::string& bytes,
+                                   std::vector<std::string>* errors = nullptr);
+
     // Called after ledger staging is flushed/closed, before replacement. Returning
     // false fails the write and cleans up; a test subprocess may terminate here
     // to leave real crash debris. Single-threaded persistence tests only; nullptr

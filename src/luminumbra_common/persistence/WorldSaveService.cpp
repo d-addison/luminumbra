@@ -1253,6 +1253,37 @@ void WorldSaveService::set_interrupt_before_region_replace_for_testing(bool enab
     InterruptBeforeRegionReplaceForTesting().store(enabled, std::memory_order_release);
 }
 
+bool WorldSaveService::write_file_durably(const std::filesystem::path& destination,
+                                          const std::string& bytes,
+                                          std::vector<std::string>* errors) {
+    std::error_code directory_error;
+    if (destination.has_parent_path()) {
+        std::filesystem::create_directories(destination.parent_path(), directory_error);
+    }
+    if (directory_error) {
+        AddError(errors,
+                 "cannot create directory " + destination.parent_path().string() + ": " +
+                     directory_error.message());
+        return false;
+    }
+    std::filesystem::path temp_path;
+    if (!WriteDurableRegionTemp(destination, bytes, temp_path, errors)) {
+        return false;
+    }
+    if (InterruptBeforeRegionReplaceForTesting().exchange(false, std::memory_order_acq_rel)) {
+        RemoveTemporaryFile(temp_path);
+        AddError(errors,
+                 "file replacement interrupted by test seam before replacing: " +
+                     destination.string());
+        return false;
+    }
+    if (!ReplaceRegionFileAtomically(temp_path, destination, errors)) {
+        RemoveTemporaryFile(temp_path);
+        return false;
+    }
+    return true;
+}
+
 void WorldSaveService::set_before_active_regions_replace_for_testing(bool (*hook)()) {
     BeforeActiveRegionsReplaceForTesting() = hook;
 }
