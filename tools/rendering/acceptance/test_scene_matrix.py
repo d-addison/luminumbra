@@ -23,6 +23,7 @@ SRC = REPO_ROOT / "src" / "luminumbra_client"
 MATRIX_PATH = HERE / "scene_matrix.json"
 VALIDATOR_PATH = REPO_ROOT / "tools" / "perf" / "validate_render_capture.py"
 
+sys.dont_write_bytecode = True  # never leave bytecode in the source tree
 sys.path.insert(0, str(HERE))
 import scene_matrix as sm  # noqa: E402
 
@@ -165,6 +166,13 @@ class MatrixSchemaTests(unittest.TestCase):
         data["scenes"][0]["variants"][1]["weather"]["type"] = "hail"
         with self.assertRaises(sm.MatrixError):
             sm.validate_matrix(data)
+
+
+class FormatTests(unittest.TestCase):
+    def test_numbers_round_trip_exactly(self):
+        self.assertEqual(float(sm._fmt(56.123456)), 56.123456)
+        self.assertEqual(float(sm._fmt(0.9999999)), 0.9999999)
+        self.assertEqual(sm._fmt(8), "8")
 
 
 class VariantSemanticsTests(unittest.TestCase):

@@ -239,7 +239,8 @@ def scene_config(entry, screenshot):
 
 
 def _fmt(value):
-    return f"{value:g}"
+    """Format a number so it round-trips exactly (the validator tolerance is 1e-5)."""
+    return repr(value) if isinstance(value, float) else str(value)
 
 
 def _join(args):
