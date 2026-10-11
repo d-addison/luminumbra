@@ -13,6 +13,9 @@ from .viewport_generation import GenerationReader
 
 ENGINE_ID = 'LUMINUMBRA_INSTALLED'
 _engines = weakref.WeakSet()
+# Clients whose asynchronous shutdown was requested but whose workers may still own broker and
+# host process trees; unload waits for them via stop_all(wait=True).
+_retired = []
 
 
 def main_thread():
@@ -28,6 +31,9 @@ def stop_all(wait=False):
     main_thread()
     for engine in tuple(_engines):
         engine.close(wait=wait)
+    for client in tuple(_retired):
+        if client.close(wait=wait):
+            _retired.remove(client)
 
 
 def redraw():
@@ -60,7 +66,8 @@ class LUMINUMBRA_RenderEngine(bpy.types.RenderEngine):
 
     def close(self, wait=False):
         if self.client:
-            self.client.close(wait=wait)
+            if not self.client.close(wait=wait):
+                _retired.append(self.client)
         if self.reader:
             self.reader.close()
         self.client = self.reader = None
