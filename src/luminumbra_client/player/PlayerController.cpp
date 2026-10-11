@@ -8,7 +8,8 @@ namespace Luminumbra::Client {
 
 PlayerController::PlayerController(GLFWwindow* window,
                                    Rendering::Camera* camera,
-                                   Systems::PhysicsSystem* physicsSystem)
+                                   Systems::PhysicsSystem* physicsSystem,
+                                   std::optional<glm::vec3> restored_walking_feet)
     : m_window(window)
     , m_camera(camera)
     , m_physicsSystem(physicsSystem) {
@@ -19,7 +20,10 @@ PlayerController::PlayerController(GLFWwindow* window,
     if (m_mode == MovementMode::Noclip) {
         m_position = m_camera->Position;
     } else {
-        m_position = Player::FeetFromSpawnAnchor(m_camera->Position, m_standingHeight);
+        m_position = restored_walking_feet.value_or(
+            Player::FeetFromSpawnAnchor(m_camera->Position, m_standingHeight));
+        if (restored_walking_feet)
+            m_camera->Position = Player::SavedSpawnAnchorForFeet(m_position, m_standingHeight);
         if (m_physicsSystem) {
             m_physicsSystem->create_player_controller(m_position);
             m_hasInitializedPhysicsPlayer = true;
