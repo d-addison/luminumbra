@@ -68,7 +68,10 @@ def collect_receipts(inputs):
 
 
 def last_shutdown_stage(log_path):
-    payload = log_path.read_bytes()
+    try:
+        payload = log_path.read_bytes()
+    except OSError as error:
+        raise InputError(f'{log_path}: cannot read log: {error}')
     if payload[:2] in (b'\xff\xfe', b'\xfe\xff'):
         text = payload.decode('utf-16', errors='replace')
     else:

@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -95,6 +96,20 @@ class ProcessReceiptSummaryTest(unittest.TestCase):
         entry = self.document([str(self.root)])['receipts'][0]
         self.assertIsNone(entry['last_shutdown_stage'])
         self.assertEqual(entry['placement'], 'before_shutdown_or_no_breadcrumbs')
+
+    def test_unreadable_log_exits_2_naming_the_log(self):
+        self.write_timeout('run4', 'Shutdown stage: query_cleanup_started\n')
+        original = Path.read_bytes
+
+        def read_bytes(path):
+            if path.suffix == '.log':
+                raise PermissionError('denied')
+            return original(path)
+
+        with mock.patch.object(Path, 'read_bytes', read_bytes):
+            code, _out, err = self.run_cli([str(self.root)])
+        self.assertEqual(code, 2)
+        self.assertIn('run4.log', err)
 
     def test_timed_out_with_missing_log(self):
         self.write_timeout('run3')

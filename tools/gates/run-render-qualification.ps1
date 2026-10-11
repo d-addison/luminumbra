@@ -33,10 +33,10 @@
   Directory receiving cells/, work/, host.json and qualification.json. Required.
 
 .PARAMETER DeclareRefresh
-  Operator refresh rates for displays the matrix leaves null, as 'display-id=hz'. Repeatable.
+  Operator refresh rates for displays the matrix leaves null, as 'display-id=hz'. Pass several as a comma-separated array.
 
 .PARAMETER Only
-  Cell ids to run (partial run). Repeatable.
+  Cell ids to run (partial run). Pass several as a comma-separated array.
 
 .PARAMETER TimeoutSeconds
   Per-client process timeout in seconds. Default: 900.
@@ -46,7 +46,7 @@
 
 .EXAMPLE
   pwsh tools/gates/run-render-qualification.ps1 -OutDir build/qualification-native `
-    -DeclareRefresh '3840x1600=165' -DeclareRefresh '3440x1440=144'
+    -DeclareRefresh '3840x1600=165','3440x1440=144'
 #>
 [CmdletBinding()]
 param(
@@ -104,7 +104,9 @@ $host_record = [ordered]@{
     gpus            = $gpus
     powershell      = $PSVersionTable.PSVersion.ToString()
 }
-$hostPath = Join-Path $outPath "host.json"
+# A dry run collects no evidence, so it must not rewrite the record of a previous real run.
+$hostName = if ($DryRun) { "host-dryrun.json" } else { "host.json" }
+$hostPath = Join-Path $outPath $hostName
 $host_record | ConvertTo-Json -Depth 5 | Set-Content -Path $hostPath -Encoding UTF8
 Write-Host "[render-qualification] host record -> $hostPath"
 
@@ -122,6 +124,10 @@ Write-Host "[render-qualification] python $($argv -join ' ')"
 & python @argv
 $code = $LASTEXITCODE
 
-$qualification = Join-Path $outPath "qualification.json"
-Write-Host "[render-qualification] qualification.json: $qualification"
+if ($DryRun) {
+    Write-Host "[render-qualification] dry run: plan only, see qualification-plan.json in $outPath"
+} else {
+    $qualification = Join-Path $outPath "qualification.json"
+    Write-Host "[render-qualification] qualification.json: $qualification"
+}
 exit $code
