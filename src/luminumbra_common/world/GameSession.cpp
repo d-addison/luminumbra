@@ -183,6 +183,8 @@ void GameSession::ResetWorldSystems() {
     m_regionSchedule = {};
     m_replicatedSimulationAnchors.reset();
     m_regionWork.clear();
+    m_regionFault.reset();
+    m_regionInputRejections = {};
     m_regionDurableDirectory.clear();
     m_simulationEventBus.clear();
     m_lastLoadedChunkCount = 0;
@@ -252,6 +254,8 @@ void GameSession::LoadSpeciesDefinitions() {
 }
 
 std::uint32_t GameSession::TickSimulation(double frame_dt) {
+    if (m_regionFault)
+        return 0;
     // Queued work belongs to this next tick; only reentrant batches must refuse.
     if (m_activeRegionsEnabled && m_simulationBatchInProgress)
         return 0;
@@ -974,21 +978,27 @@ std::uint32_t GameSession::TickSimulation(double frame_dt) {
         // The v2 events stage measures only the ordered drain. Region scheduling
         // has no telemetry stage or consumer work counter in this foundation.
         budget.Finish();
-        if (m_activeRegionsEnabled) {
+        if (m_activeRegionsEnabled && !m_regionFault) {
             const auto anchors =
                 m_replicatedSimulationAnchors
                     ? std::optional<std::span<const Vec3>>(*m_replicatedSimulationAnchors)
                     : std::nullopt;
-            m_regionSchedule = m_activeRegionLedger.schedule(
-                m_worldClock, anchors, m_regionWork, [this](RegionKey key) {
-                    const auto directory = m_regionDurableDirectory.empty()
-                                               ? GetWorldSaveDir()
-                                               : m_regionDurableDirectory;
-                    return Persistence::WorldSaveService::region_simulation_digest(
-                        directory, key, m_worldSystem->snapshot_streamed_chunks());
-                });
-            m_regionWork.clear();
+            try {
+                m_regionSchedule = m_activeRegionLedger.schedule(
+                    m_worldClock, anchors, m_regionWork, [this](RegionKey key) {
+                        const auto directory = m_regionDurableDirectory.empty()
+                                                   ? GetWorldSaveDir()
+                                                   : m_regionDurableDirectory;
+                        return Persistence::WorldSaveService::region_simulation_digest(
+                            directory, key, m_worldSystem->snapshot_streamed_chunks());
+                    });
+                m_regionWork.clear();
+            } catch (const std::exception& error) {
+                LatchRegionFault(current_tick, error.what());
+            }
         }
+        if (m_regionFault)
+            return i + 1; // the faulting tick's systems ran; the clock was rewound to it
     }
     return ticks_executed;
 }
@@ -1175,7 +1185,7 @@ bool GameSession::CreateWorldInternal(const std::string& name,
     m_metadata.spawnPoint = Vec3(spawn_x, terrain_height + kSpawnEyeHeight, spawn_z);
     m_ambientFieldAnchor = m_metadata.spawnPoint;
     if (m_activeRegionsEnabled)
-        m_activeRegionLedger.set_local_anchor(m_metadata.spawnPoint);
+        m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
     AttachRegionEditObserver();
     InitializeScentField(m_metadata.spawnPoint);
 
@@ -1339,24 +1349,51 @@ void GameSession::SetRegionSchedulerConfig(RegionSchedulerConfig config) {
     m_activeRegionLedger = ActiveRegionLedger(config);
     m_regionSchedulerConfig = config;
 }
+void GameSession::LatchRegionFault(std::uint64_t tick, std::string message) {
+    if (m_regionFault)
+        return; // first fault wins
+    m_regionFault = RegionSchedulerFault{tick, message};
+    m_simulationClock.reset(tick);
+    m_activeRegionLedger.acknowledge_world_clock(m_worldClock);
+    m_regionWork.clear();
+    LUMINUMBRA_CORE_ERROR("Region scheduler fault at tick {}: {}", tick, message);
+}
 void GameSession::SetLocalPlayerSimulationPosition(const Vec3& feet, bool walking) {
-    if (m_activeRegionsEnabled && walking)
-        m_activeRegionLedger.set_local_anchor(feet);
+    if (m_activeRegionsEnabled && walking && !m_activeRegionLedger.try_set_local_anchor(feet))
+        ++m_regionInputRejections.anchors;
 }
 void GameSession::SetReplicatedSimulationAnchors(std::vector<Vec3> anchors) {
     if (m_activeRegionsEnabled)
         m_replicatedSimulationAnchors = std::move(anchors);
 }
 void GameSession::NotifyGroundObjectEdit(const Vec3& position) {
-    if (m_activeRegionsEnabled)
+    if (!m_activeRegionsEnabled)
+        return;
+    if (!ActiveRegionLedger::valid_anchor(position)) {
+        ++m_regionInputRejections.edits;
+        return;
+    }
+    try {
         m_activeRegionLedger.mark_edited(ActiveRegionLedger::region_at(position), m_worldClock);
+    } catch (const std::length_error& error) {
+        LatchRegionFault(m_worldClock.tick(), error.what());
+    } catch (const std::invalid_argument&) {
+        ++m_regionInputRejections.edits;
+    }
 }
 void GameSession::PinActiveRegion(RegionKey key, bool pinned) {
-    if (m_activeRegionsEnabled)
+    if (!m_activeRegionsEnabled)
+        return;
+    try {
         m_activeRegionLedger.pin(key, pinned, m_worldClock);
+    } catch (const std::length_error& error) {
+        LatchRegionFault(m_worldClock.tick(), error.what());
+    } catch (const std::invalid_argument&) {
+        ++m_regionInputRejections.pins;
+    }
 }
 void GameSession::RecordActiveRegionWork(RegionWork work) {
-    if (m_activeRegionsEnabled)
+    if (m_activeRegionsEnabled && !m_regionFault)
         m_regionWork.push_back(work);
 }
 void GameSession::AttachRegionEditObserver() {
@@ -1364,7 +1401,13 @@ void GameSession::AttachRegionEditObserver() {
         m_worldSystem->SetVoxelEditObserver([this](const IVec3& chunk) {
             int x = 0, z = 0;
             Persistence::WorldSaveService::region_coords_for_chunk(chunk, x, z);
-            m_activeRegionLedger.mark_edited({x, z}, m_worldClock);
+            try {
+                m_activeRegionLedger.mark_edited({x, z}, m_worldClock);
+            } catch (const std::length_error& error) {
+                LatchRegionFault(m_worldClock.tick(), error.what());
+            } catch (const std::invalid_argument&) {
+                ++m_regionInputRejections.edits;
+            }
         });
 }
 
@@ -1633,11 +1676,16 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
     if (!snapshot_present && !m_activeRegionsEnabled)
         return true; // legacy fresh world
     if (m_activeRegionsEnabled) {
+        const Vec3 previous_ambient_anchor = m_ambientFieldAnchor;
         m_ambientFieldAnchor = ambient_anchor.value_or(m_metadata.spawnPoint);
         ActiveRegionLedger ledger;
         if (!Persistence::WorldSaveService::load_active_regions(
                 ledger, save_dir, &clock_errors, saved_clock)) {
-            m_worldOpenError = clock_errors.front();
+            m_ambientFieldAnchor = previous_ambient_anchor;
+            m_worldOpenError = clock_errors.empty()
+                                   ? std::string(ActiveRegionLedger::kCorruptMessage)
+                                   : clock_errors.front();
+            m_worldSystem->clear_world(m_physicsSystem.get());
             return false;
         }
         // Validation accepted ledger.tick() <= saved_clock.tick(). An interrupted
@@ -1646,10 +1694,11 @@ bool GameSession::LoadWorldStateFrom(const std::filesystem::path& save_dir) {
         ledger.restore_clock(saved_clock);
         m_activeRegionLedger = std::move(ledger);
         if (!m_activeRegionLedger.local_anchor())
-            m_activeRegionLedger.set_local_anchor(m_metadata.spawnPoint);
+            m_activeRegionLedger.try_set_local_anchor(m_metadata.spawnPoint);
         m_regionDurableDirectory = save_dir;
         m_regionSchedule = {};
         m_regionWork.clear();
+        m_regionFault.reset();
         m_replicatedSimulationAnchors.reset();
         RestoreWorldClock(saved_clock);
     }

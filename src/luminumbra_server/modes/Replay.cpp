@@ -91,6 +91,13 @@ int RunRecord(const ServerCliOptions& options) {
         writer.RecordInput(executed + 1, empty_inputs);
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
+        if (step.region_fault) {
+            LUMINUMBRA_CORE_ERROR(
+                "record: region scheduler fault at tick {}: {}; recording aborted",
+                executed,
+                step.region_fault_message);
+            return 1;
+        }
         if (step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("record: tick {} did not advance", executed + 1);
             return 1;
@@ -231,6 +238,13 @@ int RunReplay(const ServerCliOptions& options) {
         (void)input; // applied by the transport in; no-op for empty sets
         const auto step = runner.RunFixedTicks(1);
         executed += step.ticks_executed;
+        if (step.region_fault) {
+            LUMINUMBRA_CORE_ERROR("replay: region scheduler fault at tick {}: {}",
+                                  executed,
+                                  step.region_fault_message);
+            runner.Shutdown();
+            return 1;
+        }
         if (step.ticks_executed == 0) {
             LUMINUMBRA_CORE_ERROR("replay: tick {} did not advance", next_tick);
             runner.Shutdown();

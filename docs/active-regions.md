@@ -56,6 +56,20 @@ due, frozen never is. All stamps use WorldClock, with no load-time restart.
 Repeated/backward scheduler ticks refuse. Frozen scheduling metadata can change;
 its simulation cursor, last-ticked stamp and frozen content digest do not advance.
 
+Invalid host input never throws out of the session. Non-finite or out-of-range
+(|x|,|z| >= 2^24) walking anchors, ground-object edit positions and region pins are
+ignored and counted (observational, never hashed or saved). Invalid replicated anchors, work for
+regions the ledger does not know, and visit-time ledger exhaustion are skipped inside the scheduler
+and counted in the schedule's `rejected` triple; the schedule digest appends that triple only when
+it is non-zero, so valid input keeps its digest.
+A scheduler exception, or an edit/pin that cannot be recorded because the ledger is full, is a
+fail-stop fault: the failed schedule never mutates the ledger, the simulation clock is rewound to
+the faulting tick (whose systems ran), pending region work is dropped, the validation ceiling is raised
+to that tick, and every later tick returns zero. The server saves and exits with status 3, the
+client saves and quits, and replay recording aborts without a schedule trace. A faulted session can
+be saved and the save loads cleanly. A failed `load_active_regions` clears the world and restores the
+previous ambient anchor.
+
 `BoundedRegionResumeHook` defines an opt-in interface receiving region key,
 freeze tick, resume tick and bounded elapsed ticks. `resume_window` clamps elapsed
 ticks to both the system's explicit cap and one WorldClock calendar day; it
@@ -295,7 +309,7 @@ AVX2 ceiling, preserving lower-ISA fallback and native non-x86 selection. Its
 Debug/Release controls and native qualification retain their own source identities;
 the historical table above is not relabelled as post-repair evidence. Integrated
 and native acceptance remain tracked by [#163](https://github.com/d-addison/luminumbra/issues/163).
-The separate wind input-padding defect is tracked by [#173](https://github.com/d-addison/luminumbra/issues/173).
+The wind input-padding defect tracked by [#173](https://github.com/d-addison/luminumbra/issues/173) was fixed afterwards on devel (df8a6716, e9b122e5); the evidence above is unchanged and pre-dates that fix.
 
 `RegionRecordingOverwrite` runs the shipping recorder/player with
 `--test-streaming-radius-cap 1` on every invocation. This diagnostic option applies
