@@ -46,8 +46,10 @@ jobs:
           restore-keys: ccache-asan-gcc-${{ runner.os }}-
       - name: Reset compiler cache statistics
         run: ccache --zero-stats
+      # ccache does not cache translation units that use precompiled headers by default (RmlUi and Jolt ship them: about a third of calls were
+      # uncacheable), so the PCH is disabled here. This changes how headers are compiled, not what is built.
       - name: Configure
-        run: cmake --preset debug-asan -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: cmake --preset debug-asan -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
       - name: Build
         run: cmake --build --preset debug-asan --parallel 4
       - name: Compiler cache statistics

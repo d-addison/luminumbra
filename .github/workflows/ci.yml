@@ -46,9 +46,11 @@ jobs:
           restore-keys: ccache-linux-gcc-${{ runner.os }}-
       - name: Reset compiler cache statistics
         run: ccache --zero-stats
+      # ccache does not cache translation units that use precompiled headers by default (RmlUi and Jolt ship them: about a third of calls were
+      # uncacheable), so the PCH is disabled here. This changes how headers are compiled, not what is built.
       - name: Configure
         run: >-
-          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON
           -DLUMINUMBRA_ENABLE_PREFAB_RUNTIME=ON
       - name: Build
         run: cmake --build --preset release --parallel 4
@@ -191,9 +193,12 @@ jobs:
           restore-keys: ccache-diligent-gcc-${{ runner.os }}-
       - name: Reset compiler cache statistics
         run: ccache --zero-stats
+      # ccache does not cache translation units that use precompiled headers by default (RmlUi and Jolt ship them: about a third of calls were
+      # uncacheable), so the PCH is disabled here. This changes how headers are compiled, not what is built.
       - name: Configure with Diligent RHI
         run: |
           cmake --preset release -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DLUMINUMBRA_ENABLE_DILIGENT=ON
       - name: Build with Diligent RHI
         run: cmake --build --preset release --parallel 4
