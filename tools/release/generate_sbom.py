@@ -75,9 +75,12 @@ def files_for(root: Path, tracked: bool) -> list[Path]:
         raise ValueError(f"not a package directory: {root}")
     paths = []
     if tracked:
-        top = subprocess.check_output(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"], text=True).strip()
-        if Path(top).resolve() != root:
+        # MSYS Git can report /c/... or /tmp/... while native Python uses C:/....
+        # Ask Git whether -C is the worktree root without interpreting its paths.
+        location = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree", "--show-prefix"],
+            text=True)
+        if location != "true\n\n":
             raise ValueError("--tracked requires the repository root")
         output = subprocess.check_output(["git", "-C", str(root), "ls-files", "--stage", "-z"])
         for entry in output.split(b"\0"):
