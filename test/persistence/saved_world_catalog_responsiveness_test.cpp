@@ -95,7 +95,8 @@ TEST_F(SavedWorldCatalogResponsiveness, LargeFixtureNeverBlocksTheOwningThread) 
 
     AsyncSavedWorldCatalog catalog;
     const auto scan_start = std::chrono::steady_clock::now();
-    catalog.Request([root](std::stop_token stop) { return EnumerateSavedWorlds(root, stop); });
+    catalog.Request(
+        [root](const std::stop_token& stop) { return EnumerateSavedWorlds(root, stop); });
     const double request_ms = ElapsedMs(scan_start);
     EXPECT_LT(request_ms, 1000.0);
 
@@ -110,15 +111,17 @@ TEST_F(SavedWorldCatalogResponsiveness, LargeFixtureNeverBlocksTheOwningThread) 
             std::this_thread::sleep_for(1ms);
     }
     const double validation_ms = ElapsedMs(scan_start);
-    ASSERT_TRUE(result.has_value()) << "catalog scan did not finish within 120 s";
+    if (!result.has_value())
+        FAIL() << "catalog scan did not finish within 120 s";
+    const SavedWorldCatalog& scanned = *result;
     EXPECT_LT(max_poll_ms, 1000.0);
     EXPECT_FALSE(catalog.Poll().has_value());
 
-    EXPECT_TRUE(result->error.empty()) << result->error;
-    ASSERT_EQ(result->worlds.size(), 1u);
-    EXPECT_TRUE(result->worlds.front().error.empty()) << result->worlds.front().error;
-    EXPECT_EQ(result->worlds.front().metadata.worldId, "catalog-large");
-    EXPECT_EQ(result->worlds.front().metadata.name, "Synthetic Fixture");
+    EXPECT_TRUE(scanned.error.empty()) << scanned.error;
+    ASSERT_EQ(scanned.worlds.size(), 1u);
+    EXPECT_TRUE(scanned.worlds.front().error.empty()) << scanned.worlds.front().error;
+    EXPECT_EQ(scanned.worlds.front().metadata.worldId, "catalog-large");
+    EXPECT_EQ(scanned.worlds.front().metadata.name, "Synthetic Fixture");
 
     RecordProperty("chunks", std::to_string(chunks));
     RecordProperty("max_poll_ms", std::to_string(max_poll_ms));
