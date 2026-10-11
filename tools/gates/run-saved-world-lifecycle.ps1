@@ -17,6 +17,13 @@
 # directory (artifacts\persistence) because the load phase reads the save-phase
 # marker file from there.
 #
+# Edit persistence scope (receipt field edit_persistence_scope = scenario_session_snapshot):
+# the create_edit_save / restart_select_load pair runs the client's own
+# persistence_roundtrip_smoke scenario, which asserts the edit survives in its session
+# snapshot. The world-directory receipts prove that production loads (the switch_back
+# sessions and --load-world) leave saved bytes unchanged except world_info.json. Visual
+# confirmation of the edit in the production UI stays a manual checklist item.
+#
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\gates\run-saved-world-lifecycle.ps1 `
 #       -Package D:\accept\package-copy -FixtureDir D:\accept\fixture `
@@ -154,6 +161,20 @@ function Get-PrimaryWorld {
     return $candidates[0].Name
 }
 
+function Test-GBufferProbeDocument {
+    # True only when benchmark.json exists, parses, and has a non-empty gbuffer_probes array.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $doc = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8))
+    } catch {
+        return $false
+    }
+    if (-not (Test-JsonProperty -Object $doc -Name "gbuffer_probes")) { return $false }
+    if ($doc.gbuffer_probes -isnot [System.Array]) { return $false }
+    return (@($doc.gbuffer_probes).Count -gt 0)
+}
+
 function Get-RefusalDiagnostic {
     param([string]$Text)
     return [regex]::IsMatch($Text, '(?i)refus|cannot open|invalid')
@@ -174,7 +195,7 @@ if ($DryRun) {
     Show-PlannedCommand -Label "create_edit_save" -Exe $exePath -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "save", "--persistence-session-dir", $sessionDir, "--auto-create-world", "--auto-enter-world") + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
     Write-Host ("[dry-run] snapshot after_save (primary): {0}" -f (Join-Path $savesRoot $primaryPlaceholder))
     Show-PlannedCommand -Label "restart_select_load" -Exe $exePath -Arguments (@("--scenario", "persistence_roundtrip_smoke", "--persistence-phase", "load", "--persistence-session-dir", $sessionDir) + (Get-CommonFlags -ArtifactDir $persistenceArtifact))
-    Show-PlannedCommand -Label "second_seed" -Exe $exePath -Arguments (@("--scenario", "auto_world_smoke", "--auto-create-world", "--auto-enter-world", "--world-preset", $Preset) + (Get-CommonFlags -ArtifactDir $secondArtifact))
+    Show-PlannedCommand -Label "second_seed" -Exe $exePath -Arguments (@("--scenario", "auto_world_smoke", "--auto-create-world", "--auto-enter-world", "--world-preset", $Preset, "--timed-run", "20") + (Get-CommonFlags -ArtifactDir $secondArtifact))
     for ($i = 1; $i -le $SwitchCount; $i++) {
         if ($i % 2 -eq 1) { $switchWorld = $fixtureWorldPlaceholder } else { $switchWorld = $primaryPlaceholder }
         $switchArtifact = Join-Path $artifactsDir ("switch_back_" + $i)
@@ -244,7 +265,7 @@ try {
 
     # 4. second_seed (a second freshly created world)
     $sessions += Invoke-Session -Name "second_seed" -Kind "second_seed" -ArtifactDir $secondArtifact `
-        -Arguments (@("--scenario", "auto_world_smoke", "--auto-create-world", "--auto-enter-world", "--world-preset", $Preset) + (Get-CommonFlags -ArtifactDir $secondArtifact))
+        -Arguments (@("--scenario", "auto_world_smoke", "--auto-create-world", "--auto-enter-world", "--world-preset", $Preset, "--timed-run", "20") + (Get-CommonFlags -ArtifactDir $secondArtifact))
 
     # 5. switch_back: fixed-pose render benchmark, alternating worlds (fixture first)
     #    (after_reload and fixture_after_loads are snapshotted after this loop)
@@ -272,7 +293,7 @@ try {
         $captureSha = $null
         if (Test-Path -LiteralPath $framePath -PathType Leaf) { $captureSha = Get-FileSha256Hex -Path $framePath }
         $probe = $null
-        if (Test-Path -LiteralPath $benchPath -PathType Leaf) { $probe = "artifacts/switch-$i/benchmark.json" }
+        if (Test-GBufferProbeDocument -Path $benchPath) { $probe = "artifacts/switch-$i/benchmark.json" }
         $switches += [ordered]@{
             index = $i
             world = $switchWorld
@@ -353,6 +374,7 @@ try {
         }
         fixture_world_id = $fixtureWorldId
         primary_world_id = $primaryWorld
+        edit_persistence_scope = "scenario_session_snapshot"
         sessions = @($sessions)
         save_receipts = @($beforeEdit, $fixtureAfterLoads, $afterSave, $afterReload)
         reload_changes = $reloadChanges

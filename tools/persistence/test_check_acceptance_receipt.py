@@ -538,11 +538,37 @@ class AcceptanceReceiptContract(unittest.TestCase):
         self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "fail")
         self.assertIn("missing-preset", _check(verdict, "refusal_matrix")["detail"])
 
-    def test_refusal_timed_out_key_is_optional(self) -> None:
+    def test_refusal_timed_out_absent_is_unevaluated(self) -> None:
+        self._assert_baseline("refusal_matrix")
+        receipt = valid_receipt()
+        del receipt["refusals"][2]["timed_out"]
+        verdict = _verdict(receipt)
+        check = _check(verdict, "refusal_matrix")
+        self.assertEqual(check["verdict"], "unevaluated")
+        self.assertIn("timed_out absent for: corrupt-metadata", check["detail"])
+
         receipt = valid_receipt()
         for refusal in receipt["refusals"]:
             del refusal["timed_out"]
-        self._expect(receipt, "refusal_matrix", "pass")
+        self._expect(receipt, "refusal_matrix", "unevaluated")
+
+    def test_refusal_timed_out_absent_does_not_hide_failure(self) -> None:
+        receipt = valid_receipt()
+        del receipt["refusals"][2]["timed_out"]
+        receipt["refusals"][0]["exit_code"] = 0
+        verdict = _verdict(receipt)
+        check = _check(verdict, "refusal_matrix")
+        self.assertEqual(check["verdict"], "fail")
+        self.assertIn("timed_out absent for: corrupt-metadata", check["detail"])
+
+    def test_refusal_timed_out_non_bool_fails(self) -> None:
+        self._assert_baseline("refusal_matrix")
+        for bad in ("no", 0, None):
+            receipt = valid_receipt()
+            receipt["refusals"][1]["timed_out"] = bad
+            verdict = _verdict(receipt)
+            self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "fail", repr(bad))
+            self.assertEqual(_check(verdict, "refusal_matrix")["detail"], "malformed refusals", repr(bad))
 
     def test_refusal_missing_required_variant_unevaluated(self) -> None:
         self._assert_baseline("refusal_matrix")
@@ -573,8 +599,8 @@ class AcceptanceReceiptContract(unittest.TestCase):
     def test_refusal_variants_option_overrides_required_list(self) -> None:
         receipt = valid_receipt()
         receipt["refusals"] = [
-            {"variant": "alpha", "exit_code": 2, "diagnostic": True},
-            {"variant": "beta", "exit_code": 3, "diagnostic": True},
+            {"variant": "alpha", "exit_code": 2, "diagnostic": True, "timed_out": False},
+            {"variant": "beta", "exit_code": 3, "diagnostic": True, "timed_out": False},
         ]
         verdict = tool.evaluate(receipt, 6, ("alpha", "beta"))
         self.assertEqual(_check(verdict, "refusal_matrix")["verdict"], "pass")

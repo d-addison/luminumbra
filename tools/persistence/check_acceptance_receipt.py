@@ -370,13 +370,22 @@ def _check_refusals(receipt: dict, required: tuple) -> dict:
             failed.append(f"{refusal['variant']} ({', '.join(reasons)})")
     present = {refusal["variant"] for refusal in refusals}
     missing = [variant for variant in required if variant not in present]
+    # timed_out is required evidence: an entry without it cannot be judged clean.
+    untimed = [refusal["variant"] for refusal in refusals if "timed_out" not in refusal]
     if failed:
         detail = "refusals not clean: " + "; ".join(failed)
         if missing:
             detail += "; missing variants: " + ", ".join(missing)
+        if untimed:
+            detail += "; timed_out absent for: " + ", ".join(untimed)
         return _result(check_id, FAIL, detail)
+    pending = []
     if missing:
-        return _result(check_id, UNEVALUATED, "missing variants: " + ", ".join(missing))
+        pending.append("missing variants: " + ", ".join(missing))
+    if untimed:
+        pending.append("timed_out absent for: " + ", ".join(untimed))
+    if pending:
+        return _result(check_id, UNEVALUATED, "; ".join(pending))
     return _result(
         check_id, PASS, f"{len(refusals)} refusals exit nonzero with diagnostics; all required variants present"
     )
