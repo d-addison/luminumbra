@@ -2,6 +2,8 @@
 
 #include "systems/SHIELD_WorldSystem.h"
 
+#include <new>
+
 namespace Luminumbra::World {
 
 bool CompilePristineFarVolume(const Systems::SHIELD_WorldSystem& world,

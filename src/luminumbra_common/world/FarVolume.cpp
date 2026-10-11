@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <memory_resource>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
@@ -80,6 +81,8 @@ public:
             low = std::min(low, intent.extra_span->min_y);
             high = std::max(high, intent.extra_span->max_y);
         }
+        // The 1024 m margin is at least four of the largest (256 m) brick edges, so the
+        // brick-aligned endpoints computed below stay strictly inside +/-kCoordinateLimit.
         if (low <= -kCoordinateLimit + 1024 || high >= kCoordinateLimit - 1024)
             return fail(FarVolumeFacadeError::CoordinateRange);
         const auto first =
