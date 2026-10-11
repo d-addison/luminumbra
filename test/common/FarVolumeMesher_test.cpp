@@ -68,6 +68,10 @@ void check_geometry(const FarVolumeMesh& value) {
         }
         EXPECT_NEAR(std::hypot(vertex.normal[0], vertex.normal[1], vertex.normal[2]), 1.0, 1e-12);
     }
+    if (!value.bounds.has_value()) {
+        ADD_FAILURE() << "mesh bounds are absent";
+        return;
+    }
     EXPECT_EQ(value.bounds->min, lo);
     EXPECT_EQ(value.bounds->max, hi);
     for (std::size_t i = 0; i < value.indices.size(); i += 3) {
@@ -195,7 +199,10 @@ TEST(FarVolumeMesher, CrossingsAndVerticalBordersUseVolumeBoundsWithoutHeightCla
         const auto a = border(lower), b = border(upper);
         EXPECT_FALSE(a.empty());
         EXPECT_EQ(a, b);
-        ASSERT_TRUE(upper.bounds);
+        if (!upper.bounds.has_value()) {
+            ADD_FAILURE() << "upper mesh bounds are absent";
+            return;
+        }
         EXPECT_DOUBLE_EQ(upper.bounds->max[1], 1.0);
     }
 }
@@ -318,7 +325,7 @@ TEST(FarVolumeMesher, SampleCacheChargesUniqueCoordinatesAndExactBudgetsSucceed)
 TEST(FarVolumeMesher, MalformedMetadataAndResidentSamplesRefuseTransactionally) {
     const auto original = baseline();
     const auto previous = mesh(original, plane);
-    const auto check = [&](FarVolumeTile tile, FarVolumeMeshError expected) {
+    const auto check = [&](const FarVolumeTile& tile, FarVolumeMeshError expected) {
         auto output = previous;
         FarVolumeMeshError error;
         EXPECT_FALSE(MeshFarVolumeTile(tile, identity, plane, allowance, output, &error));

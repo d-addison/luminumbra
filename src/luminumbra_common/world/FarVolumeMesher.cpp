@@ -111,7 +111,10 @@ bool MeshFarVolumeTile(const FarVolumeTile& tile,
             refuse(FarVolumeMeshError::FieldIdentityMismatch);
         if (!sampler)
             refuse(FarVolumeMeshError::InvalidSampler);
-        const auto tier = *FarTierAt(tile.request.key.tier);
+        const auto tier_value = FarTierAt(tile.request.key.tier);
+        if (!tier_value.has_value())
+            refuse(FarVolumeMeshError::InvalidTile);
+        const auto tier = *tier_value;
         const std::int64_t step = tier.sample_spacing_meters;
         const std::int64_t edge = tier.brick_edge_meters;
         FarVolumeMesh mesh;
