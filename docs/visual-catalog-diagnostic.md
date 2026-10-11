@@ -953,7 +953,7 @@ Implementation dependencies:
 - S6: Terrain/streaming/spatial continuity, independent coverage, persistent world authority.
 - S8: Diagnostic atlas/backend outputs with honest native versus supporting evidence labels.
 
-Capture: **existing_subset**. Writes the named layer snapshot maps and metrics to the build-defined artifact directory. Biome, river and preset atlases are produced by separate tests in the same binary and are not claimed here; no matched engine views.
+Capture: **existing_subset**. Writes the named layer snapshot maps and metrics to the build-defined artifact directory. Biome and river tests in the same binary retain only aggregate metrics JSON and the preset test produces its own atlas; none of those are claimed here; no matched engine views.
 
 Arguments are a command template, not a newly executed run. Replace placeholders with owned native paths and a fresh output directory; reserve the native slot first.
 

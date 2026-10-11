@@ -3607,7 +3607,7 @@
           "--gtest_filter=WorldGenLayerSnapshotTest.ExportsLayerMetricsAndImages"
         ],
         "environment": {},
-        "scope": "Writes the named layer snapshot maps and metrics to the build-defined artifact directory. Biome, river and preset atlases are produced by separate tests in the same binary and are not claimed here; no matched engine views."
+        "scope": "Writes the named layer snapshot maps and metrics to the build-defined artifact directory. Biome and river tests in the same binary retain only aggregate metrics JSON and the preset test produces its own atlas; none of those are claimed here; no matched engine views."
       },
       "acceptance_checks": [
         "Make every layer/preset map easy to interpret and show how it appears in the actual world.",
