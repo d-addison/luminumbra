@@ -337,7 +337,11 @@ jobs:
 
   windows-ucrt64:
     name: Windows / MSYS2 UCRT64
-    if: github.ref_name == 'main' || github.base_ref == 'main'
+    # Runs on every pull request (devel- and main-bound) and on pushes to main, so a
+    # MinGW/UCRT break shows on the PR that causes it instead of at promotion. It is
+    # not a required devel context, so it informs rather than blocks there; it stays
+    # required on main. Pushes to devel do not run it (the PR already did).
+    if: github.event_name == 'pull_request' || github.ref_name == 'main'
     runs-on: windows-2025
     # Measured 40.6 min end to end on the first post-release promotion run
     # (previously two 135-minute cap kills, before the test streaming caps
