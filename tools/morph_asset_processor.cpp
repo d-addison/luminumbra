@@ -278,6 +278,9 @@ bool process_morph_gltf_checked(const std::string& input_path, const std::string
             return Refuse("External morph source images are unavailable");
     if (!SafeAccessors(*data))
         return false;
+    // cgltf_parse already resolved every node, scene, mesh and accessor index through
+    // CGLTF_PTRFIXUP_REQ, which refuses out-of-range indices, so cgltf_validate only walks
+    // in-bounds pointers.
     if (cgltf_load_buffers(&options, data.get(), nullptr) != cgltf_result_success ||
         cgltf_validate(data.get()) != cgltf_result_success)
         return Refuse("Morph GLB buffer/accessor validation failed");

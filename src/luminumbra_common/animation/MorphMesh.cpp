@@ -42,6 +42,9 @@ bool NormalTransform(const Matrix& m, NormalMatrix& normal, bool& mirrored) {
     }
     const double determinant = m[0] * normal[0] + m[1] * normal[1] + m[2] * normal[2];
     // Relative singularity test: rounding can leave a nonzero determinant for a singular matrix.
+    // The threshold is a conditioning bound: with unit-normalised columns a determinant at or
+    // below 1e-12 would amplify rounding in the inverse-transpose beyond float precision, so
+    // such transforms are refused rather than published with an unreliable normal matrix.
     const double n0 = std::hypot(m[0], m[1], m[2]);
     const double n1 = std::hypot(m[4], m[5], m[6]);
     const double n2 = std::hypot(m[8], m[9], m[10]);
