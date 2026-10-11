@@ -151,3 +151,9 @@ and builds prop, foliage and character content through the native compiler,
 checking identities, revision feedback, refusals, cancellation and cleanup.
 Undo requires an editor context and is evaluated by its interactive mode.
 Engine viewport and composed-game production acceptance remain separate lanes.
+# Installed static viewport
+
+The extension also packages the experimental installed static `RenderEngine`.
+See [setup, qualification and current limits](../../../../docs/blender-installed-viewport.md).
+Its native Blender acceptance is pending; geometry service receipts alone do not
+qualify viewport presentation or performance.

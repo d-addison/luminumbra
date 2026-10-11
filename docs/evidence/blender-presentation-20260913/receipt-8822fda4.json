@@ -1,0 +1,2080 @@
+{
+  "artifacts": {
+    "odd-downsample-behind-control.depth.f32le": {
+      "bytes": 3694404,
+      "format": "float32_le_window_depth",
+      "height": 721,
+      "origin": "lower_left",
+      "path": "odd-downsample-behind-control.depth.f32le",
+      "sha256": "61f3bc12d34652e7f625e01004cd04c637a235ec1ec723454aeae6dfb3529a4c",
+      "width": 1281
+    },
+    "odd-downsample-behind-control.ppm": {
+      "bytes": 2770819,
+      "format": "P6_RGB8",
+      "height": 721,
+      "origin": "upper_left",
+      "path": "odd-downsample-behind-control.ppm",
+      "sha256": "817a694857e132774258db1c9871c21f085028e4fc60db43098fedc070431085",
+      "width": 1281
+    },
+    "odd-downsample-behind-control.rgba8": {
+      "bytes": 3694404,
+      "format": "RGBA8",
+      "height": 721,
+      "origin": "lower_left",
+      "path": "odd-downsample-behind-control.rgba8",
+      "sha256": "9484812e76059b8fde8ab1249e0a0044728c46753cbd4b7c84a089d96b727335",
+      "width": 1281
+    },
+    "odd-downsample-front-control.depth.f32le": {
+      "bytes": 3694404,
+      "format": "float32_le_window_depth",
+      "height": 721,
+      "origin": "lower_left",
+      "path": "odd-downsample-front-control.depth.f32le",
+      "sha256": "2746549b6208609ed3cf2fa0b792adfd517d6d3fe4862d592cda35aa15d5a233",
+      "width": 1281
+    },
+    "odd-downsample-front-control.ppm": {
+      "bytes": 2770819,
+      "format": "P6_RGB8",
+      "height": 721,
+      "origin": "upper_left",
+      "path": "odd-downsample-front-control.ppm",
+      "sha256": "b261152a2e03e23259e5a22e475fe62a94635997ed34bdea52a9ecba28a26cd4",
+      "width": 1281
+    },
+    "odd-downsample-front-control.rgba8": {
+      "bytes": 3694404,
+      "format": "RGBA8",
+      "height": 721,
+      "origin": "lower_left",
+      "path": "odd-downsample-front-control.rgba8",
+      "sha256": "b9c2857631b8e9a96b34dc0d295c39cece6b479002911e40d297c2b1ab468a1b",
+      "width": 1281
+    },
+    "odd-downsample-input.coverage.u8": {
+      "bytes": 920880,
+      "height": 720,
+      "origin": "lower_left",
+      "path": "odd-downsample-input.coverage.u8",
+      "sha256": "a5920513e64c342c1f60263f0e453eed5f18ac4c16caf03665b7a85e5067c35e",
+      "width": 1279
+    },
+    "odd-downsample-input.depth.f32le": {
+      "bytes": 3683520,
+      "format": "float32_le_reversed_zero_to_one",
+      "height": 720,
+      "origin": "lower_left",
+      "path": "odd-downsample-input.depth.f32le",
+      "sha256": "f3519ffc814fcbbd39bba9153c90d906a12120ac3019aaeac292d03d25491802",
+      "width": 1279
+    },
+    "odd-downsample-input.rgba8": {
+      "bytes": 3683520,
+      "height": 720,
+      "origin": "lower_left",
+      "path": "odd-downsample-input.rgba8",
+      "sha256": "689429ba44643c293f03f76fa276f6abc7164221fd531163a47c34dd16fa7012",
+      "width": 1279
+    },
+    "odd-downsample-presented.depth.f32le": {
+      "bytes": 3694404,
+      "format": "float32_le_window_depth",
+      "height": 721,
+      "origin": "lower_left",
+      "path": "odd-downsample-presented.depth.f32le",
+      "sha256": "9a97b75841bda142da216da76d982f801f7011a4de8bb4c8f224715ff9a6b041",
+      "width": 1281
+    },
+    "odd-downsample-presented.ppm": {
+      "bytes": 2770819,
+      "format": "P6_RGB8",
+      "height": 721,
+      "origin": "upper_left",
+      "path": "odd-downsample-presented.ppm",
+      "sha256": "94f4966596a5816a493c956305e01350dfed611c49043dff74ddd353a3a25b0c",
+      "width": 1281
+    },
+    "odd-downsample-presented.rgba8": {
+      "bytes": 3694404,
+      "format": "RGBA8",
+      "height": 721,
+      "origin": "lower_left",
+      "path": "odd-downsample-presented.rgba8",
+      "sha256": "3b0cb85b956f86c9203b148da7fac25c1d1ee572e6203d349f845e63a789bfdc",
+      "width": 1281
+    },
+    "orthographic-negative-near-behind-control.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_window_depth",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-behind-control.depth.f32le",
+      "sha256": "14845df7d3a0ca87b30120f2770da359c8c809d289467fb5d272fe6176665a05",
+      "width": 160
+    },
+    "orthographic-negative-near-behind-control.ppm": {
+      "bytes": 57615,
+      "format": "P6_RGB8",
+      "height": 120,
+      "origin": "upper_left",
+      "path": "orthographic-negative-near-behind-control.ppm",
+      "sha256": "c2716d0838639a7c4f6797160030e38c15f986801c15f24b97820c6e917817cd",
+      "width": 160
+    },
+    "orthographic-negative-near-behind-control.rgba8": {
+      "bytes": 76800,
+      "format": "RGBA8",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-behind-control.rgba8",
+      "sha256": "f3aa6ccb445eb28045b2f70724eefe10ceb7078f62b5de9367611e30580da915",
+      "width": 160
+    },
+    "orthographic-negative-near-front-control.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_window_depth",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-front-control.depth.f32le",
+      "sha256": "df6c2ebcef4994cd6413531cd1278e72a89852fffa8fb760dcf81c6df0657ed8",
+      "width": 160
+    },
+    "orthographic-negative-near-front-control.ppm": {
+      "bytes": 57615,
+      "format": "P6_RGB8",
+      "height": 120,
+      "origin": "upper_left",
+      "path": "orthographic-negative-near-front-control.ppm",
+      "sha256": "9d3a6d50d3969228219f4d2976f8affe761d662e9d5fb4e3bb6e357cae1bde47",
+      "width": 160
+    },
+    "orthographic-negative-near-front-control.rgba8": {
+      "bytes": 76800,
+      "format": "RGBA8",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-front-control.rgba8",
+      "sha256": "024bdf6879c17a170e08f59ca853b18031087d801d67ca3f36fc114ad64f2b2a",
+      "width": 160
+    },
+    "orthographic-negative-near-input.coverage.u8": {
+      "bytes": 19200,
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-input.coverage.u8",
+      "sha256": "f1ea3bdec393c14b5eb83a313eb99df42bd5603c5ed90c852c6f02b126c92d57",
+      "width": 160
+    },
+    "orthographic-negative-near-input.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_reversed_zero_to_one",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-input.depth.f32le",
+      "sha256": "1bb71adf7474e040d09401d3d17eadcdaf0824422caf0241126a22c3b7309a25",
+      "width": 160
+    },
+    "orthographic-negative-near-input.rgba8": {
+      "bytes": 76800,
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-input.rgba8",
+      "sha256": "70ed1259e5a5291f8134ee0dfdff149df339c24dd288ad92d66f835d010c9f78",
+      "width": 160
+    },
+    "orthographic-negative-near-presented.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_window_depth",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-presented.depth.f32le",
+      "sha256": "01ec8b3b8ed54eeb3590a24342c083ed23ee1519192197855e90f063d71863bc",
+      "width": 160
+    },
+    "orthographic-negative-near-presented.ppm": {
+      "bytes": 57615,
+      "format": "P6_RGB8",
+      "height": 120,
+      "origin": "upper_left",
+      "path": "orthographic-negative-near-presented.ppm",
+      "sha256": "7121ab0be72739635060ea8b261957284026acbf1e442aa8141f019a170145a3",
+      "width": 160
+    },
+    "orthographic-negative-near-presented.rgba8": {
+      "bytes": 76800,
+      "format": "RGBA8",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "orthographic-negative-near-presented.rgba8",
+      "sha256": "70ed1259e5a5291f8134ee0dfdff149df339c24dd288ad92d66f835d010c9f78",
+      "width": 160
+    },
+    "perspective-behind-control.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_window_depth",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-behind-control.depth.f32le",
+      "sha256": "0e81a4073acae739c8a0bd1724d87999045dbdaa2d0d23733ec6048b0430a512",
+      "width": 160
+    },
+    "perspective-behind-control.ppm": {
+      "bytes": 57615,
+      "format": "P6_RGB8",
+      "height": 120,
+      "origin": "upper_left",
+      "path": "perspective-behind-control.ppm",
+      "sha256": "c2716d0838639a7c4f6797160030e38c15f986801c15f24b97820c6e917817cd",
+      "width": 160
+    },
+    "perspective-behind-control.rgba8": {
+      "bytes": 76800,
+      "format": "RGBA8",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-behind-control.rgba8",
+      "sha256": "f3aa6ccb445eb28045b2f70724eefe10ceb7078f62b5de9367611e30580da915",
+      "width": 160
+    },
+    "perspective-front-control.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_window_depth",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-front-control.depth.f32le",
+      "sha256": "3a48fb223afac12bfd6ff49e96666190b2e3d53d5267684e5be4d2a077b14201",
+      "width": 160
+    },
+    "perspective-front-control.ppm": {
+      "bytes": 57615,
+      "format": "P6_RGB8",
+      "height": 120,
+      "origin": "upper_left",
+      "path": "perspective-front-control.ppm",
+      "sha256": "9d3a6d50d3969228219f4d2976f8affe761d662e9d5fb4e3bb6e357cae1bde47",
+      "width": 160
+    },
+    "perspective-front-control.rgba8": {
+      "bytes": 76800,
+      "format": "RGBA8",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-front-control.rgba8",
+      "sha256": "024bdf6879c17a170e08f59ca853b18031087d801d67ca3f36fc114ad64f2b2a",
+      "width": 160
+    },
+    "perspective-input.coverage.u8": {
+      "bytes": 19200,
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-input.coverage.u8",
+      "sha256": "f1ea3bdec393c14b5eb83a313eb99df42bd5603c5ed90c852c6f02b126c92d57",
+      "width": 160
+    },
+    "perspective-input.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_reversed_zero_to_one",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-input.depth.f32le",
+      "sha256": "1bb71adf7474e040d09401d3d17eadcdaf0824422caf0241126a22c3b7309a25",
+      "width": 160
+    },
+    "perspective-input.rgba8": {
+      "bytes": 76800,
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-input.rgba8",
+      "sha256": "70ed1259e5a5291f8134ee0dfdff149df339c24dd288ad92d66f835d010c9f78",
+      "width": 160
+    },
+    "perspective-presented.depth.f32le": {
+      "bytes": 76800,
+      "format": "float32_le_window_depth",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-presented.depth.f32le",
+      "sha256": "c010708140d4fece36bcc3752d3d6ab25411c7cc6dac37599a3f545926c12296",
+      "width": 160
+    },
+    "perspective-presented.ppm": {
+      "bytes": 57615,
+      "format": "P6_RGB8",
+      "height": 120,
+      "origin": "upper_left",
+      "path": "perspective-presented.ppm",
+      "sha256": "7121ab0be72739635060ea8b261957284026acbf1e442aa8141f019a170145a3",
+      "width": 160
+    },
+    "perspective-presented.rgba8": {
+      "bytes": 76800,
+      "format": "RGBA8",
+      "height": 120,
+      "origin": "lower_left",
+      "path": "perspective-presented.rgba8",
+      "sha256": "70ed1259e5a5291f8134ee0dfdff149df339c24dd288ad92d66f835d010c9f78",
+      "width": 160
+    }
+  },
+  "blender": {
+    "backend": "OPENGL",
+    "build_hash": "adfe2921d5f3",
+    "executable": "C:\\Program Files\\Blender Foundation\\Blender 5.1\\blender.exe",
+    "executable_sha256": "f9d2e744702354e7d182861fb924bc128ea85d8cf0577b91dcb4d92f09cdc287",
+    "graphics_version": "4.6.0 NVIDIA 616.92",
+    "renderer": "NVIDIA GeForce RTX 5070 Ti/PCIe/SSE2",
+    "vendor": "NVIDIA Corporation",
+    "version": [
+      5,
+      1,
+      0
+    ],
+    "version_string": "5.1.0"
+  },
+  "cases": [
+    {
+      "camera": {
+        "depth_transform": [
+          1.0000000264846767,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.9999999606472049,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -2.0000000011920926,
+          0.0,
+          0.0,
+          0.0,
+          1.0000000000279397,
+          1.0
+        ],
+        "far_plane": 100.00000000000225,
+        "height": 120,
+        "near_plane": 0.09999999999999998,
+        "projection": [
+          1.8106601238250732,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          2.4142136573791504,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0010010009864345193,
+          -1.0,
+          0.0,
+          0.0,
+          0.10010010004043579,
+          0.0
+        ],
+        "rectangle": [
+          -1.4210854715202004e-14,
+          0.0,
+          160.00000000000003,
+          120.0
+        ],
+        "view": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "width": 160
+      },
+      "fixture": "Synthetic synchronized RGBA/depth/coverage planes",
+      "name": "perspective",
+      "original_projection": [
+        1.8106601717798214,
+        0,
+        0,
+        0,
+        0,
+        2.414213562373095,
+        0,
+        0,
+        0,
+        0,
+        -1.002002002002002,
+        -1,
+        0,
+        0,
+        -0.20020020020020018,
+        0
+      ],
+      "overlay_controls": [
+        {
+          "behind_depth": 0.8,
+          "front_depth": 0.7,
+          "pixel": [
+            60,
+            45
+          ],
+          "surface_depth": 0.75
+        },
+        {
+          "behind_depth": 0.3,
+          "front_depth": 0.2,
+          "pixel": [
+            100,
+            75
+          ],
+          "surface_depth": 0.25
+        }
+      ],
+      "samples": [
+        {
+          "actual_depth": 1.0,
+          "actual_rgba": [
+            32,
+            23,
+            191,
+            0
+          ],
+          "coverage": 0,
+          "expected_depth": 1.0,
+          "expected_rgba": [
+            32,
+            23,
+            191,
+            0
+          ],
+          "pixel": [
+            20,
+            15
+          ],
+          "source_pixel": [
+            20,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            32,
+            74,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            32,
+            74,
+            164,
+            255
+          ],
+          "pixel": [
+            20,
+            45
+          ],
+          "source_pixel": [
+            20,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            32,
+            125,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            32,
+            125,
+            137,
+            255
+          ],
+          "pixel": [
+            20,
+            75
+          ],
+          "source_pixel": [
+            20,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            32,
+            176,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            32,
+            176,
+            110,
+            255
+          ],
+          "pixel": [
+            20,
+            105
+          ],
+          "source_pixel": [
+            20,
+            105
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            23,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            23,
+            164,
+            255
+          ],
+          "pixel": [
+            60,
+            15
+          ],
+          "source_pixel": [
+            60,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            74,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            74,
+            137,
+            255
+          ],
+          "pixel": [
+            60,
+            45
+          ],
+          "source_pixel": [
+            60,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            125,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            125,
+            110,
+            255
+          ],
+          "pixel": [
+            60,
+            75
+          ],
+          "source_pixel": [
+            60,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            176,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            176,
+            191,
+            255
+          ],
+          "pixel": [
+            60,
+            105
+          ],
+          "source_pixel": [
+            60,
+            105
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            23,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            23,
+            137,
+            255
+          ],
+          "pixel": [
+            100,
+            15
+          ],
+          "source_pixel": [
+            100,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            74,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            74,
+            110,
+            255
+          ],
+          "pixel": [
+            100,
+            45
+          ],
+          "source_pixel": [
+            100,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            125,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            125,
+            191,
+            255
+          ],
+          "pixel": [
+            100,
+            75
+          ],
+          "source_pixel": [
+            100,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            176,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            176,
+            164,
+            255
+          ],
+          "pixel": [
+            100,
+            105
+          ],
+          "source_pixel": [
+            100,
+            105
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            23,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            23,
+            110,
+            255
+          ],
+          "pixel": [
+            140,
+            15
+          ],
+          "source_pixel": [
+            140,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            74,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            74,
+            191,
+            255
+          ],
+          "pixel": [
+            140,
+            45
+          ],
+          "source_pixel": [
+            140,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            125,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            125,
+            164,
+            255
+          ],
+          "pixel": [
+            140,
+            75
+          ],
+          "source_pixel": [
+            140,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            176,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            176,
+            137,
+            255
+          ],
+          "pixel": [
+            140,
+            105
+          ],
+          "source_pixel": [
+            140,
+            105
+          ]
+        }
+      ]
+    },
+    {
+      "camera": {
+        "depth_transform": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -1.999999905005102,
+          0.0,
+          2.980232227667301e-09,
+          -5.960464483090178e-09,
+          0.9999997981934879,
+          1.0
+        ],
+        "far_plane": 1000.001,
+        "height": 120,
+        "near_plane": 0.001,
+        "projection": [
+          0.375,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.5,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0010000000474974513,
+          0.0,
+          -0.20000000298023224,
+          0.15000000596046448,
+          1.0000009536743164,
+          1.0
+        ],
+        "rectangle": [
+          0.0,
+          0.0,
+          160.0,
+          120.0
+        ],
+        "view": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -500.0010070800781,
+          1.0
+        ],
+        "width": 160
+      },
+      "fixture": "Synthetic synchronized RGBA/depth/coverage planes",
+      "name": "orthographic-negative-near",
+      "original_projection": [
+        0.375,
+        0,
+        0,
+        0,
+        0,
+        0.5,
+        0,
+        0,
+        0,
+        0,
+        -0.002,
+        0,
+        -0.2,
+        0.15,
+        0,
+        1
+      ],
+      "overlay_controls": [
+        {
+          "behind_depth": 0.7999999403953553,
+          "front_depth": 0.6999999403953552,
+          "pixel": [
+            60,
+            45
+          ],
+          "surface_depth": 0.7499999403953552
+        },
+        {
+          "behind_depth": 0.2999999701976776,
+          "front_depth": 0.19999997019767762,
+          "pixel": [
+            100,
+            75
+          ],
+          "surface_depth": 0.2499999701976776
+        }
+      ],
+      "samples": [
+        {
+          "actual_depth": 1.0,
+          "actual_rgba": [
+            32,
+            23,
+            191,
+            0
+          ],
+          "coverage": 0,
+          "expected_depth": 1.0,
+          "expected_rgba": [
+            32,
+            23,
+            191,
+            0
+          ],
+          "pixel": [
+            20,
+            15
+          ],
+          "source_pixel": [
+            20,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.7499999403953552,
+          "actual_rgba": [
+            32,
+            74,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999109711062,
+          "expected_rgba": [
+            32,
+            74,
+            164,
+            255
+          ],
+          "pixel": [
+            20,
+            45
+          ],
+          "source_pixel": [
+            20,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.7499999403953552,
+          "actual_rgba": [
+            32,
+            125,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999109711062,
+          "expected_rgba": [
+            32,
+            125,
+            137,
+            255
+          ],
+          "pixel": [
+            20,
+            75
+          ],
+          "source_pixel": [
+            20,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.7499999403953552,
+          "actual_rgba": [
+            32,
+            176,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999109711062,
+          "expected_rgba": [
+            32,
+            176,
+            110,
+            255
+          ],
+          "pixel": [
+            20,
+            105
+          ],
+          "source_pixel": [
+            20,
+            105
+          ]
+        },
+        {
+          "actual_depth": 0.7499999403953552,
+          "actual_rgba": [
+            80,
+            23,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999109711062,
+          "expected_rgba": [
+            80,
+            23,
+            164,
+            255
+          ],
+          "pixel": [
+            60,
+            15
+          ],
+          "source_pixel": [
+            60,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.7499999403953552,
+          "actual_rgba": [
+            80,
+            74,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999109711062,
+          "expected_rgba": [
+            80,
+            74,
+            137,
+            255
+          ],
+          "pixel": [
+            60,
+            45
+          ],
+          "source_pixel": [
+            60,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.7499999403953552,
+          "actual_rgba": [
+            80,
+            125,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999109711062,
+          "expected_rgba": [
+            80,
+            125,
+            110,
+            255
+          ],
+          "pixel": [
+            60,
+            75
+          ],
+          "source_pixel": [
+            60,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.7499999403953552,
+          "actual_rgba": [
+            80,
+            176,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999109711062,
+          "expected_rgba": [
+            80,
+            176,
+            191,
+            255
+          ],
+          "pixel": [
+            60,
+            105
+          ],
+          "source_pixel": [
+            60,
+            105
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            128,
+            23,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            128,
+            23,
+            137,
+            255
+          ],
+          "pixel": [
+            100,
+            15
+          ],
+          "source_pixel": [
+            100,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            128,
+            74,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            128,
+            74,
+            110,
+            255
+          ],
+          "pixel": [
+            100,
+            45
+          ],
+          "source_pixel": [
+            100,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            128,
+            125,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            128,
+            125,
+            191,
+            255
+          ],
+          "pixel": [
+            100,
+            75
+          ],
+          "source_pixel": [
+            100,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            128,
+            176,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            128,
+            176,
+            164,
+            255
+          ],
+          "pixel": [
+            100,
+            105
+          ],
+          "source_pixel": [
+            100,
+            105
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            176,
+            23,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            176,
+            23,
+            110,
+            255
+          ],
+          "pixel": [
+            140,
+            15
+          ],
+          "source_pixel": [
+            140,
+            15
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            176,
+            74,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            176,
+            74,
+            191,
+            255
+          ],
+          "pixel": [
+            140,
+            45
+          ],
+          "source_pixel": [
+            140,
+            45
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            176,
+            125,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            176,
+            125,
+            164,
+            255
+          ],
+          "pixel": [
+            140,
+            75
+          ],
+          "source_pixel": [
+            140,
+            75
+          ]
+        },
+        {
+          "actual_depth": 0.2499999701976776,
+          "actual_rgba": [
+            176,
+            176,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999993471983073,
+          "expected_rgba": [
+            176,
+            176,
+            137,
+            255
+          ],
+          "pixel": [
+            140,
+            105
+          ],
+          "source_pixel": [
+            140,
+            105
+          ]
+        }
+      ]
+    },
+    {
+      "camera": {
+        "depth_transform": [
+          0.999825397831343,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.9999999606472049,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          -2.0000000011920926,
+          0.0,
+          0.0,
+          0.0,
+          1.0000000000279397,
+          1.0
+        ],
+        "far_plane": 100.00000000000225,
+        "height": 720,
+        "near_plane": 0.09999999999999998,
+        "projection": [
+          1.3590569496154785,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          2.4142136573791504,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0010010009864345193,
+          -1.0,
+          0.0,
+          0.0,
+          0.10010010004043579,
+          0.0
+        ],
+        "rectangle": [
+          0.11180555555563387,
+          0.0,
+          1280.7763888888887,
+          721.0
+        ],
+        "view": [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          -1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "width": 1279
+      },
+      "fixture": "Synthetic synchronized RGBA/depth/coverage planes",
+      "name": "odd-downsample",
+      "original_projection": [
+        1.3588196553247474,
+        0,
+        0,
+        0,
+        0,
+        2.414213562373095,
+        0,
+        0,
+        0,
+        0,
+        -1.002002002002002,
+        -1,
+        0,
+        0,
+        -0.20020020020020018,
+        0
+      ],
+      "overlay_controls": [
+        {
+          "behind_depth": 0.8,
+          "front_depth": 0.7,
+          "pixel": [
+            480,
+            270
+          ],
+          "surface_depth": 0.75
+        },
+        {
+          "behind_depth": 0.3,
+          "front_depth": 0.2,
+          "pixel": [
+            800,
+            450
+          ],
+          "surface_depth": 0.25
+        }
+      ],
+      "samples": [
+        {
+          "actual_depth": 1.0,
+          "actual_rgba": [
+            32,
+            23,
+            191,
+            0
+          ],
+          "coverage": 0,
+          "expected_depth": 1.0,
+          "expected_rgba": [
+            32,
+            23,
+            191,
+            0
+          ],
+          "pixel": [
+            160,
+            90
+          ],
+          "source_pixel": [
+            160,
+            90
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            32,
+            74,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            32,
+            74,
+            164,
+            255
+          ],
+          "pixel": [
+            160,
+            270
+          ],
+          "source_pixel": [
+            160,
+            270
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            32,
+            125,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            32,
+            125,
+            137,
+            255
+          ],
+          "pixel": [
+            160,
+            450
+          ],
+          "source_pixel": [
+            160,
+            449
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            32,
+            176,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            32,
+            176,
+            110,
+            255
+          ],
+          "pixel": [
+            160,
+            630
+          ],
+          "source_pixel": [
+            160,
+            629
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            23,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            23,
+            164,
+            255
+          ],
+          "pixel": [
+            480,
+            90
+          ],
+          "source_pixel": [
+            479,
+            90
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            74,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            74,
+            137,
+            255
+          ],
+          "pixel": [
+            480,
+            270
+          ],
+          "source_pixel": [
+            479,
+            270
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            125,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            125,
+            110,
+            255
+          ],
+          "pixel": [
+            480,
+            450
+          ],
+          "source_pixel": [
+            479,
+            449
+          ]
+        },
+        {
+          "actual_depth": 0.75,
+          "actual_rgba": [
+            80,
+            176,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.7499999998649582,
+          "expected_rgba": [
+            80,
+            176,
+            191,
+            255
+          ],
+          "pixel": [
+            480,
+            630
+          ],
+          "source_pixel": [
+            479,
+            629
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            23,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            23,
+            137,
+            255
+          ],
+          "pixel": [
+            800,
+            90
+          ],
+          "source_pixel": [
+            799,
+            90
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            74,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            74,
+            110,
+            255
+          ],
+          "pixel": [
+            800,
+            270
+          ],
+          "source_pixel": [
+            799,
+            270
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            125,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            125,
+            191,
+            255
+          ],
+          "pixel": [
+            800,
+            450
+          ],
+          "source_pixel": [
+            799,
+            449
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            128,
+            176,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            128,
+            176,
+            164,
+            255
+          ],
+          "pixel": [
+            800,
+            630
+          ],
+          "source_pixel": [
+            799,
+            629
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            23,
+            110,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            23,
+            110,
+            255
+          ],
+          "pixel": [
+            1120,
+            90
+          ],
+          "source_pixel": [
+            1118,
+            90
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            74,
+            191,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            74,
+            191,
+            255
+          ],
+          "pixel": [
+            1120,
+            270
+          ],
+          "source_pixel": [
+            1118,
+            270
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            125,
+            164,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            125,
+            164,
+            255
+          ],
+          "pixel": [
+            1120,
+            450
+          ],
+          "source_pixel": [
+            1118,
+            449
+          ]
+        },
+        {
+          "actual_depth": 0.25,
+          "actual_rgba": [
+            176,
+            176,
+            137,
+            255
+          ],
+          "coverage": 1,
+          "expected_depth": 0.24999999956693503,
+          "expected_rgba": [
+            176,
+            176,
+            137,
+            255
+          ],
+          "pixel": [
+            1120,
+            630
+          ],
+          "source_pixel": [
+            1118,
+            629
+          ]
+        }
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "name": "GUI factory context and supported Blender version",
+      "passed": true
+    },
+    {
+      "name": "little-endian frame representation",
+      "passed": true
+    },
+    {
+      "name": "actual OpenGL backend has GPU identity",
+      "passed": true
+    },
+    {
+      "name": "perspective: known preexisting depth initialized",
+      "passed": true
+    },
+    {
+      "name": "perspective: blend/depth/viewport/matrices restored",
+      "passed": true,
+      "state_after": [
+        "ALPHA",
+        "LESS_EQUAL",
+        false
+      ],
+      "state_before": [
+        "ALPHA",
+        "LESS_EQUAL",
+        false
+      ]
+    },
+    {
+      "maximum_byte_error": 0,
+      "name": "perspective: exact color orientation and output-space conversion",
+      "passed": true,
+      "samples": 16
+    },
+    {
+      "maximum_absolute_error": 4.3306497277129097e-10,
+      "name": "perspective: reprojected depth and clear coverage",
+      "passed": true,
+      "samples": 16
+    },
+    {
+      "checked_pixels": 19200,
+      "name": "perspective: complete unscaled color plane joins input",
+      "passed": true
+    },
+    {
+      "name": "perspective: geometry behind surface remains occluded (60, 45)",
+      "passed": true
+    },
+    {
+      "name": "perspective: geometry behind surface remains occluded (100, 75)",
+      "passed": true
+    },
+    {
+      "name": "perspective: geometry in clear coverage remains visible",
+      "passed": true
+    },
+    {
+      "name": "perspective: geometry in front remains visible (60, 45)",
+      "passed": true
+    },
+    {
+      "name": "perspective: geometry in front remains visible (100, 75)",
+      "passed": true
+    },
+    {
+      "name": "orthographic-negative-near: known preexisting depth initialized",
+      "passed": true
+    },
+    {
+      "name": "orthographic-negative-near: blend/depth/viewport/matrices restored",
+      "passed": true,
+      "state_after": [
+        "ALPHA",
+        "LESS_EQUAL",
+        false
+      ],
+      "state_before": [
+        "ALPHA",
+        "LESS_EQUAL",
+        false
+      ]
+    },
+    {
+      "maximum_byte_error": 0,
+      "name": "orthographic-negative-near: exact color orientation and output-space conversion",
+      "passed": true,
+      "samples": 16
+    },
+    {
+      "maximum_absolute_error": 3.547784688251454e-08,
+      "name": "orthographic-negative-near: reprojected depth and clear coverage",
+      "passed": true,
+      "samples": 16
+    },
+    {
+      "checked_pixels": 19200,
+      "name": "orthographic-negative-near: complete unscaled color plane joins input",
+      "passed": true
+    },
+    {
+      "name": "orthographic-negative-near: geometry behind surface remains occluded (60, 45)",
+      "passed": true
+    },
+    {
+      "name": "orthographic-negative-near: geometry behind surface remains occluded (100, 75)",
+      "passed": true
+    },
+    {
+      "name": "orthographic-negative-near: geometry in clear coverage remains visible",
+      "passed": true
+    },
+    {
+      "name": "orthographic-negative-near: geometry in front remains visible (60, 45)",
+      "passed": true
+    },
+    {
+      "name": "orthographic-negative-near: geometry in front remains visible (100, 75)",
+      "passed": true
+    },
+    {
+      "name": "odd-downsample: known preexisting depth initialized",
+      "passed": true
+    },
+    {
+      "name": "odd-downsample: blend/depth/viewport/matrices restored",
+      "passed": true,
+      "state_after": [
+        "ALPHA",
+        "LESS_EQUAL",
+        false
+      ],
+      "state_before": [
+        "ALPHA",
+        "LESS_EQUAL",
+        false
+      ]
+    },
+    {
+      "maximum_byte_error": 0,
+      "name": "odd-downsample: exact color orientation and output-space conversion",
+      "passed": true,
+      "samples": 16
+    },
+    {
+      "maximum_absolute_error": 4.3306497277129097e-10,
+      "name": "odd-downsample: reprojected depth and clear coverage",
+      "passed": true,
+      "samples": 16
+    },
+    {
+      "name": "odd-downsample: geometry behind surface remains occluded (480, 270)",
+      "passed": true
+    },
+    {
+      "name": "odd-downsample: geometry behind surface remains occluded (800, 450)",
+      "passed": true
+    },
+    {
+      "name": "odd-downsample: geometry in clear coverage remains visible",
+      "passed": true
+    },
+    {
+      "name": "odd-downsample: geometry in front remains visible (480, 270)",
+      "passed": true
+    },
+    {
+      "name": "odd-downsample: geometry in front remains visible (800, 450)",
+      "passed": true
+    },
+    {
+      "name": "source and staged module hashes stayed fixed",
+      "passed": true
+    },
+    {
+      "name": "executable and probe hashes stayed fixed",
+      "passed": true
+    },
+    {
+      "name": "bounded completion",
+      "passed": true
+    }
+  ],
+  "elapsed_seconds": 3.646456800001033,
+  "exit_requested": "bpy.ops.wm.quit_blender from main-thread timer",
+  "failure": "",
+  "passed": true,
+  "performance_qualified": false,
+  "probe_sha256": "073bab6e31b18c01b8b70b27543d850b5e43b531d49add80ccdef4792f0ea547",
+  "process_id": 9412,
+  "schema": "luminumbra.blender_viewport_presentation.v1",
+  "scope": "Actual Blender GPU FrameDraw presentation of synthetic planes; not native host or RenderEngine acceptance",
+  "source_modules": {
+    "viewport_adapter_state.py": {
+      "path": "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_adapter_state.py",
+      "sha256": "23f094883b933956c5ead1ccd054a1924452e1c5ddb1ed3a788958d52e5cbb7a"
+    },
+    "viewport_draw.py": {
+      "path": "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_draw.py",
+      "sha256": "3a93b50abc2713ac03ea3c8e8083aac1df431ed5f708a8e15295e3bd8fa09ddd"
+    },
+    "viewport_math.py": {
+      "path": "\\\\wsl.localhost\\Ubuntu-24.04\\code\\luminumbra\\build\\authoring-isolated\\campaign-20260913\\viewport-blender\\tools\\blender\\authoring\\extension\\viewport_math.py",
+      "sha256": "957705b658ecc1c84219829a4dce6a4fe451458866cdf3640dc3542c64e88dfc"
+    }
+  },
+  "status": "passed",
+  "visual_approved": false
+}
