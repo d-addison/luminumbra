@@ -219,7 +219,8 @@ void CameraChecks() {
     const auto orthographic = RenderView::Validate(description);
     Check(orthographic.orthographic(), "off-center orthographic camera refused or misclassified");
     common(orthographic);
-    Near(-(near_plane + far_plane) * .5 * orthographic.projection()[10] + orthographic.projection()[14],
+    Near(-(near_plane + far_plane) * .5 * orthographic.projection()[10] +
+             orthographic.projection()[14],
          .5,
          "orthographic depth is not linear");
     auto invalid = description;
