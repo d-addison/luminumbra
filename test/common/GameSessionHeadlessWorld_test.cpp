@@ -1467,10 +1467,14 @@ TEST(GameSessionHeadlessWorldTest, RegionScheduleAndWorldHashResumeAcrossBothHol
             // Change live simulation after the save at tick 3. At freeze, the
             // durable copy is stale and must lose to the dirty resident chunk.
             for (auto* session : {&original, &uninterrupted, &render_only, &loaded}) {
-                const auto chunks = session->GetWorldSystem()->snapshot_streamed_chunks();
-                ASSERT_EQ(chunks.size(), 1u);
-                chunks.front()->heightmap_data[0] = 12.0f;
-                chunks.front()->mark_voxel_data_dirty();
+                // Bounded reopening leaves this far authority on disk until requested.
+                // Adopt its exact durable bytes before editing the live authoritative object.
+                const auto chunk = session->GetWorldSystem()->find_authoritative_chunk(coords);
+                ASSERT_NE(chunk, nullptr);
+                if (!session->GetWorldSystem()->find_streamed_chunk(coords))
+                    ASSERT_TRUE(session->GetWorldSystem()->adopt_streamed_chunk(chunk));
+                chunk->heightmap_data[0] = 12.0f;
+                chunk->mark_voxel_data_dirty();
             }
         }
         for (auto* session : {&original, &uninterrupted, &render_only}) {
